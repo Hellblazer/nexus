@@ -9,7 +9,7 @@ reviewed-by: self
 created: 2026-05-12
 accepted_date:
 related_issues: []
-related_rdrs: [RDR-004, RDR-041, RDR-105, RDR-108, RDR-110, RDR-111]
+related_rdrs: [RDR-004, RDR-041, RDR-105, RDR-108, RDR-110, RDR-111, RDR-113]
 related_tests: []
 implementation_notes: ""
 ---
@@ -302,10 +302,61 @@ T2 facade and stores (`src/nexus/db/t2/`, `src/nexus/db/memory_store.py`,
    and the socket is reachable → UDS. Else if `NX_T2_ADDR` is set →
    TCP. Else read the discovery file and try UDS first, TCP second.
    Fail loud if neither reaches a live daemon.
-7. **Lifecycle hooks**: each daemon publishes change events to a
-   local pub-sub (RDR-110 tuple space surface), enabling RDR-111's
-   ORB projection without each client having to instrument writes.
-   T2, CatalogDB, and T3 all participate.
+7. **Event stream (wire contract)**: each daemon exposes a
+   streaming RPC `EventStream(subspace_prefix, since_cursor) →
+   Stream<Event>` over the same UDS/TCP transport as the regular
+   RPCs. Event records carry `{cursor: rowid, subspace, op,
+   payload_summary, ts}`. Cursor is monotonic `rowid > N` within
+   a subspace; consumers persist their last-acked cursor and
+   reconnect from there after a disconnect (at-least-once
+   delivery). Subspace-prefix matching is glob-style (e.g.
+   `tuples/*`, `daemon/*/lifecycle`). The stream is the **only**
+   way clients observe change — direct SQL polling on the
+   underlying SQLite is daemon-internal and forbidden to clients.
+
+   **Reserved subspaces**:
+   - `tuples/<subspace>` — tuple-space change events (RDR-110
+     consumers; the projection RDR-111 §Step 6 watcher consumes).
+   - `daemon/<name>/lifecycle` — substrate operational events
+     (started, stopping, migration-applied, client-connected,
+     client-disconnected, sweep-fired). First-class so a cockpit
+     binding "show me when the daemon restarts" is expressible
+     on the same bus as any other observation.
+
+   **Failure-category demux**: events carry an optional
+   `category ∈ {data, schema, substrate}` field. Consumers
+   distinguish substrate failures (transport/daemon faults) from
+   action failures (their own dispatch errors) — RDR-111
+   §Watcher failure isolation depends on this demux to avoid
+   auto-disabling user bindings when the daemon hiccups.
+
+8. **Subspace registry — daemon validates**: tuple-space
+   subspace schemas (RDR-110 §Subspace registry) ship with each
+   daemon and are validated daemon-side at startup, not in the
+   MCP client. The daemon-client version handshake carries a
+   subspace-schema digest; client refuses to connect on
+   mismatch. Rationale: the daemon owns the data and must
+   enforce its own invariants regardless of which client
+   connects. RDR-111's plugin-supplied subspaces (RDR-111 CA-9)
+   land via the daemon's `nx daemon t2 subspace add <yaml>`
+   admin RPC, not by the client registering at runtime.
+
+9. **Schema migration ownership**: the daemon is the **sole
+   migration runner**. On startup the daemon checks its own
+   schema version and applies pending migrations against its
+   single SQLite handle before accepting client connections.
+   Clients carry an expected-schema-version constant; on
+   connect, the handshake compares and fails loud if the daemon
+   is behind (instruct user to `nx daemon t2 migrate`) or ahead
+   (instruct user to upgrade the client). The MCP server stops
+   driving migrations entirely (per RDR-110 Phase 1 Step 2 needs
+   updating).
+
+10. **Original "Lifecycle hooks" promise**: superseded by items
+    7–9 above, which spell out the event-stream protocol,
+    failure demux, registry validation, and migration ownership
+    explicitly. T2, CatalogDB, and T3 all participate in the
+    EventStream RPC; same wire contract per daemon.
 
 ### Existing Infrastructure Audit
 
@@ -835,3 +886,28 @@ the planner's job, not this RDR's.
   - All round-1 closeouts (C2/S1/S2/S3/O1/O2/O3) verified clean
     by round-2 critic; no regressions introduced by round-1
     edits.
+- 2026-05-13 — **Triad rework (110/111/112 composition gaps)**:
+  deep-analyst pass `a56172936d63fd480` surfaced 10 gaps between
+  the three RDRs that local gates couldn't see. User chose deep
+  rework (option D). Three load-bearing decisions:
+  - **D1**: MCP server is a **client** of the daemon, not the
+    daemon itself. Recorded here; closes G10. RDR-110/111
+    watcher placement updates follow.
+  - **D2**: Event bus is the `EventStream(subspace_prefix,
+    since_cursor)` streaming RPC on the daemon (new Approach
+    §7 above). Closes G2 (RDR-111 watcher subscription protocol)
+    and G8 (daemon lifecycle events first-class on same bus).
+  - **D3**: Under `NX_STORAGE_MODE=daemon`, **no client ever
+    touches the SQLite file**. Direct-file mode is single-host
+    single-filesystem only. Recorded in RDR-110 revision-history
+    "Further-revised scope" block. Closes G1 (overlayfs
+    correctness extends past `data_version` to the entire CAS
+    primitive, sweeps, audit).
+  This revision also adds Approach §8 (subspace registry —
+  daemon validates, closing G3), Approach §9 (daemon is sole
+  migration runner, closing G4), failure-category demux on the
+  event stream (closing G5 with the matching consumer-side
+  change in RDR-111), and forward-references RDR-113 for host
+  trust / UDS auth (closing G6). G7 closes via a one-line
+  forward-reference in `docs/workflow-engine-synthesis.md`. G9
+  (cross-triad integration test) becomes a planning-time bead.
