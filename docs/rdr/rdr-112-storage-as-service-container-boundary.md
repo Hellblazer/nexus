@@ -285,9 +285,27 @@ T2 facade and stores (`src/nexus/db/t2/`, `src/nexus/db/memory_store.py`,
 5. **Any future persistent store** is added as a domain inside an
    existing daemon (preferred) or as a new daemon (only if a
    first-class operational separation is needed). Direct
-   `sqlite3.connect()` / `chromadb.PersistentClient()` outside a
-   daemon process becomes a lint-checked anti-pattern, enforced by
-   `nx doctor` or a CI rule.
+   `sqlite3.connect()` / `chromadb.PersistentClient()` outside
+   `src/nexus/db/` daemon-internal code becomes a lint-checked
+   anti-pattern. **Enforcement (committed)**:
+   - **Tool**: `nx doctor --check-storage-boundary` — an AST-based
+     scan modelled on the existing
+     `tests/test_no_direct_catalog_writes_outside_projector.py`
+     ε-lint (RDR-101 Phase 3 ε). The implementation lives at
+     `src/nexus/commands/doctor.py` (a new check function) and
+     scans `src/nexus/` for `sqlite3.connect(...)` and
+     `chromadb.PersistentClient(...)` call sites outside the
+     allowlisted prefix `src/nexus/db/`.
+   - **Trigger**: `nx doctor` runs the check as part of its
+     default audit pass; CI invokes `nx doctor
+     --check-storage-boundary --fail-on-violation` as a
+     dedicated step in the existing pytest workflow.
+   - **Surfacing**: violations are listed by `file:line` with the
+     offending call shape, mirroring the ε-lint output format.
+     Exit code 1 from CI fails the build.
+   - **Escape hatch**: a `# storage-boundary-allow: <reason>`
+     line marker, ≥8-char reason, parallels the
+     `# epsilon-allow:` mechanism already in the catalog lint.
 6. **Discovery (dual-primary)**: each daemon writes **both** its
    UDS socket path and its TCP `host:port` to
    `~/.config/nexus/<tier>_addr.<host_uid>` (single file, both
@@ -749,8 +767,10 @@ single end-to-end proof and ships with the daemon.
   indefinitely for debugging but is not the recommended path
   post-cutover.
 - **Secret/credential lifecycle**: N/A in v1 — local daemons,
-  UDS uses unix file permissions, TCP listeners are
-  loopback-only. Future cross-host RDR will introduce auth.
+  UDS uses unix file permissions (`chmod 0600` + peer-credential
+  check on accept; see **RDR-113** for the v1 host-trust model),
+  TCP listeners are loopback-only. Future cross-host RDR will
+  introduce token-based auth.
 - **Memory management**: daemon long-lived; needs a memory
   budget (to be set during planning based on expected concurrent
   client count and result-set sizes).
@@ -911,3 +931,21 @@ the planner's job, not this RDR's.
   trust / UDS auth (closing G6). G7 closes via a one-line
   forward-reference in `docs/workflow-engine-synthesis.md`. G9
   (cross-triad integration test) becomes a planning-time bead.
+- 2026-05-13 — **Light re-gate post-triad-rework PASSED**
+  (substantive-critic `abbc3adfbe8d94ca2`, 0C/1S/1O). Critic
+  confirmed §7-§10 integrate cleanly with §1-§6; cross-RDR
+  consistency with RDR-111 (EventStream signature, CA-9, CA-10)
+  solid; R3 PASSED items intact. Closeouts in this revision:
+  - S1 (Approach §5 lint-rule enforcement was an unresolved
+    disjunction predating the rework): committed to
+    `nx doctor --check-storage-boundary` as the concrete tool,
+    AST-scan modelled on the existing RDR-101 Phase 3 ε-lint at
+    `tests/test_no_direct_catalog_writes_outside_projector.py`.
+    Trigger (CI step + `nx doctor` default audit), surfacing
+    (file:line + exit 1), and escape hatch
+    (`# storage-boundary-allow: <reason>`, ≥8-char) all named.
+  - O1 (RDR-113 forward-reference lived only in revision
+    history + frontmatter): added a body-prose cite in
+    Cross-Cutting Concerns §Secret/credential lifecycle so the
+    cross-reference is navigable without a revision-history
+    dig.
