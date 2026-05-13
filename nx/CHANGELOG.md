@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.12] - 2026-05-13
+
+Plugin version aligned with conexus 4.32.12. No plugin-side changes
+in this release — root-package work is CI fixes (collection-cascade
+lint, JSON-parse hardening) and the RDR-111/112/113 architecture
+cycle. See root `CHANGELOG.md`.
+
 ## [4.32.3] - 2026-05-11
 
 Plugin version aligned with conexus 4.32.3. No plugin-side changes;
