@@ -328,6 +328,29 @@ class Telemetry:
             "median_top_distance": median,
         }
 
+    def query_top_distances(
+        self, collection: str, *, days: int = 30,
+    ) -> list[float]:
+        """Return raw ``top_distance`` values from ``search_telemetry`` for
+        *collection* over the trailing *days* window.
+
+        Filters to rows with ``raw_count > 0`` and non-NULL ``top_distance``
+        (matching the audit-path query). Used by
+        ``collection_audit.compute_distance_histogram`` (RDR-112 P0.5,
+        nexus-xcji).
+        """
+        if days < 1:
+            raise ValueError(f"days must be >= 1; got {days}")
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT top_distance FROM search_telemetry "
+                "WHERE collection = ? AND ts >= ? "
+                "AND raw_count > 0 AND top_distance IS NOT NULL",
+                (collection, cutoff),
+            ).fetchall()
+        return [float(r[0]) for r in rows]
+
     def trim_search_telemetry(self, days: int = 30) -> int:
         """Delete ``search_telemetry`` rows older than *days* days (Phase 2.4).
 
