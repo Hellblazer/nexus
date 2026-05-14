@@ -505,6 +505,44 @@ def test_collections_from_registry_info_filters_excluded() -> None:
     assert "docs__myrepo__voyage-context-3__v1" in out
 
 
+def test_collections_from_registry_info_prefers_conformant_code_collection() -> None:
+    """nexus-cxg9: pre-RDR-103 entries keep the legacy non-conformant
+    ``collection`` alias even after the conformant ``code_collection``
+    is set. The post-pass must enumerate the conformant name only —
+    enumerating the alias triggers ``collection_not_found`` every run.
+    """
+    from nexus.commands.index import _collections_from_registry_info
+
+    info = {
+        "collection": "code__nexus-571b8edd",  # legacy alias, no T3 collection
+        "code_collection": "code__1-2188__voyage-code-3__v1",
+        "docs_collection": "docs__1-2188__voyage-context-3__v1",
+        "rdr_collection": "rdr__1-2188__voyage-context-3__v1",
+    }
+    out = _collections_from_registry_info(info)
+    assert "code__nexus-571b8edd" not in out, (
+        "legacy non-conformant alias must not be enumerated when a "
+        "conformant code_collection is present"
+    )
+    # Cloud-mode passthrough: rdr/docs always; code__ filtered in local mode only.
+    assert "docs__1-2188__voyage-context-3__v1" in out
+    assert "rdr__1-2188__voyage-context-3__v1" in out
+
+
+def test_collections_from_registry_info_dedupes() -> None:
+    """nexus-cxg9: when the legacy ``collection`` field happens to equal
+    ``code_collection`` (post-RDR-103 fresh registrations), the result
+    must not contain duplicates.
+    """
+    from nexus.commands.index import _collections_from_registry_info
+
+    name = "code__myrepo__voyage-code-3__v1"
+    info = {"collection": name, "code_collection": name,
+            "docs_collection": "docs__myrepo__voyage-context-3__v1"}
+    out = _collections_from_registry_info(info)
+    assert len(out) == len(set(out))
+
+
 # ── GH #451: --corpus flag for nx index repo ────────────────────────────────
 
 
