@@ -241,6 +241,42 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.fixture(autouse=True)
+def _auto_migrate_t2_in_tests(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Auto-run migrations when tests construct ``T2Database`` directly.
+
+    RDR-112 P0.4 (nexus-uqqy) severed the constructor-driven migration
+    in ``T2Database.__init__``. Production callers consult
+    ``nexus.db.migrations.run_if_needed`` adjacently; the daemon will
+    own migration startup in Phase 1 (nexus-w0et). For tests, the legacy
+    ``T2Database(path)`` construction pattern is ubiquitous and threading
+    explicit migration calls through every fixture would be churn for
+    zero behavioural delta.
+
+    This autouse fixture wraps ``T2Database.__init__`` to call
+    ``run_if_needed(path)`` first, restoring the implicit migration
+    behaviour that tests rely on. Tests that need to assert the
+    constructor's *new* contract (no schema side effect) opt out via
+    the ``no_auto_migrate`` marker; see
+    ``tests/db/test_migration_ownership.py``.
+    """
+    if request.node.get_closest_marker("no_auto_migrate") is not None:
+        return
+
+    from nexus.db.migrations import run_if_needed
+    from nexus.db.t2 import T2Database
+
+    original_init = T2Database.__init__
+
+    def migrating_init(self, path: Path) -> None:  # type: ignore[no-redef]
+        run_if_needed(path)
+        original_init(self, path)
+
+    monkeypatch.setattr(T2Database, "__init__", migrating_init)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect NEXUS_CONFIG_DIR so child processes write under tmp_path.
 

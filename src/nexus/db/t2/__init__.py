@@ -165,64 +165,13 @@ class T2Database:
         # Store path for cross-domain operations (e.g. rename_collection_cascade).
         self._path: Path = path
 
-        # ── Transient connection: run pending migrations (RDR-076) ────
-        from nexus.db.migrations import _upgrade_done, _upgrade_lock, apply_pending
-
-        try:
-            path_key = str(path.resolve())
-        except OSError:
-            path_key = str(path)
-
-        # Serialise the check-then-migrate to prevent concurrent
-        # transient connections racing the WAL write lock.
-        with _upgrade_lock:
-            if path_key not in _upgrade_done:
-                try:
-                    from importlib.metadata import version as _pkg_version
-
-                    current_version = _pkg_version("conexus")
-                except Exception:
-                    current_version = "0.0.0"
-
-                # OBS-2: emit a brief migration notice so operators see
-                # progress rather than a silent hang on first post-upgrade
-                # invocation. Suppressed when stderr is not a TTY
-                # (CI, pipes, click.testing.CliRunner) because CliRunner
-                # mixes stderr into result.output and tests parsing
-                # JSON output break otherwise. The interactive operator
-                # case (running `nx <verb>` from a real terminal) keeps
-                # the visibility benefit; the headless case stays
-                # quiet.
-                import sys as _sys
-                _stderr_is_tty = (
-                    hasattr(_sys.stderr, "isatty") and _sys.stderr.isatty()
-                )
-                if _stderr_is_tty:
-                    print(
-                        f"Migrating database {path.name!r} to schema "
-                        f"version {current_version} ...",
-                        file=_sys.stderr,
-                    )
-
-                conn = sqlite3.connect(str(path), check_same_thread=False)
-                try:
-                    conn.execute("PRAGMA busy_timeout=5000")
-                    conn.execute("PRAGMA journal_mode=WAL")
-                    apply_pending(conn, current_version)
-                finally:
-                    conn.close()
-                # apply_pending() keys _upgrade_done by
-                # _connection_path_key(conn) (Path(row[2]).resolve() from
-                # PRAGMA database_list). The fast-path check above keys by
-                # str(path.resolve()) on the Path argument. The two forms
-                # are equivalent in nearly all cases but diverge in CI
-                # path-resolution edge cases (nexus-avwe), leaving the
-                # T2Database-form path_key absent from _upgrade_done after
-                # apply_pending populated only its own form. Recording the
-                # T2Database form here ensures a second construction with
-                # the same Path argument short-circuits without re-opening
-                # the connection.
-                _upgrade_done.add(path_key)
+        # RDR-112 P0.4 (nexus-uqqy): migration ownership lives outside this
+        # constructor. CLI entry points (cli.main) and the MCP server
+        # factory call ``nexus.db.migrations.run_if_needed(path)``
+        # explicitly before constructing T2Database; Phase 1 (nexus-w0et)
+        # moves ownership to daemon startup. Each domain store still
+        # creates its own tables in ``_init_schema`` and is functional
+        # against a fresh path even if ``apply_pending`` has never run.
 
         # ── Construct domain stores ───────────────────────────────────
         self.memory: MemoryStore = MemoryStore(path)

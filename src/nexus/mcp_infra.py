@@ -147,12 +147,21 @@ def get_collection_names() -> list[str]:
 def t2_ctx():
     """Return a T2Database context manager — fresh per call.
 
+    RDR-112 P0.4 (nexus-uqqy): the MCP server is the explicit migration
+    owner for its T2 path in Phase 0. ``run_if_needed`` is idempotent
+    via the process-level upgrade cache, so calling it on every factory
+    invocation is cheap after the first hit.
+
     Resolves ``default_db_path`` via this module's binding so test
     fixtures that patch ``nexus.mcp_infra.default_db_path`` continue
-    to take effect.
+    to take effect (RDR-112 P0.5, nexus-oi0z).
     """
+    from nexus.db.migrations import run_if_needed
     from nexus.db.t2 import T2Database
-    return T2Database(default_db_path())
+
+    path = default_db_path()
+    run_if_needed(path)
+    return T2Database(path)
 
 
 # ── T1 plan session cache (RDR-078) ──────────────────────────────────────────

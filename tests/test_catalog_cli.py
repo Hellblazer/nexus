@@ -18,6 +18,22 @@ from nexus.cli import main
 pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 
+def _last_output_line(output: str) -> str:
+    """Return the last non-blank, non-structlog-event line of CLI output.
+
+    RDR-112 P0.4 (nexus-uqqy) wired ``run_if_needed`` into ``cli.main``,
+    which can emit structlog events ahead of the command's own stdout.
+    CliRunner mixes stdout + stderr into ``result.output``; the
+    command's last printed line is still the authoritative answer.
+    """
+    lines = [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip() and "event=" not in line
+    ]
+    return lines[-1] if lines else ""
+
+
 @pytest.fixture(autouse=True)
 def git_identity(monkeypatch):
     monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
@@ -798,11 +814,15 @@ class TestStatsCommand:
         Bead nexus-iojz (formerly nexus-1n0t). The catalog has three
         layers; stats previously enumerated only the first two.
         """
+        from nexus.db.migrations import run_if_needed
         from nexus.db.t2 import T2Database
 
         # Seed a T2 DB with one topic + one projection assignment and
         # point the command helper at it via monkeypatched default_db_path.
+        # RDR-112 P0.4: migrations are no longer a T2Database side effect,
+        # so the test exercises the explicit entry point.
         t2_path = tmp_path / "memory.db"
+        run_if_needed(t2_path)
         with T2Database(t2_path) as db:
             db.taxonomy.conn.execute(
                 "INSERT INTO topics (label, collection, doc_count, created_at) "
@@ -1479,7 +1499,10 @@ class TestCollectionNameCommand:
         assert result.exit_code == 0, result.output
         # Tumbler 1.1 to owner_segment 1-1; canonical model for knowledge
         # is voyage-context-3; new tuple lands at v1.
-        assert result.output.strip() == "knowledge__1-1__voyage-context-3__v1"
+        # Last non-blank line is the collection name; preceding lines may
+        # carry migration log output (RDR-112 P0.4 wired run_if_needed
+        # into cli.main, which can emit structlog WARN/INFO records).
+        assert _last_output_line(result.output) == "knowledge__1-1__voyage-context-3__v1"
 
     def test_emits_conformant_name_for_code(
         self, catalog_env, tmp_path, monkeypatch,
@@ -1505,7 +1528,7 @@ class TestCollectionNameCommand:
         ])
         assert result.exit_code == 0, result.output
         # Code uses voyage-code-3.
-        assert result.output.strip() == "code__1-1__voyage-code-3__v1"
+        assert _last_output_line(result.output) == "code__1-1__voyage-code-3__v1"
 
     def test_rejects_unknown_content_type(
         self, catalog_env, tmp_path, monkeypatch,
@@ -1589,4 +1612,4 @@ class TestCollectionNameCommand:
             "--content-type", "rdr",
         ])
         assert result.exit_code == 0, result.output
-        assert result.output.strip() == "rdr__1-1__voyage-context-3__v1"
+        assert _last_output_line(result.output) == "rdr__1-1__voyage-context-3__v1"

@@ -794,6 +794,7 @@ class TestConstants:
 # ── T2Database integration tests (Phase 3) ──────────────────────────────────
 
 
+@pytest.mark.no_auto_migrate
 class TestT2DatabaseIntegration:
     """Test T2Database.__init__() with transient connection and _upgrade_done fast path."""
 
@@ -808,49 +809,53 @@ class TestT2DatabaseIntegration:
         plan_library._migrated_paths.clear()
         catalog_taxonomy._migrated_paths.clear()
 
-    def test_t2database_creates_version_table(self, tmp_path: Path) -> None:
-        """T2Database construction should create _nexus_version table."""
-        from nexus.db.t2 import T2Database
+    def test_run_if_needed_creates_version_table(self, tmp_path: Path) -> None:
+        """``run_if_needed`` is the explicit migration entry (RDR-112 P0.4).
+
+        Previously this assertion ran against ``T2Database(path)`` itself
+        because the constructor auto-migrated; nexus-uqqy severed that
+        constructor-driven trigger, so the explicit call is now the
+        contract under test.
+        """
+        from nexus.db.migrations import run_if_needed
 
         db_path = tmp_path / "memory.db"
-        db = T2Database(db_path)
+        run_if_needed(db_path)
 
-        # Verify _nexus_version exists by connecting directly
         conn = sqlite3.connect(str(db_path))
         row = conn.execute(
             "SELECT value FROM _nexus_version WHERE key='cli_version'"
         ).fetchone()
         assert row is not None
         conn.close()
-        db.close()
 
-    def test_t2database_fast_path_second_construction(self, tmp_path: Path) -> None:
-        """Second T2Database on same path skips apply_pending entirely."""
+    def test_run_if_needed_fast_path_second_call(self, tmp_path: Path) -> None:
+        """Second ``run_if_needed`` on same path skips ``apply_pending``.
+
+        Updated for nexus-uqqy: the fast-path memo now lives on
+        ``run_if_needed``, not on T2Database construction.
+        """
         from unittest.mock import patch
 
-        from nexus.db.t2 import T2Database
+        from nexus.db.migrations import run_if_needed
 
         db_path = tmp_path / "memory.db"
-        db1 = T2Database(db_path)
-        db1.close()
+        run_if_needed(db_path)
 
         with patch("nexus.db.migrations.apply_pending") as mock_ap:
-            db2 = T2Database(db_path)
+            run_if_needed(db_path)
             mock_ap.assert_not_called()
-            db2.close()
 
-    def test_t2database_records_path_key_in_upgrade_done(self, tmp_path: Path) -> None:
-        """T2Database records its own path_key form (str(path.resolve())) in
-        _upgrade_done, independent of _connection_path_key's form, so the
-        outer fast-path check on a subsequent construction is guaranteed to
-        short-circuit (nexus-avwe regression).
+    def test_run_if_needed_records_path_key_in_upgrade_done(self, tmp_path: Path) -> None:
+        """``run_if_needed`` records its path-argument form (str(path.resolve()))
+        in ``_upgrade_done``, independent of ``_connection_path_key``'s form,
+        so the outer fast-path check on a subsequent call short-circuits
+        (nexus-avwe regression, re-pointed at run_if_needed per nexus-uqqy).
         """
-        from nexus.db.migrations import _upgrade_done
-        from nexus.db.t2 import T2Database
+        from nexus.db.migrations import _upgrade_done, run_if_needed
 
         db_path = tmp_path / "memory.db"
-        db = T2Database(db_path)
-        db.close()
+        run_if_needed(db_path)
         assert str(db_path.resolve()) in _upgrade_done
 
     def test_t2database_base_tables_exist(self, tmp_path: Path) -> None:

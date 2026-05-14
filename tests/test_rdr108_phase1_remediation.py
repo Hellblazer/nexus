@@ -219,71 +219,52 @@ class TestS2DocsSkippedNoT3:
 # ── OBS-2: no migration UX during T2Database init ────────────────────────────
 
 
+@pytest.mark.no_auto_migrate
 class TestOBS2MigrationUX:
-    """OBS-2: T2Database.__init__ must emit a migration-start message on
-    stderr when apply_pending runs, so users don't see a silent hang."""
+    """OBS-2: ``run_if_needed`` must emit a structured marker via structlog
+    when it actually triggers a migration pass, so log routing surfaces
+    progress (file handler in MCP/daemon mode, stderr in CLI mode).
 
-    def test_migration_emits_progress_message(self, tmp_path, capsys, monkeypatch):
-        """First construction of T2Database on a fresh DB emits a 'migrating'
-        message to stderr when stderr is a tty.
+    RDR-112 P0.4 (nexus-uqqy): the legacy TTY-gated ``print()`` was
+    removed in favour of structlog routing per CLAUDE.md (no print() in
+    library code).
+    """
 
-        The OBS-2 message is gated on ``sys.stderr.isatty()`` so it stays
-        out of CliRunner-mixed output during JSON-parsing tests; force it
-        on here.
-        """
-        from nexus.db.t2 import T2Database
-        import sys
+    def test_run_if_needed_creates_version_table(self, tmp_path):
+        """First ``run_if_needed`` on a fresh path migrates the DB."""
+        import sqlite3
+        from nexus.db.migrations import _upgrade_done, _upgrade_lock, run_if_needed
 
-        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
-
-        # Use a unique path: tmp_path is per-test so _upgrade_done won't cache it.
         db_path = tmp_path / "obs2_fresh.db"
+        with _upgrade_lock:
+            _upgrade_done.discard(str(db_path.resolve()))
 
-        db = T2Database(db_path)
-        db.close()
+        run_if_needed(db_path)
 
-        captured = capsys.readouterr()
-        all_stderr = captured.err
-
-        assert "migrat" in all_stderr.lower(), (
-            f"Expected 'migrat' in stderr output but got: {all_stderr!r}"
-        )
-
-    def test_migration_quiet_under_non_tty_stderr(self, tmp_path, capsys, monkeypatch):
-        """OBS-2 message is suppressed when stderr is not a tty (CI, pipes,
-        click.testing.CliRunner mixing stderr into result.output)."""
-        from nexus.db.t2 import T2Database
-        import sys
-
-        monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
-
-        db_path = tmp_path / "obs2_quiet.db"
-        db = T2Database(db_path)
-        db.close()
-
-        captured = capsys.readouterr()
-        assert "migrat" not in captured.err.lower(), (
-            f"Expected NO 'migrat' under non-tty stderr but got: {captured.err!r}"
-        )
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT value FROM _nexus_version WHERE key='cli_version'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None, "run_if_needed did not populate _nexus_version"
 
     def test_no_output_on_already_migrated_db(self, tmp_path, capsys, monkeypatch):
-        """Second T2Database construction (fast-path via _upgrade_done) must
-        not re-emit the migration message even when stderr is a tty."""
-        from nexus.db.t2 import T2Database
-        import sys
-
-        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+        """Second ``run_if_needed`` call (fast-path via ``_upgrade_done``)
+        must not re-emit the marker.
+        """
+        from nexus.db.migrations import run_if_needed
 
         db_path = tmp_path / "obs2_second.db"
+        db_path.touch()
 
-        # First construction: migrations run, message emitted.
-        db = T2Database(db_path)
-        db.close()
+        # First call: migrations run, event emitted.
+        run_if_needed(db_path)
         capsys.readouterr()  # drain first-run output
 
-        # Second construction: fast path — _upgrade_done hit, no print.
-        db2 = T2Database(db_path)
-        db2.close()
+        # Second call: fast path — _upgrade_done hit, no log line.
+        run_if_needed(db_path)
 
         captured = capsys.readouterr()
         assert "migrat" not in captured.err.lower(), (
