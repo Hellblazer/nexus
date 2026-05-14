@@ -3,6 +3,7 @@
 
 RDR-112 P1.1 (nexus-61x6): transport scaffold + dual-bind UDS+TCP.
 RDR-112 P1.2 (nexus-qy0u): domain-store RPC dispatcher.
+RDR-112 P1.3 (nexus-m4gm): EventStream RPC — streaming subscription.
 
 This module provides:
   - ``T2Daemon``: the daemon class, managing two concurrent asyncio servers
@@ -43,8 +44,16 @@ Phase 1.2 scope (nexus-qy0u):
     ``{error: {type, message, traceback}}`` so the connection stays open.
   - ``database.rename_collection_cascade`` exposed as a top-level RPC.
 
+Phase 1.3 scope (nexus-m4gm):
+  - EventStream RPC: ``event_stream.subscribe`` op on a persistent connection.
+  - Server-push mode: after subscription, the daemon streams event frames
+    until the client closes or the daemon stops.
+  - Backfill: ``rowid > since_cursor`` from the ``events`` table in tuples.db.
+  - Live mode: ``PRAGMA data_version`` polling at 10 ms.
+  - Failure-category demux: ``where: {category: <str>}`` filter supported.
+  - Requires ``tuples_db_path`` arg at daemon construction.
+
 Out of scope here (later beads):
-  - EventStream subscription (P1.3 nexus-m4gm)
   - Migration runner (P1.4 nexus-w0et)
   - Subspace admin (P1.5 nexus-x98k)
   - Introspection RPCs (P1.6 nexus-08i1)
@@ -368,7 +377,13 @@ class T2Daemon:
         start_time: ISO-8601 UTC timestamp of daemon startup.
     """
 
-    def __init__(self, config_dir: Path, *, t2db: Any = None) -> None:
+    def __init__(
+        self,
+        config_dir: Path,
+        *,
+        t2db: Any = None,
+        tuples_db_path: Path | None = None,
+    ) -> None:
         """Initialise the daemon.
 
         Args:
@@ -379,6 +394,9 @@ class T2Daemon:
                 RPCs (P1.2 nexus-qy0u). When ``None``, only the handshake
                 and ping ops are available (useful for tests that only test
                 transport).
+            tuples_db_path: Path to tuples.db for EventStream subscriptions
+                (P1.3 nexus-m4gm). When ``None``, ``event_stream.subscribe``
+                returns an error.  Typically ``config_dir / "tuples.db"``.
         """
         self._config_dir = config_dir
         self._socket_dir: Path = config_dir / _SOCKET_SUBDIR
@@ -404,6 +422,9 @@ class T2Daemon:
         self._rpc_table: dict[str, Any] = {}
         if t2db is not None:
             self._rpc_table = _build_dispatch_table(t2db)
+
+        # P1.3 nexus-m4gm: tuples.db path for EventStream subscriptions.
+        self._tuples_db_path: Path | None = tuples_db_path
 
     # ------------------------------------------------------------------
     # Public properties (set after start())
@@ -714,6 +735,12 @@ class T2Daemon:
                 _log.warning("rpc_read_error", exc=str(exc))
                 return
 
+            # P1.3 nexus-m4gm: EventStream op hijacks the connection into
+            # server-push mode.  Return immediately after the stream ends.
+            if msg.get("op") == "event_stream.subscribe":
+                await self._handle_event_stream(reader, writer, msg.get("args") or {})
+                return
+
             response = await self._dispatch(msg)
             write_frame(writer, response)
             await writer.drain()
@@ -788,6 +815,41 @@ class T2Daemon:
                     "traceback": tb_text,
                 }
             }
+
+    async def _handle_event_stream(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        args: dict[str, Any],
+    ) -> None:
+        """Handle an ``event_stream.subscribe`` request in server-push mode.
+
+        Delegates to ``nexus.daemon.event_stream.handle_event_stream`` with
+        this daemon's tuples_db_path.  If ``tuples_db_path`` was not provided
+        at construction, responds with an error frame and returns.
+
+        Args:
+            reader: asyncio StreamReader for the connection.
+            writer: asyncio StreamWriter for the connection.
+            args: Parsed ``args`` dict from the subscribe request.
+        """
+        if self._tuples_db_path is None:
+            write_frame(
+                writer,
+                {"error": "event_stream not available: daemon has no tuples_db_path"},
+            )
+            await writer.drain()
+            return
+
+        from nexus.daemon.event_stream import handle_event_stream
+
+        await handle_event_stream(
+            reader=reader,
+            writer=writer,
+            tuples_db_path=self._tuples_db_path,
+            args=args,
+            stopping_fn=lambda: self._stopping,
+        )
 
     # ------------------------------------------------------------------
     # Discovery file + stdout announce
