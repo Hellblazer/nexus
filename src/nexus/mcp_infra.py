@@ -167,6 +167,20 @@ def t2_ctx(*, _path_resolver=None):
     from nexus.db.migrations import run_if_needed
     from nexus.db.t2 import T2Database
 
+    # RDR-112 P1 prereq (foundation review, 2026-05-14): under daemon
+    # mode the daemon owns the T2 path; a client-side ``_path_resolver``
+    # override is meaningless and dangerous (it would silently pick a
+    # different file). Reject so the contract is loud, not surprising.
+    if (
+        _path_resolver is not None
+        and os.environ.get("NX_STORAGE_MODE", "").lower() == "daemon"
+    ):
+        raise RuntimeError(
+            "t2_ctx(_path_resolver=...) is incompatible with "
+            "NX_STORAGE_MODE=daemon: the daemon owns the path. "
+            "Clear _path_resolver or run in direct mode."
+        )
+
     path = (_path_resolver or default_db_path)()
     run_if_needed(path)
     return T2Database(path)
@@ -1251,8 +1265,13 @@ def check_version_compatibility() -> None:
         cli_ver = _pkg_version("conexus")
 
         # ── (1) CLI ↔ T2 schema drift ────────────────────────────────────
+        # RDR-112 P1 prereq: skip the direct-open probe when the daemon
+        # owns the file. The daemon's own startup will check this.
         db_path = default_db_path()
-        if db_path.exists():
+        if (
+            db_path.exists()
+            and os.environ.get("NX_STORAGE_MODE", "").lower() != "daemon"
+        ):
             conn = sqlite3.connect(str(db_path))
             try:
                 row = conn.execute(

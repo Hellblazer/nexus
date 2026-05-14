@@ -101,12 +101,15 @@ def render_cmd(
     """Render markdown tokens into resolved sidecar files."""
     root = project_root or Path.cwd()
 
-    # Open T2 inside a context manager; resolvers live for the duration
-    # of the command. Best-effort — if T2 can't be opened (fresh
-    # install, no db), fall back to bead + RDR resolvers only.
+    # Open T2 via context manager so the Phase-1 RPC seam (`t2_ctx`
+    # returning a daemon-client proxy) is entered/exited correctly.
+    # Best-effort — if T2 can't be opened (fresh install, no db),
+    # fall back to bead + RDR resolvers only.
+    from contextlib import ExitStack
+    stack = ExitStack()
     db: T2Database | None = None
     try:
-        db = t2_ctx()
+        db = stack.enter_context(t2_ctx())
     except Exception:
         db = None
 
@@ -118,6 +121,7 @@ def render_cmd(
         try:
             phase4_trio = _phase4_catalog_t3_chash()
         except Exception as exc:
+            stack.close()
             click.echo(f"--expand-citations cannot open resolver: {exc}", err=True)
             raise click.exceptions.Exit(2)
 
@@ -154,8 +158,7 @@ def render_cmd(
             click.echo(f"io error: {exc}", err=True)
             raise click.exceptions.Exit(2)
     finally:
-        if db is not None:
-            db.close()
+        stack.close()
         if phase4_trio is not None:
             try:
                 phase4_trio[2].close()
@@ -229,9 +232,11 @@ def validate_cmd(paths: tuple[Path, ...], project_root: Path | None) -> None:
     """Parse + resolve without emitting. Exits non-zero on any miss."""
     root = project_root or Path.cwd()
 
+    from contextlib import ExitStack
+    stack = ExitStack()
     db: T2Database | None = None
     try:
-        db = t2_ctx()
+        db = stack.enter_context(t2_ctx())
     except Exception:
         db = None
 
@@ -255,8 +260,7 @@ def validate_cmd(paths: tuple[Path, ...], project_root: Path | None) -> None:
                 total_misses += 1
             total_ok += result.resolved
     finally:
-        if db is not None:
-            db.close()
+        stack.close()
 
     click.echo(
         f"validated {total_ok} tokens across {len(paths)} file(s); "
@@ -575,11 +579,8 @@ def _phase4_t2_taxonomy():
 
     @contextmanager
     def _taxonomy_ctx():
-        db = t2_ctx()
-        try:
+        with t2_ctx() as db:
             yield db.taxonomy
-        finally:
-            db.close()
 
     return _taxonomy_ctx()
 

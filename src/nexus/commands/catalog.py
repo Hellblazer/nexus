@@ -5350,6 +5350,7 @@ def _run_replay_equality() -> dict:
     # mcp_infra.manifest_write_batch_hook.
     DOCUMENTS_EXCLUDE = ["chunk_count"]
     live_uri = f"file:{live_db_path}?mode=ro"
+    # storage-boundary-allow: rdr-112-decision-3-catalog-pending-fold
     with closing(sqlite3.connect(live_uri, uri=True)) as live_conn:
         live_snap = {
             "owners": _snapshot_table(live_conn, "owners"),
@@ -5382,6 +5383,7 @@ def _run_replay_equality() -> dict:
         finally:
             proj_db.close()
 
+        # storage-boundary-allow: rdr-112-decision-3-catalog-pending-fold
         with closing(sqlite3.connect(str(projected_path))) as proj_conn:
             projected_snap = {
                 "owners": _snapshot_table(proj_conn, "owners"),

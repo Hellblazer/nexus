@@ -72,10 +72,15 @@ class EventLog:
 
         Encapsulates the ``log.path.exists() or log.path.stat().st_size``
         check that callers previously inlined (RDR-112 P0.5, nexus-siva).
+        Catches ``OSError`` broadly (not just ``FileNotFoundError``):
+        the prior inline form relied on ``Path.exists()``'s implicit
+        swallow of ``PermissionError`` and similar; preserving that
+        permissive behaviour matches caller expectations in
+        sandbox/SELinux/NFS contexts (RDR-112 P1 prereq).
         """
         try:
             return self._path.stat().st_size == 0
-        except FileNotFoundError:
+        except OSError:
             return True
 
     def append(self, event: Event) -> None:

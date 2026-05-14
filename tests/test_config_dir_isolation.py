@@ -36,12 +36,17 @@ def sandbox_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     import nexus.session
     import nexus.context
     import nexus.checkpoint
-    import nexus.pipeline_buffer
+    import nexus.db.pipeline_buffer  # real module (post-RDR-112 P0-gate)
+    import nexus.pipeline_buffer  # back-compat shim
     import nexus.commands.search_cmd
     import nexus.db.t2.memory_store
     importlib.reload(nexus.session)
     importlib.reload(nexus.context)
     importlib.reload(nexus.checkpoint)
+    # nexus-yqeu moved pipeline_buffer into src/nexus/db/. Reload the
+    # real module BEFORE the shim so the shim's star-import picks up
+    # the fresh PIPELINE_DB_PATH.
+    importlib.reload(nexus.db.pipeline_buffer)
     importlib.reload(nexus.pipeline_buffer)
     importlib.reload(nexus.commands.search_cmd)
     importlib.reload(nexus.db.t2.memory_store)
@@ -54,6 +59,7 @@ def sandbox_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     importlib.reload(nexus.session)
     importlib.reload(nexus.context)
     importlib.reload(nexus.checkpoint)
+    importlib.reload(nexus.db.pipeline_buffer)
     importlib.reload(nexus.pipeline_buffer)
     importlib.reload(nexus.commands.search_cmd)
     importlib.reload(nexus.db.t2.memory_store)

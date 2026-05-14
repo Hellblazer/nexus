@@ -208,6 +208,9 @@ def _check_t3_local() -> list[HealthResult]:
     # a 0-chunk collection lingering after `nx store delete` of every entry.
     if path_exists:
         try:
+            # RDR-112 P1 prereq: refuse direct chroma open in daemon mode.
+            from nexus.db import reject_under_daemon_mode
+            reject_under_daemon_mode("nx health (T3 local probe)")
             client = chromadb.PersistentClient(path=str(local_path))
             cols = client.list_collections()
             col_count = len(cols)
@@ -279,6 +282,9 @@ def _check_t3_cloud() -> list[HealthResult]:
     # ChromaDB reachability
     if chroma_key and chroma_database:
         try:
+            # RDR-112 P1 prereq: refuse client-side chroma open in daemon mode.
+            from nexus.db import reject_under_daemon_mode
+            reject_under_daemon_mode("nx health (ChromaDB reachability)")
             chromadb.CloudClient(
                 tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
             )
@@ -324,6 +330,8 @@ def _check_t3_cloud() -> list[HealthResult]:
         stale_count = 0
         pipeline_results: list[HealthResult] = []
         try:
+            from nexus.db import reject_under_daemon_mode
+            reject_under_daemon_mode("nx health (pipeline version check)")
             client = chromadb.CloudClient(
                 tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
             )
@@ -702,6 +710,14 @@ def _check_t2_integrity() -> list[HealthResult]:
     if not db_path.exists():
         return [HealthResult(label="T2 integrity", ok=True, detail="not created yet")]
 
+    # RDR-112 P1 prereq: skip the direct integrity probe in daemon mode
+    # (the daemon's own startup check is the authoritative path).
+    if os.environ.get("NX_STORAGE_MODE", "").lower() == "daemon":
+        return [HealthResult(
+            label="T2 integrity",
+            ok=True,
+            detail="skipped: daemon owns the file (use `nx daemon t2 doctor`)",
+        )]
     try:
         conn = sqlite3.connect(str(db_path))
         try:
@@ -832,6 +848,8 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
         chroma_tenant = get_credential("chroma_tenant")
         if chroma_key and chroma_database:
             try:
+                from nexus.db import reject_under_daemon_mode
+                reject_under_daemon_mode("nx health (chroma pagination audit)")
                 client = chromadb.CloudClient(
                     tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
                 )
