@@ -693,10 +693,14 @@ class TestCheckPlanLibrary:
         monkeypatch.setattr(
             "nexus.config.default_db_path", lambda: db_path,
         )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
+        )
         from nexus.commands.catalog import _seed_plan_templates
         _seed_plan_templates()
 
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path), \
+             patch("nexus.mcp_infra.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-plan-library"])
 
         assert result.exit_code == 0, result.output

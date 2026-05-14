@@ -5,10 +5,9 @@ from pathlib import Path
 
 import click
 
-from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.config import get_credential
-from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
+from nexus.mcp_infra import t2_ctx
 from nexus.ttl import parse_ttl
 
 
@@ -34,7 +33,7 @@ def put_cmd(content: str, project: str, title: str, tags: str, ttl: str) -> None
         ttl_days = parse_ttl(ttl)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    with T2Database(_default_db_path()) as db:
+    with t2_ctx() as db:
         row_id = db.put(project=project, title=title, content=content, tags=tags, ttl=ttl_days)
     click.echo(f"Stored: {project}/{title} (id={row_id})")
 
@@ -52,7 +51,7 @@ def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> Non
     """
     if entry_id is None and not (project and title):
         raise click.UsageError("provide an ID or --project and --title")
-    with T2Database(_default_db_path()) as db:
+    with t2_ctx() as db:
         if entry_id is not None:
             result = db.get(id=entry_id)
             if result is None:
@@ -85,7 +84,7 @@ def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> Non
 @click.option("--project", "-p", default=None, help="Scope search to a project")
 def search_cmd(query: str, project: str | None) -> None:
     """FTS5 keyword search across T2 memory entries."""
-    with T2Database(_default_db_path()) as db:
+    with t2_ctx() as db:
         results = db.search(query=query, project=project)
     if not results:
         click.echo("No results found.")
@@ -102,7 +101,7 @@ def search_cmd(query: str, project: str | None) -> None:
 @click.option("--agent", "-a", default=None, help="Filter by agent name")
 def list_cmd(project: str | None, agent: str | None) -> None:
     """List memory entries."""
-    with T2Database(_default_db_path()) as db:
+    with t2_ctx() as db:
         entries = db.list_entries(project=project, agent=agent)
     if not entries:
         click.echo("No entries found.")
@@ -136,7 +135,7 @@ def delete_cmd(
     if entry_id is None and not all_entries and not (project and title):
         raise click.UsageError("provide --id, or --project and --title, or --project and --all")
 
-    with T2Database(_default_db_path()) as db:
+    with t2_ctx() as db:
         if all_entries:
             entries = db.list_entries(project=project)
             count = len(entries)
@@ -168,7 +167,7 @@ def delete_cmd(
 @memory.command("expire")
 def expire_cmd() -> None:
     """Remove TTL-expired memory entries."""
-    with T2Database(_default_db_path()) as db:
+    with t2_ctx() as db:
         count = db.expire()
     click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
 
@@ -182,7 +181,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
     """Promote a T2 memory entry to T3 ChromaDB permanent storage."""
     from nexus.corpus import t3_collection_name
 
-    with T2Database(_default_db_path()) as db:
+    with t2_ctx() as db:
         entry = db.get(id=entry_id)
         if entry is None:
             raise click.ClickException(f"Entry {entry_id} not found in T2 memory.")

@@ -12,6 +12,7 @@ from pathlib import Path
 import structlog
 
 from nexus.db.t2 import T2Database
+from nexus.mcp_infra import t2_ctx
 from nexus.session import (
     generate_session_id,
     write_claude_session_id,
@@ -29,7 +30,7 @@ def _default_db_path() -> Path:
 
 
 def _open_t2() -> T2Database:
-    return T2Database(_default_db_path())
+    return t2_ctx()
 
 
 def _open_t1():

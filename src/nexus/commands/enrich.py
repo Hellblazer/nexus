@@ -735,6 +735,7 @@ def _select_entries(
     from nexus.commands._helpers import default_db_path
     from nexus.config import catalog_path
     from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     cat_path = catalog_path()
     if not Catalog.is_initialized(cat_path):
@@ -747,7 +748,7 @@ def _select_entries(
         # Filter to entries whose existing aspect row has model_version
         # below the threshold. Rows without an existing aspect entry
         # are also included (they need first-time extraction).
-        with T2Database(default_db_path()) as db:
+        with t2_ctx() as db:
             outdated_paths = {
                 r.source_path
                 for r in db.document_aspects.list_by_extractor_version(
@@ -952,6 +953,7 @@ def _run_extraction(
     from nexus.aspect_extractor import ExtractFail, extract_aspects
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     extractor_name = config.extractor_name
 
@@ -969,8 +971,7 @@ def _run_extraction(
     # nexus-8g79.2: same — manifest_lookup is process-cached.
     manifest_lookup = _build_catalog_manifest_lookup()
 
-    db_path = default_db_path()
-    with T2Database(db_path) as db:
+    with t2_ctx() as db:
         for i, entry in enumerate(entries, 1):
             source_path = entry.file_path or entry.title
             if not source_path:
@@ -1197,8 +1198,9 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
 
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
-    with T2Database(default_db_path()) as db:
+    with t2_ctx() as db:
         records = db.document_aspects.list_by_collection(
             collection, limit=limit if limit > 0 else None,
         )
@@ -1244,8 +1246,9 @@ def enrich_aspects_info(collection: str, source_path: str) -> None:
 
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
-    with T2Database(default_db_path()) as db:
+    with t2_ctx() as db:
         record = db.document_aspects.get(collection, source_path)
 
     if record is None:
@@ -1300,6 +1303,7 @@ def enrich_aspects_delete(
     """
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     if not yes:
         click.confirm(
@@ -1308,7 +1312,7 @@ def enrich_aspects_delete(
             abort=True,
         )
 
-    with T2Database(default_db_path()) as db:
+    with t2_ctx() as db:
         deleted = db.document_aspects.delete(collection, source_path)
 
     if deleted:
@@ -1377,9 +1381,10 @@ def enrich_aspects_promote_field(
     )
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     if history:
-        with T2Database(default_db_path()) as db:
+        with t2_ctx() as db:
             entries = list_promotions(db)
         if not entries:
             click.echo("No promotion history.")
@@ -1393,7 +1398,7 @@ def enrich_aspects_promote_field(
             )
         return
 
-    with T2Database(default_db_path()) as db:
+    with t2_ctx() as db:
         try:
             result = promote_extras_field(
                 db, field_name,
@@ -1540,6 +1545,7 @@ def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
     """
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     _, entry = _resolve_catalog_entry(tumbler_or_title)
     if not entry.physical_collection or not entry.file_path:
@@ -1550,7 +1556,7 @@ def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
         )
         return
 
-    with T2Database(default_db_path()) as db:
+    with t2_ctx() as db:
         # nexus-6xp2: post-drop, source_path-keyed lookup is unreliable
         # when the writer used a non-uri_for source_uri. Tumbler-keyed
         # get_by_doc_id is exact; fall back to legacy (coll, path) get
@@ -1610,6 +1616,7 @@ def aspects_list_cmd(
     from nexus.commands._helpers import default_db_path
     from nexus.config import catalog_path
     from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     if missing:
         cat_path = catalog_path()
@@ -1619,7 +1626,7 @@ def aspects_list_cmd(
             )
         cat = Catalog(cat_path, cat_path / ".catalog.db")
         entries = cat.list_by_collection(collection)
-        with T2Database(default_db_path()) as db:
+        with t2_ctx() as db:
             existing = {
                 r.source_path for r in db.document_aspects.list_by_collection(
                     collection,
@@ -1652,7 +1659,7 @@ def aspects_list_cmd(
             click.echo(f"  ... and {len(gaps) - limit} more.")
         return
 
-    with T2Database(default_db_path()) as db:
+    with t2_ctx() as db:
         records = db.document_aspects.list_by_collection(
             collection, limit=(limit if limit else None),
         )

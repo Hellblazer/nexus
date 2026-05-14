@@ -131,10 +131,9 @@ def delete_cmd(name: str, yes: bool) -> None:
     taxonomy_counts: dict[str, int] | None = None
     chash_deleted = 0
     try:
-        from nexus.commands._helpers import default_db_path
-        from nexus.db.t2 import T2Database
+        from nexus.mcp_infra import t2_ctx
 
-        with T2Database(default_db_path()) as db:
+        with t2_ctx() as db:
             taxonomy_counts = db.taxonomy.purge_collection(name)
             chash_deleted = db.chash_index.delete_collection(name)
     except Exception as exc:
