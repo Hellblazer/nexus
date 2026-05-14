@@ -97,9 +97,25 @@ EOF
 
 The `\$` defers runtime expansions; the bare `$HOOK_LOG` expands at write-time. Result: the generated script has the literal path hardcoded.
 
+### 4. `Notification` hook's documented trigger doesn't fire in CC 2.1.x
+
+Older docs (including the `nx/hooks/scripts/spike_ca6/README.md` written against an earlier CC) say the reliable way to fire a `Notification` hook is a **permission prompt**: set `permissions.defaultMode=default`, issue a Bash/Write tool call that would require approval, the prompt fires `Notification`. **This no longer works.** CC 2.1.x auto-allows safe tools (`echo`-style Bash, simple `Write` targets) even in `default` permission mode, so the prompt path never lands.
+
+The empirically reliable trigger is **idle-wait** (verified 2026-05-14 via CA-6 spike):
+
+```bash
+claude_prompt "Reply with the single token READY."
+claude_wait 30                  # let the agent finish its turn
+sleep 90                        # CC fires Notification after ~60-90s idle
+```
+
+The captured Notification payload has `notification_type: "idle_prompt"` and `message: "Claude is waiting for your input"`. Other `notification_type` values exist (the field is enum-like, snake_case) but the idle path is the only one this harness has confirmed in CC 2.1.x.
+
+Implication for `Notification` bridge scripts: the bridge must handle the idle case as the primary code path. If your scenario needs to verify a *permission-prompt-driven* Notification, you'll need a tool that CC won't auto-allow — none of the common safe ones qualify. Open question for a future spike.
+
 ## Working scenario template
 
-After the three fixes above, a scenario that reliably exercises MCP-tool hooks is:
+After the four fixes above, a scenario that reliably exercises MCP-tool hooks is:
 
 ```bash
 HOOK_LOG="$TEST_HOME/hook.log"
