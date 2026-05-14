@@ -1034,7 +1034,7 @@ def _markdown_chunks(
         git_meta = detect_git_metadata(md_path)
 
     raw_text = md_path.read_text(encoding="utf-8")
-    frontmatter, body = parse_frontmatter(raw_text)
+    frontmatter, body = parse_frontmatter(raw_text, source=str(md_path), strict=True)
     frontmatter_len = len(raw_text) - len(body)
 
     # RDR-102 D2: source_path is no longer carried at any layer of the
