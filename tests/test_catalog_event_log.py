@@ -50,6 +50,18 @@ class TestConstruction:
     def test_path_property(self, event_log):
         assert event_log.path.name == EVENTS_FILENAME
 
+    def test_is_empty_on_fresh_log(self, event_log):
+        assert event_log.is_empty() is True
+
+    def test_is_empty_false_after_append(self, event_log):
+        e = ev.make_event(ev.DocumentDeletedPayload(doc_id="a", reason="r"))
+        event_log.append(e)
+        assert event_log.is_empty() is False
+
+    def test_is_empty_when_file_missing(self, event_log, event_log_dir):
+        (event_log_dir / EVENTS_FILENAME).unlink()
+        assert event_log.is_empty() is True
+
 
 class TestAppend:
     def test_writes_one_line_per_event(self, event_log):

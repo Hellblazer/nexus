@@ -67,6 +67,17 @@ class EventLog:
     def path(self) -> Path:
         return self._path
 
+    def is_empty(self) -> bool:
+        """Return True when the log file is missing or zero-bytes.
+
+        Encapsulates the ``log.path.exists() or log.path.stat().st_size``
+        check that callers previously inlined (RDR-112 P0.5, nexus-siva).
+        """
+        try:
+            return self._path.stat().st_size == 0
+        except FileNotFoundError:
+            return True
+
     def append(self, event: Event) -> None:
         """Atomically append one event envelope to the log.
 
