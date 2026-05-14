@@ -59,8 +59,9 @@ inventory.
      **Watch for**: any `Bash(*)` (or similar pre-approval) in your
      user-global `~/.claude/settings.json` short-circuits the prompt
      and silently defeats this trigger. Temporarily comment out the
-     allow rule for the duration of the spike, or run the spike under
-     a clean `$HOME` (`HOME=$(mktemp -d) claude ...`) to isolate.
+     allow rule for the duration of the spike (restore it after).
+     A clean `$HOME` would break OAuth auth — `.credentials.json`
+     lives under `~/.claude/` and the temp home has none.
 
 4. After each trigger, check `$NX_SPIKE_CAPTURE_DIR/<type>.jsonl`. The
    `payload` field is the verbatim stdin JSON Claude Code piped to the

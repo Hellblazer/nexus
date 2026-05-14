@@ -67,8 +67,12 @@ block_fired_a=0; grep -q HOOK_BLOCK_FIRED "$HOOK_LOG" && block_fired_a=1
 tool_ran_a=0;    [[ -s "$STUB_LOG" ]] && grep -q '"tool": "ping"' "$STUB_LOG" && tool_ran_a=1
 # Capture FIRED count now — subsequent sub-runs wipe $HOOK_LOG, so
 # reading it in the report block would always return the last sub-run's
-# count (review round-2 regression catch).
-fired_count_a=$(grep -c FIRED "$HOOK_LOG" 2>/dev/null || echo 0)
+# count (review round-2 regression catch). Mirror the allow_fired_* /
+# tool_ran_* idiom rather than `grep -c || echo 0`: under
+# runner.sh's `set -euo pipefail`, grep -c on an empty file prints
+# "0" + exits 1, so the || branch fires and the variable becomes
+# "0\n0" (round-3 regression catch).
+fired_count_a=0; [[ -s "$HOOK_LOG" ]] && fired_count_a=$(grep -c FIRED "$HOOK_LOG")
 
 claude_exit
 
@@ -104,7 +108,7 @@ claude_wait 60
 allow_fired_b=0; grep -q HOOK_ALLOW_FIRED "$HOOK_LOG" && allow_fired_b=1
 block_fired_b=0; grep -q HOOK_BLOCK_FIRED "$HOOK_LOG" && block_fired_b=1
 tool_ran_b=0;    [[ -s "$STUB_LOG" ]] && grep -q '"tool": "ping"' "$STUB_LOG" && tool_ran_b=1
-fired_count_b=$(grep -c FIRED "$HOOK_LOG" 2>/dev/null || echo 0)
+fired_count_b=0; [[ -s "$HOOK_LOG" ]] && fired_count_b=$(grep -c FIRED "$HOOK_LOG")
 
 claude_exit
 
@@ -140,7 +144,7 @@ claude_wait 60
 
 allow_fired_c=0; grep -q HOOK_ALLOW_FIRED "$HOOK_LOG" && allow_fired_c=1
 tool_ran_c=0;    [[ -s "$STUB_LOG" ]] && grep -q '"tool": "ping"' "$STUB_LOG" && tool_ran_c=1
-fired_count_c=$(grep -c FIRED "$HOOK_LOG" 2>/dev/null || echo 0)
+fired_count_c=0; [[ -s "$HOOK_LOG" ]] && fired_count_c=$(grep -c FIRED "$HOOK_LOG")
 
 claude_exit
 
