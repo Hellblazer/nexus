@@ -275,3 +275,84 @@ def test_fold_confidence_no_matches(db: T2Database) -> None:
         ["other"],
     )
     assert (sum_, min_, max_, count) == (0.0, None, None, 0)
+
+
+# ── coverage gaps surfaced by 2026-05-14 foundation review (nexus-k8ma-followup) ─
+
+
+def test_get_root_topics_returns_orderd_by_doc_count(db: T2Database) -> None:
+    """``get_root_topics`` returns ``(collection, label, doc_count)`` rows
+    for parent_id IS NULL topics, descending by doc_count.
+
+    Used by ``nexus.context.refresh_context_l1`` (RDR-112 P0-gate
+    nexus-mz2c). Prior to this test the method was reachable only via
+    an uncovered code path.
+    """
+    # Two root topics + one child (parent_id != NULL).
+    db.taxonomy.conn.execute(
+        "INSERT INTO topics (id, label, collection, doc_count, terms, "
+        "created_at) VALUES (?, ?, ?, ?, '[]', datetime('now'))",
+        (1, "alpha", "docs__a", 5),
+    )
+    db.taxonomy.conn.execute(
+        "INSERT INTO topics (id, label, collection, doc_count, terms, "
+        "created_at) VALUES (?, ?, ?, ?, '[]', datetime('now'))",
+        (2, "beta", "code__b", 10),
+    )
+    db.taxonomy.conn.execute(
+        "INSERT INTO topics (id, label, collection, doc_count, parent_id, "
+        "terms, created_at) VALUES (?, ?, ?, ?, ?, '[]', datetime('now'))",
+        (3, "gamma-child", "docs__a", 3, 1),
+    )
+    db.taxonomy.conn.commit()
+
+    rows = db.taxonomy.get_root_topics()
+    assert rows == [
+        ("code__b", "beta", 10),
+        ("docs__a", "alpha", 5),
+    ]
+
+
+def test_get_root_topics_empty(db: T2Database) -> None:
+    assert db.taxonomy.get_root_topics() == []
+
+
+def test_get_assignment_summary_returns_none_when_no_topics(
+    db: T2Database,
+) -> None:
+    """Returns ``None`` when topics table is empty — preserves the
+    inline-callsite signal for ``compute_chash_coverage``."""
+    assert db.taxonomy.get_assignment_summary() is None
+
+
+def test_get_assignment_summary_populated(db: T2Database) -> None:
+    db.taxonomy.conn.execute(
+        "INSERT INTO topics (id, label, collection, terms, created_at) "
+        "VALUES (?, ?, ?, '[]', datetime('now'))",
+        (1, "alpha", "docs__a"),
+    )
+    db.taxonomy.conn.execute(
+        "INSERT INTO topics (id, label, collection, terms, created_at) "
+        "VALUES (?, ?, ?, '[]', datetime('now'))",
+        (2, "beta", "code__b"),
+    )
+    for doc, tid, sc, by in [
+        ("d1", 1, "ingest", "projection"),
+        ("d2", 1, "ingest", "projection"),
+        ("d3", 2, "external", "projection"),
+        ("d4", 1, None, "hdbscan"),  # non-projection, no source — excluded
+    ]:
+        db.taxonomy.conn.execute(
+            "INSERT INTO topic_assignments "
+            "(doc_id, topic_id, source_collection, assigned_by) "
+            "VALUES (?, ?, ?, ?)",
+            (doc, tid, sc, by),
+        )
+    db.taxonomy.conn.commit()
+
+    summary = db.taxonomy.get_assignment_summary()
+    assert summary is not None
+    assert summary["topics"] == 2
+    assert summary["assignments"] == 4
+    assert summary["distinct_topics_assigned"] == 2
+    assert summary["projection_by_source"] == {"ingest": 2, "external": 1}

@@ -69,6 +69,10 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
         return
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    # RDR-112 P1 prereq: this admin path opens a WAL writer. In daemon
+    # mode the daemon owns the writer — refuse rather than race.
+    from nexus.db import reject_under_daemon_mode
+    reject_under_daemon_mode("nx upgrade")
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")

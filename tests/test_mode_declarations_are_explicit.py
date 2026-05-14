@@ -27,15 +27,52 @@ VOYAGE_RE = re.compile(r"voyage-(context|code)-3")
 
 
 def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
+    # RDR-112 P1 prereq (foundation review, 2026-05-14): the
+    # ``sandbox_dir`` fixture in tests/test_config_dir_isolation.py
+    # ``importlib.reload()``s several modules. After a reload, items
+    # collected at session-start may carry function objects whose
+    # ``__code__`` points at stale line ranges relative to the on-disk
+    # file. ``inspect.getsource`` returns the wrong slice (or empty).
+    # Read source by file path instead, then scan once per file.
+    import linecache
+    from pathlib import Path
+    linecache.clearcache()
+
+    seen_files: dict[str, str] = {}
+
+    def _file_source(path: str) -> str:
+        if path not in seen_files:
+            try:
+                seen_files[path] = Path(path).read_text()
+            except OSError:
+                seen_files[path] = ""
+        return seen_files[path]
+
     offenders: list[str] = []
     for item in request.session.items:
         func = getattr(item, "function", None)
         if func is None:
             continue
+        # Cheap path: pull the function's containing-file source
+        # fresh from disk. If the function name doesn't appear in
+        # the voyage-bearing region, skip it.
+        try:
+            src_path = inspect.getsourcefile(func) or inspect.getfile(func)
+        except (OSError, TypeError):
+            continue
+        file_src = _file_source(src_path)
+        if not VOYAGE_RE.search(file_src):
+            continue
+        # The file mentions voyage; narrow to this function by
+        # walking the AST for its line range.
         try:
             src = inspect.getsource(func)
         except (OSError, TypeError):
-            continue
+            # Fall back to a substring check — better than skipping
+            # the function entirely when its line numbers drifted.
+            if func.__name__ not in file_src:
+                continue
+            src = file_src
         if not VOYAGE_RE.search(src):
             continue
         # File-level exclusion (every test in the file is exempt).

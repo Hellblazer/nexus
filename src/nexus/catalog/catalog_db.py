@@ -252,6 +252,11 @@ class CatalogDB:
 
     def __init__(self, db_path: Path) -> None:
         self._path = db_path
+        # storage-boundary-allow: rdr-112-decision-3-catalog-pending-fold
+        # The catalog has its own SQLite file (separate from T2's
+        # memory.db). RDR-112 §Decision-3 folds CatalogDB into the
+        # daemon as an eighth domain store; until that lands, direct
+        # construction here is the supported path.
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         # Reentrant: ``execute()`` callers inside a ``transaction()``
         # context (RDR-101 round-3) re-acquire the lock from the same

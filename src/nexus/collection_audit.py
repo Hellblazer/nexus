@@ -348,6 +348,7 @@ def _open_catalog_conn() -> sqlite3.Connection | None:
     path = catalog_path()
     if not Catalog.is_initialized(path):
         return None
+    # storage-boundary-allow: rdr-112-decision-3-catalog-pending-fold
     return sqlite3.connect(str(path / ".catalog.db"))
 
 

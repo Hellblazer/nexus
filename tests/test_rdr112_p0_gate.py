@@ -178,3 +178,69 @@ def test_make_ephemeral_t3_returns_working_t3() -> None:
     # talking to the network.
     col = t3._client.get_or_create_collection("ephemeral_test")
     assert col.count() == 0
+
+
+# ── Phase-1 prereq: daemon-mode hard-rejects on diagnostic sites ───────────
+
+
+def test_reject_under_daemon_mode_raises_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.db import DaemonModeDiagnosticError, reject_under_daemon_mode
+
+    monkeypatch.setenv("NX_STORAGE_MODE", "daemon")
+    with pytest.raises(DaemonModeDiagnosticError):
+        reject_under_daemon_mode("test op")
+
+
+def test_reject_under_daemon_mode_noop_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.db import reject_under_daemon_mode
+
+    monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
+    reject_under_daemon_mode("test op")  # must NOT raise
+
+
+def test_reject_under_daemon_mode_noop_when_other_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.db import reject_under_daemon_mode
+
+    monkeypatch.setenv("NX_STORAGE_MODE", "in-process")
+    reject_under_daemon_mode("test op")  # must NOT raise
+
+
+def test_t2_ctx_rejects_path_resolver_under_daemon_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """``t2_ctx(_path_resolver=...)`` is incompatible with daemon mode
+    (the daemon owns the path; a client-side override would silently
+    pick a different file).
+    """
+    from nexus.mcp_infra import t2_ctx
+
+    monkeypatch.setenv("NX_STORAGE_MODE", "daemon")
+    with pytest.raises(RuntimeError, match="incompatible with"):
+        t2_ctx(_path_resolver=lambda: tmp_path / "should-not-open.db")
+
+
+# ── EventLog.is_empty PermissionError tolerance ───────────────────────────
+
+
+def test_event_log_is_empty_tolerates_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``EventLog.is_empty`` returns True on any OSError (not just
+    FileNotFoundError) to match the prior ``Path.exists()`` permissive
+    behaviour in sandboxed environments.
+    """
+    from nexus.catalog.event_log import EventLog
+
+    log = EventLog(tmp_path)
+
+    def _boom(*_a, **_kw):
+        raise PermissionError("sandbox forbids stat")
+
+    monkeypatch.setattr(type(log._path), "stat", _boom)
+    assert log.is_empty() is True

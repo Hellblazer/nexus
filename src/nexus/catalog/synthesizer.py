@@ -789,6 +789,8 @@ def build_live_catalog_content_hash_map(
         return {}
     mapping: dict[str, str] = {}
     uri = f"file:{db_path}?mode=ro"
+    # storage-boundary-allow: rdr-112-decision-3-catalog-pending-fold
+    # Read-only open on the catalog's own SQLite (not T2 memory.db).
     with closing(sqlite3.connect(uri, uri=True)) as conn:
         rows = conn.execute(
             "SELECT tumbler, metadata FROM documents WHERE metadata IS NOT NULL"

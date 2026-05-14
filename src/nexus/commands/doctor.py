@@ -53,6 +53,12 @@ def _run_check_schema() -> None:
         click.echo("T2 database not found — nothing to check.")
         return
 
+    # RDR-112 P1 prereq (nexus-pyfg): refuse direct T2 open in daemon mode.
+
+    from nexus.db import reject_under_daemon_mode
+
+    reject_under_daemon_mode("nx doctor (T2 probe)")
+
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA busy_timeout=5000")
     # CLI review: match the other T2 connection defaults. Opening without
@@ -509,6 +515,9 @@ def _run_check_plan_library() -> None:
 
     # Context manager guards against a raise inside the count loop
     # leaking the connection (RDR-092 code-review S-3).
+    # RDR-112 P1 prereq (nexus-pyfg): refuse direct T2 open in daemon mode.
+    from nexus.db import reject_under_daemon_mode
+    reject_under_daemon_mode("nx doctor (T2 probe)")
     conn = sqlite3.connect(str(db_path))
     try:
         conn.execute("PRAGMA busy_timeout=5000")
@@ -611,6 +620,12 @@ def _run_check_aspect_queue() -> None:
     if not db_path.exists():
         click.echo("aspect_extraction_queue: T2 database not found.")
         return
+
+    # RDR-112 P1 prereq (nexus-pyfg): refuse direct T2 open in daemon mode.
+
+    from nexus.db import reject_under_daemon_mode
+
+    reject_under_daemon_mode("nx doctor (T2 probe)")
 
     conn = _sqlite3.connect(str(db_path))
     try:
@@ -716,6 +731,12 @@ def _run_check_tier_discipline() -> None:
         click.echo("Tier-discipline check:")
         click.echo(f"  T2 database not found at {db_path} (skip).")
         return
+
+    # RDR-112 P1 prereq (nexus-pyfg): refuse direct T2 open in daemon mode.
+
+    from nexus.db import reject_under_daemon_mode
+
+    reject_under_daemon_mode("nx doctor (T2 probe)")
 
     conn = _sqlite3.connect(str(db_path))
     try:
@@ -1723,6 +1744,12 @@ def _run_check_taxonomy() -> None:
     if not db_path.exists():
         click.echo("T2 database not found — nothing to check.")
         return
+
+    # RDR-112 P1 prereq (nexus-pyfg): refuse direct T2 open in daemon mode.
+
+    from nexus.db import reject_under_daemon_mode
+
+    reject_under_daemon_mode("nx doctor (T2 probe)")
 
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA busy_timeout=5000")

@@ -411,6 +411,12 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # to exercise the (mode, name) matrix. Voyage names here are the
     # subject under test, not assertions of cloud-mode behavior.
     "test_rdr_109_phase2_dispatch.py",
+    # RDR-112 P0-gate: voyage tokens appear as test-data collection
+    # names exercising the name-vs-embed-dim doctor check (claims
+    # voyage in the name but holds MiniLM 384d vectors). The tests
+    # do NOT invoke voyage embedders.
+    "test_catalog_doctor_name_vs_embed_dim.py",
+    "test_upgrade_name_vs_embed_dim_advisory.py",
     "test_catalog_path.py",
     "test_chroma_retry.py",
     "test_collection_cmd.py",
