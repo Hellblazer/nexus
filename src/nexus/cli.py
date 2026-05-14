@@ -85,27 +85,46 @@ def main(ctx: click.Context, verbose: bool) -> None:
     # a fresh path; no migrations are pending). Subsequent invocations
     # see an existing file and call run_if_needed, which is a no-op
     # via the ``_upgrade_done`` process cache after the first hit.
-    from nexus.config import default_db_path as _default_db_path
-    from nexus.db.migrations import run_if_needed as _run_if_needed
+    import os as _os
 
-    _db_path = _default_db_path()
-    if _db_path.exists():
-        # Production migration trigger for direct-mode users (post-upgrade
-        # nx invocation). Wrapped to swallow OperationalError so a
-        # corrupt or malformed DB does not crash every CLI invocation;
-        # ``nx doctor`` is the right tool to surface that case to the
-        # operator. Other exceptions still propagate as bugs.
-        import sqlite3 as _sqlite3
-        try:
-            _run_if_needed(_db_path)
-        except _sqlite3.OperationalError:
-            import structlog as _structlog
-            _structlog.get_logger(__name__).warning(
-                "cli_run_if_needed_failed",
-                path=str(_db_path),
-                hint="run `nx doctor --check-schema`",
-                exc_info=True,
-            )
+    # In daemon mode (Phase 1, RDR-112) the daemon owns the SQLite file
+    # and runs migrations at its own startup. A direct-mode client must
+    # NOT open the same path and apply migrations against it — the daemon
+    # serializes through its single writer. The env-var guard is
+    # forward-compatible: pre-Phase-1 nothing sets it and this branch is
+    # dead; Phase 1 set-and-forget at daemon spawn flips it for all
+    # client invocations.
+    if _os.environ.get("NX_STORAGE_MODE") != "daemon":
+        from nexus.config import default_db_path as _default_db_path
+        from nexus.db.migrations import run_if_needed as _run_if_needed
+
+        _db_path = _default_db_path()
+        if _db_path.exists():
+            # Production migration trigger for direct-mode users (post-upgrade
+            # nx invocation). Wrapped to swallow OperationalError so a
+            # corrupt or malformed DB does not crash every CLI invocation;
+            # ``nx doctor`` is the right tool to surface that case to the
+            # operator. Other exceptions still propagate as bugs.
+            import sqlite3 as _sqlite3
+            try:
+                _run_if_needed(_db_path)
+            except _sqlite3.OperationalError as _exc:
+                import structlog as _structlog
+                _structlog.get_logger(__name__).warning(
+                    "cli_run_if_needed_failed",
+                    path=str(_db_path),
+                    hint="run `nx doctor --check-schema`",
+                    exc_info=True,
+                )
+                # Structured warning goes to the file handler in CLI
+                # mode; an unattended operator would never see it. Mirror
+                # the alert to stderr so they actually notice — a one-liner
+                # pointing at the diagnostic command is enough.
+                click.echo(
+                    f"warning: schema migration failed for {_db_path}: {_exc}\n"
+                    "  run `nx doctor --check-schema` to inspect",
+                    err=True,
+                )
 
     # RDR-101 Phase 3 follow-up D (nexus-o6aa.9.9): TTY-gated upgrade
     # prompt. When the catalog is in bootstrap-fallback mode, surface
