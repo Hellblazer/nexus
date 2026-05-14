@@ -491,6 +491,40 @@ class TestRpcExceptionParity:
             client.ping()
 
 
+class TestDispatchTableDenylist:
+    """Methods on the deny list are NOT reachable as RPC ops."""
+
+    def test_close_rpc_rejected(self, daemon_and_client) -> None:
+        """`<store>.close` must not be reachable — would tear down the daemon's SQLite handle."""
+        _, client = daemon_and_client
+        for store in ("memory", "plans", "chash_index", "taxonomy", "telemetry", "document_aspects", "aspect_queue"):
+            with pytest.raises(T2DaemonError, match="unknown RPC op"):
+                with client._get_pool().acquire() as conn:
+                    conn.call(f"{store}.close", {})
+
+    def test_document_aspects_upsert_rejected(self, daemon_and_client) -> None:
+        """document_aspects.upsert takes a dataclass — denied until typed-arg reconstructor lands."""
+        _, client = daemon_and_client
+        for op in ("document_aspects.upsert", "document_aspects.get", "document_aspects.get_by_doc_id"):
+            with pytest.raises(T2DaemonError, match="unknown RPC op"):
+                with client._get_pool().acquire() as conn:
+                    conn.call(op, {})
+
+
+class TestClientCloseSemantics:
+    """T2Client.close() detaches the pool so subsequent use rebuilds it."""
+
+    def test_close_then_reuse_builds_fresh_pool(self, daemon_and_client) -> None:
+        _, client = daemon_and_client
+        first_pool = client._get_pool()
+        client.close()
+        assert client._pool is None
+        # Re-using the client transparently rebuilds the pool
+        assert client.ping()["pong"] is True
+        assert client._pool is not None
+        assert client._pool is not first_pool
+
+
 # ---------------------------------------------------------------------------
 # Serialization round-trip tests
 # ---------------------------------------------------------------------------

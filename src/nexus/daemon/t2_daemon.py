@@ -139,6 +139,20 @@ _T2_STORE_ATTRS: tuple[str, ...] = (
 #: Top-level T2Database methods exposed under the "database" pseudo-store.
 _T2_DATABASE_METHODS: tuple[str, ...] = ("rename_collection_cascade",)
 
+#: Method names denied at dispatch-table build for ALL stores. ``close`` is
+#: filtered to prevent a client from tearing down the daemon's SQLite handles
+#: via RPC; underscored names are already filtered separately.
+_RPC_DENY_METHODS: frozenset[str] = frozenset({"close"})
+
+#: Per-op denylist (qualified ``<store>.<method>``). Methods whose signature
+#: accepts a dataclass instance cannot round-trip JSON until a typed-arg
+#: reconstructor lands. Re-enable as the reconstructor adds coverage.
+_RPC_DENY_OPS: frozenset[str] = frozenset({
+    "document_aspects.upsert",
+    "document_aspects.get",
+    "document_aspects.get_by_doc_id",
+})
+
 
 def _t2_encode(obj: Any) -> Any:
     """Recursively encode ``obj`` into a JSON-safe structure.
@@ -303,9 +317,11 @@ def _build_dispatch_table(t2db: Any) -> dict[str, Any]:
             _log.warning("t2_store_attr_missing", attr=attr)
             continue
         for name, method in inspect.getmembers(store, predicate=inspect.ismethod):
-            if name.startswith("_"):
-                continue  # skip private/dunder methods
+            if name.startswith("_") or name in _RPC_DENY_METHODS:
+                continue  # skip private/dunder methods + denylist
             op = f"{attr}.{name}"
+            if op in _RPC_DENY_OPS:
+                continue  # per-op denylist (e.g. dataclass-arg methods until reconstructor lands)
             table[op] = method
             _log.debug("rpc_registered", op=op)
 
@@ -773,9 +789,18 @@ class T2Daemon:
             _log.warning("discovery_unlink_failed", path=str(self._discovery_path), exc=str(exc))
 
     def _announce_stdout(self) -> None:
-        """Emit a single JSON line on stdout for orchestrator capture."""
+        """Emit a single JSON line on stdout for orchestrator capture.
+
+        Containerised orchestrators capture the daemon's announce frame from
+        stdout without needing filesystem access to the discovery file. The
+        write goes via ``sys.stdout`` directly so it isn't confused with
+        library-code logging output (CLAUDE.md prohibits ``print()`` in
+        library code; this single line is the intentional orchestrator
+        contract, not log output).
+        """
         payload = self._discovery_payload()
-        print(json.dumps(payload), flush=True)
+        sys.stdout.write(json.dumps(payload) + "\n")
+        sys.stdout.flush()
 
     # ------------------------------------------------------------------
     # Directory setup

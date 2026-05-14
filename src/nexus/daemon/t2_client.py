@@ -519,9 +519,17 @@ class T2Client:
         return _SocketConnection(sock)
 
     def close(self) -> None:
-        """Close all idle pooled connections."""
-        if self._pool is not None:
-            self._pool.close_all()
+        """Close all idle pooled connections and detach the pool.
+
+        Detaching the pool under ``_pool_lock`` ensures a later call to
+        ``_get_pool()`` builds a fresh pool rather than handing back the
+        emptied one — otherwise an accidental call after ``close()`` would
+        silently open new connections through the stale handle.
+        """
+        with self._pool_lock:
+            pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.close_all()
 
     def __enter__(self) -> "T2Client":
         return self
