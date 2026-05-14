@@ -81,6 +81,8 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 
 - **Never `print()` in library code.** Use `structlog.get_logger(__name__).info(event=..., **fields)`.
 - **Never push directly to `main`.** Open a PR. The only exception is the version-bump commit during a release (`docs/contributing.md` § Release Process).
+- **PRs target `develop`, not `main`.** `develop` is the integration branch; `main` only receives release commits and the periodic `develop → main` reconciliation. Branch off `develop`, target `develop`, merge to `develop`. Hotfix exception: red-on-prod fixes may PR to `main`, then `main → develop` after. State the exception in the PR body.
+- **Batch commits into one PR per logical unit.** CI run ≈ 13–16 minutes per push; opening five PRs for one logical change wastes 65–80 minutes of CI for work that could validate in one run. Stack commits locally (each well-scoped and reviewable), then push a single PR per gate-round / RDR / sweep. One gate-round closeout = one PR; one RDR accept + planning chain output = one PR; one bead-enrichment sweep = one PR. CI-breaking fixes ship alone (fast revert path). See `feedback_develop_is_integration_branch.md` for the batching heuristics.
 - **Never `git add -A` or `git add .`.** Stage by explicit path so untracked drafts don't sneak in.
 - **Never include AI attribution in commits.** No "Generated with Claude", no `Co-Authored-By: Claude`. Bead references and `Closes #N` only.
 - **Never delete RDR files.** Closing an RDR is a frontmatter `status: closed` flip — the file stays. See [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md).
