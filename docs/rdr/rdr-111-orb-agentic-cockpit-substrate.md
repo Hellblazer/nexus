@@ -373,7 +373,7 @@ in test harnesses, linting, and local dev without polluting the tuple space.
 | CA-5 | Binding reaction end-to-end < 200ms at 10 concurrent active bindings | Open | Benchmark after bridge + watcher ship | Move watcher to dedicated process | **P2 gate** |
 | CA-6 | `SubagentStop`, `UserPromptSubmit`, `PreCompact`, `Notification` payload shapes match inferred schemas | Open — **spike required before bridge scripts for these types are written** | Register a minimal logging hook for each type; capture real payload from a live session; compare against RF-1 table. Spike ≤ 2h. | Bridge scripts emit wrong field names → tuples have missing/null dimensions | P1 (bridge for these 4 types) |
 | CA-7 | The Bakke Measure/Auto-Style/Layout adaptation is ≤ 300 LoC and can be implemented by a single developer in < 1 week | Open — **novel work, no prior art in repo** | Prototype the three pipeline phases on a static binding set before committing to Phase 3 | Layout engine becomes the long pole; delays Phase 3 by 2–4 weeks | **P2 gate** |
-| CA-8 | Multi-`PreToolUse`-hook ordering: when two hooks are registered, the first-registered "allow" does not preempt subsequent hooks' ability to "block" | Open — **empirically unverified** | Run `tests/cc-validation/scenarios/` harness with two PreToolUse hooks: hook-A returns `allow`, hook-B returns `block`; observe which wins. See scenario 07 for PermissionRequest precedent. **Fallback design if first-wins confirmed**: the bridge cannot be registered first as an unconditional `allow` emitter without neutralising legitimate block hooks. Fallback: bridge registers as a *last* entry using a separate `PostToolUse`-adjacent hook that fires after the decision hooks have run, or bridge emits no `permissionDecision` key at all (only `additionalContext`) and relies on the harness's default allow. Fallback design must be documented before Phase 2. | Bridge registered first could silently neutralise a legitimate block hook; or a block hook registered first could stall the bridge chain | P1 (bridge registration ordering) |
+| CA-8 | Multi-`PreToolUse`-hook ordering: when two hooks are registered, the first-registered "allow" does not preempt subsequent hooks' ability to "block" | **Resolved 2026-05-14 — original framing wrong**. Empirical result (CC 2.1.141, via `tests/cc-validation/run-ca8-spike.sh`): both hooks fire on every invocation; "allow" wins regardless of registration order. T2 `nexus_rdr/111-research-CA-8-spike`. Bridge design updated: `PreToolUse` bridge emits no `permissionDecision` key (observe-only). | n/a — resolved | n/a — resolved | n/a — resolved |
 | CA-9 | RDR-110's subspace registry exposes a registration mechanism for third-party subspaces not defined in the canonical five, AND (per RDR-112 Approach §8) the T2 daemon validates subspace schemas daemon-side and accepts third-party registration via the `nx daemon t2 subspace add <yaml>` admin RPC | **Definitive prerequisite — must be flagged before RDR-110 Phase 1 Step 6 ships AND before RDR-112 daemon's admin RPC surface is locked** | Two coordinations required: (a) confirm that RDR-110 Phase 1 Step 6 ships with open registration (additional YAML dirs discoverable at startup), not a closed allow-list; AND (b) confirm that the RDR-112 T2 daemon implements the `subspace add` admin RPC and accepts the ORB-supplied YAML schemas. Both are required before ORB Phase 1 Step 1 can proceed. If RDR-110 ships closed-registry, an extension mechanism must be added before ORB Phase 1 Step 1. If the daemon admin RPC is missing, the ORB cannot register at runtime even with open-registry on the file side. | Without this, the seven hook-event subspaces and `bindings/<profile>` cannot be registered; the tuple space bridge is blocked | P1 |
 | CA-10 | The T2 daemon's startup migration sequence (per RDR-112 Approach §9, daemon is sole migration runner) includes the `watcher_state` table (see schema in Phase 2 Step 6) | **Coordination required before Phase 2 Step 6** | Notify RDR-112 implementor before the daemon migration manifest is finalised; confirm `watcher_state` DDL appears in the daemon's migration sequence and is applied before the daemon accepts client connections. Gate criterion: confirmed presence of `watcher_state` CREATE TABLE in the T2 daemon's migration manifest (post-RDR-112 rework — pre-rework draft pointed at RDR-110's migration file, which is no longer the migration owner). If the daemon migration ships without it, the ORB must ship an upgrade migration via the daemon's admin RPC (with schema-version guard) before Phase 2. | Phase 2 Step 6 fails at first run with "no such table: watcher_state" (now surfaced as a daemon RPC error, not a local sqlite3 error) | P2 |
 
@@ -426,15 +426,25 @@ Each script:
    - `Stop` / `StopFailure` / `SessionEnd`: emit nothing
 5. Exits 0 unconditionally — bridge errors are logged to stderr, never propagated
 
-Registered in `nx/hooks/hooks.json` as the **first** entry for each hook type
-(before existing decision hooks) — **provisional pending CA-8 spike**. If the
-CA-8 spike (now gated before Step 2 — see Step 7a below) confirms first-wins
-semantics (i.e., the first hook's `allow` prevents subsequent hooks from
-blocking), registration must change to **last-in-chain** or the bridge must emit
-no `permissionDecision` key (only `additionalContext`). Step 2 implementation
-must use a feature flag or configuration entry for registration order so the
-CA-8 outcome can be applied without a code change. Default before CA-8 result:
-register first.
+Registered in `nx/hooks/hooks.json` — registration order does **not** matter
+for `PreToolUse` per the CA-8 spike result (2026-05-14, see T2
+`nexus_rdr/111-research-CA-8-spike`).
+
+**CA-8 spike outcome (verified empirically, CC 2.1.141):** when two
+`PreToolUse` hooks are registered for the same matcher, BOTH fire on every
+invocation regardless of registration order, and an "allow" decision from
+any one hook overrides a "block" from any other — i.e. **allow-wins,
+order-independent**. The originally-feared "first-wins" branch did not
+manifest; the data fits the mirror "allow-wins regardless of order" case
+that the spike's decision tree did not anticipate.
+
+**Implication for the bridge:** the `PreToolUse` bridge MUST emit **no
+`permissionDecision` key** (observe-only — write the tuple-space entry
+as a side effect and leave the decision to the user's existing
+`permissions.allow` allowlist and other hooks). Emitting "allow" would
+silently override a plugin's legitimate block in the same chain; emitting
+"block" is futile because any other hook's "allow" wins. The earlier
+"register first, emit allow" plan is retired.
 
 Estimated: ~150 LoC in the shared library + ~20 LoC per hook-type script (7 types
 = ~140 LoC scripts). Total ~290 LoC. Larger than originally estimated due to
