@@ -220,5 +220,35 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
                     # Non-zero exit so CI / orchestrators see the failure.
                     raise click.exceptions.Exit(1)
 
+        # nexus-b03o: post-migration advisory — pre-4.32 local-mode
+        # installs wrote 384d MiniLM vectors into collections named for
+        # voyage-* (1024d). The forward fix shipped in 4.32.0 (RDR-109
+        # Phase 2); existing mislabeled collections persist until the
+        # operator runs `nx collection rename`. Surface a one-liner so
+        # they know to look. Advisory only — does not fail the upgrade.
+        if not auto_mode and not skip_t3:
+            _emit_name_vs_embed_dim_advisory()
+
     finally:
         conn.close()
+
+
+def _emit_name_vs_embed_dim_advisory() -> None:
+    """Run the name-vs-embed-dim doctor check and emit a one-liner
+    if any collections are mislabeled. Silent on PASS, error-tolerant
+    (T3 may be unavailable on a freshly-migrated install)."""
+    try:
+        from nexus.commands.catalog import _run_name_vs_embed_dim
+        report = _run_name_vs_embed_dim()
+    except Exception:
+        return
+    if report.get("error"):
+        return
+    n = len(report.get("mismatches", []))
+    if n == 0:
+        return
+    click.echo(
+        f"\nAdvisory: {n} collection(s) appear mislabeled "
+        f"(pre-4.32 local-mode data). Run `nx catalog doctor "
+        f"--name-vs-embed-dim` for details and remediation."
+    )
