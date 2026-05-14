@@ -64,6 +64,7 @@ import inspect
 import socket
 import struct
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -589,3 +590,88 @@ class T2Client:
         with self._get_pool().acquire() as conn:
             # ping returns a flat {pong: True, ...} dict, not {result: ...}
             return conn.call("ping", {})
+
+    # ------------------------------------------------------------------
+    # EventStream (P1.3 nexus-m4gm)
+    # ------------------------------------------------------------------
+
+    def event_stream(
+        self,
+        subspace_prefix: str,
+        since_cursor: int = 0,
+        where: dict[str, Any] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield event dicts from the daemon's EventStream until the connection closes.
+
+        Opens a **dedicated** socket connection (not from the pool) that is
+        held for the generator's lifetime.  The connection is closed when the
+        generator is exhausted or when the caller calls ``close()`` / uses
+        ``break`` inside a ``for`` loop.
+
+        Protocol:
+          1. Connect + hello/hello_ack handshake.
+          2. Send ``{"op": "event_stream.subscribe", "args": {...}}``.
+          3. Read the ``{"subscribed": True, "cursor": <N>}`` ack.
+          4. Yield each ``{"event": {...}}`` frame's inner event dict.
+          5. Stop on connection close, error frame, or generator close.
+
+        Args:
+            subspace_prefix: Subspace glob prefix, e.g. ``"tuples/myspace"``.
+                The daemon appends ``*`` when the prefix contains no wildcard.
+            since_cursor: Resume cursor (rowid).  0 requests full backfill.
+            where: Optional filter dict.  Currently supports
+                ``{"category": "<str>"}`` for failure-category demux.
+
+        Yields:
+            Event dicts with keys: ``cursor``, ``subspace``, ``op``,
+            ``tuple_id``, ``payload_summary``, ``category``, ``ts``.
+
+        Raises:
+            T2DaemonError: if the daemon returns an error on the subscribe op.
+            ConnectionError: if the socket closes unexpectedly mid-stream.
+
+        Example::
+
+            for event in client.event_stream("tuples/myspace", since_cursor=42):
+                print(event["op"], event["tuple_id"])
+        """
+        conn = self._connect_once()
+        sock = conn._sock  # dedicated socket; not returned to pool
+        try:
+            # Send subscribe request
+            _sock_write_frame(
+                sock,
+                {
+                    "op": "event_stream.subscribe",
+                    "args": {
+                        "subspace_prefix": subspace_prefix,
+                        "since_cursor": since_cursor,
+                        "where": where or {},
+                    },
+                },
+            )
+            # Read ack
+            ack = _sock_read_frame(sock)
+            if "error" in ack:
+                _reraise_remote_error(ack["error"])
+            if not ack.get("subscribed"):
+                raise T2DaemonError(
+                    f"expected subscribed ack, got: {ack!r}"
+                )
+            # Stream events
+            while True:
+                frame = _sock_read_frame(sock)
+                if "error" in frame:
+                    # Daemon shutting down or protocol error — stop cleanly
+                    _log.debug("event_stream_server_error", error=frame["error"])
+                    return
+                event = frame.get("event")
+                if event is not None:
+                    yield event
+        except (ConnectionError, OSError):
+            return  # connection closed
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass

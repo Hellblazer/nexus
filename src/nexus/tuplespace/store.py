@@ -2,14 +2,18 @@
 """SQLite schema for tuples.db — the T2 claim ledger for RDR-110.
 
 New database `~/.config/nexus/tuples.db` (separate from ``memory.db``
-for operational isolation). Contains two tables:
+for operational isolation). Contains:
 
 - ``tuples`` — body store + claim state. Single-table-with-state-column
   pattern (honker RF-9). Atomicity via ``UPDATE … RETURNING`` under
   SQLite's single-writer lock. Tombstone columns follow RDR-106/107 style.
 - ``tuple_claim_log`` — append-only audit trail for every state transition
   (claim, ack, nack, expire). Never updated; never deleted except by the
-  30-day retention sweep.
+  30-day retention sweep. Includes ``failure_category`` for nack demux.
+- ``events`` — append-only projection of every committed tuple operation,
+  populated by AFTER INSERT triggers on ``tuples`` (op='out') and
+  ``tuple_claim_log`` (op=transition). Provides monotonic ``rowid``
+  cursors for the EventStream RPC (RDR-112 P1.3, nexus-m4gm).
 
 Migration coordination with RDR-112 daemon (nexus-w0et)
 --------------------------------------------------------
@@ -29,6 +33,22 @@ nexus-w0et integration note: import ``TUPLES_SCHEMA_DDL`` and call
 ``conn.executescript(TUPLES_SCHEMA_DDL)`` inside the daemon's migration
 manifest function. ``apply_tuples_schema`` is a thin wrapper around
 exactly that — the daemon may call either form.
+
+EventStream (nexus-m4gm, RDR-112 P1.3)
+---------------------------------------
+The ``events`` table is the cursor source for the EventStream RPC.
+Two triggers maintain it automatically:
+
+- ``trg_tuples_out``: fires on every INSERT into ``tuples``, emitting an
+  'out' event with the new tuple's subspace and id.
+- ``trg_claim_log_event``: fires on every INSERT into ``tuple_claim_log``,
+  emitting the transition (claim/ack/nack/expire) as the op. For 'nack'
+  transitions, the ``failure_category`` column is propagated.
+
+The ``events`` table is read by the daemon's ``event_stream.subscribe``
+handler via ``SELECT … WHERE subspace GLOB ? AND rowid > ? ORDER BY rowid
+LIMIT 1000``. Consumers (RDR-111 binding-watcher) persist ``last_cursor``
+and reconnect with ``since_cursor=last_cursor`` for at-least-once delivery.
 """
 
 from __future__ import annotations
@@ -86,18 +106,69 @@ CREATE INDEX IF NOT EXISTS idx_tuples_expires
 
 -- Append-only claim history for audit. Insert-only; never updated.
 -- Records every state transition (claim, ack, nack, expiry-release).
+-- failure_category is set on nack rows for EventStream demux (nexus-m4gm).
 CREATE TABLE IF NOT EXISTS tuple_claim_log (
-    log_id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    tuple_id        TEXT NOT NULL,
-    claim_id        TEXT NOT NULL,
-    claimant        TEXT NOT NULL,
-    transition      TEXT NOT NULL,                  -- 'claim' | 'ack' | 'nack' | 'expire'
-    at              REAL NOT NULL
+    log_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    tuple_id         TEXT NOT NULL,
+    claim_id         TEXT NOT NULL,
+    claimant         TEXT NOT NULL,
+    transition       TEXT NOT NULL,                 -- 'claim' | 'ack' | 'nack' | 'expire'
+    failure_category TEXT,                          -- set on nack; NULL for claim/ack/expire
+    at               REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_claim_log_tuple
     ON tuple_claim_log (tuple_id, at);
 CREATE INDEX IF NOT EXISTS idx_claim_log_claimant
     ON tuple_claim_log (claimant, at);
+
+-- Append-only event projection for EventStream RPC (RDR-112 P1.3, nexus-m4gm).
+-- Every committed tuple operation lands here via triggers; monotonic rowid
+-- provides the cursor for at-least-once streaming delivery.
+CREATE TABLE IF NOT EXISTS events (
+    rowid           INTEGER PRIMARY KEY AUTOINCREMENT,
+    subspace        TEXT NOT NULL,
+    op              TEXT NOT NULL,                  -- 'out' | 'claim' | 'ack' | 'nack' | 'expire'
+    tuple_id        TEXT NOT NULL,
+    payload_summary TEXT,                           -- substr of content for stream consumers
+    category        TEXT,                           -- failure category for nack events
+    ts              REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_subspace_rowid
+    ON events (subspace, rowid);
+
+-- Trigger: emit 'out' event on every new tuple insertion.
+CREATE TRIGGER IF NOT EXISTS trg_tuples_out
+    AFTER INSERT ON tuples
+BEGIN
+    INSERT INTO events (subspace, op, tuple_id, payload_summary, category, ts)
+    VALUES (
+        NEW.subspace,
+        'out',
+        NEW.id,
+        SUBSTR(NEW.content, 1, 256),
+        'data',
+        NEW.created_at
+    );
+END;
+
+-- Trigger: emit a transition event on every tuple_claim_log insertion.
+-- Propagates failure_category for nack rows; uses 'data' for all others.
+CREATE TRIGGER IF NOT EXISTS trg_claim_log_event
+    AFTER INSERT ON tuple_claim_log
+BEGIN
+    INSERT INTO events (subspace, op, tuple_id, payload_summary, category, ts)
+    VALUES (
+        (SELECT subspace FROM tuples WHERE id = NEW.tuple_id),
+        NEW.transition,
+        NEW.tuple_id,
+        NULL,
+        CASE
+            WHEN NEW.transition = 'nack' THEN COALESCE(NEW.failure_category, 'unknown')
+            ELSE 'data'
+        END,
+        NEW.at
+    );
+END;
 """
 
 # ---------------------------------------------------------------------------

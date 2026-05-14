@@ -2546,6 +2546,123 @@ def _migrate_aspect_queue_pk_via_apply_pending(conn: sqlite3.Connection) -> None
     migrate_aspect_extraction_queue_pk_to_doc_id(conn, catalog_db_path=catalog_path)
 
 
+# ── tuples.db migrations (nexus-m4gm, RDR-112 P1.3) ────────────────────────
+# These functions target tuples.db (a separate database from memory.db).
+# They are no-ops when tuples.db has not yet been initialised.
+
+
+def migrate_tuples_failure_category(conn: sqlite3.Connection) -> None:
+    """Add ``failure_category`` column to ``tuple_claim_log`` for EventStream demux.
+
+    This column carries the failure reason on nack transitions so that
+    EventStream consumers (RDR-111 binding-watcher, nexus-m4gm) can
+    filter events by category.
+
+    Idempotent: gated by ``PRAGMA table_info``. No-op when tuples.db does
+    not exist (``tuple_claim_log`` will be created with the column via
+    ``TUPLES_SCHEMA_DDL`` on first open). No-op when the column is already
+    present.
+
+    This migration operates on tuples.db, NOT memory.db.  The daemon
+    (nexus-w0et) must pass the tuples.db connection when invoking
+    ``apply_pending``, or call this function directly with the tuples
+    connection.
+    """
+    cols = {
+        r[1] for r in conn.execute(
+            "PRAGMA table_info(tuple_claim_log)"
+        ).fetchall()
+    }
+    if not cols:
+        return  # tuples.db not yet initialised; fresh install gets column via DDL
+    if "failure_category" in cols:
+        return
+    _log.info("migrate_tuples_failure_category_start")
+    conn.execute(
+        "ALTER TABLE tuple_claim_log ADD COLUMN failure_category TEXT"
+    )
+    conn.commit()
+    _log.info("migrate_tuples_failure_category_done")
+
+
+def migrate_tuples_events_table(conn: sqlite3.Connection) -> None:
+    """Create the ``events`` table and its two triggers in tuples.db.
+
+    The ``events`` table is an append-only projection of every committed
+    tuple operation.  It is populated by:
+
+    - ``trg_tuples_out``: fires on INSERT into ``tuples``; emits op='out'.
+    - ``trg_claim_log_event``: fires on INSERT into ``tuple_claim_log``;
+      emits op=transition (claim/ack/nack/expire).
+
+    The monotonic ``rowid`` is the cursor for the EventStream RPC
+    (RDR-112 P1.3, nexus-m4gm).  Consumers reconnect with
+    ``since_cursor=last_rowid`` for at-least-once delivery.
+
+    Idempotent: gated by ``sqlite_master`` check.  No-op when tuples.db
+    does not exist (fresh installs get the table via ``TUPLES_SCHEMA_DDL``
+    on first open).
+
+    This migration operates on tuples.db, NOT memory.db.
+    """
+    existing_tables = {
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "tuples" not in existing_tables:
+        return  # tuples.db not yet initialised; fresh install gets table via DDL
+    if "events" in existing_tables:
+        return  # already migrated
+
+    _log.info("migrate_tuples_events_table_start")
+    conn.executescript("""\
+CREATE TABLE IF NOT EXISTS events (
+    rowid           INTEGER PRIMARY KEY AUTOINCREMENT,
+    subspace        TEXT NOT NULL,
+    op              TEXT NOT NULL,
+    tuple_id        TEXT NOT NULL,
+    payload_summary TEXT,
+    category        TEXT,
+    ts              REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_subspace_rowid
+    ON events (subspace, rowid);
+
+CREATE TRIGGER IF NOT EXISTS trg_tuples_out
+    AFTER INSERT ON tuples
+BEGIN
+    INSERT INTO events (subspace, op, tuple_id, payload_summary, category, ts)
+    VALUES (
+        NEW.subspace,
+        'out',
+        NEW.id,
+        SUBSTR(NEW.content, 1, 256),
+        'data',
+        NEW.created_at
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_claim_log_event
+    AFTER INSERT ON tuple_claim_log
+BEGIN
+    INSERT INTO events (subspace, op, tuple_id, payload_summary, category, ts)
+    VALUES (
+        (SELECT subspace FROM tuples WHERE id = NEW.tuple_id),
+        NEW.transition,
+        NEW.tuple_id,
+        NULL,
+        CASE
+            WHEN NEW.transition = 'nack' THEN COALESCE(NEW.failure_category, 'unknown')
+            ELSE 'data'
+        END,
+        NEW.at
+    );
+END;
+""")
+    _log.info("migrate_tuples_events_table_done")
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -2716,6 +2833,20 @@ MIGRATIONS: list[Migration] = [
         "RDR-109 Phase 5: add document_aspects.salient_sentences column",
         lambda conn: _migrate_add_aspects_salient_sentences(conn),
     ),
+    # nexus-m4gm (RDR-112 P1.3): EventStream RPC substrate.
+    # These two migrations apply to tuples.db (opened separately from memory.db).
+    # They are no-ops when tuples.db does not yet exist (fresh installs get the
+    # full schema via apply_tuples_schema / TUPLES_SCHEMA_DDL on first open).
+    Migration(
+        "4.32.2",
+        "Add failure_category to tuple_claim_log (nexus-m4gm, RDR-112 P1.3)",
+        migrate_tuples_failure_category,
+    ),
+    Migration(
+        "4.32.2",
+        "Add events table + triggers to tuples.db (nexus-m4gm, RDR-112 P1.3)",
+        migrate_tuples_events_table,
+    ),
 ]
 
 
@@ -2741,6 +2872,7 @@ def _migrate_add_aspects_salient_sentences(conn: sqlite3.Connection) -> None:
         "ALTER TABLE document_aspects ADD COLUMN salient_sentences TEXT"
     )
     conn.commit()
+
 
 # ── T3 upgrade steps ────────────────────────────────────────────────────────
 # Separate from T2 migrations: these require a ChromaDB client, not sqlite3.
