@@ -243,6 +243,7 @@ class TestCLI:
     ) -> None:
         import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_with_papers)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -257,6 +258,7 @@ class TestCLI:
     ) -> None:
         import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_with_papers)
 
         runner = CliRunner()
         runner.invoke(enrich, ["aspects-promote-field", "venue"])
@@ -271,6 +273,7 @@ class TestCLI:
     ) -> None:
         import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_with_papers)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -285,6 +288,7 @@ class TestCLI:
     ) -> None:
         import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_with_papers)
 
         runner = CliRunner()
         runner.invoke(enrich, ["aspects-promote-field", "venue"])
@@ -307,6 +311,7 @@ class TestCLI:
         empty_db = tmp_path / "empty.db"
         T2Database(empty_db).close()
         monkeypatch.setattr("nexus.config.default_db_path", lambda: empty_db)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: empty_db)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -320,6 +325,7 @@ class TestCLI:
     ) -> None:
         import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_with_papers)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_with_papers)
 
         runner = CliRunner()
         result = runner.invoke(

@@ -3866,7 +3866,7 @@ class TestProjectCmd:
         runner = CliRunner()
         with (
             patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=tmp_path / "memory.db"),
-            patch("nexus.commands.taxonomy_cmd._T2Database", return_value=db),
+            patch("nexus.commands.taxonomy_cmd._t2_ctx", return_value=db),
             patch("nexus.db.make_t3") as mock_t3,
         ):
             mock_t3.return_value._client = chroma_client
@@ -3910,7 +3910,7 @@ class TestProjectCmd:
         runner = CliRunner()
         with (
             patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=tmp_path / "memory.db"),
-            patch("nexus.commands.taxonomy_cmd._T2Database", return_value=db),
+            patch("nexus.commands.taxonomy_cmd._t2_ctx", return_value=db),
             patch("nexus.db.make_t3") as mock_t3,
         ):
             mock_t3.return_value._client = chroma_client
@@ -3972,7 +3972,7 @@ class TestProjectCmd:
         with (
             patch("nexus.commands.taxonomy_cmd._default_db_path",
                   return_value=tmp_path / "db.sqlite"),
-            patch("nexus.commands.taxonomy_cmd._T2Database", return_value=db),
+            patch("nexus.commands.taxonomy_cmd._t2_ctx", return_value=db),
             patch("nexus.db.make_t3") as mock_t3,
         ):
             mock_t3.return_value._client = chroma_client

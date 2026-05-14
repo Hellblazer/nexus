@@ -74,3 +74,25 @@ def make_t3(*, _client=None, _ef_override=None) -> "T3Database":
         _client=_client,
         _ef_override=_ef_override,
     )
+
+
+def make_ephemeral_t3(*, ef=None) -> "T3Database":
+    """Return a T3Database backed by an in-process ``EphemeralClient``.
+
+    Used by ``nx index --dry-run`` and similar paths that need a
+    throwaway T3 surface without touching cloud credentials or the
+    persistent local store. Keeps the ``chromadb.EphemeralClient``
+    construction inside ``src/nexus/db/`` per RDR-112 D3 (no client-
+    process chroma construction outside this module).
+
+    When ``ef`` is omitted, the bundled ONNX MiniLM
+    ``DefaultEmbeddingFunction`` is used so callers get a working
+    embedder without API keys.
+    """
+    import chromadb
+    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+    from nexus.db.t3 import T3Database
+
+    embedder = ef or DefaultEmbeddingFunction()
+    return T3Database(_client=chromadb.EphemeralClient(), _ef_override=embedder)

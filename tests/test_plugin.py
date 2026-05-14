@@ -113,7 +113,7 @@ def test_session_end_runs_expire(runner: CliRunner, fake_home: Path) -> None:
 
     _t2_cm = MagicMock(__enter__=MagicMock(return_value=mock_t2))
     with patch("nexus.hooks._open_t1", return_value=MagicMock(flagged_entries=lambda: [])):
-        with patch("nexus.hooks.T2Database", return_value=_t2_cm):
+        with patch("nexus.hooks.t2_ctx", return_value=_t2_cm):
             result = runner.invoke(main, ["hook", "session-end"])
 
     mock_t2.expire.assert_called_once()

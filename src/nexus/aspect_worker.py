@@ -733,9 +733,16 @@ def drain_worker(
     # singleton.  A live MCP worker in another process drains its own
     # queue independently; the migration must not run while that worker is
     # alive or it will race against in_progress rows it cannot see.
-    locks_dir = _locks_dir if _locks_dir is not None else (
-        Path.home() / ".config" / "nexus" / "locks"
-    )
+    if _locks_dir is not None:
+        locks_dir = _locks_dir
+    else:
+        # Resolve via nexus_config_dir so NEXUS_CONFIG_DIR (the test
+        # isolation contract) takes effect. The legacy ``Path.home() /
+        # .config / nexus / locks`` default is what nexus_config_dir
+        # returns when no override is set, so production behaviour is
+        # unchanged.
+        from nexus.config import nexus_config_dir
+        locks_dir = nexus_config_dir() / "locks"
     _check_mcp_worker_lock(locks_dir)
 
     worker = get_worker()

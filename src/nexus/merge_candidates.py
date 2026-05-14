@@ -140,12 +140,12 @@ def compute_merge_candidates(
 
 def _open_t2():
     from nexus.config import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     db_path = default_db_path()
     if not db_path.exists():
         return None
-    return T2Database(db_path)
+    return t2_ctx()
 
 
 # ── CLI entry point ─────────────────────────────────────────────────────────

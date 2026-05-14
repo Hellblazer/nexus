@@ -80,11 +80,10 @@ def _seed_plan_templates() -> int:
     """
     from pathlib import Path
 
-    from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     seeded = 0
-    with T2Database(default_db_path()) as db:
+    with t2_ctx() as db:
         from nexus.indexer_utils import find_repo_root
         from nexus.plans.loader import load_all_tiers
 
@@ -1592,7 +1591,7 @@ def _taxonomy_stats() -> dict | None:
     (formerly nexus-1n0t).
     """
     from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     try:
         db_path = default_db_path()
@@ -1602,7 +1601,7 @@ def _taxonomy_stats() -> dict | None:
         return None
 
     try:
-        with T2Database(db_path) as db:
+        with t2_ctx() as db:
             conn = db.taxonomy.conn
             with db.taxonomy._lock:
                 topic_total = conn.execute(

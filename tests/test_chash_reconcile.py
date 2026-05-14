@@ -107,6 +107,7 @@ class TestChashReconcileCLI:
 
         import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: mem_db)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: mem_db)
         monkeypatch.setattr("nexus.db.make_t3", lambda: t3_db)
         return mem_db
 
@@ -231,6 +232,7 @@ class TestChashReconcileCLI:
         absent_db = tmp_path / "absent" / "memory.db"
         import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: absent_db)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: absent_db)
 
         result = runner.invoke(main, ["catalog", "chash-reconcile"])
         assert result.exit_code != 0
@@ -293,6 +295,7 @@ class TestChashReconcileCLI:
 
         import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: mem_db)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: mem_db)
         monkeypatch.setattr("nexus.db.make_t3", lambda: t3)
 
         result = runner.invoke(main, ["catalog", "chash-reconcile"])

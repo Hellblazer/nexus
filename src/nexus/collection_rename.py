@@ -82,11 +82,10 @@ def rename_collection_data_plane(
     # ── T2 cascade FIRST (reversible) ────────────────────────────────────────
     # Failure here raises ClickException -- T3 rename has not yet run so the
     # system remains fully consistent. Operator can diagnose and retry.
-    from nexus.config import default_db_path  # noqa: PLC0415
-    from nexus.db.t2 import T2Database  # noqa: PLC0415
+    from nexus.mcp_infra import t2_ctx  # noqa: PLC0415
 
     try:
-        with T2Database(default_db_path()) as t2db:
+        with t2_ctx() as t2db:
             cascade = t2db.rename_collection_cascade(old=old, new=new)
             counts["tax_topics"] = cascade.get("tax_topics", 0)
             counts["tax_assignments"] = cascade.get("tax_assignments", 0)

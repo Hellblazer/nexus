@@ -150,7 +150,8 @@ class TestSC4DoctorSchema:
         apply_pending(conn, _current_version())
         conn.close()
 
-        with patch("nexus.config.default_db_path", return_value=db_path):
+        with patch("nexus.config.default_db_path", return_value=db_path), \
+             patch("nexus.mcp_infra.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-schema"])
         assert result.exit_code == 0
         assert "passed" in result.output.lower()

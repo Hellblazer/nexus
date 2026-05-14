@@ -189,6 +189,10 @@ class TestBackfillCli:
             "nexus.commands._helpers.default_db_path",
             lambda: db_path,
         )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path",
+            lambda: db_path,
+        )
 
     def test_default_is_dry_run(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,

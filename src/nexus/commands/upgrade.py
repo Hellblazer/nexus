@@ -160,9 +160,9 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
         # advanced ``_nexus_version.cli_version`` to ``current``, the
         # next run computed ``pending_t3 = []`` and never re-tried.
         if not auto_mode and pending_t3:
-            from nexus.commands._helpers import default_db_path
             from nexus.db import make_t3
             from nexus.db.t2 import T2Database
+            from nexus.mcp_infra import t2_ctx
 
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS _nexus_t3_steps ("
@@ -185,7 +185,7 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
                 any_failed = False
                 try:
                     t3_db = make_t3()
-                    t2_db = T2Database(default_db_path())
+                    t2_db = t2_ctx()
                     for step in unapplied:
                         click.echo(f"  T3: [{step.introduced}] {step.name}")
                         try:

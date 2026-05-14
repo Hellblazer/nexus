@@ -111,7 +111,7 @@ def aspects_gc(apply: bool) -> None:
     """
     from nexus.commands._helpers import default_db_path
     from nexus.config import catalog_path
-    from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     mem_path = default_db_path()
     cat_db = catalog_path() / ".catalog.db"
@@ -124,7 +124,7 @@ def aspects_gc(apply: bool) -> None:
         )
         raise SystemExit(1)
 
-    with T2Database(mem_path) as db:
+    with t2_ctx() as db:
         orphans, total = db.document_aspects.delete_orphans(
             cat_db, dry_run=not apply,
         )

@@ -4,9 +4,8 @@ from typing import Any
 
 import click
 
-from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.db.t1 import T1Database
-from nexus.db.t2 import T2Database
+from nexus.mcp_infra import t2_ctx
 
 
 def _t1() -> T1Database:
@@ -131,7 +130,7 @@ def unflag_cmd(entry_id: str) -> None:
 def promote_cmd(entry_id: str, project: str, title: str) -> None:
     """Copy a scratch entry to T2 immediately."""
     t1 = _t1()
-    with T2Database(_default_db_path()) as t2:
+    with t2_ctx() as t2:
         try:
             report = t1.promote(entry_id, project=project, title=title, t2=t2)
         except KeyError as exc:
