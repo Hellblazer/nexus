@@ -214,6 +214,9 @@ class TestMergeCandidatesCli:
         monkeypatch.setattr(
             "nexus.config.default_db_path", lambda: db_path,
         )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
+        )
 
         result = runner.invoke(
             main,
@@ -232,6 +235,9 @@ class TestMergeCandidatesCli:
         _seed_t2(db_path)
         monkeypatch.setattr(
             "nexus.config.default_db_path", lambda: db_path,
+        )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
         )
 
         result = runner.invoke(
@@ -253,6 +259,9 @@ class TestMergeCandidatesCli:
         _seed_t2(db_path)
         monkeypatch.setattr(
             "nexus.config.default_db_path", lambda: db_path,
+        )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
         )
 
         result = runner.invoke(
@@ -283,6 +292,9 @@ class TestMergeCandidatesCli:
         monkeypatch.setattr(
             "nexus.config.default_db_path", lambda: db_path,
         )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
+        )
 
         result = runner.invoke(
             main, ["collection", "merge-candidates", "--min-shared", "1"],
@@ -301,6 +313,9 @@ class TestMergeCandidatesCli:
         _seed_t2(db_path)
         monkeypatch.setattr(
             "nexus.config.default_db_path", lambda: db_path,
+        )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
         )
 
         result = runner.invoke(

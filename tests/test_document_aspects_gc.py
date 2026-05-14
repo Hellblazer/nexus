@@ -210,6 +210,7 @@ class TestAspectsGcCLI:
         # at call time).
         import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: mem_db)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: mem_db)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         return cat_db, mem_db
 
@@ -271,6 +272,7 @@ class TestAspectsGcCLI:
 
         import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: mem_db)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: mem_db)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
 
         from nexus.cli import main

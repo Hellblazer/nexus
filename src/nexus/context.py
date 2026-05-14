@@ -188,11 +188,11 @@ def refresh_context_l1(
     repo_path: Path | None = None,
 ) -> Path | None:
     """Open T2, generate L1 context cache, close. Convenience wrapper."""
-    from nexus.config import default_db_path
     from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
-    path = db_path or default_db_path()
-    with T2Database(path) as db:
+    cm = T2Database(db_path) if db_path is not None else t2_ctx()
+    with cm as db:
         return generate_context_l1(
             db.taxonomy, output_path=output_path, repo_path=repo_path,
         )

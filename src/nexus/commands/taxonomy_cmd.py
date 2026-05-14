@@ -1784,20 +1784,17 @@ def backfill_source_collection_cmd(apply_: bool) -> None:
     rows stay NULL (ambiguous source).
     """
     from nexus.commands._helpers import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
     from nexus.taxonomy_backfill import backfill_source_collection
 
     db_path = default_db_path()
     if not db_path.exists():
         raise click.ClickException(f"T2 database not found: {db_path}")
 
-    t2 = T2Database(db_path)
-    try:
+    with t2_ctx() as t2:
         # Pass the store (not the raw conn) so _lock is held for the
         # read + UPDATE sequence (review gate C-1).
         report = backfill_source_collection(t2.taxonomy, apply=apply_)
-    finally:
-        t2.close()
 
     mode = "DRY-RUN" if report.dry_run else "APPLIED"
     click.echo(f"topic_assignments source_collection backfill ({mode})")
