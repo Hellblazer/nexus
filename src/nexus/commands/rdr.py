@@ -18,12 +18,13 @@ import click
 import yaml
 
 
-# Matches a flow-sequence opener followed by an unquoted ``#``-token.
-# ``\[`` opens the sequence; optional whitespace; then ``#`` directly
-# (i.e. *not* preceded by a quote). We rely on the regex being narrow
-# enough that legitimate ``#``-inside-a-quoted-string ("[\"#381\"]")
-# does not match.
-_HASH_REF_IN_FLOW_SEQ = re.compile(r":\s*\[\s*#")
+# Matches a flow-sequence opener followed (eventually) by an unquoted
+# ``#`` before the closing ``]``. ``[^\]"']*?`` lets us span multiple
+# lines (PyYAML's multi-line flow sequences parse silently into empty
+# lists when ``#`` introduces comments mid-sequence — a true false
+# negative for the single-line regex). The ``"'`` exclusion keeps quoted
+# strings from being mis-flagged as the hazard.
+_HASH_REF_IN_FLOW_SEQ = re.compile(r":\s*\[[^\]\"']*?#", re.DOTALL)
 
 
 def _frontmatter_block(text: str) -> str | None:
@@ -48,13 +49,28 @@ def _lint_one(path: Path) -> list[str]:
     if fm is None:
         return findings
 
-    for lineno, line in enumerate(fm.splitlines(), start=2):  # +1 for opening ---
-        if _HASH_REF_IN_FLOW_SEQ.search(line):
-            findings.append(
-                f"{path}:{lineno}: unquoted #-ref in YAML flow sequence "
-                f"({line.strip()!r}); quote the refs: "
-                f'prs: ["#381", "#382"]'
-            )
+    # _frontmatter_block returns text starting at index 3 (right after the
+    # opening ``---``), which is typically the trailing ``\n`` of that line.
+    # Strip the leading newline so the first content line maps cleanly to
+    # file line 2 (file line 1 is the opening ``---``).
+    fm_body = fm.lstrip("\n")
+
+    for m in _HASH_REF_IN_FLOW_SEQ.finditer(fm_body):
+        # If the opener line is itself a YAML comment (``# note: [#381]``),
+        # the ``: [`` is inside a comment and the whole thing is benign.
+        # Find the start of the line containing the match opener and
+        # check the first non-whitespace char.
+        line_start = fm_body.rfind("\n", 0, m.start()) + 1
+        if fm_body[line_start:m.start()].lstrip().startswith("#"):
+            continue
+        # Line number within fm_body. +2 for the opening ``---`` line.
+        line_no = fm_body.count("\n", 0, m.start()) + 2
+        snippet = fm_body[m.start():m.end()].replace("\n", " ").strip()
+        findings.append(
+            f"{path}:{line_no}: unquoted #-ref in YAML flow sequence "
+            f"({snippet!r}); quote the refs: "
+            f'prs: ["#381", "#382"]'
+        )
 
     try:
         yaml.safe_load(fm)
@@ -106,14 +122,20 @@ def lint(paths: tuple[Path, ...], root: Path | None) -> None:
         targets = sorted(scan_root.rglob("*.md"))
 
     all_findings: list[str] = []
+    files_with_findings = 0
     for path in targets:
-        all_findings.extend(_lint_one(path))
+        per_file = _lint_one(path)
+        if per_file:
+            files_with_findings += 1
+            all_findings.extend(per_file)
 
     if all_findings:
         for f in all_findings:
             click.echo(f, err=True)
         click.echo(
-            f"\n{len(all_findings)} finding(s) in {len(targets)} file(s)", err=True,
+            f"\n{len(all_findings)} finding(s) in {files_with_findings} of "
+            f"{len(targets)} file(s)",
+            err=True,
         )
         sys.exit(1)
 

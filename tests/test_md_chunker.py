@@ -63,6 +63,21 @@ def test_parse_frontmatter_strict_raises():
         parse_frontmatter(bad, source="x.md", strict=True)
 
 
+def test_parse_frontmatter_empty_source_is_distinct_from_none():
+    """Review #755 S-2: source="" must log as empty, not collapse to
+    the ``<unknown>`` sentinel that ``source=None`` uses."""
+    from structlog.testing import capture_logs
+
+    bad = "---\nprs: [#381]\n---\n\nBody\n"
+    with capture_logs() as cap:
+        parse_frontmatter(bad, source="")
+    fails = [e for e in cap if e["event"] == "frontmatter_parse_failed"]
+    assert len(fails) == 1
+    assert fails[0]["source"] == "", (
+        f"empty-string source must round-trip, got {fails[0]['source']!r}"
+    )
+
+
 # ── SemanticMarkdownChunker basics ───────────────────────────────────────────
 
 def test_chunk_empty_text_returns_empty(chunker):
