@@ -112,6 +112,9 @@ class TestCoveragePasses:
 
         class _FakeT3:
             _client = chroma_client
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
         result = runner.invoke(
@@ -138,6 +141,9 @@ class TestCoveragePasses:
 
         class _FakeT3:
             _client = chroma_client
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
         result = runner.invoke(
@@ -168,6 +174,9 @@ class TestCoverageFails:
 
         class _FakeT3:
             _client = chroma_client
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
         result = runner.invoke(
@@ -194,6 +203,9 @@ class TestCoverageFails:
 
         class _FakeT3:
             _client = chroma_client
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
         result = runner.invoke(
@@ -228,6 +240,9 @@ class TestCoverageFails:
 
         class _FakeT3:
             _client = chroma_client
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
         result = runner.invoke(
@@ -268,6 +283,9 @@ class TestCombined:
 
         class _FakeT3:
             _client = chroma_client
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
         result = runner.invoke(
@@ -334,6 +352,9 @@ class TestOrphanRatioSurface:
 
         class _FakeT3:
             _client = chroma_client
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
         # Text output assertions
@@ -403,6 +424,9 @@ class TestOrphanRatioSurface:
 
         class _FakeT3:
             _client = chroma_client
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
         text_result = runner.invoke(doctor_cmd, ["--t3-doc-id-coverage"])
@@ -431,6 +455,9 @@ class TestOrphanRatioSurface:
 
         class _FakeT3:
             _client = chroma_client
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
         json_result = runner.invoke(
@@ -497,6 +524,9 @@ class TestPhase3ManifestFallback:
 
         class _FakeT3:
             _client = chroma_client
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
@@ -547,6 +577,9 @@ class TestBypassSchemaSkipped:
 
         class _FakeT3:
             _client = chroma_client
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
         result = runner.invoke(
@@ -598,6 +631,9 @@ class TestSupersededSkip:
 
         class _FakeT3:
             _client = chroma_client
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
         result = runner.invoke(

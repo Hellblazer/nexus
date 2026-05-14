@@ -617,6 +617,7 @@ def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path) -> None:
 
     fake_db = MagicMock()
     fake_db._client = client
+    fake_db.get_collection = lambda name: client.get_collection(name)
 
     result = _invoke(
         runner, fake_db,
@@ -650,6 +651,7 @@ def test_reembed_no_dry_run_writes_via_voyage(
 
     fake_db = MagicMock()
     fake_db._client = client
+    fake_db.get_collection = lambda name: client.get_collection(name)
 
     upsert_calls: list[dict] = []
 
@@ -718,6 +720,7 @@ def test_reembed_skips_empty_documents(
 
     fake_db = MagicMock()
     fake_db._client = client
+    fake_db.get_collection = lambda name: client.get_collection(name)
 
     fake_embed_result = MagicMock()
     fake_embed_result.embeddings = [[0.5] * 1024]

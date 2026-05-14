@@ -282,7 +282,7 @@ def setup_cmd(remote: str) -> None:
     hash_updated = 0
     try:
         for col_info in t3.list_collections():
-            col = t3._client.get_collection(col_info["name"])
+            col = t3.get_collection(col_info["name"])
             updated, _, _ = _backfill_chunk_text_hash(col)
             hash_updated += updated
     except Exception as exc:
@@ -3453,7 +3453,7 @@ def backfill_cmd(
         click.echo("Pass 4: chunk_text_hash backfill...")
         from nexus.commands.collection import _backfill_chunk_text_hash
         for col_info in t3.list_collections():
-            col = t3._client.get_collection(col_info["name"])
+            col = t3.get_collection(col_info["name"])
             updated, _, _ = _backfill_chunk_text_hash(col)
             hash_updated += updated
 
@@ -4697,7 +4697,7 @@ def _run_chunk_size_distribution() -> dict:
     tables: dict[str, dict] = {}
     for name in collections:
         try:
-            col = t3._client.get_collection(name=name)
+            col = t3.get_collection(name=name)
         except Exception as exc:
             tables[name] = {"error": f"open: {exc}"}
             overall_pass = False
@@ -4813,7 +4813,7 @@ def _run_chunk_text_dedup() -> dict:
     chash_to_collections: dict[str, set[str]] = {}
     for name in collections:
         try:
-            col = t3._client.get_collection(name=name)
+            col = t3.get_collection(name=name)
         except Exception as exc:
             within_summary[name] = {"error": f"open: {exc}"}
             overall_pass = False
@@ -4947,7 +4947,7 @@ def _run_t3_vs_catalog() -> dict:
         # Only flag if the T3 collection actually has chunks; an empty
         # T3 collection with no docs is the zombie class below.
         try:
-            col = t3_db._client.get_collection(name=name)
+            col = t3_db.get_collection(name=name)
             count = col.count()
         except Exception:
             count = 0
@@ -4962,7 +4962,7 @@ def _run_t3_vs_catalog() -> dict:
     zombies = []
     for name in sorted(projection_names & t3_names):
         try:
-            col = t3_db._client.get_collection(name=name)
+            col = t3_db.get_collection(name=name)
             count = col.count()
         except Exception:
             continue
@@ -5576,7 +5576,7 @@ def _run_t3_doc_id_coverage(
             "Run 'nx catalog setup' to create and populate it."
         )
     log = EventLog(cat_dir)
-    if not log.path.exists() or log.path.stat().st_size == 0:
+    if log.is_empty():
         raise click.ClickException(
             f"events.jsonl is empty at {log.path}. The synthesize-log "
             "migration verb that historically populated it was retired "
@@ -5669,7 +5669,7 @@ def _run_t3_doc_id_coverage(
             continue
         _tc = _time.monotonic()
         try:
-            col = t3._client.get_collection(name=coll_name)
+            col = t3.get_collection(name=coll_name)
         except Exception as exc:
             per_coll[coll_name] = {
                 "error": f"open: {exc}",
@@ -6115,10 +6115,8 @@ def chash_reconcile_cmd(apply: bool) -> None:
         # Every other call site in nexus uses the same defensive
         # ``isinstance(c, str)`` guard; without it this verb crashes
         # with AttributeError on the string-returning versions.
-        live_collections = {
-            (c if isinstance(c, str) else c.name)
-            for c in t3._client.list_collections()
-        }
+        # ``T3Database.list_collections()`` returns ``[{name, count}]`` dicts.
+        live_collections = {c["name"] for c in t3.list_collections()}
     except Exception as exc:
         click.echo(f"Failed to list T3 collections: {exc}", err=True)
         raise SystemExit(1)
@@ -6673,7 +6671,7 @@ def link_existing_cmd(
         click.echo(
             f"Existing catalog Documents with {match_by}: {rows[0]}"
         )
-        col = t3._client.get_collection(name=collection)
+        col = t3.get_collection(name=collection)
         click.echo(f"T3 chunks in {collection}: {col.count()}")
         click.echo("\n(dry-run) --no-dry-run to write manifest rows.")
         return
