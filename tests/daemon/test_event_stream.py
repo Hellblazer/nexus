@@ -391,6 +391,59 @@ async def test_backfill_cap_1500(
 
 
 # ---------------------------------------------------------------------------
+# (g) Live mode >cap: single transaction emits 1500 rows AFTER subscribe;
+#     all must arrive (regression for the live-mode silent-drop bug)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_live_mode_above_cap_drains_all_events(
+    daemon: T2Daemon,
+    seeded_db: sqlite3.Connection,
+) -> None:
+    """Subscribe FIRST, then commit one >cap transaction; all rows arrive.
+
+    Regression: live-mode previously advanced last_data_version after a single
+    fetch capped at BACKFILL_BURST_LIMIT (1000). A transaction with >1000
+    trigger-fired rows would silently strand the remainder until another
+    unrelated write bumped data_version. Fixed by looping the live fetch
+    until an empty / under-cap batch returns.
+    """
+    n = 1500
+    client = _make_client(daemon)
+    # Spawn the collector first so it's in live mode when the transaction commits.
+    collector_task = asyncio.create_task(
+        _collect_n(client, "tuples/livecap", n, since_cursor=0, timeout=20.0)
+    )
+    # Yield enough times for the subscription to reach Phase 2 (live mode).
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+
+    # Single transaction, single commit -> single data_version bump -> 1500 trigger rows.
+    for i in range(n):
+        seeded_db.execute(
+            """\
+            INSERT INTO tuples
+                (id, subspace, template_name, content, dimensions_json, embed_text,
+                 created_at)
+            VALUES (?, 'tuples/livecap', 'test', 'x', '{}', 'x', ?)
+            """,
+            (f"livecap{i}", time.time()),
+        )
+    seeded_db.commit()
+
+    events = await collector_task
+    client.close()
+
+    assert len(events) == n, (
+        f"live mode dropped {n - len(events)} events under one data_version bump; "
+        "the per-poll fetch must drain in bursts until empty before advancing last_data_version"
+    )
+    cursors = [e["cursor"] for e in events]
+    assert cursors == sorted(set(cursors))
+
+
+# ---------------------------------------------------------------------------
 # Schema / migration smoke tests
 # ---------------------------------------------------------------------------
 

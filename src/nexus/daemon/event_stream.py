@@ -232,23 +232,33 @@ async def handle_event_stream(
             current_dv: int = await asyncio.to_thread(_get_data_version, conn)
             if current_dv == last_data_version:
                 continue  # no commit since last poll
-            last_data_version = current_dv
 
-            # Fetch new events since last emitted cursor (one burst, no limit cap in live mode
-            # since the delta since last poll is bounded by the 10ms window)
-            batch = await asyncio.to_thread(
-                _fetch_events, conn, glob_pattern, last_emitted, category_filter, BACKFILL_BURST_LIMIT
-            )
-            if not batch:
-                continue
-            for event in batch:
-                write_frame(writer, {"event": event})
-                last_emitted = event["cursor"]
-            try:
-                await writer.drain()
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                _log.debug("event_stream_client_gone_on_drain")
-                return
+            # Drain ALL new events for this data_version bump in bursts of
+            # BACKFILL_BURST_LIMIT. A single transaction can produce arbitrarily
+            # many trigger-fired rows; only advance last_data_version once an
+            # empty fetch confirms we're caught up. Otherwise a >cap write batch
+            # would silently strand rows beyond the cap until another unrelated
+            # write happened to bump data_version again.
+            while True:
+                batch = await asyncio.to_thread(
+                    _fetch_events, conn, glob_pattern, last_emitted, category_filter, BACKFILL_BURST_LIMIT
+                )
+                if not batch:
+                    last_data_version = current_dv  # caught up to this dv
+                    break
+                for event in batch:
+                    write_frame(writer, {"event": event})
+                    last_emitted = event["cursor"]
+                try:
+                    await writer.drain()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    _log.debug("event_stream_client_gone_on_drain")
+                    return
+                if len(batch) < BACKFILL_BURST_LIMIT:
+                    last_data_version = current_dv  # fewer than cap means we're caught up
+                    break
+                # Full burst: more rows may exist for this dv; loop without sleep
+                # to drain the rest before checking the wake signal again.
 
         # Daemon stopping: notify client
         if stopping_fn():
