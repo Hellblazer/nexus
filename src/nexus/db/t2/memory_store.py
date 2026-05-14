@@ -36,6 +36,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+HookFailureChain = Literal["single", "batch", "document"]
+
 import structlog
 
 from nexus.session import read_claude_session_id as _read_session_id
@@ -697,6 +699,138 @@ class MemoryStore:
             cursor = self.conn.execute(sql, params)
             self.conn.commit()
         return cursor.rowcount > 0
+
+    # ── Cross-cutting hook_failures owner (RDR-112 P0.2 / nexus-xmu5) ─────
+
+    #: Cap on the ``error`` column's persisted length. Long stack traces
+    #: blow up storage and never carry signal past the first ~2 KB; the
+    #: cap is shared by all three call paths and validated in the
+    #: truncation test.
+    HOOK_FAILURE_ERROR_MAX = 2000
+
+    def record_hook_failure(
+        self,
+        *,
+        doc_id: str,
+        collection: str,
+        hook_name: str,
+        error: str,
+        chain: HookFailureChain = "single",
+        batch_doc_ids: list[str] | None = None,
+    ) -> None:
+        """Persist a post-store hook failure to T2 ``hook_failures``.
+
+        RDR-112 P0.2 (nexus-xmu5): the canonical writer for the cross-
+        cutting ``hook_failures`` table. Replaces three raw INSERTs
+        scattered across ``mcp_infra.py`` that reached through
+        ``t2.taxonomy.conn``.
+
+        Args:
+            doc_id: subject of failure — a scalar doc id for ``single``
+                and ``document`` chains, a representative id (first of
+                the batch) for ``batch``.
+            collection: collection name the hook fired on.
+            hook_name: hook callable name (for triage).
+            error: free-text error message; truncated to 2000 chars.
+            chain: ``single`` | ``batch`` | ``document`` per RDR-089
+                4.14.2 schema. Typed as ``HookFailureChain`` so the
+                Phase-1 RPC freeze does not pin a free-text string.
+            batch_doc_ids: full doc-id list for ``chain='batch'``;
+                serialised as JSON into the ``batch_doc_ids`` column
+                and ``is_batch=1`` is set. **Must be non-empty when
+                chain='batch'**; ``None`` or ``[]`` raises ValueError
+                (a row with ``is_batch=1`` and no recoverable identity
+                is worse than a loud failure). Ignored for other chains.
+
+        Schema fallback: on a pre-4.14.2 DB the ``chain`` column is
+        absent; on a pre-4.14.1 DB ``batch_doc_ids``/``is_batch`` are
+        also absent. The method retries with progressively fewer
+        columns so mixed-version operator scenarios still persist.
+        Persistence is best-effort at the caller level — secondary
+        write failures should propagate so the outer guard in
+        ``mcp_infra`` can log + swallow.
+        """
+        import json
+
+        # ``HookFailureChain = Literal[...]`` is a static-checker hint
+        # only; the interpreter accepts any string. Phase 1's daemon-RPC
+        # deserialiser does not yet exist, so enforce at runtime now to
+        # close the gap a misbehaving caller (test stub, future RPC
+        # client, raw Python) could exploit by writing an unrecognised
+        # chain value.
+        if chain not in ("single", "batch", "document"):
+            raise ValueError(
+                f"chain must be one of 'single' | 'batch' | 'document'; got {chain!r}"
+            )
+
+        if chain == "batch" and not batch_doc_ids:
+            # Reject both ``None`` and empty list — the daemon-RPC path
+            # in Phase 1 will serialise this kwarg, so a None-or-[] from
+            # a misbehaving client must not silently produce an
+            # ``is_batch=1`` row with no recoverable identity.
+            raise ValueError(
+                "batch_doc_ids must be a non-empty list when chain='batch'"
+            )
+
+        truncated = error[: self.HOOK_FAILURE_ERROR_MAX]
+
+        with self._lock:
+            if chain == "batch":
+                payload = json.dumps(batch_doc_ids or [])
+                try:
+                    # 4.14.2: full shape — chain + is_batch + batch_doc_ids.
+                    self.conn.execute(
+                        "INSERT INTO hook_failures "
+                        "(doc_id, collection, hook_name, error, "
+                        " batch_doc_ids, is_batch, chain) "
+                        "VALUES (?, ?, ?, ?, ?, 1, 'batch')",
+                        (doc_id, collection, hook_name, truncated, payload),
+                    )
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc)
+                    if "no column named" not in msg and "no such column" not in msg:
+                        raise
+                    try:
+                        # 4.14.1: is_batch + batch_doc_ids without chain.
+                        self.conn.execute(
+                            "INSERT INTO hook_failures "
+                            "(doc_id, collection, hook_name, error, "
+                            " batch_doc_ids, is_batch) "
+                            "VALUES (?, ?, ?, ?, ?, 1)",
+                            (doc_id, collection, hook_name, truncated, payload),
+                        )
+                    except sqlite3.OperationalError as exc2:
+                        msg2 = str(exc2)
+                        if "no column named" not in msg2 and "no such column" not in msg2:
+                            raise
+                        # 4.14.0: scalar-only.
+                        self.conn.execute(
+                            "INSERT INTO hook_failures "
+                            "(doc_id, collection, hook_name, error) "
+                            "VALUES (?, ?, ?, ?)",
+                            (doc_id, collection, hook_name, truncated),
+                        )
+            else:
+                try:
+                    # 4.14.2: chain column present.
+                    self.conn.execute(
+                        "INSERT INTO hook_failures "
+                        "(doc_id, collection, hook_name, error, chain) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (doc_id, collection, hook_name, truncated, chain),
+                    )
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc)
+                    if "no column named" not in msg and "no such column" not in msg:
+                        raise
+                    # Pre-4.14.2: chain column absent. Drop the marker.
+                    self.conn.execute(
+                        "INSERT INTO hook_failures "
+                        "(doc_id, collection, hook_name, error) "
+                        "VALUES (?, ?, ?, ?)",
+                        (doc_id, collection, hook_name, truncated),
+                    )
+            self.conn.commit()
 
     # ── Housekeeping ──────────────────────────────────────────────────────
 

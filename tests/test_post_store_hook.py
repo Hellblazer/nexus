@@ -362,14 +362,23 @@ def test_fire_post_store_batch_hooks_falls_back_to_scalar_when_columns_absent(
         "pre-condition: hook_failures must lack batch_doc_ids before the test runs"
     )
 
+    from nexus.db.t2.memory_store import MemoryStore
+
     class _FakeTaxonomy:
         def __init__(self, conn: sqlite3.Connection) -> None:
             self.conn = conn
             self._lock = threading.RLock()
 
+    def _fake_memory(conn: sqlite3.Connection) -> MemoryStore:
+        store = MemoryStore.__new__(MemoryStore)
+        store.conn = conn
+        store._lock = threading.Lock()
+        return store
+
     class _FakeT2:
         def __init__(self, conn: sqlite3.Connection) -> None:
             self.taxonomy = _FakeTaxonomy(conn)
+            self.memory = _fake_memory(conn)
         def __enter__(self) -> "_FakeT2":
             return self
         def __exit__(self, *_: object) -> None:
