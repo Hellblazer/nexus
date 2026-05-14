@@ -26,6 +26,7 @@ import click
 from nexus.commands._helpers import default_db_path
 from nexus.config import load_config
 from nexus.db.t2 import T2Database
+from nexus.mcp_infra import t2_ctx
 from nexus.doc.citations import (
     extensions_report,
     grounding_report,
@@ -105,7 +106,7 @@ def render_cmd(
     # install, no db), fall back to bead + RDR resolvers only.
     db: T2Database | None = None
     try:
-        db = T2Database(default_db_path())
+        db = t2_ctx()
     except Exception:
         db = None
 
@@ -230,7 +231,7 @@ def validate_cmd(paths: tuple[Path, ...], project_root: Path | None) -> None:
 
     db: T2Database | None = None
     try:
-        db = T2Database(default_db_path())
+        db = t2_ctx()
     except Exception:
         db = None
 
@@ -574,7 +575,7 @@ def _phase4_t2_taxonomy():
 
     @contextmanager
     def _taxonomy_ctx():
-        db = T2Database(default_db_path())
+        db = t2_ctx()
         try:
             yield db.taxonomy
         finally:

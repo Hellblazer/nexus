@@ -8,13 +8,20 @@ import click
 import numpy as np
 import structlog
 
-from nexus.commands._helpers import default_db_path as _default_db_path
+from nexus.commands._helpers import default_db_path as _default_db_path  # noqa: E402
 
 
-def _T2Database(path):
-    """Lazy T2Database constructor (avoids module-level import poisoning by test mocks)."""
+def _t2_ctx():
+    """Open T2 via the supported encapsulation surface (RDR-112 P0.5).
+
+    Indirects through ``_default_db_path`` so the long-standing test
+    pattern of patching ``nexus.commands.taxonomy_cmd._default_db_path``
+    keeps working. Constructs ``T2Database`` lazily to avoid module-
+    level import poisoning by test mocks.
+    """
     from nexus.db.t2 import T2Database
-    return T2Database(path)
+    db_path = _default_db_path()
+    return T2Database(db_path)
 
 if TYPE_CHECKING:
     from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
@@ -181,7 +188,7 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
       nx taxonomy status -n 10                        # top 10 by docs
       nx taxonomy status --needs-review               # pending review only
     """
-    with _T2Database(_default_db_path()) as db:
+    with _t2_ctx() as db:
         # Storage review I-1: every .conn access goes through the
         # domain-store lock. These are read-only queries but the lock
         # protects against a concurrent writer on the same connection.
@@ -316,7 +323,7 @@ def list_cmd(collection: str, depth: int) -> None:
     from nexus.taxonomy import get_topic_tree
 
     depth = min(depth, 4)
-    with _T2Database(_default_db_path()) as db:
+    with _t2_ctx() as db:
         tree = get_topic_tree(db, collection, max_depth=depth)
         # Count docs with no topic assignment (noise / uncategorized).
         # Lock taken per storage review I-1.
@@ -361,7 +368,7 @@ def show_cmd(topic_id: int, limit: int) -> None:
     """Show documents assigned to a topic."""
     from nexus.taxonomy import get_topic_docs
 
-    with _T2Database(_default_db_path()) as db:
+    with _t2_ctx() as db:
         docs = get_topic_docs(db, topic_id, limit=limit)
     if not docs:
         click.echo(f"No documents in topic {topic_id}.")
@@ -423,7 +430,7 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
 
     total_topics = 0
     total_labeled = 0
-    with _T2Database(_default_db_path()) as db:
+    with _t2_ctx() as db:
         for i, col_name in enumerate(targets, 1):
             if len(targets) > 1:
                 click.echo(f"[{i}/{len(targets)}] {col_name}")
@@ -504,7 +511,7 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
     if k is not None:
         click.echo("Note: -k is deprecated. Cluster count is now automatic (HDBSCAN).")
 
-    with _T2Database(_default_db_path()) as db:
+    with _t2_ctx() as db:
         t3 = make_t3()
         count = discover_for_collection(
             collection, db.taxonomy, t3._client, force=True,
@@ -590,7 +597,7 @@ def _show_merge_targets(
 @click.option("--limit", "-n", default=15, type=int, help="Topics per session", show_default=True)
 def review_cmd(collection: str, limit: int) -> None:
     """Interactive topic review — accept, rename, merge, delete, or skip."""
-    with _T2Database(_default_db_path()) as db:
+    with _t2_ctx() as db:
         topics = db.taxonomy.get_unreviewed_topics(collection=collection, limit=limit)
         if not topics:
             click.echo("No unreviewed topics. All done!")
@@ -650,7 +657,7 @@ def review_cmd(collection: str, limit: int) -> None:
 @click.option("--collection", "-c", default="", help="Collection scope for label lookup")
 def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
     """Assign a document to a topic by label."""
-    with _T2Database(_default_db_path()) as db:
+    with _t2_ctx() as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
@@ -684,7 +691,7 @@ def rename_cmd(
     (the user typing a new label is an acknowledgement); ``--no-accept``
     lets you fix a typo without forcing the topic through review.
     """
-    with _T2Database(_default_db_path()) as db:
+    with _t2_ctx() as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
@@ -705,7 +712,7 @@ def rename_cmd(
 @click.option("--collection", "-c", default="", help="Collection scope for label lookup")
 def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
     """Merge source topic into target topic."""
-    with _T2Database(_default_db_path()) as db:
+    with _t2_ctx() as db:
         source_id = db.taxonomy.resolve_label(source_label, collection=collection)
         if source_id is None:
             click.echo(f"Source topic '{source_label}' not found.")
@@ -726,7 +733,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
     """Split a topic into k sub-topics via KMeans clustering."""
     from nexus.db import make_t3
 
-    with _T2Database(_default_db_path()) as db:
+    with _t2_ctx() as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
@@ -898,7 +905,7 @@ def links_cmd(collection: str, refresh: bool) -> None:
     from compute_topic_links (link_types contains 'cites', 'implements',
     etc.).  Use --refresh to recompute catalog-derived links first.
     """
-    with _T2Database(_default_db_path()) as db:
+    with _t2_ctx() as db:
         if refresh:
             catalog = _try_load_catalog()
             if catalog is None:
@@ -1140,7 +1147,7 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
         click.echo("claude CLI not found. Install Claude Code to use LLM labeling.")
         return
 
-    with _T2Database(_default_db_path()) as db:
+    with _t2_ctx() as db:
         # GitHub #243: the pre-check must see split sub-topics (children
         # with parent_id set); ``get_topics()`` only returns roots, so
         # a post-split pending child would be silently skipped here.
@@ -1221,7 +1228,7 @@ def project_cmd(
     from nexus.corpus import default_projection_threshold
     from nexus.db import make_t3
 
-    db = _T2Database(_default_db_path())
+    db = _t2_ctx()
     t3 = make_t3()
 
     # Resolve threshold: explicit flag wins; otherwise per-corpus default
@@ -1468,7 +1475,7 @@ def hubs_cmd(
     See docs/taxonomy-projection-tuning.md for guidance on interpreting
     the output and acting on flagged topics.
     """
-    db = _T2Database(_default_db_path())
+    db = _t2_ctx()
     try:
         rows = db.taxonomy.detect_hubs(
             min_collections=min_collections,
@@ -1557,7 +1564,7 @@ def audit_cmd(collection: str, threshold: float | None, top_n: int) -> None:
 
     See docs/taxonomy-projection-tuning.md for interpretation guidance.
     """
-    db = _T2Database(_default_db_path())
+    db = _t2_ctx()
     try:
         report = db.taxonomy.audit_collection(
             collection, threshold=threshold, top_n=top_n,

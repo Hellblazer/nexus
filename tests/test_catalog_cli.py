@@ -584,6 +584,7 @@ class TestSeedPlanTemplates:
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_path)
         from nexus.commands.catalog import _seed_plan_templates
         count = _seed_plan_templates()
         assert count == 15
@@ -597,6 +598,7 @@ class TestSeedPlanTemplates:
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_path)
         from nexus.commands.catalog import _seed_plan_templates
         first = _seed_plan_templates()
         second = _seed_plan_templates()
@@ -607,6 +609,7 @@ class TestSeedPlanTemplates:
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_path)
         from nexus.commands.catalog import _seed_plan_templates
         _seed_plan_templates()
         db = T2Database(db_path)
@@ -632,6 +635,7 @@ class TestSeedPlanTemplates:
 
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_path)
         # Force the scoped loader to report an empty global tier.
         monkeypatch.setattr(
             "nexus.plans.loader.load_all_tiers",
@@ -652,6 +656,7 @@ class TestSeedPlanTemplates:
         """
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_path)
         monkeypatch.setattr(
             "nexus.plans.loader.load_all_tiers",
             lambda **_kw: {},
@@ -675,6 +680,7 @@ class TestSeedPlanTemplates:
 
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_path)
 
         # Give the global tier one healthy insert so the fail-loud
         # zero-guard does not fire; rdr-099 scope surfaces an error.
@@ -704,6 +710,7 @@ class TestSeedPlanTemplates:
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_path)
         from nexus.commands.catalog import _seed_plan_templates
         _seed_plan_templates()
         db = T2Database(db_path)
@@ -721,6 +728,7 @@ class TestSeedPlanTemplates:
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_path)
         from nexus.commands.catalog import _seed_plan_templates
         _seed_plan_templates()
         db = T2Database(db_path)
@@ -744,6 +752,7 @@ class TestSeedPlanTemplates:
         from nexus.db.t2 import T2Database
         db_path = tmp_path / "t2.db"
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
+        monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_path)
         from nexus.commands.catalog import _seed_plan_templates
         _seed_plan_templates()
         db = T2Database(db_path)

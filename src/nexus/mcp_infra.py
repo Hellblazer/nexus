@@ -145,7 +145,12 @@ def get_collection_names() -> list[str]:
 
 
 def t2_ctx():
-    """Return a T2Database context manager — fresh per call."""
+    """Return a T2Database context manager — fresh per call.
+
+    Resolves ``default_db_path`` via this module's binding so test
+    fixtures that patch ``nexus.mcp_infra.default_db_path`` continue
+    to take effect.
+    """
     from nexus.db.t2 import T2Database
     return T2Database(default_db_path())
 

@@ -59,6 +59,7 @@ def catalog(tmp_path):
 def _seed_templates(tmp_path, monkeypatch):
     db_path = tmp_path / "t2.db"
     monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
+    monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db_path)
     from nexus.commands.catalog import _seed_plan_templates
     return db_path, _seed_plan_templates
 

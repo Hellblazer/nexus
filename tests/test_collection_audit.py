@@ -377,7 +377,8 @@ class TestLiveDistanceProbe:
                 sentinel_called["hit"] = True
                 raise AssertionError("live probe fired despite warm telemetry")
 
-        with patch("nexus.config.default_db_path", return_value=tmp_path / "memory.db"):
+        with patch("nexus.config.default_db_path", return_value=tmp_path / "memory.db"), \
+             patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "memory.db"):
             report = run_collection_audit(
                 "code__main", live=True, t3=ExplodingT3(),
             )
@@ -397,7 +398,8 @@ class TestLiveDistanceProbe:
             def get_or_create_collection(self_, name):
                 return col
 
-        with patch("nexus.config.default_db_path", return_value=tmp_path / "memory.db"):
+        with patch("nexus.config.default_db_path", return_value=tmp_path / "memory.db"), \
+             patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "memory.db"):
             report = run_collection_audit(
                 "code__fallback_live", live=True, t3=FakeT3(), live_n=6,
             )

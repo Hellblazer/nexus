@@ -510,8 +510,7 @@ def run_collection_postprocessing(
 
     from nexus.config import load_config as _load_cfg
     from nexus.db import make_t3
-    from nexus.db.t2 import T2Database
-    from nexus.commands._helpers import default_db_path
+    from nexus.mcp_infra import t2_ctx
 
     def _say(msg: str) -> None:
         if not quiet:
@@ -521,7 +520,7 @@ def run_collection_postprocessing(
     try:
         t3 = make_t3()
         total_topics = 0
-        with T2Database(default_db_path()) as db:
+        with t2_ctx() as db:
             for col_name in collections:
                 try:
                     n = _discover_taxonomy(col_name, db.taxonomy, t3._client)
@@ -800,14 +799,13 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     path = path.resolve()
 
     if dry_run:
-        import chromadb
         from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
-        from nexus.db import make_t3
+        from nexus.db import make_ephemeral_t3
 
         click.echo("Dry-run mode — local ONNX embeddings, no cloud writes.")
         ef = DefaultEmbeddingFunction()
-        local_t3 = make_t3(_client=chromadb.EphemeralClient(), _ef_override=ef)
+        local_t3 = make_ephemeral_t3(ef=ef)
 
         def _local_embed(texts: list[str], model: str) -> tuple[list[list[float]], str]:
             return [v.tolist() for v in ef(texts)], model
