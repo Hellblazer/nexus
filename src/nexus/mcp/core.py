@@ -387,26 +387,16 @@ def _record_tier_write(
     try:
         from datetime import datetime, timezone
 
-        from nexus.db.migrations import migrate_tier_writes
         from nexus.mcp_infra import t2_ctx
         from nexus.session import resolve_active_session_id
 
         session_id = resolve_active_session_id() or "unknown"
         ts = datetime.now(timezone.utc).isoformat()
         with t2_ctx() as t2:
-            # Any domain conn points at the same SQLite file; reuse the
-            # taxonomy connection because it is constructed eagerly and
-            # carries the per-store lock semantics this insert needs.
-            conn = t2.taxonomy.conn
-            with t2.taxonomy._lock:
-                migrate_tier_writes(conn)
-                conn.execute(
-                    "INSERT INTO tier_writes "
-                    "(session_id, ts, tool, tier, agent, project, target_title) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (session_id, ts, tool, tier, agent, project, target_title),
-                )
-                conn.commit()
+            t2.telemetry.record_tier_write(
+                session_id=session_id, ts=ts, tool=tool, tier=tier,
+                agent=agent, project=project, target_title=target_title,
+            )
     except Exception:
         # Best-effort. Telemetry breaking a tool call is the worst kind of regression.
         pass
@@ -3122,7 +3112,7 @@ def _maybe_unwrap_output_envelope(text: str, *, max_depth: int = 3) -> str:
 
 
 def _nx_answer_record_run(
-    conn: Any,
+    telemetry: Any,
     *,
     question: str,
     plan_id: int | None,
@@ -3133,19 +3123,24 @@ def _nx_answer_record_run(
     duration_ms: int,
     trace: bool,
 ) -> None:
-    """Write one row to ``nx_answer_runs``. Redacts when ``trace=False``."""
-    from nexus.db.migrations import migrate_nx_answer_runs
-    migrate_nx_answer_runs(conn)
-    q = question if trace else "[redacted]"
-    text = final_text if trace else "[redacted]"
-    conn.execute(
-        """INSERT INTO nx_answer_runs
-           (question, plan_id, matched_confidence, step_count,
-            final_text, cost_usd, duration_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (q, plan_id, matched_confidence, step_count, text, cost_usd, duration_ms),
+    """Write one row to ``nx_answer_runs``. Redacts when ``trace=False``.
+
+    Thin wrapper over :meth:`Telemetry.record_nx_answer_run`. Kept as
+    a module-local helper because every call site is already inside a
+    ``with _t2_ctx() as db:`` block; passing ``db.telemetry`` is more
+    ergonomic than typing the full method name at five sites.
+    RDR-112 P0-gate (nexus-mz2c).
+    """
+    telemetry.record_nx_answer_run(
+        question=question,
+        plan_id=plan_id,
+        matched_confidence=matched_confidence,
+        step_count=step_count,
+        final_text=final_text,
+        cost_usd=cost_usd,
+        duration_ms=duration_ms,
+        trace=trace,
     )
-    conn.commit()
 
 
 def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
@@ -3508,7 +3503,7 @@ async def nx_answer(
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.telemetry.conn, question=question, plan_id=None,
+                        db.telemetry, question=question, plan_id=None,
                         matched_confidence=matches[0].confidence if matches else None,
                         step_count=0, final_text=f"Planner error: {exc}",
                         cost_usd=0.0, duration_ms=elapsed_ms, trace=trace,
@@ -3615,7 +3610,7 @@ async def nx_answer(
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.telemetry.conn, question=question, plan_id=best.plan_id,
+                        db.telemetry, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
                         final_text=str(result_text)[:2000], cost_usd=0.0,
                         duration_ms=elapsed_ms, trace=trace,
@@ -3634,7 +3629,7 @@ async def nx_answer(
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_run(
-                        db.telemetry.conn, question=question, plan_id=best.plan_id,
+                        db.telemetry, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
                         final_text=f"Error: {exc}", cost_usd=0.0,
                         duration_ms=elapsed_ms, trace=trace,
@@ -3690,7 +3685,7 @@ async def nx_answer(
         try:
             with _t2_ctx() as db:
                 _nx_answer_record_run(
-                    db.telemetry.conn, question=question, plan_id=best.plan_id,
+                    db.telemetry, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence, step_count=0,
                     final_text=f"Error: {exc}", cost_usd=0.0,
                     duration_ms=elapsed_ms, trace=trace,
@@ -3839,7 +3834,7 @@ async def nx_answer(
     try:
         with _t2_ctx() as db:
             _nx_answer_record_run(
-                db.telemetry.conn, question=question, plan_id=best.plan_id,
+                db.telemetry, question=question, plan_id=best.plan_id,
                 matched_confidence=best.confidence, step_count=len(result.steps),
                 final_text=final_text[:2000], cost_usd=0.0,
                 duration_ms=elapsed_ms, trace=trace,

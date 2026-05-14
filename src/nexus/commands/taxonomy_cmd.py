@@ -12,16 +12,18 @@ from nexus.commands._helpers import default_db_path as _default_db_path  # noqa:
 
 
 def _t2_ctx():
-    """Open T2 via the supported encapsulation surface (RDR-112 P0.5).
+    """Delegate to ``mcp_infra.t2_ctx`` (RDR-112 P0-gate, nexus-cy3o).
 
-    Indirects through ``_default_db_path`` so the long-standing test
-    pattern of patching ``nexus.commands.taxonomy_cmd._default_db_path``
-    keeps working. Constructs ``T2Database`` lazily to avoid module-
-    level import poisoning by test mocks.
+    Phase-1 daemon-mode (``NX_STORAGE_MODE=daemon``) swaps the
+    ``mcp_infra.t2_ctx`` body to an RPC client. A previous local-
+    construction shim would have silently bypassed that swap. This
+    version routes through the supported seam while preserving the
+    long-standing test pattern of patching
+    ``nexus.commands.taxonomy_cmd._default_db_path`` via the
+    ``_path_resolver`` kwarg.
     """
-    from nexus.db.t2 import T2Database
-    db_path = _default_db_path()
-    return T2Database(db_path)
+    from nexus.mcp_infra import t2_ctx
+    return t2_ctx(_path_resolver=_default_db_path)
 
 if TYPE_CHECKING:
     from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy

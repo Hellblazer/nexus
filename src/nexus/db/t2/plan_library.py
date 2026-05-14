@@ -443,6 +443,37 @@ class PlanLibrary:
         except OSError:
             return None
 
+    def backfill_dimensions(
+        self,
+    ) -> tuple[int, list[tuple[int, str, str]]]:
+        """Run the plan-dimensions backfill migration.
+
+        Counts NULL-dimension rows before and after the pass, plus
+        surfaces low-confidence rows for operator review (oldest first).
+        Returns ``(backfilled_count, low_conf_rows)`` where each
+        low-conf row is ``(plan_id, query, verb)``. RDR-112 P0-gate
+        (nexus-yqeu) — encapsulates a former
+        ``commands/plan.py`` ``sqlite3.connect`` reach-through.
+        """
+        from nexus.db.migrations import _backfill_plan_dimensions
+        with self._lock:
+            pending_before = self.conn.execute(
+                "SELECT COUNT(*) FROM plans WHERE dimensions IS NULL"
+            ).fetchone()[0]
+            _backfill_plan_dimensions(self.conn)
+            pending_after = self.conn.execute(
+                "SELECT COUNT(*) FROM plans WHERE dimensions IS NULL"
+            ).fetchone()[0]
+            low_conf_rows = self.conn.execute(
+                "SELECT id, query, verb FROM plans "
+                "WHERE tags LIKE '%backfill-low-conf%' "
+                "ORDER BY id ASC"
+            ).fetchall()
+        return (
+            int(pending_before - pending_after),
+            [(int(r[0]), r[1], r[2]) for r in low_conf_rows],
+        )
+
     def delete_plan(self, plan_id: int) -> int:
         """Delete the plan with *plan_id*. Returns the row count removed.
 

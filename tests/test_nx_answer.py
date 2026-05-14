@@ -352,62 +352,53 @@ class TestGracefulDegradation:
 
 class TestRunRecording:
 
-    def test_record_run_trace_true(self):
+    def test_record_run_trace_true(self, tmp_path):
+        from nexus.db.t2 import T2Database
         from nexus.mcp.core import _nx_answer_record_run
-        from nexus.db.migrations import migrate_nx_answer_runs
 
-        conn = sqlite3.connect(":memory:")
-        migrate_nx_answer_runs(conn)
-
-        _nx_answer_record_run(
-            conn, question="test question", plan_id=1,
-            matched_confidence=0.55, step_count=3,
-            final_text="the answer", cost_usd=0.04,
-            duration_ms=1500, trace=True,
-        )
-
-        row = conn.execute("SELECT * FROM nx_answer_runs").fetchone()
+        with T2Database(tmp_path / "mem.db") as db:
+            _nx_answer_record_run(
+                db.telemetry, question="test question", plan_id=1,
+                matched_confidence=0.55, step_count=3,
+                final_text="the answer", cost_usd=0.04,
+                duration_ms=1500, trace=True,
+            )
+            row = db.telemetry.conn.execute(
+                "SELECT * FROM nx_answer_runs"
+            ).fetchone()
         assert row is not None
         assert row[1] == "test question"   # question
         assert row[5] == "the answer"      # final_text
 
-    def test_record_run_trace_false_redacts(self):
+    def test_record_run_trace_false_redacts(self, tmp_path):
+        from nexus.db.t2 import T2Database
         from nexus.mcp.core import _nx_answer_record_run
-        from nexus.db.migrations import migrate_nx_answer_runs
 
-        conn = sqlite3.connect(":memory:")
-        migrate_nx_answer_runs(conn)
-
-        _nx_answer_record_run(
-            conn, question="private question", plan_id=2,
-            matched_confidence=None, step_count=2,
-            final_text="sensitive answer", cost_usd=0.02,
-            duration_ms=800, trace=False,
-        )
-
-        row = conn.execute("SELECT * FROM nx_answer_runs").fetchone()
+        with T2Database(tmp_path / "mem.db") as db:
+            _nx_answer_record_run(
+                db.telemetry, question="private question", plan_id=2,
+                matched_confidence=None, step_count=2,
+                final_text="sensitive answer", cost_usd=0.02,
+                duration_ms=800, trace=False,
+            )
+            row = db.telemetry.conn.execute(
+                "SELECT * FROM nx_answer_runs"
+            ).fetchone()
         assert row[1] == "[redacted]"   # question
         assert row[5] == "[redacted]"   # final_text
 
     def test_record_run_lands_via_t2_telemetry_conn(self, tmp_path):
-        """Regression for nexus-598n: the MCP call sites write through
-        ``db.telemetry.conn``, not a nonexistent ``db.conn``.
-
-        Prior to this fix, every ``_nx_answer_record_run`` call in
-        ``mcp/core.py`` passed ``db.conn`` to this function; after the
-        RDR-063 T2Database split removed the facade-level ``.conn``
-        attribute, those writes raised ``AttributeError`` under
-        ``except Exception: pass`` — silently dropping every run
-        record. Asserting the lookup here locks the contract.
+        """Regression: the MCP call sites write through the Telemetry
+        store. RDR-112 P0-gate (nexus-mz2c) — formerly passed
+        ``db.telemetry.conn`` directly; now passes the store.
         """
         from nexus.db.t2 import T2Database
         from nexus.mcp.core import _nx_answer_record_run
 
-        path = tmp_path / "mem.db"
-        with T2Database(path) as db:
-            assert hasattr(db, "telemetry") and hasattr(db.telemetry, "conn")
+        with T2Database(tmp_path / "mem.db") as db:
+            assert hasattr(db, "telemetry")
             _nx_answer_record_run(
-                db.telemetry.conn, question="integration-probe",
+                db.telemetry, question="integration-probe",
                 plan_id=7, matched_confidence=0.8, step_count=2,
                 final_text="ok", cost_usd=0.0, duration_ms=42,
                 trace=True,
@@ -1684,20 +1675,19 @@ class TestNxAnswerCostStub:
 
     def test_cost_usd_recorded_as_zero(self, tmp_path):
         """_nx_answer_record_run stores cost_usd=0.0 (P5 stub — not real cost)."""
-        import sqlite3
+        from nexus.db.t2 import T2Database
         from nexus.mcp.core import _nx_answer_record_run
-        from nexus.db.migrations import migrate_nx_answer_runs
 
-        conn = sqlite3.connect(":memory:")
-        migrate_nx_answer_runs(conn)
-
-        _nx_answer_record_run(
-            conn, question="q", plan_id=1, matched_confidence=0.8,
-            step_count=2, final_text="answer", cost_usd=0.0,
-            duration_ms=500, trace=True,
-        )
-
-        row = conn.execute("SELECT cost_usd FROM nx_answer_runs").fetchone()
+        with T2Database(tmp_path / "mem.db") as db:
+            _nx_answer_record_run(
+                db.telemetry, question="q", plan_id=1,
+                matched_confidence=0.8, step_count=2,
+                final_text="answer", cost_usd=0.0,
+                duration_ms=500, trace=True,
+            )
+            row = db.telemetry.conn.execute(
+                "SELECT cost_usd FROM nx_answer_runs"
+            ).fetchone()
         assert row is not None
         # SC-TODO P5: cost_usd is a stub (always 0.0). When real cost tracking
         # ships, this test documents the before state and must be updated.

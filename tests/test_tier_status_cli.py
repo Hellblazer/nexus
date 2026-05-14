@@ -48,6 +48,7 @@ def isolated_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     from nexus.commands import _helpers, tier_status as ts_mod
     db = tmp_path / "t.db"
     monkeypatch.setattr("nexus.config.default_db_path", lambda: db)
+    monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db)
     monkeypatch.setattr(ts_mod, "default_db_path", lambda: db)
     return db
 
@@ -138,7 +139,14 @@ class TestExplicitFlags:
             tier_status_cmd, ["--session", "sess-J", "--json"],
         )
         assert result.exit_code == 0, result.output
-        payload = json.loads(result.stdout)
+        # Click ≥8.2 drops mix_stderr; run_if_needed's structlog warnings
+        # land on stderr which CliRunner mixes into output. Extract the
+        # JSON payload from the first ``{`` onward — the production
+        # stdout sequence is structlog-warning lines + a single JSON
+        # blob, so this is unambiguous.
+        json_start = result.output.find("{")
+        assert json_start >= 0, result.output
+        payload = json.loads(result.output[json_start:])
         assert payload["session_id"] == "sess-J"
         assert payload["total_writes"] == 2
         assert payload["by_tier"]["T2"] == 1

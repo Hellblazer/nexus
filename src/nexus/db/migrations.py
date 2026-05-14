@@ -3066,7 +3066,22 @@ def run_if_needed(path: Path) -> None:
 
     Args:
         path: T2 SQLite database path. May not yet exist.
+
+    Daemon-mode contract (RDR-112 P0-gate, nexus-907o): when
+    ``NX_STORAGE_MODE=daemon`` the daemon owns the WAL writer; client
+    processes calling this would open a second local connection and
+    race the daemon's writer. We make this a no-op client-side and
+    let the daemon's own startup (nexus-w0et) be the sole caller.
     """
+    import os
+
+    if os.environ.get("NX_STORAGE_MODE", "").lower() == "daemon":
+        _log.debug(
+            "run_if_needed_skipped_daemon_mode",
+            path=path.name,
+        )
+        return
+
     path.parent.mkdir(parents=True, exist_ok=True)
 
     try:

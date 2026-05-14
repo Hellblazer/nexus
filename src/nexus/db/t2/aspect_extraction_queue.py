@@ -472,6 +472,19 @@ class AspectExtractionQueue:
             ).fetchone()
         return row[0] if row else 0
 
+    def stuck_count(self) -> int:
+        """Return rows in any non-``failed`` status (RDR-112 P0-gate).
+
+        Used by ``aspect_worker.drain_worker`` after a drain timeout to
+        report how many rows remain blocked.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM aspect_extraction_queue "
+                "WHERE status != 'failed'"
+            ).fetchone()
+        return row[0] if row else 0
+
     def is_drained(self) -> bool:
         """Return True iff no actionable rows remain in the queue.
 

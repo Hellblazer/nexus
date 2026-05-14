@@ -447,6 +447,9 @@ class TestChashCoverageSection:
         monkeypatch.setattr(
             "nexus.config.default_db_path", lambda: db_path,
         )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
+        )
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
         cov = compute_chash_coverage("code__x")
@@ -492,6 +495,9 @@ class TestChashCoverageSection:
         monkeypatch.setattr(
             "nexus.config.default_db_path", lambda: db_path,
         )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
+        )
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
         cov = compute_chash_coverage("code__x")
@@ -524,6 +530,9 @@ class TestChashCoverageSection:
 
         monkeypatch.setattr(
             "nexus.config.default_db_path", lambda: db_path,
+        )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
         )
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
@@ -583,6 +592,9 @@ class TestChashCoverageSection:
         monkeypatch.setattr(
             "nexus.config.default_db_path", lambda: db_path,
         )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
+        )
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
 
         cov = compute_chash_coverage("code__never_created")
@@ -615,6 +627,9 @@ class TestCollectionAuditCli:
             "nexus.config.default_db_path", lambda: db_path,
         )
         monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
+        )
+        monkeypatch.setattr(
             "nexus.collection_audit._open_catalog_conn",
             lambda: __import__("sqlite3").connect(str(catalog_db_path)),
         )
@@ -640,6 +655,9 @@ class TestCollectionAuditCli:
 
         monkeypatch.setattr(
             "nexus.config.default_db_path", lambda: db_path,
+        )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
         )
         monkeypatch.setattr(
             "nexus.collection_audit._open_catalog_conn",
@@ -676,6 +694,9 @@ class TestCollectionAuditCli:
             pass
         monkeypatch.setattr(
             "nexus.config.default_db_path", lambda: db_path,
+        )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
         )
 
         # Seed an EphemeralClient collection the --live probe can sample.

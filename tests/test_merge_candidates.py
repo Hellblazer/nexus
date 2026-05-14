@@ -90,7 +90,7 @@ class TestComputeMergeCandidates:
         db = T2Database(db_path)
         try:
             pairs = compute_merge_candidates(
-                db.taxonomy.conn,
+                db.taxonomy,
                 min_shared=1,
                 min_similarity=0.0,
             )
@@ -111,7 +111,7 @@ class TestComputeMergeCandidates:
         db = T2Database(db_path)
         try:
             pairs = compute_merge_candidates(
-                db.taxonomy.conn, min_shared=1, min_similarity=0.0,
+                db.taxonomy, min_shared=1, min_similarity=0.0,
             )
         finally:
             db.close()
@@ -130,7 +130,7 @@ class TestComputeMergeCandidates:
         db = T2Database(db_path)
         try:
             pairs = compute_merge_candidates(
-                db.taxonomy.conn, min_shared=1, min_similarity=0.0,
+                db.taxonomy, min_shared=1, min_similarity=0.0,
             )
         finally:
             db.close()
@@ -146,7 +146,7 @@ class TestComputeMergeCandidates:
         db = T2Database(db_path)
         try:
             pairs = compute_merge_candidates(
-                db.taxonomy.conn, min_shared=3, min_similarity=0.0,
+                db.taxonomy, min_shared=3, min_similarity=0.0,
             )
         finally:
             db.close()
@@ -163,7 +163,7 @@ class TestComputeMergeCandidates:
         db = T2Database(db_path)
         try:
             pairs = compute_merge_candidates(
-                db.taxonomy.conn, min_shared=1, min_similarity=0.65,
+                db.taxonomy, min_shared=1, min_similarity=0.65,
             )
         finally:
             db.close()
@@ -185,7 +185,7 @@ class TestComputeMergeCandidates:
         try:
             # Top-2 hubs is enough to drop both hub topics (ids 4, 5).
             pairs = compute_merge_candidates(
-                db.taxonomy.conn,
+                db.taxonomy,
                 min_shared=1,
                 min_similarity=0.0,
                 exclude_hubs=True,

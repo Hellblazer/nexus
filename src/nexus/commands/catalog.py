@@ -1602,37 +1602,9 @@ def _taxonomy_stats() -> dict | None:
 
     try:
         with t2_ctx() as db:
-            conn = db.taxonomy.conn
-            with db.taxonomy._lock:
-                topic_total = conn.execute(
-                    "SELECT count(*) FROM topics"
-                ).fetchone()[0]
-                if not topic_total:
-                    return None
-                assignment_total = conn.execute(
-                    "SELECT count(*) FROM topic_assignments"
-                ).fetchone()[0]
-                distinct_topics = conn.execute(
-                    "SELECT count(DISTINCT topic_id) FROM topic_assignments"
-                ).fetchone()[0]
-                by_source_rows = conn.execute(
-                    "SELECT source_collection, count(*) "
-                    "FROM topic_assignments "
-                    "WHERE assigned_by = 'projection' "
-                    "AND source_collection IS NOT NULL "
-                    "AND source_collection != '' "
-                    "GROUP BY source_collection "
-                    "ORDER BY count(*) DESC"
-                ).fetchall()
+            return db.taxonomy.get_assignment_summary()
     except Exception:
         return None
-
-    return {
-        "topics": int(topic_total),
-        "assignments": int(assignment_total),
-        "distinct_topics_assigned": int(distinct_topics),
-        "projection_by_source": {row[0]: int(row[1]) for row in by_source_rows},
-    }
 
 
 @catalog.command("stats")

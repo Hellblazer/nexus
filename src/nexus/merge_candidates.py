@@ -21,7 +21,6 @@ human / agent decides.
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import asdict, dataclass, field
 
 
@@ -44,22 +43,8 @@ class MergeCandidate:
 _DEFAULT_HUB_TOP_N = 10
 
 
-def _top_hub_topic_ids(
-    conn: sqlite3.Connection, hub_top_n: int,
-) -> tuple[int, ...]:
-    rows = conn.execute(
-        "SELECT ta.topic_id "
-        "FROM topic_assignments ta "
-        "GROUP BY ta.topic_id "
-        "ORDER BY COUNT(DISTINCT ta.source_collection) DESC, ta.topic_id ASC "
-        "LIMIT ?",
-        (hub_top_n,),
-    ).fetchall()
-    return tuple(int(r[0]) for r in rows)
-
-
 def compute_merge_candidates(
-    conn: sqlite3.Connection,
+    taxonomy,
     *,
     min_shared: int = 3,
     min_similarity: float = 0.5,
@@ -68,67 +53,44 @@ def compute_merge_candidates(
     limit: int = 50,
     sample_k: int = 3,
 ) -> list[MergeCandidate]:
-    """Return ranked (a, b) cross-collection merge candidates."""
-    hub_filter = ""
-    hub_params: tuple[int, ...] = ()
-    if exclude_hubs:
-        hub_ids = _top_hub_topic_ids(conn, hub_top_n)
-        if hub_ids:
-            placeholders = ",".join("?" * len(hub_ids))
-            hub_filter = f" AND ta.topic_id NOT IN ({placeholders})"
-            hub_params = hub_ids
+    """Return ranked (a, b) cross-collection merge candidates.
 
-    # Symmetric-pair normalisation (review I-3): without this guard a
-    # bidirectional projection (A→B and B→A both populated) would
-    # emit the same pair twice with different scores. Enforcing a
-    # lexicographic order on the projection side ensures exactly one
-    # row per symmetric pair and makes the output deterministic
-    # regardless of which direction was populated first.
-    #
-    # Semantic tradeoff (Reviewer C/S-4): ``AVG(ta.similarity)`` with the
-    # ``source_collection < t.collection`` predicate averages only the
-    # A-side similarities even when both directions were populated. This
-    # is acceptable for an advisory merge-candidate score — a slight
-    # directional bias vs the strict bidirectional mean — and the
-    # alternative (UNION ALL over both orderings, then AVG) doubles
-    # the query cost for a minor numerical refinement.
-    sql = f"""
-        SELECT ta.source_collection AS a,
-               t.collection AS b,
-               COUNT(DISTINCT ta.topic_id) AS shared,
-               AVG(ta.similarity) AS mean_sim
-        FROM topic_assignments ta
-        JOIN topics t ON ta.topic_id = t.id
-        WHERE ta.source_collection IS NOT NULL
-          AND ta.source_collection < t.collection
-          AND ta.similarity IS NOT NULL
-          {hub_filter}
-        GROUP BY ta.source_collection, t.collection
-        HAVING shared >= ? AND mean_sim >= ?
-        ORDER BY shared * mean_sim DESC
-        LIMIT ?
+    Accepts a ``CatalogTaxonomy`` store (was the raw connection in
+    pre-RDR-112-P0-gate code). The pair-pruning + sample-fetch SQL is
+    encapsulated in
+    :meth:`CatalogTaxonomy.query_merge_candidate_pairs` and
+    :meth:`CatalogTaxonomy.sample_merge_candidate_doc_ids`.
+
+    Symmetric-pair normalisation (review I-3): the underlying query
+    enforces ``source_collection < t.collection`` so each symmetric
+    pair appears exactly once, regardless of which projection direction
+    was populated first.
     """
-    rows = conn.execute(sql, (*hub_params, min_shared, min_similarity, limit)).fetchall()
+    excluded: tuple[int, ...] = ()
+    if exclude_hubs:
+        excluded = tuple(
+            tid for tid, _ in taxonomy.query_hub_topic_ids(limit=hub_top_n)
+        )
+
+    rows = taxonomy.query_merge_candidate_pairs(
+        min_shared=min_shared,
+        min_similarity=min_similarity,
+        excluded_topic_ids=excluded,
+        limit=limit,
+    )
     out: list[MergeCandidate] = []
     for a, b, shared, mean_sim in rows:
-        samples = [
-            r[0] for r in conn.execute(
-                "SELECT ta.doc_id "
-                "FROM topic_assignments ta "
-                "JOIN topics t ON ta.topic_id = t.id "
-                "WHERE ta.source_collection = ? AND t.collection = ? "
-                "  AND ta.similarity IS NOT NULL "
-                f"  {hub_filter} "
-                "ORDER BY ta.similarity DESC "
-                "LIMIT ?",
-                (a, b, *hub_params, sample_k),
-            ).fetchall()
-        ]
+        samples = taxonomy.sample_merge_candidate_doc_ids(
+            source_collection=a,
+            target_collection=b,
+            excluded_topic_ids=excluded,
+            sample_k=sample_k,
+        )
         out.append(
             MergeCandidate(
                 a=a, b=b,
-                shared_topics=int(shared),
-                mean_sim=float(mean_sim),
+                shared_topics=shared,
+                mean_sim=mean_sim,
                 sample_chunks=samples,
             )
         )
@@ -165,7 +127,7 @@ def run_merge_candidates(
         return "T2 database not initialised."
     try:
         pairs = compute_merge_candidates(
-            t2.taxonomy.conn,
+            t2.taxonomy,
             min_shared=min_shared,
             min_similarity=min_similarity,
             exclude_hubs=exclude_hubs,

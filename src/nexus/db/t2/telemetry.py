@@ -328,6 +328,157 @@ class Telemetry:
             "median_top_distance": median,
         }
 
+    def query_session_tier_totals(self, session_id: str) -> dict[str, int]:
+        """Return ``{tier: count}`` for a single session from
+        ``tier_writes``. Returns an empty dict when the table is absent
+        or the session has no rows. RDR-112 P0-gate (nexus-yqeu).
+        """
+        with self._lock:
+            try:
+                rows = self.conn.execute(
+                    "SELECT tier, COUNT(*) FROM tier_writes "
+                    "WHERE session_id = ? GROUP BY tier",
+                    (session_id,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return {}
+        return {tier: int(n) for tier, n in rows}
+
+    def query_tier_status_rows(
+        self,
+        *,
+        session_id: str | None = None,
+        since_ts: str | None = None,
+        last_n: int | None = None,
+    ) -> list[tuple[str, str, str | None, str | None, int]]:
+        """Return ``(tool, tier, agent, project, count)`` rows filtered
+        per the CLI's mutually-exclusive selector. Returns ``[]`` when
+        the table is absent. RDR-112 P0-gate (nexus-yqeu).
+
+        Filter precedence (set by caller, this method assumes one is
+        active): ``last_n`` > ``session_id`` > ``since_ts``.
+        """
+        with self._lock:
+            try:
+                has_table = self.conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='tier_writes'"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return []
+            if not has_table:
+                return []
+            if last_n:
+                recent_sids = [
+                    r[0] for r in self.conn.execute(
+                        "SELECT DISTINCT session_id FROM tier_writes "
+                        "ORDER BY ts DESC LIMIT ?",
+                        (last_n,),
+                    )
+                ]
+                if not recent_sids:
+                    return []
+                placeholders = ",".join("?" for _ in recent_sids)
+                rows = self.conn.execute(
+                    f"SELECT tool, tier, agent, project, COUNT(*) "
+                    f"FROM tier_writes "
+                    f"WHERE session_id IN ({placeholders}) "
+                    f"GROUP BY tool, tier, agent, project "
+                    f"ORDER BY tier, tool",
+                    recent_sids,
+                ).fetchall()
+            elif session_id:
+                rows = self.conn.execute(
+                    "SELECT tool, tier, agent, project, COUNT(*) "
+                    "FROM tier_writes "
+                    "WHERE session_id = ? "
+                    "GROUP BY tool, tier, agent, project "
+                    "ORDER BY tier, tool",
+                    (session_id,),
+                ).fetchall()
+            elif since_ts:
+                rows = self.conn.execute(
+                    "SELECT tool, tier, agent, project, COUNT(*) "
+                    "FROM tier_writes "
+                    "WHERE ts >= ? "
+                    "GROUP BY tool, tier, agent, project "
+                    "ORDER BY tier, tool",
+                    (since_ts,),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT tool, tier, agent, project, COUNT(*) "
+                    "FROM tier_writes "
+                    "GROUP BY tool, tier, agent, project "
+                    "ORDER BY tier, tool"
+                ).fetchall()
+        return [
+            (r[0], r[1], r[2], r[3], int(r[4])) for r in rows
+        ]
+
+    def record_tier_write(
+        self,
+        *,
+        session_id: str,
+        ts: str,
+        tool: str,
+        tier: str,
+        agent: str | None,
+        project: str | None,
+        target_title: str | None,
+    ) -> None:
+        """Insert one row into ``tier_writes`` (nexus-kren).
+
+        Ensures the table exists via the idempotent migration. Used by
+        the MCP tier-write logger (RDR-112 P0-gate, nexus-mz2c —
+        replaces the prior ``t2.taxonomy.conn`` reach-through).
+        """
+        from nexus.db.migrations import migrate_tier_writes
+        with self._lock:
+            migrate_tier_writes(self.conn)
+            self.conn.execute(
+                "INSERT INTO tier_writes "
+                "(session_id, ts, tool, tier, agent, project, target_title) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, ts, tool, tier, agent, project, target_title),
+            )
+            self.conn.commit()
+
+    def record_nx_answer_run(
+        self,
+        *,
+        question: str,
+        plan_id: int | None,
+        matched_confidence: float | None,
+        step_count: int,
+        final_text: str,
+        cost_usd: float,
+        duration_ms: int,
+        trace: bool,
+    ) -> None:
+        """Write one row to ``nx_answer_runs`` (RDR-080).
+
+        Redacts ``question`` + ``final_text`` when ``trace=False``.
+        Ensures the table exists via the idempotent migration.
+        RDR-112 P0-gate (nexus-mz2c) — encapsulates a former
+        ``db.telemetry.conn.execute`` reach-through from
+        ``mcp/core.py``.
+        """
+        from nexus.db.migrations import migrate_nx_answer_runs
+        with self._lock:
+            migrate_nx_answer_runs(self.conn)
+            q = question if trace else "[redacted]"
+            text = final_text if trace else "[redacted]"
+            self.conn.execute(
+                """INSERT INTO nx_answer_runs
+                   (question, plan_id, matched_confidence, step_count,
+                    final_text, cost_usd, duration_ms)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (q, plan_id, matched_confidence, step_count,
+                 text, cost_usd, duration_ms),
+            )
+            self.conn.commit()
+
     def query_top_distances(
         self, collection: str, *, days: int = 30,
     ) -> list[float]:
