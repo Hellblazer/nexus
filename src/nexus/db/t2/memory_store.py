@@ -752,6 +752,17 @@ class MemoryStore:
         """
         import json
 
+        # ``HookFailureChain = Literal[...]`` is a static-checker hint
+        # only; the interpreter accepts any string. Phase 1's daemon-RPC
+        # deserialiser does not yet exist, so enforce at runtime now to
+        # close the gap a misbehaving caller (test stub, future RPC
+        # client, raw Python) could exploit by writing an unrecognised
+        # chain value.
+        if chain not in ("single", "batch", "document"):
+            raise ValueError(
+                f"chain must be one of 'single' | 'batch' | 'document'; got {chain!r}"
+            )
+
         if chain == "batch" and not batch_doc_ids:
             # Reject both ``None`` and empty list — the daemon-RPC path
             # in Phase 1 will serialise this kwarg, so a None-or-[] from

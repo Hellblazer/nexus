@@ -89,6 +89,20 @@ def test_record_hook_failure_truncates_error_to_cap(mem_db: T2Database) -> None:
     assert len(rows[0][3]) == MemoryStore.HOOK_FAILURE_ERROR_MAX
 
 
+def test_record_hook_failure_invalid_chain_raises(mem_db: T2Database) -> None:
+    """An unrecognised ``chain`` value is a contract bug, not silently stored.
+
+    ``HookFailureChain = Literal[...]`` is a static-checker hint only;
+    the runtime guard catches typos a misbehaving caller might smuggle
+    in (test stub, future RPC client, raw Python).
+    """
+    with pytest.raises(ValueError, match="single.*batch.*document"):
+        mem_db.memory.record_hook_failure(
+            doc_id="d", collection="c", hook_name="h", error="e",
+            chain="singleton",  # type: ignore[arg-type]
+        )
+
+
 def test_record_hook_failure_batch_without_doc_ids_raises(mem_db: T2Database) -> None:
     """Explicit ``chain='batch'`` with no ``batch_doc_ids`` is a contract bug."""
     with pytest.raises(ValueError, match="non-empty"):
