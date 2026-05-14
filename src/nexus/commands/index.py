@@ -464,6 +464,17 @@ def _collections_from_registry_info(info: dict) -> list[str]:
     projection post-processing, filtered by
     ``taxonomy.local_exclude_collections``. Empty list when
     *info* is ``{}`` or carries no collection keys.
+
+    nexus-cxg9: prefer the conformant ``code_collection`` /
+    ``docs_collection`` / ``rdr_collection`` over the legacy
+    ``collection`` alias. The alias was kept in
+    ``RepoRegistry.add`` for backward compat (line 228) but for
+    repos registered before RDR-103 it still holds the
+    non-conformant ``code__<basename>-<hash8>`` shape (no
+    embedding_model / version segments), which does not exist in
+    T3 and emits ``collection_not_found`` every post-pass. Skipping
+    the alias when the conformant ``code_collection`` is present
+    silences the false warning without touching real data.
     """
     from fnmatch import fnmatch
 
@@ -474,11 +485,21 @@ def _collections_from_registry_info(info: dict) -> list[str]:
         cfg.get("taxonomy", {}).get("local_exclude_collections", [])
         if is_local_mode() else []
     )
+    code_col = info.get("code_collection") or info.get("collection")
+    candidates = [
+        code_col,
+        info.get("docs_collection"),
+        info.get("rdr_collection"),
+    ]
     collections: list[str] = []
-    for key in ("collection", "docs_collection"):
-        col = info.get(key)
-        if col and not any(fnmatch(col, pat) for pat in exclude_patterns):
-            collections.append(col)
+    seen: set[str] = set()
+    for col in candidates:
+        if not col or col in seen:
+            continue
+        if any(fnmatch(col, pat) for pat in exclude_patterns):
+            continue
+        seen.add(col)
+        collections.append(col)
     return collections
 
 
