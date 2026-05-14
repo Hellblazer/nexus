@@ -224,6 +224,54 @@ def test_identity_where_falls_back_when_corpus_owner_missing(tmp_path, monkeypat
     assert where == {"source_path": "/abs/path/x.pdf"}
 
 
+def test_batch_index_markdowns_skips_malformed_frontmatter_and_continues(
+    tmp_path, monkeypatch,
+):
+    """nexus-qr9d: malformed YAML frontmatter on one file must not abort
+    the batch or hang the post-pass. The offending file is marked
+    ``failed`` with its path; sibling files complete normally; the whole
+    call returns within a wall-clock bound."""
+    import chromadb
+    from nexus.catalog import reset_cache
+    from nexus.catalog.catalog import Catalog
+    from nexus.db.t3 import T3Database
+
+    cat_dir = tmp_path / "test-catalog"
+    Catalog.init(cat_dir)
+    reset_cache()
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "nexus.config._global_config_path", lambda: Path("/nonexistent"),
+    )
+
+    good = tmp_path / "good.md"
+    good.write_text(
+        "---\ntitle: Good\n---\n\n# Good\n\nContent here.\n",
+        encoding="utf-8",
+    )
+    # YAML flow sequence with unquoted #-refs — the exact hazard from the bead.
+    bad = tmp_path / "bad.md"
+    bad.write_text(
+        "---\nprs: [#381, #382]\nstatus: post-mortem\n---\n\n# Body\n\nText.\n",
+        encoding="utf-8",
+    )
+
+    client = chromadb.EphemeralClient()
+    t3 = T3Database(_client=client, local_mode=True)
+
+    t0 = time.monotonic()
+    results = batch_index_markdowns(
+        [bad, good], corpus="qr9d-test", t3=t3,
+        collection_name=f"rdr__qr9d-test__{_local_token()}__v1",
+        content_type="rdr",
+    )
+    elapsed = time.monotonic() - t0
+    assert elapsed < 30.0, f"batch hung or far too slow ({elapsed:.1f}s)"
+    assert results[str(bad)] == "failed"
+    assert results[str(good)] == "indexed"
+
+
 def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     sample_md, tmp_path, monkeypatch,
 ):

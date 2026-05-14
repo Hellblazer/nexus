@@ -1450,7 +1450,12 @@ def _discover_and_index_rdrs(
     indexed = sum(1 for s in results.values() if s == "indexed")
     skipped = sum(1 for s in results.values() if s == "skipped")
     failed = sum(1 for s in results.values() if s == "failed")
-    _log.info("RDR indexing complete", indexed=indexed, current=skipped, failed=failed)
+    failed_paths = sorted(p for p, s in results.items() if s == "failed")
+    _log.info(
+        "RDR indexing complete",
+        indexed=indexed, current=skipped, failed=failed,
+        failed_paths=failed_paths,
+    )
     return indexed, skipped, failed
 
 

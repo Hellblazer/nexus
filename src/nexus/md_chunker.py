@@ -85,11 +85,24 @@ class MarkdownChunk:
     header_path: list[str]
 
 
-def parse_frontmatter(text: str) -> tuple[dict, str]:
+def parse_frontmatter(
+    text: str,
+    *,
+    source: str | None = None,
+    strict: bool = False,
+) -> tuple[dict, str]:
     """Extract YAML frontmatter from *text*.
 
     Returns ``(metadata_dict, body)`` where *body* has the frontmatter block
     stripped.  Returns ``({}, text)`` when no frontmatter is detected.
+
+    *source* is included in the warning log on parse failure so operators can
+    locate the offending file (PyYAML's default ``<unicode string>`` is
+    useless when batch-indexing).
+
+    *strict=True* re-raises ``yaml.YAMLError`` instead of swallowing it,
+    letting callers (e.g. the RDR post-pass) mark the file as failed and
+    skip rather than silently indexing the body without frontmatter.
     """
     if not text.startswith("---"):
         return {}, text
@@ -103,7 +116,13 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
         if not isinstance(data, dict):
             data = {}
     except yaml.YAMLError as exc:
-        _log.warning("frontmatter_parse_failed", error=str(exc))
+        _log.warning(
+            "frontmatter_parse_failed",
+            source=source or "<unknown>",
+            error=str(exc),
+        )
+        if strict:
+            raise
         data = {}
     return data, rest
 
