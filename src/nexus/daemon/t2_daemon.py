@@ -82,6 +82,15 @@ _log = structlog.get_logger(__name__)
 #: contract changes in a backward-incompatible way.
 DAEMON_PROTOCOL_VERSION: str = "1.0"
 
+#: Schema version for the T2 + tuples.db databases managed by this daemon.
+#: Represents the highest migration version in the MIGRATIONS registry that
+#: this daemon version applies. Clients compare their
+#: ``T2_SCHEMA_VERSION_EXPECTED`` against this value in the hello_ack to
+#: detect schema drift before issuing any RPC.
+#: Integer (monotonically increasing) to avoid version-string comparison bugs.
+#: nexus-w0et (RDR-112 P1.4): initial value = 1 (watcher_state era).
+DAEMON_SCHEMA_VERSION: int = 1
+
 #: Nexus package version embedded in discovery file and pong responses.
 try:
     from importlib.metadata import version as _pkg_version
@@ -433,13 +442,30 @@ class T2Daemon:
     async def start(self) -> None:
         """Bind both transports, write discovery file, announce to stdout.
 
+        Migration ownership (RDR-112 P1.4 / nexus-w0et): applies all pending
+        T2 migrations to both ``memory.db`` and ``tuples.db`` BEFORE binding
+        any socket. No client can connect to a partially-migrated daemon.
+
         Raises:
             RuntimeError: if the spawn lock is already held (another daemon
                 is running for this UID / config_dir).
+            MigrationError: if a data-precondition migration audit fails.
         """
         self._acquire_spawn_lock()
         self._ensure_dirs()
         self._start_time = datetime.now(timezone.utc).isoformat()
+
+        # --- Migration runner: BEFORE sockets are bound (RDR-112 P1.4) ---
+        from nexus.db.migrations import run_daemon_migrations  # noqa: PLC0415
+
+        memory_db_path = self._config_dir / "memory.db"
+        tuples_db_path = self._config_dir / "tuples.db"
+        from_ver, to_ver = run_daemon_migrations(memory_db_path, tuples_db_path)
+        _log.info(
+            "daemon/t2/lifecycle",
+            op="migration-applied",
+            **{"from": from_ver, "to": to_ver},
+        )
 
         uds_sock = self._bind_uds()
         tcp_sock = self._bind_tcp()
@@ -476,8 +502,13 @@ class T2Daemon:
                 except asyncio.TimeoutError:
                     _log.warning("t2_daemon_stop_timeout", which=repr(srv))
 
-        # Drain in-flight handlers
+        # Cancel and drain in-flight handlers.
+        # Without cancellation, handlers blocked in read_frame() (60-second
+        # timeout) would keep stop() waiting for up to 60 seconds after
+        # servers stop accepting. Cancelling lets the gather complete promptly.
         if self._active_handlers:
+            for task in list(self._active_handlers):
+                task.cancel()
             await asyncio.gather(*self._active_handlers, return_exceptions=True)
 
         self._unlink_discovery()
@@ -661,6 +692,7 @@ class T2Daemon:
                 "op": "hello_ack",
                 "daemon_protocol_version": DAEMON_PROTOCOL_VERSION,
                 "daemon_version": _NEXUS_VERSION,
+                "schema_version": DAEMON_SCHEMA_VERSION,
             },
         )
         await writer.drain()
@@ -709,6 +741,7 @@ class T2Daemon:
                     "pong": True,
                     "version": _NEXUS_VERSION,
                     "daemon_protocol_version": DAEMON_PROTOCOL_VERSION,
+                    "schema_version": DAEMON_SCHEMA_VERSION,
                     "start_time": self._start_time,
                     "pid": os.getpid(),
                 }

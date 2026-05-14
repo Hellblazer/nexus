@@ -71,11 +71,30 @@ import structlog
 
 from nexus.daemon.t2_daemon import (
     DAEMON_PROTOCOL_VERSION,
+    DAEMON_SCHEMA_VERSION,
     t2_json_dumps,
     t2_json_loads,
 )
 
 _log = structlog.get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Schema-version handshake constant (nexus-w0et RDR-112 P1.4)
+# ---------------------------------------------------------------------------
+
+#: Expected schema version from the daemon's hello_ack.
+#:
+#: The daemon includes ``schema_version: int`` in its hello_ack response.
+#: The client compares against this constant and raises ``T2DaemonError``
+#: with a directional instruction on mismatch:
+#:
+#: * ``client_version > daemon_version`` — daemon is older; restart it so
+#:   the migration runner applies the missing migrations automatically.
+#: * ``client_version < daemon_version`` — daemon is newer; upgrade the
+#:   client package.
+#:
+#: Mutable at module level so tests can monkey-patch it without subclassing.
+T2_SCHEMA_VERSION_EXPECTED: int = DAEMON_SCHEMA_VERSION
 
 # ---------------------------------------------------------------------------
 # Public exception
@@ -449,7 +468,10 @@ class T2Client:
     """
 
     # Constants
-    # nexus-w0et (P1.4 migration runner): add EXPECTED_SCHEMA_VERSION here.
+    # nexus-w0et (P1.4 migration runner): schema version handshake.
+    # Must match DAEMON_SCHEMA_VERSION in t2_daemon.py. Integer comparison
+    # avoids version-string ordering bugs. Mismatch raises T2DaemonError
+    # with a directional upgrade instruction before any RPC is issued.
 
     def __init__(
         self,
@@ -511,10 +533,36 @@ class T2Client:
             raise T2DaemonError(
                 f"expected hello_ack, got {ack.get('op')!r}"
             )
+
+        # --- Schema-version handshake (nexus-w0et RDR-112 P1.4) ---
+        daemon_sv = ack.get("schema_version")
+        if daemon_sv is not None:
+            # Read from the module-level constant so tests can monkey-patch it
+            # by assigning to nexus.daemon.t2_client.T2_SCHEMA_VERSION_EXPECTED.
+            import sys as _sys  # noqa: PLC0415
+            _mod = _sys.modules[__name__]
+            expected_sv: int = _mod.T2_SCHEMA_VERSION_EXPECTED
+            if expected_sv > daemon_sv:
+                sock.close()
+                raise T2DaemonError(
+                    f"Daemon schema version is older than this client expects "
+                    f"(daemon={daemon_sv}, client expects={expected_sv}). "
+                    "Run: nx daemon t2 stop && nx daemon t2 start "
+                    "(migration applies automatically)."
+                )
+            if expected_sv < daemon_sv:
+                sock.close()
+                raise T2DaemonError(
+                    f"Daemon schema version is newer than this client "
+                    f"(daemon={daemon_sv}, client expects={expected_sv}). "
+                    "Upgrade conexus: uv pip install -U conexus."
+                )
+
         _log.debug(
             "t2_client_connected",
             transport="uds" if self._uds_path else "tcp",
             daemon_version=ack.get("daemon_version"),
+            schema_version=daemon_sv,
         )
         return _SocketConnection(sock)
 
