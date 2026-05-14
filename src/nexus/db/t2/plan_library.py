@@ -406,6 +406,43 @@ class PlanLibrary:
             ).fetchone()
         return _row_to_dict(row) if row else None
 
+    def delete_by_tag(self, tag: str) -> int:
+        """Delete every plan whose ``tags`` column contains *tag* as a token.
+
+        RDR-112 P0.1 (nexus-j07g): closes the ``commands/plan.py`` reach-
+        through that ran ``DELETE`` directly via ``lib.conn``. Token
+        matching uses the ``',' || tags || ','`` LIKE pattern with an
+        explicit ESCAPE so a tag containing SQL wildcards (``%`` or
+        ``_``) cannot widen the match.
+
+        Returns the SQLite ``rowcount`` (number of rows removed).
+        """
+        escaped_tag = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like_pattern = f"%,{escaped_tag},%"
+        with self._lock:
+            cursor = self.conn.execute(
+                "DELETE FROM plans "
+                "WHERE (',' || tags || ',') LIKE ? ESCAPE '\\'",
+                (like_pattern,),
+            )
+            self.conn.commit()
+            return cursor.rowcount
+
+    def plans_mtime(self) -> float | None:
+        """Return the SQLite file's ``st_mtime`` for cache-staleness checks.
+
+        RDR-112 P0.1 (nexus-j07g): closes the ``mcp_infra`` reach-through
+        that called ``library.path.stat().st_mtime`` directly. Returns
+        ``None`` when the file is absent so callers can detect "no DB
+        yet" without an ``OSError`` round-trip.
+        """
+        try:
+            return self.path.stat().st_mtime
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return None
+
     def delete_plan(self, plan_id: int) -> int:
         """Delete the plan with *plan_id*. Returns the row count removed.
 

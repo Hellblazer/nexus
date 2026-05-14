@@ -477,13 +477,7 @@ def reseed_cmd(force: bool) -> None:
     if force:
         lib = PlanLibrary(path=db_path)
         try:
-            with lib._lock:
-                cursor = lib.conn.execute(
-                    "DELETE FROM plans "
-                    "WHERE (',' || tags || ',') LIKE '%,builtin-template,%'"
-                )
-                lib.conn.commit()
-                removed = cursor.rowcount
+            removed = lib.delete_by_tag("builtin-template")
         finally:
             lib.close()
         click.echo(f"--force: removed {removed} builtin row(s).")
