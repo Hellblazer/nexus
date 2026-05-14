@@ -66,10 +66,24 @@ _log = structlog.get_logger(__name__)
 DAEMON_PROTOCOL_VERSION: str = "1.0"
 
 #: Nexus package version embedded in discovery file and pong responses.
-_NEXUS_VERSION: str = "4.32.12"
+try:
+    from importlib.metadata import version as _pkg_version
+
+    _NEXUS_VERSION: str = _pkg_version("conexus")
+except Exception:  # pragma: no cover — fallback for editable / pre-install envs
+    _NEXUS_VERSION = "0.0.0+unknown"
+
+#: Maximum accepted wire-frame payload size (bytes). Guards against a malicious
+#: or buggy peer announcing a multi-gigabyte length header that would otherwise
+#: cause ``readexactly`` to block until OOM.
+_MAX_FRAME_BYTES: int = 16 * 1024 * 1024
 
 #: Backlog for listen() on both UDS and TCP sockets.
 _LISTEN_BACKLOG: int = 64
+
+
+class ProtocolError(Exception):
+    """Raised when a peer sends a malformed or oversized wire frame."""
 
 #: Socket directory inside the config dir (mode 0o700, defense-in-depth).
 _SOCKET_SUBDIR: str = "sockets"
@@ -116,6 +130,10 @@ async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
     """
     length_bytes = await reader.readexactly(4)
     length = struct.unpack(">I", length_bytes)[0]
+    if length > _MAX_FRAME_BYTES:
+        raise ProtocolError(
+            f"frame length {length} exceeds maximum {_MAX_FRAME_BYTES} bytes"
+        )
     # +1 for the trailing \n
     data = await reader.readexactly(length + 1)
     return json.loads(data[:-1])  # strip \n before parsing
@@ -491,7 +509,11 @@ class T2Daemon:
 
     def _write_discovery(self) -> None:
         payload = self._discovery_payload()
-        self._discovery_path.write_text(json.dumps(payload))
+        # Atomic write: a reader polling the discovery file between open() and
+        # the completed write() must never observe partial JSON.
+        tmp = self._discovery_path.with_suffix(self._discovery_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(str(tmp), str(self._discovery_path))
 
     def _unlink_discovery(self) -> None:
         try:

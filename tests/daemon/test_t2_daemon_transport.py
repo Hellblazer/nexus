@@ -30,6 +30,7 @@ import pytest_asyncio
 from nexus.daemon.t2_daemon import (
     DAEMON_PROTOCOL_VERSION,
     T2Daemon,
+    ProtocolError,
     read_frame,
     write_frame,
 )
@@ -306,6 +307,40 @@ async def test_wire_frame_roundtrip() -> None:
         l_writer.close()
         await r_writer.wait_closed()
         await l_writer.wait_closed()
+
+
+# ---------------------------------------------------------------------------
+# Frame-length guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_frame_rejects_oversized_length() -> None:
+    """A 4-byte length header announcing >16MiB must raise ProtocolError before readexactly blocks."""
+    import struct as _struct
+
+    left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        l_reader, l_writer = await asyncio.open_unix_connection(sock=left)
+        r_reader, r_writer = await asyncio.open_unix_connection(sock=right)
+
+        # Announce a 4 GiB payload; do not actually send it.
+        r_writer.write(_struct.pack(">I", 0xFFFFFFFF))
+        await r_writer.drain()
+
+        with pytest.raises(ProtocolError, match="exceeds maximum"):
+            await asyncio.wait_for(read_frame(l_reader), timeout=2.0)
+    finally:
+        r_writer.close()
+        l_writer.close()
+        try:
+            await r_writer.wait_closed()
+        except Exception:
+            pass
+        try:
+            await l_writer.wait_closed()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
