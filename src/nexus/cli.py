@@ -38,6 +38,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 from nexus.commands.catalog import catalog
 from nexus.commands.collection import collection
+from nexus.commands.daemon import daemon_group
 from nexus.commands.console import console
 from nexus.commands.context_cmd import context
 from nexus.commands.config_cmd import config_group
@@ -148,6 +149,7 @@ def main(ctx: click.Context, verbose: bool) -> None:
 
 main.add_command(catalog)
 main.add_command(collection)
+main.add_command(daemon_group, name="daemon")
 main.add_command(console)
 main.add_command(context)
 main.add_command(config_group, name="config")
