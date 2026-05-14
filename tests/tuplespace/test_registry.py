@@ -193,6 +193,38 @@ def test_dashed_param_name_raises_at_load(tmp_path):
         Registry.load(d)
 
 
+def test_empty_angle_brackets_raise_at_load(tmp_path):
+    """``mailbox/<>`` is the dashed-param sibling: empty identifier.
+
+    Round-2 critic catch: the original ``_ANGLE_TOKEN`` regex used
+    ``[^>]+`` (one-or-more), so empty brackets produced zero captures
+    and slipped through the bad-param filter. The widened ``[^>]*``
+    regex captures the empty string, which ``_PARAM_PATTERN`` then
+    rejects.
+    """
+    from nexus.tuplespace.registry import Registry, RegistryLoadError
+
+    yml = yaml.safe_dump(
+        {
+            "name": "mailbox/<>",
+            "tier": "project",
+            "content_type": "text",
+            "embed_from": "content",
+            "dimensions": {},
+            "take": {"enabled": True, "mode": "semantic"},
+            "read": {"default_floor": 0.4, "default_n": 5},
+            "tiers": ["project"],
+            "retention_seconds": 3600,
+        }
+    )
+    d = tmp_path / "builtin"
+    d.mkdir()
+    (d / "bad.yml").write_text(yml)
+
+    with pytest.raises(RegistryLoadError, match="invalid param"):
+        Registry.load(d)
+
+
 def test_empty_segment_rejected_in_multi_param_match(tmp_path):
     """``mailbox/<agent>/<inbox>`` must not match ``mailbox//primary``.
 

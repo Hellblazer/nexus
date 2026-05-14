@@ -190,6 +190,13 @@ class SubspaceSchema:
 # broken matcher that silently never matches.
 _PARAM_PATTERN = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_]*)>")
 
+# Used by ``_load_one`` to enumerate every angle-bracketed token in a
+# template name (valid or invalid). ``[^>]*`` (zero-or-more) deliberately
+# catches the empty-brackets case ``<>`` so the load-time guard rejects
+# it; the captured tokens are then filtered against ``_PARAM_PATTERN``
+# to identify syntactically invalid identifiers.
+_ANGLE_TOKEN = re.compile(r"<([^>]*)>")
+
 
 def _compile_template(template_name: str) -> re.Pattern[str]:
     """Compile a template like ``tasks/<project>`` into a regex.
@@ -298,10 +305,12 @@ def _load_one(yml_path: Path) -> SubspaceSchema:
 
     # Reject malformed param names at load — Python's named-group syntax
     # disallows dashes (``(?P<a-b>...)`` is a regex error). A YAML author
-    # writing ``mailbox/<agent-name>`` would otherwise ship a template
-    # whose ``<agent-name>`` placeholder is treated as a literal,
+    # writing ``mailbox/<agent-name>`` or ``mailbox/<>`` would otherwise
+    # ship a template whose placeholder is treated as a literal,
     # producing an opaque UnknownSubspaceError on first ``take``.
-    _ANGLE_TOKEN = re.compile(r"<([^>]+)>")
+    # ``_ANGLE_TOKEN`` uses ``[^>]*`` so empty ``<>`` is captured as the
+    # empty string and filtered through ``_PARAM_PATTERN`` (which
+    # requires at least one identifier char) into ``bad_params``.
     bad_params = [
         token
         for token in _ANGLE_TOKEN.findall(raw["name"])
