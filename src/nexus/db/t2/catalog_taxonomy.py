@@ -1262,6 +1262,134 @@ class CatalogTaxonomy:
             ).fetchall()
         return [r[0] for r in rows]
 
+    # ── command-layer domain methods (RDR-112 P0.5, nexus-49bw) ─────────────
+    #
+    # The following methods encapsulate SQL previously executed via
+    # ``db.taxonomy.conn.execute`` from ``nexus.commands.taxonomy_cmd``.
+    # Daemon-mode (RDR-112 P1) turns those reach-throughs into errors;
+    # this surface is the supported replacement.
+
+    def get_collection_topic_stats(
+        self,
+    ) -> list[tuple[str, int, int, int, int]]:
+        """Per-collection topic counts for ``nx taxonomy status``.
+
+        Returns rows of ``(collection, n_topics, total_docs, n_pending,
+        n_accepted)`` ordered by ``total_docs`` descending.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT collection, COUNT(*), SUM(doc_count), "
+                "SUM(CASE WHEN review_status = 'pending' THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN review_status = 'accepted' THEN 1 ELSE 0 END) "
+                "FROM topics GROUP BY collection ORDER BY SUM(doc_count) DESC"
+            ).fetchall()
+        return [(r[0], r[1], r[2] or 0, r[3] or 0, r[4] or 0) for r in rows]
+
+    def count_topic_links(self) -> int:
+        """Return total row count from ``topic_links``."""
+        with self._lock:
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM topic_links"
+            ).fetchone()[0]
+
+    def get_taxonomy_meta(
+        self, collection: str,
+    ) -> tuple[int | None, str | None] | None:
+        """Return ``(last_discover_doc_count, last_discover_at)`` or None."""
+        with self._lock:
+            return self.conn.execute(
+                "SELECT last_discover_doc_count, last_discover_at "
+                "FROM taxonomy_meta WHERE collection = ?",
+                (collection,),
+            ).fetchone()
+
+    def count_assigned_docs(self, collection: str = "") -> int:
+        """Distinct ``doc_id`` count in ``topic_assignments``.
+
+        When ``collection`` is non-empty, restrict to topics whose
+        ``collection`` field matches.
+        """
+        with self._lock:
+            if collection:
+                return self.conn.execute(
+                    "SELECT COUNT(DISTINCT doc_id) FROM topic_assignments "
+                    "WHERE topic_id IN (SELECT id FROM topics WHERE collection = ?)",
+                    (collection,),
+                ).fetchone()[0]
+            return self.conn.execute(
+                "SELECT COUNT(DISTINCT doc_id) FROM topic_assignments"
+            ).fetchone()[0]
+
+    def get_recent_hook_failures(
+        self, *, since: str = "-1 day",
+    ) -> list[tuple[str, int, str | None]]:
+        """Recent rows from ``hook_failures``.
+
+        Each row is ``(hook_name, is_batch, batch_doc_ids)``. ``is_batch``
+        is 1 for batch-shape rows and 0 for legacy scalar rows.
+        ``batch_doc_ids`` is the JSON-encoded list payload (or None).
+
+        Returns ``[]`` when the table does not exist (pre-4.9.10 DBs).
+        Falls back to the pre-4.14.1 column shape when batch columns are
+        absent — those rows are reported as scalar (``is_batch=0``,
+        ``batch_doc_ids=None``).
+
+        ``since`` is a SQLite modifier passed to ``datetime('now', ?)``.
+        """
+        with self._lock:
+            try:
+                rows = self.conn.execute(
+                    "SELECT hook_name, is_batch, COALESCE(batch_doc_ids, '') "
+                    "FROM hook_failures "
+                    "WHERE occurred_at >= datetime('now', ?)",
+                    (since,),
+                ).fetchall()
+                return [(r[0], int(r[1] or 0), r[2] or None) for r in rows]
+            except sqlite3.OperationalError:
+                try:
+                    legacy = self.conn.execute(
+                        "SELECT hook_name FROM hook_failures "
+                        "WHERE occurred_at >= datetime('now', ?)",
+                        (since,),
+                    ).fetchall()
+                    return [(r[0], 0, None) for r in legacy]
+                except sqlite3.OperationalError:
+                    return []
+
+    def list_topic_link_rows_with_labels(
+        self, *, collection: str = "",
+    ) -> list[tuple[str, str, str, str, int, str]]:
+        """Joined ``topic_links`` rows for ``nx taxonomy links`` display.
+
+        Returns ``(from_label, from_collection, to_label, to_collection,
+        link_count, link_types)`` ordered by ``link_count`` descending.
+        When ``collection`` is provided, only rows where either endpoint
+        matches are returned.
+        """
+        with self._lock:
+            if collection:
+                rows = self.conn.execute(
+                    "SELECT t1.label, t1.collection, t2.label, t2.collection, "
+                    "       tl.link_count, tl.link_types "
+                    "FROM topic_links tl "
+                    "JOIN topics t1 ON tl.from_topic_id = t1.id "
+                    "JOIN topics t2 ON tl.to_topic_id = t2.id "
+                    "WHERE t1.collection = ? OR t2.collection = ? "
+                    "ORDER BY tl.link_count DESC",
+                    (collection, collection),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT t1.label, t1.collection, t2.label, t2.collection, "
+                    "       tl.link_count, tl.link_types "
+                    "FROM topic_links tl "
+                    "JOIN topics t1 ON tl.from_topic_id = t1.id "
+                    "JOIN topics t2 ON tl.to_topic_id = t2.id "
+                    "ORDER BY tl.link_count DESC"
+                ).fetchall()
+        return [tuple(r) for r in rows]
+
     def get_topics_for_collection(
         self,
         collection: str,

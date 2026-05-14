@@ -185,13 +185,7 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         # Storage review I-1: every .conn access goes through the
         # domain-store lock. These are read-only queries but the lock
         # protects against a concurrent writer on the same connection.
-        with db.taxonomy._lock:
-            all_topics = db.taxonomy.conn.execute(
-                "SELECT collection, COUNT(*), SUM(doc_count), "
-                "SUM(CASE WHEN review_status = 'pending' THEN 1 ELSE 0 END), "
-                "SUM(CASE WHEN review_status = 'accepted' THEN 1 ELSE 0 END) "
-                "FROM topics GROUP BY collection ORDER BY SUM(doc_count) DESC"
-            ).fetchall()
+        all_topics = db.taxonomy.get_collection_topic_stats()
 
         if not all_topics:
             click.echo("No taxonomy data. Run `nx index repo` or `nx taxonomy discover`.")
@@ -214,10 +208,7 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
             if n_topics > 0 and projection_counts.get(coll, 0) == 0
         ]
 
-        with db.taxonomy._lock:
-            link_count = db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topic_links"
-            ).fetchone()[0]
+        link_count = db.taxonomy.count_topic_links()
 
         # Apply filters
         rows = all_topics
@@ -234,12 +225,7 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         if not summary:
             click.echo("Taxonomy Status\n")
             for coll, n_topics, n_docs, n_pending, n_accepted in rows:
-                with db.taxonomy._lock:
-                    meta = db.taxonomy.conn.execute(
-                        "SELECT last_discover_doc_count, last_discover_at "
-                        "FROM taxonomy_meta WHERE collection = ?",
-                        (coll,),
-                    ).fetchone()
+                meta = db.taxonomy.get_taxonomy_meta(coll)
 
                 rebal = ""
                 if meta:
@@ -282,27 +268,11 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         # exceed the row count. Reading is best-effort: pre-4.9.10 DBs
         # have no table; pre-4.14.1 DBs have no batch columns. Each path
         # falls back without crashing.
-        rows: list[tuple[str, int, int, str | None]] = []
         try:
-            with db.taxonomy._lock:
-                try:
-                    rows = db.taxonomy.conn.execute(
-                        "SELECT hook_name, is_batch, "
-                        "       COALESCE(batch_doc_ids, '') "
-                        "FROM hook_failures "
-                        "WHERE occurred_at >= datetime('now', '-1 day')"
-                    ).fetchall()
-                    rows = [(r[0], 1, r[1], r[2]) for r in rows]
-                except Exception:
-                    # Pre-4.14.1 schema: batch columns absent. Read with
-                    # legacy shape and treat every row as scalar.
-                    legacy = db.taxonomy.conn.execute(
-                        "SELECT hook_name FROM hook_failures "
-                        "WHERE occurred_at >= datetime('now', '-1 day')"
-                    ).fetchall()
-                    rows = [(r[0], 1, 0, None) for r in legacy]
+            failure_rows = db.taxonomy.get_recent_hook_failures()
         except Exception:
-            rows = []
+            failure_rows = []
+        rows = [(name, 1, is_batch, payload) for name, is_batch, payload in failure_rows]
 
         if rows:
             import json as _json
@@ -350,12 +320,7 @@ def list_cmd(collection: str, depth: int) -> None:
         tree = get_topic_tree(db, collection, max_depth=depth)
         # Count docs with no topic assignment (noise / uncategorized).
         # Lock taken per storage review I-1.
-        with db.taxonomy._lock:
-            total_assigned = db.taxonomy.conn.execute(
-                "SELECT COUNT(DISTINCT doc_id) FROM topic_assignments"
-                + (" WHERE topic_id IN (SELECT id FROM topics WHERE collection = ?)" if collection else ""),
-                (collection,) if collection else (),
-            ).fetchone()[0]
+        total_assigned = db.taxonomy.count_assigned_docs(collection)
     if not tree:
         click.echo("No topics found. Run `nx taxonomy discover --collection <name>` first.")
         return
@@ -434,12 +399,12 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
     t3 = make_t3()
 
     if discover_all:
-        colls = t3._client.list_collections()
+        colls = t3.list_collections()
         targets = [
-            c.name for c in colls
-            if c.count() >= 5
-            and not any(fnmatch(c.name, pat) for pat in exclude)
-            and not c.name.startswith("taxonomy__")
+            c["name"] for c in colls
+            if c["count"] >= 5
+            and not any(fnmatch(c["name"], pat) for pat in exclude)
+            and not c["name"].startswith("taxonomy__")
         ]
         if not targets:
             click.echo("No eligible collections found.")
@@ -945,27 +910,7 @@ def links_cmd(collection: str, refresh: bool) -> None:
 
         # Display all rows in topic_links, joined with topic labels.
         # Lock taken per storage review I-1.
-        with db.taxonomy._lock:
-            if collection:
-                rows = db.taxonomy.conn.execute(
-                    "SELECT t1.label, t1.collection, t2.label, t2.collection, "
-                    "       tl.link_count, tl.link_types "
-                    "FROM topic_links tl "
-                    "JOIN topics t1 ON tl.from_topic_id = t1.id "
-                    "JOIN topics t2 ON tl.to_topic_id = t2.id "
-                    "WHERE t1.collection = ? OR t2.collection = ? "
-                    "ORDER BY tl.link_count DESC",
-                    (collection, collection),
-                ).fetchall()
-            else:
-                rows = db.taxonomy.conn.execute(
-                    "SELECT t1.label, t1.collection, t2.label, t2.collection, "
-                    "       tl.link_count, tl.link_types "
-                    "FROM topic_links tl "
-                    "JOIN topics t1 ON tl.from_topic_id = t1.id "
-                    "JOIN topics t2 ON tl.to_topic_id = t2.id "
-                    "ORDER BY tl.link_count DESC"
-                ).fetchall()
+        rows = db.taxonomy.list_topic_link_rows_with_labels(collection=collection)
 
         if not rows:
             click.echo("No topic links found.")
