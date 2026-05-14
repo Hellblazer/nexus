@@ -65,6 +65,10 @@ claude_wait 60
 allow_fired_a=0; grep -q HOOK_ALLOW_FIRED "$HOOK_LOG" && allow_fired_a=1
 block_fired_a=0; grep -q HOOK_BLOCK_FIRED "$HOOK_LOG" && block_fired_a=1
 tool_ran_a=0;    [[ -s "$STUB_LOG" ]] && grep -q '"tool": "ping"' "$STUB_LOG" && tool_ran_a=1
+# Capture FIRED count now — subsequent sub-runs wipe $HOOK_LOG, so
+# reading it in the report block would always return the last sub-run's
+# count (review round-2 regression catch).
+fired_count_a=$(grep -c FIRED "$HOOK_LOG" 2>/dev/null || echo 0)
 
 claude_exit
 
@@ -100,6 +104,7 @@ claude_wait 60
 allow_fired_b=0; grep -q HOOK_ALLOW_FIRED "$HOOK_LOG" && allow_fired_b=1
 block_fired_b=0; grep -q HOOK_BLOCK_FIRED "$HOOK_LOG" && block_fired_b=1
 tool_ran_b=0;    [[ -s "$STUB_LOG" ]] && grep -q '"tool": "ping"' "$STUB_LOG" && tool_ran_b=1
+fired_count_b=$(grep -c FIRED "$HOOK_LOG" 2>/dev/null || echo 0)
 
 claude_exit
 
@@ -135,6 +140,7 @@ claude_wait 60
 
 allow_fired_c=0; grep -q HOOK_ALLOW_FIRED "$HOOK_LOG" && allow_fired_c=1
 tool_ran_c=0;    [[ -s "$STUB_LOG" ]] && grep -q '"tool": "ping"' "$STUB_LOG" && tool_ran_c=1
+fired_count_c=$(grep -c FIRED "$HOOK_LOG" 2>/dev/null || echo 0)
 
 claude_exit
 
@@ -149,8 +155,9 @@ echo "  13c (allow-only):   allow_fired=$allow_fired_c  tool_ran=$tool_ran_c  [b
 echo ""
 echo "Discriminator: number of FIRED lines per sub-run distinguishes"
 echo "'both hooks ran' from 'short-circuit on first decision'."
-echo "  13a FIRED count: $(grep -c FIRED "$HOOK_LOG" 2>/dev/null || echo 0)"
-echo "  13b FIRED count: $(grep -c FIRED "$HOOK_LOG" 2>/dev/null || echo 0)"
+echo "  13a FIRED count: $fired_count_a"
+echo "  13b FIRED count: $fired_count_b"
+echo "  13c FIRED count: $fired_count_c  [baseline; expect 1]"
 echo ""
 echo "Interpretation map (decision tree):"
 echo "  baseline tool_ran_c=0          -> harness setup is broken; spike inconclusive"

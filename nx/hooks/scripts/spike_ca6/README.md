@@ -56,6 +56,11 @@ inventory.
      then issue a Bash tool call that requires approval, e.g.
      `Bash(command="echo notification-trigger")`. Claude Code escalates
      to a permission prompt, which fires the Notification hook.
+     **Watch for**: any `Bash(*)` (or similar pre-approval) in your
+     user-global `~/.claude/settings.json` short-circuits the prompt
+     and silently defeats this trigger. Temporarily comment out the
+     allow rule for the duration of the spike, or run the spike under
+     a clean `$HOME` (`HOME=$(mktemp -d) claude ...`) to isolate.
 
 4. After each trigger, check `$NX_SPIKE_CAPTURE_DIR/<type>.jsonl`. The
    `payload` field is the verbatim stdin JSON Claude Code piped to the
