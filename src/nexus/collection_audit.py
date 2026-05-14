@@ -118,7 +118,7 @@ def _bucketize(distances: list[float], source: str) -> DistanceHistogram:
 
 
 def compute_distance_histogram(
-    taxonomy_conn: sqlite3.Connection, collection: str, *, days: int = 30,
+    telemetry: Any, collection: str, *, days: int = 30,
 ) -> DistanceHistogram:
     """Histogram of ``top_distance`` from search_telemetry for *collection*.
 
@@ -126,15 +126,12 @@ def compute_distance_histogram(
     ``DistanceHistogram(source="empty", sample_size=0)``. Use
     :func:`sample_live_distances` + :func:`compute_live_distance_histogram`
     for a live-probe fallback when telemetry is cold.
+
+    Takes a ``Telemetry`` store (``t2.telemetry``) and calls
+    :meth:`Telemetry.query_top_distances` — encapsulated per
+    RDR-112 P0.5 (nexus-xcji).
     """
-    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
-    rows = taxonomy_conn.execute(
-        "SELECT top_distance FROM search_telemetry "
-        "WHERE collection = ? AND ts >= ? "
-        "AND raw_count > 0 AND top_distance IS NOT NULL",
-        (collection, cutoff),
-    ).fetchall()
-    distances = [float(r[0]) for r in rows]
+    distances = telemetry.query_top_distances(collection, days=days)
     if not distances:
         return DistanceHistogram(
             buckets=[0] * _HIST_BINS, source="empty", sample_size=0,
@@ -237,35 +234,23 @@ def compute_live_distance_histogram(
 
 
 def compute_cross_projections(
-    taxonomy_conn: sqlite3.Connection, collection: str, *, top_n: int = 5,
+    taxonomy: Any, collection: str, *, top_n: int = 5,
 ) -> list[ProjectionPair]:
     """Top-*top_n* collections this one projects INTO.
 
     Ranked by ``shared_topics * avg_similarity``. Requires
     ``assigned_by='projection'`` rows with non-NULL ``similarity`` and
-    ``source_collection``.
+    ``source_collection``. Delegates the query to
+    :meth:`CatalogTaxonomy.query_cross_projections` (RDR-112 P0.5).
     """
-    rows = taxonomy_conn.execute(
-        "SELECT t.collection AS other, "
-        "       COUNT(DISTINCT ta.topic_id) AS shared, "
-        "       AVG(ta.similarity) AS avg_sim "
-        "FROM topic_assignments ta "
-        "JOIN topics t ON ta.topic_id = t.id "
-        "WHERE ta.source_collection = ? "
-        "  AND t.collection != ? "
-        "  AND ta.similarity IS NOT NULL "
-        "GROUP BY t.collection "
-        "ORDER BY shared * AVG(ta.similarity) DESC "
-        "LIMIT ?",
-        (collection, collection, top_n),
-    ).fetchall()
+    rows = taxonomy.query_cross_projections(collection, top_n=top_n)
     return [
         ProjectionPair(
-            other_collection=r[0],
-            shared_topics=int(r[1]),
-            avg_similarity=float(r[2]),
+            other_collection=other,
+            shared_topics=shared,
+            avg_similarity=avg_sim,
         )
-        for r in rows
+        for other, shared, avg_sim in rows
     ]
 
 
@@ -303,38 +288,28 @@ def compute_orphan_chunks(
 
 
 def compute_hub_assignments(
-    taxonomy_conn: sqlite3.Connection, collection: str, *, top_n: int = 10,
+    taxonomy: Any, collection: str, *, top_n: int = 10,
 ) -> list[HubAssignment]:
-    """Top-*top_n* cross-collection hub topics and this collection's share."""
-    hubs = taxonomy_conn.execute(
-        "SELECT ta.topic_id, COUNT(DISTINCT ta.source_collection) AS src_count "
-        "FROM topic_assignments ta "
-        "GROUP BY ta.topic_id "
-        "ORDER BY src_count DESC, ta.topic_id ASC "
-        "LIMIT ?",
-        (top_n,),
-    ).fetchall()
+    """Top-*top_n* cross-collection hub topics and this collection's share.
+
+    Delegates to ``CatalogTaxonomy`` domain methods (RDR-112 P0.5).
+    """
+    hubs = taxonomy.query_hub_topic_ids(limit=top_n)
     if not hubs:
         return []
     out: list[HubAssignment] = []
     for topic_id, src_count in hubs:
-        meta = taxonomy_conn.execute(
-            "SELECT label, collection FROM topics WHERE id = ?",
-            (topic_id,),
-        ).fetchone()
+        meta = taxonomy.get_topic_by_id(topic_id)
         if meta is None:
             continue
-        label, topic_collection = meta
-        chunk_count = taxonomy_conn.execute(
-            "SELECT COUNT(*) FROM topic_assignments "
-            "WHERE topic_id = ? AND source_collection = ?",
-            (topic_id, collection),
-        ).fetchone()[0]
+        chunk_count = taxonomy.count_hub_topic_assignments(
+            topic_id, collection,
+        )
         out.append(
             HubAssignment(
                 topic_id=int(topic_id),
-                topic_label=label or "",
-                topic_collection=topic_collection or "",
+                topic_label=meta.get("label") or "",
+                topic_collection=meta.get("collection") or "",
                 source_collection_count=int(src_count),
                 chunks_in_hub=int(chunk_count or 0),
             )
@@ -347,12 +322,12 @@ def compute_hub_assignments(
 
 def _open_t2():
     from nexus.config import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     db_path = default_db_path()
     if not db_path.exists():
         return None
-    return T2Database(db_path)
+    return t2_ctx()
 
 
 def _open_catalog_conn() -> sqlite3.Connection | None:
@@ -493,9 +468,9 @@ def run_collection_audit(
     cat_conn = _open_catalog_conn()
     try:
         if t2 is not None:
-            hist = compute_distance_histogram(t2.taxonomy.conn, collection)
-            projections = compute_cross_projections(t2.taxonomy.conn, collection)
-            hubs = compute_hub_assignments(t2.taxonomy.conn, collection)
+            hist = compute_distance_histogram(t2.telemetry, collection)
+            projections = compute_cross_projections(t2.taxonomy, collection)
+            hubs = compute_hub_assignments(t2.taxonomy, collection)
         else:
             hist = DistanceHistogram(buckets=[0] * _HIST_BINS, source="empty", sample_size=0)
             projections = []
