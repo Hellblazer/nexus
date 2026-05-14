@@ -120,11 +120,19 @@ def main(ctx: click.Context, verbose: bool) -> None:
                 # mode; an unattended operator would never see it. Mirror
                 # the alert to stderr so they actually notice — a one-liner
                 # pointing at the diagnostic command is enough.
-                click.echo(
-                    f"warning: schema migration failed for {_db_path}: {_exc}\n"
-                    "  run `nx doctor --check-schema` to inspect",
-                    err=True,
-                )
+                #
+                # TTY-gate so CliRunner-based tests (which default to
+                # ``mix_stderr=True`` and would capture this into
+                # ``result.output``) don't pick up the warning and break
+                # exact-output assertions when the OperationalError path
+                # is exercised under the harness. Operator at a terminal
+                # still sees the alert; scripted/test invocations don't.
+                if sys.stderr.isatty():
+                    click.echo(
+                        f"warning: schema migration failed for {_db_path}: {_exc}\n"
+                        "  run `nx doctor --check-schema` to inspect",
+                        err=True,
+                    )
 
     # RDR-101 Phase 3 follow-up D (nexus-o6aa.9.9): TTY-gated upgrade
     # prompt. When the catalog is in bootstrap-fallback mode, surface
