@@ -161,12 +161,12 @@ def _open_t2():
     """Open a ``T2Database`` rooted at the default path, or ``None``
     when the DB file doesn't exist yet."""
     from nexus.config import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     db_path = default_db_path()
     if not db_path.exists():
         return None
-    return T2Database(db_path)
+    return t2_ctx()
 
 
 def _default_telemetry_stats_fn(col: str) -> dict[str, Any]:
@@ -190,20 +190,7 @@ def _default_projection_rank_fn(cols: list[str]) -> dict[str, int]:
     if t2 is None:
         return {}
     try:
-        conn = t2.taxonomy.conn
-        rows = conn.execute(
-            "SELECT t.collection AS col, "
-            "COUNT(DISTINCT ta.source_collection) AS src_count "
-            "FROM topic_assignments ta "
-            "JOIN topics t ON ta.topic_id = t.id "
-            "WHERE t.collection IN ({}) "
-            "GROUP BY t.collection "
-            "ORDER BY src_count DESC".format(
-                ",".join("?" * len(cols)) or "''"
-            ),
-            cols,
-        ).fetchall()
-        return {row[0]: idx + 1 for idx, row in enumerate(rows)}
+        return t2.taxonomy.rank_collections_by_incoming_projection(cols)
     except Exception:
         return {}
     finally:
@@ -220,34 +207,17 @@ def _default_hub_score_fn(col: str) -> float | None:
     if t2 is None:
         return None
     try:
-        conn = t2.taxonomy.conn
-        # Top-10 hubs: topics whose assignments span the most distinct
-        # source collections. Ranks deterministically by
-        # ``(src_count DESC, topic_id ASC)``.
-        hub_rows = conn.execute(
-            "SELECT ta.topic_id "
-            "FROM topic_assignments ta "
-            "GROUP BY ta.topic_id "
-            "ORDER BY COUNT(DISTINCT ta.source_collection) DESC, ta.topic_id ASC "
-            "LIMIT 10"
-        ).fetchall()
+        # Top-10 hubs ranked by distinct source_collection count.
+        hub_rows = t2.taxonomy.query_hub_topic_ids(limit=10)
         if not hub_rows:
             return None
-        hub_ids = tuple(r[0] for r in hub_rows)
-        total = conn.execute(
-            "SELECT COUNT(*) FROM topic_assignments "
-            "WHERE source_collection = ?",
-            (col,),
-        ).fetchone()[0] or 0
+        hub_ids = [tid for tid, _ in hub_rows]
+        total = t2.taxonomy.count_assignments_for_source(col)
         if total == 0:
             return None
-        in_hubs = conn.execute(
-            "SELECT COUNT(*) FROM topic_assignments "
-            "WHERE source_collection = ? AND topic_id IN ({})".format(
-                ",".join("?" * len(hub_ids))
-            ),
-            (col, *hub_ids),
-        ).fetchone()[0] or 0
+        in_hubs = t2.taxonomy.count_assignments_in_topics_for_source(
+            col, hub_ids,
+        )
         return in_hubs / total
     except Exception:
         return None

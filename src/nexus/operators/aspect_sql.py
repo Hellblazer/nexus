@@ -511,8 +511,6 @@ def _query_filter(
     source_path string for caller back-compat.
     """
     from nexus.aspect_readers import uri_for
-    from nexus.config import default_db_path
-    from nexus.db.t2 import T2Database
 
     pred_sql, pred_params = _build_filter_predicate(field, query)
 
@@ -533,27 +531,19 @@ def _query_filter(
     matches: dict[tuple[str, str], bool] = {}
     uris: dict[tuple[str, str], str] = {}
     if ident_to_uri:
-        # Batch in 300s to leave plenty of headroom under SQLite's
-        # 999-param default cap.
-        with T2Database(default_db_path()) as db:
-            conn = db.document_aspects.conn
-            uri_list = list(ident_to_uri.values())
-            for chunk_start in range(0, len(uri_list), 300):
-                batch = uri_list[chunk_start:chunk_start + 300]
-                placeholders = ",".join(["?"] * len(batch))
-                sql = (
-                    f"SELECT source_uri "
-                    f"FROM document_aspects "
-                    f"WHERE source_uri IN ({placeholders}) "
-                    f"  AND {pred_sql}"
-                )
-                params: list[Any] = list(batch) + list(pred_params)
-                for (uri,) in conn.execute(sql, params).fetchall():
-                    ident = uri_to_ident.get(uri)
-                    if ident is None:
-                        continue
-                    matches[ident] = True
-                    uris[ident] = uri
+        from nexus.mcp_infra import t2_ctx
+        with t2_ctx() as db:
+            matched_uris = db.document_aspects.filter_uris_by_predicate(
+                list(ident_to_uri.values()),
+                where_sql=pred_sql,
+                where_params=pred_params,
+            )
+        for uri in matched_uris:
+            ident = uri_to_ident.get(uri)
+            if ident is None:
+                continue
+            matches[ident] = True
+            uris[ident] = uri
 
     rationale = []
     for c, sp in idents:
@@ -580,8 +570,7 @@ def _query_groupby(
     idents: list[tuple[str, str]], field: str,
 ) -> dict[str, list[tuple[str, str]]]:
     """Execute the groupby SQL. Return {key_value: [idents]}."""
-    from nexus.config import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     if field.startswith("extras."):
         extras_key = field[len("extras."):]
@@ -613,23 +602,17 @@ def _query_groupby(
         ident_to_uri[(c, sp)] = u
         uri_to_ident[u] = (c, sp)
 
-    with T2Database(default_db_path()) as db:
-        conn = db.document_aspects.conn
-        uri_list = list(ident_to_uri.values())
-        for chunk_start in range(0, len(uri_list), 300):
-            batch = uri_list[chunk_start:chunk_start + 300]
-            placeholders = ",".join(["?"] * len(batch))
-            params: list[Any] = list(select_params) + list(batch)
-            sql = (
-                f"SELECT source_uri, {select_expr} "
-                f"FROM document_aspects "
-                f"WHERE source_uri IN ({placeholders})"
-            )
-            for uri, value in conn.execute(sql, params).fetchall():
-                ident = uri_to_ident.get(uri)
-                if ident is None:
-                    continue
-                fetched[ident] = value
+    with t2_ctx() as db:
+        uri_to_value = db.document_aspects.select_field_by_uris(
+            list(ident_to_uri.values()),
+            select_expr=select_expr,
+            select_params=select_params,
+        )
+    for uri, value in uri_to_value.items():
+        ident = uri_to_ident.get(uri)
+        if ident is None:
+            continue
+        fetched[ident] = value
 
     for ident in idents:
         value = fetched.get(ident)
@@ -656,14 +639,12 @@ def _query_confidence_aggregate(
 ) -> float | None:
     """Run the SQL aggregate (AVG / MIN / MAX) over confidence.
 
-    Paginates over the input identities at 300-id batches (SQLite
-    parameter cap). MIN / MAX accumulate by Python folding (still
-    O(N) wall-clock but exact). AVG accumulates the sum and count
-    across batches and divides at the end (single pass, exact
-    arithmetic on floats).
+    Delegates the paginated fold to
+    :meth:`DocumentAspects.fold_confidence_by_uris` so the operator
+    layer never reaches into ``db.document_aspects.conn`` (RDR-112
+    P0.5, nexus-xcji).
     """
-    from nexus.config import default_db_path
-    from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_ctx
 
     op_map = {
         "avg_confidence": "AVG",
@@ -678,36 +659,16 @@ def _query_confidence_aggregate(
     # mapping (it folds into a scalar), so we just collect URIs.
     from nexus.aspect_readers import uri_for
 
-    sum_acc = 0.0
-    count_acc = 0
-    min_acc: float | None = None
-    max_acc: float | None = None
-
     uris_for_query: list[str] = []
     for c, sp in idents:
         u = uri_for(c, sp) or ""
         if u:
             uris_for_query.append(u)
 
-    with T2Database(default_db_path()) as db:
-        conn = db.document_aspects.conn
-        for chunk_start in range(0, len(uris_for_query), 300):
-            batch = uris_for_query[chunk_start:chunk_start + 300]
-            placeholders = ",".join(["?"] * len(batch))
-            sql = (
-                f"SELECT confidence FROM document_aspects "
-                f"WHERE source_uri IN ({placeholders}) "
-                f"  AND confidence IS NOT NULL"
-            )
-            params: list[Any] = list(batch)
-            for (value,) in conn.execute(sql, params).fetchall():
-                if value is None:
-                    continue
-                v = float(value)
-                sum_acc += v
-                count_acc += 1
-                min_acc = v if min_acc is None else min(min_acc, v)
-                max_acc = v if max_acc is None else max(max_acc, v)
+    with t2_ctx() as db:
+        sum_acc, min_acc, max_acc, count_acc = (
+            db.document_aspects.fold_confidence_by_uris(uris_for_query)
+        )
 
     if count_acc == 0:
         return None
