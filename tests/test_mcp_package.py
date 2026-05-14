@@ -21,7 +21,7 @@ def test_catalog_module_importable():
 
 
 def test_core_registered_tools():
-    """28 core tools are registered with @mcp.tool() (RDR-088 added filter, check, verify)."""
+    """36 core tools are registered with @mcp.tool() (nexus-8q4v added 8 tuplespace tools)."""
     from nexus.mcp.core import mcp
 
     tool_names = {t.name for t in mcp._tool_manager.list_tools()}
@@ -36,6 +36,10 @@ def test_core_registered_tools():
         "operator_filter", "operator_check", "operator_verify",
         "operator_groupby", "operator_aggregate",
         "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
+        # RDR-110 P1.4 tuplespace tools (nexus-8q4v)
+        "tuplespace_out", "tuplespace_read", "tuplespace_take",
+        "tuplespace_ack", "tuplespace_nack",
+        "tuplespace_list_subspaces", "tuplespace_subspace_schema", "tuplespace_subspace_stats",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

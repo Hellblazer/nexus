@@ -78,6 +78,7 @@ class TestFreshDbCreation:
             "content",
             "dimensions_json",
             "embed_text",
+            "match_text",
             "created_at",
             "expires_at",
             # claim state columns
@@ -142,7 +143,8 @@ class TestWalMode:
         # which is a write. On some SQLite builds the wal header is
         # deferred to the first real write after PRAGMA — we accept either:
         # (a) wal file exists, or (b) PRAGMA journal_mode returned 'wal'.
-        row = sqlite3.connect(str(db_path)).execute("PRAGMA journal_mode").fetchone()
+        with sqlite3.connect(str(db_path)) as c:
+            row = c.execute("PRAGMA journal_mode").fetchone()
         assert row[0] == "wal"
 
 
