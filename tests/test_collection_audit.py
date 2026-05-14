@@ -146,8 +146,7 @@ class TestCrossProjections:
         _seed_t2(db_path)
         db = T2Database(db_path)
         try:
-            pairs = compute_cross_projections(
-                db.taxonomy.conn, "code__main", top_n=5,
+            pairs = compute_cross_projections(db.taxonomy, "code__main", top_n=5,
             )
         finally:
             db.close()
@@ -171,8 +170,7 @@ class TestCrossProjections:
         _seed_t2(db_path)
         db = T2Database(db_path)
         try:
-            pairs = compute_cross_projections(
-                db.taxonomy.conn, "code__unseen", top_n=5,
+            pairs = compute_cross_projections(db.taxonomy, "code__unseen", top_n=5,
             )
         finally:
             db.close()
@@ -226,8 +224,7 @@ class TestHubAssignments:
         _seed_t2(db_path)
         db = T2Database(db_path)
         try:
-            hubs = compute_hub_assignments(
-                db.taxonomy.conn, "code__main", top_n=10,
+            hubs = compute_hub_assignments(db.taxonomy, "code__main", top_n=10,
             )
         finally:
             db.close()
@@ -255,8 +252,7 @@ class TestDistanceHistogramTelemetryOnly:
         _seed_t2(db_path)
         db = T2Database(db_path)
         try:
-            hist = compute_distance_histogram(
-                db.taxonomy.conn, "code__main",
+            hist = compute_distance_histogram(db.telemetry, "code__main",
             )
         finally:
             db.close()
@@ -272,7 +268,7 @@ class TestDistanceHistogramTelemetryOnly:
         _seed_t2(db_path)
         db = T2Database(db_path)
         try:
-            hist = compute_distance_histogram(db.taxonomy.conn, "code__cold")
+            hist = compute_distance_histogram(db.telemetry, "code__cold")
         finally:
             db.close()
         assert hist.sample_size == 0
@@ -377,7 +373,8 @@ class TestLiveDistanceProbe:
                 sentinel_called["hit"] = True
                 raise AssertionError("live probe fired despite warm telemetry")
 
-        with patch("nexus.config.default_db_path", return_value=tmp_path / "memory.db"):
+        with patch("nexus.config.default_db_path", return_value=tmp_path / "memory.db"), \
+             patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "memory.db"):
             report = run_collection_audit(
                 "code__main", live=True, t3=ExplodingT3(),
             )

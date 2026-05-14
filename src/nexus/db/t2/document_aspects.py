@@ -49,6 +49,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -844,6 +845,114 @@ class DocumentAspects:
                 for r in records
             ]
         return records
+
+    # ── paginated operator helpers (RDR-112 P0.5, nexus-xcji) ───────────────
+    #
+    # Each method below replaces a ``db.document_aspects.conn.execute``
+    # reach-through from ``src/nexus/operators/aspect_sql.py``. They
+    # share the 300-uri batching to stay under SQLite's 999-param cap.
+
+    def filter_uris_by_predicate(
+        self,
+        uris: list[str],
+        *,
+        where_sql: str,
+        where_params: tuple | list,
+        batch_size: int = 300,
+    ) -> set[str]:
+        """Return the subset of ``uris`` whose row matches ``where_sql``.
+
+        Executes ``SELECT source_uri FROM document_aspects WHERE
+        source_uri IN (<placeholders>) AND <where_sql>`` in batches of
+        ``batch_size``. ``where_sql`` and ``where_params`` are passed
+        through unchanged; the caller is responsible for validating
+        column names (they typically come from a fixed allowlist).
+        """
+        matched: set[str] = set()
+        if not uris:
+            return matched
+        with self._lock:
+            for chunk_start in range(0, len(uris), batch_size):
+                batch = uris[chunk_start:chunk_start + batch_size]
+                placeholders = ",".join("?" * len(batch))
+                sql = (
+                    f"SELECT source_uri FROM document_aspects "
+                    f"WHERE source_uri IN ({placeholders}) AND {where_sql}"
+                )
+                params = list(batch) + list(where_params)
+                for (uri,) in self.conn.execute(sql, params).fetchall():
+                    matched.add(uri)
+        return matched
+
+    def select_field_by_uris(
+        self,
+        uris: list[str],
+        *,
+        select_expr: str,
+        select_params: tuple | list = (),
+        batch_size: int = 300,
+    ) -> dict[str, Any]:
+        """Return ``{source_uri: value}`` for each uri whose row exists.
+
+        ``select_expr`` may be a column name or a SQL expression such
+        as ``json_extract(extras, ?)``; ``select_params`` supplies its
+        parameters. The caller validates ``select_expr`` from a fixed
+        allowlist.
+        """
+        out: dict[str, Any] = {}
+        if not uris:
+            return out
+        with self._lock:
+            for chunk_start in range(0, len(uris), batch_size):
+                batch = uris[chunk_start:chunk_start + batch_size]
+                placeholders = ",".join("?" * len(batch))
+                sql = (
+                    f"SELECT source_uri, {select_expr} "
+                    f"FROM document_aspects "
+                    f"WHERE source_uri IN ({placeholders})"
+                )
+                params = list(select_params) + list(batch)
+                for uri, value in self.conn.execute(sql, params).fetchall():
+                    out[uri] = value
+        return out
+
+    def fold_confidence_by_uris(
+        self,
+        uris: list[str],
+        *,
+        batch_size: int = 300,
+    ) -> tuple[float, float | None, float | None, int]:
+        """Single-pass fold over ``confidence`` for rows whose
+        ``source_uri`` is in ``uris``.
+
+        Returns ``(sum, min, max, count)``. ``min`` and ``max`` are
+        ``None`` when ``count == 0``. NULL confidences are skipped.
+        Callers compute the appropriate scalar reducer from the tuple.
+        """
+        sum_acc = 0.0
+        count_acc = 0
+        min_acc: float | None = None
+        max_acc: float | None = None
+        if not uris:
+            return (0.0, None, None, 0)
+        with self._lock:
+            for chunk_start in range(0, len(uris), batch_size):
+                batch = uris[chunk_start:chunk_start + batch_size]
+                placeholders = ",".join("?" * len(batch))
+                sql = (
+                    f"SELECT confidence FROM document_aspects "
+                    f"WHERE source_uri IN ({placeholders}) "
+                    f"AND confidence IS NOT NULL"
+                )
+                for (value,) in self.conn.execute(sql, list(batch)).fetchall():
+                    if value is None:
+                        continue
+                    v = float(value)
+                    sum_acc += v
+                    count_acc += 1
+                    min_acc = v if min_acc is None else min(min_acc, v)
+                    max_acc = v if max_acc is None else max(max_acc, v)
+        return (sum_acc, min_acc, max_acc, count_acc)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────

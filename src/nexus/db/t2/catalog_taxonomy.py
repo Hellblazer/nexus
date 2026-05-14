@@ -1390,6 +1390,118 @@ class CatalogTaxonomy:
                 ).fetchall()
         return [tuple(r) for r in rows]
 
+    # ── audit + health helpers (RDR-112 P0.5, nexus-xcji) ───────────────────
+
+    def query_cross_projections(
+        self, collection: str, *, top_n: int = 5,
+    ) -> list[tuple[str, int, float]]:
+        """Top-``top_n`` collections that ``collection`` projects INTO.
+
+        Returns ``(other_collection, shared_topics, avg_similarity)``
+        rows ordered by ``shared_topics * avg_similarity`` descending.
+        Used by ``compute_cross_projections`` in collection_audit.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT t.collection AS other, "
+                "       COUNT(DISTINCT ta.topic_id) AS shared, "
+                "       AVG(ta.similarity) AS avg_sim "
+                "FROM topic_assignments ta "
+                "JOIN topics t ON ta.topic_id = t.id "
+                "WHERE ta.source_collection = ? "
+                "  AND t.collection != ? "
+                "  AND ta.similarity IS NOT NULL "
+                "GROUP BY t.collection "
+                "ORDER BY shared * AVG(ta.similarity) DESC "
+                "LIMIT ?",
+                (collection, collection, top_n),
+            ).fetchall()
+        return [(r[0], int(r[1]), float(r[2])) for r in rows]
+
+    def query_hub_topic_ids(
+        self, *, limit: int = 10,
+    ) -> list[tuple[int, int]]:
+        """Top-``limit`` cross-collection hub topics.
+
+        Returns ``(topic_id, source_collection_count)`` rows ordered by
+        source-count descending, then ``topic_id`` ascending for
+        deterministic ties. Used by audit + health hub-score paths.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT ta.topic_id, COUNT(DISTINCT ta.source_collection) "
+                "FROM topic_assignments ta "
+                "GROUP BY ta.topic_id "
+                "ORDER BY COUNT(DISTINCT ta.source_collection) DESC, "
+                "         ta.topic_id ASC "
+                "LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [(int(r[0]), int(r[1])) for r in rows]
+
+    def count_hub_topic_assignments(
+        self, topic_id: int, source_collection: str,
+    ) -> int:
+        """Count rows in ``topic_assignments`` for the given
+        ``(topic_id, source_collection)`` pair.
+        """
+        with self._lock:
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM topic_assignments "
+                "WHERE topic_id = ? AND source_collection = ?",
+                (topic_id, source_collection),
+            ).fetchone()[0]
+
+    def count_assignments_for_source(self, source_collection: str) -> int:
+        """Total rows in ``topic_assignments`` for ``source_collection``."""
+        with self._lock:
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM topic_assignments "
+                "WHERE source_collection = ?",
+                (source_collection,),
+            ).fetchone()[0]
+
+    def count_assignments_in_topics_for_source(
+        self, source_collection: str, topic_ids: list[int] | tuple[int, ...],
+    ) -> int:
+        """Count rows where ``source_collection = ?`` AND
+        ``topic_id IN topic_ids``. Returns 0 when ``topic_ids`` is empty.
+        """
+        if not topic_ids:
+            return 0
+        with self._lock:
+            placeholders = ",".join("?" * len(topic_ids))
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM topic_assignments "
+                f"WHERE source_collection = ? AND topic_id IN ({placeholders})",
+                (source_collection, *topic_ids),
+            ).fetchone()[0]
+
+    def rank_collections_by_incoming_projection(
+        self, collections: list[str],
+    ) -> dict[str, int]:
+        """Rank ``collections`` by their incoming cross-projection count.
+
+        Rank 1 = receives from the most distinct source collections.
+        Collections with no incoming projections are absent from the
+        returned map.
+        """
+        if not collections:
+            return {}
+        with self._lock:
+            placeholders = ",".join("?" * len(collections))
+            rows = self.conn.execute(
+                "SELECT t.collection AS col, "
+                "       COUNT(DISTINCT ta.source_collection) AS src_count "
+                "FROM topic_assignments ta "
+                "JOIN topics t ON ta.topic_id = t.id "
+                f"WHERE t.collection IN ({placeholders}) "
+                "GROUP BY t.collection "
+                "ORDER BY src_count DESC",
+                list(collections),
+            ).fetchall()
+        return {row[0]: idx + 1 for idx, row in enumerate(rows)}
+
     def get_topics_for_collection(
         self,
         collection: str,
