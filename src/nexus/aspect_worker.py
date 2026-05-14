@@ -514,9 +514,15 @@ def _worker_lock_path(locks_dir: Path | None = None) -> Path:
     """
     import os
 
-    base = locks_dir if locks_dir is not None else (
-        Path.home() / ".config" / "nexus" / "locks"
-    )
+    if locks_dir is not None:
+        base = locks_dir
+    else:
+        # RDR-112 P0-gate (nexus-46xu): resolve via nexus_config_dir
+        # so NEXUS_CONFIG_DIR (test + daemon coordination contract)
+        # takes effect. Matches the drain-side default at
+        # :func:`drain_worker`.
+        from nexus.config import nexus_config_dir
+        base = nexus_config_dir() / "locks"
     return base / f"aspect_worker.{os.getpid()}"
 
 
@@ -791,10 +797,7 @@ def drain_worker(
                 return
 
         # Timeout: count stuck rows for the error message.
-        stuck = queue.conn.execute(
-            "SELECT COUNT(*) FROM aspect_extraction_queue WHERE status != 'failed'"
-        ).fetchone()
-        stuck_count = stuck[0] if stuck else 0
+        stuck_count = queue.stuck_count()
         raise DrainTimeoutError(stuck_count=stuck_count, timeout=timeout)
     finally:
         queue.close()

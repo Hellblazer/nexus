@@ -144,7 +144,7 @@ def get_collection_names() -> list[str]:
     return names
 
 
-def t2_ctx():
+def t2_ctx(*, _path_resolver=None):
     """Return a T2Database context manager — fresh per call.
 
     RDR-112 P0.4 (nexus-uqqy): the MCP server is the explicit migration
@@ -155,11 +155,19 @@ def t2_ctx():
     Resolves ``default_db_path`` via this module's binding so test
     fixtures that patch ``nexus.mcp_infra.default_db_path`` continue
     to take effect (RDR-112 P0.5, nexus-oi0z).
+
+    ``_path_resolver`` (RDR-112 P0-gate, nexus-cy3o): optional callable
+    overriding the path-resolution step. Used by
+    ``nexus.commands.taxonomy_cmd._t2_ctx`` to delegate here while
+    preserving the long-standing test pattern of patching
+    ``nexus.commands.taxonomy_cmd._default_db_path``. Production
+    callers leave this ``None`` and the module-level
+    ``default_db_path`` binding wins.
     """
     from nexus.db.migrations import run_if_needed
     from nexus.db.t2 import T2Database
 
-    path = default_db_path()
+    path = (_path_resolver or default_db_path)()
     run_if_needed(path)
     return T2Database(path)
 

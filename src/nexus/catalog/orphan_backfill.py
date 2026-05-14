@@ -127,7 +127,7 @@ def gather_titled_chunks(
     returned as a single group; callers can branch on them (use chash
     grouping or skip).
     """
-    col = t3_db._client.get_collection(name=collection)
+    col = t3_db.get_collection(collection)
     n = col.count()
     by_title: dict[str, list[ChunkRef]] = defaultdict(list)
     offset = 0
@@ -639,7 +639,7 @@ def link_by_content_hash(
     if not by_head:
         return 0, 0, 0
 
-    col = t3_db._client.get_collection(name=collection)
+    col = t3_db.get_collection(collection)
     n = col.count()
     # Group chunks by content_hash so we batch one append_manifest per doc.
     by_hash: dict[str, list[ChunkRef]] = defaultdict(list)

@@ -125,53 +125,33 @@ def promote_extras_field(
             f"got {sql_type!r}",
         )
 
-    conn = db.document_aspects.conn
-    lock = db.document_aspects._lock
     now = datetime.now(UTC).isoformat()
 
-    with lock:
-        # Step 1: ADD COLUMN if missing.
-        cols = {r[1] for r in conn.execute(
-            "PRAGMA table_info(document_aspects)"
-        ).fetchall()}
-        column_added = field_name not in cols
-        if column_added:
-            conn.execute(
-                f"ALTER TABLE document_aspects "
-                f"ADD COLUMN {field_name} {sql_type}"
-            )
-            conn.commit()
-            _log.info(
-                "aspect_promotion_column_added",
-                field=field_name, sql_type=sql_type,
-            )
-
-        # Step 2: backfill from extras → typed column. Only update
-        # rows where the typed column is currently NULL AND the
-        # extras key is set. Avoids overwriting any value an
-        # earlier extractor may have written directly to the
-        # column.
-        cur = conn.execute(
-            f"UPDATE document_aspects "
-            f"SET {field_name} = json_extract(extras, ?) "
-            f"WHERE {field_name} IS NULL "
-            f"  AND json_extract(extras, ?) IS NOT NULL",
-            (f"$.{field_name}", f"$.{field_name}"),
+    # RDR-112 P0-gate (nexus-mz2c): operations routed through public
+    # DocumentAspects methods (alter_add_column_if_missing /
+    # backfill_extras_column / prune_extras_key) so daemon-mode (Phase 1)
+    # can swap the store without touching this admin path.
+    column_added = db.document_aspects.alter_add_column_if_missing(
+        field_name=field_name, sql_type=sql_type,
+    )
+    if column_added:
+        _log.info(
+            "aspect_promotion_column_added",
+            field=field_name, sql_type=sql_type,
         )
-        conn.commit()
-        rows_backfilled = cur.rowcount
 
-        # Step 3 (opt-in): prune the key from extras.
-        rows_pruned = 0
-        if prune:
-            cur = conn.execute(
-                "UPDATE document_aspects "
-                "SET extras = json_remove(extras, ?) "
-                "WHERE json_extract(extras, ?) IS NOT NULL",
-                (f"$.{field_name}", f"$.{field_name}"),
-            )
-            conn.commit()
-            rows_pruned = cur.rowcount
+    # Backfill from extras → typed column. Only update rows where the
+    # typed column is currently NULL AND the extras key is set —
+    # avoids overwriting any value an earlier extractor wrote directly.
+    rows_backfilled = db.document_aspects.backfill_extras_column(
+        field_name=field_name,
+    )
+
+    rows_pruned = 0
+    if prune:
+        rows_pruned = db.document_aspects.prune_extras_key(
+            field_name=field_name,
+        )
 
     result = PromotionResult(
         field_name=field_name,
@@ -190,34 +170,10 @@ def promote_extras_field(
 def list_promotions(db) -> list[dict]:
     """Return the full ``aspect_promotion_log`` history, oldest first.
 
-    Each row is a dict with keys ``field_name``, ``sql_type``,
-    ``column_added``, ``rows_backfilled``, ``rows_pruned``,
-    ``pruned``, ``promoted_at``. Used by the CLI ``nx enrich
-    aspects-promote-field --history`` flag and by anyone
-    auditing the schema's evolution.
+    Routed through :meth:`DocumentAspects.list_promotion_audit` per
+    RDR-112 P0-gate (nexus-mz2c).
     """
-    conn = db.document_aspects.conn
-    lock = db.document_aspects._lock
-    _ensure_audit_table(conn, lock)
-    with lock:
-        rows = conn.execute(
-            "SELECT field_name, sql_type, column_added, rows_backfilled, "
-            "       rows_pruned, pruned, promoted_at "
-            "FROM aspect_promotion_log "
-            "ORDER BY promoted_at ASC, id ASC"
-        ).fetchall()
-    return [
-        {
-            "field_name": r[0],
-            "sql_type": r[1],
-            "column_added": bool(r[2]),
-            "rows_backfilled": r[3],
-            "rows_pruned": r[4],
-            "pruned": bool(r[5]),
-            "promoted_at": r[6],
-        }
-        for r in rows
-    ]
+    return db.document_aspects.list_promotion_audit()
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -252,65 +208,18 @@ def _is_safe_identifier(name: str) -> bool:
     return all(c.isalnum() or c == "_" for c in name)
 
 
-def _ensure_audit_table(conn, lock) -> None:
-    """Create ``aspect_promotion_log`` if missing.
-
-    Schema:
-      - id INTEGER PRIMARY KEY AUTOINCREMENT
-      - field_name TEXT NOT NULL
-      - sql_type TEXT NOT NULL
-      - column_added INTEGER NOT NULL  (0/1 boolean)
-      - rows_backfilled INTEGER NOT NULL DEFAULT 0
-      - rows_pruned INTEGER NOT NULL DEFAULT 0
-      - pruned INTEGER NOT NULL DEFAULT 0
-      - promoted_at TEXT NOT NULL  (ISO-8601 UTC)
-
-    The table is created lazily on first promotion / first list call
-    so we avoid yet another T2 migration entry. Idempotent ``CREATE
-    IF NOT EXISTS``.
-    """
-    with lock:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS aspect_promotion_log (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                field_name      TEXT NOT NULL,
-                sql_type        TEXT NOT NULL,
-                column_added    INTEGER NOT NULL,
-                rows_backfilled INTEGER NOT NULL DEFAULT 0,
-                rows_pruned     INTEGER NOT NULL DEFAULT 0,
-                pruned          INTEGER NOT NULL DEFAULT 0,
-                promoted_at     TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_aspect_promotion_log_field
-                ON aspect_promotion_log(field_name);
-        """)
-        conn.commit()
-
-
 def _record_promotion_audit(db, result: PromotionResult) -> None:
     """Insert a row into the audit log. Best-effort: persistence
-    failure logs at debug level and is otherwise swallowed (the
-    promotion already happened; losing the audit row is annoying
-    but not corruption-class)."""
-    conn = db.document_aspects.conn
-    lock = db.document_aspects._lock
+    failure logs at debug level and is otherwise swallowed."""
     try:
-        _ensure_audit_table(conn, lock)
-        with lock:
-            conn.execute(
-                "INSERT INTO aspect_promotion_log "
-                "(field_name, sql_type, column_added, "
-                " rows_backfilled, rows_pruned, pruned, "
-                " promoted_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    result.field_name, result.sql_type,
-                    1 if result.column_added else 0,
-                    result.rows_backfilled, result.rows_pruned,
-                    1 if result.pruned else 0,
-                    result.promoted_at,
-                ),
-            )
-            conn.commit()
+        db.document_aspects.record_promotion_audit(
+            field_name=result.field_name,
+            sql_type=result.sql_type,
+            column_added=result.column_added,
+            rows_backfilled=result.rows_backfilled,
+            rows_pruned=result.rows_pruned,
+            pruned=result.pruned,
+            promoted_at=result.promoted_at,
+        )
     except Exception:
         _log.debug("aspect_promotion_audit_failed", exc_info=True)

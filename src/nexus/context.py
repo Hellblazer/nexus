@@ -116,12 +116,7 @@ def generate_context_l1(
     allowed = _repo_collections(repo_path)
 
     # Query root topics only (excludes children from split)
-    with taxonomy._lock:
-        rows = taxonomy.conn.execute(
-            "SELECT collection, label, doc_count FROM topics "
-            "WHERE parent_id IS NULL "
-            "ORDER BY doc_count DESC"
-        ).fetchall()
+    rows = taxonomy.get_root_topics()
 
     if not rows:
         return None

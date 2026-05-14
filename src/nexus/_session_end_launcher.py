@@ -145,10 +145,10 @@ def _print_tier_status_summary() -> None:
     three surfaces never disagree on attribution.
     """
     try:
-        import sqlite3
         from pathlib import Path
 
         from nexus.config import default_db_path
+        from nexus.mcp_infra import t2_ctx
         from nexus.session import resolve_active_session_id
 
         session_id = resolve_active_session_id()
@@ -157,22 +157,10 @@ def _print_tier_status_summary() -> None:
         db_path = default_db_path()
         if not Path(db_path).exists():
             return
-        conn = sqlite3.connect(str(db_path))
-        try:
-            has_table = conn.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name='tier_writes'"
-            ).fetchone()
-            if not has_table:
-                return
-            rows = conn.execute(
-                "SELECT tier, COUNT(*) FROM tier_writes "
-                "WHERE session_id = ? GROUP BY tier",
-                (session_id,),
-            ).fetchall()
-        finally:
-            conn.close()
-        by_tier = {tier: n for tier, n in rows}
+        # RDR-112 P0-gate (nexus-yqeu): route through Telemetry domain
+        # method so daemon-mode swap covers this code path.
+        with t2_ctx() as db:
+            by_tier = db.telemetry.query_session_tier_totals(session_id)
         total = sum(by_tier.values())
         if total == 0:
             return

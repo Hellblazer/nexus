@@ -846,6 +846,142 @@ class DocumentAspects:
             ]
         return records
 
+    # ── schema-evolution helpers (RDR-112 P0-gate, nexus-mz2c) ──────────────
+    #
+    # Used by ``nexus.aspect_promotion`` to graduate JSON ``extras`` keys
+    # into their own typed columns. All four methods encapsulate
+    # operations the aspect_promotion module previously inlined via
+    # ``db.document_aspects.conn.execute(...)``.
+
+    def alter_add_column_if_missing(
+        self, *, field_name: str, sql_type: str,
+    ) -> bool:
+        """``ALTER TABLE document_aspects ADD COLUMN <name> <type>``.
+
+        Idempotent — returns True iff the column was added (False if it
+        already existed). The caller is responsible for validating
+        ``field_name`` and ``sql_type`` against an allowlist; this method
+        does not re-validate because it composes raw SQL.
+        """
+        with self._lock:
+            cols = {
+                r[1] for r in self.conn.execute(
+                    "PRAGMA table_info(document_aspects)"
+                ).fetchall()
+            }
+            if field_name in cols:
+                return False
+            self.conn.execute(
+                f"ALTER TABLE document_aspects "
+                f"ADD COLUMN {field_name} {sql_type}"
+            )
+            self.conn.commit()
+        return True
+
+    def backfill_extras_column(self, *, field_name: str) -> int:
+        """Copy ``extras['$.<field>']`` into the typed ``<field>``
+        column for rows where the typed column is currently NULL.
+
+        Returns the affected row count. Caller validates ``field_name``.
+        """
+        with self._lock:
+            cur = self.conn.execute(
+                f"UPDATE document_aspects "
+                f"SET {field_name} = json_extract(extras, ?) "
+                f"WHERE {field_name} IS NULL "
+                f"  AND json_extract(extras, ?) IS NOT NULL",
+                (f"$.{field_name}", f"$.{field_name}"),
+            )
+            self.conn.commit()
+        return cur.rowcount or 0
+
+    def prune_extras_key(self, *, field_name: str) -> int:
+        """Remove ``<field>`` from the ``extras`` JSON blob across all rows.
+
+        Returns the affected row count. Caller decides whether prune
+        is safe (every reader must already consume the typed column).
+        """
+        with self._lock:
+            cur = self.conn.execute(
+                "UPDATE document_aspects "
+                "SET extras = json_remove(extras, ?) "
+                "WHERE json_extract(extras, ?) IS NOT NULL",
+                (f"$.{field_name}", f"$.{field_name}"),
+            )
+            self.conn.commit()
+        return cur.rowcount or 0
+
+    def _ensure_promotion_log_table(self) -> None:
+        """Create ``aspect_promotion_log`` lazily (idempotent)."""
+        with self._lock:
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS aspect_promotion_log (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    field_name      TEXT NOT NULL,
+                    sql_type        TEXT NOT NULL,
+                    column_added    INTEGER NOT NULL,
+                    rows_backfilled INTEGER NOT NULL DEFAULT 0,
+                    rows_pruned     INTEGER NOT NULL DEFAULT 0,
+                    pruned          INTEGER NOT NULL DEFAULT 0,
+                    promoted_at     TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_aspect_promotion_log_field
+                    ON aspect_promotion_log(field_name);
+            """)
+            self.conn.commit()
+
+    def record_promotion_audit(
+        self,
+        *,
+        field_name: str,
+        sql_type: str,
+        column_added: bool,
+        rows_backfilled: int,
+        rows_pruned: int,
+        pruned: bool,
+        promoted_at: str,
+    ) -> None:
+        """Insert one row into ``aspect_promotion_log`` (best-effort)."""
+        self._ensure_promotion_log_table()
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO aspect_promotion_log "
+                "(field_name, sql_type, column_added, "
+                " rows_backfilled, rows_pruned, pruned, promoted_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    field_name, sql_type,
+                    1 if column_added else 0,
+                    rows_backfilled, rows_pruned,
+                    1 if pruned else 0,
+                    promoted_at,
+                ),
+            )
+            self.conn.commit()
+
+    def list_promotion_audit(self) -> list[dict]:
+        """Full ``aspect_promotion_log`` history, oldest first."""
+        self._ensure_promotion_log_table()
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT field_name, sql_type, column_added, rows_backfilled, "
+                "       rows_pruned, pruned, promoted_at "
+                "FROM aspect_promotion_log "
+                "ORDER BY promoted_at ASC, id ASC"
+            ).fetchall()
+        return [
+            {
+                "field_name": r[0],
+                "sql_type": r[1],
+                "column_added": bool(r[2]),
+                "rows_backfilled": r[3],
+                "rows_pruned": r[4],
+                "pruned": bool(r[5]),
+                "promoted_at": r[6],
+            }
+            for r in rows
+        ]
+
     # ── paginated operator helpers (RDR-112 P0.5, nexus-xcji) ───────────────
     #
     # Each method below replaces a ``db.document_aspects.conn.execute``

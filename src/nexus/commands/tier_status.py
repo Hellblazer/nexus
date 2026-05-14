@@ -169,25 +169,15 @@ def tier_status_cmd(
                 )
             raise click.exceptions.Exit(1)
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        # Migration is lazy in the recorder path; if no writes have ever
-        # been recorded the table won't exist. Treat as zero.
-        has_table = conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='tier_writes'"
-        ).fetchone()
-        if not has_table:
-            rows = []
-        else:
-            rows = _query(
-                conn,
-                session_id=target_session,
-                since_ts=since,
-                last_n=last_n,
-            )
-    finally:
-        conn.close()
+    # RDR-112 P0-gate (nexus-yqeu): route through Telemetry domain
+    # method so daemon-mode swap covers this admin path.
+    from nexus.mcp_infra import t2_ctx
+    with t2_ctx() as db:
+        rows = db.telemetry.query_tier_status_rows(
+            session_id=target_session,
+            since_ts=since,
+            last_n=last_n,
+        )
 
     summary = _summarize(rows)
     total = sum(summary.values())

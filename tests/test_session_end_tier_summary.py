@@ -47,6 +47,7 @@ def isolated_t2(
     from nexus.commands import _helpers
     db = tmp_path / "t.db"
     monkeypatch.setattr("nexus.config.default_db_path", lambda: db)
+    monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: db)
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
     import nexus.session
     monkeypatch.setattr(nexus.session, "read_claude_session_id", lambda: None)

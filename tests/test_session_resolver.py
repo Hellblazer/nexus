@@ -162,30 +162,13 @@ class TestRecordTierWriteRoutesThroughHelper:
 
         observed: dict[str, str] = {}
 
-        class _FakeTaxonomyConn:
-            def execute(self, sql, params):
-                if "INSERT INTO tier_writes" in sql:
-                    observed["session_id"] = params[0]
-                return self
-
-            def commit(self):
-                pass
-
-        class _FakeTaxonomy:
-            def __init__(self):
-                self.conn = _FakeTaxonomyConn()
-                self._lock = _NullLock()
-
-        class _NullLock:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
+        class _FakeTelemetry:
+            def record_tier_write(self, **kw):
+                observed["session_id"] = kw["session_id"]
 
         class _FakeT2:
             def __init__(self):
-                self.taxonomy = _FakeTaxonomy()
+                self.telemetry = _FakeTelemetry()
 
         from contextlib import contextmanager
 
@@ -194,9 +177,6 @@ class TestRecordTierWriteRoutesThroughHelper:
             yield _FakeT2()
 
         monkeypatch.setattr("nexus.mcp_infra.t2_ctx", _fake_t2_ctx)
-        monkeypatch.setattr(
-            "nexus.db.migrations.migrate_tier_writes", lambda conn: None
-        )
 
         _record_tier_write(tool="t", tier="T1")
         assert observed.get("session_id") == "HELPER-SENTINEL-9876"
@@ -212,30 +192,13 @@ class TestRecordTierWriteRoutesThroughHelper:
 
         observed: dict[str, str] = {}
 
-        class _FakeTaxonomyConn:
-            def execute(self, sql, params):
-                if "INSERT INTO tier_writes" in sql:
-                    observed["session_id"] = params[0]
-                return self
-
-            def commit(self):
-                pass
-
-        class _NullLock:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-        class _FakeTaxonomy:
-            def __init__(self):
-                self.conn = _FakeTaxonomyConn()
-                self._lock = _NullLock()
+        class _FakeTelemetry:
+            def record_tier_write(self, **kw):
+                observed["session_id"] = kw["session_id"]
 
         class _FakeT2:
             def __init__(self):
-                self.taxonomy = _FakeTaxonomy()
+                self.telemetry = _FakeTelemetry()
 
         from contextlib import contextmanager
 
@@ -244,9 +207,6 @@ class TestRecordTierWriteRoutesThroughHelper:
             yield _FakeT2()
 
         monkeypatch.setattr("nexus.mcp_infra.t2_ctx", _fake_t2_ctx)
-        monkeypatch.setattr(
-            "nexus.db.migrations.migrate_tier_writes", lambda conn: None
-        )
 
         _record_tier_write(tool="t", tier="T1")
         assert observed.get("session_id") == "unknown"
@@ -333,7 +293,10 @@ class TestSessionEndLauncherRoutesThroughHelper:
         conn.close()
 
         monkeypatch.setattr(
-            "nexus.config.default_db_path", lambda: str(db_path)
+            "nexus.config.default_db_path", lambda: db_path,
+        )
+        monkeypatch.setattr(
+            "nexus.mcp_infra.default_db_path", lambda: db_path,
         )
 
         # Capture stderr so we can assert the launcher only counted the

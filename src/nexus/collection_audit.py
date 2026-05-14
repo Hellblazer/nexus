@@ -335,6 +335,12 @@ def _open_catalog_conn() -> sqlite3.Connection | None:
 
     Tests monkeypatch this module-level function to point at a seeded
     fixture; production reaches to ``~/.config/nexus`` by default.
+
+    RDR-112 D3 allowlist: the catalog has its own daemon architecture
+    (RDR-103) — its SQLite is intentionally separate from the T2
+    daemon's ``memory.db``. This direct open is therefore inside the
+    catalog's own scope, not a T2-daemon violation. The audit verb is
+    also read-only / advisory-only.
     """
     from nexus.catalog.catalog import Catalog
     from nexus.config import catalog_path

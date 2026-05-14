@@ -64,7 +64,7 @@ def repair_cmd() -> None:
     editor commands.
     """
     from nexus.commands._helpers import default_db_path
-    from nexus.db.migrations import _backfill_plan_dimensions
+    from nexus.mcp_infra import t2_ctx
 
     db_path = default_db_path()
     if not db_path.exists():
@@ -73,38 +73,13 @@ def repair_cmd() -> None:
         )
         return
 
-    # Context manager guards against a raise in _backfill_plan_dimensions
-    # leaking the connection (RDR-092 code-review S-3).
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA journal_mode=WAL")
-
-        # Count NULL-dimension rows before the run so the report reflects
-        # reality even when the migration itself is a no-op.
-        pending_before = conn.execute(
-            "SELECT COUNT(*) FROM plans WHERE dimensions IS NULL"
-        ).fetchone()[0]
-
-        _backfill_plan_dimensions(conn)
-
-        pending_after = conn.execute(
-            "SELECT COUNT(*) FROM plans WHERE dimensions IS NULL"
-        ).fetchone()[0]
-        backfilled = pending_before - pending_after
-
-        # Surface low-confidence rows for operator review, oldest first so
-        # a re-run reports a stable order.
-        low_conf_rows = conn.execute(
-            "SELECT id, query, verb FROM plans "
-            "WHERE tags LIKE '%backfill-low-conf%' "
-            "ORDER BY id ASC"
-        ).fetchall()
-    finally:
-        conn.close()
+    # RDR-112 P0-gate (nexus-yqeu): route through PlanLibrary domain
+    # method so daemon-mode swap covers this admin path.
+    with t2_ctx() as db:
+        backfilled, low_conf_rows = db.plans.backfill_dimensions()
 
     click.echo(f"{backfilled} backfilled")
-    if backfilled == 0 and pending_before == 0:
+    if backfilled == 0:
         click.echo("Nothing to do; every plan already carries dimensions.")
 
     if low_conf_rows:

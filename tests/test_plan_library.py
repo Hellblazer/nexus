@@ -974,20 +974,25 @@ def test_plans_mtime_returns_float_when_db_exists(plan_db: T2Database) -> None:
     assert mtime > 0.0
 
 
-def test_plans_mtime_advances_after_write(plan_db: T2Database) -> None:
-    """A write to the plans table moves the file mtime forward."""
-    import time
+def test_plans_mtime_reflects_filesystem_mtime(plan_db: T2Database) -> None:
+    """``plans_mtime`` returns the live ``st_mtime`` of the SQLite file.
+
+    Driven by an explicit ``os.utime`` so the assertion is independent
+    of SQLite's WAL-checkpoint scheduling (write-ahead writes go to the
+    ``-wal`` sidecar, not the main file, so a save_plan() does not
+    necessarily bump the main file's mtime in time for an immediate
+    stat). RDR-112 P0-gate cleanup (nexus-k8ma — project no-sleep rule).
+    """
+    import os
 
     before = plan_db.plans.plans_mtime()
     assert before is not None
 
-    # 50ms clears any sub-second mtime resolution on tmp_path filesystems.
-    time.sleep(0.05)
-    plan_db.save_plan(query="post-write", plan_json="{}", tags="x")
-
+    target = before + 10.0
+    os.utime(plan_db._path, (target, target))
     after = plan_db.plans.plans_mtime()
     assert after is not None
-    assert after >= before
+    assert after == pytest.approx(target, abs=1.0)
 
 
 def test_plans_mtime_returns_none_when_path_missing(tmp_path) -> None:

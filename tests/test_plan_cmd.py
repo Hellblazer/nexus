@@ -99,6 +99,8 @@ class TestPlanRepair:
 
         with patch(
             "nexus.commands._helpers.default_db_path", return_value=db_path,
+        ), patch(
+            "nexus.mcp_infra.default_db_path", return_value=db_path,
         ):
             result = runner.invoke(main, ["plan", "repair"])
         assert result.exit_code == 0, result.output

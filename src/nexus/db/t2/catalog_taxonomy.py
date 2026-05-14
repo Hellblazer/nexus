@@ -1502,6 +1502,135 @@ class CatalogTaxonomy:
             ).fetchall()
         return {row[0]: idx + 1 for idx, row in enumerate(rows)}
 
+    def get_assignment_summary(self) -> dict[str, Any] | None:
+        """Return aggregate taxonomy/assignment counts for catalog stats.
+
+        Returns ``None`` when the ``topics`` table is empty (signals
+        "no taxonomy work has run yet" to the caller — same behaviour
+        as the prior inline ``compute_chash_coverage`` reach-through).
+        Keys: ``topics``, ``assignments``, ``distinct_topics_assigned``,
+        ``projection_by_source``. RDR-112 P0-gate (nexus-mz2c).
+        """
+        with self._lock:
+            topic_total = self.conn.execute(
+                "SELECT count(*) FROM topics"
+            ).fetchone()[0]
+            if not topic_total:
+                return None
+            assignment_total = self.conn.execute(
+                "SELECT count(*) FROM topic_assignments"
+            ).fetchone()[0]
+            distinct_topics = self.conn.execute(
+                "SELECT count(DISTINCT topic_id) FROM topic_assignments"
+            ).fetchone()[0]
+            by_source_rows = self.conn.execute(
+                "SELECT source_collection, count(*) "
+                "FROM topic_assignments "
+                "WHERE assigned_by = 'projection' "
+                "AND source_collection IS NOT NULL "
+                "AND source_collection != '' "
+                "GROUP BY source_collection "
+                "ORDER BY count(*) DESC"
+            ).fetchall()
+        return {
+            "topics": int(topic_total),
+            "assignments": int(assignment_total),
+            "distinct_topics_assigned": int(distinct_topics),
+            "projection_by_source": {row[0]: int(row[1]) for row in by_source_rows},
+        }
+
+    def query_merge_candidate_pairs(
+        self,
+        *,
+        min_shared: int = 3,
+        min_similarity: float = 0.5,
+        excluded_topic_ids: tuple[int, ...] = (),
+        limit: int = 50,
+    ) -> list[tuple[str, str, int, float]]:
+        """Cross-collection merge-candidate (a, b, shared, mean_sim) rows.
+
+        Symmetric-pair-normalised via ``source_collection < t.collection``.
+        Excludes topics in ``excluded_topic_ids`` (the hub-filter case).
+        RDR-112 P0-gate (nexus-mz2c).
+        """
+        hub_filter = ""
+        hub_params: tuple[int, ...] = ()
+        if excluded_topic_ids:
+            placeholders = ",".join("?" * len(excluded_topic_ids))
+            hub_filter = f" AND ta.topic_id NOT IN ({placeholders})"
+            hub_params = excluded_topic_ids
+        sql = f"""
+            SELECT ta.source_collection AS a,
+                   t.collection AS b,
+                   COUNT(DISTINCT ta.topic_id) AS shared,
+                   AVG(ta.similarity) AS mean_sim
+            FROM topic_assignments ta
+            JOIN topics t ON ta.topic_id = t.id
+            WHERE ta.source_collection IS NOT NULL
+              AND ta.source_collection < t.collection
+              AND ta.similarity IS NOT NULL
+              {hub_filter}
+            GROUP BY ta.source_collection, t.collection
+            HAVING shared >= ? AND mean_sim >= ?
+            ORDER BY shared * mean_sim DESC
+            LIMIT ?
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                sql, (*hub_params, min_shared, min_similarity, limit),
+            ).fetchall()
+        return [(r[0], r[1], int(r[2]), float(r[3])) for r in rows]
+
+    def sample_merge_candidate_doc_ids(
+        self,
+        *,
+        source_collection: str,
+        target_collection: str,
+        excluded_topic_ids: tuple[int, ...] = (),
+        sample_k: int = 3,
+    ) -> list[str]:
+        """Return up to ``sample_k`` doc_ids for the
+        ``(source_collection, target_collection)`` merge-candidate pair,
+        ordered by similarity desc. RDR-112 P0-gate (nexus-mz2c).
+        """
+        hub_filter = ""
+        hub_params: tuple[int, ...] = ()
+        if excluded_topic_ids:
+            placeholders = ",".join("?" * len(excluded_topic_ids))
+            hub_filter = f" AND ta.topic_id NOT IN ({placeholders})"
+            hub_params = excluded_topic_ids
+        sql = (
+            "SELECT ta.doc_id "
+            "FROM topic_assignments ta "
+            "JOIN topics t ON ta.topic_id = t.id "
+            "WHERE ta.source_collection = ? AND t.collection = ? "
+            "  AND ta.similarity IS NOT NULL "
+            f"  {hub_filter} "
+            "ORDER BY ta.similarity DESC "
+            "LIMIT ?"
+        )
+        with self._lock:
+            rows = self.conn.execute(
+                sql,
+                (source_collection, target_collection, *hub_params, sample_k),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def get_root_topics(self) -> list[tuple[str, str, int]]:
+        """Return root topics (``parent_id IS NULL``) ordered by doc count.
+
+        Returns ``(collection, label, doc_count)`` rows for use by the
+        L1 context cache (``nexus.context.refresh_context_l1``).
+        RDR-112 P0-gate (nexus-mz2c).
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT collection, label, doc_count FROM topics "
+                "WHERE parent_id IS NULL "
+                "ORDER BY doc_count DESC"
+            ).fetchall()
+        return [(r[0], r[1], int(r[2] or 0)) for r in rows]
+
     def get_topics_for_collection(
         self,
         collection: str,

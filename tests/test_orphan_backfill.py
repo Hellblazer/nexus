@@ -293,7 +293,7 @@ class _FakeT3:
         self._by_collection = by_collection
         self._client = self  # _client.get_collection in the function call
 
-    def get_collection(self, *, name: str):
+    def get_collection(self, name: str | None = None):
         return _FakeChromaCollection(self._by_collection.get(name, []))
 
 
