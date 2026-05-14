@@ -4349,6 +4349,18 @@ def synthesize_log_cmd(
     ),
 )
 @click.option(
+    "--name-vs-embed-dim",
+    "name_vs_embed_dim",
+    is_flag=True,
+    help=(
+        "nexus-j9ey: detect pre-4.32 mislabeled collections. Samples "
+        "one chunk per conformant T3 collection and compares the "
+        "actual embedding dim to the dim implied by the collection's "
+        "__<model>__ segment. FAIL on mismatch; suggests `nx collection "
+        "rename` to relabel the collection cosmetically (no re-embed)."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
@@ -4360,6 +4372,7 @@ def doctor_cmd(
     chunk_size_distribution: bool,
     chunk_text_dedup: bool,
     t3_vs_catalog: bool,
+    name_vs_embed_dim: bool,
     as_json: bool,
 ) -> None:
     """RDR-101 catalog doctor surface.
@@ -4378,13 +4391,14 @@ def doctor_cmd(
     any_check = (
         replay_equality or t3_doc_id_coverage or collections_drift
         or chunk_size_distribution or chunk_text_dedup or t3_vs_catalog
+        or name_vs_embed_dim
     )
     if not any_check:
         raise click.UsageError(
             "Pass a check flag: --replay-equality, "
             "--t3-doc-id-coverage, --collections-drift, "
             "--chunk-size-distribution, --chunk-text-dedup, "
-            "or --t3-vs-catalog."
+            "--t3-vs-catalog, or --name-vs-embed-dim."
         )
     if strict_not_in_t3 and not t3_doc_id_coverage:
         raise click.UsageError(
@@ -4491,6 +4505,18 @@ def doctor_cmd(
             if _printed_anything:
                 click.echo("")
             _print_t3_vs_catalog_text(report)
+            _printed_anything = True
+        if not report["pass"]:
+            overall_pass = False
+    if name_vs_embed_dim:
+        report = _run_name_vs_embed_dim()
+        if as_json:
+            json_payload["name_vs_embed_dim"] = report
+        else:
+            if _printed_anything:
+                click.echo("")
+            _print_name_vs_embed_dim_text(report)
+            _printed_anything = True
         if not report["pass"]:
             overall_pass = False
 
@@ -4994,6 +5020,158 @@ def _print_t3_vs_catalog_text(report: dict) -> None:
             click.echo(
                 f"    {d['physical_collection']}  docs={d['doc_count']}"
             )
+
+
+# ── nexus-j9ey: --name-vs-embed-dim ──────────────────────────────────────
+
+
+_VOYAGE_DIM = 1024
+"""All current voyage-3 family embedders produce 1024-dim vectors
+(voyage-3, voyage-code-3, voyage-context-3). Hardcoded because the
+token alone has no dim suffix. If Voyage adds a different-dim model
+to the canonical set this needs to grow into a map."""
+
+
+def _expected_dim_for_model_token(token: str) -> int | None:
+    """Return the dim implied by a conformant ``__<model>__`` segment,
+    or None if the token is unrecognized.
+
+    Local-mode tokens encode the dim in the suffix
+    (``minilm-l6-v2-384`` -> 384, ``bge-base-en-v15-768`` -> 768).
+    Voyage tokens are hardcoded to 1024."""
+    from nexus.corpus import (  # noqa: PLC0415
+        CANONICAL_EMBEDDING_MODELS,
+        LOCAL_EMBEDDING_MODELS,
+    )
+    if token in CANONICAL_EMBEDDING_MODELS:
+        return _VOYAGE_DIM
+    if token in LOCAL_EMBEDDING_MODELS:
+        tail = token.rsplit("-", 1)[-1]
+        try:
+            return int(tail)
+        except ValueError:
+            return None
+    return None
+
+
+def _run_name_vs_embed_dim() -> dict:
+    """Detect mislabeled conformant collections (4.28-era write-side bug).
+
+    Iterates T3 collections, skips bypass-schema and non-conformant
+    names, samples one chunk per remaining collection, and compares
+    actual embedding dim to the dim implied by the name's
+    ``__<model>__`` segment. Read-only against T3."""
+    from nexus.corpus import (  # noqa: PLC0415
+        is_conformant_collection_name,
+        parse_conformant_collection_name,
+    )
+    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
+
+    mismatches: list[dict] = []
+    empty: list[str] = []
+    checked = 0
+    skipped_non_conformant = 0
+    unknown_token: list[dict] = []
+
+    try:
+        t3_db = make_t3()
+        cols = [
+            c["name"] for c in t3_db.list_collections()
+            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+        ]
+    except Exception as exc:
+        return {
+            "pass": False,
+            "checked": 0,
+            "mismatches": [],
+            "empty": [],
+            "skipped_non_conformant": 0,
+            "unknown_token": [],
+            "error": f"Failed to list T3 collections: {exc}",
+        }
+
+    client = t3_db._client  # type: ignore[attr-defined]
+    for name in cols:
+        if not is_conformant_collection_name(name):
+            skipped_non_conformant += 1
+            continue
+        parsed = parse_conformant_collection_name(name)
+        token = parsed["embedding_model"]
+        expected = _expected_dim_for_model_token(token)
+        if expected is None:
+            unknown_token.append({"collection": name, "token": token})
+            continue
+        try:
+            coll = client.get_collection(name)
+            sample = coll.get(limit=1, include=["embeddings"])
+        except Exception as exc:
+            unknown_token.append(
+                {"collection": name, "token": token, "error": str(exc)}
+            )
+            continue
+        embs = sample.get("embeddings")
+        if embs is None or len(embs) == 0:
+            empty.append(name)
+            continue
+        actual = len(embs[0])
+        checked += 1
+        if actual != expected:
+            mismatches.append({
+                "collection": name,
+                "claimed_model": token,
+                "expected_dim": expected,
+                "actual_dim": actual,
+            })
+
+    return {
+        "pass": not mismatches,
+        "checked": checked,
+        "mismatches": mismatches,
+        "empty": empty,
+        "skipped_non_conformant": skipped_non_conformant,
+        "unknown_token": unknown_token,
+    }
+
+
+def _print_name_vs_embed_dim_text(report: dict) -> None:
+    if report.get("error"):
+        click.echo(f"name-vs-embed-dim: ERROR - {report['error']}")
+        return
+    status = "PASS" if report["pass"] else "FAIL"
+    click.echo(f"name-vs-embed-dim: {status}")
+    click.echo(
+        f"  checked={report['checked']}  "
+        f"mismatches={len(report['mismatches'])}  "
+        f"empty={len(report['empty'])}  "
+        f"skipped-non-conformant={report['skipped_non_conformant']}"
+    )
+    if report["mismatches"]:
+        click.echo(
+            f"\n  Mislabeled collections ({len(report['mismatches'])}):"
+        )
+        for m in report["mismatches"]:
+            click.echo(
+                f"    {m['collection']}\n"
+                f"      claims {m['claimed_model']} "
+                f"({m['expected_dim']}d) but holds {m['actual_dim']}d vectors"
+            )
+        click.echo(
+            "\n  Remediate: relabel the collection to match its actual "
+            "embeddings:\n"
+            "    nx collection rename <old> <new>\n"
+            "  Local-mode users: replace the voyage-* segment with the "
+            "matching local token (e.g. minilm-l6-v2-384 for 384d, "
+            "bge-base-en-v15-768 for 768d). No re-embed; cosmetic only."
+        )
+    if report["unknown_token"]:
+        click.echo(
+            f"\n  Collections with unrecognized model token "
+            f"({len(report['unknown_token'])}):"
+        )
+        for u in report["unknown_token"][:20]:
+            extra = f"  ({u['error']})" if u.get("error") else ""
+            click.echo(f"    {u['collection']}  token={u['token']}{extra}")
 
 
 def _check_bootstrap_status() -> dict:
