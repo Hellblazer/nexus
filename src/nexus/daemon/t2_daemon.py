@@ -2,6 +2,7 @@
 """T2 daemon — single-writer asyncio process owning the T2 SQLite stores.
 
 RDR-112 P1.1 (nexus-61x6): transport scaffold + dual-bind UDS+TCP.
+RDR-112 P1.2 (nexus-qy0u): domain-store RPC dispatcher.
 
 This module provides:
   - ``T2Daemon``: the daemon class, managing two concurrent asyncio servers
@@ -10,6 +11,8 @@ This module provides:
     length + JSON bytes + \\n trailing for human-debuggability).
   - ``DAEMON_PROTOCOL_VERSION``: the handshake version string clients must
     match.
+  - ``t2_json_dumps`` / ``t2_json_loads``: type-tagged JSON serialization
+    handling datetime, bytes, Path, and dataclasses.
 
 Wire frame: ``<4-byte big-endian length><json bytes>\\n``
   - Length counts JSON bytes only (not the trailing ``\\n``).
@@ -23,14 +26,24 @@ Transport discipline (RDR-113):
   - Peer-cred check at accept for UDS: rejects UIDs != daemon UID.
   - No peer-cred check for TCP (loopback trust delegated to orchestrator).
 
-Phase 1.1 scope (THIS module only):
+Phase 1.1 scope:
   - Transport, dual-bind, hello/hello_ack handshake, ping/pong health-check.
   - Discovery file + stdout announce at startup.
   - Spawn-lock (fcntl.LOCK_EX | LOCK_NB) prevents double-bind.
   - Graceful SIGTERM drain + discovery-file unlink.
 
+Phase 1.2 scope (nexus-qy0u):
+  - Domain-store RPC dispatcher: ``{op: "<store>.<method>", args: {...}}``.
+  - Dispatch table built at startup by introspecting T2Database attributes.
+  - Each store method runs in a thread-pool executor (stores are sync).
+  - Type-tagged JSON serialization: datetime (ISO-8601), bytes (base64),
+    Path (str), dataclasses (dict of fields). Non-serialisable args rejected
+    with a clear error.
+  - Error surfacing: handler exceptions wrapped as
+    ``{error: {type, message, traceback}}`` so the connection stays open.
+  - ``database.rename_collection_cascade`` exposed as a top-level RPC.
+
 Out of scope here (later beads):
-  - Domain-store RPCs (P1.2 nexus-qy0u)
   - EventStream subscription (P1.3 nexus-m4gm)
   - Migration runner (P1.4 nexus-w0et)
   - Subspace admin (P1.5 nexus-x98k)
@@ -39,13 +52,17 @@ Out of scope here (later beads):
 from __future__ import annotations
 
 import asyncio
+import base64
+import dataclasses
 import fcntl
+import inspect
 import json
 import os
 import signal
 import socket
 import struct
 import sys
+import traceback as _traceback_mod
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any
@@ -95,6 +112,131 @@ _DISCOVERY_FILE_TEMPLATE: str = "t2_addr.{uid}"
 _SPAWN_LOCK_FILE: str = "t2_spawn.lock"
 
 # ---------------------------------------------------------------------------
+# Type-tagged JSON serialization (P1.2 nexus-qy0u)
+# ---------------------------------------------------------------------------
+
+#: Sentinel type tag for datetime values in RPC frames.
+_TAG_DATETIME = "__datetime__"
+#: Sentinel type tag for bytes values in RPC frames.
+_TAG_BYTES = "__bytes__"
+#: Sentinel type tag for Path values in RPC frames.
+_TAG_PATH = "__path__"
+#: Sentinel type tag for dataclass instances in RPC frames.
+_TAG_DATACLASS = "__dataclass__"
+
+#: Store-attribute names on T2Database that are domain stores (used by
+#: ``_build_dispatch_table`` to enumerate RPC targets).
+_T2_STORE_ATTRS: tuple[str, ...] = (
+    "memory",
+    "plans",
+    "chash_index",
+    "taxonomy",
+    "telemetry",
+    "document_aspects",
+    "aspect_queue",
+)
+
+#: Top-level T2Database methods exposed under the "database" pseudo-store.
+_T2_DATABASE_METHODS: tuple[str, ...] = ("rename_collection_cascade",)
+
+#: Method names denied at dispatch-table build for ALL stores. ``close`` is
+#: filtered to prevent a client from tearing down the daemon's SQLite handles
+#: via RPC; underscored names are already filtered separately.
+_RPC_DENY_METHODS: frozenset[str] = frozenset({"close"})
+
+#: Per-op denylist (qualified ``<store>.<method>``). Methods whose signature
+#: accepts a dataclass instance cannot round-trip JSON until a typed-arg
+#: reconstructor lands. Re-enable as the reconstructor adds coverage.
+_RPC_DENY_OPS: frozenset[str] = frozenset({
+    "document_aspects.upsert",
+    "document_aspects.get",
+    "document_aspects.get_by_doc_id",
+})
+
+
+def _t2_encode(obj: Any) -> Any:
+    """Recursively encode ``obj`` into a JSON-safe structure.
+
+    Handles:
+    - ``datetime`` -> ``{"__datetime__": "<ISO-8601>"}``
+    - ``bytes``    -> ``{"__bytes__": "<base64>"}``
+    - ``Path``     -> ``{"__path__": "<str>"}``
+    - dataclass    -> ``{"__dataclass__": "<cls>", "fields": {<field>: <value>}}``
+    - ``tuple``    -> list (JSON round-trip; restored as list on client)
+    - dict / list  -> recurse into values
+    - primitives (str, int, float, bool, None) -> pass through
+
+    Raises:
+        TypeError: for any other type.
+    """
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, datetime):
+        return {_TAG_DATETIME: obj.isoformat()}
+    if isinstance(obj, bytes):
+        return {_TAG_BYTES: base64.b64encode(obj).decode("ascii")}
+    if isinstance(obj, Path):
+        return {_TAG_PATH: str(obj)}
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        fields = {
+            f.name: _t2_encode(getattr(obj, f.name))
+            for f in dataclasses.fields(obj)
+        }
+        return {_TAG_DATACLASS: type(obj).__qualname__, "fields": fields}
+    if isinstance(obj, dict):
+        return {k: _t2_encode(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_t2_encode(v) for v in obj]
+    raise TypeError(
+        f"value of type {type(obj).__qualname__!r} is not JSON-serialisable via t2_encode"
+    )
+
+
+def _t2_decode(obj: Any) -> Any:
+    """Recursively decode a structure produced by ``_t2_encode``.
+
+    Dataclasses are reconstructed only to the extent that the receiver
+    knows the class; the daemon uses this for incoming args, the client
+    for outgoing results. Unknown ``__dataclass__`` tags are passed
+    through as plain dicts (the actual class is imported by the proxy
+    before the call).
+    """
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, list):
+        return [_t2_decode(v) for v in obj]
+    if isinstance(obj, dict):
+        if _TAG_DATETIME in obj:
+            return datetime.fromisoformat(obj[_TAG_DATETIME])
+        if _TAG_BYTES in obj:
+            return base64.b64decode(obj[_TAG_BYTES])
+        if _TAG_PATH in obj:
+            return Path(obj[_TAG_PATH])
+        if _TAG_DATACLASS in obj:
+            # Return as plain dict; caller reconstructs if needed.
+            return {k: _t2_decode(v) for k, v in obj["fields"].items()}
+        return {k: _t2_decode(v) for k, v in obj.items()}
+    return obj
+
+
+def t2_json_dumps(obj: Any) -> bytes:
+    """Serialize ``obj`` to JSON bytes using the T2 type-tagged encoder.
+
+    Suitable for the RPC wire frame when ``obj`` contains datetime, bytes,
+    Path, or dataclass values.
+
+    Raises:
+        TypeError: if ``obj`` contains a value that cannot be serialised.
+    """
+    return json.dumps(_t2_encode(obj), separators=(",", ":")).encode()
+
+
+def t2_json_loads(data: bytes | str) -> Any:
+    """Deserialize JSON bytes produced by ``t2_json_dumps``."""
+    return _t2_decode(json.loads(data))
+
+
+# ---------------------------------------------------------------------------
 # Wire-frame helpers
 # ---------------------------------------------------------------------------
 
@@ -106,11 +248,14 @@ def write_frame(writer: asyncio.StreamWriter, obj: dict[str, Any]) -> None:
     The trailing newline is for human-debuggability (``cat`` the socket);
     the length prefix is what the parser uses.
 
+    Uses the T2 type-tagged encoder so that datetime, bytes, Path, and
+    dataclass values are preserved across the wire (P1.2 nexus-qy0u).
+
     Args:
         writer: asyncio StreamWriter to buffer into.
-        obj: JSON-serialisable mapping to send.
+        obj: mapping to send. All values must be t2_encode-compatible.
     """
-    payload: bytes = json.dumps(obj, separators=(",", ":")).encode()
+    payload: bytes = t2_json_dumps(obj)
     header: bytes = struct.pack(">I", len(payload))
     writer.write(header + payload + b"\n")
 
@@ -136,7 +281,62 @@ async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
         )
     # +1 for the trailing \n
     data = await reader.readexactly(length + 1)
-    return json.loads(data[:-1])  # strip \n before parsing
+    return t2_json_loads(data[:-1])  # strip \n before parsing
+
+
+# ---------------------------------------------------------------------------
+# Dispatch table builder (P1.2 nexus-qy0u)
+# ---------------------------------------------------------------------------
+
+
+def _build_dispatch_table(t2db: Any) -> dict[str, Any]:
+    """Build the ``{op: bound_callable}`` dispatch table from a T2Database.
+
+    Introspects each domain-store attribute on ``t2db`` (``memory``,
+    ``plans``, ``chash_index``, ``taxonomy``, ``telemetry``,
+    ``document_aspects``, ``aspect_queue``) and registers every public
+    method (non-dunder, non-underscore-prefixed) as
+    ``"<store_attr>.<method_name>"``.
+
+    Also registers ``"database.<method>"`` for the top-level T2Database
+    methods listed in ``_T2_DATABASE_METHODS`` (currently
+    ``rename_collection_cascade``).
+
+    Args:
+        t2db: A ``T2Database`` instance whose stores are already open.
+
+    Returns:
+        Mapping of RPC op string to bound callable.
+    """
+    table: dict[str, Any] = {}
+
+    # Domain stores (use the module-level constant for single source of truth)
+    for attr in _T2_STORE_ATTRS:
+        store = getattr(t2db, attr, None)
+        if store is None:
+            _log.warning("t2_store_attr_missing", attr=attr)
+            continue
+        for name, method in inspect.getmembers(store, predicate=inspect.ismethod):
+            if name.startswith("_") or name in _RPC_DENY_METHODS:
+                continue  # skip private/dunder methods + denylist
+            op = f"{attr}.{name}"
+            if op in _RPC_DENY_OPS:
+                continue  # per-op denylist (e.g. dataclass-arg methods until reconstructor lands)
+            table[op] = method
+            _log.debug("rpc_registered", op=op)
+
+    # Top-level T2Database methods
+    for name in _T2_DATABASE_METHODS:
+        method = getattr(t2db, name, None)
+        if method is None or not callable(method):
+            _log.warning("t2_database_method_missing", method=name)
+            continue
+        op = f"database.{name}"
+        table[op] = method
+        _log.debug("rpc_registered", op=op)
+
+    _log.info("rpc_table_built", count=len(table))
+    return table
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +359,18 @@ class T2Daemon:
         start_time: ISO-8601 UTC timestamp of daemon startup.
     """
 
-    def __init__(self, config_dir: Path) -> None:
+    def __init__(self, config_dir: Path, *, t2db: Any = None) -> None:
+        """Initialise the daemon.
+
+        Args:
+            config_dir: Directory for the discovery file, spawn-lock file,
+                and socket subdir.
+            t2db: Optional ``T2Database`` instance. When provided, the daemon
+                builds a dispatch table at startup and serves domain-store
+                RPCs (P1.2 nexus-qy0u). When ``None``, only the handshake
+                and ping ops are available (useful for tests that only test
+                transport).
+        """
         self._config_dir = config_dir
         self._socket_dir: Path = config_dir / _SOCKET_SUBDIR
 
@@ -177,6 +388,13 @@ class T2Daemon:
         self._spawn_lock_fh: IO | None = None
         self._active_handlers: set[asyncio.Task] = set()  # type: ignore[type-arg]
         self._stopping: bool = False
+
+        # P1.2 nexus-qy0u: domain-store dispatch table.
+        # Keys: "<store_attr>.<method_name>"; values: bound callables.
+        self._t2db = t2db
+        self._rpc_table: dict[str, Any] = {}
+        if t2db is not None:
+            self._rpc_table = _build_dispatch_table(t2db)
 
     # ------------------------------------------------------------------
     # Public properties (set after start())
@@ -472,12 +690,20 @@ class T2Daemon:
         """Dispatch a single RPC message and return the response frame.
 
         Phase 1.1 ops:
-          - ping → pong with version + start_time
+          - ping -> pong with version + start_time
+
+        Phase 1.2 ops (nexus-qy0u):
+          - ``{op: "<store>.<method>", args: {...}}`` -> dispatched to the
+            registered domain-store method. The method runs in a thread-pool
+            executor (stores are synchronous). Return value is wrapped in
+            ``{result: <t2_encoded>}``; exceptions in
+            ``{error: {type, message, traceback}}``.
 
         Unknown ops return an error frame (not an exception) so the
         connection remains open.
         """
-        match msg.get("op"):
+        op = msg.get("op")
+        match op:
             case "ping":
                 return {
                     "pong": True,
@@ -486,8 +712,49 @@ class T2Daemon:
                     "start_time": self._start_time,
                     "pid": os.getpid(),
                 }
+            case str() if "." in op and op in self._rpc_table:
+                return await self._dispatch_store_rpc(op, msg)
+            case str() if "." in op and op not in self._rpc_table:
+                return {"error": f"unknown RPC op: {op!r}"}
             case _:
-                return {"error": f"unknown op: {msg.get('op')!r}"}
+                return {"error": f"unknown op: {op!r}"}
+
+    async def _dispatch_store_rpc(
+        self, op: str, msg: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Run a domain-store method in the executor and return a response frame.
+
+        Args:
+            op: RPC op string, e.g. ``"memory.get"``.
+            msg: Full RPC message (``args`` key holds kwargs dict).
+
+        Returns:
+            ``{result: <encoded>}`` on success;
+            ``{error: {type, message, traceback}}`` on failure.
+        """
+        fn = self._rpc_table[op]
+        raw_args: dict[str, Any] = msg.get("args", {})
+
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(None, lambda: fn(**raw_args))
+            return {"result": result}
+        except Exception as exc:
+            tb_text = _traceback_mod.format_exc()
+            qname = f"{type(exc).__module__}.{type(exc).__qualname__}"
+            _log.warning(
+                "rpc_handler_error",
+                op=op,
+                exc_type=qname,
+                exc=str(exc),
+            )
+            return {
+                "error": {
+                    "type": qname,
+                    "message": str(exc),
+                    "traceback": tb_text,
+                }
+            }
 
     # ------------------------------------------------------------------
     # Discovery file + stdout announce
@@ -522,9 +789,18 @@ class T2Daemon:
             _log.warning("discovery_unlink_failed", path=str(self._discovery_path), exc=str(exc))
 
     def _announce_stdout(self) -> None:
-        """Emit a single JSON line on stdout for orchestrator capture."""
+        """Emit a single JSON line on stdout for orchestrator capture.
+
+        Containerised orchestrators capture the daemon's announce frame from
+        stdout without needing filesystem access to the discovery file. The
+        write goes via ``sys.stdout`` directly so it isn't confused with
+        library-code logging output (CLAUDE.md prohibits ``print()`` in
+        library code; this single line is the intentional orchestrator
+        contract, not log output).
+        """
         payload = self._discovery_payload()
-        print(json.dumps(payload), flush=True)
+        sys.stdout.write(json.dumps(payload) + "\n")
+        sys.stdout.flush()
 
     # ------------------------------------------------------------------
     # Directory setup

@@ -73,6 +73,12 @@ def test_no_production_caller_outside_whitelist() -> None:
     )
     assert callers == [
         "src/nexus/collection_rename.py",
+        # RDR-112 P1.2 (nexus-qy0u): daemon exposes rename_collection_cascade
+        # as a top-level RPC ("database.rename_collection_cascade"). Neither
+        # of these paths passes ``_conn`` — the daemon calls with only keyword
+        # args (old=, new=) and lets the impl open its own connection.
+        "src/nexus/daemon/t2_client.py",
+        "src/nexus/daemon/t2_daemon.py",
         "src/nexus/db/t2/__init__.py",
     ]
 
