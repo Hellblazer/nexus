@@ -313,3 +313,47 @@ def test_direct_and_daemon_paths_converge_on_same_tuples_schema(tmp_path):
         f"Direct: {[r[0] for r in direct_schema]}\n"
         f"Daemon: {[r[0] for r in daemon_schema]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test (f): second daemon start on same data dir is a no-op (idempotency)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_second_daemon_start_is_idempotent(tmp_path):
+    """A second daemon start against the same config_dir must be a no-op
+    (already at the current schema version). The tuples.db schema must
+    be byte-identical across both starts.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    tuples_path = config_dir / "tuples.db"
+
+    def _schema(path: Path) -> list[tuple[str, str]]:
+        c = sqlite3.connect(str(path))
+        try:
+            return sorted(
+                c.execute(
+                    "SELECT name, sql FROM sqlite_master "
+                    "WHERE sql IS NOT NULL ORDER BY name"
+                ).fetchall()
+            )
+        finally:
+            c.close()
+
+    daemon1 = T2Daemon(config_dir)
+    await daemon1.start()
+    schema_after_first = _schema(tuples_path)
+    await daemon1.stop()
+
+    # Second start on the same data dir — must not raise, must not change schema
+    daemon2 = T2Daemon(config_dir)
+    await daemon2.start()
+    schema_after_second = _schema(tuples_path)
+    await daemon2.stop()
+
+    assert schema_after_first == schema_after_second, (
+        "Second daemon start must produce identical schema "
+        "(CREATE TABLE IF NOT EXISTS idempotency)."
+    )
