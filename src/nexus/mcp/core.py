@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""MCP core tools: search, store, memory, scratch, collections, plans.
+"""MCP core tools: search, store, memory, scratch, collections, plans, tuplespace.
 
-14 registered tools + 3 demoted (plain functions, no @mcp.tool()).
+22 registered tools + 3 demoted (plain functions, no @mcp.tool()).
+8 tuplespace tools added by RDR-110 P1.4 (nexus-8q4v).
 """
 from __future__ import annotations
 
@@ -4023,6 +4024,331 @@ async def nx_plan_audit(
             lines.append(f"  [{f.get('severity', '?')}] {f.get('title', '')}")
         return "\n".join(lines)
     return str(payload)
+
+
+# ── Tuplespace MCP tools (RDR-110 P1.4, nexus-8q4v) ─────────────────────────
+#
+# Eight tools: tuplespace_out, tuplespace_read, tuplespace_take,
+# tuplespace_ack, tuplespace_nack, tuplespace_list_subspaces,
+# tuplespace_subspace_schema, tuplespace_subspace_stats.
+#
+# State (registry, sqlite conn, chroma index) is managed lazily via
+# _TUPLESPACE. The watcher is started on first tool invocation when
+# NX_STORAGE_MODE == "direct" (or unset) and cleaned up at process exit
+# via atexit. Daemon mode bypasses the watcher (RDR-112 §A2).
+
+
+_TUPLESPACE: dict[str, Any] = {}
+
+
+def _get_tuplespace() -> dict[str, Any]:
+    """Lazily initialise and return tuplespace singletons.
+
+    Returns a dict with keys: registry, conn, index, watcher (or None in daemon mode).
+    """
+    import atexit
+    import os
+    import sqlite3
+
+    if _TUPLESPACE:
+        return _TUPLESPACE
+
+    from nexus.config import load_config
+    from nexus.tuplespace.api import SubspaceSchemaError  # noqa: F401 (re-export)
+    from nexus.tuplespace.index import TupleIndex
+    from nexus.tuplespace.registry import Registry, default_builtin_dir
+    from nexus.tuplespace.store import open_tuples_db
+
+    import structlog
+    _ts_log = structlog.get_logger(__name__)
+
+    cfg = load_config()
+    nexus_dir = cfg.get("nexus_dir", "~/.config/nexus")
+    import os as _os
+    tuples_db_path = _os.path.expanduser(f"{nexus_dir}/tuples.db")
+
+    from pathlib import Path
+    db_path = Path(tuples_db_path)
+
+    registry = Registry.load(default_builtin_dir())
+
+    storage_mode = _os.environ.get("NX_STORAGE_MODE", "").lower()
+    if storage_mode == "daemon":
+        _ts_log.info("tuplespace_mcp_daemon_mode_conn_skipped")
+        # In daemon mode: no local SQLite connection (daemon owns the db).
+        # Tools that need conn will raise a clear error.
+        _TUPLESPACE.update({"registry": registry, "conn": None, "index": None, "watcher": None})
+        return _TUPLESPACE
+
+    conn = open_tuples_db(db_path)
+    conn.row_factory = sqlite3.Row
+
+    import chromadb
+    chroma_dir = _os.path.expanduser(f"{nexus_dir}/chroma")
+    chroma_client = chromadb.PersistentClient(path=chroma_dir)
+    index = TupleIndex.from_registry(registry, chroma_client)
+
+    watcher = None
+    try:
+        from nexus.tuplespace.watcher import _TupleSpaceWatcher
+        import threading
+        _wake_event = threading.Event()
+        watcher = _TupleSpaceWatcher(db_path=db_path, wake_event=_wake_event)
+        watcher.start()
+    except Exception as exc:
+        _ts_log.warning("tuplespace_watcher_start_failed", error=str(exc))
+
+    def _cleanup():
+        try:
+            if watcher is not None:
+                watcher.stop()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    atexit.register(_cleanup)
+
+    _TUPLESPACE.update({
+        "registry": registry,
+        "conn": conn,
+        "index": index,
+        "watcher": watcher,
+    })
+    return _TUPLESPACE
+
+
+@mcp.tool()
+def tuplespace_out(
+    subspace: str,
+    content: str,
+    dimensions: str,
+    match_text: str = "",
+    ttl_seconds: float = 0.0,
+) -> str:
+    """Post (upsert) a tuple into the semantic tuple space (RDR-110).
+
+    The tuple is stored in SQLite (claim ledger) and indexed in ChromaDB
+    (semantic retrieval).  Calling ``out`` twice with the same arguments
+    is idempotent — the same tuple_id is returned without creating a
+    duplicate.
+
+    Args:
+        subspace: Concrete subspace string (e.g. ``"tasks/nexus"``).
+        content: Tuple body text.
+        dimensions: JSON object of dimension key/value pairs validated
+            against the subspace schema (e.g. ``{"status": "open", "priority": "P1"}``).
+        match_text: Optional override for the embedding source.  Required
+            when the subspace schema declares ``embed_from: match_text``.
+        ttl_seconds: Optional TTL in seconds from now.  0 means no expiry.
+
+    Returns:
+        The stable 32-hex ``tuple_id`` for this tuple.
+    """
+    import json as _json
+    from nexus.tuplespace.api import out
+
+    ts = _get_tuplespace()
+    dims = _json.loads(dimensions) if isinstance(dimensions, str) else dimensions
+    tid = out(
+        conn=ts["conn"],
+        index=ts["index"],
+        registry=ts["registry"],
+        subspace=subspace,
+        content=content,
+        dimensions=dims,
+        match_text=match_text or None,
+        ttl_seconds=ttl_seconds if ttl_seconds > 0 else None,
+    )
+    return tid
+
+
+@mcp.tool()
+def tuplespace_read(
+    subspace: str,
+    query: str,
+    where: str = "",
+    floor: float = 0.0,
+    n: int = 0,
+) -> str:
+    """Read tuples semantically from a subspace (non-destructive).
+
+    Returns available (non-consumed, non-claimed) tuples ranked by
+    similarity to *query*.
+
+    Args:
+        subspace: Concrete subspace string (e.g. ``"tasks/nexus"``).
+        query: Semantic query text.
+        where: Optional ChromaDB metadata filter as a JSON object
+            (e.g. ``{"status": {"$eq": "open"}}``).
+        floor: Minimum similarity threshold (0.0 = use schema default).
+        n: Maximum results (0 = use schema default).
+
+    Returns:
+        JSON array of tuple objects with keys: id, content, dimensions,
+        subspace, created_at, embed_text, match_text.
+    """
+    import json as _json
+    from nexus.tuplespace.api import read
+
+    ts = _get_tuplespace()
+    where_dict = _json.loads(where) if where else None
+    results = read(
+        conn=ts["conn"],
+        index=ts["index"],
+        registry=ts["registry"],
+        subspace=subspace,
+        query=query,
+        where=where_dict,
+        floor=floor if floor > 0.0 else None,
+        n=n if n > 0 else None,
+    )
+    return _json.dumps(results, default=str)
+
+
+@mcp.tool()
+def tuplespace_take(
+    subspace: str,
+    query: str,
+    claimant: str,
+    where: str = "",
+    floor: float = 0.0,
+    lease_seconds: float = 0.0,
+) -> str:
+    """Atomically claim a tuple from a subspace (destructive read).
+
+    Uses a single-statement CAS ``UPDATE … RETURNING`` for atomicity
+    under SQLite's single-writer lock.  Two concurrent claimants cannot
+    both succeed on the same tuple.
+
+    Args:
+        subspace: Concrete subspace string (e.g. ``"tasks/nexus"``).
+        query: Semantic query text (ignored in ``exact`` mode).
+        claimant: Unique identifier for the claiming agent.
+        where: Optional filter as JSON.  In ``exact`` mode, must include
+            all ``match_keys`` declared in the schema.
+        floor: Minimum similarity threshold (0.0 = use schema default).
+        lease_seconds: Lease duration in seconds (0.0 = use schema default).
+
+    Returns:
+        JSON object ``{"tuple": {...}, "claim_id": "..."}`` if a tuple
+        was claimed, or ``null`` if no candidate was available.
+    """
+    import json as _json
+    from nexus.tuplespace.api import take
+
+    ts = _get_tuplespace()
+    where_dict = _json.loads(where) if where else None
+    result = take(
+        conn=ts["conn"],
+        index=ts["index"],
+        registry=ts["registry"],
+        subspace=subspace,
+        query=query,
+        claimant=claimant,
+        where=where_dict,
+        floor=floor if floor > 0.0 else None,
+        lease_seconds=lease_seconds if lease_seconds > 0.0 else None,
+        block=False,
+    )
+    if result is None:
+        return "null"
+    t_dict, claim_id = result
+    return _json.dumps({"tuple": t_dict, "claim_id": claim_id}, default=str)
+
+
+@mcp.tool()
+def tuplespace_ack(
+    claim_id: str,
+    claimant: str,
+) -> str:
+    """Acknowledge a claim: mark the tuple consumed and log the transition.
+
+    Args:
+        claim_id: The claim ID returned by ``tuplespace_take``.
+        claimant: The claiming agent; must match the original claimant.
+
+    Returns:
+        ``"ok"`` on success.
+    """
+    from nexus.tuplespace.api import ack
+
+    ts = _get_tuplespace()
+    ack(conn=ts["conn"], claim_id=claim_id, claimant=claimant)
+    return "ok"
+
+
+@mcp.tool()
+def tuplespace_nack(
+    claim_id: str,
+    claimant: str,
+) -> str:
+    """Negative-acknowledge a claim: release it back to available.
+
+    Args:
+        claim_id: The claim ID returned by ``tuplespace_take``.
+        claimant: The claiming agent; must match the original claimant.
+
+    Returns:
+        ``"ok"`` on success.
+    """
+    from nexus.tuplespace.api import nack
+
+    ts = _get_tuplespace()
+    nack(conn=ts["conn"], claim_id=claim_id, claimant=claimant)
+    return "ok"
+
+
+@mcp.tool()
+def tuplespace_list_subspaces() -> str:
+    """List all registered subspace template names.
+
+    Returns:
+        JSON array of template name strings
+        (e.g. ``["tasks/<project>", "locks/<resource>"]``).
+    """
+    import json as _json
+    from nexus.tuplespace.api import list_subspaces
+
+    ts = _get_tuplespace()
+    return _json.dumps(list_subspaces(registry=ts["registry"]))
+
+
+@mcp.tool()
+def tuplespace_subspace_schema(subspace: str) -> str:
+    """Return the schema for a subspace.
+
+    Args:
+        subspace: Concrete or template subspace string.
+
+    Returns:
+        JSON object with keys: name, tier, content_type, embed_from,
+        dimensions, take, read, tiers, retention_seconds.
+    """
+    import json as _json
+    from nexus.tuplespace.api import subspace_schema
+
+    ts = _get_tuplespace()
+    return _json.dumps(subspace_schema(registry=ts["registry"], subspace=subspace), default=str)
+
+
+@mcp.tool()
+def tuplespace_subspace_stats(subspace: str) -> str:
+    """Return aggregate counts for a concrete subspace.
+
+    Args:
+        subspace: Concrete subspace string (e.g. ``"tasks/nexus"``).
+
+    Returns:
+        JSON object with keys: total, available, claimed, consumed.
+    """
+    import json as _json
+    from nexus.tuplespace.api import subspace_stats
+
+    ts = _get_tuplespace()
+    return _json.dumps(subspace_stats(conn=ts["conn"], subspace=subspace))
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

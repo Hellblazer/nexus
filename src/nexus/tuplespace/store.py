@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS tuples (
     content         TEXT NOT NULL,
     dimensions_json TEXT NOT NULL,
     embed_text      TEXT NOT NULL,
+    match_text      TEXT,                           -- caller-supplied override for embedding source; participates in id
     created_at      REAL NOT NULL,
     expires_at      REAL,                           -- TTL; NULL = no expiry
     -- Claim state (formerly tuple_claims). Atomic via UPDATE ... RETURNING.
@@ -70,10 +71,14 @@ CREATE TABLE IF NOT EXISTS tuples (
 );
 -- Working-set partial index per honker's pattern (RF-9).
 -- Tombstones don't slow the claim path because they're excluded.
+-- NOTE: claim_expires_at < unixepoch() is intentionally OMITTED from this
+-- predicate because SQLite prohibits non-deterministic functions in partial
+-- index definitions when the index is referenced by UPDATE/DELETE statements
+-- (sqlite3.OperationalError: non-deterministic use of unixepoch() in an index).
+-- The expiry guard appears inline in every query's WHERE clause instead.
 CREATE INDEX IF NOT EXISTS idx_tuples_avail
     ON tuples (subspace, expires_at)
-    WHERE consumed_at IS NULL
-      AND (claim_state IS NULL OR claim_expires_at < unixepoch());
+    WHERE consumed_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_tuples_claimed
     ON tuples (claim_id) WHERE claim_state = 'claimed';
 CREATE INDEX IF NOT EXISTS idx_tuples_expires

@@ -10,6 +10,21 @@ embedder wiring. The registry validates YAML schemas; index.py wraps
 ChromaDB; downstream beads supply the full storage and network plane.
 """
 
+from nexus.tuplespace.api import (
+    BlockingNotSupported,
+    ClaimNotFoundError,
+    ClaimOwnershipError,
+    SubspaceSchemaError,
+    TakeDisabledError,
+    ack,
+    list_subspaces,
+    nack,
+    out,
+    read,
+    subspace_schema,
+    subspace_stats,
+    take,
+)
 from nexus.tuplespace.index import TupleIndex, collection_name
 from nexus.tuplespace.registry import (
     Registry,
@@ -20,11 +35,24 @@ from nexus.tuplespace.registry import (
 )
 
 __all__ = [
+    "BlockingNotSupported",
+    "ClaimNotFoundError",
+    "ClaimOwnershipError",
     "Registry",
     "RegistryLoadError",
     "SubspaceSchema",
+    "SubspaceSchemaError",
+    "TakeDisabledError",
     "TupleIndex",
     "UnknownSubspaceError",
+    "ack",
     "collection_name",
     "default_builtin_dir",
+    "list_subspaces",
+    "nack",
+    "out",
+    "read",
+    "subspace_schema",
+    "subspace_stats",
+    "take",
 ]
