@@ -296,9 +296,14 @@ class T2Database:
         Callers (``rename_collection_data_plane``) catch and re-raise as
         ClickException with a non-zero exit code.
 
-        ``_conn`` is a private test-seam parameter. Production callers
-        omit it; the method opens a fresh dedicated connection. Tests
-        pass a wrapper object to inject mid-cascade failures.
+        ``_conn`` is private — it exists ONLY as a test-seam for the
+        mid-cascade fault-injection regression test (atomicity guarantee)
+        and as the hook that RDR-112 Phase 1's daemon-side rename RPC
+        will use to share its already-open connection. No production
+        code outside ``src/nexus/db/`` or ``src/nexus/daemon/`` (Phase 1)
+        may pass it. The leading underscore + this docstring are the
+        contract; the deprecation lint added in Phase 6 (nexus-1u5v)
+        enforces the boundary mechanically.
         """
         counts: dict[str, int] = {
             "chash": 0,
