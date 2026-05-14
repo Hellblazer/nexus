@@ -2546,6 +2546,68 @@ def _migrate_aspect_queue_pk_via_apply_pending(conn: sqlite3.Connection) -> None
     migrate_aspect_extraction_queue_pk_to_doc_id(conn, catalog_db_path=catalog_path)
 
 
+# ── RDR-112 P1.4 (nexus-w0et): watcher_state in tuples.db ──────────────────
+
+
+def _tuples_db_path_from_conn(conn: sqlite3.Connection) -> Path:
+    """Derive the tuples.db path from a memory.db connection.
+
+    Mirrors the layout convention: tuples.db is a sibling of memory.db under
+    the same nexus config dir. Falls back to NEXUS_CONFIG_DIR env or the
+    default ``~/.config/nexus`` when the connection path is not resolvable
+    (e.g. in-memory DB in tests that don't need tuples.db).
+    """
+    for row in conn.execute("PRAGMA database_list").fetchall():
+        if row[1] == "main" and row[2]:
+            mem_path = Path(row[2]).resolve()
+            return mem_path.parent / "tuples.db"
+
+    import os as _os
+    override = _os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override) / "tuples.db"
+    return Path.home() / ".config" / "nexus" / "tuples.db"
+
+
+def _migrate_watcher_state_in_tuples_db(conn: sqlite3.Connection) -> None:
+    """Create watcher_state (and other tuples.db tables) in the sibling tuples.db.
+
+    RDR-111 Phase 2 Step 6 / RDR-112 P1.4 (nexus-w0et).
+
+    watcher_state lives in tuples.db (not memory.db) for genuine atomicity
+    with cursor and tuple reads (RDR-111 lines 783-786). This migration
+    wrapper:
+
+    1. Derives the tuples.db path from the memory.db connection (the
+       standard nexus layout: both files share the same config dir).
+    2. Opens the tuples.db file with WAL mode (or creates it if absent).
+    3. Applies the full TUPLES_SCHEMA_DDL (idempotent via
+       ``CREATE TABLE IF NOT EXISTS`` / ``CREATE INDEX IF NOT EXISTS``).
+
+    Idempotent: the tuples schema DDL uses CREATE IF NOT EXISTS throughout,
+    so re-running on an already-initialised tuples.db is a guaranteed no-op.
+
+    This is registered in MIGRATIONS at "4.33.0" — the daemon is the sole
+    migration runner for both databases per RDR-112 §9.
+    """
+    from nexus.tuplespace.store import apply_tuples_schema  # noqa: PLC0415
+
+    tuples_path = _tuples_db_path_from_conn(conn)
+    tuples_path.parent.mkdir(parents=True, exist_ok=True)
+    tuples_conn = sqlite3.connect(str(tuples_path))
+    try:
+        tuples_conn.execute("PRAGMA journal_mode=WAL")
+        tuples_conn.execute("PRAGMA busy_timeout=5000")
+        tuples_conn.commit()
+        apply_tuples_schema(tuples_conn)
+        _log.info(
+            "migration_watcher_state_applied",
+            tuples_db=str(tuples_path),
+        )
+    finally:
+        tuples_conn.close()
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -2715,6 +2777,17 @@ MIGRATIONS: list[Migration] = [
         "4.32.1",
         "RDR-109 Phase 5: add document_aspects.salient_sentences column",
         lambda conn: _migrate_add_aspects_salient_sentences(conn),
+    ),
+    # nexus-w0et (RDR-112 P1.4): watcher_state table in tuples.db.
+    # watcher_state lives in tuples.db (not memory.db) for genuine atomicity
+    # with cursor and tuple reads (RDR-111 lines 783-786). This migration
+    # wrapper derives the tuples.db path from the memory.db connection and
+    # applies the full tuples schema (idempotent via CREATE IF NOT EXISTS).
+    # The daemon is the SOLE migration runner for both databases per RDR-112 §9.
+    Migration(
+        "4.33.0",
+        "Create watcher_state table in tuples.db (RDR-111 nexus-w0et)",
+        _migrate_watcher_state_in_tuples_db,
     ),
 ]
 
@@ -3181,3 +3254,101 @@ def _create_base_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_TAXONOMY_SCHEMA_SQL)
     conn.executescript(_TELEMETRY_SCHEMA_SQL)
     conn.commit()
+
+
+def run_daemon_migrations(
+    memory_db_path: Path,
+    tuples_db_path: Path,
+) -> tuple[str, str]:
+    """Apply all pending migrations for both T2 databases at daemon startup.
+
+    RDR-112 P1.4 (nexus-w0et): the daemon is the SOLE migration runner for
+    both ``memory.db`` and ``tuples.db`` per RDR-112 §9. This function is
+    the canonical entry point for daemon startup; it must be called BEFORE
+    sockets are bound so no client ever connects to a partially-migrated DB.
+
+    Steps:
+    1. Apply pending migrations to ``memory_db_path`` (the T2 main store)
+       via the versioned MIGRATIONS registry. Returns (from_version,
+       to_version) from the stored ``_nexus_version`` table.
+    2. Apply the full tuples.db schema to ``tuples_db_path`` via
+       ``apply_tuples_schema`` (idempotent, CREATE IF NOT EXISTS). This
+       guarantees ``watcher_state`` and all tuples-family tables are present
+       regardless of whether the MIGRATIONS registry step ran (same-version
+       edge case: the MIGRATIONS entry at "4.33.0" does not run on installs
+       whose stored version is already "4.33.0"; the direct schema apply
+       closes that gap).
+
+    Args:
+        memory_db_path: Path to ``memory.db`` (T2 main stores). Created if absent.
+        tuples_db_path: Path to ``tuples.db`` (tuplespace + watcher_state).
+                        Created if absent.
+
+    Returns:
+        ``(from_version, to_version)`` tuple — the stored ``_nexus_version``
+        value before and after applying migrations on ``memory.db``. Useful
+        for the daemon lifecycle log event.
+
+    Raises:
+        MigrationError: if a migration fails a data-precondition audit.
+        Exception: any other migration exception propagates; the daemon must
+            not bind sockets after an exception from this function.
+    """
+    import time as _time
+
+    from nexus.tuplespace.store import apply_tuples_schema  # noqa: PLC0415
+
+    # Step 1: memory.db migrations
+    memory_db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        current_version = _pkg_version_str()
+    except Exception:
+        current_version = "0.0.0"
+
+    memory_conn = sqlite3.connect(str(memory_db_path), check_same_thread=False)
+    try:
+        memory_conn.execute("PRAGMA busy_timeout=5000")
+        memory_conn.execute("PRAGMA journal_mode=WAL")
+        memory_conn.commit()
+
+        from_version = bootstrap_version(memory_conn)
+        apply_pending(memory_conn, current_version)
+        # Read version after migration (may not change on same-version runs)
+        row = memory_conn.execute(
+            "SELECT value FROM _nexus_version WHERE key='cli_version'"
+        ).fetchone()
+        to_version = row[0] if row else current_version
+    finally:
+        memory_conn.close()
+    # Ensure the argument-form key is also in _upgrade_done (mirrors run_if_needed fix)
+    try:
+        _upgrade_done.add(str(memory_db_path.resolve()))
+    except OSError:
+        _upgrade_done.add(str(memory_db_path))
+
+    # Step 2: tuples.db schema (unconditional — idempotent)
+    tuples_db_path.parent.mkdir(parents=True, exist_ok=True)
+    tuples_conn = sqlite3.connect(str(tuples_db_path), check_same_thread=False)
+    try:
+        tuples_conn.execute("PRAGMA busy_timeout=5000")
+        tuples_conn.execute("PRAGMA journal_mode=WAL")
+        tuples_conn.commit()
+        apply_tuples_schema(tuples_conn)
+    finally:
+        tuples_conn.close()
+
+    _log.info(
+        "run_daemon_migrations_complete",
+        memory_db=str(memory_db_path),
+        tuples_db=str(tuples_db_path),
+        from_version=from_version,
+        to_version=to_version,
+    )
+    return from_version, to_version
+
+
+def _pkg_version_str() -> str:
+    """Return the running ``conexus`` package version string."""
+    from importlib.metadata import version as _iv
+    return _iv("conexus")

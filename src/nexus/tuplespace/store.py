@@ -98,6 +98,18 @@ CREATE INDEX IF NOT EXISTS idx_claim_log_tuple
     ON tuple_claim_log (tuple_id, at);
 CREATE INDEX IF NOT EXISTS idx_claim_log_claimant
     ON tuple_claim_log (claimant, at);
+
+-- Watcher cursor state per (subspace, profile) pair (RDR-111 Phase 2 Step 6).
+-- Lives in tuples.db (not memory.db) so that cursor and tuple reads are in
+-- the same database for genuine atomicity (RDR-111 lines 783-786).
+-- Added by nexus-w0et (RDR-112 P1.4 daemon-startup migration runner).
+CREATE TABLE IF NOT EXISTS watcher_state (
+    subspace   TEXT NOT NULL,
+    profile    TEXT NOT NULL,
+    last_rowid INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (subspace, profile)
+);
 """
 
 # ---------------------------------------------------------------------------
