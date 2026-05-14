@@ -39,6 +39,30 @@ def test_parse_frontmatter_strips_delimiters():
     assert "---" not in rest
 
 
+def test_parse_frontmatter_warning_includes_source_path(caplog):
+    """nexus-qr9d: PyYAML's <unicode string> default is useless when batch-indexing;
+    the warning must surface the file path so operators can locate the offender."""
+    import structlog
+    from structlog.testing import capture_logs
+
+    bad = "---\nprs: [#381, #382]\nstatus: x\n---\n\nBody\n"
+    with capture_logs() as cap:
+        fm, _ = parse_frontmatter(bad, source="/path/to/rdr-bad.md")
+    assert fm == {}
+    fails = [e for e in cap if e["event"] == "frontmatter_parse_failed"]
+    assert len(fails) == 1
+    assert fails[0]["source"] == "/path/to/rdr-bad.md"
+
+
+def test_parse_frontmatter_strict_raises():
+    """nexus-qr9d: strict mode lets RDR pipeline mark file as failed and skip,
+    rather than silently indexing the body without frontmatter."""
+    import yaml as _yaml
+    bad = "---\nprs: [#381, #382]\nstatus: x\n---\n\nBody\n"
+    with pytest.raises(_yaml.YAMLError):
+        parse_frontmatter(bad, source="x.md", strict=True)
+
+
 # ── SemanticMarkdownChunker basics ───────────────────────────────────────────
 
 def test_chunk_empty_text_returns_empty(chunker):
