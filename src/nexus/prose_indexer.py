@@ -76,7 +76,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     if ext in (".md", ".markdown"):
         # Markdown: use SemanticMarkdownChunker (M1: uses char offsets, not line numbers)
         with _stage("chunking"):
-            frontmatter, body = parse_frontmatter(content)
+            frontmatter, body = parse_frontmatter(content, source=str(file_path))
             frontmatter_len = len(content) - len(body)
             base_meta: dict = {"source_path": str(file_path), "corpus": ctx.corpus}
             chunks = SemanticMarkdownChunker().chunk(body, base_meta)

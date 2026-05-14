@@ -85,11 +85,38 @@ class MarkdownChunk:
     header_path: list[str]
 
 
-def parse_frontmatter(text: str) -> tuple[dict, str]:
+def parse_frontmatter(
+    text: str,
+    *,
+    source: str | None = None,
+    strict: bool = False,
+) -> tuple[dict, str]:
     """Extract YAML frontmatter from *text*.
 
     Returns ``(metadata_dict, body)`` where *body* has the frontmatter block
     stripped.  Returns ``({}, text)`` when no frontmatter is detected.
+
+    *source* is included in the warning log on parse failure so operators can
+    locate the offending file (PyYAML's default ``<unicode string>`` is
+    useless when batch-indexing). ``None`` (the default) logs
+    ``<unknown>``; pass ``""`` only if you genuinely want an empty
+    value rather than the sentinel.
+
+    *strict=True* re-raises ``yaml.YAMLError`` instead of swallowing it.
+
+    Caller policy
+    -------------
+    - **Authoritative content** (RDR documents) where missing frontmatter
+      means the index would carry empty metadata and search ranking would
+      degrade silently: pass ``strict=True``. The caller's existing
+      per-file ``except Exception`` (e.g. ``batch_index_markdowns``)
+      marks the file failed and skips it. Failure-mode rationale: the
+      indexer hang historically attributed to the YAML scanner was
+      avoided by *not reaching the embedding path with a broken-but-
+      partially-parsed file* — see nexus-qr9d.
+    - **Non-authoritative content** (prose, wiki, ad-hoc notes) where
+      indexing the body with empty metadata is preferable to dropping
+      the file: leave ``strict=False`` (the default).
     """
     if not text.startswith("---"):
         return {}, text
@@ -103,7 +130,13 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
         if not isinstance(data, dict):
             data = {}
     except yaml.YAMLError as exc:
-        _log.warning("frontmatter_parse_failed", error=str(exc))
+        _log.warning(
+            "frontmatter_parse_failed",
+            source=source if source is not None else "<unknown>",
+            error=str(exc),
+        )
+        if strict:
+            raise
         data = {}
     return data, rest
 

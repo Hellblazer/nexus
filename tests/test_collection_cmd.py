@@ -505,6 +505,83 @@ def test_collections_from_registry_info_filters_excluded() -> None:
     assert "docs__myrepo__voyage-context-3__v1" in out
 
 
+def test_collections_from_registry_info_prefers_conformant_code_collection() -> None:
+    """nexus-cxg9: pre-RDR-103 entries keep the legacy non-conformant
+    ``collection`` alias even after the conformant ``code_collection``
+    is set. The post-pass must enumerate the conformant name only —
+    enumerating the alias triggers ``collection_not_found`` every run.
+    """
+    from nexus.commands.index import _collections_from_registry_info
+
+    info = {
+        "collection": "code__nexus-571b8edd",  # legacy alias, no T3 collection
+        "code_collection": "code__1-2188__voyage-code-3__v1",
+        "docs_collection": "docs__1-2188__voyage-context-3__v1",
+        "rdr_collection": "rdr__1-2188__voyage-context-3__v1",
+    }
+    out = _collections_from_registry_info(info)
+    assert "code__nexus-571b8edd" not in out, (
+        "legacy non-conformant alias must not be enumerated when a "
+        "conformant code_collection is present"
+    )
+    # Cloud-mode passthrough: rdr/docs always; code__ filtered in local mode only.
+    assert "docs__1-2188__voyage-context-3__v1" in out
+    assert "rdr__1-2188__voyage-context-3__v1" in out
+
+
+def test_collections_from_registry_info_dedupes() -> None:
+    """nexus-cxg9: when the legacy ``collection`` field happens to equal
+    ``code_collection`` (post-RDR-103 fresh registrations), the result
+    must not contain duplicates.
+    """
+    from nexus.commands.index import _collections_from_registry_info
+
+    name = "code__myrepo__voyage-code-3__v1"
+    info = {"collection": name, "code_collection": name,
+            "docs_collection": "docs__myrepo__voyage-context-3__v1"}
+    out = _collections_from_registry_info(info)
+    assert len(out) == len(set(out))
+
+
+def test_run_collection_postprocessing_does_not_pass_alias_through(monkeypatch):
+    """Review #757: prove the warning suppression end-to-end. The alias
+    must never reach ``_discover_taxonomy`` (which is where the
+    ``collection_not_found`` warning would fire). Patches
+    ``_discover_taxonomy`` to capture call args; asserts the legacy
+    non-conformant name never shows up."""
+    from unittest.mock import MagicMock
+    import nexus.commands.index as index_mod
+
+    captured: list[str] = []
+
+    def _capture(collection_name, taxonomy, chroma_client, *, force=False):
+        captured.append(collection_name)
+        return 0
+
+    monkeypatch.setattr(index_mod, "_discover_taxonomy", _capture)
+
+    fake_t3 = MagicMock()
+    fake_t3._client = MagicMock()
+    monkeypatch.setattr(index_mod, "make_t3", lambda: fake_t3, raising=False)
+    # make_t3 lives in nexus.db; patch at the import site used inside
+    # run_collection_postprocessing.
+    import nexus.db as _db_mod
+    monkeypatch.setattr(_db_mod, "make_t3", lambda: fake_t3)
+
+    info = {
+        "collection": "code__nexus-571b8edd",  # legacy non-conformant alias
+        "code_collection": "code__1-2188__voyage-code-3__v1",
+        "docs_collection": "docs__1-2188__voyage-context-3__v1",
+    }
+    collections = index_mod._collections_from_registry_info(info)
+    index_mod.run_collection_postprocessing(collections, repo_path=None, quiet=True)
+
+    assert "code__nexus-571b8edd" not in captured, (
+        "legacy non-conformant alias leaked to _discover_taxonomy — the "
+        "collection_not_found warning would fire on every post-pass"
+    )
+
+
 # ── GH #451: --corpus flag for nx index repo ────────────────────────────────
 
 

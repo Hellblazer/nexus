@@ -39,3 +39,25 @@ If you need to find an RDR by topic, prefer the index in `docs/rdr/README.md` ov
 Use the lifecycle skills: `/nx:rdr-create` → `/nx:rdr-research` → `/nx:rdr-gate` → `/nx:rdr-accept` → `/nx:rdr-close`. List existing with `/nx:rdr-list`; show one with `/nx:rdr-show NNN`.
 
 The numbering is monotonic; pick the next unused integer. The frontmatter shape is enforced by `/nx:rdr-audit`.
+
+## Frontmatter quoting — `#` is comment-start in YAML
+
+When listing PR / issue / bead refs in YAML frontmatter, **always quote them.** YAML treats `#` as comment-start at any token-start position, so an unquoted flow sequence like `prs: [#381, #382]` silently parses as an empty list followed by a comment that eats the closing `]`. The scanner then runs off the end of the frontmatter and raises `ScannerError: while parsing a flow sequence … got '<stream end>'`. The indexer marks the RDR `failed` (since nexus-qr9d) and skips it; before that fix it hung.
+
+```yaml
+# ❌ broken — # makes the rest of the line a comment
+references:
+  prs: [#381, #382, #383]
+
+# ✅ flow form, quoted
+references:
+  prs: ["#381", "#382", "#383"]
+
+# ✅ block form, quoted
+references:
+  prs:
+    - "#381"
+    - "#382"
+```
+
+Run `nx rdr lint` before committing to catch this hazard.

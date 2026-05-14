@@ -225,7 +225,14 @@ class RepoRegistry:
         with self._lock:
             self._data["repos"][key] = {
                 "name": name,
-                "collection": code_col,  # backward compat alias
+                # ``collection`` is a backward-compat alias for callers
+                # written before ``code_collection`` existed (e.g.
+                # indexer.py:1003,1893 still falls back to it). Read
+                # paths in the post-pass prefer ``code_collection`` and
+                # treat the alias as the legacy fallback only —
+                # nexus-cxg9. Don't remove the alias without auditing
+                # those call sites.
+                "collection": code_col,
                 "code_collection": code_col,
                 "docs_collection": docs_col,
                 "head_hash": "",
