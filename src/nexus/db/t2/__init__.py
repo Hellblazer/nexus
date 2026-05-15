@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""T2 SQLite memory bank — seven domain stores behind a composing facade.
+"""T2 SQLite memory bank — eight domain stores behind a composing facade.
 
-The T2 tier is split into seven domain stores, each owning its own
+The T2 tier is split into eight domain stores, each owning its own
 set of tables in a shared SQLite file:
 
 =========================  ==========================  =================================================================
@@ -15,9 +15,10 @@ Attribute                  Class                       Responsibility
 ``db.chash_index``         ``ChashIndex``              chash → (collection, doc_id) global lookup (RDR-086)
 ``db.document_aspects``    ``DocumentAspects``         Per-document structured aspects table (RDR-089)
 ``db.aspect_queue``        ``AspectExtractionQueue``   Async queue feeding the aspect-extraction worker (nexus-qeo8)
+``db.catalog``             ``CatalogStore``            Catalog tables: owners, documents, links, collections (RDR-112 P2.1)
 =========================  ==========================  =================================================================
 
-``T2Database`` is a facade: it constructs the six stores and re-exposes
+``T2Database`` is a facade: it constructs the eight stores and re-exposes
 the memory-domain public methods as thin delegates for backward
 compatibility (the chash, taxonomy, and document_aspects domains are
 accessed directly via their attributes — no facade delegates exist).
@@ -81,6 +82,7 @@ if TYPE_CHECKING:
     # nexus.catalog.catalog_db -> from nexus.db.t2 import _sanitize_fts5)
     # therefore stops here without pulling sklearn -> scipy -> numpy
     # via CatalogTaxonomy.
+    from nexus.db.t2.catalog_store import CatalogStore
     from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
     from nexus.db.t2.chash_index import ChashIndex
     from nexus.db.t2.memory_store import AccessPolicy, MemoryStore
@@ -96,6 +98,7 @@ _log = structlog.get_logger()
 __all__ = [
     "AccessPolicy",
     "AspectExtractionQueue",
+    "CatalogStore",
     "CatalogTaxonomy",
     "ChashIndex",
     "DocumentAspects",
@@ -117,6 +120,7 @@ def __getattr__(name: str) -> Any:  # PEP 562
     _MAP = {
         "AccessPolicy":          "nexus.db.t2.memory_store",
         "AspectExtractionQueue": "nexus.db.t2.aspect_extraction_queue",
+        "CatalogStore":          "nexus.db.t2.catalog_store",
         "MemoryStore":           "nexus.db.t2.memory_store",
         "CatalogTaxonomy":       "nexus.db.t2.catalog_taxonomy",
         "ChashIndex":            "nexus.db.t2.chash_index",
@@ -149,11 +153,12 @@ class T2Database:
     """
 
     def __init__(self, path: Path) -> None:
-        # Lazy-load the seven store classes here rather than at module
+        # Lazy-load the eight store classes here rather than at module
         # import time so the CLI cold-start path (which only needs
         # ``_sanitize_fts5``) does not pull sklearn/scipy/numpy through
         # CatalogTaxonomy.
         from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+        from nexus.db.t2.catalog_store import CatalogStore
         from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
         from nexus.db.t2.chash_index import ChashIndex
         from nexus.db.t2.document_aspects import DocumentAspects
@@ -194,6 +199,9 @@ class T2Database:
         # async aspect-extraction worker. The hook fires fast (just
         # an enqueue); the worker drains in a background thread.
         self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(path)
+        # RDR-112 P2.1 (nexus-7ejx): catalog tables collapsed into T2 as
+        # the eighth domain store. Substrate only; Phase 4 flips callers.
+        self.catalog: CatalogStore = CatalogStore(path)
 
     @property
     def path(self) -> Path:
@@ -213,12 +221,13 @@ class T2Database:
         self.close()
 
     def close(self) -> None:
-        """Close all seven domain connections.
+        """Close all eight domain connections.
 
         Each store closes its own connection under its own lock. The
         close order is reverse of construction so that the most
-        recently opened connection (aspect_queue) is released first.
+        recently opened connection (catalog) is released first.
         """
+        self.catalog.close()
         self.aspect_queue.close()
         self.document_aspects.close()
         self.chash_index.close()

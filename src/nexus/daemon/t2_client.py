@@ -649,6 +649,17 @@ class T2Client:
         return _StoreProxy("aspect_queue", AspectExtractionQueue, self._get_pool())
 
     @property
+    def catalog(self) -> _StoreProxy:
+        """Proxy for ``CatalogStore`` — RDR-112 P2.1 (nexus-7ejx).
+
+        Same public method signatures as CatalogStore (minus ``self``).
+        Phase 4 (nexus-uar6) flips existing CatalogDB call sites here;
+        this bead ships the daemon-side substrate only.
+        """
+        from nexus.db.t2.catalog_store import CatalogStore
+        return _StoreProxy("catalog", CatalogStore, self._get_pool())
+
+    @property
     def database(self) -> _DatabaseProxy:
         return _DatabaseProxy(self._get_pool())
 

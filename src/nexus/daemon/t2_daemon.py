@@ -163,6 +163,7 @@ _T2_STORE_ATTRS: tuple[str, ...] = (
     "telemetry",
     "document_aspects",
     "aspect_queue",
+    "catalog",  # RDR-112 P2.1 (nexus-7ejx): eighth domain store
 )
 
 #: Top-level T2Database methods exposed under the "database" pseudo-store.

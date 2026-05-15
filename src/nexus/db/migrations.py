@@ -2844,6 +2844,249 @@ CREATE TABLE IF NOT EXISTS subspace_registry (
     _log.info("migrate_subspace_registry_table_done")
 
 
+def migrate_catalog_tables_in_memory_db(conn: sqlite3.Connection) -> None:
+    """RDR-112 P2.1 (nexus-7ejx): create catalog tables in memory.db.
+
+    Collapses ``CatalogDB``'s schema into the daemon's shared SQLite file.
+    The eight tables (owners, documents, documents_fts, links, collections,
+    _meta, document_chunks, plus supporting indexes and triggers) are created
+    in memory.db alongside the seven existing domain-store tables.
+
+    Idempotent: all DDL uses ``CREATE TABLE IF NOT EXISTS`` and
+    ``CREATE INDEX IF NOT EXISTS``.  Safe to re-run on a DB that already
+    has the catalog tables (e.g. after a crash mid-migration).
+
+    Schema invariants preserved per RDR-108:
+    - ``documents`` rows are graph-nodes addressed by tumblers.
+    - ``document_chunks`` manifest is authoritative for doc-to-chunk ordering.
+    - ``document_chunks.doc_id REFERENCES documents(tumbler) ON DELETE CASCADE``.
+
+    Implementation note: this function runs the catalog DDL directly on the
+    provided ``conn`` (via ``executescript``) rather than opening a second
+    connection to the same WAL-mode database.  Opening a second connection
+    inside a migration function would interleave an independent WAL write
+    with the migration runner's own connection, which can leave data written
+    by the subsequent ``migrate_catalog_legacy_import`` step invisible to
+    future readers (SQLite WAL read-snapshot isolation: the runner's
+    connection snapshot predates the second connection's commits, so
+    ``INSERT OR IGNORE`` sees a stale view and returns rowcount=0).
+    Running DDL on the shared ``conn`` avoids the snapshot mismatch entirely.
+    """
+    from nexus.db.t2.catalog_store import (  # noqa: PLC0415
+        _CATALOG_POST_SCHEMA_SQL,
+        _CATALOG_SCHEMA_SQL,
+    )
+
+    # executescript issues an implicit COMMIT first (consistent with all
+    # other migration functions that call executescript on the shared conn).
+    conn.executescript(_CATALOG_SCHEMA_SQL)
+    # Post-schema: partial indexes — executed individually because SQLite's
+    # script parser does not support WHERE clauses in all versions.
+    for stmt in _CATALOG_POST_SCHEMA_SQL.strip().split(";"):
+        stmt = stmt.strip()
+        if stmt:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # already exists; idempotent
+    conn.commit()
+    _log.info("migrate_catalog_tables_in_memory_db_done")
+
+
+def migrate_catalog_legacy_import(conn: sqlite3.Connection) -> None:
+    """RDR-112 P2.1 (nexus-7ejx): atomically import legacy catalog.db rows.
+
+    If ``<config_dir>/catalog.db`` exists next to ``memory.db``, imports all
+    its rows into the catalog tables in ``memory.db``, then renames the file
+    to ``catalog.db.imported``.
+
+    Atomicity strategy (two-phase with sentinel file):
+    1. Rename ``catalog.db`` to ``catalog.db.importing`` (sentinel).
+       If the sentinel already exists from a prior crashed run, proceed from
+       step 2 — the prior import may be retried safely because the import
+       uses ``INSERT OR IGNORE`` (idempotent).
+    2. ATTACH ``catalog.db.importing`` to this connection.
+    3. Import all rows in a single transaction via ``INSERT OR IGNORE``
+       with explicit column lists.
+    4. On transaction success: rename sentinel to ``catalog.db.imported``.
+    5. On any failure: transaction rolls back (memory.db unchanged), sentinel
+       persists for the next startup to retry.
+
+    The ATTACH approach uses explicit column names so legacy schemas (which
+    may be missing newer columns like ``bib_*``) work without schema-matching.
+    Missing columns land as SQLite defaults (empty string / 0).
+
+    Idempotent:
+    - No-op when neither ``catalog.db`` nor ``catalog.db.importing`` exists.
+    - Re-runnable when sentinel exists (INSERT OR IGNORE skips duplicates).
+    - Re-runnable after ``catalog.db.imported`` exists (both files absent).
+    """
+    # Derive memory.db directory from PRAGMA database_list.
+    config_dir: Path | None = None
+    for row in conn.execute("PRAGMA database_list").fetchall():
+        if row[1] == "main" and row[2]:
+            config_dir = Path(row[2]).parent
+            break
+    if config_dir is None:
+        _log.warning("migrate_catalog_legacy_import: cannot determine config_dir; skipping")
+        return
+
+    legacy = config_dir / "catalog.db"
+    sentinel = config_dir / "catalog.db.importing"
+    imported = config_dir / "catalog.db.imported"
+
+    # Already done: both source files absent.
+    if imported.exists() and not legacy.exists() and not sentinel.exists():
+        return
+
+    # Determine source file. Phase 1: rename to sentinel if needed.
+    if sentinel.exists():
+        source = sentinel
+        _log.info("migrate_catalog_legacy_import_resume", source=str(source))
+    elif legacy.exists():
+        try:
+            legacy.rename(sentinel)
+        except OSError as exc:
+            _log.warning("migrate_catalog_legacy_import_rename_failed", error=str(exc))
+            return
+        source = sentinel
+        _log.info("migrate_catalog_legacy_import_start", source=str(source))
+    else:
+        return  # no-op: nothing to import
+
+    # Phase 2: ATTACH + import inside one transaction.
+    # Quote the path to handle spaces.
+    source_quoted = str(source).replace("'", "''")
+    try:
+        conn.execute(f"ATTACH DATABASE '{source_quoted}' AS catalog_legacy")
+    except sqlite3.OperationalError as exc:
+        _log.warning(
+            "migrate_catalog_legacy_import_attach_failed",
+            source=str(source),
+            error=str(exc),
+        )
+        return
+
+    # Discover which columns exist in the legacy DB (schema may be older).
+    def _legacy_cols(table: str) -> set[str]:
+        try:
+            return {r[1] for r in conn.execute(f"PRAGMA catalog_legacy.table_info({table})").fetchall()}
+        except sqlite3.OperationalError:
+            return set()
+
+    try:
+        conn.execute("BEGIN")
+
+        # owners: tumbler_prefix, name, owner_type, repo_hash, description, repo_root
+        if _legacy_cols("owners"):
+            conn.execute(
+                "INSERT OR IGNORE INTO owners "
+                "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
+                "SELECT tumbler_prefix, name, owner_type, "
+                "       COALESCE(repo_hash, ''), COALESCE(description, ''), "
+                "       COALESCE(repo_root, '') "
+                "FROM catalog_legacy.owners"
+            )
+
+        # documents: import core columns; bib_* default to 0/''.
+        doc_cols = _legacy_cols("documents")
+        if doc_cols:
+            conn.execute(
+                "INSERT OR IGNORE INTO documents "
+                "(tumbler, title, author, year, content_type, file_path, corpus, "
+                " physical_collection, chunk_count, head_hash, indexed_at, metadata, "
+                " source_mtime, alias_of, source_uri) "
+                "SELECT tumbler, title, COALESCE(author, ''), COALESCE(year, 0), "
+                "       COALESCE(content_type, ''), COALESCE(file_path, ''), "
+                "       COALESCE(corpus, ''), COALESCE(physical_collection, ''), "
+                "       COALESCE(chunk_count, 0), COALESCE(head_hash, ''), "
+                "       COALESCE(indexed_at, ''), COALESCE(metadata, '{}'), "
+                "       COALESCE(source_mtime, 0.0), COALESCE(alias_of, ''), "
+                "       COALESCE(source_uri, '') "
+                "FROM catalog_legacy.documents"
+            )
+
+        # links
+        if _legacy_cols("links"):
+            conn.execute(
+                "INSERT OR IGNORE INTO links "
+                "(from_tumbler, to_tumbler, link_type, from_span, to_span, "
+                " created_by, created_at, metadata) "
+                "SELECT from_tumbler, to_tumbler, link_type, "
+                "       COALESCE(from_span, ''), COALESCE(to_span, ''), "
+                "       created_by, COALESCE(created_at, ''), "
+                "       COALESCE(metadata, '{}') "
+                "FROM catalog_legacy.links"
+            )
+
+        # collections (RDR-101 Phase 6 table; may be absent in old legacy DBs)
+        if _legacy_cols("collections"):
+            conn.execute(
+                "INSERT OR IGNORE INTO collections "
+                "(name, content_type, owner_id, embedding_model, model_version, "
+                " display_name, legacy_grandfathered, superseded_by, superseded_at, created_at) "
+                "SELECT name, COALESCE(content_type, ''), COALESCE(owner_id, ''), "
+                "       COALESCE(embedding_model, ''), COALESCE(model_version, ''), "
+                "       COALESCE(display_name, ''), COALESCE(legacy_grandfathered, 0), "
+                "       COALESCE(superseded_by, ''), COALESCE(superseded_at, ''), "
+                "       COALESCE(created_at, '') "
+                "FROM catalog_legacy.collections"
+            )
+
+        # document_chunks (RDR-108; may be absent in very old legacy DBs)
+        if _legacy_cols("document_chunks"):
+            conn.execute(
+                "INSERT OR IGNORE INTO document_chunks "
+                "(doc_id, position, chash, chunk_index, line_start, line_end, "
+                " char_start, char_end) "
+                "SELECT dc.doc_id, dc.position, dc.chash, dc.chunk_index, "
+                "       dc.line_start, dc.line_end, dc.char_start, dc.char_end "
+                "FROM catalog_legacy.document_chunks dc "
+                "WHERE EXISTS (SELECT 1 FROM documents d WHERE d.tumbler = dc.doc_id)"
+            )
+
+        # _meta (consistency marker)
+        if _legacy_cols("_meta"):
+            conn.execute(
+                "INSERT OR IGNORE INTO _meta (key, value) "
+                "SELECT key, value FROM catalog_legacy._meta"
+            )
+
+        conn.commit()
+        _log.info("migrate_catalog_legacy_import_committed", source=str(source))
+
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        _log.warning(
+            "migrate_catalog_legacy_import_failed",
+            source=str(source),
+            error=str(exc),
+        )
+        return
+    finally:
+        try:
+            conn.execute("DETACH DATABASE catalog_legacy")
+        except Exception:
+            pass
+
+    # Phase 3: rename sentinel to .imported (outside the transaction).
+    try:
+        source.rename(imported)
+        _log.info("migrate_catalog_legacy_import_done", imported=str(imported))
+    except OSError as exc:
+        # Rows are already in memory.db. The rename failure means the sentinel
+        # persists. Next startup will re-run INSERT OR IGNORE (idempotent) and
+        # retry the rename.
+        _log.warning(
+            "migrate_catalog_legacy_import_rename_to_imported_failed",
+            source=str(source),
+            error=str(exc),
+        )
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -3028,6 +3271,26 @@ MIGRATIONS: list[Migration] = [
     # nexus-m4gm (RDR-112 P1.3): EventStream RPC substrate migrations are applied
     # directly in run_daemon_migrations (not here) because they need a tuples.db
     # connection, not a memory.db connection.
+    # nexus-7ejx (RDR-112 P2.1): catalog tables in memory.db.
+    # CatalogDB collapsed into T2 as the eighth domain store. Schema migration
+    # creates owners/documents/links/collections/document_chunks/_meta tables
+    # in memory.db. CatalogStore._init_schema is idempotent via CREATE IF NOT EXISTS.
+    Migration(
+        "4.32.12",
+        "RDR-112 P2.1: catalog tables in memory.db (nexus-7ejx)",
+        migrate_catalog_tables_in_memory_db,
+    ),
+    # nexus-7ejx (RDR-112 P2.1): legacy catalog.db import.
+    # If catalog.db exists beside memory.db, atomically imports all rows into
+    # the catalog tables in memory.db and renames catalog.db to .imported.
+    # Two-phase sentinel (catalog.db.importing) + single SQLite transaction
+    # guarantees atomicity: either all rows land and file is renamed, or
+    # memory.db is unchanged and the sentinel persists for retry.
+    Migration(
+        "4.32.12",
+        "RDR-112 P2.1: import legacy catalog.db into memory.db (nexus-7ejx)",
+        migrate_catalog_legacy_import,
+    ),
 ]
 
 
