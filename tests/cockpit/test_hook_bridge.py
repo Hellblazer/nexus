@@ -113,7 +113,7 @@ dimensions:
   session:    { type: string, required: true }
   project:    { type: string, required: true }
   timestamp:  { type: string, required: true }
-  event_type: { type: string, required: true }
+  hook_event_name: { type: string, required: true }
   intent:     { type: string, required: false }
 take:
   enabled: false
@@ -160,7 +160,7 @@ dimensions:
   session:    { type: string, required: true }
   project:    { type: string, required: true }
   timestamp:  { type: string, required: true }
-  event_type: { type: string, required: true }
+  hook_event_name: { type: string, required: true }
   workflow:   { type: string, required: false }
 take:
   enabled: false
@@ -805,55 +805,70 @@ class TestScriptCorrectOutput:
 
 
 # ---------------------------------------------------------------------------
-# nexus-usic: event_type discriminator dimension on collapsed subspaces
+# nexus-usic: hook_event_name discriminator dimension on collapsed subspaces
 # ---------------------------------------------------------------------------
 
 
 class TestEventTypeDiscriminator:
-    """Stop/StopFailure and SessionStart/SessionEnd carry event_type dim."""
+    """Stop/StopFailure and SessionStart/SessionEnd carry hook_event_name dim."""
 
-    def test_stop_dim_event_type_is_stop(self) -> None:
+    def test_stop_dim_hook_event_name_is_stop(self) -> None:
         from nexus.cockpit.hook_bridge import route_payload
 
         _, dims, _ = route_payload("Stop", STOP_PAYLOAD)
-        assert dims["event_type"] == "Stop"
+        assert dims["hook_event_name"] == "Stop"
 
-    def test_stopfailure_dim_event_type_is_stopfailure(self) -> None:
+    def test_stopfailure_dim_hook_event_name_is_stopfailure(self) -> None:
         from nexus.cockpit.hook_bridge import route_payload
 
         _, dims, _ = route_payload("StopFailure", STOPFAILURE_PAYLOAD)
-        assert dims["event_type"] == "StopFailure"
+        assert dims["hook_event_name"] == "StopFailure"
 
-    def test_sessionstart_dim_event_type_is_sessionstart(self) -> None:
+    def test_sessionstart_dim_hook_event_name_is_sessionstart(self) -> None:
         from nexus.cockpit.hook_bridge import route_payload
 
         _, dims, _ = route_payload("SessionStart", SESSION_START_PAYLOAD)
-        assert dims["event_type"] == "SessionStart"
+        assert dims["hook_event_name"] == "SessionStart"
 
-    def test_sessionend_dim_event_type_is_sessionend(self) -> None:
+    def test_sessionend_dim_hook_event_name_is_sessionend(self) -> None:
         from nexus.cockpit.hook_bridge import route_payload
 
         _, dims, _ = route_payload("SessionEnd", SESSION_END_PAYLOAD)
-        assert dims["event_type"] == "SessionEnd"
+        assert dims["hook_event_name"] == "SessionEnd"
 
-    def test_stop_match_text_includes_session_and_cwd(self) -> None:
-        """match_text must carry more than the literal hook name (semantic richness)."""
+    def test_stop_match_text_is_bare_when_no_last_message(self) -> None:
+        """Stop without last_assistant_message embeds the bare hook type.
+
+        Earlier revisions embedded session_id+cwd here, but those are
+        session-constants — they collapse every turn into the same vector.
+        The discriminator lives in the hook_event_name DIMENSION, not in
+        match_text.
+        """
         from nexus.cockpit.hook_bridge import route_payload
 
         _, _, match_text = route_payload("Stop", STOP_PAYLOAD)
-        assert "Stop" in match_text
-        assert "test-session-abc" in match_text
-        assert "/projects/nexus" in match_text
+        assert match_text == "Stop"
 
-    def test_sessionstart_match_text_includes_session_and_cwd(self) -> None:
+    def test_stop_match_text_uses_last_assistant_message_when_present(self) -> None:
+        """When the payload carries last_assistant_message, prefer it."""
+        from nexus.cockpit.hook_bridge import route_payload
+
+        payload = dict(STOP_PAYLOAD)
+        payload["last_assistant_message"] = "Tests pass. Tagging release."
+        _, _, match_text = route_payload("Stop", payload)
+        assert "Stop" in match_text
+        assert "Tests pass" in match_text
+
+    def test_sessionstart_match_text_is_bare(self) -> None:
+        """SessionStart/SessionEnd have no per-event content — match_text is bare."""
         from nexus.cockpit.hook_bridge import route_payload
 
         _, _, match_text = route_payload("SessionStart", SESSION_START_PAYLOAD)
-        assert "SessionStart" in match_text
-        assert "test-session-abc" in match_text
-        assert "/projects/nexus" in match_text
+        assert match_text == "SessionStart"
+        _, _, match_text = route_payload("SessionEnd", SESSION_END_PAYLOAD)
+        assert match_text == "SessionEnd"
 
-    def test_non_collapsed_hooks_have_no_event_type(self) -> None:
+    def test_non_collapsed_hooks_have_no_hook_event_name(self) -> None:
         """Only the collapsed subspaces need the discriminator."""
         from nexus.cockpit.hook_bridge import route_payload
 
@@ -865,8 +880,8 @@ class TestEventTypeDiscriminator:
             ("Notification", NOTIFICATION_PAYLOAD),
         ]:
             _, dims, _ = route_payload(hook_type, payload)
-            assert "event_type" not in dims, (
-                f"event_type should only be on collapsed subspaces, found on {hook_type}"
+            assert "hook_event_name" not in dims, (
+                f"hook_event_name should only be on collapsed subspaces, found on {hook_type}"
             )
 
 
@@ -909,8 +924,8 @@ class TestProductionYamlSchemas:
                 f"(got {tmpl.embed_from!r})"
             )
 
-    def test_production_collapsed_subspaces_require_event_type(self) -> None:
-        """assistant_turn_ended and session_lifecycle must require event_type."""
+    def test_production_collapsed_subspaces_require_hook_event_name(self) -> None:
+        """assistant_turn_ended and session_lifecycle must require hook_event_name."""
         from nexus.cockpit.hook_bridge import _load_registry_with_hooks
 
         registry = _load_registry_with_hooks(_PROD_HOOKS_DIR)
@@ -920,10 +935,10 @@ class TestProductionYamlSchemas:
         ):
             tmpl = registry.get_schema_for(subspace)
             dims = tmpl.dimensions
-            assert "event_type" in dims, (
-                f"{subspace}: event_type discriminator required (nexus-usic)"
+            assert "hook_event_name" in dims, (
+                f"{subspace}: hook_event_name discriminator required (nexus-usic)"
             )
-            assert dims["event_type"]["required"] is True
+            assert dims["hook_event_name"]["required"] is True
 
 
 class TestEmitDirectAuto:
@@ -955,9 +970,22 @@ class TestEmitDirectAuto:
         finally:
             hook_bridge._reset_singleton_for_tests()
 
-        # tuples.db should now exist; that alone proves _emit_direct_auto
-        # opened the production self-initialisation path end-to-end.
+        # File existence proves _emit_direct_auto opened the path; the
+        # row count proves a tuple was actually written (not just that
+        # the SQLite file was created and then silently failed). Per the
+        # project "exact assertions, not file-exists" rule.
         assert (nexus_dir / "tuples.db").exists()
+        verify_conn = sqlite3.connect(nexus_dir / "tuples.db")
+        try:
+            (count,) = verify_conn.execute(
+                "SELECT COUNT(*) FROM tuples WHERE subspace = ?",
+                ("hook_events/assistant_turn_ended",),
+            ).fetchone()
+        finally:
+            verify_conn.close()
+        assert count == 1, (
+            f"expected exactly one assistant_turn_ended tuple, got {count}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1005,6 +1033,7 @@ class TestRegistryLoadFailureWarning:
         )
         assert warns[0]["log_level"] == "warning"
         assert "remediation" in warns[0]
+        assert warns[0]["error_type"] == "RegistryLoadError"
 
         hook_bridge._reset_singleton_for_tests()
 
@@ -1049,6 +1078,67 @@ class TestRegistryLoadFailureWarning:
 
         hook_bridge._reset_singleton_for_tests()
 
+    def test_close_singleton_at_exit_closes_conns_and_clears_dict(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The atexit body itself must close all cached conns and clear the dict."""
+        from nexus.cockpit import hook_bridge
+
+        nexus_dir = tmp_path / "nexus"
+        nexus_dir.mkdir()
+        monkeypatch.setattr(
+            "nexus.config.load_config",
+            lambda: {"nexus_dir": str(nexus_dir)},
+        )
+        monkeypatch.setenv("CLAUDECODE", "1")
+
+        hook_bridge._reset_singleton_for_tests()
+        # Prime the cache so we have a real connection to close.
+        resources = hook_bridge._get_or_init_resources()
+        assert resources is not None
+        conn = resources[0]
+        assert len(hook_bridge._singleton) == 1
+
+        # Directly invoke the atexit body.
+        hook_bridge._close_singleton_at_exit()
+
+        assert hook_bridge._singleton == {}
+        # The conn must now be closed — any operation should raise
+        # ProgrammingError.
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+
+        hook_bridge._reset_singleton_for_tests()
+
+    def test_warm_path_skips_load_config(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """After init, repeat _get_or_init_resources must not re-read config."""
+        from nexus.cockpit import hook_bridge
+
+        nexus_dir = tmp_path / "nexus"
+        nexus_dir.mkdir()
+
+        call_count = {"n": 0}
+
+        def _counting_load_config():
+            call_count["n"] += 1
+            return {"nexus_dir": str(nexus_dir)}
+
+        monkeypatch.setattr("nexus.config.load_config", _counting_load_config)
+        monkeypatch.setenv("CLAUDECODE", "1")
+
+        hook_bridge._reset_singleton_for_tests()
+        hook_bridge._get_or_init_resources()  # cold path — reads config
+        first = call_count["n"]
+        hook_bridge._get_or_init_resources()  # warm path — must skip
+        hook_bridge._get_or_init_resources()
+        assert call_count["n"] == first, (
+            f"warm path should not re-read load_config; "
+            f"calls went {first} -> {call_count['n']}"
+        )
+        hook_bridge._reset_singleton_for_tests()
+
     def test_atexit_handler_registered_on_first_init(
         self, tmp_path, monkeypatch
     ) -> None:
@@ -1065,9 +1155,9 @@ class TestRegistryLoadFailureWarning:
         )
         monkeypatch.setenv("CLAUDECODE", "1")
 
+        # _reset_singleton_for_tests() now clears _atexit_registered too
+        # (substantive review: prior version left a test-order foot-gun).
         hook_bridge._reset_singleton_for_tests()
-        # Reset the registration flag so this test is order-independent.
-        hook_bridge._atexit_registered = False
 
         registered: list[Any] = []
         real_register = _atexit.register

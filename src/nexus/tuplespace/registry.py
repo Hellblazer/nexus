@@ -365,16 +365,35 @@ def _load_one(yml_path: Path) -> SubspaceSchema:
 
 
 def default_builtin_dir() -> Path:
-    """Return the repo's canonical ``nx/tuplespace/builtin/`` directory.
+    """Return the canonical ``nx/tuplespace/builtin/`` directory.
 
-    Resolves relative to the running package: walks up from this file
-    to the repo root and then into ``nx/tuplespace/builtin/``. Works
-    for editable installs (``uv sync``) and source checkouts; for wheel
-    installs the path may not exist and callers can pass an explicit
-    directory to ``Registry.load`` instead.
+    Resolution order (RDR-092 / PR #786 packaging-parity with plan
+    YAMLs):
+
+    1. Package-data resource — ``importlib.resources.files("nexus") /
+       "_resources" / "tuplespace" / "builtin"``. Works for both wheel
+       installs (force-include lands files at that path) and editable
+       installs (``src/nexus/_resources/tuplespace`` symlink back into
+       ``nx/tuplespace``).
+    2. Repo-relative fallback — walks up from this file four levels to
+       the repo root and looks for ``nx/tuplespace/builtin``. Covers
+       unusual layouts where importlib.resources cannot resolve.
+
+    The first existing path wins. Returns the first candidate even if
+    none exist so callers get a deterministic error from ``Registry.load``.
     """
+    from importlib.resources import as_file, files
+
+    candidates: list[Path] = []
+    try:
+        resource = files("nexus") / "_resources" / "tuplespace" / "builtin"
+        with as_file(resource) as resolved:
+            candidates.append(Path(resolved))
+    except (ModuleNotFoundError, FileNotFoundError, TypeError):
+        pass
     here = Path(__file__).resolve()
-    # src/nexus/tuplespace/registry.py — four parent hops reach the repo
-    # root: tuplespace → nexus → src → repo.
-    repo_root = here.parent.parent.parent.parent
-    return repo_root / "nx" / "tuplespace" / "builtin"
+    candidates.append(here.parent.parent.parent.parent / "nx" / "tuplespace" / "builtin")
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return candidates[0]

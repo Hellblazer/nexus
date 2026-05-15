@@ -10,7 +10,7 @@ dimensions:
   session:   { type: string, required: true }
   project:   { type: string, required: true }
   timestamp: { type: string, required: true }
-  event_type: { type: string, required: true }
+  hook_event_name: { type: string, required: true }
   intent:    { type: string, required: false }
 take:
   enabled: false

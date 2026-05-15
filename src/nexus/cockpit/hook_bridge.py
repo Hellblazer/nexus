@@ -63,6 +63,7 @@ _log = structlog.get_logger(__name__)
 # pages warm and the cost is bounded by the first invocation per process.
 _singleton_lock = threading.Lock()
 _singleton: dict[tuple[str, str], tuple[Any, Any, Any]] = {}
+_cached_key: tuple[str, str] | None = None
 _registry_load_failed_once = False
 _atexit_registered = False
 
@@ -314,17 +315,19 @@ def _emit_direct_auto(
             match_text=match_text,
         )
     except UnknownSubspaceError:
-        # Daemon-mode cutover (nexus-pce1.6) will hit this if the bridge
-        # fires before nexus-78mh registers the seven hook-event YAMLs with
-        # the daemon. Treat as expected-but-noteworthy: structured WARN with
-        # a remediation hint, not an exception traceback.
+        # In direct mode this is reachable only if the registry loaded but
+        # is missing one of the seven hook subspace YAMLs (partial-deploy
+        # state). Daemon-mode (nexus-pce1.6) will also hit this when the
+        # bridge fires before nexus-78mh registers the schemas. Either way
+        # we surface a structured WARN with a remediation hint instead of
+        # an exception traceback.
         _log.warning(
             "hook_bridge_unknown_subspace",
             subspace=subspace,
             remediation=(
-                "Run 'nx subspace register' or wait for nexus-78mh startup "
-                "registration. Subspace YAMLs may not yet be registered "
-                "with the daemon."
+                "Subspace not in local registry (direct mode) or not yet "
+                "registered with the daemon. Verify the hook YAMLs are "
+                "installed; in daemon mode wait for nexus-78mh registration."
             ),
         )
 
@@ -339,7 +342,15 @@ def _get_or_init_resources() -> tuple[Any, Any, Any] | None:
     Uses a double-checked-lock so the cached fast-path skips the
     ``_singleton_lock`` entirely once the resources are initialised.
     """
-    global _registry_load_failed_once, _atexit_registered
+    global _registry_load_failed_once, _atexit_registered, _cached_key
+
+    # Fast path: if the key has already been resolved once and the cache is
+    # warm for it, skip the lock AND the load_config() disk read. nexus_dir
+    # is stable across a process lifetime so the cached key is safe to reuse.
+    if _cached_key is not None:
+        cached = _singleton.get(_cached_key)
+        if cached is not None:
+            return cached
 
     import chromadb as _chromadb
 
@@ -355,15 +366,17 @@ def _get_or_init_resources() -> tuple[Any, Any, Any] | None:
 
     key = (str(db_path), str(chroma_dir))
 
-    # Fast path: dict lookup is atomic under the GIL for a single get(); if
-    # another thread is mid-init the second check inside the lock catches it.
+    # Second fast-path check now that we have the freshly resolved key
+    # (handles the first-call race where _cached_key wasn't populated yet).
     cached = _singleton.get(key)
     if cached is not None:
+        _cached_key = key
         return cached
 
     with _singleton_lock:
         cached = _singleton.get(key)
         if cached is not None:
+            _cached_key = key
             return cached
 
         builtin = default_builtin_dir()
@@ -395,6 +408,7 @@ def _get_or_init_resources() -> tuple[Any, Any, Any] | None:
             return None
 
         _singleton[key] = (conn, index, registry)
+        _cached_key = key
         if not _atexit_registered:
             atexit.register(_close_singleton_at_exit)
             _atexit_registered = True
@@ -402,8 +416,15 @@ def _get_or_init_resources() -> tuple[Any, Any, Any] | None:
 
 
 def _reset_singleton_for_tests() -> None:
-    """Clear the module-level resource cache. Test-only helper."""
-    global _registry_load_failed_once
+    """Clear all module-level state. Test-only helper.
+
+    Resets the resource cache, the once-per-process registry-load
+    warning flag, AND the atexit-registered flag so the next emit()
+    starts from a clean slate. Without the atexit reset, tests that
+    run after a successful init would see "already registered" even
+    though _singleton was cleared.
+    """
+    global _registry_load_failed_once, _atexit_registered, _cached_key
     with _singleton_lock:
         for conn, _, _ in _singleton.values():
             try:
@@ -411,7 +432,9 @@ def _reset_singleton_for_tests() -> None:
             except Exception:
                 pass
         _singleton.clear()
+        _cached_key = None
         _registry_load_failed_once = False
+        _atexit_registered = False
 
 
 def _load_registry_with_hooks(builtin_dir: Path) -> "Registry":
@@ -482,11 +505,13 @@ def _build_dimensions(hook_type: str, payload: dict[str, Any]) -> dict[str, Any]
     if tool_name and hook_type in ("PreToolUse", "PostToolUse"):
         dims["tool"] = tool_name
 
-    # event_type discriminator for collapsed subspaces (Stop/StopFailure ->
-    # assistant_turn_ended, SessionStart/SessionEnd -> session_lifecycle).
-    # Without this, downstream consumers cannot tell the variants apart.
+    # hook_event_name discriminator for collapsed subspaces (Stop/StopFailure
+    # -> assistant_turn_ended, SessionStart/SessionEnd -> session_lifecycle).
+    # Named to match the CC API field and to avoid colliding with the
+    # ``event_type`` dim reserved for layout_state subspace paths in
+    # RDR-111 §Phase 2 (line 519).
     if hook_type in ("Stop", "StopFailure", "SessionStart", "SessionEnd"):
-        dims["event_type"] = hook_type
+        dims["hook_event_name"] = hook_type
 
     # No additional optional dims for the other types at this stage
     # (workflow, intent, priority are reserved for future enrichment)
@@ -525,19 +550,25 @@ def _build_match_text(hook_type: str, payload: dict[str, Any]) -> str:
             return payload.get("message", "")
 
         case "Stop" | "StopFailure":
-            # Embed something semantically richer than the bare event name so
-            # downstream semantic search differentiates one turn from another.
-            # session_id is stable per turn; cwd grounds the project. The
-            # event_type DIMENSION carries the variant for exact-match filters.
-            session = payload.get("session_id", "")
-            cwd = payload.get("cwd", "")
-            stop_active = payload.get("stop_hook_active", False)
-            return f"{hook_type} session={session} cwd={cwd} active={stop_active}".strip()
+            # Prefer per-turn content (last_assistant_message) when the
+            # payload carries it; otherwise fall back to the bare hook
+            # type. Earlier revisions embedded session_id+cwd, but those
+            # are session-constants — embedding them at every turn produces
+            # N near-identical vectors that collapse the subspace into one
+            # cluster per session. The hook_event_name DIMENSION carries
+            # the Stop/StopFailure variant for exact-match filtering.
+            last_msg = payload.get("last_assistant_message", "")
+            if last_msg:
+                return f"{hook_type} {last_msg}"[:512].strip()
+            return hook_type
 
         case "SessionStart" | "SessionEnd":
-            session = payload.get("session_id", "")
-            cwd = payload.get("cwd", "")
-            return f"{hook_type} session={session} cwd={cwd}".strip()
+            # No per-event content is reliably available on these payloads;
+            # the bare hook_event_name (in the dim) plus the literal hook
+            # type as match_text is the honest answer. Avoid session-
+            # constant string compounding that would cluster all session
+            # boundaries together.
+            return hook_type
 
         case _:
             return ""
