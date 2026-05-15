@@ -3177,6 +3177,7 @@ async def _nx_answer_plan_miss(
     and return a synthetic Match for plan_run.
     """
     from nexus.operators.dispatch import claude_dispatch
+    from nexus.operators.dispatch_router import pick_dispatcher_for
     from nexus.plans.match import Match
     from nexus.mcp_infra import get_collection_names
 
@@ -3229,9 +3230,18 @@ async def _nx_answer_plan_miss(
     for attempt in range(2):
         attempt_timeout = 300.0 if attempt == 0 else 150.0
         try:
-            payload = await claude_dispatch(
-                prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
-            )
+            if pick_dispatcher_for("plan_miss_planner") == "qwen":
+                from nexus.operators.qwen_dispatch import qwen_dispatch
+
+                payload = await qwen_dispatch(
+                    prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
+                    operator_name="plan_miss_planner",
+                )
+            else:
+                payload = await claude_dispatch(
+                    prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
+                    operator_name="plan_miss_planner",
+                )
             break
         except _OpOutputError as exc:
             last_output_error = exc
