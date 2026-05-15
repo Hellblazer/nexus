@@ -1360,3 +1360,114 @@ class TestOperatorAggregate:
         assert len(result["aggregates"]) == 3
         keys = {a["key_value"] for a in result["aggregates"]}
         assert keys == {"alpha", "beta", "gamma"}
+
+
+# ── Cost telemetry ───────────────────────────────────────────────────────
+
+
+class _LogCapture:
+    """Stand-in for the module ``_log`` that records ``info(event, **kw)`` calls."""
+
+    def __init__(self) -> None:
+        self.entries: list[tuple[str, dict[str, object]]] = []
+
+    def info(self, event: str, **kwargs: object) -> None:
+        self.entries.append((event, kwargs))
+
+    def debug(self, *a: object, **kw: object) -> None:  # pragma: no cover
+        pass
+
+    def warning(self, *a: object, **kw: object) -> None:  # pragma: no cover
+        pass
+
+    def error(self, *a: object, **kw: object) -> None:  # pragma: no cover
+        pass
+
+
+def _envelope(
+    total_cost_usd: float | None = 0.0123,
+    input_tokens: int | None = 1200,
+    output_tokens: int | None = 250,
+    structured: dict | None = None,
+) -> bytes:
+    """Build a faked ``claude -p --output-format json`` envelope."""
+    env: dict[str, object] = {
+        "type": "result",
+        "is_error": False,
+        "result": "",
+        "structured_output": structured or {"result": "ok"},
+    }
+    if total_cost_usd is not None:
+        env["total_cost_usd"] = total_cost_usd
+    usage: dict[str, object] = {}
+    if input_tokens is not None:
+        usage["input_tokens"] = input_tokens
+    if output_tokens is not None:
+        usage["output_tokens"] = output_tokens
+    if usage:
+        env["usage"] = usage
+    return json.dumps(env).encode()
+
+
+class TestClaudeDispatchCostTelemetry:
+    """RDR-PR#623 follow-up: surface ``total_cost_usd`` + usage from the
+    claude -p envelope as a structured log entry."""
+
+    @pytest.mark.asyncio
+    async def test_logs_total_cost_and_usage_from_envelope(self) -> None:
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc(stdout=_envelope(
+            total_cost_usd=0.0123, input_tokens=1200, output_tokens=250,
+        ))
+        cap = _LogCapture()
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)), \
+             patch("nexus.operators.dispatch._log", cap):
+            result = await claude_dispatch(
+                "prompt",
+                _SIMPLE_SCHEMA,
+                operator_name="operator_extract",
+            )
+        assert result == {"result": "ok"}
+        cost = [e for e in cap.entries if e[0] == "operator_dispatch_cost"]
+        assert cost, f"expected operator_dispatch_cost entry; got {cap.entries!r}"
+        _, kw = cost[-1]
+        assert kw["dispatch_engine"] == "claude"
+        assert kw["dispatch_operator"] == "operator_extract"
+        assert kw["dispatch_cost_usd"] == pytest.approx(0.0123)
+        assert kw["dispatch_input_tokens"] == 1200
+        assert kw["dispatch_output_tokens"] == 250
+        assert kw["dispatch_would_have_cost_usd"] is None
+
+    @pytest.mark.asyncio
+    async def test_logs_null_cost_when_total_cost_usd_missing(self) -> None:
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc(stdout=_envelope(total_cost_usd=None))
+        cap = _LogCapture()
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)), \
+             patch("nexus.operators.dispatch._log", cap):
+            await claude_dispatch("p", _SIMPLE_SCHEMA)
+        cost = [e for e in cap.entries if e[0] == "operator_dispatch_cost"]
+        assert cost
+        _, kw = cost[-1]
+        assert kw["dispatch_cost_usd"] is None
+        # Usage was still present — those should be preserved.
+        assert kw["dispatch_input_tokens"] == 1200
+
+    @pytest.mark.asyncio
+    async def test_logs_null_tokens_when_usage_block_missing(self) -> None:
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc(stdout=_envelope(
+            input_tokens=None, output_tokens=None,
+        ))
+        cap = _LogCapture()
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)), \
+             patch("nexus.operators.dispatch._log", cap):
+            await claude_dispatch("p", _SIMPLE_SCHEMA)
+        cost = [e for e in cap.entries if e[0] == "operator_dispatch_cost"]
+        assert cost
+        _, kw = cost[-1]
+        assert kw["dispatch_input_tokens"] is None
+        assert kw["dispatch_output_tokens"] is None
