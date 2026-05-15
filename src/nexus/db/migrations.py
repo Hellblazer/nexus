@@ -3264,11 +3264,17 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
     ``bootstrap_version()`` could raise and a concurrent caller that
     entered under the released lock would see the path as "done" and
     proceed against a half-initialised schema (storage review C-1).
+
+    ``_connection_path_key`` is computed inside the lock so that the
+    key derivation (PRAGMA database_list + Path.resolve) and the
+    ``_upgrade_done`` membership check are atomic with respect to
+    concurrent callers — eliminating a window where two threads could
+    both derive a key before either adds it to the set.
     """
     import time as _time
 
-    path_key = _connection_path_key(conn)
     with _upgrade_lock:
+        path_key = _connection_path_key(conn)
         if path_key in _upgrade_done:
             return
 
