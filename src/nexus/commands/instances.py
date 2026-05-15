@@ -50,9 +50,14 @@ def instances_cmd(json_out: bool, sweep: bool) -> None:
     for every row in the liveness table. Stale rows (no heartbeat for
     > 60 s) are marked with an asterisk in human output.
 
-    Under RDR-112 daemon mode both the MCP heartbeat and this CLI command
-    route through the same ``MemoryStore.liveness_*`` methods via the
-    ``mcp_infra.t2_ctx`` facade.
+    Storage routing: the MCP heartbeat and this CLI command both call
+    ``MemoryStore.liveness_*`` methods via ``mcp_infra.t2_ctx``. Today
+    ``t2_ctx`` always opens a direct SQLite connection regardless of
+    ``NX_STORAGE_MODE``; daemon-mode routing through ``T2Client`` is
+    deferred to nexus-pce1.6 and will land once the Phase 2 CatalogDB
+    collapse settles the dispatch surface. The method names match the
+    daemon's RPC namespace (memory.liveness_*) so the eventual flip is
+    a routing change inside ``t2_ctx``, not a call-site rewrite here.
     """
     db_path = default_db_path()
     if not Path(db_path).exists():
