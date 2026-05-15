@@ -244,6 +244,40 @@ async def test_sigterm_unlinks_discovery_file(config_dir: Path) -> None:
     assert not discovery_path.exists(), "discovery file must be unlinked after stop"
 
 
+@pytest.mark.asyncio
+async def test_run_until_signal_wakes_on_signal_event(config_dir: Path) -> None:
+    """run_until_signal returns when ``stop_event`` is set by the signal path.
+
+    Exercises the full signal-handler wiring: ``run_until_signal`` installs
+    the SIGTERM/SIGINT handlers, blocks on ``_stop_event.wait()``, and
+    returns after ``stop()`` (which sets the event and drains). A real
+    SIGTERM cannot easily be sent from inside a single test process without
+    affecting pytest itself, but this covers the same wake path by setting
+    the underlying event directly via ``stop()`` from a peer task.
+    """
+    daemon = T2Daemon(config_dir=config_dir)
+    await daemon.start()
+
+    discovery_path = daemon.discovery_path
+
+    async def _trigger_stop() -> None:
+        # Yield enough times for run_until_signal to enter its wait, then
+        # call stop() — which is also the SIGTERM handler's action.
+        for _ in range(20):
+            await asyncio.sleep(0.005)
+        await daemon.stop()
+
+    trigger_task = asyncio.create_task(_trigger_stop())
+    try:
+        await daemon.run_until_signal()  # must return cleanly after stop()
+    finally:
+        await trigger_task
+
+    assert not discovery_path.exists(), (
+        "discovery file must be unlinked after run_until_signal returns"
+    )
+
+
 # ---------------------------------------------------------------------------
 # UDS socket permissions (RDR-113)
 # ---------------------------------------------------------------------------
