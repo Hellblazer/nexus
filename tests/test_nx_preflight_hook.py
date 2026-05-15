@@ -134,7 +134,13 @@ class TestHookConfigWiresPreflightEarly:
             / "nx" / "hooks" / "hooks.json"
         )
         data = json.loads(cfg.read_text())
-        sessionstart = data["hooks"]["SessionStart"][0]["hooks"]
+        # Flatten all SessionStart matcher groups: y0nb prepended an orb_bridge
+        # entry at index 0; the originals (nx upgrade, preflight, using-nx-skills)
+        # live in subsequent matcher groups.
+        sessionstart = [
+            h for entry in data["hooks"]["SessionStart"] for h in entry["hooks"]
+            if "orb_bridge_" not in h["command"]
+        ]
         # Position 0 is `nx upgrade --auto` (existing contract per
         # tests/test_phase5_integration.py::TestHooksJson::
         # test_upgrade_auto_is_first_session_start_hook).
@@ -158,7 +164,13 @@ class TestHookConfigWiresPreflightEarly:
             / "nx" / "hooks" / "hooks.json"
         )
         data = json.loads(cfg.read_text())
-        sessionstart = data["hooks"]["SessionStart"][0]["hooks"]
+        # Flatten all SessionStart matcher groups: y0nb prepended an orb_bridge
+        # entry at index 0; the originals (nx upgrade, preflight, using-nx-skills)
+        # live in subsequent matcher groups.
+        sessionstart = [
+            h for entry in data["hooks"]["SessionStart"] for h in entry["hooks"]
+            if "orb_bridge_" not in h["command"]
+        ]
         cmds = [h["command"] for h in sessionstart]
         preflight_idx = next(
             (i for i, c in enumerate(cmds) if "preflight.py" in c), -1,
@@ -186,6 +198,12 @@ class TestHookConfigWiresPreflightEarly:
             / "nx" / "hooks" / "hooks.json"
         )
         data = json.loads(cfg.read_text())
-        sessionstart = data["hooks"]["SessionStart"][0]["hooks"]
+        # Flatten all SessionStart matcher groups: y0nb prepended an orb_bridge
+        # entry at index 0; the originals (nx upgrade, preflight, using-nx-skills)
+        # live in subsequent matcher groups.
+        sessionstart = [
+            h for entry in data["hooks"]["SessionStart"] for h in entry["hooks"]
+            if "orb_bridge_" not in h["command"]
+        ]
         commands = " ".join(h["command"] for h in sessionstart)
         assert "using-nx-skills" in commands

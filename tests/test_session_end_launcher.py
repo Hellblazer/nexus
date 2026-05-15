@@ -210,10 +210,14 @@ def test_hooks_json_session_end_timeout_is_three_seconds() -> None:
     triggers. Tighter timeout means a wedged hook is reaped faster.
     """
     cfg = _read_plugin_hooks_json()
+    # y0nb prepended an orb_bridge SessionEnd hook (timeout 5); the launcher
+    # itself still ships with timeout 3. Filter the bridge entry before
+    # asserting on the original contract.
     timeouts = [
         h["timeout"]
         for entry in cfg["hooks"]["SessionEnd"]
         for h in entry.get("hooks", [])
+        if "orb_bridge_" not in h["command"]
     ]
     assert timeouts == [3], f"expected SessionEnd timeout 3s; got {timeouts!r}"
 

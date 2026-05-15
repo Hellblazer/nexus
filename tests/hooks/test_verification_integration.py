@@ -108,8 +108,13 @@ class TestHooksJsonStructure:
     def test_hooks_json_stop_timeout(self) -> None:
         data = json.loads(HOOKS_JSON.read_text())
         stop_hooks = data["hooks"]["Stop"]
-        hook = stop_hooks[0]["hooks"][0]
-        assert hook["timeout"] == 180
+        # y0nb prepended an orb_bridge entry at index 0; pick the verification
+        # hook by command-fragment match.
+        verification = next(
+            h for entry in stop_hooks for h in entry["hooks"]
+            if "stop_verification_hook" in h["command"]
+        )
+        assert verification["timeout"] == 180
 
     def test_hooks_json_pretooluse_timeout(self) -> None:
         """The advisory hook must have a tight ceiling.
@@ -123,9 +128,12 @@ class TestHooksJsonStructure:
         """
         data = json.loads(HOOKS_JSON.read_text())
         pre_hooks = data["hooks"]["PreToolUse"]
-        hook = pre_hooks[0]["hooks"][0]
-        assert hook["timeout"] <= 10, (
-            f"PreToolUse Bash timeout {hook['timeout']}s is too high; "
+        advisory = next(
+            h for entry in pre_hooks for h in entry["hooks"]
+            if "pre_close_verification_hook" in h["command"]
+        )
+        assert advisory["timeout"] <= 10, (
+            f"PreToolUse Bash timeout {advisory['timeout']}s is too high; "
             f"the advisory hook should never need >5s. A long ceiling "
             f"masks real stalls."
         )
@@ -133,7 +141,12 @@ class TestHooksJsonStructure:
     def test_hooks_json_pretooluse_matcher_is_bash(self) -> None:
         data = json.loads(HOOKS_JSON.read_text())
         pre_hooks = data["hooks"]["PreToolUse"]
-        assert pre_hooks[0]["matcher"] == "Bash"
+        # The advisory verification hook is gated to Bash; y0nb's orb_bridge
+        # entry has matcher "" (fires on every tool). Find the Bash-gated one.
+        bash_entry = next(
+            entry for entry in pre_hooks if entry["matcher"] == "Bash"
+        )
+        assert bash_entry["matcher"] == "Bash"
 
     def test_hooks_json_existing_hooks_unchanged(self) -> None:
         data = json.loads(HOOKS_JSON.read_text())
