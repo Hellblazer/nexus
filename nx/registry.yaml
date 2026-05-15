@@ -395,6 +395,55 @@ standalone_skills:
       - "understanding what RDRs relate to a file"
     tools: [Bash, Read]
 
+  tuplespace-tasks:
+    description: "Dispatch and claim work units via the tasks subspace (RDR-110 coordination)"
+    triggers:
+      - "post a task for any agent to claim"
+      - "claim the next work unit"
+    tools: [Bash, Read]
+
+  tuplespace-mailbox:
+    description: "Send a named message between specific agents via the mailbox subspace"
+    triggers:
+      - "send a message to a named agent"
+      - "agent-to-agent direct delivery"
+    tools: [Bash, Read]
+
+  tuplespace-lock:
+    description: "Mutual exclusion on a named resource via the locks subspace"
+    triggers:
+      - "acquire an exclusive lock on a resource"
+      - "release a lock"
+    tools: [Bash, Read]
+
+  tuplespace-events:
+    description: "Broadcast state changes via the events subspace (pub-sub)"
+    triggers:
+      - "publish a state-change event"
+      - "subscribe to broadcast events"
+    tools: [Bash, Read]
+
+  tuplespace-barriers:
+    description: "Fan-in synchronization for parallel agents via the barriers subspace"
+    triggers:
+      - "wait for N parallel agents to finish"
+      - "fan-in coordination barrier"
+    tools: [Bash, Read]
+
+  tuplespace-list:
+    description: "List registered subspaces and inspect their schemas"
+    triggers:
+      - "show all registered tuple-space subspaces"
+      - "inspect a subspace schema"
+    tools: [Bash, Read]
+
+  tuplespace-stats:
+    description: "Per-subspace tuple counts for triage and capacity checks"
+    triggers:
+      - "show tuple counts per subspace"
+      - "triage a stuck coordinator"
+    tools: [Bash, Read]
+
   nexus:
     description: "Nexus CLI reference for nx search, nx store, nx memory"
     triggers:
