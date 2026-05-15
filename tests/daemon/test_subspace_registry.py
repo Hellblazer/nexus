@@ -369,11 +369,14 @@ async def test_hello_ack_registry_digest_changes_after_add(
 
 
 @pytest.mark.asyncio
-async def test_all_seven_hook_event_subspaces_register(
+async def test_all_seven_hook_event_subspaces_rejected_via_subspace_add(
     registry_daemon: T2Daemon,
 ) -> None:
-    """All seven RDR-111 hook-event subspace names parse and register without error."""
-    registered = []
+    """nexus-me9y: hook_events/ is now a reserved-prefix namespace owned by
+    the builtin seed path. Third parties cannot mint into it via
+    ``subspace_add``; the gate must fire for every one of the seven RDR-111
+    hook-event channel names.
+    """
     for name in _HOOK_EVENT_SUBSPACES:
         yaml_str = _HOOK_EVENT_YAML_TEMPLATE.format(name=name)
         resp = await _rpc_uds(
@@ -381,16 +384,14 @@ async def test_all_seven_hook_event_subspaces_register(
             "subspace_add",
             {"yaml": yaml_str},
         )
-        assert "error" not in resp, (
-            f"hook-event subspace {name!r} failed to register: {resp}"
+        assert "error" in resp, (
+            f"hook-event subspace {name!r} must be rejected (reserved prefix): {resp}"
         )
-        result = resp.get("result", {})
-        assert result.get("name") == name, (
-            f"Expected name={name!r}, got: {result.get('name')!r}"
+        err = resp["error"]
+        msg = err.get("message", "") if isinstance(err, dict) else str(err)
+        assert "hook_events/" in msg or "reserved" in msg.lower(), (
+            f"Error must mention reserved prefix for {name!r}: {msg!r}"
         )
-        registered.append(result.get("name"))
-
-    assert len(registered) == 7, f"Expected 7 registered subspaces, got: {registered}"
 
 
 # ---------------------------------------------------------------------------
