@@ -194,9 +194,15 @@ async def handle_event_stream(
     from nexus.daemon.t2_daemon import write_frame  # avoid circular at module level
 
     # --- Validate args ---
+    # Error frames use the same ``{error: {type, message}}`` shape as the
+    # dispatch-layer error frames so clients can consume them with a single
+    # decoder. See ``t2_client._reraise_remote_error`` for the consumer side.
     subspace_prefix = args.get("subspace_prefix")
     if not subspace_prefix:
-        write_frame(writer, {"error": "event_stream.subscribe: subspace_prefix is required"})
+        write_frame(writer, {"error": {
+            "type": "InvalidArgument",
+            "message": "event_stream.subscribe: subspace_prefix is required",
+        }})
         await writer.drain()
         return
 
@@ -207,7 +213,10 @@ async def handle_event_stream(
     # position. Allowed character set is the path-safe subset.
     validation_error = _validate_subspace_prefix(subspace_prefix)
     if validation_error is not None:
-        write_frame(writer, {"error": f"event_stream.subscribe: {validation_error}"})
+        write_frame(writer, {"error": {
+            "type": "InvalidArgument",
+            "message": f"event_stream.subscribe: {validation_error}",
+        }})
         await writer.drain()
         return
 
@@ -233,7 +242,10 @@ async def handle_event_stream(
         conn.execute("PRAGMA query_only=ON")  # read-only guard
     except Exception as exc:
         _log.error("event_stream_db_open_failed", error=str(exc))
-        write_frame(writer, {"error": f"event_stream: failed to open tuples.db: {exc}"})
+        write_frame(writer, {"error": {
+            "type": exc.__class__.__name__,
+            "message": f"event_stream: failed to open tuples.db: {exc}",
+        }})
         await writer.drain()
         return
 
@@ -305,7 +317,10 @@ async def handle_event_stream(
         # Daemon stopping: notify client
         if stopping_fn():
             try:
-                write_frame(writer, {"error": "daemon is shutting down"})
+                write_frame(writer, {"error": {
+                    "type": "DaemonShuttingDown",
+                    "message": "daemon is shutting down",
+                }})
                 await writer.drain()
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
