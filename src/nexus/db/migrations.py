@@ -3295,17 +3295,6 @@ MIGRATIONS: list[Migration] = [
         "RDR-109 Phase 5: add document_aspects.salient_sentences column",
         lambda conn: _migrate_add_aspects_salient_sentences(conn),
     ),
-    # nexus-w0et (RDR-112 P1.4): watcher_state table in tuples.db.
-    # watcher_state lives in tuples.db (not memory.db) for genuine atomicity
-    # with cursor and tuple reads (RDR-111 lines 783-786). This migration
-    # wrapper derives the tuples.db path from the memory.db connection and
-    # applies the full tuples schema (idempotent via CREATE IF NOT EXISTS).
-    # The daemon is the SOLE migration runner for both databases per RDR-112 §9.
-    Migration(
-        "4.33.0",
-        "Create watcher_state table in tuples.db (RDR-111 nexus-w0et)",
-        _migrate_watcher_state_in_tuples_db,
-    ),
     # nexus-m4gm (RDR-112 P1.3): EventStream RPC substrate migrations are applied
     # directly in run_daemon_migrations (not here) because they need a tuples.db
     # connection, not a memory.db connection.
@@ -3322,6 +3311,17 @@ MIGRATIONS: list[Migration] = [
         "4.32.12",
         "RDR-112 P2.1: import legacy catalog.db into memory.db (nexus-7ejx)",
         migrate_catalog_legacy_import,
+    ),
+    # nexus-w0et (RDR-112 P1.4): watcher_state table in tuples.db.
+    # watcher_state lives in tuples.db (not memory.db) for genuine atomicity
+    # with cursor and tuple reads (RDR-111 lines 783-786). This migration
+    # wrapper derives the tuples.db path from the memory.db connection and
+    # applies the full tuples schema (idempotent via CREATE IF NOT EXISTS).
+    # The daemon is the SOLE migration runner for both databases per RDR-112 §9.
+    Migration(
+        "4.33.0",
+        "Create watcher_state table in tuples.db (RDR-111 nexus-w0et)",
+        _migrate_watcher_state_in_tuples_db,
     ),
     Migration(
         "4.35.0",
