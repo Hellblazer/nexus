@@ -1147,3 +1147,236 @@ class TestBatchExtraction:
                 "only one ExtractorConfig registered; mixed-config "
                 "test is vacuous"
             )
+
+
+# ── NEXUS_ASPECT_BACKEND parallel qwen adapter (Path B) ──────────────────────
+
+
+class TestPickAspectBackend:
+    """Backend selector contract for NEXUS_ASPECT_BACKEND."""
+
+    def test_default_is_claude(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import _pick_aspect_backend
+        monkeypatch.delenv("NEXUS_ASPECT_BACKEND", raising=False)
+        assert _pick_aspect_backend() == "claude"
+
+    def test_explicit_claude(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import _pick_aspect_backend
+        monkeypatch.setenv("NEXUS_ASPECT_BACKEND", "claude")
+        assert _pick_aspect_backend() == "claude"
+
+    def test_explicit_qwen(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import _pick_aspect_backend
+        monkeypatch.setenv("NEXUS_ASPECT_BACKEND", "qwen")
+        assert _pick_aspect_backend() == "qwen"
+
+    def test_case_insensitive(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import _pick_aspect_backend
+        monkeypatch.setenv("NEXUS_ASPECT_BACKEND", "QWEN")
+        assert _pick_aspect_backend() == "qwen"
+
+    def test_unknown_falls_back_to_claude_with_warn(
+        self, monkeypatch, caplog,
+    ) -> None:
+        from nexus.aspect_extractor import _pick_aspect_backend
+        monkeypatch.setenv("NEXUS_ASPECT_BACKEND", "gpt5")
+        # structlog logs go through stdlib root by default in tests;
+        # validate behaviour by result rather than asserting on
+        # caplog (config-sensitive).
+        assert _pick_aspect_backend() == "claude"
+
+    def test_empty_string_is_default(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import _pick_aspect_backend
+        monkeypatch.setenv("NEXUS_ASPECT_BACKEND", "")
+        assert _pick_aspect_backend() == "claude"
+
+
+class TestInvokeOnceQwen:
+    """Single-paper qwen invoker — exception mapping + happy path."""
+
+    def _patch_dispatch(self, monkeypatch, side_effect):
+        """Patch ``qwen_dispatch`` as a stub coroutine. ``side_effect``
+        is either a dict to return or an exception class/instance to
+        raise."""
+        from nexus.operators import qwen_dispatch as qd_mod
+
+        async def fake_dispatch(prompt, schema, **kwargs):
+            if isinstance(side_effect, Exception):
+                raise side_effect
+            if isinstance(side_effect, type) and issubclass(
+                side_effect, Exception
+            ):
+                raise side_effect("simulated")
+            return side_effect
+
+        monkeypatch.setattr(qd_mod, "qwen_dispatch", fake_dispatch)
+
+    def test_happy_path_returns_parsed_dict(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import _invoke_once_qwen
+        payload = {
+            "problem_formulation": "x",
+            "proposed_method": "y",
+            "experimental_datasets": [],
+            "experimental_baselines": [],
+            "experimental_results": "z",
+            "extras": {},
+            "confidence": 0.7,
+        }
+        self._patch_dispatch(monkeypatch, payload)
+        out = _invoke_once_qwen("prompt")
+        assert out == payload
+
+    def test_timeout_raises_transient(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import _TransientFailure, _invoke_once_qwen
+        from nexus.operators.qwen_dispatch import QwenOperatorTimeoutError
+        self._patch_dispatch(monkeypatch, QwenOperatorTimeoutError)
+        with pytest.raises(_TransientFailure):
+            _invoke_once_qwen("prompt")
+
+    def test_output_error_raises_hard(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import _HardFailure, _invoke_once_qwen
+        from nexus.operators.qwen_dispatch import QwenOperatorOutputError
+        self._patch_dispatch(monkeypatch, QwenOperatorOutputError)
+        with pytest.raises(_HardFailure):
+            _invoke_once_qwen("prompt")
+
+    def test_http_5xx_raises_transient(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import _TransientFailure, _invoke_once_qwen
+        from nexus.operators.qwen_dispatch import QwenOperatorError
+        self._patch_dispatch(
+            monkeypatch,
+            QwenOperatorError(
+                "qwen_dispatch non-2xx (503): Service Unavailable "
+                "(attempt 1/2, backend=http://x)"
+            ),
+        )
+        with pytest.raises(_TransientFailure):
+            _invoke_once_qwen("prompt")
+
+    def test_http_4xx_raises_hard(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import _HardFailure, _invoke_once_qwen
+        from nexus.operators.qwen_dispatch import QwenOperatorError
+        self._patch_dispatch(
+            monkeypatch,
+            QwenOperatorError(
+                "qwen_dispatch non-2xx (400): Bad Request "
+                "(attempt 1/2, backend=http://x)"
+            ),
+        )
+        with pytest.raises(_HardFailure):
+            _invoke_once_qwen("prompt")
+
+    def test_non_dict_top_level_raises_hard(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import _HardFailure, _invoke_once_qwen
+        self._patch_dispatch(monkeypatch, ["not", "a", "dict"])
+        with pytest.raises(_HardFailure):
+            _invoke_once_qwen("prompt")
+
+
+class TestInvokeOnceBatchQwen:
+    """Batch qwen invoker — papers-array contract + happy path."""
+
+    def _patch_dispatch(self, monkeypatch, side_effect):
+        from nexus.operators import qwen_dispatch as qd_mod
+
+        async def fake_dispatch(prompt, schema, **kwargs):
+            if isinstance(side_effect, Exception):
+                raise side_effect
+            return side_effect
+
+        monkeypatch.setattr(qd_mod, "qwen_dispatch", fake_dispatch)
+
+    def test_happy_path_returns_papers(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import _invoke_once_batch_qwen
+        payload = {"papers": [{"source_path": "/a.pdf"}]}
+        self._patch_dispatch(monkeypatch, payload)
+        out = _invoke_once_batch_qwen("prompt", timeout=300)
+        assert out == payload
+
+    def test_missing_papers_raises_hard(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import (
+            _HardFailure,
+            _invoke_once_batch_qwen,
+        )
+        self._patch_dispatch(monkeypatch, {"not_papers": []})
+        with pytest.raises(_HardFailure):
+            _invoke_once_batch_qwen("prompt", timeout=300)
+
+    def test_non_dict_raises_hard(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import (
+            _HardFailure,
+            _invoke_once_batch_qwen,
+        )
+        self._patch_dispatch(monkeypatch, [1, 2, 3])
+        with pytest.raises(_HardFailure):
+            _invoke_once_batch_qwen("prompt", timeout=300)
+
+
+class TestRetrySubprocessBackendBranch:
+    """End-to-end at ``_retry_subprocess``: backend env flag routes to
+    qwen vs subprocess invokers."""
+
+    def test_default_env_uses_subprocess_invoker(self, monkeypatch) -> None:
+        import nexus.aspect_extractor as mod
+        monkeypatch.delenv("NEXUS_ASPECT_BACKEND", raising=False)
+        called = {"sub": 0, "qwen": 0}
+
+        def fake_invoke_once(prompt):
+            called["sub"] += 1
+            return {"problem_formulation": "x"}
+
+        def fake_invoke_once_qwen(prompt):
+            called["qwen"] += 1
+            return {"problem_formulation": "y"}
+
+        monkeypatch.setattr(mod, "_invoke_once", fake_invoke_once)
+        monkeypatch.setattr(mod, "_invoke_once_qwen", fake_invoke_once_qwen)
+
+        cfg = next(iter(mod._REGISTRY.values()))
+        out = mod._retry_subprocess("prompt", cfg)
+        assert out == {"problem_formulation": "x"}
+        assert called == {"sub": 1, "qwen": 0}
+
+    def test_qwen_env_uses_qwen_invoker(self, monkeypatch) -> None:
+        import nexus.aspect_extractor as mod
+        monkeypatch.setenv("NEXUS_ASPECT_BACKEND", "qwen")
+        called = {"sub": 0, "qwen": 0}
+
+        def fake_invoke_once(prompt):
+            called["sub"] += 1
+            return {"problem_formulation": "x"}
+
+        def fake_invoke_once_qwen(prompt):
+            called["qwen"] += 1
+            return {"problem_formulation": "y"}
+
+        monkeypatch.setattr(mod, "_invoke_once", fake_invoke_once)
+        monkeypatch.setattr(mod, "_invoke_once_qwen", fake_invoke_once_qwen)
+
+        cfg = next(iter(mod._REGISTRY.values()))
+        out = mod._retry_subprocess("prompt", cfg)
+        assert out == {"problem_formulation": "y"}
+        assert called == {"sub": 0, "qwen": 1}
+
+    def test_qwen_env_batch_uses_qwen_batch_invoker(
+        self, monkeypatch,
+    ) -> None:
+        import nexus.aspect_extractor as mod
+        monkeypatch.setenv("NEXUS_ASPECT_BACKEND", "qwen")
+        called = {"sub": 0, "qwen": 0}
+
+        def fake_batch(prompt, *, timeout):
+            called["sub"] += 1
+            return {"papers": []}
+
+        def fake_batch_qwen(prompt, *, timeout):
+            called["qwen"] += 1
+            return {"papers": [{"source_path": "/a"}]}
+
+        monkeypatch.setattr(mod, "_invoke_once_batch", fake_batch)
+        monkeypatch.setattr(mod, "_invoke_once_batch_qwen", fake_batch_qwen)
+
+        cfg = next(iter(mod._REGISTRY.values()))
+        out = mod._retry_subprocess_batch("prompt", cfg, timeout=300)
+        assert out == {"papers": [{"source_path": "/a"}]}
+        assert called == {"sub": 0, "qwen": 1}
