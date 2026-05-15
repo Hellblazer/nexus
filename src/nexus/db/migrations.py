@@ -2667,6 +2667,19 @@ def migrate_tuples_events_table(conn: sqlite3.Connection) -> None:
     on first open).
 
     This migration operates on tuples.db, NOT memory.db.
+
+    .. note::
+
+       Ordering dependency: ``trg_claim_log_event`` (created here)
+       references ``NEW.subspace`` on ``tuple_claim_log``. The
+       ``subspace`` column is added by
+       :func:`migrate_tuples_claim_log_subspace` (nexus-pce1.4). SQLite
+       defers column validation to trigger fire time (not CREATE time),
+       so the CREATE succeeds even before the column exists, but if a
+       future caller invokes these migrations out of order the FIRST
+       trigger fire after a ``tuple_claim_log`` INSERT will raise. The
+       canonical call order in ``run_daemon_migrations`` is:
+       events_table → claim_log_subspace.
     """
     existing_tables = {
         r[0] for r in conn.execute(
@@ -2809,6 +2822,15 @@ def migrate_subspace_registry_table(conn: sqlite3.Connection) -> None:
     Must be called with a ``tuples.db`` connection (not memory.db).
     Idempotent: uses ``CREATE TABLE IF NOT EXISTS``.
     """
+    # Gate the start/done log lines on whether work actually happens to
+    # avoid spurious log noise on idempotent re-runs.
+    existing_tables = {
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='subspace_registry'"
+        ).fetchall()
+    }
+    if "subspace_registry" in existing_tables:
+        return
     _log.info("migrate_subspace_registry_table_start")
     conn.execute("""
 CREATE TABLE IF NOT EXISTS subspace_registry (
