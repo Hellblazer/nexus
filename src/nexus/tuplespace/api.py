@@ -381,7 +381,16 @@ def out(
     embed_text = _resolve_embed_text(schema.embed_from, content, match_text, dimensions)
     dims_json = json.dumps(dimensions, sort_keys=True)
     now = time.time()
-    expires_at = now + ttl_seconds if ttl_seconds is not None else None
+    # Resolve effective TTL: explicit ttl_seconds wins; otherwise fall back
+    # to the subspace schema's retention_seconds (nexus-kk9h, RDR-111).
+    # retention_seconds == 0 means "no expiry" — leave expires_at NULL so
+    # the retention sweeper skips the row.
+    effective_ttl: Optional[float] = ttl_seconds
+    if effective_ttl is None:
+        ret = getattr(schema, "retention_seconds", 0) or 0
+        if ret > 0:
+            effective_ttl = float(ret)
+    expires_at = now + effective_ttl if effective_ttl is not None else None
 
     # Upsert into SQLite (INSERT OR IGNORE for idempotency — same tid = same content)
     conn.execute(

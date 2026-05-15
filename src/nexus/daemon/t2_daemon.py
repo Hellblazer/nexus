@@ -450,6 +450,7 @@ class T2Daemon:
         registry_store: Any = None,
         tuplespace_service: Any = None,
         enable_admin_ping: bool = False,
+        builtin_dir: Path | None = None,
     ) -> None:
         """Initialise the daemon.
 
@@ -524,6 +525,9 @@ class T2Daemon:
         # ``yaml`` import). A thin lambda bridges the two so the wire-level
         # kwarg name is stable for clients.
         self._registry_store = registry_store
+        # nexus-me9y: builtin-seed dir (None -> resolved lazily in start()
+        # from default_builtin_dir() when a registry_store is wired).
+        self._builtin_dir: Path | None = builtin_dir
         if registry_store is not None:
             def _subspace_add_handler(yaml: str) -> dict[str, str]:  # noqa: A006
                 # Add to the registry, then rewrite the discovery file so its
@@ -584,6 +588,10 @@ class T2Daemon:
 
         # P1.3 nexus-m4gm: tuples.db path for EventStream subscriptions.
         self._tuples_db_path: Path | None = tuples_db_path
+
+        # nexus-kk9h (RDR-111): tuples.db retention sweeper task handle.
+        # Started in start(); cancelled in stop().
+        self._retention_task: asyncio.Task | None = None  # type: ignore[type-arg]
 
     # ------------------------------------------------------------------
     # Public properties (set after start())
@@ -647,6 +655,41 @@ class T2Daemon:
             **{"from": from_ver, "to": to_ver},
         )
 
+        # nexus-me9y: seed the registry from nx/tuplespace/builtin/ BEFORE
+        # sockets bind. Builtin schemas are the single source of truth for
+        # reserved-prefix namespaces (tasks/, mailbox/, hook_events/, ...);
+        # third-party subspace_add cannot mint into those prefixes. Seed
+        # is idempotent across restarts -- a YAML bump becomes an UPDATE,
+        # an unchanged YAML is a no-op.
+        if self._registry_store is not None:
+            from nexus.tuplespace.registry import default_builtin_dir  # noqa: PLC0415
+
+            seed_dir = self._builtin_dir if self._builtin_dir is not None else default_builtin_dir()
+            if seed_dir.is_dir():
+                try:
+                    written = self._registry_store.seed_from_builtin_dir(seed_dir)
+                    _log.info(
+                        "daemon/t2/lifecycle",
+                        op="builtin-seed",
+                        builtin_dir=str(seed_dir),
+                        rows_written=written,
+                    )
+                except Exception as exc:
+                    _log.error(
+                        "daemon/t2/lifecycle",
+                        op="builtin-seed-failed",
+                        builtin_dir=str(seed_dir),
+                        error=str(exc),
+                    )
+                    raise
+            else:
+                _log.warning(
+                    "daemon/t2/lifecycle",
+                    op="builtin-seed-skipped",
+                    reason="builtin_dir_missing",
+                    builtin_dir=str(seed_dir),
+                )
+
         uds_sock = self._bind_uds()
         tcp_sock = self._bind_tcp()
 
@@ -657,6 +700,15 @@ class T2Daemon:
 
         self._write_discovery()
         self._announce_stdout()
+
+        # nexus-kk9h: run one retention sweep at startup and schedule a
+        # recurring 6-hour sweep. Done after sockets bind so clients can
+        # connect immediately; the sweep itself is short and SQLite-only.
+        try:
+            self._run_retention_sweep_sync()
+        except Exception as exc:  # pragma: no cover — defensive
+            _log.warning("retention_sweep_startup_failed", error=str(exc))
+        self._retention_task = asyncio.create_task(self._retention_loop())
 
         _log.info(
             "t2_daemon_started",
@@ -671,6 +723,15 @@ class T2Daemon:
         self._stopping = True
         if self._stop_event is not None:
             self._stop_event.set()
+
+        # nexus-kk9h: cancel the retention sweeper before tearing down servers.
+        if self._retention_task is not None:
+            self._retention_task.cancel()
+            try:
+                await self._retention_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._retention_task = None
 
         for srv in (self._uds_server, self._tcp_server):
             if srv is not None:
@@ -1061,6 +1122,57 @@ class T2Daemon:
             args=args,
             stopping_fn=lambda: self._stopping,
         )
+
+    # ------------------------------------------------------------------
+    # Retention sweeper (nexus-kk9h, RDR-111)
+    # ------------------------------------------------------------------
+
+    #: Interval between retention sweeps. 6 hours per the bead brief.
+    _RETENTION_SWEEP_INTERVAL_SECONDS: int = 6 * 3600
+
+    def _run_retention_sweep_sync(self) -> int:
+        """Run one tuples.db retention sweep synchronously.
+
+        SQLite-only: the daemon does not own a Chroma client, so paired
+        Chroma vectors are not removed here. Orphan Chroma rows (a vector
+        with no matching SQLite row) are bounded by total write volume
+        and are tolerated until a follow-up wires a Chroma client into
+        the daemon constructor.
+        """
+        if self._tuples_db_path is None:
+            return 0
+        import sqlite3 as _sqlite3
+        from nexus.tuplespace.store import prune_expired_tuples
+
+        # Short-lived connection so we don't contend with the daemon's
+        # main writer for long (WAL allows concurrent readers; the DELETE
+        # acquires the writer lock briefly).
+        conn = _sqlite3.connect(str(self._tuples_db_path))
+        try:
+            return prune_expired_tuples(conn)
+        finally:
+            conn.close()
+
+    async def _retention_loop(self) -> None:
+        """Recurring 6-hour retention sweep. Cancelled on daemon stop."""
+        try:
+            while not self._stopping:
+                try:
+                    await asyncio.sleep(self._RETENTION_SWEEP_INTERVAL_SECONDS)
+                except asyncio.CancelledError:
+                    raise
+                if self._stopping:
+                    return
+                try:
+                    loop = asyncio.get_running_loop()
+                    deleted = await loop.run_in_executor(
+                        None, self._run_retention_sweep_sync
+                    )
+                    _log.info("retention_sweep_completed", deleted=deleted)
+                except Exception as exc:  # pragma: no cover — defensive
+                    _log.warning("retention_sweep_failed", error=str(exc))
+        except asyncio.CancelledError:
+            return
 
     # ------------------------------------------------------------------
     # Discovery file + stdout announce
