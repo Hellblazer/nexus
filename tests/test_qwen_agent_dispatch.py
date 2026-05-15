@@ -212,7 +212,7 @@ class TestHappyPath:
         assert session.last_args["name"] == "qwen_oneshot"
         assert args["task"] == "what is the answer"
         assert args["opts"]["json_schema"] == _SCHEMA
-        assert args["opts"]["extensions"] == ["nx"]
+        assert args["opts"]["extensions"] == {"only": ["nx"]}
         assert args["opts"]["timeout_ms"] == 10000
 
     @pytest.mark.asyncio
