@@ -227,12 +227,13 @@ def test_exec_raw_rejects_delete_via_mode_ro(service: IntrospectionService, popu
 
 
 def test_schema_tables_present(service: IntrospectionService, populated_db: sqlite3.Connection) -> None:
-    """schema() tables list includes our created table."""
+    """schema() returns both-DB shape; memory section includes our created table."""
     populated_db.close()
 
     result = service.schema()
-    assert "tables" in result
-    table_names = [t["name"] for t in result["tables"]]
+    # New shape: top-level keys are "memory" and "tuples".
+    assert "memory" in result, f"Expected 'memory' key in schema(), got: {list(result)}"
+    table_names = [t["name"] for t in result["memory"]["tables"]]
     assert "test_items" in table_names
 
 
@@ -274,11 +275,12 @@ def test_schema_fts_present(service: IntrospectionService, populated_db: sqlite3
 
 
 def test_schema_column_shape_present(service: IntrospectionService, populated_db: sqlite3.Connection) -> None:
-    """schema() tables include column information."""
+    """schema()['memory'] tables include column information."""
     populated_db.close()
 
     result = service.schema()
-    test_table = next(t for t in result["tables"] if t["name"] == "test_items")
+    # New shape: memory tables are under result["memory"]["tables"].
+    test_table = next(t for t in result["memory"]["tables"] if t["name"] == "test_items")
     assert "columns" in test_table
     col_names = [c["name"] for c in test_table["columns"]]
     assert "id" in col_names
@@ -655,3 +657,187 @@ def test_exec_raw_audit_log_fires_after_execution(
         f"audit must fire only on success; got {len(raw_exec_events)} event(s) "
         "for a failed exec_raw"
     )
+
+
+# ---------------------------------------------------------------------------
+# schema + stats — tuples.db coverage (nexus-b03o)
+# ---------------------------------------------------------------------------
+
+
+def _make_tuples_db(path: Path) -> None:
+    """Apply the full TUPLES_SCHEMA_DDL to a fresh SQLite file at ``path``."""
+    from nexus.tuplespace.store import TUPLES_SCHEMA_DDL
+
+    conn = sqlite3.connect(str(path))
+    conn.executescript(TUPLES_SCHEMA_DDL)
+    conn.commit()
+    conn.close()
+
+
+def test_schema_new_shape_returns_both_dbs(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+    tuples_db_path: Path,
+) -> None:
+    """schema() with no filters returns both 'memory' and 'tuples' keys."""
+    populated_db.close()
+    _make_tuples_db(tuples_db_path)
+
+    result = service.schema()
+
+    assert "memory" in result, f"'memory' key missing from schema(): {list(result)}"
+    assert "tuples" in result, f"'tuples' key missing from schema(): {list(result)}"
+
+
+def test_schema_memory_section_has_expected_tables(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+    tuples_db_path: Path,
+) -> None:
+    """schema()['memory'] contains the test_items table."""
+    populated_db.close()
+    _make_tuples_db(tuples_db_path)
+
+    result = service.schema()
+    memory_table_names = [t["name"] for t in result["memory"]["tables"]]
+    assert "test_items" in memory_table_names
+
+
+def test_schema_tuples_section_has_expected_tables(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+    tuples_db_path: Path,
+) -> None:
+    """schema()['tuples'] contains all five tuples.db tables."""
+    populated_db.close()
+    _make_tuples_db(tuples_db_path)
+
+    result = service.schema()
+    tuples_table_names = {t["name"] for t in result["tuples"]["tables"]}
+    expected = {"tuples", "tuple_claim_log", "watcher_state", "events", "subspace_registry"}
+    assert expected <= tuples_table_names, (
+        f"Missing tables in tuples schema: {expected - tuples_table_names}"
+    )
+
+
+def test_schema_db_filter_memory_only(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+    tuples_db_path: Path,
+) -> None:
+    """schema(filters={'db': 'memory'}) returns only the 'memory' key."""
+    populated_db.close()
+    _make_tuples_db(tuples_db_path)
+
+    result = service.schema(filters={"db": "memory"})
+    assert "memory" in result
+    assert "tuples" not in result
+
+
+def test_schema_db_filter_tuples_only(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+    tuples_db_path: Path,
+) -> None:
+    """schema(filters={'db': 'tuples'}) returns only the 'tuples' key."""
+    populated_db.close()
+    _make_tuples_db(tuples_db_path)
+
+    result = service.schema(filters={"db": "tuples"})
+    assert "tuples" in result
+    assert "memory" not in result
+
+
+def test_schema_legacy_filter_returns_flat_shape(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+) -> None:
+    """Legacy filter shape (section keys only, no 'db') returns flat dict for memory."""
+    populated_db.close()
+
+    # Legacy callers pass section keys like {"tables": True} with no "db" key.
+    result = service.schema(filters={"tables": True})
+
+    # Flat shape: "tables" at top level, NOT nested under "memory"/"tuples".
+    assert "tables" in result, f"Expected flat 'tables' key, got: {list(result)}"
+    assert "memory" not in result
+    assert "tuples" not in result
+    table_names = [t["name"] for t in result["tables"]]
+    assert "test_items" in table_names
+
+
+def test_stats_new_shape_tables_has_memory_and_tuples(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+    tuples_db_path: Path,
+) -> None:
+    """stats()['tables'] is now {'memory': {...}, 'tuples': {...}}."""
+    populated_db.close()
+    _make_tuples_db(tuples_db_path)
+
+    result = service.stats()
+    tables = result["tables"]
+    assert "memory" in tables, f"'memory' key missing from stats tables: {list(tables)}"
+    assert "tuples" in tables, f"'tuples' key missing from stats tables: {list(tables)}"
+
+
+def test_stats_memory_counts_include_test_table(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+    tuples_db_path: Path,
+) -> None:
+    """stats()['tables']['memory'] contains the test_items row count."""
+    _make_tuples_db(tuples_db_path)
+    _insert_rows(populated_db, "test_items", [
+        {"name": "x", "value": 1},
+        {"name": "y", "value": 2},
+    ])
+    populated_db.close()
+
+    result = service.stats()
+    memory_counts = result["tables"]["memory"]
+    assert "test_items" in memory_counts
+    assert memory_counts["test_items"] == 2
+
+
+def test_stats_tuples_counts_include_tuples_table(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+    tuples_db_path: Path,
+) -> None:
+    """stats()['tables']['tuples'] contains row counts for tuples.db tables."""
+    populated_db.close()
+    _make_tuples_db(tuples_db_path)
+
+    result = service.stats()
+    tuples_counts = result["tables"]["tuples"]
+    # All five canonical tables should appear (counts may be 0 for empty DB).
+    for tname in ("tuples", "tuple_claim_log", "watcher_state", "events", "subspace_registry"):
+        assert tname in tuples_counts, f"'{tname}' missing from tuples counts"
+
+
+def test_stats_file_size_keys_unchanged(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+    tuples_db_path: Path,
+) -> None:
+    """stats() still returns the four file-size keys unchanged."""
+    populated_db.close()
+    _make_tuples_db(tuples_db_path)
+
+    result = service.stats()
+    for key in ("memory_db_bytes", "memory_db_wal_bytes", "tuples_db_bytes", "tuples_db_wal_bytes"):
+        assert key in result, f"File-size key '{key}' missing from stats()"
+        assert isinstance(result[key], int)
+
+
+def test_stats_tuples_missing_db_returns_empty_counts(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+) -> None:
+    """stats() returns empty dict for tuples counts when tuples.db does not exist."""
+    populated_db.close()
+    # tuples_db_path fixture points to a path that has not been created.
+
+    result = service.stats()
+    assert result["tables"]["tuples"] == {}
