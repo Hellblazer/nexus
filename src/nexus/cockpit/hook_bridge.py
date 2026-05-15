@@ -290,33 +290,16 @@ def _emit_direct_auto(
 
 
 def _load_registry_with_hooks(builtin_dir: Path) -> "Registry":
-    """Load the registry, merging in hook-event YAMLs from a ``hooks`` subdir.
+    """Load the registry, including the hook-event subdir.
 
-    The main registry only globs ``*.yml`` from its top-level dir. The
-    hook-event schemas (nexus-78mh) land in ``<builtin_dir>/hooks/``. This
-    helper merges them in without modifying the main registry loader.
+    Delegates to ``Registry.load(builtin_dir, subdirs=("hooks",))`` so the
+    hook-event YAMLs in ``<builtin_dir>/hooks/`` participate in the same
+    duplicate-name guard and ``_compile_template`` flow as top-level YAMLs.
+    No private-attribute access.
     """
-    from nexus.tuplespace.registry import Registry, _load_one
+    from nexus.tuplespace.registry import Registry
 
-    registry = Registry.load(builtin_dir)
-
-    hooks_subdir = builtin_dir / "hooks"
-    if hooks_subdir.is_dir():
-        for yml_path in sorted(hooks_subdir.glob("*.yml")):
-            try:
-                schema = _load_one(yml_path)
-                if schema.name not in registry._by_template:
-                    from nexus.tuplespace.registry import _compile_template
-                    registry._by_template[schema.name] = schema
-                    registry._matchers.append((_compile_template(schema.name), schema))
-            except Exception as exc:
-                _log.warning(
-                    "hook_bridge_hooks_yaml_load_error",
-                    path=str(yml_path),
-                    error=str(exc),
-                )
-
-    return registry
+    return Registry.load(builtin_dir, subdirs=("hooks",))
 
 
 def _direct_out(
