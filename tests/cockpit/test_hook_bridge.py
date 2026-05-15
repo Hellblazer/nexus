@@ -531,6 +531,13 @@ class TestOutputForHook:
 class TestEmit:
     """emit() calls api.out with the correct args in direct mode."""
 
+    @pytest.fixture(autouse=True)
+    def _claudecode_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # emit() short-circuits when CLAUDECODE is not set (RF-5). CI runners
+        # don't have it; dev shells running inside Claude Code do, which is
+        # why this only failed on Linux CI. Pin it on for the whole class.
+        monkeypatch.setenv("CLAUDECODE", "1")
+
     def _make_mock_tuplespace(self):
         """Return a mock that satisfies the api.out call signature."""
         mock_out = MagicMock(return_value="abc123")

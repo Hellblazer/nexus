@@ -491,6 +491,10 @@ class T2Daemon:
         self._spawn_lock_fh: IO | None = None
         self._active_handlers: set[asyncio.Task] = set()  # type: ignore[type-arg]
         self._stopping: bool = False
+        # Set by stop() so callers blocked in run_until_signal() wake without
+        # needing an actual SIGTERM/SIGINT. Lazily created on the first
+        # run_until_signal() call so the Event is bound to the right loop.
+        self._stop_event: asyncio.Event | None = None
 
         # P1.2 nexus-qy0u: domain-store dispatch table.
         # Keys: "<store_attr>.<method_name>"; values: bound callables.
@@ -648,6 +652,8 @@ class T2Daemon:
     async def stop(self) -> None:
         """Graceful shutdown: stop accepting, drain in-flight, unlink discovery."""
         self._stopping = True
+        if self._stop_event is not None:
+            self._stop_event.set()
 
         for srv in (self._uds_server, self._tcp_server):
             if srv is not None:
@@ -681,7 +687,9 @@ class T2Daemon:
         Registers asyncio signal handlers so the event loop drives shutdown
         rather than Python's synchronous signal module.
         """
-        stop_event = asyncio.Event()
+        if self._stop_event is None:
+            self._stop_event = asyncio.Event()
+        stop_event = self._stop_event
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGTERM, stop_event.set)
         loop.add_signal_handler(signal.SIGINT, stop_event.set)
