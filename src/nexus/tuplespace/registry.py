@@ -15,6 +15,7 @@ RDR-112 ``nexus-x98k`` in Phase 2.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -224,8 +225,13 @@ class Registry:
     _matchers: list[tuple[re.Pattern[str], SubspaceSchema]] = field(default_factory=list)
 
     @classmethod
-    def load(cls, builtin_dir: Path) -> "Registry":
-        """Load + validate every ``*.yml`` under *builtin_dir*.
+    def load(cls, builtin_dir: Path, *, subdirs: Iterable[str] = ()) -> "Registry":
+        """Load + validate every ``*.yml`` under *builtin_dir* and *subdirs*.
+
+        *builtin_dir* is globbed at the top level; each name in *subdirs* is
+        appended as a relative path under *builtin_dir* and globbed in turn
+        (e.g. ``subdirs=("hooks",)`` includes ``builtin_dir/hooks/*.yml``).
+        Subdirs not present on disk are silently skipped.
 
         Raises:
             RegistryLoadError: a file fails YAML parse, JSON Schema
@@ -239,20 +245,28 @@ class Registry:
             )
 
         registry = cls()
-        for yml_path in sorted(builtin_dir.glob("*.yml")):
-            schema = _load_one(yml_path)
-            if schema.name in registry._by_template:
-                raise RegistryLoadError(
-                    f"{yml_path.name}: duplicate subspace name "
-                    f"{schema.name!r} (also in "
-                    f"{registry._by_template[schema.name].source_path})"
-                )
-            registry._by_template[schema.name] = schema
-            registry._matchers.append((_compile_template(schema.name), schema))
+        search_dirs: list[Path] = [builtin_dir]
+        for sub in subdirs:
+            sub_path = builtin_dir / sub
+            if sub_path.is_dir():
+                search_dirs.append(sub_path)
+
+        for d in search_dirs:
+            for yml_path in sorted(d.glob("*.yml")):
+                schema = _load_one(yml_path)
+                if schema.name in registry._by_template:
+                    raise RegistryLoadError(
+                        f"{yml_path.name}: duplicate subspace name "
+                        f"{schema.name!r} (also in "
+                        f"{registry._by_template[schema.name].source_path})"
+                    )
+                registry._by_template[schema.name] = schema
+                registry._matchers.append((_compile_template(schema.name), schema))
 
         _log.info(
             "tuplespace_registry_loaded",
             builtin_dir=str(builtin_dir),
+            subdirs=tuple(subdirs),
             count=len(registry._by_template),
         )
         return registry

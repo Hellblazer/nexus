@@ -268,7 +268,7 @@ issues; no production hook in this repo reads them yet.
 |---|---|---|
 | `PreToolUse` | `tool_name`, `tool_input` (object with tool args, e.g. `command`, `file_path`) | **Required**: `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"\|"block", "additionalContext": "..."}}` — malformed output blocks tool calls |
 | `PostToolUse` | `tool_name`, `tool_input`, `tool_response` (tool output, any JSON type) | `{"hookSpecificOutput": {"hookEventName": "PostToolUse", "permissionDecision": "allow", "additionalContext": "..."}}` — advisory, never blocks |
-| `PermissionRequest` | `tool_name` | **Required**: `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}` — malformed output blocks tool |
+| `PermissionRequest` | `tool_name` | **Required**: `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "permissionDecision": "allow"}}` — malformed output blocks tool. (Earlier draft used `decision.behavior`; `permissionDecision` is consistent with the §Required-response lines further down and matches CC 2.1.x runtime behaviour.) |
 | `Stop` | `stop_hook_active` (bool) | `{"decision": "approve", "reason": "..."}` — top-level `decision`, NOT `hookSpecificOutput` |
 | `StopFailure` | `error` (type string: rate_limit \| authentication_failed \| billing_error \| invalid_request \| server_error \| max_output_tokens \| unknown), `error_details` (string), `last_assistant_message` | Output **ignored** by harness; side-effects only |
 | `SubagentStart` | `task` (description), `prompt` (agent prompt text) | `{"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": "..."}}` — injected into subagent context |
@@ -421,7 +421,10 @@ Each script:
 2. Maps to the appropriate subspace + dimensions + `match_text`
 3. Calls `out` on the tuple space (skipped if `CLAUDECODE` not set — RF-5)
 4. Emits the correct stdout for that hook type (RF-2):
-   - `PreToolUse` / `PermissionRequest`: emit transparent `allow` JSON
+   - `PermissionRequest`: emit transparent `allow` JSON (`permissionDecision: allow`)
+   - `PreToolUse`: emit nothing (observe-only — CA-8 spike resolved 2026-05-14:
+     allow-wins regardless of ordering, so the bridge stays silent to avoid
+     locking in a stance)
    - `SubagentStart`: emit no stdout (bridge registered first; existing hook follows)
    - `Stop` / `StopFailure` / `SessionEnd`: emit nothing
 5. Exits 0 unconditionally — bridge errors are logged to stderr, never propagated

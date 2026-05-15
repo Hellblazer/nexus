@@ -1,0 +1,23 @@
+# RDR-111 hook-event subspace: PostToolUse -> tool_call_completed
+# Registered via nexus-78mh (CA-9 coordination).
+# Bridge: nx/hooks/scripts/orb_bridge_posttooluse.py
+name: hook_events/tool_call_completed
+tier: session
+content_type: text
+embed_from: match_text
+dimensions:
+  actor:     { type: string, required: true }
+  session:   { type: string, required: true }
+  project:   { type: string, required: true }
+  timestamp: { type: string, required: true }
+  tool:      { type: string, required: false }
+take:
+  enabled: false
+  mode: semantic
+  floor: 0.30
+  margin: 0.05
+read:
+  default_floor: 0.20
+  default_n: 20
+tiers: [session]
+retention_seconds: 86400
