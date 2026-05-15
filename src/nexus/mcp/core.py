@@ -3970,7 +3970,25 @@ async def nx_enrich_beads(
     if context:
         prompt += f"\n\nAdditional context:\n{context}"
 
-    payload = await claude_dispatch(prompt, schema, timeout=timeout)
+    # Tier-B dispatcher selection (RDR follow-on to operator-level qwen
+    # offload). Default ``claude`` preserves prior behavior; setting
+    # ``NEXUS_TIER_B_DISPATCHER=qwen_agent`` routes through the
+    # qwen-coprocessor-stack supervisor with the ``nx`` extension wired
+    # in so the spawned qwen session can use search/query tools mid-loop.
+    tier_b = _os.environ.get("NEXUS_TIER_B_DISPATCHER", "claude").lower()
+    if tier_b == "qwen_agent":
+        from nexus.operators.qwen_agent_dispatch import qwen_agent_dispatch
+
+        payload = await qwen_agent_dispatch(
+            prompt,
+            schema,
+            timeout=timeout,
+            extensions=["nx"],
+            max_tool_calls=20,
+            operator_name="nx_enrich_beads",
+        )
+    else:
+        payload = await claude_dispatch(prompt, schema, timeout=timeout)
     return (
         payload.get("enriched_description", "")
         if isinstance(payload, dict) else str(payload)
