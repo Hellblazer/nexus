@@ -1,11 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Daemon-side subspace registry with SQLite persistence (RDR-112 P1.5 nexus-x98k).
 
-``RegistryStore`` accepts third-party subspace YAML schemas via the
-``subspace_add`` admin RPC, validates them using
-``nexus.tuplespace.registry.SubspaceSchema``, enforces reserved-prefix rules,
-and persists accepted schemas to the ``subspace_registry`` table in
-``tuples.db``.
+``RegistryStore`` is the single source of truth for subspace schemas inside a
+running daemon. Two structurally distinct entry points populate it:
+
+* ``seed_from_builtin_dir(path)`` -- called once at daemon startup, before any
+  socket binds. Idempotently upserts every YAML under
+  ``nx/tuplespace/builtin/`` (and its conventional subdirs). Bypasses the
+  reserved-prefix gate because the builtin subspaces *define* the reserved
+  prefixes.
+* ``add(yaml_str)`` -- third-party admission via the ``subspace_add`` admin
+  RPC. Enforces the reserved-prefix gate so external callers cannot mint a
+  schema that shadows a builtin namespace.
+
+The split is structural (two methods) not just a runtime flag, so the
+distinction shows up at the call site (RDR-112 nexus-me9y).
 
 Design decisions:
 - Persistence: ``tuples.db`` (same SQLite file as tuple stores) to keep the
@@ -13,18 +22,13 @@ Design decisions:
   future phases.
 - Validation: reuses the JSON Schema validator and parameter-pattern regexes
   from ``nexus.tuplespace.registry`` (``_VALIDATOR``, ``_ANGLE_TOKEN``,
-  ``_PARAM_PATTERN``) so the daemon and the loader stay in lockstep. We do
-  not call ``_load_one`` directly because that function takes a ``Path``;
-  the registry admin RPC accepts a YAML string in-memory, so the parse
-  pipeline is mirrored here (yaml.safe_load + the same checks). When the
-  loader gains a new rule, mirror it here.
+  ``_PARAM_PATTERN``) so the daemon and the loader stay in lockstep.
 - Digest: sha256 over ``json.dumps({name: schema_digest}, sort_keys=True,
   separators=(",", ":"))`` where ``schema_digest`` is sha256 of the raw
-  YAML bytes. ``sort_keys=True`` gives a canonical key ordering;
-  ``separators=(",", ":")`` removes whitespace variability. The overall
-  digest is cached and invalidated on every ``add()``.
-- Reserved prefixes: ``tuples/`` (RDR-110 namespace) and ``daemon/``
-  (RDR-112 lifecycle) are rejected.
+  YAML bytes. The overall digest is cached and invalidated on every write.
+- Reserved prefixes: see ``_RESERVED_PREFIXES`` below. Every canonical
+  builtin namespace plus the daemon lifecycle prefix is reserved. Builtins
+  enter via ``seed_from_builtin_dir``; third parties cannot mint into them.
 """
 from __future__ import annotations
 
@@ -43,18 +47,55 @@ from nexus.tuplespace.registry import (
     _ANGLE_TOKEN,
     _PARAM_PATTERN,
     _VALIDATOR,
+    Registry,
     SubspaceSchema,
 )
 
 _log = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Reserved name prefixes (RDR-112 §8, RDR-110 §Subspace registry)
+# Reserved name prefixes (RDR-112 §8, RDR-110 §Subspace registry, nexus-me9y)
 # ---------------------------------------------------------------------------
 
-#: Subspace name prefixes that are reserved for the daemon's own internal
-#: event channels. Third-party YAML schemas must not use these prefixes.
-_RESERVED_PREFIXES: tuple[str, ...] = ("tuples/", "daemon/")
+#: Subspace name prefixes that are reserved for builtin / daemon namespaces.
+#: Third-party YAML schemas submitted via ``subspace_add`` must not use any of
+#: these prefixes; builtin schemas under ``nx/tuplespace/builtin/`` enter the
+#: store via ``seed_from_builtin_dir`` which deliberately bypasses this gate.
+#:
+#: Canonical builtin namespaces (RDR-110, RDR-111, RDR-112 nexus-0xaq):
+#:   tasks/           -- RDR-110 project tasks
+#:   mailbox/         -- RDR-110 agent mailboxes
+#:   locks/           -- RDR-110 mutual-exclusion resources
+#:   events/          -- RDR-110 generic event channels
+#:   barriers/        -- RDR-110 synchronisation barriers
+#:   hook_events/     -- RDR-111 Claude Code hook event channels
+#:   layout_state/    -- RDR-111 cockpit layout state
+#:   connection_manifest/ -- RDR-111 cockpit connection state
+#:   bindings/        -- RDR-112 nexus-0xaq binding profiles
+#:   derived/         -- RDR-112 nexus-0xaq derived event channel
+#: Daemon internals:
+#:   tuples/          -- RDR-110 namespace (raw tuple storage)
+#:   daemon/          -- RDR-112 daemon lifecycle channel
+_RESERVED_PREFIXES: tuple[str, ...] = (
+    "tasks/",
+    "mailbox/",
+    "locks/",
+    "events/",
+    "barriers/",
+    "hook_events/",
+    "layout_state/",
+    "connection_manifest/",
+    "bindings/",
+    "derived/",
+    "tuples/",
+    "daemon/",
+)
+
+
+#: Subdirectories of the builtin dir that ``seed_from_builtin_dir`` will
+#: walk in addition to the top level. Matches the ``subdirs`` arg used by
+#: existing client-side ``Registry.load`` callers (``hooks/``, ``bindings/``).
+_BUILTIN_SUBDIRS: tuple[str, ...] = ("hooks", "bindings")
 
 # ---------------------------------------------------------------------------
 # DDL (also in migrations.py via migrate_subspace_registry_table)
@@ -80,7 +121,12 @@ class SubspaceValidationError(Exception):
 
 
 class ReservedPrefixError(Exception):
-    """Subspace name starts with a reserved prefix (``tuples/`` or ``daemon/``)."""
+    """Subspace name starts with a reserved prefix.
+
+    Raised by ``RegistryStore.add`` (third-party path) when the schema's
+    name matches one of the prefixes in ``_RESERVED_PREFIXES``. Builtin
+    schemas use the ``seed_from_builtin_dir`` path and are exempt.
+    """
 
 
 class DuplicateSubspaceError(Exception):
@@ -162,11 +208,18 @@ def _parse_and_validate(yaml_str: str) -> SubspaceSchema:
 
 
 class RegistryStore:
-    """Persists third-party subspace schemas to ``tuples.db``.
+    """Persists subspace schemas to ``tuples.db``.
+
+    Two entry points:
+      * ``seed_from_builtin_dir`` -- idempotent bulk-upsert from
+        ``nx/tuplespace/builtin/``. Bypasses reserved-prefix gate.
+        Called at daemon startup before any socket binds.
+      * ``add`` -- third-party admission via ``subspace_add`` admin RPC.
+        Enforces reserved-prefix gate; raises on duplicate.
 
     Constructor injection: pass an explicit ``tuples_db_path``. The DDL is
     applied at construction so the table is always present before the first
-    ``add()`` call.
+    write.
 
     Thread-safety: each method opens a short-lived connection. The daemon
     invokes ``add()`` via ``run_in_executor`` (one call at a time), so no
@@ -198,13 +251,15 @@ class RegistryStore:
         return conn
 
     # ------------------------------------------------------------------
-    # Public API
+    # Public API -- third-party admission
     # ------------------------------------------------------------------
 
     def add(self, yaml_str: str) -> dict[str, str]:
-        """Validate and persist a subspace schema from a YAML string.
+        """Validate and persist a third-party subspace schema.
 
-        The parameter name avoids shadowing the module-level ``yaml`` import.
+        Enforces the reserved-prefix gate: names beginning with any prefix
+        in ``_RESERVED_PREFIXES`` are rejected. Builtin schemas must enter
+        via ``seed_from_builtin_dir`` instead.
 
         Args:
             yaml_str: Raw YAML text for the subspace schema.
@@ -220,12 +275,15 @@ class RegistryStore:
         schema = _parse_and_validate(yaml_str)
         name = schema.name
 
-        # Reserved-prefix check
+        # Reserved-prefix check (third-party gate; seed path is exempt)
         for prefix in _RESERVED_PREFIXES:
             if name.startswith(prefix):
                 raise ReservedPrefixError(
-                    f"subspace name {name!r} starts with reserved prefix {prefix!r}; "
-                    "reserved prefixes: tuples/ (RDR-110), daemon/ (RDR-112)"
+                    f"subspace name {name!r} starts with reserved prefix "
+                    f"{prefix!r}; reserved prefixes are managed by the "
+                    f"builtin seed path (nx/tuplespace/builtin/) and "
+                    f"cannot be registered via subspace_add. "
+                    f"All reserved prefixes: {', '.join(_RESERVED_PREFIXES)}"
                 )
 
         yaml_bytes = yaml_str.encode("utf-8")
@@ -256,14 +314,128 @@ class RegistryStore:
             op="subspace-added",
             name=name,
             digest=s_digest,
+            source="third_party",
         )
         return {"name": name, "digest": s_digest}
+
+    # ------------------------------------------------------------------
+    # Public API -- builtin seed
+    # ------------------------------------------------------------------
+
+    def seed_from_builtin_dir(self, builtin_dir: Path) -> int:
+        """Idempotently upsert every builtin subspace YAML into the store.
+
+        Walks *builtin_dir* and its conventional subdirs (``hooks/``,
+        ``bindings/``) via ``Registry.load`` so YAML parsing and JSON
+        Schema validation match the loader exactly. Bypasses the
+        reserved-prefix gate enforced by ``add``: builtins *define* the
+        reserved prefixes.
+
+        Idempotency contract:
+          * If a row for ``name`` does not exist, INSERT it.
+          * If a row for ``name`` exists and its ``schema_digest`` matches
+            the on-disk YAML digest, no write occurs.
+          * If a row exists with a stale digest (YAML was bumped), the
+            row is UPDATEd with the new yaml/digest/timestamp.
+
+        Args:
+            builtin_dir: Path to ``nx/tuplespace/builtin/`` (or test
+                equivalent).
+
+        Returns:
+            Number of rows written or updated (0 means everything was
+            already current).
+
+        Raises:
+            FileNotFoundError: builtin_dir does not exist.
+            SubspaceValidationError: a YAML file under builtin_dir failed
+                parse or schema validation (re-raised from the loader).
+        """
+        if not builtin_dir.is_dir():
+            raise FileNotFoundError(
+                f"builtin dir does not exist or is not a directory: {builtin_dir}"
+            )
+
+        # Reuse the client-side loader so parsing stays in lockstep.
+        registry = Registry.load(builtin_dir, subdirs=_BUILTIN_SUBDIRS)
+        schemas = registry.schemas()
+
+        now = time.time()
+        written = 0
+        conn = self._connect()
+        try:
+            for schema in schemas:
+                if schema.source_path is None:  # pragma: no cover -- defensive
+                    continue
+                yaml_bytes = schema.source_path.read_bytes()
+                s_digest = _schema_digest(yaml_bytes)
+                yaml_str = yaml_bytes.decode("utf-8")
+
+                row = conn.execute(
+                    "SELECT schema_digest FROM subspace_registry WHERE name = ?",
+                    (schema.name,),
+                ).fetchone()
+
+                if row is None:
+                    conn.execute(
+                        "INSERT INTO subspace_registry "
+                        "(name, yaml, schema_digest, added_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (schema.name, yaml_str, s_digest, now),
+                    )
+                    written += 1
+                    _log.info(
+                        "daemon/t2/lifecycle",
+                        op="subspace-seeded",
+                        name=schema.name,
+                        digest=s_digest,
+                        source="builtin",
+                        action="insert",
+                    )
+                elif row[0] != s_digest:
+                    conn.execute(
+                        "UPDATE subspace_registry "
+                        "SET yaml = ?, schema_digest = ?, added_at = ? "
+                        "WHERE name = ?",
+                        (yaml_str, s_digest, now, schema.name),
+                    )
+                    written += 1
+                    _log.info(
+                        "daemon/t2/lifecycle",
+                        op="subspace-seeded",
+                        name=schema.name,
+                        digest=s_digest,
+                        source="builtin",
+                        action="update",
+                        prior_digest=row[0],
+                    )
+                # else: row exists with current digest -- no-op
+            conn.commit()
+        finally:
+            conn.close()
+
+        if written:
+            self._cached_digest = None
+
+        _log.info(
+            "daemon/t2/lifecycle",
+            op="seed-complete",
+            builtin_dir=str(builtin_dir),
+            schemas_total=len(schemas),
+            schemas_written=written,
+        )
+        return written
+
+    # ------------------------------------------------------------------
+    # Public API -- digest
+    # ------------------------------------------------------------------
 
     def digest(self) -> str:
         """Return a sha256 digest over the sorted ``{name: schema_digest}`` map.
 
-        Cached between ``add()`` calls. Invalidated on every successful add.
-        Empty registry returns the sha256 of an empty JSON object (``{}``).
+        Cached between writes. Invalidated on every successful add or
+        seed-write. Empty registry returns the sha256 of an empty JSON
+        object (``{}``).
         """
         if self._cached_digest is not None:
             return self._cached_digest
