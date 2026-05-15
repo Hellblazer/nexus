@@ -204,6 +204,25 @@ _ADMIN_OPS: frozenset[str] = frozenset({
     "import",                      # future
 })
 
+#: Names that future beads MUST treat as admin (UDS-only) if they appear in
+#: the dispatch table. Independent of ``_ADMIN_OPS`` so the startup integrity
+#: check can detect "dispatch table registered the op but _ADMIN_OPS missed
+#: it" without a tautology.
+#:
+#: When you ship a new admin RPC:
+#:  1. Add it to ``_ADMIN_OPS`` above (so the gate rejects TCP requests).
+#:  2. Add it here (so the startup check catches future regressions).
+#:  3. Register it in the dispatch table.
+#:
+#: The integrity check fails loud at startup if any name here ends up in the
+#: dispatch table without also being in ``_ADMIN_OPS``.
+_KNOWN_ADMIN_NAMES: frozenset[str] = frozenset({
+    "admin_ping",
+    "subspace_add",
+    "apply_pending_migrations",
+    "import",
+})
+
 
 def _t2_encode(obj: Any) -> Any:
     """Recursively encode ``obj`` into a JSON-safe structure.
@@ -467,6 +486,22 @@ class T2Daemon:
         # the UDS-only gate. Production code never sets enable_admin_ping.
         if enable_admin_ping:
             self._rpc_table["admin_ping"] = lambda: {"ok": True}
+
+        # P1.6 nexus-pce1.1: startup integrity check.
+        # The UDS-only gate relies on _ADMIN_OPS membership. If a future bead
+        # registers an admin op in the dispatch table but forgets to add it
+        # here, the op would be TCP-callable — silently regressing the gate.
+        # Fail loud at startup rather than at first malicious request.
+        _unprotected_admin_ops = {
+            op for op in self._rpc_table
+            if op in _KNOWN_ADMIN_NAMES and op not in _ADMIN_OPS
+        }
+        if _unprotected_admin_ops:
+            raise RuntimeError(
+                f"Admin ops registered in dispatch table but missing from _ADMIN_OPS: "
+                f"{sorted(_unprotected_admin_ops)}. Add them to _ADMIN_OPS in t2_daemon.py "
+                "to enforce the UDS-only gate."
+            )
 
         # P1.3 nexus-m4gm: tuples.db path for EventStream subscriptions.
         self._tuples_db_path: Path | None = tuples_db_path

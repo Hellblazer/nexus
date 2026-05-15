@@ -258,3 +258,56 @@ async def test_non_admin_op_tcp_roundtrip(rpc_daemon: T2Daemon) -> None:
     finally:
         writer.close()
         await writer.wait_closed()
+
+
+# ---------------------------------------------------------------------------
+# (d) Future admin op (in _ADMIN_OPS but NOT in dispatch table)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_future_admin_op_rejected_over_tcp(rpc_daemon: T2Daemon) -> None:
+    """A name listed in _ADMIN_OPS but absent from the dispatch table is
+    still rejected over TCP — the gate must fire before dispatch-lookup,
+    so a malicious peer cannot probe "this op exists" vs "permission denied"
+    by transport.
+    """
+    reader, writer = await _connect_tcp("127.0.0.1", rpc_daemon.tcp_port)
+    try:
+        await _handshake(reader, writer)
+        # subspace_add is in _ADMIN_OPS (forward-looking) but not in the
+        # dispatch table yet (ships with nexus-x98k).
+        resp = await _rpc(reader, writer, op="subspace_add", args={"yaml": "stub"})
+        assert "error" in resp
+        err = resp["error"]
+        if isinstance(err, dict):
+            assert err.get("type") == "PermissionDenied"
+            assert "subspace_add" in err.get("message", "")
+        else:
+            # Some daemons may flatten error frames; accept either shape but
+            # require the gate's signal in the message.
+            assert "PermissionDenied" in str(err) or "requires UDS" in str(err)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_future_admin_op_over_uds_is_unknown_op(rpc_daemon: T2Daemon) -> None:
+    """The same future admin op over UDS clears the gate and falls through
+    to the unknown-op fallback — confirming the gate is strictly transport-based,
+    not table-presence-based.
+    """
+    reader, writer = await _connect_uds(rpc_daemon.uds_path)
+    try:
+        await _handshake(reader, writer)
+        resp = await _rpc(reader, writer, op="subspace_add", args={"yaml": "stub"})
+        assert "error" in resp
+        err = resp["error"]
+        msg = err.get("message", "") if isinstance(err, dict) else str(err)
+        # Must NOT be PermissionDenied on UDS
+        assert "PermissionDenied" not in (err.get("type", "") if isinstance(err, dict) else "")
+        assert "permission" not in msg.lower() or "unknown" in msg.lower()
+    finally:
+        writer.close()
+        await writer.wait_closed()
