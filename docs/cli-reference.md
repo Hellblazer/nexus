@@ -1396,3 +1396,53 @@ nx mineru status
 ```
 
 Show server status: running/stopped, PID, port, active tasks, and completed tasks. Removes stale PID file if the server process is no longer running.
+
+## nx instances
+
+```
+nx instances [--json] [--sweep]
+```
+
+List running Nexus MCP instances from the T2 liveness table (RDR-111 P1.3). Each active MCP server writes a heartbeat row to the `liveness` table in `memory.db` at startup and every 30 seconds. Rows older than 60 seconds are considered stale (process may have exited without cleanup).
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Emit structured JSON instead of the human table |
+| `--sweep` | Delete stale rows (last_seen > 60 s) before listing |
+
+**Output columns (human table):**
+
+| Column | Description |
+|--------|-------------|
+| PID | Process ID of the MCP server |
+| MACHINE | Hostname |
+| USER | OS user name |
+| SESSION | Claude session ID (`NX_SESSION_ID`) |
+| PROJECT | Project name (`NX_PROJECT`) |
+| FOCUS | Current focus area (`NX_FOCUS`) |
+| ACTIVITY | Current activity label (`NX_ACTIVITY`) |
+| AGE | Time since last heartbeat |
+
+Rows marked with `*` in the PID column have not sent a heartbeat in more than 60 seconds and may represent stale entries from processes that exited without cleanup. Use `--sweep` to remove them.
+
+**Example:**
+
+```
+$ nx instances
+PID      MACHINE              USER         SESSION        PROJECT        FOCUS            ACTIVITY         AGE
+-------- -------------------- ------------ -------------- -------------- ---------------- ---------------- ------------
+ 12345   myhost.local         hal          ses-abc123     nexus          rdr-111          coding            5s ago
+*54321   myhost.local         hal          ses-xyz999     nexus          (none)           (none)            90s ago
+  * stale (no heartbeat for > 60 s); use --sweep to remove
+
+$ nx instances --json
+[
+  {
+    "pid": 12345,
+    "machine": "myhost.local",
+    "user_id": "hal",
+    "session": "ses-abc123",
+    ...
+  }
+]
+```

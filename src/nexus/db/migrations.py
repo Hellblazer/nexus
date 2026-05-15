@@ -2546,6 +2546,43 @@ def _migrate_aspect_queue_pk_via_apply_pending(conn: sqlite3.Connection) -> None
     migrate_aspect_extraction_queue_pk_to_doc_id(conn, catalog_db_path=catalog_path)
 
 
+def migrate_liveness_table(conn: sqlite3.Connection) -> None:
+    """RDR-111 P1.3 (nexus-r0vi): create the ``liveness`` table in memory.db.
+
+    The liveness table stores one row per running MCP instance (or CLI
+    invocation that participates in heartbeating). Rows are keyed by
+    ``(pid, machine)`` and carry a ``last_seen`` float (unix epoch with
+    sub-second precision via ``unixepoch('subsec')``).
+
+    Must be called with a ``memory.db`` connection.
+    Idempotent: gated by ``CREATE TABLE IF NOT EXISTS``.
+    """
+    existing = {
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='liveness'"
+        ).fetchall()
+    }
+    if "liveness" in existing:
+        return
+    _log.info("migrate_liveness_table_start")
+    conn.executescript("""
+CREATE TABLE IF NOT EXISTS liveness (
+    pid       INTEGER NOT NULL,
+    machine   TEXT    NOT NULL,
+    user_id   TEXT    NOT NULL,
+    session   TEXT,
+    project   TEXT,
+    focus     TEXT,
+    activity  TEXT,
+    last_seen REAL    NOT NULL,
+    PRIMARY KEY (pid, machine)
+);
+CREATE INDEX IF NOT EXISTS idx_liveness_last_seen ON liveness (last_seen);
+""")
+    conn.commit()
+    _log.info("migrate_liveness_table_done")
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -2715,6 +2752,14 @@ MIGRATIONS: list[Migration] = [
         "4.32.1",
         "RDR-109 Phase 5: add document_aspects.salient_sentences column",
         lambda conn: _migrate_add_aspects_salient_sentences(conn),
+    ),
+    # nexus-7ejx (RDR-112 P2.1): CatalogDB collapse into T2 as eighth domain
+    # store. Migration entry at 4.34.0 is reserved for that bead; it will be
+    # inserted here when nexus-7ejx rebases onto develop.
+    Migration(
+        "4.35.0",
+        "RDR-111 P1.3: create liveness table + last_seen index (nexus-r0vi)",
+        migrate_liveness_table,
     ),
 ]
 

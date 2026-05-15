@@ -323,7 +323,113 @@ def _sigterm_handler(_signo: int, _frame: Any) -> None:
     _os._exit(0)
 
 
-mcp = FastMCP("nexus", lifespan=_t1_chroma_lifespan)
+# ── Liveness heartbeat (RDR-111 P1.3, nexus-r0vi) ───────────────────────────
+
+_LIVENESS_INTERVAL_SECONDS = 30
+_LIVENESS_MAX_AGE_SECONDS = 60
+
+
+async def _liveness_heartbeat_task(stop: Any) -> None:
+    """Background coroutine: upsert + sweep every ``_LIVENESS_INTERVAL_SECONDS``.
+
+    Runs until ``stop.set()`` is called by the lifespan cleanup.
+    All errors are caught and logged so a transient DB lock never
+    kills the server.
+
+    ``stop`` is an ``asyncio.Event``; the task awaits it with a timeout
+    so it wakes promptly on shutdown rather than waiting the full
+    interval.
+    """
+    import asyncio
+    import os as _os2
+    import socket
+    import structlog
+
+    _hb_log = structlog.get_logger(__name__)
+    pid = _os2.getpid()
+    machine = socket.gethostname()
+    user_id = _os2.environ.get("USER", _os2.environ.get("LOGNAME", str(pid)))
+
+    async def _beat() -> None:
+        try:
+            with _t2_ctx() as _db:
+                _db.memory.liveness_upsert(
+                    pid=pid,
+                    machine=machine,
+                    user_id=user_id,
+                    session=_os2.environ.get("NX_SESSION_ID"),
+                    project=_os2.environ.get("NX_PROJECT"),
+                    focus=_os2.environ.get("NX_FOCUS"),
+                    activity=_os2.environ.get("NX_ACTIVITY"),
+                )
+                _db.memory.liveness_sweep(max_age_seconds=_LIVENESS_MAX_AGE_SECONDS)
+        except Exception as _hb_exc:
+            _hb_log.debug(
+                "liveness_heartbeat_error", error=str(_hb_exc),
+                pid=pid, machine=machine,
+            )
+
+    # Initial beat on startup.
+    await _beat()
+
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=float(_LIVENESS_INTERVAL_SECONDS))
+        except asyncio.TimeoutError:
+            pass
+        if stop.is_set():
+            break
+        await _beat()
+
+
+@asynccontextmanager
+async def _combined_lifespan(_app: Any):
+    """Chain T1 chroma lifespan with liveness heartbeat (RDR-111 P1.3).
+
+    Starts the heartbeat task after T1 chroma is up (or skipped in
+    isolation mode); cancels it and deletes the liveness row on exit.
+    """
+    import asyncio
+    import os as _os2
+    import socket
+    import structlog
+
+    _cl_log = structlog.get_logger(__name__)
+
+    async with _t1_chroma_lifespan(_app):
+        pid = _os2.getpid()
+        machine = socket.gethostname()
+        user_id = _os2.environ.get("USER", _os2.environ.get("LOGNAME", str(pid)))
+
+        stop_event: asyncio.Event = asyncio.Event()
+        task = asyncio.create_task(
+            _liveness_heartbeat_task(stop_event),
+            name="liveness-heartbeat",
+        )
+        try:
+            yield
+        finally:
+            stop_event.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                task.cancel()
+            # Best-effort delete our row on clean shutdown.
+            try:
+                with _t2_ctx() as _db:
+                    _db.memory.conn.execute(
+                        "DELETE FROM liveness WHERE pid = ? AND machine = ?",
+                        (pid, machine),
+                    )
+                    _db.memory.conn.commit()
+            except Exception as _del_exc:
+                _cl_log.debug(
+                    "liveness_delete_on_shutdown_error",
+                    error=str(_del_exc), pid=pid, machine=machine,
+                )
+
+
+mcp = FastMCP("nexus", lifespan=_combined_lifespan)
 
 _DEFAULT_PAGE_SIZE = 10
 

@@ -60,6 +60,7 @@ from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.commands.tier_status import tier_status_cmd
 from nexus.commands.aspects import aspects_group
 from nexus.commands.upgrade import upgrade
+from nexus.commands.instances import instances_cmd
 
 @click.group()
 @click.version_option(package_name="conexus", prog_name="nx")
@@ -109,3 +110,4 @@ main.add_command(taxonomy)
 main.add_command(tier_status_cmd, name="tier-status")
 main.add_command(aspects_group, name="aspects")
 main.add_command(upgrade)
+main.add_command(instances_cmd, name="instances")
