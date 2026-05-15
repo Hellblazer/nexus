@@ -110,6 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_tuples_expires
 CREATE TABLE IF NOT EXISTS tuple_claim_log (
     log_id           INTEGER PRIMARY KEY AUTOINCREMENT,
     tuple_id         TEXT NOT NULL,
+    subspace         TEXT NOT NULL,                 -- denormalized from tuples.subspace (nexus-pce1.4)
     claim_id         TEXT NOT NULL,
     claimant         TEXT NOT NULL,
     transition       TEXT NOT NULL,                 -- 'claim' | 'ack' | 'nack' | 'expire'
@@ -165,14 +166,15 @@ END;
 
 -- Trigger: emit a transition event on every tuple_claim_log insertion.
 -- Propagates failure_category for nack rows; uses 'data' for all others.
--- COALESCE on subspace handles the edge case where the tuple was deleted before
--- the claim log row was written (e.g. in tests or cleanup races).
+-- Uses NEW.subspace directly (denormalized at insert time) so the event
+-- survives even when the source tuple has been hard-deleted (e.g. by a
+-- retention sweep that races a slow nack). nexus-pce1.4.
 CREATE TRIGGER IF NOT EXISTS trg_claim_log_event
     AFTER INSERT ON tuple_claim_log
 BEGIN
     INSERT INTO events (subspace, op, tuple_id, payload_summary, category, ts)
     VALUES (
-        COALESCE((SELECT subspace FROM tuples WHERE id = NEW.tuple_id), ''),
+        NEW.subspace,
         NEW.transition,
         NEW.tuple_id,
         NULL,

@@ -691,9 +691,9 @@ def take(
         return None
 
     conn.execute(
-        "INSERT INTO tuple_claim_log (tuple_id, claim_id, claimant, transition, at) "
-        "VALUES (?, ?, ?, 'claim', ?)",
-        (row[0], cid, claimant, now),
+        "INSERT INTO tuple_claim_log (tuple_id, subspace, claim_id, claimant, transition, at) "
+        "VALUES (?, ?, ?, ?, 'claim', ?)",
+        (row[0], subspace, cid, claimant, now),
     )
     conn.commit()
 
@@ -726,7 +726,7 @@ def ack(
         ClaimOwnershipError: *claimant* does not own the claim.
     """
     row = conn.execute(
-        "SELECT id, claimant FROM tuples WHERE claim_id = ? AND claim_state = 'claimed'",
+        "SELECT id, claimant, subspace FROM tuples WHERE claim_id = ? AND claim_state = 'claimed'",
         (claim_id,),
     ).fetchone()
 
@@ -748,9 +748,9 @@ def ack(
         (now, claimant, claim_id),
     )
     conn.execute(
-        "INSERT INTO tuple_claim_log (tuple_id, claim_id, claimant, transition, at) "
-        "VALUES (?, ?, ?, 'ack', ?)",
-        (row[0], claim_id, claimant, now),
+        "INSERT INTO tuple_claim_log (tuple_id, subspace, claim_id, claimant, transition, at) "
+        "VALUES (?, ?, ?, ?, 'ack', ?)",
+        (row[0], row[2], claim_id, claimant, now),
     )
     conn.commit()
     _log.debug("tuplespace_ack", tuple_id=row[0], claim_id=claim_id, claimant=claimant)
@@ -774,7 +774,7 @@ def nack(
         ClaimOwnershipError: *claimant* does not own the claim.
     """
     row = conn.execute(
-        "SELECT id, claimant FROM tuples WHERE claim_id = ? AND claim_state = 'claimed'",
+        "SELECT id, claimant, subspace FROM tuples WHERE claim_id = ? AND claim_state = 'claimed'",
         (claim_id,),
     ).fetchone()
 
@@ -796,9 +796,9 @@ def nack(
         (claim_id,),
     )
     conn.execute(
-        "INSERT INTO tuple_claim_log (tuple_id, claim_id, claimant, transition, at) "
-        "VALUES (?, ?, ?, 'nack', ?)",
-        (row[0], claim_id, claimant, now),
+        "INSERT INTO tuple_claim_log (tuple_id, subspace, claim_id, claimant, transition, at) "
+        "VALUES (?, ?, ?, ?, 'nack', ?)",
+        (row[0], row[2], claim_id, claimant, now),
     )
     conn.commit()
     _log.debug("tuplespace_nack", tuple_id=row[0], claim_id=claim_id, claimant=claimant)

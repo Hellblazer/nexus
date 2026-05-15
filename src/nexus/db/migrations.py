@@ -2711,7 +2711,7 @@ CREATE TRIGGER IF NOT EXISTS trg_claim_log_event
 BEGIN
     INSERT INTO events (subspace, op, tuple_id, payload_summary, category, ts)
     VALUES (
-        COALESCE((SELECT subspace FROM tuples WHERE id = NEW.tuple_id), ''),
+        NEW.subspace,
         NEW.transition,
         NEW.tuple_id,
         NULL,
@@ -2724,6 +2724,73 @@ BEGIN
 END;
 """)
     _log.info("migrate_tuples_events_table_done")
+
+
+def migrate_tuples_claim_log_subspace(conn: sqlite3.Connection) -> None:
+    """Denormalize ``subspace`` into ``tuple_claim_log`` (nexus-pce1.4).
+
+    The original ``trg_claim_log_event`` trigger used a COALESCE-on-JOIN to
+    fetch subspace from the parent tuple, falling back to empty string when
+    the tuple had been hard-deleted (e.g., retention sweep racing a slow
+    nack). Empty-string subspace events were invisible to all GLOB-pattern
+    subscribers, silently dropping legitimate nack signals.
+
+    This migration:
+      1. Adds ``subspace TEXT NOT NULL DEFAULT ''`` column to tuple_claim_log
+         (legacy rows get '' which preserves prior behaviour — they were
+         already silently dropped).
+      2. Backfills existing rows from tuples via JOIN where possible.
+      3. Drops + recreates ``trg_claim_log_event`` using ``NEW.subspace``
+         directly, eliminating the JOIN and the empty-string fallback.
+
+    Idempotent: gated by ``PRAGMA table_info``. No-op when tuples.db does
+    not exist (fresh installs get the column via TUPLES_SCHEMA_DDL).
+    """
+    cols = {
+        r[1] for r in conn.execute(
+            "PRAGMA table_info(tuple_claim_log)"
+        ).fetchall()
+    }
+    if not cols:
+        return  # tuples.db not yet initialised
+    if "subspace" in cols:
+        return
+
+    _log.info("migrate_tuples_claim_log_subspace_start")
+    # SQLite ALTER TABLE ADD COLUMN with NOT NULL requires a default.
+    conn.execute(
+        "ALTER TABLE tuple_claim_log ADD COLUMN subspace TEXT NOT NULL DEFAULT ''"
+    )
+    # Backfill from the parent tuple where it still exists.
+    conn.execute(
+        "UPDATE tuple_claim_log "
+        "SET subspace = (SELECT t.subspace FROM tuples t WHERE t.id = tuple_claim_log.tuple_id) "
+        "WHERE subspace = '' "
+        "  AND EXISTS (SELECT 1 FROM tuples t WHERE t.id = tuple_claim_log.tuple_id)"
+    )
+    # Replace the trigger body — DROP + CREATE since CREATE TRIGGER IF NOT EXISTS
+    # won't overwrite an existing definition.
+    conn.executescript("""\
+DROP TRIGGER IF EXISTS trg_claim_log_event;
+CREATE TRIGGER trg_claim_log_event
+    AFTER INSERT ON tuple_claim_log
+BEGIN
+    INSERT INTO events (subspace, op, tuple_id, payload_summary, category, ts)
+    VALUES (
+        NEW.subspace,
+        NEW.transition,
+        NEW.tuple_id,
+        NULL,
+        CASE
+            WHEN NEW.transition = 'nack' THEN COALESCE(NEW.failure_category, 'unknown')
+            ELSE 'data'
+        END,
+        NEW.at
+    );
+END;
+""")
+    conn.commit()
+    _log.info("migrate_tuples_claim_log_subspace_done")
 
 
 MIGRATIONS: list[Migration] = [
@@ -3464,6 +3531,9 @@ def run_daemon_migrations(
         # databases created before m4gm shipped.
         migrate_tuples_failure_category(tuples_conn)
         migrate_tuples_events_table(tuples_conn)
+        # nexus-pce1.4: denormalize subspace into tuple_claim_log to remove
+        # the COALESCE-on-deleted-tuple silent-drop in the EventStream trigger.
+        migrate_tuples_claim_log_subspace(tuples_conn)
     finally:
         tuples_conn.close()
 

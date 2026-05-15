@@ -52,6 +52,7 @@ the daemon to filter events by ``category`` column in the SELECT WHERE clause.
 from __future__ import annotations
 
 import asyncio
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -66,6 +67,36 @@ BACKFILL_BURST_LIMIT: int = 1_000
 
 #: Poll interval (seconds) while a subscriber is connected.
 _POLL_ACTIVE: float = 0.010  # 10 ms
+
+#: Allowed character set for the non-wildcard part of subspace_prefix. The
+#: subspace name is path-shaped (e.g. ``tuples/tasks/coordinator``) so we
+#: accept alphanumerics, slash, dash, underscore, and dot. The only allowed
+#: GLOB metacharacter is a single trailing ``*``.
+_SUBSPACE_PREFIX_BODY = re.compile(r"^[A-Za-z0-9_./-]+$")
+
+
+def _validate_subspace_prefix(prefix: str) -> str | None:
+    """Return None if *prefix* is safe to expand to a GLOB pattern, else an error string.
+
+    Rejects:
+    - GLOB metacharacters other than a single trailing ``*`` (``?`` matches any
+      single character; ``[...]`` is a character class).
+    - ``*`` appearing anywhere except as the final character.
+    - Characters outside the path-safe set.
+    """
+    if "?" in prefix:
+        return "subspace_prefix may not contain '?' (GLOB single-char wildcard)"
+    if "[" in prefix or "]" in prefix:
+        return "subspace_prefix may not contain '[' or ']' (GLOB bracket-class)"
+    star_count = prefix.count("*")
+    if star_count > 1:
+        return "subspace_prefix may contain at most one '*' (as trailing wildcard)"
+    if star_count == 1 and not prefix.endswith("*"):
+        return "subspace_prefix '*' is only allowed as the trailing character"
+    body = prefix[:-1] if prefix.endswith("*") else prefix
+    if not _SUBSPACE_PREFIX_BODY.match(body):
+        return "subspace_prefix contains characters outside [A-Za-z0-9_./-]"
+    return None
 
 # ---------------------------------------------------------------------------
 # SQLite helpers (run in thread pool via asyncio.to_thread)
@@ -169,12 +200,23 @@ async def handle_event_stream(
         await writer.drain()
         return
 
+    # nexus-pce1.5: reject GLOB metacharacters other than a single trailing '*'.
+    # Without this, "tuples/foo?" would expand to "tuples/foo?*" where '?' is a
+    # GLOB wildcard matching any single character — broader than the caller
+    # likely intended. Also reject bracket-classes and '*' in non-terminal
+    # position. Allowed character set is the path-safe subset.
+    validation_error = _validate_subspace_prefix(subspace_prefix)
+    if validation_error is not None:
+        write_frame(writer, {"error": f"event_stream.subscribe: {validation_error}"})
+        await writer.drain()
+        return
+
     since_cursor: int = int(args.get("since_cursor") or 0)
     where: dict[str, Any] = args.get("where") or {}
     category_filter: str | None = where.get("category") or None
 
     # Convert subspace_prefix to SQLite GLOB pattern: "tuples/foo" -> "tuples/foo*"
-    glob_pattern = subspace_prefix if "*" in subspace_prefix else subspace_prefix + "*"
+    glob_pattern = subspace_prefix if subspace_prefix.endswith("*") else subspace_prefix + "*"
 
     _log.info(
         "event_stream_subscribe",

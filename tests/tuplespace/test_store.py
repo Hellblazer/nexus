@@ -295,8 +295,8 @@ class TestPartialIndexCorrectness:
 
         # Insert a log row so the planner has a populated table.
         conn.execute(
-            "INSERT INTO tuple_claim_log (tuple_id, claim_id, claimant, transition, at) "
-            "VALUES ('t1', 'c1', 'agent', 'claim', ?)",
+            "INSERT INTO tuple_claim_log (tuple_id, subspace, claim_id, claimant, transition, at) "
+            "VALUES ('t1', 'tuples/test', 'c1', 'agent', 'claim', ?)",
             (now,),
         )
         conn.commit()
