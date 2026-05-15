@@ -1,0 +1,27 @@
+# RDR-110 canonical subspace: request-reply mailbox.
+# Agents post messages addressed to a recipient agent; the recipient
+# takes by exact match on (to_actor, correlation_id) to atomically
+# pop the request and reply via the matching reply_to subspace.
+#
+# Reference: RDR-110 §Implementation Plan Step 6, line 1408; pattern
+# documented at §Phase 1 Step 8 (nx:tuplespace-mailbox skill).
+name: mailbox/<agent>
+tier: project
+content_type: text
+embed_from: content
+dimensions:
+  from_actor:     { type: string, required: true }
+  to_actor:       { type: string, required: true }
+  correlation_id: { type: string, required: true }
+  reply_to:       { type: string, required: false }
+  priority:       { type: enum, values: [P0, P1, P2, P3, P4], required: false }
+take:
+  enabled: true
+  mode: exact
+  match_keys: [to_actor, correlation_id]
+  default_lease_seconds: 300
+read:
+  default_floor: 0.0
+  default_n: 20
+tiers: [project]
+retention_seconds: 86400  # 1 day — messages older than this are stale

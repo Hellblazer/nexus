@@ -1,0 +1,28 @@
+# RDR-110 canonical subspace: N-way barrier coordination.
+# Each participant posts an arrival tuple to the same barrier_id.
+# When count(participants) == target_n the barrier "trips" — any
+# consumer can read all arrival tuples for the barrier and proceed.
+# Each participant identified by participant_id; a participant tries
+# to take its own arrival tuple to release.
+#
+# Reference: RDR-110 §Implementation Plan Step 6, line 1408; pattern
+# documented at §Phase 1 Step 8 (nx:tuplespace-barriers skill).
+name: barriers/<barrier_id>
+tier: project
+content_type: text
+embed_from: content
+dimensions:
+  barrier_id:     { type: string, required: true }
+  participant_id: { type: string, required: true }
+  target_n:       { type: string, required: true }
+  arrived_at:     { type: string, required: true }
+take:
+  enabled: true
+  mode: exact
+  match_keys: [barrier_id, participant_id]
+  default_lease_seconds: 60
+read:
+  default_floor: 0.0
+  default_n: 100
+tiers: [project]
+retention_seconds: 3600  # 1 hour
