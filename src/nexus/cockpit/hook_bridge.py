@@ -340,25 +340,30 @@ def _get_or_init_resources() -> tuple[Any, Any, Any] | None:
         builtin = default_builtin_dir()
         try:
             registry = _load_registry_with_hooks(builtin)
-        except (RegistryError, FileNotFoundError, OSError) as exc:
+            conn = open_tuples_db(db_path)
+            conn.row_factory = sqlite3.Row
+            chroma_client = _chromadb.PersistentClient(path=str(chroma_dir))
+            index = TupleIndex.from_registry(registry, chroma_client)
+        except (RegistryError, FileNotFoundError, OSError, ValueError) as exc:
+            # Covers the wheel-install silent-drop (RegistryLoadError /
+            # FileNotFoundError), a corrupted chroma directory or bad
+            # collection name (ValueError from chromadb), or a permission
+            # problem opening tuples.db (OSError). All are reported under
+            # the same structured event so observability stays consistent.
             if not _registry_load_failed_once:
                 _log.warning(
                     "hook_bridge_registry_unavailable",
                     error=str(exc),
+                    error_type=type(exc).__name__,
                     builtin_dir=str(builtin),
                     remediation=(
-                        "Registry YAMLs not found on disk. For wheel installs, "
-                        "pass an explicit builtin_dir or install from source."
+                        "Registry YAMLs not found on disk or storage init "
+                        "failed. For wheel installs, pass an explicit "
+                        "builtin_dir or install from source."
                     ),
                 )
                 _registry_load_failed_once = True
             return None
-
-        conn = open_tuples_db(db_path)
-        conn.row_factory = sqlite3.Row
-
-        chroma_client = _chromadb.PersistentClient(path=str(chroma_dir))
-        index = TupleIndex.from_registry(registry, chroma_client)
 
         _singleton[key] = (conn, index, registry)
         return _singleton[key]

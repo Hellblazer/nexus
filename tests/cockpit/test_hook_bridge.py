@@ -927,11 +927,6 @@ class TestEmitDirectAuto:
             return {"nexus_dir": str(nexus_dir)}
 
         monkeypatch.setattr(
-            "nexus.cockpit.hook_bridge.load_config",
-            _fake_load_config,
-            raising=False,
-        )
-        monkeypatch.setattr(
             "nexus.config.load_config",
             _fake_load_config,
         )
@@ -957,18 +952,15 @@ class TestRegistryLoadFailureWarning:
     """Wheel-install silent-drop: registry load failure must emit a WARN."""
 
     def test_unavailable_registry_logs_warning_and_returns(
-        self, tmp_path, monkeypatch, caplog
+        self, tmp_path, monkeypatch
     ) -> None:
+        from structlog.testing import capture_logs
+
         from nexus.cockpit import hook_bridge
         from nexus.tuplespace.registry import RegistryLoadError
 
         hook_bridge._reset_singleton_for_tests()
         monkeypatch.setenv("CLAUDECODE", "1")
-        monkeypatch.setattr(
-            "nexus.cockpit.hook_bridge.load_config",
-            lambda: {"nexus_dir": str(tmp_path)},
-            raising=False,
-        )
         monkeypatch.setattr(
             "nexus.config.load_config",
             lambda: {"nexus_dir": str(tmp_path)},
@@ -984,8 +976,18 @@ class TestRegistryLoadFailureWarning:
 
         # Must not raise — silent-drop is acceptable behaviour but it must
         # be observable via structured logging.
-        with caplog.at_level("WARNING"):
+        with capture_logs() as logs:
             hook_bridge.emit("Stop", STOP_PAYLOAD)
+
+        warns = [
+            r for r in logs
+            if r.get("event") == "hook_bridge_registry_unavailable"
+        ]
+        assert warns, (
+            f"expected hook_bridge_registry_unavailable WARN, got {logs!r}"
+        )
+        assert warns[0]["log_level"] == "warning"
+        assert "remediation" in warns[0]
 
         hook_bridge._reset_singleton_for_tests()
 
@@ -997,11 +999,6 @@ class TestRegistryLoadFailureWarning:
 
         nexus_dir = tmp_path / "nexus"
         nexus_dir.mkdir()
-        monkeypatch.setattr(
-            "nexus.cockpit.hook_bridge.load_config",
-            lambda: {"nexus_dir": str(nexus_dir)},
-            raising=False,
-        )
         monkeypatch.setattr(
             "nexus.config.load_config",
             lambda: {"nexus_dir": str(nexus_dir)},
@@ -1033,18 +1030,15 @@ class TestUnknownSubspaceWarning:
     """When the registry lacks the requested subspace, log WARN — do not crash."""
 
     def test_unknown_subspace_emits_warning_not_exception(
-        self, tmp_path, monkeypatch, caplog
+        self, tmp_path, monkeypatch
     ) -> None:
+        from structlog.testing import capture_logs
+
         from nexus.cockpit import hook_bridge
         from nexus.tuplespace.registry import UnknownSubspaceError
 
         nexus_dir = tmp_path / "nexus"
         nexus_dir.mkdir()
-        monkeypatch.setattr(
-            "nexus.cockpit.hook_bridge.load_config",
-            lambda: {"nexus_dir": str(nexus_dir)},
-            raising=False,
-        )
         monkeypatch.setattr(
             "nexus.config.load_config",
             lambda: {"nexus_dir": str(nexus_dir)},
@@ -1060,13 +1054,19 @@ class TestUnknownSubspaceWarning:
         )
 
         hook_bridge._reset_singleton_for_tests()
-        with caplog.at_level("WARNING"):
+        with capture_logs() as logs:
             # Must not raise.
             hook_bridge.emit("Stop", STOP_PAYLOAD)
 
-        # Structured warning was logged (event field "hook_bridge_unknown_subspace"
-        # via structlog goes through stdlib logging at WARNING).
-        # We accept any WARNING-level record from the hook_bridge logger here;
-        # the explicit guard is "no exception escaped emit()".
+        warns = [
+            r for r in logs
+            if r.get("event") == "hook_bridge_unknown_subspace"
+        ]
+        assert warns, (
+            f"expected hook_bridge_unknown_subspace WARN, got {logs!r}"
+        )
+        assert warns[0]["log_level"] == "warning"
+        assert "remediation" in warns[0]
+        assert warns[0]["subspace"] == "hook_events/assistant_turn_ended"
 
         hook_bridge._reset_singleton_for_tests()
