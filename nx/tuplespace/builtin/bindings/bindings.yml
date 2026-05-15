@@ -1,0 +1,24 @@
+# RDR-111 §Phase 2 lynchpin: binding profile subspace (nexus-0xaq).
+# Each tuple in this subspace is a YAML profile describing how the
+# _BindingWatcher should react to events on other subspaces. Profiles
+# are loaded at watcher startup from on-disk YAML; the subspace itself
+# exists so that operators can also drop profiles into the tuplespace
+# at runtime via `nx scratch` (future enhancement, see PR follow-ups).
+name: bindings/<profile>
+tier: project
+content_type: text
+embed_from: content
+dimensions:
+  profile:    { type: string, required: true }
+  enabled:    { type: bool,   required: true }
+  created_by: { type: string, required: true }
+take:
+  enabled: false
+  mode: semantic
+  floor: 0.50
+  margin: 0.05
+read:
+  default_floor: 0.30
+  default_n: 50
+tiers: [project]
+retention_seconds: 0  # never expire -- profiles are durable config
