@@ -43,6 +43,11 @@ _log = structlog.get_logger(__name__)
 # Maximum rows per peek call (hard cap from chroma quota constant for consistency).
 _PEEK_MAX: int = QUOTAS.MAX_QUERY_RESULTS  # 300
 
+#: Hard cap for ``exec_raw`` result rows. Above this the daemon raises rather
+#: than materialising the result set into a Python list. Admin-only op but a
+#: misbehaving caller should not be able to crash the daemon on a large table.
+_EXEC_RAW_MAX_ROWS: int = 50_000
+
 
 class IntrospectionService:
     """Read-only introspection over the T2 SQLite stores.
@@ -63,9 +68,41 @@ class IntrospectionService:
         self,
         memory_db_path: Path,
         tuples_db_path: Path,
+        export_root: Path | None = None,
     ) -> None:
         self._memory_db_path: Path = memory_db_path
         self._tuples_db_path: Path = tuples_db_path
+        # Export destinations must resolve inside this root. Default is the
+        # config dir parent (the db files' parent dir) so a fresh container
+        # mount works without extra wiring. Operators with a dedicated export
+        # volume should pass export_root explicitly.
+        self._export_root: Path = (
+            export_root.resolve()
+            if export_root is not None
+            else memory_db_path.parent.resolve()
+        )
+
+    def _validate_export_path(self, dest_path: str) -> Path:
+        """Resolve ``dest_path`` and reject anything outside ``_export_root``.
+
+        Defends against path-traversal (``../../etc/cron.d/...``) under an
+        admin caller. Admin gate restricts who can call ``export``; this
+        restricts where they can write to.
+        """
+        try:
+            dest = Path(dest_path).resolve()
+        except OSError as exc:
+            raise ValueError(f"export dest_path could not be resolved: {exc}") from exc
+        root = self._export_root
+        try:
+            dest.relative_to(root)
+        except ValueError:
+            raise ValueError(
+                f"export dest_path {str(dest)!r} is outside the configured "
+                f"export root {str(root)!r}. Daemon writes are restricted to "
+                "the export root to prevent path-traversal."
+            ) from None
+        return dest
 
     # ------------------------------------------------------------------
     # exec_raw
@@ -93,11 +130,6 @@ class IntrospectionService:
                 other SQLite error.
         """
         sql_hash = hashlib.sha256(sql.encode()).hexdigest()[:16]
-        _log.info(
-            "daemon/t2/lifecycle",
-            op="raw-exec",
-            sql_hash=sql_hash,
-        )
 
         uri = f"file:{self._memory_db_path}?mode=ro"
         conn: sqlite3.Connection | None = None
@@ -105,7 +137,26 @@ class IntrospectionService:
             conn = sqlite3.connect(uri, uri=True)
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(sql)
-            return [dict(row) for row in cursor.fetchall()]
+            # Cap result size to avoid OOM on unbounded SELECTs over large
+            # tables. Admin-only op, but a misbehaving admin should not be
+            # able to crash the daemon process by querying a 50M-row table.
+            rows: list[dict[str, Any]] = []
+            for row in cursor:
+                if len(rows) >= _EXEC_RAW_MAX_ROWS:
+                    raise ValueError(
+                        f"exec_raw result exceeded {_EXEC_RAW_MAX_ROWS} rows; "
+                        "add a LIMIT clause or use export for full table dumps"
+                    )
+                rows.append(dict(row))
+            # Audit after successful execution — pre-execution logging would
+            # record failed/rejected attempts as DoS noise.
+            _log.info(
+                "daemon/t2/lifecycle",
+                op="raw-exec",
+                sql_hash=sql_hash,
+                row_count=len(rows),
+            )
+            return rows
         finally:
             if conn is not None:
                 conn.close()
@@ -196,16 +247,23 @@ class IntrospectionService:
         """Return a paged slice of ``table``.
 
         ``limit`` is silently clamped to ``MAX_QUERY_RESULTS`` (300).
+        ``limit <= 0`` raises ``ValueError`` (a zero-result silent-success is
+        indistinguishable from an empty table and is a usability foot-gun).
+        ``offset < 0`` likewise raises.
 
         Args:
             table: Table name to inspect (must be an existing table).
-            offset: Number of rows to skip (default 0).
-            limit: Maximum rows to return; clamped to 300 (default 300).
+            offset: Number of rows to skip (default 0). Must be >= 0.
+            limit: Maximum rows to return; must be > 0; clamped to 300.
 
         Returns:
             Dict with keys ``rows`` (list of dicts), ``total`` (int),
             ``offset`` (int), ``limit`` (int — the effective clamped value).
         """
+        if limit <= 0:
+            raise ValueError(f"peek limit must be positive, got {limit!r}")
+        if offset < 0:
+            raise ValueError(f"peek offset must be non-negative, got {offset!r}")
         effective_limit = min(limit, _PEEK_MAX)
 
         uri = f"file:{self._memory_db_path}?mode=ro"
@@ -317,7 +375,7 @@ class IntrospectionService:
         if format not in {"jsonl", "csv", "sqlite"}:
             raise ValueError(f"Unsupported export format: {format!r}. Use jsonl, csv, or sqlite.")
 
-        dest = Path(dest_path)
+        dest = self._validate_export_path(dest_path)
 
         if format == "sqlite":
             return self._export_sqlite(dest)

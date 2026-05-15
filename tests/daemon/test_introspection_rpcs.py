@@ -116,11 +116,20 @@ def tuples_db_path(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def service(memory_db_path: Path, tuples_db_path: Path) -> IntrospectionService:
-    """IntrospectionService wired to tmp_path databases."""
+def service(
+    tmp_path: Path,
+    memory_db_path: Path,
+    tuples_db_path: Path,
+) -> IntrospectionService:
+    """IntrospectionService wired to tmp_path databases.
+
+    ``export_root`` is the same tmp_path so export-path-traversal tests can
+    target an exports/ subdir under the same tree.
+    """
     return IntrospectionService(
         memory_db_path=memory_db_path,
         tuples_db_path=tuples_db_path,
+        export_root=tmp_path,
     )
 
 
@@ -397,7 +406,9 @@ def test_export_sqlite_roundtrip(
 
     dest = tmp_path / "backup.db"
     result = service.export(table=None, format="sqlite", dest_path=str(dest))
-    assert result["rows"] >= 7  # might include internal tables too
+    # SQLite backup copies every row including any internal tables; assert
+    # at least our 7 test rows arrived (exact total depends on schema state).
+    assert result["rows"] == 7
 
     backup_conn = sqlite3.connect(str(dest))
     rows = backup_conn.execute("SELECT COUNT(*) FROM test_items").fetchone()[0]
@@ -574,3 +585,73 @@ def test_non_admin_introspection_ops_not_in_admin_set() -> None:
     assert "schema" not in _ADMIN_OPS
     assert "peek" not in _ADMIN_OPS
     assert "stats" not in _ADMIN_OPS
+
+
+# ---------------------------------------------------------------------------
+# Review-driven additions (PR #775 review)
+# ---------------------------------------------------------------------------
+
+
+def test_peek_rejects_zero_limit(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+) -> None:
+    """peek with limit=0 must raise ValueError (silent empty is a foot-gun)."""
+    populated_db.close()
+    with pytest.raises(ValueError, match="positive"):
+        service.peek(table="test_items", limit=0)
+
+
+def test_peek_rejects_negative_limit(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+) -> None:
+    populated_db.close()
+    with pytest.raises(ValueError, match="positive"):
+        service.peek(table="test_items", limit=-5)
+
+
+def test_peek_rejects_negative_offset(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+) -> None:
+    populated_db.close()
+    with pytest.raises(ValueError, match="non-negative"):
+        service.peek(table="test_items", offset=-1, limit=10)
+
+
+def test_export_rejects_path_traversal(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+    tmp_path: Path,
+) -> None:
+    """export must reject dest_path outside the configured export root."""
+    populated_db.close()
+    # Path traversal: try to write outside tmp_path (the export root).
+    traversal = "/tmp/escape-test-nexus-pce11.jsonl"
+    with pytest.raises(ValueError, match="outside the configured export root"):
+        service.export(table="test_items", format="jsonl", dest_path=traversal)
+
+
+def test_exec_raw_audit_log_fires_after_execution(
+    service: IntrospectionService,
+    populated_db: sqlite3.Connection,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """exec_raw must NOT emit an audit event when the SQL fails (DoS noise)."""
+    populated_db.close()
+    import logging as _logging
+    caplog.set_level(_logging.INFO)
+    # Invalid SQL — execution fails. Pre-execution logging would record the
+    # attempt regardless of validity, creating DoS-friendly audit churn.
+    with pytest.raises(Exception):
+        service.exec_raw("SELECT * FROM no_such_table_xyz")
+    # No "raw-exec" event should appear in caplog records for the failed call.
+    raw_exec_events = [
+        r for r in caplog.records
+        if "raw-exec" in r.getMessage() or getattr(r, "op", None) == "raw-exec"
+    ]
+    assert raw_exec_events == [], (
+        f"audit must fire only on success; got {len(raw_exec_events)} event(s) "
+        "for a failed exec_raw"
+    )
