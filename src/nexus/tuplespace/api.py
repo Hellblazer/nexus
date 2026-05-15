@@ -204,7 +204,18 @@ def _resolve_embed_text(
     if embed_from == "content":
         return content
     if embed_from == "match_text":
-        return match_text or content
+        # nexus-zm2n: fail loud. An empty/None match_text on an
+        # embed_from=match_text schema is a caller misconfiguration; silently
+        # substituting content would index against the wrong text and degrade
+        # semantic recall without any visible signal
+        # (feedback_no_silent_fallbacks_for_correctness.md).
+        if not match_text:
+            raise SubspaceSchemaError(
+                "embed_from='match_text' requires a non-empty match_text argument; "
+                "got empty value. Either pass match_text=<query> or change the "
+                "subspace schema's embed_from to 'content'."
+            )
+        return match_text
     if embed_from.startswith("dimensions:"):
         key = embed_from[len("dimensions:"):]
         return str(dimensions[key])
@@ -378,7 +389,16 @@ def out(
 
     mt = match_text or ""
     tid = _tuple_id(subspace, content, dimensions, mt)
-    embed_text = _resolve_embed_text(schema.embed_from, content, match_text, dimensions)
+    try:
+        embed_text = _resolve_embed_text(
+            schema.embed_from, content, match_text, dimensions
+        )
+    except SubspaceSchemaError as exc:
+        # nexus-zm2n: re-raise with subspace + schema context so the caller
+        # can identify which write was misconfigured.
+        raise SubspaceSchemaError(
+            f"subspace={subspace!r} (schema={schema.name!r}): {exc}"
+        ) from exc
     dims_json = json.dumps(dimensions, sort_keys=True)
     now = time.time()
     # Resolve effective TTL: explicit ttl_seconds wins; otherwise fall back
@@ -392,17 +412,16 @@ def out(
             effective_ttl = float(ret)
     expires_at = now + effective_ttl if effective_ttl is not None else None
 
-    # Upsert into SQLite (INSERT OR IGNORE for idempotency — same tid = same content)
-    conn.execute(
-        "INSERT OR IGNORE INTO tuples "
-        "(id, subspace, template_name, content, dimensions_json, embed_text, "
-        " match_text, created_at, expires_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (tid, subspace, schema.name, content, dims_json, embed_text, mt or None, now, expires_at),
-    )
-    conn.commit()
-
-    # Upsert into ChromaDB (idempotent by design)
+    # Two-store atomicity (nexus-qmrr): write Chroma FIRST, then commit
+    # SQLite.  Invariant: a SQLite row's existence implies the Chroma
+    # record exists.  If the Chroma upsert fails (or this process is
+    # killed mid-flight, e.g. the cockpit-hook 5s SIGTERM), no SQLite row
+    # is committed.  Worst case is an orphan Chroma record from a prior
+    # partial write of the same tuple_id; Chroma upserts are idempotent
+    # so it is reclaimed on retry, and the retention sweeper picks up any
+    # stragglers.  This ordering mirrors (asymmetrically) the retention
+    # sweeper (nexus-kk9h) which deletes Chroma first then SQLite, so a
+    # crash there leaves recoverable SQLite orphans.
     meta: dict[str, Any] = {"subspace": subspace}
     for k, v in dimensions.items():
         # ChromaDB metadata values must be str/int/float/bool
@@ -415,6 +434,16 @@ def out(
         payload=embed_text,
         metadata=meta,
     )
+
+    # SQLite second.  INSERT OR IGNORE for idempotency (same tid = same content).
+    conn.execute(
+        "INSERT OR IGNORE INTO tuples "
+        "(id, subspace, template_name, content, dimensions_json, embed_text, "
+        " match_text, created_at, expires_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (tid, subspace, schema.name, content, dims_json, embed_text, mt or None, now, expires_at),
+    )
+    conn.commit()
 
     _log.debug("tuplespace_out_complete", subspace=subspace, tuple_id=tid)
     return tid
