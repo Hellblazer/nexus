@@ -37,6 +37,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from nexus.commands.catalog import catalog
+from nexus.commands.cockpit import cockpit_group
 from nexus.commands.collection import collection
 from nexus.commands.daemon import daemon_group
 from nexus.commands.console import console
@@ -150,6 +151,7 @@ def main(ctx: click.Context, verbose: bool) -> None:
 
 
 main.add_command(catalog)
+main.add_command(cockpit_group, name="cockpit")
 main.add_command(collection)
 main.add_command(daemon_group, name="daemon")
 main.add_command(console)
