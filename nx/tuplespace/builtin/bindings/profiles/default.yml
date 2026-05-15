@@ -1,0 +1,34 @@
+# RDR-111 §Phase 2 lynchpin: default binding profile (nexus-0xaq).
+#
+# Two reference bindings demonstrate the watcher primitive end-to-end:
+#
+# 1. `post_tool_use_to_derived` -- pure in-tuplespace reaction. Every
+#    PostToolUse event ("op == out" on subspace hook_events/tool_call_completed)
+#    fans out a derived tuple onto derived/default. No shell-out, no
+#    external side effect.
+#
+# 2. `notification_log_marker` -- emits a structlog event with a known
+#    marker on every Notification 'out' event. Demonstrates the
+#    "side-effect" action shape without spawning subprocesses.
+#
+# Both bindings are intentionally narrow -- match-predicate is a flat
+# dict of equality checks against event-record fields (subspace, op,
+# category). Anything fancier (regex, dotted-field access, OR clauses)
+# is a follow-up; v1 keeps the surface small.
+profile: default
+bindings:
+  - name: post_tool_use_to_derived
+    match:
+      subspace: hook_events/tool_call_completed
+      op: out
+    action:
+      kind: python
+      callable: nexus.cockpit.bindings:action_emit_derived
+
+  - name: notification_log_marker
+    match:
+      subspace: hook_events/notification
+      op: out
+    action:
+      kind: python
+      callable: nexus.cockpit.bindings:action_log_marker

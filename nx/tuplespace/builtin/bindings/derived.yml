@@ -1,0 +1,23 @@
+# RDR-111 §Phase 2: derived-event subspace produced by binding reactions.
+# Reference binding `post_tool_use_to_derived` writes here when a
+# PostToolUse event fires, demonstrating in-tuplespace reaction (one
+# event in, a different event out, no shell-out).
+name: derived/<profile>
+tier: session
+content_type: text
+embed_from: match_text
+dimensions:
+  profile:     { type: string, required: true }
+  source_op:   { type: string, required: true }
+  source_sub:  { type: string, required: true }
+  tuple_id:    { type: string, required: true }
+take:
+  enabled: false
+  mode: semantic
+  floor: 0.30
+  margin: 0.05
+read:
+  default_floor: 0.20
+  default_n: 50
+tiers: [session]
+retention_seconds: 86400
