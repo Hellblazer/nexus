@@ -638,7 +638,7 @@ class TestPlanMissPlanner:
             ],
         }
 
-        async def fake_dispatch(prompt, schema, timeout=60.0):
+        async def fake_dispatch(prompt, schema, timeout=60.0, **kwargs):
             return fake_plan
 
         with patch.object(_dispatch_mod, "claude_dispatch", fake_dispatch):
@@ -655,7 +655,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0):
+        async def fake_dispatch(prompt, schema, timeout=60.0, **kwargs):
             return {"steps": []}
 
         with patch.object(_dispatch_mod, "claude_dispatch", fake_dispatch):
@@ -668,7 +668,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0):
+        async def fake_dispatch(prompt, schema, timeout=60.0, **kwargs):
             return {"steps": [
                 {"tool": "mcp__plugin_sn_serena__jet_brains_find_symbol", "args": {}},
             ]}
@@ -686,7 +686,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0):
+        async def fake_dispatch(prompt, schema, timeout=60.0, **kwargs):
             return {"steps": [
                 {"tool": "Grep", "args": {}},
                 {"tool": "Read", "args": {}},
@@ -705,7 +705,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0):
+        async def fake_dispatch(prompt, schema, timeout=60.0, **kwargs):
             return {"steps": [
                 {"tool": "mcp__plugin_nx_nexus__search", "args": {"query": "$intent"}},
                 {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
@@ -723,7 +723,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0):
+        async def fake_dispatch(prompt, schema, timeout=60.0, **kwargs):
             return {"steps": [
                 {"tool": "search", "args": {"query": "$intent"}},
                 {"tool": "totally_unknown_tool", "args": {}},
@@ -749,7 +749,7 @@ class TestPlanMissPlanner:
 
         dispatch_calls = []
 
-        async def fake_dispatch(prompt, schema, timeout=60.0):
+        async def fake_dispatch(prompt, schema, timeout=60.0, **kwargs):
             dispatch_calls.append(prompt)
             return {"steps": [{"tool": "search", "args": {"query": "$intent"}}]}
 
@@ -2048,3 +2048,71 @@ def test_maybe_unwrap_output_envelope_max_depth_bounded() -> None:
     out = _maybe_unwrap_output_envelope(text, max_depth=3)
     # 3 unwraps from a 4-layer payload leaves one layer remaining.
     assert "core" in out and out.startswith('{')
+
+
+# ── Named call-site routing for the plan-miss planner ───────────────────────
+
+
+class TestPlannerRouting:
+    """The plan-miss planner routes through
+    ``pick_dispatcher_for('plan_miss_planner')``.
+
+    Under default env it still calls ``claude_dispatch`` (preserves
+    byte-for-byte behavior). Under
+    ``NEXUS_DISPATCH_QWEN_OPERATORS=plan_miss_planner`` it calls
+    ``qwen_dispatch`` with the same prompt, schema, and timeout — and
+    tags both calls with ``operator_name='plan_miss_planner'`` for the
+    cost-telemetry log.
+    """
+
+    @pytest.mark.asyncio
+    async def test_default_env_calls_claude_dispatch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nexus.mcp.core import _nx_answer_plan_miss
+
+        for var in (
+            "NEXUS_DISPATCH_BACKEND",
+            "NEXUS_DISPATCH_QWEN_OPERATORS",
+            "NEXUS_DISPATCH_CLAUDE_OPERATORS",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        plan = {"steps": [{"tool": "search", "args": {"query": "$intent"}}]}
+        claude_mock = AsyncMock(return_value=plan)
+        qwen_mock = AsyncMock(return_value=plan)
+        with patch("nexus.operators.dispatch.claude_dispatch", claude_mock), \
+             patch("nexus.operators.qwen_dispatch.qwen_dispatch", qwen_mock):
+            await _nx_answer_plan_miss("how does X work")
+
+        assert claude_mock.called
+        assert not qwen_mock.called
+        kwargs = claude_mock.call_args.kwargs
+        assert kwargs.get("operator_name") == "plan_miss_planner"
+        assert kwargs.get("timeout") == 300.0
+
+    @pytest.mark.asyncio
+    async def test_qwen_pin_routes_to_qwen_dispatch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nexus.mcp.core import _nx_answer_plan_miss, _PLANNER_SCHEMA
+
+        monkeypatch.setenv("NEXUS_DISPATCH_QWEN_OPERATORS", "plan_miss_planner")
+        monkeypatch.delenv("NEXUS_DISPATCH_CLAUDE_OPERATORS", raising=False)
+        monkeypatch.delenv("NEXUS_DISPATCH_BACKEND", raising=False)
+
+        plan = {"steps": [{"tool": "search", "args": {"query": "$intent"}}]}
+        claude_mock = AsyncMock(return_value=plan)
+        qwen_mock = AsyncMock(return_value=plan)
+        with patch("nexus.operators.dispatch.claude_dispatch", claude_mock), \
+             patch("nexus.operators.qwen_dispatch.qwen_dispatch", qwen_mock):
+            await _nx_answer_plan_miss("how does X work")
+
+        assert qwen_mock.called
+        assert not claude_mock.called
+        args, kwargs = qwen_mock.call_args.args, qwen_mock.call_args.kwargs
+        # First positional is prompt, second is schema.
+        assert "how does X work" in args[0]
+        assert args[1] is _PLANNER_SCHEMA
+        assert kwargs.get("timeout") == 300.0
+        assert kwargs.get("operator_name") == "plan_miss_planner"

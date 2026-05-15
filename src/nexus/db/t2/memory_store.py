@@ -90,6 +90,21 @@ def _sanitize_fts5(query: str) -> str:
 
 # ── Schema SQL (memory + memory_fts + triggers) ───────────────────────────────
 
+_LIVENESS_SCHEMA_SQL = """\
+CREATE TABLE IF NOT EXISTS liveness (
+    pid       INTEGER NOT NULL,
+    machine   TEXT    NOT NULL,
+    user_id   TEXT    NOT NULL,
+    session   TEXT,
+    project   TEXT,
+    focus     TEXT,
+    activity  TEXT,
+    last_seen REAL    NOT NULL,
+    PRIMARY KEY (pid, machine)
+);
+CREATE INDEX IF NOT EXISTS idx_liveness_last_seen ON liveness (last_seen);
+"""
+
 _MEMORY_SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS memory (
     id            INTEGER PRIMARY KEY,
@@ -283,6 +298,7 @@ class MemoryStore:
         """
         with self._lock:
             self.conn.executescript(_MEMORY_SCHEMA_SQL)
+            self.conn.executescript(_LIVENESS_SCHEMA_SQL)
             self.conn.executescript("PRAGMA journal_mode=WAL;")
             self.conn.commit()
             result = self.conn.execute("PRAGMA journal_mode").fetchone()
@@ -1014,3 +1030,103 @@ class MemoryStore:
                 (project, cutoff, cutoff),
             ).fetchall()
         return [dict(zip(_COLUMNS, row)) for row in rows]
+
+    # ── Liveness (RDR-111 P1.3, nexus-r0vi) ─────────────────────────────────
+
+    def liveness_upsert(
+        self,
+        *,
+        pid: int,
+        machine: str,
+        user_id: str,
+        session: str | None = None,
+        project: str | None = None,
+        focus: str | None = None,
+        activity: str | None = None,
+        _now: float | None = None,
+    ) -> None:
+        """Register or refresh this instance's liveness row.
+
+        INSERT OR REPLACE keyed by (pid, machine). ``last_seen`` is set
+        to ``_now`` when supplied (for deterministic tests) or to the
+        current ``unixepoch('subsec')`` via an in-SQL expression.
+
+        The optional ``_now`` kwarg is injected by tests; production
+        callers omit it and the SQL fallback applies.
+        """
+        if _now is not None:
+            sql = """
+                INSERT OR REPLACE INTO liveness
+                    (pid, machine, user_id, session, project, focus, activity, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            params: tuple = (pid, machine, user_id, session, project, focus, activity, _now)
+        else:
+            sql = """
+                INSERT OR REPLACE INTO liveness
+                    (pid, machine, user_id, session, project, focus, activity, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, unixepoch('subsec'))
+            """
+            params = (pid, machine, user_id, session, project, focus, activity)
+        with self._lock:
+            self.conn.execute(sql, params)
+            self.conn.commit()
+
+    def liveness_sweep(
+        self,
+        *,
+        max_age_seconds: int = 60,
+        _now: float | None = None,
+    ) -> int:
+        """Delete rows whose ``last_seen`` is older than ``max_age_seconds``.
+
+        Returns the number of rows deleted. ``_now`` overrides the current
+        epoch for deterministic tests; production callers omit it.
+        """
+        if _now is not None:
+            cutoff = _now - max_age_seconds
+            sql = "DELETE FROM liveness WHERE last_seen < ?"
+            params_sw: tuple = (cutoff,)
+        else:
+            sql = "DELETE FROM liveness WHERE last_seen < unixepoch('subsec') - ?"
+            params_sw = (max_age_seconds,)
+        with self._lock:
+            cursor = self.conn.execute(sql, params_sw)
+            self.conn.commit()
+        return cursor.rowcount
+
+    def liveness_list(self) -> list[dict]:
+        """Return all current liveness rows ordered by last_seen DESC.
+
+        Freshest-first ordering matches the natural display contract of
+        `nx instances` (most recently active at the top). Stable secondary
+        key on (pid, machine) preserves determinism when two rows share
+        a last_seen timestamp.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT pid, machine, user_id, session, project, focus, activity, last_seen
+                FROM liveness
+                ORDER BY last_seen DESC, pid ASC, machine ASC
+                """
+            ).fetchall()
+        keys = ("pid", "machine", "user_id", "session", "project", "focus", "activity", "last_seen")
+        return [dict(zip(keys, row)) for row in rows]
+
+    def liveness_delete(self, *, pid: int, machine: str) -> int:
+        """Delete the liveness row for ``(pid, machine)``.
+
+        Returns the number of rows removed (0 or 1). Used by MCP server
+        shutdown to clean up the local instance's row before exit so the
+        sweep doesn't have to wait the full TTL to reflect the departure.
+        Tolerates absence (returns 0) — no error if the row was already
+        swept or never written.
+        """
+        with self._lock:
+            cursor = self.conn.execute(
+                "DELETE FROM liveness WHERE pid = ? AND machine = ?",
+                (pid, machine),
+            )
+            self.conn.commit()
+        return cursor.rowcount

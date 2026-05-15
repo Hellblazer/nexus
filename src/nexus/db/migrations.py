@@ -2546,6 +2546,7 @@ def _migrate_aspect_queue_pk_via_apply_pending(conn: sqlite3.Connection) -> None
     migrate_aspect_extraction_queue_pk_to_doc_id(conn, catalog_db_path=catalog_path)
 
 
+<<<<<<< HEAD
 # ── RDR-112 P1.4 (nexus-w0et): watcher_state in tuples.db ──────────────────
 
 
@@ -2844,6 +2845,43 @@ CREATE TABLE IF NOT EXISTS subspace_registry (
     _log.info("migrate_subspace_registry_table_done")
 
 
+def migrate_liveness_table(conn: sqlite3.Connection) -> None:
+    """RDR-111 P1.3 (nexus-r0vi): create the ``liveness`` table in memory.db.
+
+    The liveness table stores one row per running MCP instance (or CLI
+    invocation that participates in heartbeating). Rows are keyed by
+    ``(pid, machine)`` and carry a ``last_seen`` float (unix epoch with
+    sub-second precision via ``unixepoch('subsec')``).
+
+    Must be called with a ``memory.db`` connection.
+    Idempotent: gated by ``CREATE TABLE IF NOT EXISTS``.
+    """
+    existing = {
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='liveness'"
+        ).fetchall()
+    }
+    if "liveness" in existing:
+        return
+    _log.info("migrate_liveness_table_start")
+    conn.executescript("""
+CREATE TABLE IF NOT EXISTS liveness (
+    pid       INTEGER NOT NULL,
+    machine   TEXT    NOT NULL,
+    user_id   TEXT    NOT NULL,
+    session   TEXT,
+    project   TEXT,
+    focus     TEXT,
+    activity  TEXT,
+    last_seen REAL    NOT NULL,
+    PRIMARY KEY (pid, machine)
+);
+CREATE INDEX IF NOT EXISTS idx_liveness_last_seen ON liveness (last_seen);
+""")
+    conn.commit()
+    _log.info("migrate_liveness_table_done")
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -3028,6 +3066,13 @@ MIGRATIONS: list[Migration] = [
     # nexus-m4gm (RDR-112 P1.3): EventStream RPC substrate migrations are applied
     # directly in run_daemon_migrations (not here) because they need a tuples.db
     # connection, not a memory.db connection.
+    # nexus-7ejx (RDR-112 P2.1): CatalogDB collapse — version 4.34.0 reserved
+    # for that bead; its rebase will insert here.
+    Migration(
+        "4.35.0",
+        "RDR-111 P1.3: create liveness table + last_seen index (nexus-r0vi)",
+        migrate_liveness_table,
+    ),
 ]
 
 
