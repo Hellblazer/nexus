@@ -4185,7 +4185,14 @@ def _get_tuplespace() -> dict[str, Any]:
     from pathlib import Path
     db_path = Path(tuples_db_path)
 
-    registry = Registry.load(default_builtin_dir())
+    # Load top-level builtin YAMLs AND the hooks/ subdir so MCP-routed
+    # tuplespace tools resolve hook_events/* subspaces. Without subdirs=,
+    # any caller targeting hook_events_assistant_turn_ended or
+    # hook_events_session_lifecycle would raise UnknownSubspaceError under
+    # daemon-mode (RDR-112 Phase 3) routing — silent drop via the broad
+    # except in hook_bridge.emit(). Symmetric with
+    # hook_bridge._load_registry_with_hooks (PR #786 audit follow-up).
+    registry = Registry.load(default_builtin_dir(), subdirs=("hooks",))
 
     storage_mode = _os.environ.get("NX_STORAGE_MODE", "").lower()
     if storage_mode == "daemon":

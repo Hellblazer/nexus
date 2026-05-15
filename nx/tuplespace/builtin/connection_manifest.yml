@@ -1,0 +1,28 @@
+# RDR-111 Step 1: connection_manifest subspace.
+# Direct peer-to-peer streams (RDR-111 §The connection manifest subspace,
+# lines 487-506). Producer posts the manifest after the endpoint is ready;
+# consumer reads + connects directly. Heartbeats refresh the tuple's TTL
+# via out() with the same ID (idempotent); take() or TTL expiry signals
+# teardown.
+#
+# Shipped now (Phase 1 Step 1) so producers can register and write to a
+# registered schema before the Phase 3 layout / cockpit consumers exist.
+name: connection_manifest
+tier: session
+content_type: text
+embed_from: match_text
+dimensions:
+  producer:     { type: string, required: true }
+  consumer:     { type: string, required: true }
+  conn_type:    { type: enum, values: [stream, pipe, websocket, sse, file-fd], required: true }
+  payload_type: { type: string, required: true }
+  ttl_seconds:  { type: string, required: true }
+take:
+  enabled: true
+  mode: exact
+  match_keys: [producer, consumer, conn_type]
+read:
+  default_floor: 0.0
+  default_n: 50
+tiers: [session]
+retention_seconds: 3600

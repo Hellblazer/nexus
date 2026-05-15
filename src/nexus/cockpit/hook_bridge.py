@@ -234,6 +234,8 @@ def emit(
         index: TupleIndex wrapping ChromaDB (test injection; None to auto-open).
         registry: Loaded Registry of subspace schemas (test injection; None to auto-load).
     """
+    from nexus.tuplespace.api import SubspaceSchemaError  # noqa: PLC0415
+
     if not os.environ.get("CLAUDECODE"):
         _log.debug("hook_bridge_skip_no_claudecode", hook_type=hook_type)
         return
@@ -271,7 +273,23 @@ def emit(
             hook_type=hook_type,
             subspace=subspace,
         )
+    except SubspaceSchemaError as exc:
+        # Schema-violation drops are a data-correctness problem (per the
+        # "no silent fallbacks for correctness" rule) — surface them under
+        # a distinct event so they're filterable and alertable. The hook
+        # script still exits 0 per the bridge contract.
+        _log.error(
+            "hook_bridge_schema_violation",
+            hook_type=hook_type,
+            subspace=subspace,
+            error=str(exc),
+            dimensions=list(dimensions.keys()),
+        )
     except Exception:
+        # Last-resort guard so a hook script never crashes Claude Code.
+        # Specific exception classes that have known handling above this
+        # point should NOT reach here; if they do, log with the traceback
+        # for postmortem.
         _log.exception("hook_bridge_emit_error", hook_type=hook_type, subspace=subspace)
 
 
@@ -505,13 +523,14 @@ def _build_dimensions(hook_type: str, payload: dict[str, Any]) -> dict[str, Any]
     if tool_name and hook_type in ("PreToolUse", "PostToolUse"):
         dims["tool"] = tool_name
 
-    # hook_event_name discriminator for collapsed subspaces (Stop/StopFailure
-    # -> assistant_turn_ended, SessionStart/SessionEnd -> session_lifecycle).
-    # Named to match the CC API field and to avoid colliding with the
-    # ``event_type`` dim reserved for layout_state subspace paths in
-    # RDR-111 §Phase 2 (line 519).
-    if hook_type in ("Stop", "StopFailure", "SessionStart", "SessionEnd"):
-        dims["hook_event_name"] = hook_type
+    # hook_event_name is the canonical CC payload key. Populate it on
+    # every dim dict, not only for the collapsed subspaces (Stop+StopFailure,
+    # SessionStart+SessionEnd). Cheap to include, and it removes the entire
+    # class of silent-drop bugs where a future schema marks the dim required
+    # on a subspace whose hook type forgot to populate it. Named to match
+    # the CC API field and avoid colliding with ``event_type`` reserved for
+    # layout_state/<profile> subspaces (RDR-111 §Phase 2, line 519).
+    dims["hook_event_name"] = hook_type
 
     # No additional optional dims for the other types at this stage
     # (workflow, intent, priority are reserved for future enrichment)

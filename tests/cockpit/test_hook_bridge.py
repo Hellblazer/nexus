@@ -868,8 +868,12 @@ class TestEventTypeDiscriminator:
         _, _, match_text = route_payload("SessionEnd", SESSION_END_PAYLOAD)
         assert match_text == "SessionEnd"
 
-    def test_non_collapsed_hooks_have_no_hook_event_name(self) -> None:
-        """Only the collapsed subspaces need the discriminator."""
+    def test_all_hooks_populate_hook_event_name(self) -> None:
+        """hook_event_name is populated on every dim dict, not just collapsed
+        subspaces. Defensive design: removes the silent-drop class where a
+        future schema marks the dim required on a subspace whose hook type
+        forgot to populate it.
+        """
         from nexus.cockpit.hook_bridge import route_payload
 
         for hook_type, payload in [
@@ -880,8 +884,8 @@ class TestEventTypeDiscriminator:
             ("Notification", NOTIFICATION_PAYLOAD),
         ]:
             _, dims, _ = route_payload(hook_type, payload)
-            assert "hook_event_name" not in dims, (
-                f"hook_event_name should only be on collapsed subspaces, found on {hook_type}"
+            assert dims["hook_event_name"] == hook_type, (
+                f"hook_event_name should equal the hook type for {hook_type}"
             )
 
 
@@ -923,6 +927,28 @@ class TestProductionYamlSchemas:
                 f"{subspace}: production YAMLs must embed match_text "
                 f"(got {tmpl.embed_from!r})"
             )
+
+    def test_step1_layout_state_and_connection_manifest_present(self) -> None:
+        """RDR-111 Step 1 ships three subspace sets: hook_events/* (7),
+        connection_manifest (1), layout_state/<profile> (1). All must load.
+        """
+        from nexus.cockpit.hook_bridge import _load_registry_with_hooks
+
+        registry = _load_registry_with_hooks(_PROD_HOOKS_DIR)
+        # connection_manifest is concrete (no params).
+        cm = registry.get_schema_for("connection_manifest")
+        assert cm is not None
+        assert "producer" in cm.dimensions
+        assert "consumer" in cm.dimensions
+
+        # layout_state is templated by profile.
+        ls = registry.get_schema_for("layout_state/dev")
+        assert ls is not None
+        # event_type here is the layout_state stylesheet selector — keyed
+        # on subspace path. Distinct from hook_event_name (the hook-event
+        # discriminator). The two dims must coexist without collision.
+        assert "event_type" in ls.dimensions
+        assert "profile" in ls.dimensions
 
     def test_production_collapsed_subspaces_require_hook_event_name(self) -> None:
         """assistant_turn_ended and session_lifecycle must require hook_event_name."""
@@ -1208,6 +1234,51 @@ class TestRegistryLoadFailureWarning:
 # ---------------------------------------------------------------------------
 # nexus-hrz7: UnknownSubspaceError -> structured WARN (ordering hazard guard)
 # ---------------------------------------------------------------------------
+
+
+class TestSchemaViolationLogged:
+    """SubspaceSchemaError must surface under its own structured event."""
+
+    def test_missing_required_dim_logs_schema_violation(
+        self, db_conn, hook_index, hook_registry, monkeypatch
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        from nexus.cockpit import hook_bridge
+        from nexus.tuplespace.api import SubspaceSchemaError
+
+        monkeypatch.setenv("CLAUDECODE", "1")
+
+        def _raise_schema(**_kwargs):
+            raise SubspaceSchemaError("missing required dim 'hook_event_name'")
+
+        monkeypatch.setattr(
+            "nexus.cockpit.hook_bridge._direct_out",
+            _raise_schema,
+        )
+
+        with capture_logs() as logs:
+            # Must not raise — bridge contract is exit 0 on any error.
+            hook_bridge.emit(
+                "Stop",
+                STOP_PAYLOAD,
+                conn=db_conn,
+                index=hook_index,
+                registry=hook_registry,
+            )
+
+        violations = [
+            r for r in logs
+            if r.get("event") == "hook_bridge_schema_violation"
+        ]
+        assert violations, (
+            f"expected hook_bridge_schema_violation event, got {logs!r}"
+        )
+        assert violations[0]["log_level"] == "error"
+        assert violations[0]["hook_type"] == "Stop"
+        # The dimension list must include hook_event_name so a debugger
+        # can see exactly what was sent.
+        assert "hook_event_name" in violations[0]["dimensions"]
 
 
 class TestUnknownSubspaceWarning:

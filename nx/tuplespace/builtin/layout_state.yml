@@ -1,0 +1,34 @@
+# RDR-111 Step 1: layout_state subspace.
+# Auto-layout engine stylesheet output (RDR-111 §The layout_state subspace,
+# lines 508-532). One tuple per (profile, event_type) keying pair, written
+# by the layout engine and read by all cockpit surfaces to know which slot
+# and level to use for each event type.
+#
+# Note: ``event_type`` here is the SUBSPACE PATH (e.g.
+# ``hook_events/tool_call_intent``) — a stylesheet selector keyed on the
+# tuple subspace, NOT the same dim as the hook-event subspace's
+# ``hook_event_name`` discriminator (PR #786). The two dims occupy
+# disjoint subspaces by design.
+#
+# Shipped now (Phase 1 Step 1) so producers can register and write to a
+# registered schema before the layout engine (Phase 3 Step 11) lands.
+name: layout_state/<profile>
+tier: project
+content_type: text
+embed_from: match_text
+dimensions:
+  profile:        { type: string, required: true }
+  event_type:     { type: string, required: true }
+  surface_level:  { type: enum, values: [status-line, notification, panel, full-screen], required: true }
+  demotion_level: { type: enum, values: [status-line, notification, panel, full-screen], required: true }
+  ttl_seconds:    { type: string, required: true }
+  pinned:         { type: string, required: false }
+take:
+  enabled: true
+  mode: exact
+  match_keys: [profile, event_type]
+read:
+  default_floor: 0.0
+  default_n: 100
+tiers: [project]
+retention_seconds: 604800  # 7 days
