@@ -194,6 +194,12 @@ class T2Database:
         # async aspect-extraction worker. The hook fires fast (just
         # an enqueue); the worker drains in a background thread.
         self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(path)
+        # RDR-112 P2.1 (nexus-7ejx): catalog tables collapse into T2 as
+        # the eighth domain store. Owns the documents/links/collections
+        # surface previously held by ``nexus.catalog.catalog_db.CatalogDB``.
+        # Phase 4 (catalog port) flips existing CatalogDB consumers.
+        from nexus.db.t2.catalog_store import CatalogStore
+        self.catalog: CatalogStore = CatalogStore(path)
 
     @property
     def path(self) -> Path:
@@ -219,6 +225,7 @@ class T2Database:
         close order is reverse of construction so that the most
         recently opened connection (aspect_queue) is released first.
         """
+        self.catalog.close()
         self.aspect_queue.close()
         self.document_aspects.close()
         self.chash_index.close()
