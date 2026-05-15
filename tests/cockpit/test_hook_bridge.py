@@ -836,6 +836,23 @@ class TestEventTypeDiscriminator:
         _, dims, _ = route_payload("SessionEnd", SESSION_END_PAYLOAD)
         assert dims["event_type"] == "SessionEnd"
 
+    def test_stop_match_text_includes_session_and_cwd(self) -> None:
+        """match_text must carry more than the literal hook name (semantic richness)."""
+        from nexus.cockpit.hook_bridge import route_payload
+
+        _, _, match_text = route_payload("Stop", STOP_PAYLOAD)
+        assert "Stop" in match_text
+        assert "test-session-abc" in match_text
+        assert "/projects/nexus" in match_text
+
+    def test_sessionstart_match_text_includes_session_and_cwd(self) -> None:
+        from nexus.cockpit.hook_bridge import route_payload
+
+        _, _, match_text = route_payload("SessionStart", SESSION_START_PAYLOAD)
+        assert "SessionStart" in match_text
+        assert "test-session-abc" in match_text
+        assert "/projects/nexus" in match_text
+
     def test_non_collapsed_hooks_have_no_event_type(self) -> None:
         """Only the collapsed subspaces need the discriminator."""
         from nexus.cockpit.hook_bridge import route_payload
@@ -988,6 +1005,83 @@ class TestRegistryLoadFailureWarning:
         )
         assert warns[0]["log_level"] == "warning"
         assert "remediation" in warns[0]
+
+        hook_bridge._reset_singleton_for_tests()
+
+    def test_fast_path_skips_lock_when_cached(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """After init, _get_or_init_resources must hit the dict without taking the lock."""
+        from nexus.cockpit import hook_bridge
+
+        nexus_dir = tmp_path / "nexus"
+        nexus_dir.mkdir()
+        monkeypatch.setattr(
+            "nexus.config.load_config",
+            lambda: {"nexus_dir": str(nexus_dir)},
+        )
+        monkeypatch.setenv("CLAUDECODE", "1")
+
+        hook_bridge._reset_singleton_for_tests()
+        # Prime the cache.
+        hook_bridge._get_or_init_resources()
+
+        # Patch the lock with a sentinel that records acquire() calls. The
+        # fast-path returns BEFORE entering the with-block, so acquire() must
+        # not be invoked on a warm cache.
+        acquired: list[bool] = []
+        real_lock = hook_bridge._singleton_lock
+
+        class _SpyLock:
+            def __enter__(self):
+                acquired.append(True)
+                return real_lock.__enter__()
+
+            def __exit__(self, *args):
+                return real_lock.__exit__(*args)
+
+        monkeypatch.setattr(hook_bridge, "_singleton_lock", _SpyLock())
+        result = hook_bridge._get_or_init_resources()
+        assert result is not None
+        assert acquired == [], (
+            "fast path must skip the lock when the cache is warm"
+        )
+
+        hook_bridge._reset_singleton_for_tests()
+
+    def test_atexit_handler_registered_on_first_init(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """atexit cleanup hook is registered exactly once across emit() calls."""
+        import atexit as _atexit
+
+        from nexus.cockpit import hook_bridge
+
+        nexus_dir = tmp_path / "nexus"
+        nexus_dir.mkdir()
+        monkeypatch.setattr(
+            "nexus.config.load_config",
+            lambda: {"nexus_dir": str(nexus_dir)},
+        )
+        monkeypatch.setenv("CLAUDECODE", "1")
+
+        hook_bridge._reset_singleton_for_tests()
+        # Reset the registration flag so this test is order-independent.
+        hook_bridge._atexit_registered = False
+
+        registered: list[Any] = []
+        real_register = _atexit.register
+
+        def _counting_register(fn, *a, **kw):
+            registered.append(fn)
+            return real_register(fn, *a, **kw)
+
+        monkeypatch.setattr(_atexit, "register", _counting_register)
+
+        hook_bridge.emit("Stop", STOP_PAYLOAD)
+        hook_bridge.emit("Stop", STOP_PAYLOAD)
+
+        assert registered.count(hook_bridge._close_singleton_at_exit) == 1
 
         hook_bridge._reset_singleton_for_tests()
 

@@ -32,6 +32,7 @@ Key design decisions (backed by RDR-111 spike results):
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import sqlite3
@@ -39,7 +40,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -63,6 +64,25 @@ _log = structlog.get_logger(__name__)
 _singleton_lock = threading.Lock()
 _singleton: dict[tuple[str, str], tuple[Any, Any, Any]] = {}
 _registry_load_failed_once = False
+_atexit_registered = False
+
+
+def _close_singleton_at_exit() -> None:
+    """Best-effort cleanup of cached resources at interpreter shutdown.
+
+    Hook bridge scripts are short-lived so SQLite WAL + chromadb's own
+    shutdown handlers usually win the race, but importers that hold the
+    module for the lifetime of a longer process (tests, future daemon
+    routing) benefit from explicit close to flush any pending writes.
+    Errors are swallowed: the interpreter is exiting either way.
+    """
+    with _singleton_lock:
+        for conn, _index, _registry in _singleton.values():
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _singleton.clear()
 
 
 def configure_logging_to_stderr() -> None:
@@ -315,8 +335,11 @@ def _get_or_init_resources() -> tuple[Any, Any, Any] | None:
     Returns ``None`` (and logs a structured WARN once) if registry load fails,
     which is the wheel-install silent-drop condition: ``default_builtin_dir()``
     is repo-relative and does not exist when conexus is installed from a wheel.
+
+    Uses a double-checked-lock so the cached fast-path skips the
+    ``_singleton_lock`` entirely once the resources are initialised.
     """
-    global _registry_load_failed_once
+    global _registry_load_failed_once, _atexit_registered
 
     import chromadb as _chromadb
 
@@ -331,6 +354,12 @@ def _get_or_init_resources() -> tuple[Any, Any, Any] | None:
     chroma_dir = Path(os.path.expanduser(f"{nexus_dir}/chroma"))
 
     key = (str(db_path), str(chroma_dir))
+
+    # Fast path: dict lookup is atomic under the GIL for a single get(); if
+    # another thread is mid-init the second check inside the lock catches it.
+    cached = _singleton.get(key)
+    if cached is not None:
+        return cached
 
     with _singleton_lock:
         cached = _singleton.get(key)
@@ -366,6 +395,9 @@ def _get_or_init_resources() -> tuple[Any, Any, Any] | None:
             return None
 
         _singleton[key] = (conn, index, registry)
+        if not _atexit_registered:
+            atexit.register(_close_singleton_at_exit)
+            _atexit_registered = True
         return _singleton[key]
 
 
@@ -493,11 +525,19 @@ def _build_match_text(hook_type: str, payload: dict[str, Any]) -> str:
             return payload.get("message", "")
 
         case "Stop" | "StopFailure":
-            return hook_type
+            # Embed something semantically richer than the bare event name so
+            # downstream semantic search differentiates one turn from another.
+            # session_id is stable per turn; cwd grounds the project. The
+            # event_type DIMENSION carries the variant for exact-match filters.
+            session = payload.get("session_id", "")
+            cwd = payload.get("cwd", "")
+            stop_active = payload.get("stop_hook_active", False)
+            return f"{hook_type} session={session} cwd={cwd} active={stop_active}".strip()
 
         case "SessionStart" | "SessionEnd":
+            session = payload.get("session_id", "")
             cwd = payload.get("cwd", "")
-            return f"{hook_type} {cwd}".strip()
+            return f"{hook_type} session={session} cwd={cwd}".strip()
 
         case _:
             return ""
