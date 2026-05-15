@@ -4,6 +4,7 @@
 RDR-112 P1.1 (nexus-61x6): transport scaffold + dual-bind UDS+TCP.
 RDR-112 P1.2 (nexus-qy0u): domain-store RPC dispatcher.
 RDR-112 P1.3 (nexus-m4gm): EventStream RPC — streaming subscription.
+RDR-112 P1.6 (nexus-pce1.1): admin-RPC UDS-only gate.
 
 This module provides:
   - ``T2Daemon``: the daemon class, managing two concurrent asyncio servers
@@ -52,6 +53,16 @@ Phase 1.3 scope (nexus-m4gm):
   - Live mode: ``PRAGMA data_version`` polling at 10 ms.
   - Failure-category demux: ``where: {category: <str>}`` filter supported.
   - Requires ``tuples_db_path`` arg at daemon construction.
+
+Phase 1.6 scope (nexus-pce1.1):
+  - ``_ADMIN_OPS`` frozenset: forward-looking gate for ops that must only be
+    callable over UDS (peer-cred-verified transport). Adding any admin op to
+    the dispatch table also requires adding it to ``_ADMIN_OPS``.
+  - ``is_uds`` derived once in ``_handle_connection`` and threaded to
+    ``_dispatch``. Admin ops sent over TCP receive a ``PermissionDenied``
+    error frame; the connection is NOT closed.
+  - ``admin_ping`` op: test-scaffold only (``enable_admin_ping=True``).
+    Never enabled in production. Documents the pattern for real admin ops.
 
 Out of scope here (later beads):
   - Migration runner (P1.4 nexus-w0et)
@@ -169,6 +180,47 @@ _RPC_DENY_OPS: frozenset[str] = frozenset({
     "document_aspects.upsert",
     "document_aspects.get",
     "document_aspects.get_by_doc_id",
+})
+
+#: Ops that may ONLY be called over a UDS connection (RDR-112 P1.6 / RDR-113).
+#:
+#: Rationale: UDS connections have been peer-credential-verified (UID == daemon
+#: UID). TCP is loopback-only but carries no per-process identity proof; admin
+#: ops that mutate schema or subspace configuration must not be reachable over
+#: TCP even on a single-user host.
+#:
+#: **Maintenance rule**: whenever a new admin op is added to the dispatch table
+#: (e.g. ``subspace_add`` in nexus-x98k, ``apply_pending_migrations`` if it
+#: ever becomes an explicit RPC), add it here too. The gate in ``_dispatch``
+#: enforces the constraint at runtime.
+#:
+#: ``admin_ping`` is a test-scaffold op registered only when T2Daemon is
+#: constructed with ``enable_admin_ping=True``. It exercises the UDS gate in
+#: the test suite without requiring a real admin op in the dispatch table.
+_ADMIN_OPS: frozenset[str] = frozenset({
+    "admin_ping",                  # test-scaffold only (enable_admin_ping=True)
+    "subspace_add",                # future — RDR-112 P1.5 nexus-x98k
+    "apply_pending_migrations",    # currently NOT in dispatch table (internal to daemon start)
+    "import",                      # future
+})
+
+#: Names that future beads MUST treat as admin (UDS-only) if they appear in
+#: the dispatch table. Independent of ``_ADMIN_OPS`` so the startup integrity
+#: check can detect "dispatch table registered the op but _ADMIN_OPS missed
+#: it" without a tautology.
+#:
+#: When you ship a new admin RPC:
+#:  1. Add it to ``_ADMIN_OPS`` above (so the gate rejects TCP requests).
+#:  2. Add it here (so the startup check catches future regressions).
+#:  3. Register it in the dispatch table.
+#:
+#: The integrity check fails loud at startup if any name here ends up in the
+#: dispatch table without also being in ``_ADMIN_OPS``.
+_KNOWN_ADMIN_NAMES: frozenset[str] = frozenset({
+    "admin_ping",
+    "subspace_add",
+    "apply_pending_migrations",
+    "import",
 })
 
 
@@ -383,6 +435,7 @@ class T2Daemon:
         *,
         t2db: Any = None,
         tuples_db_path: Path | None = None,
+        enable_admin_ping: bool = False,
     ) -> None:
         """Initialise the daemon.
 
@@ -397,6 +450,11 @@ class T2Daemon:
             tuples_db_path: Path to tuples.db for EventStream subscriptions
                 (P1.3 nexus-m4gm). When ``None``, ``event_stream.subscribe``
                 returns an error.  Typically ``config_dir / "tuples.db"``.
+            enable_admin_ping: If ``True``, register the ``admin_ping``
+                test-scaffold op in the dispatch table. This op is in
+                ``_ADMIN_OPS`` and is used by tests to exercise the UDS-only
+                gate without requiring a real admin op. Never set this in
+                production code.
         """
         self._config_dir = config_dir
         self._socket_dir: Path = config_dir / _SOCKET_SUBDIR
@@ -422,6 +480,28 @@ class T2Daemon:
         self._rpc_table: dict[str, Any] = {}
         if t2db is not None:
             self._rpc_table = _build_dispatch_table(t2db)
+
+        # P1.6 nexus-pce1.1: test-scaffold admin op.
+        # admin_ping is in _ADMIN_OPS; registering it here lets tests exercise
+        # the UDS-only gate. Production code never sets enable_admin_ping.
+        if enable_admin_ping:
+            self._rpc_table["admin_ping"] = lambda: {"ok": True}
+
+        # P1.6 nexus-pce1.1: startup integrity check.
+        # The UDS-only gate relies on _ADMIN_OPS membership. If a future bead
+        # registers an admin op in the dispatch table but forgets to add it
+        # here, the op would be TCP-callable — silently regressing the gate.
+        # Fail loud at startup rather than at first malicious request.
+        _unprotected_admin_ops = {
+            op for op in self._rpc_table
+            if op in _KNOWN_ADMIN_NAMES and op not in _ADMIN_OPS
+        }
+        if _unprotected_admin_ops:
+            raise RuntimeError(
+                f"Admin ops registered in dispatch table but missing from _ADMIN_OPS: "
+                f"{sorted(_unprotected_admin_ops)}. Add them to _ADMIN_OPS in t2_daemon.py "
+                "to enforce the UDS-only gate."
+            )
 
         # P1.3 nexus-m4gm: tuples.db path for EventStream subscriptions.
         self._tuples_db_path: Path | None = tuples_db_path
@@ -641,11 +721,14 @@ class T2Daemon:
           3. Respond hello_ack.
           4. Serve RPCs until client closes or daemon is stopping.
         """
-        # --- Peer-cred check (UDS only) ---
+        # --- Derive is_uds once (P1.6 nexus-pce1.1) ---
+        # is_uds is threaded into _dispatch to gate admin-only ops.
         transport = writer.transport
         raw_sock: socket.socket | None = transport.get_extra_info("socket")
+        is_uds: bool = raw_sock is not None and raw_sock.family == socket.AF_UNIX
 
-        if raw_sock is not None and raw_sock.family == socket.AF_UNIX:
+        # --- Peer-cred check (UDS only) ---
+        if is_uds:
             try:
                 creds: PeerCredentials = read_peer_credentials(raw_sock)
             except Exception as exc:
@@ -741,11 +824,13 @@ class T2Daemon:
                 await self._handle_event_stream(reader, writer, msg.get("args") or {})
                 return
 
-            response = await self._dispatch(msg)
+            response = await self._dispatch(msg, is_uds=is_uds)
             write_frame(writer, response)
             await writer.drain()
 
-    async def _dispatch(self, msg: dict[str, Any]) -> dict[str, Any]:
+    async def _dispatch(
+        self, msg: dict[str, Any], *, is_uds: bool = False
+    ) -> dict[str, Any]:
         """Dispatch a single RPC message and return the response frame.
 
         Phase 1.1 ops:
@@ -758,10 +843,40 @@ class T2Daemon:
             ``{result: <t2_encoded>}``; exceptions in
             ``{error: {type, message, traceback}}``.
 
+        Phase 1.6 ops (nexus-pce1.1):
+          - Admin ops listed in ``_ADMIN_OPS`` are rejected over TCP with a
+            ``PermissionDenied`` error frame. The connection stays open.
+
         Unknown ops return an error frame (not an exception) so the
         connection remains open.
+
+        Args:
+            msg: Decoded RPC message from the client.
+            is_uds: ``True`` when the connection arrived over a UDS socket
+                (``AF_UNIX``). Admin ops require ``is_uds=True``.
         """
         op = msg.get("op")
+
+        # --- Admin-RPC gate (P1.6 nexus-pce1.1) ---
+        # Admin ops in _ADMIN_OPS require a UDS connection. TCP connections
+        # have no per-process identity proof; even loopback TCP must not reach
+        # admin ops. Returning an error frame (not raising) keeps the
+        # connection open so the client can issue non-admin RPCs.
+        if op in _ADMIN_OPS and not is_uds:
+            _log.warning(
+                "admin_op_rejected_over_tcp",
+                op=op,
+            )
+            return {
+                "error": {
+                    "type": "PermissionDenied",
+                    "message": (
+                        f"admin op {op!r} requires UDS transport; "
+                        "TCP connections cannot invoke admin ops"
+                    ),
+                }
+            }
+
         match op:
             case "ping":
                 return {
@@ -772,7 +887,7 @@ class T2Daemon:
                     "start_time": self._start_time,
                     "pid": os.getpid(),
                 }
-            case str() if "." in op and op in self._rpc_table:
+            case str() if op in self._rpc_table:
                 return await self._dispatch_store_rpc(op, msg)
             case str() if "." in op and op not in self._rpc_table:
                 return {"error": f"unknown RPC op: {op!r}"}
