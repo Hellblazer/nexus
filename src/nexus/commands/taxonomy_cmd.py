@@ -1058,8 +1058,20 @@ async def _generate_labels_batch(
     results: list[str | None] = [None] * len(items)
     try:
         from nexus.operators.dispatch import claude_dispatch
+        from nexus.operators.dispatch_router import pick_dispatcher_for
 
-        payload = await claude_dispatch(prompt, _LABEL_SCHEMA, timeout=120.0)
+        if pick_dispatcher_for("topic_labeler") == "qwen":
+            from nexus.operators.qwen_dispatch import qwen_dispatch
+
+            payload = await qwen_dispatch(
+                prompt, _LABEL_SCHEMA, timeout=120.0,
+                operator_name="topic_labeler",
+            )
+        else:
+            payload = await claude_dispatch(
+                prompt, _LABEL_SCHEMA, timeout=120.0,
+                operator_name="topic_labeler",
+            )
     except Exception:
         return results
 
