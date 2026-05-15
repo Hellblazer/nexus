@@ -199,11 +199,9 @@ _RPC_DENY_OPS: frozenset[str] = frozenset({
 #: the test suite without requiring a real admin op in the dispatch table.
 _ADMIN_OPS: frozenset[str] = frozenset({
     "admin_ping",                  # test-scaffold only (enable_admin_ping=True)
-    "subspace_add",                # future — RDR-112 P1.5 nexus-x98k
+    "subspace_add",                # RDR-112 P1.5 nexus-x98k
     "apply_pending_migrations",    # currently NOT in dispatch table (internal to daemon start)
     "import",                      # future
-    "exec_raw",                    # P1.6 nexus-08i1 — arbitrary read-only SQL; high blast radius
-    "export",                      # P1.6 nexus-08i1 — daemon-side file write; high blast radius
 })
 
 #: Names that future beads MUST treat as admin (UDS-only) if they appear in
@@ -223,8 +221,6 @@ _KNOWN_ADMIN_NAMES: frozenset[str] = frozenset({
     "subspace_add",
     "apply_pending_migrations",
     "import",
-    "exec_raw",
-    "export",
 })
 
 
@@ -499,27 +495,15 @@ class T2Daemon:
 
         # P1.5 nexus-x98k: subspace admin RPC.
         # subspace_add is in _ADMIN_OPS (UDS-only gate enforced by _dispatch).
+        # Wire contract uses kwarg ``yaml`` while the implementation takes
+        # ``yaml_str`` (the implementation avoids shadowing the module-level
+        # ``yaml`` import). A thin lambda bridges the two so the wire-level
+        # kwarg name is stable for clients.
         self._registry_store = registry_store
         if registry_store is not None:
-            self._rpc_table["subspace_add"] = registry_store.add
-
-        # P1.6 nexus-08i1: introspection RPCs.
-        # exec_raw and export are admin-only (in _ADMIN_OPS); schema, peek,
-        # stats are read-only metadata and safe over TCP.
-        if t2db is not None:
-            from nexus.daemon.introspection import IntrospectionService
-            _intr = IntrospectionService(
-                memory_db_path=t2db._path,
-                tuples_db_path=(
-                    tuples_db_path if tuples_db_path is not None
-                    else config_dir / "tuples.db"
-                ),
+            self._rpc_table["subspace_add"] = (
+                lambda yaml: registry_store.add(yaml_str=yaml)  # noqa: A006
             )
-            self._rpc_table["exec_raw"] = _intr.exec_raw
-            self._rpc_table["schema"] = _intr.schema
-            self._rpc_table["peek"] = _intr.peek
-            self._rpc_table["stats"] = _intr.stats
-            self._rpc_table["export"] = _intr.export
 
         # P1.6 nexus-pce1.1: startup integrity check.
         # The UDS-only gate relies on _ADMIN_OPS membership. If a future bead

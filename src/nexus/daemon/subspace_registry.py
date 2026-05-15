@@ -11,10 +11,13 @@ Design decisions:
 - Persistence: ``tuples.db`` (same SQLite file as tuple stores) to keep the
   SQLite file count low and enable single-transaction cross-table queries in
   future phases.
-- Validation: delegates to ``nexus.tuplespace.registry._load_one`` via
-  in-memory file-like routing (reads YAML from a ``tmp`` file for the existing
-  loader path) — actually calls ``_VALIDATOR`` and ``_load_one`` helpers
-  directly by parsing the YAML string ourselves.
+- Validation: reuses the JSON Schema validator and parameter-pattern regexes
+  from ``nexus.tuplespace.registry`` (``_VALIDATOR``, ``_ANGLE_TOKEN``,
+  ``_PARAM_PATTERN``) so the daemon and the loader stay in lockstep. We do
+  not call ``_load_one`` directly because that function takes a ``Path``;
+  the registry admin RPC accepts a YAML string in-memory, so the parse
+  pipeline is mirrored here (yaml.safe_load + the same checks). When the
+  loader gains a new rule, mirror it here.
 - Digest: sha256 over ``json.dumps(sorted({name: schema_digest}))`` where
   ``schema_digest`` is sha256 of the raw YAML bytes. The overall digest is
   cached and invalidated on every ``add()``.
@@ -196,11 +199,13 @@ class RegistryStore:
     # Public API
     # ------------------------------------------------------------------
 
-    def add(self, yaml: str) -> dict[str, str]:
+    def add(self, yaml_str: str) -> dict[str, str]:
         """Validate and persist a subspace schema from a YAML string.
 
+        The parameter name avoids shadowing the module-level ``yaml`` import.
+
         Args:
-            yaml: Raw YAML text for the subspace schema.
+            yaml_str: Raw YAML text for the subspace schema.
 
         Returns:
             ``{"name": <name>, "digest": <schema_digest>}`` on success.
@@ -210,7 +215,7 @@ class RegistryStore:
             ReservedPrefixError: Name starts with a reserved prefix.
             DuplicateSubspaceError: A schema with this name already exists.
         """
-        schema = _parse_and_validate(yaml)
+        schema = _parse_and_validate(yaml_str)
         name = schema.name
 
         # Reserved-prefix check
@@ -221,7 +226,7 @@ class RegistryStore:
                     "reserved prefixes: tuples/ (RDR-110), daemon/ (RDR-112)"
                 )
 
-        yaml_bytes = yaml.encode("utf-8")
+        yaml_bytes = yaml_str.encode("utf-8")
         s_digest = _schema_digest(yaml_bytes)
         now = time.time()
 
@@ -231,7 +236,7 @@ class RegistryStore:
                 conn.execute(
                     "INSERT INTO subspace_registry (name, yaml, schema_digest, added_at) "
                     "VALUES (?, ?, ?, ?)",
-                    (name, yaml, s_digest, now),
+                    (name, yaml_str, s_digest, now),
                 )
                 conn.commit()
             except sqlite3.IntegrityError:

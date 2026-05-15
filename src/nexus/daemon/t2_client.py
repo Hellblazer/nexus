@@ -592,6 +592,24 @@ class T2Client:
         self.close()
 
     # ------------------------------------------------------------------
+    # Bare-op invocation (admin RPCs and introspection verbs)
+    # ------------------------------------------------------------------
+
+    def call(self, op: str, args: dict[str, Any] | None = None) -> Any:
+        """Invoke a bare-op RPC and return its ``result`` payload.
+
+        Use for ops that are not exposed via a store proxy — admin ops
+        (``subspace_add``), introspection verbs (``exec_raw``, ``schema``,
+        ``peek``, ``stats``, ``export``), or any future bare-op handler.
+        Raises ``T2DaemonError`` on remote error frames.
+
+        Public alternative to reaching into ``_get_pool()`` directly so the
+        CLI does not bind to internal pool internals.
+        """
+        with self._get_pool().acquire() as conn:
+            return conn.call(op, args or {})
+
+    # ------------------------------------------------------------------
     # Store proxies (attribute properties)
     # ------------------------------------------------------------------
 

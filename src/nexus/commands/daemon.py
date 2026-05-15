@@ -225,40 +225,33 @@ def subspace_add_cmd(yaml_path: Path, config_dir_str: str | None) -> None:
     disc = _discovery_path(config_dir)
     if not disc.exists():
         click.echo("No T2 daemon discovery file found — is the daemon running?", err=True)
-        import sys
         sys.exit(1)
 
     try:
         data = json.loads(disc.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         click.echo(f"Failed to read discovery file: {exc}", err=True)
-        import sys
         sys.exit(1)
 
     uds_path_str = data.get("uds_path")
     if not uds_path_str:
         click.echo("Discovery file missing 'uds_path'. Cannot use admin RPC over TCP.", err=True)
-        import sys
         sys.exit(1)
 
     try:
         yaml_text = yaml_path.read_text()
     except OSError as exc:
         click.echo(f"Failed to read YAML file: {exc}", err=True)
-        import sys
         sys.exit(1)
 
     try:
         with T2Client(uds_path=Path(uds_path_str)) as client:
-            with client._get_pool().acquire() as conn:
-                result = conn.call("subspace_add", {"yaml": yaml_text})
+            result = client.call("subspace_add", {"yaml": yaml_text})
     except T2DaemonError as exc:
         click.echo(f"Error: {exc}", err=True)
-        import sys
         sys.exit(1)
     except OSError as exc:
         click.echo(f"Connection error: {exc}", err=True)
-        import sys
         sys.exit(1)
 
     click.echo(f"Registered: {result.get('name')}")
