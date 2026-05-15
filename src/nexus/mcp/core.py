@@ -415,14 +415,13 @@ async def _combined_lifespan(_app: Any):
                 await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 task.cancel()
-            # Best-effort delete our row on clean shutdown.
+            # Best-effort delete our row on clean shutdown. Use the public
+            # MemoryStore.liveness_delete method so the call respects the
+            # store's lock and stays compatible with future daemon-mode
+            # routing (nexus-pce1.6) — no raw `.conn` reach-throughs.
             try:
                 with _t2_ctx() as _db:
-                    _db.memory.conn.execute(
-                        "DELETE FROM liveness WHERE pid = ? AND machine = ?",
-                        (pid, machine),
-                    )
-                    _db.memory.conn.commit()
+                    _db.memory.liveness_delete(pid=pid, machine=machine)
             except Exception as _del_exc:
                 _cl_log.debug(
                     "liveness_delete_on_shutdown_error",

@@ -10,6 +10,7 @@ Tests cover:
 """
 from __future__ import annotations
 
+import asyncio
 import socket
 import sqlite3
 import time
@@ -319,3 +320,112 @@ class TestLivenessList:
         assert r["project"] is None
         assert r["focus"] is None
         assert r["activity"] is None
+
+
+# ---------------------------------------------------------------------------
+# liveness_delete coverage (nexus-r0vi review fix)
+# ---------------------------------------------------------------------------
+
+
+class TestLivenessDelete:
+    def test_delete_removes_row(self, tmp_path) -> None:
+        from nexus.db.t2.memory_store import MemoryStore
+
+        store = MemoryStore(tmp_path / "memory.db")
+        try:
+            store.liveness_upsert(pid=42, machine=_MACHINE, user_id=_USER)
+            assert len(store.liveness_list()) == 1
+            removed = store.liveness_delete(pid=42, machine=_MACHINE)
+            assert removed == 1
+            assert store.liveness_list() == []
+        finally:
+            store.close()
+
+    def test_delete_missing_row_returns_zero(self, tmp_path) -> None:
+        from nexus.db.t2.memory_store import MemoryStore
+
+        store = MemoryStore(tmp_path / "memory.db")
+        try:
+            removed = store.liveness_delete(pid=999, machine="no-such-machine")
+            assert removed == 0
+        finally:
+            store.close()
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat lifecycle (Important #3 from review): cancellation + error swallow
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatLifecycle:
+    @pytest.mark.asyncio
+    async def test_heartbeat_wakes_on_stop_event_before_full_interval(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The heartbeat task must wake on stop_event.set() rather than
+        after the full 30s sleep, so MCP shutdown does not stall.
+        """
+        from nexus.db.t2.memory_store import MemoryStore
+        from nexus.mcp import core as core_mod
+
+        store = MemoryStore(tmp_path / "memory.db")
+        monkeypatch.setattr(core_mod, "_t2_ctx", lambda: _StoreCtx(store))
+        monkeypatch.setattr(core_mod, "_LIVENESS_INTERVAL_SECONDS", 30.0)
+
+        stop = asyncio.Event()
+        task = asyncio.create_task(core_mod._liveness_heartbeat_task(stop))
+        try:
+            # Yield enough times for the task to enter its first wait window
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+            # At least one upsert must have happened by now (heartbeat reads
+            # os.getpid() internally; we just verify the row was written).
+            import os as _os
+            current_pid = _os.getpid()
+            assert any(r["pid"] == current_pid for r in store.liveness_list())
+            t0 = asyncio.get_running_loop().time()
+            stop.set()
+            await asyncio.wait_for(task, timeout=2.0)
+            elapsed = asyncio.get_running_loop().time() - t0
+            assert elapsed < 1.0, f"task did not wake on stop_event within 1s, took {elapsed:.2f}s"
+        finally:
+            if not task.done():
+                task.cancel()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_swallows_internal_errors(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A transient error inside the heartbeat beat must NOT propagate
+        out of the task — the MCP server must survive an unreachable DB.
+        """
+        from nexus.mcp import core as core_mod
+
+        class BrokenCtx:
+            def __enter__(self):
+                raise RuntimeError("simulated DB failure")
+            def __exit__(self, *_a):
+                return False
+
+        monkeypatch.setattr(core_mod, "_t2_ctx", lambda: BrokenCtx())
+
+        stop = asyncio.Event()
+        task = asyncio.create_task(core_mod._liveness_heartbeat_task(stop))
+        # Give the task a chance to hit the failing _t2_ctx at least once
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+        assert not task.done(), "heartbeat task died on internal error"
+        stop.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+
+class _StoreCtx:
+    """Minimal context-manager wrapper to mimic t2_ctx for heartbeat tests."""
+    def __init__(self, store):
+        from types import SimpleNamespace
+        self._db = SimpleNamespace(memory=store)
+    def __enter__(self):
+        return self._db
+    def __exit__(self, *_a):
+        return False

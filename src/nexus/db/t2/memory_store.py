@@ -1096,14 +1096,37 @@ class MemoryStore:
         return cursor.rowcount
 
     def liveness_list(self) -> list[dict]:
-        """Return all current liveness rows ordered by (pid ASC, machine ASC)."""
+        """Return all current liveness rows ordered by last_seen DESC.
+
+        Freshest-first ordering matches the natural display contract of
+        `nx instances` (most recently active at the top). Stable secondary
+        key on (pid, machine) preserves determinism when two rows share
+        a last_seen timestamp.
+        """
         with self._lock:
             rows = self.conn.execute(
                 """
                 SELECT pid, machine, user_id, session, project, focus, activity, last_seen
                 FROM liveness
-                ORDER BY pid ASC, machine ASC
+                ORDER BY last_seen DESC, pid ASC, machine ASC
                 """
             ).fetchall()
         keys = ("pid", "machine", "user_id", "session", "project", "focus", "activity", "last_seen")
         return [dict(zip(keys, row)) for row in rows]
+
+    def liveness_delete(self, *, pid: int, machine: str) -> int:
+        """Delete the liveness row for ``(pid, machine)``.
+
+        Returns the number of rows removed (0 or 1). Used by MCP server
+        shutdown to clean up the local instance's row before exit so the
+        sweep doesn't have to wait the full TTL to reflect the departure.
+        Tolerates absence (returns 0) — no error if the row was already
+        swept or never written.
+        """
+        with self._lock:
+            cursor = self.conn.execute(
+                "DELETE FROM liveness WHERE pid = ? AND machine = ?",
+                (pid, machine),
+            )
+            self.conn.commit()
+        return cursor.rowcount
