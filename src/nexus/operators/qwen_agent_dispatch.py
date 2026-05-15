@@ -220,7 +220,13 @@ async def qwen_agent_dispatch(
         "max_attempts": max_attempts,
     }
     if extensions is not None:
-        opts["extensions"] = extensions
+        # qwen_oneshot's ``opts.extensions`` is an object with
+        # ``enable`` / ``disable`` / ``only`` array fields — not a
+        # bare list. Treat the list arg as "only these extensions"
+        # (the most restrictive / predictable semantic for tier-B
+        # dispatch). If a future caller needs enable/disable
+        # subsets, widen the arg type at that point.
+        opts["extensions"] = {"only": list(extensions)}
 
     # Generous slack so the supervisor's own timeout fires first and
     # we get its structured error rather than a python-side cancel.
