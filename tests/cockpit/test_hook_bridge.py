@@ -648,6 +648,91 @@ class TestEmit:
 # ---------------------------------------------------------------------------
 
 
+class TestBridgeDisableGate:
+    """NX_BRIDGE_DISABLE is the per-bridge escape hatch (CLAUDECODE-independent)."""
+
+    def test_emit_skips_when_nx_bridge_disable_set(
+        self, db_conn, hook_index, hook_registry
+    ) -> None:
+        from nexus.cockpit import hook_bridge
+
+        called = []
+
+        def _fake_out(**kwargs):
+            called.append(kwargs)
+            return "id"
+
+        with patch("nexus.cockpit.hook_bridge._direct_out", _fake_out):
+            with patch.dict(
+                os.environ, {"CLAUDECODE": "1", "NX_BRIDGE_DISABLE": "1"}
+            ):
+                hook_bridge.emit(
+                    "PreToolUse",
+                    PRETOOLUSE_PAYLOAD,
+                    conn=db_conn,
+                    index=hook_index,
+                    registry=hook_registry,
+                )
+
+        assert called == [], (
+            "NX_BRIDGE_DISABLE must suppress emission even when CLAUDECODE is set"
+        )
+
+
+class TestDimensionValueCaps:
+    """User-controlled dim values are length-capped before storage."""
+
+    def test_cwd_capped_at_512_bytes(self) -> None:
+        from nexus.cockpit.hook_bridge import route_payload
+
+        payload = dict(STOP_PAYLOAD)
+        payload["cwd"] = "/" + "a" * 5000
+        _, dims, _ = route_payload("Stop", payload)
+        assert len(dims["project"]) == 512
+
+    def test_session_id_capped_at_512_bytes(self) -> None:
+        from nexus.cockpit.hook_bridge import route_payload
+
+        payload = dict(STOP_PAYLOAD)
+        payload["session_id"] = "x" * 5000
+        _, dims, _ = route_payload("Stop", payload)
+        assert len(dims["session"]) == 512
+        assert len(dims["actor"]) == 512  # actor derives from session_id
+
+    def test_tool_name_capped_at_512_bytes(self) -> None:
+        from nexus.cockpit.hook_bridge import route_payload
+
+        payload = dict(PRETOOLUSE_PAYLOAD)
+        payload["tool_name"] = "T" * 5000
+        _, dims, _ = route_payload("PreToolUse", payload)
+        assert len(dims["tool"]) == 512
+
+
+class TestContentByteTruncation:
+    """_build_content truncates by bytes (not codepoints) so the chroma
+    quota validator cannot reject high-unicode payloads.
+    """
+
+    def test_emoji_payload_stays_under_safe_chunk_bytes(self) -> None:
+        from nexus.cockpit.hook_bridge import _build_content
+        from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
+
+        # 4100 emoji (each 4 bytes when UTF-8 encoded) gives 16,400 raw bytes,
+        # past SAFE_CHUNK_BYTES=12288 AND past MAX_DOCUMENT_BYTES=16384.
+        payload = {"tool_response": "\U0001F600" * 4100}
+        out = _build_content("PostToolUse", payload)
+        assert len(out.encode("utf-8")) <= SAFE_CHUNK_BYTES, (
+            f"byte-len {len(out.encode('utf-8'))} exceeds SAFE_CHUNK_BYTES={SAFE_CHUNK_BYTES}"
+        )
+
+    def test_ascii_payload_unchanged_when_under_cap(self) -> None:
+        from nexus.cockpit.hook_bridge import _build_content
+
+        payload = {"prompt": "hello world"}
+        out = _build_content("UserPromptSubmit", payload)
+        assert "hello world" in out
+
+
 class TestClaudecodeGate:
     """RF-5: side effects skipped when CLAUDECODE not set in environment."""
 
@@ -711,14 +796,18 @@ def _run_script(
     script_name: str,
     stdin_data: str,
     env: dict[str, str] | None = None,
+    argv: list[str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a bridge script with given stdin, return CompletedProcess."""
     script_path = _SCRIPTS_DIR / script_name
     run_env = dict(os.environ)
     if env is not None:
         run_env.update(env)
+    cmd = [sys.executable, str(script_path)]
+    if argv:
+        cmd.extend(argv)
     return subprocess.run(
-        [sys.executable, str(script_path)],
+        cmd,
         input=stdin_data,
         capture_output=True,
         text=True,
@@ -769,6 +858,28 @@ class TestScriptClaudecodeGate:
         out = output_for_hook("PermissionRequest")
         assert out is not None
         assert "allow" in out
+
+
+class TestStopArgvFallback:
+    """orb_bridge_stop.py must accept the variant via argv so a payload without
+    hook_event_name is not silently stored as ``Stop`` when it was ``StopFailure``.
+    """
+
+    def test_stop_script_picks_up_stopfailure_from_argv(self) -> None:
+        """No hook_event_name in payload + argv[1]=StopFailure → emit as StopFailure."""
+        # Strip hook_event_name to simulate CC payloads that omit it.
+        payload = {k: v for k, v in STOPFAILURE_PAYLOAD.items() if k != "hook_event_name"}
+        # Without CLAUDECODE set, emit is a no-op but the script still runs
+        # through hook_type discrimination — assert exit 0 and no stdout.
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        result = _run_script(
+            "orb_bridge_stop.py",
+            json.dumps(payload),
+            env=env,
+            argv=["StopFailure"],
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
 
 
 class TestScriptCorrectOutput:

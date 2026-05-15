@@ -13,9 +13,11 @@ Key design decisions (backed by RDR-111 spike results):
   emits no stdout, leaving permission decisions to the user's allowlist
   and other installed hooks.
 
-- **PermissionRequest needs explicit allow**: unlike PreToolUse, a
-  PermissionRequest hook that emits no output may be treated as a block.
-  The bridge emits a transparent allow for PermissionRequest.
+- **PermissionRequest is NOT bridged here**: a separate Bash hook
+  (``nx/hooks/scripts/auto-approve-nx-mcp.sh``) handles
+  PermissionRequest. ``output_for_hook("PermissionRequest")`` still
+  returns a transparent-allow string for any future caller, but no
+  ``orb_bridge_permissionrequest.py`` script exists today.
 
 - **Daemon-mode routing deferred** (nexus-pce1.6): ``emit()`` currently
   dispatches in ``direct`` mode only (opens tuples.db directly via
@@ -236,6 +238,14 @@ def emit(
         registry: Loaded Registry of subspace schemas (test injection; None to auto-load).
     """
     from nexus.tuplespace.api import SubspaceSchemaError  # noqa: PLC0415
+
+    # NX_BRIDGE_DISABLE is the per-bridge escape hatch (clearing CLAUDECODE
+    # would also disable Claude Code itself, which is rarely what a user
+    # wants when temporarily disabling tuple emission for privacy /
+    # debugging / perf testing).
+    if os.environ.get("NX_BRIDGE_DISABLE"):
+        _log.debug("hook_bridge_skip_disabled_env", hook_type=hook_type)
+        return
 
     if not os.environ.get("CLAUDECODE"):
         _log.debug("hook_bridge_skip_no_claudecode", hook_type=hook_type)
@@ -558,8 +568,13 @@ def _build_dimensions(hook_type: str, payload: dict[str, Any]) -> dict[str, Any]
     Required dimensions: actor, session, project, timestamp.
     Optional: tool, workflow, intent, priority (only when non-empty).
     """
-    session_id = payload.get("session_id", "unknown")
-    cwd = payload.get("cwd", os.environ.get("CLAUDE_PROJECT_DIR", ""))
+    # User-controlled strings are length-capped before storage. ChromaDB
+    # accepts arbitrary-length metadata, but downstream renderers / log
+    # parsers / dim-aware queries should not see multi-KiB strings. The
+    # 512-byte cap is generous for legitimate paths/IDs.
+    _DIM_VALUE_CAP = 512
+    session_id = str(payload.get("session_id", "unknown"))[:_DIM_VALUE_CAP]
+    cwd = str(payload.get("cwd", os.environ.get("CLAUDE_PROJECT_DIR", "")))[:_DIM_VALUE_CAP]
     # "actor" is the process/agent identifier -- use session_id as a stable key
     actor = session_id
     timestamp = str(time.time())
@@ -574,7 +589,7 @@ def _build_dimensions(hook_type: str, payload: dict[str, Any]) -> dict[str, Any]
     # Optional dimensions -- populated per hook type
     tool_name = payload.get("tool_name")
     if tool_name and hook_type in ("PreToolUse", "PostToolUse"):
-        dims["tool"] = tool_name
+        dims["tool"] = str(tool_name)[:_DIM_VALUE_CAP]
 
     # hook_event_name is the canonical CC payload key. Populate it on
     # every dim dict, not only for the collapsed subspaces (Stop+StopFailure,
@@ -651,10 +666,17 @@ def _build_content(hook_type: str, payload: dict[str, Any]) -> str:
 
     Serialises the raw payload as JSON, capped to ``SAFE_CHUNK_BYTES``
     (which is 4 KiB below ``MAX_DOCUMENT_BYTES``) so api.out's quota
-    validator cannot reject. Defence-in-depth: the slice keeps us under
-    the cap even for non-ASCII payloads where ``len(str) != len(bytes)``.
+    validator cannot reject. Truncation is BYTE-aware, not codepoint-
+    aware: a payload of 4-byte codepoints (CJK supplementary, emoji)
+    encoding to ~4x the codepoint count would otherwise blow through
+    MAX_DOCUMENT_BYTES under a naive slice. We re-decode with errors=
+    "ignore" so a multi-byte sequence cut mid-character does not produce
+    invalid UTF-8.
     """
     from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES  # noqa: PLC0415
 
     raw = json.dumps(payload, ensure_ascii=False)
-    return raw[:SAFE_CHUNK_BYTES]
+    encoded = raw.encode("utf-8")
+    if len(encoded) <= SAFE_CHUNK_BYTES:
+        return raw
+    return encoded[:SAFE_CHUNK_BYTES].decode("utf-8", errors="ignore")

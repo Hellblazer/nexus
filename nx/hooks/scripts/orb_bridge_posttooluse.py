@@ -14,6 +14,12 @@ import json
 import os
 import sys
 
+# Configure structlog to stderr BEFORE importing nexus.cockpit.hook_bridge so any
+# module-level or transitive-import log records land on stderr, not stdout (which
+# is reserved for the Claude Code hook protocol).
+import structlog as _structlog
+_structlog.configure(logger_factory=_structlog.PrintLoggerFactory(file=sys.stderr))
+
 if sys.version_info < (3, 12):
     sys.stderr.write(
         f"ERROR: nx hook bridge requires Python 3.12+, got {sys.version.split()[0]}\n"
@@ -32,9 +38,7 @@ def main() -> None:
         payload = {}
 
     try:
-        from nexus.cockpit.hook_bridge import configure_logging_to_stderr, emit, output_for_hook
-
-        configure_logging_to_stderr()
+        from nexus.cockpit.hook_bridge import emit, output_for_hook
         emit(_HOOK_TYPE, payload)
 
         out = output_for_hook(_HOOK_TYPE)

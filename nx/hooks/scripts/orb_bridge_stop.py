@@ -16,6 +16,12 @@ from __future__ import annotations
 import json
 import sys
 
+# Configure structlog to stderr BEFORE importing nexus.cockpit.hook_bridge so any
+# module-level or transitive-import log records land on stderr, not stdout (which
+# is reserved for the Claude Code hook protocol).
+import structlog as _structlog
+_structlog.configure(logger_factory=_structlog.PrintLoggerFactory(file=sys.stderr))
+
 if sys.version_info < (3, 12):
     sys.stderr.write(
         f"ERROR: nx hook bridge requires Python 3.12+, got {sys.version.split()[0]}\n"
@@ -33,14 +39,18 @@ def main() -> None:
         sys.stderr.write(f"[orb-bridge-stop] malformed JSON: {exc}\n")
         payload = {}
 
-    hook_type = payload.get("hook_event_name", "Stop")
+    # Prefer the payload's hook_event_name; fall back to argv[1] (which
+    # hooks.json passes for Stop/StopFailure differentiation) so a payload
+    # without hook_event_name does not silently get stored as "Stop" when
+    # it was actually "StopFailure". Mirrors orb_bridge_session.py.
+    hook_type = payload.get("hook_event_name", "")
+    if hook_type not in _SUPPORTED and len(sys.argv) > 1:
+        hook_type = sys.argv[1]
     if hook_type not in _SUPPORTED:
         hook_type = "Stop"
 
     try:
-        from nexus.cockpit.hook_bridge import configure_logging_to_stderr, emit, output_for_hook
-
-        configure_logging_to_stderr()
+        from nexus.cockpit.hook_bridge import emit, output_for_hook
         emit(hook_type, payload)
 
         out = output_for_hook(hook_type)
