@@ -430,6 +430,118 @@ class _DatabaseProxy:
 
 
 # ---------------------------------------------------------------------------
+# Tuplespace proxy (RDR-112 nexus-6s8v)
+# ---------------------------------------------------------------------------
+
+
+class _TuplespaceProxy:
+    """Proxy for the daemon's tuplespace.* RPC suite.
+
+    The tuplespace API lives as free functions (``nexus.tuplespace.api``)
+    operating on three injected resources (conn, index, registry); there
+    is no single class whose methods can be introspected the way
+    ``_StoreProxy`` introspects domain stores. This proxy hand-defines
+    each method, mirroring the keyword-only public API.
+
+    Returns are JSON-decoded results from the daemon-side
+    ``TuplespaceService`` (see ``nexus.daemon.tuplespace_service``).
+    """
+
+    def __init__(self, pool: _ConnectionPool) -> None:
+        self._pool = pool
+
+    def _call(self, op: str, args: dict[str, Any]) -> Any:
+        with self._pool.acquire() as conn:
+            return conn.call(f"tuplespace.{op}", args)
+
+    def out(
+        self,
+        *,
+        subspace: str,
+        content: str,
+        dimensions: dict[str, Any],
+        match_text: str | None = None,
+        ttl_seconds: float | None = None,
+    ) -> str:
+        return self._call(
+            "out",
+            {
+                "subspace": subspace,
+                "content": content,
+                "dimensions": dimensions,
+                "match_text": match_text,
+                "ttl_seconds": ttl_seconds,
+            },
+        )
+
+    def read(
+        self,
+        *,
+        subspace: str,
+        query: str,
+        where: dict[str, Any] | None = None,
+        floor: float | None = None,
+        n: int | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._call(
+            "read",
+            {
+                "subspace": subspace,
+                "query": query,
+                "where": where,
+                "floor": floor,
+                "n": n,
+            },
+        )
+
+    def take(
+        self,
+        *,
+        subspace: str,
+        query: str,
+        claimant: str,
+        where: dict[str, Any] | None = None,
+        floor: float | None = None,
+        lease_seconds: float | None = None,
+        block: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Returns ``{"tuple": <dict>, "claim_id": <str>} | None``.
+
+        The two-tuple ``(tuple_dict, claim_id)`` of ``api.take`` is wrapped
+        into a single dict on the daemon side for JSON friendliness.
+        """
+        return self._call(
+            "take",
+            {
+                "subspace": subspace,
+                "query": query,
+                "claimant": claimant,
+                "where": where,
+                "floor": floor,
+                "lease_seconds": lease_seconds,
+                "block": block,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+
+    def ack(self, *, claim_id: str, claimant: str) -> str:
+        return self._call("ack", {"claim_id": claim_id, "claimant": claimant})
+
+    def nack(self, *, claim_id: str, claimant: str) -> str:
+        return self._call("nack", {"claim_id": claim_id, "claimant": claimant})
+
+    def list_subspaces(self) -> list[str]:
+        return self._call("list_subspaces", {})
+
+    def subspace_schema(self, *, subspace: str) -> dict[str, Any]:
+        return self._call("subspace_schema", {"subspace": subspace})
+
+    def subspace_stats(self, *, subspace: str) -> dict[str, Any]:
+        return self._call("subspace_stats", {"subspace": subspace})
+
+
+# ---------------------------------------------------------------------------
 # T2Client
 # ---------------------------------------------------------------------------
 
@@ -661,6 +773,16 @@ class T2Client:
     @property
     def database(self) -> _DatabaseProxy:
         return _DatabaseProxy(self._get_pool())
+
+    @property
+    def tuplespace(self) -> "_TuplespaceProxy":
+        """RDR-112 (nexus-6s8v): tuplespace RPC proxy.
+
+        Mirrors the tuplespace free-function API
+        (``nexus.tuplespace.api``) as keyword-only methods. Each method
+        round-trips through the daemon's ``tuplespace.<op>`` RPC.
+        """
+        return _TuplespaceProxy(self._get_pool())
 
     # ------------------------------------------------------------------
     # Convenience ping

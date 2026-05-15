@@ -61,9 +61,11 @@ def configure_logging_to_stderr() -> None:
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
     )
 
-# Daemon-mode routing is deferred to nexus-pce1.6 (RDR-112 daemon RPC surface).
-# Until that ships, emit() uses direct mode exclusively.
-_ROUTING_TBA = "direct"  # will become "daemon" once nexus-pce1.6 ships
+# nexus-6s8v (RDR-112): daemon-mode routing is now the preferred path.
+# ``emit()`` tries the daemon first; on connection failure it falls through
+# to direct mode (own SQLite + chroma), and on a final failure it logs and
+# skips so user-facing hooks never crash because the tuplespace is down.
+_ROUTING_TBA = "daemon"
 
 # ---------------------------------------------------------------------------
 # Subspace routing table
@@ -211,7 +213,7 @@ def emit(
 
     try:
         if conn is not None and index is not None and registry is not None:
-            # Test injection path
+            # Test injection path (resources supplied — bypass routing)
             _direct_out(
                 conn=conn,
                 index=index,
@@ -221,9 +223,10 @@ def emit(
                 dimensions=dimensions,
                 match_text=match_text or None,
             )
+            route = "direct-injected"
         else:
-            # Script self-initialization path
-            _emit_direct_auto(
+            # Production routing: prefer daemon, fall back to direct, then skip.
+            route = _emit_routed(
                 subspace=subspace,
                 content=content,
                 dimensions=dimensions,
@@ -233,9 +236,71 @@ def emit(
             "hook_bridge_emitted",
             hook_type=hook_type,
             subspace=subspace,
+            route=route,
         )
     except Exception:
         _log.exception("hook_bridge_emit_error", hook_type=hook_type, subspace=subspace)
+
+
+def _emit_routed(
+    *,
+    subspace: str,
+    content: str,
+    dimensions: dict[str, Any],
+    match_text: str | None,
+) -> str:
+    """Try daemon -> direct -> skip. Returns the chosen route as a string.
+
+    Daemon path (preferred): discover the running T2 daemon and call its
+    ``tuplespace.out`` RPC. If discovery fails or the RPC raises, fall
+    back to direct mode. If direct mode also fails (e.g. corrupt
+    ``tuples.db``, missing chroma dir) the exception propagates to
+    ``emit``'s outer try/except, which logs and swallows it so the hook
+    cannot crash user-facing tools.
+
+    nexus-6s8v (RDR-112): with the daemon owning ``tuples.db``, direct
+    mode runs the risk of WAL conflicts. Direct-mode fallback is kept
+    as a defense-in-depth for environments without a daemon (e.g. early
+    test runs); the regression test for daemon-mode routing
+    (``tests/cockpit/test_hook_bridge_daemon_routing.py``) asserts that
+    when a daemon is reachable the daemon path is taken.
+    """
+    if _ROUTING_TBA == "daemon":
+        try:
+            from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415
+            from nexus.daemon.t2_client import T2Client  # noqa: PLC0415
+
+            info = find_t2_daemon()
+            if info is not None:
+                uds_path_str = info.get("uds_path") or ""
+                uds_path = Path(uds_path_str) if uds_path_str else None
+                if uds_path is not None and uds_path.exists():
+                    client = T2Client(uds_path=uds_path)
+                else:
+                    client = T2Client(tcp_addr=(info["tcp_host"], info["tcp_port"]))
+                try:
+                    client.tuplespace.out(
+                        subspace=subspace,
+                        content=content,
+                        dimensions=dimensions,
+                        match_text=match_text,
+                    )
+                    return "daemon"
+                finally:
+                    client.close()
+        except Exception as exc:
+            _log.warning(
+                "hook_bridge_daemon_route_failed_falling_back_to_direct",
+                error=str(exc),
+            )
+    # Fallback (or _ROUTING_TBA == "direct"): direct-mode auto path.
+    _emit_direct_auto(
+        subspace=subspace,
+        content=content,
+        dimensions=dimensions,
+        match_text=match_text,
+    )
+    return "direct"
 
 
 def _emit_direct_auto(
