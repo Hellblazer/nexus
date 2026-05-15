@@ -76,16 +76,17 @@ def _insert_nack(
     conn: sqlite3.Connection,
     *,
     tuple_id: str,
+    subspace: str = "tuples/test",
     failure_category: str = "timeout",
 ) -> None:
     """Insert a nack row into tuple_claim_log (triggers trg_claim_log_event)."""
     conn.execute(
         """\
         INSERT INTO tuple_claim_log
-            (tuple_id, claim_id, claimant, transition, failure_category, at)
-        VALUES (?, 'clm1', 'agent1', 'nack', ?, ?)
+            (tuple_id, subspace, claim_id, claimant, transition, failure_category, at)
+        VALUES (?, ?, 'clm1', 'agent1', 'nack', ?, ?)
         """,
-        (tuple_id, failure_category, time.time()),
+        (tuple_id, subspace, failure_category, time.time()),
     )
     conn.commit()
 
@@ -301,9 +302,9 @@ async def test_failure_category_demux(
     # Insert a tuple first (trg_tuples_out fires an 'out' event, category='data')
     _insert_tuple(seeded_db, tuple_id="demux1", subspace="tuples/demux")
     # Now insert a nack with category='timeout'
-    _insert_nack(seeded_db, tuple_id="demux1", failure_category="timeout")
+    _insert_nack(seeded_db, tuple_id="demux1", subspace="tuples/demux", failure_category="timeout")
     # Insert another nack with category='disk_error'
-    _insert_nack(seeded_db, tuple_id="demux1", failure_category="disk_error")
+    _insert_nack(seeded_db, tuple_id="demux1", subspace="tuples/demux", failure_category="disk_error")
 
     client = _make_client(daemon)
     # Subscribe with category filter = 'timeout'; collect the one matching event.
@@ -497,7 +498,7 @@ def test_nack_trigger_inserts_event_with_category(tmp_path: Path) -> None:
     conn = _open_tuples_db(tmp_path / "t.db")
     try:
         _insert_tuple(conn, tuple_id="nk1", subspace="tuples/nack")
-        _insert_nack(conn, tuple_id="nk1", failure_category="disk_error")
+        _insert_nack(conn, tuple_id="nk1", subspace="tuples/nack", failure_category="disk_error")
         rows = conn.execute(
             "SELECT op, tuple_id, category FROM events ORDER BY rowid"
         ).fetchall()
@@ -539,3 +540,87 @@ def test_migrate_tuples_events_table_idempotent(tmp_path: Path) -> None:
         assert "events" in tables
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# (g) nexus-pce1.4: nack-after-tuple-delete still delivers event to subscriber
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_nack_after_tuple_deleted_still_delivered(
+    daemon: T2Daemon,
+    seeded_db: sqlite3.Connection,
+) -> None:
+    """Retention-sweep simulation: delete the tuple, then write the nack.
+
+    Pre-pce1.4 trg_claim_log_event used COALESCE-on-JOIN with empty-string
+    fallback, which left no subspace-matched subscriber able to see the
+    event. With subspace denormalized into tuple_claim_log, the trigger
+    uses NEW.subspace directly and the event reaches subscribers.
+    """
+    subspace = "tuples/retention"
+    _insert_tuple(seeded_db, tuple_id="rt1", subspace=subspace)
+    # Hard-delete the tuple BEFORE the nack lands (retention sweep race).
+    seeded_db.execute("DELETE FROM tuples WHERE id = 'rt1'")
+    seeded_db.commit()
+    # Now write the nack — subspace must be supplied because the parent row is gone.
+    _insert_nack(seeded_db, tuple_id="rt1", subspace=subspace, failure_category="late-nack")
+
+    client = _make_client(daemon)
+    # We expect two events for this subspace: the 'out' and the 'nack'.
+    events = await _collect_n(client, subspace, 2, since_cursor=0, timeout=5.0)
+    client.close()
+
+    ops = sorted(e["op"] for e in events)
+    assert ops == ["nack", "out"]
+    nack_event = next(e for e in events if e["op"] == "nack")
+    assert nack_event["subspace"] == subspace
+    assert nack_event["category"] == "late-nack"
+
+
+# ---------------------------------------------------------------------------
+# (h) nexus-pce1.5: subspace_prefix GLOB injection rejected
+# ---------------------------------------------------------------------------
+
+
+def test_validate_subspace_prefix_accepts_safe_inputs() -> None:
+    from nexus.daemon.event_stream import _validate_subspace_prefix
+
+    assert _validate_subspace_prefix("tuples/tasks") is None
+    assert _validate_subspace_prefix("tuples/tasks*") is None
+    assert _validate_subspace_prefix("tuples/tasks/coordinator") is None
+    assert _validate_subspace_prefix("tuples/v1.2") is None
+    assert _validate_subspace_prefix("tuples/with-dash") is None
+    assert _validate_subspace_prefix("tuples/with_underscore") is None
+
+
+def test_validate_subspace_prefix_rejects_glob_metachars() -> None:
+    from nexus.daemon.event_stream import _validate_subspace_prefix
+
+    assert "'?'" in (_validate_subspace_prefix("tuples/foo?") or "")
+    assert "[" in (_validate_subspace_prefix("tuples/[abc]") or "")
+    assert "]" in (_validate_subspace_prefix("tuples/abc]") or "")
+
+
+def test_validate_subspace_prefix_rejects_non_terminal_star() -> None:
+    from nexus.daemon.event_stream import _validate_subspace_prefix
+
+    err = _validate_subspace_prefix("tuples/*/foo")
+    assert err is not None
+    assert "trailing" in err or "at most one" in err
+
+
+def test_validate_subspace_prefix_rejects_multiple_stars() -> None:
+    from nexus.daemon.event_stream import _validate_subspace_prefix
+
+    err = _validate_subspace_prefix("tuples/*/*")
+    assert err is not None
+
+
+def test_validate_subspace_prefix_rejects_disallowed_chars() -> None:
+    from nexus.daemon.event_stream import _validate_subspace_prefix
+
+    assert _validate_subspace_prefix("tuples/foo bar") is not None  # space
+    assert _validate_subspace_prefix("tuples/foo;DROP") is not None  # semicolon
+    assert _validate_subspace_prefix("tuples/foo'") is not None  # quote
