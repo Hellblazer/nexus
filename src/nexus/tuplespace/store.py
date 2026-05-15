@@ -54,7 +54,9 @@ and reconnect with ``since_cursor=last_cursor`` for at-least-once delivery.
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -265,6 +267,114 @@ def open_tuples_db(path: Path) -> sqlite3.Connection:
     apply_tuples_schema(conn)
     _log.info("tuples_db_opened", path=str(path))
     return conn
+
+
+# ---------------------------------------------------------------------------
+# Retention sweep (nexus-kk9h, RDR-111)
+# ---------------------------------------------------------------------------
+
+
+def prune_expired_tuples(
+    conn: sqlite3.Connection,
+    *,
+    index: Any = None,
+    registry: Any = None,
+    now: int | None = None,
+) -> int:
+    """Delete tuples whose ``expires_at`` has passed and their Chroma vectors.
+
+    Rows with ``expires_at IS NULL`` are NEVER deleted — NULL means "no
+    expiry" per the schema contract. Uses ``idx_tuples_expires`` (partial
+    index on ``expires_at IS NOT NULL AND consumed_at IS NULL``) for the
+    selection.
+
+    **Atomicity note (RDR-111).** Two-store atomicity between SQLite and
+    Chroma is a separate concern (bead nexus-qmrr). This sweeper deletes
+    from Chroma FIRST, then SQLite — so a crash mid-sweep leaves orphan
+    SQLite rows (recoverable on the next sweep, since ``expires_at`` is
+    still in the past) rather than orphan Chroma vectors (which would
+    silently return stale ids in semantic queries).
+
+    Args:
+        conn: Open SQLite connection to tuples.db.
+        index: Optional ``TupleIndex`` for the paired Chroma deletion.
+            When ``None``, Chroma is not touched (SQLite-only prune; used
+            by tests that don't care about the Chroma side).
+        registry: Optional ``Registry`` — accepted for symmetry with the
+            rest of the tuplespace API, currently unused (template_name
+            comes from the tuple row itself).
+        now: Optional epoch seconds to compare ``expires_at`` against.
+            Defaults to ``int(time.time())``. Tests use this to simulate
+            future sweeps without sleeping.
+
+    Returns:
+        Number of SQLite rows deleted.
+    """
+    del registry  # Currently unused; accepted for future schema-aware sweeps.
+    now_epoch = int(time.time()) if now is None else int(now)
+
+    rows = conn.execute(
+        "SELECT id, template_name FROM tuples "
+        "WHERE expires_at IS NOT NULL AND expires_at < ?",
+        (now_epoch,),
+    ).fetchall()
+
+    if not rows:
+        return 0
+
+    # Group ids by template_name so each collection.delete() is a single batch.
+    by_template: dict[str, list[str]] = {}
+    for row in rows:
+        tid, template = row[0], row[1]
+        by_template.setdefault(template, []).append(tid)
+
+    # --- Chroma first, then SQLite (see atomicity note above) ---
+    if index is not None:
+        for template_name, ids in by_template.items():
+            try:
+                index.delete(template_name=template_name, tuple_ids=ids)
+            except KeyError:
+                # Template not registered in this index (e.g. schema removed).
+                # Skip the Chroma half; SQLite row deletion proceeds below.
+                _log.warning(
+                    "prune_expired_chroma_template_missing",
+                    template=template_name,
+                    count=len(ids),
+                )
+            except Exception as exc:  # pragma: no cover — defensive
+                _log.error(
+                    "prune_expired_chroma_delete_failed",
+                    template=template_name,
+                    count=len(ids),
+                    error=str(exc),
+                )
+                # Don't proceed to SQLite delete for this batch — leave the
+                # rows so the next sweep retries.
+                by_template[template_name] = []
+
+    # Delete from SQLite. Chunk by SQLite parameter limit (max 999 by default
+    # in CPython's stdlib; use 300 to match the Chroma write quota).
+    deleted = 0
+    all_ids: list[str] = [tid for ids in by_template.values() for tid in ids]
+    BATCH = 300
+    for i in range(0, len(all_ids), BATCH):
+        chunk = all_ids[i : i + BATCH]
+        placeholders = ",".join("?" * len(chunk))
+        cur = conn.execute(
+            f"DELETE FROM tuples WHERE id IN ({placeholders})",
+            chunk,
+        )
+        deleted += cur.rowcount
+    conn.commit()
+
+    if deleted:
+        _log.info(
+            "tuples_retention_swept",
+            deleted=deleted,
+            templates=len(by_template),
+            now_epoch=now_epoch,
+        )
+    return deleted
 
 
 # ---------------------------------------------------------------------------
