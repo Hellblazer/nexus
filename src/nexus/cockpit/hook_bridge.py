@@ -36,6 +36,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
@@ -47,6 +48,21 @@ if TYPE_CHECKING:
     from nexus.tuplespace.registry import Registry
 
 _log = structlog.get_logger(__name__)
+
+# Module-level lazy singletons for the direct-mode emit path. ChromaDB
+# PersistentClient init is 200-500ms; opening it on every hook invocation
+# (PostToolUse fires per Bash/Read/Write/Edit) eats most of the 5s hook
+# timeout. We cache the (registry, conn, index) triple per (db_path, chroma_dir)
+# key so subsequent invocations within the same process reuse them.
+#
+# Note: hook bridge scripts are short-lived subprocesses, so this caching
+# helps when the same process emits multiple events (e.g. emit() called
+# more than once before script exit). Across separate subprocess invocations
+# the singleton resets — that is fine, the OS page cache keeps the chroma
+# pages warm and the cost is bounded by the first invocation per process.
+_singleton_lock = threading.Lock()
+_singleton: dict[tuple[str, str], tuple[Any, Any, Any]] = {}
+_registry_load_failed_once = False
 
 
 def configure_logging_to_stderr() -> None:
@@ -251,29 +267,21 @@ def _emit_direct_auto(
     ChromaDB directly (no daemon) using the nexus config. The registry
     is loaded from the default builtin dir, augmented with any hook-event
     YAML schemas in ``nx/tuplespace/builtin/hooks/`` if they exist.
+
+    Resources are cached at module scope (per-process singleton) so repeated
+    emit() calls within the same process do not re-pay the 200-500ms
+    PersistentClient init cost.
+
+    A failure to load the registry (e.g. wheel-install where
+    ``default_builtin_dir()`` does not exist on disk) is logged once via a
+    structured WARN so the silent-no-op condition is detectable.
     """
-    import chromadb as _chromadb
+    from nexus.tuplespace.registry import UnknownSubspaceError
 
-    from nexus.config import load_config
-    from nexus.tuplespace.index import TupleIndex
-    from nexus.tuplespace.registry import Registry, default_builtin_dir
-    from nexus.tuplespace.store import open_tuples_db
-
-    cfg = load_config()
-    nexus_dir = cfg.get("nexus_dir", "~/.config/nexus")
-    db_path = Path(os.path.expanduser(f"{nexus_dir}/tuples.db"))
-    chroma_dir = Path(os.path.expanduser(f"{nexus_dir}/chroma"))
-
-    # Load registry from default builtin dir; also try the hooks subdir
-    # where nexus-78mh will place the seven hook-event YAMLs.
-    builtin = default_builtin_dir()
-    registry = _load_registry_with_hooks(builtin)
-
-    conn = open_tuples_db(db_path)
-    conn.row_factory = sqlite3.Row
-
-    chroma_client = _chromadb.PersistentClient(path=str(chroma_dir))
-    index = TupleIndex.from_registry(registry, chroma_client)
+    resources = _get_or_init_resources()
+    if resources is None:
+        return  # registry unavailable — already logged
+    conn, index, registry = resources
 
     try:
         _direct_out(
@@ -285,8 +293,88 @@ def _emit_direct_auto(
             dimensions=dimensions,
             match_text=match_text,
         )
-    finally:
-        conn.close()
+    except UnknownSubspaceError:
+        # Daemon-mode cutover (nexus-pce1.6) will hit this if the bridge
+        # fires before nexus-78mh registers the seven hook-event YAMLs with
+        # the daemon. Treat as expected-but-noteworthy: structured WARN with
+        # a remediation hint, not an exception traceback.
+        _log.warning(
+            "hook_bridge_unknown_subspace",
+            subspace=subspace,
+            remediation=(
+                "Run 'nx subspace register' or wait for nexus-78mh startup "
+                "registration. Subspace YAMLs may not yet be registered "
+                "with the daemon."
+            ),
+        )
+
+
+def _get_or_init_resources() -> tuple[Any, Any, Any] | None:
+    """Return cached (conn, index, registry) triple or initialise on first use.
+
+    Returns ``None`` (and logs a structured WARN once) if registry load fails,
+    which is the wheel-install silent-drop condition: ``default_builtin_dir()``
+    is repo-relative and does not exist when conexus is installed from a wheel.
+    """
+    global _registry_load_failed_once
+
+    import chromadb as _chromadb
+
+    from nexus.config import load_config
+    from nexus.tuplespace.index import TupleIndex
+    from nexus.tuplespace.registry import RegistryError, default_builtin_dir
+    from nexus.tuplespace.store import open_tuples_db
+
+    cfg = load_config()
+    nexus_dir = cfg.get("nexus_dir", "~/.config/nexus")
+    db_path = Path(os.path.expanduser(f"{nexus_dir}/tuples.db"))
+    chroma_dir = Path(os.path.expanduser(f"{nexus_dir}/chroma"))
+
+    key = (str(db_path), str(chroma_dir))
+
+    with _singleton_lock:
+        cached = _singleton.get(key)
+        if cached is not None:
+            return cached
+
+        builtin = default_builtin_dir()
+        try:
+            registry = _load_registry_with_hooks(builtin)
+        except (RegistryError, FileNotFoundError, OSError) as exc:
+            if not _registry_load_failed_once:
+                _log.warning(
+                    "hook_bridge_registry_unavailable",
+                    error=str(exc),
+                    builtin_dir=str(builtin),
+                    remediation=(
+                        "Registry YAMLs not found on disk. For wheel installs, "
+                        "pass an explicit builtin_dir or install from source."
+                    ),
+                )
+                _registry_load_failed_once = True
+            return None
+
+        conn = open_tuples_db(db_path)
+        conn.row_factory = sqlite3.Row
+
+        chroma_client = _chromadb.PersistentClient(path=str(chroma_dir))
+        index = TupleIndex.from_registry(registry, chroma_client)
+
+        _singleton[key] = (conn, index, registry)
+        return _singleton[key]
+
+
+def _reset_singleton_for_tests() -> None:
+    """Clear the module-level resource cache. Test-only helper."""
+    global _registry_load_failed_once
+    with _singleton_lock:
+        for conn, _, _ in _singleton.values():
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _singleton.clear()
+        _registry_load_failed_once = False
 
 
 def _load_registry_with_hooks(builtin_dir: Path) -> "Registry":
@@ -356,6 +444,12 @@ def _build_dimensions(hook_type: str, payload: dict[str, Any]) -> dict[str, Any]
     tool_name = payload.get("tool_name")
     if tool_name and hook_type in ("PreToolUse", "PostToolUse"):
         dims["tool"] = tool_name
+
+    # event_type discriminator for collapsed subspaces (Stop/StopFailure ->
+    # assistant_turn_ended, SessionStart/SessionEnd -> session_lifecycle).
+    # Without this, downstream consumers cannot tell the variants apart.
+    if hook_type in ("Stop", "StopFailure", "SessionStart", "SessionEnd"):
+        dims["event_type"] = hook_type
 
     # No additional optional dims for the other types at this stage
     # (workflow, intent, priority are reserved for future enrichment)

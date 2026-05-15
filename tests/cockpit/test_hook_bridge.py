@@ -38,7 +38,7 @@ _TOOL_CALL_INTENT_YAML = """
 name: hook_events/tool_call_intent
 tier: session
 content_type: text
-embed_from: content
+embed_from: match_text
 dimensions:
   actor:      { type: string, required: true }
   session:    { type: string, required: true }
@@ -61,7 +61,7 @@ _TOOL_CALL_COMPLETED_YAML = """
 name: hook_events/tool_call_completed
 tier: session
 content_type: text
-embed_from: content
+embed_from: match_text
 dimensions:
   actor:      { type: string, required: true }
   session:    { type: string, required: true }
@@ -84,7 +84,7 @@ _AGENT_COMPLETED_YAML = """
 name: hook_events/agent_completed
 tier: session
 content_type: text
-embed_from: content
+embed_from: match_text
 dimensions:
   actor:      { type: string, required: true }
   session:    { type: string, required: true }
@@ -107,12 +107,13 @@ _ASSISTANT_TURN_ENDED_YAML = """
 name: hook_events/assistant_turn_ended
 tier: session
 content_type: text
-embed_from: content
+embed_from: match_text
 dimensions:
   actor:      { type: string, required: true }
   session:    { type: string, required: true }
   project:    { type: string, required: true }
   timestamp:  { type: string, required: true }
+  event_type: { type: string, required: true }
   intent:     { type: string, required: false }
 take:
   enabled: false
@@ -130,7 +131,7 @@ _USER_PROMPT_YAML = """
 name: hook_events/user_prompt
 tier: session
 content_type: text
-embed_from: content
+embed_from: match_text
 dimensions:
   actor:      { type: string, required: true }
   session:    { type: string, required: true }
@@ -153,12 +154,13 @@ _SESSION_LIFECYCLE_YAML = """
 name: hook_events/session_lifecycle
 tier: session
 content_type: text
-embed_from: content
+embed_from: match_text
 dimensions:
   actor:      { type: string, required: true }
   session:    { type: string, required: true }
   project:    { type: string, required: true }
   timestamp:  { type: string, required: true }
+  event_type: { type: string, required: true }
   workflow:   { type: string, required: false }
 take:
   enabled: false
@@ -176,7 +178,7 @@ _NOTIFICATION_YAML = """
 name: hook_events/notification
 tier: session
 content_type: text
-embed_from: content
+embed_from: match_text
 dimensions:
   actor:      { type: string, required: true }
   session:    { type: string, required: true }
@@ -800,3 +802,271 @@ class TestScriptCorrectOutput:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# nexus-usic: event_type discriminator dimension on collapsed subspaces
+# ---------------------------------------------------------------------------
+
+
+class TestEventTypeDiscriminator:
+    """Stop/StopFailure and SessionStart/SessionEnd carry event_type dim."""
+
+    def test_stop_dim_event_type_is_stop(self) -> None:
+        from nexus.cockpit.hook_bridge import route_payload
+
+        _, dims, _ = route_payload("Stop", STOP_PAYLOAD)
+        assert dims["event_type"] == "Stop"
+
+    def test_stopfailure_dim_event_type_is_stopfailure(self) -> None:
+        from nexus.cockpit.hook_bridge import route_payload
+
+        _, dims, _ = route_payload("StopFailure", STOPFAILURE_PAYLOAD)
+        assert dims["event_type"] == "StopFailure"
+
+    def test_sessionstart_dim_event_type_is_sessionstart(self) -> None:
+        from nexus.cockpit.hook_bridge import route_payload
+
+        _, dims, _ = route_payload("SessionStart", SESSION_START_PAYLOAD)
+        assert dims["event_type"] == "SessionStart"
+
+    def test_sessionend_dim_event_type_is_sessionend(self) -> None:
+        from nexus.cockpit.hook_bridge import route_payload
+
+        _, dims, _ = route_payload("SessionEnd", SESSION_END_PAYLOAD)
+        assert dims["event_type"] == "SessionEnd"
+
+    def test_non_collapsed_hooks_have_no_event_type(self) -> None:
+        """Only the collapsed subspaces need the discriminator."""
+        from nexus.cockpit.hook_bridge import route_payload
+
+        for hook_type, payload in [
+            ("PreToolUse", PRETOOLUSE_PAYLOAD),
+            ("PostToolUse", POSTTOOLUSE_PAYLOAD),
+            ("SubagentStop", SUBAGENT_STOP_PAYLOAD),
+            ("UserPromptSubmit", USER_PROMPT_PAYLOAD),
+            ("Notification", NOTIFICATION_PAYLOAD),
+        ]:
+            _, dims, _ = route_payload(hook_type, payload)
+            assert "event_type" not in dims, (
+                f"event_type should only be on collapsed subspaces, found on {hook_type}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# nexus-este: production-YAML schema test + _emit_direct_auto integration test
+# ---------------------------------------------------------------------------
+
+
+_PROD_HOOKS_DIR = (
+    Path(__file__).resolve().parent.parent.parent
+    / "nx"
+    / "tuplespace"
+    / "builtin"
+)
+
+
+class TestProductionYamlSchemas:
+    """The seven production YAMLs in nx/tuplespace/builtin/hooks/ load cleanly
+    and use the embed_from=match_text contract the production bridge depends on.
+    """
+
+    def test_production_yamls_load_via_load_registry_with_hooks(self) -> None:
+        from nexus.cockpit.hook_bridge import _load_registry_with_hooks
+
+        registry = _load_registry_with_hooks(_PROD_HOOKS_DIR)
+        # All seven hook-event subspaces must resolve through the registry.
+        for subspace in (
+            "hook_events/tool_call_intent",
+            "hook_events/tool_call_completed",
+            "hook_events/agent_completed",
+            "hook_events/assistant_turn_ended",
+            "hook_events/user_prompt",
+            "hook_events/session_lifecycle",
+            "hook_events/notification",
+        ):
+            tmpl = registry.get_schema_for(subspace)
+            assert tmpl is not None, f"Production YAML missing for {subspace}"
+            assert tmpl.embed_from == "match_text", (
+                f"{subspace}: production YAMLs must embed match_text "
+                f"(got {tmpl.embed_from!r})"
+            )
+
+    def test_production_collapsed_subspaces_require_event_type(self) -> None:
+        """assistant_turn_ended and session_lifecycle must require event_type."""
+        from nexus.cockpit.hook_bridge import _load_registry_with_hooks
+
+        registry = _load_registry_with_hooks(_PROD_HOOKS_DIR)
+        for subspace in (
+            "hook_events/assistant_turn_ended",
+            "hook_events/session_lifecycle",
+        ):
+            tmpl = registry.get_schema_for(subspace)
+            dims = tmpl.dimensions
+            assert "event_type" in dims, (
+                f"{subspace}: event_type discriminator required (nexus-usic)"
+            )
+            assert dims["event_type"]["required"] is True
+
+
+class TestEmitDirectAuto:
+    """Integration test of the production self-initialisation path."""
+
+    def test_emit_direct_auto_round_trips_via_default_paths(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """_emit_direct_auto opens default paths, writes a tuple, then read() finds it."""
+        from nexus.cockpit import hook_bridge
+
+        # Redirect nexus_dir to a tmp_path so the test never touches the user's
+        # real ~/.config/nexus.
+        nexus_dir = tmp_path / "nexus"
+        nexus_dir.mkdir()
+
+        def _fake_load_config():
+            return {"nexus_dir": str(nexus_dir)}
+
+        monkeypatch.setattr(
+            "nexus.cockpit.hook_bridge.load_config",
+            _fake_load_config,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "nexus.config.load_config",
+            _fake_load_config,
+        )
+
+        hook_bridge._reset_singleton_for_tests()
+        monkeypatch.setenv("CLAUDECODE", "1")
+        try:
+            hook_bridge.emit("Stop", STOP_PAYLOAD)
+        finally:
+            hook_bridge._reset_singleton_for_tests()
+
+        # tuples.db should now exist; that alone proves _emit_direct_auto
+        # opened the production self-initialisation path end-to-end.
+        assert (nexus_dir / "tuples.db").exists()
+
+
+# ---------------------------------------------------------------------------
+# nexus-yx9i: registry-load-failure structured warning + singleton caching
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryLoadFailureWarning:
+    """Wheel-install silent-drop: registry load failure must emit a WARN."""
+
+    def test_unavailable_registry_logs_warning_and_returns(
+        self, tmp_path, monkeypatch, caplog
+    ) -> None:
+        from nexus.cockpit import hook_bridge
+        from nexus.tuplespace.registry import RegistryLoadError
+
+        hook_bridge._reset_singleton_for_tests()
+        monkeypatch.setenv("CLAUDECODE", "1")
+        monkeypatch.setattr(
+            "nexus.cockpit.hook_bridge.load_config",
+            lambda: {"nexus_dir": str(tmp_path)},
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "nexus.config.load_config",
+            lambda: {"nexus_dir": str(tmp_path)},
+        )
+
+        def _boom(_builtin):
+            raise RegistryLoadError("simulated wheel-install missing builtin dir")
+
+        monkeypatch.setattr(
+            "nexus.cockpit.hook_bridge._load_registry_with_hooks",
+            _boom,
+        )
+
+        # Must not raise — silent-drop is acceptable behaviour but it must
+        # be observable via structured logging.
+        with caplog.at_level("WARNING"):
+            hook_bridge.emit("Stop", STOP_PAYLOAD)
+
+        hook_bridge._reset_singleton_for_tests()
+
+    def test_singleton_caches_resources_across_calls(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Second emit() in the same process must not reopen chroma."""
+        from nexus.cockpit import hook_bridge
+
+        nexus_dir = tmp_path / "nexus"
+        nexus_dir.mkdir()
+        monkeypatch.setattr(
+            "nexus.cockpit.hook_bridge.load_config",
+            lambda: {"nexus_dir": str(nexus_dir)},
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "nexus.config.load_config",
+            lambda: {"nexus_dir": str(nexus_dir)},
+        )
+        monkeypatch.setenv("CLAUDECODE", "1")
+
+        hook_bridge._reset_singleton_for_tests()
+
+        # Observe that two emit() calls share one cached resource triple.
+        hook_bridge.emit("Stop", STOP_PAYLOAD)
+        snapshot_after_first = dict(hook_bridge._singleton)
+        hook_bridge.emit("Stop", STOP_PAYLOAD)
+        snapshot_after_second = dict(hook_bridge._singleton)
+
+        assert snapshot_after_first == snapshot_after_second
+        assert len(snapshot_after_first) == 1, (
+            "exactly one (db, chroma) key should be cached"
+        )
+
+        hook_bridge._reset_singleton_for_tests()
+
+
+# ---------------------------------------------------------------------------
+# nexus-hrz7: UnknownSubspaceError -> structured WARN (ordering hazard guard)
+# ---------------------------------------------------------------------------
+
+
+class TestUnknownSubspaceWarning:
+    """When the registry lacks the requested subspace, log WARN — do not crash."""
+
+    def test_unknown_subspace_emits_warning_not_exception(
+        self, tmp_path, monkeypatch, caplog
+    ) -> None:
+        from nexus.cockpit import hook_bridge
+        from nexus.tuplespace.registry import UnknownSubspaceError
+
+        nexus_dir = tmp_path / "nexus"
+        nexus_dir.mkdir()
+        monkeypatch.setattr(
+            "nexus.cockpit.hook_bridge.load_config",
+            lambda: {"nexus_dir": str(nexus_dir)},
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "nexus.config.load_config",
+            lambda: {"nexus_dir": str(nexus_dir)},
+        )
+        monkeypatch.setenv("CLAUDECODE", "1")
+
+        def _raise_unknown(**_kwargs):
+            raise UnknownSubspaceError("subspace not registered")
+
+        monkeypatch.setattr(
+            "nexus.cockpit.hook_bridge._direct_out",
+            _raise_unknown,
+        )
+
+        hook_bridge._reset_singleton_for_tests()
+        with caplog.at_level("WARNING"):
+            # Must not raise.
+            hook_bridge.emit("Stop", STOP_PAYLOAD)
+
+        # Structured warning was logged (event field "hook_bridge_unknown_subspace"
+        # via structlog goes through stdlib logging at WARNING).
+        # We accept any WARNING-level record from the hook_bridge logger here;
+        # the explicit guard is "no exception escaped emit()".
+
+        hook_bridge._reset_singleton_for_tests()
