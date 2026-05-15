@@ -4070,6 +4070,18 @@ async def nx_enrich_beads(
     )
     if context:
         prompt += f"\n\nAdditional context:\n{context}"
+    # Schema-conformance directive (spike_d follow-on). Tier-B qwen
+    # reliably emits "Now I have..." narrative at finalization in
+    # tool-use loops instead of json_schema output; an explicit
+    # "JSON only" trailer fixes that. Applied to both legs — claude
+    # is tolerant of the looser prompt but the tighter directive is
+    # a no-op there and guards against future qwen-flavored
+    # regressions on the claude path.
+    prompt += (
+        "\n\nRespond with ONLY a JSON object conforming to the schema "
+        "above. No prose, no commentary, no prefix, no markdown fences. "
+        "Begin your response with `{` and end with `}`."
+    )
 
     # Tier-B dispatcher selection (RDR follow-on to operator-level qwen
     # offload). Default ``claude`` preserves prior behavior; setting
@@ -4085,7 +4097,12 @@ async def nx_enrich_beads(
             schema,
             timeout=timeout,
             extensions=["nx"],
-            max_tool_calls=20,
+            # spike_d bench (3 cases) observed qwen self-terminating at
+            # 14/17/19 tool calls; the prior cap of 20 was aborting every
+            # exploration at exactly 21 (cap+1). 50 = 2.5× the max
+            # observed, giving headroom for harder cases without being
+            # unbounded.
+            max_tool_calls=50,
             operator_name="nx_enrich_beads",
         )
     else:
