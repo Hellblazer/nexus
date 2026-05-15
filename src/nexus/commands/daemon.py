@@ -84,6 +84,7 @@ def start_cmd(config_dir_str: str | None, foreground: bool) -> None:
     """
     from nexus.daemon.subspace_registry import RegistryStore
     from nexus.daemon.t2_daemon import T2Daemon
+    from nexus.daemon.tuplespace_service import TuplespaceService
     from nexus.db.t2 import T2Database
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
@@ -98,11 +99,25 @@ def start_cmd(config_dir_str: str | None, foreground: bool) -> None:
         # daemon's writer.
         t2db = T2Database(memory_db_path)
         registry_store = RegistryStore(tuples_db_path=tuples_db_path)
+
+        # nexus-6s8v (RDR-112): construct TuplespaceService so the daemon
+        # serves the tuplespace.* RPC suite. The service opens its own
+        # SQLite connection to tuples.db (single-writer per RDR-112 §9)
+        # and a TupleIndex backed by the local persistent chroma.
+        import chromadb
+        chroma_dir = config_dir / "chroma"
+        chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
+        tuplespace_service = TuplespaceService(
+            tuples_db_path=tuples_db_path,
+            chroma_client=chroma_client,
+        )
+
         daemon = T2Daemon(
             config_dir=config_dir,
             t2db=t2db,
             tuples_db_path=tuples_db_path,
             registry_store=registry_store,
+            tuplespace_service=tuplespace_service,
         )
         try:
             await daemon.start()
