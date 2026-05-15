@@ -202,6 +202,8 @@ _ADMIN_OPS: frozenset[str] = frozenset({
     "subspace_add",                # future — RDR-112 P1.5 nexus-x98k
     "apply_pending_migrations",    # currently NOT in dispatch table (internal to daemon start)
     "import",                      # future
+    "exec_raw",                    # P1.6 nexus-08i1 — arbitrary read-only SQL; high blast radius
+    "export",                      # P1.6 nexus-08i1 — daemon-side file write; high blast radius
 })
 
 #: Names that future beads MUST treat as admin (UDS-only) if they appear in
@@ -221,6 +223,8 @@ _KNOWN_ADMIN_NAMES: frozenset[str] = frozenset({
     "subspace_add",
     "apply_pending_migrations",
     "import",
+    "exec_raw",
+    "export",
 })
 
 
@@ -486,6 +490,24 @@ class T2Daemon:
         # the UDS-only gate. Production code never sets enable_admin_ping.
         if enable_admin_ping:
             self._rpc_table["admin_ping"] = lambda: {"ok": True}
+
+        # P1.6 nexus-08i1: introspection RPCs.
+        # exec_raw and export are admin-only (in _ADMIN_OPS); schema, peek,
+        # stats are read-only metadata and safe over TCP.
+        if t2db is not None:
+            from nexus.daemon.introspection import IntrospectionService
+            _intr = IntrospectionService(
+                memory_db_path=t2db._path,
+                tuples_db_path=(
+                    tuples_db_path if tuples_db_path is not None
+                    else config_dir / "tuples.db"
+                ),
+            )
+            self._rpc_table["exec_raw"] = _intr.exec_raw
+            self._rpc_table["schema"] = _intr.schema
+            self._rpc_table["peek"] = _intr.peek
+            self._rpc_table["stats"] = _intr.stats
+            self._rpc_table["export"] = _intr.export
 
         # P1.6 nexus-pce1.1: startup integrity check.
         # The UDS-only gate relies on _ADMIN_OPS membership. If a future bead
