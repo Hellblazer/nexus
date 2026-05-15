@@ -169,6 +169,41 @@ class TupleIndex:
         )
 
     # ------------------------------------------------------------------
+    # Delete
+    # ------------------------------------------------------------------
+
+    def delete(
+        self,
+        *,
+        template_name: str,
+        tuple_ids: list[str],
+    ) -> None:
+        """Delete tuples from the template's collection by id.
+
+        Chunks by ``QUOTAS.MAX_RECORDS_PER_WRITE`` so callers can pass
+        large id lists (e.g. from the retention sweeper, nexus-kk9h) without
+        hitting the Chroma quota.
+
+        Args:
+            template_name: The template key (e.g. ``"tasks/<project>"``).
+            tuple_ids: List of tuple IDs to remove from Chroma.
+
+        Raises:
+            KeyError: *template_name* is not in this index.
+        """
+        if not tuple_ids:
+            return
+        coll = self._collections[template_name]
+        batch = QUOTAS.MAX_RECORDS_PER_WRITE
+        for i in range(0, len(tuple_ids), batch):
+            coll.delete(ids=tuple_ids[i : i + batch])
+        _log.debug(
+            "tuplespace_delete",
+            template=template_name,
+            count=len(tuple_ids),
+        )
+
+    # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------
 
