@@ -358,6 +358,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--backends", default="claude,qwen",
         help="Comma-separated backends to run (default: claude,qwen).",
     )
+    p.add_argument(
+        "--prompt-override", type=Path,
+        help="Path to a file whose contents replace _SCHOLARLY_PAPER_CONFIG.prompt_template "
+             "for the duration of this run. Must include '{content}' placeholder. "
+             "Used to A/B prompt revisions without shipping production changes.",
+    )
     return p.parse_args(argv)
 
 
@@ -427,6 +433,29 @@ def _render_md(summary: dict, out_path: Path) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    if args.prompt_override:
+        # Monkey-patch the registered scholarly-paper-v1 prompt for
+        # the duration of this run. Both engines see the new prompt,
+        # so the comparison stays fair. Production code path is
+        # untouched on import (the patch lives only in this process).
+        from nexus.aspect_extractor import _SCHOLARLY_PAPER_CONFIG  # noqa: E402
+
+        new_prompt = args.prompt_override.read_text(encoding="utf-8")
+        if "{content}" not in new_prompt:
+            print(
+                "error: --prompt-override file must contain '{content}' placeholder",
+                file=sys.stderr,
+            )
+            return 2
+        # ExtractorConfig is a dataclass; in-place replace via object.__setattr__
+        # in case it ships frozen=True (defensive).
+        try:
+            _SCHOLARLY_PAPER_CONFIG.prompt_template = new_prompt
+        except (AttributeError, TypeError):
+            object.__setattr__(_SCHOLARLY_PAPER_CONFIG, "prompt_template", new_prompt)
+        print(f"prompt-override applied: {args.prompt_override} ({len(new_prompt)} chars)", file=sys.stderr)
+
     sources: list[dict] = []
     for u in args.uri:
         sources.append({"uri": u, "collection": args.collection})
