@@ -448,6 +448,7 @@ class T2Daemon:
         t2db: Any = None,
         tuples_db_path: Path | None = None,
         registry_store: Any = None,
+        tuplespace_service: Any = None,
         enable_admin_ping: bool = False,
     ) -> None:
         """Initialise the daemon.
@@ -468,6 +469,13 @@ class T2Daemon:
                 the dispatch table. When ``None``, ``subspace_add`` returns an
                 unknown-op error. Typically constructed with
                 ``RegistryStore(tuples_db_path=config_dir / "tuples.db")``.
+            tuplespace_service: Optional ``TuplespaceService`` instance
+                (RDR-112 nexus-6s8v). When provided, the ``tuplespace.*``
+                RPCs (``out``, ``read``, ``take``, ``ack``, ``nack``,
+                ``list_subspaces``, ``subspace_schema``, ``subspace_stats``)
+                are registered in the dispatch table. When ``None``, those
+                ops return an unknown-op error and direct-mode is the only
+                way to reach the tuplespace.
             enable_admin_ping: If ``True``, register the ``admin_ping``
                 test-scaffold op in the dispatch table. This op is in
                 ``_ADMIN_OPS`` and is used by tests to exercise the UDS-only
@@ -530,6 +538,15 @@ class T2Daemon:
                     _log.warning("discovery_rewrite_failed_after_subspace_add", error=str(exc))
                 return result
             self._rpc_table["subspace_add"] = _subspace_add_handler
+
+        # nexus-6s8v (RDR-112): tuplespace RPC suite.
+        # Registers tuplespace.{out,read,take,ack,nack,list_subspaces,
+        # subspace_schema,subspace_stats}. The service owns its own SQLite
+        # connection to tuples.db (daemon is single writer per RDR-112 §9).
+        self._tuplespace_service = tuplespace_service
+        if tuplespace_service is not None:
+            from nexus.daemon.tuplespace_service import register_tuplespace_rpcs
+            register_tuplespace_rpcs(self._rpc_table, tuplespace_service)
 
         # P1.6 nexus-08i1: introspection RPCs.
         # exec_raw and export are admin-only (in _ADMIN_OPS); schema, peek,
@@ -675,6 +692,13 @@ class T2Daemon:
             for task in list(self._active_handlers):
                 task.cancel()
             await asyncio.gather(*self._active_handlers, return_exceptions=True)
+
+        # nexus-6s8v: release tuplespace SQLite connection.
+        if self._tuplespace_service is not None:
+            try:
+                self._tuplespace_service.close()
+            except Exception:  # pragma: no cover — defensive
+                _log.warning("tuplespace_service_close_failed", exc_info=True)
 
         self._unlink_discovery()
         self._release_spawn_lock()
