@@ -2793,6 +2793,35 @@ END;
     _log.info("migrate_tuples_claim_log_subspace_done")
 
 
+def migrate_subspace_registry_table(conn: sqlite3.Connection) -> None:
+    """Create the ``subspace_registry`` table in tuples.db if absent.
+
+    RDR-112 P1.5 (nexus-x98k): daemon-side admin registry for third-party
+    subspace YAML schemas. Persists to tuples.db (same file as the tuple
+    stores) so future cross-table queries remain single-connection.
+
+    Columns:
+        name          TEXT PK   -- subspace name (e.g. ``hook_events/tool_call_intent``)
+        yaml          TEXT      -- raw YAML as submitted
+        schema_digest TEXT      -- sha256 of yaml bytes
+        added_at      REAL      -- unix epoch float
+
+    Must be called with a ``tuples.db`` connection (not memory.db).
+    Idempotent: uses ``CREATE TABLE IF NOT EXISTS``.
+    """
+    _log.info("migrate_subspace_registry_table_start")
+    conn.execute("""
+CREATE TABLE IF NOT EXISTS subspace_registry (
+    name          TEXT    PRIMARY KEY,
+    yaml          TEXT    NOT NULL,
+    schema_digest TEXT    NOT NULL,
+    added_at      REAL    NOT NULL
+)
+""")
+    conn.commit()
+    _log.info("migrate_subspace_registry_table_done")
+
+
 MIGRATIONS: list[Migration] = [
     Migration("1.10.0", "Memory FTS rebuild with title", migrate_memory_fts),
     Migration("2.8.0", "Add plan project column", migrate_plan_project),
@@ -3534,6 +3563,8 @@ def run_daemon_migrations(
         # nexus-pce1.4: denormalize subspace into tuple_claim_log to remove
         # the COALESCE-on-deleted-tuple silent-drop in the EventStream trigger.
         migrate_tuples_claim_log_subspace(tuples_conn)
+        # nexus-x98k (RDR-112 P1.5): daemon-side subspace admin registry.
+        migrate_subspace_registry_table(tuples_conn)
     finally:
         tuples_conn.close()
 

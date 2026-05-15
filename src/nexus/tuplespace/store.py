@@ -185,6 +185,18 @@ BEGIN
         NEW.at
     );
 END;
+
+-- Admin registry for third-party subspace schemas (RDR-112 P1.5, nexus-x98k).
+-- Persists YAML schemas submitted via the ``subspace_add`` admin RPC.
+-- Lives in tuples.db alongside the tuple stores so future cross-table
+-- queries (e.g. validating a tuple's subspace against registered schemas)
+-- remain single-connection and atomic.
+CREATE TABLE IF NOT EXISTS subspace_registry (
+    name          TEXT    PRIMARY KEY,
+    yaml          TEXT    NOT NULL,
+    schema_digest TEXT    NOT NULL,
+    added_at      REAL    NOT NULL
+);
 """
 
 # ---------------------------------------------------------------------------

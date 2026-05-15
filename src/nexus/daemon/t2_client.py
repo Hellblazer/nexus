@@ -559,11 +559,16 @@ class T2Client:
                     "Upgrade conexus: uv pip install -U conexus."
                 )
 
+        # P1.5 nexus-x98k: record registry_digest from hello_ack.
+        # No enforcement in this bead — the field is logged and stored for
+        # future beads that may add warn-or-refuse on digest mismatch.
+        registry_digest: str | None = ack.get("registry_digest")
         _log.debug(
             "t2_client_connected",
             transport="uds" if self._uds_path else "tcp",
             daemon_version=ack.get("daemon_version"),
             schema_version=daemon_sv,
+            registry_digest=registry_digest,
         )
         return _SocketConnection(sock)
 

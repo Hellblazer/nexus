@@ -4,6 +4,7 @@
 RDR-112 P1.1 (nexus-61x6): transport scaffold + dual-bind UDS+TCP.
 RDR-112 P1.2 (nexus-qy0u): domain-store RPC dispatcher.
 RDR-112 P1.3 (nexus-m4gm): EventStream RPC — streaming subscription.
+RDR-112 P1.5 (nexus-x98k): subspace_add admin RPC + daemon-side registry.
 RDR-112 P1.6 (nexus-pce1.1): admin-RPC UDS-only gate.
 
 This module provides:
@@ -66,7 +67,6 @@ Phase 1.6 scope (nexus-pce1.1):
 
 Out of scope here (later beads):
   - Migration runner (P1.4 nexus-w0et)
-  - Subspace admin (P1.5 nexus-x98k)
   - Introspection RPCs (P1.6 nexus-08i1)
 """
 from __future__ import annotations
@@ -202,6 +202,8 @@ _ADMIN_OPS: frozenset[str] = frozenset({
     "subspace_add",                # future — RDR-112 P1.5 nexus-x98k
     "apply_pending_migrations",    # currently NOT in dispatch table (internal to daemon start)
     "import",                      # future
+    "exec_raw",                    # P1.6 nexus-08i1 — arbitrary read-only SQL; high blast radius
+    "export",                      # P1.6 nexus-08i1 — daemon-side file write; high blast radius
 })
 
 #: Names that future beads MUST treat as admin (UDS-only) if they appear in
@@ -221,6 +223,8 @@ _KNOWN_ADMIN_NAMES: frozenset[str] = frozenset({
     "subspace_add",
     "apply_pending_migrations",
     "import",
+    "exec_raw",
+    "export",
 })
 
 
@@ -435,6 +439,7 @@ class T2Daemon:
         *,
         t2db: Any = None,
         tuples_db_path: Path | None = None,
+        registry_store: Any = None,
         enable_admin_ping: bool = False,
     ) -> None:
         """Initialise the daemon.
@@ -450,6 +455,11 @@ class T2Daemon:
             tuples_db_path: Path to tuples.db for EventStream subscriptions
                 (P1.3 nexus-m4gm). When ``None``, ``event_stream.subscribe``
                 returns an error.  Typically ``config_dir / "tuples.db"``.
+            registry_store: Optional ``RegistryStore`` instance (P1.5 nexus-x98k).
+                When provided, the ``subspace_add`` admin RPC is registered in
+                the dispatch table. When ``None``, ``subspace_add`` returns an
+                unknown-op error. Typically constructed with
+                ``RegistryStore(tuples_db_path=config_dir / "tuples.db")``.
             enable_admin_ping: If ``True``, register the ``admin_ping``
                 test-scaffold op in the dispatch table. This op is in
                 ``_ADMIN_OPS`` and is used by tests to exercise the UDS-only
@@ -486,6 +496,30 @@ class T2Daemon:
         # the UDS-only gate. Production code never sets enable_admin_ping.
         if enable_admin_ping:
             self._rpc_table["admin_ping"] = lambda: {"ok": True}
+
+        # P1.5 nexus-x98k: subspace admin RPC.
+        # subspace_add is in _ADMIN_OPS (UDS-only gate enforced by _dispatch).
+        self._registry_store = registry_store
+        if registry_store is not None:
+            self._rpc_table["subspace_add"] = registry_store.add
+
+        # P1.6 nexus-08i1: introspection RPCs.
+        # exec_raw and export are admin-only (in _ADMIN_OPS); schema, peek,
+        # stats are read-only metadata and safe over TCP.
+        if t2db is not None:
+            from nexus.daemon.introspection import IntrospectionService
+            _intr = IntrospectionService(
+                memory_db_path=t2db._path,
+                tuples_db_path=(
+                    tuples_db_path if tuples_db_path is not None
+                    else config_dir / "tuples.db"
+                ),
+            )
+            self._rpc_table["exec_raw"] = _intr.exec_raw
+            self._rpc_table["schema"] = _intr.schema
+            self._rpc_table["peek"] = _intr.peek
+            self._rpc_table["stats"] = _intr.stats
+            self._rpc_table["export"] = _intr.export
 
         # P1.6 nexus-pce1.1: startup integrity check.
         # The UDS-only gate relies on _ADMIN_OPS membership. If a future bead
@@ -790,6 +824,11 @@ class T2Daemon:
             await writer.drain()
             return
 
+        registry_digest: str | None = (
+            self._registry_store.digest()
+            if self._registry_store is not None
+            else None
+        )
         write_frame(
             writer,
             {
@@ -797,6 +836,7 @@ class T2Daemon:
                 "daemon_protocol_version": DAEMON_PROTOCOL_VERSION,
                 "daemon_version": _NEXUS_VERSION,
                 "schema_version": DAEMON_SCHEMA_VERSION,
+                "registry_digest": registry_digest,
             },
         )
         await writer.drain()
@@ -971,6 +1011,11 @@ class T2Daemon:
     # ------------------------------------------------------------------
 
     def _discovery_payload(self) -> dict[str, Any]:
+        registry_digest: str | None = (
+            self._registry_store.digest()
+            if self._registry_store is not None
+            else None
+        )
         return {
             "uds_path": str(self._uds_path),
             "tcp_host": self._tcp_host,
@@ -979,9 +1024,7 @@ class T2Daemon:
             "daemon_protocol_version": DAEMON_PROTOCOL_VERSION,
             "pid": os.getpid(),
             "start_time": self._start_time,
-            # TODO(nexus-x98k P1.5): replace placeholder with real digest
-            # once subspace schema registry is wired up.
-            "subspace_schema_digest": "TODO",
+            "subspace_schema_digest": registry_digest,
         }
 
     def _write_discovery(self) -> None:
