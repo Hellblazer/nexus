@@ -375,3 +375,19 @@ class TestLegacyImportAtomicRollback:
             "After failed import, either catalog.db or catalog.db.importing "
             "should exist so the operator can retry"
         )
+
+
+class TestRpcDenyOpsContextManagers:
+    """transaction() and bulk_load_documents() are @contextmanager methods
+    that cannot round-trip over the RPC dispatch table. They MUST be in
+    _RPC_DENY_OPS so a client invoking them as plain RPCs gets an explicit
+    'unknown RPC op' error rather than a silent None return.
+    """
+
+    def test_catalog_transaction_in_deny_ops(self) -> None:
+        from nexus.daemon.t2_daemon import _RPC_DENY_OPS
+        assert "catalog.transaction" in _RPC_DENY_OPS
+
+    def test_catalog_bulk_load_in_deny_ops(self) -> None:
+        from nexus.daemon.t2_daemon import _RPC_DENY_OPS
+        assert "catalog.bulk_load_documents" in _RPC_DENY_OPS

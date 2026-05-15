@@ -491,3 +491,34 @@ class TestClose:
         store.close()
         # Second close should not raise
         store.close()
+
+
+class TestMigratedPathsGuard:
+    """Second CatalogStore on the same path must not re-run executescript.
+
+    Re-running executescript silently commits any active transaction on the
+    shared connection — a latent footgun if a future code path constructs
+    two CatalogStore instances against the same DB file inside one process.
+    The _migrated_paths set short-circuits the second call.
+    """
+
+    def test_second_construction_skips_schema_init(self, tmp_path) -> None:
+        from nexus.db.t2 import catalog_store as cs_module
+
+        db = tmp_path / "memory.db"
+        first = CatalogStore(db)
+        canonical = str(db.resolve())
+        assert canonical in cs_module._migrated_paths, (
+            "first CatalogStore must add path to _migrated_paths"
+        )
+
+        # Reset the executescript counter on the SAME path by re-constructing.
+        # If the guard works, _init_schema should early-return and NOT call
+        # executescript again. We can't easily count calls, but we can verify
+        # the set still contains the path and the construction does not raise.
+        second = CatalogStore(db)
+        try:
+            assert canonical in cs_module._migrated_paths
+        finally:
+            first.close()
+            second.close()

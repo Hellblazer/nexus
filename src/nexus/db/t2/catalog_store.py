@@ -268,8 +268,17 @@ class CatalogStore:
         """Create catalog tables and post-schema indexes.
 
         Guarded by the per-domain migration lock so two constructors on the
-        same path cannot both run the schema creation concurrently.
+        same path do not both run schema creation concurrently. Membership
+        in ``_migrated_paths`` short-circuits subsequent constructions on
+        the same path — without this, ``executescript`` would re-issue an
+        implicit COMMIT on every new ``CatalogStore`` against an already-
+        migrated DB, which can silently commit an open caller transaction.
+        Mirrors the MemoryStore pattern (``memory_store.py:291-296``).
         """
+        with _migrated_lock:
+            if path_key in _migrated_paths:
+                return
+            _migrated_paths.add(path_key)
         with self._lock:
             self._conn.executescript(_CATALOG_SCHEMA_SQL)
             # Post-schema: partial indexes and physical_collection index.

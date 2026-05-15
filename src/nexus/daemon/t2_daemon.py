@@ -181,6 +181,14 @@ _RPC_DENY_OPS: frozenset[str] = frozenset({
     "document_aspects.upsert",
     "document_aspects.get",
     "document_aspects.get_by_doc_id",
+    # nexus-7ejx (RDR-112 P2.1): context-manager methods cannot round-trip
+    # over the dispatch table. Calling these as plain RPCs returns the
+    # generator object underlying the @contextmanager, not a meaningful
+    # value — the with-block never runs daemon-side. Phase 4 callers
+    # needing transactional bulk load must use direct store access OR a
+    # purpose-built non-context-manager RPC (deferred).
+    "catalog.transaction",
+    "catalog.bulk_load_documents",
 })
 
 #: Ops that may ONLY be called over a UDS connection (RDR-112 P1.6 / RDR-113).
