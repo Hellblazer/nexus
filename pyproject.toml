@@ -136,6 +136,12 @@ exclude = [
 # wheel.
 [tool.hatch.build.targets.wheel.force-include]
 "nx/plans" = "nexus/_resources/plans"
+# RDR-111 (PR #786 follow-up): ship the tuplespace builtin subspace
+# YAMLs (including hooks/) as package data so the hook bridge can
+# resolve them on wheel installs via importlib.resources. Without
+# this, default_builtin_dir() is repo-relative and every hook fire
+# on a PyPI install silently no-ops the tuple write.
+"nx/tuplespace" = "nexus/_resources/tuplespace"
 # nexus-tv5u: ship DT-side AppleScripts as package data so
 # ``nx dt install-scripts`` can resolve them via
 # ``importlib.resources.files("nexus") / "_resources" / "dt-scripts"``
@@ -147,6 +153,7 @@ exclude = [
 include = [
     "src",
     "nx/plans",
+    "nx/tuplespace",
     "dt/scripts",
     "README.md",
     "LICENSE",
