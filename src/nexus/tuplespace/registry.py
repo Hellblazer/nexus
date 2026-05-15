@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Subspace registry: YAML loader + JSON Schema validation (RDR-110 P1.1).
 
 Loads ``nx/tuplespace/builtin/*.yml`` at MCP/CLI startup, validates each

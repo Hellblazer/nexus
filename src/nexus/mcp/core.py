@@ -4076,7 +4076,12 @@ def _get_tuplespace() -> dict[str, Any]:
     if storage_mode == "daemon":
         _ts_log.info("tuplespace_mcp_daemon_mode_conn_skipped")
         # In daemon mode: no local SQLite connection (daemon owns the db).
-        # Tools that need conn will raise a clear error.
+        # Tools that need conn currently raise AttributeError on the first
+        # ``conn.execute(...)`` call inside ``api.out``/``read``/``take``/
+        # ``ack``/``nack``. RDR-112 Phase 3 will replace the conn/index
+        # references with T2Client routing so each tool hits the daemon
+        # instead. Until that ships, tuplespace_* tools are non-functional
+        # under ``NX_STORAGE_MODE=daemon``.
         _TUPLESPACE.update({"registry": registry, "conn": None, "index": None, "watcher": None})
         return _TUPLESPACE
 

@@ -18,9 +18,11 @@ Design decisions:
   the registry admin RPC accepts a YAML string in-memory, so the parse
   pipeline is mirrored here (yaml.safe_load + the same checks). When the
   loader gains a new rule, mirror it here.
-- Digest: sha256 over ``json.dumps(sorted({name: schema_digest}))`` where
-  ``schema_digest`` is sha256 of the raw YAML bytes. The overall digest is
-  cached and invalidated on every ``add()``.
+- Digest: sha256 over ``json.dumps({name: schema_digest}, sort_keys=True,
+  separators=(",", ":"))`` where ``schema_digest`` is sha256 of the raw
+  YAML bytes. ``sort_keys=True`` gives a canonical key ordering;
+  ``separators=(",", ":")`` removes whitespace variability. The overall
+  digest is cached and invalidated on every ``add()``.
 - Reserved prefixes: ``tuples/`` (RDR-110 namespace) and ``daemon/``
   (RDR-112 lifecycle) are rejected.
 """

@@ -162,7 +162,9 @@ class T2Database:
         from nexus.db.t2.telemetry import Telemetry
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Store path for cross-domain operations (e.g. rename_collection_cascade).
+        # Store path for cross-domain operations (e.g. rename_collection_cascade)
+        # and the read-only ``path`` property exposed to daemon-side wiring
+        # (IntrospectionService construction in nexus.daemon.t2_daemon).
         self._path: Path = path
 
         # RDR-112 P0.4 (nexus-uqqy): migration ownership lives outside this
@@ -192,6 +194,17 @@ class T2Database:
         # async aspect-extraction worker. The hook fires fast (just
         # an enqueue); the worker drains in a background thread.
         self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(path)
+
+    @property
+    def path(self) -> Path:
+        """Filesystem path of the SQLite file backing this T2Database.
+
+        Read-only accessor exposed for daemon-side wiring (e.g.
+        ``IntrospectionService`` construction in ``nexus.daemon.t2_daemon``)
+        that needs the on-disk path without reaching into the private
+        ``_path`` attribute.
+        """
+        return self._path
 
     def __enter__(self) -> "T2Database":
         return self

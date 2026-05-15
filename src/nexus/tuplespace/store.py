@@ -234,6 +234,22 @@ def open_tuples_db(path: Path) -> sqlite3.Connection:
 
     The caller is responsible for closing the returned connection.
 
+    .. warning::
+
+       Direct-mode upgrade gap. ``apply_tuples_schema`` only runs the
+       baseline DDL via ``CREATE TABLE IF NOT EXISTS``; it does NOT run
+       the column-addition migrations in ``nexus.db.migrations``
+       (``migrate_tuples_failure_category``, ``migrate_tuples_claim_log_subspace``,
+       etc.). Per RDR-112 §9 the daemon is the sole migration runner, so
+       a pre-pce1.4 ``tuples.db`` opened in direct mode will still have
+       ``tuple_claim_log`` without ``subspace`` / ``failure_category``
+       and the next ``api.take()``/``ack()``/``nack()`` INSERT will
+       fail with ``NOT NULL constraint failed: tuple_claim_log.subspace``.
+       Direct mode is safe ONLY against freshly-created databases or
+       databases that have been migrated by a daemon-mode start at least
+       once. Operators upgrading should run ``nx daemon t2 start``
+       before reverting to direct mode.
+
     Args:
         path: Filesystem path to the ``tuples.db`` file. Typically
             ``~/.config/nexus/tuples.db``.

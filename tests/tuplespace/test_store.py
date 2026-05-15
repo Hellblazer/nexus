@@ -97,7 +97,16 @@ class TestFreshDbCreation:
         conn = sqlite3.connect(str(db_path))
         apply_tuples_schema(conn)
         cols = _columns(conn, "tuple_claim_log")
-        required = {"log_id", "tuple_id", "claim_id", "claimant", "transition", "at"}
+        required = {
+            "log_id",
+            "tuple_id",
+            "subspace",          # pce1.4 denormalized — all writers must populate it
+            "claim_id",
+            "claimant",
+            "transition",
+            "failure_category",  # m4gm — set on nack rows for EventStream demux
+            "at",
+        }
         assert required <= cols, f"Missing columns: {required - cols}"
 
     def test_tuples_indexes_exist(self, tmp_path: Path) -> None:

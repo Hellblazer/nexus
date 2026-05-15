@@ -505,9 +505,19 @@ class T2Daemon:
         # kwarg name is stable for clients.
         self._registry_store = registry_store
         if registry_store is not None:
-            self._rpc_table["subspace_add"] = (
-                lambda yaml: registry_store.add(yaml_str=yaml)  # noqa: A006
-            )
+            def _subspace_add_handler(yaml: str) -> dict[str, str]:  # noqa: A006
+                # Add to the registry, then rewrite the discovery file so its
+                # subspace_schema_digest field reflects the new state. hello_ack
+                # already computes the digest fresh per handshake (live clients
+                # always see the right value); the discovery rewrite is for
+                # operators inspecting daemon state from disk.
+                result = registry_store.add(yaml_str=yaml)
+                try:
+                    self._write_discovery()
+                except Exception as exc:  # pragma: no cover — log + continue
+                    _log.warning("discovery_rewrite_failed_after_subspace_add", error=str(exc))
+                return result
+            self._rpc_table["subspace_add"] = _subspace_add_handler
 
         # P1.6 nexus-08i1: introspection RPCs.
         # exec_raw and export are admin-only (in _ADMIN_OPS); schema, peek,
@@ -515,7 +525,7 @@ class T2Daemon:
         if t2db is not None:
             from nexus.daemon.introspection import IntrospectionService
             _intr = IntrospectionService(
-                memory_db_path=t2db._path,
+                memory_db_path=t2db.path,
                 tuples_db_path=(
                     tuples_db_path if tuples_db_path is not None
                     else config_dir / "tuples.db"
