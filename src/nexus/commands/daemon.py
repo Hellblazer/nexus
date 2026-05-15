@@ -72,31 +72,54 @@ def start_cmd(config_dir_str: str | None, foreground: bool) -> None:
     """Start the T2 daemon.
 
     Binds both a UDS socket (mode 0600, peer-cred checked) and a
-    loopback TCP port. Writes a discovery file so clients can find it.
+    loopback TCP port. Constructs ``T2Database`` + ``RegistryStore`` so
+    domain-store RPCs (``memory.*``, ``plans.*`` etc.), introspection
+    RPCs (``exec_raw``, ``schema``, ``peek``, ``stats``, ``export``),
+    and the ``subspace_add`` admin RPC are all served. Writes a
+    discovery file so clients can find it.
 
     With --foreground the process blocks until SIGTERM or SIGINT.
     Without --foreground (default) the process daemonises and returns
     immediately with the discovery JSON printed to stdout.
     """
+    from nexus.daemon.subspace_registry import RegistryStore
     from nexus.daemon.t2_daemon import T2Daemon
+    from nexus.db.t2 import T2Database
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    memory_db_path = config_dir / "memory.db"
+    tuples_db_path = config_dir / "tuples.db"
 
     async def _run() -> None:
-        daemon = T2Daemon(config_dir=config_dir)
+        # T2Daemon.start() runs migrations against memory.db AND tuples.db
+        # BEFORE binding sockets. Construct T2Database + RegistryStore here
+        # so the same migration path produces a coherent schema; T2Database
+        # opens its own connections lazily so there is no race with the
+        # daemon's writer.
+        t2db = T2Database(memory_db_path)
+        registry_store = RegistryStore(tuples_db_path=tuples_db_path)
+        daemon = T2Daemon(
+            config_dir=config_dir,
+            t2db=t2db,
+            tuples_db_path=tuples_db_path,
+            registry_store=registry_store,
+        )
         try:
             await daemon.start()
         except RuntimeError as exc:
             click.echo(f"Error: {exc}", err=True)
+            t2db.close()
             sys.exit(1)
 
-        if foreground:
-            await daemon.run_until_signal()
-        # In non-foreground mode: start() already announced on stdout;
-        # the process exits, leaving the event loop's background servers.
-        # NOTE: full background-daemonise (double-fork) is a follow-on
-        # bead; for now --foreground is the reliable path and the default
-        # exits immediately after printing the discovery JSON.
+        try:
+            if foreground:
+                await daemon.run_until_signal()
+            # In non-foreground mode: start() already announced on stdout;
+            # the process exits, leaving the event loop's background servers.
+            # Full background-daemonise (double-fork) is a follow-on bead;
+            # --foreground is the reliable path for now.
+        finally:
+            t2db.close()
 
     asyncio.run(_run())
 

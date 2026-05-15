@@ -739,6 +739,57 @@ class TestApplyPending:
         # it already present and returns early before calling bootstrap_version.
         assert call_count["n"] == 1
 
+    def test_concurrent_apply_pending_stress(self, tmp_path: Path) -> None:
+        """Stress-test _upgrade_lock: 50 independent concurrent pairs, each must
+        call bootstrap_version exactly once.
+
+        Exercises the nexus-l8oo race fix (path_key computed inside the lock)
+        with enough repetitions to expose residual non-determinism on loaded CI
+        schedulers.  Each iteration uses a fresh database file so _upgrade_done
+        state from one round does not bleed into the next.
+        """
+        from unittest.mock import patch as _patch
+
+        from nexus.db import migrations
+        from nexus.db.migrations import apply_pending
+
+        original_bootstrap = migrations.bootstrap_version
+
+        for iteration in range(50):
+            db_path = tmp_path / f"stress_{iteration}.db"
+            call_count = {"n": 0}
+            errors: list[Exception] = []
+            barrier = threading.Barrier(2, timeout=5)
+
+            def counting_bootstrap(conn, _orig=original_bootstrap):  # noqa: B023
+                call_count["n"] += 1
+                return _orig(conn)
+
+            migrations._upgrade_done.discard(str(db_path.resolve()))
+
+            def worker(_db=db_path) -> None:
+                try:
+                    conn = sqlite3.connect(str(_db))
+                    conn.execute("PRAGMA busy_timeout=5000")
+                    barrier.wait()
+                    apply_pending(conn, "4.1.2")
+                    conn.close()
+                except Exception as exc:
+                    errors.append(exc)
+
+            with _patch.object(migrations, "bootstrap_version", counting_bootstrap):
+                t1 = threading.Thread(target=worker)
+                t2 = threading.Thread(target=worker)
+                t1.start()
+                t2.start()
+                t1.join(timeout=10)
+                t2.join(timeout=10)
+
+            assert not errors, f"Iteration {iteration}: concurrent apply_pending failed: {errors}"
+            assert call_count["n"] == 1, (
+                f"Iteration {iteration}: bootstrap_version called {call_count['n']} times, expected 1"
+            )
+
     def test_prerelease_version_not_stored(self, tmp_path: Path) -> None:
         """Pre-release versions (parsed as (0,0,0)) must not be stored."""
         from nexus.db.migrations import apply_pending

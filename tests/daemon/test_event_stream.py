@@ -624,3 +624,79 @@ def test_validate_subspace_prefix_rejects_disallowed_chars() -> None:
     assert _validate_subspace_prefix("tuples/foo bar") is not None  # space
     assert _validate_subspace_prefix("tuples/foo;DROP") is not None  # semicolon
     assert _validate_subspace_prefix("tuples/foo'") is not None  # quote
+
+
+# ---------------------------------------------------------------------------
+# (i) EventStream over loopback TCP — nexus-52lb defer (Track A Suggestion 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_event_stream_subscribe_over_tcp(
+    daemon: T2Daemon,
+    seeded_db: sqlite3.Connection,
+) -> None:
+    """EventStream subscriptions must work over loopback TCP, not just UDS.
+
+    event_stream.subscribe is NOT in _ADMIN_OPS so the UDS-only gate does
+    not apply. Live mode + backfill must traverse the TCP socket the same
+    way they traverse UDS.
+    """
+    n = 5
+    for i in range(n):
+        _insert_tuple(seeded_db, tuple_id=f"tcp{i}", subspace="tuples/tcp-stream")
+
+    tcp_client = T2Client(tcp_addr=("127.0.0.1", daemon.tcp_port))
+    try:
+        events = await _collect_n(tcp_client, "tuples/tcp-stream", n, since_cursor=0)
+    finally:
+        tcp_client.close()
+
+    assert len(events) == n
+    assert all(e["op"] == "out" for e in events)
+    cursors = [e["cursor"] for e in events]
+    assert cursors == sorted(cursors)
+
+
+# ---------------------------------------------------------------------------
+# (j) Error frame shape unified with dispatch — nexus-52lb defer
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_event_stream_error_frame_has_typed_shape(daemon: T2Daemon) -> None:
+    """EventStream error frames use ``{error: {type, message}}`` like dispatch.
+
+    Closes the inconsistency flagged in Track C Important #1: previously
+    EventStream errors were bare strings (``{error: '...'}``) while
+    dispatch-layer errors were typed dicts. Unified shape lets consumers
+    decode with a single error-frame handler.
+    """
+    import asyncio as _asyncio
+    from nexus.daemon.t2_daemon import (
+        DAEMON_PROTOCOL_VERSION,
+        read_frame,
+        write_frame,
+    )
+
+    reader, writer = await _asyncio.open_unix_connection(str(daemon.uds_path))
+    try:
+        write_frame(writer, {"op": "hello", "protocol_version": DAEMON_PROTOCOL_VERSION})
+        await writer.drain()
+        await read_frame(reader)  # hello_ack
+        # Send a subscribe with an invalid subspace_prefix to trigger error path
+        write_frame(writer, {
+            "op": "event_stream.subscribe",
+            "args": {"subspace_prefix": "tuples/foo?"},  # '?' is a rejected GLOB metachar
+        })
+        await writer.drain()
+        frame = await _asyncio.wait_for(read_frame(reader), timeout=2.0)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+    assert "error" in frame
+    err = frame["error"]
+    assert isinstance(err, dict), f"expected dict error frame, got {type(err).__name__}: {err!r}"
+    assert err.get("type") == "InvalidArgument"
+    assert "subspace_prefix" in err.get("message", "")

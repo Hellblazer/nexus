@@ -166,21 +166,82 @@ class IntrospectionService:
     # ------------------------------------------------------------------
 
     def schema(self, filters: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Return schema information from ``sqlite_master``.
+        """Return schema information from ``sqlite_master`` for one or both DBs.
+
+        New behaviour (when ``filters`` contains no legacy section keys OR
+        contains a ``"db"`` key): returns a two-key result::
+
+            {
+                "memory": {"tables": [...], "indexes": [...], "fts": [...]},
+                "tuples": {"tables": [...], "indexes": [...], "fts": [...]},
+            }
+
+        Pass ``db="memory"`` or ``db="tuples"`` to restrict to a single DB.
+
+        Legacy behaviour (backward-compat): when ``filters`` is a dict that
+        contains any of the legacy section-filter keys (``"tables"``,
+        ``"indexes"``, ``"fts"``), the call is treated as a memory-only
+        request and the result is the flat shape::
+
+            {"tables": [...], "indexes": [...], "fts": [...]}
+
+        .. deprecated::
+            Pass a ``db`` key or omit ``filters`` entirely to get both DBs.
+            The flat legacy shape is preserved for existing callers (e.g.
+            ``nx doctor``) that only know about memory.db.
 
         Args:
-            filters: Optional dict controlling which sections to include.
-                - ``"tables"`` (str | True): include table list. If a string,
-                  filter to only that table name. If True, include all tables.
-                - ``"indexes"`` (bool): include index list.
-                - ``"fts"`` (bool): include FTS5 virtual tables.
-                When ``filters`` is None, all sections are included.
+            filters: Optional dict. Recognised keys:
+                - ``"db"`` (str): ``"memory"`` or ``"tuples"`` -- restrict to one DB.
+                - ``"tables"`` (str | True): legacy -- include table list.
+                - ``"indexes"`` (bool): legacy -- include index list.
+                - ``"fts"`` (bool): legacy -- include FTS5 virtual tables.
+                When ``filters`` is None, all sections for both DBs are returned.
 
         Returns:
-            Dict with keys ``"tables"``, ``"indexes"``, ``"fts"`` (each a
-            list of dicts). Absent keys indicate the section was filtered out.
+            Two-key dict ``{"memory": ..., "tuples": ...}`` (new shape), or
+            flat ``{"tables": ..., "indexes": ..., "fts": ...}`` (legacy shape
+            when legacy section-filter keys are detected without a ``"db"`` key).
         """
         f = filters or {}
+
+        # Detect legacy shape: any of the old section-filter keys are present
+        # and no new "db" key is present.
+        _legacy_keys = {"tables", "indexes", "fts"}
+        is_legacy = bool(f.keys() & _legacy_keys) and "db" not in f
+
+        if is_legacy:
+            # Preserve the original single-DB flat behaviour for backward compat.
+            return self._schema_single(self._memory_db_path, f)
+
+        # New shape: one or both DBs.
+        db_filter = f.get("db", None)
+        if db_filter == "memory":
+            return {"memory": self._schema_single(self._memory_db_path, {})}
+        if db_filter == "tuples":
+            return {"tuples": self._schema_single(self._tuples_db_path, {})}
+
+        # Default: both DBs.
+        return {
+            "memory": self._schema_single(self._memory_db_path, {}),
+            "tuples": self._schema_single(self._tuples_db_path, {}),
+        }
+
+    def _schema_single(
+        self, db_path: Path, filters: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Return schema info for a single SQLite DB at ``db_path``.
+
+        Args:
+            db_path: Path to the SQLite database file.
+            filters: Section-filter dict (same semantics as legacy ``schema()``
+                ``filters`` arg): keys ``"tables"``, ``"indexes"``, ``"fts"``.
+                Empty dict means include all sections.
+
+        Returns:
+            Flat dict with keys ``"tables"``, ``"indexes"``, ``"fts"``.
+        """
+        f = filters
         include_tables = "tables" in f or not f
         include_indexes = "indexes" in f or not f
         include_fts = "fts" in f or not f
@@ -189,11 +250,22 @@ class IntrospectionService:
         if "tables" in f and isinstance(f["tables"], str):
             table_name_filter = f["tables"]
 
-        uri = f"file:{self._memory_db_path}?mode=ro"
+        if not db_path.exists():
+            # DB file has not been created yet (e.g. tuples.db before first write).
+            result: dict[str, Any] = {}
+            if include_tables:
+                result["tables"] = []
+            if include_indexes:
+                result["indexes"] = []
+            if include_fts:
+                result["fts"] = []
+            return result
+
+        uri = f"file:{db_path}?mode=ro"
         conn: sqlite3.Connection | None = None
         try:
             conn = sqlite3.connect(uri, uri=True)
-            result: dict[str, Any] = {}
+            result = {}
 
             if include_tables:
                 if table_name_filter is not None:
@@ -299,19 +371,51 @@ class IntrospectionService:
     def stats(self) -> dict[str, Any]:
         """Return row counts per table plus DB file sizes.
 
+        ``"tables"`` is now a two-key dict covering both databases::
+
+            {
+                "memory": {"<table>": <count>, ...},
+                "tuples": {"<table>": <count>, ...},
+            }
+
+        The file-size keys (``memory_db_bytes``, ``memory_db_wal_bytes``,
+        ``tuples_db_bytes``, ``tuples_db_wal_bytes``) are unchanged.
+
         Returns:
             Dict with keys:
-            - ``"tables"``: mapping of table_name -> row_count.
+            - ``"tables"``: ``{"memory": {table: count, ...}, "tuples": {table: count, ...}}``.
             - ``"memory_db_bytes"``: file size of memory_db_path (0 if missing).
             - ``"memory_db_wal_bytes"``: WAL file size (0 if missing).
             - ``"tuples_db_bytes"``: file size of tuples_db_path (0 if missing).
             - ``"tuples_db_wal_bytes"``: WAL file size (0 if missing).
         """
-        uri = f"file:{self._memory_db_path}?mode=ro"
+        return {
+            "tables": {
+                "memory": self._table_counts(self._memory_db_path),
+                "tuples": self._table_counts(self._tuples_db_path),
+            },
+            "memory_db_bytes": _file_size(self._memory_db_path),
+            "memory_db_wal_bytes": _file_size(
+                self._memory_db_path.parent / (self._memory_db_path.name + "-wal")
+            ),
+            "tuples_db_bytes": _file_size(self._tuples_db_path),
+            "tuples_db_wal_bytes": _file_size(
+                self._tuples_db_path.parent / (self._tuples_db_path.name + "-wal")
+            ),
+        }
+
+    def _table_counts(self, db_path: Path) -> dict[str, int]:
+        """Return a mapping of table_name to row count for ``db_path``.
+
+        Returns an empty dict if the database file does not yet exist (e.g.
+        tuples.db before the first write).
+        """
+        if not db_path.exists():
+            return {}
+        uri = f"file:{db_path}?mode=ro"
         conn: sqlite3.Connection | None = None
         try:
             conn = sqlite3.connect(uri, uri=True)
-
             table_names: list[str] = [
                 row[0]
                 for row in conn.execute(
@@ -319,25 +423,13 @@ class IntrospectionService:
                     "AND name NOT LIKE 'sqlite_%'"
                 ).fetchall()
             ]
-
             counts: dict[str, int] = {}
             for tname in table_names:
                 row = conn.execute(
                     f"SELECT COUNT(*) FROM \"{_quote_id(tname)}\""  # noqa: S608
                 ).fetchone()
                 counts[tname] = row[0] if row else 0
-
-            return {
-                "tables": counts,
-                "memory_db_bytes": _file_size(self._memory_db_path),
-                "memory_db_wal_bytes": _file_size(
-                    self._memory_db_path.parent / (self._memory_db_path.name + "-wal")
-                ),
-                "tuples_db_bytes": _file_size(self._tuples_db_path),
-                "tuples_db_wal_bytes": _file_size(
-                    self._tuples_db_path.parent / (self._tuples_db_path.name + "-wal")
-                ),
-            }
+            return counts
         finally:
             if conn is not None:
                 conn.close()

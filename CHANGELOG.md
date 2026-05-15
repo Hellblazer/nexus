@@ -6,6 +6,54 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — RDR-112 T2 Storage-as-Service Phase 1 complete (2026-05-14)
+
+T2 SQLite stores now live behind a single-writer asyncio daemon that
+clients reach via JSON-RPC over UDS (primary) or loopback TCP (fallback).
+All Phase 1 surfaces shipped and gate-reviewed by four parallel auditors;
+nexus-52lb GATE PASSED, T2 entry `nexus/rdr-112-phase1-gate-passed.md`.
+
+- **nexus-61x6** (PR #766) — T2 daemon process scaffold + dual-bind
+  UDS+TCP transport. UDS at chmod 0600 with peer-cred enforced;
+  TCP hardcoded to 127.0.0.1. A3 spike: UDS p50 = 100µs, TCP p50 = 114µs.
+- **nexus-qy0u** (PR #768) — 150 domain-store RPCs across 8 namespaces
+  (memory, plans, chash_index, taxonomy, telemetry, document_aspects,
+  aspect_queue, database) + `T2Client` facade with type-tagged JSON
+  (datetime, bytes, Path, dataclass) and pooled connections.
+- **nexus-m4gm** (PR #771) — EventStream RPC with rowid-cursored backfill
+  capped at 1000 rows/burst, live mode via `PRAGMA data_version` polling,
+  and failure-category demux via server-side SQL filter.
+- **nexus-w0et** (PR #770) — Daemon-startup migration runner. Daemon is
+  sole migration runner per RDR-112 §9; includes the RDR-111 watcher_state
+  table per CA-10. Schema version handshake with directional errors.
+- **nexus-x98k** (PR #774) — `subspace_add` admin RPC with reserved-prefix
+  rejection (`tuples/`, `daemon/`), digest advertisement in hello_ack, and
+  fixture-tested registration of all seven RDR-111 hook-event subspaces.
+- **nexus-08i1** (PR #775) — Introspection RPCs: `exec_raw` (mode=ro URI,
+  row-capped at 50k, audit hash post-execution), `schema`, `peek`
+  (clamped to 300), `stats`, `export` (streaming for jsonl/csv via
+  fetchmany(256), Backup API for sqlite; path-traversal defense).
+- **nexus-pce1.1** (PR #773) — Admin-RPC UDS-only gate. `_ADMIN_OPS` +
+  `_KNOWN_ADMIN_NAMES` frozensets + startup integrity check catch any
+  drift between dispatch-table registration and gate membership.
+- **nexus-pce1.4 + pce1.5** (PR #772) — Denormalize subspace into
+  `tuple_claim_log` (eliminates COALESCE-on-deleted-tuple silent drop in
+  the EventStream trigger); validate `subspace_prefix` to prevent GLOB
+  metacharacter injection.
+- **nexus-52lb** (PR #777) — Phase 1 gate cleanup. Duplicate CLI removed;
+  `subspace_add` rewrites discovery file digest; new test column
+  assertions; public `T2Database.path`; documentation polish.
+
+CLI: `nx daemon t2 {start|stop|info|exec|schema|peek|stats|export|subspace add}`.
+`nx daemon t2 start` constructs T2Database + RegistryStore + T2Daemon fully
+wired so domain-store RPCs work from day one. Live smoke: memory.put +
+memory.get round-trip ≈ 9ms over UDS on M-series Mac.
+
+Out of scope here, tracked for Phase 2/3:
+- `tuplespace_*` MCP tool routing under `NX_STORAGE_MODE=daemon`
+  (nexus-pce1.6, blocked on Phase 2 CatalogDB collapse).
+- Default `NX_STORAGE_MODE` flip from direct to daemon (nexus-507q P6.3).
+
 ## [4.32.12] - 2026-05-13
 
 Patch on 4.32.11. Two CI-correctness fixes plus substantial RDR
