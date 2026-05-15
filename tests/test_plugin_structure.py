@@ -39,6 +39,11 @@ _STANDALONE_SKILLS = {
     # RDR-078 verb skills — dispatch plan_match + plan_run directly, no agent relay
     "research", "review", "analyze", "debug", "document",
     "plan-author", "plan-inspect", "plan-promote", "plan-first",
+    # RDR-110 Step 8-10 tuple-space consumer skills (nexus-90pe) — pointer
+    # skills documenting the MCP / CLI surface; no agent dispatch.
+    "tuplespace-tasks", "tuplespace-mailbox", "tuplespace-lock",
+    "tuplespace-events", "tuplespace-barriers",
+    "tuplespace-list", "tuplespace-stats",
 }
 
 
