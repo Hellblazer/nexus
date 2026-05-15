@@ -17,10 +17,14 @@ dimensions:
   conn_type:    { type: enum, values: [stream, pipe, websocket, sse, file-fd], required: true }
   payload_type: { type: string, required: true }
   ttl_seconds:  { type: string, required: true }
+# match_keys includes payload_type so a producer-consumer pair can register
+# distinct streams per (conn_type, payload_type) without one ``out`` silently
+# overwriting another. Excluding payload_type would let, e.g., a JSON manifest
+# and a msgpack manifest collide on the same take identity.
 take:
   enabled: true
   mode: exact
-  match_keys: [producer, consumer, conn_type]
+  match_keys: [producer, consumer, conn_type, payload_type]
 read:
   default_floor: 0.0
   default_n: 50

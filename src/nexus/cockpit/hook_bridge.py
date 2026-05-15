@@ -98,9 +98,10 @@ def configure_logging_to_stderr() -> None:
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
     )
 
-# Daemon-mode routing is deferred to nexus-pce1.6 (RDR-112 daemon RPC surface).
-# Until that ships, emit() uses direct mode exclusively.
-_ROUTING_TBA = "direct"  # will become "daemon" once nexus-pce1.6 ships
+# TODO(nexus-pce1.6): emit() currently uses direct mode exclusively. When
+# the RDR-112 daemon ships a ``tuplespace.out`` RPC, route via
+# ``T2Client.call("tuplespace.out", ...)`` under ``NX_STORAGE_MODE=daemon``
+# and reserve direct mode for the no-daemon fallback.
 
 # ---------------------------------------------------------------------------
 # Subspace routing table
@@ -285,6 +286,36 @@ def emit(
             error=str(exc),
             dimensions=list(dimensions.keys()),
         )
+    except sqlite3.OperationalError as exc:
+        # Transient: WAL contention, "database is locked". Once RDR-112
+        # daemon mode ships, multi-writer contention becomes common;
+        # categorise it under a distinct event so alerts don't fire on
+        # every transient. No retry here — retry handling is deferred to
+        # nexus-pce1.6's _chroma_with_retry wrap.
+        _log.warning(
+            "hook_bridge_transient",
+            hook_type=hook_type,
+            subspace=subspace,
+            error=str(exc),
+            error_type="OperationalError",
+        )
+    except (sqlite3.ProgrammingError, sqlite3.DatabaseError) as exc:
+        # The cached singleton conn is poisoned — closed, or pointing at
+        # a corrupted db. Invalidate so the next emit() rebuilds. Without
+        # this, every subsequent hook fire in this process would raise
+        # the same error.
+        _invalidate_singleton()
+        _log.error(
+            "hook_bridge_singleton_poison",
+            hook_type=hook_type,
+            subspace=subspace,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            remediation=(
+                "Cached SQLite connection or chroma client poisoned; "
+                "singleton invalidated, next emit() will reinit."
+            ),
+        )
     except Exception:
         # Last-resort guard so a hook script never crashes Claude Code.
         # Specific exception classes that have known handling above this
@@ -433,6 +464,28 @@ def _get_or_init_resources() -> tuple[Any, Any, Any] | None:
         return _singleton[key]
 
 
+def _invalidate_singleton() -> None:
+    """Drop the cached resources so the next emit() rebuilds.
+
+    Called from `_emit_direct_auto` when a cached resource is poisoned
+    (closed sqlite3.Connection, corrupted database). Unlike
+    `_reset_singleton_for_tests` this preserves `_atexit_registered`
+    (the atexit handler is per-process and still valid) and the
+    `_registry_load_failed_once` flag (if the registry is genuinely
+    unavailable we don't want a poison-driven invalidation to undo the
+    one-shot WARN suppression).
+    """
+    global _cached_key
+    with _singleton_lock:
+        for conn, _, _ in _singleton.values():
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _singleton.clear()
+        _cached_key = None
+
+
 def _reset_singleton_for_tests() -> None:
     """Clear all module-level state. Test-only helper.
 
@@ -532,8 +585,8 @@ def _build_dimensions(hook_type: str, payload: dict[str, Any]) -> dict[str, Any]
     # layout_state/<profile> subspaces (RDR-111 §Phase 2, line 519).
     dims["hook_event_name"] = hook_type
 
-    # No additional optional dims for the other types at this stage
-    # (workflow, intent, priority are reserved for future enrichment)
+    # TODO(rdr-111-phase2): wire workflow / intent / priority dims when
+    # the binding-reaction loop (nexus-7ncn) needs them for matching.
 
     return dims
 
@@ -596,9 +649,12 @@ def _build_match_text(hook_type: str, payload: dict[str, Any]) -> str:
 def _build_content(hook_type: str, payload: dict[str, Any]) -> str:
     """Build the tuple content field (stored verbatim, not embedded).
 
-    Serialises the raw payload as JSON, capped to a safe chunk size to
-    stay within ChromaDB's MAX_DOCUMENT_BYTES limit.
+    Serialises the raw payload as JSON, capped to ``SAFE_CHUNK_BYTES``
+    (which is 4 KiB below ``MAX_DOCUMENT_BYTES``) so api.out's quota
+    validator cannot reject. Defence-in-depth: the slice keeps us under
+    the cap even for non-ASCII payloads where ``len(str) != len(bytes)``.
     """
+    from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES  # noqa: PLC0415
+
     raw = json.dumps(payload, ensure_ascii=False)
-    # Stay well within SAFE_CHUNK_BYTES = 12288
-    return raw[:12000]
+    return raw[:SAFE_CHUNK_BYTES]

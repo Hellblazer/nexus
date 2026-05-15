@@ -17,8 +17,16 @@ tier: project
 content_type: text
 embed_from: match_text
 dimensions:
+  # profile + event_type are the keying dimensions per the RDR.
   profile:        { type: string, required: true }
   event_type:     { type: string, required: true }
+  # RDR-111 calls surface_level / demotion_level / ttl_seconds / pinned
+  # "content_fields", but SubspaceSchema has no content_fields concept —
+  # the only addressable structure is ``dimensions``. Promoting them lets
+  # cockpit surfaces filter by surface_level/demotion_level via the
+  # standard ``read(where=...)`` path instead of unpacking the content
+  # blob. If the registry ever gains a content_fields concept these may
+  # migrate; the on-the-wire keys are unchanged.
   surface_level:  { type: enum, values: [status-line, notification, panel, full-screen], required: true }
   demotion_level: { type: enum, values: [status-line, notification, panel, full-screen], required: true }
   ttl_seconds:    { type: string, required: true }

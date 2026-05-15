@@ -762,7 +762,7 @@ class TestScriptClaudecodeGate:
         # observe-only: no stdout
         assert result.stdout.strip() == ""
 
-    def test_permissionrequest_not_a_script_but_output_for_hook_is_pure(self) -> None:
+    def test_output_for_hook_permissionrequest_is_pure(self) -> None:
         """output_for_hook is pure Python, not gated on env; PermissionRequest always allows."""
         from nexus.cockpit.hook_bridge import output_for_hook
 
@@ -1279,6 +1279,113 @@ class TestSchemaViolationLogged:
         # The dimension list must include hook_event_name so a debugger
         # can see exactly what was sent.
         assert "hook_event_name" in violations[0]["dimensions"]
+
+
+class TestSqliteOperationalErrorTransient:
+    """sqlite3.OperationalError (e.g. database-locked) is logged as transient."""
+
+    def test_locked_db_logs_transient_warning(
+        self, db_conn, hook_index, hook_registry, monkeypatch
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        from nexus.cockpit import hook_bridge
+
+        monkeypatch.setenv("CLAUDECODE", "1")
+
+        def _raise_locked(**_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("nexus.cockpit.hook_bridge._direct_out", _raise_locked)
+
+        with capture_logs() as logs:
+            hook_bridge.emit(
+                "Stop",
+                STOP_PAYLOAD,
+                conn=db_conn,
+                index=hook_index,
+                registry=hook_registry,
+            )
+
+        transients = [
+            r for r in logs
+            if r.get("event") == "hook_bridge_transient"
+        ]
+        assert transients, f"expected hook_bridge_transient WARN, got {logs!r}"
+        assert transients[0]["log_level"] == "warning"
+        assert transients[0]["error_type"] == "OperationalError"
+
+
+class TestSingletonPoisonInvalidation:
+    """A closed conn or corrupted db poisons the singleton; invalidate + ERROR."""
+
+    def test_programming_error_invalidates_singleton(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        from nexus.cockpit import hook_bridge
+
+        nexus_dir = tmp_path / "nexus"
+        nexus_dir.mkdir()
+        monkeypatch.setattr(
+            "nexus.config.load_config",
+            lambda: {"nexus_dir": str(nexus_dir)},
+        )
+        monkeypatch.setenv("CLAUDECODE", "1")
+
+        hook_bridge._reset_singleton_for_tests()
+        # Prime so we have a real cached triple to invalidate.
+        hook_bridge._get_or_init_resources()
+        assert len(hook_bridge._singleton) == 1
+
+        def _raise_poison(**_kwargs):
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database")
+
+        monkeypatch.setattr("nexus.cockpit.hook_bridge._direct_out", _raise_poison)
+
+        with capture_logs() as logs:
+            hook_bridge.emit("Stop", STOP_PAYLOAD)
+
+        poisons = [
+            r for r in logs
+            if r.get("event") == "hook_bridge_singleton_poison"
+        ]
+        assert poisons, f"expected hook_bridge_singleton_poison, got {logs!r}"
+        assert poisons[0]["log_level"] == "error"
+        assert poisons[0]["error_type"] == "ProgrammingError"
+        # Singleton must have been cleared so a future call rebuilds.
+        assert hook_bridge._singleton == {}
+        assert hook_bridge._cached_key is None
+
+        hook_bridge._reset_singleton_for_tests()
+
+    def test_database_error_also_invalidates_singleton(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from nexus.cockpit import hook_bridge
+
+        nexus_dir = tmp_path / "nexus"
+        nexus_dir.mkdir()
+        monkeypatch.setattr(
+            "nexus.config.load_config",
+            lambda: {"nexus_dir": str(nexus_dir)},
+        )
+        monkeypatch.setenv("CLAUDECODE", "1")
+
+        hook_bridge._reset_singleton_for_tests()
+        hook_bridge._get_or_init_resources()
+        assert len(hook_bridge._singleton) == 1
+
+        monkeypatch.setattr(
+            "nexus.cockpit.hook_bridge._direct_out",
+            lambda **_: (_ for _ in ()).throw(sqlite3.DatabaseError("file is not a database")),
+        )
+
+        hook_bridge.emit("Stop", STOP_PAYLOAD)
+        assert hook_bridge._singleton == {}
+
+        hook_bridge._reset_singleton_for_tests()
 
 
 class TestUnknownSubspaceWarning:
