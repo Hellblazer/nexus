@@ -104,6 +104,27 @@ def main() -> None:
     else:
         debug("bd command not found")
 
+    # --- Tuplespace summary (RDR-110, nexus-90pe) ---
+    # One-line consumer landing surface: "tuplespace: N subspaces, M tuples,
+    # K active claims". Defensive: must never crash the session-start hook,
+    # so we wrap the call and fall back silently on any failure.
+    if which('nx'):
+        ts_line = run_command(['nx', 'tuplespace', 'stats', '--json'], timeout=NX_TIMEOUT, cwd=cwd)
+        if ts_line:
+            try:
+                import json as _json
+                payload = _json.loads(ts_line)
+                summary = payload.get('summary') or payload
+                subs = summary.get('subspaces', 0)
+                tups = summary.get('tuples', 0)
+                claims = summary.get('active_claims', 0)
+                output_lines.append(
+                    f"tuplespace: {subs} subspaces, {tups} tuples, {claims} active claims"
+                )
+                output_lines.append("")
+            except (ValueError, AttributeError, TypeError) as e:
+                debug(f"tuplespace summary parse failed: {e}")
+
     # --- Capabilities summary (AI-optimized, minimal tokens) ---
     output_lines.append("## nx Capabilities")
     output_lines.append("")
