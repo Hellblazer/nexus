@@ -114,7 +114,7 @@ def test_list_subspaces_plain(runner: CliRunner, env) -> None:
 def test_list_subspaces_json(runner: CliRunner, env) -> None:
     result = runner.invoke(main, ["tuplespace", "list-subspaces", "--json"])
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert "tasks/<project>" in payload["subspaces"]
     assert "locks/<resource>" in payload["subspaces"]
 
@@ -128,7 +128,7 @@ def test_show_schema_unknown(runner: CliRunner, env) -> None:
 def test_show_schema_known(runner: CliRunner, env) -> None:
     result = runner.invoke(main, ["tuplespace", "show-schema", "tasks/demo", "--json"])
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["name"] == "tasks/<project>"
     assert "status" in payload["dimensions"]
 
@@ -176,7 +176,7 @@ def test_read_returns_tuple(runner: CliRunner, env) -> None:
         ["tuplespace", "read", "tasks/demo", "--query", "ship", "-n", "5"],
     )
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert len(payload["results"]) >= 1
     assert payload["results"][0]["content"].startswith("ship")
 
