@@ -187,3 +187,72 @@ def info_cmd(config_dir_str: str | None, as_json: bool) -> None:
     click.echo("-" * 40)
     for key, value in data.items():
         click.echo(f"  {key}: {value}")
+
+
+# ---------------------------------------------------------------------------
+# nx daemon t2 subspace  (P1.5 nexus-x98k)
+# ---------------------------------------------------------------------------
+
+
+@t2_group.group("subspace")
+def subspace_group() -> None:
+    """Manage registered subspace schemas (admin; UDS only)."""
+
+
+@subspace_group.command("add")
+@click.argument("yaml_path", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+def subspace_add_cmd(yaml_path: Path, config_dir_str: str | None) -> None:
+    """Register a subspace schema from a YAML file.
+
+    Reads YAML_PATH, sends it to the running T2 daemon via the UDS-only
+    ``subspace_add`` admin RPC, and prints the registered name + digest.
+
+    The daemon validates the schema (JSON Schema + reserved-prefix check)
+    and persists it to tuples.db. Duplicate names are rejected.
+
+    Requires a running daemon (``nx daemon t2 start``) and must be invoked
+    as the same user that owns the daemon (UDS peer-cred gate).
+    """
+    from nexus.daemon.t2_client import T2Client, T2DaemonError
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    disc = _discovery_path(config_dir)
+    if not disc.exists():
+        click.echo("No T2 daemon discovery file found — is the daemon running?", err=True)
+        sys.exit(1)
+
+    try:
+        data = json.loads(disc.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        click.echo(f"Failed to read discovery file: {exc}", err=True)
+        sys.exit(1)
+
+    uds_path_str = data.get("uds_path")
+    if not uds_path_str:
+        click.echo("Discovery file missing 'uds_path'. Cannot use admin RPC over TCP.", err=True)
+        sys.exit(1)
+
+    try:
+        yaml_text = yaml_path.read_text()
+    except OSError as exc:
+        click.echo(f"Failed to read YAML file: {exc}", err=True)
+        sys.exit(1)
+
+    try:
+        with T2Client(uds_path=Path(uds_path_str)) as client:
+            result = client.call("subspace_add", {"yaml": yaml_text})
+    except T2DaemonError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    except OSError as exc:
+        click.echo(f"Connection error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Registered: {result.get('name')}")
+    click.echo(f"Digest:     {result.get('digest')}")

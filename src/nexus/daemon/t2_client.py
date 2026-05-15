@@ -559,11 +559,16 @@ class T2Client:
                     "Upgrade conexus: uv pip install -U conexus."
                 )
 
+        # P1.5 nexus-x98k: record registry_digest from hello_ack.
+        # No enforcement in this bead — the field is logged and stored for
+        # future beads that may add warn-or-refuse on digest mismatch.
+        registry_digest: str | None = ack.get("registry_digest")
         _log.debug(
             "t2_client_connected",
             transport="uds" if self._uds_path else "tcp",
             daemon_version=ack.get("daemon_version"),
             schema_version=daemon_sv,
+            registry_digest=registry_digest,
         )
         return _SocketConnection(sock)
 
@@ -585,6 +590,24 @@ class T2Client:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+    # ------------------------------------------------------------------
+    # Bare-op invocation (admin RPCs and introspection verbs)
+    # ------------------------------------------------------------------
+
+    def call(self, op: str, args: dict[str, Any] | None = None) -> Any:
+        """Invoke a bare-op RPC and return its ``result`` payload.
+
+        Use for ops that are not exposed via a store proxy — admin ops
+        (``subspace_add``), introspection verbs (``exec_raw``, ``schema``,
+        ``peek``, ``stats``, ``export``), or any future bare-op handler.
+        Raises ``T2DaemonError`` on remote error frames.
+
+        Public alternative to reaching into ``_get_pool()`` directly so the
+        CLI does not bind to internal pool internals.
+        """
+        with self._get_pool().acquire() as conn:
+            return conn.call(op, args or {})
 
     # ------------------------------------------------------------------
     # Store proxies (attribute properties)
