@@ -365,3 +365,45 @@ def test_real_builtin_dir_loads_cleanly():
 
     reg = Registry.load(default_builtin_dir())
     assert len(list(reg.schemas())) >= 1
+
+
+def test_five_canonical_coordination_subspaces_all_present():
+    """RDR-110 §Step 6 promises five canonical coordination subspaces.
+
+    Prior to this commit, only tasks.yml shipped — the four others
+    (mailbox/<agent>, locks/<resource>, events/<topic>, barriers/<barrier_id>)
+    were missing. ``take`` had no consumers. Regression-locks the full set.
+    """
+    from nexus.tuplespace.registry import Registry, default_builtin_dir
+
+    reg = Registry.load(default_builtin_dir(), subdirs=("hooks",))
+    expected = {
+        "tasks/<project>",
+        "mailbox/<agent>",
+        "locks/<resource>",
+        "events/<topic>",
+        "barriers/<barrier_id>",
+    }
+    present = set(reg._by_template.keys())
+    missing = expected - present
+    assert not missing, (
+        f"RDR-110 §Step 6 canonical subspaces missing: {missing}"
+    )
+
+
+def test_coordination_subspace_take_is_enabled_where_expected():
+    """mailbox / locks / barriers must have take.enabled=true (their whole
+    point is atomic claim). events is read-only (take.enabled=false).
+    """
+    from nexus.tuplespace.registry import Registry, default_builtin_dir
+
+    reg = Registry.load(default_builtin_dir(), subdirs=("hooks",))
+    for name in ("tasks/<project>", "mailbox/<agent>", "locks/<resource>", "barriers/<barrier_id>"):
+        s = reg._by_template[name]
+        assert s.take.get("enabled") is True, (
+            f"{name}: take.enabled should be true for a coordination subspace"
+        )
+    events = reg._by_template["events/<topic>"]
+    assert events.take.get("enabled") is False, (
+        "events/<topic>: take.enabled should be false (read-only telemetry)"
+    )

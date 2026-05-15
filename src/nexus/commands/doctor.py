@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Any
 
@@ -836,6 +837,149 @@ def _run_check_post_store_hooks() -> None:
     click.echo(f"\nTotal: {total} hook(s) registered across 3 chains.")
 
 
+# ── --check-bridge (RDR-111 deep-review pass — bridge installability) ─────
+
+
+def _run_check_bridge() -> None:
+    """Diagnose ORB hook-bridge installability.
+
+    Per the 2026-05-15 deep-review pass: a wheel-only install delivers no
+    bridge silently — the seven ``orb_bridge_*.py`` scripts live under
+    ``$CLAUDE_PLUGIN_ROOT`` and require both the Python wheel AND the nx
+    Claude Code plugin. Without ``nx doctor`` checking, users get a
+    silently-broken bridge.
+
+    Checks:
+      1. ``CLAUDE_PLUGIN_ROOT`` is set (otherwise bridge scripts can't be located).
+      2. All seven ``orb_bridge_*.py`` exist under it.
+      3. ``~/.config/nexus/tuples.db`` exists and is readable.
+      4. The seven hook-event subspace YAMLs resolve via the registry.
+      5. At least one tuple has been written in the last 24h (sanity that
+         the bridge has actually fired).
+    """
+    plugin_root_env = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    expected_scripts = [
+        "orb_bridge_pretooluse.py",
+        "orb_bridge_posttooluse.py",
+        "orb_bridge_stop.py",
+        "orb_bridge_subagent_stop.py",
+        "orb_bridge_user_prompt_submit.py",
+        "orb_bridge_session.py",
+        "orb_bridge_notification.py",
+    ]
+
+    click.echo("ORB hook-bridge diagnostics (RDR-111):")
+    click.echo("")
+
+    # 1. CLAUDE_PLUGIN_ROOT
+    if plugin_root_env:
+        click.echo(_check("CLAUDE_PLUGIN_ROOT", True, plugin_root_env))
+        plugin_root = Path(plugin_root_env)
+    else:
+        click.echo(
+            _check(
+                "CLAUDE_PLUGIN_ROOT",
+                False,
+                "unset — bridge scripts cannot be located; install the nx Claude Code plugin",
+            )
+        )
+        plugin_root = None
+
+    # 2. Bridge scripts
+    if plugin_root is not None:
+        scripts_dir = plugin_root / "hooks" / "scripts"
+        missing = [s for s in expected_scripts if not (scripts_dir / s).is_file()]
+        if missing:
+            click.echo(
+                _check(
+                    "bridge scripts",
+                    False,
+                    f"missing under {scripts_dir}: {missing}",
+                )
+            )
+        else:
+            click.echo(
+                _check(
+                    "bridge scripts",
+                    True,
+                    f"7/7 present under {scripts_dir}",
+                )
+            )
+
+    # 3. tuples.db
+    tuples_db = Path(os.path.expanduser("~/.config/nexus/tuples.db"))
+    if tuples_db.exists():
+        size = tuples_db.stat().st_size
+        click.echo(
+            _check("tuples.db", True, f"{tuples_db} ({size} bytes)")
+        )
+    else:
+        click.echo(
+            _check(
+                "tuples.db",
+                False,
+                f"{tuples_db} not present — bridge has not run yet",
+            )
+        )
+
+    # 4. Registry resolves hook subspaces
+    try:
+        from nexus.tuplespace.registry import Registry, default_builtin_dir
+        reg = Registry.load(default_builtin_dir(), subdirs=("hooks",))
+        hook_subspaces = [
+            s for s in reg._by_template.keys() if s.startswith("hook_events/")
+        ]
+        if len(hook_subspaces) == 7:
+            click.echo(
+                _check(
+                    "hook-event subspaces",
+                    True,
+                    f"7/7 resolve via {default_builtin_dir()}",
+                )
+            )
+        else:
+            click.echo(
+                _check(
+                    "hook-event subspaces",
+                    False,
+                    f"only {len(hook_subspaces)}/7 resolve",
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        click.echo(_check("hook-event subspaces", False, f"registry load failed: {exc}"))
+
+    # 5. Recent tuple sanity
+    if tuples_db.exists():
+        import sqlite3 as _sqlite3
+        try:
+            conn = _sqlite3.connect(f"file:{tuples_db}?mode=ro", uri=True)
+            row = conn.execute(
+                "SELECT COUNT(*) FROM tuples "
+                "WHERE subspace LIKE 'hook_events/%' "
+                "AND created_at > unixepoch() - 86400"
+            ).fetchone()
+            conn.close()
+            recent = row[0] if row else 0
+            if recent > 0:
+                click.echo(
+                    _check(
+                        "recent hook events",
+                        True,
+                        f"{recent} tuple(s) in the last 24h",
+                    )
+                )
+            else:
+                click.echo(
+                    _check(
+                        "recent hook events",
+                        False,
+                        "0 tuples in last 24h — bridge may not be firing (set CLAUDECODE, unset NX_BRIDGE_DISABLE)",
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            click.echo(_check("recent hook events", False, f"query failed: {exc}"))
+
+
 # ── --check-mineru (nexus-2fyb code-review R3-3) ────────────────────────────
 
 
@@ -1084,6 +1228,16 @@ def _run_check_mineru() -> None:
          "but the addr file is missing or unreachable.",
 )
 @click.option(
+    "--check-bridge",
+    "check_bridge",
+    is_flag=True,
+    default=False,
+    help="Diagnose ORB hook-bridge installability (RDR-111): "
+         "CLAUDE_PLUGIN_ROOT, bridge scripts present, tuples.db, "
+         "registry resolves the 7 hook-event subspaces, and at "
+         "least one tuple landed in the last 24h.",
+)
+@click.option(
     "--days",
     "days",
     default=30,
@@ -1104,6 +1258,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_post_store_hooks: bool,
                check_aspect_queue: bool,
                check_t1: bool,
+               check_bridge: bool,
                check_tier_discipline: bool) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
@@ -1157,6 +1312,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_t1:
         _run_check_t1()
+        return
+
+    if check_bridge:
+        _run_check_bridge()
         return
 
     if check_tier_discipline:

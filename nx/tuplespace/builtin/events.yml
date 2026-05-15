@@ -1,0 +1,26 @@
+# RDR-110 canonical subspace: append-only event telemetry.
+# Producers emit events with topic dimension; consumers read by topic
+# (and optionally semantic match on content). Take is DISABLED — this
+# subspace is for audit / telemetry, not coordination. Multiple readers
+# can observe the same event independently.
+#
+# Reference: RDR-110 §Implementation Plan Step 6, line 1408; pattern
+# documented at §Phase 1 Step 8 (nx:tuplespace-events skill).
+name: events/<topic>
+tier: project
+content_type: text
+embed_from: content
+dimensions:
+  topic:    { type: string, required: true }
+  producer: { type: string, required: true }
+  severity: { type: enum, values: [debug, info, warn, error, critical], required: false }
+take:
+  enabled: false
+  mode: semantic
+  floor: 0.30
+  margin: 0.05
+read:
+  default_floor: 0.20
+  default_n: 50
+tiers: [project]
+retention_seconds: 604800  # 7 days

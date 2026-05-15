@@ -251,6 +251,18 @@ def emit(
         _log.debug("hook_bridge_skip_no_claudecode", hook_type=hook_type)
         return
 
+    # Daemon-mode routing not yet wired (RDR-112 Phase 3, nexus-pce1.6).
+    # Until that ships, the bridge would race the daemon's migration runner
+    # if it opened tuples.db directly. Skip cleanly with a debug log instead
+    # of raising under NX_STORAGE_MODE=daemon. Tuples will resume flowing
+    # once the bridge gains T2Client routing.
+    if os.environ.get("NX_STORAGE_MODE", "").lower() == "daemon":
+        _log.debug(
+            "hook_bridge_skip_daemon_mode_pending_pce16",
+            hook_type=hook_type,
+        )
+        return
+
     routed = route_payload(hook_type, payload)
     if routed is None:
         _log.debug("hook_bridge_skip_unrouted", hook_type=hook_type)

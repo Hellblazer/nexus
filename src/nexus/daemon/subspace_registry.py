@@ -54,6 +54,13 @@ _log = structlog.get_logger(__name__)
 
 #: Subspace name prefixes that are reserved for the daemon's own internal
 #: event channels. Third-party YAML schemas must not use these prefixes.
+#:
+#: TODO(nexus-followup): expand to also block builtin canonical namespaces
+#: (``hook_events/``, ``tasks/``, ``mailbox/``, ``locks/``, ``events/``,
+#: ``barriers/``, ``layout_state/``, ``connection_manifest``) once the
+#: daemon auto-seeds from ``default_builtin_dir()`` at startup. Today the
+#: builtin registration flow uses the same admin RPC, so blocking would
+#: break startup; the proper fix splits builtin-seed from third-party-add.
 _RESERVED_PREFIXES: tuple[str, ...] = ("tuples/", "daemon/")
 
 # ---------------------------------------------------------------------------

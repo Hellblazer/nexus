@@ -648,6 +648,69 @@ class TestEmit:
 # ---------------------------------------------------------------------------
 
 
+class TestDaemonModeSkip:
+    """Under NX_STORAGE_MODE=daemon the bridge must skip cleanly, not
+    race the daemon's migration runner via direct open_tuples_db.
+    """
+
+    def test_emit_skips_under_daemon_mode(
+        self, db_conn, hook_index, hook_registry
+    ) -> None:
+        from nexus.cockpit import hook_bridge
+
+        called = []
+
+        def _fake_out(**kwargs):
+            called.append(kwargs)
+            return "id"
+
+        with patch("nexus.cockpit.hook_bridge._direct_out", _fake_out):
+            with patch.dict(
+                os.environ,
+                {"CLAUDECODE": "1", "NX_STORAGE_MODE": "daemon"},
+            ):
+                hook_bridge.emit(
+                    "PreToolUse",
+                    PRETOOLUSE_PAYLOAD,
+                    conn=db_conn,
+                    index=hook_index,
+                    registry=hook_registry,
+                )
+
+        assert called == [], (
+            "bridge must not write under NX_STORAGE_MODE=daemon — would "
+            "race daemon migration runner (RDR-112 §9)"
+        )
+
+
+class TestOpenTuplesDbGate:
+    """open_tuples_db must refuse under NX_STORAGE_MODE=daemon unless the
+    explicit opt-out is set (which the daemon itself uses).
+    """
+
+    def test_open_tuples_db_raises_under_daemon_mode(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from nexus.db import DaemonModeDiagnosticError
+        from nexus.tuplespace.store import open_tuples_db
+
+        monkeypatch.setenv("NX_STORAGE_MODE", "daemon")
+        with pytest.raises(DaemonModeDiagnosticError):
+            open_tuples_db(tmp_path / "t.db")
+
+    def test_open_tuples_db_allows_opt_out_under_daemon_mode(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Daemon process itself passes allow_direct_in_daemon_mode=True."""
+        from nexus.tuplespace.store import open_tuples_db
+
+        monkeypatch.setenv("NX_STORAGE_MODE", "daemon")
+        conn = open_tuples_db(
+            tmp_path / "t.db", allow_direct_in_daemon_mode=True
+        )
+        conn.close()
+
+
 class TestBridgeDisableGate:
     """NX_BRIDGE_DISABLE is the per-bridge escape hatch (CLAUDECODE-independent)."""
 

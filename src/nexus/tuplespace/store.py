@@ -223,14 +223,24 @@ def apply_tuples_schema(conn: sqlite3.Connection) -> None:
     _log.info("tuples_schema_applied", db=_db_path_hint(conn))
 
 
-def open_tuples_db(path: Path) -> sqlite3.Connection:
+def open_tuples_db(
+    path: Path, *, allow_direct_in_daemon_mode: bool = False
+) -> sqlite3.Connection:
     """Open (or create) the tuples database at *path*.
 
     Steps performed:
-    1. Open the SQLite file (creates it if it does not exist).
-    2. Enable WAL journal mode (project convention; required for
+    1. Refuse to open under ``NX_STORAGE_MODE=daemon`` unless the caller
+       sets ``allow_direct_in_daemon_mode=True``. Per RDR-112 §9 the
+       daemon is the sole migration runner; opening from a non-daemon
+       caller would race the daemon's DDL. The daemon itself sets the
+       opt-out via ``allow_direct_in_daemon_mode`` so it can still own
+       the db. The bridge subprocess (cockpit/hook_bridge.py) must NOT
+       set the opt-out — under daemon mode it should route through
+       ``T2Client.call("tuplespace.out", ...)`` instead (RDR-112 Phase 3).
+    2. Open the SQLite file (creates it if it does not exist).
+    3. Enable WAL journal mode (project convention; required for
        multi-process concurrent access per RDR-112 §9).
-    3. Apply the schema via ``apply_tuples_schema`` (idempotent).
+    4. Apply the schema via ``apply_tuples_schema`` (idempotent).
 
     The caller is responsible for closing the returned connection.
 
@@ -258,6 +268,11 @@ def open_tuples_db(path: Path) -> sqlite3.Connection:
         An open ``sqlite3.Connection`` with WAL mode enabled and
         schema applied.
     """
+    if not allow_direct_in_daemon_mode:
+        from nexus.db import reject_under_daemon_mode  # noqa: PLC0415
+
+        reject_under_daemon_mode("tuplespace.store.open_tuples_db")
+
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA journal_mode=WAL")

@@ -1,0 +1,27 @@
+# RDR-110 canonical subspace: mutex / lease locks.
+# A claim on locks/<resource> is held by exactly one holder for the
+# duration of the lease. Other holders attempting to take the same
+# resource block (or fail-fast under block=False) until the lease
+# expires or the holder releases via ack.
+#
+# Reference: RDR-110 §Implementation Plan Step 6, line 1408; pattern
+# documented at §Phase 1 Step 8 (nx:tuplespace-lock skill).
+name: locks/<resource>
+tier: project
+content_type: text
+embed_from: content
+dimensions:
+  resource:    { type: string, required: true }
+  holder:      { type: string, required: true }
+  acquired_at: { type: string, required: true }
+  reason:      { type: string, required: false }
+take:
+  enabled: true
+  mode: exact
+  match_keys: [resource]
+  default_lease_seconds: 600
+read:
+  default_floor: 0.0
+  default_n: 50
+tiers: [project]
+retention_seconds: 3600  # 1 hour — released locks roll off quickly
