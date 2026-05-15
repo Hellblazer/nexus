@@ -4189,15 +4189,35 @@ def _get_tuplespace() -> dict[str, Any]:
 
     storage_mode = _os.environ.get("NX_STORAGE_MODE", "").lower()
     if storage_mode == "daemon":
-        _ts_log.info("tuplespace_mcp_daemon_mode_conn_skipped")
-        # In daemon mode: no local SQLite connection (daemon owns the db).
-        # Tools that need conn currently raise AttributeError on the first
-        # ``conn.execute(...)`` call inside ``api.out``/``read``/``take``/
-        # ``ack``/``nack``. RDR-112 Phase 3 will replace the conn/index
-        # references with T2Client routing so each tool hits the daemon
-        # instead. Until that ships, tuplespace_* tools are non-functional
-        # under ``NX_STORAGE_MODE=daemon``.
-        _TUPLESPACE.update({"registry": registry, "conn": None, "index": None, "watcher": None})
+        # nexus-6s8v (RDR-112): daemon-mode tuplespace routing.
+        # Build a T2Client connected to the running daemon's UDS (or TCP
+        # fallback), and stash it in _TUPLESPACE for the tool handlers to
+        # call instead of the direct conn/index path. The registry is
+        # still loaded locally for callers that only need schema metadata
+        # without an RPC round-trip — registry is read-only and the local
+        # builtin YAMLs are the same the daemon loads.
+        from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415
+        from nexus.daemon.t2_client import T2Client  # noqa: PLC0415
+
+        info = find_t2_daemon()
+        if info is None:
+            _ts_log.error("tuplespace_mcp_daemon_mode_daemon_not_running")
+            raise RuntimeError(
+                "NX_STORAGE_MODE=daemon is set but no T2 daemon discovery "
+                "file was found. Run `nx daemon t2 start` first."
+            )
+        uds_path = Path(info["uds_path"]) if info.get("uds_path") else None
+        if uds_path is not None and uds_path.exists():
+            client = T2Client(uds_path=uds_path)
+        else:
+            client = T2Client(tcp_addr=(info["tcp_host"], info["tcp_port"]))
+        _ts_log.info(
+            "tuplespace_mcp_daemon_mode_client_ready",
+            transport="uds" if uds_path is not None and uds_path.exists() else "tcp",
+        )
+        _TUPLESPACE.update(
+            {"registry": registry, "conn": None, "index": None, "watcher": None, "client": client}
+        )
         return _TUPLESPACE
 
     conn = open_tuples_db(db_path)
@@ -4272,6 +4292,15 @@ def tuplespace_out(
 
     ts = _get_tuplespace()
     dims = _json.loads(dimensions) if isinstance(dimensions, str) else dimensions
+    client = ts.get("client")
+    if client is not None:
+        return client.tuplespace.out(
+            subspace=subspace,
+            content=content,
+            dimensions=dims,
+            match_text=match_text or None,
+            ttl_seconds=ttl_seconds if ttl_seconds > 0 else None,
+        )
     tid = out(
         conn=ts["conn"],
         index=ts["index"],
@@ -4315,16 +4344,26 @@ def tuplespace_read(
 
     ts = _get_tuplespace()
     where_dict = _json.loads(where) if where else None
-    results = read(
-        conn=ts["conn"],
-        index=ts["index"],
-        registry=ts["registry"],
-        subspace=subspace,
-        query=query,
-        where=where_dict,
-        floor=floor if floor > 0.0 else None,
-        n=n if n > 0 else None,
-    )
+    client = ts.get("client")
+    if client is not None:
+        results = client.tuplespace.read(
+            subspace=subspace,
+            query=query,
+            where=where_dict,
+            floor=floor if floor > 0.0 else None,
+            n=n if n > 0 else None,
+        )
+    else:
+        results = read(
+            conn=ts["conn"],
+            index=ts["index"],
+            registry=ts["registry"],
+            subspace=subspace,
+            query=query,
+            where=where_dict,
+            floor=floor if floor > 0.0 else None,
+            n=n if n > 0 else None,
+        )
     return _json.dumps(results, default=str)
 
 
@@ -4361,6 +4400,22 @@ def tuplespace_take(
 
     ts = _get_tuplespace()
     where_dict = _json.loads(where) if where else None
+    client = ts.get("client")
+    if client is not None:
+        # Daemon-side ``take`` returns a single dict (or None) with the
+        # ``tuple`` + ``claim_id`` already wrapped.
+        wrapped = client.tuplespace.take(
+            subspace=subspace,
+            query=query,
+            claimant=claimant,
+            where=where_dict,
+            floor=floor if floor > 0.0 else None,
+            lease_seconds=lease_seconds if lease_seconds > 0.0 else None,
+            block=False,
+        )
+        if wrapped is None:
+            return "null"
+        return _json.dumps(wrapped, default=str)
     result = take(
         conn=ts["conn"],
         index=ts["index"],
@@ -4396,6 +4451,10 @@ def tuplespace_ack(
     from nexus.tuplespace.api import ack
 
     ts = _get_tuplespace()
+    client = ts.get("client")
+    if client is not None:
+        client.tuplespace.ack(claim_id=claim_id, claimant=claimant)
+        return "ok"
     ack(conn=ts["conn"], claim_id=claim_id, claimant=claimant)
     return "ok"
 
@@ -4417,6 +4476,10 @@ def tuplespace_nack(
     from nexus.tuplespace.api import nack
 
     ts = _get_tuplespace()
+    client = ts.get("client")
+    if client is not None:
+        client.tuplespace.nack(claim_id=claim_id, claimant=claimant)
+        return "ok"
     nack(conn=ts["conn"], claim_id=claim_id, claimant=claimant)
     return "ok"
 
@@ -4433,6 +4496,9 @@ def tuplespace_list_subspaces() -> str:
     from nexus.tuplespace.api import list_subspaces
 
     ts = _get_tuplespace()
+    client = ts.get("client")
+    if client is not None:
+        return _json.dumps(client.tuplespace.list_subspaces())
     return _json.dumps(list_subspaces(registry=ts["registry"]))
 
 
@@ -4451,6 +4517,9 @@ def tuplespace_subspace_schema(subspace: str) -> str:
     from nexus.tuplespace.api import subspace_schema
 
     ts = _get_tuplespace()
+    client = ts.get("client")
+    if client is not None:
+        return _json.dumps(client.tuplespace.subspace_schema(subspace=subspace), default=str)
     return _json.dumps(subspace_schema(registry=ts["registry"], subspace=subspace), default=str)
 
 
@@ -4468,6 +4537,9 @@ def tuplespace_subspace_stats(subspace: str) -> str:
     from nexus.tuplespace.api import subspace_stats
 
     ts = _get_tuplespace()
+    client = ts.get("client")
+    if client is not None:
+        return _json.dumps(client.tuplespace.subspace_stats(subspace=subspace))
     return _json.dumps(subspace_stats(conn=ts["conn"], subspace=subspace))
 
 
