@@ -62,6 +62,7 @@ from nexus.commands.tier_status import tier_status_cmd
 from nexus.commands.aspects import aspects_group
 from nexus.commands.upgrade import upgrade
 from nexus.commands.instances import instances_cmd
+from nexus.commands.tuplespace import tuplespace_group
 
 @click.group()
 @click.version_option(package_name="conexus", prog_name="nx")
@@ -175,3 +176,4 @@ main.add_command(tier_status_cmd, name="tier-status")
 main.add_command(aspects_group, name="aspects")
 main.add_command(upgrade)
 main.add_command(instances_cmd, name="instances")
+main.add_command(tuplespace_group, name="tuplespace")
