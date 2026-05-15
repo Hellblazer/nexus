@@ -368,10 +368,36 @@ negligible. No measurable overhead expected.
 
 ### Contradiction Check
 
-To be filled at gate time. Pre-check: this RDR layers cleanly
-on RDR-112 (no contradiction); RDR-110 and RDR-111 inherit the
-trust boundary without changes (they observe via the daemon,
-which now performs the peer check).
+Reviewed against the active RDR-110 / RDR-111 / RDR-112
+contracts. No contradictions surfaced.
+
+- **Same-host claims from RDR-110/111 are honored.** RDR-110
+  (cockpit) and RDR-111 (binding watcher / reaction loop) both
+  assume a single-user local workstation: the cockpit reads and
+  writes via the same daemon the user already owns, and the
+  watcher dispatches reactions inside the daemon process. This
+  RDR narrows the trust model for the daemon's *transport
+  surface*, it does not redefine the same-host coordination
+  surface those RDRs depend on. UDS bind discipline (bind,
+  chmod 0o600, listen) plus the `SO_PEERCRED` peer check keep
+  the same-uid invariant that RDR-110 and RDR-111 already
+  assume, so their claims pass through unchanged.
+- **TCP-fallback trust is delegated to the orchestrator.** v1
+  ships UDS-only and explicitly defers any TCP listener to a
+  later RDR. If a future revision introduces a TCP fallback or
+  a socket-relay, peer identity can no longer be derived from
+  `SO_PEERCRED` (see §A2): the originating uid is hidden behind
+  the relay or the TCP stack. In that world the trust decision
+  moves up to the orchestrator (mTLS, signed tokens, or a
+  brokered handshake), and this RDR's same-host guarantees no
+  longer apply transitively. v1 is consistent because it does
+  not open that surface; the contradiction is bounded to a
+  future RDR that introduces the relay.
+- **No other contradictions found.** RDR-112 (daemon
+  lifecycle) is layered cleanly: the peer check runs inside the
+  daemon's accept loop, which RDR-112 already owns. RDR-111
+  CA-9 / CA-10 (coordination subspaces, migration gate) do not
+  cross the transport boundary and are unaffected.
 
 ### Assumption Verification
 
