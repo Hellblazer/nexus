@@ -206,9 +206,12 @@ def _jittered_backoff_seconds(*, attempt: int, initial: float, cap: float) -> fl
 
     Capped exponential (``initial * 2**attempt``, clipped to ``cap``) with
     ±25 % uniform jitter on top. RDR-114 §Decision Rationale calibrated
-    the defaults so 10 attempts × max 8 s ≈ a 30 s budget that comfortably
-    covers a systemd ``RestartSec=5s`` crash-restart cycle and matches
-    launchd ``ThrottleInterval=10s``.
+    the defaults so 10 attempts at the documented cap give a nominal
+    sum of ~48 s (the geometric series
+    ``0.25 + 0.5 + 1 + 2 + 4 + 8 + 8 + 8 + 8 + 8 = 47.75 s``), spanning
+    ~36-60 s with ±25 % jitter. That window comfortably covers a
+    systemd ``RestartSec=5s`` crash-restart cycle and matches launchd's
+    ``ThrottleInterval=10s``.
 
     Module-level so the jitter spread test (RDR §Test Plan) can seed
     ``random`` directly and assert reproducible behaviour.
@@ -954,7 +957,9 @@ class T2Client:
                 attempt (before jitter). Default 0.25.
             max_backoff_seconds: Cap on the per-attempt backoff (before
                 jitter). Default 8.0. Total budget for 10 attempts at
-                these defaults is roughly 30 s.
+                these defaults is the geometric sum
+                ``0.25 + 0.5 + 1 + 2 + 4 + 8 + 8 + 8 + 8 + 8 = 47.75 s``
+                nominal (range ~36-60 s with ±25 % jitter).
 
         Yields:
             Event dicts with keys: ``cursor``, ``subspace``, ``op``,

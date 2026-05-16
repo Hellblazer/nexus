@@ -188,8 +188,9 @@ recoverable, not silent.
 - **EventStream reconnect contract** (nexus-wfko, RDR-114 Step 1).
   `T2Client.event_stream` now wraps subscribe in a reconnect loop:
   capped exponential backoff (initial 0.25 s, cap 8 s, max 10
-  attempts) with ±25 % uniform jitter, about 30 s total budget,
-  cursor-driven resumption via `since_cursor=last`. Delivery is
+  attempts) with ±25 % uniform jitter, ~48 s nominal budget (range
+  36-60 s with jitter), cursor-driven resumption via
+  `since_cursor=last`. Delivery is
   **at-least-once**: callers requiring exactly-once must dedup
   via the `action_idempotency` table (RDR-111 / nexus-8wvs) keyed
   on `tuple_id`. New typed exception `EventStreamUnavailable`
