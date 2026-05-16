@@ -1466,7 +1466,7 @@ against path-traversal exploits via crafted args. Streaming via
 ### t2 install / uninstall
 
 ```
-nx daemon t2 install --autostart
+nx daemon t2 install --autostart [--force]
 nx daemon t2 uninstall --autostart
 ```
 
@@ -1478,6 +1478,24 @@ bootstrap gui/$UID`. On Linux: writes
 enable --now nexus-t2.service`. The plist's `KeepAlive: Crashed` and
 the unit's `SuccessExitStatus=143` cooperate so `nx daemon t2 stop`
 does not trigger an instant respawn.
+
+| Flag | Description |
+|------|-------------|
+| `--autostart` | Required. Selects the autostart install mode. |
+| `--force` | Treat supervisor activation failures (`launchctl` / `systemctl` exit non-zero, or binary missing on PATH) as warnings instead of errors. The plist/unit file is still written. Useful in CI or shells without a GUI session where `launchctl bootstrap` cannot complete. |
+
+Exit codes: `0` on success or on activation failure with `--force`;
+`1` if the plist/unit file was written but supervisor activation
+failed without `--force` (so CI / scripts that check `$?` see the
+failure instead of silently continuing with non-functional autostart).
+
+Daemon logging: the launchd plist and systemd unit append daemon
+stderr to `__LOG_DIR__/nexus-t2.log` (and `.err`). That file is the
+supervisor crash-diagnostics stream and is not rotated by launchd /
+systemd. The bounded primary daemon log is
+`~/.config/nexus/logs/daemon.log` (10 MB rotation, 5 backups), where
+steady-state telemetry (retention sweep, RPC accept, binding watcher
+reactions) lands via the in-process `RotatingFileHandler`.
 
 ### t2 subspace add
 

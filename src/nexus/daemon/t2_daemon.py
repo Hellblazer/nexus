@@ -607,6 +607,11 @@ class T2Daemon:
         # Started in start(); cancelled in stop().
         self._retention_task: asyncio.Task | None = None  # type: ignore[type-arg]
 
+        # nexus-r7dy: startup-sweep future (dispatched in start() via
+        # run_in_executor). Held so stop() can wait for it briefly during
+        # graceful shutdown without re-entering it.
+        self._startup_sweep_future: asyncio.Future[Any] | None = None
+
         # nexus-9eiw (RDR-111 §Phase 2 Step 6): binding watcher reaction loop.
         # Constructed in start() when NX_COCKPIT_BINDINGS_DISABLE is not set
         # and at least one binding profile is loaded. Stopped in stop().
@@ -724,11 +729,15 @@ class T2Daemon:
 
         # nexus-kk9h: run one retention sweep at startup and schedule a
         # recurring 6-hour sweep. Done after sockets bind so clients can
-        # connect immediately; the sweep itself is short and SQLite-only.
-        try:
-            self._run_retention_sweep_sync()
-        except Exception as exc:  # pragma: no cover — defensive
-            _log.warning("retention_sweep_startup_failed", error=str(exc))
+        # connect immediately. nexus-r7dy: dispatch the startup sweep via
+        # ``run_in_executor`` and do not await it; on a ``tuples.db`` with
+        # weeks of expired rows the DELETE can block socket-bind completion
+        # for seconds-to-minutes. The future is held only so the daemon
+        # can surface failures in the scheduled-loop's warning path.
+        loop = asyncio.get_running_loop()
+        self._startup_sweep_future = loop.run_in_executor(
+            None, self._run_retention_sweep_sync
+        )
         self._retention_task = asyncio.create_task(self._retention_loop())
 
         # nexus-9eiw (RDR-111 §Phase 2 Step 6): start the binding watcher

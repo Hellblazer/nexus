@@ -2,6 +2,14 @@
 ## Installed by ``nx daemon t2 install --autostart``. The ``__NX_BIN__``
 ## placeholder is substituted at install time with the resolved absolute
 ## path to the ``nx`` executable.
+##
+## nexus-uuuh: ``StandardOutput`` / ``StandardError`` below capture the
+## supervisor stream — used for interpreter crash diagnostics. The
+## bounded primary daemon log is at ``~/.config/nexus/logs/daemon.log``
+## (10 MB rotation, 5 backups, written via
+## nexus.logging_setup.configure_logging("daemon")). systemd-journald
+## or ``append:`` capture has no built-in rotation; the rotated log is
+## the canonical source of recent events.
 
 [Unit]
 Description=Nexus T2 daemon (memory + tuplespace)

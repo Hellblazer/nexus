@@ -86,11 +86,19 @@ def start_cmd(config_dir_str: str | None, foreground: bool) -> None:
     With --foreground the process blocks until SIGTERM or SIGINT.
     Without --foreground (default) the process daemonises and returns
     immediately with the discovery JSON printed to stdout.
+
+    nexus-uuuh: configures a RotatingFileHandler at
+    ``~/.config/nexus/logs/daemon.log`` (10 MB, 5 backups). The
+    launchd/systemd-captured stderr stream becomes a crash-diagnostics
+    log only; steady-state telemetry is bounded by the rotation here.
     """
     from nexus.daemon.subspace_registry import RegistryStore
     from nexus.daemon.t2_daemon import T2Daemon
     from nexus.daemon.tuplespace_service import TuplespaceService
     from nexus.db.t2 import T2Database
+    from nexus.logging_setup import configure_logging
+
+    configure_logging("daemon")
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     memory_db_path = config_dir / "memory.db"
@@ -728,7 +736,18 @@ def _autostart_filename() -> str:
         "unit on Linux) so the T2 daemon starts at login / boot."
     ),
 )
-def install_cmd(autostart: bool) -> None:
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help=(
+        "Treat supervisor activation failures (launchctl/systemctl exit "
+        "non-zero, or binary missing on PATH) as warnings instead of "
+        "errors. The plist/unit file is still written. Useful for CI "
+        "or shells without a GUI session where bootstrap fails."
+    ),
+)
+def install_cmd(autostart: bool, force: bool) -> None:
     """Install the T2 daemon autostart entry for the current user.
 
     macOS: writes ~/Library/LaunchAgents/com.nexus.t2.plist and bootstraps
@@ -736,6 +755,13 @@ def install_cmd(autostart: bool) -> None:
 
     Linux: writes ~/.config/systemd/user/nexus-t2.service and enables it
     via ``systemctl --user enable --now nexus-t2.service``.
+
+    Exit codes:
+      0 - install + activation both succeeded, or activation failed under
+          ``--force`` (warning emitted, file still on disk).
+      1 - file installed but supervisor activation failed (no ``--force``).
+          Operators or CI scripts that check ``$?`` see the failure and can
+          react instead of silently continuing with non-functional autostart.
     """
     if not autostart:  # pragma: no cover -- click enforces required=True
         raise click.UsageError("--autostart is required")
@@ -764,20 +790,25 @@ def install_cmd(autostart: bool) -> None:
         cmd = ["launchctl", "bootstrap", f"gui/{uid}", str(dest)]
     else:
         cmd = ["systemctl", "--user", "enable", "--now", template_name]
+    label = "Warning" if force else "Error"
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError as exc:
         click.echo(
-            f"Warning: {cmd[0]} not found on PATH; file installed but not activated ({exc}).",
+            f"{label}: {cmd[0]} not found on PATH; file installed but not activated ({exc}).",
             err=True,
         )
+        if not force:
+            sys.exit(1)
         return
     if result.returncode != 0:
         click.echo(
-            f"Warning: {' '.join(cmd)} exited {result.returncode}: "
+            f"{label}: {' '.join(cmd)} exited {result.returncode}: "
             f"{result.stderr.strip() or result.stdout.strip()}",
             err=True,
         )
+        if not force:
+            sys.exit(1)
         return
     click.echo(f"Activated via: {' '.join(cmd)}")
 
