@@ -147,6 +147,27 @@ The `nx` command provides direct access to all storage tiers, indexing, and sear
 
 Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md).
 
+## Qwen offload (optional)
+
+Nexus can offload selected LLM workloads onto a local Qwen3.6-35B-A3B coprocessor running behind the [qwen-coprocessor-stack](https://github.com/Hellblazer/qwen-coprocessor-stack) supervisor. The coprocessor is opt-in across three call-site tiers: bundleable operators (already qwen-default), named operator-tier sites (`topic_labeler`, `plan_miss_planner`), the aspect extractor (`nx enrich aspects`), and tier-B agentic tools (`nx_enrich_beads`, `nx_tidy`, `nx_plan_audit`). Claude remains the default everywhere except the 10 bundleable operators; nothing changes unless you set the env knobs below.
+
+```bash
+# Operator-tier — schema-bounded oneshot, low risk
+export NEXUS_DISPATCH_BACKEND=auto
+export NEXUS_DISPATCH_QWEN_OPERATORS=topic_labeler,plan_miss_planner
+
+# Aspect extractor — pair with the v2 prompt
+export NEXUS_ASPECT_BACKEND=qwen
+export NEXUS_SCHOLARLY_PAPER_VERSION=v2
+
+# Tier-B agentic — enrich + tidy on qwen; nx_plan_audit stays on claude
+export NEXUS_TIER_B_DISPATCHER=qwen_agent
+```
+
+**Bench summary (2026-05 session):** operator-tier 1.03× latency parity with 100% oracle agreement; aspect extractor 5–12× slower than claude but a clear cost-savings story (~$0.18/paper saved); tier-B mixed — `nx_enrich_beads` + `nx_tidy` viable on qwen, `nx_plan_audit` pinned to claude by default after a structural hallucination class survived prompt-tightening. Full evidence in the qwen-coprocessor-stack [`docs/integrations/qwen-offload-2026-05-session-summary.md`](https://github.com/Hellblazer/qwen-coprocessor-stack/blob/main/docs/integrations/qwen-offload-2026-05-session-summary.md).
+
+Per-knob detail, defaults, and the prerequisite Qwen Code extension wiring live in [Configuration § Qwen Offload](https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md#qwen-offload). Supervisor setup (install, backends, sessions, MCP wiring) lives in the [qwen-coprocessor-stack](https://github.com/Hellblazer/qwen-coprocessor-stack) repo.
+
 ## Documentation
 
 | Document | What it covers |

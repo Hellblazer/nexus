@@ -231,6 +231,84 @@ If no marker file is found and no command is configured, the test check is skipp
 
 **bd-close gate** (`on_close: true`): Fires before `bd close` or `bd done` commands. Advisory only — warns when no review marker found in T1 scratch (from `/nx:review-code`). Never blocks.
 
+## Qwen Offload
+
+Optional opt-in surface for routing selected LLM workloads onto a local Qwen3.6-35B-A3B coprocessor running behind the [qwen-coprocessor-stack](https://github.com/Hellblazer/qwen-coprocessor-stack) supervisor. Three call-site tiers are independently routable: bundleable operators (already qwen-default), named operator-tier sites (`topic_labeler`, `plan_miss_planner`), the aspect extractor, and tier-B agentic tools (`nx_enrich_beads`, `nx_tidy`, `nx_plan_audit`). Claude is the default everywhere except the 10 bundleable operators that were already migrated; nothing routes to qwen unless the relevant knob is set.
+
+Full bench evidence and per-call-site verdicts live in the qwen-coprocessor-stack [`docs/integrations/qwen-offload-2026-05-session-summary.md`](https://github.com/Hellblazer/qwen-coprocessor-stack/blob/main/docs/integrations/qwen-offload-2026-05-session-summary.md). Supervisor install + backend configuration lives in the same repo.
+
+### Prerequisite — Qwen Code extension (tier-B only)
+
+Tier-B routing (`NEXUS_TIER_B_DISPATCHER=qwen_agent`) spawns the qwen CLI with an `nx` extension that wires the `nx-mcp` MCP server into the session so qwen can call `memory_*`, `store_*`, etc. The extension manifest must exist at `~/.qwen/extensions/nx/qwen-extension.json`. The full snippet plus install instructions live in the qwen-coprocessor-stack [`docs/integrations/qwen-dispatch-nexus.md`](https://github.com/Hellblazer/qwen-coprocessor-stack/blob/main/docs/integrations/qwen-dispatch-nexus.md). Operator-tier and aspect-extractor routing do not need it — those paths use schema-bounded oneshot dispatch via `QWEN_BACKEND_URL` directly.
+
+### Operator-tier routing
+
+#### `NEXUS_DISPATCH_BACKEND`
+
+- **Default:** `auto`
+- **Allowed:** `claude` / `qwen` / `auto`
+- **Effect:** Global mode for the 10 bundleable operators and for named operator-tier call sites that opt into `pick_dispatcher_for(...)` (currently `topic_labeler` and `plan_miss_planner`). `auto` picks per-operator from bake-in routing tables; `claude` and `qwen` force-pin everything in scope.
+- **Bench:** Validated in nexus#623 (bundleables, 100% oracle agreement, 1.03× latency parity) and nexus#778/#779 (named call sites, 5/5 each).
+
+#### `NEXUS_DISPATCH_QWEN_OPERATORS` / `NEXUS_DISPATCH_CLAUDE_OPERATORS`
+
+- **Default:** unset
+- **Allowed:** comma-separated list of operator / call-site names (e.g. `topic_labeler,plan_miss_planner`)
+- **Effect:** Per-operator pin lists overlaid on `NEXUS_DISPATCH_BACKEND`. The CLAUDE list wins over the QWEN list when an operator appears in both. Empty / unset = inherit the global mode.
+- **Notes:** Recognised call-site names are the keys consumed by `pick_dispatcher_for(call_site)`; the canonical list is in the dispatcher module. Misspellings are silently ignored.
+
+#### `NEXUS_QWEN_CONCURRENCY`
+
+- **Default:** `1`
+- **Allowed:** positive integer
+- **Effect:** Module-level semaphore on `qwen_dispatch` — caps concurrent in-flight calls to the qwen backend so a single host with a single GPU does not get serialised in surprising ways. Raise only if the backend can genuinely serve concurrent requests.
+
+#### `QWEN_BACKEND_URL` / `QWEN_MODEL`
+
+- **Default:** supervisor-provided
+- **Effect:** OpenAI-compatible endpoint and model id used by `qwen_dispatch` (the schema-bounded oneshot path). Operators with the supervisor running on the default port will not normally set these; override when running against a non-default backend or model. Validated end-to-end in nexus#623.
+
+### Aspect extractor
+
+#### `NEXUS_ASPECT_BACKEND`
+
+- **Default:** `claude`
+- **Allowed:** `claude` / `qwen`
+- **Effect:** Selects the backend for `nx enrich aspects`. Same output schema, same downstream T2 enrichment path; the only operator-visible difference is the engine on the wire and the latency/cost profile.
+- **Bench:** Validated by spike_c (nexus#782, nexus#793) on the Grossberg-lab cognitive-modeling corpus (10 PDFs). Aspect on qwen is **5–12× slower** than claude; the win is cost (~$0.18/paper saved), not latency.
+- **Notes:** When set to `qwen`, pair with `NEXUS_SCHOLARLY_PAPER_VERSION=v2` — the v1 prompt has a small field-completeness gap that v2 closes.
+
+#### `NEXUS_SCHOLARLY_PAPER_VERSION`
+
+- **Default:** `v1`
+- **Allowed:** `v1` / `v2`
+- **Effect:** Aspect-extractor prompt revision. `v2` tightens the per-field schema and recovers the field-completeness gap qwen showed against v1.
+- **Bench:** Validated alongside `NEXUS_ASPECT_BACKEND=qwen` in nexus#790, nexus#793.
+- **Notes:** Recommended whenever `NEXUS_ASPECT_BACKEND=qwen`. Has no negative effect on claude — operators on claude can opt in too if they want the tighter schema.
+
+### Tier-B agentic tools
+
+#### `NEXUS_TIER_B_DISPATCHER`
+
+- **Default:** `claude`
+- **Allowed:** `claude` / `qwen_agent`
+- **Effect:** Global mode for tier-B agentic tools (`nx_enrich_beads`, `nx_tidy`, `nx_plan_audit`). `qwen_agent` routes through `qwen_agent_dispatch`, which spawns the qwen CLI with the `nx-mcp` extension active.
+- **Bench:** Validated by spike_d (nexus#797, generalized judge in nexus#804). `nx_enrich_beads` 3/3 PASS, `nx_tidy` 2/2 PASS, `nx_plan_audit` mixed (see per-tool override below).
+- **Notes:** Requires the Qwen Code extension at `~/.qwen/extensions/nx/qwen-extension.json` (see prerequisite above). Per-tool overrides win absolutely over this global setting.
+
+#### `NEXUS_TIER_B_NX_TIDY_DISPATCHER` / `NEXUS_TIER_B_NX_ENRICH_BEADS_DISPATCHER` / `NEXUS_TIER_B_NX_PLAN_AUDIT_DISPATCHER`
+
+- **Default:** inherits `NEXUS_TIER_B_DISPATCHER`, except `NX_PLAN_AUDIT` which is **pinned to `claude`** via the `TIER_B_CLAUDE_PINNED` constant regardless of the global mode (see caveat).
+- **Allowed:** `claude` / `qwen_agent`
+- **Effect:** Per-tool override. The override wins absolutely — if `NEXUS_TIER_B_DISPATCHER=qwen_agent` but `NEXUS_TIER_B_NX_TIDY_DISPATCHER=claude`, `nx_tidy` runs on claude.
+- **Caveat — `nx_plan_audit`:** Pinned to claude by default. Bench surfaced a structural hallucination class on qwen that prompt-tightening (nexus#810) did not fix; the `verification_method` enum (nexus#812) makes the failure mode addressable but does not eliminate it. The per-tool override surface (nexus#813) is provided so the pin can be lifted for re-benching — set `NEXUS_TIER_B_NX_PLAN_AUDIT_DISPATCHER=qwen_agent` only if you are deliberately re-running the spike.
+
+#### `QWEN_AGENT_SUPERVISOR`
+
+- **Default:** supervisor-provided
+- **Allowed:** command string (path to supervisor binary or `qwen` wrapper)
+- **Effect:** Command invoked by `qwen_agent_dispatch` to launch the qwen CLI session. Operators with the standard supervisor install will not normally set this; override when running a custom supervisor build or when the binary is not on `PATH`. Introduced in nexus#796.
+
 ## File Locations
 
 | File | Purpose |
