@@ -41,7 +41,6 @@ __all__ = [
     "QWEN_OPERATORS_DEFAULT",
     "CLAUDE_OPERATORS_PINNED",
     "pick_dispatcher",
-    "pick_dispatcher_for",
     "pick_dispatcher_for_bundle",
 ]
 
@@ -120,30 +119,6 @@ def pick_dispatcher(operator_name: str) -> DispatchBackend:
         return "claude"
     # mode == "claude" or unset: default Claude (preserves prior behavior).
     return "claude"
-
-
-def pick_dispatcher_for(call_site: str) -> DispatchBackend:
-    """Route a named non-operator call site through the same machinery.
-
-    Some ``claude_dispatch`` callers aren't bundleable operators —
-    e.g. ``taxonomy_cmd._generate_labels_batch`` (topic labeler) and
-    the inline plan-miss planner. They still benefit from per-site
-    routing so the operator can flip them to Qwen once bench evidence
-    lands, without a code change.
-
-    Semantics: identical to :func:`pick_dispatcher`. The two per-call
-    env vars (``NEXUS_DISPATCH_QWEN_OPERATORS`` /
-    ``NEXUS_DISPATCH_CLAUDE_OPERATORS``) accept call-site names too —
-    "what to route" is the same surface whether it's an operator or a
-    call site, so a separate env var would be bloat.
-
-    Because call sites are not in :data:`QWEN_OPERATORS_DEFAULT`, the
-    auto-mode unknown-name branch routes them to claude — cautious-by-
-    default, matching #623's rollout posture. Opting one site into
-    Qwen is a one-env-var flip
-    (``NEXUS_DISPATCH_QWEN_OPERATORS=<call_site>``).
-    """
-    return pick_dispatcher(call_site)
 
 
 def pick_dispatcher_for_bundle(tools: Iterable[str]) -> DispatchBackend:
