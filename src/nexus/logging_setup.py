@@ -43,7 +43,7 @@ def _resolve_level(mode: str, verbose: bool) -> int:
 
 
 def configure_logging(
-    mode: Literal["cli", "console", "mcp", "hook", "watchdog"],
+    mode: Literal["cli", "console", "mcp", "hook", "watchdog", "daemon"],
     verbose: bool = False,
 ) -> None:
     """Configure logging for the given nexus entry point.
@@ -58,10 +58,15 @@ def configure_logging(
     Modes:
       * ``cli``: stderr only, WARNING default. Kept legacy-compatible so
         the human-facing CLI does not gain noise from this change.
-      * ``console`` / ``mcp`` / ``hook`` / ``watchdog``: stderr +
-        RotatingFileHandler at ``<config_dir>/logs/<mode>.log``, INFO
-        default. Lifecycle events, tool dispatches, and structured
-        warnings now land in the log file.
+      * ``console`` / ``mcp`` / ``hook`` / ``watchdog`` / ``daemon``:
+        stderr + RotatingFileHandler at ``<config_dir>/logs/<mode>.log``,
+        INFO default. Lifecycle events, tool dispatches, and structured
+        warnings now land in the log file. ``daemon`` (nexus-uuuh) is the
+        bounded primary log for the T2 daemon — launchd/systemd capture
+        of stderr is retained for interpreter crash diagnostics, but
+        steady-state telemetry (retention sweep, RPC accept, binding
+        watcher reactions) is rotated here so the supervisor-captured
+        file does not grow unbounded.
 
     The level is overridable via the ``NEXUS_LOG_LEVEL`` env var; useful
     for one-off DEBUG runs without code changes.

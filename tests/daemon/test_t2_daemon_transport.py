@@ -393,3 +393,46 @@ async def test_spawn_lock_prevents_double_start(config_dir: Path) -> None:
             await d2.start()
     finally:
         await d1.stop()
+
+
+# ---------------------------------------------------------------------------
+# nexus-r7dy: startup retention sweep is non-blocking
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_retention_sweep_is_non_blocking(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``start()`` must not await the startup retention sweep (nexus-r7dy).
+
+    Pre-fix, the sweep ran synchronously inline. On a ``tuples.db`` with weeks
+    of expired rows that DELETE blocked socket binding completion.
+
+    Post-fix, the sweep is dispatched via ``loop.run_in_executor`` without
+    being awaited, so ``start()`` returns promptly while the sweep runs in
+    the daemon's default executor.
+    """
+    import threading
+
+    sweep_called = threading.Event()
+    can_finish = threading.Event()
+    sweep_finished = threading.Event()
+
+    def _slow_sweep(self):
+        sweep_called.set()
+        can_finish.wait(timeout=15.0)
+        sweep_finished.set()
+        return 0
+
+    monkeypatch.setattr(T2Daemon, "_run_retention_sweep_sync", _slow_sweep)
+    daemon = T2Daemon(config_dir=config_dir)
+    try:
+        await asyncio.wait_for(daemon.start(), timeout=5.0)
+        assert sweep_called.wait(timeout=2.0), "sweep was never dispatched"
+        assert not sweep_finished.is_set(), (
+            "start() should not have awaited the sweep to completion"
+        )
+    finally:
+        can_finish.set()
+        await daemon.stop()
