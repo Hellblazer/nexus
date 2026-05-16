@@ -41,6 +41,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tuples.db`, the hook-event subspace registry, and recent emission
   activity. Recommended after `nx upgrade` or plugin reinstall.
 
+### Added: RDR-114 daemon unavailability policy (2026-05-16)
+
+Plugin-side surface for RDR-114 (epic nexus-homw). The wheel ships
+the reconnect wrapper, the fail-closed gate, and the new typed
+exceptions; the plugin contributes operator-facing diagnostics.
+
+- **`nx doctor --check-bridge` extended** (nexus-6bad, RDR-114
+  Step 3): two new output sections. The first reports the bridge
+  fail-closed policy state, calls out `NX_BRIDGE_ALLOW_DIRECT_FALLBACK`
+  as an operator override when set, and warns when the conflicting
+  combination `NX_BRIDGE_DISABLE` plus `NX_BRIDGE_ALLOW_DIRECT_FALLBACK`
+  is set (the former exits first in `emit()` so the latter has no
+  effect). The second scans `~/.config/nexus/logs/daemon.log` for
+  `hook_bridge_emit_drop_rpc_failed` events within the last 24
+  hours and reports the count; missing log file is reported as a
+  clean state.
+- **Operator-facing env**: `NX_BRIDGE_ALLOW_DIRECT_FALLBACK=1`
+  restores the legacy fail-open path under daemon routing for
+  operators who knowingly accept the WAL-contention risk during
+  planned daemon downtime. Default is fail-closed.
+
+See root `CHANGELOG.md` for the full RDR-114 surface (reconnect
+wrapper, `T2Client(rpc_timeout_seconds=...)`, `EventStreamUnavailable`
+and `RpcTimeoutError` typed exceptions, drop event name).
+
 ## [4.32.12] - 2026-05-13
 
 Plugin version aligned with conexus 4.32.12. No plugin-side changes
