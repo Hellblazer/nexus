@@ -148,12 +148,19 @@ exclude = [
 # from a uv-tool / pipx / Homebrew install. Editable installs use a
 # ``src/nexus/_resources/dt-scripts`` symlink back into ``dt/scripts``.
 "dt/scripts" = "nexus/_resources/dt-scripts"
+# RDR-112 (nexus-6w0c): ship the daemon autostart templates (launchd
+# plist + systemd user unit) as package data so ``nx daemon t2 install
+# --autostart`` can resolve them via importlib.resources on PyPI / uv
+# tool / pipx installs. Editable installs see the
+# ``src/nexus/_resources/daemon`` symlink back into ``nx/daemon``.
+"nx/daemon" = "nexus/_resources/daemon"
 
 [tool.hatch.build.targets.sdist]
 include = [
     "src",
     "nx/plans",
     "nx/tuplespace",
+    "nx/daemon",
     "dt/scripts",
     "README.md",
     "LICENSE",
