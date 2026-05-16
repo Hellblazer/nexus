@@ -435,12 +435,20 @@ def out(
         metadata=meta,
     )
 
-    # SQLite second.  INSERT OR IGNORE for idempotency (same tid = same content).
+    # SQLite second.  Upsert keyed on id: a content-identical refire refreshes
+    # created_at/expires_at so the retention sweeper (nexus-kk9h) does not
+    # expire the row based on the first fire's clock (nexus-i4kd, RDR-111).
+    # Claim state (claim_state, claimant, claim_id, claim_expires_at) and
+    # tombstone state (consumed_at, consumed_by) are NOT touched: an in-flight
+    # claim survives a refire untouched.  Single statement => no race window.
     conn.execute(
-        "INSERT OR IGNORE INTO tuples "
+        "INSERT INTO tuples "
         "(id, subspace, template_name, content, dimensions_json, embed_text, "
         " match_text, created_at, expires_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET "
+        "    created_at = excluded.created_at, "
+        "    expires_at = excluded.expires_at",
         (tid, subspace, schema.name, content, dims_json, embed_text, mt or None, now, expires_at),
     )
     conn.commit()
