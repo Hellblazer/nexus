@@ -70,9 +70,7 @@ Retry policy (audit F8):
 """
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import random
 import re
 import subprocess
@@ -1069,13 +1067,9 @@ def _retry_subprocess_batch(
     null-out). Returns the outer dict ``{"papers": [...]}`` on
     success, ``None`` on final failure.
     """
-    backend = _pick_aspect_backend()
-    invoker = (
-        _invoke_once_batch_qwen if backend == "qwen" else _invoke_once_batch
-    )
     for attempt in range(_RETRY_ATTEMPTS):
         try:
-            return invoker(prompt, timeout=timeout)
+            return _invoke_once_batch(prompt, timeout=timeout)
         except _TransientFailure as exc:
             _log.debug(
                 "aspect_extractor_batch_transient_failure",
@@ -1221,147 +1215,6 @@ def _build_record_from_entry(
     )
 
 
-# ── Backend selection (Path B parallel adapter) ──────────────────────────────
-
-
-_ASPECT_BACKEND_ENV = "NEXUS_ASPECT_BACKEND"
-_ASPECT_BACKEND_DEFAULT = "claude"
-_ASPECT_BACKEND_VALID = ("claude", "qwen")
-
-# Permissive schemas for the qwen path. The aspect prompt was authored
-# against ``claude -p`` which doesn't take a schema, so we don't
-# fabricate field constraints here — the existing post-parse
-# validation in ``_build_record`` / ``_build_record_from_entry``
-# still applies. The schema is required by ``qwen_dispatch`` solely
-# to render the system-prompt JSON contract.
-_QWEN_ASPECT_SCHEMA_SINGLE: dict[str, Any] = {"type": "object"}
-_QWEN_ASPECT_SCHEMA_BATCH: dict[str, Any] = {
-    "type": "object",
-    "properties": {"papers": {"type": "array"}},
-    "required": ["papers"],
-}
-
-
-def _pick_aspect_backend() -> str:
-    """Resolve the aspect-extractor backend from ``NEXUS_ASPECT_BACKEND``.
-
-    Values: ``claude`` (default) routes to the existing subprocess
-    invokers; ``qwen`` routes to ``qwen_dispatch``. Unknown values
-    fall back to ``claude`` with a warning log. This is the only
-    surface that decides between the two engines — the retry/backoff
-    wrapper is shared.
-    """
-    raw = os.environ.get(_ASPECT_BACKEND_ENV)
-    if raw is None or raw == "":
-        return _ASPECT_BACKEND_DEFAULT
-    val = raw.strip().lower()
-    if val in _ASPECT_BACKEND_VALID:
-        return val
-    _log.warning(
-        "aspect_extractor_unknown_backend",
-        requested=raw,
-        fallback=_ASPECT_BACKEND_DEFAULT,
-        valid=_ASPECT_BACKEND_VALID,
-    )
-    return _ASPECT_BACKEND_DEFAULT
-
-
-def _dispatch_qwen_sync(
-    prompt: str,
-    schema: dict[str, Any],
-    *,
-    timeout: float,
-    operator_name: str,
-) -> dict[str, Any]:
-    """Run ``qwen_dispatch`` from a synchronous caller, translating
-    its exceptions into the local ``_TransientFailure`` /
-    ``_HardFailure`` taxonomy so the existing retry wrapper applies
-    without modification.
-
-    Exception mapping:
-
-    * ``QwenOperatorTimeoutError`` → ``_TransientFailure`` (HTTP
-      timeout is retriable at this layer).
-    * ``QwenOperatorOutputError`` → ``_HardFailure`` (qwen_dispatch
-      already retried JSON-parse internally; further retries here
-      won't reshape the model output).
-    * ``QwenOperatorError`` (other) → ``_TransientFailure`` for 5xx
-      backend errors, ``_HardFailure`` otherwise.
-    * Any unexpected exception → ``_HardFailure`` (don't silently
-      retry the unknown).
-    """
-    # Lazy import: avoids httpx + qwen_dispatch module load on the
-    # default (claude) path. Resolve via the module so tests that
-    # monkeypatch ``qwen_dispatch.qwen_dispatch`` are honoured.
-    from nexus.operators import qwen_dispatch as _qd_mod
-    QwenOperatorError = _qd_mod.QwenOperatorError
-    QwenOperatorOutputError = _qd_mod.QwenOperatorOutputError
-    QwenOperatorTimeoutError = _qd_mod.QwenOperatorTimeoutError
-
-    try:
-        return asyncio.run(
-            _qd_mod.qwen_dispatch(
-                prompt,
-                schema,
-                timeout=timeout,
-                operator_name=operator_name,
-            )
-        )
-    except QwenOperatorTimeoutError as exc:
-        raise _TransientFailure(f"qwen timeout: {exc}") from exc
-    except QwenOperatorOutputError as exc:
-        raise _HardFailure(f"qwen output parse exhausted: {exc}") from exc
-    except QwenOperatorError as exc:
-        msg = str(exc)
-        # Classify 5xx as transient; anything else (4xx, shape
-        # mismatch) as hard.
-        if "non-2xx (5" in msg:
-            raise _TransientFailure(f"qwen 5xx: {exc}") from exc
-        raise _HardFailure(f"qwen error: {exc}") from exc
-
-
-def _invoke_once_qwen(prompt: str) -> dict:
-    """Qwen-backed analogue of :func:`_invoke_once`. Returns the parsed
-    JSON dict on success. Raises ``_TransientFailure`` /
-    ``_HardFailure`` per the same taxonomy as the subprocess path.
-
-    No outer ``{"result": ...}`` envelope to unwrap — ``qwen_dispatch``
-    already returns the parsed inner dict. Post-parse validation
-    (top-level must be a dict) mirrors the subprocess path.
-    """
-    parsed = _dispatch_qwen_sync(
-        prompt,
-        _QWEN_ASPECT_SCHEMA_SINGLE,
-        timeout=180.0,
-        operator_name="aspect_single",
-    )
-    if not isinstance(parsed, dict):
-        raise _HardFailure(
-            f"qwen json top-level not a dict (got {type(parsed).__name__})"
-        )
-    return parsed
-
-
-def _invoke_once_batch_qwen(prompt: str, *, timeout: int) -> dict:
-    """Qwen-backed analogue of :func:`_invoke_once_batch`. Asserts the
-    response contains a ``papers`` array — same hard-failure contract
-    as the subprocess batch path.
-    """
-    parsed = _dispatch_qwen_sync(
-        prompt,
-        _QWEN_ASPECT_SCHEMA_BATCH,
-        timeout=float(timeout),
-        operator_name="aspect_batch",
-    )
-    if not isinstance(parsed, dict):
-        raise _HardFailure(
-            f"qwen batch top-level not a dict (got {type(parsed).__name__})"
-        )
-    if not isinstance(parsed.get("papers"), list):
-        raise _HardFailure("qwen batch response missing 'papers' array")
-    return parsed
-
-
 # ── Subprocess invocation + retry loop ───────────────────────────────────────
 
 
@@ -1372,11 +1225,9 @@ def _retry_subprocess(
     """Invoke the Claude CLI with retry. Return the parsed JSON dict on
     success, or ``None`` after final failure.
     """
-    backend = _pick_aspect_backend()
-    invoker = _invoke_once_qwen if backend == "qwen" else _invoke_once
     for attempt in range(_RETRY_ATTEMPTS):
         try:
-            return invoker(prompt)
+            return _invoke_once(prompt)
         except _TransientFailure as exc:
             _log.debug(
                 "aspect_extractor_transient_failure",
