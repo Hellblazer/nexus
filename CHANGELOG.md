@@ -178,6 +178,58 @@ Out of scope here, tracked for Phase 2/3:
   `SuccessExitStatus=143` cooperate so `nx daemon t2 stop` is a
   clean SIGTERM that does not flap-respawn.
 
+### Added: RDR-114 daemon unavailability policy (2026-05-16)
+
+Implements RDR-114 (epic nexus-homw). Unifies daemon-unavailability
+behaviour across both client surfaces (subscribers and emitters):
+in daemon-routing mode, daemon unavailability is loud and
+recoverable, not silent.
+
+- **EventStream reconnect contract** (nexus-wfko, RDR-114 Step 1).
+  `T2Client.event_stream` now wraps subscribe in a reconnect loop:
+  capped exponential backoff (initial 0.25 s, cap 8 s, max 10
+  attempts) with ±25 % uniform jitter, about 30 s total budget,
+  cursor-driven resumption via `since_cursor=last`. Delivery is
+  **at-least-once**: callers requiring exactly-once must dedup
+  via the `action_idempotency` table (RDR-111 / nexus-8wvs) keyed
+  on `tuple_id`. New typed exception `EventStreamUnavailable`
+  (with `last_cursor` attribute) raised on budget exhaustion;
+  `reconnect=False` preserves the legacy single-subscribe
+  semantics.
+- **T2Client RPC timeout** (nexus-wcs9, RDR-114 Step 4).
+  `T2Client(rpc_timeout_seconds=5.0)` applies a socket timeout to
+  every recv. A hung daemon (UDS accepts but never replies) now
+  surfaces as the new typed exception `RpcTimeoutError`,
+  deliberately NOT a subclass of `ConnectionRefusedError` or
+  `OSError` so the reconnect wrapper can distinguish hung-daemon
+  from gone-daemon. Cloud-mode operators with high Voyage RTT
+  can override per-RPC.
+- **Bridge fail-closed default** (nexus-jokh, RDR-114 Step 2).
+  Under the shipped routing default (`_ROUTING_TBA == "daemon"`),
+  the bridge no longer silently falls back to a direct SQLite
+  open when the daemon RPC fails. A drop is logged as the
+  structlog event `hook_bridge_emit_drop_rpc_failed` with the
+  hook type, subspace, and underlying error class. The hook's
+  RF-2 transparent-allow stdout is unchanged so user-facing tools
+  never see the drop. Operators who knowingly accept the WAL-
+  contention risk during planned daemon downtime can opt in via
+  the env `NX_BRIDGE_ALLOW_DIRECT_FALLBACK=1`. The gate is keyed
+  off `_ROUTING_TBA`, NOT `NX_STORAGE_MODE`, so the rule fires
+  uniformly across operator workflows whether or not the storage
+  mode env is exported.
+- **`nx doctor --check-bridge` operator surfacing** (nexus-6bad,
+  RDR-114 Step 3). Two new fields: (a) bridge fail-closed policy
+  state (default vs operator override; warns when both
+  `NX_BRIDGE_DISABLE` and `NX_BRIDGE_ALLOW_DIRECT_FALLBACK` are
+  set since the former exits first and the latter has no effect),
+  (b) recent `hook_bridge_emit_drop_rpc_failed` events from
+  `~/.config/nexus/logs/daemon.log` within the last 24 hours.
+
+RDR file: `docs/rdr/rdr-114-daemon-unavailability-policy.md`. Spike
+script preserved at
+`scripts/spikes/spike_rdr114_tuplespace_out_latency.py`
+(p99=48 ms local-mode, N=1000).
+
 ## [4.32.12] - 2026-05-13
 
 Patch on 4.32.11. Two CI-correctness fixes plus substantial RDR
