@@ -304,7 +304,8 @@ surfaces.
 records the last-seen cursor, catches close-side exceptions, and
 retries via `find_t2_daemon` + new subscribe with `since_cursor=last`.
 Retry policy: capped exponential backoff (250 ms × 2^N, max 8 s, max
-attempts 10 ≈ 30 s budget), jittered by ±25 % to avoid synchronised
+attempts 10; nominal sum ~48 s, range 36-60 s with jitter), jittered
+by ±25 % to avoid synchronised
 reconnect storms when multiple subscribers race the same daemon
 restart. After exhaustion the wrapper raises a typed
 `EventStreamUnavailable` exception with the last-seen cursor in the
@@ -443,21 +444,24 @@ fail-closed drop is observable (one log line per drop) where a
 silent fallback is not. The opt-in env gives operators a one-line
 escape hatch for planned downtime.
 
-**Bounded retry budget** (~30 s) because the daemon is intended to
-be HA-supervised (launchd / systemd KeepAlive + RestartSec). If the
-daemon is down for longer, that's an operator-attention event, not
-a thing the client should paper over. Supervisor-restart asymmetry
+**Bounded retry budget** (~48 s nominal, range 36-60 s with the
+±25 % jitter) because the daemon is intended to be HA-supervised
+(launchd / systemd KeepAlive + RestartSec). If the daemon is down
+for longer, that's an operator-attention event, not a thing the
+client should paper over. The 10-attempt geometric series
+``0.25 + 0.5 + 1 + 2 + 4 + 8 + 8 + 8 + 8 + 8 = 47.75 s`` (the
+attempts saturate at the 8 s cap from attempt 5 onward) gives the
+budget; jitter expands it to ~36-60 s. Supervisor-restart asymmetry
 note (Layer 3 gate finding):
 
 - **systemd**: `RestartSec=5s` + `SuccessExitStatus=143`. A clean
   SIGTERM does not trigger restart; a crash respawns after 5 s.
-  10 reconnect attempts × max 8 s backoff comfortably covers a
-  crash-restart cycle.
+  The ~48 s nominal budget comfortably covers a crash-restart cycle.
 - **launchd**: `KeepAlive.Crashed: true` (NOT unconditional
   KeepAlive). A clean SIGTERM is not supervised. A crash triggers
   respawn but launchd's default `ThrottleInterval` is 10 s, so a
   crash-restart cycle can be up to 10 s + daemon-init time. Under
-  the 30 s budget the client gets ~3 restart attempts before
+  the ~48 s budget the client gets 4-5 restart attempts before
   exhaustion. Operators who restart the daemon via `nx daemon t2
   stop && nx daemon t2 start` on macOS are responsible for
   starting it back themselves; planned restarts are not auto-
@@ -467,9 +471,9 @@ This calibration is sufficient for systemd-managed deployments and
 acceptable for the macOS interactive workflow. Tightening it would
 require either flipping the plist to unconditional `KeepAlive: true`
 (out of scope for RDR-114) or extending the retry budget. The
-30 s budget is the proposed default; callers needing different
-semantics can pass `max_reconnect_attempts` / `max_backoff_seconds`
-explicitly.
+~48 s nominal budget is the proposed default; callers needing
+different semantics can pass `max_reconnect_attempts` /
+`max_backoff_seconds` explicitly.
 
 ## Alternatives Considered
 
@@ -750,15 +754,17 @@ None. Both surfaces use existing modules.
    Chroma vector written through the bridge's own client.
 4. **Scenario**: Subscriber retry-budget exhaustion (daemon never
    starts).
-   **Expected**: `EventStreamUnavailable` raised after ~30 s with
-   cursor in the message.
+   **Expected**: `EventStreamUnavailable` raised after the budget
+   sum of 10 backoffs (~36-60 s with jitter) with cursor in the
+   message.
 
 ### Performance Expectations
 
-Reconnect budget bounded at ~30 s (10 attempts × max 8 s backoff).
-The wrapper's per-event overhead is one cursor assignment; negligible
-vs. the existing per-event JSON decode. Backoff jitter is 16 random
-floats per reconnect, well under any measurable cost.
+Reconnect budget bounded at ~48 s nominal, range 36-60 s with the
+±25 % jitter. The wrapper's per-event overhead is one cursor
+assignment; negligible vs. the existing per-event JSON decode.
+Backoff jitter is 16 random floats per reconnect, well under any
+measurable cost.
 
 ## Finalization Gate
 
@@ -883,9 +889,10 @@ Design pseudocode.
 
 **Significant 1: Supervisor restart asymmetry.** Added explicit
 note on launchd `KeepAlive.Crashed` (NOT unconditional) vs systemd
-`RestartSec=5s`. The 30 s reconnect budget covers 3 crash-restart
-cycles on macOS at default `ThrottleInterval=10s`; planned restarts
-on macOS are operator-driven. Affects Decision Rationale.
+`RestartSec=5s`. The ~48 s reconnect budget (geometric sum of the
+capped backoff series) covers 4-5 crash-restart cycles on macOS
+at default `ThrottleInterval=10s`; planned restarts on macOS are
+operator-driven. Affects Decision Rationale.
 
 **Significant 2: `NX_BRIDGE_DISABLE × NX_BRIDGE_ALLOW_DIRECT_FALLBACK`
 interaction.** Documented in the Technical Design docstring and in
@@ -964,6 +971,31 @@ significant, 0 observations. Both round-2 fixes landed cleanly:
   with Research Findings.
 
 Gate complete. Ready for `/nx:rdr-accept rdr-114`.
+
+### 2026-05-16, Post-implementation review round 2: budget math corrected
+
+After Phase 1 shipped (Steps 1-4 + review follow-ups + CHANGELOG),
+a second-pass code review (nx:code-review-expert dispatched manually)
+caught a conservative arithmetic error in the reconnect budget claim.
+
+The original docstring said "10 attempts × max 8 s ≈ a 30 s budget"
+which is arithmetically incoherent (10 × 8 = 80, not 30). The
+actual geometric series at the capped exponential defaults is
+``0.25 + 0.5 + 1 + 2 + 4 + 8 + 8 + 8 + 8 + 8 = 47.75 s`` nominal,
+expanding to ~36-60 s with ±25 % jitter.
+
+The error was conservative (operators get more retry budget than
+the docstring promised, never less), but the math was confusing
+to a future reader trying to verify calibration. Fixed in:
+
+- `src/nexus/daemon/t2_client.py` `_jittered_backoff_seconds` docstring
+- `src/nexus/daemon/t2_client.py` `event_stream` docstring
+- `CHANGELOG.md` Unreleased section RDR-114 entry
+- This RDR file (Approach + Decision Rationale + Test Plan +
+  Performance Expectations + Revision History round-1 entry)
+
+No code change: the implementation was always correct; only the
+prose around the calibration claim was wrong.
 
 
 
