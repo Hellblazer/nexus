@@ -6,6 +6,41 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added: RDR-110/111 user-facing surfaces
+
+- **Tuplespace skills**: seven `nx:tuplespace-*` cockpit skills land
+  with the ORB tuple substrate (nexus-90pe, PR #791) so operators
+  have Day-1 entry points for `out` / `read` / `take` / `ack` /
+  `nack` workflows without needing to invent prompts each time.
+- **`nx cockpit` CLI**: three subcommands (`status`, `show`,
+  `dashboard`) plus the `recent-events` / `active-claims` /
+  `active-bindings` panels (nexus-ut5r, PR #802).
+- **Hook bridge scripts**: seven `orb_bridge_*.py` scripts under
+  `hooks/scripts/` (PreToolUse, PostToolUse, Stop, SubagentStop,
+  UserPromptSubmit, Session, Notification) projecting Claude Code
+  hooks into the seven `hook_events/*` subspaces (nexus-y0nb, PR
+  #784). `EXPECTED_BRIDGE_API_VERSION` embedded in each script for
+  plugin/wheel version-compat guard (nexus-yeu8, PR #809).
+- **Binding profiles**: `tuplespace/builtin/bindings/profiles/`
+  ships a `default` profile with two reference bindings:
+  `post_tool_use_to_derived` (in-tuplespace reaction) and
+  `notification_log_marker` (structlog side effect). User-authored
+  profiles drop in alongside.
+- **Substrate YAMLs**: six coordination subspace YAMLs
+  (connection_manifest, layout_state, mailbox, barriers, locks,
+  events) plus the seven `hook_events/*` schemas now ship in the
+  wheel-packaged plugin (PR #803).
+- **`nx daemon t2 {install,uninstall} --autostart`**: launchd
+  (macOS) and systemd (Linux) autostart units for the T2 storage
+  daemon (nexus-6w0c, PR #808).
+
+### Added: operator diagnostics
+
+- **`nx doctor --check-bridge`**: RDR-111 hook bridge installability
+  check; verifies `CLAUDE_PLUGIN_ROOT`, the seven bridge scripts,
+  `tuples.db`, the hook-event subspace registry, and recent emission
+  activity. Recommended after `nx upgrade` or plugin reinstall.
+
 ## [4.32.12] - 2026-05-13
 
 Plugin version aligned with conexus 4.32.12. No plugin-side changes

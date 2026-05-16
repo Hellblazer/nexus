@@ -1191,6 +1191,310 @@ Exit codes:
 
 ---
 
+## nx tuplespace
+
+CLI surface for the ORB tuplespace (RDR-110). Subspaces are namespaced
+schemas (`tasks/<project>`, `locks/<resource>`, `hook_events/...`) and
+each tuple carries content plus a dimensions map validated against the
+subspace's YAML registry. Lifecycle: `out` posts; `read` browses without
+claiming; `take` claims with a lease; `ack` consumes; `nack` releases.
+
+```
+nx tuplespace list-subspaces
+nx tuplespace show-schema tasks/nexus
+nx tuplespace stats
+nx tuplespace out tasks/nexus '{"status":"open","priority":"P2","created_by":"hal"}' --content "fix the parser bug"
+nx tuplespace read tasks/nexus --query "parser bug"
+nx tuplespace take tasks/nexus --claimant agent-A --query "parser bug"
+nx tuplespace ack <claim-id> --claimant agent-A
+nx tuplespace nack <claim-id> --claimant agent-A
+```
+
+**Daemon-mode note**: under `NX_STORAGE_MODE=daemon` the daemon owns
+`tuples.db` as the single SQLite writer (RDR-112). Mutating subcommands
+(`out`, `take`, `ack`, `nack`) refuse to open a competing connection and
+exit with an explanatory error directing callers to the daemon RPC.
+Read-only introspection (`list-subspaces`, `show-schema`, `stats`)
+loads the registry from YAML and remains available.
+
+### list-subspaces
+
+```
+nx tuplespace list-subspaces [--json]
+```
+
+Lists every registered subspace name plus its tier and content type.
+`--json` emits machine-readable output for tooling.
+
+### show-schema
+
+```
+nx tuplespace show-schema SUBSPACE [--json]
+```
+
+Dumps the resolved schema for a subspace: dimensions (with types and
+required-flag), `take` config (mode, floor, margin, default lease),
+`read` defaults, retention. Useful before calling `out` to know which
+dimensions you must provide. `--json` for tooling.
+
+### stats
+
+```
+nx tuplespace stats [SUBSPACE] [--json]
+```
+
+Row counts plus claim-state breakdown. Omit `SUBSPACE` for an overview
+across the whole tuplespace.
+
+### out
+
+```
+nx tuplespace out SUBSPACE DIMENSIONS_JSON [--content TEXT] [--match-text TEXT] [--ttl-seconds N]
+```
+
+Post a tuple. `DIMENSIONS_JSON` is a JSON object whose keys match the
+subspace's required dimensions. `--content` is the body text; some
+subspaces (`embed_from: dimensions:KEY`) embed a dimension instead, in
+which case `--content` is stored verbatim and never embedded.
+`--match-text` overrides the embed source. `--ttl-seconds` sets an
+explicit expiry; omitted, the subspace `retention_seconds` default
+applies.
+
+### read
+
+```
+nx tuplespace read SUBSPACE [--query TEXT] [--where JSON] [--floor F] [-n N]
+```
+
+Browse unclaimed, unconsumed tuples. `--query` runs the semantic search
+(omit for any-tuple browse). `--where` is a JSON filter dict over
+dimension values. `--floor` overrides the subspace floor; `-n`
+overrides the default result count. Read does not modify state.
+
+### take
+
+```
+nx tuplespace take SUBSPACE --claimant ID [--query TEXT] [--where JSON] [--floor F] [--lease-seconds N]
+```
+
+Claim the top match for exclusive processing. Returns the tuple plus a
+`claim_id` the caller must use for `ack`/`nack`. `--claimant` is the
+agent identifier; same-claimant re-takes during the active lease
+return the existing claim (idempotent retake, CA-1/CA-2). Lease defaults
+to the subspace setting; expiry rolls the claim back to unclaimed.
+
+### ack
+
+```
+nx tuplespace ack CLAIM_ID --claimant ID
+```
+
+Mark the claimed tuple as consumed. `--claimant` must match the
+claimant from `take`; mismatch fails fast.
+
+### nack
+
+```
+nx tuplespace nack CLAIM_ID --claimant ID
+```
+
+Release the claim without consuming. The tuple returns to the unclaimed
+pool so another claimant (or the same one) can `take` it again. Use
+when an agent decides not to act on a tuple after inspection.
+
+---
+
+## nx cockpit
+
+Read-only operator views over the tuplespace state (RDR-111). The
+cockpit is observation-only: it never writes tuples or fires bindings
+on its own (that is the daemon's binding watcher). Panels feed off
+`tuples.db` and surface the agentic substrate's working memory in a
+form humans can scan.
+
+```
+nx cockpit status                       # one-line activity summary
+nx cockpit show recent-events --limit 50
+nx cockpit show active-claims
+nx cockpit show active-bindings
+nx cockpit dashboard                    # multi-panel view
+```
+
+### status
+
+```
+nx cockpit status [--window 5m|1h|24h] [--db-path PATH]
+```
+
+One-line summary of cockpit activity over the chosen window: event
+count, active claims, recent bindings firings. `--db-path` overrides
+the default `tuples.db` location for testing.
+
+### show
+
+```
+nx cockpit show PANEL [--limit N] [--json]
+```
+
+Available panels:
+
+- `recent-events`: last N rows from the events table
+  (subspace, op, tuple_id, timestamp, category).
+- `active-claims`: every tuple currently claimed (claimant, claim_id,
+  lease expiry, subspace).
+- `active-bindings`: loaded binding profiles and their match
+  predicates (no firing history, just the active routing table).
+
+`--limit` defaults to 25; `--json` emits structured output.
+
+### dashboard
+
+```
+nx cockpit dashboard [--limit N] [--width N]
+```
+
+Multi-panel view stacking recent events, active claims, and active
+bindings into a single screen-friendly layout. Honours the `COLUMNS`
+environment variable for terminal width; override explicitly with
+`--width`. Intended as the "left it running in a window" status view.
+
+---
+
+## nx daemon
+
+Manage the T2 storage daemon (RDR-112). The daemon owns the SQLite
+handles for `memory.db` and `tuples.db` as the single writer; clients
+reach it via JSON-RPC over UDS (primary, mode 0600 with peer-cred
+enforced) or loopback TCP (fallback, 127.0.0.1 only). When
+`NX_STORAGE_MODE=daemon` is set the CLI and MCP route through this
+process rather than opening direct SQLite connections.
+
+```
+nx daemon t2 start --foreground       # run in foreground (recommended)
+nx daemon t2 stop                     # SIGTERM the running daemon
+nx daemon t2 info --json              # discovery file contents
+nx daemon t2 install --autostart      # launchd / systemd autostart
+```
+
+### t2 start
+
+```
+nx daemon t2 start [--config-dir DIR] [--foreground]
+```
+
+Bind UDS+TCP transports, run migrations against `memory.db` and
+`tuples.db`, write the discovery file at
+`<config_dir>/t2_addr.<uid>`, and announce on stdout. `--foreground`
+blocks until SIGTERM / SIGINT (the reliable path until the background
+fork mode ships). Without `--foreground` the process exits as soon as
+the discovery announce completes; background mode is currently
+best-effort, so prefer the autostart unit for production.
+
+### t2 stop
+
+```
+nx daemon t2 stop [--config-dir DIR]
+```
+
+Reads the discovery file, sends SIGTERM to the daemon PID, and exits.
+The daemon performs a graceful drain (cancel retention sweeper, close
+binding watcher, close servers, unlink discovery file) before exiting.
+
+### t2 info
+
+```
+nx daemon t2 info [--json] [--config-dir DIR]
+```
+
+Print the discovery file's contents: UDS path, TCP host/port, PID,
+start time, daemon version, protocol version, subspace schema digest.
+`--json` for tooling.
+
+### t2 exec
+
+```
+nx daemon t2 exec --raw "SQL" [--json] [--config-dir DIR]
+```
+
+Run a read-only SQL statement against the daemon's `memory.db`. Admin
+op, UDS-only (refuses over TCP). The daemon opens a `mode=ro`
+connection and caps rows at 50000 with a post-execution audit hash.
+`--json` emits structured output.
+
+### t2 schema
+
+```
+nx daemon t2 schema [--tables NAME] [--indexes] [--fts] [--json] [--config-dir DIR]
+```
+
+Introspect the live schema on the daemon's `memory.db`. Defaults to
+tables only; `--indexes` includes index definitions, `--fts` includes
+FTS5 virtual tables. `--tables NAME` filters to one table. `--json` for
+tooling.
+
+### t2 peek
+
+```
+nx daemon t2 peek TABLE [--offset N] [--limit N] [--json] [--config-dir DIR]
+```
+
+Sample rows from a table on the daemon. `--limit` defaults to 20 and
+is clamped to 300 by the daemon (ChromaDB quota parity). `--offset`
+paginates. `--json` for tooling.
+
+### t2 stats
+
+```
+nx daemon t2 stats [--json] [--config-dir DIR]
+```
+
+Per-table row counts plus database file size. `--json` for tooling.
+
+### t2 export
+
+```
+nx daemon t2 export [--table NAME] --format {jsonl|csv} DEST [--config-dir DIR]
+```
+
+Stream rows out of `memory.db` for backup or migration. Admin op,
+UDS-only. `--table` exports one table; omit for all tables. `--format`
+picks the on-disk shape. `DEST` is the output file path; export refuses
+paths that traverse outside the operator's home as a defense-in-depth
+against path-traversal exploits via crafted args. Streaming via
+`fetchmany(256)` keeps memory bounded on large tables.
+
+### t2 install / uninstall
+
+```
+nx daemon t2 install --autostart
+nx daemon t2 uninstall --autostart
+```
+
+Install (or remove) the OS autostart entry so the T2 daemon starts at
+login or boot. On macOS: writes
+`~/Library/LaunchAgents/com.nexus.t2.plist` and runs `launchctl
+bootstrap gui/$UID`. On Linux: writes
+`~/.config/systemd/user/nexus-t2.service` and runs `systemctl --user
+enable --now nexus-t2.service`. The plist's `KeepAlive: Crashed` and
+the unit's `SuccessExitStatus=143` cooperate so `nx daemon t2 stop`
+does not trigger an instant respawn.
+
+### t2 subspace add
+
+```
+nx daemon t2 subspace add YAML_PATH [--config-dir DIR]
+```
+
+Register a new subspace schema from `YAML_PATH` via the daemon's
+`subspace_add` admin RPC. Admin op, UDS-only. The daemon validates the
+schema against the JSON Schema for subspace definitions plus the
+reserved-prefix list (`tuples/`, `daemon/`, `tasks/`, `mailbox/`,
+`hook_events/...`); duplicate names are rejected. On success the
+discovery file is rewritten so its `subspace_schema_digest` reflects
+the new registry state.
+
+---
+
 ## nx doctor
 
 Health check for all dependencies.
@@ -1259,6 +1563,12 @@ nx doctor --check-aspect-queue       # Surface RDR-089 aspect-extraction worker 
 ```
 
 The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `aspect_extraction_queue` row count plus per-status breakdown (`pending`, `processing`, `failed`, `completed`), the oldest non-completed `enqueued_at` as a lag indicator, and the top failed rows with their `last_error`. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring. Pre-RDR-089 databases (no queue table) report cleanly as "table not present" rather than erroring.
+
+```
+nx doctor --check-bridge             # Diagnose ORB hook-bridge installability (RDR-111)
+```
+
+The `--check-bridge` flag (introduced with RDR-111 hook bridge) verifies that the seven `orb_bridge_*.py` scripts can actually fire. A wheel-only install delivers no bridge: the scripts live in `$CLAUDE_PLUGIN_ROOT/hooks/scripts/` and require both the Python wheel AND the `nx` Claude Code plugin. The check reports: (1) `CLAUDE_PLUGIN_ROOT` is set, (2) all seven bridge scripts exist under it, (3) `~/.config/nexus/tuples.db` exists and is readable, (4) the seven hook-event subspace YAMLs resolve via the registry, (5) at least one tuple has been written in the last 24 hours (sanity that emission is actually working; set `CLAUDECODE` and unset `NX_BRIDGE_DISABLE` if zero). Recommended right after `nx upgrade` or after re-installing the plugin.
 
 ---
 
