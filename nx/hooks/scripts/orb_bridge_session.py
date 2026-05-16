@@ -28,6 +28,9 @@ if sys.version_info < (3, 12):
 
 _SUPPORTED = frozenset({"SessionStart", "SessionEnd"})
 
+# Plugin/wheel compat protocol (nexus-yeu8). See orb_bridge_pretooluse.py.
+EXPECTED_BRIDGE_API_VERSION = 1
+
 
 def main() -> None:
     raw = sys.stdin.read()
@@ -45,9 +48,16 @@ def main() -> None:
         hook_type = "SessionStart"
 
     try:
-        from nexus.cockpit.hook_bridge import configure_logging_to_stderr, emit, output_for_hook
+        from nexus.cockpit.hook_bridge import (
+            check_bridge_api_version,
+            configure_logging_to_stderr,
+            emit,
+            output_for_hook,
+        )
 
         configure_logging_to_stderr()
+        if not check_bridge_api_version(EXPECTED_BRIDGE_API_VERSION):
+            return
         emit(hook_type, payload)
 
         out = output_for_hook(hook_type)
