@@ -86,7 +86,7 @@ The substrate for both decisions already exists:
 - `action_idempotency` table (`src/nexus/db/migrations.py`,
   shipped as nexus-8wvs in PR #824), guards against
   at-least-once duplicate processing on the receive side.
-- `_BRIDGE_DISABLE` opt-out env (already wired by nexus-7zvp).
+- `NX_BRIDGE_DISABLE` opt-out env (already wired by nexus-7zvp).
 - `NX_STORAGE_MODE=daemon` env gate read by
   `reject_under_daemon_mode` (`src/nexus/db/__init__.py`).
 
@@ -737,7 +737,10 @@ None. Both surfaces use existing modules.
 ### Testing Strategy
 
 1. **Scenario**: Real-daemon SIGTERM + restart with active subscriber.
-   **Expected**: all events delivered exactly once across cursor.
+   **Expected**: all events delivered (at-least-once; no gaps in
+   cursor ordering; duplicates possible only if the caller crashes
+   between yield and cursor-persist, guarded via
+   `action_idempotency` when exactly-once is required by the caller).
 2. **Scenario**: Real-daemon stopped + bridge emit.
    **Expected**: structlog drop event, zero SQLite writes, zero
    Chroma writes.
@@ -918,4 +921,30 @@ driving the second insertion batch, to avoid a flaky race.
 
 Layer 1 (structure) and Layer 2 (assumption audit) both PASS. Ready
 for gate round 2.
+
+### 2026-05-16, Gate round 2 (Layer 3 substantive critic): BLOCKED, fixed inline
+
+Verdict from re-run of `/nx:rdr-gate rdr-114`: 1 critical and 2
+observations.
+
+**Critical 1: Residual "exactly once" in Validation Testing
+Strategy Scenario 1.** Round 1's at-least-once relabel was applied
+to Problem Statement, Key Discoveries, Day 2 table, and the round-1
+revision entry, but not to the Validation Testing Strategy at
+line 740. Fixed by replacing the expected outcome with the full
+at-least-once statement plus the `action_idempotency` pointer.
+
+**Observation: `_BRIDGE_DISABLE` typo on line 89.** Substrate-list
+bullet referenced what looked like an internal constant name
+instead of the public env var `NX_BRIDGE_DISABLE`. Fixed.
+
+**Observation: Step 4 sizing + log event rename are clean.**
+Critic confirmed the new T2Client RPC timeout is correctly scoped
+and the typed exception is distinguishable from
+`ConnectionRefusedError`. Critic also confirmed the renamed log
+event has no consumer-breakage risk (neither old nor new name
+exists in source yet).
+
+Ready for gate round 3.
+
 
