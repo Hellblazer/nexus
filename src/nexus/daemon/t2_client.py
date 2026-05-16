@@ -130,6 +130,24 @@ class T2DaemonError(Exception):
         return base
 
 
+class RpcTimeoutError(Exception):
+    """Raised when a T2Client RPC exceeds the configured socket timeout.
+
+    RDR-114 Step 4 (nexus-wcs9): a hung daemon (UDS accepts connections
+    but never replies) used to stall the client indefinitely because
+    ``socket.recv`` had no per-call timeout. Now the connection socket
+    is set to ``rpc_timeout_seconds`` and a recv-side timeout surfaces
+    as this typed exception.
+
+    The class is **deliberately not** a subclass of
+    ``ConnectionRefusedError`` (or any ``OSError``) so the EventStream
+    reconnect wrapper (RDR-114 Step 1, nexus-wfko) can distinguish
+    "daemon hung, retryable" from "daemon gone, re-discover" by
+    exception class without collapsing both into the same OSError
+    branch.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Wire helpers (synchronous socket I/O)
 # ---------------------------------------------------------------------------
@@ -160,10 +178,24 @@ def _sock_read_frame(sock: socket.socket) -> dict[str, Any]:
 
 
 def _recvexactly(sock: socket.socket, n: int) -> bytes:
-    """Receive exactly ``n`` bytes from ``sock``, blocking until available."""
+    """Receive exactly ``n`` bytes from ``sock``, blocking until available.
+
+    nexus-wcs9 (RDR-114 Step 4): if the socket has a timeout set via
+    ``sock.settimeout(...)`` and ``recv`` exceeds that budget, the
+    stdlib raises ``socket.timeout`` (alias for ``TimeoutError`` since
+    Python 3.10). Translate to the typed :class:`RpcTimeoutError` so
+    callers can distinguish a hung daemon (this exception) from a
+    gone daemon (``ConnectionRefusedError`` raised on ``connect``).
+    """
     buf = bytearray()
     while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
+        try:
+            chunk = sock.recv(n - len(buf))
+        except socket.timeout as exc:
+            raise RpcTimeoutError(
+                f"daemon RPC timed out after {sock.gettimeout()} s "
+                f"waiting for {n} bytes (received {len(buf)})"
+            ) from exc
         if not chunk:
             raise ConnectionError("socket closed before expected bytes arrived")
         buf.extend(chunk)
@@ -613,6 +645,7 @@ class T2Client:
         uds_path: Path | None = None,
         tcp_addr: tuple[str, int] | None = None,
         pool_size: int = _POOL_DEFAULT_SIZE,
+        rpc_timeout_seconds: float = 5.0,
     ) -> None:
         if (uds_path is None) == (tcp_addr is None):
             raise ValueError(
@@ -622,6 +655,15 @@ class T2Client:
         self._uds_path = uds_path
         self._tcp_addr = tcp_addr
         self._pool_size = pool_size
+        # nexus-wcs9 (RDR-114 Step 4): per-RPC socket timeout. Default 5.0 s
+        # is generous for local-mode (spike measured p99=48 ms) and accommodates
+        # cloud-mode Voyage RTT under load. Operators driving high-latency
+        # embeddings can override at construction time. Applied via
+        # sock.settimeout() in _connect_once; a recv exceeding the budget
+        # surfaces as RpcTimeoutError, NOT ConnectionRefusedError, so the
+        # reconnect wrapper (nexus-wfko) can distinguish hung-daemon from
+        # gone-daemon by exception class.
+        self._rpc_timeout_seconds = rpc_timeout_seconds
 
         # Lazy init: pool is created on the first attribute proxy access
         self._pool: _ConnectionPool | None = None
@@ -651,6 +693,12 @@ class T2Client:
             host, port = self._tcp_addr  # type: ignore[misc]
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((host, port))
+
+        # nexus-wcs9: apply the per-RPC timeout AFTER connect so a slow
+        # connect (separate concern, governed by the OS) does not trip it.
+        # The handshake read below uses this timeout; subsequent recv calls
+        # inherit it because settimeout is socket-level state.
+        sock.settimeout(self._rpc_timeout_seconds)
 
         _sock_write_frame(
             sock,
