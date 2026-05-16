@@ -49,6 +49,63 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Plugin/wheel compatibility protocol (nexus-yeu8)
+# ---------------------------------------------------------------------------
+
+#: Bridge public-API protocol version.
+#:
+#: The nx plugin ships seven ``orb_bridge_*.py`` scripts that import this
+#: module from the installed ``conexus`` wheel. Plugin and wheel can drift
+#: in version (user upgrades one but not the other). Each script embeds an
+#: ``EXPECTED_BRIDGE_API_VERSION`` literal and calls
+#: :func:`check_bridge_api_version` before doing any hook work. On mismatch
+#: the helper logs ``hook_bridge_version_mismatch`` at ERROR level and the
+#: script exits 0 so the user's tool flow is not disrupted.
+#:
+#: Bump policy: increment ``BRIDGE_API_VERSION`` whenever the bridge's
+#: public API changes in a way that the existing scripts cannot accommodate.
+#: That includes (non-exhaustive):
+#:
+#: - incompatible signature change to :func:`emit` or :func:`output_for_hook`
+#: - removal or rename of a public symbol the scripts import
+#: - change in the contract for return values the scripts rely on
+#:
+#: Bumping this constant without also bumping the embedded
+#: ``EXPECTED_BRIDGE_API_VERSION`` in all seven scripts will trip the
+#: mismatch path on every hook fire by design: the wheel asserts the
+#: protocol shape, and stale scripts are guaranteed to skip rather than
+#: silently corrupt telemetry. The version is intentionally distinct from
+#: the package ``__version__``; package versions may bump for reasons that
+#: do not touch the bridge contract.
+BRIDGE_API_VERSION: int = 1
+
+
+def check_bridge_api_version(expected: int) -> bool:
+    """Return True if the script's expected protocol matches the wheel.
+
+    On mismatch, emits a ``hook_bridge_version_mismatch`` ERROR log with
+    both versions and returns False. Callers (bridge scripts) should exit 0
+    on False so a version skew between plugin and wheel does not crash the
+    user's tool flow; the tuple is simply not written.
+
+    Args:
+        expected: The ``EXPECTED_BRIDGE_API_VERSION`` literal embedded in
+            the calling script at plugin-author time.
+
+    Returns:
+        True on match, False on mismatch.
+    """
+    if expected == BRIDGE_API_VERSION:
+        return True
+    _log.error(
+        "hook_bridge_version_mismatch",
+        expected=expected,
+        actual=BRIDGE_API_VERSION,
+    )
+    return False
+
+
 def configure_logging_to_stderr() -> None:
     """Redirect structlog output to stderr.
 
