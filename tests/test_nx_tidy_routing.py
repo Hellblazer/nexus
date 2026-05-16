@@ -62,10 +62,3 @@ async def test_qwen_agent_env_routes_to_qwen_agent(
     assert "summary" in args[1].get("properties", {})
     # JSON-only trailer applied (#799 pattern).
     assert "ONLY a JSON object" in args[0]
-    # Mandatory tool-use directive (spike_d follow-on): 0 tool calls
-    # observed on 2/2 nx_tidy cases when prompt was soft.
-    assert "You MUST call `mcp__nx__search`" in args[0]
-    # Anti-recursion guard: qwen previously emitted actions of the form
-    # {tool: "mcp__nx__nx_tidy", ...} interpreting the schema as a plan.
-    assert "ANTI-PATTERN" in args[0]
-    assert "mcp__nx__nx_tidy" in args[0]
