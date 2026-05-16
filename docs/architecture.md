@@ -68,7 +68,7 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     │
     └── Storage tiers
           T1: ChromaDB HTTP server (session scratch, shared across agent processes)
-          T2: SQLite + FTS5 (persistent memory, project context)
+          T2: SQLite + FTS5 (persistent memory, project context, tuplespace)
           T3: ChromaDB PersistentClient + ONNX (local, zero-config)
               OR ChromaDB Cloud + Voyage AI (cloud, higher quality)
                 code__*       voyage-code-3 index + query
@@ -77,7 +77,117 @@ CLI (cli.py)            MCP Server (mcp_server.py)
                 knowledge__*  voyage-context-3 (CCE) index + query
 ```
 
-Data flows upward (T1 → T2 → T3).
+Data flows upward (T1 → T2 → T3). T2 is a pair of SQLite files:
+`memory.db` (seven domain stores, RDR-063) and `tuples.db` (the ORB
+tuplespace plus watcher state, RDR-110/111). Both live behind the T2
+daemon under `NX_STORAGE_MODE=daemon` (RDR-112); the next section
+covers that boundary.
+
+## T2 Daemon, Tuplespace, and Cockpit (RDR-110/111/112/113)
+
+The substrate that lets Claude Code hooks land in the tuplespace,
+react via user-authored bindings, and surface in operator panels lives
+across three closely-coupled module groups.
+
+### Process model and host trust (RDR-112, RDR-113)
+
+`NX_STORAGE_MODE=daemon` puts T2 behind a single-writer asyncio
+daemon. Clients reach it via JSON-RPC over Unix domain sockets
+(primary) or loopback TCP (fallback); direct sqlite connections to
+`memory.db` or `tuples.db` from any other process are then a
+boundary violation.
+
+- **Discovery**: the daemon writes
+  `<config_dir>/t2_addr.<uid>` with UDS path, TCP host/port, PID,
+  start time, protocol version, and `subspace_schema_digest`. Clients
+  call `nexus.daemon.discovery.find_t2_daemon()`; the helper PID-probes
+  via `os.kill(pid, 0)` and unlinks stale files automatically.
+- **UDS primary**: socket mode `0600` with `SO_PEERCRED` peer-credential
+  check at accept time. The `bind() → chmod(0o600) → listen()`
+  ordering verified by RDR-113 A1: a `connect()` to a bound-but-not-
+  listening UDS returns `ConnectionRefusedError`, so the bind-to-chmod
+  window is provably closed.
+- **TCP fallback**: hard-bound to `127.0.0.1`. No peer-cred check on
+  loopback (trust delegated to the orchestrator per the RDR-113
+  single-user host model).
+- **Admin RPCs are UDS-only**. The daemon enforces
+  `_ADMIN_OPS` membership at dispatch and refuses admin verbs over TCP
+  with a clear error.
+- **Migrations are daemon-owned**. The daemon runs all pending
+  migrations on `memory.db` and `tuples.db` before binding sockets, so
+  no client ever sees a partially-migrated schema.
+- **Autostart**: `nx daemon t2 install --autostart` writes a launchd
+  plist (macOS) or systemd user unit (Linux) so the daemon comes up
+  at login. `KeepAlive: Crashed` and `SuccessExitStatus=143` make
+  `nx daemon t2 stop` a clean SIGTERM that does not flap-respawn.
+
+Boundary lint: `nx doctor --check-storage-boundary` runs an AST scan
+that flags direct `sqlite3.connect` / `chromadb.PersistentClient`
+construction outside `src/nexus/db/` (RDR-112 §5). The check is the
+mechanical complement to the prose contract above.
+
+### ORB tuplespace (RDR-110)
+
+The tuplespace is a typed, content-addressed message log persisted in
+`tuples.db`. Subspaces define schemas (dimensions, embed source, take
+semantics, retention); tuples carry content plus a dimensions map.
+
+- **CLI**: `nx tuplespace {out|read|take|ack|nack|list-subspaces|show-schema|stats}`.
+- **MCP**: `tuplespace_out/read/take/ack/nack/list_subspaces/subspace_schema/subspace_stats`.
+- **Lifecycle**: `out` posts; `read` browses without claiming; `take`
+  claims with a lease; `ack` consumes; `nack` releases. Same-claimant
+  re-takes during the active lease return the existing claim
+  (idempotent retake, CA-1/CA-2).
+- **Two-store atomicity** (RDR-111 §nexus-qmrr): `out()` writes Chroma
+  first, then commits SQLite. Invariant: SQLite presence implies
+  Chroma presence. A failure in the reverse window leaves an orphan
+  Chroma record that idempotent refire reclaims; the retention sweeper
+  picks up stragglers.
+- **Builtin subspaces** ship under `nx/tuplespace/builtin/`:
+  `tasks/<project>`, `locks/<resource>`, `mailbox/<topic>`,
+  `events`, `barriers`, `layout_state`, `connection_manifest`, plus
+  the seven `hook_events/*` schemas under `hooks/`.
+- **Reserved prefixes**: `tuples/`, `daemon/`, and every builtin
+  prefix are reserved at the registry level. Third-party
+  `subspace_add` cannot mint into reserved namespaces.
+
+### Hook bridge and cockpit (RDR-111)
+
+The bridge projects Claude Code hooks onto the tuplespace and the
+cockpit panels surface the resulting state.
+
+- **`src/nexus/cockpit/hook_bridge.py`**: `emit()` is the entry point
+  each `orb_bridge_*.py` script calls with a parsed hook payload.
+  Side effects are gated by both `CLAUDECODE` (RF-5, prevents
+  contamination of non-Claude shells) and `NX_BRIDGE_DISABLE`
+  (operator opt-out, documented in
+  [`tuplespace-env.md`](tuplespace-env.md)). Routing prefers the
+  daemon's `tuplespace.out` RPC; failure paths fall back to a direct
+  SQLite + Chroma open under the nexus config.
+- **Seven hook event subspaces** map one-to-one to Claude Code hook
+  types: `tool_call_intent` (PreToolUse), `tool_call_completed`
+  (PostToolUse), `assistant_turn_ended` (Stop / StopFailure),
+  `agent_completed` (SubagentStop), `user_prompt` (UserPromptSubmit),
+  `session_lifecycle` (SessionStart / SessionEnd), `notification`.
+  `PreCompact`, `PostCompact`, and `SubagentStart` are intentionally
+  excluded (RDR-111).
+- **`src/nexus/cockpit/bindings.py`**: user-authored binding profiles
+  (YAML under `nx/tuplespace/builtin/bindings/profiles/`) react to
+  matching events. Actions are `python:<module:func>` (in-process) or
+  `log:<marker>` (structlog). The `_BindingWatcher` polls the events
+  table on the asyncio loop, dispatches actions in cursor order,
+  contains errors so one bad binding does not starve siblings, and
+  dedups via the `action_idempotency` table (RDR-111 §lines 909-942)
+  so a crash between dispatch and cursor save cannot replay python
+  actions on restart.
+- **Cockpit CLI**: `nx cockpit {status|show|dashboard}` is the
+  human-facing read surface. Panels are observation-only; they never
+  write tuples or fire bindings. The reaction loop runs inside the
+  daemon under `NX_STORAGE_MODE=daemon`; `NX_COCKPIT_BINDINGS_DISABLE`
+  is the operator opt-out for the watcher.
+
+For environment variables consumed by this substrate see
+[`docs/tuplespace-env.md`](tuplespace-env.md).
 
 ## Catalog & Link Graph
 
@@ -438,6 +548,9 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 | **Hooks** | `commands/hooks.py`, `commands/hook.py` | `hooks.py`: Git hook install/uninstall/status, sentinel-bounded stanza management. `hook.py`: Claude Code SessionStart/SessionEnd lifecycle runners |
 | **Verification** | `config.py` (verification section), `nx/hooks/scripts/stop_verification_hook.sh`, `nx/hooks/scripts/pre_close_verification_hook.sh`, `nx/hooks/scripts/read_verification_config.py` | Opt-in mechanical enforcement: Stop hook (session-end checks), PreToolUse hook (bd-close gate), standalone config reader. See [Verification config](configuration.md#verification) |
 | **MCP Servers** | `mcp/core.py`, `mcp/catalog.py`, `mcp_infra.py`, `mcp_server.py` (shim) | Dual-server FastMCP architecture (RDR-062). **Core server (`nexus`, 15 tools)**: `search`, `query`, `store_put`, `store_get`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`. **Catalog server (`nexus-catalog`, 10 tools)**: `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` (short names -- the `catalog_` prefix is dropped since the server namespace already provides context). **Demoted to CLI-only (6 tools)**: `store_delete`, `collection_info`, `collection_verify`, `catalog_unlink`, `catalog_link_audit`, `catalog_link_bulk`. Backward-compat shim at `mcp_server.py` re-exports all 30 functions. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth). Singletons and test injection in `mcp_infra.py` |
+| **T2 Daemon** | `daemon/t2_daemon.py`, `daemon/t2_client.py`, `daemon/discovery.py`, `daemon/tuplespace_service.py`, `daemon/event_stream.py`, `daemon/subspace_registry.py`, `daemon/introspection.py`, `daemon/peer.py`, `commands/daemon.py` | Single-writer asyncio daemon owning `memory.db` + `tuples.db` (RDR-112). `t2_daemon.py` runs the dual-bind UDS+TCP transport, the binding-watcher reaction loop (RDR-111 §Phase 2 Step 6), and the retention sweeper. `tuplespace_service.py` exposes the `tuplespace.*` RPC suite via the daemon's single SQLite handle. `event_stream.py` serves `event_stream.subscribe` with rowid-cursored backfill. `subspace_registry.py` is the daemon-side schema cache with reserved-prefix validation. `introspection.py` exposes `exec_raw` / `schema` / `peek` / `stats` / `export`. `discovery.py` is the client-side helper (PID-liveness probe drops stale files); `peer.py` reads `SO_PEERCRED` for the UDS UID gate. CLI: `nx daemon t2 {start|stop|info|exec|schema|peek|stats|export|install|uninstall|subspace add}` |
+| **Tuplespace** | `tuplespace/api.py`, `tuplespace/store.py`, `tuplespace/registry.py`, `tuplespace/index.py`, `tuplespace/watcher.py`, `commands/tuplespace.py` | ORB tuple primitives (RDR-110). `api.py`: `out`/`read`/`take`/`ack`/`nack` + subspace introspection. `store.py`: `tuples.db` schema (`tuples`, `events`, `tuple_claim_log`, `watcher_state`, `subspace_registry`) plus the events trigger that feeds the binding watcher. `registry.py`: subspace YAML loader with template matching for parameterised names (`tasks/<project>`). `index.py`: per-subspace Chroma collection wrapper used by semantic `read`/`take`. `watcher.py`: rowid-cursored polling primitive shared by the cockpit binding watcher. CLI: `nx tuplespace {list-subspaces|show-schema|stats|out|read|take|ack|nack}` refuses mutating subcommands under `NX_STORAGE_MODE=daemon`. MCP: `tuplespace_out/read/take/ack/nack/list_subspaces/subspace_schema/subspace_stats` |
+| **Cockpit** | `cockpit/hook_bridge.py`, `cockpit/bindings.py`, `cockpit/panels/{recent_events,active_claims,active_bindings}.py`, `commands/cockpit.py`, `nx/hooks/scripts/orb_bridge_*.py` | Hook-bridge + reaction loop (RDR-111). `hook_bridge.py`: seven `orb_bridge_*.py` scripts call `emit()` to drain Claude Code hooks into the seven `hook_events/*` subspaces; gated by `CLAUDECODE` (RF-5) plus `NX_BRIDGE_DISABLE` (operator opt-out). Routing prefers the daemon's `tuplespace.out` RPC and falls back to direct mode on discovery / RPC failure. `bindings.py`: user-authored binding profiles, `_BindingWatcher` reaction loop, `action_idempotency` dedup gate. Started inside the daemon under `_start_binding_watcher`; `NX_COCKPIT_BINDINGS_DISABLE` is the kill switch. `panels/`: read-only operator views over `tuples.db`. CLI: `nx cockpit {status|show|dashboard}` |
 | **Enrichment** | `bib_enricher.py`, `aspect_extractor.py`, `aspect_worker.py`, `commands/enrich.py` | Two enrichment surfaces. (1) Bibliographic via Semantic Scholar (`bib_enricher.py` lookup + `nx enrich bib` CLI). (2) Structured aspects via Claude CLI (`aspect_extractor.py` synchronous extractor + `aspect_worker.py` async-queue daemon worker registered as the document-grain post-store hook + `nx enrich aspects` CLI). Aspect extraction is `knowledge__*` only in Phase 1 (RDR-089); the worker drains `aspect_extraction_queue` and writes to `document_aspects` |
 | **Health** | `health.py`, `logging_setup.py` | `health.py`: health check data model and runner used by `nx doctor` and `nx console`. `logging_setup.py`: structured logging configuration for CLI, console, MCP, and hook entry points (stderr + rotating file handler) |
 | **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `types.py`, `errors.py`, `retry.py`, `commands/_helpers.py`, `commands/_provision.py` | Configuration, naming, formatting, session lifecycle, transient-error retry. `_helpers.py`: shared CLI helpers (e.g. `default_db_path()`). `_provision.py`: ChromaDB Cloud database provisioning (tenant resolution, database creation) |

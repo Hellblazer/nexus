@@ -6,6 +6,110 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added: RDR-110 Semantic Tuple Space landed (2026-05-14)
+
+ORB tuplespace ships as the substrate the rest of the agentic
+substrate stands on. Subspaces declare a schema (dimensions, embed
+source, take semantics, retention) in YAML; `out`/`read`/`take`/
+`ack`/`nack` are the lifecycle primitives. `tuples.db` lives next to
+`memory.db` under the T2 daemon (RDR-112 §9) so subspaces share the
+single-writer guarantee.
+
+- **CLI** (`nx tuplespace`): `out`, `read`, `take`, `ack`, `nack`,
+  `list-subspaces`, `show-schema`, `stats`. Mutating subcommands
+  refuse to open a competing SQLite handle under
+  `NX_STORAGE_MODE=daemon`.
+- **MCP tools**: `tuplespace_out`, `tuplespace_read`,
+  `tuplespace_take`, `tuplespace_ack`, `tuplespace_nack`,
+  `tuplespace_list_subspaces`, `tuplespace_subspace_schema`,
+  `tuplespace_subspace_stats`. Routed through the daemon RPCs when
+  `NX_STORAGE_MODE=daemon`.
+- **Idempotent retake** (CA-1/CA-2): same-claimant `take` during the
+  active lease returns the existing claim, no extra `tuple_claim_log`
+  row, no rotation of `claim_id`.
+- **Two-store atomicity** (nexus-qmrr, PR #800): `api.out` writes
+  Chroma first, commits SQLite second. SQLite presence implies Chroma
+  presence; the reverse window leaves an orphan Chroma record that
+  idempotent refire reclaims.
+- **Tuple refresh on refire** (nexus-i4kd, PR #806): content-
+  identical refire refreshes `created_at`/`expires_at` so the
+  retention sweeper does not expire rows based on the first fire's
+  clock. Claim and tombstone state survive untouched.
+- **Builtin subspaces** under `nx/tuplespace/builtin/`:
+  `tasks/<project>`, `locks/<resource>`, `mailbox/<topic>`, `events`,
+  `barriers`, `layout_state`, `connection_manifest`, plus the seven
+  `hook_events/*` schemas under `hooks/`. Reserved prefixes
+  (`tuples/`, `daemon/`, builtins) cannot be minted by third-party
+  `subspace_add`.
+- **Coordination landing surface** (nexus-90pe, PR #791): four
+  consumer-facing subspaces and seven cockpit skills wired up so the
+  tuplespace has real Day-1 traffic, not just primitives waiting for
+  callers.
+
+### Added: RDR-111 ORB Hook Bridge and Cockpit landed (2026-05-15)
+
+Claude Code hook events now project onto the tuplespace, user-authored
+binding profiles react to matching events, and operators see the
+resulting state through cockpit panels. The four-RDR cockpit substrate
+(110/111/112/113) is now structurally complete on `develop`.
+
+- **Hook bridge** (nexus-y0nb, PR #784): seven `orb_bridge_*.py`
+  scripts under `nx/hooks/scripts/` drain Claude Code hooks into the
+  seven `hook_events/*` subspaces. `emit()` gates on `CLAUDECODE`
+  (RF-5: prevents contamination of non-Claude shells) plus
+  `NX_BRIDGE_DISABLE` (operator opt-out; nexus-7zvp, PR #822). The
+  `output_for_hook()` pure helper stays unconditional so disabling
+  emission cannot break the hook protocol (PermissionRequest
+  transparent-allow still fires).
+- **Daemon-mode routing** (nexus-6s8v, PR #789): bridge prefers the
+  T2 daemon's `tuplespace.out` RPC, falls back to direct mode on
+  discovery or RPC failure. Daemon-mode is now the default
+  (`_ROUTING_TBA = "daemon"`).
+- **SQLite write retry** (nexus-wf07, PR #807): `_sqlite_with_retry`
+  wraps the bridge's SQLite writes with bounded exponential backoff on
+  `OperationalError: database is locked` / `busy`.
+- **Plugin / wheel version-compat guard** (nexus-yeu8, PR #809):
+  bridge scripts embed `EXPECTED_BRIDGE_API_VERSION` and skip cleanly
+  when the installed wheel exposes a different `BRIDGE_API_VERSION`.
+  Stale scripts on a fresh wheel exit 0 instead of corrupting tuples.
+- **Cockpit `_BindingWatcher`** (nexus-0xaq, PR #787): async polling
+  reaction loop over the events table. User-authored binding profiles
+  match events by subspace/op/category and fire `python:<module:func>`
+  or `log:<marker>` actions in cursor order. Error containment: one
+  bad binding does not crash the loop or starve siblings.
+- **Cockpit panels** (nexus-ut5r, PR #802): `nx cockpit
+  {status|show|dashboard}` reads `tuples.db` and surfaces recent
+  events, active claims, and active bindings. Read-only by
+  construction; no panel writes tuples.
+- **Retention sweeper** (nexus-kk9h, PR #788): recurring 6-hour sweep
+  prunes expired tuples and claim-log rows. Best-effort SQLite-only
+  sweep in Phase 1; Chroma vector cleanup deferred.
+- **embed_from fail-loud** (nexus-zm2n, PR #800): subspace schemas
+  that reference a missing embed source raise `EmbedFromError` with a
+  precise error instead of silently writing zero-vector embeddings.
+- **Substrate hardening** (PR #803): six coordination YAML schemas
+  shipped in the wheel, `nx doctor --check-bridge` for installability
+  diagnostics, plugin/wheel packaging verified.
+
+### Added: RDR-113 Host-Trust v1 (2026-05-13)
+
+Single-user host trust boundary for the T2 daemon transports.
+
+- **UDS**: socket mode `0600`, `SO_PEERCRED` peer-credential check at
+  accept time. `bind()` then `chmod(0o600)` then `listen()` ordering
+  (A1 spike verified) closes the bind-to-chmod window: `connect()` to
+  a bound-but-not-listening UDS returns `ConnectionRefusedError`.
+- **TCP fallback**: hard-bound to `127.0.0.1`. No peer-cred check on
+  loopback (orchestrator trust per single-user host model).
+- **Admin gate**: `_ADMIN_OPS` + `_KNOWN_ADMIN_NAMES` frozensets plus
+  startup integrity check force admin RPCs to UDS only and catch any
+  drift between dispatch-table registration and the gate. Verbs:
+  `subspace_add`, `exec_raw`, `export`, plus the `admin_ping` test
+  scaffold (production never registers it).
+- **Contradiction check filled** (nexus-ycf5, PR #792): RDR-113
+  Finalization Gate Contradiction Check section completed with the
+  bind-to-chmod analysis and the loopback-TCP justification.
+
 ### Added — RDR-112 T2 Storage-as-Service Phase 1 complete (2026-05-14)
 
 T2 SQLite stores now live behind a single-writer asyncio daemon that
@@ -53,6 +157,26 @@ Out of scope here, tracked for Phase 2/3:
 - `tuplespace_*` MCP tool routing under `NX_STORAGE_MODE=daemon`
   (nexus-pce1.6, blocked on Phase 2 CatalogDB collapse).
 - Default `NX_STORAGE_MODE` flip from direct to daemon (nexus-507q P6.3).
+
+### Added: RDR-112 Phase 2 in flight (2026-05-15)
+
+- **CatalogDB collapse** (nexus-7ejx, PR #785): eight catalog tables
+  (`owners`, `documents`, `documents_fts`, `links`, `collections`,
+  `_meta`, `document_chunks`, plus supporting indexes/triggers) move
+  into `memory.db` alongside the seven domain stores. Schema
+  invariants from RDR-108 preserved: `documents` is tumbler-
+  addressable, `document_chunks` is authoritative for the chunk-to-
+  doc manifest.
+- **Daemon registry seed** (nexus-me9y, PR #801): daemon seeds the
+  subspace registry from `nx/tuplespace/builtin/` on every start
+  before sockets bind. Builtin schemas become the single source of
+  truth for reserved-prefix namespaces; YAML bumps land as UPDATEs,
+  unchanged YAMLs are no-ops.
+- **Daemon auto-start** (nexus-6w0c, PR #808): `nx daemon t2
+  install --autostart` writes the OS autostart unit (launchd plist
+  on macOS, systemd user unit on Linux). `KeepAlive: Crashed` plus
+  `SuccessExitStatus=143` cooperate so `nx daemon t2 stop` is a
+  clean SIGTERM that does not flap-respawn.
 
 ## [4.32.12] - 2026-05-13
 
