@@ -149,6 +149,12 @@ def main(ctx: click.Context, verbose: bool) -> None:
     from nexus.commands._migration_prompt import maybe_emit_bootstrap_prompt
     maybe_emit_bootstrap_prompt()
 
+    # nexus-mf91 (RDR-112): first-run TTY nudge to install the T2
+    # daemon autostart unit. Silent in CI / subagent / non-TTY contexts
+    # and after the first nudge per machine.
+    from nexus.commands._autostart_prompt import maybe_emit_autostart_prompt
+    maybe_emit_autostart_prompt()
+
 
 main.add_command(catalog)
 main.add_command(cockpit_group, name="cockpit")

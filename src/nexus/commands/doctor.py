@@ -932,6 +932,61 @@ def _run_check_storage_boundary() -> int:
     return 0
 
 
+# ── --check-autostart (RDR-112; nexus-mf91) ──────────────────────────────
+
+
+def _run_check_autostart(*, json_out: bool = False) -> None:
+    """Report whether the T2 daemon autostart unit is installed.
+
+    Complements the first-run TTY nudge in
+    ``nexus.commands._autostart_prompt``: tells the operator the same
+    thing the nudge says, on demand, with no TTY / marker gating. Use
+    when the nudge has already been silenced or the operator wants the
+    state without rerunning ``nx daemon t2 install --autostart``.
+    """
+    import json as _json
+
+    from nexus.commands._autostart_prompt import autostart_status
+
+    status = autostart_status()
+
+    if json_out:
+        click.echo(_json.dumps(status))
+        return
+
+    click.echo("Autostart status (RDR-112):")
+    if not status["platform_supported"]:
+        click.echo(
+            _check(
+                "platform supported",
+                False,
+                f"sys.platform={sys.platform!r} (only darwin and linux are supported)",
+            )
+        )
+        return
+    click.echo(_check("platform supported", True))
+    click.echo(f"  unit path: {status['unit_path']}")
+    click.echo(_check("autostart installed", bool(status["installed"])))
+    click.echo(
+        _check(
+            "nudge marker written",
+            bool(status["marker_present"]),
+            "operator has been nudged once"
+            if status["marker_present"]
+            else "no nudge fired yet on this machine",
+        )
+    )
+    if status["storage_mode"]:
+        click.echo(f"  NX_STORAGE_MODE: {status['storage_mode']}")
+    if not status["installed"]:
+        click.echo("")
+        click.echo(
+            "Hint: `nx daemon t2 install --autostart` to install the "
+            "launchd plist (macOS) or systemd user unit (Linux) so the "
+            "daemon comes up at login."
+        )
+
+
 # ── --check-bridge (RDR-111 deep-review pass — bridge installability) ─────
 
 
@@ -1343,6 +1398,16 @@ def _run_check_mineru() -> None:
          "nexus-b7o1.",
 )
 @click.option(
+    "--check-autostart",
+    "check_autostart",
+    is_flag=True,
+    default=False,
+    help="Report T2 daemon autostart unit status (RDR-112 nexus-mf91): "
+         "platform support, unit path, whether the launchd plist or "
+         "systemd user unit is installed, and whether the once-per-"
+         "machine nudge marker has fired.",
+)
+@click.option(
     "--days",
     "days",
     default=30,
@@ -1365,6 +1430,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_t1: bool,
                check_bridge: bool,
                check_storage_boundary: bool,
+               check_autostart: bool,
                check_tier_discipline: bool) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
@@ -1428,6 +1494,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         exit_code = _run_check_storage_boundary()
         if exit_code != 0:
             raise SystemExit(exit_code)
+        return
+
+    if check_autostart:
+        _run_check_autostart(json_out=json_out)
         return
 
     if check_tier_discipline:
