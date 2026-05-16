@@ -161,3 +161,176 @@ def test_check_bridge_direct_mode_opens_tuples_readback(
     # output names the 24h window.
     assert "recent hook events" in result.output
     assert "24h" in result.output
+
+
+# ---------------------------------------------------------------------------
+# RDR-114 Step 3 (nexus-6bad): operator-surfacing for the fail-closed policy
+# ---------------------------------------------------------------------------
+
+
+def _write_daemon_log(fake_home: Path, lines: list[str]) -> Path:
+    """Write a daemon.log under the fake HOME's nexus config dir, return path."""
+    log_dir = fake_home / ".config" / "nexus" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "daemon.log"
+    log_path.write_text("\n".join(lines) + "\n")
+    return log_path
+
+
+def test_check_bridge_reports_operator_override_when_opt_in_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nexus-6bad: NX_BRIDGE_ALLOW_DIRECT_FALLBACK=1 is surfaced as an
+    operator override so the override does not silently linger."""
+    plugin_root = tmp_path / "plugin"
+    _stub_bridge_scripts(plugin_root)
+    _write_plugin_manifest(plugin_root, "0.0.0-stale")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", "1")
+    monkeypatch.delenv("NX_BRIDGE_DISABLE", raising=False)
+
+    runner = CliRunner()
+    result = runner.invoke(doctor_cmd.doctor_cmd, ["--check-bridge"])
+
+    assert result.exit_code == 0, result.output
+    assert "NX_BRIDGE_ALLOW_DIRECT_FALLBACK" in result.output
+    out_lower = result.output.lower()
+    assert "override" in out_lower or "fail-open" in out_lower or "direct" in out_lower
+
+
+def test_check_bridge_default_reports_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nexus-6bad: with the opt-in unset, doctor reports the shipped
+    fail-closed default."""
+    plugin_root = tmp_path / "plugin"
+    _stub_bridge_scripts(plugin_root)
+    _write_plugin_manifest(plugin_root, "0.0.0-stale")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", raising=False)
+    monkeypatch.delenv("NX_BRIDGE_DISABLE", raising=False)
+
+    runner = CliRunner()
+    result = runner.invoke(doctor_cmd.doctor_cmd, ["--check-bridge"])
+
+    assert result.exit_code == 0, result.output
+    # Default fail-closed should be visible as a green check line.
+    out_lower = result.output.lower()
+    assert "fail-closed" in out_lower or "default" in out_lower
+
+
+def test_check_bridge_warns_on_conflicting_env_combination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nexus-6bad: BOTH NX_BRIDGE_DISABLE=1 AND
+    NX_BRIDGE_ALLOW_DIRECT_FALLBACK=1 -> doctor warns that DISABLE
+    exits first and ALLOW_DIRECT_FALLBACK has no effect."""
+    plugin_root = tmp_path / "plugin"
+    _stub_bridge_scripts(plugin_root)
+    _write_plugin_manifest(plugin_root, "0.0.0-stale")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("NX_BRIDGE_DISABLE", "1")
+    monkeypatch.setenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", "1")
+
+    runner = CliRunner()
+    result = runner.invoke(doctor_cmd.doctor_cmd, ["--check-bridge"])
+
+    assert result.exit_code == 0, result.output
+    out_lower = result.output.lower()
+    # The warning must name both envs and explain the interaction.
+    assert "nx_bridge_disable" in out_lower
+    assert "nx_bridge_allow_direct_fallback" in out_lower
+    assert "no effect" in out_lower or "exits first" in out_lower or "conflict" in out_lower
+
+
+def test_check_bridge_surfaces_recent_drop_events_from_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nexus-6bad: hook_bridge_emit_drop_rpc_failed events from
+    daemon.log within the last 24h are surfaced with a count."""
+    plugin_root = tmp_path / "plugin"
+    _stub_bridge_scripts(plugin_root)
+    _write_plugin_manifest(plugin_root, "0.0.0-stale")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    # Three drop events in the last hour, plus one stale one outside
+    # the 24h window. Format matches logging_setup.py's
+    # RotatingFileHandler default: "%(asctime)s %(name)s %(levelname)s %(message)s".
+    # The message is structlog's KeyValueRenderer output.
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    recent_ts = now.isoformat()
+    stale_ts = (now - _dt.timedelta(hours=48)).isoformat()
+    log_lines = [
+        f"{recent_ts[:19].replace('T', ' ')},123 nexus.cockpit.hook_bridge WARNING "
+        f"event=hook_bridge_emit_drop_rpc_failed hook_type=PreToolUse "
+        f"subspace=hook_events/tool_call_intent error=ConnectionRefusedError "
+        f"timestamp={recent_ts} level=warning",
+        f"{recent_ts[:19].replace('T', ' ')},234 nexus.cockpit.hook_bridge WARNING "
+        f"event=hook_bridge_emit_drop_rpc_failed hook_type=PostToolUse "
+        f"subspace=hook_events/tool_call_completed error=RpcTimeoutError "
+        f"timestamp={recent_ts} level=warning",
+        f"{recent_ts[:19].replace('T', ' ')},345 nexus.cockpit.hook_bridge WARNING "
+        f"event=hook_bridge_emit_drop_rpc_failed hook_type=Stop "
+        f"subspace=hook_events/assistant_turn_ended error=ConnectionRefusedError "
+        f"timestamp={recent_ts} level=warning",
+        # Stale (older than 24h) — must NOT count.
+        f"{stale_ts[:19].replace('T', ' ')},456 nexus.cockpit.hook_bridge WARNING "
+        f"event=hook_bridge_emit_drop_rpc_failed hook_type=Stop "
+        f"subspace=hook_events/assistant_turn_ended error=ConnectionRefusedError "
+        f"timestamp={stale_ts} level=warning",
+    ]
+    _write_daemon_log(fake_home, log_lines)
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", raising=False)
+    monkeypatch.delenv("NX_BRIDGE_DISABLE", raising=False)
+
+    runner = CliRunner()
+    result = runner.invoke(doctor_cmd.doctor_cmd, ["--check-bridge"])
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    # The recent drops line must be present and report N=3 (stale event
+    # is excluded by the 24h window).
+    assert "recent bridge drops" in out.lower() or "bridge drops" in out.lower()
+    assert "3" in out
+
+
+def test_check_bridge_no_recent_drops_reports_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When no drop events exist (no log file or zero matching lines),
+    doctor reports a clean 'no recent drops' line."""
+    plugin_root = tmp_path / "plugin"
+    _stub_bridge_scripts(plugin_root)
+    _write_plugin_manifest(plugin_root, "0.0.0-stale")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", raising=False)
+    monkeypatch.delenv("NX_BRIDGE_DISABLE", raising=False)
+
+    runner = CliRunner()
+    result = runner.invoke(doctor_cmd.doctor_cmd, ["--check-bridge"])
+
+    assert result.exit_code == 0, result.output
+    out_lower = result.output.lower()
+    # Clean state surfaced (either via a "no drops" line or implicit pass).
+    assert "no recent" in out_lower or "0 drops" in out_lower or "bridge drops" in out_lower

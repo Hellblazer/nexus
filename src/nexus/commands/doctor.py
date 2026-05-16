@@ -1194,6 +1194,103 @@ def _run_check_bridge() -> None:
         except Exception as exc:  # noqa: BLE001
             click.echo(_check("recent hook events", False, f"query failed: {exc}"))
 
+    # 7. Bridge fail-closed operator-override surfacing (RDR-114 Step 3, nexus-6bad)
+    #
+    # Report whether the operator has opted into the legacy fail-open
+    # path via NX_BRIDGE_ALLOW_DIRECT_FALLBACK, warn on the
+    # conflicting-env combination, and surface any recent
+    # hook_bridge_emit_drop_rpc_failed events from the daemon's
+    # rotated log (RotatingFileHandler at ~/.config/nexus/logs/daemon.log
+    # via nexus.logging_setup.configure_logging("daemon")).
+    bridge_disable = os.environ.get("NX_BRIDGE_DISABLE", "").strip()
+    direct_fallback_env = os.environ.get("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", "").strip()
+    _falsy = ("", "0", "false", "False")
+    direct_fallback_set = direct_fallback_env not in _falsy
+    bridge_disable_set = bridge_disable not in _falsy
+    if direct_fallback_set:
+        # Operator override visible.
+        click.echo(
+            _check(
+                "bridge fail-closed policy",
+                False,
+                f"OPERATOR OVERRIDE: NX_BRIDGE_ALLOW_DIRECT_FALLBACK={direct_fallback_env!r} — "
+                "legacy fail-open direct-mode fallback enabled; "
+                "WAL-contention race with daemon writer is accepted",
+            )
+        )
+        if bridge_disable_set:
+            click.echo(
+                _check(
+                    "bridge env conflict",
+                    False,
+                    "WARNING: NX_BRIDGE_DISABLE and NX_BRIDGE_ALLOW_DIRECT_FALLBACK are both set; "
+                    "NX_BRIDGE_DISABLE exits first in emit() and NX_BRIDGE_ALLOW_DIRECT_FALLBACK "
+                    "has no effect (conflict; unset NX_BRIDGE_DISABLE if the fallback should fire)",
+                )
+            )
+    else:
+        click.echo(
+            _check(
+                "bridge fail-closed policy",
+                True,
+                "default fail-closed under daemon routing (RDR-114); "
+                "drops surface as hook_bridge_emit_drop_rpc_failed",
+            )
+        )
+
+    # Read recent drop events from the daemon's rotated log. Best-effort:
+    # if the log is missing, unreadable, or the daemon mode never ran,
+    # report a clean state.
+    daemon_log = Path(os.path.expanduser("~/.config/nexus/logs/daemon.log"))
+    recent_drops = 0
+    if daemon_log.is_file():
+        try:
+            import datetime as _dt
+            cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=24)
+            cutoff_iso = cutoff.isoformat()
+            # Each drop event line includes "timestamp=<isoformat>" because
+            # nexus.logging_setup wires the structlog TimeStamper with
+            # utc=True; pair the event-name match with a string
+            # comparison against the cutoff ISO so the parse is robust
+            # to small RotatingFileHandler formatting variations.
+            for line in daemon_log.read_text(errors="replace").splitlines():
+                if "hook_bridge_emit_drop_rpc_failed" not in line:
+                    continue
+                idx = line.find("timestamp=")
+                if idx == -1:
+                    # No timestamp field: count as recent (defensive).
+                    recent_drops += 1
+                    continue
+                ts_str = line[idx + len("timestamp="):].split()[0]
+                if ts_str >= cutoff_iso:
+                    recent_drops += 1
+        except Exception as exc:  # noqa: BLE001
+            click.echo(
+                _check(
+                    "recent bridge drops",
+                    False,
+                    f"failed to scan {daemon_log}: {exc}",
+                )
+            )
+            return
+    if recent_drops > 0:
+        click.echo(
+            _check(
+                "recent bridge drops",
+                False,
+                f"{recent_drops} hook_bridge_emit_drop_rpc_failed event(s) in last 24h; "
+                f"daemon may have been unavailable (check `nx daemon t2 info`)",
+            )
+        )
+    else:
+        click.echo(
+            _check(
+                "recent bridge drops",
+                True,
+                f"no recent drops in {daemon_log}",
+            )
+        )
+
 
 # ── --check-mineru (nexus-2fyb code-review R3-3) ────────────────────────────
 
