@@ -4089,8 +4089,32 @@ async def nx_plan_audit(
         "type": "object",
         "required": ["verdict", "findings", "summary"],
         "properties": {
-            "verdict": {"type": "string"},
-            "findings": {"type": "array", "items": {"type": "object"}},
+            "verdict": {
+                "type": "string",
+                "enum": ["pass", "fail", "partial", "skipped"],
+            },
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["title", "verification_method"],
+                    "properties": {
+                        "title": {"type": "string"},
+                        "severity": {"type": "string"},
+                        "detail": {"type": "string"},
+                        "verification_method": {
+                            "type": "string",
+                            "enum": [
+                                "mcp_search",
+                                "filesystem",
+                                "prompt_only",
+                                "n/a",
+                            ],
+                        },
+                        "verification_evidence": {"type": "string"},
+                    },
+                },
+            },
             "summary": {"type": "string"},
         },
     }
@@ -4100,15 +4124,37 @@ async def nx_plan_audit(
         "lookup tool like `mcp__nx__query`) to verify EACH file path cited "
         "in the plan before listing it in `findings`. An audit produced "
         "without tool calls is not a valid audit — it is speculation.\n\n"
-        "Verdict semantics:\n"
-        "  - `ok` / `fail`: you attempted verification via tool calls and "
-        "reached a conclusion.\n"
+        "Verdict semantics (enum-bound):\n"
+        "  - `pass` / `fail`: you attempted verification via tool calls "
+        "and reached a conclusion.\n"
         "  - `partial`: ONLY appropriate when tool calls were ATTEMPTED "
         "and FAILED (e.g. search returned no results, query errored). It "
         "is NOT appropriate when you simply skipped tool calls. If you "
         "return verdict=`partial`, your `findings` MUST explicitly name "
         "which tool calls failed and why (e.g. {severity: 'info', title: "
-        "'search returned 0 hits for path X', tool: 'mcp__nx__search'}).\n\n"
+        "'search returned 0 hits for path X', tool: 'mcp__nx__search'}).\n"
+        "  - `skipped`: return this when you decided NOT to call tools — "
+        "do NOT fabricate `partial` or `pass` for unverified findings. "
+        "`skipped` is the honest report for 'I did not run a real audit'; "
+        "operators can then re-run or pin to claude.\n\n"
+        "Per-finding `verification_method` (REQUIRED, enum-bound):\n"
+        "  - `mcp_search`: you called `mcp__nx__search` (or equivalent T3 "
+        "lookup) and the result substantiates the finding.\n"
+        "  - `filesystem`: you called Read / Glob / Grep or another "
+        "filesystem tool and the result substantiates the finding.\n"
+        "  - `prompt_only`: NO tool calls — finding is inferred from the "
+        "prompt content alone. This is an honest admission of "
+        "non-verification.\n"
+        "  - `n/a`: structural / dependency-ordering check that needs no "
+        "external verification (e.g. phase B references phase A by id).\n\n"
+        "HONESTY RULE: If ANY finding has `verification_method: "
+        "prompt_only`, your overall `verdict` MUST be `skipped`. That is "
+        "how you structurally report 'I did not do verification' instead "
+        "of fabricating authoritative-sounding specifics. Operators filter "
+        "on `verification_method` post-hoc.\n\n"
+        "`verification_evidence` is optional free-text: the search query "
+        "used, the file content quoted, the line number observed. "
+        "Encouraged for `mcp_search` / `filesystem` findings.\n\n"
         "Parse the plan, verify file paths exist via tool calls, check "
         "dependency ordering, identify gaps or incorrect assumptions, then "
         "emit a structured verdict grounded in the tool-call results.\n\n"
@@ -4146,7 +4192,11 @@ async def nx_plan_audit(
         findings = payload.get("findings", [])
         lines = [f"Verdict: {verdict}", summary]
         for f in findings:
-            lines.append(f"  [{f.get('severity', '?')}] {f.get('title', '')}")
+            lines.append(
+                f"  [{f.get('severity', '?')}/"
+                f"{f.get('verification_method', '?')}] "
+                f"{f.get('title', '')}"
+            )
         return "\n".join(lines)
     return str(payload)
 
