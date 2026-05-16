@@ -3177,7 +3177,6 @@ async def _nx_answer_plan_miss(
     and return a synthetic Match for plan_run.
     """
     from nexus.operators.dispatch import claude_dispatch
-    from nexus.operators.dispatch_router import pick_dispatcher_for
     from nexus.plans.match import Match
     from nexus.mcp_infra import get_collection_names
 
@@ -3230,18 +3229,9 @@ async def _nx_answer_plan_miss(
     for attempt in range(2):
         attempt_timeout = 300.0 if attempt == 0 else 150.0
         try:
-            if pick_dispatcher_for("plan_miss_planner") == "qwen":
-                from nexus.operators.qwen_dispatch import qwen_dispatch
-
-                payload = await qwen_dispatch(
-                    prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
-                    operator_name="plan_miss_planner",
-                )
-            else:
-                payload = await claude_dispatch(
-                    prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
-                    operator_name="plan_miss_planner",
-                )
+            payload = await claude_dispatch(
+                prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
+            )
             break
         except _OpOutputError as exc:
             last_output_error = exc
@@ -3865,47 +3855,6 @@ async def nx_answer(
     )
 
 
-# ── Tier-B dispatcher routing ─────────────────────────────────────────────────
-#
-# Tools listed here are *pinned* to ``claude_dispatch`` even when the global
-# ``NEXUS_TIER_B_DISPATCHER=qwen_agent`` is set. Mirrors the bake-in pin
-# pattern from PR #626 (which pinned ``extract`` to claude after a single
-# bench miss).
-#
-# nx_plan_audit: spike-D bench v3 (2026-05-16,
-#   /tmp/spike-d-out/parity-audit-v3-2026-05-16.jsonl) — even with PR #810
-#   (prompt mandate) and PR #812 (verification_method enum) in place, qwen
-#   emits zero ``tool_use`` blocks and fabricates findings with
-#   ``verification_method: filesystem``. The structured-honesty slot exists
-#   but qwen fills it dishonestly. Pin avoids shipping that by default;
-#   operators can opt back in per-shell via
-#   ``NEXUS_TIER_B_NX_PLAN_AUDIT_DISPATCHER=qwen_agent``.
-TIER_B_CLAUDE_PINNED: frozenset[str] = frozenset({"nx_plan_audit"})
-
-
-def _pick_tier_b_dispatcher(tool_name: str) -> str:
-    """Resolve the tier-B dispatcher for *tool_name*.
-
-    Precedence (highest first):
-      1. ``NEXUS_TIER_B_<TOOL>_DISPATCHER`` — per-tool override, wins
-         absolutely.
-      2. ``NEXUS_TIER_B_DISPATCHER`` — global mode. If ``qwen_agent`` AND
-         the tool is NOT in ``TIER_B_CLAUDE_PINNED``, routes through qwen.
-      3. ``claude`` — default.
-
-    Returns the lowercased dispatcher name (``claude`` or ``qwen_agent``).
-    """
-    env_per_tool = _os.environ.get(
-        f"NEXUS_TIER_B_{tool_name.upper()}_DISPATCHER"
-    )
-    if env_per_tool:
-        return env_per_tool.lower()
-    global_mode = _os.environ.get("NEXUS_TIER_B_DISPATCHER", "claude").lower()
-    if global_mode == "qwen_agent" and tool_name in TIER_B_CLAUDE_PINNED:
-        return "claude"
-    return global_mode
-
-
 @mcp.tool()
 async def nx_tidy(
     topic: str,
@@ -3940,57 +3889,16 @@ async def nx_tidy(
         },
     }
     prompt = (
-        "You are the `tidy` knowledge consolidation operator.\n\n"
-        "You MUST call `mcp__nx__search` against the specified collection "
-        "FIRST, before producing any output. Then use `mcp__nx__store_get` / "
-        "`mcp__nx__query` as needed to inspect specific entries. Output is "
-        "only valid if it is grounded in the results of those tool calls.\n\n"
-        "The output schema has two fields:\n"
-        "  - `summary`: describes what you FOUND and CONSOLIDATED from the "
-        "search results (e.g. 'Found 4 entries; entries A and B duplicate "
-        "claim X; entry C contradicts B on Y'). It is NOT a statement of "
-        "intent like 'Initiating consolidation for topic Z'.\n"
-        "  - `actions`: recommendations grounded in the search results "
-        "(e.g. {action: 'merge', from: 'entry-X', into: 'entry-Y', "
-        "reason: 'both describe Z'}). It is NOT a list of tools you plan "
-        "to call.\n\n"
-        "ANTI-PATTERN — DO NOT DO THIS: returning an action of the form "
-        "`{tool: 'mcp__nx__nx_tidy', arguments: {...}}`. You ARE nx_tidy; "
-        "emitting that would be a recursive call back into yourself and is "
-        "always incorrect. Actions describe consolidations on the data you "
-        "retrieved, not tool invocations.\n\n"
+        "You are the `tidy` knowledge consolidation operator. You have "
+        "access to nx MCP tools (search, query, store_put, store_get). "
+        "Search the specified collection for entries matching the topic, "
+        "identify duplicates, contradictions, and outdated entries, then "
+        "produce a consolidated summary.\n\n"
         f"Consolidate knowledge entries about '{topic}' in collection "
         f"'{collection}'. Search for all related entries, identify duplicates "
         "or contradictions, and produce a consolidated summary."
     )
-    # Schema-conformance directive — mirror of nx_enrich_beads (#799).
-    # Tier-B qwen reliably emits narrative at finalization in tool-use
-    # loops instead of json_schema output; explicit "JSON only" trailer
-    # fixes that. No-op for claude.
-    prompt += (
-        "\n\nRespond with ONLY a JSON object conforming to the schema "
-        "above. No prose, no commentary, no prefix, no markdown fences. "
-        "Begin your response with `{` and end with `}`."
-    )
-
-    # Tier-B dispatcher selection — via _pick_tier_b_dispatcher so
-    # per-tool overrides and pin-set semantics apply uniformly.
-    if _pick_tier_b_dispatcher("nx_tidy") == "qwen_agent":
-        from nexus.operators.qwen_agent_dispatch import qwen_agent_dispatch
-
-        payload = await qwen_agent_dispatch(
-            prompt,
-            schema,
-            timeout=timeout,
-            extensions=["nx"],
-            # 50 mirrors the nx_enrich_beads cap (#799) — no per-tool
-            # bench evidence yet; the harness change in this PR makes
-            # that bench possible as a follow-on operator action.
-            max_tool_calls=50,
-            operator_name="nx_tidy",
-        )
-    else:
-        payload = await claude_dispatch(prompt, schema, timeout=timeout)
+    payload = await claude_dispatch(prompt, schema, timeout=timeout)
 
     summary = payload.get("summary", "") if isinstance(payload, dict) else str(payload)
     actions = payload.get("actions", []) if isinstance(payload, dict) else []
@@ -4051,42 +3959,8 @@ async def nx_enrich_beads(
     )
     if context:
         prompt += f"\n\nAdditional context:\n{context}"
-    # Schema-conformance directive (spike_d follow-on). Tier-B qwen
-    # reliably emits "Now I have..." narrative at finalization in
-    # tool-use loops instead of json_schema output; an explicit
-    # "JSON only" trailer fixes that. Applied to both legs — claude
-    # is tolerant of the looser prompt but the tighter directive is
-    # a no-op there and guards against future qwen-flavored
-    # regressions on the claude path.
-    prompt += (
-        "\n\nRespond with ONLY a JSON object conforming to the schema "
-        "above. No prose, no commentary, no prefix, no markdown fences. "
-        "Begin your response with `{` and end with `}`."
-    )
 
-    # Tier-B dispatcher selection (RDR follow-on to operator-level qwen
-    # offload). Default ``claude`` preserves prior behavior; setting
-    # ``NEXUS_TIER_B_DISPATCHER=qwen_agent`` routes through the
-    # qwen-coprocessor-stack supervisor with the ``nx`` extension wired
-    # in so the spawned qwen session can use search/query tools mid-loop.
-    if _pick_tier_b_dispatcher("nx_enrich_beads") == "qwen_agent":
-        from nexus.operators.qwen_agent_dispatch import qwen_agent_dispatch
-
-        payload = await qwen_agent_dispatch(
-            prompt,
-            schema,
-            timeout=timeout,
-            extensions=["nx"],
-            # spike_d bench (3 cases) observed qwen self-terminating at
-            # 14/17/19 tool calls; the prior cap of 20 was aborting every
-            # exploration at exactly 21 (cap+1). 50 = 2.5× the max
-            # observed, giving headroom for harder cases without being
-            # unbounded.
-            max_tool_calls=50,
-            operator_name="nx_enrich_beads",
-        )
-    else:
-        payload = await claude_dispatch(prompt, schema, timeout=timeout)
+    payload = await claude_dispatch(prompt, schema, timeout=timeout)
     return (
         payload.get("enriched_description", "")
         if isinstance(payload, dict) else str(payload)
@@ -4129,114 +4003,29 @@ async def nx_plan_audit(
         "type": "object",
         "required": ["verdict", "findings", "summary"],
         "properties": {
-            "verdict": {
-                "type": "string",
-                "enum": ["pass", "fail", "partial", "skipped"],
-            },
-            "findings": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "required": ["title", "verification_method"],
-                    "properties": {
-                        "title": {"type": "string"},
-                        "severity": {"type": "string"},
-                        "detail": {"type": "string"},
-                        "verification_method": {
-                            "type": "string",
-                            "enum": [
-                                "mcp_search",
-                                "filesystem",
-                                "prompt_only",
-                                "n/a",
-                            ],
-                        },
-                        "verification_evidence": {"type": "string"},
-                    },
-                },
-            },
+            "verdict": {"type": "string"},
+            "findings": {"type": "array", "items": {"type": "object"}},
             "summary": {"type": "string"},
         },
     }
     prompt = (
-        "You are the `audit` plan validation operator.\n\n"
-        "You MUST call `mcp__nx__search` (or an equivalent T3 / code "
-        "lookup tool like `mcp__nx__query`) to verify EACH file path cited "
-        "in the plan before listing it in `findings`. An audit produced "
-        "without tool calls is not a valid audit — it is speculation.\n\n"
-        "Verdict semantics (enum-bound):\n"
-        "  - `pass` / `fail`: you attempted verification via tool calls "
-        "and reached a conclusion.\n"
-        "  - `partial`: ONLY appropriate when tool calls were ATTEMPTED "
-        "and FAILED (e.g. search returned no results, query errored). It "
-        "is NOT appropriate when you simply skipped tool calls. If you "
-        "return verdict=`partial`, your `findings` MUST explicitly name "
-        "which tool calls failed and why (e.g. {severity: 'info', title: "
-        "'search returned 0 hits for path X', tool: 'mcp__nx__search'}).\n"
-        "  - `skipped`: return this when you decided NOT to call tools — "
-        "do NOT fabricate `partial` or `pass` for unverified findings. "
-        "`skipped` is the honest report for 'I did not run a real audit'; "
-        "operators can then re-run or pin to claude.\n\n"
-        "Per-finding `verification_method` (REQUIRED, enum-bound):\n"
-        "  - `mcp_search`: you called `mcp__nx__search` (or equivalent T3 "
-        "lookup) and the result substantiates the finding.\n"
-        "  - `filesystem`: you called Read / Glob / Grep or another "
-        "filesystem tool and the result substantiates the finding.\n"
-        "  - `prompt_only`: NO tool calls — finding is inferred from the "
-        "prompt content alone. This is an honest admission of "
-        "non-verification.\n"
-        "  - `n/a`: structural / dependency-ordering check that needs no "
-        "external verification (e.g. phase B references phase A by id).\n\n"
-        "HONESTY RULE: If ANY finding has `verification_method: "
-        "prompt_only`, your overall `verdict` MUST be `skipped`. That is "
-        "how you structurally report 'I did not do verification' instead "
-        "of fabricating authoritative-sounding specifics. Operators filter "
-        "on `verification_method` post-hoc.\n\n"
-        "`verification_evidence` is optional free-text: the search query "
-        "used, the file content quoted, the line number observed. "
-        "Encouraged for `mcp_search` / `filesystem` findings.\n\n"
-        "Parse the plan, verify file paths exist via tool calls, check "
-        "dependency ordering, identify gaps or incorrect assumptions, then "
-        "emit a structured verdict grounded in the tool-call results.\n\n"
+        "You are the `audit` plan validation operator. You have access "
+        "to nx MCP tools (search, query) for codebase verification. "
+        "Parse the plan, verify file paths exist, check dependency ordering, "
+        "identify gaps or incorrect assumptions, then emit a structured verdict.\n\n"
         f"Audit this plan for correctness and codebase alignment:\n\n{plan_json}"
     )
     if context:
         prompt += f"\n\nContext:\n{context}"
-    # Schema-conformance directive — mirror of nx_enrich_beads (#799).
-    prompt += (
-        "\n\nRespond with ONLY a JSON object conforming to the schema "
-        "above. No prose, no commentary, no prefix, no markdown fences. "
-        "Begin your response with `{` and end with `}`."
-    )
 
-    # Tier-B dispatcher selection — pinned to claude by default; see
-    # TIER_B_CLAUDE_PINNED for the rationale and override knob.
-    if _pick_tier_b_dispatcher("nx_plan_audit") == "qwen_agent":
-        from nexus.operators.qwen_agent_dispatch import qwen_agent_dispatch
-
-        payload = await qwen_agent_dispatch(
-            prompt,
-            schema,
-            timeout=timeout,
-            extensions=["nx"],
-            # 50 mirrors nx_enrich_beads (#799). Plan audit is bounded
-            # by plan size and is largely read-only; 50 is generous.
-            max_tool_calls=50,
-            operator_name="nx_plan_audit",
-        )
-    else:
-        payload = await claude_dispatch(prompt, schema, timeout=timeout)
+    payload = await claude_dispatch(prompt, schema, timeout=timeout)
     if isinstance(payload, dict):
         verdict = payload.get("verdict", "unknown")
         summary = payload.get("summary", "")
         findings = payload.get("findings", [])
         lines = [f"Verdict: {verdict}", summary]
         for f in findings:
-            lines.append(
-                f"  [{f.get('severity', '?')}/"
-                f"{f.get('verification_method', '?')}] "
-                f"{f.get('title', '')}"
-            )
+            lines.append(f"  [{f.get('severity', '?')}] {f.get('title', '')}")
         return "\n".join(lines)
     return str(payload)
 

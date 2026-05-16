@@ -19,7 +19,6 @@ from nexus.operators.dispatch_router import (
     CLAUDE_OPERATORS_PINNED,
     QWEN_OPERATORS_DEFAULT,
     pick_dispatcher,
-    pick_dispatcher_for,
     pick_dispatcher_for_bundle,
 )
 
@@ -233,54 +232,3 @@ class TestBundleRouting:
         assert (
             pick_dispatcher_for_bundle(["summarize", "compare"]) == "claude"
         )
-
-
-# ── Named call-site routing (non-operator callers) ───────────────────────
-
-
-class TestNamedCallSite:
-    """Per-call-site routing for non-operator ``claude_dispatch`` users.
-
-    ``pick_dispatcher_for`` delegates to ``pick_dispatcher`` — call sites
-    are not in ``QWEN_OPERATORS_DEFAULT`` so the auto-mode unknown-name
-    branch routes them to claude. Pins use the same env vars.
-    """
-
-    def test_default_routes_to_claude(self) -> None:
-        assert pick_dispatcher_for("topic_labeler") == "claude"
-
-    def test_auto_mode_routes_to_claude(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Cautious default: no bench evidence yet for call sites, so
-        # auto-mode still routes them to claude.
-        monkeypatch.setenv("NEXUS_DISPATCH_BACKEND", "auto")
-        assert pick_dispatcher_for("topic_labeler") == "claude"
-
-    def test_global_qwen_mode_routes_to_qwen(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("NEXUS_DISPATCH_BACKEND", "qwen")
-        assert pick_dispatcher_for("topic_labeler") == "qwen"
-
-    def test_qwen_pin_via_operators_env(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Reuse the per-operator env var — semantic is "what to route",
-        # operator vs call site is the same surface.
-        monkeypatch.setenv("NEXUS_DISPATCH_QWEN_OPERATORS", "topic_labeler")
-        assert pick_dispatcher_for("topic_labeler") == "qwen"
-
-    def test_claude_pin_overrides_qwen_pin(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("NEXUS_DISPATCH_QWEN_OPERATORS", "topic_labeler")
-        monkeypatch.setenv("NEXUS_DISPATCH_CLAUDE_OPERATORS", "topic_labeler")
-        assert pick_dispatcher_for("topic_labeler") == "claude"
-
-    def test_claude_pin_overrides_global_qwen(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("NEXUS_DISPATCH_BACKEND", "qwen")
-        monkeypatch.setenv("NEXUS_DISPATCH_CLAUDE_OPERATORS", "topic_labeler")
-        assert pick_dispatcher_for("topic_labeler") == "claude"

@@ -70,9 +70,7 @@ Retry policy (audit F8):
 """
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import random
 import re
 import subprocess
@@ -235,152 +233,6 @@ its ``source_path`` line.
 """
 
 
-# v2 prompt — feature/scholarly-paper-v2. Tightened
-# ``experimental_datasets`` and ``experimental_baselines`` definitions
-# vs. v1; problem/method/results/extras/confidence unchanged. Verbatim
-# copy of /tmp/aspect-prompt-v4.txt validated against the Grossberg-lab
-# 10-paper bench corpus (v1: 46% / 64% semantic agreement on datasets /
-# baselines; v4: 100% / 93%).
-_SCHOLARLY_PAPER_V2_PROMPT = """\
-You are extracting structured aspects from a scholarly paper. Read the
-paper text below and return a JSON object with EXACTLY the following
-fields:
-
-  problem_formulation:    string — one or two sentences naming the
-                          problem the paper addresses.
-  proposed_method:        string — one to three sentences naming the
-                          paper's proposed approach.
-  experimental_datasets:  array of strings — empirical datasets the
-                          paper DIRECTLY USES or GENERATES in its own
-                          experiments. NOT data merely cited in
-                          related-work or background discussion.
-
-                          CRITICAL — return [] when:
-                          - The paper proposes a theoretical model
-                            and the candidate "datasets" are task
-                            paradigms, behavioral findings, or
-                            empirical results reported by CITED prior
-                            work (i.e. the paper references the data
-                            but does not run experiments on it).
-                          - The paper is a review, survey, or
-                            position paper with no experiments of
-                            its own.
-                          - The paper's only quantitative content is
-                            symbolic/mathematical analysis of a
-                            proposed model against analytical
-                            predictions, not against an empirical
-                            dataset.
-
-                          Examples of CORRECT extraction:
-                          - ML paper that trains on MNIST and reports
-                            accuracy: ["MNIST"]
-                          - Theoretical neuroscience paper that cites
-                            Bizzi et al. (1984) arm-movement data but
-                            does not run its own experiments on that
-                            data: []
-                          - Paper that introduces and uses its own
-                            new corpus of 535 English words rated on
-                            Mechanical Turk: ["535-word MTurk
-                            attribute rating corpus"]
-
-                          Each entry: SHORT NAME ONLY, max 12 words,
-                          no parenthetical citation suffix
-                          (e.g. "MNIST" not "MNIST (LeCun 1998)"),
-                          no aggregation phrases ("various", "other",
-                          "etc.").
-
-  experimental_baselines: array of strings — DISTINCT prior models or
-                          methods (from OTHER authors / prior work)
-                          that the paper QUANTITATIVELY COMPARES
-                          AGAINST in its own reported experiments.
-
-                          IMPORTANT — do NOT list:
-                          - Internal ablation variants of the paper's
-                            own proposed model (e.g. "ProposedModel
-                            without component X"). The proposed model
-                            itself and its ablation variants are
-                            collectively the paper's contribution,
-                            not baselines.
-                          - Models merely reviewed, discussed, or
-                            surveyed without quantitative comparison.
-
-                          Each entry: model/method NAME ONLY, max 8
-                          words, no parenthetical citation suffix
-                          ("HILLARY" not "HILLARY (Iba et al. 1988)"),
-                          no aggregation phrases. Empty array is the
-                          correct answer when the paper runs no
-                          quantitative comparison against prior
-                          external models.
-
-  experimental_results:   string — one to two sentences summarizing
-                          the headline experimental result.
-  extras:                 JSON object — any other useful structured
-                          fields (e.g. venue, ablations_present,
-                          code_release). May be empty.
-  confidence:             number in [0, 1] — your confidence that
-                          the extraction is faithful to the paper.
-
-Respond with ONLY the JSON object (no Markdown, no commentary).
-
-Paper text follows:
-
----
-
-{content}
-"""
-
-
-# v2 batch header — the v1 batch header (above) deliberately punts
-# field semantics to the single-paper prompt, listing field names only.
-# The per-paper definitional tightening in v2 is single-paper-resident;
-# the batch wrapper inherits semantics via the per-paper-rendered
-# response shape it asks for. We add a brief reminder block here so
-# operators reading the wire prompt see that the same dataset /
-# baseline rules apply in batch mode. The outer ``{papers: [...]}``
-# JSON shape is unchanged.
-_SCHOLARLY_BATCH_PROMPT_HEADER_V2 = """\
-You are extracting structured aspects from N scholarly papers in one
-pass. Each paper carries a ``source_path`` identifier; you must echo
-that identifier back in each output entry so the caller can match
-extractions to inputs.
-
-Return a JSON object with this exact shape:
-
-  {{
-    "papers": [
-      {{
-        "source_path": "<verbatim from input>",
-        "problem_formulation": string — one or two sentences,
-        "proposed_method": string — one to three sentences,
-        "experimental_datasets": array of strings (empty if none),
-        "experimental_baselines": array of strings (empty if none),
-        "experimental_results": string — one to two sentences,
-        "extras": JSON object (may be empty),
-        "confidence": number in [0, 1]
-      }},
-      ...
-    ]
-  }}
-
-Field-definition reminders (apply per paper):
-  * experimental_datasets — ONLY empirical datasets the paper directly
-    uses or generates in its own experiments. Return [] for theoretical
-    / review / symbolic-analysis papers that merely cite prior data.
-    Short name only, max 12 words, no citation suffix, no aggregation.
-  * experimental_baselines — DISTINCT prior models (from OTHER authors /
-    prior work) that the paper QUANTITATIVELY COMPARES AGAINST. Do NOT
-    list internal ablation variants of the paper's own proposed model.
-    Name only, max 8 words, no citation suffix, no aggregation.
-
-The ``papers`` array must have EXACTLY one entry per input paper, in
-the same order. Echo each paper's ``source_path`` verbatim. Respond
-with ONLY the JSON object (no Markdown, no commentary).
-
-The papers follow, separated by ``=====``. Each paper is preceded by
-its ``source_path`` line.
-"""
-
-
 _SCHOLARLY_PAPER_CONFIG = ExtractorConfig(
     extractor_name="scholarly-paper-v1",
     # The model is pinned at config; the actual Claude CLI may
@@ -401,84 +253,7 @@ _SCHOLARLY_PAPER_CONFIG = ExtractorConfig(
 )
 
 
-# v2 mirror config. Same required_fields and model_version as v1 —
-# the schema and pinned model are unchanged; only the prompt body and
-# the extractor_name (for downstream model_version + extractor_name
-# rows on document_aspects) differ. Bench evidence: see PR body and
-# the harness in #782.
-_SCHOLARLY_PAPER_V2_CONFIG = ExtractorConfig(
-    extractor_name="scholarly-paper-v2",
-    model_version="claude-haiku-4-5-20251001",
-    prompt_template=_SCHOLARLY_PAPER_V2_PROMPT,
-    required_fields=(
-        "problem_formulation",
-        "proposed_method",
-        "experimental_datasets",
-        "experimental_baselines",
-        "experimental_results",
-    ),
-)
-
-
-# ── Scholarly-paper prompt version switch ────────────────────────────────────
-#
-# Opt-in v2 prompt selection. v1 remains the default; setting
-# ``NEXUS_SCHOLARLY_PAPER_VERSION=v2`` routes ``knowledge__*``
-# collections through ``_SCHOLARLY_PAPER_V2_CONFIG`` (and its batch
-# header analogue ``_SCHOLARLY_BATCH_PROMPT_HEADER_V2``). Unknown
-# values fall back to v1 with a warning log.
-#
-# Resolution is **lookup-time**, not module-import-time. Tests can
-# ``monkeypatch.setenv`` per-test without re-importing the module;
-# operators can flip the env per-shell or per-systemd-unit without
-# restarting long-running processes that share the import.
-#
-# This is intentionally a coarse global toggle, not a per-collection
-# routing system. Per-collection routing is a future enhancement if
-# more than two prompt revisions ever ship simultaneously.
-
-_SCHOLARLY_PAPER_VERSION_ENV = "NEXUS_SCHOLARLY_PAPER_VERSION"
-_SCHOLARLY_PAPER_VERSION_DEFAULT = "v1"
-_SCHOLARLY_PAPER_VERSION_VALID = ("v1", "v2")
-
-
-def _pick_scholarly_paper_version() -> str:
-    """Resolve the scholarly-paper prompt version from env.
-
-    Returns ``"v1"`` or ``"v2"``. Default is ``"v1"``. Unknown values
-    log a warning and fall back to ``"v1"``. Case-insensitive on the
-    value side.
-    """
-    raw = os.environ.get(_SCHOLARLY_PAPER_VERSION_ENV)
-    if raw is None or raw == "":
-        return _SCHOLARLY_PAPER_VERSION_DEFAULT
-    val = raw.strip().lower()
-    if val in _SCHOLARLY_PAPER_VERSION_VALID:
-        return val
-    _log.warning(
-        "aspect_extractor_unknown_scholarly_version",
-        requested=raw,
-        fallback=_SCHOLARLY_PAPER_VERSION_DEFAULT,
-        valid=_SCHOLARLY_PAPER_VERSION_VALID,
-    )
-    return _SCHOLARLY_PAPER_VERSION_DEFAULT
-
-
-def _pick_scholarly_paper_config() -> ExtractorConfig:
-    """Return the active scholarly-paper ``ExtractorConfig`` for the
-    current ``NEXUS_SCHOLARLY_PAPER_VERSION`` setting."""
-    if _pick_scholarly_paper_version() == "v2":
-        return _SCHOLARLY_PAPER_V2_CONFIG
-    return _SCHOLARLY_PAPER_CONFIG
-
-
 _REGISTRY: dict[str, ExtractorConfig] = {
-    # ``knowledge__`` entry is the default (v1). The actual resolved
-    # config for ``knowledge__*`` lookups goes through
-    # ``_pick_scholarly_paper_config`` inside ``select_config`` so the
-    # env toggle is honoured at call time. The dict entry remains for
-    # back-compat with tests / callers that iterate ``_REGISTRY``
-    # directly.
     "knowledge__": _SCHOLARLY_PAPER_CONFIG,
     # docs__* — NOT registered (nexus-z70w reverted #377). docs__<repo>
     # is populated by `nx index repo`, which sweeps any prose file in
@@ -862,12 +637,6 @@ def select_config(collection: str) -> ExtractorConfig | None:
     """
     for prefix, config in _REGISTRY.items():
         if collection.startswith(prefix):
-            # ``knowledge__`` honours the NEXUS_SCHOLARLY_PAPER_VERSION
-            # env toggle at call time so operators can flip v1↔v2 per
-            # shell / systemd-unit without restarting long-running
-            # processes. Other prefixes (``rdr__``) are not versioned.
-            if prefix == "knowledge__":
-                return _pick_scholarly_paper_config()
             return config
     return None
 
@@ -1278,14 +1047,7 @@ def _build_batch_prompt(
     ``source_path`` line followed by its content, separated from
     other papers by a ``=====`` divider.
     """
-    # Pick the v2 batch header when the active config is the v2 one;
-    # otherwise use v1. Keyed off the config object identity so the
-    # batch path matches whatever single-paper would have used.
-    if config is _SCHOLARLY_PAPER_V2_CONFIG:
-        header = _SCHOLARLY_BATCH_PROMPT_HEADER_V2
-    else:
-        header = _SCHOLARLY_BATCH_PROMPT_HEADER
-    parts = [header]
+    parts = [_SCHOLARLY_BATCH_PROMPT_HEADER]
     for _idx, _collection, source_path, content in callable_inputs:
         parts.append("\n=====\n")
         parts.append(f"source_path: {source_path}\n\n")
@@ -1305,13 +1067,9 @@ def _retry_subprocess_batch(
     null-out). Returns the outer dict ``{"papers": [...]}`` on
     success, ``None`` on final failure.
     """
-    backend = _pick_aspect_backend()
-    invoker = (
-        _invoke_once_batch_qwen if backend == "qwen" else _invoke_once_batch
-    )
     for attempt in range(_RETRY_ATTEMPTS):
         try:
-            return invoker(prompt, timeout=timeout)
+            return _invoke_once_batch(prompt, timeout=timeout)
         except _TransientFailure as exc:
             _log.debug(
                 "aspect_extractor_batch_transient_failure",
@@ -1457,147 +1215,6 @@ def _build_record_from_entry(
     )
 
 
-# ── Backend selection (Path B parallel adapter) ──────────────────────────────
-
-
-_ASPECT_BACKEND_ENV = "NEXUS_ASPECT_BACKEND"
-_ASPECT_BACKEND_DEFAULT = "claude"
-_ASPECT_BACKEND_VALID = ("claude", "qwen")
-
-# Permissive schemas for the qwen path. The aspect prompt was authored
-# against ``claude -p`` which doesn't take a schema, so we don't
-# fabricate field constraints here — the existing post-parse
-# validation in ``_build_record`` / ``_build_record_from_entry``
-# still applies. The schema is required by ``qwen_dispatch`` solely
-# to render the system-prompt JSON contract.
-_QWEN_ASPECT_SCHEMA_SINGLE: dict[str, Any] = {"type": "object"}
-_QWEN_ASPECT_SCHEMA_BATCH: dict[str, Any] = {
-    "type": "object",
-    "properties": {"papers": {"type": "array"}},
-    "required": ["papers"],
-}
-
-
-def _pick_aspect_backend() -> str:
-    """Resolve the aspect-extractor backend from ``NEXUS_ASPECT_BACKEND``.
-
-    Values: ``claude`` (default) routes to the existing subprocess
-    invokers; ``qwen`` routes to ``qwen_dispatch``. Unknown values
-    fall back to ``claude`` with a warning log. This is the only
-    surface that decides between the two engines — the retry/backoff
-    wrapper is shared.
-    """
-    raw = os.environ.get(_ASPECT_BACKEND_ENV)
-    if raw is None or raw == "":
-        return _ASPECT_BACKEND_DEFAULT
-    val = raw.strip().lower()
-    if val in _ASPECT_BACKEND_VALID:
-        return val
-    _log.warning(
-        "aspect_extractor_unknown_backend",
-        requested=raw,
-        fallback=_ASPECT_BACKEND_DEFAULT,
-        valid=_ASPECT_BACKEND_VALID,
-    )
-    return _ASPECT_BACKEND_DEFAULT
-
-
-def _dispatch_qwen_sync(
-    prompt: str,
-    schema: dict[str, Any],
-    *,
-    timeout: float,
-    operator_name: str,
-) -> dict[str, Any]:
-    """Run ``qwen_dispatch`` from a synchronous caller, translating
-    its exceptions into the local ``_TransientFailure`` /
-    ``_HardFailure`` taxonomy so the existing retry wrapper applies
-    without modification.
-
-    Exception mapping:
-
-    * ``QwenOperatorTimeoutError`` → ``_TransientFailure`` (HTTP
-      timeout is retriable at this layer).
-    * ``QwenOperatorOutputError`` → ``_HardFailure`` (qwen_dispatch
-      already retried JSON-parse internally; further retries here
-      won't reshape the model output).
-    * ``QwenOperatorError`` (other) → ``_TransientFailure`` for 5xx
-      backend errors, ``_HardFailure`` otherwise.
-    * Any unexpected exception → ``_HardFailure`` (don't silently
-      retry the unknown).
-    """
-    # Lazy import: avoids httpx + qwen_dispatch module load on the
-    # default (claude) path. Resolve via the module so tests that
-    # monkeypatch ``qwen_dispatch.qwen_dispatch`` are honoured.
-    from nexus.operators import qwen_dispatch as _qd_mod
-    QwenOperatorError = _qd_mod.QwenOperatorError
-    QwenOperatorOutputError = _qd_mod.QwenOperatorOutputError
-    QwenOperatorTimeoutError = _qd_mod.QwenOperatorTimeoutError
-
-    try:
-        return asyncio.run(
-            _qd_mod.qwen_dispatch(
-                prompt,
-                schema,
-                timeout=timeout,
-                operator_name=operator_name,
-            )
-        )
-    except QwenOperatorTimeoutError as exc:
-        raise _TransientFailure(f"qwen timeout: {exc}") from exc
-    except QwenOperatorOutputError as exc:
-        raise _HardFailure(f"qwen output parse exhausted: {exc}") from exc
-    except QwenOperatorError as exc:
-        msg = str(exc)
-        # Classify 5xx as transient; anything else (4xx, shape
-        # mismatch) as hard.
-        if "non-2xx (5" in msg:
-            raise _TransientFailure(f"qwen 5xx: {exc}") from exc
-        raise _HardFailure(f"qwen error: {exc}") from exc
-
-
-def _invoke_once_qwen(prompt: str) -> dict:
-    """Qwen-backed analogue of :func:`_invoke_once`. Returns the parsed
-    JSON dict on success. Raises ``_TransientFailure`` /
-    ``_HardFailure`` per the same taxonomy as the subprocess path.
-
-    No outer ``{"result": ...}`` envelope to unwrap — ``qwen_dispatch``
-    already returns the parsed inner dict. Post-parse validation
-    (top-level must be a dict) mirrors the subprocess path.
-    """
-    parsed = _dispatch_qwen_sync(
-        prompt,
-        _QWEN_ASPECT_SCHEMA_SINGLE,
-        timeout=180.0,
-        operator_name="aspect_single",
-    )
-    if not isinstance(parsed, dict):
-        raise _HardFailure(
-            f"qwen json top-level not a dict (got {type(parsed).__name__})"
-        )
-    return parsed
-
-
-def _invoke_once_batch_qwen(prompt: str, *, timeout: int) -> dict:
-    """Qwen-backed analogue of :func:`_invoke_once_batch`. Asserts the
-    response contains a ``papers`` array — same hard-failure contract
-    as the subprocess batch path.
-    """
-    parsed = _dispatch_qwen_sync(
-        prompt,
-        _QWEN_ASPECT_SCHEMA_BATCH,
-        timeout=float(timeout),
-        operator_name="aspect_batch",
-    )
-    if not isinstance(parsed, dict):
-        raise _HardFailure(
-            f"qwen batch top-level not a dict (got {type(parsed).__name__})"
-        )
-    if not isinstance(parsed.get("papers"), list):
-        raise _HardFailure("qwen batch response missing 'papers' array")
-    return parsed
-
-
 # ── Subprocess invocation + retry loop ───────────────────────────────────────
 
 
@@ -1608,11 +1225,9 @@ def _retry_subprocess(
     """Invoke the Claude CLI with retry. Return the parsed JSON dict on
     success, or ``None`` after final failure.
     """
-    backend = _pick_aspect_backend()
-    invoker = _invoke_once_qwen if backend == "qwen" else _invoke_once
     for attempt in range(_RETRY_ATTEMPTS):
         try:
-            return invoker(prompt)
+            return _invoke_once(prompt)
         except _TransientFailure as exc:
             _log.debug(
                 "aspect_extractor_transient_failure",
