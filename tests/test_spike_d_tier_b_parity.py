@@ -170,14 +170,10 @@ async def test_qwen_agent_leg_sets_env(
 async def test_run_case_skips_qwen_for_unwired_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Historical skip path — opt-in via ``--skip-unwired`` (which the
-    driver translates into a non-default ``unwired`` set). Verifies the
-    skip mechanism still works for replaying pre-completion benches.
-    """
     monkeypatch.delenv("NEXUS_TIER_B_DISPATCHER", raising=False)
     fake_claude = AsyncMock(return_value={"summary": "s", "actions": []})
     fake_qwen = AsyncMock(side_effect=AssertionError(
-        "qwen_agent must not run when caller opts into --skip-unwired"
+        "qwen_agent must not run for nx_tidy until routing lands"
     ))
     with (
         patch("nexus.operators.dispatch.claude_dispatch", fake_claude),
@@ -190,39 +186,11 @@ async def test_run_case_skips_qwen_for_unwired_tools(
             {"name": "tidy-1", "tool": "nx_tidy",
              "input": {"topic": "x", "collection": "knowledge"}},
             ["claude_agent", "qwen_agent"],
-            unwired=frozenset({"nx_tidy", "nx_plan_audit"}),
         )
     assert row["qwen_agent_skipped"] is True
     assert row["qwen_agent"] is None
     assert row["claude_agent"]["payload"] == {"summary": "s", "actions": []}
     fake_qwen.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_run_case_default_runs_qwen_for_nx_tidy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Tier-B completion: default ``unwired`` set is empty, so
-    ``nx_tidy`` now runs the qwen leg like ``nx_enrich_beads``.
-    """
-    monkeypatch.delenv("NEXUS_TIER_B_DISPATCHER", raising=False)
-    fake_claude = AsyncMock(return_value={"summary": "s", "actions": []})
-    fake_qwen = AsyncMock(return_value={"summary": "qs", "actions": []})
-    with (
-        patch("nexus.operators.dispatch.claude_dispatch", fake_claude),
-        patch(
-            "nexus.operators.qwen_agent_dispatch.qwen_agent_dispatch",
-            fake_qwen,
-        ),
-    ):
-        row = await spike._run_case(
-            {"name": "tidy-1", "tool": "nx_tidy",
-             "input": {"topic": "x", "collection": "knowledge"}},
-            ["claude_agent", "qwen_agent"],
-        )
-    assert not row.get("qwen_agent_skipped")
-    assert fake_claude.await_count == 1
-    assert fake_qwen.await_count == 1
 
 
 @pytest.mark.asyncio

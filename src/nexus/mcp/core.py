@@ -3908,34 +3908,7 @@ async def nx_tidy(
         f"'{collection}'. Search for all related entries, identify duplicates "
         "or contradictions, and produce a consolidated summary."
     )
-    # Schema-conformance directive — mirror of nx_enrich_beads (#799).
-    # Tier-B qwen reliably emits narrative at finalization in tool-use
-    # loops instead of json_schema output; explicit "JSON only" trailer
-    # fixes that. No-op for claude.
-    prompt += (
-        "\n\nRespond with ONLY a JSON object conforming to the schema "
-        "above. No prose, no commentary, no prefix, no markdown fences. "
-        "Begin your response with `{` and end with `}`."
-    )
-
-    # Tier-B dispatcher selection — mirror of nx_enrich_beads.
-    tier_b = _os.environ.get("NEXUS_TIER_B_DISPATCHER", "claude").lower()
-    if tier_b == "qwen_agent":
-        from nexus.operators.qwen_agent_dispatch import qwen_agent_dispatch
-
-        payload = await qwen_agent_dispatch(
-            prompt,
-            schema,
-            timeout=timeout,
-            extensions=["nx"],
-            # 50 mirrors the nx_enrich_beads cap (#799) — no per-tool
-            # bench evidence yet; the harness change in this PR makes
-            # that bench possible as a follow-on operator action.
-            max_tool_calls=50,
-            operator_name="nx_tidy",
-        )
-    else:
-        payload = await claude_dispatch(prompt, schema, timeout=timeout)
+    payload = await claude_dispatch(prompt, schema, timeout=timeout)
 
     summary = payload.get("summary", "") if isinstance(payload, dict) else str(payload)
     actions = payload.get("actions", []) if isinstance(payload, dict) else []
@@ -4089,30 +4062,8 @@ async def nx_plan_audit(
     )
     if context:
         prompt += f"\n\nContext:\n{context}"
-    # Schema-conformance directive — mirror of nx_enrich_beads (#799).
-    prompt += (
-        "\n\nRespond with ONLY a JSON object conforming to the schema "
-        "above. No prose, no commentary, no prefix, no markdown fences. "
-        "Begin your response with `{` and end with `}`."
-    )
 
-    # Tier-B dispatcher selection — mirror of nx_enrich_beads.
-    tier_b = _os.environ.get("NEXUS_TIER_B_DISPATCHER", "claude").lower()
-    if tier_b == "qwen_agent":
-        from nexus.operators.qwen_agent_dispatch import qwen_agent_dispatch
-
-        payload = await qwen_agent_dispatch(
-            prompt,
-            schema,
-            timeout=timeout,
-            extensions=["nx"],
-            # 50 mirrors nx_enrich_beads (#799). Plan audit is bounded
-            # by plan size and is largely read-only; 50 is generous.
-            max_tool_calls=50,
-            operator_name="nx_plan_audit",
-        )
-    else:
-        payload = await claude_dispatch(prompt, schema, timeout=timeout)
+    payload = await claude_dispatch(prompt, schema, timeout=timeout)
     if isinstance(payload, dict):
         verdict = payload.get("verdict", "unknown")
         summary = payload.get("summary", "")
