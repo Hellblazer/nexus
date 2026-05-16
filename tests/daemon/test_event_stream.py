@@ -700,3 +700,104 @@ async def test_event_stream_error_frame_has_typed_shape(daemon: T2Daemon) -> Non
     assert isinstance(err, dict), f"expected dict error frame, got {type(err).__name__}: {err!r}"
     assert err.get("type") == "InvalidArgument"
     assert "subspace_prefix" in err.get("message", "")
+
+
+# ---------------------------------------------------------------------------
+# (k) nexus-egok: subscribe without subspace_prefix returns InvalidArgument
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_event_stream_subscribe_missing_subspace_prefix(
+    daemon: T2Daemon,
+) -> None:
+    """``event_stream.subscribe`` without ``subspace_prefix`` returns InvalidArgument.
+
+    Existing coverage rejected GLOB metachars in the prefix; the absent /
+    empty prefix path (``args={}``) was untested. event_stream.py guards
+    this with the same ``{type: 'InvalidArgument', message: ...}`` error
+    frame shape as the GLOB-rejection path.
+    """
+    import asyncio as _asyncio
+    from nexus.daemon.t2_daemon import (
+        DAEMON_PROTOCOL_VERSION,
+        read_frame,
+        write_frame,
+    )
+
+    reader, writer = await _asyncio.open_unix_connection(str(daemon.uds_path))
+    try:
+        write_frame(writer, {"op": "hello", "protocol_version": DAEMON_PROTOCOL_VERSION})
+        await writer.drain()
+        await read_frame(reader)  # hello_ack
+        write_frame(writer, {"op": "event_stream.subscribe", "args": {}})
+        await writer.drain()
+        frame = await _asyncio.wait_for(read_frame(reader), timeout=2.0)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+    assert "error" in frame
+    err = frame["error"]
+    assert isinstance(err, dict), f"expected dict error frame, got {type(err).__name__}: {err!r}"
+    assert err.get("type") == "InvalidArgument"
+    assert "subspace_prefix" in err.get("message", "")
+    assert "required" in err.get("message", "")
+
+
+# ---------------------------------------------------------------------------
+# (l) nexus-a3n8: db-open failure surfaces typed error frame
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_event_stream_subscribe_db_open_failure_returns_error_frame(
+    daemon: T2Daemon,
+    tmp_path: Path,
+) -> None:
+    """``sqlite3.connect`` failure inside subscribe surfaces a typed error frame.
+
+    event_stream.py wraps the ``sqlite3.connect`` call in a try/except so
+    a bad tuples_db_path (one that points at a directory, a locked file,
+    or anything else SQLite cannot open) produces the standard
+    ``{error: {type, message}}`` frame instead of crashing the handler.
+    Force the failure by swapping the daemon's ``_tuples_db_path`` to a
+    directory before sending subscribe.
+    """
+    import asyncio as _asyncio
+    from nexus.daemon.t2_daemon import (
+        DAEMON_PROTOCOL_VERSION,
+        read_frame,
+        write_frame,
+    )
+
+    # sqlite3.connect on a directory raises OperationalError ("unable to
+    # open database file"); pointing the daemon there mid-flight is the
+    # most direct way to force the except branch.
+    bad_path = tmp_path / "tuples_is_a_directory_not_a_file"
+    bad_path.mkdir()
+    daemon._tuples_db_path = bad_path
+
+    reader, writer = await _asyncio.open_unix_connection(str(daemon.uds_path))
+    try:
+        write_frame(writer, {"op": "hello", "protocol_version": DAEMON_PROTOCOL_VERSION})
+        await writer.drain()
+        await read_frame(reader)  # hello_ack
+        write_frame(writer, {
+            "op": "event_stream.subscribe",
+            "args": {"subspace_prefix": "tuples/whatever"},
+        })
+        await writer.drain()
+        frame = await _asyncio.wait_for(read_frame(reader), timeout=2.0)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+    assert "error" in frame, f"expected error frame; got {frame!r}"
+    err = frame["error"]
+    assert isinstance(err, dict), f"expected dict error frame, got {type(err).__name__}: {err!r}"
+    # event_stream uses the exception class name as type; OperationalError
+    # is the most likely from sqlite3 on a directory path, but any non-empty
+    # type label is acceptable.
+    assert err.get("type"), f"error frame must carry a type; got {err!r}"
+    assert "tuples.db" in err.get("message", "") or "failed to open" in err.get("message", "").lower()
