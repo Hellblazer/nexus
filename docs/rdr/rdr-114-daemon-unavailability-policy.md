@@ -947,4 +947,23 @@ exists in source yet).
 
 Ready for gate round 3.
 
+### 2026-05-16, Gate round 3 (Layer 3 substantive critic): PASSED
+
+Verdict from re-run of `/nx:rdr-gate rdr-114`: 0 critical, 0
+significant, 0 observations. Both round-2 fixes landed cleanly:
+
+- Zero remaining "exactly once" (unhyphenated) claims in the body;
+  the five `exactly-once` (hyphenated) hits are all caller-side
+  qualifiers, not system guarantees.
+- Line 89 substrate-list bullet now reads `NX_BRIDGE_DISABLE`
+  correctly.
+- Revision History honestly describes the round-1 and round-2
+  findings and fixes.
+- Validation Testing Strategy Scenario 1 coherence intact;
+  at-least-once with `action_idempotency` pointer is consistent
+  with Research Findings.
+
+Gate complete. Ready for `/nx:rdr-accept rdr-114`.
+
+
 
