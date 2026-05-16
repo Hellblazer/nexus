@@ -11,6 +11,7 @@ substitution and file placement are exercised for real.
 
 from __future__ import annotations
 
+import shlex
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -40,20 +41,23 @@ def test_template_files_ship_in_resources() -> None:
 def test_render_template_substitutes_placeholders(tmp_path: Path) -> None:
     rendered = daemon_cmd._render_template(
         "com.nexus.t2.plist",
-        nx_bin="/opt/nx/bin/nx",
+        nx_bin=["/opt/nx/bin/nx"],
         log_dir=str(tmp_path / "logs"),
         path_env="/usr/local/bin:/usr/bin",
     )
-    assert "__NX_BIN__" not in rendered
+    # ProgramArguments slot is real (the placeholder in the file header
+    # comment is left untouched and is harmless — launchd ignores XML
+    # comments).
+    assert "<string>__NX_BIN__</string>" not in rendered
     assert "__LOG_DIR__" not in rendered
     assert "__PATH_ENV__" not in rendered
-    assert "/opt/nx/bin/nx" in rendered
+    assert "<string>/opt/nx/bin/nx</string>" in rendered
     assert str(tmp_path / "logs") in rendered
 
 
 def test_resolve_nx_bin_uses_which(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(daemon_cmd.shutil, "which", lambda name: "/opt/uv/bin/nx")
-    assert daemon_cmd._resolve_nx_bin() == "/opt/uv/bin/nx"
+    assert daemon_cmd._resolve_nx_bin() == ["/opt/uv/bin/nx"]
 
 
 def test_resolve_nx_bin_falls_back_to_python_module(
@@ -61,9 +65,66 @@ def test_resolve_nx_bin_falls_back_to_python_module(
 ) -> None:
     monkeypatch.setattr(daemon_cmd.shutil, "which", lambda name: None)
     resolved = daemon_cmd._resolve_nx_bin()
-    # Falls back to ``<python> -m nexus.cli``; both tokens present.
-    assert sys.executable in resolved
-    assert "nexus.cli" in resolved
+    assert resolved == [sys.executable, "-m", "nexus.cli"]
+
+
+def test_render_plist_multi_token_expands_to_one_string_per_token(
+    tmp_path: Path,
+) -> None:
+    """nexus-ooxh: multi-token nx_bin must produce N <string> elements, not one space-joined slot."""
+    rendered = daemon_cmd._render_template(
+        "com.nexus.t2.plist",
+        nx_bin=["/opt/python/bin/python3.12", "-m", "nexus.cli"],
+        log_dir=str(tmp_path / "logs"),
+        path_env="/usr/bin",
+    )
+    assert "<string>/opt/python/bin/python3.12</string>" in rendered
+    assert "<string>-m</string>" in rendered
+    assert "<string>nexus.cli</string>" in rendered
+    # No single mashed-together slot.
+    assert "<string>/opt/python/bin/python3.12 -m nexus.cli</string>" not in rendered
+    # daemon argv survives.
+    assert "<string>daemon</string>" in rendered
+    assert "<string>--foreground</string>" in rendered
+
+
+def test_render_systemd_multi_token_uses_shlex_join(tmp_path: Path) -> None:
+    """nexus-ooxh: multi-token nx_bin in systemd ExecStart must shlex-quote tokens."""
+    rendered = daemon_cmd._render_template(
+        "nexus-t2.service",
+        nx_bin=["/opt/python with spaces/python3.12", "-m", "nexus.cli"],
+        log_dir=str(tmp_path / "logs"),
+        path_env="/usr/bin",
+    )
+    # Pull the ExecStart line.
+    exec_lines = [line for line in rendered.splitlines() if line.startswith("ExecStart=")]
+    assert len(exec_lines) == 1
+    exec_line = exec_lines[0].removeprefix("ExecStart=")
+    parsed = shlex.split(exec_line)
+    assert parsed[:3] == [
+        "/opt/python with spaces/python3.12",
+        "-m",
+        "nexus.cli",
+    ]
+    assert parsed[3:] == ["daemon", "t2", "start", "--foreground"]
+
+
+def test_plist_keepalive_uses_crashed_not_successfulexit() -> None:
+    """nexus-o6g9: plist KeepAlive must be ``Crashed: true`` so clean SIGTERM stops respawn."""
+    plist = daemon_cmd._read_template("com.nexus.t2.plist")
+    # Old broken semantic was ``<key>SuccessfulExit</key><false/>``.
+    assert "SuccessfulExit" not in plist
+    # New semantic: respawn on crash only.
+    assert "<key>Crashed</key>" in plist
+    crashed_index = plist.index("<key>Crashed</key>")
+    snippet = plist[crashed_index : crashed_index + 80]
+    assert "<true/>" in snippet
+
+
+def test_systemd_unit_marks_sigterm_exit_as_success() -> None:
+    """nexus-o6g9: systemd unit must include ``SuccessExitStatus=143`` (SIGTERM)."""
+    service = daemon_cmd._read_template("nexus-t2.service")
+    assert "SuccessExitStatus=143" in service
 
 
 def test_install_autostart_macos_writes_plist(
@@ -72,7 +133,7 @@ def test_install_autostart_macos_writes_plist(
     _set_platform(monkeypatch, "darwin")
     monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: tmp_path / "LaunchAgents")
     monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
-    monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: "/opt/nx/bin/nx")
+    monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/nx/bin/nx"])
 
     with patch.object(daemon_cmd.subprocess, "run") as mock_run:
         mock_run.return_value.returncode = 0
@@ -85,8 +146,8 @@ def test_install_autostart_macos_writes_plist(
     plist_path = tmp_path / "LaunchAgents" / "com.nexus.t2.plist"
     assert plist_path.exists()
     body = plist_path.read_text()
-    assert "/opt/nx/bin/nx" in body
-    assert "__NX_BIN__" not in body
+    assert "<string>/opt/nx/bin/nx</string>" in body
+    assert "<string>__NX_BIN__</string>" not in body
     # File permissions: 0o644 (world-readable, owner-writable).
     mode = plist_path.stat().st_mode & 0o777
     assert mode == 0o644
@@ -102,7 +163,7 @@ def test_install_autostart_linux_writes_service(
     _set_platform(monkeypatch, "linux")
     monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: tmp_path / "systemd")
     monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
-    monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: "/opt/nx/bin/nx")
+    monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/nx/bin/nx"])
 
     with patch.object(daemon_cmd.subprocess, "run") as mock_run:
         mock_run.return_value.returncode = 0
