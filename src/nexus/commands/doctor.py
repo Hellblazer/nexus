@@ -1098,8 +1098,73 @@ def _run_check_bridge() -> None:
     except Exception as exc:  # noqa: BLE001
         click.echo(_check("hook-event subspaces", False, f"registry load failed: {exc}"))
 
-    # 5. Recent tuple sanity
+    # 5. Plugin/wheel version skew (nexus-y1xc)
+    #
+    # The bridge has a BRIDGE_API_VERSION protocol gate, but plugin/wheel
+    # versions can still drift on otherwise-compatible protocols (e.g. a
+    # newer wheel ships docs/CLI changes the plugin scripts depend on).
+    # Soft-warn on mismatch; do not fail loud.
+    plugin_version: str | None = None
+    if plugin_root is not None:
+        manifest_path = plugin_root / ".claude-plugin" / "plugin.json"
+        if manifest_path.is_file():
+            try:
+                import json as _json
+                plugin_version = _json.loads(manifest_path.read_text()).get("version")
+            except Exception:  # noqa: BLE001
+                plugin_version = None
+    wheel_version: str | None
+    try:
+        from importlib.metadata import version as _pkg_version
+        wheel_version = _pkg_version("conexus")
+    except Exception:  # noqa: BLE001
+        wheel_version = None
+    if plugin_version and wheel_version:
+        if plugin_version == wheel_version:
+            click.echo(
+                _check(
+                    "plugin/wheel version",
+                    True,
+                    f"nx={plugin_version} conexus={wheel_version}",
+                )
+            )
+        else:
+            click.echo(
+                _check(
+                    "plugin/wheel version",
+                    False,
+                    f"skew: nx plugin={plugin_version} != conexus wheel={wheel_version} — "
+                    f"reinstall the matching pair (uv tool install conexus and update the "
+                    f"nx plugin) or expect drift bugs beyond the BRIDGE_API_VERSION gate",
+                )
+            )
+    elif plugin_version is None and plugin_root is not None:
+        click.echo(
+            _check(
+                "plugin/wheel version",
+                False,
+                "nx plugin manifest not found under CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json",
+            )
+        )
+
+    # 6. Recent tuple sanity (nexus-1xip: refuse the direct tuples.db open
+    # under daemon mode — the daemon owns the WAL writer and a parallel
+    # connection from this process is a race risk. Surface the skip with
+    # a hint so the operator knows where the live signal lives.)
     if tuples_db.exists():
+        from nexus.db import DaemonModeDiagnosticError, reject_under_daemon_mode
+        try:
+            reject_under_daemon_mode("nx doctor --check-bridge (tuples.db readback)")
+        except DaemonModeDiagnosticError as exc:
+            click.echo(
+                _check(
+                    "recent hook events",
+                    True,
+                    f"skipped under NX_STORAGE_MODE=daemon — use `nx daemon t2 peek tuples` "
+                    f"or watch event_stream for live signal ({exc.__class__.__name__})",
+                )
+            )
+            return
         import sqlite3 as _sqlite3
         try:
             conn = _sqlite3.connect(f"file:{tuples_db}?mode=ro", uri=True)
