@@ -117,7 +117,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        chunk: [4a, 4b, 4c, 4d]
+        chunk: [4c1, 4c2, 4c3, 4c4]
 
     steps:
       - uses: actions/checkout@v4
@@ -147,22 +147,15 @@ jobs:
           # split into 4 chunks of ~46 files each. Then append the flaky
           # tests so contamination from the chunk surfaces as a failure.
           ls tests/*.py | sort > /tmp/all.txt
-          PRE_COUNT=$(grep -n '^tests/test_migrations\.py$' /tmp/all.txt | head -1 | cut -d: -f1)
-          PRE_COUNT=$((PRE_COUNT - 1))
-          # Sub-bisect chunk 4 (lines 139..183, 45 files) into 4 sub-chunks of ~12 files each
-          CHUNK4_START=139
-          CHUNK4_END=$PRE_COUNT
-          CHUNK4_SIZE=$(( CHUNK4_END - CHUNK4_START + 1 ))
-          SUB_SIZE=$(( (CHUNK4_SIZE + 3) / 4 ))
+          # Phase 2 sub-bisect of chunk 4c (12 files, lines 163..174) into
+          # quarters of 3 files each. 4c failed at iteration 9 of the
+          # concurrent migration race; 4a/4b/4d passed.
           case "${{ matrix.chunk }}" in
-            4a) IDX=0 ;;
-            4b) IDX=1 ;;
-            4c) IDX=2 ;;
-            4d) IDX=3 ;;
+            4c1) START=163; END=165 ;;
+            4c2) START=166; END=168 ;;
+            4c3) START=169; END=171 ;;
+            4c4) START=172; END=174 ;;
           esac
-          START=$(( CHUNK4_START + IDX * SUB_SIZE ))
-          END=$(( START + SUB_SIZE - 1 ))
-          if [ $END -gt $CHUNK4_END ]; then END=$CHUNK4_END; fi
           sed -n "${START},${END}p" /tmp/all.txt > /tmp/chunk.txt
           echo "sub-chunk ${{ matrix.chunk }}: $(wc -l < /tmp/chunk.txt) files (lines $START..$END)"
           cat /tmp/chunk.txt
