@@ -232,6 +232,12 @@ def _isolate_dispatch_routing(monkeypatch: pytest.MonkeyPatch) -> None:
         # test off the default claude path. Same isolation reasoning as
         # NEXUS_DISPATCH_BACKEND above.
         "NEXUS_TIER_B_DISPATCHER",
+        # Per-tool tier-B overrides (PR pin-plan-audit-claude). The pin
+        # set defaults nx_plan_audit to claude even when the global var
+        # is qwen_agent; tests that exercise pin semantics must opt in.
+        "NEXUS_TIER_B_NX_PLAN_AUDIT_DISPATCHER",
+        "NEXUS_TIER_B_NX_TIDY_DISPATCHER",
+        "NEXUS_TIER_B_NX_ENRICH_BEADS_DISPATCHER",
         # Supervisor-binary override for the qwen-agent transport — kept
         # out of band so tests that exercise resolution can ``setenv`` it
         # explicitly without inheriting an operator's real supervisor
