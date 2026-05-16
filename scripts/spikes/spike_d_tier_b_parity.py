@@ -12,14 +12,14 @@ does not fit. This script ships the new harness.
 Routing reality
 ---------------
 
-Per PR #796, only ``nx_enrich_beads`` honors
-``NEXUS_TIER_B_DISPATCHER``. The other two unconditionally call
-``claude_dispatch``. For those tools the bench records
-``qwen_agent_skipped: true`` on the qwen leg and runs only the claude
-leg; the structural-diff axis becomes vacuously self-equal, but the
-elapsed/ok-rate axis is still useful as a baseline. Routing for those
-two is the **follow-on PR** — spike_d ships the harness, not the
-routing.
+As of the tier-B completion PR (follow-on to #796/#799), all three
+tools (``nx_enrich_beads``, ``nx_tidy``, ``nx_plan_audit``) honor
+``NEXUS_TIER_B_DISPATCHER=qwen_agent``. Earlier revisions of this
+harness short-circuited ``nx_tidy`` / ``nx_plan_audit`` with
+``qwen_agent_skipped: true``; that skip is now opt-in via the
+``--skip-unwired`` flag (kept for reproducing the original bench), and
+the aggregation / reporting code that handles the skipped state is
+retained for backward-compat with earlier JSONL records.
 
 Three-axis metric
 -----------------
@@ -82,8 +82,6 @@ Operator-supplied JSON list (no fixture corpus shipped with the PR)::
 Out of scope
 ------------
 
-* Routing for ``nx_tidy`` / ``nx_plan_audit`` — that's the follow-on
-  PR. spike_d *bench-skips* them on the qwen_agent leg.
 * Semantic-equivalence LLM judge — separate script.
 * Fixture corpus.
 """
@@ -111,10 +109,13 @@ SUPPORTED_TOOLS: tuple[str, ...] = (
     "nx_plan_audit",
 )
 
-# Tools currently NOT wired to NEXUS_TIER_B_DISPATCHER opt-in. Both
-# legs of the bench run claude_dispatch for these; the qwen leg is
-# recorded as skipped so per-tool aggregates flag the gap.
-QWEN_AGENT_UNWIRED: frozenset[str] = frozenset({"nx_tidy", "nx_plan_audit"})
+# Historically (PR #797 era) ``nx_tidy`` and ``nx_plan_audit`` were
+# unwired to ``NEXUS_TIER_B_DISPATCHER``; the harness recorded
+# ``qwen_agent_skipped: true`` for them. As of the tier-B completion
+# PR, all three tier-B tools honor the env. This set is empty by
+# default; pass ``--skip-unwired`` to re-enable the historical skip
+# (useful only for reproducing pre-completion benches).
+QWEN_AGENT_UNWIRED_DEFAULT: frozenset[str] = frozenset()
 
 # Per-tool structural fields used for Jaccard overlap.
 STRUCTURAL_FIELDS: dict[str, tuple[str, ...]] = {
@@ -396,6 +397,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--backends", default="claude_agent,qwen_agent",
                    help="Comma-separated backends (default: "
                         "claude_agent,qwen_agent).")
+    p.add_argument("--skip-unwired", action="store_true",
+                   help="Reproduce the pre-completion bench by "
+                        "skipping qwen_agent for nx_tidy and "
+                        "nx_plan_audit. As of the tier-B completion "
+                        "PR all three tools are wired; this flag is "
+                        "retained only for replaying historical runs.")
     return p.parse_args(argv)
 
 
@@ -519,6 +526,7 @@ def _render_md(summary: dict, out_path: Path) -> str:
 async def _run_case(
     case: dict,
     backends: list[str],
+    unwired: frozenset[str] = QWEN_AGENT_UNWIRED_DEFAULT,
 ) -> dict:
     tool = case["tool"]
     row: dict[str, Any] = {
@@ -528,7 +536,7 @@ async def _run_case(
         "input": case["input"],
     }
     for backend in backends:
-        if backend == "qwen_agent" and tool in QWEN_AGENT_UNWIRED:
+        if backend == "qwen_agent" and tool in unwired:
             row["qwen_agent_skipped"] = True
             row["qwen_agent"] = None
             continue
@@ -569,12 +577,18 @@ async def _main_async(args: argparse.Namespace) -> int:
             print(f"error: unknown backend {b!r}", file=sys.stderr)
             return 2
 
+    unwired = (
+        frozenset({"nx_tidy", "nx_plan_audit"})
+        if args.skip_unwired
+        else QWEN_AGENT_UNWIRED_DEFAULT
+    )
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
     records: list[dict] = []
     with args.out.open("w", encoding="utf-8") as fp:
         for repeat_ix in range(args.repeat):
             for case in cases:
-                row = await _run_case(case, backends)
+                row = await _run_case(case, backends, unwired=unwired)
                 row["repeat"] = repeat_ix
                 fp.write(json.dumps(row, default=str) + "\n")
                 fp.flush()
