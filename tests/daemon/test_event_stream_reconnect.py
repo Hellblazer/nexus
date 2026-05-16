@@ -104,6 +104,36 @@ def test_budget_exhaustion_raises_event_stream_unavailable(tmp_path: Path) -> No
         client.close()
 
 
+def test_repeated_clean_close_without_events_exhausts_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for code-review-round-1 observation: a daemon that
+    repeatedly accepts the subscribe, yields zero events, and closes
+    cleanly must still tick the reconnect budget. The wrapper's
+    ``attempt += 1`` at the end of each iteration is unconditional, so
+    repeated zero-event clean closes converge to EventStreamUnavailable
+    rather than spinning forever.
+    """
+    # Monkeypatch _event_stream_once to always return a no-event generator.
+    def _empty_once(self, subspace_prefix, since_cursor, where):
+        return iter(())
+
+    monkeypatch.setattr(T2Client, "_event_stream_once", _empty_once)
+
+    client = T2Client(uds_path=Path("/dev/null"), rpc_timeout_seconds=0.1)
+    try:
+        with pytest.raises(EventStreamUnavailable):
+            list(client.event_stream(
+                "tuples/whatever",
+                since_cursor=0,
+                max_reconnect_attempts=3,
+                initial_backoff_seconds=0.01,
+                max_backoff_seconds=0.04,
+            ))
+    finally:
+        client.close()
+
+
 def test_reconnect_false_preserves_legacy_silent_close(tmp_path: Path) -> None:
     """reconnect=False reproduces the legacy single-subscribe behaviour:
     socket-close exits the generator cleanly (no retry, no raise)."""
@@ -334,25 +364,16 @@ def test_reconnect_jitter_spreads_attempts(monkeypatch: pytest.MonkeyPatch, tmp_
         )
         for _ in range(20)
     ]
-    # Group samples into 250 ms windows (the RDR's spec).
+    # Group samples into 250 ms windows (the RDR's spec). With an
+    # initial backoff of 0.25 s and ±25 % jitter, samples span
+    # [0.1875, 0.3125), straddling the 0.25 s boundary. Genuine spread
+    # therefore lands samples in at least two distinct 250 ms buckets.
     windows: dict[int, int] = {}
     for s in samples:
         bucket = int(s * 4)  # 0.25 s buckets => bucket 0 = [0, 0.25), bucket 1 = [0.25, 0.5)
         windows[bucket] = windows.get(bucket, 0) + 1
-    # No bucket exceeds 2 (RDR criterion). The samples span ±25 % around
-    # 0.25 s, i.e., 0.1875 s to 0.3125 s — straddles a bucket boundary so
-    # the spread is genuine, not collapsed.
-    max_in_window = max(windows.values())
-    assert max_in_window <= 2 + 18, (
-        # Note: with N=20 samples and an initial backoff of 0.25 ±25%,
-        # all 20 might fall in the same wider window. The RDR's criterion
-        # is about cross-subscriber spread on the SAME attempt index,
-        # which is what we measure here. Tighten to: at least 2 distinct
-        # buckets observed when the jitter range straddles the bucket
-        # boundary.
-        f"jitter did not spread samples: {windows}"
-    )
-    # Stronger criterion: at least 2 distinct windows must be hit.
+    # RDR §Test Plan: jitter must spread across at least 2 windows so a
+    # thundering-herd-collapse regression would fail this assertion.
     assert len(windows) >= 2, (
         f"jitter samples collapsed into a single 250ms window: {windows}; "
         f"samples: {samples}"
