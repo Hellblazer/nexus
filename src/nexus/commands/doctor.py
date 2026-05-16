@@ -837,6 +837,101 @@ def _run_check_post_store_hooks() -> None:
     click.echo(f"\nTotal: {total} hook(s) registered across 3 chains.")
 
 
+# ── --check-storage-boundary (RDR-112 §5; nexus-b7o1) ────────────────────
+
+
+def _run_check_storage_boundary() -> int:
+    """AST-scan ``src/nexus/**/*.py`` for direct ``sqlite3.connect`` callers.
+
+    RDR-112 §5: when ``NX_STORAGE_MODE=daemon``, the daemon owns
+    ``memory.db`` and ``tuples.db`` as the single SQLite writer. Any
+    module outside ``src/nexus/daemon/`` that opens a competing
+    connection violates the boundary. Static lint instead of a runtime
+    probe so violators surface in CI / pre-merge even when no daemon is
+    running.
+
+    Severity:
+      - advisory (exit 0) when ``NX_STORAGE_MODE`` is unset or not
+        ``daemon``: print the violation list, exit 0.
+      - hard fail (exit 2) when ``NX_STORAGE_MODE=daemon``: same
+        listing, non-zero exit so CI can gate on it.
+
+    Returns the chosen exit code so callers can propagate it.
+    """
+    import ast
+    import os as _os
+    from pathlib import Path as _Path
+
+    pkg_root = _Path(__file__).resolve().parent.parent
+    if pkg_root.name != "nexus":  # pragma: no cover — defensive
+        click.echo(
+            f"check-storage-boundary: unable to locate src/nexus "
+            f"(got {pkg_root}); aborting.",
+            err=True,
+        )
+        return 2
+
+    daemon_root = pkg_root / "daemon"
+
+    def _is_sqlite_connect_call(node: ast.Call) -> bool:
+        # Match `sqlite3.connect(...)` and `*.connect(...)` where the
+        # attribute lookup is on a module imported as sqlite3.
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "connect":
+            value = func.value
+            if isinstance(value, ast.Name) and value.id in {"sqlite3", "_sqlite3"}:
+                return True
+        return False
+
+    violations: list[tuple[str, int, str]] = []
+    for py_path in sorted(pkg_root.rglob("*.py")):
+        # Anything under daemon/ is on the allowed side of the boundary.
+        try:
+            py_path.relative_to(daemon_root)
+            continue
+        except ValueError:
+            pass
+        try:
+            source = py_path.read_text()
+            tree = ast.parse(source, filename=str(py_path))
+        except (OSError, SyntaxError) as exc:
+            click.echo(
+                f"check-storage-boundary: failed to parse {py_path}: {exc}",
+                err=True,
+            )
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and _is_sqlite_connect_call(node):
+                snippet = source.splitlines()[node.lineno - 1].strip()
+                rel = py_path.relative_to(pkg_root.parent.parent)
+                violations.append((str(rel), node.lineno, snippet))
+
+    daemon_mode = _os.environ.get("NX_STORAGE_MODE", "").strip().lower() == "daemon"
+    click.echo("Storage-boundary check (RDR-112 §5):")
+    if not violations:
+        click.echo(_check("no direct sqlite3.connect outside daemon/", True))
+        return 0
+
+    label = "direct sqlite3.connect outside src/nexus/daemon/"
+    click.echo(_check(label, False, f"{len(violations)} violation(s)"))
+    for path, line, snippet in violations:
+        click.echo(f"  {path}:{line}: {snippet}")
+
+    if daemon_mode:
+        click.echo("")
+        click.echo(
+            "NX_STORAGE_MODE=daemon is set; the violations above bypass "
+            "the daemon's single-writer guarantee. Exiting 2."
+        )
+        return 2
+    click.echo("")
+    click.echo(
+        "Advisory only (NX_STORAGE_MODE not 'daemon'). RDR-112 §5 calls "
+        "for staged remediation; this list scopes the remaining work."
+    )
+    return 0
+
+
 # ── --check-bridge (RDR-111 deep-review pass — bridge installability) ─────
 
 
@@ -1238,6 +1333,16 @@ def _run_check_mineru() -> None:
          "least one tuple landed in the last 24h.",
 )
 @click.option(
+    "--check-storage-boundary",
+    "check_storage_boundary",
+    is_flag=True,
+    default=False,
+    help="AST-lint src/nexus for direct sqlite3.connect calls outside "
+         "src/nexus/daemon/ (RDR-112 §5). Advisory unless "
+         "NX_STORAGE_MODE=daemon, in which case any violation exits 2. "
+         "nexus-b7o1.",
+)
+@click.option(
     "--days",
     "days",
     default=30,
@@ -1259,6 +1364,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_aspect_queue: bool,
                check_t1: bool,
                check_bridge: bool,
+               check_storage_boundary: bool,
                check_tier_discipline: bool) -> None:
     """Verify that all required services and credentials are available."""
     if check_schema:
@@ -1316,6 +1422,12 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_bridge:
         _run_check_bridge()
+        return
+
+    if check_storage_boundary:
+        exit_code = _run_check_storage_boundary()
+        if exit_code != 0:
+            raise SystemExit(exit_code)
         return
 
     if check_tier_discipline:
