@@ -3939,6 +3939,14 @@ def run_daemon_migrations(
         memory_conn.commit()
 
         from_version = bootstrap_version(memory_conn)
+        # nexus-uvv1 (RDR-112): snapshot memory.db before migrations run
+        # so partial-failure mid-list leaves a recoverable backup beside
+        # the live file. Skipped on same-version no-op runs (nothing to
+        # migrate) and when NX_MIGRATION_BACKUP=0 is set. The backup is
+        # taken AFTER bootstrap_version so the version table exists in
+        # the snapshot, before apply_pending touches anything else.
+        if from_version != current_version:
+            _backup_db_pre_migration(memory_db_path, from_version=from_version)
         apply_pending(memory_conn, current_version)
         # Read version after migration (may not change on same-version runs)
         row = memory_conn.execute(
@@ -3990,3 +3998,115 @@ def _pkg_version_str() -> str:
     """Return the running ``conexus`` package version string."""
     from importlib.metadata import version as _iv
     return _iv("conexus")
+
+
+# ---------------------------------------------------------------------------
+# Pre-migration backups (nexus-uvv1, RDR-112)
+# ---------------------------------------------------------------------------
+
+#: How many pre-migration backups to keep per database file.
+_MIGRATION_BACKUP_KEEP: int = 3
+
+
+def _migration_backup_disabled() -> bool:
+    """Return True if pre-migration backups are opted out.
+
+    ``NX_MIGRATION_BACKUP=0`` (or ``false`` / ``False``) skips backup
+    creation. Tests under tmp_path set this to keep fixtures fast and
+    deterministic. Production should leave it unset.
+    """
+    import os as _os
+
+    val = _os.environ.get("NX_MIGRATION_BACKUP", "").strip()
+    return val in ("0", "false", "False")
+
+
+def _backup_sqlite_db(src_path: Path, dest_path: Path) -> None:
+    """Copy a live SQLite database file using the online backup API.
+
+    SQLite's ``Connection.backup()`` is WAL-safe: it cooperates with the
+    write-ahead log and produces a consistent snapshot even with
+    concurrent readers. We open the source read-only and the destination
+    on a fresh empty connection, then call ``backup`` in a single page.
+    """
+    src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
+    try:
+        dest = sqlite3.connect(str(dest_path))
+        try:
+            src.backup(dest)
+        finally:
+            dest.close()
+    finally:
+        src.close()
+
+
+def _backup_db_pre_migration(
+    db_path: Path, *, from_version: str
+) -> Path | None:
+    """Snapshot ``db_path`` before a migration runs. Returns the backup path.
+
+    Backup filename: ``<db>.bak-<from_version>-<unix_ms>``. Skipped when
+    the DB file does not yet exist (fresh install) or when the operator
+    opted out via ``NX_MIGRATION_BACKUP=0``. Failures degrade open: log
+    and continue rather than block the daemon's startup migration.
+    """
+    if _migration_backup_disabled():
+        return None
+    if not db_path.exists():
+        return None
+    timestamp_ms = int(time.time() * 1000)
+    safe_from = from_version.replace("/", "_").replace("\\", "_")
+    dest = db_path.with_name(f"{db_path.name}.bak-{safe_from}-{timestamp_ms}")
+    try:
+        _backup_sqlite_db(db_path, dest)
+    except (sqlite3.Error, OSError) as exc:
+        _log.warning(
+            "migration_backup_failed",
+            db_path=str(db_path),
+            error=str(exc),
+        )
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+    _log.info(
+        "migration_backup_created",
+        db_path=str(db_path),
+        backup_path=str(dest),
+        from_version=from_version,
+    )
+    _prune_old_backups(db_path)
+    return dest
+
+
+def _prune_old_backups(db_path: Path, *, keep: int = _MIGRATION_BACKUP_KEEP) -> int:
+    """Keep only the newest ``keep`` backups for ``db_path``. Returns count removed."""
+    prefix = f"{db_path.name}.bak-"
+    parent = db_path.parent
+    if not parent.is_dir():
+        return 0
+    candidates = sorted(
+        (p for p in parent.iterdir() if p.is_file() and p.name.startswith(prefix)),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    removed = 0
+    for stale in candidates[keep:]:
+        try:
+            stale.unlink()
+            removed += 1
+        except OSError as exc:
+            _log.warning(
+                "migration_backup_prune_failed",
+                path=str(stale),
+                error=str(exc),
+            )
+    if removed:
+        _log.info(
+            "migration_backup_pruned",
+            db_path=str(db_path),
+            kept=keep,
+            removed=removed,
+        )
+    return removed
