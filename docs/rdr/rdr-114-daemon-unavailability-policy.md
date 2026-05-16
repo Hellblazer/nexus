@@ -2,12 +2,12 @@
 title: "Daemon unavailability policy: EventStream reconnect contract + bridge fail-closed-vs-open"
 id: RDR-114
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hellblazer
 reviewed-by: self
 created: 2026-05-16
-accepted_date:
+accepted_date: 2026-05-16
 related_issues: [nexus-sddg, nexus-mx0z]
 ---
 
