@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -2881,6 +2882,59 @@ CREATE INDEX IF NOT EXISTS idx_liveness_last_seen ON liveness (last_seen);
     _log.info("migrate_liveness_table_done")
 
 
+def migrate_action_idempotency_table(conn: sqlite3.Connection) -> None:
+    """RDR-111 §lines 909-942 (nexus-8wvs): action_idempotency dedup table.
+
+    The binding watcher's at-least-once contract requires a dedup table
+    so that a crash between ``_dispatch_event`` and ``_save_cursor``
+    cannot replay an action on restart. Keys are
+    ``sha256(binding_name + tuple_id)`` and carry a 300-second TTL by
+    default; expired rows are swept in the daemon's retention loop.
+
+    Must be called with a ``memory.db`` connection.
+    Idempotent: gated by ``CREATE TABLE IF NOT EXISTS``.
+    """
+    existing = {
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='action_idempotency'"
+        ).fetchall()
+    }
+    if "action_idempotency" in existing:
+        return
+    _log.info("migrate_action_idempotency_table_start")
+    conn.executescript("""
+CREATE TABLE IF NOT EXISTS action_idempotency (
+    idempotency_key TEXT PRIMARY KEY,
+    expires_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_action_idempotency_expires
+    ON action_idempotency (expires_at);
+""")
+    conn.commit()
+    _log.info("migrate_action_idempotency_table_done")
+
+
+def sweep_action_idempotency(conn: sqlite3.Connection) -> int:
+    """Delete expired ``action_idempotency`` rows. Returns the count.
+
+    Safe on a fresh ``memory.db`` that has not yet seen the migration —
+    if the table is absent the function is a no-op and returns 0.
+    """
+    cursor = conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='table' AND name='action_idempotency'"
+    )
+    if cursor.fetchone() is None:
+        return 0
+    deleted = conn.execute(
+        "DELETE FROM action_idempotency WHERE expires_at <= ?",
+        (time.time(),),
+    ).rowcount
+    conn.commit()
+    return int(deleted or 0)
+
+
 def migrate_catalog_tables_in_memory_db(conn: sqlite3.Connection) -> None:
     """RDR-112 P2.1 (nexus-7ejx): create catalog tables in memory.db.
 
@@ -3327,6 +3381,11 @@ MIGRATIONS: list[Migration] = [
         "4.35.0",
         "RDR-111 P1.3: create liveness table + last_seen index (nexus-r0vi)",
         migrate_liveness_table,
+    ),
+    Migration(
+        "4.36.0",
+        "RDR-111 §lines 909-942: action_idempotency dedup table (nexus-8wvs)",
+        migrate_action_idempotency_table,
     ),
 ]
 

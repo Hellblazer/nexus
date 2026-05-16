@@ -105,6 +105,19 @@ CREATE TABLE IF NOT EXISTS liveness (
 CREATE INDEX IF NOT EXISTS idx_liveness_last_seen ON liveness (last_seen);
 """
 
+# nexus-8wvs (RDR-111 §lines 909-942): action_idempotency dedup table.
+# Created here so fresh installs get the table directly, mirroring the
+# liveness pattern. The version-gated migrate_action_idempotency_table
+# in migrations.py covers upgrade paths from pre-RDR-111 databases.
+_ACTION_IDEMPOTENCY_SCHEMA_SQL = """\
+CREATE TABLE IF NOT EXISTS action_idempotency (
+    idempotency_key TEXT PRIMARY KEY,
+    expires_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_action_idempotency_expires
+    ON action_idempotency (expires_at);
+"""
+
 _MEMORY_SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS memory (
     id            INTEGER PRIMARY KEY,
@@ -299,6 +312,7 @@ class MemoryStore:
         with self._lock:
             self.conn.executescript(_MEMORY_SCHEMA_SQL)
             self.conn.executescript(_LIVENESS_SCHEMA_SQL)
+            self.conn.executescript(_ACTION_IDEMPOTENCY_SCHEMA_SQL)
             self.conn.executescript("PRAGMA journal_mode=WAL;")
             self.conn.commit()
             result = self.conn.execute("PRAGMA journal_mode").fetchone()

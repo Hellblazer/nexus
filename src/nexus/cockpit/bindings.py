@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import importlib
 import sqlite3
 import time
@@ -273,6 +274,47 @@ def _resolve_python_callable(target: str) -> Callable[..., Any]:
     return fn
 
 
+#: Default TTL on the action_idempotency rows. RDR-111:933.
+_IDEMPOTENCY_TTL_SECONDS = 300.0
+
+
+def _idempotency_key(binding_name: str, tuple_id: str) -> str:
+    """Deterministic key for the ``action_idempotency`` table.
+
+    RDR-111 lines 909-942: ``sha256(binding_name + tuple_id)``. The key
+    is per-(binding, event) so two different bindings on the same event
+    each get their own dedup row, but a watcher restart that replays
+    the same event for the same binding hits the dedup hit and skips.
+    """
+    raw = f"{binding_name}:{tuple_id}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _idempotency_check(
+    memory_conn: sqlite3.Connection, *, key: str, now: float
+) -> bool:
+    """Return True if a non-expired key already exists for this action."""
+    row = memory_conn.execute(
+        "SELECT 1 FROM action_idempotency "
+        "WHERE idempotency_key = ? AND expires_at > ? LIMIT 1",
+        (key, now),
+    ).fetchone()
+    return row is not None
+
+
+def _idempotency_record(
+    memory_conn: sqlite3.Connection, *, key: str, expires_at: float
+) -> None:
+    """Insert (or refresh) the dedup row for a successfully dispatched action."""
+    memory_conn.execute(
+        "INSERT INTO action_idempotency (idempotency_key, expires_at) "
+        "VALUES (?, ?) "
+        "ON CONFLICT(idempotency_key) DO UPDATE SET expires_at = excluded.expires_at",
+        (key, expires_at),
+    )
+    memory_conn.commit()
+
+
 async def _dispatch_action(
     action: Action,
     *,
@@ -281,6 +323,9 @@ async def _dispatch_action(
     context: "BindingContext",
 ) -> None:
     if action.kind == "log":
+        # Log actions are inherently idempotent — a second log line on
+        # crash-replay is harmless, and the dedup gate would only waste a
+        # SELECT round-trip per event.
         _log.info(
             "binding_action_log",
             marker=action.target,
@@ -291,10 +336,50 @@ async def _dispatch_action(
         )
         return
     if action.kind == "python":
+        # RDR-111:909-942 dedup gate. Only applied when memory_conn is
+        # wired (production daemon path). Tests that pass a stub context
+        # without memory_conn keep the legacy at-least-once semantics.
+        if context.memory_conn is not None:
+            key = _idempotency_key(binding.name, event.tuple_id)
+            now = time.time()
+            try:
+                if _idempotency_check(context.memory_conn, key=key, now=now):
+                    _log.info(
+                        "binding_action_dedup_skip",
+                        binding=binding.name,
+                        subspace=event.subspace,
+                        tuple_id=event.tuple_id,
+                    )
+                    return
+            except sqlite3.Error:
+                # Table missing or other persistent error — fall through to
+                # dispatch (degrade-open). Without the table, replays cannot
+                # be filtered, but skipping the action is the worse failure
+                # mode (silent loss of side effect).
+                _log.exception(
+                    "binding_action_idempotency_check_failed",
+                    binding=binding.name,
+                    tuple_id=event.tuple_id,
+                )
+
         fn = _resolve_python_callable(action.target)
         result = fn(event, binding, context)
         if asyncio.iscoroutine(result):
             await result
+
+        if context.memory_conn is not None:
+            try:
+                _idempotency_record(
+                    context.memory_conn,
+                    key=_idempotency_key(binding.name, event.tuple_id),
+                    expires_at=time.time() + _IDEMPOTENCY_TTL_SECONDS,
+                )
+            except sqlite3.Error:
+                _log.exception(
+                    "binding_action_idempotency_record_failed",
+                    binding=binding.name,
+                    tuple_id=event.tuple_id,
+                )
         return
     raise BindingProfileError(f"unknown action kind {action.kind!r}")
 
@@ -311,12 +396,20 @@ class BindingContext:
     Holds the tuplespace handles an action might need to write derived
     tuples back into the system. Tests inject a stub object; production
     wiring constructs one in :meth:`_BindingWatcher.start`.
+
+    ``memory_conn`` is the optional ``memory.db`` connection used for
+    the ``action_idempotency`` dedup gate (RDR-111 §lines 909-942,
+    nexus-8wvs). When ``None`` the watcher runs without the dedup gate
+    — tests that inject a stub context exercise this path. Production
+    wiring (the daemon) populates it so a crash between dispatch and
+    cursor save cannot re-fire a python action on restart.
     """
 
     conn: Optional[sqlite3.Connection] = None
     index: Any = None  # nexus.tuplespace.index.TupleIndex
     registry: Any = None  # nexus.tuplespace.registry.Registry
     profile_name: str = ""
+    memory_conn: Optional[sqlite3.Connection] = None
     # Free-form bag so reference actions and tests can stash arbitrary
     # state without growing the dataclass for every consumer.
     extras: dict[str, Any] = dataclasses.field(default_factory=dict)
@@ -487,6 +580,7 @@ class _BindingWatcher:
         subspace_glob: str = "*",
         poll_interval: float = 0.05,
         batch_limit: int = 100,
+        stop_timeout: float = 5.0,
     ) -> None:
         self._conn = conn
         self._profiles: tuple[BindingProfile, ...] = tuple(profiles)
@@ -494,15 +588,56 @@ class _BindingWatcher:
         self._subspace_glob = subspace_glob
         self._poll_interval = poll_interval
         self._batch_limit = batch_limit
+        self._stop_timeout = stop_timeout
         self._stop = asyncio.Event()
         # One cursor per (subspace_glob, profile_name). Loaded lazily in run().
         self._cursors: dict[str, int] = {}
+        # Task handle from start(); stays None until start() is called.
+        self._task: asyncio.Task | None = None  # type: ignore[type-arg]
 
     # -- lifecycle --------------------------------------------------------
 
     def request_stop(self) -> None:
         """Signal the watcher to exit at the next loop boundary."""
         self._stop.set()
+
+    def start(self) -> "asyncio.Task[None]":
+        """Schedule :meth:`run` on the current event loop. Idempotent.
+
+        Returns the asyncio task driving the loop. Subsequent calls
+        return the existing task without spawning a second one. The
+        daemon stores the watcher instance and calls :meth:`stop`
+        during shutdown; tests can ``await`` the returned task
+        directly for fine-grained orchestration.
+        """
+        if self._task is not None and not self._task.done():
+            return self._task
+        self._task = asyncio.create_task(self.run())
+        return self._task
+
+    async def stop(self) -> None:
+        """Signal the loop to exit and wait for the task to finish.
+
+        Bounded by ``stop_timeout`` (default 5s, matching the daemon's
+        socket-close timeout). On timeout the task is cancelled and a
+        warning is logged. Safe to call before :meth:`start` (no-op)
+        or twice (second call is a no-op).
+        """
+        self.request_stop()
+        if self._task is None or self._task.done():
+            return
+        try:
+            await asyncio.wait_for(self._task, timeout=self._stop_timeout)
+        except asyncio.TimeoutError:
+            _log.warning(
+                "binding_watcher_stop_timeout",
+                timeout=self._stop_timeout,
+            )
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def run(self) -> None:
         """Run the polling loop until :meth:`request_stop` is invoked."""
