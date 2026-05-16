@@ -33,43 +33,10 @@ async def test_default_env_routes_to_claude(
 
 
 @pytest.mark.asyncio
-async def test_global_qwen_env_still_routes_to_claude_due_to_pin(
+async def test_qwen_agent_env_routes_to_qwen_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """nx_plan_audit is in TIER_B_CLAUDE_PINNED. Setting the global
-    ``NEXUS_TIER_B_DISPATCHER=qwen_agent`` MUST NOT route this tool
-    through qwen — pin wins. Operators opt back in per-tool only.
-    """
     monkeypatch.setenv("NEXUS_TIER_B_DISPATCHER", "qwen_agent")
-    monkeypatch.delenv("NEXUS_TIER_B_NX_PLAN_AUDIT_DISPATCHER", raising=False)
-    fake_claude = AsyncMock(return_value={
-        "verdict": "pass", "findings": [], "summary": "claude-ran",
-    })
-    fake_qwen = AsyncMock(side_effect=AssertionError(
-        "qwen_agent must not run — nx_plan_audit is pinned to claude"
-    ))
-    with (
-        patch("nexus.operators.dispatch.claude_dispatch", fake_claude),
-        patch(
-            "nexus.operators.qwen_agent_dispatch.qwen_agent_dispatch",
-            new=fake_qwen,
-        ),
-    ):
-        from nexus.mcp.core import nx_plan_audit
-        impl = getattr(nx_plan_audit, "fn", nx_plan_audit)
-        result = await impl('{"phases": []}')
-    assert "claude-ran" in result
-    assert fake_claude.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_per_tool_override_routes_to_qwen_agent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Per-tool override beats the pin set. Operators who want to
-    re-bench or experiment can opt back into qwen explicitly.
-    """
-    monkeypatch.setenv("NEXUS_TIER_B_NX_PLAN_AUDIT_DISPATCHER", "qwen_agent")
     fake_qwen = AsyncMock(return_value={
         "verdict": "pass", "findings": [], "summary": "qwen-summary",
     })

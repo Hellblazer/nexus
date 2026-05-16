@@ -3865,47 +3865,6 @@ async def nx_answer(
     )
 
 
-# ── Tier-B dispatcher routing ─────────────────────────────────────────────────
-#
-# Tools listed here are *pinned* to ``claude_dispatch`` even when the global
-# ``NEXUS_TIER_B_DISPATCHER=qwen_agent`` is set. Mirrors the bake-in pin
-# pattern from PR #626 (which pinned ``extract`` to claude after a single
-# bench miss).
-#
-# nx_plan_audit: spike-D bench v3 (2026-05-16,
-#   /tmp/spike-d-out/parity-audit-v3-2026-05-16.jsonl) — even with PR #810
-#   (prompt mandate) and PR #812 (verification_method enum) in place, qwen
-#   emits zero ``tool_use`` blocks and fabricates findings with
-#   ``verification_method: filesystem``. The structured-honesty slot exists
-#   but qwen fills it dishonestly. Pin avoids shipping that by default;
-#   operators can opt back in per-shell via
-#   ``NEXUS_TIER_B_NX_PLAN_AUDIT_DISPATCHER=qwen_agent``.
-TIER_B_CLAUDE_PINNED: frozenset[str] = frozenset({"nx_plan_audit"})
-
-
-def _pick_tier_b_dispatcher(tool_name: str) -> str:
-    """Resolve the tier-B dispatcher for *tool_name*.
-
-    Precedence (highest first):
-      1. ``NEXUS_TIER_B_<TOOL>_DISPATCHER`` — per-tool override, wins
-         absolutely.
-      2. ``NEXUS_TIER_B_DISPATCHER`` — global mode. If ``qwen_agent`` AND
-         the tool is NOT in ``TIER_B_CLAUDE_PINNED``, routes through qwen.
-      3. ``claude`` — default.
-
-    Returns the lowercased dispatcher name (``claude`` or ``qwen_agent``).
-    """
-    env_per_tool = _os.environ.get(
-        f"NEXUS_TIER_B_{tool_name.upper()}_DISPATCHER"
-    )
-    if env_per_tool:
-        return env_per_tool.lower()
-    global_mode = _os.environ.get("NEXUS_TIER_B_DISPATCHER", "claude").lower()
-    if global_mode == "qwen_agent" and tool_name in TIER_B_CLAUDE_PINNED:
-        return "claude"
-    return global_mode
-
-
 @mcp.tool()
 async def nx_tidy(
     topic: str,
@@ -3973,9 +3932,9 @@ async def nx_tidy(
         "Begin your response with `{` and end with `}`."
     )
 
-    # Tier-B dispatcher selection — via _pick_tier_b_dispatcher so
-    # per-tool overrides and pin-set semantics apply uniformly.
-    if _pick_tier_b_dispatcher("nx_tidy") == "qwen_agent":
+    # Tier-B dispatcher selection — mirror of nx_enrich_beads.
+    tier_b = _os.environ.get("NEXUS_TIER_B_DISPATCHER", "claude").lower()
+    if tier_b == "qwen_agent":
         from nexus.operators.qwen_agent_dispatch import qwen_agent_dispatch
 
         payload = await qwen_agent_dispatch(
@@ -4069,7 +4028,8 @@ async def nx_enrich_beads(
     # ``NEXUS_TIER_B_DISPATCHER=qwen_agent`` routes through the
     # qwen-coprocessor-stack supervisor with the ``nx`` extension wired
     # in so the spawned qwen session can use search/query tools mid-loop.
-    if _pick_tier_b_dispatcher("nx_enrich_beads") == "qwen_agent":
+    tier_b = _os.environ.get("NEXUS_TIER_B_DISPATCHER", "claude").lower()
+    if tier_b == "qwen_agent":
         from nexus.operators.qwen_agent_dispatch import qwen_agent_dispatch
 
         payload = await qwen_agent_dispatch(
@@ -4209,9 +4169,9 @@ async def nx_plan_audit(
         "Begin your response with `{` and end with `}`."
     )
 
-    # Tier-B dispatcher selection — pinned to claude by default; see
-    # TIER_B_CLAUDE_PINNED for the rationale and override knob.
-    if _pick_tier_b_dispatcher("nx_plan_audit") == "qwen_agent":
+    # Tier-B dispatcher selection — mirror of nx_enrich_beads.
+    tier_b = _os.environ.get("NEXUS_TIER_B_DISPATCHER", "claude").lower()
+    if tier_b == "qwen_agent":
         from nexus.operators.qwen_agent_dispatch import qwen_agent_dispatch
 
         payload = await qwen_agent_dispatch(
