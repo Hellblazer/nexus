@@ -136,6 +136,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-111](rdr-111-orb-agentic-cockpit-substrate.md) | The ORB: Observable Relay Bus — Hook Projection, Bindings, and C2 Cockpit Substrate | Architecture | Accepted | 2026-05-11 |
 | [RDR-112](rdr-112-storage-as-service-container-boundary.md) | Storage-as-Service: Every Persistent Shared-State Store Behind a Daemon, T1 Stays In-Container | Architecture | Accepted | 2026-05-12 |
 | [RDR-113](rdr-113-host-trust-model.md) | Host-Trust Model for nexus Daemons: UDS Permissions, Peer Credentials, Single-User v1 | Architecture | Accepted | 2026-05-13 |
+| [RDR-114](rdr-114-daemon-unavailability-policy.md) | Daemon Unavailability Policy: EventStream Reconnect Contract + Bridge Fail-Closed-vs-Open | Architecture | Draft | 2026-05-16 |
 
 ---
 
