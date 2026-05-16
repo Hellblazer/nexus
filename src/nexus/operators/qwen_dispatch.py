@@ -41,9 +41,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-import structlog
-
-_log = structlog.get_logger(__name__)
 
 __all__ = [
     "qwen_dispatch",
@@ -51,37 +48,6 @@ __all__ = [
     "QwenOperatorTimeoutError",
     "QwenOperatorOutputError",
 ]
-
-
-# Cost-telemetry rates for the "would-have-cost" estimator.
-#
-# These are the published Anthropic API rates for Claude Sonnet 4.x as of
-# 2026-05 — see https://www.anthropic.com/pricing#api. Used only to give
-# operators a rough "how much did running this on Qwen save us" signal in
-# the structured logs; this is NOT a billing system. Refresh the constants
-# (and the date below) when Anthropic publishes a new Sonnet rate card.
-#
-# Last verified: 2026-05-14, source: https://www.anthropic.com/pricing
-_SONNET_INPUT_USD_PER_MTOK = 3.0
-_SONNET_OUTPUT_USD_PER_MTOK = 15.0
-
-
-def _estimate_sonnet_cost_usd(
-    input_tokens: int | None, output_tokens: int | None
-) -> float | None:
-    """Compute the Sonnet 4.x would-have-cost for *input* / *output* tokens.
-
-    Returns ``None`` when either token count is missing — the upstream
-    response did not include a ``usage`` block (older llama-server build,
-    streaming response that elided usage, etc.). Callers log the ``None``
-    rather than fabricating a number.
-    """
-    if input_tokens is None or output_tokens is None:
-        return None
-    return (
-        input_tokens * _SONNET_INPUT_USD_PER_MTOK / 1_000_000.0
-        + output_tokens * _SONNET_OUTPUT_USD_PER_MTOK / 1_000_000.0
-    )
 
 
 class QwenOperatorError(RuntimeError):
@@ -229,7 +195,6 @@ async def qwen_dispatch(
     backend_url: str | None = None,
     model: str | None = None,
     max_attempts: int = 2,
-    operator_name: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch one operator call to Qwen via OpenAI-compat ``/v1/chat/completions``.
 
@@ -328,35 +293,6 @@ async def qwen_dispatch(
                     f"qwen_dispatch unexpected response shape: {exc} "
                     f"(attempt {attempt}/{max_attempts})"
                 ) from exc
-
-            # Cost telemetry: extract usage + emit would-have-cost estimate.
-            # Missing ``usage`` block (older llama-server, streaming) →
-            # log nulls rather than crashing. The dispatch path itself
-            # does not depend on this signal.
-            usage = (
-                payload.get("usage") if isinstance(payload, dict) else None
-            )
-            input_tokens: int | None = None
-            output_tokens: int | None = None
-            if isinstance(usage, dict):
-                pt = usage.get("prompt_tokens")
-                ct = usage.get("completion_tokens")
-                if isinstance(pt, int):
-                    input_tokens = pt
-                if isinstance(ct, int):
-                    output_tokens = ct
-            would_have_cost = _estimate_sonnet_cost_usd(
-                input_tokens, output_tokens
-            )
-            _log.info(
-                "operator_dispatch_cost",
-                dispatch_engine="qwen",
-                dispatch_operator=operator_name,
-                dispatch_input_tokens=input_tokens,
-                dispatch_output_tokens=output_tokens,
-                dispatch_cost_usd=0.0,
-                dispatch_would_have_cost_usd=would_have_cost,
-            )
 
             stripped = _strip_code_fences(last_raw)
             try:

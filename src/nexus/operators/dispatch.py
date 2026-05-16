@@ -173,8 +173,6 @@ async def claude_dispatch(
     prompt: str,
     json_schema: dict[str, Any],
     timeout: float = 300.0,
-    *,
-    operator_name: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch a single operator call to claude -p, fully async.
 
@@ -308,38 +306,6 @@ async def claude_dispatch(
         raise OperatorOutputError(
             f"claude -p output is not valid JSON: {exc} — got: {raw[:200]}"
         ) from exc
-
-    # Cost telemetry: the `claude -p` JSON envelope carries
-    # ``total_cost_usd`` plus a ``usage`` block with input/output token
-    # counts. Surface them as a structured log entry so operators can
-    # roll up spend downstream without threading a new return field
-    # through every caller. Missing fields → log nulls; the dispatch
-    # path does not depend on this signal.
-    if isinstance(parsed, dict):
-        cost_usd = parsed.get("total_cost_usd")
-        usage = parsed.get("usage")
-        in_tok: int | None = None
-        out_tok: int | None = None
-        if isinstance(usage, dict):
-            pt = usage.get("input_tokens")
-            ct = usage.get("output_tokens")
-            if isinstance(pt, int):
-                in_tok = pt
-            if isinstance(ct, int):
-                out_tok = ct
-        _log.info(
-            "operator_dispatch_cost",
-            dispatch_engine="claude",
-            dispatch_operator=operator_name,
-            dispatch_input_tokens=in_tok,
-            dispatch_output_tokens=out_tok,
-            dispatch_cost_usd=(
-                float(cost_usd)
-                if isinstance(cost_usd, (int, float))
-                else None
-            ),
-            dispatch_would_have_cost_usd=None,
-        )
 
     # `claude -p --output-format json` returns a wrapper:
     # {"type":"result", "is_error":bool, "result":str, "structured_output":dict, ...}
