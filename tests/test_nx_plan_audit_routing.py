@@ -63,3 +63,8 @@ async def test_qwen_agent_env_routes_to_qwen_agent(
     assert isinstance(args[1], dict)
     assert "verdict" in args[1].get("properties", {})
     assert "ONLY a JSON object" in args[0]
+    # Mandatory tool-use directive (spike_d follow-on): 0 tool calls
+    # observed on 2/2 nx_plan_audit cases when prompt was soft.
+    assert "You MUST call `mcp__nx__search`" in args[0]
+    # `partial` verdict is gated on attempted-but-failed tool calls.
+    assert "verdict=`partial`" in args[0]
