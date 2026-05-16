@@ -52,3 +52,51 @@ jobs:
 
       - name: Run tests
         run: uv run pytest tests/ -v
+
+  migration-race-probe:
+    # nexus-9eaz: the two concurrent-migration tests below are skip-marked
+    # in the main suite because they fail intermittently when the full
+    # 6800-test pytest session is in flight. This job runs them in
+    # isolation (their own pytest invocation, no prior test pollution)
+    # so we can tell whether the race is intrinsic to the apply_pending
+    # lock semantics on Linux or whether it is process-state pollution.
+    #
+    # Outcome:
+    #   - probe passes consistently: race is process-pollution from
+    #     earlier tests; root-cause lives in the test harness, not in
+    #     apply_pending.
+    #   - probe fails: race is intrinsic to apply_pending under Linux/CI;
+    #     INFO-level instrumentation in #811 + #814 captures evidence
+    #     in the log output.
+    #
+    # Job is non-blocking on the main suite (continue-on-error) so a
+    # flake here does not red-bar PRs while the investigation is open.
+    name: migration race probe (nexus-9eaz, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Run isolated concurrent-migration tests (un-skip override)
+        # NEXUS_RUN_FLAKY_MIGRATION_TESTS=1 instructs the skip markers
+        # in tests/test_migrations.py to no-op. The tests then run in
+        # this fresh pytest process with no prior test pollution.
+        env:
+          NEXUS_RUN_FLAKY_MIGRATION_TESTS: "1"
+        run: |
+          uv run pytest \
+            tests/test_migrations.py::TestApplyPending::test_concurrent_apply_pending_runs_once \
+            tests/test_migrations.py::TestApplyPending::test_concurrent_apply_pending_stress \
+            -v \
+            --log-cli-level=INFO
