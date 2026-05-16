@@ -3581,7 +3581,7 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
         # nexus-9eaz instrumentation: every check-then-add observed under
         # _upgrade_lock. If two threads both report "membership=False" for
         # the same path_key, the lock is not actually serializing.
-        _log.debug(
+        _log.info(
             "upgrade_done_check",
             path_key=path_key,
             membership=_membership,
@@ -3666,7 +3666,7 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
         # succeeded — record the path as done.
         _upgrade_done.add(path_key)
         # nexus-9eaz instrumentation: log every successful add with thread id.
-        _log.debug(
+        _log.info(
             "upgrade_done_add",
             path_key=path_key,
             thread_id=_threading.get_ident(),
