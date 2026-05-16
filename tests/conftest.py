@@ -218,14 +218,6 @@ def _isolate_dispatch_routing(monkeypatch: pytest.MonkeyPatch) -> None:
         "NEXUS_DISPATCH_BACKEND",
         "NEXUS_DISPATCH_QWEN_OPERATORS",
         "NEXUS_DISPATCH_CLAUDE_OPERATORS",
-        # Aspect-extractor backend (PR #780) and scholarly-paper prompt
-        # version (feature/scholarly-paper-v2): both are read at every
-        # call into ``aspect_extractor``. A shell that has the
-        # ``v2`` toggle exported for an operator session would
-        # otherwise silently flip every aspect test off the default
-        # prompt body, masking v1-shaped assertions.
-        "NEXUS_ASPECT_BACKEND",
-        "NEXUS_SCHOLARLY_PAPER_VERSION",
     ):
         monkeypatch.delenv(var, raising=False)
 
