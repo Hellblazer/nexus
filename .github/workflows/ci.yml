@@ -100,3 +100,76 @@ jobs:
             tests/test_migrations.py::TestApplyPending::test_concurrent_apply_pending_stress \
             -v \
             --log-cli-level=INFO
+
+  migration-race-bisect:
+    # nexus-9eaz Phase C: bisect the pre-test_migrations cohort to find the
+    # contaminating test(s). The four chunks divide tests/*.py alphabetically
+    # into quarters that precede test_migrations.py. Each chunk job runs its
+    # chunk followed by the two flaky concurrent-migration tests, with the
+    # un-skip env var enabled. Whichever chunk fails identifies the cohort
+    # containing the polluter; we can then sub-bisect.
+    #
+    # Non-blocking (continue-on-error) so a flake here does not red-bar PRs.
+    name: migration race bisect chunk ${{ matrix.chunk }} (nexus-9eaz, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: [1, 2, 3, 4]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Cache ChromaDB ONNX model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/chroma
+          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Compute chunk file list
+        id: chunk
+        run: |
+          # All tests/*.py files alphabetically before test_migrations.py,
+          # split into 4 chunks of ~46 files each. Then append the flaky
+          # tests so contamination from the chunk surfaces as a failure.
+          ls tests/*.py | sort > /tmp/all.txt
+          PRE_COUNT=$(grep -n '^tests/test_migrations\.py$' /tmp/all.txt | head -1 | cut -d: -f1)
+          PRE_COUNT=$((PRE_COUNT - 1))
+          CHUNK_SIZE=$(( (PRE_COUNT + 3) / 4 ))
+          START=$(( (${{ matrix.chunk }} - 1) * CHUNK_SIZE + 1 ))
+          END=$(( ${{ matrix.chunk }} * CHUNK_SIZE ))
+          if [ $END -gt $PRE_COUNT ]; then END=$PRE_COUNT; fi
+          sed -n "${START},${END}p" /tmp/all.txt > /tmp/chunk.txt
+          echo "chunk size: $(wc -l < /tmp/chunk.txt) files (lines $START..$END of $PRE_COUNT pre-migrations files)"
+          cat /tmp/chunk.txt
+          # Emit pytest argv: chunk files + flaky tests pinned at end.
+          {
+            cat /tmp/chunk.txt
+            echo "tests/test_migrations.py::TestApplyPending::test_concurrent_apply_pending_runs_once"
+            echo "tests/test_migrations.py::TestApplyPending::test_concurrent_apply_pending_stress"
+          } | tr '\n' ' ' > /tmp/argv.txt
+          echo "argv=$(cat /tmp/argv.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Run chunk + flaky tests
+        env:
+          NEXUS_RUN_FLAKY_MIGRATION_TESTS: "1"
+        run: |
+          # -p no:randomly preserves alphabetical order so the chunk runs
+          # before the flaky tests deterministically. -x stops at first
+          # failure so we get the contaminating test's name in the log.
+          uv run pytest -p no:randomly -x --tb=short \
+            $(cat /tmp/argv.txt)
