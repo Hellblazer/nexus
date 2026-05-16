@@ -7,6 +7,7 @@ They will fail until migrations.py is implemented (nexus-6cn).
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -693,12 +694,15 @@ class TestApplyPending:
         assert rows[0][0] == "4.1.2"
         conn.close()
 
-    @pytest.mark.skip(
+    @pytest.mark.skipif(
+        not os.environ.get("NEXUS_RUN_FLAKY_MIGRATION_TESTS"),
         reason="Same race family as test_concurrent_apply_pending_stress. "
         "Tracked in nexus-9eaz: bootstrap_version called twice despite "
         "_upgrade_lock; CI Linux only, not reproducible on darwin in 100 "
         "iterations. Instrumentation added to apply_pending so the next "
-        "real failure surfaces thread-id + path_key evidence."
+        "real failure surfaces thread-id + path_key evidence. "
+        "Run with NEXUS_RUN_FLAKY_MIGRATION_TESTS=1 (the migration-race-probe "
+        "CI job in .github/workflows/ci.yml) to exercise in isolation."
     )
     def test_concurrent_apply_pending_runs_once(self, tmp_path: Path) -> None:
         """_upgrade_lock prevents concurrent apply_pending double-execution."""
@@ -746,10 +750,13 @@ class TestApplyPending:
         # it already present and returns early before calling bootstrap_version.
         assert call_count["n"] == 1
 
-    @pytest.mark.skip(
+    @pytest.mark.skipif(
+        not os.environ.get("NEXUS_RUN_FLAKY_MIGRATION_TESTS"),
         reason="Flaky on Linux CI (~iteration 45 of 50). Tracked in nexus-9eaz: "
         "bootstrap_version called twice despite _upgrade_lock; passes on darwin. "
-        "Skip while the real race is investigated so the rest of the suite can run."
+        "Skip while the real race is investigated so the rest of the suite can run. "
+        "Run with NEXUS_RUN_FLAKY_MIGRATION_TESTS=1 (the migration-race-probe CI "
+        "job in .github/workflows/ci.yml) to exercise in isolation."
     )
     def test_concurrent_apply_pending_stress(self, tmp_path: Path) -> None:
         """Stress-test _upgrade_lock: 50 independent concurrent pairs, each must
