@@ -117,7 +117,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        chunk: [1, 2, 3, 4]
+        chunk: [4a, 4b, 4c, 4d]
 
     steps:
       - uses: actions/checkout@v4
@@ -147,14 +147,24 @@ jobs:
           # split into 4 chunks of ~46 files each. Then append the flaky
           # tests so contamination from the chunk surfaces as a failure.
           ls tests/*.py | sort > /tmp/all.txt
-          PRE_COUNT=$(grep -n '^tests/test_migrations\.py$' /tmp/all.txt | head -1 | cut -d: -f1)
+          PRE_COUNT=$(grep -n '^tests/test_migrations\.py\$' /tmp/all.txt | head -1 | cut -d: -f1)
           PRE_COUNT=$((PRE_COUNT - 1))
-          CHUNK_SIZE=$(( (PRE_COUNT + 3) / 4 ))
-          START=$(( (${{ matrix.chunk }} - 1) * CHUNK_SIZE + 1 ))
-          END=$(( ${{ matrix.chunk }} * CHUNK_SIZE ))
-          if [ $END -gt $PRE_COUNT ]; then END=$PRE_COUNT; fi
+          # Sub-bisect chunk 4 (lines 139..183, 45 files) into 4 sub-chunks of ~12 files each
+          CHUNK4_START=139
+          CHUNK4_END=$PRE_COUNT
+          CHUNK4_SIZE=$(( CHUNK4_END - CHUNK4_START + 1 ))
+          SUB_SIZE=$(( (CHUNK4_SIZE + 3) / 4 ))
+          case "${{ matrix.chunk }}" in
+            4a) IDX=0 ;;
+            4b) IDX=1 ;;
+            4c) IDX=2 ;;
+            4d) IDX=3 ;;
+          esac
+          START=$(( CHUNK4_START + IDX * SUB_SIZE ))
+          END=$(( START + SUB_SIZE - 1 ))
+          if [ $END -gt $CHUNK4_END ]; then END=$CHUNK4_END; fi
           sed -n "${START},${END}p" /tmp/all.txt > /tmp/chunk.txt
-          echo "chunk size: $(wc -l < /tmp/chunk.txt) files (lines $START..$END of $PRE_COUNT pre-migrations files)"
+          echo "sub-chunk ${{ matrix.chunk }}: $(wc -l < /tmp/chunk.txt) files (lines $START..$END)"
           cat /tmp/chunk.txt
           # Emit pytest argv: chunk files + flaky tests pinned at end.
           {
