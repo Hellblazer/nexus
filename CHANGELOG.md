@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.33.0] - 2026-05-16
+
 ### Added — Qwen offload integration (2026-05-15/16)
 
 Operator-readable opt-in surface for offloading selected LLM
