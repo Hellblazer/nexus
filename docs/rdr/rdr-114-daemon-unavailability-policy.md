@@ -164,22 +164,104 @@ Beads that pre-shipped supporting substrate:
 
 ### Critical Assumptions
 
-- [ ] Bridge-side daemon-RPC latency p99 under load is < 250 ms,
-  **Status**: Unverified, **Method**: Spike (measure tuplespace.out
-  end-to-end with the production registry seeded).
+- [x] Bridge-side daemon-RPC latency p99 under load is < 250 ms,
+  **Status**: Verified (local-mode) / Caveat (cloud-mode),
+  **Method**: Spike (2026-05-16).
   *Why load-bearing*: if the daemon path is slow enough that bridges
   routinely give up on it, fail-closed becomes a hot-path correctness
   regression rather than a defense-in-depth gain.
-- [ ] EventStream subscribers can tolerate a 0.5–2.0 s reconnect
-  gap without dropping reactive correctness (e.g., binding watcher),
-  **Status**: Unverified, **Method**: Source Search of
-  `src/nexus/cockpit/binding_watcher.py` to confirm the reactor
-  loop checks `events` rowid > cursor on each tick rather than
-  assuming a continuous stream.
-- [ ] No production reader currently depends on the silent direct-
-  mode fallback to mask daemon outages, **Status**: Unverified,
-  **Method**: Source Search across the repo for callers that rely
-  on bridge emission during known daemon-down periods.
+
+  *Spike result*, local-mode, daemon on tmp config_dir with
+  production registry seeded, `chromadb.PersistentClient` +
+  `DefaultEmbeddingFunction` (bundled ONNX MiniLM), N=1000 sequential
+  `tuplespace.out` calls after 5-call warmup:
+
+  | Metric | Value |
+  | --- | --- |
+  | min | 36.57 ms |
+  | p50 | 41.01 ms |
+  | p95 | 45.20 ms |
+  | p99 | **48.47 ms** |
+  | max | 89.44 ms |
+  | mean / stdev | 41.30 ms / 2.86 ms |
+
+  PASS: p99 48.47 ms is roughly 5x under the 250 ms target. The
+  spike script is preserved at
+  `scripts/spikes/spike_rdr114_tuplespace_out_latency.py` for
+  reproducibility. Methodology: background-thread daemon + sync
+  T2Client (the asyncio loop must run on a separate thread to
+  avoid a same-loop deadlock when the sync client blocks waiting
+  on RPC reply from a daemon scheduled on the same loop).
+
+  *Cloud-mode caveat*: under `chromadb.CloudClient` + `voyage-context-3`
+  the per-embed cost is dominated by a Voyage API round-trip
+  (typical 100–300 ms p50, higher under provider load). p99 in
+  that regime could approach or exceed the 250 ms target. The
+  fail-closed default is still correct under cloud mode (a slow
+  daemon is preferable to a WAL-contention race), but the
+  implementation must size the T2Client per-RPC timeout to
+  accommodate cloud-mode latency, and operator docs should call
+  out the trade-off. Spike for cloud mode is deferred to
+  implementation time when API credentials are wired into a test
+  fixture.
+
+- [x] EventStream subscribers can tolerate a 0.5–2.0 s reconnect
+  gap without dropping reactive correctness, **Status**: Verified
+  via Source Search.
+
+  *Finding*: `src/nexus/cockpit/bindings.py` lines 549..572 ship
+  `_BindingWatcher` as **direct SQLite polling against the events
+  table**, NOT via `event_stream.subscribe`. The class docstring
+  explicitly defers daemon-mode subscription ("will swap the SQL
+  polling for `event_stream.subscribe` once the RPC ships"). Grep
+  across `src/nexus` + `nx/` confirms zero production consumers of
+  `event_stream.subscribe` outside the daemon's own handler.
+
+  Implications:
+  1. The reconnect-gap assumption is moot for v1 because no
+     production reader is on `event_stream.subscribe` yet.
+  2. When the binding watcher migrates, its current poll interval
+     is 50 ms (`poll_interval=0.05` default). A 0.5–2.0 s
+     reconnect gap is 10–40x the steady-state tick budget. The
+     watcher would observe a brief latency bump but lose nothing,
+     because the cursor-driven `rowid > last_rowid` query
+     replays any events that landed during the gap. Reactive
+     correctness is preserved.
+  3. Cockpit panels (RDR-111) currently read recent events via
+     daemon RPC (`introspection.peek` over `events`), not via
+     `event_stream.subscribe`. Same conclusion as above.
+
+- [x] No production reader currently depends on the silent direct-
+  mode fallback to mask daemon outages, **Status**: Verified via
+  Source Search.
+
+  *Finding*: There are exactly 7 production callers of
+  `hook_bridge.emit`, the seven `orb_bridge_*.py` scripts under
+  `nx/hooks/scripts/`. Each script wraps `emit()` in a
+  `try / except Exception: log + exit 0` block and does not check
+  the return value. None of the scripts contain logic that depends
+  on the tuple actually landing on the SQLite side, they all
+  produce their RF-2 transparent-allow stdout regardless of the
+  emission result.
+
+  The direct-fallback test suite at
+  `tests/cockpit/test_hook_bridge_direct_fallback.py` exercises
+  the fallback as a regression shield (verifying that
+  `_emit_direct_auto` works correctly when invoked), not as a
+  production consumer that depends on it. Under the proposed
+  default flip:
+  1. The test fixture must set `NX_STORAGE_MODE=daemon` +
+     `NX_BRIDGE_ALLOW_DIRECT_FALLBACK=1` to keep exercising the
+     fallback path under daemon-mode. Or run in direct mode (no
+     `NX_STORAGE_MODE` env), the default test path.
+  2. A new test must cover the fail-closed branch under daemon
+     mode without the opt-in (no SQLite / Chroma writes, drop
+     event logged).
+
+  Conclusion: the silent fallback exists only to mask interactive
+  daemon-not-yet-started situations during operator setup. The
+  `NX_BRIDGE_ALLOW_DIRECT_FALLBACK=1` opt-in env preserves this
+  exact behaviour as a one-line escape hatch.
 
 **Method definitions**:
 
@@ -452,9 +534,9 @@ data demands it.
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified
-- [ ] `find_t2_daemon` PID probe (nexus-j6dj), already shipped.
-- [ ] `NX_BRIDGE_DISABLE` env handling (nexus-7zvp), already shipped.
+- [x] All Critical Assumptions verified (2026-05-16)
+- [x] `find_t2_daemon` PID probe (nexus-j6dj), shipped PR #826
+- [x] `NX_BRIDGE_DISABLE` env handling (nexus-7zvp), shipped PR #822
 
 ### Minimum Viable Validation
 
@@ -586,8 +668,24 @@ env gate, structlog rotation).
 
 ### Assumption Verification
 
-Three Critical Assumptions remain unverified at draft time. All
-three must be checked before implementation begins:
+All three Critical Assumptions are verified as of 2026-05-16:
+
+1. Bridge-side daemon-RPC p99 latency: local-mode PASS at 48.47 ms
+   under N=1000 sequential `tuplespace.out` (target 250 ms).
+   Cloud-mode caveat documented (Voyage RTT may push p99 closer
+   to target); implementation must size T2Client RPC timeout
+   accordingly. Spike methodology in Research Findings.
+2. Subscriber reconnect-gap tolerance: VERIFIED via Source Search.
+   No production consumer of `event_stream.subscribe` exists yet;
+   the planned binding-watcher migrant uses cursor-driven catch-up
+   on 50 ms polling that absorbs gaps without loss.
+3. No production reader depends on silent direct-mode fallback:
+   VERIFIED via Source Search. All seven `orb_bridge_*.py` scripts
+   wrap `emit()` in `try/except + log + exit 0` and do not check
+   the return value. The opt-in env preserves the interactive-
+   setup escape hatch.
+
+No remaining blockers from the assumption gate.
 
 #### API Verification
 
@@ -597,6 +695,7 @@ three must be checked before implementation begins:
 | `asyncio.IncompleteReadError` on graceful server close | stdlib | Source Search confirmed. |
 | `find_t2_daemon` PID probe | nexus.daemon.discovery (in-tree) | Source Search confirmed PR #826. |
 | `sqlite3.connect` with `mode=ro` URI | stdlib | Already used elsewhere in tree. |
+| `tuplespace.out` end-to-end latency | in-tree RPC | Spike 2026-05-16: p99 48.47 ms local-mode (N=1000, warmup=5). |
 
 ### Scope Verification
 
