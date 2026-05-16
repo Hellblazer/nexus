@@ -150,6 +150,55 @@ def _chroma_with_retry(
             delay = min(delay * 2, 30.0)
 
 
+# ── SQLite locked/busy retry (nexus-wf07) ────────────────────────────────────
+#
+# Tight, short-budget loop for cases like the cockpit hook-bridge that write
+# to a SQLite file under daemon-mode WAL contention. Total budget across 3
+# attempts: 50 + 100 + 200 = 350ms, well under the 5s Claude Code hook
+# timeout. Only retries OperationalError whose message contains "locked" or
+# "busy"; other OperationalErrors (malformed SQL, etc.) raise immediately.
+
+
+def _is_retryable_sqlite_lock(exc: BaseException) -> bool:
+    """Return True if *exc* is a transient SQLite lock/busy error."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
+
+
+def _sqlite_with_retry(
+    fn: Callable[..., Any],
+    *args: Any,
+    max_attempts: int = 3,
+    initial_delay: float = 0.05,
+    event: str = "sqlite_locked_retry",
+    **kwargs: Any,
+) -> Any:
+    """Call *fn* with short exponential backoff on SQLite locked/busy errors.
+
+    Defaults: 3 attempts, 50ms initial delay, doubling (50ms, 100ms, 200ms).
+    Non-locking ``OperationalError``s (and any other exception type) raise
+    immediately. Every retry emits a WARN structlog line under *event* so
+    operators can see retry pressure.
+    """
+    delay = initial_delay
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if attempt == max_attempts or not _is_retryable_sqlite_lock(exc):
+                raise
+            _log.warning(
+                event,
+                attempt=attempt,
+                delay=delay,
+                error=str(exc)[:120],
+            )
+            time.sleep(delay)
+            delay *= 2
+
+
 # ── Voyage AI transient-error retry ──────────────────────────────────────────
 #
 # voyageai.error is imported lazily by ``_get_voyage_error_types()`` rather
