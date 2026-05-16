@@ -16,7 +16,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -593,4 +595,182 @@ def export_cmd(config_dir_str: str | None, table: str | None, fmt: str, dest: st
         f"Export complete: {result.get('rows', '?')} rows, "
         f"{result.get('bytes_written', 0):,} bytes -> {result.get('path', dest)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# nx daemon t2 install / uninstall --autostart  (RDR-112, nexus-6w0c)
+# ---------------------------------------------------------------------------
+#
+# After OS reboot the user should not have to manually run
+# ``nx daemon t2 start``. We ship a launchd plist (macOS) and a systemd
+# user-unit (Linux) under ``src/nexus/_resources/daemon/``, force-included
+# into the wheel. ``install --autostart`` renders the template, drops it
+# into the per-OS location, and bootstraps it; ``uninstall --autostart``
+# is the symmetric remove.
+
+_PLIST_NAME = "com.nexus.t2.plist"
+_SERVICE_NAME = "nexus-t2.service"
+_LAUNCHD_LABEL = "com.nexus.t2"
+
+
+def _autostart_platform() -> str:
+    """Indirection point so tests can stub the platform."""
+    return sys.platform
+
+
+def _autostart_install_dir() -> Path:
+    platform = _autostart_platform()
+    if platform == "darwin":
+        return Path.home() / "Library" / "LaunchAgents"
+    if platform.startswith("linux"):
+        return Path.home() / ".config" / "systemd" / "user"
+    raise click.ClickException(
+        f"Autostart is not supported on platform {platform!r}; "
+        "supported platforms are macOS (launchd) and Linux (systemd user units)."
+    )
+
+
+def _autostart_log_dir() -> Path:
+    platform = _autostart_platform()
+    if platform == "darwin":
+        return Path.home() / "Library" / "Logs"
+    return Path.home() / ".local" / "state" / "nexus"
+
+
+def _read_template(name: str) -> str:
+    from importlib.resources import as_file, files
+
+    resource = files("nexus") / "_resources" / "daemon" / name
+    with as_file(resource) as resolved:
+        return Path(resolved).read_text()
+
+
+def _render_template(name: str, *, nx_bin: str, log_dir: str, path_env: str) -> str:
+    body = _read_template(name)
+    return (
+        body.replace("__NX_BIN__", nx_bin)
+        .replace("__LOG_DIR__", log_dir)
+        .replace("__PATH_ENV__", path_env)
+    )
+
+
+def _resolve_nx_bin() -> str:
+    """Resolve the absolute path to the ``nx`` executable.
+
+    Prefer ``shutil.which("nx")``. If unavailable (rare; uv-tool installs
+    expose ``nx`` on PATH), fall back to ``<python> -m nexus.cli`` which
+    works for any wheel install. We do not hardcode ``/usr/local/bin/nx``.
+    """
+    found = shutil.which("nx")
+    if found:
+        return found
+    return f"{sys.executable} -m nexus.cli"
+
+
+def _autostart_filename() -> str:
+    return _PLIST_NAME if _autostart_platform() == "darwin" else _SERVICE_NAME
+
+
+@t2_group.command("install")
+@click.option(
+    "--autostart",
+    is_flag=True,
+    required=True,
+    help=(
+        "Install OS autostart entry (launchd on macOS, systemd user "
+        "unit on Linux) so the T2 daemon starts at login / boot."
+    ),
+)
+def install_cmd(autostart: bool) -> None:
+    """Install the T2 daemon autostart entry for the current user.
+
+    macOS: writes ~/Library/LaunchAgents/com.nexus.t2.plist and bootstraps
+    it via ``launchctl bootstrap gui/$UID``.
+
+    Linux: writes ~/.config/systemd/user/nexus-t2.service and enables it
+    via ``systemctl --user enable --now nexus-t2.service``.
+    """
+    if not autostart:  # pragma: no cover -- click enforces required=True
+        raise click.UsageError("--autostart is required")
+
+    install_dir = _autostart_install_dir()
+    install_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = _autostart_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    template_name = _autostart_filename()
+    rendered = _render_template(
+        template_name,
+        nx_bin=_resolve_nx_bin(),
+        log_dir=str(log_dir),
+        path_env=os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+    )
+    dest = install_dir / template_name
+    dest.write_text(rendered)
+    dest.chmod(0o644)
+    click.echo(f"Wrote {dest}")
+
+    platform = _autostart_platform()
+    if platform == "darwin":
+        uid = os.getuid()
+        cmd = ["launchctl", "bootstrap", f"gui/{uid}", str(dest)]
+    else:
+        cmd = ["systemctl", "--user", "enable", "--now", template_name]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        click.echo(
+            f"Warning: {cmd[0]} not found on PATH; file installed but not activated ({exc}).",
+            err=True,
+        )
+        return
+    if result.returncode != 0:
+        click.echo(
+            f"Warning: {' '.join(cmd)} exited {result.returncode}: "
+            f"{result.stderr.strip() or result.stdout.strip()}",
+            err=True,
+        )
+        return
+    click.echo(f"Activated via: {' '.join(cmd)}")
+
+
+@t2_group.command("uninstall")
+@click.option(
+    "--autostart",
+    is_flag=True,
+    required=True,
+    help="Remove OS autostart entry installed by ``install --autostart``.",
+)
+def uninstall_cmd(autostart: bool) -> None:
+    """Remove the T2 daemon autostart entry for the current user."""
+    if not autostart:  # pragma: no cover
+        raise click.UsageError("--autostart is required")
+
+    install_dir = _autostart_install_dir()
+    template_name = _autostart_filename()
+    dest = install_dir / template_name
+
+    if not dest.exists():
+        click.echo(f"Autostart not installed (nothing at {dest}).")
+        return
+
+    platform = _autostart_platform()
+    if platform == "darwin":
+        uid = os.getuid()
+        cmd = ["launchctl", "bootout", f"gui/{uid}/{_LAUNCHD_LABEL}"]
+    else:
+        cmd = ["systemctl", "--user", "disable", "--now", template_name]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            click.echo(
+                f"Warning: {' '.join(cmd)} exited {result.returncode}: "
+                f"{result.stderr.strip() or result.stdout.strip()}",
+                err=True,
+            )
+    except FileNotFoundError as exc:
+        click.echo(f"Warning: {cmd[0]} not found ({exc}); removing file anyway.", err=True)
+
+    dest.unlink()
+    click.echo(f"Removed {dest}")
 
