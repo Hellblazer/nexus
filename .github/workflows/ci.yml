@@ -147,7 +147,7 @@ jobs:
           # split into 4 chunks of ~46 files each. Then append the flaky
           # tests so contamination from the chunk surfaces as a failure.
           ls tests/*.py | sort > /tmp/all.txt
-          PRE_COUNT=$(grep -n '^tests/test_migrations\.py\$' /tmp/all.txt | head -1 | cut -d: -f1)
+          PRE_COUNT=$(grep -n '^tests/test_migrations\.py$' /tmp/all.txt | head -1 | cut -d: -f1)
           PRE_COUNT=$((PRE_COUNT - 1))
           # Sub-bisect chunk 4 (lines 139..183, 45 files) into 4 sub-chunks of ~12 files each
           CHUNK4_START=139
