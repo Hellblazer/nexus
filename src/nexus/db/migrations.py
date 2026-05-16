@@ -3573,9 +3573,22 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
     """
     import time as _time
 
+    import threading as _threading
+
     with _upgrade_lock:
         path_key = _connection_path_key(conn)
-        if path_key in _upgrade_done:
+        _membership = path_key in _upgrade_done
+        # nexus-9eaz instrumentation: every check-then-add observed under
+        # _upgrade_lock. If two threads both report "membership=False" for
+        # the same path_key, the lock is not actually serializing.
+        _log.debug(
+            "upgrade_done_check",
+            path_key=path_key,
+            membership=_membership,
+            thread_id=_threading.get_ident(),
+            done_size=len(_upgrade_done),
+        )
+        if _membership:
             return
 
         # OBS-1: record migration session start for telemetry.
@@ -3584,6 +3597,7 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
             "migration_start",
             path_key=path_key,
             current_version=current_version,
+            thread_id=_threading.get_ident(),
         )
 
         # Run the entire sequence under the lock — bootstrap_version +
@@ -3651,6 +3665,13 @@ def apply_pending(conn: sqlite3.Connection, current_version: str) -> None:
         # Only now — after bootstrap + migrations + version update all
         # succeeded — record the path as done.
         _upgrade_done.add(path_key)
+        # nexus-9eaz instrumentation: log every successful add with thread id.
+        _log.debug(
+            "upgrade_done_add",
+            path_key=path_key,
+            thread_id=_threading.get_ident(),
+            done_size=len(_upgrade_done),
+        )
 
         # OBS-1: emit migration session completion telemetry.
         _log.info(
