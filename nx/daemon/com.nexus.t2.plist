@@ -22,8 +22,8 @@
     <true/>
     <key>KeepAlive</key>
     <dict>
-        <key>SuccessfulExit</key>
-        <false/>
+        <key>Crashed</key>
+        <true/>
     </dict>
     <key>ProcessType</key>
     <string>Background</string>

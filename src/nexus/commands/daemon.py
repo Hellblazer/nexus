@@ -16,11 +16,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 from pathlib import Path
+from xml.sax.saxutils import escape as _xml_escape
 
 import click
 
@@ -645,26 +648,70 @@ def _read_template(name: str) -> str:
         return Path(resolved).read_text()
 
 
-def _render_template(name: str, *, nx_bin: str, log_dir: str, path_env: str) -> str:
+_PLIST_NX_BIN_LINE_RE = re.compile(r"^(?P<indent>[ \t]*)<string>__NX_BIN__</string>\s*$")
+
+
+def _substitute_plist_argv(body: str, nx_bin: list[str]) -> str:
+    """Expand the ``<string>__NX_BIN__</string>`` line into one entry per token.
+
+    The plist's ``ProgramArguments`` array gives launchd one ``<string>``
+    per argv element. A multi-token fallback (``["/path/python", "-m",
+    "nexus.cli"]``) must therefore render as multiple ``<string>``
+    siblings, not a single space-joined string — launchd treats one
+    ``<string>`` slot as a single executable name, so a single
+    ``"<string>python -m nexus.cli</string>"`` makes ``posix_spawn``
+    fail with ENOENT.
+    """
+    out_lines: list[str] = []
+    for line in body.splitlines(keepends=True):
+        match = _PLIST_NX_BIN_LINE_RE.match(line.rstrip("\n"))
+        if match is None:
+            out_lines.append(line)
+            continue
+        indent = match.group("indent")
+        trailing_nl = "\n" if line.endswith("\n") else ""
+        for token in nx_bin:
+            out_lines.append(f"{indent}<string>{_xml_escape(token)}</string>{trailing_nl}")
+    return "".join(out_lines)
+
+
+def _render_template(name: str, *, nx_bin: list[str], log_dir: str, path_env: str) -> str:
+    """Substitute placeholders in a shipped autostart template.
+
+    ``nx_bin`` is a token list. The plist substitutes the
+    ``<string>__NX_BIN__</string>`` line into one ``<string>`` per
+    token; the systemd unit's ``ExecStart=__NX_BIN__ ...`` line uses
+    ``shlex.join`` so multi-token argvs survive systemd's
+    whitespace-split parser.
+    """
     body = _read_template(name)
+    if name.endswith(".plist"):
+        body = _substitute_plist_argv(body, nx_bin)
+    else:
+        body = body.replace("__NX_BIN__", shlex.join(nx_bin))
     return (
-        body.replace("__NX_BIN__", nx_bin)
+        body
         .replace("__LOG_DIR__", log_dir)
         .replace("__PATH_ENV__", path_env)
     )
 
 
-def _resolve_nx_bin() -> str:
-    """Resolve the absolute path to the ``nx`` executable.
+def _resolve_nx_bin() -> list[str]:
+    """Resolve the argv prefix for invoking ``nx``.
 
-    Prefer ``shutil.which("nx")``. If unavailable (rare; uv-tool installs
-    expose ``nx`` on PATH), fall back to ``<python> -m nexus.cli`` which
-    works for any wheel install. We do not hardcode ``/usr/local/bin/nx``.
+    Returns a single-element list when ``nx`` is on ``$PATH`` (the
+    common case for ``uv tool install``). Falls back to a three-element
+    list ``[python, "-m", "nexus.cli"]`` when ``shutil.which("nx")``
+    returns ``None``. Callers must respect the token boundaries when
+    rendering into platform autostart formats: a multi-element list
+    cannot be flattened into a single ``<string>`` plist slot, and the
+    systemd ``ExecStart=`` line must shlex-quote each token so paths
+    with spaces stay one argument.
     """
     found = shutil.which("nx")
     if found:
-        return found
-    return f"{sys.executable} -m nexus.cli"
+        return [found]
+    return [sys.executable, "-m", "nexus.cli"]
 
 
 def _autostart_filename() -> str:
@@ -699,9 +746,10 @@ def install_cmd(autostart: bool) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     template_name = _autostart_filename()
+    nx_bin = _resolve_nx_bin()
     rendered = _render_template(
         template_name,
-        nx_bin=_resolve_nx_bin(),
+        nx_bin=nx_bin,
         log_dir=str(log_dir),
         path_env=os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
     )
