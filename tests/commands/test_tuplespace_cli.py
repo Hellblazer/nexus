@@ -264,7 +264,8 @@ def test_daemon_mode_allows_list(runner: CliRunner, env, monkeypatch) -> None:
 
 def test_banner_summary_no_db(env) -> None:
     s = ts_cmd.banner_summary()
-    assert s["subspaces"] >= 2
+    # Fixture builtin_dir installs exactly two YAMLs (tasks.yml + locks.yml).
+    assert s["subspaces"] == 2
     assert s["tuples"] == 0
     assert s["active_claims"] == 0
     line = ts_cmd.banner_line()

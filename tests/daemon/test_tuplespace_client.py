@@ -338,8 +338,8 @@ class TestTuplespaceRoundTrip:
             dimensions=_dims(),
         )
         stats = client.tuplespace.subspace_stats(subspace="tasks/nexus")
-        assert stats["total"] >= 1
-        assert stats["available"] >= 1
+        assert stats["total"] == 1
+        assert stats["available"] == 1
 
 
 # ---------------------------------------------------------------------------

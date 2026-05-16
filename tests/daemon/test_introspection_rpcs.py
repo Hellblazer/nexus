@@ -334,7 +334,7 @@ def test_peek_returns_dicts(service: IntrospectionService, populated_db: sqlite3
     populated_db.close()
 
     result = service.peek("test_items", offset=0, limit=10)
-    assert len(result["rows"]) >= 1
+    assert len(result["rows"]) == 1
     row = result["rows"][0]
     assert isinstance(row, dict)
     assert "name" in row
@@ -429,7 +429,7 @@ def test_export_all_tables_jsonl(
 
     dest = tmp_path / "all_tables"
     result = service.export(table=None, format="jsonl", dest_path=str(dest))
-    assert result["rows"] >= 1
+    assert result["rows"] == 1
 
 
 # ---------------------------------------------------------------------------

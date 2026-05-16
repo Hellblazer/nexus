@@ -17,11 +17,13 @@ Key design decisions (backed by RDR-111 spike results):
   PermissionRequest hook that emits no output may be treated as a block.
   The bridge emits a transparent allow for PermissionRequest.
 
-- **Daemon-mode routing deferred** (nexus-pce1.6): ``emit()`` currently
-  dispatches in ``direct`` mode only (opens tuples.db directly via
-  ``api.out``). When the RDR-112 daemon ships a ``tuplespace.out`` RPC
-  the bridge can route through ``T2Client.call("tuplespace.out", ...)``
-  instead. The ``_ROUTING_TBA`` constant documents this deferral.
+- **Daemon-preferred routing** (RDR-112, nexus-6s8v): ``emit()`` first
+  tries to dispatch through the T2 daemon's ``tuplespace.out`` RPC. On
+  daemon-discovery or RPC failure it falls back to direct mode (opening
+  ``tuples.db`` itself via ``api.out``); on a final failure it logs and
+  swallows so hooks never crash user-facing tools. The ``_ROUTING_TBA``
+  constant gates the daemon-first path and is set to ``"daemon"`` in
+  shipped builds.
 
 - **RF-5 gate**: all tuplespace side-effects are skipped when the
   ``CLAUDECODE`` environment variable is absent. The hook scripts still
@@ -245,9 +247,11 @@ def emit(
     resources are used directly; no file-system or ChromaDB connections are
     opened.
 
-    Daemon-mode routing (nexus-pce1.6 / _ROUTING_TBA): currently routes
-    through direct mode only. When the RDR-112 ``tuplespace.out`` daemon RPC
-    ships, this function will detect the daemon and route accordingly.
+    Daemon-preferred routing (RDR-112 / nexus-6s8v, _ROUTING_TBA="daemon"):
+    in the production call path (no test injections), ``emit`` delegates to
+    ``_emit_routed`` which tries the running T2 daemon's ``tuplespace.out``
+    RPC first, falls back to direct mode on daemon discovery or RPC failure,
+    and finally logs-and-skips so hooks never crash user-facing tools.
 
     Args:
         hook_type: The CC hook type string.
