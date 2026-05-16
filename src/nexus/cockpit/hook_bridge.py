@@ -260,6 +260,10 @@ def emit(
         _log.debug("hook_bridge_skip_no_claudecode", hook_type=hook_type)
         return
 
+    if _bridge_disabled():
+        _log.debug("hook_bridge_skip_disabled", hook_type=hook_type)
+        return
+
     routed = route_payload(hook_type, payload)
     if routed is None:
         _log.debug("hook_bridge_skip_unrouted", hook_type=hook_type)
@@ -538,12 +542,57 @@ def _build_match_text(hook_type: str, payload: dict[str, Any]) -> str:
             return ""
 
 
+_CONTENT_BYTE_CAP = 12000
+
+
+def _bridge_disabled() -> bool:
+    """Return True if NX_BRIDGE_DISABLE is set to a truthy value.
+
+    Falsy tokens (bridge runs): unset, ``""``, ``"0"``, ``"false"``, ``"False"``.
+    Any other non-empty value disables the bridge.
+
+    This is the documented privacy opt-out (docs/tuplespace-env.md). It
+    fires after the CLAUDECODE gate in ``emit()`` so it covers both the
+    daemon and direct-fallback paths. ``output_for_hook()`` is *not*
+    gated by this — disabling tuple emission must not break the hook
+    protocol (e.g. PermissionRequest still needs a transparent-allow
+    response).
+    """
+    val = os.environ.get("NX_BRIDGE_DISABLE", "").strip()
+    return val not in ("", "0", "false", "False")
+
+
 def _build_content(hook_type: str, payload: dict[str, Any]) -> str:
     """Build the tuple content field (stored verbatim, not embedded).
 
-    Serialises the raw payload as JSON, capped to a safe chunk size to
-    stay within ChromaDB's MAX_DOCUMENT_BYTES limit.
+    Returns a JSON-parseable string. When the full JSON exceeds the byte
+    cap, projects the payload down to a stable set of small fields with
+    a ``_truncated: true`` marker so consumers always see valid JSON
+    instead of a mid-string slice. The byte cap stays well under
+    ``SAFE_CHUNK_BYTES = 12288``.
     """
     raw = json.dumps(payload, ensure_ascii=False)
-    # Stay well within SAFE_CHUNK_BYTES = 12288
-    return raw[:12000]
+    if len(raw.encode("utf-8")) <= _CONTENT_BYTE_CAP:
+        return raw
+
+    original_bytes = len(raw.encode("utf-8"))
+
+    projection: dict[str, Any] = {
+        "_truncated": True,
+        "_original_bytes": original_bytes,
+    }
+    for key in ("session_id", "hook_event_name", "tool_name", "cwd", "permission_mode"):
+        if key in payload:
+            projection[key] = payload[key]
+    projected = json.dumps(projection, ensure_ascii=False)
+    if len(projected.encode("utf-8")) <= _CONTENT_BYTE_CAP:
+        return projected
+
+    # Last-resort: minimal envelope with just the event name. Bounded by
+    # construction (event name is a short identifier), guaranteed to fit.
+    minimal = {
+        "_truncated": True,
+        "_original_bytes": original_bytes,
+        "hook_event_name": str(payload.get("hook_event_name", ""))[:64],
+    }
+    return json.dumps(minimal, ensure_ascii=False)

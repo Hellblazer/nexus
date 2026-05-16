@@ -43,10 +43,17 @@ through the 4.27 to 4.28 cycle (RDR-105).
 
 ## NX_BRIDGE_DISABLE
 
-Disables the hook-to-tuple bridge (RDR-111). When set, Claude Code hook
-events stop landing in the `events/hook` subspace. The bridge is the
-upstream feed for several event subscribers; with it disabled, those
-subscribers see no input and may appear stuck.
+Disables the hook-to-tuple bridge (RDR-111). When set to any truthy
+value, Claude Code hook events stop landing in the `events/hook`
+subspace. The bridge is the upstream feed for several event subscribers;
+with it disabled, those subscribers see no input and may appear stuck.
+
+Falsy tokens (bridge runs): unset, `""`, `"0"`, `"false"`, `"False"`.
+Any other non-empty value (`"1"`, `"true"`, `"yes"`, ...) disables the
+bridge. The gate sits after the `CLAUDECODE` check in `emit()`, so it
+covers both the daemon-routed and direct-fallback paths. Hook protocol
+responses (e.g. PermissionRequest transparent-allow) are not silenced —
+disabling tuple emission must not break the user's tool flow.
 
 ## NX_HOOK_DEBUG, NX_TIMEOUT, BD_TIMEOUT
 

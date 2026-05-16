@@ -632,6 +632,141 @@ class TestTakeCASRace:
 
 
 # ---------------------------------------------------------------------------
+# take — idempotent retake by same claimant (RDR-110 CA-1/CA-2, nexus-edmw)
+# ---------------------------------------------------------------------------
+
+
+class TestTakeIdempotentRetake:
+    """Same claimant re-taking a still-leased tuple must observe the same claim.
+
+    Pins the contract at ``src/nexus/tuplespace/api.py:690-713`` (the
+    read-then-update probe above the CAS): a second ``take`` from the
+    holding claimant returns the same tuple, the same ``claim_id``, and
+    writes no extra ``tuple_claim_log`` row.
+    """
+
+    def test_same_claimant_retake_returns_same_claim_id(
+        self, db_conn, index, registry
+    ):
+        from nexus.tuplespace.api import out, take
+
+        tid = out(
+            conn=db_conn, index=index, registry=registry,
+            subspace="tasks/nexus",
+            content="idempotent retake target",
+            dimensions=_valid_task_dims(),
+        )
+
+        first = take(
+            conn=db_conn, index=index, registry=registry,
+            subspace="tasks/nexus", query="idempotent retake target",
+            claimant="agent-A",
+        )
+        assert first is not None
+        first_tuple, first_claim_id = first
+        assert first_tuple["id"] == tid
+
+        second = take(
+            conn=db_conn, index=index, registry=registry,
+            subspace="tasks/nexus", query="idempotent retake target",
+            claimant="agent-A",
+        )
+        assert second is not None
+        second_tuple, second_claim_id = second
+        assert second_tuple["id"] == tid
+        assert second_claim_id == first_claim_id
+
+    def test_retake_does_not_rotate_claim_id_on_tuples_row(
+        self, db_conn, index, registry
+    ):
+        from nexus.tuplespace.api import out, take
+
+        tid = out(
+            conn=db_conn, index=index, registry=registry,
+            subspace="tasks/nexus", content="no-rotation target",
+            dimensions=_valid_task_dims(),
+        )
+        first = take(
+            conn=db_conn, index=index, registry=registry,
+            subspace="tasks/nexus", query="no-rotation target",
+            claimant="agent-A",
+        )
+        assert first is not None
+        _, first_claim_id = first
+
+        # Snapshot the stored claim_id before the retake.
+        before = db_conn.execute(
+            "SELECT claim_id FROM tuples WHERE id = ?", (tid,)
+        ).fetchone()
+        assert before["claim_id"] == first_claim_id
+
+        take(
+            conn=db_conn, index=index, registry=registry,
+            subspace="tasks/nexus", query="no-rotation target",
+            claimant="agent-A",
+        )
+
+        after = db_conn.execute(
+            "SELECT claim_id FROM tuples WHERE id = ?", (tid,)
+        ).fetchone()
+        assert after["claim_id"] == first_claim_id
+
+    def test_retake_writes_exactly_one_claim_log_entry(
+        self, db_conn, index, registry
+    ):
+        from nexus.tuplespace.api import out, take
+
+        tid = out(
+            conn=db_conn, index=index, registry=registry,
+            subspace="tasks/nexus", content="single-log target",
+            dimensions=_valid_task_dims(),
+        )
+        take(
+            conn=db_conn, index=index, registry=registry,
+            subspace="tasks/nexus", query="single-log target",
+            claimant="agent-A",
+        )
+        take(
+            conn=db_conn, index=index, registry=registry,
+            subspace="tasks/nexus", query="single-log target",
+            claimant="agent-A",
+        )
+
+        count = db_conn.execute(
+            "SELECT COUNT(*) FROM tuple_claim_log "
+            "WHERE tuple_id = ? AND transition = 'claim'",
+            (tid,),
+        ).fetchone()[0]
+        # Exact equality — inequality is how silent-corruption tests pass.
+        assert count == 1
+
+    def test_other_claimant_take_during_lease_returns_none(
+        self, db_conn, index, registry
+    ):
+        """Counter-test: a foreign claimant must not hit the idempotent path."""
+        from nexus.tuplespace.api import out, take
+
+        out(
+            conn=db_conn, index=index, registry=registry,
+            subspace="tasks/nexus", content="foreign claimant target",
+            dimensions=_valid_task_dims(),
+        )
+        first = take(
+            conn=db_conn, index=index, registry=registry,
+            subspace="tasks/nexus", query="foreign claimant target",
+            claimant="agent-A",
+        )
+        assert first is not None
+
+        intruder = take(
+            conn=db_conn, index=index, registry=registry,
+            subspace="tasks/nexus", query="foreign claimant target",
+            claimant="agent-B",
+        )
+        assert intruder is None
+
+
+# ---------------------------------------------------------------------------
 # take — exact mode (locks/<resource>)
 # ---------------------------------------------------------------------------
 
