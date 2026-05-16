@@ -218,6 +218,25 @@ def _isolate_dispatch_routing(monkeypatch: pytest.MonkeyPatch) -> None:
         "NEXUS_DISPATCH_BACKEND",
         "NEXUS_DISPATCH_QWEN_OPERATORS",
         "NEXUS_DISPATCH_CLAUDE_OPERATORS",
+        # Aspect-extractor backend (PR #780) and scholarly-paper prompt
+        # version (feature/scholarly-paper-v2): both are read at every
+        # call into ``aspect_extractor``. A shell that has the
+        # ``v2`` toggle exported for an operator session would
+        # otherwise silently flip every aspect test off the default
+        # prompt body, masking v1-shaped assertions.
+        "NEXUS_ASPECT_BACKEND",
+        "NEXUS_SCHOLARLY_PAPER_VERSION",
+        # Tier-B dispatcher routing (qwen_agent_dispatch). A shell that
+        # exports ``NEXUS_TIER_B_DISPATCHER=qwen_agent`` for an operator
+        # session would otherwise silently flip every nx_enrich_beads
+        # test off the default claude path. Same isolation reasoning as
+        # NEXUS_DISPATCH_BACKEND above.
+        "NEXUS_TIER_B_DISPATCHER",
+        # Supervisor-binary override for the qwen-agent transport — kept
+        # out of band so tests that exercise resolution can ``setenv`` it
+        # explicitly without inheriting an operator's real supervisor
+        # path.
+        "QWEN_AGENT_SUPERVISOR",
     ):
         monkeypatch.delenv(var, raising=False)
 
