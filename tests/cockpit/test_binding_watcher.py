@@ -613,3 +613,247 @@ class TestBindingWatcher:
         await asyncio.sleep(0.05)
         watcher.request_stop()
         await asyncio.wait_for(task, timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# Tests: lifecycle wrappers (nexus-9eiw)
+# ---------------------------------------------------------------------------
+
+
+class TestBindingWatcherLifecycle:
+    """start() / stop() wrappers — idempotent, bounded-stop, no-op safety."""
+
+    @pytest.mark.asyncio
+    async def test_start_returns_running_task_and_is_idempotent(
+        self, conn, context
+    ) -> None:
+        profile = BindingProfile(name="lifecycle", bindings=())
+        watcher = _BindingWatcher(
+            conn=conn, profiles=[profile], context=context, poll_interval=0.01
+        )
+        task1 = watcher.start()
+        task2 = watcher.start()
+        try:
+            assert task1 is task2
+            assert not task1.done()
+        finally:
+            await watcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_terminates_running_loop(self, conn, context) -> None:
+        profile = BindingProfile(name="lifecycle", bindings=())
+        watcher = _BindingWatcher(
+            conn=conn, profiles=[profile], context=context, poll_interval=0.01
+        )
+        watcher.start()
+        await asyncio.sleep(0.02)
+        await watcher.stop()
+        assert watcher._task is not None
+        assert watcher._task.done()
+
+    @pytest.mark.asyncio
+    async def test_stop_without_start_is_noop(self, conn, context) -> None:
+        profile = BindingProfile(name="lifecycle", bindings=())
+        watcher = _BindingWatcher(
+            conn=conn, profiles=[profile], context=context, poll_interval=0.01
+        )
+        # Must not raise even though start() never ran.
+        await watcher.stop()
+        assert watcher._task is None
+
+    @pytest.mark.asyncio
+    async def test_double_stop_is_noop(self, conn, context) -> None:
+        profile = BindingProfile(name="lifecycle", bindings=())
+        watcher = _BindingWatcher(
+            conn=conn, profiles=[profile], context=context, poll_interval=0.01
+        )
+        watcher.start()
+        await asyncio.sleep(0.02)
+        await watcher.stop()
+        # Second stop is a no-op — must not deadlock or raise.
+        await watcher.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: action_idempotency dedup gate (nexus-8wvs)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def memory_conn(tmp_path: Path):
+    """memory.db connection seeded with the action_idempotency schema."""
+    from nexus.db.migrations import migrate_action_idempotency_table
+
+    db = tmp_path / "memory.db"
+    c = sqlite3.connect(str(db))
+    c.row_factory = sqlite3.Row
+    migrate_action_idempotency_table(c)
+    yield c
+    c.close()
+
+
+class TestActionIdempotency:
+    """RDR-111:909-942 dedup gate prevents python-action replay on restart."""
+
+    def _make_event(self, *, tuple_id: str) -> EventRecord:
+        return EventRecord(
+            cursor=1,
+            subspace="hook_events/notification",
+            op="out",
+            tuple_id=tuple_id,
+            payload_summary=None,
+            category="data",
+            ts=1700000000.0,
+        )
+
+    def _make_binding(self) -> Binding:
+        return Binding(
+            name="dedup-binding",
+            match={"subspace": "hook_events/notification"},
+            action=Action(
+                kind="python",
+                target="tests.cockpit.test_binding_watcher:_idem_action_recorder",
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_dispatch_runs_action(
+        self, conn, index, registry, memory_conn
+    ) -> None:
+        from nexus.cockpit.bindings import _dispatch_action
+
+        _idem_invocations.clear()
+        ctx = BindingContext(
+            conn=conn,
+            index=index,
+            registry=registry,
+            memory_conn=memory_conn,
+            profile_name="default",
+        )
+        binding = self._make_binding()
+        event = self._make_event(tuple_id="tuple-1")
+        await _dispatch_action(
+            binding.action, event=event, binding=binding, context=ctx
+        )
+        assert len(_idem_invocations) == 1
+
+    @pytest.mark.asyncio
+    async def test_replay_with_same_tuple_id_is_deduped(
+        self, conn, index, registry, memory_conn
+    ) -> None:
+        from nexus.cockpit.bindings import _dispatch_action
+
+        _idem_invocations.clear()
+        ctx = BindingContext(
+            conn=conn,
+            index=index,
+            registry=registry,
+            memory_conn=memory_conn,
+            profile_name="default",
+        )
+        binding = self._make_binding()
+        event = self._make_event(tuple_id="tuple-2")
+        await _dispatch_action(
+            binding.action, event=event, binding=binding, context=ctx
+        )
+        await _dispatch_action(
+            binding.action, event=event, binding=binding, context=ctx
+        )
+        # First call runs the action, second hits the dedup gate.
+        assert len(_idem_invocations) == 1
+
+    @pytest.mark.asyncio
+    async def test_log_action_skips_dedup_check(
+        self, conn, index, registry, memory_conn
+    ) -> None:
+        """log actions are inherently idempotent — no row should be written."""
+        from nexus.cockpit.bindings import _dispatch_action
+
+        ctx = BindingContext(
+            conn=conn,
+            index=index,
+            registry=registry,
+            memory_conn=memory_conn,
+            profile_name="default",
+        )
+        binding = Binding(
+            name="log-only",
+            match={"subspace": "hook_events/notification"},
+            action=Action(kind="log", target="LOG-MARKER"),
+        )
+        event = self._make_event(tuple_id="tuple-3")
+        await _dispatch_action(
+            binding.action, event=event, binding=binding, context=ctx
+        )
+        count = memory_conn.execute(
+            "SELECT count(*) FROM action_idempotency"
+        ).fetchone()[0]
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_expired_row_lets_next_dispatch_through(
+        self, conn, index, registry, memory_conn
+    ) -> None:
+        from nexus.cockpit.bindings import _dispatch_action, _idempotency_key
+
+        _idem_invocations.clear()
+        binding = self._make_binding()
+        event = self._make_event(tuple_id="tuple-4")
+        # Pre-seed an expired row for this (binding, tuple_id).
+        memory_conn.execute(
+            "INSERT INTO action_idempotency (idempotency_key, expires_at) "
+            "VALUES (?, ?)",
+            (_idempotency_key(binding.name, event.tuple_id), 1.0),
+        )
+        memory_conn.commit()
+
+        ctx = BindingContext(
+            conn=conn,
+            index=index,
+            registry=registry,
+            memory_conn=memory_conn,
+            profile_name="default",
+        )
+        await _dispatch_action(
+            binding.action, event=event, binding=binding, context=ctx
+        )
+        # Expired row did not dedup; the action ran exactly once.
+        assert len(_idem_invocations) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_memory_conn_disables_dedup_gate(
+        self, conn, index, registry
+    ) -> None:
+        """Backward-compat: contexts without memory_conn keep at-least-once."""
+        from nexus.cockpit.bindings import _dispatch_action
+
+        _idem_invocations.clear()
+        ctx = BindingContext(
+            conn=conn,
+            index=index,
+            registry=registry,
+            memory_conn=None,
+            profile_name="default",
+        )
+        binding = self._make_binding()
+        event = self._make_event(tuple_id="tuple-5")
+        await _dispatch_action(
+            binding.action, event=event, binding=binding, context=ctx
+        )
+        await _dispatch_action(
+            binding.action, event=event, binding=binding, context=ctx
+        )
+        # No dedup gate → both calls run.
+        assert len(_idem_invocations) == 2
+
+
+# Used by TestActionIdempotency via the python-action lookup mechanism.
+_idem_invocations: list[str] = []
+
+
+def _idem_action_recorder(
+    event: EventRecord,
+    binding: Binding,
+    context: BindingContext,
+) -> None:
+    _idem_invocations.append(event.tuple_id)

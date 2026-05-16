@@ -80,6 +80,7 @@ import json
 import os
 import signal
 import socket
+import sqlite3
 import struct
 import sys
 import traceback as _traceback_mod
@@ -92,6 +93,19 @@ import structlog
 from nexus.daemon.peer import PeerCredentials, read_peer_credentials
 
 _log = structlog.get_logger(__name__)
+
+
+def _cockpit_bindings_disabled() -> bool:
+    """Return True if ``NX_COCKPIT_BINDINGS_DISABLE`` is set to a truthy value.
+
+    Falsy tokens (watcher runs): unset, ``""``, ``"0"``, ``"false"``, ``"False"``.
+    Any other non-empty value disables the cockpit binding watcher. Mirrors
+    the ``NX_BRIDGE_DISABLE`` opt-out semantics so operators have a single
+    mental model for cockpit feature kill switches.
+    """
+    val = os.environ.get("NX_COCKPIT_BINDINGS_DISABLE", "").strip()
+    return val not in ("", "0", "false", "False")
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -593,6 +607,13 @@ class T2Daemon:
         # Started in start(); cancelled in stop().
         self._retention_task: asyncio.Task | None = None  # type: ignore[type-arg]
 
+        # nexus-9eiw (RDR-111 §Phase 2 Step 6): binding watcher reaction loop.
+        # Constructed in start() when NX_COCKPIT_BINDINGS_DISABLE is not set
+        # and at least one binding profile is loaded. Stopped in stop().
+        self._binding_watcher: Any = None
+        self._binding_watcher_conn: sqlite3.Connection | None = None
+        self._binding_watcher_memory_conn: sqlite3.Connection | None = None
+
     # ------------------------------------------------------------------
     # Public properties (set after start())
     # ------------------------------------------------------------------
@@ -710,6 +731,15 @@ class T2Daemon:
             _log.warning("retention_sweep_startup_failed", error=str(exc))
         self._retention_task = asyncio.create_task(self._retention_loop())
 
+        # nexus-9eiw (RDR-111 §Phase 2 Step 6): start the binding watcher
+        # unless NX_COCKPIT_BINDINGS_DISABLE is truthy. The watcher polls
+        # the events table and fires loaded profiles with action_idempotency
+        # dedup (nexus-8wvs) on the memory.db connection it owns.
+        if _cockpit_bindings_disabled():
+            _log.info("binding_watcher_skipped_disable_env")
+        else:
+            self._start_binding_watcher(memory_db_path, tuples_db_path)
+
         _log.info(
             "t2_daemon_started",
             uds_path=str(self._uds_path),
@@ -732,6 +762,27 @@ class T2Daemon:
             except (asyncio.CancelledError, Exception):
                 pass
             self._retention_task = None
+
+        # nexus-9eiw: signal the binding watcher to exit and close its
+        # SQLite connections. Bounded by the watcher's own stop_timeout.
+        if self._binding_watcher is not None:
+            try:
+                await self._binding_watcher.stop()
+            except Exception as exc:  # pragma: no cover — defensive
+                _log.warning("binding_watcher_stop_failed", error=str(exc))
+            self._binding_watcher = None
+        if self._binding_watcher_conn is not None:
+            try:
+                self._binding_watcher_conn.close()
+            except sqlite3.Error:
+                pass
+            self._binding_watcher_conn = None
+        if self._binding_watcher_memory_conn is not None:
+            try:
+                self._binding_watcher_memory_conn.close()
+            except sqlite3.Error:
+                pass
+            self._binding_watcher_memory_conn = None
 
         for srv in (self._uds_server, self._tcp_server):
             if srv is not None:
@@ -1124,6 +1175,88 @@ class T2Daemon:
         )
 
     # ------------------------------------------------------------------
+    # Binding watcher (nexus-9eiw, RDR-111 §Phase 2 Step 6)
+    # ------------------------------------------------------------------
+
+    def _start_binding_watcher(
+        self, memory_db_path: Path, tuples_db_path: Path
+    ) -> None:
+        """Construct and start the cockpit binding watcher.
+
+        Loads profiles from the default profiles directory and opens
+        dedicated SQLite connections to both ``tuples.db`` (for the
+        events poll) and ``memory.db`` (for the ``action_idempotency``
+        dedup gate). When no profiles are loaded the watcher is not
+        constructed — the loop would have nothing to do.
+        """
+        from nexus.cockpit.bindings import (  # noqa: PLC0415
+            BindingContext,
+            _BindingWatcher,
+            default_profiles_dir,
+            load_profiles_dir,
+        )
+
+        profiles_dir = default_profiles_dir()
+        if not profiles_dir.is_dir():
+            _log.info(
+                "binding_watcher_no_profiles_dir",
+                path=str(profiles_dir),
+            )
+            return
+        try:
+            profiles = load_profiles_dir(profiles_dir)
+        except Exception as exc:  # pragma: no cover — defensive
+            _log.warning(
+                "binding_watcher_profile_load_failed",
+                path=str(profiles_dir),
+                error=str(exc),
+            )
+            return
+        if not profiles:
+            _log.info("binding_watcher_no_profiles")
+            return
+
+        # Dedicated connections so the watcher can run on the event loop
+        # thread without contending with the daemon's writer.
+        tuples_conn = sqlite3.connect(
+            str(tuples_db_path), check_same_thread=False
+        )
+        tuples_conn.row_factory = sqlite3.Row
+        memory_conn = sqlite3.connect(
+            str(memory_db_path), check_same_thread=False
+        )
+        memory_conn.row_factory = sqlite3.Row
+
+        # Wire the tuplespace index + registry from the running service
+        # so python actions can write derived tuples via the same backend.
+        if self._tuplespace_service is not None:
+            index = getattr(self._tuplespace_service, "_index", None)
+            registry = getattr(self._tuplespace_service, "_registry", None)
+        else:
+            index = None
+            registry = None
+
+        context = BindingContext(
+            conn=tuples_conn,
+            index=index,
+            registry=registry,
+            memory_conn=memory_conn,
+        )
+        watcher = _BindingWatcher(
+            conn=tuples_conn,
+            profiles=profiles,
+            context=context,
+        )
+        self._binding_watcher = watcher
+        self._binding_watcher_conn = tuples_conn
+        self._binding_watcher_memory_conn = memory_conn
+        watcher.start()
+        _log.info(
+            "binding_watcher_scheduled",
+            profile_count=len(profiles),
+        )
+
+    # ------------------------------------------------------------------
     # Retention sweeper (nexus-kk9h, RDR-111)
     # ------------------------------------------------------------------
 
@@ -1138,20 +1271,44 @@ class T2Daemon:
         with no matching SQLite row) are bounded by total write volume
         and are tolerated until a follow-up wires a Chroma client into
         the daemon constructor.
+
+        Also sweeps expired ``action_idempotency`` rows from
+        ``memory.db`` (nexus-8wvs). Both sweeps are best-effort — a
+        failure on either side logs and continues.
         """
         if self._tuples_db_path is None:
             return 0
-        import sqlite3 as _sqlite3
-        from nexus.tuplespace.store import prune_expired_tuples
+        from nexus.db.migrations import sweep_action_idempotency  # noqa: PLC0415
+        from nexus.tuplespace.store import prune_expired_tuples  # noqa: PLC0415
 
-        # Short-lived connection so we don't contend with the daemon's
+        # Short-lived connections so we don't contend with the daemon's
         # main writer for long (WAL allows concurrent readers; the DELETE
         # acquires the writer lock briefly).
-        conn = _sqlite3.connect(str(self._tuples_db_path))
+        conn = sqlite3.connect(str(self._tuples_db_path))
         try:
-            return prune_expired_tuples(conn)
+            deleted = prune_expired_tuples(conn)
         finally:
             conn.close()
+
+        memory_db_path = self._config_dir / "memory.db"
+        if memory_db_path.exists():
+            mem_conn = sqlite3.connect(str(memory_db_path))
+            try:
+                idem_deleted = sweep_action_idempotency(mem_conn)
+                if idem_deleted:
+                    _log.info(
+                        "action_idempotency_sweep",
+                        deleted=idem_deleted,
+                    )
+            except sqlite3.Error as exc:
+                _log.warning(
+                    "action_idempotency_sweep_failed",
+                    error=str(exc),
+                )
+            finally:
+                mem_conn.close()
+
+        return deleted
 
     async def _retention_loop(self) -> None:
         """Recurring 6-hour retention sweep. Cancelled on daemon stop."""
