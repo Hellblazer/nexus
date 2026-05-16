@@ -540,6 +540,27 @@ class _TuplespaceProxy:
     def subspace_stats(self, *, subspace: str) -> dict[str, Any]:
         return self._call("subspace_stats", {"subspace": subspace})
 
+    def list_active_claims(
+        self, *, now: float | None = None
+    ) -> list[dict[str, Any]]:
+        """RDR-112 cockpit-boundary RPC (nexus-x65c).
+
+        Returns active-claim rows shaped as
+        ``{"subspace": str, "tuple_id": str, "claim_id": str,
+        "claimant": str, "ttl_remaining_seconds": float | None}``.
+        """
+        return self._call("list_active_claims", {"now": now})
+
+    def recent_events(self, *, limit: int = 25) -> list[dict[str, Any]]:
+        """RDR-112 cockpit-boundary RPC (nexus-x65c).
+
+        Returns events-table rows shaped as
+        ``{"cursor": int, "subspace": str, "op": str, "tuple_id": str,
+        "ts": float, "payload_summary": str | None,
+        "category": str | None}``.
+        """
+        return self._call("recent_events", {"limit": int(limit)})
+
 
 # ---------------------------------------------------------------------------
 # T2Client

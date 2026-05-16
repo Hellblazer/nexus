@@ -18,11 +18,16 @@ Daemon-mode awareness
 ---------------------
 
 When ``NX_STORAGE_MODE=daemon`` is set, the tuplespace daemon owns
-``tuples.db``. Phase 3 panels read directly from that SQLite file in
-read-only WAL mode, which is safe (the daemon never holds an exclusive
-write lock for long). A full daemon-RPC path (``T2Client.cockpit.*``)
-is a follow-up; for v1 we accept the direct-read approach and document
-the deferral in the PR body.
+``tuples.db`` as the single writer (RDR-112 §9). Panels then route
+through the daemon's ``tuplespace.list_active_claims`` and
+``tuplespace.recent_events`` RPCs instead of opening a second SQLite
+handle on the same file (nexus-x65c). Failure modes (no discovery
+file, dead PID, RPC error) surface loud rather than silently falling
+back to a direct-read; the boundary is the contract.
+
+The ``active-bindings`` panel reads binding-profile YAML, not
+SQLite, so it is unaffected by the boundary and continues to read
+profiles from disk directly.
 """
 
 from __future__ import annotations
@@ -186,20 +191,73 @@ def _render_one(panel: str, *, limit: int) -> RenderedPanel:
     raise click.UsageError(f"unknown panel: {panel}")
 
 
-def _render_active_claims() -> RenderedPanel:
-    from nexus.cockpit.panels.active_claims import fetch_active_claims
+def _is_daemon_mode() -> bool:
+    """Return True if ``NX_STORAGE_MODE=daemon`` is set."""
+    return os.environ.get("NX_STORAGE_MODE", "").strip().lower() == "daemon"
 
-    db_path = _cockpit_tuples_db()
-    if not db_path.exists():
+
+def _open_daemon_client() -> "T2Client":  # noqa: F821 — forward ref
+    """Construct a T2Client from the daemon discovery file.
+
+    Fails loud (`click.ClickException`) under daemon mode with no
+    silent fallback to direct-read — the RDR-112 §9 boundary forbids
+    a second SQLite writer.
+    """
+    from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415
+    from nexus.daemon.t2_client import T2Client  # noqa: PLC0415
+
+    info = find_t2_daemon()
+    if info is None:
         raise click.ClickException(
-            f"tuples.db not found at {db_path}; nothing to render."
+            "NX_STORAGE_MODE=daemon is set but no T2 daemon discovery "
+            "file was found. Start the daemon "
+            "(`nx daemon t2 start --foreground` or install autostart) "
+            "or unset NX_STORAGE_MODE."
         )
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
-        result = fetch_active_claims(conn=conn)
-    finally:
-        conn.close()
+    uds = info.get("uds_path") or ""
+    uds_path = Path(uds) if uds else None
+    if uds_path is not None and uds_path.exists():
+        return T2Client(uds_path=uds_path)
+    return T2Client(tcp_addr=(info["tcp_host"], info["tcp_port"]))
+
+
+def _render_active_claims() -> RenderedPanel:
+    from nexus.cockpit.panels.active_claims import (
+        ActiveClaimsResult,
+        ClaimRow,
+        fetch_active_claims,
+    )
+
+    if _is_daemon_mode():
+        client = _open_daemon_client()
+        try:
+            rows_data = client.tuplespace.list_active_claims()
+        finally:
+            client.close()
+        result = ActiveClaimsResult(
+            rows=[
+                ClaimRow(
+                    subspace=r["subspace"],
+                    tuple_id=r["tuple_id"],
+                    claim_id=r.get("claim_id") or "",
+                    claimant=r.get("claimant") or "",
+                    ttl_remaining_seconds=r.get("ttl_remaining_seconds"),
+                )
+                for r in rows_data
+            ]
+        )
+    else:
+        db_path = _cockpit_tuples_db()
+        if not db_path.exists():
+            raise click.ClickException(
+                f"tuples.db not found at {db_path}; nothing to render."
+            )
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            result = fetch_active_claims(conn=conn)
+        finally:
+            conn.close()
 
     if not result.rows:
         return RenderedPanel(title="Active Claims", lines=[])
@@ -221,19 +279,44 @@ def _render_active_claims() -> RenderedPanel:
 
 
 def _render_recent_events(*, limit: int) -> RenderedPanel:
-    from nexus.cockpit.panels.recent_events import fetch_recent_events
+    from nexus.cockpit.panels.recent_events import (
+        EventRow,
+        RecentEventsResult,
+        fetch_recent_events,
+    )
 
-    db_path = _cockpit_tuples_db()
-    if not db_path.exists():
-        raise click.ClickException(
-            f"tuples.db not found at {db_path}; nothing to render."
+    if _is_daemon_mode():
+        client = _open_daemon_client()
+        try:
+            rows_data = client.tuplespace.recent_events(limit=limit)
+        finally:
+            client.close()
+        result = RecentEventsResult(
+            rows=[
+                EventRow(
+                    cursor=int(r["cursor"]),
+                    subspace=r["subspace"],
+                    op=r["op"],
+                    tuple_id=r["tuple_id"],
+                    ts=float(r["ts"]),
+                    payload_summary=r.get("payload_summary"),
+                    category=r.get("category"),
+                )
+                for r in rows_data
+            ]
         )
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
-        result = fetch_recent_events(conn=conn, limit=limit)
-    finally:
-        conn.close()
+    else:
+        db_path = _cockpit_tuples_db()
+        if not db_path.exists():
+            raise click.ClickException(
+                f"tuples.db not found at {db_path}; nothing to render."
+            )
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            result = fetch_recent_events(conn=conn, limit=limit)
+        finally:
+            conn.close()
 
     if not result.rows:
         return RenderedPanel(title="Recent Events", lines=[])

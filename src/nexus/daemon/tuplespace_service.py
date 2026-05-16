@@ -217,6 +217,88 @@ class TuplespaceService:
             return ts_api.subspace_stats(conn=self._conn, subspace=subspace)
 
     # ------------------------------------------------------------------
+    # Read-only RPCs for cockpit panels (RDR-112 boundary; nexus-x65c)
+    # ------------------------------------------------------------------
+
+    def list_active_claims(
+        self, *, now: Optional[float] = None
+    ) -> list[dict[str, Any]]:
+        """Return active claims as a list of dicts (JSON-friendly).
+
+        Mirrors ``nexus.cockpit.panels.active_claims.fetch_active_claims``
+        so cockpit panels under ``NX_STORAGE_MODE=daemon`` can avoid
+        opening a second SQLite handle on ``tuples.db``. The daemon is
+        the single writer (RDR-112 §9); read RPCs must originate from
+        this process to preserve the boundary.
+        """
+        import time as _time
+
+        ts = _time.time() if now is None else float(now)
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT subspace, id AS tuple_id, claim_id, claimant, "
+                "claim_expires_at "
+                "FROM tuples "
+                "WHERE claim_state = 'claimed' "
+                "  AND consumed_at IS NULL "
+                "  AND (claim_expires_at IS NULL OR claim_expires_at > ?) "
+                "ORDER BY subspace, claim_expires_at",
+                (ts,),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            expires = r.get("claim_expires_at")
+            out.append(
+                {
+                    "subspace": r["subspace"],
+                    "tuple_id": r["tuple_id"],
+                    "claim_id": r.get("claim_id") or "",
+                    "claimant": r.get("claimant") or "",
+                    "ttl_remaining_seconds": (
+                        None
+                        if expires is None
+                        else max(0.0, float(expires) - ts)
+                    ),
+                }
+            )
+        return out
+
+    def recent_events(self, *, limit: int = 25) -> list[dict[str, Any]]:
+        """Return the newest ``limit`` rows from the events table.
+
+        Mirrors ``nexus.cockpit.panels.recent_events.fetch_recent_events``
+        so cockpit panels under daemon mode read through the daemon
+        instead of opening ``tuples.db`` directly (RDR-112 boundary).
+        """
+        n = int(limit)
+        if n <= 0:
+            return []
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT rowid, subspace, op, tuple_id, payload_summary, "
+                "category, ts "
+                "FROM events "
+                "ORDER BY rowid DESC LIMIT ?",
+                (n,),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "cursor": int(r["rowid"]),
+                    "subspace": r["subspace"],
+                    "op": r["op"],
+                    "tuple_id": r["tuple_id"],
+                    "ts": float(r["ts"]),
+                    "payload_summary": r.get("payload_summary"),
+                    "category": r.get("category"),
+                }
+            )
+        return out
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
@@ -256,6 +338,8 @@ def register_tuplespace_rpcs(
         "tuplespace.list_subspaces": service.list_subspaces,
         "tuplespace.subspace_schema": service.subspace_schema,
         "tuplespace.subspace_stats": service.subspace_stats,
+        "tuplespace.list_active_claims": service.list_active_claims,
+        "tuplespace.recent_events": service.recent_events,
     }
     for op, fn in handlers.items():
         rpc_table[op] = fn
@@ -274,4 +358,6 @@ TUPLESPACE_RPC_OPS: tuple[str, ...] = (
     "list_subspaces",
     "subspace_schema",
     "subspace_stats",
+    "list_active_claims",
+    "recent_events",
 )
