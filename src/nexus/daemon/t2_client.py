@@ -61,9 +61,11 @@ from __future__ import annotations
 import builtins
 import contextlib
 import inspect
+import random
 import socket
 import struct
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -148,6 +150,28 @@ class RpcTimeoutError(Exception):
     """
 
 
+class EventStreamUnavailable(Exception):
+    """Raised by ``T2Client.event_stream`` when the reconnect budget is exhausted.
+
+    RDR-114 Step 1 (nexus-wfko): the reconnect wrapper retries close-side
+    failures (``RpcTimeoutError``, ``ConnectionRefusedError``,
+    ``ConnectionResetError``, ``ConnectionError`` / ``OSError``) with
+    capped exponential backoff + jitter. After ``max_reconnect_attempts``
+    consecutive failures the wrapper gives up and raises this typed
+    exception. The ``last_cursor`` attribute carries the last-yielded
+    event cursor so a supervising loop can decide whether to escalate,
+    re-discover, or exit.
+
+    Like ``RpcTimeoutError``, this is **deliberately not** an
+    ``OSError`` subclass so caller ``except OSError`` blocks do not
+    silently swallow exhaustion.
+    """
+
+    def __init__(self, message: str, *, last_cursor: int) -> None:
+        super().__init__(message)
+        self.last_cursor = last_cursor
+
+
 # ---------------------------------------------------------------------------
 # Wire helpers (synchronous socket I/O)
 # ---------------------------------------------------------------------------
@@ -175,6 +199,22 @@ def _sock_read_frame(sock: socket.socket) -> dict[str, Any]:
     # +1 for trailing \n
     data = _recvexactly(sock, length + 1)
     return t2_json_loads(data[:-1])
+
+
+def _jittered_backoff_seconds(*, attempt: int, initial: float, cap: float) -> float:
+    """Return the next reconnect backoff in seconds.
+
+    Capped exponential (``initial * 2**attempt``, clipped to ``cap``) with
+    ±25 % uniform jitter on top. RDR-114 §Decision Rationale calibrated
+    the defaults so 10 attempts × max 8 s ≈ a 30 s budget that comfortably
+    covers a systemd ``RestartSec=5s`` crash-restart cycle and matches
+    launchd ``ThrottleInterval=10s``.
+
+    Module-level so the jitter spread test (RDR §Test Plan) can seed
+    ``random`` directly and assert reproducible behaviour.
+    """
+    base = min(initial * (2 ** attempt), cap)
+    return base * random.uniform(0.75, 1.25)
 
 
 def _recvexactly(sock: socket.socket, n: int) -> bytes:
@@ -872,20 +912,30 @@ class T2Client:
         subspace_prefix: str,
         since_cursor: int = 0,
         where: dict[str, Any] | None = None,
+        *,
+        reconnect: bool = True,
+        max_reconnect_attempts: int = 10,
+        initial_backoff_seconds: float = 0.25,
+        max_backoff_seconds: float = 8.0,
     ) -> Iterator[dict[str, Any]]:
-        """Yield event dicts from the daemon's EventStream until the connection closes.
+        """Yield event dicts from the daemon's EventStream, reconnecting across daemon restarts.
 
-        Opens a **dedicated** socket connection (not from the pool) that is
-        held for the generator's lifetime.  The connection is closed when the
-        generator is exhausted or when the caller calls ``close()`` / uses
-        ``break`` inside a ``for`` loop.
+        RDR-114 Step 1 (nexus-wfko): the wrapper records the last-yielded
+        event cursor and retries close-side failures (``RpcTimeoutError`` from
+        a hung daemon; ``ConnectionRefusedError`` / ``ConnectionResetError`` /
+        ``ConnectionError`` / ``OSError`` from a gone or restarting daemon)
+        with capped exponential backoff + ±25 % uniform jitter. After
+        ``max_reconnect_attempts`` consecutive failures, raises
+        :class:`EventStreamUnavailable` with the last-seen cursor.
 
-        Protocol:
-          1. Connect + hello/hello_ack handshake.
-          2. Send ``{"op": "event_stream.subscribe", "args": {...}}``.
-          3. Read the ``{"subscribed": True, "cursor": <N>}`` ack.
-          4. Yield each ``{"event": {...}}`` frame's inner event dict.
-          5. Stop on connection close, error frame, or generator close.
+        **Delivery is at-least-once.** The server advances its emit cursor
+        when writing each frame; the client cursor is only persisted after
+        the caller processes the event (i.e., after this generator yields).
+        A caller that processes an event and then crashes before persisting
+        the cursor will see the event re-delivered on reconnect. Callers
+        requiring exactly-once must dedup via the ``action_idempotency``
+        table (RDR-111 / nexus-8wvs, see ``nexus.db.migrations``) keyed on
+        ``tuple_id``.
 
         Args:
             subspace_prefix: Subspace glob prefix, e.g. ``"tuples/myspace"``.
@@ -893,24 +943,103 @@ class T2Client:
             since_cursor: Resume cursor (rowid).  0 requests full backfill.
             where: Optional filter dict.  Currently supports
                 ``{"category": "<str>"}`` for failure-category demux.
+            reconnect: If True (default), retry close-side failures with
+                jittered backoff. If False, legacy single-subscribe
+                semantics: the generator exits cleanly on close (no
+                retry, no raise) so existing callers can opt out.
+            max_reconnect_attempts: Maximum consecutive reconnect attempts
+                before raising ``EventStreamUnavailable``. Default 10.
+                A successful event yield resets the attempt counter to 0.
+            initial_backoff_seconds: Backoff for the first reconnect
+                attempt (before jitter). Default 0.25.
+            max_backoff_seconds: Cap on the per-attempt backoff (before
+                jitter). Default 8.0. Total budget for 10 attempts at
+                these defaults is roughly 30 s.
 
         Yields:
             Event dicts with keys: ``cursor``, ``subspace``, ``op``,
             ``tuple_id``, ``payload_summary``, ``category``, ``ts``.
 
         Raises:
-            T2DaemonError: if the daemon returns an error on the subscribe op.
-            ConnectionError: if the socket closes unexpectedly mid-stream.
+            EventStreamUnavailable: when the reconnect budget is exhausted.
+            T2DaemonError: if the daemon returns a non-recoverable error
+                on the subscribe op.
 
         Example::
 
             for event in client.event_stream("tuples/myspace", since_cursor=42):
-                print(event["op"], event["tuple_id"])
+                process(event["tuple_id"])
+        """
+        if not reconnect:
+            # Legacy single-subscribe semantics: socket-close exits the
+            # generator cleanly (no retry, no raise).
+            try:
+                yield from self._event_stream_once(subspace_prefix, since_cursor, where)
+            except (ConnectionError, OSError, RpcTimeoutError):
+                return
+            return
+
+        last_cursor = since_cursor
+        attempt = 0
+        while True:
+            try:
+                for event in self._event_stream_once(subspace_prefix, last_cursor, where):
+                    # Successful event delivery: advance the cursor and
+                    # reset the retry counter so subsequent outages get a
+                    # fresh budget.
+                    cursor_val = event.get("cursor")
+                    if isinstance(cursor_val, int) and cursor_val > last_cursor:
+                        last_cursor = cursor_val
+                    attempt = 0
+                    yield event
+                # The generator returned cleanly. The daemon either closed
+                # gracefully (SIGTERM drain) or the server-side handler
+                # exited. Either way the wrapper treats it as reconnectable.
+                _log.debug(
+                    "event_stream_clean_close_reconnect",
+                    last_cursor=last_cursor,
+                    attempt=attempt,
+                )
+            except (RpcTimeoutError, ConnectionError, OSError) as exc:
+                # Close-side failure. Sleep + retry below.
+                _log.debug(
+                    "event_stream_close_side_reconnect",
+                    error_type=type(exc).__name__,
+                    last_cursor=last_cursor,
+                    attempt=attempt,
+                )
+
+            if attempt >= max_reconnect_attempts:
+                raise EventStreamUnavailable(
+                    f"event_stream gave up after {attempt} reconnect attempts; "
+                    f"last seen cursor: {last_cursor}",
+                    last_cursor=last_cursor,
+                )
+
+            backoff = _jittered_backoff_seconds(
+                attempt=attempt,
+                initial=initial_backoff_seconds,
+                cap=max_backoff_seconds,
+            )
+            time.sleep(backoff)
+            attempt += 1
+
+    def _event_stream_once(
+        self,
+        subspace_prefix: str,
+        since_cursor: int,
+        where: dict[str, Any] | None,
+    ) -> Iterator[dict[str, Any]]:
+        """Single-subscribe inner generator. Raises on close so the wrapper
+        can reconnect; ``event_stream`` swallows the close when
+        ``reconnect=False`` is passed.
+
+        Opens a dedicated socket (not pooled) so the long-lived stream does
+        not contend with short-lived RPC traffic for pool slots.
         """
         conn = self._connect_once()
         sock = conn._sock  # dedicated socket; not returned to pool
         try:
-            # Send subscribe request
             _sock_write_frame(
                 sock,
                 {
@@ -922,7 +1051,6 @@ class T2Client:
                     },
                 },
             )
-            # Read ack
             ack = _sock_read_frame(sock)
             if "error" in ack:
                 _reraise_remote_error(ack["error"])
@@ -930,18 +1058,14 @@ class T2Client:
                 raise T2DaemonError(
                     f"expected subscribed ack, got: {ack!r}"
                 )
-            # Stream events
             while True:
                 frame = _sock_read_frame(sock)
                 if "error" in frame:
-                    # Daemon shutting down or protocol error — stop cleanly
                     _log.debug("event_stream_server_error", error=frame["error"])
                     return
                 event = frame.get("event")
                 if event is not None:
                     yield event
-        except (ConnectionError, OSError):
-            return  # connection closed
         finally:
             try:
                 sock.close()
