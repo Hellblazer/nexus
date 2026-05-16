@@ -35,13 +35,18 @@ RPC. When the daemon restarts, the server-side asyncio handler is
 torn down and the client's stream closes. The client library has no
 specified retry policy: callers see an arbitrary `IncompleteReadError`
 or `ConnectionResetError` and are left to roll their own reconnect.
-The cursor mechanism (`since_cursor`) is already round-trippable, so
-exactly-once-or-more delivery semantics are achievable; what is
-missing is a written contract for *who* retries, *with what backoff*,
-*how many times*, and *what happens after exhaustion*. Cockpit-side
-binding watchers, the planned auditor agent, and any third-party
-subscriber would otherwise each re-derive a slightly different
-policy, with cross-implementation drift.
+The cursor mechanism (`since_cursor`) is round-trippable, so
+**at-least-once** delivery is achievable on resumption (the server
+sends each event with its cursor; a caller that records the last-
+seen cursor and reconnects with `since_cursor=last` replays gap-
+period events). Exactly-once requires caller-side dedup via the
+`action_idempotency` table (RDR-111 / nexus-8wvs) or an equivalent
+idempotency key keyed on `tuple_id`. What is missing today is a
+written contract for *who* retries, *with what backoff*, *how many
+times*, and *what happens after exhaustion*. Cockpit-side binding
+watchers, the planned auditor agent, and any third-party subscriber
+would otherwise each re-derive a slightly different policy, with
+cross-implementation drift.
 
 #### Gap 2: Bridge silently falls back to direct sqlite3 open when daemon RPC fails
 
@@ -145,9 +150,15 @@ Beads that pre-shipped supporting substrate:
   always written into the wire frame on the server side
   (`{op: "out", cursor: N}`), and the client's generator yields
   events with their cursor. Resumption from `since_cursor=N`
-  delivers strictly events with `rowid > N`. So a client that
-  records the last-seen cursor and reconnects with `since_cursor=last`
-  has effectively exactly-once delivery semantics across reconnects.
+  delivers strictly events with `rowid > N`. **Delivery is at-least-
+  once**, not exactly-once: the server advances `last_emitted` as it
+  writes each frame (`event_stream.py:271..273, 304..305`), but the
+  client cursor is updated only when the caller persists it after
+  processing. A caller that processes an event and then crashes
+  before flushing the cursor will see that event re-delivered on
+  reconnect. Callers requiring exactly-once must guard via the
+  `action_idempotency` table (nexus-8wvs) keyed on `tuple_id`, or an
+  equivalent external dedup surface.
 - **Documented**: `find_t2_daemon` with the PID probe distinguishes
   "daemon truly running" from "stale discovery file" in O(microseconds).
   Reconnect attempts that bypass discovery (e.g., reusing a known
@@ -231,6 +242,14 @@ Beads that pre-shipped supporting substrate:
      daemon RPC (`introspection.peek` over `events`), not via
      `event_stream.subscribe`. Same conclusion as above.
 
+  *Re-verification gate at migration*: when `_BindingWatcher`
+  migrates from SQL polling to `event_stream.subscribe`, A2 must
+  be re-verified against the watcher's then-current reactive
+  latency contract before the migration merges. The migration
+  bead must reference this RDR and re-evaluate the gap tolerance
+  in the context of any binding actions whose downstream
+  deadlines have changed since this RDR was drafted.
+
 - [x] No production reader currently depends on the silent direct-
   mode fallback to mask daemon outages, **Status**: Verified via
   Source Search.
@@ -294,17 +313,30 @@ The contract is **explicitly documented in the client-library
 docstring + the daemon CLI reference** so all subscribers, current
 and future, share one policy.
 
-**Gap 2 (bridge fail-closed):** Under `NX_STORAGE_MODE=daemon`, the
+**Gap 2 (bridge fail-closed):** When the bridge's routing
+discriminant `_ROUTING_TBA` is `"daemon"` (the shipped default), the
 bridge's direct-mode fallback is **off by default**. Daemon-RPC
-failure logs a typed event (`hook_bridge_emit_drop_daemon_unavailable`,
-with the hook type, subspace, and exception class) and returns
-without writing anywhere. The hook script still produces correct
-stdout (RF-2 transparent allow) so user-facing tools never see the
-drop. An opt-in env `NX_BRIDGE_ALLOW_DIRECT_FALLBACK=1` re-enables
-the legacy fail-open path for operators who knowingly accept the
-WAL-contention risk during planned daemon downtime. In direct mode
-(`NX_STORAGE_MODE` unset or `direct`) the current behaviour is
-unchanged, direct emission is the supported path.
+failure logs a typed event (`hook_bridge_emit_drop_rpc_failed`, with
+the hook type, subspace, and exception class) and returns without
+writing anywhere. The hook script still produces correct stdout
+(RF-2 transparent allow) so user-facing tools never see the drop.
+An opt-in env `NX_BRIDGE_ALLOW_DIRECT_FALLBACK=1` re-enables the
+legacy fail-open path for operators who knowingly accept the
+WAL-contention risk during planned daemon downtime. In legacy
+direct routing (`_ROUTING_TBA = "direct"`, available via the
+constant; not the shipped default) the bridge writes directly and
+no fallback is in play.
+
+**Gate keys off the routing discriminant, not `NX_STORAGE_MODE`.**
+`_ROUTING_TBA` is the same constant the bridge already consults to
+decide whether to try the daemon path at all (`hook_bridge.py:128`,
+checked at `:334`). Keying the new fail-closed gate off the same
+constant guarantees the gate fires in exactly the cases where the
+daemon path is attempted, even if `NX_STORAGE_MODE` is unset (the
+common developer-machine workflow with a daemon running but no env
+exported). `NX_STORAGE_MODE` continues to gate `reject_under_daemon_mode`
+for direct-T2-open paths inside the wheel; the two envs are
+orthogonal.
 
 ### Technical Design
 
@@ -349,12 +381,23 @@ free by upgrading to the new client method.
 def _direct_fallback_allowed() -> bool:
     """True iff direct-mode fallback is permitted from this process.
 
-    Returns True when NX_STORAGE_MODE is not set or != "daemon"
-    (i.e., we're in direct mode and direct is the supported path).
-    Returns True when NX_BRIDGE_ALLOW_DIRECT_FALLBACK is explicitly
-    set to a truthy value (operator override during planned downtime).
-    Returns False otherwise, under daemon mode the bridge fails
-    closed on daemon-RPC failure.
+    The gate keys off _ROUTING_TBA (the routing discriminant the
+    bridge already consults at line 334), NOT NX_STORAGE_MODE:
+
+    - When _ROUTING_TBA != "daemon" (legacy direct routing, not the
+      shipped default): fallback irrelevant, direct is the supported
+      path. Return True.
+    - When _ROUTING_TBA == "daemon" AND NX_BRIDGE_ALLOW_DIRECT_FALLBACK
+      is truthy: operator opt-in to the legacy fail-open path
+      (planned daemon downtime, CI without a daemon, etc.).
+      Return True.
+    - When _ROUTING_TBA == "daemon" AND NX_BRIDGE_ALLOW_DIRECT_FALLBACK
+      is unset / falsy: fail-closed default. Return False.
+
+    Interaction with NX_BRIDGE_DISABLE: the privacy opt-out
+    (_bridge_disabled, hook_bridge.py:590..604) is checked earlier in
+    emit() and exits before _emit_routed runs. NX_BRIDGE_ALLOW_DIRECT_FALLBACK
+    has no effect when NX_BRIDGE_DISABLE is also set.
     """
 
 def _emit_routed(...) -> str:
@@ -362,11 +405,11 @@ def _emit_routed(...) -> str:
     if daemon_failed:
         if not _direct_fallback_allowed():
             _log.warning(
-                "hook_bridge_emit_drop_daemon_unavailable",
+                "hook_bridge_emit_drop_rpc_failed",
                 hook_type=hook_type, subspace=subspace,
                 error=str(daemon_exc),
             )
-            return "skipped-daemon-unavailable"
+            return "skipped-rpc-failed"
         # Else: existing direct fallback path.
 ```
 
@@ -403,7 +446,30 @@ escape hatch for planned downtime.
 **Bounded retry budget** (~30 s) because the daemon is intended to
 be HA-supervised (launchd / systemd KeepAlive + RestartSec). If the
 daemon is down for longer, that's an operator-attention event, not
-a thing the client should paper over.
+a thing the client should paper over. Supervisor-restart asymmetry
+note (Layer 3 gate finding):
+
+- **systemd**: `RestartSec=5s` + `SuccessExitStatus=143`. A clean
+  SIGTERM does not trigger restart; a crash respawns after 5 s.
+  10 reconnect attempts × max 8 s backoff comfortably covers a
+  crash-restart cycle.
+- **launchd**: `KeepAlive.Crashed: true` (NOT unconditional
+  KeepAlive). A clean SIGTERM is not supervised. A crash triggers
+  respawn but launchd's default `ThrottleInterval` is 10 s, so a
+  crash-restart cycle can be up to 10 s + daemon-init time. Under
+  the 30 s budget the client gets ~3 restart attempts before
+  exhaustion. Operators who restart the daemon via `nx daemon t2
+  stop && nx daemon t2 start` on macOS are responsible for
+  starting it back themselves; planned restarts are not auto-
+  supervised under launchd today.
+
+This calibration is sufficient for systemd-managed deployments and
+acceptable for the macOS interactive workflow. Tightening it would
+require either flipping the plist to unconditional `KeepAlive: true`
+(out of scope for RDR-114) or extending the retry budget. The
+30 s budget is the proposed default; callers needing different
+semantics can pass `max_reconnect_attempts` / `max_backoff_seconds`
+explicitly.
 
 ## Alternatives Considered
 
@@ -516,10 +582,19 @@ data demands it.
 
 ### Failure Modes
 
-- Daemon down + bridge in daemon mode: visible, one log line per
-  dropped emission, hook stdout still correct (transparent allow);
-  diagnosable via `nx doctor --check-bridge` which already counts
-  recent hook events.
+- Daemon down + bridge in daemon mode (UDS connect refused or
+  discovery file absent): visible, one `hook_bridge_emit_drop_rpc_failed`
+  log per dropped emission, hook stdout still correct (transparent
+  allow); diagnosable via `nx doctor --check-bridge` which already
+  counts recent hook events.
+- Partial daemon failure (UDS accepts, daemon process running,
+  internal RPC hangs or returns error, e.g. `tuples.db` locked
+  during a WAL checkpoint stall or migration runner): bridge sees
+  a typed RPC error or socket-level RPC-timeout (Step 4) and emits
+  the same `hook_bridge_emit_drop_rpc_failed` event with the
+  exception class in the payload. The log event is intentionally
+  named after the RPC outcome, not the daemon process state, so
+  partial-failure does not falsely report the daemon as "down."
 - Daemon flapping: bridge drops the tuples during each window,
   subscribers reconnect each cycle with jittered backoff. Both
   surfaces are visible via structlog.
@@ -528,7 +603,9 @@ data demands it.
   + decides (restart, escalate, exit).
 - Operator override: setting `NX_BRIDGE_ALLOW_DIRECT_FALLBACK=1` is
   reflected in `nx doctor --check-bridge` output as a one-line
-  warning so the override doesn't get forgotten.
+  warning so the override doesn't get forgotten. When combined
+  with `NX_BRIDGE_DISABLE=1`, doctor warns that the latter exits
+  first and the former has no effect.
 
 ## Implementation Plan
 
@@ -545,13 +622,23 @@ A two-phase integration test:
 1. Start a T2 daemon on a tmp config_dir. Open a `T2Client.event_stream`
    subscription. Insert 5 tuples. Send the daemon SIGTERM; the client's
    stream closes. Within the reconnect budget, restart the daemon
-   in-test and insert 5 more tuples. Assert the wrapper yields all
-   10 tuples in cursor-sorted order with no duplicates.
+   in-test, then *wait for daemon readiness* (discovery file present
+   AND PID probe passes) before inserting 5 more tuples. Assert the
+   wrapper yields all 10 tuples in cursor-sorted order with no
+   duplicates and no events lost.
 
-2. With the daemon stopped and `NX_STORAGE_MODE=daemon`, invoke a
-   bridge emit. Assert: zero rows written to either `tuples.db` or
-   the daemon's Chroma; one `hook_bridge_emit_drop_daemon_unavailable`
-   structlog event; hook stdout matches RF-2 expectations.
+   *Readiness wait*: avoids a flaky race where the wrapper's first
+   retry can fire before the new daemon has written its discovery
+   file. The retry would back off and the test would interpret the
+   delay as a wrapper bug. Standard pattern: poll the discovery
+   file with PID probe up to a short timeout (~2 s) before driving
+   the second insertion batch.
+
+2. With the daemon stopped and `_ROUTING_TBA == "daemon"` (shipped
+   default), invoke a bridge emit. Assert: zero rows written to
+   either `tuples.db` or the daemon's Chroma; one
+   `hook_bridge_emit_drop_rpc_failed` structlog event; hook stdout
+   matches RF-2 expectations.
 
 ### Phase 1: Code Implementation
 
@@ -579,6 +666,23 @@ Update `nx doctor --check-bridge` to:
   override visible).
 - Surface the last hook-bridge drop event from `~/.config/nexus/logs/`
   if any in the last 24h.
+- Warn when `NX_BRIDGE_ALLOW_DIRECT_FALLBACK` and `NX_BRIDGE_DISABLE`
+  are both set (latter exits first; former has no effect).
+
+#### Step 4: T2Client RPC timeout (closes A1 cloud-mode caveat)
+
+`T2Client._recvexactly` currently has no socket-level timeout
+(verified by Layer 3 critique). Wire an explicit RPC timeout (default
+5 s, override via `T2Client(rpc_timeout_seconds=...)`) on the call
+path. This is required for the bridge fail-closed default to be
+hot-path-safe under cloud-mode: without the timeout, a hung
+`tuplespace.out` would block the bridge subprocess past Claude
+Code's hook deadline. With it, the bridge waits up to 5 s, sees a
+typed timeout exception, then fails closed (or falls open under the
+opt-in env). Implementation note: must propagate as a typed
+exception class distinguishable from `ConnectionRefusedError` so
+the reconnect wrapper (Step 1) does not misclassify a hung daemon
+as "daemon gone."
 
 ### Phase 2: Operational Activation
 
@@ -595,9 +699,9 @@ hatch and the operator-visible drop event name.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| `NX_BRIDGE_ALLOW_DIRECT_FALLBACK` env opt-in | N/A, env var, no persistent resource | `nx doctor --check-bridge` reports current state | Unset env to revert | `nx doctor` surfaces override | N/A |
-| `EventStreamUnavailable` exception | N/A, exception class | Module docstring | N/A | Caller-side regression tests | N/A |
-| Hook drop log events | Already rotated via `daemon` mode log handler (nexus-uuuh) | `grep hook_bridge_emit_drop_daemon_unavailable ~/.config/nexus/logs/daemon.log` | Log rotation handles | `nx doctor --check-bridge` surfaces | RotatingFileHandler keeps 5 × 10MB |
+| `NX_BRIDGE_ALLOW_DIRECT_FALLBACK` env opt-in | N/A, env var, no persistent resource | `nx doctor --check-bridge` reports current state and warns when set together with `NX_BRIDGE_DISABLE` (combination is no-op because BRIDGE_DISABLE exits first) | Unset env to revert | `nx doctor` surfaces override | N/A |
+| `EventStreamUnavailable` exception | N/A, exception class | Module docstring documenting at-least-once delivery + caller-side dedup expectation | N/A | Caller-side regression tests | N/A |
+| Hook drop log events | Already rotated via `daemon` mode log handler (nexus-uuuh) | `grep hook_bridge_emit_drop_rpc_failed ~/.config/nexus/logs/daemon.log` | Log rotation handles | `nx doctor --check-bridge` surfaces | RotatingFileHandler keeps 5 × 10MB |
 
 ### New Dependencies
 
@@ -611,9 +715,10 @@ None. Both surfaces use existing modules.
   **Verify**: `EventStreamUnavailable` raised with last-seen cursor
   in message; no infinite retry loop.
 - **Scenario**: Reconnect jitter spread across N concurrent
-  subscribers, **Verify**: backoff windows do not collapse to a
-  thundering herd (statistical check across, say, 20 subscribers
-  driving the same daemon-restart event).
+  subscribers, **Verify**: no more than 2 of 20 subscribers reconnect
+  within the same 250 ms window as measured by reconnect timestamp
+  distribution (test uses a seeded RNG for determinism; passing
+  threshold matches the ±25 % jitter spec).
 - **Scenario**: Bridge fail-closed under daemon mode, **Verify**:
   zero rows in `tuples.db` and the daemon's Chroma collection; one
   structlog event per drop; hook stdout unchanged.
@@ -748,5 +853,69 @@ rationale.
 
 ## Revision History
 
-(Gate findings are appended here in dated subsections after each
-`/nx:rdr-gate` run.)
+### 2026-05-16, Gate round 1 (Layer 3 substantive critic): BLOCKED, fixed inline
+
+Verdict from `/nx:rdr-gate rdr-114`: BLOCKED with 2 critical and 3
+significant issues. All resolved inline:
+
+**Critical 1: Exactly-once delivery claim overstated.** The server
+advances `last_emitted` when writing each frame, but the client
+cursor is persisted by the caller after processing. A caller crash
+between yield and cursor-persist re-delivers the event. Fixed by
+relabelling delivery as "at-least-once" throughout the RDR and
+adding the `action_idempotency` pointer for callers requiring
+exactly-once. Affects Problem Statement (Gap 1) and Key Discoveries.
+
+**Critical 2: Fail-closed gate keyed off wrong discriminant.** The
+bridge's daemon-route decision uses `_ROUTING_TBA == "daemon"`
+(module constant, always `"daemon"` in shipped builds), but the
+proposed `_direct_fallback_allowed()` gated on `NX_STORAGE_MODE`.
+With `NX_STORAGE_MODE` unset (common dev-workflow scenario), the
+gate would not fire, leaving silent fallback in place. Fixed by
+keying the gate off `_ROUTING_TBA` directly, matching the routing
+decision. Also documented the orthogonal relationship with
+`NX_STORAGE_MODE` (which continues to gate `reject_under_daemon_mode`
+inside the wheel). Affects Proposed Solution Gap 2 + Technical
+Design pseudocode.
+
+**Significant 1: Supervisor restart asymmetry.** Added explicit
+note on launchd `KeepAlive.Crashed` (NOT unconditional) vs systemd
+`RestartSec=5s`. The 30 s reconnect budget covers 3 crash-restart
+cycles on macOS at default `ThrottleInterval=10s`; planned restarts
+on macOS are operator-driven. Affects Decision Rationale.
+
+**Significant 2: `NX_BRIDGE_DISABLE × NX_BRIDGE_ALLOW_DIRECT_FALLBACK`
+interaction.** Documented in the Technical Design docstring and in
+the Day 2 Operations table; `nx doctor --check-bridge` warns when
+both are set.
+
+**Significant 3: A2 has no migration trigger.** Added an explicit
+re-verification gate to A2 in Critical Assumptions: when
+`_BindingWatcher` migrates from SQL polling to
+`event_stream.subscribe`, A2 must be re-verified against the
+watcher's then-current reactive latency contract before merging.
+
+**Observation: partial daemon failure.** Renamed the structlog drop
+event from `hook_bridge_emit_drop_daemon_unavailable` to
+`hook_bridge_emit_drop_rpc_failed` to be accurate in the partial-
+failure case (daemon process running, RPC hangs / errors). Added
+the partial-failure scenario to Failure Modes.
+
+**Observation: T2Client has no RPC timeout.** Added Phase 1 Step 4
+to wire an explicit RPC timeout (default 5 s, override via
+`T2Client(rpc_timeout_seconds=...)`) propagated as a typed exception
+distinguishable from `ConnectionRefusedError` so the reconnect
+wrapper does not misclassify a hung daemon as "daemon gone."
+
+**Observation: thundering-herd test scenario.** Replaced the
+"statistical check" wording with a concrete pass criterion
+("no more than 2 of 20 subscribers reconnect within the same 250 ms
+window, with a seeded RNG").
+
+**Observation: MVV readiness sequencing.** Spelled out the post-
+restart daemon-readiness wait (discovery file + PID probe) before
+driving the second insertion batch, to avoid a flaky race.
+
+Layer 1 (structure) and Layer 2 (assumption audit) both PASS. Ready
+for gate round 2.
+
