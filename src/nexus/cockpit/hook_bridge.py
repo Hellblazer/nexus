@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -505,11 +506,46 @@ def _build_dimensions(hook_type: str, payload: dict[str, Any]) -> dict[str, Any]
     return dims
 
 
+# nexus-es13: ANSI CSI (Control Sequence Introducer) sequences and other
+# C0/C1 control chars must not survive into match_text. The bridge embeds
+# match_text via Voyage and surfaces it in cockpit panels; a malicious
+# tool_input carrying ANSI cursor moves or terminal-control escapes would
+# otherwise be displayed verbatim (log injection / panel scramble).
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _sanitize_match_text(s: str) -> str:
+    """Strip ANSI escape sequences and disallowed control chars from *s*.
+
+    Keeps printable text, ``\\t``, ``\\n``, ``\\r`` (which are legitimate
+    whitespace), and strips:
+      * ANSI CSI sequences (``ESC [ ... <letter>``) — cursor / colour moves.
+      * ANSI OSC sequences (``ESC ] ... BEL`` or ``ESC \\``) — window-title
+        manipulation and the like.
+      * C0 control bytes 0x00..0x08, 0x0b, 0x0c, 0x0e..0x1f, plus DEL (0x7f).
+        The kept whitespace bytes (TAB 0x09, LF 0x0a, CR 0x0d) are excluded
+        from the strip class so multi-line tool input survives intact.
+
+    Returned strings are safe to embed and to render in cockpit panels.
+    """
+    if not s:
+        return s
+    s = _ANSI_OSC_RE.sub("", s)
+    s = _ANSI_CSI_RE.sub("", s)
+    s = _CTRL_CHARS_RE.sub("", s)
+    return s
+
+
 def _build_match_text(hook_type: str, payload: dict[str, Any]) -> str:
     """Extract the semantic match text for a hook event tuple.
 
     The match text is what gets embedded for semantic search. Each hook
-    type uses the most semantically rich field available.
+    type uses the most semantically rich field available. nexus-es13:
+    control characters and ANSI escape sequences are stripped before
+    returning so a malicious or careless tool_input cannot pollute log
+    output or cockpit-panel rendering.
     """
     match hook_type:
         case "PreToolUse":
@@ -519,31 +555,33 @@ def _build_match_text(hook_type: str, payload: dict[str, Any]) -> str:
                 input_summary = " ".join(str(v) for v in tool_input.values())
             else:
                 input_summary = str(tool_input)
-            return f"{tool} {input_summary}".strip()
+            raw = f"{tool} {input_summary}".strip()
 
         case "PostToolUse":
             tool = payload.get("tool_name", "")
             response = payload.get("tool_response", "")
-            return f"{tool} {response}"[:512].strip()
+            raw = f"{tool} {response}"[:512].strip()
 
         case "SubagentStop":
-            return payload.get("last_assistant_message", "")
+            raw = payload.get("last_assistant_message", "")
 
         case "UserPromptSubmit":
-            return payload.get("prompt", "")
+            raw = payload.get("prompt", "")
 
         case "Notification":
-            return payload.get("message", "")
+            raw = payload.get("message", "")
 
         case "Stop" | "StopFailure":
-            return hook_type
+            raw = hook_type
 
         case "SessionStart" | "SessionEnd":
             cwd = payload.get("cwd", "")
-            return f"{hook_type} {cwd}".strip()
+            raw = f"{hook_type} {cwd}".strip()
 
         case _:
-            return ""
+            raw = ""
+
+    return _sanitize_match_text(raw)
 
 
 _CONTENT_BYTE_CAP = 12000

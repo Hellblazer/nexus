@@ -725,10 +725,17 @@ class T2Daemon:
         uds_sock = self._bind_uds()
         tcp_sock = self._bind_tcp()
 
-        # asyncio servers from pre-bound sockets
-        handler = self._make_handler()
-        self._uds_server = await asyncio.start_unix_server(handler, sock=uds_sock)
-        self._tcp_server = await asyncio.start_server(handler, sock=tcp_sock)
+        # asyncio servers from pre-bound sockets. nexus-y6fk: each transport
+        # gets its own handler closure that carries an explicit ``is_uds``
+        # tag, so the admin-RPC gate downstream does not depend on re-
+        # deriving the transport family from ``transport.get_extra_info``
+        # (which can return None for future ssl/proxy wrappers).
+        self._uds_server = await asyncio.start_unix_server(
+            self._make_handler(is_uds=True), sock=uds_sock
+        )
+        self._tcp_server = await asyncio.start_server(
+            self._make_handler(is_uds=False), sock=tcp_sock
+        )
 
         self._write_discovery()
         self._announce_stdout()
@@ -903,8 +910,18 @@ class T2Daemon:
     # Connection handler factory
     # ------------------------------------------------------------------
 
-    def _make_handler(self):
-        """Return the asyncio stream handler coroutine (closure over self)."""
+    def _make_handler(self, *, is_uds: bool):
+        """Return the asyncio stream handler coroutine for one transport.
+
+        nexus-y6fk: the ``is_uds`` tag is captured at handler-construction
+        time (one handler per transport) rather than derived from the
+        connection's ``transport.get_extra_info("socket")`` inside the
+        request loop. Re-derivation was structurally one line away from a
+        silent regression: a future asyncio backend that returned ``None``
+        from ``get_extra_info`` (or wrapped the UDS in a proxy stream
+        whose socket family was not ``AF_UNIX``) would have flipped
+        ``is_uds`` to ``False``, opening admin RPCs to TCP callers.
+        """
 
         async def _handler(
             reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -913,7 +930,7 @@ class T2Daemon:
             if task is not None:
                 self._active_handlers.add(task)
             try:
-                await self._handle_connection(reader, writer)
+                await self._handle_connection(reader, writer, is_uds=is_uds)
             finally:
                 if task is not None:
                     self._active_handlers.discard(task)
@@ -929,6 +946,8 @@ class T2Daemon:
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
+        *,
+        is_uds: bool,
     ) -> None:
         """Process a single client connection.
 
@@ -937,15 +956,34 @@ class T2Daemon:
           2. Read hello frame; validate protocol_version.
           3. Respond hello_ack.
           4. Serve RPCs until client closes or daemon is stopping.
+
+        Args:
+            is_uds: True if this connection arrived on the UDS server,
+                False for TCP. Threaded from ``_make_handler`` rather than
+                derived from the transport so the admin-RPC gate is
+                immune to future asyncio backend changes (nexus-y6fk).
         """
-        # --- Derive is_uds once (P1.6 nexus-pce1.1) ---
-        # is_uds is threaded into _dispatch to gate admin-only ops.
         transport = writer.transport
         raw_sock: socket.socket | None = transport.get_extra_info("socket")
-        is_uds: bool = raw_sock is not None and raw_sock.family == socket.AF_UNIX
 
         # --- Peer-cred check (UDS only) ---
         if is_uds:
+            # Defense-in-depth: the closure tagged this handler as UDS,
+            # so the underlying transport must be an AF_UNIX socket. If
+            # asyncio surprises us with a missing or non-UNIX socket we
+            # fail closed (no RPC dispatch) rather than fall through and
+            # open admin ops to an unauthenticated peer.
+            if raw_sock is None or raw_sock.family != socket.AF_UNIX:
+                _log.error(
+                    "uds_handler_transport_mismatch",
+                    raw_sock_family=(raw_sock.family if raw_sock is not None else None),
+                )
+                write_frame(
+                    writer,
+                    {"error": "internal: UDS handler received non-UDS transport"},
+                )
+                await writer.drain()
+                return
             try:
                 creds: PeerCredentials = peer.read_peer_credentials(raw_sock)
             except Exception as exc:
