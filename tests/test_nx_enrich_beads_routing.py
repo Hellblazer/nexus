@@ -62,7 +62,7 @@ async def test_qwen_agent_env_routes_to_qwen_agent(
     _, kwargs = fake_qwen.call_args
     assert kwargs.get("extensions") == ["nx"]
     assert kwargs.get("operator_name") == "nx_enrich_beads"
-    assert kwargs.get("max_tool_calls") == 50
+    assert kwargs.get("max_tool_calls") == 20
     # Prompt forwarded positionally; schema is the second positional arg.
     args, _ = fake_qwen.call_args
     assert "parsing widgets" in args[0]
