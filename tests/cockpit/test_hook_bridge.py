@@ -950,3 +950,80 @@ class TestScriptCorrectOutput:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# nexus-es13: match_text sanitization (control char and ANSI escape strip)
+# ---------------------------------------------------------------------------
+
+
+class TestMatchTextSanitization:
+    """``_build_match_text`` strips ANSI escape codes and control chars.
+
+    The match_text field is embedded into the tuplespace and rendered
+    inline in cockpit panels. A malicious or careless tool input
+    carrying ANSI cursor moves or terminal-control escapes would
+    otherwise pollute log output or scramble the panel display.
+    """
+
+    def test_strips_ansi_color_csi_from_pretooluse(self) -> None:
+        from nexus.cockpit.hook_bridge import route_payload
+
+        payload = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "\x1b[31mDANGER\x1b[0m"},
+            "session_id": "s",
+            "cwd": "/p",
+        }
+        result = route_payload("PreToolUse", payload)
+        assert result is not None
+        _, _, match_text = result
+        assert "\x1b" not in match_text
+        assert "[31m" not in match_text
+        assert "[0m" not in match_text
+        assert "DANGER" in match_text
+
+    def test_strips_ansi_osc_from_user_prompt(self) -> None:
+        from nexus.cockpit.hook_bridge import route_payload
+
+        payload = {
+            # OSC 0 ; <title> BEL — sets window title in many terminals.
+            "prompt": "Hello\x1b]0;malicious-title\x07world",
+            "session_id": "s",
+            "cwd": "/p",
+        }
+        result = route_payload("UserPromptSubmit", payload)
+        assert result is not None
+        _, _, match_text = result
+        assert "\x1b" not in match_text
+        assert "malicious-title" not in match_text
+        assert "Hello" in match_text
+        assert "world" in match_text
+
+    def test_strips_c0_control_chars_but_keeps_whitespace(self) -> None:
+        from nexus.cockpit.hook_bridge import _sanitize_match_text
+
+        raw = "before\x00mid\x07\x08end\tspace\nnewline\rcr\x7fdel"
+        sanitized = _sanitize_match_text(raw)
+        # The stripped chars must be gone.
+        for forbidden in ("\x00", "\x07", "\x08", "\x7f"):
+            assert forbidden not in sanitized
+        # Whitespace bytes that are not control noise are preserved.
+        assert "\t" in sanitized
+        assert "\n" in sanitized
+        assert "\r" in sanitized
+        # Text fragments survive.
+        assert "before" in sanitized
+        assert "mid" in sanitized
+        assert "end" in sanitized
+
+    def test_empty_input_returns_empty(self) -> None:
+        from nexus.cockpit.hook_bridge import _sanitize_match_text
+
+        assert _sanitize_match_text("") == ""
+
+    def test_clean_input_passes_through_unchanged(self) -> None:
+        from nexus.cockpit.hook_bridge import _sanitize_match_text
+
+        clean = "ls -la /tmp"
+        assert _sanitize_match_text(clean) == clean

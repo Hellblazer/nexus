@@ -393,3 +393,82 @@ async def test_spawn_lock_prevents_double_start(config_dir: Path) -> None:
             await d2.start()
     finally:
         await d1.stop()
+
+
+# ---------------------------------------------------------------------------
+# nexus-y6fk: is_uds tag is explicit, not derived from transport extra-info
+# ---------------------------------------------------------------------------
+
+
+def test_make_handler_threads_is_uds_tag(config_dir: Path) -> None:
+    """Each transport's handler closure captures an explicit ``is_uds`` tag.
+
+    Pre-fix, ``_handle_connection`` derived ``is_uds`` from
+    ``transport.get_extra_info("socket")`` at request time. A future
+    asyncio backend that wraps the UDS in a proxy stream (or returns
+    ``None`` from ``get_extra_info``) would have silently flipped
+    ``is_uds`` to ``False``, opening admin RPCs to TCP-shaped callers.
+
+    Post-fix, ``_make_handler(is_uds=True/False)`` is the only place the
+    tag is set; ``_handle_connection`` accepts it as a keyword arg and
+    asserts the underlying socket matches when ``is_uds`` is True.
+    """
+    import inspect
+
+    daemon = T2Daemon(config_dir=config_dir)
+    sig = inspect.signature(daemon._make_handler)
+    assert "is_uds" in sig.parameters, (
+        "_make_handler must accept is_uds as a parameter (nexus-y6fk)"
+    )
+    sig2 = inspect.signature(daemon._handle_connection)
+    assert "is_uds" in sig2.parameters, (
+        "_handle_connection must accept is_uds as a keyword arg (nexus-y6fk)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_uds_handler_rejects_non_uds_transport(config_dir: Path) -> None:
+    """Defense-in-depth: a UDS-tagged handler with a non-AF_UNIX socket fails closed.
+
+    Constructs a UDS handler closure (``is_uds=True``), then invokes
+    ``_handle_connection`` with a transport whose ``get_extra_info`` returns
+    a TCP socket. The handler must respond with an internal-error frame
+    and return without proceeding to the hello / dispatch phase.
+    """
+    daemon = T2Daemon(config_dir=config_dir)
+    # We never actually start the daemon — we drive _handle_connection
+    # directly with a fake reader/writer pair.
+
+    written: list[bytes] = []
+
+    class _FakeTransport:
+        def get_extra_info(self, name: str):
+            if name == "socket":
+                # Hand back a TCP socket (AF_INET) — wrong family for UDS.
+                return socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            return None
+
+    class _FakeWriter:
+        transport = _FakeTransport()
+
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:  # pragma: no cover — not exercised here
+            pass
+
+        async def wait_closed(self) -> None:  # pragma: no cover
+            pass
+
+    class _FakeReader:
+        async def readexactly(self, n: int):  # pragma: no cover - not exercised
+            raise asyncio.IncompleteReadError(b"", n)
+
+    await daemon._handle_connection(_FakeReader(), _FakeWriter(), is_uds=True)
+    assert written, "handler must write an internal-error frame for transport mismatch"
+    # Concatenate frame payloads and check for the mismatch sentinel.
+    blob = b"".join(written)
+    assert b"non-UDS" in blob or b"transport" in blob
