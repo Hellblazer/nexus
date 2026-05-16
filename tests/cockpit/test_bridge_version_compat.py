@@ -30,7 +30,7 @@ from nexus.cockpit import hook_bridge
 
 def test_bridge_api_version_exported_as_int() -> None:
     assert isinstance(hook_bridge.BRIDGE_API_VERSION, int)
-    assert hook_bridge.BRIDGE_API_VERSION >= 1
+    assert hook_bridge.BRIDGE_API_VERSION == 1
 
 
 def test_check_bridge_api_version_match_returns_true() -> None:
