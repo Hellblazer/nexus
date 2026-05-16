@@ -293,6 +293,7 @@ def emit(
         else:
             # Production routing: prefer daemon, fall back to direct, then skip.
             route = _emit_routed(
+                hook_type=hook_type,
                 subspace=subspace,
                 content=content,
                 dimensions=dimensions,
@@ -310,28 +311,35 @@ def emit(
 
 def _emit_routed(
     *,
+    hook_type: str = "",
     subspace: str,
     content: str,
     dimensions: dict[str, Any],
     match_text: str | None,
 ) -> str:
-    """Try daemon -> direct -> skip. Returns the chosen route as a string.
+    """Route the emission: daemon -> fail-closed (default) | direct (opt-in).
 
-    Daemon path (preferred): discover the running T2 daemon and call its
-    ``tuplespace.out`` RPC. If discovery fails or the RPC raises, fall
-    back to direct mode. If direct mode also fails (e.g. corrupt
-    ``tuples.db``, missing chroma dir) the exception propagates to
-    ``emit``'s outer try/except, which logs and swallows it so the hook
-    cannot crash user-facing tools.
+    Returns the chosen route as a string:
+      * ``"daemon"`` -- successful daemon RPC.
+      * ``"skipped-rpc-failed"`` -- daemon path failed and the
+        fail-closed gate refused fallback (RDR-114 Step 2, nexus-jokh).
+        One ``hook_bridge_emit_drop_rpc_failed`` structlog event is
+        emitted before returning. The hook's stdout (RF-2 transparent
+        allow) is unaffected, so user-facing tools never see the drop.
+      * ``"direct"`` -- direct-mode emission fired (either because
+        ``_ROUTING_TBA != "daemon"`` or because
+        ``NX_BRIDGE_ALLOW_DIRECT_FALLBACK=1`` opted into the legacy
+        fail-open path).
 
-    nexus-6s8v (RDR-112): with the daemon owning ``tuples.db``, direct
-    mode runs the risk of WAL conflicts. Direct-mode fallback is kept
-    as a defense-in-depth for environments without a daemon (e.g. early
-    test runs); the regression test for daemon-mode routing
-    (``tests/cockpit/test_hook_bridge_daemon_routing.py``) asserts that
-    when a daemon is reachable the daemon path is taken.
+    The event is intentionally named after the RPC outcome
+    (``_drop_rpc_failed``), not the daemon process state, so it stays
+    accurate under partial failure (UDS accepts but the RPC raises) as
+    well as full daemon-down scenarios.
     """
-    if _ROUTING_TBA == "daemon":
+    daemon_attempted = _ROUTING_TBA == "daemon"
+    daemon_exc: Exception | None = None
+
+    if daemon_attempted:
         try:
             from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415
             from nexus.daemon.t2_client import T2Client  # noqa: PLC0415
@@ -354,12 +362,38 @@ def _emit_routed(
                     return "daemon"
                 finally:
                     client.close()
+            else:
+                # Discovery returned None (no daemon, stale file removed).
+                # Treat as a soft daemon-not-found error so the gate path
+                # below has a meaningful exception to log.
+                daemon_exc = RuntimeError("daemon discovery returned None")
         except Exception as exc:
-            _log.warning(
-                "hook_bridge_daemon_route_failed_falling_back_to_direct",
-                error=str(exc),
-            )
-    # Fallback (or _ROUTING_TBA == "direct"): direct-mode auto path.
+            daemon_exc = exc
+
+    # nexus-jokh (RDR-114 Step 2): the daemon route did not succeed (or
+    # was not attempted because _ROUTING_TBA != "daemon"). Decide
+    # whether to fall through to direct or drop. The gate is keyed off
+    # _ROUTING_TBA, not NX_STORAGE_MODE (Gate Round 1 critical fix).
+    if daemon_attempted and not _direct_fallback_allowed():
+        _log.warning(
+            "hook_bridge_emit_drop_rpc_failed",
+            hook_type=hook_type,
+            subspace=subspace,
+            error=f"{type(daemon_exc).__name__}: {daemon_exc}" if daemon_exc else "no daemon",
+        )
+        return "skipped-rpc-failed"
+
+    if daemon_attempted and daemon_exc is not None:
+        # Operator has opted in to fail-open; surface the underlying
+        # failure once so the legacy fallback path is observable in logs
+        # before it fires.
+        _log.warning(
+            "hook_bridge_daemon_route_failed_falling_back_to_direct",
+            hook_type=hook_type,
+            subspace=subspace,
+            error=str(daemon_exc),
+        )
+
     _emit_direct_auto(
         subspace=subspace,
         content=content,
@@ -585,6 +619,43 @@ def _build_match_text(hook_type: str, payload: dict[str, Any]) -> str:
 
 
 _CONTENT_BYTE_CAP = 12000
+
+
+def _direct_fallback_allowed() -> bool:
+    """Return True iff the bridge may fall back to direct-mode emission
+    when the daemon path fails (RDR-114 Step 2, nexus-jokh).
+
+    The gate keys off ``_ROUTING_TBA`` (the bridge's routing
+    discriminant, the same constant checked at the top of
+    :func:`_emit_routed`), NOT ``NX_STORAGE_MODE``. Gate Round 1 of
+    the RDR-114 review caught this critical distinction: if the gate
+    keyed off ``NX_STORAGE_MODE`` and the env was unset (the common
+    developer-machine workflow with a daemon running but no env
+    exported), the gate would not fire and the silent fallback would
+    remain in place.
+
+    Returns:
+      * ``True`` when ``_ROUTING_TBA != "daemon"`` (legacy direct
+        routing; fallback is irrelevant, direct is the supported path).
+      * ``True`` when ``_ROUTING_TBA == "daemon"`` AND the
+        ``NX_BRIDGE_ALLOW_DIRECT_FALLBACK`` env is truthy (operator
+        opt-in for planned daemon downtime, CI without a daemon, etc.).
+        Falsy tokens mirror :func:`_bridge_disabled`'s set:
+        unset, ``""``, ``"0"``, ``"false"``, ``"False"``.
+      * ``False`` otherwise: under daemon routing with no opt-in,
+        the bridge fails closed on daemon-RPC failure.
+
+    Interaction with ``NX_BRIDGE_DISABLE``: the privacy opt-out
+    (:func:`_bridge_disabled`) is checked earlier in :func:`emit` and
+    returns before :func:`_emit_routed` runs. This helper has no
+    effect when ``NX_BRIDGE_DISABLE`` is also set; ``nx doctor
+    --check-bridge`` warns on the combination so operators do not
+    silently get the unexpected no-op.
+    """
+    if _ROUTING_TBA != "daemon":
+        return True
+    val = os.environ.get("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", "").strip()
+    return val not in ("", "0", "false", "False")
 
 
 def _bridge_disabled() -> bool:

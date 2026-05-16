@@ -80,6 +80,13 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
 
     monkeypatch.setenv("CLAUDECODE", "1")
+    # nexus-jokh (RDR-114 Step 2): the bridge defaults to fail-closed
+    # under daemon-routing mode (the shipped _ROUTING_TBA="daemon"). The
+    # direct-fallback regression suite still needs to exercise
+    # _emit_direct_auto end-to-end, so opt in via the documented escape
+    # hatch. Production operators who set this env knowingly accept the
+    # WAL-contention risk during planned daemon downtime.
+    monkeypatch.setenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", "1")
     return nexus_dir, builtin
 
 

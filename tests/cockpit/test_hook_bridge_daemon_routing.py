@@ -160,18 +160,24 @@ class TestDaemonRouting:
             conn.close()
         assert count == 1, f"expected 1 daemon-posted tuple, got {count}"
 
-    def test_emit_falls_back_to_direct_when_no_daemon(
+    def test_emit_falls_back_to_direct_when_opt_in_set(
         self,
         tmp_path: Path,
         monkeypatch,
     ) -> None:
-        """No discovery file -> _emit_direct_auto is called."""
+        """Daemon unreachable + NX_BRIDGE_ALLOW_DIRECT_FALLBACK=1 -> direct path.
+
+        Under the RDR-114 fail-closed default, the bridge would normally
+        drop the tuple when the daemon is unreachable. The opt-in env
+        restores the legacy fail-open path; this test pins that
+        round-trip.
+        """
         config_dir = tmp_path / "config"
         config_dir.mkdir()
-        # Point discovery at an empty dir so find_t2_daemon returns None.
         from nexus.daemon import discovery as _disc
         monkeypatch.setattr(_disc, "nexus_config_dir", lambda: config_dir)
         monkeypatch.setenv("CLAUDECODE", "1")
+        monkeypatch.setenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", "1")
 
         called: list[dict] = []
 
@@ -204,3 +210,172 @@ class TestDaemonRouting:
     def test_routing_constant_is_daemon(self) -> None:
         """Regression: nexus-6s8v flipped _ROUTING_TBA to 'daemon'."""
         assert hook_bridge._ROUTING_TBA == "daemon"
+
+
+# ---------------------------------------------------------------------------
+# RDR-114 Step 2 (nexus-jokh): fail-closed default + opt-in opt-out
+# ---------------------------------------------------------------------------
+
+
+class TestFailClosedGate:
+    """The gate is keyed off ``_ROUTING_TBA == 'daemon'`` (Gate Round 1
+    critical fix; NOT ``NX_STORAGE_MODE``). On daemon-side failure the
+    bridge drops the tuple, logs ``hook_bridge_emit_drop_rpc_failed``,
+    and returns ``"skipped-rpc-failed"``. The opt-in env
+    ``NX_BRIDGE_ALLOW_DIRECT_FALLBACK`` restores legacy fail-open
+    behaviour.
+    """
+
+    def test_direct_fallback_allowed_helper_keys_off_routing_tba(
+        self, monkeypatch
+    ) -> None:
+        """Under shipped default (_ROUTING_TBA='daemon') without opt-in,
+        the helper returns False."""
+        monkeypatch.delenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", raising=False)
+        assert hook_bridge._ROUTING_TBA == "daemon"
+        assert hook_bridge._direct_fallback_allowed() is False
+
+    def test_direct_fallback_allowed_with_opt_in(self, monkeypatch) -> None:
+        """Opt-in env flips the gate to True under daemon routing."""
+        monkeypatch.setenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", "1")
+        assert hook_bridge._direct_fallback_allowed() is True
+
+    def test_direct_fallback_allowed_under_legacy_direct_routing(
+        self, monkeypatch
+    ) -> None:
+        """When _ROUTING_TBA is not 'daemon', the gate is irrelevant -> True."""
+        monkeypatch.setattr(hook_bridge, "_ROUTING_TBA", "direct")
+        monkeypatch.delenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", raising=False)
+        assert hook_bridge._direct_fallback_allowed() is True
+
+    def test_direct_fallback_opt_in_falsy_tokens(self, monkeypatch) -> None:
+        """Mirror NX_BRIDGE_DISABLE's falsy-token set ('', '0', 'false', 'False')."""
+        monkeypatch.setenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", "0")
+        assert hook_bridge._direct_fallback_allowed() is False
+        monkeypatch.setenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", "false")
+        assert hook_bridge._direct_fallback_allowed() is False
+
+    def test_daemon_down_default_drops_with_log_event(
+        self, tmp_path: Path, monkeypatch, caplog
+    ) -> None:
+        """Daemon unreachable + no opt-in -> drop + log event + no direct call."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        from nexus.daemon import discovery as _disc
+        monkeypatch.setattr(_disc, "nexus_config_dir", lambda: config_dir)
+        monkeypatch.setenv("CLAUDECODE", "1")
+        monkeypatch.delenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", raising=False)
+
+        direct_called: list[dict] = []
+
+        def _fake_direct(*, subspace, content, dimensions, match_text):
+            direct_called.append({"subspace": subspace})
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        structlog.configure()
+        with capture_logs() as logs, patch.object(
+            hook_bridge, "_emit_direct_auto", _fake_direct
+        ):
+            hook_bridge.emit("PreToolUse", _PAYLOAD)
+
+        assert direct_called == [], (
+            "fail-closed must NOT invoke _emit_direct_auto under daemon mode"
+        )
+        drop_events = [
+            e for e in logs if e.get("event") == "hook_bridge_emit_drop_rpc_failed"
+        ]
+        assert len(drop_events) == 1, (
+            f"expected exactly one hook_bridge_emit_drop_rpc_failed event; got {logs!r}"
+        )
+        evt = drop_events[0]
+        assert evt.get("hook_type") == "PreToolUse"
+        assert evt.get("subspace") == "hook_events/tool_call_intent"
+
+    def test_partial_daemon_failure_also_drops(
+        self, tmp_path: Path, monkeypatch, caplog
+    ) -> None:
+        """Daemon discovery succeeds but RPC raises -> drop event named
+        hook_bridge_emit_drop_rpc_failed (intentionally about the RPC
+        outcome, not the daemon process state)."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        from nexus.daemon import discovery as _disc
+
+        # Fake a successful discovery to a non-existent socket so the
+        # connect attempt raises ConnectionRefusedError.
+        def _fake_find(config_dir=None):
+            return {
+                "uds_path": str(tmp_path / "no-such.sock"),
+                "tcp_host": "127.0.0.1",
+                "tcp_port": 1,
+                "pid": os.getpid(),
+            }
+
+        monkeypatch.setattr(
+            "nexus.daemon.discovery.find_t2_daemon", _fake_find
+        )
+        monkeypatch.setattr(_disc, "nexus_config_dir", lambda: config_dir)
+        monkeypatch.setenv("CLAUDECODE", "1")
+        monkeypatch.delenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", raising=False)
+
+        direct_called: list[dict] = []
+
+        def _fake_direct(*, subspace, content, dimensions, match_text):
+            direct_called.append({"subspace": subspace})
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        structlog.configure()
+        with capture_logs() as logs, patch.object(
+            hook_bridge, "_emit_direct_auto", _fake_direct
+        ):
+            hook_bridge.emit("PreToolUse", _PAYLOAD)
+
+        assert direct_called == [], "partial-failure must not invoke direct path"
+        drop_events = [
+            e for e in logs if e.get("event") == "hook_bridge_emit_drop_rpc_failed"
+        ]
+        assert len(drop_events) == 1
+        # The error field captures the underlying exception class string.
+        assert drop_events[0].get("error"), "drop event must include error detail"
+
+    def test_hook_stdout_rf2_allow_preserved_on_drop(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """RF-2 contract: even when emission drops, output_for_hook() still
+        produces the transparent-allow stdout shape (or None for observe-
+        only hooks). The drop is invisible to user-facing tools."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        from nexus.daemon import discovery as _disc
+        monkeypatch.setattr(_disc, "nexus_config_dir", lambda: config_dir)
+        monkeypatch.setenv("CLAUDECODE", "1")
+        monkeypatch.delenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", raising=False)
+
+        # Drive emit() (which will drop) then call output_for_hook directly.
+        hook_bridge.emit("PreToolUse", _PAYLOAD)
+        # PreToolUse is observe-only (CA-8 spike): output_for_hook returns
+        # None, the script writes nothing to stdout. Drop is invisible.
+        assert hook_bridge.output_for_hook("PreToolUse") is None
+
+    def test_emit_routed_returns_skipped_rpc_failed_when_dropping(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """_emit_routed returns the route label 'skipped-rpc-failed' on drop."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        from nexus.daemon import discovery as _disc
+        monkeypatch.setattr(_disc, "nexus_config_dir", lambda: config_dir)
+        monkeypatch.delenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", raising=False)
+
+        route = hook_bridge._emit_routed(
+            hook_type="PreToolUse",
+            subspace="hook_events/tool_call_intent",
+            content="{}",
+            dimensions={},
+            match_text=None,
+        )
+        assert route == "skipped-rpc-failed"
