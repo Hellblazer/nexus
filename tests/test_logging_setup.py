@@ -82,6 +82,31 @@ def test_mcp_mode_creates_file_handler(tmp_path, monkeypatch):
         h.close()
 
 
+def test_daemon_mode_creates_rotating_file_handler(tmp_path, monkeypatch):
+    """nexus-uuuh: daemon mode wires a RotatingFileHandler at logs/daemon.log.
+
+    The launchd plist and systemd unit append daemon stderr to an unbounded
+    log file. Without an in-process rotating handler, steady-state INFO on
+    every retention sweep + RPC accept grew that file unbounded. The daemon
+    mode mirrors mcp/console: 10 MB rotation, 5 backups, INFO default.
+    """
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    configure_logging("daemon")
+    log_path = tmp_path / "logs" / "daemon.log"
+    root = logging.getLogger()
+    file_handlers = [
+        h for h in root.handlers if isinstance(h, logging.handlers.RotatingFileHandler)
+    ]
+    assert len(file_handlers) == 1
+    assert file_handlers[0].baseFilename == str(log_path)
+    assert file_handlers[0].maxBytes == 10 * 1024 * 1024
+    assert file_handlers[0].backupCount == 5
+    # Cleanup
+    for h in file_handlers:
+        root.removeHandler(h)
+        h.close()
+
+
 def test_noisy_loggers_suppressed():
     configure_logging("cli")
     for name in ("httpx", "httpcore", "chromadb.telemetry", "opentelemetry"):

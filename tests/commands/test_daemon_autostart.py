@@ -256,3 +256,106 @@ def test_install_without_autostart_flag_errors() -> None:
     runner = CliRunner()
     result = runner.invoke(daemon_cmd.daemon_group, ["t2", "install"])
     assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# nexus-xqos: subprocess activation failures propagate as non-zero exit
+# ---------------------------------------------------------------------------
+
+
+def test_install_autostart_exits_nonzero_on_launchctl_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nexus-xqos: ``launchctl bootstrap`` failure must surface as non-zero exit.
+
+    Pre-fix the warning was printed and the command exited 0; CI/automation
+    pipelines checking ``$?`` saw success and moved on with non-functional
+    autostart.
+    """
+    _set_platform(monkeypatch, "darwin")
+    monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: tmp_path / "LaunchAgents")
+    monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/nx/bin/nx"])
+
+    with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+        mock_run.return_value.returncode = 1
+        mock_run.return_value.stderr = "Bootstrap failed: 5: Input/output error"
+        mock_run.return_value.stdout = ""
+        runner = CliRunner()
+        result = runner.invoke(
+            daemon_cmd.daemon_group, ["t2", "install", "--autostart"]
+        )
+
+    assert result.exit_code != 0, result.output
+    # stderr from the subprocess is surfaced in the user-facing error.
+    assert "Bootstrap failed" in result.output
+
+
+def test_install_autostart_exits_nonzero_on_systemctl_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nexus-xqos: ``systemctl --user enable`` failure must surface as non-zero exit."""
+    _set_platform(monkeypatch, "linux")
+    monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: tmp_path / "systemd")
+    monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/nx/bin/nx"])
+
+    with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+        mock_run.return_value.returncode = 5
+        mock_run.return_value.stderr = "Failed to enable unit: Unit nexus-t2.service not found."
+        mock_run.return_value.stdout = ""
+        runner = CliRunner()
+        result = runner.invoke(
+            daemon_cmd.daemon_group, ["t2", "install", "--autostart"]
+        )
+
+    assert result.exit_code != 0, result.output
+    assert "Failed to enable unit" in result.output
+
+
+def test_install_autostart_force_downgrades_failure_to_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--force`` flag preserves the legacy warn-and-continue behaviour.
+
+    Some CI runners cannot bootstrap launchd jobs (no GUI session); operators
+    who only want the plist on disk can pass ``--force`` to suppress the
+    activation failure.
+    """
+    _set_platform(monkeypatch, "darwin")
+    monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: tmp_path / "LaunchAgents")
+    monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/nx/bin/nx"])
+
+    with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+        mock_run.return_value.returncode = 1
+        mock_run.return_value.stderr = "Bootstrap failed"
+        mock_run.return_value.stdout = ""
+        runner = CliRunner()
+        result = runner.invoke(
+            daemon_cmd.daemon_group, ["t2", "install", "--autostart", "--force"]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Warning" in result.output or "warning" in result.output
+
+
+def test_install_autostart_filenotfound_still_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nexus-xqos: missing supervisor binary (FileNotFoundError) is also a failure."""
+    _set_platform(monkeypatch, "darwin")
+    monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: tmp_path / "LaunchAgents")
+    monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/nx/bin/nx"])
+
+    def _raise_fnf(*args, **kwargs):
+        raise FileNotFoundError("[Errno 2] launchctl: not found")
+
+    with patch.object(daemon_cmd.subprocess, "run", side_effect=_raise_fnf):
+        runner = CliRunner()
+        result = runner.invoke(
+            daemon_cmd.daemon_group, ["t2", "install", "--autostart"]
+        )
+
+    assert result.exit_code != 0, result.output
