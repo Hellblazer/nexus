@@ -693,6 +693,149 @@ class TestClaudecodeGate:
 
 
 # ---------------------------------------------------------------------------
+# Tests: NX_BRIDGE_DISABLE privacy opt-out (nexus-7zvp)
+# ---------------------------------------------------------------------------
+
+
+class TestBridgeDisableGate:
+    """NX_BRIDGE_DISABLE skips tuple emission but preserves hook protocol output."""
+
+    @pytest.fixture(autouse=True)
+    def _set_claudecode(self, monkeypatch):
+        monkeypatch.setenv("CLAUDECODE", "1")
+
+    @pytest.mark.parametrize("falsy_value", ["", "0", "false", "False"])
+    def test_falsy_values_keep_bridge_running(
+        self, monkeypatch, db_conn, hook_index, hook_registry, falsy_value: str
+    ) -> None:
+        """Documented falsy tokens leave the bridge live (no silent disable)."""
+        from nexus.cockpit import hook_bridge
+
+        monkeypatch.setenv("NX_BRIDGE_DISABLE", falsy_value)
+        called = []
+
+        def _fake_out(**kwargs):
+            called.append(kwargs)
+            return "id"
+
+        with patch("nexus.cockpit.hook_bridge._direct_out", _fake_out):
+            hook_bridge.emit(
+                "PreToolUse",
+                PRETOOLUSE_PAYLOAD,
+                conn=db_conn,
+                index=hook_index,
+                registry=hook_registry,
+            )
+
+        assert called, f"emit must run when NX_BRIDGE_DISABLE={falsy_value!r}"
+
+    @pytest.mark.parametrize("truthy_value", ["1", "true", "yes", "TRUE", " 1 "])
+    def test_truthy_values_disable_emission(
+        self, monkeypatch, db_conn, hook_index, hook_registry, truthy_value: str
+    ) -> None:
+        """Any non-falsy value silences tuple emission."""
+        from nexus.cockpit import hook_bridge
+
+        monkeypatch.setenv("NX_BRIDGE_DISABLE", truthy_value)
+        called = []
+
+        def _fake_out(**kwargs):
+            called.append(kwargs)
+            return "id"
+
+        with patch("nexus.cockpit.hook_bridge._direct_out", _fake_out):
+            hook_bridge.emit(
+                "PreToolUse",
+                PRETOOLUSE_PAYLOAD,
+                conn=db_conn,
+                index=hook_index,
+                registry=hook_registry,
+            )
+
+        assert called == [], (
+            f"_direct_out must not be called when NX_BRIDGE_DISABLE={truthy_value!r}"
+        )
+
+    def test_disabled_does_not_break_hook_protocol(self, monkeypatch) -> None:
+        """output_for_hook is pure and must keep producing the hook response."""
+        from nexus.cockpit.hook_bridge import output_for_hook
+
+        monkeypatch.setenv("NX_BRIDGE_DISABLE", "1")
+        out = output_for_hook("PermissionRequest")
+        assert out is not None
+        parsed = json.loads(out)
+        assert parsed["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+# ---------------------------------------------------------------------------
+# Tests: _build_content always produces parseable JSON (nexus-sv7t)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildContent:
+    """_build_content must always return JSON-parseable strings."""
+
+    def test_small_payload_round_trips(self) -> None:
+        from nexus.cockpit.hook_bridge import _build_content
+
+        out = _build_content("PreToolUse", PRETOOLUSE_PAYLOAD)
+        assert json.loads(out) == PRETOOLUSE_PAYLOAD
+
+    def test_oversized_payload_projects_and_marks_truncated(self) -> None:
+        from nexus.cockpit.hook_bridge import _build_content
+
+        big_payload = {
+            **PRETOOLUSE_PAYLOAD,
+            "tool_response": "X" * 20000,  # forces overflow
+        }
+        out = _build_content("PostToolUse", big_payload)
+        parsed = json.loads(out)
+        assert parsed["_truncated"] is True
+        assert parsed["_original_bytes"] > 12000
+        assert parsed["hook_event_name"] == "PreToolUse"
+        assert parsed["session_id"] == PRETOOLUSE_PAYLOAD["session_id"]
+        assert parsed["tool_name"] == "Bash"
+        assert parsed["cwd"] == "/projects/nexus"
+
+    def test_oversized_payload_stays_under_cap(self) -> None:
+        from nexus.cockpit.hook_bridge import _CONTENT_BYTE_CAP, _build_content
+
+        big_payload = {
+            **PRETOOLUSE_PAYLOAD,
+            "tool_response": "Y" * 20000,
+        }
+        out = _build_content("PostToolUse", big_payload)
+        assert len(out.encode("utf-8")) <= _CONTENT_BYTE_CAP
+
+    def test_unicode_payload_round_trips(self) -> None:
+        """Multi-byte UTF-8 payloads must not produce mid-codepoint slices."""
+        from nexus.cockpit.hook_bridge import _build_content
+
+        payload = {**PRETOOLUSE_PAYLOAD, "extra": "café snowman ☃ emoji \U0001f600"}
+        out = _build_content("PreToolUse", payload)
+        parsed = json.loads(out)
+        assert parsed["extra"] == "café snowman ☃ emoji \U0001f600"
+
+    def test_huge_projection_falls_back_to_minimal_envelope(self) -> None:
+        """Even pathological projected fields must still yield valid JSON."""
+        from nexus.cockpit.hook_bridge import _CONTENT_BYTE_CAP, _build_content
+
+        # Stable-projection fields themselves blown out — falls back to minimal.
+        payload = {
+            "session_id": "S" * 15000,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "cwd": "/c",
+            "permission_mode": "ask",
+        }
+        out = _build_content("PreToolUse", payload)
+        parsed = json.loads(out)
+        assert parsed["_truncated"] is True
+        assert parsed["hook_event_name"] == "PreToolUse"
+        assert len(out.encode("utf-8")) <= _CONTENT_BYTE_CAP
+
+
+# ---------------------------------------------------------------------------
 # Tests: script exit-0 on malformed JSON
 # ---------------------------------------------------------------------------
 
