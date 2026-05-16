@@ -155,32 +155,49 @@ async def test_two_clients_tcp(running_daemon: T2Daemon) -> None:
 
 @pytest.mark.asyncio
 async def test_uds_peer_uid_rejection(config_dir: Path) -> None:
-    """A UDS peer whose UID differs from the daemon's UID is rejected."""
+    """A UDS peer whose UID differs from the daemon's UID is rejected.
+
+    nexus-04zd: the contract is that the daemon writes a typed error frame
+    naming the rejected UID before closing the connection. A bare
+    connection-close (no frame) used to be an acceptable outcome here,
+    which silently passed if the peer-cred check were ever skipped via a
+    regression. We now hard-require the error frame.
+
+    S-7: the monkey patch targets ``nexus.daemon.peer.read_peer_credentials``
+    at source. t2_daemon imports the ``peer`` module and calls
+    ``peer.read_peer_credentials(...)``, so the source-attribute patch is
+    what the call site resolves through.
+    """
     from nexus.daemon.peer import PeerCredentials
 
     daemon = T2Daemon(config_dir=config_dir)
     await daemon.start()
     try:
-        # Patch read_peer_credentials to report a different UID than geteuid().
         foreign_uid = os.geteuid() + 1
         fake_creds = PeerCredentials(pid=9999, uid=foreign_uid, gid=9999)
 
         with patch(
-            "nexus.daemon.t2_daemon.read_peer_credentials",
+            "nexus.daemon.peer.read_peer_credentials",
             return_value=fake_creds,
         ):
             reader, writer = await _connect_uds(daemon.uds_path)
             try:
-                # The daemon should close the connection or send an error
-                # frame before or immediately after the hello.
                 write_frame(writer, {"op": "hello", "protocol_version": DAEMON_PROTOCOL_VERSION})
                 await writer.drain()
                 response = await asyncio.wait_for(read_frame(reader), timeout=2.0)
-                assert "error" in response
-                assert "uid" in response["error"].lower() or "reject" in response["error"].lower()
-            except (asyncio.IncompleteReadError, ConnectionResetError):
-                # Also acceptable: daemon just closes the connection.
-                pass
+                assert "error" in response, (
+                    f"daemon must write a typed error frame for foreign-UID "
+                    f"rejection; got {response!r}"
+                )
+                err_str = response["error"]
+                # Error frame is currently a bare string; tolerate either
+                # legacy string shape or a typed dict shape.
+                err_text = err_str.lower() if isinstance(err_str, str) else (
+                    err_str.get("message", "").lower() + err_str.get("type", "").lower()
+                )
+                assert "uid" in err_text or "reject" in err_text, (
+                    f"error frame must name 'uid' or 'reject'; got {response!r}"
+                )
             finally:
                 writer.close()
                 await writer.wait_closed()
@@ -195,17 +212,30 @@ async def test_uds_peer_uid_rejection(config_dir: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_version_mismatch_rejected(running_daemon: T2Daemon) -> None:
-    """A client with a mismatched protocol_version receives an error and is disconnected."""
+    """A client with a mismatched protocol_version receives an error and is disconnected.
+
+    nexus-04zd: the daemon contract is that an error frame is written
+    naming the version mismatch before the connection closes. A bare
+    close (no frame) is NOT an acceptable substitute; the test used to
+    silently pass on that path, which masked any regression where the
+    daemon failed to produce the error frame.
+    """
     reader, writer = await _connect_uds(running_daemon.uds_path)
     try:
-        # Send hello with an unknown version
         write_frame(writer, {"op": "hello", "protocol_version": "99.99"})
         await writer.drain()
         response = await asyncio.wait_for(read_frame(reader), timeout=2.0)
-        assert "error" in response
-        # After mismatch the connection should be closed
-    except (asyncio.IncompleteReadError, ConnectionResetError):
-        pass  # Also acceptable — daemon closed the stream
+        assert "error" in response, (
+            f"daemon must write a typed error frame for version mismatch; "
+            f"got {response!r}"
+        )
+        err = response["error"]
+        err_text = err.lower() if isinstance(err, str) else (
+            err.get("message", "").lower() + err.get("type", "").lower()
+        )
+        assert "version" in err_text or "protocol" in err_text, (
+            f"error frame must name 'version' or 'protocol'; got {response!r}"
+        )
     finally:
         writer.close()
         await writer.wait_closed()

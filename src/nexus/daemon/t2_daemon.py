@@ -90,7 +90,13 @@ from typing import IO, Any
 
 import structlog
 
-from nexus.daemon.peer import PeerCredentials, read_peer_credentials
+# nexus-04zd: import the ``peer`` module rather than its functions so the
+# call site (`peer.read_peer_credentials(...)`) resolves through the source
+# module's binding. Tests can then patch the source attribute and have it
+# affect this daemon's lookup, instead of having to patch a local name
+# bound at this module's import time.
+from nexus.daemon import peer
+from nexus.daemon.peer import PeerCredentials
 
 _log = structlog.get_logger(__name__)
 
@@ -932,7 +938,7 @@ class T2Daemon:
         # --- Peer-cred check (UDS only) ---
         if is_uds:
             try:
-                creds: PeerCredentials = read_peer_credentials(raw_sock)
+                creds: PeerCredentials = peer.read_peer_credentials(raw_sock)
             except Exception as exc:
                 _log.error("peer_cred_read_failed", exc=str(exc))
                 write_frame(writer, {"error": "peer credential read failed"})
