@@ -430,6 +430,64 @@ async def test_spawn_lock_prevents_double_start(config_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# nexus-dc9a: retention sweep passes TupleIndex to prune_expired_tuples
+# ---------------------------------------------------------------------------
+
+
+def test_retention_sweep_wires_tuplespace_index(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``_run_retention_sweep_sync`` passes the wired TupleIndex through to
+    ``prune_expired_tuples`` so paired Chroma vectors are deleted alongside
+    SQLite rows. Without this wiring, expired tuples' vectors used to
+    accumulate as orphans and resurface in semantic ``read()`` /
+    ``take()`` after the SQLite row was deleted.
+    """
+    import sqlite3 as _sqlite3
+    from nexus.tuplespace.store import apply_tuples_schema
+
+    # Build a daemon with a real TuplespaceService so ``self._tuplespace_service``
+    # has an ``_index`` attribute the sweep can pick up.
+    import chromadb
+    from nexus.daemon.tuplespace_service import TuplespaceService
+
+    tuples_db = tmp_path / "tuples.db"
+    conn = _sqlite3.connect(str(tuples_db))
+    apply_tuples_schema(conn)
+    conn.close()
+
+    chroma_client = chromadb.EphemeralClient()
+    service = TuplespaceService(
+        tuples_db_path=tuples_db,
+        chroma_client=chroma_client,
+    )
+    daemon = T2Daemon(
+        config_dir=config_dir,
+        tuples_db_path=tuples_db,
+        tuplespace_service=service,
+    )
+
+    # Spy on prune_expired_tuples to capture the index arg.
+    captured: dict = {}
+
+    def _spy(conn, *, index=None, registry=None, now=None):
+        captured["index_passed"] = index
+        return 0
+
+    monkeypatch.setattr("nexus.tuplespace.store.prune_expired_tuples", _spy)
+
+    daemon._run_retention_sweep_sync()
+
+    # The index must be the TuplespaceService's own _index, not None.
+    assert captured.get("index_passed") is service._index, (
+        "retention sweep must pass the daemon's TupleIndex through to "
+        "prune_expired_tuples (nexus-dc9a); orphan Chroma vectors otherwise."
+    )
+
+    service.close()
+
+
 @pytest.mark.asyncio
 async def test_startup_retention_sweep_is_non_blocking(
     config_dir: Path, monkeypatch: pytest.MonkeyPatch

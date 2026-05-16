@@ -1319,11 +1319,15 @@ class T2Daemon:
     def _run_retention_sweep_sync(self) -> int:
         """Run one tuples.db retention sweep synchronously.
 
-        SQLite-only: the daemon does not own a Chroma client, so paired
-        Chroma vectors are not removed here. Orphan Chroma rows (a vector
-        with no matching SQLite row) are bounded by total write volume
-        and are tolerated until a follow-up wires a Chroma client into
-        the daemon constructor.
+        nexus-dc9a: when a TuplespaceService is wired in at construction
+        time (production path), the sweep passes its TupleIndex to
+        ``prune_expired_tuples`` so paired Chroma vectors are deleted
+        alongside the SQLite rows. Without the index, orphan Chroma
+        vectors accumulate and resurface in semantic ``read()`` /
+        ``take()`` calls after their SQLite row has been deleted (the
+        impact grew with write volume and TTL usage). Test-construction
+        of the daemon without a TuplespaceService still works: the sweep
+        falls back to SQLite-only and logs a one-time warning.
 
         Also sweeps expired ``action_idempotency`` rows from
         ``memory.db`` (nexus-8wvs). Both sweeps are best-effort — a
@@ -1334,12 +1338,22 @@ class T2Daemon:
         from nexus.db.migrations import sweep_action_idempotency  # noqa: PLC0415
         from nexus.tuplespace.store import prune_expired_tuples  # noqa: PLC0415
 
+        # Resolve the TupleIndex from the wired TuplespaceService when
+        # available. SQLite-only sweep is retained as a safety fallback
+        # so retention still runs even on a daemon built without the
+        # service (early-test construction path).
+        index = (
+            getattr(self._tuplespace_service, "_index", None)
+            if self._tuplespace_service is not None
+            else None
+        )
+
         # Short-lived connections so we don't contend with the daemon's
         # main writer for long (WAL allows concurrent readers; the DELETE
         # acquires the writer lock briefly).
         conn = sqlite3.connect(str(self._tuples_db_path))
         try:
-            deleted = prune_expired_tuples(conn)
+            deleted = prune_expired_tuples(conn, index=index)
         finally:
             conn.close()
 
