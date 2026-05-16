@@ -378,10 +378,21 @@ def _direct_out(
     match_text: str | None = None,
     ttl_seconds: float | None = None,
 ) -> str:
-    """Thin wrapper around api.out for easy mocking in tests."""
+    """Thin wrapper around api.out for easy mocking in tests.
+
+    nexus-wf07: wraps the write in a tight retry loop (3 attempts, 50/100/200ms
+    backoff) for SQLite ``OperationalError`` whose message indicates "locked"
+    or "busy". Under daemon-mode WAL contention (RDR-112) the bridge and the
+    daemon may compete for ``tuples.db``; without retry every contention drops
+    a tuple silently. Non-locking ``OperationalError``s (e.g. malformed SQL)
+    are not retried. Applies to both the daemon-fallback path (via
+    ``_emit_direct_auto``) and the injected-test path.
+    """
+    from nexus.retry import _sqlite_with_retry
     from nexus.tuplespace.api import out
 
-    return out(
+    return _sqlite_with_retry(
+        out,
         conn=conn,
         index=index,
         registry=registry,
@@ -390,6 +401,7 @@ def _direct_out(
         dimensions=dimensions,
         match_text=match_text,
         ttl_seconds=ttl_seconds,
+        event="hook_bridge_retried",
     )
 
 
