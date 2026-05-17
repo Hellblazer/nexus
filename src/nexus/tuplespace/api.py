@@ -405,6 +405,14 @@ def out(
         ) from exc
     dims_json = json.dumps(dimensions, sort_keys=True)
     now = time.time()
+    # nexus-6m9i (third 360° EDGE S4): ttl_seconds=0 is ambiguous
+    # (immediately-expired tuple vs no expiry). Refuse <=0 explicitly;
+    # callers wanting "no expiry" pass None.
+    if ttl_seconds is not None and float(ttl_seconds) <= 0:
+        raise ValueError(
+            f"ttl_seconds={ttl_seconds} must be > 0 (pass None for "
+            "no-expiry semantics, matching schema retention_seconds=0)"
+        )
     # Resolve effective TTL: explicit ttl_seconds wins; otherwise fall back
     # to the subspace schema's retention_seconds (nexus-kk9h, RDR-111).
     # retention_seconds == 0 means "no expiry", leave expires_at NULL so
@@ -498,6 +506,12 @@ def read(
     schema = registry.get_schema_for(subspace)
     effective_floor = floor if floor is not None else schema.read["default_floor"]
     effective_n = n if n is not None else schema.read["default_n"]
+    # nexus-6m9i (third 360° EDGE S3): n=0 / negative is silently
+    # passed through to chroma as a confusing no-op.  Refuse loud.
+    if effective_n is not None and effective_n <= 0:
+        raise ValueError(
+            f"n={n} must be > 0 (use the default by passing None)"
+        )
 
     # Clamp n_results to chroma quota maximum
     from nexus.db.chroma_quotas import QUOTAS
@@ -607,11 +621,21 @@ def take(
             "those route through the daemon's blocking_take RPC."
         )
 
-    if timeout_seconds is not None and timeout_seconds > 30:
-        raise InvalidTimeoutError(
-            f"timeout_seconds={timeout_seconds} exceeds the MCP transport budget cap of 30 s "
-            "(RDR-110 §Technical Design)"
-        )
+    if timeout_seconds is not None:
+        # nexus-6m9i (third 360° EDGE C1): cap NEGATIVE too. Without
+        # this guard a caller could pass timeout_seconds=-1 and the
+        # blocking_take poll loop would immediately fall through with
+        # ``remaining <= 0`` — same as timeout=0 but obscure. Fail
+        # loud at the boundary.
+        if timeout_seconds < 0:
+            raise InvalidTimeoutError(
+                f"timeout_seconds={timeout_seconds} must be non-negative"
+            )
+        if timeout_seconds > 30:
+            raise InvalidTimeoutError(
+                f"timeout_seconds={timeout_seconds} exceeds the MCP transport budget cap of 30 s "
+                "(RDR-110 §Technical Design)"
+            )
 
     schema = registry.get_schema_for(subspace)
 
@@ -627,6 +651,15 @@ def take(
     effective_lease = lease_seconds if lease_seconds is not None else schema.take.get(
         "default_lease_seconds", 60
     )
+    # nexus-6m9i (third 360° EDGE C2): refuse <=0 leases. A zero or
+    # negative lease produces an immediately-expired claim that any
+    # other claimant wins on the next read, breaking the lease
+    # contract entirely.
+    if effective_lease is not None and float(effective_lease) <= 0:
+        raise ValueError(
+            f"lease_seconds={effective_lease} must be > 0 "
+            "(zero/negative lease produces an immediately-expired claim)"
+        )
 
     # Candidate selection
     top_ids: list[str] = []

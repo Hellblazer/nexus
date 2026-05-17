@@ -663,7 +663,11 @@ def _load_cursor(
     ).fetchone()
     if row is None:
         return 0
-    return int(row[0])
+    # nexus-6m9i (third 360° EDGE C3): floor at 0 so a negative cursor
+    # (corrupted manually, or written by an older buggy version) does
+    # not cause the watcher to re-fire every historical event on
+    # restart.
+    return max(0, int(row[0]))
 
 
 def _save_cursor(
