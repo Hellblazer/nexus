@@ -204,11 +204,14 @@ Two-layer approach:
    Elapsed-time is logged on the exit path under an `rpc_handler_ok`
    event (paired with the existing `rpc_handler_error`).
 
-For Gap 2, `blocking_take`'s four return-None paths each emit a
-distinct DEBUG-level log event before returning, carrying the same
-`request_id`. Operators triaging the "agents not getting work"
+For Gap 2, `blocking_take`'s three return-None paths each emit a
+distinct DEBUG-level log event (`blocking_take_shutdown_observed`,
+`blocking_take_conn_closed_during_take`,
+`blocking_take_deadline_elapsed`) before returning, carrying the
+same `request_id`. Operators triaging the "agents not getting work"
 symptom can grep on `request_id` and see the categorised return
-reason.
+reason. (Semaphore exhaustion raises `BlockingTakeResourceExhausted`,
+a typed exception — distinguishable already; not a None path.)
 
 ### Technical Design
 
@@ -269,10 +272,49 @@ share a key.
 
 ### Decision Rationale
 
-Substantive refactor (touches every dispatch path, every domain
-store's transitive logger) — deferred from the third 360°
-remediation precisely because the right design needs research and
-a gate, not an inline patch.
+**Why wire-level + log-level contextvars over per-log-site
+injection.** The naive alternative — make every log call thread
+a `request_id` kwarg via signature changes — would touch ~50+
+domain-store methods across nine `src/nexus/db/t2/*.py` modules
+plus the dispatch layer itself. Round 1 research (T2
+`nexus_rdr/115-research-3`) confirmed all nine stores use
+`structlog.get_logger(...)` with the `merge_contextvars`
+processor already in the chain, so an asyncio-task-bound
+contextvar with explicit `copy_context().run(...)` propagation
+across `run_in_executor` reaches every store-layer log line with
+zero per-store source edits. The cost is one mandatory wrapper
+line in `_dispatch_store_rpc`; the benefit is that future stores
+inherit correlation automatically. Symmetry on the client side
+(module-level `_request_id_cv` + `client.request_context(...)`
+context manager) avoids a parallel kwarg-threading sprawl across
+the auto-generated `_StoreProxy` surface.
+
+**Why not OpenTelemetry now.** OpenTelemetry would deliver the
+same correlation + latency story plus cross-process span
+propagation if the daemon ever grew multi-host or out-of-process
+clients. Round 1 research (`nexus_rdr/115-research-5`) confirmed
+the dependency footprint (`opentelemetry-api` +
+`opentelemetry-sdk` + protobuf + grpcio) is disproportionate to
+the v1 single-host single-daemon scale and would add operational
+surface area (collector configuration, environment differences)
+that the substrate does not yet need. The contextvar approach
+ships the same observable benefit at zero new-dependency cost.
+**Re-evaluate trigger**: when the daemon serves multiple hosts
+or callers want spans visible in an external tracing UI
+(Honeycomb / Tempo / Datadog), file a follow-up RDR proposing
+the OpenTelemetry migration with the contextvar contract as the
+client-facing API to preserve.
+
+**Why three None-paths + typed exceptions over a unified return
+code.** Folding the three None-returning paths plus the typed
+exceptions (`BlockingTakeResourceExhausted`,
+`InvalidTimeoutError`) into one machine-readable return code was
+considered and rejected: it would either bloat the success-path
+return shape with an always-present `_reason` field or force
+callers to inspect both a return value AND a side-channel log
+line. Distinct DEBUG events keyed on `request_id` let callers
+opt into reason-discovery without changing the existing
+`Optional[dict]` return contract.
 
 ## Alternatives Considered
 
@@ -328,15 +370,23 @@ Updated after Round 1 research. Phases sequenced so each delivers
 observable value independently:
 
 - **Phase 1: daemon-side contextvar plumbing + copy_context spike**
-  - Add `bind_request_context` helper in `nexus.daemon.protocol`
-    (or inline in `t2_daemon.py` if RDR-117 / M-2 protocol-extract
-    is deferred).
+  - Add `bind_request_context` helper inline in `t2_daemon.py`.
+    (The third 360° dim-7 M-2 protocol-extract aspiration was
+    never promoted to an RDR; no upstream RDR to defer to. A
+    future protocol-extract RDR can relocate this helper to the
+    new module.)
   - Update `_dispatch_store_rpc` to bind contextvars AND wrap the
     executor dispatch with `copy_context().run(...)`. THIS IS THE
     SPIKE — verify domain-store logs receive the bound keys end
     to end. Without this gate the rest of the work is wasted.
   - Add `rpc_handler_ok` exit event with `elapsed_ms` (Gap 3).
-  - Housekeeping: align the 8-of-9 stores omitting `__name__`.
+  - The 8-of-9 stores omitting `__name__` on `get_logger` is a
+    pre-existing housekeeping debt unrelated to correlation IDs;
+    file as a separate `housekeeping`-tagged bead, NOT scoped to
+    this RDR's Phase 1 (per gate Round 1 observation O3 — avoids
+    PR review noise and prevents conflation of the
+    housekeeping change with the functional logger pipeline
+    change).
 - **Phase 2: wire-level request_id extension**
   - Extend RPC frame shape with optional `request_id`.
   - Daemon mints on miss; echoes on response frame.
@@ -350,18 +400,38 @@ observable value independently:
   - Three DEBUG events: `blocking_take_shutdown_observed`,
     `blocking_take_conn_closed_during_take`,
     `blocking_take_deadline_elapsed`. All carry `request_id`.
-- **Phase 5 (optional)**: `nx daemon t2 doctor --recent` could
-  surface the last N request IDs + their elapsed_ms from an
-  in-memory ring buffer on the daemon side. Out of scope for v1
-  if Phases 1-4 prove sufficient for incident triage.
+- **Phase 5: DEFERRED to a follow-on bead / RDR**. The
+  in-memory ring buffer for `nx daemon t2 doctor --recent`
+  (last N request_ids + their elapsed_ms) is genuinely useful
+  but not load-bearing for the correlation contract. Resolving
+  it to "out of scope until evidence demands it" instead of
+  "maybe later" cleans up the planning-chain scope (gate
+  Round 1 observation O1).
 
 ## Test Plan
 
-- **Phase 1 spike (load-bearing)**: bind a request_id in the
-  asyncio task, dispatch a sync function through `run_in_executor`
-  with `copy_context().run(...)`, verify the function's structlog
-  logger sees the bound key. Same test WITHOUT `copy_context()`
-  must fail (regression guard).
+- **Phase 1 spike (load-bearing) — positive arm**: bind a
+  request_id in the asyncio task via
+  `structlog.contextvars.bind_contextvars`, capture
+  `ctx = contextvars.copy_context()`, dispatch a sync function
+  through `loop.run_in_executor(None, lambda: ctx.run(fn))`,
+  capture the function's structlog output via
+  `structlog.testing.capture_logs()`, and assert the bound
+  `request_id` key appears in the captured log event. **Pass
+  criterion**: assert the bound key is present in the captured
+  record.
+- **Phase 1 spike (load-bearing) — negative control arm**: same
+  test scaffold but dispatch as
+  `loop.run_in_executor(None, fn)` (no `copy_context()` wrap).
+  **Pass criterion**: assert the bound key is ABSENT from the
+  captured record. This regression guard ensures that an
+  implementer who forgets the `copy_context()` wrapper cannot
+  ship a green test. Both arms must pass for Phase 1 to be
+  declared done.
+- **Phase 1 ordering invariant**: explicit test that the bind
+  MUST precede the `copy_context()` call. Bind-after-copy
+  produces an empty context snapshot; the spike asserts the
+  worker thread sees a default-value contextvar in that ordering.
 - **Scenario**: Two concurrent `T2Client.call`s with distinct
   client-side request_ids — **Verify**: every log line in each
   RPC's chain (client `t2_client_*` + daemon `rpc_handler_*` +
@@ -389,7 +459,86 @@ read-latency spike harness if introduced.
 
 ## Finalization Gate
 
-To be completed before `/nx:rdr-accept`.
+### Contradiction Check
+
+No contradictions found between Research Findings (Round 1),
+Technical Design, Implementation Plan, and Test Plan after the
+Round 1 gate remediation.  The single round-1 contradiction (the
+stale "four None-paths" count in §Approach vs the three named in
+§Technical Design) was fixed in the same revision pass.
+
+### Assumption Verification
+
+All three Critical Assumptions verified by Round 1 research:
+
+- A1 (`bind_contextvars` propagation across `run_in_executor`):
+  REFUTED — Spike confirmed `copy_context().run(...)` is
+  mandatory; mitigation locked into Technical Design and
+  Phase 1 spike with both positive + negative arms.
+- A2 (request_id frame-size budget): Verified — Source Search.
+- A3 (domain-store retrofit without per-store source changes):
+  Verified — Source Search across all 9 stores.
+
+#### API Verification
+
+| API Call | Library | Verification |
+| --- | --- | --- |
+| `structlog.contextvars.bind_contextvars` | structlog | Source Search (`nexus_rdr/115-research-1`) |
+| `contextvars.copy_context()` | stdlib | Source Search + Spike (Python 3.12.11 in project env) |
+| `asyncio.AbstractEventLoop.run_in_executor` | stdlib | Source Search — default executor does NOT propagate context |
+| `t2_json_loads` unknown-key tolerance | nexus.daemon.t2_daemon | Source Search (`nexus_rdr/115-research-2`) |
+
+### Scope Verification
+
+Minimum Viable Validation: Phase 1 spike (positive + negative
+arms) verifies the `copy_context()` wrapper is both effective
+and necessary.  In scope for Phase 1; will be executed as the
+first deliverable, not deferred.
+
+### Cross-Cutting Concerns
+
+- **Versioning**: `DAEMON_PROTOCOL_VERSION = "1.0"` stays
+  unchanged. Daemon's strict equality check at
+  `t2_daemon.py:1238` is unaffected because the new
+  `request_id` is an optional top-level key in the JSON frame;
+  `t2_json_loads` is schema-free and ignores unknown keys
+  (verified `nexus_rdr/115-research-2`). The semantic
+  compatibility (new daemon + old client and vice versa) is
+  preserved without a version bump.
+- **Build tool compatibility**: N/A (no build-system change).
+- **Licensing**: N/A (no new third-party dependencies; uses
+  stdlib `contextvars` + already-bundled `structlog`).
+- **Deployment model**: `request_id` binding is transport-
+  agnostic. The dispatch layer binds the contextvar before
+  consulting `is_uds`, so both UDS and TCP frames carry the
+  same correlation. The traceback-stripping rule from third
+  360° SEC-2 (`is_uds` gate at `t2_daemon.py:1430`) is
+  unchanged — `request_id` appears in both `is_uds` and
+  `not is_uds` error frames.
+- **IDE compatibility**: N/A.
+- **Incremental adoption**: Phases 1-4 each deliver observable
+  value independently. Operators can adopt by phase; old
+  clients without `client.request_context(...)` continue to
+  work and receive daemon-minted IDs.
+- **Secret/credential lifecycle**: N/A (request_id is a
+  correlation token, not a secret; minted as `uuid.uuid4().hex`
+  with no security implications; not logged into any persistent
+  store beyond the rolling daemon logs).
+- **Memory management**: Phase 5 (in-memory ring buffer) is
+  DEFERRED — that's the only feature with a memory-growth
+  surface. Phases 1-4 add only short-lived contextvar bindings
+  (cleared at task / frame exit) and per-frame UUID strings
+  (54 bytes, GC-collected with the frame). No new long-lived
+  allocations.
+
+### Proportionality
+
+Right-sized. The RDR touches a structurally significant surface
+(every RPC dispatch path + every domain store's logger + the
+wire protocol), and the design space had a non-obvious failure
+mode (A1 refutation) that warranted careful documentation. The
+remaining sections — Day 2 Operations, New Dependencies — are
+N/A and intentionally omitted to avoid template-driven bloat.
 
 ## References
 
@@ -430,3 +579,45 @@ To be completed before `/nx:rdr-accept`.
   `client.request_context(...)` context manager** for
   architectural symmetry with the daemon and to avoid touching
   50+ `_StoreProxy` method signatures.
+
+### 2026-05-17 — Gate Round 1
+
+Gate result: BLOCKED on first dispatch (1 critical + 3 significant
++ 3 observations). Critic identified an absent Decision Rationale,
+a Phase 1 spike criterion missing its control arm, a stale
+"four" None-paths count contradicting the corrected Technical
+Design, and an empty Finalization Gate on a structurally
+significant RDR.
+
+Single-pass remediation:
+
+- C1: §Decision Rationale rewritten with three substantive
+  paragraphs (why contextvars over per-log-site injection; why
+  not OpenTelemetry now + re-evaluate trigger; why three
+  None-paths + typed exceptions over a unified return code).
+- S1: §Phase 1 test plan now specifies positive AND negative
+  control arms — both must pass; ordering invariant (bind
+  before copy_context) gets its own assertion.
+- S2: stale "four" at line 210 corrected to "three" + the three
+  event names spelled out in the Approach paragraph for
+  consistency with §Technical Design.
+- S3: §Finalization Gate filled — Contradiction Check,
+  Assumption Verification + API Verification table, Scope
+  Verification, Cross-Cutting Concerns (Versioning, Build tool,
+  Licensing, Deployment model, IDE, Incremental adoption,
+  Secret/credential, Memory management), Proportionality.
+- O1: §Phase 5 changed from conditional ("out of scope if
+  Phases 1-4 prove sufficient") to explicitly DEFERRED to a
+  follow-on bead/RDR.
+- O2: stale "RDR-117 / M-2 protocol-extract" reference replaced
+  with a one-liner explaining there is no upstream RDR; helper
+  is inline in `t2_daemon.py` until a protocol-extract RDR
+  lands.
+- O3: 8-of-9 `__name__` housekeeping removed from Phase 1
+  scope; called out as a separate housekeeping-tagged bead so
+  the correlation-ID change is not conflated with unrelated
+  logger-style cleanup.
+
+Cross-RDR P7 check (RDR-112) ran clean in Round 1 and does not
+need re-verification in Round 2 unless the new Decision
+Rationale introduces a fresh design claim (it does not).
