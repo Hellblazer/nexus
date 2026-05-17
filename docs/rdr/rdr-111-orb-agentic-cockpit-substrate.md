@@ -2,16 +2,19 @@
 title: "The ORB: Observable Relay Bus — Hook Projection, Bindings, and C2 Cockpit Substrate"
 id: RDR-111
 type: Architecture
-status: accepted
+status: closed
+close_reason: implemented
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-11
 accepted_date: 2026-05-13
+closed_date: 2026-05-17
 related_issues: []
 related_rdrs: [RDR-105, RDR-110, RDR-112, RDR-113]
 related_tests: []
-implementation_notes: ""
+implementation_notes: "Shipped via epic nexus-429m (20/24 children closed 2026-05-17; 3 P4 leaves deferred for consumer-driven reactivation, 1 closed as superseded). Substrate landed through deep-review umbrellas nexus-g7yy + nexus-hp9f and close-out commit 3aa0e9fe. Phase 4 connection-manifest consumers are RDR-author-declared deferrals per line 1104. Post-mortem: docs/rdr/post-mortem/111-orb-agentic-cockpit-substrate.md."
+epic_bead: nexus-429m
 ---
 
 # RDR-111: The ORB: Observable Relay Bus — Hook Projection, Bindings, and C2 Cockpit Substrate
