@@ -182,6 +182,30 @@ Why this is a spike and not adoption:
 
 Run instructions are in the script's docstring. The script is gated behind `--collection` and reads from existing T3; it does not modify state.
 
+### First run — 2026-05-17, RDR corpus
+
+| Pipeline | recall@10 | MRR@10 | latency | index floats |
+|---|---|---|---|---|
+| voyage-context-3 cosine | **0.8000** | 0.5404 | 160 ms | 204,800 |
+| ColBERT `colbertv2.0` | 0.6000 | **0.5692** | 15 ms | 3,478,784 (17×) |
+| Delta | **−20.0 pp** | +0.029 | — | 17× |
+
+Repro:
+```
+NX_STORAGE_MODE=direct uv run python scripts/colbert_recall_spike.py \
+  --collection rdr__1-1__voyage-context-3__v1 \
+  --sample-size 200 --n-queries 50
+```
+
+Threshold not met. **Rejected on RDR corpus.** Caveats:
+
+- Synthetic queries are salient n-grams extracted verbatim from chunk text, biasing toward exact-string match, which favours single-vector cosine over late interaction.
+- `colbertv2.0` is a generic English ColBERT, not domain-tuned for RDR prose.
+- 200 chunks / 50 queries is a small sample; baseline recall@10 = 0.80 leaves thin headroom for improvement.
+- MRR@10 is marginally higher for ColBERT, suggesting better ranking when a hit lands, but the hit rate itself is lower.
+
+A second data point on `code__nexus*` may be worth running because vocabulary mismatch is higher in code than in RDR prose. Lower priority than the §5c VL-augmentation P0 spike.
+
 ## 7. Cross-links with sibling proposals
 
 - **Beyond Similarity Search** (`beyond-similarity-search-application.md`): the retrieval layer's split-tier consistency problem. Late interaction is orthogonal — it changes *what* is retrieved, not *where* the manifest authority lives.

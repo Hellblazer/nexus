@@ -226,13 +226,15 @@ def run_voyage_baseline(
     query_strs = [q for q, _ in queries]
     relevant_ids = [cid for _, cid in queries]
     t0 = time.perf_counter()
-    # voyage-context-3 uses contextualized chunk embeddings; for query
-    # embedding we call .embed with model=voyage-context-3 and
-    # input_type="query". Matches the indexer's contract.
-    resp = client.embed(
-        query_strs, model="voyage-context-3", input_type="query",
-    )
-    query_embeds = resp.embeddings
+    # voyage-context-3 uses the contextualized_embed endpoint; queries
+    # go in as one-text-per-inner-list with input_type="query".
+    # Matches the indexer's contract (nexus/db/t3.py::_cce_embed).
+    query_embeds: list[list[float]] = []
+    for q in query_strs:
+        resp = client.contextualized_embed(
+            inputs=[[q]], model="voyage-context-3", input_type="query",
+        )
+        query_embeds.append(resp.results[0].embeddings[0])
     embed_elapsed = time.perf_counter() - t0
 
     hits = 0
