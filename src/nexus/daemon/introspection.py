@@ -46,7 +46,14 @@ _PEEK_MAX: int = QUOTAS.MAX_QUERY_RESULTS  # 300
 #: Hard cap for ``exec_raw`` result rows. Above this the daemon raises rather
 #: than materialising the result set into a Python list. Admin-only op but a
 #: misbehaving caller should not be able to crash the daemon on a large table.
-_EXEC_RAW_MAX_ROWS: int = 50_000
+#:
+#: nexus-3tl3.4 (SR-4, 2026-05-17): tightened from 50_000 -> 10_000 so the
+#: encoded JSON response fits comfortably inside the 1 MiB wire-frame cap
+#: (nexus-ex4r, ``t2_daemon._MAX_FRAME_BYTES``). Each row is typically
+#: 50-200 bytes JSON-encoded so 10k rows lands at <2 MiB worst case and
+#: < 1 MiB in the typical case. Paged export remains the route for
+#: legitimate large-result needs (``export`` already streams).
+_EXEC_RAW_MAX_ROWS: int = 10_000
 
 
 class IntrospectionService:

@@ -6,6 +6,46 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security (360° remediation Bundle SR, nexus-3tl3)
+
+Four security-class findings from the 2026-05-17 360° code review,
+fixed under the same-day remediation umbrella `nexus-ku5k`:
+
+- **SR-1 (CRITICAL): Path traversal in binding_create / binding_delete
+  MCP tools** (nexus-3tl3.1). `bindings_crud._profile_path` previously
+  joined `profile` directly into the target dir with zero validation,
+  so `profile="../malicious"` or `profile="/etc/passwd"` escaped the
+  profiles dir. Combined with the watcher's `kind: python` action
+  dispatch, a misbehaving MCP-capable agent could plant arbitrary
+  code execution at any user-writable `.yml` path. Fixed by validating
+  `profile` against `^[A-Za-z0-9][A-Za-z0-9_-]*$` before constructing
+  the path. 18 parametrised tests cover the rejection cases plus a
+  regression guard for valid names.
+- **SR-2: blocking_take timeout cap not enforced daemon-side**
+  (nexus-3tl3.2). The 30s `InvalidTimeoutError` cap only fired for
+  `api.take(block=True)`; the daemon's `blocking_take` loop called
+  `api.take(block=False)` so a same-UID client could pass
+  `timeout_seconds=99999` and hold a thread-pool worker + read-only
+  SQLite connection indefinitely. Fixed by raising
+  `InvalidTimeoutError` in `TuplespaceService.blocking_take` when
+  `timeout_seconds > 30`.
+- **SR-3: `_unlink_discovery` exception scope** (nexus-3tl3.3). The
+  docstring promised "never raises", but Step 1's `except OSError`
+  did not catch `sqlite3.OperationalError` raised transitively via
+  `_discovery_payload() -> registry_store.digest()`. Widened to
+  `except Exception` with `exc_type` logging so the contract holds.
+- **SR-4: exec_raw row cap conflicts with 1 MiB frame cap**
+  (nexus-3tl3.4). `_EXEC_RAW_MAX_ROWS = 50_000` would generate JSON
+  responses well above the new 1 MiB frame cap (nexus-ex4r); the
+  daemon would silently `ProtocolError` on large legitimate
+  introspection responses. Tightened to 10_000 (typical row width
+  50-200 bytes encodes to <2 MiB worst case, <1 MiB typical).
+  Paged `export` remains the route for legitimate bulk pulls.
+
+Tests: 24 new cases in `tests/daemon/test_360_remediation_sr.py`.
+Regression on impacted surfaces (bindings CRUD + blocking_take +
+introspection + daemon startup hardening): 79/79 PASS.
+
 ### Added (RDR-110 P3.1, nexus-ry0v): client-side block=True enablement
 
 Wires `T2Client.tuplespace.take(block=True, ...)` to dispatch to the

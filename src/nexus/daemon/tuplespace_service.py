@@ -227,6 +227,15 @@ class TuplespaceService:
         t_dict, claim_id = result
         return {"tuple": t_dict, "claim_id": claim_id}
 
+    # nexus-3tl3.2 (SR-2): timeout_seconds is capped at 30 s to match
+    # the api.take(block=True) contract documented in
+    # nexus.tuplespace.api.InvalidTimeoutError. Without this cap, a
+    # same-UID client could call blocking_take(timeout_seconds=99999)
+    # and hold a thread-pool worker + read-only SQLite connection for
+    # the requested duration; ~9 such connections would starve the
+    # dispatcher (RDR-114 §A1, post-cutover review 2026-05-17).
+    _BLOCKING_TAKE_MAX_TIMEOUT_S: float = 30.0
+
     def blocking_take(
         self,
         *,
@@ -263,6 +272,23 @@ class TuplespaceService:
             ``{"tuple": <dict>, "claim_id": <str>}`` on success, or
             ``None`` when the deadline elapses with no candidate.
         """
+        # nexus-3tl3.2 (SR-2): enforce the same 30 s cap that
+        # api.take(block=True) advertises via InvalidTimeoutError.
+        # Without this gate the polling loop would honour any caller-
+        # supplied timeout, including absurd values that starve the
+        # daemon's thread-pool.
+        from nexus.tuplespace.api import InvalidTimeoutError  # noqa: PLC0415
+
+        if (
+            timeout_seconds is not None
+            and float(timeout_seconds) > self._BLOCKING_TAKE_MAX_TIMEOUT_S
+        ):
+            raise InvalidTimeoutError(
+                f"timeout_seconds={timeout_seconds} exceeds the daemon's "
+                f"blocking_take cap of {self._BLOCKING_TAKE_MAX_TIMEOUT_S} s "
+                "(MCP transport budget, RDR-110 §Technical Design)"
+            )
+
         # api.take(block=True) raises BlockingNotSupported, so we drive
         # the poll loop ourselves and call api.take(block=False) inside.
         deadline = time.perf_counter() + max(0.0, float(timeout_seconds))

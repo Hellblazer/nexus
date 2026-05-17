@@ -1536,16 +1536,24 @@ class T2Daemon:
         # Step 1: stamp a shutdown marker. Best-effort: failure to write the
         # marker (e.g. EROFS, permission denied) is logged but does not
         # block the unlink attempt.
+        #
+        # nexus-3tl3.3 (SR-3, 2026-05-17): catch ``Exception`` not just
+        # ``OSError``. ``_discovery_payload()`` reaches into
+        # ``self._registry_store.digest()`` which calls ``sqlite3.connect``
+        # internally; ``sqlite3.OperationalError`` is NOT an OSError
+        # subclass, so the prior catch let it propagate and violated the
+        # "never raises" contract advertised in this docstring.
         try:
             marker_payload = self._discovery_payload()
             marker_payload["status"] = "shutting_down"
             marker_payload["shutdown_at"] = datetime.now(timezone.utc).isoformat()
             self._discovery_path.write_text(json.dumps(marker_payload))
-        except OSError as exc:
+        except Exception as exc:
             _log.warning(
                 "discovery_marker_write_failed",
                 path=str(self._discovery_path),
                 exc=str(exc),
+                exc_type=type(exc).__qualname__,
             )
 
         # Step 2: unlink with one retry. NFS-style transient errors usually

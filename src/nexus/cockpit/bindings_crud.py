@@ -46,8 +46,38 @@ def _resolve_dir(profiles_dir: Optional[Path]) -> Path:
     return target
 
 
+# nexus-3tl3.1 (SR-1): allowlist for binding profile names. Anything
+# outside this charset is rejected by ``_profile_path`` so an
+# attacker-controlled ``profile=\"../foo\"`` or ``profile=\"/etc/passwd\"``
+# cannot escape ``profiles_dir`` to plant a YAML at an arbitrary
+# user-writable path. Same-UID threat model: a misbehaving MCP-capable
+# agent could otherwise drop a ``kind: python`` action callable into
+# the watcher's scan roots and get arbitrary code execution on the
+# next event tick.
+import re as _re
+
+_VALID_PROFILE_NAME_RE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def _validate_profile_name(profile: str) -> None:
+    """Raise ``ValueError`` for any profile name that escapes the dir."""
+    if not isinstance(profile, str) or not _VALID_PROFILE_NAME_RE.fullmatch(
+        profile
+    ):
+        raise ValueError(
+            f"invalid binding profile name {profile!r}; must match "
+            f"^[A-Za-z0-9][A-Za-z0-9_-]*$ (no path separators, no "
+            "traversal sequences, no whitespace, no shell metacharacters)"
+        )
+
+
 def _profile_path(profiles_dir: Path, profile: str) -> Path:
-    """Return the canonical YAML path for ``profile`` in ``profiles_dir``."""
+    """Return the canonical YAML path for ``profile`` in ``profiles_dir``.
+
+    Raises ``ValueError`` if ``profile`` contains anything outside the
+    allowlist (path separators, parent-dir tokens, shell meta, etc.).
+    """
+    _validate_profile_name(profile)
     return profiles_dir / f"{profile}.yml"
 
 
