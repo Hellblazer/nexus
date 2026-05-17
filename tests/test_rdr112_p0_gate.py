@@ -91,12 +91,15 @@ def test_taxonomy_cmd_t2_ctx_delegates_to_mcp_infra(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The shim must route through ``mcp_infra.t2_ctx`` so Phase-1's
-    daemon swap is honoured.
+    daemon swap is honoured. nexus-qw21: pin direct mode so the
+    resolver path is exercised; daemon-mode bypass is covered by the
+    sibling test below.
     """
     from nexus import mcp_infra
     from nexus.commands import taxonomy_cmd
 
     db_path = tmp_path / "memory.db"
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
     monkeypatch.setattr(
         "nexus.commands.taxonomy_cmd._default_db_path", lambda: db_path,
     )
@@ -111,6 +114,42 @@ def test_taxonomy_cmd_t2_ctx_delegates_to_mcp_infra(
     call_kwargs = spy.call_args.kwargs
     assert "_path_resolver" in call_kwargs
     assert call_kwargs["_path_resolver"] is taxonomy_cmd._default_db_path
+
+
+def test_taxonomy_cmd_t2_ctx_skips_path_resolver_under_daemon_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-qw21: under daemon mode the daemon owns the path. The
+    shim must call ``mcp_infra.t2_ctx()`` with no ``_path_resolver``
+    kwarg; passing one raises ``RuntimeError`` in ``mcp_infra``.
+    """
+    from nexus import mcp_infra
+    from nexus.commands import taxonomy_cmd
+
+    monkeypatch.setenv("NX_STORAGE_MODE", "daemon")
+
+    # Patch t2_ctx to avoid actually opening a daemon RPC; just observe
+    # the call shape. Returning a no-op context manager keeps the
+    # ``with`` body unreachable but the call itself is what we assert.
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _fake_t2_ctx(**kwargs):
+        # Capture and re-raise the guard if the wrapper accidentally
+        # forwards a resolver — this is the regression we are guarding.
+        if "_path_resolver" in kwargs and kwargs["_path_resolver"] is not None:
+            raise RuntimeError(
+                "regression: _t2_ctx forwarded _path_resolver under daemon mode"
+            )
+        yield None
+
+    with patch.object(mcp_infra, "t2_ctx", side_effect=_fake_t2_ctx) as spy:
+        with taxonomy_cmd._t2_ctx():
+            pass
+
+    spy.assert_called_once()
+    call_kwargs = spy.call_args.kwargs
+    assert "_path_resolver" not in call_kwargs or call_kwargs["_path_resolver"] is None
 
 
 def test_taxonomy_cmd_t2_ctx_respects_default_db_path_patch(

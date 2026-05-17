@@ -21,8 +21,17 @@ def _t2_ctx():
     long-standing test pattern of patching
     ``nexus.commands.taxonomy_cmd._default_db_path`` via the
     ``_path_resolver`` kwarg.
+
+    nexus-qw21: under daemon mode the daemon owns the path; passing
+    ``_path_resolver`` raises in ``mcp_infra.t2_ctx``. Gate the
+    resolver on direct mode so daemon callers go through the RPC
+    shim with no path override, while the test-patch seam still
+    fires under direct mode (where tests run).
     """
+    from nexus.db import is_daemon_mode
     from nexus.mcp_infra import t2_ctx
+    if is_daemon_mode():
+        return t2_ctx()
     return t2_ctx(_path_resolver=_default_db_path)
 
 if TYPE_CHECKING:
