@@ -105,7 +105,7 @@ The text-only ColBERT spike (§6) is unchanged in scope — it's about late-inte
 | Item | Status | Spike scope |
 |---|---|---|
 | ColPali retrieval on Apple Silicon (no generator) | **Reconsider** | Index a 20-PDF subset with ColPali via transformers+MPS. Measure: per-page index time, query latency, recall@10 vs Voyage on figure-heavy queries. File a bead if index time ≤ 60s/page and recall@10 lift on figure-bearing queries ≥ 10pp. |
-| Figure-only embeddings via SigLIP | **New, deferred** | Use Docling's figure bounding boxes (already extracted); embed via `sentence-transformers/clip-ViT-B-32` or SigLIP base; store as a parallel index per PDF. Test on the same figure-heavy query set. Lighter footprint (~400 MB model, CPU OK). |
+| Figure-only embeddings via SigLIP | **Spike PASSED — bead filed (nexus-8siy)** | Caption-to-figure self-retrieval on M3DocRAG paper (7 figures, 5 with captions): recall@10 = 1.0000, MRR@10 = 0.85 on `google/siglip-base-patch16-224` (768-dim, MPS). 12 s end-to-end extract+embed per paper. Threshold ≥ 0.7 cleanly met; nexus-8siy filed with the cross-paper validation requirement before production adoption. |
 
 ## 5c. Qwen coprocessor as a local VL backend — REVISED 2026-05-17
 
@@ -125,7 +125,7 @@ The retrieval-only spikes (§5b) remain valid but **drop in priority** relative 
 |---|---|---|
 | **NEW P0** | **VL-augmented chunk enrichment at ingest** | Closes M3DocRAG §5.1's visual-evidence gap by turning visual signal into text. No retrieval-architecture change. Leverages existing qwentescence backend. Smallest blast radius of any spike here. |
 | P1 | Text-only ColBERT (§6) | Independent of VL; addresses vocabulary mismatch on text corpora. Scaffold shipped. |
-| P2 | Figure-only SigLIP (§5b) | Lighter than ColPali; an alternative to VL-augmentation IF the VL endpoint is unavailable. Lower priority because VL gives richer text than image embeddings give vector matches. |
+| P2 | Figure-only SigLIP (§5b) | Lighter than ColPali; an alternative to VL-augmentation IF the VL endpoint is unavailable. Lower priority because VL gives richer text than image embeddings give vector matches. **Spike PASSED 2026-05-17; bead nexus-8siy filed.** |
 | P3 | ColPali on Apple Silicon (§5b) | Heaviest spike; only relevant if both VL-augmentation and SigLIP underperform on figure-heavy queries. |
 
 ### NEW P0 spike scope
