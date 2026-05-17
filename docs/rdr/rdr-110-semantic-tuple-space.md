@@ -2,16 +2,19 @@
 title: "Semantic Tuple Space: Unified Coordination Primitive over ChromaDB + SQLite"
 id: RDR-110
 type: Architecture
-status: accepted
+status: closed
+close_reason: implemented
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-09
 accepted_date: 2026-05-09
+closed_date: 2026-05-17
 related_issues: []
 related_rdrs: [RDR-004, RDR-041, RDR-077, RDR-078, RDR-079, RDR-087, RDR-092, RDR-105, RDR-106, RDR-107, RDR-108, RDR-112, RDR-113]
 related_tests: []
-implementation_notes: ""
+implementation_notes: "Shipped via epic nexus-qg7t (21/21 children closed 2026-05-17). Post-mortem: docs/rdr/post-mortem/110-semantic-tuple-space.md. RDR Phase 5 (v2 wrappers) and Phase 6 (deprecation) explicitly deferred to separate RDR per §Implementation Plan."
+epic_bead: nexus-qg7t
 ---
 
 # RDR-110: Semantic Tuple Space: Unified Coordination Primitive over ChromaDB + SQLite
