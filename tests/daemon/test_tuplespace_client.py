@@ -261,7 +261,9 @@ class TestTuplespaceRoundTrip:
         result = client.tuplespace.ack(
             claim_id=wrapped["claim_id"], claimant="agent-A"
         )
-        assert result == "ok"
+        # nexus-6m9i (third 360° ERGO E-2): service.ack now returns None
+        # to match api.ack so direct↔daemon mode parity holds.
+        assert result is None
 
     def test_nack_releases_claim(self, daemon_and_client) -> None:
         _daemon, client = daemon_and_client
@@ -279,7 +281,8 @@ class TestTuplespaceRoundTrip:
         result = client.tuplespace.nack(
             claim_id=wrapped["claim_id"], claimant="agent-A"
         )
-        assert result == "ok"
+        # nexus-6m9i (third 360° ERGO E-2): service.nack now returns None.
+        assert result is None
         # After nack the same claimant can re-take
         retaken = client.tuplespace.take(
             subspace="tasks/nexus",

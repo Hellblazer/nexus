@@ -265,6 +265,11 @@ def open_tuples_db(path: Path) -> sqlite3.Connection:
     # the daemon and direct-mode tuplespace consumers.
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA journal_mode=WAL")
+    # nexus-6m9i (third 360° INTEG C-3): busy_timeout 5s so a brief
+    # writer-lock contention burst (3 in-process writers: service +
+    # binding-watcher derived-out + retention sweep DELETE) does not
+    # surface as SQLITE_BUSY at the caller.
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.commit()
     apply_tuples_schema(conn)
     _log.info("tuples_db_opened", path=str(path))

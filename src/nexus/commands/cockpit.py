@@ -341,9 +341,21 @@ def _render_recent_events(*, limit: int) -> RenderedPanel:
 
 def _render_active_bindings() -> RenderedPanel:
     from nexus.cockpit.panels.active_bindings import fetch_active_bindings
+    from nexus.cockpit.bindings import (
+        default_profiles_dir,
+        user_profiles_dir,
+    )
 
-    profiles_dir = _cockpit_profiles_dir()
-    result = fetch_active_bindings(profiles_dir=profiles_dir)
+    # nexus-6m9i (third 360° INTEG C-2): walk BOTH the builtin and
+    # user dirs so operator-CRUD'd bindings render alongside the
+    # shipped builtins. Matches the daemon watcher's loading order.
+    dirs: list[Path] = [default_profiles_dir(), user_profiles_dir()]
+    override = os.environ.get("NX_COCKPIT_PROFILES_DIR")
+    if override:
+        # Backward-compat: env override REPLACES the default pair so
+        # tests pinning a single dir still work.
+        dirs = [Path(override)]
+    result = fetch_active_bindings(profiles_dirs=dirs)
 
     if not result.rows and not result.errors:
         return RenderedPanel(title="Active Bindings", lines=[])

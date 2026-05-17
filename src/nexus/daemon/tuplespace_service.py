@@ -177,6 +177,10 @@ class TuplespaceService:
             check_same_thread=False,
         )
         self._conn.row_factory = sqlite3.Row
+        # nexus-6m9i (third 360° INTEG C-3): busy_timeout so brief
+        # writer-lock contention with the retention sweep / binding
+        # watcher does not surface as SQLITE_BUSY at the RPC layer.
+        self._conn.execute("PRAGMA busy_timeout=5000")
         # Serialise SQL execution across executor threads. Single shared
         # connection + threading.Lock is the standard CPython pattern for
         # a sync-API service called from an asyncio thread-pool.

@@ -301,6 +301,15 @@ _ADMIN_OPS: frozenset[str] = frozenset({
 #:
 #: The integrity check fails loud at startup if any name here ends up in the
 #: dispatch table without also being in ``_ADMIN_OPS``.
+#: nexus-6m9i (third 360° PERF C-2): per-transport concurrent-handler
+#: cap. asyncio.start_server has no built-in connection limit; this
+#: bound prevents a misbehaving client (or runaway agent fanout) from
+#: exhausting the executor / fd budget. Comfortably above the
+#: documented HR-1 budget (16 blocking_take + 32 non-blocking RPC
+#: headroom = 48) with margin for slow-handler shutdowns.
+_MAX_CONCURRENT_HANDLERS: int = 256
+
+
 _KNOWN_ADMIN_NAMES: frozenset[str] = frozenset({
     "admin_ping",
     "subspace_add",
@@ -1083,6 +1092,39 @@ class T2Daemon:
         async def _handler(
             reader: asyncio.StreamReader, writer: asyncio.StreamWriter
         ) -> None:
+            # nexus-6m9i (third 360° PERF C-2): cap concurrent
+            # connections. asyncio.start_server has no built-in conn
+            # limit, so a misbehaving client (or runaway agent fanout)
+            # could open thousands of sockets and exhaust the executor
+            # / fd budget. Refuse early with a clear error frame
+            # rather than queueing silently.
+            if len(self._active_handlers) >= _MAX_CONCURRENT_HANDLERS:
+                _log.warning(
+                    "daemon_connection_refused_at_cap",
+                    active=len(self._active_handlers),
+                    cap=_MAX_CONCURRENT_HANDLERS,
+                )
+                try:
+                    write_frame(
+                        writer,
+                        {
+                            "error": (
+                                f"daemon's concurrent connection cap "
+                                f"({_MAX_CONCURRENT_HANDLERS}) reached; "
+                                "retry after a brief backoff"
+                            )
+                        },
+                    )
+                    await writer.drain()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+                finally:
+                    try:
+                        writer.close()
+                        await writer.wait_closed()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        pass
+                return
             task = asyncio.current_task()
             if task is not None:
                 self._active_handlers.add(task)
@@ -1548,6 +1590,9 @@ class T2Daemon:
         # main writer for long (WAL allows concurrent readers; the DELETE
         # acquires the writer lock briefly).
         conn = sqlite3.connect(str(self._tuples_db_path))
+        # nexus-6m9i (third 360° INTEG C-3): busy_timeout so brief
+        # writer-lock contention does not surface as SQLITE_BUSY.
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             deleted = prune_expired_tuples(conn, index=index)
             # nexus-anjo: also prune the events table so its monotonic
