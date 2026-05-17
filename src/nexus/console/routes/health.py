@@ -2,6 +2,7 @@
 """Panel 2: Sessions & Health — system health dashboard."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -189,7 +190,9 @@ def _age_str(seconds: int) -> str:
 @router.get("/health")
 async def health_index(request: Request, scope: str = "project"):
     """Panel 2: Sessions & Health — synchronous full render."""
-    data = _collect_health_data()
+    # nexus-71kc (S360-async S2): dispatch the sync collector off the
+    # event loop so a slow sqlite probe does not block other routes.
+    data = await asyncio.to_thread(_collect_health_data)
     data["age_str"] = _age_str
     templates = request.app.state.templates
     return templates.TemplateResponse(
@@ -202,7 +205,9 @@ async def health_index(request: Request, scope: str = "project"):
 @router.get("/health/refresh")
 async def health_refresh(request: Request, scope: str = "project"):
     """Manual refresh — returns HTMX partial."""
-    data = _collect_health_data()
+    # nexus-71kc (S360-async S2): dispatch the sync collector off the
+    # event loop so a slow sqlite probe does not block other routes.
+    data = await asyncio.to_thread(_collect_health_data)
     data["age_str"] = _age_str
     templates = request.app.state.templates
     return templates.TemplateResponse(

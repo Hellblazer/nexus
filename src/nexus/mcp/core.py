@@ -351,19 +351,25 @@ async def _liveness_heartbeat_task(stop: Any) -> None:
     machine = socket.gethostname()
     user_id = _os2.environ.get("USER", _os2.environ.get("LOGNAME", str(pid)))
 
+    def _beat_sync() -> None:
+        # nexus-71kc (S360-async S1): sqlite work must run off the loop
+        # thread; called via asyncio.to_thread below so the heartbeat's
+        # 30 s cadence never pauses MCP route handling.
+        with _t2_ctx() as _db:
+            _db.memory.liveness_upsert(
+                pid=pid,
+                machine=machine,
+                user_id=user_id,
+                session=_os2.environ.get("NX_SESSION_ID"),
+                project=_os2.environ.get("NX_PROJECT"),
+                focus=_os2.environ.get("NX_FOCUS"),
+                activity=_os2.environ.get("NX_ACTIVITY"),
+            )
+            _db.memory.liveness_sweep(max_age_seconds=_LIVENESS_MAX_AGE_SECONDS)
+
     async def _beat() -> None:
         try:
-            with _t2_ctx() as _db:
-                _db.memory.liveness_upsert(
-                    pid=pid,
-                    machine=machine,
-                    user_id=user_id,
-                    session=_os2.environ.get("NX_SESSION_ID"),
-                    project=_os2.environ.get("NX_PROJECT"),
-                    focus=_os2.environ.get("NX_FOCUS"),
-                    activity=_os2.environ.get("NX_ACTIVITY"),
-                )
-                _db.memory.liveness_sweep(max_age_seconds=_LIVENESS_MAX_AGE_SECONDS)
+            await asyncio.to_thread(_beat_sync)
         except Exception as _hb_exc:
             _hb_log.debug(
                 "liveness_heartbeat_error", error=str(_hb_exc),
@@ -419,9 +425,15 @@ async def _combined_lifespan(_app: Any):
             # MemoryStore.liveness_delete method so the call respects the
             # store's lock and stays compatible with future daemon-mode
             # routing (nexus-pce1.6) — no raw `.conn` reach-throughs.
-            try:
+            def _liveness_delete_sync() -> None:
+                # nexus-71kc (S360-async S1): sqlite on the lifespan-exit
+                # path must dispatch via to_thread for the same reason as
+                # the heartbeat itself.
                 with _t2_ctx() as _db:
                     _db.memory.liveness_delete(pid=pid, machine=machine)
+
+            try:
+                await asyncio.to_thread(_liveness_delete_sync)
             except Exception as _del_exc:
                 _cl_log.debug(
                     "liveness_delete_on_shutdown_error",

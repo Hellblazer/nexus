@@ -807,6 +807,24 @@ class T2Daemon:
         self._startup_sweep_future = loop.run_in_executor(
             None, self._run_retention_sweep_sync
         )
+        # nexus-71kc (S360-async S3): attach a done-callback so a sweep
+        # exception surfaces in the operator log immediately rather
+        # than dying silently at Future-GC time. ``stop()`` also awaits
+        # the future before closing the SQLite connection (nexus-abhy
+        # S360-conc S2 dedup) to prevent the DELETE from racing
+        # conn.close().
+        def _log_startup_sweep_result(fut: Any) -> None:
+            exc = fut.exception() if not fut.cancelled() else None
+            if exc is not None:
+                _log.warning(
+                    "startup_sweep_failed",
+                    exc=str(exc),
+                    exc_type=type(exc).__qualname__,
+                )
+
+        self._startup_sweep_future.add_done_callback(
+            _log_startup_sweep_result
+        )
         self._retention_task = asyncio.create_task(self._retention_loop())
 
         # nexus-9eiw (RDR-111 §Phase 2 Step 6): start the binding watcher
@@ -840,6 +858,27 @@ class T2Daemon:
             except (asyncio.CancelledError, Exception):
                 pass
             self._retention_task = None
+
+        # nexus-abhy / nexus-71kc (S360-conc S2 + S360-async S3):
+        # drain the startup retention sweep so a still-running DELETE
+        # does not race the SQLite close below. Bounded so a wedged
+        # sweep cannot stall shutdown forever; the done-callback
+        # already wired during start() logs any failure.
+        if self._startup_sweep_future is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.wrap_future(self._startup_sweep_future),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                _log.warning("startup_sweep_timeout_on_stop")
+            except Exception as exc:
+                _log.warning(
+                    "startup_sweep_failed_on_stop",
+                    exc=str(exc),
+                    exc_type=type(exc).__qualname__,
+                )
+            self._startup_sweep_future = None
 
         # nexus-9eiw: signal the binding watcher to exit and close its
         # SQLite connections. Bounded by the watcher's own stop_timeout.

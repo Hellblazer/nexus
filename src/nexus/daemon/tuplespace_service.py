@@ -477,25 +477,41 @@ class TuplespaceService:
             # the poll loop ourselves and call api.take(block=False) inside.
             deadline = time.perf_counter() + max(0.0, float(timeout_seconds))
             while True:
+                # nexus-abhy (S360-conc S1): bail out promptly when the
+                # service is shutting down so executor threads do not
+                # keep polling for the remainder of their 30 s budget.
+                # ``close()`` sets both ``_wake_stop`` and ``_wake_event``
+                # so an in-flight wait wakes too.
+                if self._wake_stop.is_set():
+                    return None
                 # nexus-z4m7 (CR-3): clear the wake event BEFORE the
                 # take attempt so any commit observed after this point
                 # is guaranteed to fire a fresh wake. This is the
                 # canonical edge-triggered Event pattern; a wake that
                 # races the take is caught by the wait() below.
                 self._wake_event.clear()
-                with self._lock:
-                    result = ts_api.take(
-                        conn=self._conn,
-                        index=self._index,
-                        registry=self._registry,
-                        subspace=subspace,
-                        query=query,
-                        claimant=claimant,
-                        where=where,
-                        floor=floor,
-                        lease_seconds=lease_seconds,
-                        block=False,
-                    )
+                try:
+                    with self._lock:
+                        result = ts_api.take(
+                            conn=self._conn,
+                            index=self._index,
+                            registry=self._registry,
+                            subspace=subspace,
+                            query=query,
+                            claimant=claimant,
+                            where=where,
+                            floor=floor,
+                            lease_seconds=lease_seconds,
+                            block=False,
+                        )
+                except sqlite3.ProgrammingError:
+                    # nexus-abhy (S360-conc S1): the underlying conn was
+                    # closed beneath us (shutdown race). Treat as a
+                    # graceful timeout rather than surfacing the raw
+                    # sqlite error to the caller.
+                    if self._wake_stop.is_set():
+                        return None
+                    raise
                 if result is not None:
                     t_dict, claim_id = result
                     return {"tuple": t_dict, "claim_id": claim_id}
