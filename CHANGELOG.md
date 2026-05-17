@@ -6,6 +6,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Tests (RDR-111, nexus-2oa6: CA-3 read-latency spike at 10k/50k/100k)
+
+New spike test under `tests/tuplespace/spikes/test_ca_3_read_latency.py`
+characterising `ts_api.read()` latency at four scales (1k smoke +
+10k/50k/100k slow). Populates each scale via direct Chroma batch
+upsert + SQL `executemany` to bypass per-record `api.out` overhead so
+even the 100k setup completes in ~13 minutes (vs hours through
+`api.out`).
+
+Baseline captured on Apple M-series with ChromaDB EphemeralClient and
+the bundled ONNX MiniLM embedder:
+
+| N | p50 | p95 | p99 | max |
+|---|---|---|---|---|
+| 1,000 | 37.7ms | 39.5ms | 41.0ms | 42.0ms |
+| 10,000 | 50.2ms | 52.1ms | 53.7ms | 55.0ms |
+| 50,000 | 111.8ms | 116.5ms | 126.3ms | 126.5ms |
+| 100,000 | 225.6ms | 234.6ms | 243.2ms | 275.6ms |
+
+Scaling pattern is roughly sub-linear (Chroma HNSW gives log-N-ish
+growth). 100x more tuples (1k → 100k) yields only ~6x p99 growth.
+The 1k smoke runs in the default suite; the 10k/50k/100k cases are
+gated behind `@pytest.mark.slow` (deselected by `pyproject.toml`).
+Conservative p99 ceilings (~10x observed baseline) catch a
+full-scan regression without flaking on hardware variance.
+
 ### Added (RDR-111, nexus-7lb9: Bindings CRUD MCP tools)
 
 Four new MCP tools and a backing helper module make cockpit
