@@ -22,9 +22,13 @@ eligible row (claim_state already set) and returns nothing.
 per RDR-110 design note.  The CAS pattern conflates same-claimant retake with
 foreign-claimant contention, so same-claimant retake is handled separately.
 
-**block=True is feature-flagged OFF in Phase 1** (overlayfs unsafe, RDR-112
-§A2).  The parameter is accepted but raises ``BlockingNotSupported`` in
-direct-mode.  The daemon-mode block path lands in Phase 3.
+**block=True is not supported in direct-mode.**  Direct-mode opens its
+own SQLite handle and cannot honour the single-writer guarantee that
+the blocking-take CAS needs.  Use daemon mode (set
+``NX_STORAGE_MODE=daemon``) and call ``T2Client.tuplespace.take(block=True, ...)`` or ``T2Client.tuplespace.blocking_take(...)`` —
+those route through the daemon's ``blocking_take`` RPC which polls
+``PRAGMA data_version`` on a dedicated wake thread (RDR-110 CA #5)
+and returns either a claim or ``None`` when the deadline elapses.
 
 **embed_from** validation happens on the first ``out`` against a subspace.
 Valid forms: ``"content"``, ``"match_text"``, or ``"dimensions:<key>"`` where
@@ -597,8 +601,10 @@ def take(
     """
     if block:
         raise BlockingNotSupported(
-            "block=True is not supported in Phase 1 direct-mode (RDR-112 §A2). "
-            "The daemon-mode block path lands in Phase 3."
+            "block=True is not supported in direct-mode. Set "
+            "NX_STORAGE_MODE=daemon and call T2Client.tuplespace.take("
+            "block=True, ...) or T2Client.tuplespace.blocking_take(...) — "
+            "those route through the daemon's blocking_take RPC."
         )
 
     if timeout_seconds is not None and timeout_seconds > 30:

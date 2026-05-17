@@ -176,7 +176,7 @@ semantics, retention); tuples carry content plus a dimensions map.
   claims with a lease; `ack` consumes; `nack` releases. Same-claimant
   re-takes during the active lease return the existing claim
   (idempotent retake, CA-1/CA-2).
-- **Two-store atomicity** (RDR-111 §nexus-qmrr): `out()` writes Chroma
+- **Two-store atomicity** (RDR-111 / nexus-qmrr): `out()` writes Chroma
   first, then commits SQLite. Invariant: SQLite presence implies
   Chroma presence. A failure in the reverse window leaves an orphan
   Chroma record that idempotent refire reclaims; the retention sweeper

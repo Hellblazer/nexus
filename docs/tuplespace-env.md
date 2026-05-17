@@ -83,5 +83,26 @@ the given seconds; `BD_TIMEOUT` caps `bd` calls. Defaults are 10 s and
 | `NX_TUPLESPACE_BUILTIN_DIR` | `nx/tuplespace/builtin/` | subspace YAML directory |
 | `NX_T1_ISOLATED` | unset | skip T1 chroma session spawn |
 | `NX_BRIDGE_DISABLE` | unset | disables the hook-to-tuple bridge |
+| `NX_BRIDGE_ALLOW_DIRECT_FALLBACK` | unset | RDR-114 escape hatch — when truthy AND daemon unavailable, hook bridge falls back to direct tuples.db write |
+| `NX_COCKPIT_BINDINGS_DISABLE` | unset | kills the daemon-side cockpit binding watcher; bindings YAML still loads but no actions fire |
 | `NX_HOOK_DEBUG` | `0` | session-start hook debug trace |
 | `NX_TIMEOUT` | `10` | `nx` subprocess timeout for the session hook |
+
+## NX_BRIDGE_ALLOW_DIRECT_FALLBACK
+
+RDR-114 operator escape hatch.  When the hook bridge cannot reach the
+daemon (UDS missing, daemon stopped, transient EOF) AND this variable
+is truthy, the bridge falls back to a direct tuples.db write rather
+than dropping the event.  Falsy / unset is the default — the bridge
+fails closed.
+
+Truthy tokens: `1`, `true`, `yes`, `on` (case-insensitive).
+
+## NX_COCKPIT_BINDINGS_DISABLE
+
+Disables the daemon-side binding watcher entirely.  Bindings YAML
+still loads (so `nx mcp binding_list` works), but no actions fire on
+events.  Useful for diagnosing whether a runaway binding is the cause
+of unexpected daemon load.
+
+Truthy tokens: `1`, `true`, `yes`, `on` (case-insensitive).

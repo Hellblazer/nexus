@@ -1023,7 +1023,7 @@ above conflates same-claimant retake with foreign-claimant
 contention. Documented; not in the pseudocode for clarity.
 
 **`data_version` polling thread** (`NX_STORAGE_MODE=direct` only):
-a single `_TupleSpaceWatcher` thread per `tuples.db` connection
+a single `DataVersionWatcher` (formerly `_TupleSpaceWatcher`) thread per `tuples.db` connection
 runs `PRAGMA data_version` every 1ms, fires `wake_event` on
 increment. Started at MCP lifespan start (per RDR-094), stopped
 at lifespan finally. CPU cost: one integer read per millisecond
@@ -1366,7 +1366,7 @@ Wire into `nx-mcp` as eight new MCP tools. `take` accepts
 `block`/`timeout_seconds` per RF-9.
 
 In the same step, add `src/nexus/tuplespace/watcher.py` —
-a `_TupleSpaceWatcher` thread per `tuples.db` connection that
+a `DataVersionWatcher` (formerly `_TupleSpaceWatcher`) thread per `tuples.db` connection that
 polls `PRAGMA data_version` every 1ms and fires a shared
 `threading.Event` (the `wake_event` referenced in the `take`
 algorithm) on any increment. Started at MCP lifespan start
@@ -1930,7 +1930,7 @@ surfaced three patterns that materially improve v1:
 3. Visibility timeout = lease (terminology equivalence noted).
 
 Implementation plan Step 4 expanded to include the
-`_TupleSpaceWatcher`. Step 5 sweep set extended with
+`DataVersionWatcher` (formerly `_TupleSpaceWatcher`). Step 5 sweep set extended with
 `sweep_claim_log`. References extended with honker reference.
 CA #1 status upgraded to Verified (source-search + production
 reference); new CA #6 added for `data_version` cost.
@@ -2143,7 +2143,7 @@ this revision (no design-surface change; record-keeping only):
 - **S** (significant): Technical Design `data_version` polling
   thread description (lines ~1025) and Implementation Plan
   Step 4 watcher description (lines ~1368) said the
-  `_TupleSpaceWatcher` runs in-process against `tuples.db` —
+  `DataVersionWatcher` (formerly `_TupleSpaceWatcher`) runs in-process against `tuples.db` —
   correct in `NX_STORAGE_MODE=direct`, but under
   `NX_STORAGE_MODE=daemon` (RDR-112) the watcher is
   daemon-internal and clients subscribe via the daemon's

@@ -22,8 +22,8 @@ The four-paragraph version is on the Tensegrity blog: [**How I actually use Nexu
 | **Search** | Semantic · keyword · hybrid · taxonomy-boosted · catalog-aware · plan-driven via `nx_answer`. Metadata filtering via `--where bib_year>=2024 --where chunk_type=table_page` and similar |
 | **Catalog** | Event-sourced (`events.jsonl` canonical, SQLite is a deterministic projection) · typed links (`cites`, `implements`, `supersedes`, …) · Tumbler addressing inspired by Ted Nelson's Xanadu |
 | **Decision tracking (RDR)** | Specification-before-code lifecycle: `create → research → gate → accept → close`, with post-mortems and a searchable history that surfaces during new design work |
-| **Claude Code plugin** | 13 specialized agents · 43 skills (RDR lifecycle, plan-centric retrieval, dev workflow) · 36 MCP tools across two servers · session hooks for cold-start context |
-| **CLI** | `nx` with 16 top-level verbs (`index`, `search`, `query`, `store`, `memory`, `scratch`, `catalog`, `taxonomy`, `enrich`, `doctor`, `upgrade`, …) |
+| **Claude Code plugin** | 14 specialized agents · 50 skills (RDR lifecycle, plan-centric retrieval, dev workflow) · 36 MCP tools across two servers · session hooks for cold-start context |
+| **CLI** | `nx` with 28 top-level verbs (`index`, `search`, `query`, `store`, `memory`, `scratch`, `catalog`, `taxonomy`, `enrich`, `doctor`, `upgrade`, `daemon`, `cockpit`, `tuplespace`, …) |
 | **Local-first** | Default install runs entirely on your machine, zero API keys (ONNX MiniLM + local ChromaDB). Voyage AI + ChromaDB Cloud are opt-in for higher-quality embeddings |
 | **License** | AGPL-3.0-or-later |
 
@@ -118,7 +118,7 @@ The `nx/` directory is a Claude Code plugin that gives agents access to everythi
 /plugin install nx@nexus-plugins
 ```
 
-The plugin provides 13 specialized agents, 43 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows, session hooks for automatic context initialization, and 36 MCP tools split across two focused servers: `nexus` (26 tools: search, store, memory, scratch, plans, 5 operator tools for structured extract/rank/compare/summarize/generate, plus 4 orchestration tools including `nx_answer` for plan-matched multi-step retrieval) and `nexus-catalog` (10 catalog tools: search, show, link, resolve, stats, etc.). The plan-centric retrieval layer (`nx_answer`) matches questions against a library of scenario templates, executes the matched plan, and records every run, so the library compounds with use. Agents search indexed code before proposing changes, check prior RDR decisions before designing new features, and coordinate through standard pipelines (plan → implement → review → test) with built-in quality gates.
+The plugin provides 14 specialized agents, 50 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows, session hooks for automatic context initialization, and 36 MCP tools split across two focused servers: `nexus` (26 tools: search, store, memory, scratch, plans, 5 operator tools for structured extract/rank/compare/summarize/generate, plus 4 orchestration tools including `nx_answer` for plan-matched multi-step retrieval) and `nexus-catalog` (10 catalog tools: search, show, link, resolve, stats, etc.). The plan-centric retrieval layer (`nx_answer`) matches questions against a library of scenario templates, executes the matched plan, and records every run, so the library compounds with use. Agents search indexed code before proposing changes, check prior RDR decisions before designing new features, and coordinate through standard pipelines (plan → implement → review → test) with built-in quality gates.
 
 The plugin integrates with [Beads](https://github.com/BeadsProject/beads) for task tracking. See [nx/README.md](https://github.com/Hellblazer/nexus/blob/main/nx/README.md) for the full plugin documentation.
 
@@ -190,7 +190,7 @@ core CLI. Three RDRs cover the moving parts:
   surface; the matching MCP tools route through the daemon when
   `NX_STORAGE_MODE=daemon`. Atomicity (Chroma + SQLite) and idempotent
   retake are first-class contracts (CA-1 / CA-2).
-- **[RDR-111 ORB Hook Bridge and Cockpit](docs/rdr/rdr-111-orb-hook-bridge-cockpit.md).**
+- **[RDR-111 ORB Agentic Cockpit Substrate](docs/rdr/rdr-111-orb-agentic-cockpit-substrate.md).**
   Claude Code hooks (PreToolUse, PostToolUse, Stop, SubagentStop,
   UserPromptSubmit, Session, Notification) project into seven
   `hook_events/*` subspaces via the `orb_bridge_*.py` scripts under
@@ -200,7 +200,7 @@ core CLI. Three RDRs cover the moving parts:
   `nx/tuplespace/builtin/bindings/profiles/` react to events with
   configurable actions; the cockpit binding watcher in
   `nexus.cockpit.bindings` drives the dispatch.
-- **[RDR-112 T2 Storage-as-Service](docs/rdr/rdr-112-t2-storage-service.md).**
+- **[RDR-112 Storage-as-Service Container Boundary](docs/rdr/rdr-112-storage-as-service-container-boundary.md).**
   A persistent local daemon (`nx daemon t2 start`) owns the single
   SQLite writer for `memory.db` and `tuples.db`, exposing every
   domain-store method over a UDS-primary / loopback-TCP-fallback RPC

@@ -1,5 +1,11 @@
 # Agentic cockpit: tuple space common model + semantic events as integration
 
+> **Implementation status (2026-05-17)**: the substrate described in
+> this document shipped via RDR-111 (accepted 2026-05-13).  See
+> [`docs/rdr/rdr-111-orb-agentic-cockpit-substrate.md`](rdr/rdr-111-orb-agentic-cockpit-substrate.md)
+> for the accepted spec, `src/nexus/cockpit/` for the production
+> code, and `nx cockpit --help` for the operator surface.
+
 A design exploration. **Not a workflow engine spec.** The workflow engine
 is handed off to the work-instance under a separate document set; here
 it is a free variable. We assume *some* workflow capability exists; we

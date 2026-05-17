@@ -25,12 +25,17 @@ suitable for high-frequency production use (that is the daemon's
 job).
 
 RDR-110 §Mode-split note: the watcher is gated behind
-``NX_STORAGE_MODE == "direct"`` (or unset, which is treated as direct).
+``NX_STORAGE_MODE == "direct"`` set explicitly.  Since the 2026-05-17
+cutover (nexus-507q), unset resolves to ``daemon`` and the watcher's
+``__init__`` raises ``StorageModeError`` to prevent a second writer
+from racing the daemon-owned ``tuples.db``.
 
-nexus-zrk4: class renamed from ``_TupleSpaceWatcher`` to
-``_DataVersionWatcher`` so its role (data_version polling for take()
-wake-ups) is self-evident and does not collide with
-``_BindingWatcher`` (cockpit binding dispatch over the events table).
+nexus-zrk4 + nexus-qggv: class renamed from ``_TupleSpaceWatcher``
+through ``_DataVersionWatcher`` to the current public
+``DataVersionWatcher`` so its role (data_version polling for take()
+wake-ups) is self-evident and the production import path no longer
+violates the underscore-private convention.  Distinct from
+``BindingWatcher`` (cockpit binding dispatch over the events table).
 """
 
 from __future__ import annotations
