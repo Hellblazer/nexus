@@ -171,10 +171,8 @@ def t2_ctx(*, _path_resolver=None):
     # mode the daemon owns the T2 path; a client-side ``_path_resolver``
     # override is meaningless and dangerous (it would silently pick a
     # different file). Reject so the contract is loud, not surprising.
-    if (
-        _path_resolver is not None
-        and os.environ.get("NX_STORAGE_MODE", "").lower() == "daemon"
-    ):
+    from nexus.db import is_daemon_mode as _is_daemon_mode
+    if _path_resolver is not None and _is_daemon_mode():
         raise RuntimeError(
             "t2_ctx(_path_resolver=...) is incompatible with "
             "NX_STORAGE_MODE=daemon: the daemon owns the path. "
@@ -1268,10 +1266,8 @@ def check_version_compatibility() -> None:
         # RDR-112 P1 prereq: skip the direct-open probe when the daemon
         # owns the file. The daemon's own startup will check this.
         db_path = default_db_path()
-        if (
-            db_path.exists()
-            and os.environ.get("NX_STORAGE_MODE", "").lower() != "daemon"
-        ):
+        from nexus.db import is_daemon_mode as _is_daemon_mode
+        if db_path.exists() and not _is_daemon_mode():
             conn = sqlite3.connect(str(db_path))
             try:
                 row = conn.execute(

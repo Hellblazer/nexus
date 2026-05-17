@@ -129,8 +129,8 @@ def _collect_aspect_queue_data() -> dict[str, Any]:
 
     # RDR-112 P1 prereq: skip direct probe in daemon mode (the daemon's
     # own health RPC is the supported path).
-    import os
-    if os.environ.get("NX_STORAGE_MODE", "").lower() == "daemon":
+    from nexus.db import is_daemon_mode
+    if is_daemon_mode():
         return {"present": False, "skipped_reason": "daemon_mode"}
 
     try:

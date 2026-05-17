@@ -116,13 +116,17 @@ class _DataVersionWatcher:
     def __init__(self, db_path: Path, wake_event: threading.Event) -> None:
         # Guard: reject daemon mode immediately so the caller fails loudly
         # rather than silently opening a second writer against the daemon's db.
-        storage_mode = os.environ.get("NX_STORAGE_MODE", "").lower()
-        if storage_mode == "daemon":
+        # nexus-507q (RDR-112 P6.3 cutover, 2026-05-17): the default flipped
+        # to daemon, so an unset env now triggers this guard. Callers that
+        # genuinely want a direct-mode watcher must set NX_STORAGE_MODE=direct
+        # explicitly.
+        from nexus.db import is_daemon_mode  # noqa: PLC0415
+        if is_daemon_mode():
             raise StorageModeError(
                 "_DataVersionWatcher is direct-mode only; "
-                "NX_STORAGE_MODE=daemon detected. "
-                "In daemon mode the daemon owns tuples.db. "
-                "Use the blocking-take RPC instead (RDR-112 §7)."
+                "active storage mode is daemon (set NX_STORAGE_MODE=direct "
+                "to construct the watcher, or use the daemon's blocking-take "
+                "RPC, RDR-112 §7)."
             )
 
         self._db_path = db_path

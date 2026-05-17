@@ -50,7 +50,8 @@ def _resolve_tuples_db_path() -> Path:
 
 
 def _is_daemon_mode() -> bool:
-    return os.environ.get("NX_STORAGE_MODE", "").lower() == "daemon"
+    from nexus.db import is_daemon_mode
+    return is_daemon_mode()
 
 
 def _load_registry():

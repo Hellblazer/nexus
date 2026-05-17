@@ -78,7 +78,10 @@ def env(tmp_path: Path, builtin_dir: Path, monkeypatch):
     db_path = tmp_path / "tuples.db"
     monkeypatch.setenv("NX_TUPLES_DB", str(db_path))
     monkeypatch.setenv("NX_TUPLESPACE_BUILTIN_DIR", str(builtin_dir))
-    monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
+    # nexus-507q (RDR-112 P6.3 cutover, 2026-05-17): unset env now
+    # resolves to daemon mode; the CLI commands under test exercise
+    # the direct-mode code path, so pin direct explicitly.
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
 
     # Replace the persistent chroma builder with an in-process Ephemeral one
     # so we don't write a real ``chroma/`` directory under the user's

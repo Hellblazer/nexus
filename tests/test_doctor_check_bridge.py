@@ -140,7 +140,13 @@ def test_check_bridge_under_daemon_mode_skips_tuples_readback(
 def test_check_bridge_direct_mode_opens_tuples_readback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """In direct mode (no NX_STORAGE_MODE), the readback runs against tuples.db."""
+    """In direct mode (NX_STORAGE_MODE=direct), the readback runs against tuples.db.
+
+    nexus-507q (RDR-112 P6.3 cutover, 2026-05-17): direct mode is now
+    an explicit opt-in; this test sets the env explicitly. The default
+    (env unset) resolves to daemon mode, which skips the readback per
+    nexus-1xip.
+    """
     plugin_root = tmp_path / "plugin"
     _stub_bridge_scripts(plugin_root)
     _write_plugin_manifest(plugin_root, "0.0.0-stale")
@@ -151,7 +157,7 @@ def test_check_bridge_direct_mode_opens_tuples_readback(
 
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
     monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
 
     runner = CliRunner()
     result = runner.invoke(doctor_cmd.doctor_cmd, ["--check-bridge"])

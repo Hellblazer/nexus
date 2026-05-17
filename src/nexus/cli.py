@@ -99,7 +99,8 @@ def main(ctx: click.Context, verbose: bool) -> None:
     # forward-compatible: pre-Phase-1 nothing sets it and this branch is
     # dead; Phase 1 set-and-forget at daemon spawn flips it for all
     # client invocations.
-    if _os.environ.get("NX_STORAGE_MODE") != "daemon":
+    from nexus.db import is_daemon_mode as _is_daemon_mode
+    if not _is_daemon_mode():
         from nexus.config import default_db_path as _default_db_path
         from nexus.db.migrations import run_if_needed as _run_if_needed
 

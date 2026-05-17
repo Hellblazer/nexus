@@ -6,6 +6,55 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed (RDR-112 P6.3 cutover, nexus-507q): NX_STORAGE_MODE default flipped direct -> daemon
+
+**User-visible behaviour change.** As of this release, the active
+storage mode resolves to `daemon` when `NX_STORAGE_MODE` is unset.
+Previously, an unset env var resolved to `direct`. Direct mode
+remains available indefinitely as the debug fallback by setting
+`NX_STORAGE_MODE=direct` explicitly.
+
+#### What this means for operators
+
+- **New installations**: install the daemon with `nx daemon t2
+  install --autostart` (launchd on macOS, systemd user unit on
+  Linux), then `nx daemon t2 start`. The MCP server, CLI commands,
+  and helper modules will route through the daemon automatically.
+- **Existing direct-mode users**: nothing breaks if you set
+  `NX_STORAGE_MODE=direct` in your shell profile. The CLI, MCP
+  server, and helpers all honour the override and continue to use
+  the in-process SQLite open path.
+- **Fail-loud safety**: in daemon mode, the MCP tuplespace bootstrap
+  raises `RuntimeError` if no daemon discovery file is found, rather
+  than silently falling back to a second in-process SQLite writer
+  that would race the daemon. The error names the recovery action
+  (`nx daemon t2 start`).
+
+#### What changed internally
+
+- New `nexus.db.default_storage_mode()` helper resolves the mode
+  (returns `daemon` when env is unset, the lowercased env value
+  otherwise).
+- New `nexus.db.is_daemon_mode()` convenience helper for the dozens
+  of call sites that gate on daemon routing.
+- All inline `os.environ.get("NX_STORAGE_MODE", "")` checks across
+  `mcp_infra.py`, `mcp/core.py`, `cli.py`, `health.py`,
+  `db/migrations.py`, `commands/tuplespace.py`, `commands/cockpit.py`,
+  `commands/doctor.py`, `console/routes/health.py`, and
+  `tuplespace/watcher.py` now route through the helpers.
+- `reject_under_daemon_mode` now fires when env is unset (the new
+  default). The error message names `NX_STORAGE_MODE=direct` as the
+  opt-in.
+- `_DataVersionWatcher.__init__` now refuses construction when env
+  is unset (the watcher is direct-mode only).
+- Test suite is unaffected: a new autouse fixture in
+  `tests/conftest.py` pins `NX_STORAGE_MODE=direct` for tests so the
+  thousands of existing direct-mode test contracts continue to hold.
+  Tests that exercise daemon mode opt in with
+  `monkeypatch.setenv(..., "daemon")` as they already did; a new
+  `tests/test_default_storage_mode.py` explicitly unsets the env
+  inside test bodies to probe the production resolver.
+
 ### Tests (RDR-110, nexus-r6u5: 10-worker work-stealing MVV harness)
 
 New spike test under

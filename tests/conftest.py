@@ -242,6 +242,32 @@ def _isolate_dispatch_routing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _pin_storage_mode_direct_for_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-507q: pin ``NX_STORAGE_MODE=direct`` as the test default.
+
+    The RDR-112 P6.3 cutover (2026-05-17) flipped the production default
+    for ``NX_STORAGE_MODE`` from ``direct`` to ``daemon``: an unset env
+    var resolves to ``daemon``. The test suite has thousands of cases
+    that don't set the env var and assume direct-mode behaviour
+    (in-process SQLite opens, no daemon RPC routing). Flipping the
+    production default without preserving the test contract would
+    silently route every such test through a non-existent daemon and
+    cascade-fail.
+
+    This autouse fixture pins ``NX_STORAGE_MODE=direct`` before each
+    test runs, so direct-mode behaviour is the test default. Tests
+    that exercise daemon-mode opt in with ``monkeypatch.setenv("NX_
+    STORAGE_MODE", "daemon")`` (as many already do). Tests that
+    exercise the new default explicitly (``tests/test_default_storage
+    _mode.py``) ``delenv`` the var inside the test body to probe the
+    production resolver.
+    """
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Force tests onto the explicit-isolation T1 path.
 
