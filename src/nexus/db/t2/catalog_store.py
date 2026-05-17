@@ -273,12 +273,14 @@ class CatalogStore:
         the same path — without this, ``executescript`` would re-issue an
         implicit COMMIT on every new ``CatalogStore`` against an already-
         migrated DB, which can silently commit an open caller transaction.
-        Mirrors the MemoryStore pattern (``memory_store.py:291-296``).
+        Mirrors the MemoryStore pattern (``memory_store.py:321-326``): the
+        ``_migrated_paths.add`` happens AFTER schema creation succeeds, so
+        a mid-init exception leaves the path eligible for retry on the
+        next construction rather than stranding an empty connection.
         """
         with _migrated_lock:
             if path_key in _migrated_paths:
                 return
-            _migrated_paths.add(path_key)
         with self._lock:
             self._conn.executescript(_CATALOG_SCHEMA_SQL)
             # Post-schema: partial indexes and physical_collection index.
@@ -297,6 +299,8 @@ class CatalogStore:
             # yet registered in the collections table get an auto-row (mirrors
             # CatalogDB.__init__ backfill path).
             self._backfill_collections()
+        with _migrated_lock:
+            _migrated_paths.add(path_key)
 
     def _backfill_collections(self) -> None:
         """Insert legacy physical_collection values into collections (idempotent)."""

@@ -3079,21 +3079,64 @@ def migrate_catalog_legacy_import(conn: sqlite3.Connection) -> None:
                 "FROM catalog_legacy.owners"
             )
 
-        # documents: import core columns; bib_* default to 0/''.
+        # documents: 15 always-imported core columns + optional bib_* columns.
+        # bib_* columns are preserved when present in the legacy DB (any user
+        # who ran ``nx enrich bib`` against catalog.db has populated values
+        # there); missing ones default to 0/'' per the destination schema.
         doc_cols = _legacy_cols("documents")
         if doc_cols:
+            # Core 15 — schema-stable across every catalog version that
+            # could plausibly appear on disk (RDR-096 P2.1 added source_uri;
+            # earlier shapes are handled by the CatalogDB ALTER migrations,
+            # which run before this point because CatalogDB also opens the
+            # legacy file briefly in some tests). COALESCE protects against
+            # NULL on the rare nullable column.
+            insert_cols = [
+                "tumbler", "title", "author", "year", "content_type",
+                "file_path", "corpus", "physical_collection", "chunk_count",
+                "head_hash", "indexed_at", "metadata", "source_mtime",
+                "alias_of", "source_uri",
+            ]
+            select_exprs = [
+                "tumbler",
+                "title",
+                "COALESCE(author, '')",
+                "COALESCE(year, 0)",
+                "COALESCE(content_type, '')",
+                "COALESCE(file_path, '')",
+                "COALESCE(corpus, '')",
+                "COALESCE(physical_collection, '')",
+                "COALESCE(chunk_count, 0)",
+                "COALESCE(head_hash, '')",
+                "COALESCE(indexed_at, '')",
+                "COALESCE(metadata, '{}')",
+                "COALESCE(source_mtime, 0.0)",
+                "COALESCE(alias_of, '')",
+                "COALESCE(source_uri, '')",
+            ]
+            # RDR-112 P2.review S1 (nexus-3vyw): preserve bib_* enrichment.
+            # The bib_* columns ship with RDR-101 Phase 1 PR D (nexus-knn3).
+            # Skipping them silently reverts every ``nx enrich bib`` result
+            # to default on the next daemon startup. Conditionally include
+            # each present-in-legacy column with the destination default.
+            bib_defaults: tuple[tuple[str, str], ...] = (
+                ("bib_year",                "0"),
+                ("bib_authors",             "''"),
+                ("bib_venue",               "''"),
+                ("bib_citation_count",      "0"),
+                ("bib_semantic_scholar_id", "''"),
+                ("bib_openalex_id",         "''"),
+                ("bib_doi",                 "''"),
+                ("bib_enriched_at",         "''"),
+            )
+            for col, default in bib_defaults:
+                if col in doc_cols:
+                    insert_cols.append(col)
+                    select_exprs.append(f"COALESCE({col}, {default})")
             conn.execute(
                 "INSERT OR IGNORE INTO documents "
-                "(tumbler, title, author, year, content_type, file_path, corpus, "
-                " physical_collection, chunk_count, head_hash, indexed_at, metadata, "
-                " source_mtime, alias_of, source_uri) "
-                "SELECT tumbler, title, COALESCE(author, ''), COALESCE(year, 0), "
-                "       COALESCE(content_type, ''), COALESCE(file_path, ''), "
-                "       COALESCE(corpus, ''), COALESCE(physical_collection, ''), "
-                "       COALESCE(chunk_count, 0), COALESCE(head_hash, ''), "
-                "       COALESCE(indexed_at, ''), COALESCE(metadata, '{}'), "
-                "       COALESCE(source_mtime, 0.0), COALESCE(alias_of, ''), "
-                "       COALESCE(source_uri, '') "
+                f"({', '.join(insert_cols)}) "
+                f"SELECT {', '.join(select_exprs)} "
                 "FROM catalog_legacy.documents"
             )
 
@@ -3352,10 +3395,19 @@ MIGRATIONS: list[Migration] = [
     # nexus-m4gm (RDR-112 P1.3): EventStream RPC substrate migrations are applied
     # directly in run_daemon_migrations (not here) because they need a tuples.db
     # connection, not a memory.db connection.
-    # nexus-7ejx (RDR-112 P2.1): catalog migrations pinned at the current
-    # installed package version (4.32.12) so apply_pending fires them on
-    # fresh installs (last_seen=0.0.0 < 4.32.12 <= current 4.32.12). Using a
-    # future version would defer execution until the next release bump.
+    # nexus-7ejx (RDR-112 P2.1): catalog migrations pinned at current installed
+    # version (4.32.12) so apply_pending fires them on fresh installs
+    # (last_seen=0.0.0 < 4.32.12 <= current 4.32.12).
+    #
+    # RDR-112 P2.review C2 (nexus-3vyw): the strict-greater filter
+    # ``m_ver > last_seen_t`` at apply_pending will SKIP these migrations
+    # for users who installed v4.32.12 from PyPI between the tag
+    # (2026-05-13) and the next release (their last_seen=4.32.12 == m_ver).
+    # The next release MUST bump these ``introduced`` strings to the next
+    # release version in the same commit that bumps pyproject.toml + the
+    # three plugin manifests + CHANGELOG.md. Verified by
+    # /tmp/smoke-version-pin-test.py: with last_seen=4.32.12,
+    # current=4.32.13, steps_run=0 — no tables, no import.
     Migration(
         "4.32.12",
         "RDR-112 P2.1: catalog tables collapsed into memory.db (nexus-7ejx)",
