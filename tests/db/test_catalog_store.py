@@ -522,3 +522,143 @@ class TestMigratedPathsGuard:
         finally:
             first.close()
             second.close()
+
+    def test_failed_init_does_not_stamp_path(self, tmp_path, monkeypatch) -> None:
+        """RDR-112 P2.review C1 (nexus-3vyw): if schema creation raises, the
+        path MUST NOT be added to _migrated_paths. Pre-fix the path was
+        stamped before executescript, so a failed init permanently stranded
+        the path as 'migrated' for the rest of the process, leaving every
+        subsequent CatalogStore call against a schema-less connection."""
+        from nexus.db.t2 import catalog_store as cs_module
+
+        db = tmp_path / "memory.db"
+        canonical = str(db.resolve())
+        cs_module._migrated_paths.discard(canonical)
+
+        original_schema_sql = cs_module._CATALOG_SCHEMA_SQL
+        monkeypatch.setattr(
+            cs_module, "_CATALOG_SCHEMA_SQL", "INVALID SQL STATEMENT;",
+        )
+        with pytest.raises(sqlite3.OperationalError):
+            CatalogStore(db)
+        assert canonical not in cs_module._migrated_paths, (
+            "failed init must leave path eligible for retry"
+        )
+
+        monkeypatch.setattr(
+            cs_module, "_CATALOG_SCHEMA_SQL", original_schema_sql,
+        )
+        store = CatalogStore(db)
+        try:
+            tables = {
+                r[0]
+                for r in store._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            assert "owners" in tables, "retry construction must rebuild schema"
+            assert canonical in cs_module._migrated_paths
+        finally:
+            store.close()
+
+
+class TestRebuildFieldParity:
+    """RDR-112 P2.review S3: field-by-field parity (not just count) between
+    CatalogStore and CatalogDB rebuild. Catches serialization divergences
+    (NULL vs '' for nullable columns, metadata JSON encoding, etc.) that
+    count-only assertions would silently miss.
+    """
+
+    def test_documents_row_field_parity(self, tmp_path: Path) -> None:
+        owners = {
+            "1.1": OwnerRecord(
+                owner="1.1", name="parity-repo", owner_type="repo",
+                repo_hash="hash-xyz", description="parity test",
+                repo_root="/some/root",
+            ),
+        }
+        docs = {
+            "1.1.1": DocumentRecord(
+                tumbler="1.1.1",
+                title="parity.py",
+                author="alice",
+                year=2025,
+                content_type="code",
+                file_path="src/parity.py",
+                corpus="test-corpus",
+                physical_collection="code__parity",
+                chunk_count=7,
+                head_hash="head-abc",
+                indexed_at="2026-01-15T12:34:56Z",
+                meta={"key": "value", "nested": {"a": 1}},
+                source_mtime=1234567.89,
+                alias_of="",
+                source_uri="file:///src/parity.py",
+            ),
+        }
+        links = [
+            LinkRecord(
+                from_t="1.1.1", to_t="1.1.2", link_type="cites",
+                from_span="span-from", to_span="span-to",
+                created_by="alice",
+                created_at="2026-01-15T13:00:00Z",
+                meta={"weight": 0.7},
+            ),
+        ]
+
+        legacy = CatalogDB(tmp_path / "legacy.db")
+        legacy.rebuild(owners, docs, links, consistency_mtime=42.0)
+        legacy_doc = legacy._conn.execute(
+            "SELECT tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+            "metadata, source_mtime, alias_of, source_uri "
+            "FROM documents WHERE tumbler = '1.1.1'"
+        ).fetchone()
+        legacy_owner = legacy._conn.execute(
+            "SELECT tumbler_prefix, name, owner_type, repo_hash, description, repo_root "
+            "FROM owners WHERE tumbler_prefix = '1.1'"
+        ).fetchone()
+        legacy_link = legacy._conn.execute(
+            "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
+            "created_by, created_at, metadata "
+            "FROM links WHERE from_tumbler = '1.1.1'"
+        ).fetchone()
+        legacy_meta = legacy._conn.execute(
+            "SELECT value FROM _meta WHERE key='last_consistency_mtime'"
+        ).fetchone()
+        legacy.close()
+
+        store = CatalogStore(tmp_path / "store.db")
+        store.rebuild(owners, docs, links, consistency_mtime=42.0)
+        store_doc = store._conn.execute(
+            "SELECT tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+            "metadata, source_mtime, alias_of, source_uri "
+            "FROM documents WHERE tumbler = '1.1.1'"
+        ).fetchone()
+        store_owner = store._conn.execute(
+            "SELECT tumbler_prefix, name, owner_type, repo_hash, description, repo_root "
+            "FROM owners WHERE tumbler_prefix = '1.1'"
+        ).fetchone()
+        store_link = store._conn.execute(
+            "SELECT from_tumbler, to_tumbler, link_type, from_span, to_span, "
+            "created_by, created_at, metadata "
+            "FROM links WHERE from_tumbler = '1.1.1'"
+        ).fetchone()
+        store_meta = store._conn.execute(
+            "SELECT value FROM _meta WHERE key='last_consistency_mtime'"
+        ).fetchone()
+        store.close()
+
+        assert store_doc == legacy_doc, (
+            f"document row diverges:\nstore={store_doc}\nlegacy={legacy_doc}"
+        )
+        assert store_owner == legacy_owner, (
+            f"owner row diverges:\nstore={store_owner}\nlegacy={legacy_owner}"
+        )
+        assert store_link == legacy_link, (
+            f"link row diverges:\nstore={store_link}\nlegacy={legacy_link}"
+        )
+        assert store_meta == legacy_meta, (
+            f"_meta row diverges:\nstore={store_meta}\nlegacy={legacy_meta}"
+        )

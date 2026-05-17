@@ -309,6 +309,57 @@ class TestLegacyImport:
         conn.close()
         assert count == 0
 
+    def test_bib_columns_preserved_on_legacy_import(self, tmp_path: Path) -> None:
+        """RDR-112 P2.review S1 (nexus-3vyw): legacy import must carry bib_*
+        enrichment values from catalog.db into memory.db. Pre-fix the SELECT
+        omitted all bib_* columns; any ``nx enrich bib`` result would silently
+        revert to defaults on the next daemon startup."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        legacy_path = config_dir / "catalog.db"
+
+        # Seed a legacy catalog.db with documents carrying non-default bib_*.
+        from nexus.catalog.catalog_db import CatalogDB
+        legacy = CatalogDB(legacy_path)
+        owners = {"1.1": _make_owner()}
+        docs = {"1.1.1": _make_doc(tumbler="1.1.1", title="enriched.pdf")}
+        legacy.rebuild(owners, docs, [])
+        legacy._conn.execute(
+            "UPDATE documents SET "
+            "bib_year=?, bib_authors=?, bib_venue=?, bib_citation_count=?, "
+            "bib_semantic_scholar_id=?, bib_openalex_id=?, bib_doi=?, bib_enriched_at=? "
+            "WHERE tumbler='1.1.1'",
+            (
+                2024, "Smith, Jones", "NeurIPS", 137,
+                "s2-deadbeef", "openalex-abc123", "10.1234/abcd",
+                "2026-04-01T10:00:00Z",
+            ),
+        )
+        legacy._conn.commit()
+        legacy.close()
+
+        # Run migration; legacy rows should land in memory.db.
+        from nexus.db import migrations as mig
+        db_path = config_dir / "memory.db"
+        mig.run_if_needed(db_path)
+
+        # Verify every bib_* value survives the import.
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT bib_year, bib_authors, bib_venue, bib_citation_count, "
+                "       bib_semantic_scholar_id, bib_openalex_id, bib_doi, "
+                "       bib_enriched_at "
+                "FROM documents WHERE tumbler='1.1.1'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row == (
+            2024, "Smith, Jones", "NeurIPS", 137,
+            "s2-deadbeef", "openalex-abc123", "10.1234/abcd",
+            "2026-04-01T10:00:00Z",
+        ), f"bib_* values lost on legacy import: row={row}"
+
 
 class TestLegacyImportAtomicRollback:
     def test_corrupt_legacy_file_leaves_no_partial_state(self, tmp_path: Path) -> None:
