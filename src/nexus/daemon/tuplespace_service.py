@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -56,6 +57,14 @@ from nexus.tuplespace.registry import Registry, default_builtin_dir
 from nexus.tuplespace.store import open_tuples_db
 
 _log = structlog.get_logger(__name__)
+
+
+# nexus-73vq: blocking_take poll cadence. Short enough that wake
+# latency after a competing out() is operator-acceptable (well under
+# the CA-5 reactive-take latency budget); long enough that idle
+# RPCs aren't burning CPU. 10ms matches the daemon's EventStream
+# data_version poll interval in t2_daemon (nexus-m4gm).
+_BLOCKING_TAKE_POLL_INTERVAL_S: float = 0.010
 
 
 class TuplespaceService:
@@ -195,6 +204,103 @@ class TuplespaceService:
             return None
         t_dict, claim_id = result
         return {"tuple": t_dict, "claim_id": claim_id}
+
+    def blocking_take(
+        self,
+        *,
+        subspace: str,
+        query: str,
+        claimant: str,
+        where: Optional[dict[str, Any]] = None,
+        floor: Optional[float] = None,
+        lease_seconds: Optional[float] = None,
+        timeout_seconds: float = 30.0,
+    ) -> Optional[dict[str, Any]]:
+        """Poll ``take()`` until a candidate is claimed or the deadline fires.
+
+        nexus-73vq (RDR-112 P1.3.1): the daemon-side companion to
+        RDR-110's direct-mode ``_DataVersionWatcher``. The daemon
+        owns the SQLite handle, so the polling loop lives in this
+        process (one polling task per blocking_take RPC, dispatched
+        in the daemon's thread-pool executor). Competing ``out()``
+        calls increment ``PRAGMA data_version`` which this loop
+        observes via a dedicated read-only connection (no lock
+        contention against the service's main writer).
+
+        Args:
+            subspace: Concrete subspace string.
+            query: Semantic query text.
+            claimant: Unique identifier for the claiming agent.
+            where: Optional ChromaDB metadata filter dict.
+            floor: Minimum similarity threshold (overrides schema default).
+            lease_seconds: Lease duration override.
+            timeout_seconds: Maximum wait. Capped at 30s by ``api.take``
+                contract (``InvalidTimeoutError``).
+
+        Returns:
+            ``{"tuple": <dict>, "claim_id": <str>}`` on success, or
+            ``None`` when the deadline elapses with no candidate.
+        """
+        # api.take(block=True) raises BlockingNotSupported, so we drive
+        # the poll loop ourselves and call api.take(block=False) inside.
+        deadline = time.perf_counter() + max(0.0, float(timeout_seconds))
+
+        # Dedicated read-only connection for the PRAGMA data_version
+        # poll so the polling loop doesn't contend with the main
+        # writer's lock. WAL mode allows multiple readers concurrently.
+        # storage-boundary-allow: daemon-internal-data_version-poll (nexus-73vq)
+        version_conn = sqlite3.connect(
+            f"file:{self._tuples_db_path}?mode=ro",
+            uri=True,
+            check_same_thread=False,
+        )
+        try:
+            last_version = self._read_data_version(version_conn)
+            while True:
+                # Try a non-blocking claim under the service lock.
+                with self._lock:
+                    result = ts_api.take(
+                        conn=self._conn,
+                        index=self._index,
+                        registry=self._registry,
+                        subspace=subspace,
+                        query=query,
+                        claimant=claimant,
+                        where=where,
+                        floor=floor,
+                        lease_seconds=lease_seconds,
+                        block=False,
+                    )
+                if result is not None:
+                    t_dict, claim_id = result
+                    return {"tuple": t_dict, "claim_id": claim_id}
+
+                # No candidate. Compute remaining budget.
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    return None
+
+                # Poll data_version with a short sleep cap, so we
+                # observe new commits within at most one tick.
+                sleep_for = min(_BLOCKING_TAKE_POLL_INTERVAL_S, remaining)
+                time.sleep(sleep_for)
+
+                current_version = self._read_data_version(version_conn)
+                if current_version == last_version:
+                    # Nothing committed; loop will check the deadline at
+                    # the top of the next iteration.
+                    continue
+                last_version = current_version
+        finally:
+            try:
+                version_conn.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _read_data_version(conn: sqlite3.Connection) -> int:
+        row = conn.execute("PRAGMA data_version").fetchone()
+        return int(row[0]) if row else 0
 
     def ack(self, *, claim_id: str, claimant: str) -> str:
         with self._lock:
@@ -346,6 +452,8 @@ def register_tuplespace_rpcs(
         "tuplespace.out": service.out,
         "tuplespace.read": service.read,
         "tuplespace.take": service.take,
+        # nexus-73vq (RDR-112 P1.3.1)
+        "tuplespace.blocking_take": service.blocking_take,
         "tuplespace.ack": service.ack,
         "tuplespace.nack": service.nack,
         "tuplespace.list_subspaces": service.list_subspaces,
@@ -366,6 +474,9 @@ TUPLESPACE_RPC_OPS: tuple[str, ...] = (
     "out",
     "read",
     "take",
+    # nexus-73vq (RDR-112 P1.3.1): daemon-side polling take that
+    # wakes on PRAGMA data_version increments until the deadline.
+    "blocking_take",
     "ack",
     "nack",
     "list_subspaces",

@@ -261,7 +261,13 @@ class _SocketConnection:
     def __init__(self, sock: socket.socket) -> None:
         self._sock = sock
 
-    def call(self, op: str, args: dict[str, Any]) -> Any:
+    def call(
+        self,
+        op: str,
+        args: dict[str, Any],
+        *,
+        recv_timeout_override: float | None = None,
+    ) -> Any:
         """Send ``{op, args}`` and return the decoded result.
 
         For domain-store ops the daemon wraps the return value in
@@ -269,13 +275,28 @@ class _SocketConnection:
         flat dict.  This method always returns the full response dict for
         non-store ops, and the unwrapped result value for store ops.
 
+        nexus-73vq: ``recv_timeout_override`` temporarily widens the
+        socket recv timeout for the duration of this single call. Used
+        by the ``blocking_take`` proxy where the daemon-side handler
+        legitimately blocks up to ``timeout_seconds`` waiting for a
+        candidate; the default ``rpc_timeout_seconds`` (5s) is too
+        aggressive for that case. Restored on the way out.
+
         Raises:
             T2DaemonError: on remote error that is not a recognised builtin.
             <builtin exception>: when the daemon reports a stdlib exception.
             ConnectionError: if the socket breaks mid-call.
         """
-        _sock_write_frame(self._sock, {"op": op, "args": args})
-        resp = _sock_read_frame(self._sock)
+        original_timeout: float | None = None
+        if recv_timeout_override is not None:
+            original_timeout = self._sock.gettimeout()
+            self._sock.settimeout(float(recv_timeout_override))
+        try:
+            _sock_write_frame(self._sock, {"op": op, "args": args})
+            resp = _sock_read_frame(self._sock)
+        finally:
+            if original_timeout is not None and recv_timeout_override is not None:
+                self._sock.settimeout(original_timeout)
         if "error" in resp:
             _reraise_remote_error(resp["error"])
         # Domain-store ops wrap their return value under "result"
@@ -528,9 +549,19 @@ class _TuplespaceProxy:
     def __init__(self, pool: _ConnectionPool) -> None:
         self._pool = pool
 
-    def _call(self, op: str, args: dict[str, Any]) -> Any:
+    def _call(
+        self,
+        op: str,
+        args: dict[str, Any],
+        *,
+        recv_timeout_override: float | None = None,
+    ) -> Any:
         with self._pool.acquire() as conn:
-            return conn.call(f"tuplespace.{op}", args)
+            return conn.call(
+                f"tuplespace.{op}",
+                args,
+                recv_timeout_override=recv_timeout_override,
+            )
 
     def out(
         self,
@@ -601,6 +632,46 @@ class _TuplespaceProxy:
                 "block": block,
                 "timeout_seconds": timeout_seconds,
             },
+        )
+
+    def blocking_take(
+        self,
+        *,
+        subspace: str,
+        query: str,
+        claimant: str,
+        where: dict[str, Any] | None = None,
+        floor: float | None = None,
+        lease_seconds: float | None = None,
+        timeout_seconds: float = 30.0,
+    ) -> dict[str, Any] | None:
+        """Poll-and-wake variant of :meth:`take` (nexus-73vq).
+
+        The daemon-side handler polls ``PRAGMA data_version`` after a
+        non-blocking ``take()`` returns ``None`` and retries the claim
+        CAS on each commit, returning either the new claim or ``None``
+        when the deadline elapses.
+
+        The RPC call itself uses a longer socket-level timeout
+        (``timeout_seconds + 5s`` headroom) so the client-side
+        ``RpcTimeoutError`` fires only when the daemon has actually
+        stalled, not on the legitimate blocking wait.
+        """
+        # The per-call RPC timeout must outlive the daemon's blocking
+        # deadline. We extend it by 5s for daemon-side scheduling and
+        # the response round trip.
+        return self._call(
+            "blocking_take",
+            {
+                "subspace": subspace,
+                "query": query,
+                "claimant": claimant,
+                "where": where,
+                "floor": floor,
+                "lease_seconds": lease_seconds,
+                "timeout_seconds": timeout_seconds,
+            },
+            recv_timeout_override=timeout_seconds + 5.0,
         )
 
     def ack(self, *, claim_id: str, claimant: str) -> str:
