@@ -225,6 +225,104 @@ def stop_cmd(config_dir_str: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# nx daemon t2 doctor (nexus-6m9i, third 360° OBS C-3 + RECOV S-2)
+# ---------------------------------------------------------------------------
+
+
+@t2_group.command("doctor")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+@click.option(
+    "--json", "as_json", is_flag=True, default=False,
+    help="Output raw JSON.",
+)
+def doctor_cmd(config_dir_str: str | None, as_json: bool) -> None:
+    """Probe the running T2 daemon's health + load.
+
+    Hits the daemon's ``ping`` RPC and reports active-handler count,
+    blocking_take in-flight slots, wake-thread liveness, registry
+    digest, schema version, and process identity.
+
+    Pre-third-360°, ``nx doctor`` and ``nx health`` referenced this
+    command in error hints but it did not exist (nexus-6m9i OBS C-3 +
+    RECOV S-2).
+    """
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    disc = _discovery_path(config_dir)
+    if not disc.exists():
+        click.echo("No T2 daemon discovery file found.", err=True)
+        click.echo("  Fix: run `nx daemon t2 start` first.", err=True)
+        sys.exit(1)
+
+    try:
+        data = json.loads(disc.read_text())
+        uds_path = data.get("uds_path")
+    except (OSError, json.JSONDecodeError) as exc:
+        click.echo(f"Failed to read discovery file: {exc}", err=True)
+        sys.exit(1)
+
+    from nexus.daemon.t2_client import T2Client
+
+    if uds_path and Path(uds_path).exists():
+        client = T2Client(uds_path=Path(uds_path), rpc_timeout_seconds=2.0)
+    else:
+        tcp_host = data.get("tcp_host", "127.0.0.1")
+        tcp_port = data.get("tcp_port", 0)
+        if not tcp_port:
+            click.echo("Daemon has neither UDS nor TCP transport.", err=True)
+            sys.exit(2)
+        client = T2Client(
+            tcp_addr=(tcp_host, int(tcp_port)), rpc_timeout_seconds=2.0
+        )
+
+    try:
+        pong = client.call("ping")
+    except Exception as exc:
+        click.echo(f"Daemon ping failed: {exc}", err=True)
+        click.echo(
+            "  Fix: the daemon may be wedged. `nx daemon t2 stop && "
+            "nx daemon t2 start` (or kill -9 the pid in the discovery "
+            "file if stop hangs, then `rm <uds_path>`).",
+            err=True,
+        )
+        sys.exit(2)
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+    if as_json:
+        click.echo(json.dumps(pong, indent=2, default=str))
+        return
+
+    click.echo("T2 Daemon Doctor")
+    click.echo("-" * 40)
+    click.echo(f"  pid              : {data.get('pid')}")
+    click.echo(f"  daemon_version   : {pong.get('version')}")
+    click.echo(f"  schema_version   : {pong.get('schema_version')}")
+    click.echo(f"  protocol_version : {pong.get('daemon_protocol_version')}")
+    click.echo(f"  start_time       : {pong.get('start_time')}")
+    click.echo(f"  uds_path         : {uds_path}")
+    click.echo(
+        f"  tcp              : {data.get('tcp_host')}:{data.get('tcp_port')}"
+    )
+    # Load metrics (nexus-6m9i OBS C-1): enriched ping returns these.
+    if "active_handlers" in pong:
+        click.echo(f"  active_handlers  : {pong['active_handlers']}")
+    if "blocking_take_in_flight" in pong:
+        click.echo(
+            f"  blocking_take    : {pong['blocking_take_in_flight']}"
+        )
+    if "wake_thread_alive" in pong:
+        click.echo(f"  wake_thread      : {pong['wake_thread_alive']}")
+
+
 @t2_group.command("info")
 @click.option(
     "--config-dir",

@@ -1346,6 +1346,26 @@ class T2Daemon:
 
         match op:
             case "ping":
+                # nexus-6m9i (third 360° OBS C-1): ping returns live
+                # load metrics so `nx daemon t2 doctor` / monitoring
+                # callers can spot saturation without a separate RPC.
+                blocking_in_flight = 0
+                wake_thread_alive = False
+                if self._tuplespace_service is not None:
+                    svc = self._tuplespace_service
+                    from nexus.daemon.tuplespace_service import (  # noqa: PLC0415
+                        _BLOCKING_TAKE_MAX_CONCURRENT,
+                    )
+                    blocking_in_flight = (
+                        _BLOCKING_TAKE_MAX_CONCURRENT
+                        - getattr(
+                            svc._blocking_take_sema, "_value", 0
+                        )
+                    )
+                    _wt = getattr(svc, "_wake_thread", None)
+                    wake_thread_alive = bool(
+                        _wt is not None and _wt.is_alive()
+                    )
                 return {
                     "pong": True,
                     "version": _NEXUS_VERSION,
@@ -1353,6 +1373,9 @@ class T2Daemon:
                     "schema_version": DAEMON_SCHEMA_VERSION,
                     "start_time": self._start_time,
                     "pid": os.getpid(),
+                    "active_handlers": len(self._active_handlers),
+                    "blocking_take_in_flight": blocking_in_flight,
+                    "wake_thread_alive": wake_thread_alive,
                 }
             case str() if op in self._rpc_table:
                 return await self._dispatch_store_rpc(op, msg, is_uds=is_uds)
