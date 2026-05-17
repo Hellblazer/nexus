@@ -142,7 +142,14 @@ except Exception:  # pragma: no cover — fallback for editable / pre-install en
 #: Maximum accepted wire-frame payload size (bytes). Guards against a malicious
 #: or buggy peer announcing a multi-gigabyte length header that would otherwise
 #: cause ``readexactly`` to block until OOM.
-_MAX_FRAME_BYTES: int = 16 * 1024 * 1024
+#:
+#: nexus-ex4r (RDR-113 d-i-d): tightened from 16 MiB to 1 MiB. Typical T2 RPC
+#: payloads (single rows, small batches, search params) are well under 64 KiB;
+#: 16 MiB allowed a misbehaving same-UID peer to force the daemon to allocate
+#: that buffer per connection in ``readexactly``. Bulk ops that legitimately
+#: need a larger frame (introspection export, schema dumps) must page their
+#: results or lift the cap on a per-RPC basis after explicit review.
+_MAX_FRAME_BYTES: int = 1 * 1024 * 1024
 
 #: Backlog for listen() on both UDS and TCP sockets.
 _LISTEN_BACKLOG: int = 64
@@ -172,6 +179,39 @@ _TAG_BYTES = "__bytes__"
 _TAG_PATH = "__path__"
 #: Sentinel type tag for dataclass instances in RPC frames.
 _TAG_DATACLASS = "__dataclass__"
+
+#: Allowlist of dataclass qualnames that may appear inside a ``__dataclass__``
+#: tag on the wire. nexus-ac2l (RDR-113 d-i-d): ``_t2_decode`` previously
+#: unpacked any tagged dict to a plain dict, silently discarding the qualname.
+#: A same-UID client could feed an unexpected tag to bypass a downstream
+#: "looks like a dataclass payload?" check. Not exploitable today, but the
+#: strict-allowlist stance is correct.
+#:
+#: Maintenance rule: when a new dataclass starts crossing the RPC boundary
+#: (either as a return value from a non-denied dispatch op, or as an arg if
+#: a future op accepts dataclass kwargs), add its bare ``__qualname__`` here.
+#: Encode is permissive: anything ``dataclasses.is_dataclass(...)`` gets
+#: tagged on outbound. Decode is strict: unknown tag raises ``ValueError``.
+_ALLOWED_DATACLASS_TYPES: frozenset[str] = frozenset({
+    # aspect_extraction_queue: returned by claim_next / claim_batch / list_pending
+    "QueueRow",
+    # document_aspects: methods are in _RPC_DENY_OPS today, but the encoder
+    # would still tag the type if a future non-denied op returned it.
+    "AspectRecord",
+    # catalog.tumbler
+    "Tumbler",
+    "OwnerRecord",
+    "DocumentRecord",
+    "LinkRecord",
+    # catalog.catalog
+    "CatalogEntry",
+    "CatalogLink",
+    # catalog.catalog_writes
+    "ManifestRow",
+    # catalog.dedupe
+    "OrphanPlan",
+    "DedupePlan",
+})
 
 #: Store-attribute names on T2Database that are domain stores (used by
 #: ``_build_dispatch_table`` to enumerate RPC targets).
@@ -297,11 +337,13 @@ def _t2_encode(obj: Any) -> Any:
 def _t2_decode(obj: Any) -> Any:
     """Recursively decode a structure produced by ``_t2_encode``.
 
-    Dataclasses are reconstructed only to the extent that the receiver
-    knows the class; the daemon uses this for incoming args, the client
-    for outgoing results. Unknown ``__dataclass__`` tags are passed
-    through as plain dicts (the actual class is imported by the proxy
-    before the call).
+    Dataclasses are unpacked to a plain ``dict`` of their fields; the
+    qualname is consulted only as an allowlist gate, not for actual
+    reconstruction. Callers that need typed instances import the class
+    themselves before the call. nexus-ac2l: an unknown ``__dataclass__``
+    qualname raises ``ValueError`` rather than silently passing through
+    (defence-in-depth against a same-UID peer probing for tag-based
+    bypasses; the wire allowlist is :data:`_ALLOWED_DATACLASS_TYPES`).
     """
     if obj is None or isinstance(obj, (bool, int, float, str)):
         return obj
@@ -315,7 +357,12 @@ def _t2_decode(obj: Any) -> Any:
         if _TAG_PATH in obj:
             return Path(obj[_TAG_PATH])
         if _TAG_DATACLASS in obj:
-            # Return as plain dict; caller reconstructs if needed.
+            qualname = obj[_TAG_DATACLASS]
+            if qualname not in _ALLOWED_DATACLASS_TYPES:
+                raise ValueError(
+                    f"unknown __dataclass__ tag {qualname!r}; "
+                    "not in t2 wire allowlist"
+                )
             return {k: _t2_decode(v) for k, v in obj["fields"].items()}
         return {k: _t2_decode(v) for k, v in obj.items()}
     return obj

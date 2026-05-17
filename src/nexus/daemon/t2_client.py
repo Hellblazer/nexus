@@ -176,7 +176,10 @@ class EventStreamUnavailable(Exception):
 # Wire helpers (synchronous socket I/O)
 # ---------------------------------------------------------------------------
 
-_MAX_FRAME_BYTES: int = 16 * 1024 * 1024
+#: Maximum accepted wire-frame payload size (bytes). MUST match the daemon
+#: cap in :data:`nexus.daemon.t2_daemon._MAX_FRAME_BYTES` or one side leaks.
+#: nexus-ex4r (RDR-113 d-i-d): 1 MiB. See the daemon-side note for rationale.
+_MAX_FRAME_BYTES: int = 1 * 1024 * 1024
 
 
 def _sock_write_frame(sock: socket.socket, obj: dict[str, Any]) -> None:

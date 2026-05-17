@@ -13,6 +13,35 @@ group array; ``cr_groups[0]`` is the effective GID.
 Failures are loud: unsupported platform → ``NotImplementedError``;
 non-UDS socket → ``ValueError``; ``cr_version != XUCRED_VERSION`` → ``OSError``.
 No "accept with warning" fallback (RDR-113 §Failure Modes).
+
+**TOCTOU semantics (nexus-qyff):**
+
+The two platforms answer different questions about "who is on the other
+end of this socket":
+
+- **Linux ``SO_PEERCRED``** is evaluated at ``connect``/``accept`` time
+  AND re-read fresh on every ``getsockopt`` call: it always reflects the
+  current ``pid`` / ``uid`` / ``gid`` of the peer descriptor's owner.
+  Suitable for periodic re-checks.
+- **macOS ``LOCAL_PEERCRED``** returns credentials captured at peer
+  socket-creation time (the moment the kernel set up the file
+  descriptor on the peer side). It does NOT re-derive on each call.
+  A peer process that ``connect()``s then ``fork+execve()``s into a
+  different binary hands its connected socket to a new process whose
+  observable ``cr_uid`` is still the original opener's UID.
+
+For the daemon's same-UID threat model this difference is benign:
+``cr_uid`` is bound to a UID we already trust (our own), so the
+identity over the connection cannot escalate. The daemon's peer-UID
+check happens once at ``accept`` time and that check remains correct
+under the macOS semantic: a same-UID peer that exec'd a different
+binary post-connect is still a same-UID peer.
+
+The difference becomes relevant if a future RDR widens the trust model
+to "same UID and same process binary", at which point macOS would
+require an out-of-band identity proof (e.g. a SCM_CREDENTIALS message
+mid-stream on Linux equivalents, or a kernel framework callout on
+darwin). Document the gap rather than papering over it.
 """
 
 from __future__ import annotations
@@ -110,6 +139,11 @@ def _read_linux(sock: socket.socket) -> PeerCredentials:
 
 
 def _read_darwin(sock: socket.socket) -> PeerCredentials:
+    # nexus-qyff: ``LOCAL_PEERCRED`` snapshots the peer's identity at peer
+    # socket-creation time, not at every ``getsockopt`` call. A peer that
+    # ``fork+execve``s after connecting still observes the original opener's
+    # ``cr_uid``. Safe under the daemon's same-UID model (UID is constant);
+    # see module docstring for the wider trust-model caveat.
     raw = sock.getsockopt(
         _DARWIN_SOL_LOCAL, _DARWIN_LOCAL_PEERCRED, _DARWIN_XUCRED_SIZE
     )
