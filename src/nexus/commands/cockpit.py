@@ -214,11 +214,13 @@ def _open_daemon_client() -> "T2Client":  # noqa: F821 — forward ref
 
     info = find_t2_daemon()
     if info is None:
+        # nexus-6m9i (third 360° CONFIG S-4): post-cutover wording —
+        # daemon is the DEFAULT since 2026-05-17, not opt-in via env.
         raise click.ClickException(
-            "NX_STORAGE_MODE=daemon is set but no T2 daemon discovery "
-            "file was found. Start the daemon "
-            "(`nx daemon t2 start --foreground` or install autostart) "
-            "or unset NX_STORAGE_MODE."
+            "Storage mode is 'daemon' (default since 2026-05-17 cutover). "
+            "No T2 daemon discovery file found. Run "
+            "`nx daemon t2 install --autostart && nx daemon t2 start`, "
+            "or opt out with NX_STORAGE_MODE=direct."
         )
     uds = info.get("uds_path") or ""
     uds_path = Path(uds) if uds else None

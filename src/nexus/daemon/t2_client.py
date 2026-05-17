@@ -61,6 +61,7 @@ from __future__ import annotations
 import builtins
 import contextlib
 import inspect
+import os
 import random
 import socket
 import struct
@@ -68,7 +69,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import structlog
 
@@ -834,6 +835,8 @@ class T2Client:
         tcp_addr: tuple[str, int] | None = None,
         pool_size: int = _POOL_DEFAULT_SIZE,
         rpc_timeout_seconds: float = 5.0,
+        expected_registry_digest: str | None = None,
+        strict_registry_digest: bool = False,
     ) -> None:
         if (uds_path is None) == (tcp_addr is None):
             raise ValueError(
@@ -843,6 +846,13 @@ class T2Client:
         self._uds_path = uds_path
         self._tcp_addr = tcp_addr
         self._pool_size = pool_size
+        # nexus-6m9i (third 360° SPEC C-1): RDR-112 §8 digest match.
+        # When provided, the client checks the daemon's hello_ack
+        # registry_digest against this expected value. Mismatch logs
+        # WARNING by default; ``strict_registry_digest=True`` (or
+        # NX_T2_STRICT_DIGEST truthy) raises T2DaemonError.
+        self._expected_registry_digest = expected_registry_digest
+        self._strict_registry_digest = strict_registry_digest
         # nexus-wcs9 (RDR-114 Step 4): per-RPC socket timeout. Default 5.0 s
         # is generous for local-mode (spike measured p99=48 ms) and accommodates
         # cloud-mode Voyage RTT under load. Operators driving high-latency
@@ -929,9 +939,45 @@ class T2Client:
                 )
 
         # P1.5 nexus-x98k: record registry_digest from hello_ack.
-        # No enforcement in this bead, the field is logged and stored for
-        # future beads that may add warn-or-refuse on digest mismatch.
+        # nexus-6m9i (third 360° SPEC C-1): RDR-112 §8 mismatch
+        # enforcement. When the caller provided an expected digest
+        # (via constructor or NX_T2_EXPECTED_REGISTRY_DIGEST) we
+        # compare; mismatch is WARNING-level by default but raises
+        # T2DaemonError when ``strict_registry_digest`` is True OR
+        # ``NX_T2_STRICT_DIGEST`` is truthy.
         registry_digest: str | None = ack.get("registry_digest")
+        expected = (
+            self._expected_registry_digest
+            or os.environ.get(
+                "NX_T2_EXPECTED_REGISTRY_DIGEST", ""
+            ).strip()
+            or None
+        )
+        if (
+            expected is not None
+            and registry_digest is not None
+            and expected != registry_digest
+        ):
+            strict = self._strict_registry_digest or (
+                os.environ.get("NX_T2_STRICT_DIGEST", "").strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
+            if strict:
+                sock.close()
+                raise T2DaemonError(
+                    f"Subspace registry digest mismatch: client expects "
+                    f"{expected!r}, daemon serves {registry_digest!r}. "
+                    "Update the client's registry to match (rebuild + "
+                    "redeploy), restart the daemon to re-seed its "
+                    "registry, or set NX_T2_STRICT_DIGEST=0 to downgrade "
+                    "to a warning."
+                )
+            _log.warning(
+                "t2_client_registry_digest_mismatch",
+                expected=expected,
+                daemon=registry_digest,
+                hint="Set NX_T2_STRICT_DIGEST=1 to refuse.",
+            )
         _log.debug(
             "t2_client_connected",
             transport="uds" if self._uds_path else "tcp",
@@ -982,40 +1028,58 @@ class T2Client:
     # Store proxies (attribute properties)
     # ------------------------------------------------------------------
 
+    # nexus-6m9i (third 360° CRAFT C-1): cache the store proxies so a
+    # tight loop like ``for x in ids: client.memory.get(...)`` does
+    # not rebuild a fresh _StoreProxy (which runs inspect.getmembers
+    # + inspect.signature per public method on the store class) on
+    # every attribute access. The proxy is stateless given the same
+    # pool, so memoisation is safe.
+    def _cached_proxy(
+        self,
+        attr: str,
+        loader: Callable[[], type],  # type: ignore[type-arg]
+    ) -> _StoreProxy:
+        cached: dict[str, _StoreProxy] = getattr(self, "_proxy_cache", {})
+        if not cached:
+            self._proxy_cache = cached  # type: ignore[attr-defined]
+        if attr not in cached:
+            cached[attr] = _StoreProxy(attr, loader(), self._get_pool())
+        return cached[attr]
+
     @property
     def memory(self) -> _StoreProxy:
         from nexus.db.t2.memory_store import MemoryStore
-        return _StoreProxy("memory", MemoryStore, self._get_pool())
+        return self._cached_proxy("memory", lambda: MemoryStore)
 
     @property
     def plans(self) -> _StoreProxy:
         from nexus.db.t2.plan_library import PlanLibrary
-        return _StoreProxy("plans", PlanLibrary, self._get_pool())
+        return self._cached_proxy("plans", lambda: PlanLibrary)
 
     @property
     def chash_index(self) -> _StoreProxy:
         from nexus.db.t2.chash_index import ChashIndex
-        return _StoreProxy("chash_index", ChashIndex, self._get_pool())
+        return self._cached_proxy("chash_index", lambda: ChashIndex)
 
     @property
     def taxonomy(self) -> _StoreProxy:
         from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
-        return _StoreProxy("taxonomy", CatalogTaxonomy, self._get_pool())
+        return self._cached_proxy("taxonomy", lambda: CatalogTaxonomy)
 
     @property
     def telemetry(self) -> _StoreProxy:
         from nexus.db.t2.telemetry import Telemetry
-        return _StoreProxy("telemetry", Telemetry, self._get_pool())
+        return self._cached_proxy("telemetry", lambda: Telemetry)
 
     @property
     def document_aspects(self) -> _StoreProxy:
         from nexus.db.t2.document_aspects import DocumentAspects
-        return _StoreProxy("document_aspects", DocumentAspects, self._get_pool())
+        return self._cached_proxy("document_aspects", lambda: DocumentAspects)
 
     @property
     def aspect_queue(self) -> _StoreProxy:
         from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
-        return _StoreProxy("aspect_queue", AspectExtractionQueue, self._get_pool())
+        return self._cached_proxy("aspect_queue", lambda: AspectExtractionQueue)
 
     @property
     def catalog(self) -> _StoreProxy:
@@ -1025,7 +1089,7 @@ class T2Client:
         call sites by swapping the constructor injection only.
         """
         from nexus.db.t2.catalog_store import CatalogStore
-        return _StoreProxy("catalog", CatalogStore, self._get_pool())
+        return self._cached_proxy("catalog", lambda: CatalogStore)
 
     @property
     def database(self) -> _DatabaseProxy:

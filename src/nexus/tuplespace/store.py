@@ -270,6 +270,14 @@ def open_tuples_db(path: Path) -> sqlite3.Connection:
     # binding-watcher derived-out + retention sweep DELETE) does not
     # surface as SQLITE_BUSY at the caller.
     conn.execute("PRAGMA busy_timeout=5000")
+    # nexus-6m9i (third 360° RECOV S-3): cap WAL growth. Without
+    # journal_size_limit a long-running daemon's WAL can grow
+    # unboundedly between checkpoints on bursty write loads. 64 MiB
+    # is comfortable headroom over per-transaction sizes and well
+    # below disk-pressure territory; auto-checkpoint at 1000 pages
+    # matches catalog_db.py's tuning.
+    conn.execute("PRAGMA journal_size_limit=67108864")
+    conn.execute("PRAGMA wal_autocheckpoint=1000")
     conn.commit()
     apply_tuples_schema(conn)
     _log.info("tuples_db_opened", path=str(path))

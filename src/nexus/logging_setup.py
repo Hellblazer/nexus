@@ -35,6 +35,16 @@ def _resolve_level(mode: str, verbose: bool) -> int:
         resolved = getattr(logging, override, None)
         if isinstance(resolved, int):
             return resolved
+        # nexus-6m9i (third 360° CONFIG S-5): surface invalid value
+        # via stderr (logging is mid-setup, so no logger yet).
+        # Falling through silently to defaults left operators
+        # debugging why their level was ignored.
+        import sys as _sys
+        _sys.stderr.write(
+            f"warning: NEXUS_LOG_LEVEL={override!r} is not a valid "
+            "logging level (use DEBUG/INFO/WARNING/ERROR/CRITICAL); "
+            "falling back to defaults.\n"
+        )
     if verbose:
         return logging.DEBUG
     if mode == "cli":
