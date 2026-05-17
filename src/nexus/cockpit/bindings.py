@@ -64,14 +64,22 @@ import dataclasses
 import hashlib
 import importlib
 import os
+import re as _re
 import sqlite3
 import time
+import unicodedata
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Callable, Optional  # noqa: F401  -- Callable used in type hints
 
 import structlog
 import yaml
+
+# nexus-uf3w (S360-uni S1): SR-1 profile-name allowlist promoted from
+# bindings_crud._VALID_PROFILE_NAME_RE so load_profile can enforce it
+# too. The CRUD copy is kept as a thin re-export so callers that
+# imported the symbol via the old module still resolve it.
+_VALID_PROFILE_NAME_RE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 _log = structlog.get_logger(__name__)
 
@@ -207,6 +215,17 @@ def load_profile(path: Path) -> BindingProfile:
     if not isinstance(name, str) or not name:
         raise BindingProfileError(f"{path.name}: missing/empty 'profile' field")
 
+    # nexus-uf3w (S360-uni S1): enforce the SR-1 allowlist on the
+    # LOAD path too, not just the CRUD-create entry point. A
+    # same-UID agent that drops a YAML directly into the profiles
+    # dir would otherwise smuggle an arbitrary `profile:` value
+    # into the derived subspace (line 463-465).
+    if not _VALID_PROFILE_NAME_RE.fullmatch(name):
+        raise BindingProfileError(
+            f"{path.name}: invalid 'profile' value {name!r}; must "
+            f"match ^[A-Za-z0-9][A-Za-z0-9_-]*$ (SR-1 allowlist)."
+        )
+
     raw_bindings = raw.get("bindings")
     if not isinstance(raw_bindings, list):
         raise BindingProfileError(
@@ -226,12 +245,17 @@ def load_profile(path: Path) -> BindingProfile:
             raise BindingProfileError(
                 f"{path.name}: binding[{i}] missing/empty 'name'"
             )
-        if bname in seen_names:
+        # nexus-uf3w (S360-uni S2): NFC normalise so a binding named
+        # 'café' (NFC) and one named 'café' (NFD) collide as expected.
+        # macOS HFS+ round-trips filenames through NFD; without this
+        # the dedup check sees two distinct strings.
+        bname_norm = unicodedata.normalize("NFC", bname)
+        if bname_norm in seen_names:
             raise BindingProfileError(
-                f"{path.name}: duplicate binding name {bname!r}"
+                f"{path.name}: duplicate binding name {bname_norm!r}"
             )
-        seen_names.add(bname)
-        source = f"{path.name}:{bname}"
+        seen_names.add(bname_norm)
+        source = f"{path.name}:{bname_norm}"
         match = _validate_match(b.get("match"), source=source)
         action = _validate_action(b.get("action"), source=source)
         enabled_raw = b.get("enabled", True)
@@ -242,7 +266,10 @@ def load_profile(path: Path) -> BindingProfile:
             )
         bindings.append(
             Binding(
-                name=bname, match=match, action=action, enabled=enabled_raw
+                name=bname_norm,
+                match=match,
+                action=action,
+                enabled=enabled_raw,
             )
         )
 
@@ -295,6 +322,32 @@ def _resolve_python_callable(target: str) -> Callable[..., Any]:
 
 #: Default TTL on the action_idempotency rows. RDR-111:933.
 _IDEMPOTENCY_TTL_SECONDS = 300.0
+
+
+# nexus-9pkn (S360-time S1): wall-clock floor that never moves
+# backwards. A backward NTP correction or sleep/wake jump would
+# otherwise shorten the dedup window and admit replay of an already-
+# dispatched side-effecting action. Tracked in-process; cross-process
+# safety still relies on the daemon's periodic
+# ``sweep_action_idempotency`` and reasonably-bounded NTP slews.
+import threading as _threading_idempotency  # noqa: PLC0415
+
+_idempotency_clock_lock = _threading_idempotency.Lock()
+_idempotency_clock_floor: float = 0.0
+
+
+def _idempotency_now() -> float:
+    """Wall-clock time, clamped against backward movement.
+
+    Returns the larger of ``time.time()`` and the largest value
+    previously observed by this helper. Subsequent callers see at
+    least the clamped value.
+    """
+    global _idempotency_clock_floor
+    with _idempotency_clock_lock:
+        now = max(time.time(), _idempotency_clock_floor)
+        _idempotency_clock_floor = now
+        return now
 
 
 def _idempotency_key(binding_name: str, tuple_id: str) -> str:
@@ -360,7 +413,8 @@ async def _dispatch_action(
         # without memory_conn keep the legacy at-least-once semantics.
         if context.memory_conn is not None:
             key = _idempotency_key(binding.name, event.tuple_id)
-            now = time.time()
+            # nexus-9pkn (S360-time S1): clamped wall clock.
+            now = _idempotency_now()
             try:
                 if _idempotency_check(context.memory_conn, key=key, now=now):
                     _log.info(
@@ -391,7 +445,8 @@ async def _dispatch_action(
                 _idempotency_record(
                     context.memory_conn,
                     key=_idempotency_key(binding.name, event.tuple_id),
-                    expires_at=time.time() + _IDEMPOTENCY_TTL_SECONDS,
+                    # nexus-9pkn (S360-time S1): clamped wall clock.
+                    expires_at=_idempotency_now() + _IDEMPOTENCY_TTL_SECONDS,
                 )
             except sqlite3.Error:
                 _log.exception(
@@ -702,7 +757,11 @@ class BindingWatcher:
         self._profiles_dirs: tuple[Path, ...] = (
             tuple(profiles_dirs) if profiles_dirs else ()
         )
-        self._profile_fingerprints: dict[Path, float] = {}
+        # nexus-9pkn (S360-time S2): fingerprint pairs (mtime, size) so
+        # two writes within the same coarse-mtime second still produce
+        # distinct fingerprints. Older APFS-fallback, FAT, and some NFS
+        # filesystems round mtime to whole seconds.
+        self._profile_fingerprints: dict[Path, tuple[float, int]] = {}
         self._fingerprint_profiles_dirs()
         # One cursor per (subspace_glob, profile_name). Loaded lazily in run().
         self._cursors: dict[str, int] = {}
@@ -853,14 +912,21 @@ class BindingWatcher:
     # -- mtime-based hot reload (nexus-7lb9) ----------------------------
 
     def _fingerprint_profiles_dirs(self) -> None:
-        """Snapshot per-file mtimes across the watcher's profile dirs."""
-        fps: dict[Path, float] = {}
+        """Snapshot per-file (mtime, size) across the watcher's profile dirs.
+
+        nexus-9pkn (S360-time S2): tuple includes size so back-to-back
+        writes within the same coarse-mtime second still produce
+        different fingerprints. mtime alone misses such edits on
+        filesystems with 1-second granularity.
+        """
+        fps: dict[Path, tuple[float, int]] = {}
         for d in self._profiles_dirs:
             if not d.is_dir():
                 continue
             for yml in d.glob("*.yml"):
                 try:
-                    fps[yml] = yml.stat().st_mtime
+                    st = yml.stat()
+                    fps[yml] = (st.st_mtime, st.st_size)
                 except OSError:
                     continue
         self._profile_fingerprints = fps

@@ -15,6 +15,7 @@ import chromadb
 import structlog
 
 from nexus.config import default_db_path
+from nexus.db import DaemonModeDiagnosticError
 
 _log = structlog.get_logger(__name__)
 
@@ -227,6 +228,19 @@ def _check_t3_local() -> list[HealthResult]:
                 label="Local collections", ok=True,
                 detail=f"{col_count} collections{empty_note}, {size_str} on disk",
             ))
+        except DaemonModeDiagnosticError as exc:
+            # nexus-p0sk (S360-err): surface the diagnostic-mode hint
+            # so the operator sees the actionable fix instead of the
+            # bare "could not query" the generic guard below would
+            # produce.
+            results.append(HealthResult(
+                label="Local collections", ok=True,
+                detail=f"skipped under NX_STORAGE_MODE=daemon ({exc.__class__.__name__})",
+                fix_suggestions=[
+                    "nx daemon t2 start (probe will route through the daemon)",
+                    "NX_STORAGE_MODE=direct nx health (local probe, single-writer)",
+                ],
+            ))
         except Exception as exc:
             _log.debug("doctor_local_collections_failed", error=str(exc))
             results.append(HealthResult(label="Local collections", ok=True, detail="could not query"))
@@ -292,6 +306,17 @@ def _check_t3_cloud() -> list[HealthResult]:
             )
             results.append(HealthResult(
                 label=f"ChromaDB  ({chroma_database})", ok=True, detail="reachable",
+            ))
+        except DaemonModeDiagnosticError as exc:
+            # nexus-p0sk (S360-err): surface the daemon-mode hint.
+            results.append(HealthResult(
+                label=f"ChromaDB  ({chroma_database})",
+                ok=True,
+                detail=f"skipped under NX_STORAGE_MODE=daemon ({exc.__class__.__name__})",
+                fix_suggestions=[
+                    "nx daemon t2 start (probe will route through the daemon)",
+                    "NX_STORAGE_MODE=direct nx health (direct client probe)",
+                ],
             ))
         except Exception as exc:
             _log.debug("db_not_reachable", db_name=chroma_database, error=str(exc))
@@ -359,6 +384,17 @@ def _check_t3_cloud() -> list[HealthResult]:
                     pipeline_results.append(HealthResult(
                         label=f"pipeline ({col.name})", ok=True, detail=f"v{stored}",
                     ))
+        except DaemonModeDiagnosticError as exc:
+            # nexus-p0sk (S360-err): preserve the actionable diagnostic.
+            pipeline_results.append(HealthResult(
+                label=f"pipeline ({chroma_database})",
+                ok=True,
+                detail=f"skipped under NX_STORAGE_MODE=daemon ({exc.__class__.__name__})",
+                fix_suggestions=[
+                    "nx daemon t2 start (probe will route through the daemon)",
+                    "NX_STORAGE_MODE=direct nx health (direct client probe)",
+                ],
+            ))
         except Exception as exc:
             _log.debug("doctor_pipeline_check_failed", db=chroma_database, error=str(exc))
             pipeline_results.append(HealthResult(
@@ -859,6 +895,18 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
                     tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
                 )
                 results.extend(_check_chroma_pagination(client, chroma_database))
+            except DaemonModeDiagnosticError as exc:
+                # nexus-p0sk (S360-err): keep the daemon-mode hint
+                # rather than collapsing to "client unavailable".
+                results.append(HealthResult(
+                    label=f"ChromaDB pagination ({chroma_database})",
+                    ok=True,
+                    detail=f"skipped under NX_STORAGE_MODE=daemon ({exc.__class__.__name__})",
+                    fix_suggestions=[
+                        "nx daemon t2 start (probe will route through the daemon)",
+                        "NX_STORAGE_MODE=direct nx health (direct client probe)",
+                    ],
+                ))
             except Exception as exc:
                 _log.debug(
                     "doctor_pagination_check_client_failed",

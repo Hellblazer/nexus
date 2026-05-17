@@ -55,9 +55,11 @@ def _resolve_dir(profiles_dir: Optional[Path]) -> Path:
 # agent could otherwise drop a ``kind: python`` action callable into
 # the watcher's scan roots and get arbitrary code execution on the
 # next event tick.
-import re as _re
-
-_VALID_PROFILE_NAME_RE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+# nexus-uf3w (S360-uni S1): the canonical SR-1 regex lives in
+# nexus.cockpit.bindings so both the LOAD and CRUD paths share the
+# same source of truth. Re-export it here so existing importers
+# resolve unchanged.
+from nexus.cockpit.bindings import _VALID_PROFILE_NAME_RE  # noqa: E402,F401
 
 
 def _validate_profile_name(profile: str) -> None:
@@ -154,6 +156,12 @@ def create_binding(
     target_dir = _resolve_dir(profiles_dir)
     path = _profile_path(target_dir, profile)
 
+    # nexus-uf3w (S360-uni S2): normalise the binding name to NFC so
+    # macOS NFD ↔ Linux NFC round trips collapse as expected when
+    # comparing or persisting.
+    import unicodedata as _unicodedata  # noqa: PLC0415
+    name = _unicodedata.normalize("NFC", name)
+
     if path.exists():
         body = _read_profile_dict(path)
         bindings = body.get("bindings", [])
@@ -162,7 +170,11 @@ def create_binding(
                 f"{path.name}: 'bindings' must be a list, "
                 f"got {type(bindings).__name__}"
             )
-        if any(b.get("name") == name for b in bindings if isinstance(b, dict)):
+        if any(
+            _unicodedata.normalize("NFC", b.get("name") or "") == name
+            for b in bindings
+            if isinstance(b, dict)
+        ):
             raise BindingProfileError(
                 f"{path.name}: duplicate binding name {name!r}"
             )
@@ -184,13 +196,25 @@ def create_binding(
     try:
         load_profile(path)
     except BindingProfileError:
-        # Undo the partial write so the user sees the original state.
-        if len(bindings) == 1:
-            path.unlink(missing_ok=True)
-        else:
-            bindings.pop()
-            body["bindings"] = bindings
-            _write_profile_dict(path, body)
+        # nexus-p0sk (S360-err S2): guard the rollback so a failure
+        # there (EROFS, ENOSPC, gone-disk) cannot mask the original
+        # validation error. Log the rollback failure separately and
+        # re-raise the original BindingProfileError.
+        try:
+            if len(bindings) == 1:
+                path.unlink(missing_ok=True)
+            else:
+                bindings.pop()
+                body["bindings"] = bindings
+                _write_profile_dict(path, body)
+        except OSError as rollback_exc:
+            _log.error(
+                "binding_rollback_failed",
+                profile=profile,
+                name=name,
+                error=str(rollback_exc),
+                error_type=type(rollback_exc).__qualname__,
+            )
         raise
 
     _log.info(
