@@ -174,6 +174,12 @@ class TuplespaceService:
         self._blocking_take_sema = threading.Semaphore(
             _BLOCKING_TAKE_MAX_CONCURRENT
         )
+        # nexus-noqq (S360-res S2): hold a reference to the chroma
+        # client so close() can release the PersistentClient's internal
+        # threads / SQLite handles. Previously the caller (daemon CLI)
+        # built the client, handed it in, then never closed it on the
+        # finally path.
+        self._chroma_client = chroma_client
         self._index: TupleIndex = TupleIndex.from_registry(
             self._registry, chroma_client
         )
@@ -689,6 +695,24 @@ class TuplespaceService:
                 error=str(exc),
                 error_type=type(exc).__qualname__,
             )
+        # nexus-noqq (S360-res S2): release the chromadb client we
+        # were handed at construction time. chromadb >=0.5 exposes
+        # ``reset()`` on the persistent client to drop internal
+        # threads + SQLite handles; ephemeral clients ignore it.
+        if self._chroma_client is not None:
+            for attr in ("reset", "close"):
+                fn = getattr(self._chroma_client, attr, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception as exc:
+                        _log.warning(
+                            "tuplespace_service_chroma_close_failed",
+                            method=attr,
+                            error=str(exc),
+                            error_type=type(exc).__qualname__,
+                        )
+                    break
 
 
 # ---------------------------------------------------------------------------

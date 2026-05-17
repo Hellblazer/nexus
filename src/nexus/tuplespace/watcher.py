@@ -81,10 +81,10 @@ def _next_poll_interval(*, idle_polls: int, current: Optional[float]) -> float:
     return max(doubled, _POLL_INTERVAL_BASELINE_SECONDS)
 
 
-# Backwards-compatible alias retained for transition: the prior name
-# was exported by spike tests and the MCP core. New code should import
-# the renamed class. The alias is removed in the next major bump.
-# nexus-zrk4.
+# nexus-vao3 (S360-dep S1): the prior alias-retention note (alias
+# kept for transition, removed in next major bump) was superseded by
+# nexus-cgul.1's hard removal; see the footer at ~line 234. Removed
+# so the header no longer contradicts the footer.
 
 # ---------------------------------------------------------------------------
 # Errors

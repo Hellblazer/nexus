@@ -736,9 +736,10 @@ class T2Daemon:
         memory_db_path = self._config_dir / "memory.db"
         tuples_db_path = self._config_dir / "tuples.db"
         from_ver, to_ver = run_daemon_migrations(memory_db_path, tuples_db_path)
+        # nexus-1uni (S360-log): event name follows the snake_case
+        # convention used by every other event in this module / arc.
         _log.info(
-            "daemon/t2/lifecycle",
-            op="migration-applied",
+            "daemon_migration_applied",
             **{"from": from_ver, "to": to_ver},
         )
 
@@ -755,24 +756,22 @@ class T2Daemon:
             if seed_dir.is_dir():
                 try:
                     written = self._registry_store.seed_from_builtin_dir(seed_dir)
+                    # nexus-1uni (S360-log): canonical snake_case.
                     _log.info(
-                        "daemon/t2/lifecycle",
-                        op="builtin-seed",
+                        "daemon_builtin_seed_completed",
                         builtin_dir=str(seed_dir),
                         rows_written=written,
                     )
                 except Exception as exc:
                     _log.error(
-                        "daemon/t2/lifecycle",
-                        op="builtin-seed-failed",
+                        "daemon_builtin_seed_failed",
                         builtin_dir=str(seed_dir),
                         error=str(exc),
                     )
                     raise
             else:
                 _log.warning(
-                    "daemon/t2/lifecycle",
-                    op="builtin-seed-skipped",
+                    "daemon_builtin_seed_skipped",
                     reason="builtin_dir_missing",
                     builtin_dir=str(seed_dir),
                 )

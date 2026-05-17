@@ -7,8 +7,9 @@ Contract:
 - watcher_state table exists in tuples.db after first daemon start.
 - Schema-version mismatch in hello_ack raises T2DaemonError with a
   directional instruction message.
-- The lifecycle log event "daemon/t2/lifecycle" fires with
-  op="migration-applied", from, and to keys.
+- The lifecycle log event "daemon_migration_applied" fires with
+  from and to keys (renamed from "daemon/t2/lifecycle"
+  op="migration-applied" by nexus-1uni).
 """
 from __future__ import annotations
 
@@ -232,7 +233,7 @@ async def test_watcher_state_primary_key_shape(tmp_path):
 @pytest.mark.asyncio
 async def test_lifecycle_migration_applied_event(tmp_path):
     """T2Daemon.start() must emit a structured log event:
-    event='daemon/t2/lifecycle' with op='migration-applied', 'from', 'to' keys.
+    event='daemon_migration_applied' with 'from', 'to' keys (nexus-1uni).
     """
     import logging
 
@@ -253,14 +254,14 @@ async def test_lifecycle_migration_applied_event(tmp_path):
     finally:
         structlog.configure(**saved_config)
 
-    # Look for the migration-applied event
+    # Look for the migration-applied event (renamed from
+    # 'daemon/t2/lifecycle' + op='migration-applied' by nexus-1uni).
     migration_events = [
         e for e in captured
-        if e.get("event") == "daemon/t2/lifecycle"
-        and e.get("op") == "migration-applied"
+        if e.get("event") == "daemon_migration_applied"
     ]
     assert len(migration_events) >= 1, (
-        "Expected at least one 'daemon/t2/lifecycle' event with op='migration-applied'. "
+        "Expected at least one 'daemon_migration_applied' event. "
         f"Got events: {[e.get('event') for e in captured]}"
     )
     evt = migration_events[0]

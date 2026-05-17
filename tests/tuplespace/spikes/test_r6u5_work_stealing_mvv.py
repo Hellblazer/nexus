@@ -275,6 +275,7 @@ def _direct_worker(
     latencies_ms: list[float],
     sync_lock: threading.Lock,
     deadline: float,
+    n_tuples: int,
 ) -> None:
     conn = _open_worker_conn(db_path)
     try:
@@ -297,7 +298,7 @@ def _direct_worker(
                 # Either drained or transient contention; back off briefly.
                 time.sleep(POLL_SLEEP_S)
                 with sync_lock:
-                    if successes and len(successes) >= deadline_target: 
+                    if successes and len(successes) >= n_tuples:
                         return
                 continue
             t_success = time.perf_counter()
@@ -306,7 +307,7 @@ def _direct_worker(
             with sync_lock:
                 successes.append(t_success)
                 latencies_ms.append((t_success - t_attempt) * 1000.0)
-                if len(successes) >= deadline_target: 
+                if len(successes) >= n_tuples:
                     return
     finally:
         conn.close()
@@ -339,6 +340,9 @@ def _stop_daemon_in_thread(
 ) -> None:
     asyncio.run_coroutine_threadsafe(daemon.stop(), loop).result(timeout=5.0)
     loop.call_soon_threadsafe(loop.stop)
+    # nexus-xc3w (S360-test F3): close the loop after run_forever
+    # exits so its internal fds release rather than leaking.
+    loop.call_soon_threadsafe(loop.close)
 
 
 def _daemon_worker(
@@ -350,6 +354,7 @@ def _daemon_worker(
     latencies_ms: list[float],
     sync_lock: threading.Lock,
     deadline: float,
+    n_tuples: int,
 ) -> None:
     # nexus-r6u5: bump per-RPC timeout. TuplespaceService.take serialises
     # through self._lock, so 10 concurrent take RPCs each waiting on
@@ -371,7 +376,7 @@ def _daemon_worker(
             if result is None:
                 time.sleep(POLL_SLEEP_S)
                 with sync_lock:
-                    if successes and len(successes) >= deadline_target: 
+                    if successes and len(successes) >= n_tuples:
                         return
                 continue
             t_success = time.perf_counter()
@@ -382,7 +387,7 @@ def _daemon_worker(
             with sync_lock:
                 successes.append(t_success)
                 latencies_ms.append((t_success - t_attempt) * 1000.0)
-                if len(successes) >= deadline_target: 
+                if len(successes) >= n_tuples:
                     return
     finally:
         client.close()
@@ -393,10 +398,10 @@ def _daemon_worker(
 # ---------------------------------------------------------------------------
 
 
-# Module-level mutable so worker closures can read the target.
-# Set per-test; threading-safe because workers only READ it after the
-# test thread sets it (no concurrent writes).
-deadline_target: int = N_TUPLES_DEFAULT
+# nexus-xc3w (S360-test F1): the prior module-level ``deadline_target``
+# global was set per-test and read by the worker closures. Latent under
+# serial execution, racy under parallel. ``n_tuples`` now flows
+# through ``_run_drain`` -> worker kwargs as a closure-captured value.
 
 
 def _run_drain(
@@ -409,9 +414,6 @@ def _run_drain(
 
     Returns a stats dict (consumed, total_elapsed_ms, p50/p95/p99 ms).
     """
-    global deadline_target
-    deadline_target = n_tuples
-
     start_event = threading.Event()
     successes: list[float] = []
     latencies_ms: list[float] = []
@@ -428,6 +430,7 @@ def _run_drain(
                 latencies_ms=latencies_ms,
                 sync_lock=sync_lock,
                 deadline=deadline,
+                n_tuples=n_tuples,
             ),
             name=f"w-{i}",
             daemon=True,
@@ -560,8 +563,13 @@ class TestWorkStealingMvvDaemon:
         n = N_TUPLES_DEFAULT
         # macOS UDS path length cap: keep config dir under /tmp not pytest's
         # /private/var/folders/.../ which can exceed the 104-char limit.
+        # nexus-xc3w (S360-test F2): register atexit cleanup so the
+        # daemon's tuples.db + WAL + UDS socket do not accumulate.
+        import atexit as _atexit
+        import shutil as _shutil
         import tempfile as _tempfile
         config_dir = Path(_tempfile.mkdtemp(prefix="r6u5-", dir="/tmp"))
+        _atexit.register(_shutil.rmtree, str(config_dir), ignore_errors=True)
         tuples_db = config_dir / "tuples.db"
 
         service = TuplespaceService(

@@ -83,9 +83,20 @@ def chroma_client() -> chromadb.EphemeralClient:
 
 
 def _short_config_dir() -> Path:
-    """tempdir under /tmp to keep UDS paths under the macOS 104-char cap."""
+    """Tempdir under /tmp (macOS 104-char UDS path cap), cleaned at exit.
+
+    nexus-xc3w (S360-test F2): register an atexit shutil.rmtree so the
+    daemon's tuples.db + WAL + UDS socket do not accumulate across
+    test runs. Per-test cleanup is intentionally NOT used because the
+    daemon often outlives the test function (started in a sibling
+    thread); a process-exit hook is the safest place to reap.
+    """
+    import atexit as _atexit
+    import shutil as _shutil
     import tempfile as _tempfile
-    return Path(_tempfile.mkdtemp(prefix="ry0v-", dir="/tmp"))
+    d = Path(_tempfile.mkdtemp(prefix="ry0v-", dir="/tmp"))
+    _atexit.register(_shutil.rmtree, str(d), ignore_errors=True)
+    return d
 
 
 def _run_daemon_in_thread(
@@ -110,6 +121,11 @@ def _stop_daemon_in_thread(
 ) -> None:
     asyncio.run_coroutine_threadsafe(daemon.stop(), loop).result(timeout=5.0)
     loop.call_soon_threadsafe(loop.stop)
+    # nexus-xc3w (S360-test F3): loop.stop() exits run_forever but
+    # leaves the loop's internal fds open. Close from outside the
+    # loop thread is safe once run_forever has returned; schedule
+    # via call_soon_threadsafe to enforce that ordering.
+    loop.call_soon_threadsafe(loop.close)
 
 
 def _dims() -> dict[str, Any]:

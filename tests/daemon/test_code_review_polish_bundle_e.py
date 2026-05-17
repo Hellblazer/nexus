@@ -3,7 +3,7 @@
 
 Three behavioural test classes covering the changes that ship with this
 bundle. The trivial fixes (4ivq drop ``or None``, qu6t docstring tweak,
-kkp9 ``route_payload`` documentation, zrk4 ``_DataVersionWatcher`` ->
+kkp9 ``route_payload`` documentation, zrk4 ``_TupleSpaceWatcher`` ->
 ``_DataVersionWatcher`` rename) are covered by the existing test
 suites; this file adds regression guards for the behaviour changes:
 

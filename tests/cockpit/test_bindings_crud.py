@@ -75,9 +75,9 @@ class TestBindingEnabledField:
         assert by_name["b-off"].enabled is False
 
     def test_disabled_binding_does_not_dispatch(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch
     ) -> None:
-        """``_BindingWatcher._dispatch_event`` skips bindings with enabled=False."""
+        """``BindingWatcher._dispatch_event`` skips bindings with enabled=False."""
         from nexus.cockpit.bindings import (
             Action,
             Binding,
@@ -95,10 +95,12 @@ class TestBindingEnabledField:
         def _record(event, binding, context):  # noqa: ARG001
             fired.append(binding.name)
 
-        # Stash the callable so the YAML resolver can find it.
+        # nexus-xc3w (S360-test F4): monkeypatch.setitem so the
+        # stashed module is torn down at test exit, instead of
+        # leaking into sys.modules for the rest of the pytest session.
         mod = type(_sys)("_test_bindings_crud_disabled")
         mod.record = _record  # type: ignore[attr-defined]
-        _sys.modules["_test_bindings_crud_disabled"] = mod
+        monkeypatch.setitem(_sys.modules, "_test_bindings_crud_disabled", mod)
 
         b_on = Binding(
             name="b-on",

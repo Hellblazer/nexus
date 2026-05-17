@@ -4268,6 +4268,11 @@ def _get_tuplespace() -> dict[str, Any]:
         _TUPLESPACE.update(
             {"registry": registry, "conn": None, "index": None, "watcher": None, "client": client}
         )
+        # nexus-noqq (S360-res S1): ensure the daemon-mode T2Client's
+        # socket pool is drained at process exit. Direct-mode below has
+        # its own atexit, but daemon-mode used to return early here and
+        # leaked up to 4 pooled UDS sockets per MCP process.
+        atexit.register(client.close)
         return _TUPLESPACE
 
     conn = open_tuples_db(db_path)
@@ -4282,9 +4287,12 @@ def _get_tuplespace() -> dict[str, Any]:
 
     watcher = None
     try:
-        # nexus-zrk4: class renamed from _DataVersionWatcher to
-        # _DataVersionWatcher so its role (data_version polling for
-        # take() wake-ups) is self-evident.
+        # nexus-zrk4 + nexus-qggv: class renamed from
+        # ``_TupleSpaceWatcher`` (zrk4) to ``_DataVersionWatcher`` then
+        # to ``DataVersionWatcher`` (qggv, 2026-05-17) so its role
+        # (data_version polling for take() wake-ups) is self-evident
+        # and the production import path no longer violates the
+        # underscore-private convention.
         from nexus.tuplespace.watcher import DataVersionWatcher
         import threading
         _wake_event = threading.Event()
