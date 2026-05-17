@@ -46,6 +46,20 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     │     rdr:   SemanticMarkdownChunker → voyage-context-3 → rdr__<repo>
     │     pdf:   auto-detect routing (Docling → MinerU → PyMuPDF) → table/formula detection → bib enrichment → voyage-context-3 → docs__<corpus>
     │     skip:  .xml/.json/.yml/.html/.css/.lock/etc → silently ignored
+
+    Text-first PDF strategy: nexus extracts figure captions, equation
+    text, and table content into the chunk stream rather than indexing
+    page images. The text-vs-multimodal RAG gap measured by M3DocRAG
+    (Cho et al. 2024, arXiv:2411.04952) §5.1 is concentrated in figures
+    and charts with no textual description; for nexus's
+    research-paper / code / RDR / markdown corpus, MinerU and Docling
+    capture most of the visual signal as text. The full M3DocRAG
+    pipeline (ColPali retrieval + Qwen2-VL generator) is rejected
+    because the Qwen2-VL answer path is GPU-mandatory and nexus has no
+    generator. Retrieval-only variants (ColPali via Apple-Silicon MPS;
+    figure-only SigLIP embeddings) are scoped as spikes in
+    `docs/proposals/m3docrag-application.md` §5b — measured before
+    adopted.
     │
     ├── Search: query → retrieve → rerank → topic-boost → group → format
     │     semantic, hybrid (+ frecency + ripgrep)

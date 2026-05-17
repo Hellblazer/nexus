@@ -111,6 +111,8 @@ nx index repo ./my-project
 
 Most PDFs work fine with the default (`auto`). You only need to think about this if you're indexing **math-heavy academic papers** with equations.
 
+> **Why text-first, not page-image.** Nexus extracts captions, equation text, and table content into the chunk stream rather than indexing page images. The text-vs-multimodal RAG gap measured by M3DocRAG (Cho et al. 2024, arXiv:2411.04952) §5.1 is concentrated in figures and charts with no textual description; with MinerU + Docling capturing the visual signal as text, that residual gap is small for nexus's research-paper / code / RDR / markdown corpus. The full M3DocRAG pipeline pairs page-image retrieval with a Qwen2-VL 7B generator that is GPU-mandatory — and nexus has no generator (synthesis happens in the calling LLM). Retrieval-only variants (ColPali on Apple-Silicon MPS, or figure-only SigLIP embeddings) are scoped as spikes in `docs/proposals/m3docrag-application.md`; measured before adopted.
+
 **How `auto` works:**
 
 1. Docling extracts the PDF and counts formula regions
