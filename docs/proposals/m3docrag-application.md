@@ -105,7 +105,7 @@ The text-only ColBERT spike (§6) is unchanged in scope — it's about late-inte
 | Item | Status | Spike scope |
 |---|---|---|
 | ColPali retrieval on Apple Silicon (no generator) | **Reconsider** | Index a 20-PDF subset with ColPali via transformers+MPS. Measure: per-page index time, query latency, recall@10 vs Voyage on figure-heavy queries. File a bead if index time ≤ 60s/page and recall@10 lift on figure-bearing queries ≥ 10pp. |
-| Figure-only embeddings via SigLIP | **Spike PASSED — bead filed (nexus-8siy)** | Caption-to-figure self-retrieval on M3DocRAG paper (7 figures, 5 with captions): recall@10 = 1.0000, MRR@10 = 0.85 on `google/siglip-base-patch16-224` (768-dim, MPS). 12 s end-to-end extract+embed per paper. Threshold ≥ 0.7 cleanly met; nexus-8siy filed with the cross-paper validation requirement before production adoption. |
+| Figure-only embeddings via SigLIP | **Spike PASSED, cross-paper validated — bead nexus-8siy** | Single-paper (M3DocRAG): recall@10 = 1.0000, MRR@10 = 0.85. Cross-paper (3 dt-papers): recall@10 = 1.0000, MRR@10 = 0.875, top-1 same-paper match 100 % (6/6). SigLIP retrieval is solid; new prerequisite discovered — Docling figure extraction yield is highly uneven (M3DocRAG: 7, BSS: 1, Open Ontologies: **0**). Implementation now gated on characterising the Docling under-detection (or testing MinerU / supplemental detector) before promising corpus-wide figure coverage. Detail in nexus-8siy notes. |
 
 ## 5c. Qwen coprocessor as a local VL backend — REVISED 2026-05-17
 

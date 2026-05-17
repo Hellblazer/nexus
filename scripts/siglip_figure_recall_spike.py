@@ -63,12 +63,13 @@ class Figure:
     image_path: Path
     page_number: int
     bbox: tuple[float, float, float, float] | None
+    paper_id: str = ""
 
 
 # ── Figure extraction via Docling ────────────────────────────────────────────
 
 
-def extract_figures(pdf_path: Path, out_dir: Path) -> list[Figure]:
+def extract_figures(pdf_path: Path, out_dir: Path, paper_id: str = "") -> list[Figure]:
     """Run Docling on the PDF, write each picture region to PNG, and
     return ``Figure`` records.
 
@@ -132,15 +133,17 @@ def extract_figures(pdf_path: Path, out_dir: Path) -> list[Figure]:
             if bb is not None:
                 bbox = (bb.l, bb.t, bb.r, bb.b)
 
-        image_path = out_dir / f"figure_{i:03d}.png"
+        slug = paper_id or pdf_path.stem
+        image_path = out_dir / f"{slug}_figure_{i:03d}.png"
         pil.save(image_path)
         figures.append(
             Figure(
-                figure_id=f"fig_{i:03d}",
+                figure_id=f"{slug}/fig_{i:03d}",
                 caption=caption,
                 image_path=image_path,
                 page_number=page_no,
                 bbox=bbox,
+                paper_id=slug,
             )
         )
     return figures
@@ -267,8 +270,8 @@ def _print(m: Metrics, label: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--pdf", required=True, type=Path,
-        help="Path to a PDF to extract figures from.",
+        "--pdf", action="append", default=[], type=Path,
+        help="Path to a PDF. Repeat for cross-paper validation.",
     )
     parser.add_argument(
         "--model", default="google/siglip-base-patch16-224",
@@ -279,47 +282,76 @@ def main() -> int:
         help="Directory to write extracted figure PNGs.",
     )
     args = parser.parse_args()
+    if not args.pdf:
+        raise SystemExit("at least one --pdf is required")
+    for p in args.pdf:
+        if not p.exists():
+            raise SystemExit(f"PDF not found: {p}")
 
-    if not args.pdf.exists():
-        raise SystemExit(f"PDF not found: {args.pdf}")
+    label = "cross-paper" if len(args.pdf) > 1 else args.pdf[0].name
+    print(f"\n=== SigLIP figure-only spike — {label} ===\n")
 
-    print(f"\n=== SigLIP figure-only spike — {args.pdf.name} ===\n")
-
+    all_figures: list[Figure] = []
     t_total = time.perf_counter()
-    figures = extract_figures(args.pdf, args.out)
+    for pdf in args.pdf:
+        figs = extract_figures(pdf, args.out, paper_id=pdf.stem[:16])
+        n_cap = sum(1 for f in figs if f.caption)
+        print(f"  {pdf.name}: {len(figs)} figures, {n_cap} captioned")
+        all_figures.extend(figs)
     extract_elapsed = time.perf_counter() - t_total
-    print(f"\nextracted {len(figures)} figures in {extract_elapsed:.1f}s")
-    if not figures:
+    print(f"\nextracted {len(all_figures)} figures total in {extract_elapsed:.1f}s")
+
+    if not all_figures:
         print("no figures extracted; nothing to measure.")
         return 0
 
-    n_with_caption = sum(1 for f in figures if f.caption)
-    print(f"  {n_with_caption} of {len(figures)} figures have a caption")
+    n_with_caption = sum(1 for f in all_figures if f.caption)
+    print(f"  {n_with_caption} of {len(all_figures)} figures have a caption")
     if n_with_caption == 0:
         print("no captions; cannot run caption→figure retrieval.")
         return 0
 
-    image_embeds, caption_embeds, dim = embed_with_siglip(figures, args.model)
+    image_embeds, caption_embeds, dim = embed_with_siglip(all_figures, args.model)
     print(f"  embedding dim: {dim}")
 
-    print("\n--- caption → figure retrieval ---")
+    print("\n--- caption → figure retrieval (cross-paper) ---")
     m = measure_caption_to_figure(
-        figure_ids=[f.figure_id for f in figures],
+        figure_ids=[f.figure_id for f in all_figures],
         image_embeds=image_embeds,
         caption_embeds=caption_embeds,
-        captions=[f.caption for f in figures],
+        captions=[f.caption for f in all_figures],
     )
     _print(m, f"SigLIP self-retrieval ({args.model})")
 
+    # Cross-paper additional diagnostic: how often does the top-1
+    # result come from the wrong paper? This is the cross-paper
+    # confusion signal — important when scaling to many papers.
+    print("\n--- diagnostic: top-1 paper match rate ---")
+    correct_paper = 0
+    n_check = 0
+    for i, (fig, q_emb) in enumerate(zip(all_figures, caption_embeds)):
+        if not fig.caption:
+            continue
+        n_check += 1
+        scored = [
+            (j, _cosine(q_emb, img_emb))
+            for j, img_emb in enumerate(image_embeds)
+        ]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        top1_idx = scored[0][0]
+        if all_figures[top1_idx].paper_id == fig.paper_id:
+            correct_paper += 1
+    print(f"  top-1 result from same paper as query: "
+          f"{correct_paper}/{n_check} ({correct_paper / max(n_check, 1):.2%})")
+
     print("\n--- decision ---")
-    if m.recall_at_10 >= 0.7:
-        print(f"  recall@10 = {m.recall_at_10:.4f} ≥ 0.7. Viable. "
-              "Per proposal §5b, file a bead for an opt-in figure-image index.")
+    if m.recall_at_10 >= 0.7 and m.mrr_at_10 >= 0.5:
+        print(f"  recall@10 = {m.recall_at_10:.4f}, MRR@10 = {m.mrr_at_10:.4f}. "
+              "Cross-paper PASSED.")
     else:
-        print(f"  recall@10 = {m.recall_at_10:.4f} < 0.7. Viability "
-              "below threshold; figure-only path likely doesn't pay for "
-              "itself on this PDF. Consider running on more PDFs / a "
-              "stronger image encoder before final reject.")
+        print(f"  recall@10 = {m.recall_at_10:.4f}, MRR@10 = {m.mrr_at_10:.4f}. "
+              "Cross-paper FAILED — the same-paper win was an artifact of "
+              "small candidate pool; reconsider before adoption.")
     return 0
 
 
