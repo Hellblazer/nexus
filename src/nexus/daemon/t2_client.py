@@ -287,15 +287,24 @@ class _SocketConnection:
             <builtin exception>: when the daemon reports a stdlib exception.
             ConnectionError: if the socket breaks mid-call.
         """
+        # nexus-6kxb (CR-1): track whether we installed an override so the
+        # finally can unconditionally restore. The prior guard required
+        # ``original_timeout is not None``, which short-circuited when the
+        # socket started in blocking mode and left the override installed
+        # on the pooled connection for the next caller.
+        was_overridden = recv_timeout_override is not None
         original_timeout: float | None = None
-        if recv_timeout_override is not None:
+        if was_overridden:
             original_timeout = self._sock.gettimeout()
             self._sock.settimeout(float(recv_timeout_override))
         try:
             _sock_write_frame(self._sock, {"op": op, "args": args})
             resp = _sock_read_frame(self._sock)
         finally:
-            if original_timeout is not None and recv_timeout_override is not None:
+            if was_overridden:
+                # settimeout(None) re-enables blocking mode, so a single
+                # call restores correctly for both the timed and blocking
+                # original states.
                 self._sock.settimeout(original_timeout)
         if "error" in resp:
             _reraise_remote_error(resp["error"])
@@ -374,11 +383,48 @@ class _ConnectionPool:
 # ---------------------------------------------------------------------------
 
 
+#: nexus-muhk (CR-2): registry mapping daemon-defined exception qualnames
+#: to their concrete classes. Built lazily on first ``_reraise_remote_error``
+#: call to avoid pulling ``tuplespace_service`` (and its chroma / sqlite
+#: dependency closure) into the t2_client import graph eagerly.
+#:
+#: The daemon emits ``f"{exc.__module__}.{exc.__qualname__}"`` as the
+#: ``type`` field; matching by full qualname keeps unrelated short-name
+#: collisions (e.g. another ``InvalidTimeoutError`` elsewhere) from
+#: hijacking the resolution.
+_TYPED_EXCEPTION_REGISTRY: dict[str, type[BaseException]] | None = None
+
+
+def _typed_exception_registry() -> dict[str, type[BaseException]]:
+    """Return (building on first call) the daemon typed-exception registry."""
+    global _TYPED_EXCEPTION_REGISTRY
+    if _TYPED_EXCEPTION_REGISTRY is None:
+        from nexus.daemon.tuplespace_service import (  # noqa: PLC0415
+            BlockingTakeResourceExhausted,
+        )
+        from nexus.tuplespace.api import (  # noqa: PLC0415
+            InvalidTimeoutError,
+        )
+
+        _TYPED_EXCEPTION_REGISTRY = {
+            "nexus.daemon.tuplespace_service.BlockingTakeResourceExhausted": (
+                BlockingTakeResourceExhausted
+            ),
+            "nexus.tuplespace.api.InvalidTimeoutError": InvalidTimeoutError,
+        }
+    return _TYPED_EXCEPTION_REGISTRY
+
+
 def _reraise_remote_error(error: Any) -> None:
     """Re-raise a remote error dict as a Python exception.
 
-    If the remote ``type`` resolves to a built-in exception, raise it
-    directly.  Otherwise raise ``T2DaemonError``.
+    Resolution order:
+      1. Typed daemon exceptions registered in ``_typed_exception_registry()``
+         (full-qualname match).
+      2. Built-in exception class by simple name (e.g. ``"KeyError"``,
+         ``"builtins.ValueError"``).
+      3. Generic :class:`T2DaemonError` preserving the original qualname
+         in ``type_name`` for caller introspection.
     """
     if isinstance(error, str):
         # Bare string error (transport / protocol errors, not store errors)
@@ -391,7 +437,13 @@ def _reraise_remote_error(error: Any) -> None:
     message: str = error.get("message", str(error))
     remote_tb: str = error.get("traceback", "")
 
-    # Try to resolve the last component as a builtin exception
+    # 1) Typed daemon exception by full qualname (nexus-muhk CR-2).
+    typed_cls = _typed_exception_registry().get(type_name)
+    if typed_cls is not None:
+        raise typed_cls(message)
+
+    # 2) Built-in exception by simple name (preserves prior behaviour for
+    #    standard errors emitted by the daemon, e.g. ValueError, KeyError).
     simple_name = type_name.rsplit(".", 1)[-1] if type_name else ""
     builtin_cls = getattr(builtins, simple_name, None)
     if (
