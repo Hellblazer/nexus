@@ -63,6 +63,7 @@ import asyncio
 import dataclasses
 import hashlib
 import importlib
+import os
 import sqlite3
 import time
 from collections.abc import Iterable
@@ -103,11 +104,19 @@ class Action:
 
 @dataclasses.dataclass(frozen=True)
 class Binding:
-    """One binding row: when ``match`` is satisfied, fire ``action``."""
+    """One binding row: when ``match`` is satisfied, fire ``action``.
+
+    nexus-7lb9: ``enabled`` defaults to True; disabled bindings are
+    loaded into the watcher's profile list but skipped at dispatch
+    time. CRUD via :func:`nexus.cockpit.bindings_crud.toggle_binding`
+    flips this flag on the YAML file; the watcher's mtime-poll reload
+    picks the change up on the next tick.
+    """
 
     name: str
     match: dict[str, Any]
     action: Action
+    enabled: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
@@ -225,7 +234,17 @@ def load_profile(path: Path) -> BindingProfile:
         source = f"{path.name}:{bname}"
         match = _validate_match(b.get("match"), source=source)
         action = _validate_action(b.get("action"), source=source)
-        bindings.append(Binding(name=bname, match=match, action=action))
+        enabled_raw = b.get("enabled", True)
+        if not isinstance(enabled_raw, bool):
+            raise BindingProfileError(
+                f"{source}: 'enabled' must be a bool, "
+                f"got {type(enabled_raw).__name__}"
+            )
+        bindings.append(
+            Binding(
+                name=bname, match=match, action=action, enabled=enabled_raw
+            )
+        )
 
     return BindingProfile(name=name, bindings=tuple(bindings))
 
@@ -660,6 +679,7 @@ class _BindingWatcher:
         poll_interval: float = 0.05,
         batch_limit: int = 100,
         stop_timeout: float = 5.0,
+        profiles_dirs: Optional[Iterable[Path]] = None,
     ) -> None:
         self._conn = conn
         self._profiles: tuple[BindingProfile, ...] = tuple(profiles)
@@ -669,6 +689,16 @@ class _BindingWatcher:
         self._batch_limit = batch_limit
         self._stop_timeout = stop_timeout
         self._stop = asyncio.Event()
+        # nexus-7lb9: profile-reload support. When ``profiles_dirs`` is
+        # provided, ``_reload_if_changed`` re-scans those directories and
+        # rebuilds ``self._profiles`` when any source file's mtime changes
+        # (or the directory contents change). Cheap: one stat per file
+        # per check, polled at the existing tick cadence.
+        self._profiles_dirs: tuple[Path, ...] = (
+            tuple(profiles_dirs) if profiles_dirs else ()
+        )
+        self._profile_fingerprints: dict[Path, float] = {}
+        self._fingerprint_profiles_dirs()
         # One cursor per (subspace_glob, profile_name). Loaded lazily in run().
         self._cursors: dict[str, int] = {}
         # Task handle from start(); stays None until start() is called.
@@ -763,7 +793,14 @@ class _BindingWatcher:
     # -- single iteration --------------------------------------------------
 
     async def _tick(self) -> int:
-        """Run one polling iteration. Returns the number of events processed."""
+        """Run one polling iteration. Returns the number of events processed.
+
+        nexus-7lb9: each tick first checks whether the profile source
+        files have changed on disk and reloads if so. The mtime stat is
+        cheap (one stat per *.yml in the configured dirs) and skipped
+        entirely when no ``profiles_dirs`` were wired (legacy path).
+        """
+        self._reload_if_changed()
         total = 0
         for profile in self._profiles:
             cursor = self._cursors.get(profile.name, 0)
@@ -808,10 +845,66 @@ class _BindingWatcher:
             total += len(events)
         return total
 
+    # -- mtime-based hot reload (nexus-7lb9) ----------------------------
+
+    def _fingerprint_profiles_dirs(self) -> None:
+        """Snapshot per-file mtimes across the watcher's profile dirs."""
+        fps: dict[Path, float] = {}
+        for d in self._profiles_dirs:
+            if not d.is_dir():
+                continue
+            for yml in d.glob("*.yml"):
+                try:
+                    fps[yml] = yml.stat().st_mtime
+                except OSError:
+                    continue
+        self._profile_fingerprints = fps
+
+    def _reload_if_changed(self) -> None:
+        """Re-load profiles when any source YAML's mtime changed.
+
+        No-op when ``profiles_dirs`` is empty (the legacy fixed-profile
+        construction path). Profile-level errors during reload are
+        logged and the previous profile list is retained, so a broken
+        YAML in the user dir cannot brick the watcher.
+        """
+        if not self._profiles_dirs:
+            return
+        previous = dict(self._profile_fingerprints)
+        self._fingerprint_profiles_dirs()
+        if previous == self._profile_fingerprints:
+            return
+
+        # Something changed: reload everything.
+        new_profiles: list[BindingProfile] = []
+        for d in self._profiles_dirs:
+            if not d.is_dir():
+                continue
+            for yml in sorted(d.glob("*.yml")):
+                try:
+                    new_profiles.append(load_profile(yml))
+                except Exception as exc:
+                    _log.warning(
+                        "binding_watcher_profile_reload_failed",
+                        path=str(yml),
+                        error=str(exc),
+                    )
+        self._profiles = tuple(new_profiles)
+        _log.info(
+            "binding_watcher_profiles_reloaded",
+            count=len(new_profiles),
+            profiles=[p.name for p in new_profiles],
+        )
+
     async def _dispatch_event(
         self, profile: BindingProfile, event: EventRecord
     ) -> None:
         for binding in profile.bindings:
+            # nexus-7lb9: disabled bindings stay in the loaded profile
+            # so the CRUD MCP can list / toggle them, but they do not
+            # fire actions.
+            if not binding.enabled:
+                continue
             if not matches(event, binding.match):
                 continue
             try:
@@ -842,8 +935,26 @@ class _BindingWatcher:
 
 
 def default_profiles_dir() -> Path:
-    """Resolve the canonical profiles dir relative to the package."""
+    """Resolve the canonical builtin profiles dir relative to the package.
+
+    Returns the shipped builtin path under ``nx/tuplespace/builtin/bindings/
+    profiles/``. Operator-created bindings live in :func:`user_profiles_dir`
+    so CRUD writes do not modify checked-in defaults.
+    """
     here = Path(__file__).resolve()
-    # src/nexus/cockpit/bindings.py → repo root → nx/tuplespace/builtin/bindings/profiles
+    # src/nexus/cockpit/bindings.py -> repo root -> nx/tuplespace/builtin/bindings/profiles
     repo_root = here.parent.parent.parent.parent
     return repo_root / "nx" / "tuplespace" / "builtin" / "bindings" / "profiles"
+
+
+def user_profiles_dir() -> Path:
+    """Return the user-owned binding-profile dir.
+
+    nexus-7lb9: operator-created bindings (via the binding_create MCP
+    tool or hand-edited YAML) live here, separate from the shipped
+    builtin defaults under :func:`default_profiles_dir`. The watcher
+    loads both dirs (builtin first, then user) and the user profiles
+    can override builtin profiles by name.
+    """
+    home = Path(os.path.expanduser("~"))
+    return home / ".config" / "nexus" / "bindings" / "profiles"
