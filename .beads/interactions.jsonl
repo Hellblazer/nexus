@@ -889,3 +889,4 @@
 {"id":"int-ac34a98f","kind":"field_change","created_at":"2026-05-17T14:52:05.2838Z","actor":"Hellblazer","issue_id":"nexus-e8ao","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-c0becb56","kind":"field_change","created_at":"2026-05-17T14:52:08.401639Z","actor":"Hellblazer","issue_id":"nexus-b43y","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-c5ed609a","kind":"field_change","created_at":"2026-05-17T14:52:11.745847Z","actor":"Hellblazer","issue_id":"nexus-nphw","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-7e6e8dbb","kind":"field_change","created_at":"2026-05-17T15:12:11.538561Z","actor":"Hellblazer","issue_id":"nexus-z4m7","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}

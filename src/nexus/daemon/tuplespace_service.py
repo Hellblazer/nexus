@@ -59,11 +59,11 @@ from nexus.tuplespace.store import open_tuples_db
 _log = structlog.get_logger(__name__)
 
 
-# nexus-73vq: blocking_take poll cadence. Short enough that wake
-# latency after a competing out() is operator-acceptable (well under
-# the CA-5 reactive-take latency budget); long enough that idle
-# RPCs aren't burning CPU. 10ms matches the daemon's EventStream
-# data_version poll interval in t2_daemon (nexus-m4gm).
+# nexus-73vq: prior blocking_take poll cadence. Retained as a hint of
+# the original 10 ms periodic-poll design; no longer referenced after
+# nexus-z4m7 (CR-3) restored the data_version wake mechanism. Safe to
+# remove once any external follow-up bead settles whether a periodic
+# wake-up fallback should also be reintroduced.
 _BLOCKING_TAKE_POLL_INTERVAL_S: float = 0.010
 
 
@@ -87,6 +87,38 @@ class BlockingTakeResourceExhausted(RuntimeError):
     as a typed exception lets clients implement back-off rather than
     silently waiting at the connection layer.
     """
+
+
+# nexus-z4m7 (CR-3): adaptive cadence for the daemon-side data_version
+# watcher. Mirrors ``tuplespace/watcher.py`` direct-mode constants so
+# the daemon delivers RDR-110 CA #5's 1-2 ms median wake claim while
+# letting idle systems amortise the polling cost. Active polls run at
+# 1 ms (CA #6 verified the cost is negligible on M-series hardware);
+# after ``_DAEMON_WAKE_IDLE_RAMP`` consecutive idle ticks (~100 ms of
+# dead air) the cadence doubles each tick until it reaches
+# ``_DAEMON_WAKE_POLL_MAX_S``, cutting idle CPU by ~1000x. Activity
+# (any data_version increment) resets the interval back to baseline.
+_DAEMON_WAKE_POLL_BASELINE_S: float = 0.001
+_DAEMON_WAKE_POLL_MAX_S: float = 1.0
+_DAEMON_WAKE_IDLE_RAMP: int = 100
+
+
+def _next_daemon_wake_interval(
+    *, idle_polls: int, current: Optional[float]
+) -> float:
+    """Adaptive cadence helper for the daemon's data_version watcher.
+
+    Pure function: deterministic, no side effects, no I/O. Mirrors
+    ``tuplespace.watcher._next_poll_interval`` but kept separate so
+    the daemon-internal path does not depend on the direct-mode
+    module's daemon-mode guard.
+    """
+    if idle_polls == 0:
+        return _DAEMON_WAKE_POLL_BASELINE_S
+    if idle_polls <= _DAEMON_WAKE_IDLE_RAMP or current is None:
+        return _DAEMON_WAKE_POLL_BASELINE_S
+    doubled = min(current * 2.0, _DAEMON_WAKE_POLL_MAX_S)
+    return max(doubled, _DAEMON_WAKE_POLL_BASELINE_S)
 
 
 class TuplespaceService:
@@ -145,10 +177,97 @@ class TuplespaceService:
         self._index: TupleIndex = TupleIndex.from_registry(
             self._registry, chroma_client
         )
+        # nexus-z4m7 (CR-3): data_version watcher. Polls PRAGMA
+        # data_version on a dedicated read-only connection and fires
+        # ``self._wake_event`` on each detected commit. Blocking
+        # ``take`` callers wait on the event with their own timeout so
+        # RDR-110 CA #5's 1-2 ms median wake claim holds. Started
+        # eagerly so the first blocking_take pays no cold-start cost.
+        self._wake_event = threading.Event()
+        self._wake_stop = threading.Event()
+        # _wake_baselined fires once the watcher has captured its first
+        # data_version reading, so callers (and tests) can synchronise
+        # on "watcher is now observing changes" rather than racing the
+        # thread's startup. Without this, a commit landing between
+        # `_wake_thread.start()` and the first poll would be invisible
+        # to the watcher (baseline captures the post-commit version).
+        self._wake_baselined = threading.Event()
+        self._wake_thread: Optional[threading.Thread] = None
+        self._start_wake_watcher()
+        # Block __init__ until the watcher has captured baseline so
+        # any subsequent commit is guaranteed to fire wake_event.
+        self._wake_baselined.wait(timeout=2.0)
         _log.info(
             "tuplespace_service_started",
             tuples_db=str(tuples_db_path),
         )
+
+    def _start_wake_watcher(self) -> None:
+        """Spawn the data_version watcher thread (idempotent)."""
+        if self._wake_thread is not None and self._wake_thread.is_alive():
+            return
+        self._wake_stop.clear()
+        self._wake_thread = threading.Thread(
+            target=self._wake_watcher_loop,
+            name="t2-tuplespace-data-version-watcher",
+            daemon=True,
+        )
+        self._wake_thread.start()
+
+    def _wake_watcher_loop(self) -> None:
+        """Run on the watcher thread: open a read conn and poll data_version."""
+        try:
+            # storage-boundary-allow: daemon-internal data_version polling
+            # for RDR-110 CA #5 wake source (nexus-z4m7). Read-only WAL
+            # reader cannot contend with the service's main writer.
+            conn = sqlite3.connect(
+                f"file:{self._tuples_db_path}?mode=ro",
+                uri=True,
+                check_same_thread=False,
+            )
+        except sqlite3.Error as exc:
+            _log.warning(
+                "wake_watcher_connect_failed",
+                db=str(self._tuples_db_path),
+                error=str(exc),
+            )
+            return
+        try:
+            last_version: Optional[int] = None
+            idle_polls: int = 0
+            interval: float = _DAEMON_WAKE_POLL_BASELINE_S
+            while not self._wake_stop.is_set():
+                activity = False
+                try:
+                    row = conn.execute("PRAGMA data_version").fetchone()
+                    version = int(row[0]) if row else 0
+                except sqlite3.Error as exc:
+                    _log.warning(
+                        "wake_watcher_poll_failed",
+                        error=str(exc),
+                    )
+                    self._wake_stop.wait(interval)
+                    continue
+                if last_version is None:
+                    last_version = version
+                    self._wake_baselined.set()
+                elif version != last_version:
+                    last_version = version
+                    activity = True
+                    self._wake_event.set()
+                if activity:
+                    idle_polls = 0
+                else:
+                    idle_polls += 1
+                interval = _next_daemon_wake_interval(
+                    idle_polls=idle_polls, current=interval
+                )
+                self._wake_stop.wait(timeout=interval)
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
     # ------------------------------------------------------------------
     # RPC handlers, keyword-only contracts mirroring nexus.tuplespace.api
@@ -284,12 +403,13 @@ class TuplespaceService:
         process (one polling task per blocking_take RPC, dispatched
         in the daemon's thread-pool executor).
 
-        nexus-2kld.3 (HR-3): the loop is a simple periodic poll at
-        ``_BLOCKING_TAKE_POLL_INTERVAL_S`` (10 ms). The prior version
-        opened a read-only conn and tracked ``PRAGMA data_version``
-        but never used the increment as a wake source — the loop
-        retried unconditionally every tick, so the version
-        machinery was vestigial. Removed.
+        nexus-z4m7 (CR-3): blocking_take waits on ``self._wake_event``
+        which the daemon-internal data_version watcher fires on each
+        detected commit. The watcher polls at ``_DAEMON_WAKE_POLL_BASELINE_S``
+        (1 ms baseline, ramping toward ``_DAEMON_WAKE_POLL_MAX_S`` when
+        idle), restoring the RDR-110 CA #5 1-2 ms median wake claim
+        that HR-3's ``vestigial cleanup`` had silently weakened to the
+        prior 10 ms poll floor.
 
         nexus-2kld.1 (HR-1): each in-flight blocking_take holds a
         slot on ``self._blocking_take_sema``. Beyond
@@ -298,10 +418,11 @@ class TuplespaceService:
         than letting callers queue silently at the asyncio dispatch
         layer.
 
-        Cross-subspace wake characteristic (DR-5): the loop wakes
-        every 10 ms regardless of which subspace committed. On
-        multi-agent multi-subspace deployments with high write rates
-        across other subspaces this is O(N callers x poll rate)
+        Cross-subspace wake characteristic (DR-5): any commit anywhere
+        on the file fires the shared wake_event, so callers in
+        unrelated subspaces wake spuriously and re-poll. On
+        multi-agent multi-subspace deployments with high cross-
+        subspace write rates this is O(N callers x commit rate)
         speculative claim attempts. Acceptable for v1; a future
         per-subspace ``threading.Event`` channel is tracked under the
         umbrella backlog (nexus-ku5k.1).
@@ -356,6 +477,12 @@ class TuplespaceService:
             # the poll loop ourselves and call api.take(block=False) inside.
             deadline = time.perf_counter() + max(0.0, float(timeout_seconds))
             while True:
+                # nexus-z4m7 (CR-3): clear the wake event BEFORE the
+                # take attempt so any commit observed after this point
+                # is guaranteed to fire a fresh wake. This is the
+                # canonical edge-triggered Event pattern; a wake that
+                # races the take is caught by the wait() below.
+                self._wake_event.clear()
                 with self._lock:
                     result = ts_api.take(
                         conn=self._conn,
@@ -378,10 +505,13 @@ class TuplespaceService:
                 if remaining <= 0:
                     return None
 
-                # Periodic poll at _BLOCKING_TAKE_POLL_INTERVAL_S
-                # (10 ms). Sleep capped to the remaining budget so we
-                # don't overshoot.
-                time.sleep(min(_BLOCKING_TAKE_POLL_INTERVAL_S, remaining))
+                # nexus-z4m7 (CR-3): wait on the data_version wake
+                # event. The watcher fires it within the active
+                # cadence (1 ms baseline, RDR-110 CA #5 / CA #6) of
+                # any commit, so the median wake here is ~1-2 ms. The
+                # ``remaining`` budget bounds the wait so a missed
+                # signal still surfaces as a timeout.
+                self._wake_event.wait(timeout=remaining)
         finally:
             self._blocking_take_sema.release()
 
@@ -492,7 +622,7 @@ class TuplespaceService:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the SQLite connection.
+        """Stop the wake watcher and close the SQLite connection.
 
         nexus-dxap: failure on close (e.g. ``sqlite3.OperationalError``
         when the connection's thread is gone, or an EROFS on the
@@ -501,7 +631,18 @@ class TuplespaceService:
         with no signal when shutdown didn't actually release the
         underlying handle. Idempotent: a follow-up call on an
         already-closed connection is harmless.
+
+        nexus-z4m7 (CR-3): signal the wake watcher to stop and join
+        it before tearing down the writer. The thread is daemon=True
+        so a hard-exit will not deadlock, but join keeps the resource
+        story clean for tests and graceful shutdown.
         """
+        self._wake_stop.set()
+        # Re-set the event so any waiter in blocking_take returns
+        # immediately rather than waiting out its full timeout.
+        self._wake_event.set()
+        if self._wake_thread is not None and self._wake_thread.is_alive():
+            self._wake_thread.join(timeout=1.5)
         try:
             self._conn.close()
         except Exception as exc:

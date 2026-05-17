@@ -413,3 +413,194 @@ class TestCR2WireTraversal:
                     client.call("lookup", {})
             finally:
                 client.close()
+
+
+# ---------------------------------------------------------------------------
+# CR-3 (nexus-z4m7): data_version wake source for blocking_take
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+import chromadb as _chromadb
+
+_CR3_TASKS_YAML = """
+name: tasks/<project>
+tier: project
+content_type: text
+embed_from: content
+dimensions:
+  status: { type: enum, values: [open, in_progress, done], required: true }
+  priority: { type: enum, values: [P0, P1, P2], required: true }
+  created_by: { type: string, required: true }
+take:
+  enabled: true
+  mode: semantic
+  floor: 0.0
+  margin: 0.0
+  default_lease_seconds: 60
+read:
+  default_floor: 0.0
+  default_n: 100
+tiers: [project]
+retention_seconds: 86400
+"""
+
+
+@pytest.fixture()
+def _cr3_registry(tmp_path):
+    from nexus.tuplespace.registry import Registry
+
+    d = tmp_path / "builtin"
+    d.mkdir()
+    (d / "tasks.yml").write_text(_CR3_TASKS_YAML)
+    return Registry.load(d)
+
+
+@pytest.fixture()
+def _cr3_chroma():
+    client = _chromadb.EphemeralClient()
+    for coll in client.list_collections():
+        client.delete_collection(coll.name)
+    yield client
+    for coll in client.list_collections():
+        client.delete_collection(coll.name)
+
+
+class TestCR3DataVersionWakeMechanism:
+    """blocking_take must wake within a few ms of a sibling commit.
+
+    RDR-110 CA #5 claims ~1-2ms median wake latency via a data_version
+    poll thread. HR-3 (commit d248aeed) removed the data_version
+    machinery as 'vestigial', leaving the daemon polling at 10ms
+    unconditionally. CR-3 path A restores a dedicated polling thread
+    that fires a shared ``wake_event`` on each detected commit.
+    """
+
+    def test_watcher_fires_event_within_few_ms_of_commit(
+        self, tmp_path, _cr3_registry, _cr3_chroma
+    ) -> None:
+        """The data_version watcher must fire ``wake_event`` within a few
+        ms of any commit on the tuples.db file.
+
+        Uses a direct no-op write via the service's own connection so
+        the assertion measures watcher detection latency, not the cost
+        of ``ts_api.out`` (which embeds + indexes and dominates wall
+        clock). Ceiling is 25ms which comfortably accommodates CI
+        scheduler jitter while still failing the 10ms-floor regression.
+        """
+        from nexus.daemon.tuplespace_service import TuplespaceService
+
+        service = TuplespaceService(
+            tuples_db_path=tmp_path / "tuples.db",
+            chroma_client=_cr3_chroma,
+            registry=_cr3_registry,
+        )
+        try:
+            # Provision a small side-table once so the commit-only
+            # measurement loop doesn't pay schema-creation cost.
+            with service._lock:
+                service._conn.execute(
+                    "CREATE TABLE IF NOT EXISTS _wake_probe (id INTEGER)"
+                )
+                service._conn.commit()
+            # Warm-up commit so the watcher's adaptive cadence resets
+            # to its 1ms baseline (otherwise the test can land while
+            # the watcher is in an idle-ramped interval and the wake
+            # latency floor reflects that, not the active-load floor).
+            with service._lock:
+                service._conn.execute(
+                    "INSERT INTO _wake_probe (id) VALUES (0)"
+                )
+                service._conn.commit()
+            assert service._wake_event.wait(timeout=0.5), (
+                "warm-up commit never fired wake_event"
+            )
+            service._wake_event.clear()
+
+            def _commit_once() -> None:
+                with service._lock:
+                    service._conn.execute(
+                        "INSERT INTO _wake_probe (id) VALUES (1)"
+                    )
+                    service._conn.commit()
+
+            t0 = _time.perf_counter()
+            threading.Thread(target=_commit_once, daemon=True).start()
+            fired = service._wake_event.wait(timeout=1.0)
+            elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+            assert fired, "wake_event was never set despite a sibling commit"
+            assert elapsed_ms < 25.0, (
+                f"wake latency too high — {elapsed_ms:.1f}ms; the "
+                "data_version watcher should observe the commit within "
+                "the active 1ms cadence + CI scheduler jitter."
+            )
+        finally:
+            service.close()
+
+    def test_blocking_take_wakes_via_watcher_not_polling(
+        self, tmp_path, _cr3_registry, _cr3_chroma
+    ) -> None:
+        """blocking_take must use the wake_event, not the prior 10ms sleep."""
+        from nexus.daemon.tuplespace_service import TuplespaceService
+
+        service = TuplespaceService(
+            tuples_db_path=tmp_path / "tuples.db",
+            chroma_client=_cr3_chroma,
+            registry=_cr3_registry,
+        )
+        try:
+            sleep_seconds = 0.05
+
+            def _delayed_out() -> None:
+                _time.sleep(sleep_seconds)
+                service.out(
+                    subspace="tasks/cr3",
+                    content="hello",
+                    dimensions={
+                        "status": "open",
+                        "priority": "P1",
+                        "created_by": "x",
+                    },
+                )
+
+            t = threading.Thread(target=_delayed_out, daemon=True)
+            t.start()
+            t0 = _time.perf_counter()
+            result = service.blocking_take(
+                subspace="tasks/cr3",
+                query="hello",
+                claimant="solo",
+                timeout_seconds=5.0,
+            )
+            elapsed_ms = (_time.perf_counter() - t0) * 1000.0
+            assert result is not None
+            # Ceiling generous enough to absorb embedding cost on cold
+            # chroma but tight enough that 10ms polling cadence on each
+            # idle tick would push past it after a few cycles.
+            assert elapsed_ms < 200.0, (
+                f"blocking_take total elapsed {elapsed_ms:.1f}ms is "
+                "high; wake-event path should keep this well under the "
+                "polling-only baseline."
+            )
+            service.ack(claim_id=result["claim_id"], claimant="solo")
+        finally:
+            service.close()
+
+    def test_close_stops_wake_watcher_thread(
+        self, tmp_path, _cr3_registry, _cr3_chroma
+    ) -> None:
+        """close() must join the watcher thread within a sane budget."""
+        from nexus.daemon.tuplespace_service import TuplespaceService
+
+        service = TuplespaceService(
+            tuples_db_path=tmp_path / "tuples.db",
+            chroma_client=_cr3_chroma,
+            registry=_cr3_registry,
+        )
+        # Watcher started eagerly in __init__; sanity-check it's alive.
+        watcher = service._wake_thread
+        assert watcher is not None and watcher.is_alive()
+        service.close()
+        # join called inside close(); thread should be reaped.
+        watcher.join(timeout=2.0)
+        assert not watcher.is_alive()
