@@ -42,16 +42,20 @@ several thousand interleaved RPCs. The semaphore in HR-1 + the
 multi-thread executor mean concurrent calls are the rule, not the
 exception.
 
-#### Gap 2: Blocking-take returns None for at least four distinct reasons with no log differentiation
+#### Gap 2: Blocking-take returns None for three distinct reasons with no log differentiation
 
 `blocking_take` returns `None` when (a) the deadline elapsed
-naturally, (b) the per-claimant semaphore was already saturated and
-the rollback path fired, (c) the service is shutting down and
-`_wake_stop` was observed, (d) the sqlite connection was closed
-underneath the in-flight call (third 360° SEC handling). Each of
-these is operationally distinct; an operator triaging "why are my
-agents not getting work?" cannot tell the four apart from the
-client-side `None` return alone.
+naturally, (b) the service is shutting down and `_wake_stop` was
+observed at the loop-top check, (c) the sqlite connection was
+closed underneath the in-flight call (third 360° SEC handling).
+Each of these is operationally distinct; an operator triaging
+"why are my agents not getting work?" cannot tell the three apart
+from the client-side `None` return alone.
+
+(Note: semaphore-exhaustion paths — both the global HR-1 cap and
+the per-claimant SEC-4 cap — raise `BlockingTakeResourceExhausted`,
+a typed exception that already survives wire traversal. Those are
+not None-returning paths and are distinguishable today.)
 
 #### Gap 3: No latency breadcrumb in the standard RPC log
 
@@ -99,34 +103,88 @@ in every store-call log line) is captured here for proper design.
 
 ### Investigation
 
-To be expanded under `/nx:rdr-research`. The minimum set of source
-paths to read before locking the design:
+Round 1 research complete (2026-05-17). Full evidence in T2:
+`nexus_rdr/115-research-1` through `115-research-5`. Sources
+consulted:
 
 - `src/nexus/daemon/t2_daemon.py` (dispatch loop, ping response,
   `_dispatch_store_rpc` error frame shape)
-- `src/nexus/daemon/t2_client.py` (`call`, `_call`, `_SocketConnection`
-  frame protocol)
-- `src/nexus/daemon/tuplespace_service.py` (blocking_take's four
-  distinct "return None" paths)
-- One representative store (`src/nexus/db/t2/memory_store.py`) to
-  understand the contextvar / log-binding plumbing surface
-- `structlog` documentation for `structlog.contextvars.bind_contextvars`
-  and the context-propagation patterns recommended for asyncio +
-  thread-pool executors.
+- `src/nexus/daemon/t2_client.py` (`call`, `_call`,
+  `_SocketConnection` frame protocol — `t2_json_loads` passes
+  unknown top-level keys through without error)
+- `src/nexus/daemon/tuplespace_service.py` (blocking_take's
+  three actual None-return paths — enumeration below)
+- All nine `src/nexus/db/t2/*.py` stores audited for logger
+  construction pattern
+- structlog `bind_contextvars` source + Python 3.12 asyncio
+  `loop.run_in_executor` behaviour empirically tested in the
+  project's uv env
+
+#### Dependency Source Verification
+
+| Dependency | Source Searched? | Key Findings |
+| --- | --- | --- |
+| `asyncio.AbstractEventLoop.run_in_executor` | Yes | Does NOT propagate the current task's `contextvars.Context` to the thread-pool worker by default in Python 3.12. The asyncio implementation does not call `copy_context()` for the default executor path. Verified empirically. |
+| `contextvars.copy_context()` | Yes | When the dispatch wraps the executor callable as `ctx = copy_context(); run_in_executor(None, lambda: ctx.run(fn))`, contextvars set in the asyncio task DO propagate to the worker thread. |
+| `structlog.contextvars.bind_contextvars` | Yes | Stores its state in a single `contextvars.ContextVar`; processor `merge_contextvars` (already in the project's processor chain) pulls keys at log time. Inherits the propagation semantics of the underlying `contextvars` module. |
+| `t2_json_loads` / `_sock_read_frame` | Yes | No schema validation on top-level keys; unknown keys pass through. Adding `request_id` is fully backward-compatible — old daemons silently ignore client-supplied IDs; old clients that don't send any trigger daemon-side minting. No protocol version bump required. |
+
+### Key Discoveries
+
+- **Refuted** (A1): the initial scaffolded "subtle but likely
+  works" framing for `bind_contextvars` propagation across
+  `run_in_executor` was wrong. Without explicit
+  `copy_context().run(fn)`, the worker thread sees `None` for
+  every bound key. This is a *mandatory* design constraint, not
+  a nice-to-have. See `nexus_rdr/115-research-1`.
+- **Verified** (A2): UUID-v4 string is 36 bytes; with JSON key
+  overhead (`"request_id":"…"`) the total per-frame cost is ~54
+  bytes. Production frames are dominated by content payload
+  (largest observed ~60 KB → 0.057 MiB); 1 MiB cap is never
+  approached. See `nexus_rdr/115-research-2`.
+- **Verified** (A3): all 9 stores under `src/nexus/db/t2/*.py`
+  use `_log = structlog.get_logger(...)` — none use
+  `logging.getLogger`. The contextvar-merging processor is
+  global to all structlog loggers, so zero source edits per
+  store. One housekeeping note: 8 of 9 stores omit `__name__`
+  on the `get_logger` call (only `catalog_store.py` passes it);
+  this does not block the design but should be fixed during
+  Phase 1. See `nexus_rdr/115-research-3`.
+- **Verified** (Gap 2 enumeration): blocking_take has THREE
+  None-returning paths in the current code (not four as the
+  draft claimed). The semaphore-exhaustion cases raise
+  `BlockingTakeResourceExhausted` and are already
+  distinguishable. The three None paths are: (a) shutdown
+  observed at the loop-top `_wake_stop.is_set()` check, (b)
+  `sqlite3.ProgrammingError` from the conn-closed-race caught
+  in the take attempt, (c) `remaining <= 0` deadline elapsed.
+  See `nexus_rdr/115-research-4`.
+- **Verified** (no competing tracing infra): no
+  `opentelemetry-*` packages in `pyproject.toml`. The
+  Alternatives-Considered rejection of OpenTelemetry stands;
+  no existing tracing surface would conflict with structlog
+  contextvars. See `nexus_rdr/115-research-5`.
 
 ### Critical Assumptions
 
-- [ ] structlog's `bind_contextvars` propagates correctly across
-  `asyncio.run_in_executor` boundaries when the contextvar API is
-  used (Python 3.12's `contextvars` module ensures per-task
-  propagation; the thread-pool path requires `copy_context()`)
-  — **Status**: Unverified — **Method**: Spike
-- [ ] Adding a `request_id` field to every RPC frame does not push
-  any production payload over the 1 MiB frame cap — **Status**:
-  Documented — **Method**: Docs Only
-- [ ] Domain-store logs can be retrofitted to read the active
-  contextvars without source changes to each store — **Status**:
-  Unverified — **Method**: Source Search
+- [x] structlog's `bind_contextvars` propagates correctly across
+  `asyncio.run_in_executor` boundaries — **Status**: REFUTED —
+  **Method**: Spike. The dispatch layer MUST wrap the executor
+  callable with `contextvars.copy_context().run(...)` for keys
+  to cross the thread-pool boundary. Without this the feature
+  silently emits no request_ids in store logs.
+- [x] Adding a `request_id` field to every RPC frame does not
+  push any production payload over the 1 MiB frame cap —
+  **Status**: Verified — **Method**: Source Search. 54-byte
+  overhead vs. 1 MiB cap; production frames dominated by
+  content payload (largest observed 60 KB).
+- [x] Domain-store logs can be retrofitted to read the active
+  contextvars without source changes to each store —
+  **Status**: Verified — **Method**: Source Search. All 9
+  stores under `src/nexus/db/t2/*.py` use structlog; the
+  merging processor is global to all loggers. Pre-existing
+  housekeeping note: 8 of 9 omit `__name__` on
+  `get_logger` — fix during Phase 1.
 
 ## Proposed Solution
 
@@ -154,22 +212,60 @@ reason.
 
 ### Technical Design
 
-To be expanded. Initial sketch:
+Locked-in design after Round 1 research:
 
-- Add `request_id` to the RPC frame shape (already-flexible JSON;
-  zero protocol-version bump if treated as optional).
-- New helper in `nexus.daemon.protocol` (or inline in
-  `t2_daemon.py` if the protocol-extract from third 360° M-2 is
-  deferred): `bind_request_context(*, request_id, op)` that wraps
-  `structlog.contextvars.bind_contextvars` with the project's
-  processor chain.
-- Domain stores require no source changes — the structlog processor
-  picks up the contextvars set by the dispatch layer.
-- `_dispatch_store_rpc` measures `t0 = time.perf_counter()` before
-  the executor dispatch and `elapsed_ms = (time.perf_counter() - t0)
-  * 1000` before logging the exit event.
-- Update `T2Client._call` / `T2Client.call` / `_SocketConnection.call`
-  signatures to thread an optional caller-provided `request_id`.
+**Daemon side** (`_dispatch_store_rpc`):
+1. Read `request_id` from the inbound frame; mint a fresh
+   `uuid.uuid4().hex` if absent.
+2. Bind `request_id`, `op`, and `start_ns = time.perf_counter_ns()`
+   into the asyncio task's contextvars via
+   `structlog.contextvars.bind_contextvars(request_id=...,
+   op=...)`.
+3. **CRITICAL** (per Round 1 A1 refutation): capture
+   `ctx = contextvars.copy_context()` and dispatch as
+   `loop.run_in_executor(None, lambda: ctx.run(fn, **raw_args))`
+   so the bound vars propagate to the worker thread. Without this
+   the store-layer logs see no request_id (the feature silently
+   fails). This is a one-line change but it is load-bearing.
+4. Echo the (possibly minted) `request_id` on the response frame
+   so clients without their own IDs can recover one.
+5. Log `rpc_handler_ok` (or existing `rpc_handler_error`) on exit
+   with `elapsed_ms`.
+
+**Client side** (`T2Client` / `_SocketConnection`):
+- Architectural symmetry with the daemon: introduce a
+  module-level `_request_id_cv: ContextVar[str | None]` plus a
+  context manager `client.request_context(request_id=...)`.
+- `_SocketConnection.call` reads the contextvar and threads its
+  value into the outbound frame's `request_id` field.
+- This avoids modifying the signature of every generated
+  `_StoreProxy` method (~50+ methods across 9 stores). Callers
+  that want a custom ID enter the context manager; callers that
+  don't get a daemon-minted ID echoed back on the response frame.
+
+**Protocol compat**: `t2_json_loads` is schema-free at the top
+level (unknown keys pass through), so adding `request_id` does
+not break older daemons/clients. No `DAEMON_PROTOCOL_VERSION`
+bump.
+
+**Domain stores**: zero source edits — the `merge_contextvars`
+processor (already in the project's processor chain) pulls the
+bound keys at log time. Housekeeping: align the 8-of-9 stores
+that omit `__name__` on `structlog.get_logger()` during
+Phase 1 (Round 1 A3 housekeeping note).
+
+**Gap 2 (blocking_take None paths)**: emit three distinct
+DEBUG events before returning:
+  - `blocking_take_shutdown_observed`: `_wake_stop` was set at
+    the loop-top check.
+  - `blocking_take_conn_closed_during_take`: caught
+    `sqlite3.ProgrammingError` while `_wake_stop` was set.
+  - `blocking_take_deadline_elapsed`: `remaining <= 0` after a
+    take returned no candidate.
+
+Each carries the active `request_id` + `op` so the client's
+None-return log line and the daemon's classified-return event
+share a key.
 
 ### Decision Rationale
 
@@ -228,29 +324,61 @@ is in cross-process production use.
 
 ## Implementation Plan
 
-To be expanded during `/nx:rdr-research` and locked at
-`/nx:rdr-gate`. High-level phases:
+Updated after Round 1 research. Phases sequenced so each delivers
+observable value independently:
 
-- Phase 1: structlog processor + contextvar plumbing on the daemon
-  side (no wire change yet).
-- Phase 2: extend the RPC frame with optional `request_id`; client
-  + daemon both honour it; daemon mints on miss.
-- Phase 3: differentiate the four `blocking_take None` return paths
-  via DEBUG-level events.
-- Phase 4: optional CLI / monitoring hook — `nx daemon t2 doctor
-  --recent` could surface the last N request IDs + elapsed times.
+- **Phase 1: daemon-side contextvar plumbing + copy_context spike**
+  - Add `bind_request_context` helper in `nexus.daemon.protocol`
+    (or inline in `t2_daemon.py` if RDR-117 / M-2 protocol-extract
+    is deferred).
+  - Update `_dispatch_store_rpc` to bind contextvars AND wrap the
+    executor dispatch with `copy_context().run(...)`. THIS IS THE
+    SPIKE — verify domain-store logs receive the bound keys end
+    to end. Without this gate the rest of the work is wasted.
+  - Add `rpc_handler_ok` exit event with `elapsed_ms` (Gap 3).
+  - Housekeeping: align the 8-of-9 stores omitting `__name__`.
+- **Phase 2: wire-level request_id extension**
+  - Extend RPC frame shape with optional `request_id`.
+  - Daemon mints on miss; echoes on response frame.
+  - No protocol-version bump (verified backward-compat).
+- **Phase 3: client-side contextvar API**
+  - Module-level `_request_id_cv` + `client.request_context(...)`
+    context manager.
+  - `_SocketConnection.call` reads the contextvar; no `_StoreProxy`
+    method signatures change.
+- **Phase 4: blocking_take None-path disambiguation (Gap 2)**
+  - Three DEBUG events: `blocking_take_shutdown_observed`,
+    `blocking_take_conn_closed_during_take`,
+    `blocking_take_deadline_elapsed`. All carry `request_id`.
+- **Phase 5 (optional)**: `nx daemon t2 doctor --recent` could
+  surface the last N request IDs + their elapsed_ms from an
+  in-memory ring buffer on the daemon side. Out of scope for v1
+  if Phases 1-4 prove sufficient for incident triage.
 
 ## Test Plan
 
+- **Phase 1 spike (load-bearing)**: bind a request_id in the
+  asyncio task, dispatch a sync function through `run_in_executor`
+  with `copy_context().run(...)`, verify the function's structlog
+  logger sees the bound key. Same test WITHOUT `copy_context()`
+  must fail (regression guard).
 - **Scenario**: Two concurrent `T2Client.call`s with distinct
-  request_ids — **Verify**: every log line in each RPC's chain
-  carries the matching ID.
+  client-side request_ids — **Verify**: every log line in each
+  RPC's chain (client `t2_client_*` + daemon `rpc_handler_*` +
+  store `<op>_*`) carries the matching ID; the two streams do
+  not interleave by ID.
 - **Scenario**: Caller omits `request_id`; daemon mints one —
-  **Verify**: response frame carries the daemon-minted ID; logs
-  use the same ID.
-- **Scenario**: `blocking_take` returns None due to deadline vs.
-  shutdown vs. saturated semaphore — **Verify**: the DEBUG event
-  for each path identifies which.
+  **Verify**: response frame carries the daemon-minted ID; the
+  daemon's own logs use the minted ID; the client's logs also
+  use it once the response frame is parsed.
+- **Scenario**: Three blocking_take None-return paths fire —
+  **Verify**: the corresponding DEBUG event is emitted before
+  the return; each event carries the request_id; client-side
+  None-return log uses the same ID for correlation.
+- **Scenario**: Backward-compat — an older client (one that does
+  not send `request_id`) connects to the new daemon —
+  **Verify**: daemon mints; old client ignores the unknown key
+  in the response frame; no protocol error raised.
 
 ## Validation
 
@@ -267,10 +395,38 @@ To be completed before `/nx:rdr-accept`.
 
 - nexus-6m9i umbrella (third 360° remediation)
 - Third 360° agent scratch entry `7c5abccb` (observability)
+- T2 research entries: `nexus_rdr/115-research-1` (A1 refuted),
+  `115-research-2` (A2 verified), `115-research-3` (A3 verified),
+  `115-research-4` (Gap 2 enumeration), `115-research-5` (no
+  competing tracing infra)
 - structlog documentation, contextvars module (Python 3.12)
+- Python asyncio docs on `loop.run_in_executor` +
+  `contextvars.copy_context()` propagation semantics
 - RDR-112 (storage-as-service container boundary, sets the daemon
   surface this RDR extends)
 
 ## Revision History
 
-(Gate rounds will be appended here.)
+### 2026-05-17 — Round 1 research
+
+- A1 status moved from Unverified → **REFUTED**. Initial draft
+  framed `bind_contextvars` + `run_in_executor` propagation as
+  "subtle but likely works"; empirical testing confirmed the
+  worker thread sees `None` without explicit `copy_context()`.
+  Technical Design updated to make `copy_context().run(...)` a
+  load-bearing requirement; Phase 1 spike now the first
+  validation gate.
+- A2 status moved from Documented → **Verified**. 54-byte
+  per-frame overhead vs 1 MiB cap; no protocol-version bump.
+- A3 status moved from Unverified → **Verified**. All 9
+  domain stores under `src/nexus/db/t2/*.py` use structlog;
+  zero source edits per store. Housekeeping noted (8-of-9
+  omit `__name__` on `get_logger`).
+- Gap 2 None-path count corrected from 4 to **3**. Semaphore
+  exhaustion raises `BlockingTakeResourceExhausted` (already
+  distinguishable), not None.
+- Client-side API approach changed from "kwarg threading
+  through every method" to **module-level contextvar +
+  `client.request_context(...)` context manager** for
+  architectural symmetry with the daemon and to avoid touching
+  50+ `_StoreProxy` method signatures.
