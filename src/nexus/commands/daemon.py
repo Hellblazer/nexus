@@ -73,7 +73,24 @@ def t2_group() -> None:
     default=False,
     help="Run in foreground (block until SIGTERM/SIGINT). Default: background.",
 )
-def start_cmd(config_dir_str: str | None, foreground: bool) -> None:
+@click.option(
+    "--announce-stdout",
+    "announce_stdout",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit the discovery JSON (UDS path, PID, ports, registry digest) "
+        "on stdout at startup. Required when launched under an "
+        "orchestrator that captures stdout for service discovery (e.g. a "
+        "container init). Default off (nexus-l712 RDR-113): the "
+        "discovery file at ~/.config/nexus/t2_addr.<uid> is the primary "
+        "channel, and a shared stdout sink would otherwise leak PID + "
+        "UDS path + registry digest."
+    ),
+)
+def start_cmd(
+    config_dir_str: str | None, foreground: bool, announce_stdout: bool
+) -> None:
     """Start the T2 daemon.
 
     Binds both a UDS socket (mode 0600, peer-cred checked) and a
@@ -131,6 +148,7 @@ def start_cmd(config_dir_str: str | None, foreground: bool) -> None:
             tuples_db_path=tuples_db_path,
             registry_store=registry_store,
             tuplespace_service=tuplespace_service,
+            announce_stdout=announce_stdout,
         )
         try:
             await daemon.start()

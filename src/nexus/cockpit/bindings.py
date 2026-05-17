@@ -514,6 +514,81 @@ def _save_cursor(
     conn.commit()
 
 
+_GLOB_SPECIAL_CHARS = frozenset("*?[")
+
+
+def _glob_to_prefix_range(subspace_glob: str) -> tuple[str, str] | None:
+    """Return ``(lo, hi)`` so ``lo <= subspace < hi`` matches ``prefix*``.
+
+    Returns ``None`` when ``subspace_glob`` is not a pure-prefix shape
+    (e.g. ``*``, ``[abc]*``, ``foo?bar``); callers fall back to GLOB.
+
+    For ``"tasks/*"`` returns ``("tasks/", "tasks0")``: ``"0"`` is the
+    next ASCII byte after ``"/"`` (``0x30`` > ``0x2F``), and SQLite's
+    default ``BINARY`` collation compares bytewise so the half-open range
+    covers exactly the rows starting with ``"tasks/"``. We append a
+    high-codepoint byte (``"￿"``) for prefixes that don't end in a
+    safely-incrementable ASCII byte, giving SQLite something concrete to
+    range-scan against rather than rebuilding the alphabet boundary.
+    """
+    if not subspace_glob.endswith("*"):
+        return None
+    prefix = subspace_glob[:-1]
+    # Reject anything with glob metacharacters inside the prefix.
+    if any(c in _GLOB_SPECIAL_CHARS for c in prefix):
+        return None
+    if not prefix:
+        return None
+    # Compute the smallest string strictly greater than every ``prefix*``
+    # match. Using ``"￿"`` as the upper sentinel works for any UTF-8
+    # input (SQLite stores TEXT as UTF-8, BINARY collation is bytewise).
+    hi = prefix + "￿"
+    return prefix, hi
+
+
+def _build_fetch_event_batch_sql(
+    *,
+    subspace_glob: str,
+    after_rowid: int,
+    limit: int,
+) -> tuple[str, tuple]:
+    """Pick the right SQL + params for ``_fetch_event_batch``.
+
+    Returns ``(sql, params)`` so callers (and tests) can run EXPLAIN
+    QUERY PLAN against the rewrite. Three branches:
+
+    - ``"*"`` -> drop the subspace predicate entirely. The query becomes
+      a rowid range walk (integer primary key) and never touches
+      ``idx_events_subspace_rowid``.
+    - ``"prefix*"`` -> rewrite to ``subspace >= 'prefix' AND
+      subspace < 'prefix￿'``, which SQLite resolves via
+      ``idx_events_subspace_rowid`` as a range scan.
+    - Anything else (e.g. ``"[abc]*"``, ``"foo?bar"``) keeps the
+      original ``GLOB`` predicate. SQLite uses whatever index it can.
+    """
+    if subspace_glob == "*":
+        return (
+            "SELECT rowid, subspace, op, tuple_id, payload_summary, category, ts "
+            "FROM events WHERE rowid > ? ORDER BY rowid LIMIT ?",
+            (after_rowid, limit),
+        )
+    prefix_range = _glob_to_prefix_range(subspace_glob)
+    if prefix_range is not None:
+        lo, hi = prefix_range
+        return (
+            "SELECT rowid, subspace, op, tuple_id, payload_summary, category, ts "
+            "FROM events WHERE subspace >= ? AND subspace < ? AND rowid > ? "
+            "ORDER BY rowid LIMIT ?",
+            (lo, hi, after_rowid, limit),
+        )
+    return (
+        "SELECT rowid, subspace, op, tuple_id, payload_summary, category, ts "
+        "FROM events WHERE subspace GLOB ? AND rowid > ? "
+        "ORDER BY rowid LIMIT ?",
+        (subspace_glob, after_rowid, limit),
+    )
+
+
 def _fetch_event_batch(
     conn: sqlite3.Connection,
     *,
@@ -521,12 +596,16 @@ def _fetch_event_batch(
     after_rowid: int,
     limit: int,
 ) -> list[EventRecord]:
-    rows = conn.execute(
-        "SELECT rowid, subspace, op, tuple_id, payload_summary, category, ts "
-        "FROM events WHERE subspace GLOB ? AND rowid > ? "
-        "ORDER BY rowid LIMIT ?",
-        (subspace_glob, after_rowid, limit),
-    ).fetchall()
+    """Pull the next ``events`` batch since ``after_rowid``.
+
+    nexus-anjo: dispatches on the glob shape so SQLite can use the
+    right index. See :func:`_build_fetch_event_batch_sql` for the
+    rewrite rules.
+    """
+    sql, params = _build_fetch_event_batch_sql(
+        subspace_glob=subspace_glob, after_rowid=after_rowid, limit=limit
+    )
+    rows = conn.execute(sql, params).fetchall()
     return [
         EventRecord(
             cursor=int(r[0]),
