@@ -231,6 +231,27 @@ script preserved at
 `scripts/spikes/spike_rdr114_tuplespace_out_latency.py`
 (p99=48 ms local-mode, N=1000).
 
+### Tests (RDR-112 coverage gaps, nexus-hwy7 Bundle D)
+
+Two test-only additions closing coverage gaps surfaced by the
+360-critique. Pure additions; no behaviour change.
+
+- **`_BindingWatcher._tick` sqlite3.Error handlers** (nexus-a79y).
+  Both ``except sqlite3.Error`` blocks (around ``_fetch_event_batch``
+  and ``_save_cursor``) were 0% covered. Two new tests in
+  ``tests/daemon/test_coverage_bundle_d.py`` patch each call to raise
+  ``sqlite3.OperationalError`` mid-tick and assert the watcher
+  continues, the cursors stay sane, and no propagation reaches the
+  caller.
+- **`T2Daemon._retention_loop` body** (nexus-qhxf). The body past
+  ``await asyncio.sleep(_RETENTION_SWEEP_INTERVAL_SECONDS)`` was 0%
+  covered. Two new tests monkey-patch the interval to 50 ms, spin
+  ``_retention_loop`` through 2+ iterations, and assert
+  ``_run_retention_sweep_sync`` fires the expected number of times;
+  the second test flips ``_stopping`` mid-loop and asserts the loop
+  exits without exception via the ``if self._stopping: return``
+  mid-loop check.
+
 ### Fixed (RDR-112 A2 cockpit boundary, nexus-wlkf Bundle C)
 
 Two cockpit-boundary findings from the 360-critique sweep. Both
