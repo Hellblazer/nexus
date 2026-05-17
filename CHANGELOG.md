@@ -6,6 +6,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (RDR-112 P1.3.1, nexus-73vq): daemon-side blocking_take RPC
+
+`TuplespaceService.blocking_take` (new method + new
+`tuplespace.blocking_take` RPC op) polls until either a candidate
+becomes available or the deadline fires.
+
+- **Daemon side**: each `blocking_take` RPC opens a dedicated
+  read-only SQLite connection for `PRAGMA data_version` polling so
+  the polling loop never contends with the service's main writer
+  lock. Poll cadence is 10ms; competing `out()` calls are observed
+  within at most one tick. Each handler runs in its own thread-pool
+  executor slot, so N concurrent callers don't bottleneck on a
+  single polling task.
+- **Client side**: `T2Client.tuplespace.blocking_take(..., timeout_
+  seconds=30.0)` is the matching proxy. The per-call socket recv
+  timeout is widened to `timeout_seconds + 5s` so the
+  RpcTimeoutError fires only when the daemon has actually stalled,
+  not on the legitimate blocking wait. The widening uses a new
+  `recv_timeout_override` parameter on `_SocketConnection.call` and
+  is restored on the way out (single-call scope).
+- **Tests** (`tests/daemon/test_blocking_take_handler.py`, 6 cases):
+  immediate-hit, timeout-returns-none, wait-then-hit (sibling thread
+  out()s after 200ms; wake lands within 50ms tolerance), 10-caller
+  concurrent drain with distinct claim_ids (no CAS race).
+
+This is the daemon-side companion to RDR-110's direct-mode
+`_DataVersionWatcher`. The chain finally enables the `block=True`
+take semantics that have been feature-flagged-off since Phase 1:
+`nexus-ry0v` (RDR-110 P3.1) wires the client proxy onto the
+existing `T2Client.tuplespace.take(block=True)` dispatch, at which
+point both the RDR-110 P3 review gate (`nexus-jql6`) and the
+RDR-111 P4 final gate (`nexus-b97f`) clear.
+
 ### Changed (RDR-112 P6.3 cutover, nexus-507q): NX_STORAGE_MODE default flipped direct -> daemon
 
 **User-visible behaviour change.** As of this release, the active
