@@ -84,7 +84,7 @@ class TestBindingEnabledField:
             BindingContext,
             BindingProfile,
             EventRecord,
-            _BindingWatcher,
+            BindingWatcher,
         )
 
         fired: list[str] = []
@@ -120,7 +120,7 @@ class TestBindingEnabledField:
 
         import sqlite3 as _sqlite3
         tuples_conn = _sqlite3.connect(":memory:")
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=tuples_conn,
             profiles=[prof],
             context=BindingContext(conn=tuples_conn, index=None, registry=None),
@@ -359,11 +359,11 @@ class TestBindingWatcherReload:
         """Drop a new profile YAML into the user dir; watcher reloads it."""
         from nexus.cockpit.bindings import (
             BindingContext,
-            _BindingWatcher,
+            BindingWatcher,
         )
 
         tuples_conn = sqlite3.connect(":memory:")
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=tuples_conn,
             profiles=[],
             context=BindingContext(conn=tuples_conn, index=None, registry=None),
@@ -394,7 +394,7 @@ class TestBindingWatcherReload:
         """Modify an existing profile; watcher reloads with new contents."""
         from nexus.cockpit.bindings import (
             BindingContext,
-            _BindingWatcher,
+            BindingWatcher,
             load_profile,
         )
 
@@ -410,7 +410,7 @@ class TestBindingWatcherReload:
 
         tuples_conn = sqlite3.connect(":memory:")
         prof = load_profile(yml)
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=tuples_conn,
             profiles=[prof],
             context=BindingContext(conn=tuples_conn, index=None, registry=None),
@@ -438,7 +438,7 @@ class TestBindingWatcherReload:
         """
         from nexus.cockpit.bindings import (
             BindingContext,
-            _BindingWatcher,
+            BindingWatcher,
             load_profile,
         )
 
@@ -454,7 +454,7 @@ class TestBindingWatcherReload:
 
         tuples_conn = sqlite3.connect(":memory:")
         prof = load_profile(yml)
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=tuples_conn,
             profiles=[prof],
             context=BindingContext(conn=tuples_conn, index=None, registry=None),
@@ -479,10 +479,10 @@ class TestBindingWatcherReload:
 
     def test_reload_no_op_when_unchanged(self, tmp_path: Path) -> None:
         """No mtime change → no reload (cheap repeated calls)."""
-        from nexus.cockpit.bindings import BindingContext, _BindingWatcher
+        from nexus.cockpit.bindings import BindingContext, BindingWatcher
 
         tuples_conn = sqlite3.connect(":memory:")
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=tuples_conn,
             profiles=[],
             context=BindingContext(conn=tuples_conn, index=None, registry=None),

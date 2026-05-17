@@ -110,7 +110,7 @@ class TestDataVersionWatcherStartIdempotent:
     """Calling ``start()`` twice must not spawn two polling threads."""
 
     def test_double_start_keeps_single_thread(self) -> None:
-        from nexus.tuplespace.watcher import _DataVersionWatcher
+        from nexus.tuplespace.watcher import DataVersionWatcher
 
         tmp = _short_tmpdir()
         db = tmp / "tuples.db"
@@ -118,7 +118,7 @@ class TestDataVersionWatcherStartIdempotent:
         sqlite3.connect(str(db)).close()
 
         wake_event = threading.Event()
-        watcher = _DataVersionWatcher(db_path=db, wake_event=wake_event)
+        watcher = DataVersionWatcher(db_path=db, wake_event=wake_event)
         try:
             watcher.start()
             first_thread = watcher._thread
@@ -134,14 +134,14 @@ class TestDataVersionWatcherStartIdempotent:
 
     def test_start_after_stop_creates_fresh_thread(self) -> None:
         """After ``stop()``, ``start()`` again must create a new thread."""
-        from nexus.tuplespace.watcher import _DataVersionWatcher
+        from nexus.tuplespace.watcher import DataVersionWatcher
 
         tmp = _short_tmpdir()
         db = tmp / "tuples.db"
         sqlite3.connect(str(db)).close()
 
         wake_event = threading.Event()
-        watcher = _DataVersionWatcher(db_path=db, wake_event=wake_event)
+        watcher = DataVersionWatcher(db_path=db, wake_event=wake_event)
         watcher.start()
         first_thread = watcher._thread
         watcher.stop()

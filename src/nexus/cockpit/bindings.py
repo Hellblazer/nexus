@@ -649,7 +649,7 @@ def _fetch_event_batch(
 # ---------------------------------------------------------------------------
 
 
-class _BindingWatcher:
+class BindingWatcher:
     """Async polling reaction loop over the tuplespace ``events`` table.
 
     One watcher subscribes to a single *subspace_glob* (defaults to ``*``
@@ -658,7 +658,7 @@ class _BindingWatcher:
 
     Wire from cockpit startup:
 
-        >>> watcher = _BindingWatcher(
+        >>> watcher = BindingWatcher(
         ...     conn=conn,
         ...     profiles=load_profiles_dir(profiles_dir),
         ...     context=BindingContext(conn=conn, index=index, registry=registry),

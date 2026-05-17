@@ -100,7 +100,7 @@ class StorageModeError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-class _DataVersionWatcher:
+class DataVersionWatcher:
     """Poll ``PRAGMA data_version`` and fire *wake_event* on any commit.
 
     Direct-mode only per RDR-110 §Mode-split note. nexus-zrk4: was

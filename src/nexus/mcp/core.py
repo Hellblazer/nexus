@@ -4285,10 +4285,10 @@ def _get_tuplespace() -> dict[str, Any]:
         # nexus-zrk4: class renamed from _DataVersionWatcher to
         # _DataVersionWatcher so its role (data_version polling for
         # take() wake-ups) is self-evident.
-        from nexus.tuplespace.watcher import _DataVersionWatcher
+        from nexus.tuplespace.watcher import DataVersionWatcher
         import threading
         _wake_event = threading.Event()
-        watcher = _DataVersionWatcher(db_path=db_path, wake_event=_wake_event)
+        watcher = DataVersionWatcher(db_path=db_path, wake_event=_wake_event)
         watcher.start()
     except Exception as exc:
         _ts_log.warning("tuplespace_watcher_start_failed", error=str(exc))

@@ -1339,7 +1339,7 @@ class T2Daemon:
         """
         from nexus.cockpit.bindings import (  # noqa: PLC0415
             BindingContext,
-            _BindingWatcher,
+            BindingWatcher,
             default_profiles_dir,
             load_profiles_dir,
             user_profiles_dir,
@@ -1392,9 +1392,11 @@ class T2Daemon:
 
         # Wire the tuplespace index + registry from the running service
         # so python actions can write derived tuples via the same backend.
+        # nexus-qggv (S360-mod): use the public accessors instead of
+        # reaching into the sibling service's private attributes.
         if self._tuplespace_service is not None:
-            index = getattr(self._tuplespace_service, "_index", None)
-            registry = getattr(self._tuplespace_service, "_registry", None)
+            index = self._tuplespace_service.tuple_index()
+            registry = self._tuplespace_service.registry()
         else:
             index = None
             registry = None
@@ -1405,7 +1407,7 @@ class T2Daemon:
             registry=registry,
             memory_conn=memory_conn,
         )
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=tuples_conn,
             profiles=profiles,
             context=context,
@@ -1456,8 +1458,9 @@ class T2Daemon:
         # available. SQLite-only sweep is retained as a safety fallback
         # so retention still runs even on a daemon built without the
         # service (early-test construction path).
+        # nexus-qggv (S360-mod): public accessor; no more reach-through.
         index = (
-            getattr(self._tuplespace_service, "_index", None)
+            self._tuplespace_service.tuple_index()
             if self._tuplespace_service is not None
             else None
         )

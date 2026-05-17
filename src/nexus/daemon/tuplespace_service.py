@@ -270,6 +270,28 @@ class TuplespaceService:
                 pass
 
     # ------------------------------------------------------------------
+    # Public accessors
+    # ------------------------------------------------------------------
+
+    def tuple_index(self) -> TupleIndex:
+        """Return the live :class:`TupleIndex` instance.
+
+        nexus-qggv (S360-mod): typed accessor so callers (notably
+        ``T2Daemon._start_binding_watcher``) do not have to reach into
+        the private ``_index`` attribute.
+        """
+        return self._index
+
+    def registry(self) -> Registry:
+        """Return the loaded :class:`Registry` instance.
+
+        nexus-qggv (S360-mod): paired with :meth:`tuple_index` to
+        eliminate ``getattr(svc, "_registry", None)`` reach-throughs
+        from sibling services.
+        """
+        return self._registry
+
+    # ------------------------------------------------------------------
     # RPC handlers, keyword-only contracts mirroring nexus.tuplespace.api
     # ------------------------------------------------------------------
 

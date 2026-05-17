@@ -26,7 +26,7 @@ from nexus.cockpit.bindings import (
     BindingProfile,
     BindingProfileError,
     EventRecord,
-    _BindingWatcher,
+    BindingWatcher,
     action_emit_derived,
     action_log_marker,
     load_profile,
@@ -362,7 +362,7 @@ class TestActionEmitDerived:
 # ---------------------------------------------------------------------------
 
 
-async def _run_briefly(watcher: _BindingWatcher, *, ticks: int = 5):
+async def _run_briefly(watcher: BindingWatcher, *, ticks: int = 5):
     """Drive the watcher long enough to drain pending events."""
     task = asyncio.create_task(watcher.run())
     # Yield control several times so the loop polls.
@@ -405,7 +405,7 @@ class TestBindingWatcher:
                 ),
             ),
         )
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=conn, profiles=[profile], context=context, poll_interval=0.01
         )
         await _run_briefly(watcher)
@@ -442,7 +442,7 @@ class TestBindingWatcher:
                 ),
             ),
         )
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=conn, profiles=[profile], context=context, poll_interval=0.01
         )
         # First run picks up the event.
@@ -452,7 +452,7 @@ class TestBindingWatcher:
         # A second watcher with the SAME profile name and SAME conn must
         # see the persisted cursor and process zero events.
         calls.clear()
-        watcher2 = _BindingWatcher(
+        watcher2 = BindingWatcher(
             conn=conn, profiles=[profile], context=context, poll_interval=0.01
         )
         await _run_briefly(watcher2)
@@ -496,7 +496,7 @@ class TestBindingWatcher:
                 ),
             ),
         )
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=conn, profiles=[profile], context=context, poll_interval=0.01
         )
         await _run_briefly(watcher)
@@ -541,7 +541,7 @@ class TestBindingWatcher:
                 ),
             ),
         )
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=conn, profiles=[profile], context=context, poll_interval=0.01
         )
         await _run_briefly(watcher)
@@ -592,7 +592,7 @@ class TestBindingWatcher:
                 ),
             ),
         )
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=conn, profiles=[profile], context=context, poll_interval=0.01
         )
         await _run_briefly(watcher)
@@ -606,7 +606,7 @@ class TestBindingWatcher:
     @pytest.mark.asyncio
     async def test_request_stop_terminates_loop(self, conn, context):
         profile = BindingProfile(name="stop-prof", bindings=())
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=conn, profiles=[profile], context=context, poll_interval=0.01
         )
         task = asyncio.create_task(watcher.run())
@@ -628,7 +628,7 @@ class TestBindingWatcherLifecycle:
         self, conn, context
     ) -> None:
         profile = BindingProfile(name="lifecycle", bindings=())
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=conn, profiles=[profile], context=context, poll_interval=0.01
         )
         task1 = watcher.start()
@@ -642,7 +642,7 @@ class TestBindingWatcherLifecycle:
     @pytest.mark.asyncio
     async def test_stop_terminates_running_loop(self, conn, context) -> None:
         profile = BindingProfile(name="lifecycle", bindings=())
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=conn, profiles=[profile], context=context, poll_interval=0.01
         )
         watcher.start()
@@ -654,7 +654,7 @@ class TestBindingWatcherLifecycle:
     @pytest.mark.asyncio
     async def test_stop_without_start_is_noop(self, conn, context) -> None:
         profile = BindingProfile(name="lifecycle", bindings=())
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=conn, profiles=[profile], context=context, poll_interval=0.01
         )
         # Must not raise even though start() never ran.
@@ -664,7 +664,7 @@ class TestBindingWatcherLifecycle:
     @pytest.mark.asyncio
     async def test_double_stop_is_noop(self, conn, context) -> None:
         profile = BindingProfile(name="lifecycle", bindings=())
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=conn, profiles=[profile], context=context, poll_interval=0.01
         )
         watcher.start()

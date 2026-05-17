@@ -22,7 +22,7 @@ class TestWatcher:
     def test_watcher_fires_on_commit(self, tmp_path: Path) -> None:
         """Watcher fires wake_event when a commit increments data_version."""
         from nexus.tuplespace.store import apply_tuples_schema
-        from nexus.tuplespace.watcher import _DataVersionWatcher
+        from nexus.tuplespace.watcher import DataVersionWatcher
 
         db_path = tmp_path / "tuples.db"
         # Open write connection
@@ -32,7 +32,7 @@ class TestWatcher:
         write_conn.commit()
 
         wake_event = threading.Event()
-        watcher = _DataVersionWatcher(db_path=db_path, wake_event=wake_event)
+        watcher = DataVersionWatcher(db_path=db_path, wake_event=wake_event)
         watcher.start()
         # Wait briefly for the watcher thread to start and read the initial
         # data_version so the first commit is guaranteed to be a fresh change.
@@ -58,7 +58,7 @@ class TestWatcher:
     def test_watcher_does_not_fire_without_commit(self, tmp_path: Path) -> None:
         """Watcher does NOT fire if no commit happens within the window."""
         from nexus.tuplespace.store import apply_tuples_schema
-        from nexus.tuplespace.watcher import _DataVersionWatcher
+        from nexus.tuplespace.watcher import DataVersionWatcher
 
         db_path = tmp_path / "tuples2.db"
         write_conn = sqlite3.connect(str(db_path))
@@ -67,7 +67,7 @@ class TestWatcher:
         write_conn.commit()
 
         wake_event = threading.Event()
-        watcher = _DataVersionWatcher(db_path=db_path, wake_event=wake_event)
+        watcher = DataVersionWatcher(db_path=db_path, wake_event=wake_event)
         watcher.start()
         # Wait for watcher thread to settle before checking quiescence.
         time.sleep(0.05)
@@ -83,7 +83,7 @@ class TestWatcher:
     def test_watcher_stops_cleanly(self, tmp_path: Path) -> None:
         """stop() terminates the polling thread within 1 second."""
         from nexus.tuplespace.store import apply_tuples_schema
-        from nexus.tuplespace.watcher import _DataVersionWatcher
+        from nexus.tuplespace.watcher import DataVersionWatcher
 
         db_path = tmp_path / "tuples3.db"
         conn = sqlite3.connect(str(db_path))
@@ -92,7 +92,7 @@ class TestWatcher:
         conn.close()
 
         wake_event = threading.Event()
-        watcher = _DataVersionWatcher(db_path=db_path, wake_event=wake_event)
+        watcher = DataVersionWatcher(db_path=db_path, wake_event=wake_event)
         watcher.start()
         watcher.stop()
 
@@ -102,7 +102,7 @@ class TestWatcher:
     def test_watcher_start_is_idempotent(self, tmp_path: Path) -> None:
         """Calling start() twice does not raise."""
         from nexus.tuplespace.store import apply_tuples_schema
-        from nexus.tuplespace.watcher import _DataVersionWatcher
+        from nexus.tuplespace.watcher import DataVersionWatcher
 
         db_path = tmp_path / "tuples4.db"
         conn = sqlite3.connect(str(db_path))
@@ -111,7 +111,7 @@ class TestWatcher:
         conn.close()
 
         wake_event = threading.Event()
-        watcher = _DataVersionWatcher(db_path=db_path, wake_event=wake_event)
+        watcher = DataVersionWatcher(db_path=db_path, wake_event=wake_event)
         watcher.start()
         try:
             watcher.start()  # Should not raise
@@ -121,7 +121,7 @@ class TestWatcher:
     def test_watcher_refires_on_multiple_commits(self, tmp_path: Path) -> None:
         """Each commit increments data_version; wake_event can be cleared and re-fired."""
         from nexus.tuplespace.store import apply_tuples_schema
-        from nexus.tuplespace.watcher import _DataVersionWatcher
+        from nexus.tuplespace.watcher import DataVersionWatcher
 
         db_path = tmp_path / "tuples5.db"
         write_conn = sqlite3.connect(str(db_path))
@@ -130,7 +130,7 @@ class TestWatcher:
         write_conn.commit()
 
         wake_event = threading.Event()
-        watcher = _DataVersionWatcher(db_path=db_path, wake_event=wake_event)
+        watcher = DataVersionWatcher(db_path=db_path, wake_event=wake_event)
         watcher.start()
         # Wait for watcher thread to settle before starting the commit loop.
         time.sleep(0.05)
@@ -163,5 +163,5 @@ class TestWatcherStorageBoundary:
         wake_event = threading.Event()
 
         with pytest.raises(StorageModeError, match="direct"):
-            from nexus.tuplespace.watcher import _DataVersionWatcher
-            _DataVersionWatcher(db_path=db_path, wake_event=wake_event)
+            from nexus.tuplespace.watcher import DataVersionWatcher
+            DataVersionWatcher(db_path=db_path, wake_event=wake_event)

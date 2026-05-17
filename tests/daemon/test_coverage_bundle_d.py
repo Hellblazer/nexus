@@ -27,7 +27,7 @@ from nexus.cockpit.bindings import (
     BindingContext,
     BindingProfile,
     EventRecord,
-    _BindingWatcher,
+    BindingWatcher,
 )
 from nexus.daemon.t2_daemon import T2Daemon
 
@@ -91,7 +91,7 @@ class TestBindingWatcherSqliteErrorHandlers:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """_fetch_event_batch raising sqlite3.OperationalError must not crash _tick."""
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=tuples_conn,
             profiles=[_empty_profile("p1"), _empty_profile("p2")],
             context=binding_context,
@@ -130,7 +130,7 @@ class TestBindingWatcherSqliteErrorHandlers:
         )
         tuples_conn.commit()
 
-        watcher = _BindingWatcher(
+        watcher = BindingWatcher(
             conn=tuples_conn,
             profiles=[_empty_profile("p1")],
             context=binding_context,

@@ -36,7 +36,7 @@ from nexus.tuplespace.api import out, take, ack
 from nexus.tuplespace.index import TupleIndex
 from nexus.tuplespace.registry import Registry
 from nexus.tuplespace.store import open_tuples_db
-from nexus.tuplespace.watcher import _DataVersionWatcher
+from nexus.tuplespace.watcher import DataVersionWatcher
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -314,7 +314,7 @@ class TestPollingLatency:
         init_conn.close()
 
         wake_event = threading.Event()
-        watcher = _DataVersionWatcher(db_path=db_path, wake_event=wake_event)
+        watcher = DataVersionWatcher(db_path=db_path, wake_event=wake_event)
         watcher.start()
 
         # storage-boundary-allow: spike-harness (RDR-110 Phase 1 Step 7 CA spike)
