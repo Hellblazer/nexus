@@ -238,50 +238,197 @@ Three coordinated changes (refined after Round 1 research):
 
 ### Technical Design
 
-Locked-in design after Round 1 research:
+Locked-in design after Round 1 research.
 
-- New `_ReaderConnPool` class in `tuplespace_service.py`
-  analogous to `nexus.daemon.t2_client._ConnectionPool`.
-  Lease semantics: `pop` on checkout, `append` on success,
-  `close` on exception. Pool connections initialised with
-  `row_factory = sqlite3.Row` at create time; never returned
-  to the pool from an exception path (sqlite3 conn state
-  carries open-transaction risk).
-- `acquire_reader()` context manager on `TuplespaceService`
-  mirroring `_ConnectionPool.acquire`.
-- Writer path unchanged except `blocking_take`'s outer
-  framing waits on `self._cond_for(subspace).wait(timeout=...)`
-  instead of the shared `_wake_event.wait(...)`. The inner
-  CAS still runs under `self._lock` (writer); only the
-  WAIT is per-subspace.
-- The data_version watcher's `_wake_watcher_loop` gains:
-  - `last_events_rowid: int = 0` state field initialised
-    on the first poll.
-  - On each detected data_version bump: execute
-    `SELECT DISTINCT subspace FROM events WHERE rowid > ?`
-    with `last_events_rowid`; collect the changed-subspace
-    set; advance `last_events_rowid` to the new max rowid;
-    `notify_all` on the Condition for each changed subspace
-    (lazily create on first reference).
-  - Backward-compat: the shared `_wake_event` is retained
-    for one release as a fan-out fallback for callers that
-    don't know their target subspace yet (e.g. cross-subspace
-    administrative tasks). Removed in the release AFTER all
-    in-tree callers migrate to per-subspace wait.
+#### Reader-conn pool
 
-**Performance target**: 5-10x improvement on mixed read-heavy
+New `_ReaderConnPool` class in `tuplespace_service.py`
+analogous to `nexus.daemon.t2_client._ConnectionPool`. Lease
+semantics: `pop` on checkout, `append` on success, `close` on
+exception. Pool connections initialised with
+`row_factory = sqlite3.Row` at create time; never returned to
+the pool from an exception path (sqlite3 conn state carries
+open-transaction risk).
+
+`acquire_reader()` is a context manager on `TuplespaceService`
+mirroring `_ConnectionPool.acquire`. The four read-only
+methods replace `with self._lock:` framing with a pool
+acquisition AND replace `conn=self._conn` with the
+pool-acquired conn — `ts_api.read(conn=self._conn)` without
+the writer lock is a data race (the writer conn is not safe
+for concurrent access).
+
+**Pool exhaustion contract** (resolves Gap 1 failure mode):
+- Pool is fixed-size 10 (matches
+  `chroma_quotas.MAX_CONCURRENT_READS`). The fixed bound is
+  intentional — growing the pool unbounded would defeat the
+  whole point of bounding daemon resource use.
+- `acquire_reader()` waits on an internal
+  `threading.Semaphore(10)` with a 5-second timeout. On
+  timeout, raises a typed `ReaderPoolExhausted` exception
+  (in `nexus.daemon.errors`). The dispatcher maps this to an
+  RPC `ServiceBusy` reply so callers can retry; the daemon
+  itself does not block indefinitely.
+- The exhaustion path is observable: `ping` returns the
+  pool's `available` count alongside `active_handlers`
+  (extending the third 360° OBS C-1 ping surface).
+- Pool teardown: `TuplespaceService.close()` calls
+  `self._reader_pool.close_all()` which drains the deque
+  closing each connection. The writer `self._conn.close()`
+  call is unchanged.
+
+#### Writer lock + per-subspace wake channel
+
+The writer path is unchanged except for `blocking_take`'s
+outer-loop wake source. The inner CAS still acquires
+`self._lock` and runs against `self._conn` — only the WAIT
+between iterations becomes per-subspace.
+
+Wake-channel state:
+- `self._cond_for_subspace: dict[str, threading.Condition]`
+- `self._cond_lookup_lock: threading.Lock` — guards dict
+  lookup/insert ONLY. Never held while calling `notify_all`
+  or `wait` on a Condition; `_cond_for(subspace)` releases
+  this lock before returning.
+
+`_cond_for(subspace)` pattern:
+
+```python
+def _cond_for(self, subspace: str) -> threading.Condition:
+    with self._cond_lookup_lock:
+        cond = self._cond_for_subspace.get(subspace)
+        if cond is None:
+            cond = threading.Condition()
+            self._cond_for_subspace[subspace] = cond
+    return cond
+```
+
+Notifier (inside `_wake_watcher_loop`, on each detected
+data_version bump — reuses the watcher's existing
+`mode=ro&uri=true` connection; does NOT open a new one):
+
+```python
+# self._ro_conn is the existing watcher conn opened in
+# _wake_watcher_loop init at current line 251. Do NOT
+# open a new connection per bump — that leaks fds at
+# ~1ms cadence.
+cur = self._ro_conn.execute(
+    "SELECT DISTINCT subspace, MAX(rowid) "
+    "FROM events WHERE rowid > ? GROUP BY subspace",
+    (self._last_events_rowid,),
+)
+rows = cur.fetchall()
+if not rows:
+    continue
+changed = [row[0] for row in rows]
+# advance cursor to the new max rowid across all
+# changed subspaces in this bump
+self._last_events_rowid = max(row[1] for row in rows)
+for subspace in changed:
+    cond = self._cond_for(subspace)
+    with cond:           # acquire Condition's internal lock
+        cond.notify_all()  # safe under acquired lock
+```
+
+Waiter (`blocking_take` outer loop):
+
+```python
+# inside blocking_take's poll loop
+cond = self._cond_for(subspace)
+with cond:               # acquire Condition's internal lock
+    cond.wait(timeout=remaining)
+```
+
+**Why threading.Condition not threading.Event**: a bare
+`Event` race exists when N callers each clear-then-wait. If
+a commit fires between two callers' clears, the second
+caller misses the signal. Condition + `notify_all` makes
+fan-out atomic: the Condition's internal lock serialises
+acquire/notify/wait without TOCTOU.
+
+**Lock-order discipline**: `_cond_lookup_lock` is held ONLY
+inside `_cond_for`. It is never held across a `with cond:`
+block. This is the invariant that prevents deadlock — a
+nested acquisition of `_cond_lookup_lock` inside a
+`Condition` block would create an inversion against a
+notifier holding the Condition trying to take
+`_cond_lookup_lock`.
+
+#### Watcher cursor state
+
+The data_version watcher's `_wake_watcher_loop` gains a
+`last_events_rowid: int = 0` state field initialised on
+loop start (`SELECT MAX(rowid) FROM events` against the
+watcher's existing read-only connection). The SELECT
+DISTINCT-with-MAX(rowid) query then runs against deltas
+only — each poll touches O(rows-since-last-bump) rows of
+the `events` rowid PK, not the whole table. The watcher's
+existing `mode=ro&uri=true` connection (line 251 of
+current `tuplespace_service.py`) is reused for the new
+query; the notifier pseudocode above is illustrative of
+the query shape, not the connection lifecycle. No
+per-bump `sqlite3.connect` calls are added.
+
+#### No backward-compat fallback (S3)
+
+The initial sketch retained `_wake_event` "for one release
+as a fan-out fallback for callers that don't know their
+target subspace yet." Round-2 grep of the codebase confirms
+every `blocking_take` call-site passes a concrete subspace
+string; there are no cross-subspace `blocking_take` callers
+in-tree. The fallback would be dead code on arrival. Phase 2
+deletes `_wake_event` outright; the watcher's `notify_all`
+on per-subspace channels replaces all wake fan-out.
+
+**Performance target**: 5–10x improvement on mixed read-heavy
 workloads where reads dominate writes; modest improvement on
-write-heavy workloads (the writer lock is unchanged).
-Quantify under a derived spike harness based on
-`tests/tuplespace/spikes/test_ca_3_read_latency.py`.
+write-heavy workloads (the writer lock is unchanged). The
+baseline harness and metric definitions are specified in
+§Validation.
 
 ### Decision Rationale
 
-Substantive design — needs careful migration to preserve the
-SQLite single-writer invariant and the per-claimant blocking_take
-cap, while broadening read parallelism. Deferred from the third
-360° remediation precisely because an inline fix risked breaking
-the contracts shipped under RDR-110 / RDR-112.
+**Reader-conn pool over `PRAGMA query_only`-only**: Alternative
+2 (flip `query_only=ON` per read) keeps the single-lock design
+intact and only hardens against accidental writes from
+read-classified methods. That is a safety belt, not a
+throughput mechanism — reads still serialise on `self._lock`,
+the 70–300 ops/s ceiling stays put, and the dim-1 N2 escalation
+is unaddressed. The pool unlocks true read concurrency on WAL
+mode (already proven safe by two shipped production precedents:
+the wake watcher's 1ms-cadence `mode=ro&uri=true` polls and the
+EventStream subscribe handler's `query_only` reads). The pool
+and `query_only` are complementary — Phase 4 keeps the
+`query_only` PRAGMA on pool conns as defense-in-depth.
+
+**threading.Condition over Event + generation counter**: the
+multi-waiter signal-loss race in bare `threading.Event` is
+real (N callers each clear-then-wait; a `set` fired between
+two callers' clears is lost to the second). The natural fix
+is either Condition (semantically the right primitive — its
+internal lock serialises notify and wait) or Event +
+monotonic generation counter (waiter remembers gen, retries
+if `event.is_set() and gen unchanged`). Generation counters
+require manual TOCTOU management on every wait/notify pair;
+Condition handles it for free. Condition is also the Python
+documented idiom for fan-out wake — sticking with the
+documented primitive reduces the surface for the next
+maintainer to misread.
+
+**Events-table cursor over a separate subspace-tag column**:
+the watcher needs per-bump "which subspaces changed?". Two
+shapes: (a) add a `subspace_tag` column to `tuples` or a
+separate index table, denormalised at INSERT time; (b)
+`SELECT DISTINCT subspace FROM events WHERE rowid > ?` against
+the existing events table. Option (a) couples schema to wake
+routing, requires a migration, and adds writer-side cost for
+every `out`. Option (b) reuses the `events` table (already
+maintained for EventStream subscribers since RDR-110), runs
+as a rowid-PK delta scan (cheap), and adds nothing to the
+write path. Watcher state grows by one int
+(`last_events_rowid`). The events table is the right
+source-of-truth because it is the only place that already
+records every commit with subspace attribution.
 
 ## Alternatives Considered
 
@@ -340,9 +487,15 @@ read-path safety belt.
   CA-6 1ms-data_version-cost spike.
   **Mitigation**: benchmark; if regression, fall back to shared
   event for Phase 1 and ship the subspace channels as a Phase 2.
-- **Risk**: reader-conn pool exhaustion under burst panel queries.
-  **Mitigation**: cap at 10 (matching chroma quota); document the
-  ceiling.
+- **Risk**: reader-conn pool exhaustion under burst panel queries
+  triggering an executor deadlock (48 executor threads contending
+  for 10 pool conns).
+  **Mitigation**: bounded wait — `acquire_reader()` blocks on
+  the pool semaphore for 5 seconds then raises
+  `ReaderPoolExhausted`; the RPC dispatcher maps to a
+  `ServiceBusy` reply so callers can retry. The daemon never
+  blocks indefinitely on pool acquisition. Observability: the
+  pool's `available` count is exposed on the `ping` admin RPC.
 - **Risk**: regression in correctness — splitting reads from
   writes leaves one path that touches both (the `take` CAS reads
   candidates then writes the claim) requiring careful classification.
@@ -351,8 +504,23 @@ read-path safety belt.
 
 ## Implementation Plan
 
-Sequenced after Round 1 research:
+Sequenced after Round 1 research and Round 2 critique.
 
+- **Phase 0: baseline capture**.
+  - Implement the mixed-load arm in
+    `tests/tuplespace/spikes/test_ca_3_read_latency.py`
+    BEFORE any pool work. Configuration: N=32 reader threads
+    (each issuing `read(subspace=...)` in a tight loop),
+    M=4 writer threads (each issuing `out(...)`), run for
+    60 seconds against a freshly-initialised
+    `TuplespaceService` with the CURRENT single-lock
+    implementation.
+  - Capture: read p50, read p99, write p50, write p99,
+    aggregate ops/s. Record hardware (cpu model, core
+    count, OS) in the spike output.
+  - Persist baseline numbers to `nexus_rdr/116-baseline`
+    in T2. Phase 1 gate checks against these numbers
+    directly — no later phase may re-define "baseline".
 - **Phase 1: reader-conn pool + read-only method classification
   (Gap 1)**.
   - Add `_ReaderConnPool` class mirroring `_ConnectionPool` in
@@ -360,61 +528,176 @@ Sequenced after Round 1 research:
     `sqlite3.connect(f"file:{path}?mode=ro&uri=true",
     uri=True, check_same_thread=False)` with
     `row_factory = sqlite3.Row` set at create time.
+  - Internal `threading.Semaphore(10)` for the 5-second
+    exhaustion wait; `ReaderPoolExhausted` exception in
+    `nexus.daemon.errors`.
   - `acquire_reader()` context manager on
-    `TuplespaceService`.
+    `TuplespaceService`. Pool teardown in
+    `TuplespaceService.close()`.
   - Migrate `.read`, `.list_active_claims`, `.recent_events`,
-    `.subspace_stats` to acquire from the pool; remove their
-    `self._lock` acquire.
+    `.subspace_stats` to acquire from the pool. Each call
+    site must replace BOTH the `self._lock` framing AND
+    the `conn=self._conn` argument with the pool conn.
+  - Watcher loop's existing `mode=ro` connection upgraded to
+    `mode=ro&uri=true` for parity with the pool string
+    (current line 251 of `tuplespace_service.py`).
   - **Do NOT touch** `blocking_take`'s inner CAS — stays on
-    writer lock. The Phase 1 win is read methods no longer
-    queue behind in-flight `blocking_take` iterations.
-  - Spike: extend `tests/tuplespace/spikes/test_ca_3_read_latency.py`
-    with a mixed-load arm (N readers + M writers).
-- **Phase 2: per-subspace wake channel (Gap 3)**.
+    writer lock.
+  - **Gate**: rerun the Phase 0 mixed-load spike. Acceptance
+    criterion: read throughput (ops/s) ≥ 4x baseline at
+    N=32 readers + M=4 writers. Read p99 latency ≤ baseline.
+    Write p50/p99 ≤ baseline + 10% noise. If the gate fails,
+    diagnose before Phase 2.
+- **Phase 2: per-subspace wake channel + drop `_wake_event`
+  (Gap 3)**.
   - Add `self._cond_for_subspace: dict[str, threading.Condition]`
     + `self._cond_lookup_lock: threading.Lock`. Lazy creation
-    keyed on subspace string.
+    keyed on subspace string. `_cond_for(subspace)` releases
+    `_cond_lookup_lock` BEFORE returning (lock-order
+    discipline per §Technical Design).
   - Watcher loop gains `last_events_rowid` cursor + per-bump
     `SELECT DISTINCT subspace FROM events WHERE rowid > ?`
-    query; `notify_all` on each changed subspace's Condition.
+    query; `notify_all` on each changed subspace's Condition
+    (acquired via `with cond:`).
   - `blocking_take` poll loop's outer wait switches from
-    `self._wake_event.wait(...)` to
-    `with self._cond_for(subspace): self._cond_for(subspace).wait(timeout=...)`.
-  - Existing `_wake_event` retained as fallback for one
-    release (backward-compat for callers not yet migrated).
-- **Phase 3: spike + remove the fallback**.
-  - Mixed-load + cross-subspace wake-amplification spike
-    measures: (a) read p50/p99 under 32 reader / 4 writer
-    load; (b) blocking_take wake spurious-wake count with N
-    callers across 2 subspaces and commits in only one.
-  - Delete `_wake_event` after all in-tree callers migrate.
-- **Phase 4 (deferred to follow-up)**: optional `PRAGMA
+    `self._wake_event.wait(...)` to (matching the
+    §Technical Design waiter pseudocode):
+    ```python
+    cond = self._cond_for(subspace)
+    with cond:
+        cond.wait(timeout=remaining)
+    ```
+  - **Delete `_wake_event`** in the same change — Round 2
+    grep confirmed no in-tree cross-subspace callers; no
+    backward-compat surface to preserve.
+  - **Gate**: cross-subspace wake-amplification spike. 8
+    `blocking_take` callers in subspace A; 8 in subspace B;
+    commits land only in A for 30 seconds. Acceptance
+    criterion: discriminate via `Condition.wait(timeout)`
+    return value (True = notified, False = timed out).
+    B's callers' notified-wake count == 0; A's callers'
+    notified-wake count == commit count.
+- **Phase 3 (deferred to follow-up)**: optional `PRAGMA
   query_only=ON` on the reader-pool conns as defense-in-depth
   (Alternative 2 in this RDR — safety belt, not perf).
 
-## Test Plan
-
-- **Scenario**: 32 concurrent reads + 4 concurrent writes —
-  **Verify**: reads do not block on writes; aggregate throughput
-  ≥ 4x current single-lock baseline.
-- **Scenario**: blocking_take wake amplification — 8 callers in
-  subspace A, 8 in subspace B; commits land in A only —
-  **Verify**: B's callers do not see spurious wake re-polls.
-- **Scenario**: writer lock invariant — concurrent `out` + `take`
-  + `ack` — **Verify**: no claim-state corruption; existing
-  CA-1 atomicity test passes unchanged.
+- **Scenario**: 32 concurrent reads + 4 concurrent writes
+  (Phase 0 baseline + Phase 1 gate) — **Verify**: reads do
+  not block on writes; aggregate read throughput ≥ 4x
+  baseline; read p99 ≤ baseline p99; write p50/p99 ≤
+  baseline + 10%.
+- **Scenario**: reader-pool exhaustion under burst —
+  spawn 20 simultaneous reader tasks against pool size
+  10 — **Verify**: first 10 acquire immediately; remaining
+  10 either acquire within the 5s window OR raise
+  `ReaderPoolExhausted` (no thread hangs indefinitely;
+  no executor deadlock).
+- **Scenario**: blocking_take wake amplification (Phase 2
+  gate) — 8 callers in subspace A, 8 in subspace B;
+  commits land in A only for 30 seconds —
+  **Verify**: discriminate notify-wakes from
+  timeout-wakes via `Condition.wait(timeout)`'s return
+  value (`True` = notified, `False` = timed out). B's
+  callers' notified-wake count == 0; A's callers'
+  notified-wake count == commit count (per caller, since
+  `notify_all` wakes all waiters).
+- **Scenario**: Condition lost-signal regression — 1
+  notifier thread issues N `notify_all` calls against a
+  single subspace's Condition, with a 5ms sleep between
+  notifies; 4 waiter threads each call `wait(timeout=1.0)`
+  in a loop and append to per-thread deques on each
+  notified-return. **Verify**: each waiter's deque length
+  ≥ ceil(N × 0.9) (allows 10% coalescing tolerance for
+  scheduling overlap). The deliberate inter-notify sleep
+  prevents the level-triggered coalescing that
+  `Condition.wait` is allowed to perform, so the
+  expected per-waiter wake count matches notify count
+  within tolerance. The test rules out the bare-Event
+  race that motivated the Condition switch.
+- **Scenario**: writer lock invariant — concurrent `out`
+  + `take` + `ack` — **Verify**: no claim-state
+  corruption; existing CA-1 atomicity test passes
+  unchanged.
+- **Scenario**: pool teardown — start a service, acquire
+  3 reader conns, return them, call `close()` —
+  **Verify**: all pool conns closed (no
+  `ResourceWarning`); writer conn closed; no fd leak.
 
 ## Validation
 
 ### Performance Expectations
 
-5–10x improvement on read-heavy mixed workloads; modest improvement
-on write-heavy. Measure under a new spike harness deriving from
-existing `tests/tuplespace/spikes/test_ca_3_read_latency.py`.
+5–10x improvement on read-heavy mixed workloads (the dominant
+agent-fanout case); modest improvement on write-heavy workloads
+because the writer lock is unchanged.
+
+### Baseline Definition (resolves S4)
+
+The "baseline" referenced throughout this RDR is captured by
+Phase 0 BEFORE Phase 1 changes ship. The baseline spike lives
+in `tests/tuplespace/spikes/test_ca_3_read_latency.py`
+(extended with a mixed-load arm) and runs the CURRENT
+single-lock `TuplespaceService` against the following
+configuration:
+
+- **Workload**: 32 reader threads issuing
+  `service.read(subspace=...)` in a tight loop; 4 writer
+  threads issuing `service.out(...)` with distinct
+  subspaces; 60-second run window.
+- **Metrics**: read p50, read p99, write p50, write p99,
+  aggregate ops/s. Captured per-thread then aggregated.
+- **Hardware**: recorded in the spike's JSON output
+  (`platform.processor()`, `os.cpu_count()`,
+  `platform.system()`, `platform.release()`).
+- **Persistence**: numbers stored to
+  `nexus_rdr/116-baseline` in T2. Phase 1 acceptance
+  compares directly against the persisted numbers — no
+  later phase may re-define baseline.
+
+**Acceptance thresholds** (also re-stated in Implementation
+Plan Phase 1 Gate):
+- Read throughput (ops/s): ≥ 4x baseline.
+- Read p99 latency: ≤ baseline p99.
+- Write p50/p99: ≤ baseline + 10% noise floor.
+
+The 5–10x claim is a stretch target; the gate threshold is
+the more conservative 4x. If Phase 1 hits the 4x floor but
+not the 5–10x ceiling, that is a PASS — the optimisation
+shipped per spec.
 
 ## Finalization Gate
 
-To be completed before `/nx:rdr-accept`.
+- [x] **Memory management**: reader-pool connections are
+  owned by `TuplespaceService` and torn down in
+  `TuplespaceService.close()` via
+  `self._reader_pool.close_all()` (drains the deque,
+  closing each connection). Pool size is fixed at 10 so
+  the daemon's resource footprint grows by a bounded
+  amount on startup, never beyond that.
+- [x] **Incremental adoption**: `NX_STORAGE_MODE=direct-file`
+  callers bypass `TuplespaceService` entirely (they own
+  their own SQLite connection per `TupleStore` instance)
+  so this change is invisible to non-daemon users.
+  Backward-compatible on the wire — RPC surface, request
+  shapes, and reply shapes are unchanged. Only the
+  in-daemon execution path changes.
+- [x] **No schema migration required**: events table and
+  watcher_state table are unchanged. `last_events_rowid`
+  is in-memory watcher state initialised from
+  `SELECT MAX(rowid) FROM events` on each daemon start.
+- [x] **Versioning**: no public API change, no minor-bump
+  required. Lands as a patch.
+- [x] **Build / dependency**: no new dependencies. Uses
+  stdlib `threading.Condition` and `threading.Semaphore`.
+- [x] **Observability**: `ping` admin RPC extended with
+  reader-pool `available` count (matches the third 360°
+  OBS C-1 surface for `active_handlers`,
+  `blocking_take_in_flight`, `wake_thread_alive`).
+- [x] **Secret/credential lifecycle**: N/A — this RDR
+  touches no credential material.
+- [x] **Deployment model**: single-host daemon mode only;
+  this RDR makes no claims about multi-daemon or
+  distributed deployments.
 
 ## References
 
@@ -469,3 +752,93 @@ To be completed before `/nx:rdr-accept`.
   Phase 4 optional `PRAGMA query_only` defense-in-depth.
 - §References gained citation block for the 6 research
   entries + 2 production precedents.
+
+### 2026-05-17 — Round 1 gate (BLOCKED) + single-pass remediation
+
+Gate result `nexus_rdr/116-gate-latest` (initial): BLOCKED,
+3 critical, 4 significant, 4 observations. Findings
+remediated in-place; ready for Round 2 gate.
+
+- **C1 (Decision Rationale was a one-sentence placeholder)**:
+  §Decision Rationale expanded to three paragraphs
+  justifying: (a) reader-pool over `PRAGMA query_only`-only,
+  (b) `threading.Condition` over `Event + generation
+  counter`, (c) events-table cursor over a separate
+  subspace-tag column.
+- **C2 (Condition locking protocol underspecified — lost-
+  signal risk)**: §Technical Design gained explicit
+  pseudocode blocks for `_cond_for`, the notifier (watcher
+  loop), and the waiter (`blocking_take` outer loop). The
+  lock-order discipline is stated outright: 
+  `_cond_lookup_lock` is held ONLY inside `_cond_for`,
+  never across a `with cond:` block. `notify_all` is
+  called only under the Condition's own internal lock
+  (`with cond: cond.notify_all()`).
+- **C3 (Phase 3 conflated spike measurement with
+  destructive deletion)**: Implementation Plan rewritten.
+  Phase 0 captures baseline BEFORE any pool work. Phase 1
+  gate compares against the persisted baseline. Phase 2
+  combines wake-channel switch + `_wake_event` deletion
+  (justified by S3). Old "Phase 4 deferred" PRAGMA work
+  renumbered to Phase 3 (still deferred).
+- **S1 (Finalization Gate was empty)**: §Finalization Gate
+  populated with explicit memory mgmt, incremental
+  adoption, no-schema-migration, versioning, build/dep,
+  observability, secret lifecycle, deployment-model
+  sign-offs.
+- **S2 (pool exhaustion contract not specified)**:
+  §Technical Design pool block now specifies bounded
+  semaphore wait (5s timeout → `ReaderPoolExhausted` →
+  RPC `ServiceBusy`). §Risks/Mitigations rewritten.
+  `ping` admin RPC extended with pool `available` count.
+- **S3 (_wake_event fallback was dead code on arrival)**:
+  §Technical Design "No backward-compat fallback" block
+  added. §Implementation Plan Phase 2 deletes
+  `_wake_event` in the same change as the Condition
+  switch.
+- **S4 (spike baseline undefined)**: §Validation gained
+  explicit Baseline Definition section — workload,
+  metrics, hardware capture, T2 persistence
+  (`nexus_rdr/116-baseline`). Acceptance thresholds
+  cross-referenced from Implementation Plan Phase 1
+  Gate. Phase 0 captures baseline BEFORE Phase 1 changes
+  ship.
+- Test Plan extended with: reader-pool exhaustion under
+  burst, Condition lost-signal regression, pool teardown
+  scenarios.
+
+### 2026-05-17 — Round 2 gate (PASSED after NS-1 fix)
+
+Round 2 confirmed all 7 Round 1 findings CLOSED. One new
+significant issue surfaced by the remediation; fixed in
+the same pass:
+
+- **NS-1 (notifier pseudocode contradicted prose)**: the
+  notifier pseudocode opened a throwaway
+  `sqlite3.connect(...)` per data_version bump and never
+  closed it, while the Watcher cursor state prose
+  correctly said "watcher's existing connection is
+  reused." At ~1ms cadence this would have leaked a
+  file descriptor per bump if the pseudocode were
+  copy-pasted. Fixed: pseudocode rewritten to use
+  `self._ro_conn` directly. Watcher cursor state prose
+  updated to explicitly call out that the pseudocode
+  illustrates query shape, not connection lifecycle.
+  Query also collapsed to a single
+  `SELECT DISTINCT subspace, MAX(rowid) FROM events
+  WHERE rowid > ? GROUP BY subspace` to fetch the changed
+  set and the new cursor in one round-trip.
+- **NO1 (cosmetic — double `_cond_for` call)**:
+  Implementation Plan Phase 2 waiter snippet now matches
+  the §Technical Design waiter pseudocode
+  (assign Condition to local, then `with cond: cond.wait`).
+- **NO2 (Condition lost-signal test underspecified)**:
+  test now specifies per-thread deques, a 5ms inter-notify
+  sleep to prevent level-triggered coalescing, and a
+  `≥ ceil(N × 0.9)` per-waiter wake-count assertion with
+  documented coalescing tolerance.
+- **NO3 (wake-amplification gate needed timeout
+  discrimination)**: both the Test Plan scenario and
+  Implementation Plan Phase 2 Gate now explicitly call out
+  `Condition.wait(timeout)`'s return value (`True` =
+  notified, `False` = timed out) as the discriminator.
