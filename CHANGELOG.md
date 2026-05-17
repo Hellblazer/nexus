@@ -231,6 +231,50 @@ script preserved at
 `scripts/spikes/spike_rdr114_tuplespace_out_latency.py`
 (p99=48 ms local-mode, N=1000).
 
+### Fixed (RDR-112 daemon hardening, nexus-gdb3 Bundle B)
+
+Four operational findings from the 360-critique sweep that affect
+daemon install / start / shutdown reliability. All in
+`src/nexus/daemon/t2_daemon.py` or `src/nexus/commands/daemon.py`
+(plus a `nx doctor --check-bridge` surfacing line for the autostart
+drift case).
+
+- **Discovery-file shutdown marker and unlink retry** (nexus-12gb).
+  `_unlink_discovery` now writes a `status: "shutting_down"` marker
+  (with `shutdown_at` timestamp) into the discovery JSON before
+  attempting unlink, and retries the unlink once on `OSError`.
+  Together with the PID-liveness probe in `find_t2_daemon()`
+  (nexus-j6dj), this closes the stale-discovery race: a reader that
+  arrives during shutdown sees the marker and skips the file even
+  when transient filesystem errors (NFS hiccups, EROFS, EPERM)
+  prevent the unlink from completing.
+- **Native Windows refused on `nx daemon t2 start`** (nexus-dl3g).
+  `_acquire_spawn_lock` previously logged a warning on
+  `sys.platform == "win32"` and returned without holding the lock,
+  permitting two daemons to start concurrently. Native Windows is
+  out of v1 scope (RDR-112 §Host-Trust Model); the lock acquire
+  now raises `RuntimeError` with a message naming the supported
+  alternative (run the daemon on Linux or macOS and connect
+  Windows-VM clients via the TCP fallback).
+- **Install overwrite guard** (nexus-31cr).
+  `nx daemon t2 install --autostart` previously called
+  `dest.write_text(rendered)` unconditionally, silently clobbering
+  operator customisations (extra `EnvironmentVariables`, log-dir
+  changes, etc.). The command now compares existing-vs-rendered
+  content: identical files are a no-op ("already up to date"),
+  divergent files refuse with a diagnostic naming the `--force`
+  override, and `--force` overwrites as before. The `--force` flag's
+  documentation expands accordingly.
+- **Autostart-binary drift detection in `nx doctor`** (nexus-2wvl).
+  `_resolve_nx_bin` is captured at install time; a later
+  `pip install --upgrade conexus` (or `uv tool` relocation) can
+  move the `nx` executable, leaving the launchd plist /
+  systemd unit pointing at a vanished path. `nx doctor
+  --check-bridge` now parses the installed autostart file (using
+  `plistlib` on macOS, `ExecStart=` shlex-split on Linux) and
+  surfaces a stale-path warning that names `nx daemon t2 install
+  --autostart --force` as the remediation.
+
 ### Security (RDR-113 defence-in-depth, nexus-qh9k Bundle A)
 
 Three same-UID surface tightenings on the T2 daemon's wire path. None

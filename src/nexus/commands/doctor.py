@@ -1147,6 +1147,38 @@ def _run_check_bridge() -> None:
             )
         )
 
+    # nexus-2wvl: detect autostart-binary drift.  ``_resolve_nx_bin`` is
+    # captured at install time; later ``pip install --upgrade conexus``
+    # can move the nx executable, leaving the autostart entry pointing
+    # at a vanished path.  Silent only until launchd / systemd tries to
+    # spawn the daemon, so surface it loudly in doctor.
+    try:
+        from nexus.commands.daemon import _read_installed_autostart_nx_bin
+        autostart_nx_bin = _read_installed_autostart_nx_bin()
+    except Exception:  # noqa: BLE001 -- defensive
+        autostart_nx_bin = None
+    if autostart_nx_bin is not None:
+        if Path(autostart_nx_bin).exists():
+            click.echo(
+                _check(
+                    "autostart binary",
+                    True,
+                    f"{autostart_nx_bin} exists",
+                )
+            )
+        else:
+            click.echo(
+                _check(
+                    "autostart binary",
+                    False,
+                    f"stale path: {autostart_nx_bin} does not exist "
+                    f"(likely after `pip install --upgrade conexus` or a "
+                    f"`uv tool` relocation); re-run "
+                    f"`nx daemon t2 install --autostart --force` to "
+                    f"refresh the entry",
+                )
+            )
+
     # 6. Recent tuple sanity (nexus-1xip: refuse the direct tuples.db open
     # under daemon mode — the daemon owns the WAL writer and a parallel
     # connection from this process is a race risk. Surface the skip with

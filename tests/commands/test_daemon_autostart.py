@@ -359,3 +359,108 @@ def test_install_autostart_filenotfound_still_exits_nonzero(
         )
 
     assert result.exit_code != 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# nexus-31cr: install overwrite guard (does not clobber customised plist/unit)
+# ---------------------------------------------------------------------------
+
+
+def test_install_autostart_skips_overwrite_when_content_identical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Second install with the same nx_bin path is a no-op (no churn)."""
+    _set_platform(monkeypatch, "darwin")
+    install_dir = tmp_path / "LaunchAgents"
+    monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: install_dir)
+    monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/nx/bin/nx"])
+
+    with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+        mock_run.return_value.returncode = 0
+        runner = CliRunner()
+        # First install: writes file.
+        first = runner.invoke(
+            daemon_cmd.daemon_group, ["t2", "install", "--autostart"]
+        )
+        assert first.exit_code == 0, first.output
+        plist_path = install_dir / "com.nexus.t2.plist"
+        mtime_after_first = plist_path.stat().st_mtime_ns
+
+        # Second install with identical inputs: no rewrite, no error.
+        second = runner.invoke(
+            daemon_cmd.daemon_group, ["t2", "install", "--autostart"]
+        )
+
+    assert second.exit_code == 0, second.output
+    assert plist_path.stat().st_mtime_ns == mtime_after_first, (
+        "identical content must not trigger a rewrite (mtime should not change)"
+    )
+    assert (
+        "already" in second.output.lower()
+        or "up to date" in second.output.lower()
+        or "unchanged" in second.output.lower()
+    ), f"expected an 'already installed' notice: {second.output!r}"
+
+
+def test_install_autostart_refuses_overwrite_when_content_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator-customised plist is preserved; install refuses without --force."""
+    _set_platform(monkeypatch, "darwin")
+    install_dir = tmp_path / "LaunchAgents"
+    install_dir.mkdir(parents=True)
+    plist_path = install_dir / "com.nexus.t2.plist"
+    # Simulate operator customisation: edited plist with extra EnvironmentVariables.
+    operator_content = (
+        "<?xml version=\"1.0\"?>\n<plist><key>EnvironmentVariables</key>"
+        "<dict><key>NX_CUSTOM</key><string>operator-set</string></dict></plist>"
+    )
+    plist_path.write_text(operator_content)
+
+    monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: install_dir)
+    monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/nx/bin/nx"])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        daemon_cmd.daemon_group, ["t2", "install", "--autostart"]
+    )
+
+    assert result.exit_code != 0, (
+        "must refuse to overwrite operator-customised file: " + result.output
+    )
+    assert plist_path.read_text() == operator_content, (
+        "existing customised plist must not be touched"
+    )
+    assert "--force" in result.output, (
+        "diagnostic must point to the override flag: " + result.output
+    )
+
+
+def test_install_autostart_force_overwrites_diverged_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--force`` overrides the overwrite guard and writes the rendered file."""
+    _set_platform(monkeypatch, "darwin")
+    install_dir = tmp_path / "LaunchAgents"
+    install_dir.mkdir(parents=True)
+    plist_path = install_dir / "com.nexus.t2.plist"
+    plist_path.write_text("STALE OPERATOR EDIT")
+
+    monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: install_dir)
+    monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
+    monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/nx/bin/nx"])
+
+    with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+        mock_run.return_value.returncode = 0
+        runner = CliRunner()
+        result = runner.invoke(
+            daemon_cmd.daemon_group,
+            ["t2", "install", "--autostart", "--force"],
+        )
+
+    assert result.exit_code == 0, result.output
+    body = plist_path.read_text()
+    assert "STALE OPERATOR EDIT" not in body
+    assert "<string>/opt/nx/bin/nx</string>" in body
