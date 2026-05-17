@@ -67,6 +67,28 @@ _log = structlog.get_logger(__name__)
 _BLOCKING_TAKE_POLL_INTERVAL_S: float = 0.010
 
 
+# nexus-2kld.1 (HR-1): cap concurrent in-flight blocking_take RPCs so
+# the daemon's asyncio thread pool cannot be starved by long-polling
+# callers. Each blocking RPC holds an executor thread + a read-only
+# SQLite conn for up to 30s; without this gate, N > pool-size
+# callers would silently queue at the asyncio dispatch level with no
+# explicit error. 16 is the v1 default — high enough for multi-agent
+# workloads, low enough to leave headroom for non-blocking RPCs in
+# the default ``min(32, cpu+4)`` executor.
+_BLOCKING_TAKE_MAX_CONCURRENT: int = 16
+
+
+class BlockingTakeResourceExhausted(RuntimeError):
+    """Raised when ``blocking_take`` cannot acquire a concurrency slot.
+
+    nexus-2kld.1 (HR-1): explicit fail-loud error returned to the
+    caller when the daemon's per-process blocking_take cap
+    (``_BLOCKING_TAKE_MAX_CONCURRENT``) is saturated. Surfacing this
+    as a typed exception lets clients implement back-off rather than
+    silently waiting at the connection layer.
+    """
+
+
 class TuplespaceService:
     """Daemon-side service wrapping the tuplespace free-function API.
 
@@ -113,6 +135,13 @@ class TuplespaceService:
         # connection + threading.Lock is the standard CPython pattern for
         # a sync-API service called from an asyncio thread-pool.
         self._lock = threading.Lock()
+        # nexus-2kld.1 (HR-1): semaphore caps concurrent blocking_take
+        # RPCs. Initialised from the module-level constant at construct
+        # time so tests can monkey-patch the constant before the
+        # service is built.
+        self._blocking_take_sema = threading.Semaphore(
+            _BLOCKING_TAKE_MAX_CONCURRENT
+        )
         self._index: TupleIndex = TupleIndex.from_registry(
             self._registry, chroma_client
         )
@@ -253,10 +282,29 @@ class TuplespaceService:
         RDR-110's direct-mode ``_DataVersionWatcher``. The daemon
         owns the SQLite handle, so the polling loop lives in this
         process (one polling task per blocking_take RPC, dispatched
-        in the daemon's thread-pool executor). Competing ``out()``
-        calls increment ``PRAGMA data_version`` which this loop
-        observes via a dedicated read-only connection (no lock
-        contention against the service's main writer).
+        in the daemon's thread-pool executor).
+
+        nexus-2kld.3 (HR-3): the loop is a simple periodic poll at
+        ``_BLOCKING_TAKE_POLL_INTERVAL_S`` (10 ms). The prior version
+        opened a read-only conn and tracked ``PRAGMA data_version``
+        but never used the increment as a wake source — the loop
+        retried unconditionally every tick, so the version
+        machinery was vestigial. Removed.
+
+        nexus-2kld.1 (HR-1): each in-flight blocking_take holds a
+        slot on ``self._blocking_take_sema``. Beyond
+        ``_BLOCKING_TAKE_MAX_CONCURRENT`` concurrent calls,
+        ``BlockingTakeResourceExhausted`` is raised explicitly rather
+        than letting callers queue silently at the asyncio dispatch
+        layer.
+
+        Cross-subspace wake characteristic (DR-5): the loop wakes
+        every 10 ms regardless of which subspace committed. On
+        multi-agent multi-subspace deployments with high write rates
+        across other subspaces this is O(N callers x poll rate)
+        speculative claim attempts. Acceptable for v1; a future
+        per-subspace ``threading.Event`` channel is tracked under the
+        umbrella backlog (nexus-ku5k.1).
 
         Args:
             subspace: Concrete subspace string.
@@ -265,12 +313,17 @@ class TuplespaceService:
             where: Optional ChromaDB metadata filter dict.
             floor: Minimum similarity threshold (overrides schema default).
             lease_seconds: Lease duration override.
-            timeout_seconds: Maximum wait. Capped at 30s by ``api.take``
-                contract (``InvalidTimeoutError``).
+            timeout_seconds: Maximum wait. Capped at 30 s
+                (``InvalidTimeoutError`` when exceeded).
 
         Returns:
             ``{"tuple": <dict>, "claim_id": <str>}`` on success, or
             ``None`` when the deadline elapses with no candidate.
+
+        Raises:
+            InvalidTimeoutError: ``timeout_seconds`` > 30.
+            BlockingTakeResourceExhausted: daemon's concurrent
+                blocking_take cap is saturated.
         """
         # nexus-3tl3.2 (SR-2): enforce the same 30 s cap that
         # api.take(block=True) advertises via InvalidTimeoutError.
@@ -289,23 +342,20 @@ class TuplespaceService:
                 "(MCP transport budget, RDR-110 §Technical Design)"
             )
 
-        # api.take(block=True) raises BlockingNotSupported, so we drive
-        # the poll loop ourselves and call api.take(block=False) inside.
-        deadline = time.perf_counter() + max(0.0, float(timeout_seconds))
-
-        # Dedicated read-only connection for the PRAGMA data_version
-        # poll so the polling loop doesn't contend with the main
-        # writer's lock. WAL mode allows multiple readers concurrently.
-        # storage-boundary-allow: daemon-internal-data_version-poll (nexus-73vq)
-        version_conn = sqlite3.connect(
-            f"file:{self._tuples_db_path}?mode=ro",
-            uri=True,
-            check_same_thread=False,
-        )
+        # nexus-2kld.1 (HR-1): non-blocking semaphore acquire. If the
+        # cap is saturated, fail loud with a typed exception so the
+        # caller can back off rather than wait at the connection layer.
+        if not self._blocking_take_sema.acquire(blocking=False):
+            raise BlockingTakeResourceExhausted(
+                f"daemon's concurrent blocking_take cap "
+                f"({_BLOCKING_TAKE_MAX_CONCURRENT}) is saturated; "
+                "retry later or back off"
+            )
         try:
-            last_version = self._read_data_version(version_conn)
+            # api.take(block=True) raises BlockingNotSupported, so we drive
+            # the poll loop ourselves and call api.take(block=False) inside.
+            deadline = time.perf_counter() + max(0.0, float(timeout_seconds))
             while True:
-                # Try a non-blocking claim under the service lock.
                 with self._lock:
                     result = ts_api.take(
                         conn=self._conn,
@@ -328,27 +378,12 @@ class TuplespaceService:
                 if remaining <= 0:
                     return None
 
-                # Poll data_version with a short sleep cap, so we
-                # observe new commits within at most one tick.
-                sleep_for = min(_BLOCKING_TAKE_POLL_INTERVAL_S, remaining)
-                time.sleep(sleep_for)
-
-                current_version = self._read_data_version(version_conn)
-                if current_version == last_version:
-                    # Nothing committed; loop will check the deadline at
-                    # the top of the next iteration.
-                    continue
-                last_version = current_version
+                # Periodic poll at _BLOCKING_TAKE_POLL_INTERVAL_S
+                # (10 ms). Sleep capped to the remaining budget so we
+                # don't overshoot.
+                time.sleep(min(_BLOCKING_TAKE_POLL_INTERVAL_S, remaining))
         finally:
-            try:
-                version_conn.close()
-            except Exception:
-                pass
-
-    @staticmethod
-    def _read_data_version(conn: sqlite3.Connection) -> int:
-        row = conn.execute("PRAGMA data_version").fetchone()
-        return int(row[0]) if row else 0
+            self._blocking_take_sema.release()
 
     def ack(self, *, claim_id: str, claimant: str) -> str:
         with self._lock:

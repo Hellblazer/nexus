@@ -6,6 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed (360° remediation Bundle HR, nexus-2kld) — daemon hardening
+
+Four robustness fixes from the 2026-05-17 360° code review:
+
+- **HR-1: blocking_take concurrency cap** (nexus-2kld.1).
+  `TuplespaceService` now bounds concurrent in-flight `blocking_take`
+  RPCs with a `threading.Semaphore(_BLOCKING_TAKE_MAX_CONCURRENT)`
+  (default 16). Overflow raises the new typed
+  `BlockingTakeResourceExhausted` exception so callers can back off
+  rather than silently queue at the asyncio dispatch layer behind a
+  saturated default executor.
+- **HR-2: find_t2_daemon honours shutdown marker** (nexus-2kld.2).
+  `nexus.daemon.discovery.find_t2_daemon` now returns `None` when
+  the discovery payload carries `status == "shutting_down"`, even if
+  the PID liveness probe says the daemon is still alive. Closes the
+  stale-discovery race on NFS / EROFS scenarios where
+  `_unlink_discovery` fails after the marker stamp; without this
+  reader the marker shipped in Bundle B was aspirational.
+- **HR-3: blocking_take data_version polling simplified**
+  (nexus-2kld.3). The blocking_take loop opened a dedicated read-
+  only SQLite connection and tracked `PRAGMA data_version` but
+  never used the increment as a wake source — the retry fired
+  unconditionally every tick, so the version machinery was
+  vestigial. Removed; the loop is now a simple 10 ms periodic
+  poll. Behaviour unchanged; ~30 lines of dead complexity gone.
+- **HR-4: `_glob_to_prefix_range` covers supplementary plane**
+  (nexus-2kld.4). Upper sentinel was `"￿"` (UTF-8: `0xEF BF
+  BF`), which sits below any supplementary-plane byte sequence
+  (those start at `0xF0+`). A glob like `"tasks/*"` against a
+  subspace such as `"tasks/🔥"` silently missed the row under the
+  prior sentinel. Bumped to `"\U0010FFFF"`. Latent — subspaces are
+  ASCII in practice — but the comment now matches the behaviour.
+
+Tests: 8 new in `tests/daemon/test_360_remediation_hr.py`.
+Regression: 672/672 PASS across daemon + cockpit + tuplespace.
+
 ### Security (360° remediation Bundle SR, nexus-3tl3)
 
 Four security-class findings from the 2026-05-17 360° code review,

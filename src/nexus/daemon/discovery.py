@@ -69,6 +69,21 @@ def find_t2_daemon(config_dir: Optional[Path] = None) -> Optional[dict[str, Any]
         _log.warning("t2_discovery_read_failed", path=str(path), error=str(exc))
         return None
 
+    # nexus-2kld.2 (HR-2, 2026-05-17): honour the shutdown marker.
+    # ``T2Daemon._unlink_discovery`` stamps ``status: "shutting_down"``
+    # into the file before attempting unlink. Combined with the PID-
+    # liveness probe below, this closes the stale-discovery race on
+    # NFS / EROFS scenarios where the unlink itself fails: a reader
+    # that arrives during shutdown sees the marker and treats the
+    # file as stale even though the PID is still observably alive.
+    if payload.get("status") == "shutting_down":
+        _log.info(
+            "t2_discovery_shutdown_marker_seen",
+            path=str(path),
+            shutdown_at=payload.get("shutdown_at"),
+        )
+        return None
+
     pid = payload.get("pid")
     if not isinstance(pid, int) or pid <= 0:
         _log.warning(

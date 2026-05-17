@@ -559,9 +559,14 @@ def _glob_to_prefix_range(subspace_glob: str) -> tuple[str, str] | None:
     if not prefix:
         return None
     # Compute the smallest string strictly greater than every ``prefix*``
-    # match. Using ``"￿"`` as the upper sentinel works for any UTF-8
-    # input (SQLite stores TEXT as UTF-8, BINARY collation is bytewise).
-    hi = prefix + "￿"
+    # match. nexus-2kld.4 (HR-4, 2026-05-17): use ``"\U0010FFFF"``
+    # (last valid Unicode codepoint, UTF-8: 0xF4 0x8F 0xBF 0xBF) rather
+    # than the prior ``"￿"`` (U+FFFF, UTF-8: 0xEF 0xBF 0xBF) which
+    # sits BELOW any supplementary-plane byte sequence (those start
+    # at 0xF0+). A glob like ``"tasks/*"`` against a subspace such as
+    # ``"tasks/🔥"`` silently missed the row under the old sentinel
+    # since SQLite TEXT uses bytewise BINARY collation.
+    hi = prefix + "\U0010FFFF"
     return prefix, hi
 
 
