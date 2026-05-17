@@ -6,6 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Tests (360° remediation Bundle TR, nexus-0cf1) — contract gaps + coverage
+
+Five test-quality findings from the 2026-05-17 360° review:
+
+- **TR-1**: `test_start_skips_announce_when_disabled` rewritten
+  (renamed to `test_start_actually_skips_announce_when_disabled`).
+  The prior version manually evaluated the gate inline and asserted
+  `called == 0` — trivially true, never exercised the production
+  path. Now drives `T2Daemon.start()` against stub socket binds so
+  the real `if self._announce_stdout_enabled` gate fires. Added
+  sibling `test_start_invokes_announce_when_enabled` for the
+  positive case.
+- **TR-2**: malformed-YAML reload path. Hardened
+  `_BindingWatcher._reload_if_changed` to retain the FULL previous
+  profile list when ANY YAML fails to parse — partial success would
+  silently drop profiles whose YAML went bad mid-reload, violating
+  the docstring contract. New test
+  `test_reload_tolerates_malformed_yaml` exercises the path.
+- **TR-3**: aligned timing window in
+  `test_wait_then_hit_when_sibling_outs` (73vq spike) from 180-800ms
+  to 180-1500ms, matching the ry0v sibling. On heavily loaded CI
+  hosts with >600ms scheduling jitter the 800ms ceiling would flake
+  first.
+- **TR-4**: removed 4 incorrect `# type: ignore[name-defined]`
+  suppressions in the r6u5 MVV harness. The `deadline_target`
+  variable is defined at module scope; the suppression hid nothing
+  and misled readers.
+- **TR-5**: `test_unset_env_raises_when_daemon_not_running` now sets
+  `NEXUS_CONFIG_DIR` (not just HOME). `nexus_config_dir()` honours
+  `NEXUS_CONFIG_DIR`; the prior version passed for the wrong reason
+  (tmp UID-named file absent) and wouldn't catch a regression that
+  bypassed the override.
+
+Tests: 2 new + 4 rewrites. Regression: 674/674 PASS across daemon
++ cockpit + tuplespace.
+
 ### Fixed (360° remediation Bundle HR, nexus-2kld) — daemon hardening
 
 Four robustness fixes from the 2026-05-17 360° code review:

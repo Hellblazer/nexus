@@ -239,22 +239,130 @@ class TestAnnounceStdoutGate:
         # this exercises the production write path.
         assert "uds_path" in captured.out
 
-    def test_start_skips_announce_when_disabled(
+    def test_start_actually_skips_announce_when_disabled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """T2Daemon.start() does not invoke ``_announce_stdout`` under default."""
-        daemon = T2Daemon(tmp_path / "config")
+        """Drive T2Daemon.start() with stubs; assert _announce_stdout never fires.
+
+        nexus-0cf1.1 (TR-1, 2026-05-17): the prior version of this test
+        manually evaluated ``if daemon._announce_stdout_enabled:
+        _announce_stdout()`` and asserted called == 0 — a trivially-true
+        check that didn't exercise the production gate in start(). This
+        rewrite spies on the helper and drives start() against stub
+        socket binds so the actual ``if self._announce_stdout_enabled:
+        self._announce_stdout()`` path is reached.
+        """
+        import asyncio
+        from nexus.daemon import t2_daemon as _t2_daemon_mod
+
+        # Stub the helpers start() invokes BEFORE the announce gate so
+        # we can run through to the gate without binding real sockets.
+        daemon = T2Daemon(tmp_path / "config", announce_stdout=False)
         called = {"n": 0}
 
         def _spy() -> None:
             called["n"] += 1
 
         monkeypatch.setattr(daemon, "_announce_stdout", _spy)
-        # We don't need to actually start the daemon (which requires sockets);
-        # the gate's call site checks the flag inline.
-        if daemon._announce_stdout_enabled:
-            daemon._announce_stdout()
-        assert called["n"] == 0
+        monkeypatch.setattr(daemon, "_ensure_dirs", lambda: None)
+        monkeypatch.setattr(daemon, "_acquire_spawn_lock", lambda: None)
+        monkeypatch.setattr(daemon, "_release_spawn_lock", lambda: None)
+        monkeypatch.setattr(daemon, "_write_discovery", lambda: None)
+        monkeypatch.setattr(daemon, "_unlink_discovery", lambda: None)
+
+        # Stub the bind helpers + asyncio.start_*_server so we never
+        # actually bind sockets. The gate sits AFTER these calls.
+        class _FakeSock:
+            def close(self) -> None:
+                pass
+
+        class _FakeServer:
+            sockets = ()
+            def close(self) -> None:
+                pass
+            async def wait_closed(self) -> None:
+                return None
+
+        monkeypatch.setattr(daemon, "_bind_uds", lambda: _FakeSock())
+        monkeypatch.setattr(daemon, "_bind_tcp", lambda: _FakeSock())
+
+        async def _fake_unix_server(*args, **kwargs):
+            return _FakeServer()
+
+        async def _fake_tcp_server(*args, **kwargs):
+            return _FakeServer()
+
+        monkeypatch.setattr(asyncio, "start_unix_server", _fake_unix_server)
+        monkeypatch.setattr(asyncio, "start_server", _fake_tcp_server)
+
+        # Drive start() to completion.
+        async def _drive() -> None:
+            try:
+                await daemon.start()
+            finally:
+                await daemon.stop()
+
+        asyncio.run(_drive())
+
+        assert called["n"] == 0, (
+            "announce_stdout=False must NOT invoke _announce_stdout during "
+            "start(); the production gate has regressed."
+        )
+
+    def test_start_invokes_announce_when_enabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Companion to the above: with the flag True, the gate fires."""
+        import asyncio
+
+        daemon = T2Daemon(tmp_path / "config", announce_stdout=True)
+        called = {"n": 0}
+
+        def _spy() -> None:
+            called["n"] += 1
+
+        monkeypatch.setattr(daemon, "_announce_stdout", _spy)
+        monkeypatch.setattr(daemon, "_ensure_dirs", lambda: None)
+        monkeypatch.setattr(daemon, "_acquire_spawn_lock", lambda: None)
+        monkeypatch.setattr(daemon, "_release_spawn_lock", lambda: None)
+        monkeypatch.setattr(daemon, "_write_discovery", lambda: None)
+        monkeypatch.setattr(daemon, "_unlink_discovery", lambda: None)
+
+        class _FakeSock:
+            def close(self) -> None:
+                pass
+
+        class _FakeServer:
+            sockets = ()
+            def close(self) -> None:
+                pass
+            async def wait_closed(self) -> None:
+                return None
+
+        monkeypatch.setattr(daemon, "_bind_uds", lambda: _FakeSock())
+        monkeypatch.setattr(daemon, "_bind_tcp", lambda: _FakeSock())
+
+        async def _fake_unix_server(*args, **kwargs):
+            return _FakeServer()
+
+        async def _fake_tcp_server(*args, **kwargs):
+            return _FakeServer()
+
+        monkeypatch.setattr(asyncio, "start_unix_server", _fake_unix_server)
+        monkeypatch.setattr(asyncio, "start_server", _fake_tcp_server)
+
+        async def _drive() -> None:
+            try:
+                await daemon.start()
+            finally:
+                await daemon.stop()
+
+        asyncio.run(_drive())
+
+        assert called["n"] == 1, (
+            "announce_stdout=True must invoke _announce_stdout exactly "
+            "once during start()."
+        )
 
 
 # ---------------------------------------------------------------------------

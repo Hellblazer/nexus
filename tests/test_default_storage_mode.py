@@ -119,10 +119,19 @@ class TestMcpFailLoudOnMissingDaemon:
     def test_unset_env_raises_when_daemon_not_running(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ) -> None:
-        """The new default selects daemon; missing discovery -> RuntimeError."""
+        """The new default selects daemon; missing discovery -> RuntimeError.
+
+        nexus-0cf1.5 (TR-5, 2026-05-17): override NEXUS_CONFIG_DIR (not
+        just HOME) so the discovery probe consults the tmp dir, not the
+        operator's real ~/.config/nexus/. The prior version only set
+        HOME, but nexus_config_dir() honours NEXUS_CONFIG_DIR — the
+        test passed for the wrong reason (tmp UID-named file absent),
+        and would not catch a regression that bypassed the override.
+        """
         # Force the resolver: no env at all, no daemon discovery file.
         monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "nexus-config"))
         # Wipe the module-level cache so the bootstrap actually runs again.
         from nexus.mcp import core as _core
         _core._TUPLESPACE.clear()

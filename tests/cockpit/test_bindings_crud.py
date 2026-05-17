@@ -431,6 +431,52 @@ class TestBindingWatcherReload:
         watcher._reload_if_changed()
         assert watcher._profiles[0].bindings[0].action.target == "v2"
 
+    def test_reload_tolerates_malformed_yaml(self, tmp_path: Path) -> None:
+        """nexus-0cf1.2 (TR-2): a broken YAML in the user dir must not
+        brick the watcher. Previous profile list is retained; a
+        warning logs.
+        """
+        from nexus.cockpit.bindings import (
+            BindingContext,
+            _BindingWatcher,
+            load_profile,
+        )
+
+        yml = tmp_path / "ops.yml"
+        yml.write_text(yaml.safe_dump({
+            "profile": "ops",
+            "bindings": [{
+                "name": "b1",
+                "match": {"subspace": "x"},
+                "action": {"kind": "log", "marker": "v1"},
+            }],
+        }))
+
+        tuples_conn = sqlite3.connect(":memory:")
+        prof = load_profile(yml)
+        watcher = _BindingWatcher(
+            conn=tuples_conn,
+            profiles=[prof],
+            context=BindingContext(conn=tuples_conn, index=None, registry=None),
+            profiles_dirs=[tmp_path],
+        )
+        assert len(watcher._profiles) == 1
+        original_target = watcher._profiles[0].bindings[0].action.target
+        assert original_target == "v1"
+
+        # Now corrupt the YAML: invalid syntax (unbalanced bracket).
+        time.sleep(0.01)
+        yml.write_text("profile: ops\nbindings: [{name: b1, match: {\n")
+        watcher._reload_if_changed()
+
+        # Previous profile list is retained (the watcher did NOT brick).
+        assert len(watcher._profiles) == 1, (
+            "malformed YAML must NOT clear the profile list; the "
+            "watcher should retain the prior good state."
+        )
+        # The retained profile is the SAME one (action.target unchanged).
+        assert watcher._profiles[0].bindings[0].action.target == "v1"
+
     def test_reload_no_op_when_unchanged(self, tmp_path: Path) -> None:
         """No mtime change → no reload (cheap repeated calls)."""
         from nexus.cockpit.bindings import BindingContext, _BindingWatcher

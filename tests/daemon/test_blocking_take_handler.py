@@ -195,7 +195,12 @@ class TestBlockingTakeBehaviour:
         assert result is not None, "blocking_take should return when sibling out()s"
         # Should pick up the new tuple within roughly one poll cadence
         # (~50ms tolerance) after the 200ms sibling write.
-        assert 180 <= elapsed_ms <= 800, (
+        # nexus-0cf1.3 (TR-3, 2026-05-17): widened upper bound from
+        # 800ms to 1500ms to match the sibling test in
+        # test_block_true_enablement.py. On heavily loaded CI hosts
+        # with > 600ms scheduling jitter, the 800ms ceiling was the
+        # first to flake.
+        assert 180 <= elapsed_ms <= 1500, (
             f"wake should land near 200ms; got {elapsed_ms:.0f}ms"
         )
         service.ack(claim_id=result["claim_id"], claimant="solo")

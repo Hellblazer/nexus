@@ -297,7 +297,7 @@ def _direct_worker(
                 # Either drained or transient contention; back off briefly.
                 time.sleep(POLL_SLEEP_S)
                 with sync_lock:
-                    if successes and len(successes) >= deadline_target:  # type: ignore[name-defined]
+                    if successes and len(successes) >= deadline_target: 
                         return
                 continue
             t_success = time.perf_counter()
@@ -306,7 +306,7 @@ def _direct_worker(
             with sync_lock:
                 successes.append(t_success)
                 latencies_ms.append((t_success - t_attempt) * 1000.0)
-                if len(successes) >= deadline_target:  # type: ignore[name-defined]
+                if len(successes) >= deadline_target: 
                     return
     finally:
         conn.close()
@@ -371,7 +371,7 @@ def _daemon_worker(
             if result is None:
                 time.sleep(POLL_SLEEP_S)
                 with sync_lock:
-                    if successes and len(successes) >= deadline_target:  # type: ignore[name-defined]
+                    if successes and len(successes) >= deadline_target: 
                         return
                 continue
             t_success = time.perf_counter()
@@ -382,7 +382,7 @@ def _daemon_worker(
             with sync_lock:
                 successes.append(t_success)
                 latencies_ms.append((t_success - t_attempt) * 1000.0)
-                if len(successes) >= deadline_target:  # type: ignore[name-defined]
+                if len(successes) >= deadline_target: 
                     return
     finally:
         client.close()

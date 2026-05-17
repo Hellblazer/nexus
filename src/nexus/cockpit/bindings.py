@@ -869,9 +869,10 @@ class _BindingWatcher:
         """Re-load profiles when any source YAML's mtime changed.
 
         No-op when ``profiles_dirs`` is empty (the legacy fixed-profile
-        construction path). Profile-level errors during reload are
-        logged and the previous profile list is retained, so a broken
-        YAML in the user dir cannot brick the watcher.
+        construction path). If ANY YAML fails to parse, the previous
+        profile list is retained in full — a broken YAML in the user
+        dir cannot brick the watcher OR silently drop a previously-
+        loaded profile (nexus-0cf1.2, TR-2).
         """
         if not self._profiles_dirs:
             return
@@ -880,8 +881,12 @@ class _BindingWatcher:
         if previous == self._profile_fingerprints:
             return
 
-        # Something changed: reload everything.
+        # Something changed: reload everything. nexus-0cf1.2 (TR-2):
+        # ANY parse error retains the previous profile list. Partial
+        # success would silently drop profiles whose YAML went bad
+        # mid-reload, which violates the docstring contract.
         new_profiles: list[BindingProfile] = []
+        had_failure = False
         for d in self._profiles_dirs:
             if not d.is_dir():
                 continue
@@ -889,11 +894,22 @@ class _BindingWatcher:
                 try:
                     new_profiles.append(load_profile(yml))
                 except Exception as exc:
+                    had_failure = True
                     _log.warning(
                         "binding_watcher_profile_reload_failed",
                         path=str(yml),
                         error=str(exc),
                     )
+
+        if had_failure:
+            _log.warning(
+                "binding_watcher_reload_aborted_retaining_previous",
+                profile_count=len(self._profiles),
+            )
+            # Restore the previous fingerprints so the next tick re-tries.
+            self._profile_fingerprints = previous
+            return
+
         self._profiles = tuple(new_profiles)
         _log.info(
             "binding_watcher_profiles_reloaded",
