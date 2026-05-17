@@ -6,6 +6,58 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Tests (RDR-110, nexus-r6u5: 10-worker work-stealing MVV harness)
+
+New spike test under
+`tests/tuplespace/spikes/test_r6u5_work_stealing_mvv.py`. Pre-populates
+a shared `tasks/r6u5` subspace and races 10 worker threads to drain it,
+asserting four invariants against the SQLite + claim-log audit trail:
+
+- Exactly N tuples consumed (no duplicate claims, no missed tuples).
+- Zero rows still in `claim_state='claimed'` after drain.
+- `tuple_claim_log` records exactly 2 * N rows (one `claim` + one `ack`
+  per tuple).
+- No tuple_id appears as the target of two distinct active claims
+  (CAS race guard).
+
+Two parametrised modes:
+
+- **Direct**: workers open their own SQLite WAL connections and call
+  `api.take`/`ack` synchronously. Exercises the CAS UPDATE ... RETURNING
+  contention path under WAL.
+- **Daemon**: workers route every take/ack through `T2Client` over a UDS
+  socket to a `T2Daemon` with a wired `TuplespaceService`. Exercises
+  RPC serialisation through the service's single-writer `self._lock`
+  plus the single-writer SQLite guarantee.
+
+Default `N=200` runs in ~50s per mode (~2 minutes for the pair); the
+full 1000-tuple variant required by the RDR-110 acceptance criterion
+is gated behind `@pytest.mark.slow`.
+
+Observed baseline (Apple M-series, EphemeralClient, ONNX MiniLM, N=200):
+
+| mode | elapsed | p50 | p99 |
+|---|---|---|---|
+| direct | 43.3s | 269.5ms | 597.3ms |
+| daemon | 54.8s | 261.9ms | 398.7ms |
+
+Two real-substrate issues surfaced and were resolved during
+authoring:
+
+- Semantic-mode `take()` with `default_n=5` starves the worker pool
+  after the first 5 consumed tuples because chroma keeps returning the
+  same top-K (it has no consumption signal). Test YAML bumps
+  `default_n` to 100 and the workers vary the query text per
+  attempt so chroma's top-K rotates.
+- `TuplespaceService.take` serialises through `self._lock`, so 10
+  concurrent take RPCs queue. The RDR-114 default 5s per-RPC timeout
+  is too aggressive under sustained contention; the spike's daemon
+  client uses `rpc_timeout_seconds=30.0`.
+
+Both findings are characterisation observations, not regressions; the
+behaviour is well-defined and the spike documents it for future
+substrate work.
+
 ### Tests (RDR-111, nexus-2oa6: CA-3 read-latency spike at 10k/50k/100k)
 
 New spike test under `tests/tuplespace/spikes/test_ca_3_read_latency.py`
