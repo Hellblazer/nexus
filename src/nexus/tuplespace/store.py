@@ -377,6 +377,54 @@ def prune_expired_tuples(
     return deleted
 
 
+# Default events-table retention window. The events table is the cursor
+# source for EventStream subscribers (RDR-112) and the cockpit binding
+# watcher (RDR-111). Seven days lets a daemon recover from a multi-day
+# subscriber outage while preventing unbounded growth on
+# write-heavy systems (an active session emits hundreds of events per
+# minute). nexus-anjo (RDR-112 A2 bundle C).
+EVENTS_RETENTION_SECONDS_DEFAULT: int = 86400 * 7
+
+
+def prune_old_events(
+    conn: sqlite3.Connection,
+    *,
+    retention_seconds: int = EVENTS_RETENTION_SECONDS_DEFAULT,
+    now: float | None = None,
+) -> int:
+    """Delete ``events`` rows older than ``retention_seconds``.
+
+    nexus-anjo: the events table accumulates a row per tuple operation
+    (out / claim / ack / nack / expire) and has no built-in cap. Without
+    a periodic prune, the table grows linearly with write volume and
+    eventually pessimises both the binding watcher's batch query and the
+    EventStream RPC's backfill.
+
+    Args:
+        conn: Open SQLite connection to tuples.db.
+        retention_seconds: Rows with ``ts < now - retention_seconds`` are
+            deleted. Defaults to :data:`EVENTS_RETENTION_SECONDS_DEFAULT`.
+        now: Optional epoch seconds. Defaults to ``time.time()``. Tests
+            use this to simulate future sweeps without sleeping.
+
+    Returns:
+        Number of rows deleted.
+    """
+    now_epoch = time.time() if now is None else now
+    cutoff = now_epoch - retention_seconds
+    cur = conn.execute("DELETE FROM events WHERE ts < ?", (cutoff,))
+    deleted = cur.rowcount
+    conn.commit()
+    if deleted:
+        _log.info(
+            "events_retention_swept",
+            deleted=deleted,
+            retention_seconds=retention_seconds,
+            cutoff_epoch=cutoff,
+        )
+    return deleted
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------

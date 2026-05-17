@@ -231,6 +231,45 @@ script preserved at
 `scripts/spikes/spike_rdr114_tuplespace_out_latency.py`
 (p99=48 ms local-mode, N=1000).
 
+### Fixed (RDR-112 A2 cockpit boundary, nexus-wlkf Bundle C)
+
+Two cockpit-boundary findings from the 360-critique sweep. Both
+were silent-degradation issues that would have surfaced as
+performance regressions or security warnings as the daemon
+accumulated load over time.
+
+- **`_fetch_event_batch` GLOB rewrite** (nexus-anjo). The cockpit
+  binding watcher polled the tuplespace `events` table with
+  `WHERE subspace GLOB ? AND rowid > ?` and the default
+  `subspace_glob='*'`. SQLite cannot use a B-tree prefix scan with a
+  leading wildcard, so `idx_events_subspace_rowid` went unused and
+  every poll did a full-table scan (negligible at current volume,
+  linear with growth). The query now dispatches on glob shape:
+  `'*'` drops the subspace predicate entirely (rowid range walk),
+  `'prefix*'` rewrites to a half-open `subspace >= 'prefix' AND
+  subspace < 'prefix\\uffff'` range scan that hits the index, and
+  anything else (`[abc]*`, `foo?bar`) falls back to GLOB.
+  `_build_fetch_event_batch_sql` is the new public-ish helper that
+  tests use for `EXPLAIN QUERY PLAN` assertions.
+- **`events` table retention** (nexus-anjo, secondary fix). The
+  `events` table had no retention sweep, so it grew linearly with
+  write volume forever. New `prune_old_events(conn, *,
+  retention_seconds=7*86400, now=None)` in
+  `nexus.tuplespace.store`; wired into
+  `_run_retention_sweep_sync` so the daemon's 6-hour retention loop
+  drops events older than 7 days. Failure on the events sweep is
+  logged but does not abort the tuples-prune count.
+- **`_announce_stdout` gated behind explicit flag** (nexus-l712).
+  `T2Daemon` previously wrote the discovery JSON (UDS path, PID,
+  TCP port, registry digest) to stdout unconditionally at startup.
+  Under a shared stdout sink (containerised orchestrators that pipe
+  stdout to a multi-tenant log), the PID + socket-path + install
+  fingerprint became visible to anyone with read access to the sink.
+  Now opt-in via `T2Daemon(..., announce_stdout=True)` and the
+  matching `nx daemon t2 start --announce-stdout` CLI flag; the
+  discovery file at `~/.config/nexus/t2_addr.<uid>` remains the
+  primary channel and is unaffected.
+
 ### Fixed (RDR-112 daemon hardening, nexus-gdb3 Bundle B)
 
 Four operational findings from the 360-critique sweep that affect

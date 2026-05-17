@@ -518,6 +518,7 @@ class T2Daemon:
         tuplespace_service: Any = None,
         enable_admin_ping: bool = False,
         builtin_dir: Path | None = None,
+        announce_stdout: bool = False,
     ) -> None:
         """Initialise the daemon.
 
@@ -552,6 +553,13 @@ class T2Daemon:
         """
         self._config_dir = config_dir
         self._socket_dir: Path = config_dir / _SOCKET_SUBDIR
+
+        # nexus-l712 (RDR-112 A2 bundle C): the stdout discovery announce
+        # is now opt-in. Containerised orchestrators that capture stdout
+        # for the discovery payload must pass ``announce_stdout=True``;
+        # the default suppresses the PID + UDS-path + registry-digest
+        # leak that would otherwise land in any shared stdout sink.
+        self._announce_stdout_enabled: bool = announce_stdout
 
         uid = os.getuid()
         self._discovery_path: Path = config_dir / _DISCOVERY_FILE_TEMPLATE.format(uid=uid)
@@ -785,7 +793,8 @@ class T2Daemon:
         )
 
         self._write_discovery()
-        self._announce_stdout()
+        if self._announce_stdout_enabled:
+            self._announce_stdout()
 
         # nexus-kk9h: run one retention sweep at startup and schedule a
         # recurring 6-hour sweep. Done after sockets bind so clients can
@@ -1383,7 +1392,10 @@ class T2Daemon:
         if self._tuples_db_path is None:
             return 0
         from nexus.db.migrations import sweep_action_idempotency  # noqa: PLC0415
-        from nexus.tuplespace.store import prune_expired_tuples  # noqa: PLC0415
+        from nexus.tuplespace.store import (  # noqa: PLC0415
+            prune_expired_tuples,
+            prune_old_events,
+        )
 
         # Resolve the TupleIndex from the wired TuplespaceService when
         # available. SQLite-only sweep is retained as a safety fallback
@@ -1401,6 +1413,22 @@ class T2Daemon:
         conn = sqlite3.connect(str(self._tuples_db_path))
         try:
             deleted = prune_expired_tuples(conn, index=index)
+            # nexus-anjo: also prune the events table so its monotonic
+            # growth cannot pessimise the binding watcher and EventStream
+            # backfill query. Failure here is logged but does not abort
+            # the tuples-prune result (we still want the count back).
+            try:
+                events_deleted = prune_old_events(conn)
+                if events_deleted:
+                    _log.info(
+                        "events_retention_swept_daemon",
+                        deleted=events_deleted,
+                    )
+            except sqlite3.Error as exc:
+                _log.warning(
+                    "events_retention_sweep_failed",
+                    error=str(exc),
+                )
         finally:
             conn.close()
 
