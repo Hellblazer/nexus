@@ -104,7 +104,7 @@ The text-only ColBERT spike (§6) is unchanged in scope — it's about late-inte
 
 | Item | Status | Spike scope |
 |---|---|---|
-| ColPali retrieval on Apple Silicon (no generator) | **Reconsider** | Index a 20-PDF subset with ColPali via transformers+MPS. Measure: per-page index time, query latency, recall@10 vs Voyage on figure-heavy queries. File a bead if index time ≤ 60s/page and recall@10 lift on figure-bearing queries ≥ 10pp. |
+| ColPali retrieval on Apple Silicon (no generator) | **Spike RUN, REJECTED 2026-05-17** | On M3DocRAG (13 pages, M-class MPS): per-page index 0.70 s (PASSES ≤ 60 s by 86×). But retrieval ranking is weak: flat MaxSim scores (0.96–0.99 across top-5 for one query), target pages frequently missed from top-1, content query "single-page DocVQA multimodal LM bounding box" ranks page 13 (the references) first. Rejected on quality grounds, not infrastructure; the P0 VL-augmentation path delivers stronger ranking signal at lower adoption cost. |
 | Figure-only embeddings via SigLIP | **Spike PASSED, cross-paper validated, Docling investigation cleared — bead nexus-8siy** | Single-paper (M3DocRAG): recall@10 = 1.0000, MRR@10 = 0.85. Cross-paper (3 dt-papers): recall@10 = 1.0000, MRR@10 = 0.875, top-1 same-paper match 100 % (6/6). Docling under-detection hypothesis **REFUTED** by `scripts/docling_figure_yield_probe.py`: the per-paper yield (M3DocRAG 7, BSS 1, OO 0) reflects actual paper content, not classification errors. BSS has 1 figure + 4 result tables + SQL; OO has zero figures (the A/B/C/D tool-access ablation we cited is a table, not a figure). Docling correctly classifies them. The figure-image index is genuinely useful only on visually rich papers. No Docling prerequisite needed. |
 
 ## 5c. Qwen coprocessor as a local VL backend — REVISED 2026-05-17
@@ -126,7 +126,7 @@ The retrieval-only spikes (§5b) remain valid but **drop in priority** relative 
 | **P0 — SHIPPED** | **VL-augmented chunk enrichment at ingest** | Spike PASSED 2026-05-17. Cross-paper MRR@10 0.56 → 0.87 (+0.31), mean rank 2.39 → 1.33. 3.0 s avg VL throughput. Bead **nexus-6h0e** filed for the opt-in ingest hook. |
 | P1 | Text-only ColBERT (§6) | Independent of VL; addresses vocabulary mismatch on text corpora. Scaffold shipped. |
 | P2 | Figure-only SigLIP (§5b) | Lighter than ColPali; an alternative to VL-augmentation IF the VL endpoint is unavailable. Lower priority because VL gives richer text than image embeddings give vector matches. **Spike PASSED 2026-05-17; bead nexus-8siy filed.** |
-| P3 | ColPali on Apple Silicon (§5b) | Heaviest spike; only relevant if both VL-augmentation and SigLIP underperform on figure-heavy queries. |
+| P3 | ColPali on Apple Silicon (§5b) | **REJECTED 2026-05-17**. Index-time tractable (0.70 s/page) but retrieval ranking too flat (scores cluster in 0.03 range across top-5; references page ranked above content). P0 VL-augmentation delivers stronger signal more cheaply. |
 
 ### NEW P0 spike scope
 
