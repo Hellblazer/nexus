@@ -337,12 +337,28 @@ Locked-in design after Round 1 research.
       ).fetchall()
       for r in rows:
           dims = json.loads(r["dimensions_json"])
+          # Mirror api.py:437-440 production out() call site:
+          # metadata MUST include the "subspace" key
+          # (TupleIndex.out docstring at index.py:143;
+          # _merge_where at index.py:364 unconditionally
+          # injects {"subspace": {"$eq": ...}} into every
+          # in_() query — rebuilt tuples missing the subspace
+          # key are silently invisible to all semantic queries).
+          # Dimensions are coerced to Chroma-acceptable
+          # primitives (str/int/float/bool) the same way the
+          # production call site does.
+          meta: dict[str, Any] = {"subspace": r["subspace"]}
+          for k, v in dims.items():
+              meta[k] = (
+                  v if isinstance(v, (str, int, float, bool))
+                  else str(v)
+              )
           index.out(
               template_name=r["template_name"],
               subspace=r["subspace"],
               tuple_id=r["id"],
               payload=r["embed_text"],
-              metadata=dims,
+              metadata=meta,
           )
       return len(rows)
   ```
@@ -351,7 +367,9 @@ Locked-in design after Round 1 research.
   be rebuilt without actually calling `index.out`.
 - CLI: `nx daemon t2 rebuild-index [--dry-run]`.
 - Safe to re-run (`get_or_create_collection` is
-  idempotent; `out` upserts).
+  idempotent; `out` upserts; rebuild reads
+  `consumed_at IS NULL` so re-running after a partial
+  rebuild only redoes the unconsumed set).
 - Documented caveat: if the Voyage model version changed
   between snapshot and rebuild, vectors will differ —
   full rebuild is still correct, semantic queries may
@@ -363,31 +381,84 @@ Locked-in design after Round 1 research.
   default 10) Click options to existing
   `commands/daemon.py:stop_cmd`. No daemon-side code
   changes.
-- Force-stop sequence (CLI-side):
+- Force-stop sequence (CLI-side, reuses the same
+  `os.kill(pid, 0)` PID-liveness probe from
+  `discovery.py:50-61`; note the `PermissionError`
+  disposition is INVERTED here — discovery.py is a
+  reader trying to decide whether to attempt a connect,
+  so it treats `PermissionError` as "live, try anyway";
+  force-stop is an operator command trying to decide
+  whether the original daemon is still worth killing,
+  so it treats the same exception as "recycled, do NOT
+  SIGKILL the wrong process"):
   ```python
-  # already-existing SIGTERM send
+  # Read uds_path FROM discovery BEFORE unlinking it
+  disc_payload = json.loads(disc.read_text())
+  uds_path = Path(disc_payload["uds_path"])
+
   os.kill(pid, signal.SIGTERM)
   if force:
       deadline = time.monotonic() + force_timeout
+      recycled = False
       while time.monotonic() < deadline:
           try:
               os.kill(pid, 0)  # liveness probe
               time.sleep(0.2)
           except ProcessLookupError:
+              break  # daemon dead, proceed to cleanup
+          except PermissionError:
+              # PID exists but under a different UID —
+              # the original daemon process exited and
+              # the kernel reused this PID for another
+              # process. Do NOT SIGKILL it; that would
+              # signal the wrong process. Proceed to
+              # cleanup. discovery.py:58-61 documents
+              # the same rationale.
+              recycled = True
               break
       else:
+          # Loop completed without break → daemon is
+          # still our daemon and is wedged. SIGKILL.
           os.kill(pid, signal.SIGKILL)
-          # drain — wait briefly for OS to reap
-          time.sleep(0.5)
-      # cleanup orphaned filesystem state
-      uds_path = Path(discovery_json["uds_path"])
+          time.sleep(0.5)  # let OS reap
+      # Cleanup orphaned filesystem state regardless
+      # of whether we SIGKILLed, the daemon exited
+      # cleanly, or the PID was recycled.
       uds_path.unlink(missing_ok=True)
       disc.unlink(missing_ok=True)
+      if recycled:
+          click.echo(
+              f"warning: pid {pid} was recycled by the "
+              "kernel under a different UID. Discovery "
+              "and UDS socket cleaned up; daemon was "
+              "already dead. No SIGKILL sent.",
+              err=True,
+          )
   ```
 - Next `nx daemon t2 start` succeeds cleanly because
   `_bind_uds()` re-unlinks residual socket and the
   spawn lock was released by OS on process death.
   WAL is auto-recovered by SQLite on next open.
+
+#### Recovery decision matrix
+
+Cross-product of snapshot freshness × events-table
+retention. At the default `NX_TUPLES_BACKUP_INTERVAL_S=6h`
++ `NX_TUPLES_BACKUP_RETENTION=3` (18h of snapshot
+coverage) and the 7-day events retention:
+
+| Scenario | Snapshot age | Events age | Recoverable? |
+|---|---|---|---|
+| Steady state | < 6h | < 7d | **Yes** — restore snapshot + `rebuild-index`; events bridge cursor position from snapshot → corruption time |
+| Recent rotation | 6h-18h | < 7d | **Yes** with a gap — restore oldest retained snapshot; events bridge cursor; tuples created in the rotation gap are lost from the snapshot but recoverable from the events log up to retention |
+| Snapshot expired | > 18h (rotation rolled off) | < 7d | **Partial** — events bridge cursor position only (no tuple content reconstruction from events; events are claim-log entries, not full tuple replay). Tuples created after the most recent snapshot but before corruption are LOST. |
+| Events expired | any | > 7d in gap | **Partial** — same as "Snapshot expired" but with no cursor recovery for the > 7d window |
+| Never enabled backups | none | < 7d | **Partial** — `rebuild-index` reconstructs chroma vectors from whatever tuples.db rows survive (if the corruption is chroma-only); events bridge cursor position only |
+| Never enabled backups | none | > 7d in gap | **No recovery** — operator should declare data loss and restart from empty |
+
+**Practical rule for operators**: keep
+`NX_TUPLES_BACKUP_INTERVAL_S` ≤ 6h. Max-safe-data-loss
+window = `min(snapshot_age, 7-day events retention)`.
 
 #### Recovery doc structure
 
@@ -400,19 +471,75 @@ sections:
 4. Restart the daemon (`nx daemon t2 start`)
 5. Rebuild the chroma index (`nx daemon t2 rebuild-index`)
 6. Verify (smoke queries against restored state)
-7. What you lost (events between snapshot and corruption,
-   minus pruned events older than retention)
+7. What you lost — reproduce the recovery decision
+   matrix verbatim. Walk the operator through finding
+   their row by inspecting `<config_dir>/backups/tuples/`
+   directory listing and the `events` table's oldest
+   `ts` value.
 8. Prevention (enable `NX_TUPLES_BACKUP_INTERVAL_S`;
    recommend 6h or less)
 
 ### Decision Rationale
 
-Substantive design — the recovery procedure has multiple defensible
-shapes (snapshot vs. event-replay vs. hybrid) and the operator
-surface (CLI verbs vs. file-drop-and-restart) needs a single
-opinion. Deferred from third 360° remediation precisely because
-inline shipping of incomplete options would lock in the wrong
-operator workflow.
+**Online Backup API over stop-and-cp**: the simplest
+recovery story is "stop the daemon, copy the .db file,
+restart" — `cp` is the API. That works for memory.db
+today via the introspection.export path BUT also for an
+operator who shells in and copies the file while the
+daemon is stopped. The reason this RDR mandates the
+Online Backup API path for tuples.db is operational
+asymmetry: memory.db already has BOTH paths
+(`introspection.export` for live snapshots,
+`pre_migration_backup` for migration-window snapshots);
+giving tuples.db only the downtime path would force
+operators to schedule a daemon outage for every backup.
+For agent-fanout workloads where the daemon is the
+critical path for every Claude subprocess, scheduled
+downtime defeats the daemon-as-service model RDR-112
+committed to. The Online Backup API is shipped
+production code (`_backup_sqlite_db` in migrations.py
++ `_export_sqlite` in introspection.py); reusing it is
+strictly less risky than inventing a new pattern.
+
+**Chroma-rebuild from rows over chroma-snapshot**: the
+alternative is to snapshot the chroma collection AND
+tuples.db in lockstep — give every backup TWO files
+that must be restored together. Three problems with
+that: (1) chroma's local persistence is its own format
+with its own restore semantics, requiring an additional
+documented procedure operators must learn; (2)
+maintaining consistency between two snapshots requires
+quiescing both at the same instant — the Online Backup
+API gives no such cross-database synchronisation
+primitive, so an operator restoring a snapshot pair
+taken even seconds apart could see a row in tuples.db
+with no matching chroma vector or vice versa; (3)
+chroma vectors are deterministic functions of
+`embed_text` + the Voyage model version — they are
+strictly reconstructible from tuples.db rows. Rebuild
+adds one CLI verb and ~20 lines; snapshot-pairing
+adds an entire second restore surface and a
+correctness invariant operators must verify by hand.
+Rebuild is the strictly simpler shape.
+
+**`--force` flag on existing `stop` over separate
+`stop-force` verb**: precedent — `nx daemon t2
+install --force` already exists in the same command
+group with similar "skip a safety check" semantics
+(install: skip the existing-install check; stop:
+skip the graceful-wait). Adding `--force` to `stop`
+preserves the operator's mental model: there is one
+verb for "shut the daemon down", with optional escape
+hatches. A separate `stop-force` verb fragments the
+namespace and makes operators choose between two
+similar-looking commands. The implementation is
+CLI-side only — no daemon code changes — which means
+both code paths share `stop_cmd`'s discovery
+resolution and config-dir handling without
+duplication. The split-verb shape would either
+duplicate that code or factor a third helper, both of
+which add maintenance surface for zero operator
+benefit.
 
 ## Alternatives Considered
 
@@ -521,22 +648,71 @@ Sequenced after Round 1 research.
   - Reviewer test: a fresh operator can follow the doc
     end-to-end without asking questions.
 
-## Test Plan
-
-- **Scenario**: live snapshot under concurrent writer load —
-  **Verify**: snapshot consistent (post-restore: schema correct,
-  no orphan rows, claim state coherent); writer latency
-  unchanged within noise floor.
+- **Scenario**: live snapshot under concurrent writer
+  load — **Verify**: snapshot consistent (post-restore:
+  schema correct, no orphan rows, claim state coherent);
+  writer latency unchanged within noise floor.
 - **Scenario**: scheduled snapshot rotation —
   **Verify**: retention=3 keeps the latest 3, rotates oldest.
-- **Scenario**: corrupt tuples.db → restore from snapshot →
-  daemon starts cleanly → binding watcher resumes cursors —
-  **Verify**: no event replay storm; cursors point at the
-  snapshotted last-rowid.
-- **Scenario**: wedged daemon → `nx daemon t2 stop --force` →
-  daemon process terminated, UDS socket gone, discovery file
-  stamped + unlinked, restart succeeds —
+- **Scenario**: corrupt tuples.db → restore from
+  snapshot → daemon starts cleanly → binding watcher
+  resumes cursors — **Verify**: no event replay storm;
+  cursors point at the snapshotted last-rowid.
+- **Scenario**: wedged daemon → `nx daemon t2 stop
+  --force` → daemon process terminated, UDS socket gone,
+  discovery file stamped + unlinked, restart succeeds —
   **Verify**: no leftover state from the wedged process.
+- **Scenario (rebuild metadata correctness — C1
+  regression)**: snapshot tuples.db with tuples in N
+  distinct subspaces → corrupt chroma collection →
+  `rebuild-index` → call `in_(subspace="...")` on every
+  subspace — **Verify**: each `in_` call returns the
+  exact tuples seeded for that subspace (count + ids
+  match). This test formally locks the gate-C1 fix:
+  rebuilt metadata MUST include the `subspace` key or
+  `_merge_where` returns empty results.
+- **Scenario (rebuild race — new tuple during rebuild)**:
+  start `rebuild-index` on a snapshot with 1000 tuples;
+  while the rebuild loop is running, issue an `out()`
+  for a NEW tuple from the live daemon → **Verify**:
+  the new tuple appears in chroma exactly once (the live
+  `out()` writes it; the rebuild loop's iteration over
+  the snapshot does NOT see it since it was inserted
+  post-snapshot). No double-write, no missing tuple.
+  Documents the snapshot-isolation semantics of the
+  rebuild path.
+- **Scenario (force-stop with PID reuse — S4
+  regression)**: simulate PID-reuse by mocking
+  `os.kill(pid, 0)` to raise `PermissionError` after the
+  first call → **Verify**: force-stop loop breaks
+  without sending SIGKILL; warning printed; UDS socket
+  + discovery unlinked anyway; restart succeeds.
+- **Scenario (force-stop during mid-snapshot)**: start
+  `nx daemon t2 stop --force` while a scheduled snapshot
+  loop iteration is mid-flight (e.g. step 7 of 13) →
+  **Verify**: partial .db file is NOT left as a valid
+  snapshot file in the rotation directory (the
+  in-progress snapshot must be either complete OR
+  removed; never a partial blob that the operator could
+  mistake for a usable backup).
+- **Scenario (snapshot under concurrent memory.db
+  migration)**: trigger a memory.db migration via
+  `pre_migration_backup` path while a tuples.db
+  scheduled snapshot is mid-loop — **Verify**: both
+  complete without error; neither blocks the other; both
+  produce consistent files (memory.db migration
+  snapshot, tuples.db scheduled snapshot, both valid).
+- **Scenario (operator end-to-end recovery —
+  scripted)**: CI integration test runs the full
+  recovery sequence: (a) seed daemon with known tuples;
+  (b) trigger a scheduled snapshot; (c) corrupt
+  tuples.db (truncate, or inject random bytes); (d)
+  `nx daemon t2 stop --force`; (e) restore snapshot
+  via `cp`; (f) `nx daemon t2 start`; (g) `nx daemon
+  t2 rebuild-index`; (h) smoke-query the restored
+  state — **Verify**: every step succeeds, query
+  results match pre-corruption state for tuples
+  captured by the snapshot.
 
 ## Validation
 
@@ -548,7 +724,68 @@ per step at default pages-per-step. Quantify before locking.
 
 ## Finalization Gate
 
-To be completed before `/nx:rdr-accept`.
+- [x] **Memory / fd hygiene on snapshot loop**: each
+  scheduled-snapshot iteration opens a fresh RO-URI
+  connection to tuples.db (mirrors `_export_sqlite`),
+  runs `sqlite3.Connection.backup(target, pages=1024)`,
+  closes both source and target connections in a
+  `try/finally` block. No long-lived conn beyond the
+  per-iteration window. Loop teardown in
+  `T2Daemon.stop_async` cancels the task and awaits
+  cancellation cleanly.
+- [x] **No new runtime deps**: uses stdlib (`sqlite3`,
+  `asyncio`, `signal`, `os`, `pathlib`, `time`) +
+  existing `click`. No new requirements in
+  `pyproject.toml`.
+- [x] **Deployment model**: single-host daemon mode only.
+  Chroma is local. Backups land on the same filesystem
+  as the source DB; operators are responsible for
+  off-host copies (CLI returns a path the operator can
+  `scp`).
+- [x] **CI coverage**: Phase 1 test in
+  `tests/daemon/test_introspection.py` (extend the
+  existing `_export_sqlite` test suite). Phase 2 in
+  new `tests/tuplespace/test_rebuild_chroma_index.py`
+  (must include the C1 regression test from §Test
+  Plan). Phase 3 in `tests/commands/test_daemon.py`
+  (extend `stop_cmd` suite with `--force` cases).
+  Phase 4 in `tests/daemon/test_t2_daemon.py` (scheduled
+  loop). Phase 5 is doc-only.
+- [x] **Operator ergonomics**: the recovery doc is
+  written for a `nx daemon t2 doctor`-aware operator;
+  the doctor output should surface backup-state info
+  (last snapshot age, count of snapshots in rotation,
+  estimated max-safe-data-loss window). Cross-link
+  doctor → recovery doc when corruption is detected.
+- [x] **Cross-RDR conformance**:
+  - RDR-110 §CA-1 (atomicity): preserved — the snapshot
+    is read-only via RO-URI; the rebuild path goes
+    through `TupleIndex.out` which uses Chroma upsert
+    (atomic per-tuple).
+  - RDR-110 §CA-2 (watcher resumability): preserved —
+    `watcher_state` is in the snapshot; restored cursors
+    pick up at the snapshotted rowid.
+  - RDR-110 §CA-5 (cross-process visibility): preserved
+    — restore happens with the daemon STOPPED; on next
+    start every client re-discovers via the discovery
+    file (rebuilt at start).
+  - RDR-111 (binding watcher cursors): cursors are
+    persisted in `watcher_state`; restore + start
+    resumes cleanly. Event-replay storm prevented by
+    `last_events_rowid` cursor.
+  - RDR-112 §9 (single-writer): preserved — backup
+    opens a separate RO conn; rebuild runs against the
+    daemon's writer through normal `TupleIndex.out`;
+    no parallel writers introduced.
+- [x] **Test execution evidence**: tests added in the
+  files listed above will be run under the standard
+  `uv run pytest` gate; the operator end-to-end
+  scenario goes under `tests/e2e/` (integration suite,
+  excluded from default CI per project convention but
+  runnable manually).
+- [x] **Secret / credential lifecycle**: N/A — backup
+  files are SQLite databases on the local filesystem.
+  No credentials material touched.
 
 ## References
 
@@ -608,3 +845,98 @@ To be completed before `/nx:rdr-accept`.
   recovery doc.
 - §References gained citation block for the 4 research
   entries + 4 production precedents.
+
+### 2026-05-17 — Round 1 gate (BLOCKED) + single-pass remediation
+
+Gate result `nexus_rdr/117-gate-latest` (initial): BLOCKED,
+1 critical, 5 significant, 0 observations. Findings
+remediated in-place; ready for Round 2 gate.
+
+- **C1 (rebuild helper silently invisible to all
+  semantic queries)**: rebuild snippet passed
+  `metadata=dims` where `dims` came from
+  `dimensions_json` column which does NOT include the
+  `subspace` key. `_merge_where` in
+  `tuplespace/index.py:364-367` unconditionally
+  injects `{"subspace": {"$eq": ...}}` into every
+  `in_()` query — rebuilt tuples missing the subspace
+  key are silently invisible. Verified against the
+  production `out()` call site at
+  `tuplespace/api.py:437-440` which builds
+  `meta = {"subspace": subspace}` then merges
+  dimensions with primitive coercion. Fix: rebuild
+  loop now constructs `meta` the same way + applies
+  the same primitive coercion + includes inline
+  comment cross-referencing the docstring and
+  `_merge_where` so the next maintainer cannot miss
+  it. Added §Test Plan scenario "rebuild metadata
+  correctness — C1 regression" that locks the fix.
+- **S1 (Finalization Gate empty)**: populated with 7
+  explicit sign-offs (memory/fd hygiene, no new deps,
+  deployment model, CI coverage with specific test
+  file targets, operator ergonomics, cross-RDR
+  conformance against RDR-110/111/112, test execution
+  evidence, secret lifecycle).
+- **S2 (Decision Rationale was placeholder)**:
+  expanded to three substantive paragraphs justifying:
+  (a) Online Backup API over stop-and-cp (operational
+  asymmetry; daemon-as-service model requires no
+  scheduled downtime), (b) chroma rebuild from rows
+  over chroma snapshot (avoids two-snapshot
+  consistency invariant; vectors are deterministic
+  functions of embed_text + model version), (c)
+  `--force` flag on existing `stop` over separate
+  `stop-force` verb (precedent: `install --force`;
+  unified mental model; CLI-side only avoids code
+  duplication).
+- **S3 (max-safe-data-loss matrix missing)**: added a
+  cross-product table to §Technical Design before
+  §Recovery doc structure. Six rows covering steady
+  state, recent rotation, snapshot expired, events
+  expired, never-enabled-backups (events intact), and
+  never-enabled-backups (events gone). Recovery doc
+  §7 will reproduce this matrix verbatim and walk the
+  operator through identifying their row.
+- **S4 (force-stop PID-reuse failure mode)**: liveness
+  probe sequence now mirrors `discovery.py:50-61`
+  handling. `PermissionError` from `os.kill(pid, 0)`
+  treated as "PID recycled under another UID" — break
+  loop, skip SIGKILL, proceed to cleanup with a
+  warning. `ProcessLookupError` continues to be
+  "daemon dead, proceed to cleanup". Only the
+  timeout-elapsed path (neither error raised) sends
+  SIGKILL.
+- **S5 (Test Plan missing 4 scenarios)**: added 5
+  scenarios (the critic flagged 4; the C1 regression
+  is a 5th derived from the critical fix). New
+  scenarios: C1 metadata regression, rebuild race
+  during concurrent `out()`, force-stop with PID
+  reuse, force-stop during mid-snapshot, snapshot
+  under concurrent memory.db migration, operator
+  end-to-end recovery scripted CI test.
+
+### 2026-05-17 — Round 2 gate (PASSED)
+
+Round 2 confirmed all 6 Round 1 findings CLOSED. Critic
+verified the C1 rebuild snippet matches the production
+`api.py:437-440` call site exactly (seed
+`{"subspace": subspace}`, merge dimensions with primitive
+coercion), the Finalization Gate is concrete + testable,
+the Decision Rationale runs three substantive paragraphs,
+the max-safe-data-loss matrix arithmetic is internally
+consistent (6h × 3 = 18h matches §Proposed Solution
+defaults), and the force-stop sequence correctly mirrors
+`discovery.py` PID-liveness handling.
+
+One critic observation addressed in this pass: the
+inline comment for the force-stop sequence now
+explicitly notes that `PermissionError` disposition is
+INVERTED relative to discovery.py (reader treats as
+"live, try anyway"; force-stop treats as "recycled, do
+NOT SIGKILL"). Removes the trap where a future
+maintainer reads the "mirrors discovery.py:50-61"
+note, looks up the reference, sees "treat as live",
+and concludes the force-stop handling is wrong.
+
+No new defects introduced by remediation. Outcome:
+PASSED. Ready for `/nx:rdr-accept RDR-117`.
