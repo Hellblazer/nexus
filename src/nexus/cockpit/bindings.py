@@ -323,7 +323,7 @@ async def _dispatch_action(
     context: "BindingContext",
 ) -> None:
     if action.kind == "log":
-        # Log actions are inherently idempotent — a second log line on
+        # Log actions are inherently idempotent, a second log line on
         # crash-replay is harmless, and the dedup gate would only waste a
         # SELECT round-trip per event.
         _log.info(
@@ -352,7 +352,7 @@ async def _dispatch_action(
                     )
                     return
             except sqlite3.Error:
-                # Table missing or other persistent error — fall through to
+                # Table missing or other persistent error, fall through to
                 # dispatch (degrade-open). Without the table, replays cannot
                 # be filtered, but skipping the action is the worse failure
                 # mode (silent loss of side effect).
@@ -400,7 +400,7 @@ class BindingContext:
     ``memory_conn`` is the optional ``memory.db`` connection used for
     the ``action_idempotency`` dedup gate (RDR-111 §lines 909-942,
     nexus-8wvs). When ``None`` the watcher runs without the dedup gate
-    — tests that inject a stub context exercise this path. Production
+   , tests that inject a stub context exercise this path. Production
     wiring (the daemon) populates it so a crash between dispatch and
     cursor save cannot re-fire a python action on restart.
     """

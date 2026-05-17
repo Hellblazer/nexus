@@ -17,7 +17,7 @@ a ``chromadb.EphemeralClient`` so no filesystem side-effects occur.  The
 so ChromaDB uses its bundled all-MiniLM-L6-v2 embedder when documents are
 passed.  Explicit embedding-function injection is deferred to P1.4/Phase 2.
 
-**API consumers (P1.4 api.py) do not touch ChromaDB directly** — they call
+**API consumers (P1.4 api.py) do not touch ChromaDB directly**, they call
 ``out()`` and ``read()`` on this class only.
 """
 

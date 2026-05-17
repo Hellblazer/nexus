@@ -47,7 +47,7 @@ telemetry:
   stderr_silent_zero: true    # Phase 1.2: emit stderr note when a query returns zero results due to threshold filtering
 ```
 
-Both default `true`. Set either to `false` to opt out project-wide. Query strings are sha256-hashed before persistence — raw queries are never stored.
+Both default `true`. Set either to `false` to opt out project-wide. Query strings are sha256-hashed before persistence, raw queries are never stored.
 
 ---
 
@@ -78,17 +78,17 @@ nx index repo ./my-project
 | Flag | Description |
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
-| `--force-stale` | Re-index only if collection pipeline version is outdated (smart force — skips current collections) |
+| `--force-stale` | Re-index only if collection pipeline version is outdated (smart force, skips current collections) |
 | `--on-locked {skip,wait}` | Behavior when another process holds the repo lock: `skip` exits immediately, `wait` blocks (default: `wait`) |
 | `--no-taxonomy` | Skip automatic topic discovery after indexing |
-| `--debug-timing` | Emit an end-of-run per-stage breakdown to stderr (chunking / embed / upload / retry seconds per file, aggregated with percentages). Instruments code, prose, and PDF per-file paths — silent without the flag. Use when investigating "why did indexing take N minutes?" (introduced 4.9.0, nexus-7niu) |
+| `--debug-timing` | Emit an end-of-run per-stage breakdown to stderr (chunking / embed / upload / retry seconds per file, aggregated with percentages). Instruments code, prose, and PDF per-file paths, silent without the flag. Use when investigating "why did indexing take N minutes?" (introduced 4.9.0, nexus-7niu) |
 
 **Observability output** (stderr, all emitted automatically during `repo` runs):
 
-- **Per-file line** — `  [N/total] path — K chunks  (T.Ts)` printed as each file completes (or when `--monitor` / no-TTY).
-- **`[eta]` line** — every 60 s: `[eta] N/total files · C chunks · Xs/file avg · ~M min remaining`. Fires regardless of TTY so CI / `nohup` / `tail -f` see pace even when tqdm suppresses its bar (introduced 4.8.0, nexus-vatx Gap 3).
-- **`[post]` phase markers** — after the per-file loop, the pipeline keeps running for RDR discovery, pruning, pipeline-version stamping, and catalog registration. Each phase emits `[post] <phase>…` / `[post] <phase> done (Xs)`, bookended by `[post] Post-processing complete (Xs)` (introduced 4.8.0, nexus-vatx Gap 2).
-- **Transient-error backoff summary** — on exit, if any Voyage / ChromaDB retry fired: `Transient-error backoff: Xs total (voyage ..., chroma ...)`. Silent on clean runs. Visible on exception paths (introduced 4.8.0, nexus-vatx Gap 4a).
+- **Per-file line**, `  [N/total] path, K chunks  (T.Ts)` printed as each file completes (or when `--monitor` / no-TTY).
+- **`[eta]` line**, every 60 s: `[eta] N/total files · C chunks · Xs/file avg · ~M min remaining`. Fires regardless of TTY so CI / `nohup` / `tail -f` see pace even when tqdm suppresses its bar (introduced 4.8.0, nexus-vatx Gap 3).
+- **`[post]` phase markers**, after the per-file loop, the pipeline keeps running for RDR discovery, pruning, pipeline-version stamping, and catalog registration. Each phase emits `[post] <phase>…` / `[post] <phase> done (Xs)`, bookended by `[post] Post-processing complete (Xs)` (introduced 4.8.0, nexus-vatx Gap 2).
+- **Transient-error backoff summary**, on exit, if any Voyage / ChromaDB retry fired: `Transient-error backoff: Xs total (voyage ..., chroma ...)`. Silent on clean runs. Visible on exception paths (introduced 4.8.0, nexus-vatx Gap 4a).
 
 **`pdf` and `md` flags:**
 
@@ -129,7 +129,7 @@ Most PDFs work fine with the default (`auto`). You only need to think about this
 - Large PDFs are automatically split into 5-page batches, each processed in
   an isolated subprocess to prevent OOM on formula-dense documents
 
-**MinerU is included by default** since nexus-2fyb. Previously gated behind a `[mineru]` extra; the extras gate produced silent formula loss because fresh installs never picked it up. First use of `auto` or `mineru` modes downloads the unimernet model (~2-3 GB). If MinerU is missing at runtime, your install is corrupt — reinstall with `uv tool install --reinstall conexus`.
+**MinerU is included by default** since nexus-2fyb. Previously gated behind a `[mineru]` extra; the extras gate produced silent formula loss because fresh installs never picked it up. First use of `auto` or `mineru` modes downloads the unimernet model (~2-3 GB). If MinerU is missing at runtime, your install is corrupt, reinstall with `uv tool install --reinstall conexus`.
 
 **Setting a default backend (sticky config):**
 
@@ -426,7 +426,7 @@ nx enrich aspects-promote-field NAME [--type {TEXT|INTEGER|REAL}] [--prune] [--h
 
 Promote a recurring `extras.<name>` key into a fixed column on `document_aspects` (RDR-089 Phase E). Three-phase mechanic:
 
-1. `ALTER TABLE document_aspects ADD COLUMN <name> <type>` (idempotent — re-running on an already-promoted field is a no-op).
+1. `ALTER TABLE document_aspects ADD COLUMN <name> <type>` (idempotent, re-running on an already-promoted field is a no-op).
 2. Backfill: copy the value of `extras.<name>` into the new column for every existing row via `json_extract`.
 3. (Optional) `--prune` removes the `extras.<name>` key after backfill so the source of truth is the new column.
 
@@ -436,14 +436,14 @@ The promotion is logged to `aspect_promotion_log` (registry-managed) for audit. 
 |------|-------------|
 | `NAME` (positional) | The `extras.<name>` key to promote into a fixed column. Validated against an alphanumeric+underscore identifier rule |
 | `--type {TEXT|INTEGER|REAL}` | SQL column type. Default `TEXT`. `BLOB`, `JSON`, and other types are rejected |
-| `--prune` | After backfill, remove the `extras.<name>` key from every row. Use when the new column should replace the extras key as the source of truth. **Destructive** — re-running with `--prune` after data has been written to the new column has no effect, but rolling back requires reverting the schema change manually |
+| `--prune` | After backfill, remove the `extras.<name>` key from every row. Use when the new column should replace the extras key as the source of truth. **Destructive**, re-running with `--prune` after data has been written to the new column has no effect, but rolling back requires reverting the schema change manually |
 | `--history` | List prior promotions from the audit log instead of running a new promotion |
 
 ---
 
 ## nx catalog
 
-Document catalog — track indexed documents and the relationships between them.
+Document catalog, track indexed documents and the relationships between them.
 
 ### nx catalog setup
 
@@ -557,7 +557,7 @@ Per content-type report showing what percentage of catalog entries have at least
 nx catalog suggest-links [--limit N]
 ```
 
-Find unlinked code-RDR pairs by module name overlap. Read-only — shows potential links without creating them.
+Find unlinked code-RDR pairs by module name overlap. Read-only, shows potential links without creating them.
 
 ### nx catalog links-for-file
 
@@ -607,7 +607,7 @@ Update catalog entry metadata. `TUMBLER` accepts a tumbler or title. Batch mode 
 nx catalog gc [--dry-run]
 ```
 
-Remove orphan catalog entries (entries with `miss_count >= 2` — missed in 2 consecutive index runs). Use `--dry-run` to preview.
+Remove orphan catalog entries (entries with `miss_count >= 2`, missed in 2 consecutive index runs). Use `--dry-run` to preview.
 
 ### nx catalog link-density
 
@@ -720,7 +720,7 @@ Carve-outs:
 
 ## nx taxonomy
 
-Topic taxonomy — HDBSCAN clustering of T3 collection embeddings into topics for navigation, search grouping, and relevance boosting.
+Topic taxonomy, HDBSCAN clustering of T3 collection embeddings into topics for navigation, search grouping, and relevance boosting.
 
 Topics are auto-discovered after `nx index repo` and auto-labeled with Claude haiku when available. Search results are grouped by topic and boosted when results share a topic cluster.
 
@@ -752,7 +752,7 @@ nx taxonomy validate-refs docs/**/*.md                        # stale-reference 
 ### `nx taxonomy validate-refs`
 
 Scan markdown docs for stale collection references and chunk-count claims
-that have drifted from current T3 state. **Deterministic** — pure regex
+that have drifted from current T3 state. **Deterministic**, pure regex
 plus `collection_list()` / `count()` lookups; no LLM.
 
 ```
@@ -769,9 +769,9 @@ Scans for `<prefix>__<name>` references (default prefixes `docs`, `code`,
 are ignored so tutorial snippets don't false-positive.
 
 Per-reference verdicts:
-- `OK` — collection exists and (when a count is claimed) it matches within tolerance.
-- `Drift` — collection exists but the claimed count differs by more than `--tolerance`.
-- `Missing` — collection is not in the current T3 (renamed, split, or never indexed).
+- `OK`, collection exists and (when a count is claimed) it matches within tolerance.
+- `Drift`, collection exists but the claimed count differs by more than `--tolerance`.
+- `Missing`, collection is not in the current T3 (renamed, split, or never indexed).
 
 Exit codes: `0` = all OK (or only `Missing` without `--strict`); `1` = drift
 (or `Missing` with `--strict`); `2` = scanner or T3 failure.
@@ -798,7 +798,7 @@ taxonomy:
 | `split LABEL --k N` | Split into N sub-topics via KMeans. `-c NAME` scopes label lookup |
 | `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection |
 | `rebuild` | Full re-cluster (alias for `discover --force`). `-c NAME` required |
-| `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](taxonomy-projection-tuning.md)). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077). `--persist` to write assignments. `--backfill` to project all collections against each other |
+| `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55, see [taxonomy-projection-tuning.md](taxonomy-projection-tuning.md)). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077). `--persist` to write assignments. `--backfill` to project all collections against each other |
 | `hubs` | List generic-pattern hub topics (RDR-077 Phase 5). `--min-collections N` (default 2), `--max-icf F` filter, `--warn-stale` flags hubs whose latest assignment post-dates the newest `last_discover_at` across contributing source collections, `--explain` shows DF / ICF / matched stopword tokens per row. |
 | `audit --collection NAME` | Per-collection projection-quality report (RDR-077 Phase 6): total assignments, p10/p50/p90 of raw cosine, count below threshold (re-projection candidates), top receiving topics with ICF, pattern-pollution flags. `--threshold F` overrides the per-corpus default; `--top-n N` caps the receiving-topic list. |
 
@@ -807,7 +807,7 @@ taxonomy:
 ```yaml
 taxonomy:
   auto_label: true                    # label with Claude haiku after discover (default: true)
-  local_exclude_collections: []       # default: ["code__*"] — MiniLM clusters poorly on code
+  local_exclude_collections: []       # default: ["code__*"], MiniLM clusters poorly on code
 ```
 
 **Upgrade path**: Run `nx upgrade` after upgrading to apply pending migrations and T3 upgrade steps (including cross-collection projection backfill). Run `nx taxonomy discover --all` to populate topics for new collections.
@@ -958,10 +958,10 @@ nx scratch put "hypothesis: cache invalidation is stale"
 promotion result as `Promoted <id> -> <project>/<title> (action=<ACTION>)`.
 Two actions are possible today:
 
-- `action=new` — no similar entry found under the target project. Clean write.
-- `action=overlap_detected` — an FTS5 keyword scan found a similar entry in the
+- `action=new`, no similar entry found under the target project. Clean write.
+- `action=overlap_detected`, an FTS5 keyword scan found a similar entry in the
   target project under a different title. The new row is **still** written to
-  T2 as a separate entry — the report is an advisory, not a rejection.
+  T2 as a separate entry, the report is an advisory, not a rejection.
   Agents should decide whether to manually merge via `memory_consolidate(action="merge", ...)`.
 
 The underlying `T1.promote()` method returns a full `PromotionReport` dataclass
@@ -988,7 +988,7 @@ nx collection list
 | `backfill-hash [NAME]` | Add `chunk_text_hash` metadata to chunks missing it (no re-embedding) |
 | `rename OLD NEW` | In-place rename via ChromaDB `modify(name=)` + T2 + catalog cascade (4.8.0, nexus-1ccq) |
 | `audit NAME` | Deep-dive per-collection report: distance histogram, top-5 cross-projections, orphan chunks, hub topics, chash coverage (RDR-087 Phase 4) |
-| `health` | Composite per-collection health table — chunk counts (T3-sourced), staleness, hub score, chash coverage (RDR-087 Phase 3.4) |
+| `health` | Composite per-collection health table, chunk counts (T3-sourced), staleness, hub score, chash coverage (RDR-087 Phase 3.4) |
 | `delete NAME` | Delete collection (irreversible) |
 
 **`verify` flags:**
@@ -1011,9 +1011,9 @@ The `reindex` command performs a pre-delete safety check before wiping the colle
 |------|-------------|
 | `--all` | Backfill all collections instead of a single named one |
 
-Reads each chunk's stored text from ChromaDB and computes `sha256(text.encode()).hexdigest()`, updating metadata in-place. Embeddings and documents are untouched — no API keys or re-embedding needed. Idempotent: chunks that already have `chunk_text_hash` are skipped. Also runs automatically during `nx catalog setup`.
+Reads each chunk's stored text from ChromaDB and computes `sha256(text.encode()).hexdigest()`, updating metadata in-place. Embeddings and documents are untouched, no API keys or re-embedding needed. Idempotent: chunks that already have `chunk_text_hash` are skipped. Also runs automatically during `nx catalog setup`.
 
-**RDR-086 Phase 1.3 — T2 `chash_index` reconciliation.** The same per-chunk
+**RDR-086 Phase 1.3, T2 `chash_index` reconciliation.** The same per-chunk
 pass also populates the T2 `chash_index` table so `nx doc cite` and
 `Catalog.resolve_chash` can answer "which collection + doc_id holds this
 chunk hash?" in ~50 µs instead of scanning ChromaDB. Reconciles gaps left
@@ -1028,9 +1028,9 @@ takes ~25–70 minutes on ChromaDB Cloud. Maintenance-window operation.
 
 | Flag | Description |
 |------|-------------|
-| `--force-prefix-change` | Allow a cross-prefix rename (e.g. `code__foo` → `docs__foo`). Embedding-model spaces differ across prefixes, so the renamed collection is query-incompatible with its old clients — use only when you've deleted every downstream reader |
+| `--force-prefix-change` | Allow a cross-prefix rename (e.g. `code__foo` → `docs__foo`). Embedding-model spaces differ across prefixes, so the renamed collection is query-incompatible with its old clients, use only when you've deleted every downstream reader |
 
-Uses ChromaDB's native `modify(name=)` for an O(1) metadata update — no embedding re-upload, no Voyage cost, no ChromaDB egress. Cascades the new name through T2 taxonomy, `chash_index`, and catalog (JSONL + SQLite). The cascade is fail-open by design: T3 renames first; a T2 or catalog failure prints a `warn: …` line on stderr but leaves T3 renamed so the operation is recoverable by retrying the cascade alone.
+Uses ChromaDB's native `modify(name=)` for an O(1) metadata update, no embedding re-upload, no Voyage cost, no ChromaDB egress. Cascades the new name through T2 taxonomy, `chash_index`, and catalog (JSONL + SQLite). The cascade is fail-open by design: T3 renames first; a T2 or catalog failure prints a `warn: …` line on stderr but leaves T3 renamed so the operation is recoverable by retrying the cascade alone.
 
 **`audit` flags:**
 
@@ -1048,7 +1048,7 @@ Renders five sections: distance histogram, top-5 cross-projections, orphan chunk
 | `--sort COLUMN` | Sort the table by a named column (`name`, `chunk_count`, `last_indexed`, `zero_hit_rate_30d`, `median_query_distance_30d`, `cross_projection_rank`, `orphan_catalog_rows`, `hub_domination_score`). Default: `name` |
 | `--format {table,json}` | Output format (default: `table`). `--format=json` returns `{generated_at, collections: [...]}` for dashboards and CI gates |
 
-Chunk counts come from T3's live `coll.count()` (same source as `nx collection list`) so the two surfaces cannot disagree — catalog-sourced counts were historically drifting to 0 on tenants that predated the catalog's `chunk_count` column (fixed 4.9.0, nexus-39zi).
+Chunk counts come from T3's live `coll.count()` (same source as `nx collection list`) so the two surfaces cannot disagree, catalog-sourced counts were historically drifting to 0 on tenants that predated the catalog's `chunk_count` column (fixed 4.9.0, nexus-39zi).
 
 **`delete` flags:**
 
@@ -1133,7 +1133,7 @@ nx doc validate docs/paper.md
 
 ### nx doc check-grounding
 
-Report citation-coverage per markdown file — chash / prose / bracket counts
+Report citation-coverage per markdown file, chash / prose / bracket counts
 and the chash-coverage ratio. With `--fail-ungrounded` (RDR-086 Phase 4),
 additionally exits 1 when any `chash:` span fails `Catalog.resolve_chash`
 and prints `file:line: unresolved chash:<first8>…` to stderr.
@@ -1185,9 +1185,9 @@ nx doc cite "claim" --against knowledge__corpus --limit 10 --min-similarity 0.25
 | `--json` | Emit full candidate schema instead of a markdown link |
 
 Exit codes:
-- `0` — cite emitted; in JSON mode, `threshold_met=true`
-- `1` — top distance above `--min-similarity`; stderr warning, stdout empty (markdown); JSON still returns candidates
-- `2` — empty `chash_index` (run `nx collection backfill-hash --all`), empty collection, or unknown collection
+- `0`, cite emitted; in JSON mode, `threshold_met=true`
+- `1`, top distance above `--min-similarity`; stderr warning, stdout empty (markdown); JSON still returns candidates
+- `2`, empty `chash_index` (run `nx collection backfill-hash --all`), empty collection, or unknown collection
 
 ---
 
@@ -1531,7 +1531,7 @@ nx doctor --fix-paths           # Migrate absolute file_path entries to relative
 nx doctor --fix-paths --dry-run # Preview migration without applying
 ```
 
-The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing local-mode collections. New collections get this automatically. In cloud mode (SPANN), prints a skip message — SPANN defaults are adequate.
+The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing local-mode collections. New collections get this automatically. In cloud mode (SPANN), prints a skip message, SPANN defaults are adequate.
 
 ```
 nx doctor --check-schema          # Validate T2 database schema and report pending migrations
@@ -1567,8 +1567,8 @@ nx doctor --check-quotas --json     # Structured output for dashboards / CI gate
 The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a three-section pre-flight report: (1) ChromaDB Cloud limits drawn from `nexus.db.chroma_quotas.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps) plus a live reachability probe of the configured tenant; (2) Voyage AI per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3`) with `VOYAGE_API_KEY` presence check; (3) the cumulative retry accumulator from `nexus.retry.get_retry_stats()` so any transient-error backoffs observed in the current process surface alongside the static limits.
 
 Exit codes:
-- `0` — reachable cloud tenant or local-mode (limits are reference-only).
-- `1` — cloud tenant unreachable in cloud mode; the report is not actionable without a working client. Suitable as a CI gate.
+- `0`, reachable cloud tenant or local-mode (limits are reference-only).
+- `1`, cloud tenant unreachable in cloud mode; the report is not actionable without a working client. Suitable as a CI gate.
 
 ```
 nx doctor --check-post-store-hooks   # Enumerate registered post-store hook chains
@@ -1642,7 +1642,7 @@ nx upgrade --auto                 # Quiet mode for hook invocation (T2 only, exi
 |------|-------------|
 | `--dry-run` | List pending migrations without executing (creates base tables if absent) |
 | `--force` | Reset version gate to 0.0.0 and re-run all migrations. Per-migration idempotency guards still apply |
-| `--auto` | Quiet mode for SessionStart hook. T2 migrations only (T3 skipped — may exceed hook timeout). Exit 0 always |
+| `--auto` | Quiet mode for SessionStart hook. T2 migrations only (T3 skipped, may exceed hook timeout). Exit 0 always |
 
 **How it works**: The CLI version (`importlib.metadata.version("conexus")`) is compared against the last-seen version stored in T2 (`_nexus_version` table). Migrations tagged with versions between last-seen and current are executed. Each migration is idempotent via `PRAGMA table_info()` / `sqlite_master` guards.
 

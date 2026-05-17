@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""SQLite schema for tuples.db — the T2 claim ledger for RDR-110.
+"""SQLite schema for tuples.db, the T2 claim ledger for RDR-110.
 
 New database `~/.config/nexus/tuples.db` (separate from ``memory.db``
 for operational isolation). Contains:
 
-- ``tuples`` — body store + claim state. Single-table-with-state-column
+- ``tuples``, body store + claim state. Single-table-with-state-column
   pattern (honker RF-9). Atomicity via ``UPDATE … RETURNING`` under
   SQLite's single-writer lock. Tombstone columns follow RDR-106/107 style.
-- ``tuple_claim_log`` — append-only audit trail for every state transition
+- ``tuple_claim_log``, append-only audit trail for every state transition
   (claim, ack, nack, expire). Never updated; never deleted except by the
   30-day retention sweep. Includes ``failure_category`` for nack demux.
-- ``events`` — append-only projection of every committed tuple operation,
+- ``events``, append-only projection of every committed tuple operation,
   populated by AFTER INSERT triggers on ``tuples`` (op='out') and
   ``tuple_claim_log`` (op=transition). Provides monotonic ``rowid``
   cursors for the EventStream RPC (RDR-112 P1.3, nexus-m4gm).
@@ -20,19 +20,19 @@ Migration coordination with RDR-112 daemon (nexus-w0et)
 Per RDR-112 §9, the daemon is the sole migration runner for tuples.db.
 This module exposes:
 
-- ``TUPLES_SCHEMA_DDL`` — the idempotent DDL string; the daemon's
+- ``TUPLES_SCHEMA_DDL``, the idempotent DDL string; the daemon's
   manifest (bead nexus-w0et) should import and execute this directly.
-- ``apply_tuples_schema(conn)`` — idempotent direct-mode applier. Used
+- ``apply_tuples_schema(conn)``, idempotent direct-mode applier. Used
   by the direct-mode path (``NX_STORAGE_MODE=direct``) and by unit tests
   that need a fresh in-process database.
-- ``open_tuples_db(path)`` — opens the database file, enables WAL, and
+- ``open_tuples_db(path)``, opens the database file, enables WAL, and
   calls ``apply_tuples_schema``. The daemon calls this once at startup;
   direct-mode callers use it per-process.
 
 nexus-w0et integration note: import ``TUPLES_SCHEMA_DDL`` and call
 ``conn.executescript(TUPLES_SCHEMA_DDL)`` inside the daemon's migration
 manifest function. ``apply_tuples_schema`` is a thin wrapper around
-exactly that — the daemon may call either form.
+exactly that, the daemon may call either form.
 
 EventStream (nexus-m4gm, RDR-112 P1.3)
 ---------------------------------------
@@ -300,7 +300,7 @@ def prune_expired_tuples(
 
     **Atomicity note (RDR-111).** Two-store atomicity between SQLite and
     Chroma is a separate concern (bead nexus-qmrr). This sweeper deletes
-    from Chroma FIRST, then SQLite — so a crash mid-sweep leaves orphan
+    from Chroma FIRST, then SQLite, so a crash mid-sweep leaves orphan
     SQLite rows (recoverable on the next sweep, since ``expires_at`` is
     still in the past) rather than orphan Chroma vectors (which would
     silently return stale ids in semantic queries).
@@ -310,7 +310,7 @@ def prune_expired_tuples(
         index: Optional ``TupleIndex`` for the paired Chroma deletion.
             When ``None``, Chroma is not touched (SQLite-only prune; used
             by tests that don't care about the Chroma side).
-        registry: Optional ``Registry`` — accepted for symmetry with the
+        registry: Optional ``Registry``, accepted for symmetry with the
             rest of the tuplespace API, currently unused (template_name
             comes from the tuple row itself).
         now: Optional epoch seconds to compare ``expires_at`` against.
@@ -351,14 +351,14 @@ def prune_expired_tuples(
                     template=template_name,
                     count=len(ids),
                 )
-            except Exception as exc:  # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover, defensive
                 _log.error(
                     "prune_expired_chroma_delete_failed",
                     template=template_name,
                     count=len(ids),
                     error=str(exc),
                 )
-                # Don't proceed to SQLite delete for this batch — leave the
+                # Don't proceed to SQLite delete for this batch, leave the
                 # rows so the next sweep retries.
                 by_template[template_name] = []
 

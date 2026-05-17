@@ -403,7 +403,7 @@ def out(
     now = time.time()
     # Resolve effective TTL: explicit ttl_seconds wins; otherwise fall back
     # to the subspace schema's retention_seconds (nexus-kk9h, RDR-111).
-    # retention_seconds == 0 means "no expiry" — leave expires_at NULL so
+    # retention_seconds == 0 means "no expiry", leave expires_at NULL so
     # the retention sweeper skips the row.
     effective_ttl: Optional[float] = ttl_seconds
     if effective_ttl is None:
@@ -689,7 +689,7 @@ def take(
 
     # --- Idempotent retake by same claimant (two-statement read-then-update) ---
     # The CAS pattern below would see claim_state='claimed' AND claim_expires_at>now
-    # for the same claimant's live claim and return no row — indistinguishable from
+    # for the same claimant's live claim and return no row, indistinguishable from
     # a foreign-claimant loss.  Handle it explicitly first.
     placeholders = ",".join("?" * len(top_ids))
     existing = conn.execute(
@@ -702,7 +702,7 @@ def take(
     ).fetchone()
 
     if existing is not None:
-        # Same claimant still holds the lease — return existing claim
+        # Same claimant still holds the lease, return existing claim
         t_dict = _load_tuple_row(conn, existing[0])
         _log.debug(
             "tuplespace_take_idempotent_retake",
@@ -733,7 +733,7 @@ def take(
     ).fetchone()
 
     if row is None:
-        # All candidates raced away — no winner
+        # All candidates raced away, no winner
         return None
 
     conn.execute(

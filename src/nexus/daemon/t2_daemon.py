@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""T2 daemon — single-writer asyncio process owning the T2 SQLite stores.
+"""T2 daemon, single-writer asyncio process owning the T2 SQLite stores.
 
 RDR-112 P1.1 (nexus-61x6): transport scaffold + dual-bind UDS+TCP.
 RDR-112 P1.2 (nexus-qy0u): domain-store RPC dispatcher.
-RDR-112 P1.3 (nexus-m4gm): EventStream RPC — streaming subscription.
+RDR-112 P1.3 (nexus-m4gm): EventStream RPC, streaming subscription.
 RDR-112 P1.5 (nexus-x98k): subspace_add admin RPC + daemon-side registry.
 RDR-112 P1.6 (nexus-pce1.1): admin-RPC UDS-only gate.
 
@@ -136,7 +136,7 @@ try:
     from importlib.metadata import version as _pkg_version
 
     _NEXUS_VERSION: str = _pkg_version("conexus")
-except Exception:  # pragma: no cover — fallback for editable / pre-install envs
+except Exception:  # pragma: no cover, fallback for editable / pre-install envs
     _NEXUS_VERSION = "0.0.0+unknown"
 
 #: Maximum accepted wire-frame payload size (bytes). Guards against a malicious
@@ -270,8 +270,8 @@ _ADMIN_OPS: frozenset[str] = frozenset({
     "subspace_add",                # RDR-112 P1.5 nexus-x98k
     "apply_pending_migrations",    # currently NOT in dispatch table (internal to daemon start)
     "import",                      # future
-    "exec_raw",                    # RDR-112 P1.6 nexus-08i1 — arbitrary read-only SQL
-    "export",                      # RDR-112 P1.6 nexus-08i1 — daemon-side file write
+    "exec_raw",                    # RDR-112 P1.6 nexus-08i1, arbitrary read-only SQL
+    "export",                      # RDR-112 P1.6 nexus-08i1, daemon-side file write
 })
 
 #: Names that future beads MUST treat as admin (UDS-only) if they appear in
@@ -613,7 +613,7 @@ class T2Daemon:
                 result = registry_store.add(yaml_str=yaml)
                 try:
                     self._write_discovery()
-                except Exception as exc:  # pragma: no cover — log + continue
+                except Exception as exc:  # pragma: no cover, log + continue
                     _log.warning("discovery_rewrite_failed_after_subspace_add", error=str(exc))
                 return result
             self._rpc_table["subspace_add"] = _subspace_add_handler
@@ -648,7 +648,7 @@ class T2Daemon:
         # P1.6 nexus-pce1.1: startup integrity check.
         # The UDS-only gate relies on _ADMIN_OPS membership. If a future bead
         # registers an admin op in the dispatch table but forgets to add it
-        # here, the op would be TCP-callable — silently regressing the gate.
+        # here, the op would be TCP-callable, silently regressing the gate.
         # Fail loud at startup rather than at first malicious request.
         _unprotected_admin_ops = {
             op for op in self._rpc_table
@@ -846,7 +846,7 @@ class T2Daemon:
         if self._binding_watcher is not None:
             try:
                 await self._binding_watcher.stop()
-            except Exception as exc:  # pragma: no cover — defensive
+            except Exception as exc:  # pragma: no cover, defensive
                 _log.warning("binding_watcher_stop_failed", error=str(exc))
             self._binding_watcher = None
         if self._binding_watcher_conn is not None:
@@ -887,7 +887,7 @@ class T2Daemon:
         if self._tuplespace_service is not None:
             try:
                 self._tuplespace_service.close()
-            except Exception:  # pragma: no cover — defensive
+            except Exception:  # pragma: no cover, defensive
                 _log.warning("tuplespace_service_close_failed", exc_info=True)
 
         self._unlink_discovery()
@@ -1296,7 +1296,7 @@ class T2Daemon:
         dedicated SQLite connections to both ``tuples.db`` (for the
         events poll) and ``memory.db`` (for the ``action_idempotency``
         dedup gate). When no profiles are loaded the watcher is not
-        constructed — the loop would have nothing to do.
+        constructed, the loop would have nothing to do.
         """
         from nexus.cockpit.bindings import (  # noqa: PLC0415
             BindingContext,
@@ -1314,7 +1314,7 @@ class T2Daemon:
             return
         try:
             profiles = load_profiles_dir(profiles_dir)
-        except Exception as exc:  # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover, defensive
             _log.warning(
                 "binding_watcher_profile_load_failed",
                 path=str(profiles_dir),
@@ -1386,7 +1386,7 @@ class T2Daemon:
         falls back to SQLite-only and logs a one-time warning.
 
         Also sweeps expired ``action_idempotency`` rows from
-        ``memory.db`` (nexus-8wvs). Both sweeps are best-effort — a
+        ``memory.db`` (nexus-8wvs). Both sweeps are best-effort, a
         failure on either side logs and continues.
         """
         if self._tuples_db_path is None:
@@ -1468,7 +1468,7 @@ class T2Daemon:
                         None, self._run_retention_sweep_sync
                     )
                     _log.info("retention_sweep_completed", deleted=deleted)
-                except Exception as exc:  # pragma: no cover — defensive
+                except Exception as exc:  # pragma: no cover, defensive
                     _log.warning("retention_sweep_failed", error=str(exc))
         except asyncio.CancelledError:
             return

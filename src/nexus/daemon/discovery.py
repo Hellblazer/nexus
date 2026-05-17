@@ -56,7 +56,7 @@ def find_t2_daemon(config_dir: Optional[Path] = None) -> Optional[dict[str, Any]
     liveness without delivering a signal; ``ProcessLookupError`` means
     the PID is unallocated and the file is stale, in which case we
     best-effort unlink it so a future check is fast. A ``PermissionError``
-    means the PID exists under a different UID — that is a sysadmin-
+    means the PID exists under a different UID, that is a sysadmin-
     level scenario; treat as live and let the eventual connect surface
     a clear error.
     """
@@ -90,7 +90,7 @@ def find_t2_daemon(config_dir: Optional[Path] = None) -> Optional[dict[str, Any]
             )
         return None
     except PermissionError:
-        # Live process under a different UID. Keep the payload — the
+        # Live process under a different UID. Keep the payload, the
         # eventual connect will give a clearer error than we can here.
         pass
 

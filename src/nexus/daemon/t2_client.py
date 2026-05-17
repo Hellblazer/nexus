@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""T2Client — synchronous RPC proxy for the T2 daemon.
+"""T2Client, synchronous RPC proxy for the T2 daemon.
 
 RDR-112 P1.2 (nexus-qy0u): client facade that mirrors ``T2Database``'s shape
 so call sites flip in Phase 3 via constructor injection only.
 
 Architecture
 ------------
-``T2Client`` is **synchronous** — matching ``T2Database``'s sync nature — and
+``T2Client`` is **synchronous**, matching ``T2Database``'s sync nature, and
 maintains a small pool of persistent socket connections (UDS or TCP) to amortise
 the per-call connect overhead.
 
@@ -91,9 +91,9 @@ _log = structlog.get_logger(__name__)
 #: The client compares against this constant and raises ``T2DaemonError``
 #: with a directional instruction on mismatch:
 #:
-#: * ``client_version > daemon_version`` — daemon is older; restart it so
+#: * ``client_version > daemon_version``, daemon is older; restart it so
 #:   the migration runner applies the missing migrations automatically.
-#: * ``client_version < daemon_version`` — daemon is newer; upgrade the
+#: * ``client_version < daemon_version``, daemon is newer; upgrade the
 #:   client package.
 #:
 #: Mutable at module level so tests can monkey-patch it without subclassing.
@@ -656,7 +656,7 @@ class T2Client:
         pool_size: Number of persistent connections to maintain (default 4).
 
     Attributes:
-        memory: Proxy for ``MemoryStore`` — same public method signatures.
+        memory: Proxy for ``MemoryStore``, same public method signatures.
         plans: Proxy for ``PlanLibrary``.
         chash_index: Proxy for ``ChashIndex``.
         taxonomy: Proxy for ``CatalogTaxonomy``.
@@ -787,7 +787,7 @@ class T2Client:
                 )
 
         # P1.5 nexus-x98k: record registry_digest from hello_ack.
-        # No enforcement in this bead — the field is logged and stored for
+        # No enforcement in this bead, the field is logged and stored for
         # future beads that may add warn-or-refuse on digest mismatch.
         registry_digest: str | None = ack.get("registry_digest")
         _log.debug(
@@ -804,7 +804,7 @@ class T2Client:
 
         Detaching the pool under ``_pool_lock`` ensures a later call to
         ``_get_pool()`` builds a fresh pool rather than handing back the
-        emptied one — otherwise an accidental call after ``close()`` would
+        emptied one, otherwise an accidental call after ``close()`` would
         silently open new connections through the stale handle.
         """
         with self._pool_lock:
@@ -825,7 +825,7 @@ class T2Client:
     def call(self, op: str, args: dict[str, Any] | None = None) -> Any:
         """Invoke a bare-op RPC and return its ``result`` payload.
 
-        Use for ops that are not exposed via a store proxy — admin ops
+        Use for ops that are not exposed via a store proxy, admin ops
         (``subspace_add``), introspection verbs (``exec_raw``, ``schema``,
         ``peek``, ``stats``, ``export``), or any future bare-op handler.
         Raises ``T2DaemonError`` on remote error frames.
@@ -877,7 +877,7 @@ class T2Client:
 
     @property
     def catalog(self) -> _StoreProxy:
-        """RDR-112 P2.1 (nexus-7ejx): eighth domain store — catalog tables.
+        """RDR-112 P2.1 (nexus-7ejx): eighth domain store, catalog tables.
 
         Method names mirror ``CatalogDB`` so Phase 4 (catalog port) flips
         call sites by swapping the constructor injection only.

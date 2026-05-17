@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Introspection RPC surface for the T2 daemon — RDR-112 P1.6 (nexus-08i1).
+"""Introspection RPC surface for the T2 daemon, RDR-112 P1.6 (nexus-08i1).
 
 Provides ``IntrospectionService`` with five verbs:
 
@@ -57,7 +57,7 @@ class IntrospectionService:
     a ``finally`` block. ``export`` streams rows via a generator to avoid
     materialising the full result set in memory.
 
-    Constructor injection only — no global state.
+    Constructor injection only, no global state.
 
     Args:
         memory_db_path: Path to the T2 memory/plans/taxonomy/etc. SQLite DB.
@@ -113,7 +113,7 @@ class IntrospectionService:
 
         Opens a fresh ``sqlite3.connect("file:<path>?mode=ro", uri=True)``
         connection per call. The read-only constraint is enforced by SQLite's
-        URI ``mode=ro`` flag — NOT by SQL pattern matching.
+        URI ``mode=ro`` flag, NOT by SQL pattern matching.
 
         Audit: emits ``daemon/t2/lifecycle`` with ``op=raw-exec`` and
         ``sql_hash=sha256(sql)[:16]``. The full SQL is never logged.
@@ -148,7 +148,7 @@ class IntrospectionService:
                         "add a LIMIT clause or use export for full table dumps"
                     )
                 rows.append(dict(row))
-            # Audit after successful execution — pre-execution logging would
+            # Audit after successful execution, pre-execution logging would
             # record failed/rejected attempts as DoS noise.
             _log.info(
                 "daemon/t2/lifecycle",
@@ -330,7 +330,7 @@ class IntrospectionService:
 
         Returns:
             Dict with keys ``rows`` (list of dicts), ``total`` (int),
-            ``offset`` (int), ``limit`` (int — the effective clamped value).
+            ``offset`` (int), ``limit`` (int, the effective clamped value).
         """
         if limit <= 0:
             raise ValueError(f"peek limit must be positive, got {limit!r}")

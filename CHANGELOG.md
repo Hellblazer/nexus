@@ -231,6 +231,26 @@ script preserved at
 `scripts/spikes/spike_rdr114_tuplespace_out_latency.py`
 (p99=48 ms local-mode, N=1000).
 
+### Style (em-dash sweep, nexus-oyho Bundles F.1 + F.2)
+
+Mechanical replacement of em-dashes (U+2014) with commas or comma-space
+sequences per the project rule (no em-dashes in prose under Hal's
+name). `sed -e 's/ — /, /g' -e 's/—/,/g'` applied across two scoped
+sets; the third leaf (`nexus-ibdl`, 747-instance CHANGELOG sweep) is
+deferred to a separate decision because it touches historical
+release-note text where the mechanical rewrite would lose git-blame
+granularity for limited reader benefit.
+
+- **`nexus-d7a3` docs sweep**: 49 instances cleared from
+  `docs/cli-reference.md` (37) and `docs/architecture.md` (12).
+  RDR files under `docs/rdr/` are left untouched (historical record;
+  RDR files are never deleted or rewritten per project rule).
+- **`nexus-upes` src sweep**: 77 instances cleared from
+  `src/nexus/cockpit/` (9), `src/nexus/tuplespace/` (26), and
+  `src/nexus/daemon/` (42). All in docstrings and comments; no
+  behaviour change. Daemon+cockpit+tuplespace suite 606/606 PASS
+  after the sweep.
+
 ### Docs (UX + first-run, nexus-m0bw Bundle G)
 
 Two UX-doc follow-ups from the documentation critic, both

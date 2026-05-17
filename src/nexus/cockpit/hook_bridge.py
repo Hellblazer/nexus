@@ -8,7 +8,7 @@ tuplespace subspace. Hook scripts call ``emit()`` to post an event tuple and
 Key design decisions (backed by RDR-111 spike results):
 
 - **PreToolUse is observe-only** (CA-8 spike, 2026-05-14): emitting
-  ``permissionDecision`` is not needed — allow-wins regardless of hook
+  ``permissionDecision`` is not needed, allow-wins regardless of hook
   registration order. The bridge writes its tuple as a side effect and
   emits no stdout, leaving permission decisions to the user's allowlist
   and other installed hooks.
@@ -288,7 +288,7 @@ def emit(
 
     try:
         if conn is not None and index is not None and registry is not None:
-            # Test injection path (resources supplied — bypass routing)
+            # Test injection path (resources supplied, bypass routing)
             _direct_out(
                 conn=conn,
                 index=index,
@@ -564,8 +564,8 @@ def _sanitize_match_text(s: str) -> str:
 
     Keeps printable text, ``\\t``, ``\\n``, ``\\r`` (which are legitimate
     whitespace), and strips:
-      * ANSI CSI sequences (``ESC [ ... <letter>``) — cursor / colour moves.
-      * ANSI OSC sequences (``ESC ] ... BEL`` or ``ESC \\``) — window-title
+      * ANSI CSI sequences (``ESC [ ... <letter>``), cursor / colour moves.
+      * ANSI OSC sequences (``ESC ] ... BEL`` or ``ESC \\``), window-title
         manipulation and the like.
       * C0 control bytes 0x00..0x08, 0x0b, 0x0c, 0x0e..0x1f, plus DEL (0x7f).
         The kept whitespace bytes (TAB 0x09, LF 0x0a, CR 0x0d) are excluded
@@ -676,7 +676,7 @@ def _bridge_disabled() -> bool:
     This is the documented privacy opt-out (docs/tuplespace-env.md). It
     fires after the CLAUDECODE gate in ``emit()`` so it covers both the
     daemon and direct-fallback paths. ``output_for_hook()`` is *not*
-    gated by this — disabling tuple emission must not break the hook
+    gated by this, disabling tuple emission must not break the hook
     protocol (e.g. PermissionRequest still needs a transparent-allow
     response).
     """

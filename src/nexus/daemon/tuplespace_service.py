@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tuplespace service — daemon-side wrapper exposing the tuplespace
+"""Tuplespace service, daemon-side wrapper exposing the tuplespace
 free-function API (``nexus.tuplespace.api``) as a set of RPC handlers.
 
 RDR-112 / nexus-6s8v: Tuplespace was missing from ``_T2_STORE_ATTRS`` in
@@ -14,7 +14,7 @@ The other domain stores expose bound methods on ``t2db.<attr>`` that
 introspect cleanly via ``inspect.getmembers``. Tuplespace operates on
 *three* injected resources (``sqlite3.Connection``, ``TupleIndex``,
 ``Registry``) and the public API lives as free functions in
-``nexus.tuplespace.api`` — there is no single store object whose methods
+``nexus.tuplespace.api``, there is no single store object whose methods
 share a signature pattern that can be enumerated. A purpose-built
 service wrapping the three resources is cleaner than retrofitting the
 free-function API onto the introspection path.
@@ -31,7 +31,7 @@ RPC surface (registered in T2Daemon via ``register_tuplespace_rpcs``):
 
 EventStream subscriptions (``event_stream.subscribe``) are already
 served by the existing ``handle_event_stream`` machinery (P1.3
-nexus-m4gm) — no new RPC needed for that.
+nexus-m4gm), no new RPC needed for that.
 
 Connection lifecycle
 --------------------
@@ -91,7 +91,7 @@ class TuplespaceService:
         # connection with ``check_same_thread=False`` because the daemon
         # dispatches handlers in the thread-pool executor. The daemon
         # serialises tuplespace RPCs across the single connection (one
-        # writer at a time) — SQLite's WAL mode permits concurrent
+        # writer at a time), SQLite's WAL mode permits concurrent
         # readers safely so passing the connection between executor
         # threads is well-defined here.
         open_tuples_db(tuples_db_path).close()
@@ -113,7 +113,7 @@ class TuplespaceService:
         )
 
     # ------------------------------------------------------------------
-    # RPC handlers — keyword-only contracts mirroring nexus.tuplespace.api
+    # RPC handlers, keyword-only contracts mirroring nexus.tuplespace.api
     # ------------------------------------------------------------------
 
     def out(
@@ -360,7 +360,7 @@ def register_tuplespace_rpcs(
 
 
 #: Public list of tuplespace RPC op names. Imported by ``T2Client.tuplespace``
-#: so the client and the daemon stay in lockstep — adding an op here is the
+#: so the client and the daemon stay in lockstep, adding an op here is the
 #: single point of change.
 TUPLESPACE_RPC_OPS: tuple[str, ...] = (
     "out",

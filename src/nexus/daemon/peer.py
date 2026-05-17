@@ -7,7 +7,7 @@ isolates the platform-specific `getsockopt` dance behind a single
 
 Linux ``SO_PEERCRED`` returns ``struct ucred = {pid, uid, gid}`` as three
 32-bit ints (12 bytes). macOS ``LOCAL_PEERCRED`` returns ``struct xucred``
-(76 bytes, natural-alignment) — no PID, but ``cr_uid`` plus a 16-slot
+(76 bytes, natural-alignment), no PID, but ``cr_uid`` plus a 16-slot
 group array; ``cr_groups[0]`` is the effective GID.
 
 Failures are loud: unsupported platform → ``NotImplementedError``;
@@ -59,7 +59,7 @@ _log = structlog.get_logger(__name__)
 class PeerCredentials(NamedTuple):
     """Peer process identity over a UDS socket.
 
-    ``pid`` is ``-1`` on macOS — ``xucred`` does not carry it. Callers
+    ``pid`` is ``-1`` on macOS, ``xucred`` does not carry it. Callers
     that need PID-level identity must use Linux or solicit it over the
     application protocol.
     """
@@ -71,7 +71,7 @@ class PeerCredentials(NamedTuple):
 
 # Linux struct ucred = {pid_t pid, uid_t uid, gid_t gid}: signed pid (can be
 # negative in odd corner cases), unsigned uid/gid (UIDs above 2^31 unpack as
-# negative if we read them as signed — see nobody on some distros).
+# negative if we read them as signed, see nobody on some distros).
 _LINUX_UCRED_FMT = "=iII"
 _LINUX_UCRED_SIZE = struct.calcsize(_LINUX_UCRED_FMT)
 

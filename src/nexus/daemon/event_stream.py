@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Daemon-side EventStream RPC implementation — RDR-112 P1.3 (nexus-m4gm).
+"""Daemon-side EventStream RPC implementation, RDR-112 P1.3 (nexus-m4gm).
 
 Provides ``handle_event_stream``, the asyncio coroutine that handles the
 ``event_stream.subscribe`` op.  When called, it:
@@ -208,7 +208,7 @@ async def handle_event_stream(
 
     # nexus-pce1.5: reject GLOB metacharacters other than a single trailing '*'.
     # Without this, "tuples/foo?" would expand to "tuples/foo?*" where '?' is a
-    # GLOB wildcard matching any single character — broader than the caller
+    # GLOB wildcard matching any single character, broader than the caller
     # likely intended. Also reject bracket-classes and '*' in non-terminal
     # position. Allowed character set is the path-safe subset.
     validation_error = _validate_subspace_prefix(subspace_prefix)

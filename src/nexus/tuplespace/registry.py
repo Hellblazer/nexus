@@ -7,7 +7,7 @@ exposes ``Registry.get_schema_for(subspace)`` with single-segment
 parameterised matching (``tasks/<project>`` matches concrete
 ``tasks/nexus`` but NOT ``tasks/a/b``).
 
-Phase 1.1 is purely client-side substrate — no SQLite, no daemon. The
+Phase 1.1 is purely client-side substrate, no SQLite, no daemon. The
 daemon-side admin RPC for third-party subspace registration ships under
 RDR-112 ``nexus-x98k`` in Phase 2.
 """
@@ -186,7 +186,7 @@ class SubspaceSchema:
 # -- Param matching ----------------------------------------------------------
 
 
-# Param identifiers follow Python regex named-group rules — no dashes
+# Param identifiers follow Python regex named-group rules, no dashes
 # (CPython rejects ``(?P<a-b>...)``). Mirror that constraint here so a
 # typo in a template name fails at YAML load rather than producing a
 # broken matcher that silently never matches.
@@ -207,7 +207,7 @@ def _compile_template(template_name: str) -> re.Pattern[str]:
     other than ``/``). The whole template is anchored.
     """
     escaped = re.escape(template_name)
-    # ``re.escape`` escapes the angle brackets too — restore them so the
+    # ``re.escape`` escapes the angle brackets too, restore them so the
     # param substitution below works on the original character class.
     escaped = escaped.replace(r"\<", "<").replace(r"\>", ">")
     pattern = _PARAM_PATTERN.sub(r"(?P<\1>[^/]+)", escaped)
@@ -302,7 +302,7 @@ def _load_one(yml_path: Path) -> SubspaceSchema:
     try:
         raw = yaml.safe_load(yml_path.read_text())
     except yaml.YAMLError as exc:
-        raise RegistryLoadError(f"{yml_path.name}: malformed YAML — {exc}") from exc
+        raise RegistryLoadError(f"{yml_path.name}: malformed YAML, {exc}") from exc
 
     if not isinstance(raw, dict):
         raise RegistryLoadError(
@@ -318,7 +318,7 @@ def _load_one(yml_path: Path) -> SubspaceSchema:
             f"{yml_path.name}: schema validation failed at {path}: {exc.message}"
         ) from exc
 
-    # Reject malformed param names at load — Python's named-group syntax
+    # Reject malformed param names at load, Python's named-group syntax
     # disallows dashes (``(?P<a-b>...)`` is a regex error). A YAML author
     # writing ``mailbox/<agent-name>`` or ``mailbox/<>`` would otherwise
     # ship a template whose placeholder is treated as a literal,
@@ -335,7 +335,7 @@ def _load_one(yml_path: Path) -> SubspaceSchema:
         raise RegistryLoadError(
             f"{yml_path.name}: invalid param identifier(s) {bad_params!r} "
             f"in name {raw['name']!r}; params must match "
-            f"[a-zA-Z_][a-zA-Z0-9_]* (Python named-group syntax — no dashes)"
+            f"[a-zA-Z_][a-zA-Z0-9_]* (Python named-group syntax, no dashes)"
         )
 
     take = raw["take"]
@@ -374,7 +374,7 @@ def default_builtin_dir() -> Path:
     directory to ``Registry.load`` instead.
     """
     here = Path(__file__).resolve()
-    # src/nexus/tuplespace/registry.py — four parent hops reach the repo
+    # src/nexus/tuplespace/registry.py, four parent hops reach the repo
     # root: tuplespace → nexus → src → repo.
     repo_root = here.parent.parent.parent.parent
     return repo_root / "nx" / "tuplespace" / "builtin"
