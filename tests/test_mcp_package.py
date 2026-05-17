@@ -21,7 +21,7 @@ def test_catalog_module_importable():
 
 
 def test_core_registered_tools():
-    """36 core tools are registered with @mcp.tool() (nexus-8q4v added 8 tuplespace tools)."""
+    """40 core tools are registered with @mcp.tool() (nexus-7lb9 added 4 binding CRUD tools)."""
     from nexus.mcp.core import mcp
 
     tool_names = {t.name for t in mcp._tool_manager.list_tools()}
@@ -40,6 +40,8 @@ def test_core_registered_tools():
         "tuplespace_out", "tuplespace_read", "tuplespace_take",
         "tuplespace_ack", "tuplespace_nack",
         "tuplespace_list_subspaces", "tuplespace_subspace_schema", "tuplespace_subspace_stats",
+        # RDR-111 P2.1 binding CRUD tools (nexus-7lb9)
+        "binding_create", "binding_list", "binding_toggle", "binding_delete",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

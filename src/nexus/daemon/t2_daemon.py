@@ -1303,26 +1303,41 @@ class T2Daemon:
             _BindingWatcher,
             default_profiles_dir,
             load_profiles_dir,
+            user_profiles_dir,
         )
 
-        profiles_dir = default_profiles_dir()
-        if not profiles_dir.is_dir():
+        # nexus-7lb9: scan BOTH the shipped builtin dir and the user dir
+        # so operator CRUD writes under ~/.config/nexus/bindings/profiles
+        # land in the same watcher. The watcher's mtime-poll reload picks
+        # up changes to either dir without a daemon restart.
+        builtin_dir = default_profiles_dir()
+        user_dir = user_profiles_dir()
+        candidate_dirs = [
+            d for d in (builtin_dir, user_dir) if d.is_dir()
+        ]
+        if not candidate_dirs:
             _log.info(
                 "binding_watcher_no_profiles_dir",
-                path=str(profiles_dir),
+                builtin=str(builtin_dir),
+                user=str(user_dir),
             )
             return
         try:
-            profiles = load_profiles_dir(profiles_dir)
+            profiles: list = []
+            for d in candidate_dirs:
+                profiles.extend(load_profiles_dir(d))
         except Exception as exc:  # pragma: no cover, defensive
             _log.warning(
                 "binding_watcher_profile_load_failed",
-                path=str(profiles_dir),
+                dirs=[str(d) for d in candidate_dirs],
                 error=str(exc),
             )
             return
         if not profiles:
-            _log.info("binding_watcher_no_profiles")
+            _log.info(
+                "binding_watcher_no_profiles",
+                dirs=[str(d) for d in candidate_dirs],
+            )
             return
 
         # Dedicated connections so the watcher can run on the event loop
@@ -1355,6 +1370,7 @@ class T2Daemon:
             conn=tuples_conn,
             profiles=profiles,
             context=context,
+            profiles_dirs=candidate_dirs,
         )
         self._binding_watcher = watcher
         self._binding_watcher_conn = tuples_conn

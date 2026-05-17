@@ -4581,6 +4581,139 @@ def tuplespace_subspace_stats(subspace: str) -> str:
     return _json.dumps(subspace_stats(conn=ts["conn"], subspace=subspace))
 
 
+# ---------------------------------------------------------------------------
+# Binding CRUD MCP tools (RDR-111 nexus-7lb9)
+# ---------------------------------------------------------------------------
+#
+# Four tools operating on user-profile YAMLs under
+# ``~/.config/nexus/bindings/profiles/``. The cockpit's _BindingWatcher
+# reloads profiles on file mtime change so CRUD writes take effect
+# without a daemon restart. Builtin profiles under
+# ``nx/tuplespace/builtin/bindings/profiles/`` are read-only via this
+# surface (operators edit those by hand in the wheel checkout).
+
+
+@mcp.tool()
+def binding_create(
+    profile: str,
+    name: str,
+    match: str,
+    action: str,
+    enabled: bool = True,
+) -> str:
+    """Create a new cockpit binding in the named user profile.
+
+    The profile YAML is created on demand under
+    ``~/.config/nexus/bindings/profiles/<profile>.yml``. Duplicate
+    binding names within a profile are rejected.
+
+    Args:
+        profile: Profile name (also the YAML basename without ``.yml``).
+        name: Unique binding name within the profile.
+        match: JSON object of predicate fields, e.g.
+            ``'{"subspace": "hook_events/posttooluse"}'``.
+        action: JSON object of action, e.g.
+            ``'{"kind": "log", "marker": "test-failed"}'`` or
+            ``'{"kind": "python", "callable": "mod.path:func"}'``.
+        enabled: Initial enabled state. Default True.
+
+    Returns:
+        JSON object with keys: created (bool), profile, name, enabled.
+    """
+    import json as _json
+    from nexus.cockpit.bindings_crud import create_binding
+
+    match_dict = _json.loads(match) if isinstance(match, str) else dict(match)
+    action_dict = _json.loads(action) if isinstance(action, str) else dict(action)
+    create_binding(
+        profile=profile,
+        name=name,
+        match=match_dict,
+        action=action_dict,
+        enabled=bool(enabled),
+    )
+    return _json.dumps({
+        "created": True,
+        "profile": profile,
+        "name": name,
+        "enabled": bool(enabled),
+    })
+
+
+@mcp.tool()
+def binding_list(
+    profile: str = "",
+    enabled_only: bool = False,
+) -> str:
+    """List bindings across user-profile YAMLs.
+
+    Args:
+        profile: When set, filter to a single profile name.
+        enabled_only: When True, omit bindings with ``enabled=False``.
+
+    Returns:
+        JSON array of ``{profile, name, enabled, match, action}`` dicts.
+    """
+    import json as _json
+    from nexus.cockpit.bindings_crud import list_bindings
+
+    bindings = list_bindings(
+        profile=profile if profile else None,
+        enabled_only=bool(enabled_only),
+    )
+    return _json.dumps(bindings)
+
+
+@mcp.tool()
+def binding_toggle(
+    profile: str,
+    name: str,
+    enabled: bool,
+) -> str:
+    """Flip the ``enabled`` flag on the named binding.
+
+    Args:
+        profile: Profile name (YAML basename without ``.yml``).
+        name: Binding name within the profile.
+        enabled: New enabled state.
+
+    Returns:
+        JSON object: ``{profile, name, enabled}``.
+    """
+    import json as _json
+    from nexus.cockpit.bindings_crud import toggle_binding
+
+    new_state = toggle_binding(profile, name, enabled=bool(enabled))
+    return _json.dumps({
+        "profile": profile,
+        "name": name,
+        "enabled": new_state,
+    })
+
+
+@mcp.tool()
+def binding_delete(profile: str, name: str) -> str:
+    """Remove the named binding. Deletes the YAML file when it was the
+    only binding in the profile.
+
+    Args:
+        profile: Profile name.
+        name: Binding name within the profile.
+
+    Returns:
+        JSON object: ``{deleted, profile, name}``.
+    """
+    import json as _json
+    from nexus.cockpit.bindings_crud import delete_binding
+
+    delete_binding(profile, name)
+    return _json.dumps({
+        "deleted": True,
+        "profile": profile,
+        "name": name,
+    })
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 

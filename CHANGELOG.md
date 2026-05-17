@@ -6,6 +6,44 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (RDR-111, nexus-7lb9: Bindings CRUD MCP tools)
+
+Four new MCP tools and a backing helper module make cockpit
+bindings runtime-managed without a daemon restart.
+
+- **New MCP tools** (`nexus.mcp.core`): `binding_create`,
+  `binding_list`, `binding_toggle`, `binding_delete`. All operate
+  on user-owned profile YAMLs under
+  `~/.config/nexus/bindings/profiles/`; the shipped builtin profiles
+  under `nx/tuplespace/builtin/bindings/profiles/` are read-only
+  via this surface (operators edit those by hand if needed).
+- **`Binding.enabled` field** (`nexus.cockpit.bindings`). New
+  optional field on the `Binding` dataclass, default `True`,
+  parsed from the YAML `enabled:` key. `_BindingWatcher._dispatch_event`
+  skips bindings with `enabled=False` so `binding_toggle` has a real
+  flag to flip without removing the binding row.
+- **Watcher hot-reload** (`_BindingWatcher._reload_if_changed`).
+  When constructed with `profiles_dirs=[...]`, the watcher fingerprints
+  per-file mtimes across those dirs and rebuilds `self._profiles`
+  whenever a source file changes. Called once per `_tick`; a stat
+  call per `*.yml` per tick is negligible against the existing 50ms
+  cadence. CRUD writes take effect on the next tick.
+- **`bindings_crud` helper module**
+  (`nexus.cockpit.bindings_crud`). Synchronous filesystem helpers
+  underneath the MCP tools: `create_binding`, `list_bindings`,
+  `toggle_binding`, `delete_binding`. Profile YAML is created on
+  demand for the first binding and removed when the last binding in
+  it is deleted (an empty `bindings: []` would fail validation on
+  the next load).
+- **Daemon wiring** (`T2Daemon._start_binding_watcher`). The watcher
+  now loads from both the builtin and user dirs and passes both as
+  `profiles_dirs` to `_BindingWatcher` so hot reload sees CRUD
+  writes immediately.
+
+Tests: `tests/cockpit/test_bindings_crud.py` with 20 cases
+(`TestBindingEnabledField` + `TestBindingsCrudHelpers` +
+`TestBindingWatcherReload` + `TestMcpToolWrappers`).
+
 ### Added: RDR-110 Semantic Tuple Space landed (2026-05-14)
 
 ORB tuplespace ships as the substrate the rest of the agentic
