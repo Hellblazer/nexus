@@ -185,7 +185,29 @@ class TuplespaceService:
         ``api.take`` returns ``(tuple_dict, claim_id) | None``. The RPC
         wraps the tuple as ``{"tuple": <dict>, "claim_id": <str>}`` so the
         client sees a single dict result.
+
+        nexus-ry0v (RDR-110 P3.1, 2026-05-17): when ``block=True`` is
+        requested, this method delegates to :meth:`blocking_take`
+        rather than forwarding the flag to ``api.take`` (which raises
+        ``BlockingNotSupported`` for the direct-mode path). The daemon
+        owns the SQLite handle and has a real ``PRAGMA data_version``
+        wake source, so the blocking semantics are well-defined here.
+        ``block=False`` keeps the legacy fast-path through ``api.take``.
         """
+        if block:
+            return self.blocking_take(
+                subspace=subspace,
+                query=query,
+                claimant=claimant,
+                where=where,
+                floor=floor,
+                lease_seconds=lease_seconds,
+                timeout_seconds=(
+                    float(timeout_seconds)
+                    if timeout_seconds is not None
+                    else 30.0
+                ),
+            )
         with self._lock:
             result = ts_api.take(
                 conn=self._conn,
@@ -197,7 +219,7 @@ class TuplespaceService:
                 where=where,
                 floor=floor,
                 lease_seconds=lease_seconds,
-                block=block,
+                block=False,
                 timeout_seconds=timeout_seconds,
             )
         if result is None:

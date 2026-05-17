@@ -619,7 +619,26 @@ class _TuplespaceProxy:
 
         The two-tuple ``(tuple_dict, claim_id)`` of ``api.take`` is wrapped
         into a single dict on the daemon side for JSON friendliness.
+
+        nexus-ry0v (RDR-110 P3.1, 2026-05-17): when ``block=True``,
+        dispatches to the daemon's ``blocking_take`` RPC with a
+        widened per-call socket recv timeout (``timeout_seconds + 5s``)
+        so the legitimate blocking wait does not trip the default
+        ``rpc_timeout_seconds`` of 5 s.
         """
+        if block:
+            effective_timeout = (
+                float(timeout_seconds) if timeout_seconds is not None else 30.0
+            )
+            return self.blocking_take(
+                subspace=subspace,
+                query=query,
+                claimant=claimant,
+                where=where,
+                floor=floor,
+                lease_seconds=lease_seconds,
+                timeout_seconds=effective_timeout,
+            )
         return self._call(
             "take",
             {

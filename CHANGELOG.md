@@ -6,6 +6,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (RDR-110 P3.1, nexus-ry0v): client-side block=True enablement
+
+Wires `T2Client.tuplespace.take(block=True, ...)` to dispatch to the
+daemon's `blocking_take` RPC (shipped in nexus-73vq), and routes
+`TuplespaceService.take(block=True, ...)` to its own
+`blocking_take` method instead of forwarding the flag to
+`api.take` (which still raises `BlockingNotSupported` for the
+direct-mode path, where there is no safe wake source).
+
+Net effect: existing callers get blocking semantics for free by
+flipping a flag. The legitimate blocking wait is not truncated by
+the default 5s `rpc_timeout_seconds` because the per-call socket
+recv timeout widens to `timeout_seconds + 5s` automatically.
+
+Tests (`tests/daemon/test_block_true_enablement.py`, 5 cases):
+service-internal delegation (immediate-hit, timeout, block=False
+fast-path); end-to-end client RPC (wait-then-hit with sibling-thread
+out() at ~200ms, timeout returns None without RpcTimeoutError).
+
+This closes the last real-work bead in the cockpit-substrate arc.
+The RDR-110 P3 review gate (`nexus-jql6`), RDR-110 final gate
+(`nexus-4ven`), and RDR-111 final gate (`nexus-b97f`) all clear
+once this lands, retiring both RDR-110 (`nexus-qg7t`) and RDR-111
+(`nexus-429m`) epics.
+
 ### Added (RDR-112 P1.3.1, nexus-73vq): daemon-side blocking_take RPC
 
 `TuplespaceService.blocking_take` (new method + new
