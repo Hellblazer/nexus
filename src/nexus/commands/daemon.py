@@ -726,6 +726,55 @@ def _autostart_filename() -> str:
     return _PLIST_NAME if _autostart_platform() == "darwin" else _SERVICE_NAME
 
 
+def _read_installed_autostart_nx_bin() -> str | None:
+    """Return the nx_bin path from the installed autostart file.
+
+    nexus-2wvl: ``_resolve_nx_bin`` is called at install time; after a
+    later ``pip install --upgrade`` (or a ``uv tool`` update that
+    relocates the entry point), the path baked into the autostart file
+    can become stale. ``nx doctor --check-bridge`` reads this value and
+    verifies the binary still exists on disk; if not, it tells the
+    operator to re-render via ``install --autostart --force``.
+
+    Returns:
+        The first argument of the autostart command line as a string,
+        or ``None`` when no autostart is installed for the current
+        platform OR when the file format is unrecognised.
+
+        - macOS: ``ProgramArguments[0]`` from the launchd plist.
+        - Linux: the first whitespace-separated token of the
+          ``ExecStart=`` line in the systemd user unit.
+    """
+    try:
+        install_dir = _autostart_install_dir()
+    except click.ClickException:
+        return None  # platform unsupported
+    dest = install_dir / _autostart_filename()
+    if not dest.is_file():
+        return None
+
+    platform = _autostart_platform()
+    try:
+        if platform == "darwin":
+            import plistlib
+            data = plistlib.loads(dest.read_bytes())
+            args = data.get("ProgramArguments")
+            if isinstance(args, list) and args:
+                return str(args[0])
+            return None
+        # Linux / systemd
+        for line in dest.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("ExecStart="):
+                tokens = shlex.split(stripped[len("ExecStart="):])
+                if tokens:
+                    return tokens[0]
+                return None
+        return None
+    except Exception:  # noqa: BLE001 -- diagnostic helper, never raises
+        return None
+
+
 @t2_group.command("install")
 @click.option(
     "--autostart",
@@ -741,10 +790,13 @@ def _autostart_filename() -> str:
     is_flag=True,
     default=False,
     help=(
-        "Treat supervisor activation failures (launchctl/systemctl exit "
-        "non-zero, or binary missing on PATH) as warnings instead of "
-        "errors. The plist/unit file is still written. Useful for CI "
-        "or shells without a GUI session where bootstrap fails."
+        "Two effects, both intentional: (1) overwrite an existing "
+        "plist/unit file even when its content differs from the "
+        "freshly rendered template (nexus-31cr); (2) treat supervisor "
+        "activation failures (launchctl/systemctl exit non-zero, or "
+        "binary missing on PATH) as warnings instead of errors. "
+        "Without ``--force`` an operator-customised file is preserved "
+        "and the command refuses with a diagnostic naming this flag."
     ),
 )
 def install_cmd(autostart: bool, force: bool) -> None:
@@ -758,10 +810,13 @@ def install_cmd(autostart: bool, force: bool) -> None:
 
     Exit codes:
       0 - install + activation both succeeded, or activation failed under
-          ``--force`` (warning emitted, file still on disk).
-      1 - file installed but supervisor activation failed (no ``--force``).
-          Operators or CI scripts that check ``$?`` see the failure and can
-          react instead of silently continuing with non-functional autostart.
+          ``--force`` (warning emitted, file still on disk), or the file
+          on disk is already byte-identical to the rendered template
+          (no-op).
+      1 - file installed but supervisor activation failed (no ``--force``),
+          OR existing file content differs from the rendered template and
+          ``--force`` was not supplied (overwrite refusal). Operators or
+          CI scripts that check ``$?`` see the failure and can react.
     """
     if not autostart:  # pragma: no cover -- click enforces required=True
         raise click.UsageError("--autostart is required")
@@ -780,6 +835,28 @@ def install_cmd(autostart: bool, force: bool) -> None:
         path_env=os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
     )
     dest = install_dir / template_name
+
+    # nexus-31cr: overwrite guard. Operator may have customised the file
+    # (added EnvironmentVariables, changed log dir, etc.). Preserve it
+    # unless --force is given.
+    if dest.exists():
+        try:
+            existing = dest.read_text()
+        except OSError:
+            existing = None
+        if existing == rendered:
+            click.echo(f"{dest} already up to date; no changes")
+            return
+        if not force and existing is not None:
+            click.echo(
+                f"Error: {dest} exists and its content differs from the "
+                "rendered template; refusing to overwrite. Re-run with "
+                "--force to replace the existing file (your customisations "
+                "will be lost), or remove the file first.",
+                err=True,
+            )
+            sys.exit(1)
+
     dest.write_text(rendered)
     dest.chmod(0o644)
     click.echo(f"Wrote {dest}")

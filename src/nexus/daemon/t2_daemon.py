@@ -1475,10 +1475,55 @@ class T2Daemon:
         os.replace(str(tmp), str(self._discovery_path))
 
     def _unlink_discovery(self) -> None:
+        """Best-effort discovery-file removal at shutdown.
+
+        nexus-12gb: stamp a shutdown marker into the file BEFORE attempting
+        unlink, then retry the unlink once on ``OSError``. Combined with the
+        ``find_t2_daemon()`` PID-liveness probe (nexus-j6dj), this closes the
+        stale-discovery race: a reader that arrives while the daemon is
+        shutting down sees ``status == "shutting_down"`` in the JSON even if
+        the unlink itself transiently fails (NFS hiccups, read-only mount,
+        permission flake) and skips the file rather than routing to the
+        dying PID.
+
+        Never raises: shutdown cleanup cannot abort the rest of the stop
+        sequence (handlers waiting on graceful drain, lock release, etc.).
+        """
+        # Step 1: stamp a shutdown marker. Best-effort: failure to write the
+        # marker (e.g. EROFS, permission denied) is logged but does not
+        # block the unlink attempt.
         try:
-            self._discovery_path.unlink(missing_ok=True)
+            marker_payload = self._discovery_payload()
+            marker_payload["status"] = "shutting_down"
+            marker_payload["shutdown_at"] = datetime.now(timezone.utc).isoformat()
+            self._discovery_path.write_text(json.dumps(marker_payload))
         except OSError as exc:
-            _log.warning("discovery_unlink_failed", path=str(self._discovery_path), exc=str(exc))
+            _log.warning(
+                "discovery_marker_write_failed",
+                path=str(self._discovery_path),
+                exc=str(exc),
+            )
+
+        # Step 2: unlink with one retry. NFS-style transient errors usually
+        # clear on the second attempt; permanent errors (EROFS, EPERM) fall
+        # through to the final warning log.
+        for attempt in (1, 2):
+            try:
+                self._discovery_path.unlink(missing_ok=True)
+                return
+            except OSError as exc:
+                if attempt == 1:
+                    _log.info(
+                        "discovery_unlink_retry",
+                        path=str(self._discovery_path),
+                        exc=str(exc),
+                    )
+                    continue
+                _log.warning(
+                    "discovery_unlink_failed",
+                    path=str(self._discovery_path),
+                    exc=str(exc),
+                )
 
     def _announce_stdout(self) -> None:
         """Emit a single JSON line on stdout for orchestrator capture.
@@ -1513,15 +1558,25 @@ class T2Daemon:
         """Acquire an exclusive non-blocking lock on the spawn-lock file.
 
         Raises:
-            RuntimeError: if another daemon already holds the lock.
+            RuntimeError: another daemon already holds the lock, OR the
+                process is running on native Windows (nexus-dl3g: out of
+                v1 scope; use the TCP fallback from a Linux or macOS
+                host).
         """
         if sys.platform == "win32":
-            # fcntl not available on Windows; use best-effort file existence
-            # check. The T2 daemon is not designed to run natively on Windows
-            # (TCP fallback serves Windows-VM clients), but allow startup
-            # without the lock for completeness.
-            _log.warning("spawn_lock_unavailable", platform="win32")
-            return
+            # nexus-dl3g: the previous implementation logged a warning and
+            # returned without acquiring the lock, allowing two daemons to
+            # start concurrently on Windows. ``fcntl`` is unavailable on
+            # Windows and the equivalent ``msvcrt.locking()`` carries
+            # different invariants (record-level, not file-level). Native
+            # Windows is explicitly out of v1 scope (RDR-112 §Host-Trust
+            # Model). Refuse hard so operators can't end up with a
+            # double-bound daemon.
+            raise RuntimeError(
+                "nx daemon t2 start is not supported natively on Windows. "
+                "Run the T2 daemon on a Linux or macOS host and connect "
+                "Windows-VM clients via the TCP fallback transport."
+            )
 
         self._config_dir.mkdir(parents=True, exist_ok=True)
         fh = open(self._spawn_lock_path, "w")

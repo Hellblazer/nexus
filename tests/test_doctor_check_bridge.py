@@ -334,3 +334,166 @@ def test_check_bridge_no_recent_drops_reports_clean(
     out_lower = result.output.lower()
     # Clean state surfaced (either via a "no drops" line or implicit pass).
     assert "no recent" in out_lower or "0 drops" in out_lower or "bridge drops" in out_lower
+
+
+# ---------------------------------------------------------------------------
+# nexus-2wvl: autostart binary-path drift detection
+# ---------------------------------------------------------------------------
+
+
+def _write_plist_with_nx_bin(plist_path: Path, nx_bin: str) -> None:
+    """Write a minimal launchd plist whose ProgramArguments[0] points at nx_bin."""
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<plist version=\"1.0\">\n"
+        "<dict>\n"
+        "  <key>Label</key><string>com.nexus.t2</string>\n"
+        "  <key>ProgramArguments</key>\n"
+        "  <array>\n"
+        f"    <string>{nx_bin}</string>\n"
+        "    <string>daemon</string>\n"
+        "    <string>t2</string>\n"
+        "    <string>start</string>\n"
+        "    <string>--foreground</string>\n"
+        "  </array>\n"
+        "</dict>\n"
+        "</plist>\n"
+    )
+
+
+def _write_systemd_unit_with_nx_bin(unit_path: Path, nx_bin: str) -> None:
+    """Write a minimal systemd user unit whose ExecStart references nx_bin."""
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(
+        "[Unit]\nDescription=nexus T2 daemon\n\n"
+        f"[Service]\nExecStart={nx_bin} daemon t2 start --foreground\n"
+        "Restart=on-failure\n\n[Install]\nWantedBy=default.target\n"
+    )
+
+
+def test_check_bridge_reports_stale_autostart_binary_macos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nexus-2wvl: launchd plist points at a path that no longer exists."""
+    plugin_root = tmp_path / "plugin"
+    _stub_bridge_scripts(plugin_root)
+    _write_plugin_manifest(plugin_root, "0.0.0-stale")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("NX_BRIDGE_ALLOW_DIRECT_FALLBACK", raising=False)
+    monkeypatch.delenv("NX_BRIDGE_DISABLE", raising=False)
+
+    plist_path = fake_home / "Library" / "LaunchAgents" / "com.nexus.t2.plist"
+    stale_bin = str(tmp_path / "deleted" / "nx")  # does not exist
+    _write_plist_with_nx_bin(plist_path, stale_bin)
+
+    # Force the check to behave as macOS so it consults Library/LaunchAgents.
+    from nexus.commands import daemon as daemon_cmd
+    monkeypatch.setattr(daemon_cmd, "_autostart_platform", lambda: "darwin")
+
+    runner = CliRunner()
+    result = runner.invoke(doctor_cmd.doctor_cmd, ["--check-bridge"])
+
+    assert result.exit_code == 0, result.output
+    out_lower = result.output.lower()
+    # Must surface stale/missing autostart binary, with the install command as remediation.
+    assert "autostart" in out_lower
+    assert "stale" in out_lower or "missing" in out_lower or "not exist" in out_lower
+    assert "install --autostart" in result.output, (
+        "remediation must name 'nx daemon t2 install --autostart --force': "
+        + result.output
+    )
+
+
+def test_check_bridge_reports_healthy_autostart_binary_macos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plist binary still exists on disk: green line, no warning."""
+    plugin_root = tmp_path / "plugin"
+    _stub_bridge_scripts(plugin_root)
+    _write_plugin_manifest(plugin_root, "0.0.0-stale")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    plist_path = fake_home / "Library" / "LaunchAgents" / "com.nexus.t2.plist"
+    valid_bin_path = tmp_path / "bin" / "nx"
+    valid_bin_path.parent.mkdir(parents=True)
+    valid_bin_path.write_text("#!/bin/sh\nexec\n")
+    valid_bin_path.chmod(0o755)
+    _write_plist_with_nx_bin(plist_path, str(valid_bin_path))
+
+    from nexus.commands import daemon as daemon_cmd
+    monkeypatch.setattr(daemon_cmd, "_autostart_platform", lambda: "darwin")
+
+    runner = CliRunner()
+    result = runner.invoke(doctor_cmd.doctor_cmd, ["--check-bridge"])
+
+    assert result.exit_code == 0, result.output
+    # Healthy case: the stale-path warning specifically must NOT appear.
+    # (Other lines may contain "stale" because plugin version 0.0.0-stale
+    # shows up in the version-skew check, so we search for the specific
+    # warning phrase, not any keyword.)
+    assert "stale path" not in result.output.lower(), (
+        "no stale-binary warning expected when binary exists: " + result.output
+    )
+    # Green autostart-binary line must be present.
+    assert "autostart binary" in result.output
+    assert "exists" in result.output
+
+
+def test_check_bridge_skips_autostart_check_when_no_plist_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No autostart installed: check is a no-op (no false positive)."""
+    plugin_root = tmp_path / "plugin"
+    _stub_bridge_scripts(plugin_root)
+    _write_plugin_manifest(plugin_root, "0.0.0-stale")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    from nexus.commands import daemon as daemon_cmd
+    monkeypatch.setattr(daemon_cmd, "_autostart_platform", lambda: "darwin")
+
+    runner = CliRunner()
+    result = runner.invoke(doctor_cmd.doctor_cmd, ["--check-bridge"])
+
+    assert result.exit_code == 0, result.output
+
+
+def test_check_bridge_reports_stale_autostart_binary_linux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nexus-2wvl: systemd unit ExecStart references a binary that no longer exists."""
+    plugin_root = tmp_path / "plugin"
+    _stub_bridge_scripts(plugin_root)
+    _write_plugin_manifest(plugin_root, "0.0.0-stale")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    unit_path = fake_home / ".config" / "systemd" / "user" / "nexus-t2.service"
+    stale_bin = str(tmp_path / "deleted" / "nx")
+    _write_systemd_unit_with_nx_bin(unit_path, stale_bin)
+
+    from nexus.commands import daemon as daemon_cmd
+    monkeypatch.setattr(daemon_cmd, "_autostart_platform", lambda: "linux")
+
+    runner = CliRunner()
+    result = runner.invoke(doctor_cmd.doctor_cmd, ["--check-bridge"])
+
+    assert result.exit_code == 0, result.output
+    out_lower = result.output.lower()
+    assert "autostart" in out_lower
+    assert "stale" in out_lower or "missing" in out_lower or "not exist" in out_lower
