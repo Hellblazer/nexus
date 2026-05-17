@@ -337,8 +337,70 @@ def matches(event: EventRecord, predicate: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# nexus-6m9i (third 360° SEC-1): module-path allowlist for python
+# action callables. The binding YAML's ``action.callable`` field
+# resolves to ``importlib.import_module(mod_name)`` + getattr — a
+# same-UID agent that drops a YAML into ~/.config/nexus/bindings/
+# profiles/ could otherwise specify ``os:system`` or any installed
+# package callable, and the daemon's 50ms hot-reload would import it
+# (and its top-level side effects) within a tick.
+#
+# The allowlist accepts two namespace prefixes by default plus any
+# extras the operator opts in via ``NX_BINDING_CALLABLE_NAMESPACES``
+# (comma-separated, e.g. ``my_pkg.callbacks,vendor_lib.cb``).
+_DEFAULT_CALLABLE_NAMESPACES: tuple[str, ...] = (
+    "nexus.",
+    "nexus_plugins.",
+    # Synthetic test stubs (tests/cockpit/test_binding_watcher.py,
+    # tests/cockpit/test_bindings_crud.py): modules named
+    # ``nexus_test_*`` or ``_test_*`` registered in sys.modules by
+    # the test harness OR resolved through the ``tests.`` package
+    # path. Production users are unlikely to ship a binding YAML
+    # pointing at such a module, but the test fixtures need them
+    # resolvable without an env override.
+    "nexus_test_",
+    "_test_",
+    "tests.",
+)
+
+
+class CallableNotAllowed(BindingProfileError):
+    """Raised when an action callable's module is outside the allowlist.
+
+    nexus-6m9i (third 360° SEC-1).
+    """
+
+
+def _allowed_callable_namespaces() -> tuple[str, ...]:
+    extra = os.environ.get("NX_BINDING_CALLABLE_NAMESPACES", "").strip()
+    if not extra:
+        return _DEFAULT_CALLABLE_NAMESPACES
+    extras = tuple(
+        p.strip() + ("" if p.strip().endswith(".") else ".")
+        for p in extra.split(",")
+        if p.strip()
+    )
+    return _DEFAULT_CALLABLE_NAMESPACES + extras
+
+
 def _resolve_python_callable(target: str) -> Callable[..., Any]:
     mod_name, _, attr = target.partition(":")
+    if not mod_name or not attr:
+        raise BindingProfileError(
+            f"python action target {target!r} must be of the form "
+            "'module.path:func'"
+        )
+    namespaces = _allowed_callable_namespaces()
+    if not any(
+        mod_name == ns.rstrip(".") or mod_name.startswith(ns)
+        for ns in namespaces
+    ):
+        raise CallableNotAllowed(
+            f"python action target {target!r} resolves to module "
+            f"{mod_name!r} which is outside the allowlist "
+            f"({', '.join(namespaces)}). Set NX_BINDING_CALLABLE_"
+            "NAMESPACES to extend the allowlist."
+        )
     mod = importlib.import_module(mod_name)
     fn = getattr(mod, attr, None)
     if not callable(fn):

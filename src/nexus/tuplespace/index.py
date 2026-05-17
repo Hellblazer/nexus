@@ -292,6 +292,49 @@ class TupleIndex:
 # ---------------------------------------------------------------------------
 
 
+# nexus-6m9i (third 360° SEC-6): allowlist of ChromaDB ``where``
+# operators.  Without this gate the caller can pass any of
+# ``$exists``, ``$nin``, ``$not``, ``$contains``, etc. and use them to
+# probe / enumerate dimension values that the subspace filter would
+# otherwise hide.  Restrict to the standard comparison + boolean ops.
+_ALLOWED_WHERE_OPERATORS: frozenset[str] = frozenset({
+    "$eq",
+    "$ne",
+    "$gt",
+    "$gte",
+    "$lt",
+    "$lte",
+    "$in",
+    "$and",
+    "$or",
+})
+
+
+class WhereOperatorNotAllowed(ValueError):
+    """Caller used a ChromaDB ``where`` operator outside the allowlist.
+
+    nexus-6m9i (third 360° SEC-6): see ``_ALLOWED_WHERE_OPERATORS``.
+    """
+
+
+def _validate_where_operators(payload: Any, *, path: str = "") -> None:
+    """Walk a caller ``where`` dict and refuse non-allowlisted ``$``-prefixed keys."""
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if isinstance(key, str) and key.startswith("$"):
+                if key not in _ALLOWED_WHERE_OPERATORS:
+                    raise WhereOperatorNotAllowed(
+                        f"where operator {key!r} at {path or '<root>'} is "
+                        f"not in the allowlist: "
+                        f"{sorted(_ALLOWED_WHERE_OPERATORS)}"
+                    )
+            sub_path = f"{path}.{key}" if path else str(key)
+            _validate_where_operators(value, path=sub_path)
+    elif isinstance(payload, list):
+        for i, item in enumerate(payload):
+            _validate_where_operators(item, path=f"{path}[{i}]")
+
+
 def _merge_where(
     subspace: str,
     caller_where: dict[str, Any] | None,
@@ -301,17 +344,29 @@ def _merge_where(
     Always injects a ``subspace`` equality filter.  If the caller supplied
     additional predicates, wraps both in a ``$and`` compound filter.
 
+    nexus-6m9i (third 360° SEC-6): validates the caller's ``where``
+    against ``_ALLOWED_WHERE_OPERATORS`` before merging so a
+    malicious caller cannot use ``$exists`` / ``$nin`` / ``$not`` /
+    ``$contains`` to enumerate dimension values past the subspace
+    filter's equality constraint.
+
     Args:
         subspace: The concrete subspace string to filter on.
         caller_where: Optional caller-supplied filter dict (may be ``None``).
 
     Returns:
         A single ChromaDB-compatible ``where`` dict.
+
+    Raises:
+        WhereOperatorNotAllowed: ``caller_where`` uses a non-allowlisted
+            ``$``-prefixed operator anywhere in its structure.
     """
     subspace_filter: dict[str, Any] = {"subspace": {"$eq": subspace}}
 
     if not caller_where:
         return subspace_filter
+
+    _validate_where_operators(caller_where)
 
     # Wrap subspace filter and caller filter in $and.
     return {"$and": [subspace_filter, caller_where]}

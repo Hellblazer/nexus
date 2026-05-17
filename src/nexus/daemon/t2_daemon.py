@@ -278,6 +278,15 @@ _ADMIN_OPS: frozenset[str] = frozenset({
     "import",                      # future
     "exec_raw",                    # RDR-112 P1.6 nexus-08i1, arbitrary read-only SQL
     "export",                      # RDR-112 P1.6 nexus-08i1, daemon-side file write
+    # nexus-6m9i (third 360° SEC-5): row-returning introspection RPCs
+    # were originally permitted over TCP as "read-only metadata", but
+    # peek paginates actual row data (memory.*, plans.*, telemetry.*)
+    # and stats can expose table shapes / counts useful for
+    # reconnaissance. Gate to UDS so only same-UID peer-credentialed
+    # callers reach them.
+    "schema",
+    "peek",
+    "stats",
 })
 
 #: Names that future beads MUST treat as admin (UDS-only) if they appear in
@@ -299,6 +308,10 @@ _KNOWN_ADMIN_NAMES: frozenset[str] = frozenset({
     "import",
     "exec_raw",
     "export",
+    # nexus-6m9i (third 360° SEC-5): see _ADMIN_OPS comment above.
+    "schema",
+    "peek",
+    "stats",
 })
 
 
@@ -634,8 +647,11 @@ class T2Daemon:
             register_tuplespace_rpcs(self._rpc_table, tuplespace_service)
 
         # P1.6 nexus-08i1: introspection RPCs.
-        # exec_raw and export are admin-only (in _ADMIN_OPS); schema, peek,
-        # stats are read-only metadata and safe over TCP.
+        # All five (exec_raw, schema, peek, stats, export) are now gated
+        # UDS-only via _ADMIN_OPS after the third 360° (SEC-5): peek
+        # paginates real row data, stats can leak table shape /
+        # cardinality, schema describes the full DB layout. Same-UID
+        # peer-cred is the access boundary.
         if t2db is not None:
             from nexus.daemon.introspection import IntrospectionService
             _intr = IntrospectionService(
@@ -1297,24 +1313,30 @@ class T2Daemon:
                     "pid": os.getpid(),
                 }
             case str() if op in self._rpc_table:
-                return await self._dispatch_store_rpc(op, msg)
+                return await self._dispatch_store_rpc(op, msg, is_uds=is_uds)
             case str() if "." in op and op not in self._rpc_table:
                 return {"error": f"unknown RPC op: {op!r}"}
             case _:
                 return {"error": f"unknown op: {op!r}"}
 
     async def _dispatch_store_rpc(
-        self, op: str, msg: dict[str, Any]
+        self, op: str, msg: dict[str, Any], *, is_uds: bool = True
     ) -> dict[str, Any]:
         """Run a domain-store method in the executor and return a response frame.
 
         Args:
             op: RPC op string, e.g. ``"memory.get"``.
             msg: Full RPC message (``args`` key holds kwargs dict).
+            is_uds: ``True`` when the connection arrived over UDS.
+                Threaded so the error frame can strip the Python
+                traceback for TCP callers (nexus-6m9i SEC-2): the
+                full traceback exposes install paths, module names,
+                and arg repr to any same-host TCP peer.
 
         Returns:
             ``{result: <encoded>}`` on success;
-            ``{error: {type, message, traceback}}`` on failure.
+            ``{error: {type, message, traceback?}}`` on failure
+            (``traceback`` omitted for TCP callers).
         """
         fn = self._rpc_table[op]
         raw_args: dict[str, Any] = msg.get("args", {})
@@ -1331,14 +1353,18 @@ class T2Daemon:
                 op=op,
                 exc_type=qname,
                 exc=str(exc),
+                is_uds=is_uds,
             )
-            return {
-                "error": {
-                    "type": qname,
-                    "message": str(exc),
-                    "traceback": tb_text,
-                }
+            error_payload: dict[str, Any] = {
+                "type": qname,
+                "message": str(exc),
             }
+            # nexus-6m9i (third 360° SEC-2): only UDS callers (same-UID
+            # peer-credentialed) get the full traceback.  TCP error
+            # frames carry only the type + message.
+            if is_uds:
+                error_payload["traceback"] = tb_text
+            return {"error": error_payload}
 
     async def _handle_event_stream(
         self,
@@ -1615,6 +1641,12 @@ class T2Daemon:
         # the completed write() must never observe partial JSON.
         tmp = self._discovery_path.with_suffix(self._discovery_path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload))
+        # nexus-6m9i (third 360° SEC-3): chmod to 0o600 before replace
+        # so the discovery file (which contains the TCP port + uds_path
+        # + pid) is not world-readable. Standard umask (022) would
+        # otherwise create the tmp file mode 0o644, leaking the TCP
+        # port to any co-tenant process on a shared host.
+        os.chmod(str(tmp), 0o600)
         os.replace(str(tmp), str(self._discovery_path))
 
     def _unlink_discovery(self) -> None:
@@ -1654,6 +1686,8 @@ class T2Daemon:
                 self._discovery_path.suffix + ".tmp"
             )
             tmp.write_text(json.dumps(marker_payload))
+            # nexus-6m9i (third 360° SEC-3): chmod 0o600 before replace.
+            os.chmod(str(tmp), 0o600)
             os.replace(str(tmp), str(self._discovery_path))
         except Exception as exc:
             _log.warning(

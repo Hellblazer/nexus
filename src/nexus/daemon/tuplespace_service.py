@@ -86,7 +86,21 @@ class BlockingTakeResourceExhausted(RuntimeError):
     (``_BLOCKING_TAKE_MAX_CONCURRENT``) is saturated. Surfacing this
     as a typed exception lets clients implement back-off rather than
     silently waiting at the connection layer.
+
+    nexus-6m9i (third 360° SEC-4): also raised when a single claimant
+    already holds ``_BLOCKING_TAKE_MAX_PER_CLAIMANT`` slots, so one
+    runaway agent cannot single-handedly starve the daemon-wide cap.
     """
+
+
+# nexus-6m9i (third 360° SEC-4): per-claimant sub-limit on top of the
+# global semaphore. A single claimant that holds N or more in-flight
+# blocking_take RPCs cannot acquire a (N+1)-th — the daemon-wide
+# 16-slot cap stays usable for other agents.  Claimant string is
+# caller-supplied so an attacker can defeat the cap by varying it,
+# but the cap still bounds the naive runaway-agent failure mode and
+# is cheap enough to keep on by default.
+_BLOCKING_TAKE_MAX_PER_CLAIMANT: int = 4
 
 
 # nexus-z4m7 (CR-3): adaptive cadence for the daemon-side data_version
@@ -174,6 +188,9 @@ class TuplespaceService:
         self._blocking_take_sema = threading.Semaphore(
             _BLOCKING_TAKE_MAX_CONCURRENT
         )
+        # nexus-6m9i (third 360° SEC-4): per-claimant in-flight count.
+        self._blocking_take_per_claimant_lock = threading.Lock()
+        self._blocking_take_per_claimant: dict[str, int] = {}
         # nexus-noqq (S360-res S2): hold a reference to the chroma
         # client so close() can release the PersistentClient's internal
         # threads / SQLite handles. Previously the caller (daemon CLI)
@@ -491,10 +508,32 @@ class TuplespaceService:
                 "(MCP transport budget, RDR-110 §Technical Design)"
             )
 
+        # nexus-6m9i (third 360° SEC-4): per-claimant in-flight cap.
+        # Refuse before touching the global semaphore so a runaway
+        # caller cannot starve siblings.
+        with self._blocking_take_per_claimant_lock:
+            in_flight = self._blocking_take_per_claimant.get(claimant, 0)
+            if in_flight >= _BLOCKING_TAKE_MAX_PER_CLAIMANT:
+                raise BlockingTakeResourceExhausted(
+                    f"claimant {claimant!r} already holds {in_flight} "
+                    f"in-flight blocking_take slots; per-claimant cap is "
+                    f"{_BLOCKING_TAKE_MAX_PER_CLAIMANT}. Back off or "
+                    "use distinct claimant identifiers for parallel work."
+                )
+            self._blocking_take_per_claimant[claimant] = in_flight + 1
+
         # nexus-2kld.1 (HR-1): non-blocking semaphore acquire. If the
         # cap is saturated, fail loud with a typed exception so the
         # caller can back off rather than wait at the connection layer.
         if not self._blocking_take_sema.acquire(blocking=False):
+            with self._blocking_take_per_claimant_lock:
+                # Roll back the per-claimant bump we just did so the
+                # exception path doesn't leak the slot.
+                self._blocking_take_per_claimant[claimant] = (
+                    self._blocking_take_per_claimant.get(claimant, 1) - 1
+                )
+                if self._blocking_take_per_claimant[claimant] <= 0:
+                    del self._blocking_take_per_claimant[claimant]
             raise BlockingTakeResourceExhausted(
                 f"daemon's concurrent blocking_take cap "
                 f"({_BLOCKING_TAKE_MAX_CONCURRENT}) is saturated; "
@@ -558,6 +597,13 @@ class TuplespaceService:
                 self._wake_event.wait(timeout=remaining)
         finally:
             self._blocking_take_sema.release()
+            # nexus-6m9i (third 360° SEC-4): release per-claimant slot.
+            with self._blocking_take_per_claimant_lock:
+                self._blocking_take_per_claimant[claimant] = (
+                    self._blocking_take_per_claimant.get(claimant, 1) - 1
+                )
+                if self._blocking_take_per_claimant[claimant] <= 0:
+                    del self._blocking_take_per_claimant[claimant]
 
     def ack(self, *, claim_id: str, claimant: str) -> str:
         with self._lock:

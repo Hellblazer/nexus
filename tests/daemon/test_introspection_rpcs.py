@@ -581,12 +581,20 @@ def test_admin_introspection_ops_in_admin_set(config_dir: Path, t2db: T2Database
     assert "export" in _ADMIN_OPS
 
 
-def test_non_admin_introspection_ops_not_in_admin_set() -> None:
-    """schema, peek, stats are NOT in _ADMIN_OPS (safe over TCP)."""
+def test_introspection_ops_admin_gated_post_360_3() -> None:
+    """schema, peek, stats are NOW in _ADMIN_OPS (UDS-only, nexus-6m9i SEC-5).
+
+    Pre-third-360° they were TCP-callable as ``read-only metadata``.
+    The audit found that peek returns paginated row data (memory.*,
+    plans.*, telemetry.*) and stats / schema leak table shape /
+    cardinality useful for reconnaissance. All three are now gated
+    via _ADMIN_OPS so only same-UID peer-credentialed callers
+    reach them.
+    """
     from nexus.daemon.t2_daemon import _ADMIN_OPS
-    assert "schema" not in _ADMIN_OPS
-    assert "peek" not in _ADMIN_OPS
-    assert "stats" not in _ADMIN_OPS
+    assert "schema" in _ADMIN_OPS
+    assert "peek" in _ADMIN_OPS
+    assert "stats" in _ADMIN_OPS
 
 
 # ---------------------------------------------------------------------------
