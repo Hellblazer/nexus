@@ -605,15 +605,20 @@ class TuplespaceService:
                 if self._blocking_take_per_claimant[claimant] <= 0:
                     del self._blocking_take_per_claimant[claimant]
 
-    def ack(self, *, claim_id: str, claimant: str) -> str:
+    def ack(self, *, claim_id: str, claimant: str) -> None:
+        # nexus-6m9i (third 360° ERGO E-2): return None to match
+        # api.ack so callers switching direct→daemon mode see a
+        # consistent return value. The MCP wrapper still emits
+        # "ok" for backward compat with existing tool consumers.
         with self._lock:
             ts_api.ack(conn=self._conn, claim_id=claim_id, claimant=claimant)
-        return "ok"
+        return None
 
-    def nack(self, *, claim_id: str, claimant: str) -> str:
+    def nack(self, *, claim_id: str, claimant: str) -> None:
+        # nexus-6m9i (third 360° ERGO E-2): return None to match api.nack.
         with self._lock:
             ts_api.nack(conn=self._conn, claim_id=claim_id, claimant=claimant)
-        return "ok"
+        return None
 
     def list_subspaces(self) -> list[str]:
         return ts_api.list_subspaces(registry=self._registry)

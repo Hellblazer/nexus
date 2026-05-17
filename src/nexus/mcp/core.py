@@ -4446,6 +4446,8 @@ def tuplespace_take(
     where: str = "",
     floor: float = 0.0,
     lease_seconds: float = 0.0,
+    block: bool = False,
+    timeout_seconds: float = 30.0,
 ) -> str:
     """Atomically claim a tuple from a subspace (destructive read).
 
@@ -4461,6 +4463,13 @@ def tuplespace_take(
             all ``match_keys`` declared in the schema.
         floor: Minimum similarity threshold (0.0 = use schema default).
         lease_seconds: Lease duration in seconds (0.0 = use schema default).
+        block: When True, dispatch through the daemon's blocking_take
+            RPC so the call waits for a candidate up to
+            ``timeout_seconds`` (nexus-6m9i third 360° ERGO E-1
+            remediation). Requires NX_STORAGE_MODE=daemon; raises
+            ``BlockingNotSupported`` in direct mode.
+        timeout_seconds: Maximum wait when ``block=True``. Capped at
+            30 s by ``InvalidTimeoutError``. Ignored when ``block=False``.
 
     Returns:
         JSON object ``{"tuple": {...}, "claim_id": "..."}`` if a tuple
@@ -4482,7 +4491,8 @@ def tuplespace_take(
             where=where_dict,
             floor=floor if floor > 0.0 else None,
             lease_seconds=lease_seconds if lease_seconds > 0.0 else None,
-            block=False,
+            block=block,
+            timeout_seconds=timeout_seconds if block else None,
         )
         if wrapped is None:
             return "null"
@@ -4497,7 +4507,8 @@ def tuplespace_take(
         where=where_dict,
         floor=floor if floor > 0.0 else None,
         lease_seconds=lease_seconds if lease_seconds > 0.0 else None,
-        block=False,
+        block=block,
+        timeout_seconds=timeout_seconds if block else None,
     )
     if result is None:
         return "null"

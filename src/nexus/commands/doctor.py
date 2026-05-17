@@ -155,7 +155,19 @@ def _run_check_schema() -> None:
                         f"{len(pending)} pending (stored: v{stored}, CLI: v{cli_ver})",
                     )
                 )
-                lines.append("    Fix: run 'nx upgrade'")
+                # nexus-6m9i (third 360° UPGRADE U-CRIT-1): under
+                # daemon mode `nx upgrade` is rejected; the daemon
+                # applies migrations at its own startup. Surface
+                # both recovery paths.
+                from nexus.db import is_daemon_mode as _idm
+                if _idm():
+                    lines.append(
+                        "    Fix (daemon mode): `nx daemon t2 stop && "
+                        "nx daemon t2 start` (migrations apply at "
+                        "daemon startup)."
+                    )
+                else:
+                    lines.append("    Fix: run 'nx upgrade'")
             else:
                 lines.append(_check_line("Schema version", True, f"v{stored}"))
         else:
