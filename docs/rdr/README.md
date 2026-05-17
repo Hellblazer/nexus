@@ -138,7 +138,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-113](rdr-113-host-trust-model.md) | Host-Trust Model for nexus Daemons: UDS Permissions, Peer Credentials, Single-User v1 | Architecture | Accepted | 2026-05-13 |
 | [RDR-114](rdr-114-daemon-unavailability-policy.md) | Daemon Unavailability Policy: EventStream Reconnect Contract + Bridge Fail-Closed-vs-Open | Architecture | Closed | 2026-05-16 |
 | [RDR-115](rdr-115-t2-daemon-request-tracing.md) | T2 Daemon Request Tracing: Correlation IDs across Client → Daemon → Store Call | Architecture | Accepted | 2026-05-17 |
-| [RDR-116](rdr-116-tuplespace-service-lock-decomposition.md) | TuplespaceService Lock Decomposition: Reader-Conn Pool + Writer Lock | Architecture | Draft | 2026-05-17 |
+| [RDR-116](rdr-116-tuplespace-service-lock-decomposition.md) | TuplespaceService Lock Decomposition: Reader-Conn Pool + Writer Lock | Architecture | Accepted | 2026-05-17 |
 | [RDR-117](rdr-117-tuples-db-durability-and-recovery.md) | tuples.db Durability and Recovery: Backup, Restore, and Rebuild Story | Architecture | Draft | 2026-05-17 |
 
 ---
