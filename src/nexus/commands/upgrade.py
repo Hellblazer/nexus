@@ -73,6 +73,8 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
     # mode the daemon owns the writer — refuse rather than race.
     from nexus.db import reject_under_daemon_mode
     reject_under_daemon_mode("nx upgrade")
+    # storage-boundary-allow: schema-upgrade admin path, refused under
+    # daemon mode just above; opens a WAL writer for the migration.
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")

@@ -134,6 +134,8 @@ def _collect_aspect_queue_data() -> dict[str, Any]:
         return {"present": False, "skipped_reason": "daemon_mode"}
 
     try:
+        # storage-boundary-allow: console health endpoint probe; skipped
+        # above when is_daemon_mode() returns True.
         conn = _sqlite3.connect(str(db_path))
     except _sqlite3.Error:
         return {"present": False}

@@ -4263,6 +4263,8 @@ def _get_tuplespace() -> dict[str, Any]:
 
     import chromadb
     chroma_dir = _os.path.expanduser(f"{nexus_dir}/chroma")
+    # storage-boundary-allow: MCP fallback chroma for direct-mode
+    # tuplespace serving (RDR-112 cutover-period exception, nexus-nphw).
     chroma_client = chromadb.PersistentClient(path=chroma_dir)
     index = TupleIndex.from_registry(registry, chroma_client)
 

@@ -211,6 +211,8 @@ def _check_t3_local() -> list[HealthResult]:
             # RDR-112 P1 prereq: refuse direct chroma open in daemon mode.
             from nexus.db import reject_under_daemon_mode
             reject_under_daemon_mode("nx health (T3 local probe)")
+            # storage-boundary-allow: T3 local-mode probe; daemon-mode
+            # callers are rejected on the line above.
             client = chromadb.PersistentClient(path=str(local_path))
             cols = client.list_collections()
             col_count = len(cols)
@@ -720,6 +722,8 @@ def _check_t2_integrity() -> list[HealthResult]:
             detail="skipped: daemon owns the file (use `nx daemon t2 doctor`)",
         )]
     try:
+        # storage-boundary-allow: T2 integrity probe; skipped above when
+        # is_daemon_mode() returns True (daemon owns the file).
         conn = sqlite3.connect(str(db_path))
         try:
             rows = conn.execute("PRAGMA integrity_check").fetchall()

@@ -1268,6 +1268,8 @@ def check_version_compatibility() -> None:
         db_path = default_db_path()
         from nexus.db import is_daemon_mode as _is_daemon_mode
         if db_path.exists() and not _is_daemon_mode():
+            # storage-boundary-allow: MCP startup version-drift probe;
+            # gated on `not _is_daemon_mode()` above.
             conn = sqlite3.connect(str(db_path))
             try:
                 row = conn.execute(

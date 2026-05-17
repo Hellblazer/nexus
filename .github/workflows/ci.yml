@@ -177,3 +177,28 @@ jobs:
           # failure so we get the contaminating test's name in the log.
           uv run pytest -p no:randomly -x --tb=short \
             $(cat /tmp/argv.txt)
+
+  storage-boundary-lint:
+    # RDR-112 §5 (nexus-b43y): static lint for direct sqlite3.connect /
+    # chromadb.PersistentClient calls outside src/nexus/daemon/ and
+    # src/nexus/db/. Standalone fast gate so a regression surfaces in
+    # seconds, not after the full pytest suite. The --fail-on-violation
+    # flag makes the lint a hard gate regardless of NX_STORAGE_MODE.
+    name: storage-boundary lint (RDR-112 §5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Lint storage substrate boundary
+        run: uv run nx doctor --check-storage-boundary --fail-on-violation

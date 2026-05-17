@@ -60,6 +60,7 @@ def _run_check_schema() -> None:
 
     reject_under_daemon_mode("nx doctor (T2 probe)")
 
+    # storage-boundary-allow: doctor T2 probe; rejected under daemon mode above.
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA busy_timeout=5000")
     # CLI review: match the other T2 connection defaults. Opening without
@@ -519,6 +520,7 @@ def _run_check_plan_library() -> None:
     # RDR-112 P1 prereq (nexus-pyfg): refuse direct T2 open in daemon mode.
     from nexus.db import reject_under_daemon_mode
     reject_under_daemon_mode("nx doctor (T2 probe)")
+    # storage-boundary-allow: doctor T2 probe; rejected under daemon mode above.
     conn = sqlite3.connect(str(db_path))
     try:
         conn.execute("PRAGMA busy_timeout=5000")
@@ -628,6 +630,7 @@ def _run_check_aspect_queue() -> None:
 
     reject_under_daemon_mode("nx doctor (T2 probe)")
 
+    # storage-boundary-allow: doctor T2 probe; rejected under daemon mode above.
     conn = _sqlite3.connect(str(db_path))
     try:
         # Confirm the table exists (pre-RDR-089 dbs won't have it).
@@ -739,6 +742,7 @@ def _run_check_tier_discipline() -> None:
 
     reject_under_daemon_mode("nx doctor (T2 probe)")
 
+    # storage-boundary-allow: doctor T2 probe; rejected under daemon mode above.
     conn = _sqlite3.connect(str(db_path))
     try:
         has_table = conn.execute(
@@ -840,21 +844,37 @@ def _run_check_post_store_hooks() -> None:
 # ── --check-storage-boundary (RDR-112 §5; nexus-b7o1) ────────────────────
 
 
-def _run_check_storage_boundary() -> int:
-    """AST-scan ``src/nexus/**/*.py`` for direct ``sqlite3.connect`` callers.
+def _run_check_storage_boundary(*, fail_on_violation: bool = False) -> int:
+    """AST-scan ``src/nexus/**/*.py`` for direct storage-substrate callers.
 
     RDR-112 §5: when ``NX_STORAGE_MODE=daemon``, the daemon owns
-    ``memory.db`` and ``tuples.db`` as the single SQLite writer. Any
-    module outside ``src/nexus/daemon/`` that opens a competing
-    connection violates the boundary. Static lint instead of a runtime
-    probe so violators surface in CI / pre-merge even when no daemon is
-    running.
+    ``memory.db``, ``tuples.db``, and the local chromadb directory as
+    the single writer of each. Any module outside the storage substrate
+    that opens a competing connection violates the boundary. Static
+    lint instead of a runtime probe so violators surface in CI /
+    pre-merge even when no daemon is running.
+
+    Detected calls:
+      - ``sqlite3.connect(...)`` (also matches ``import sqlite3 as _x``)
+      - ``chromadb.PersistentClient(...)`` (CR-6 / nexus-nphw)
+
+    Allowlist roots (CR-4 / nexus-e8ao):
+      - ``src/nexus/daemon/`` (the storage process itself)
+      - ``src/nexus/db/`` (daemon-internal domain stores)
+
+    Per-line allowlist: any call whose source line — or any contiguous
+    comment line immediately above it — contains
+    ``# storage-boundary-allow:`` is treated as an intentional
+    exception. The comment SHOULD include a short reason after the
+    colon.
 
     Severity:
-      - advisory (exit 0) when ``NX_STORAGE_MODE`` is unset or not
-        ``daemon``: print the violation list, exit 0.
-      - hard fail (exit 2) when ``NX_STORAGE_MODE=daemon``: same
-        listing, non-zero exit so CI can gate on it.
+      - advisory (exit 0) when ``NX_STORAGE_MODE`` is unset / not
+        ``daemon`` AND ``fail_on_violation`` is False.
+      - hard fail (exit 2) when ``NX_STORAGE_MODE=daemon`` OR
+        ``fail_on_violation`` is True. The flag (CR-5 / nexus-b43y) is
+        wired into CI so the lint gates merges regardless of the local
+        ``NX_STORAGE_MODE`` setting.
 
     Returns the chosen exit code so callers can propagate it.
     """
@@ -871,7 +891,9 @@ def _run_check_storage_boundary() -> int:
         )
         return 2
 
-    daemon_root = pkg_root / "daemon"
+    # CR-4 (nexus-e8ao): allowlist matches RDR-112 §5 — daemon/ holds the
+    # storage process and db/ holds the daemon-internal domain stores.
+    allowed_roots = (pkg_root / "daemon", pkg_root / "db")
 
     def _is_sqlite_connect_call(node: ast.Call) -> bool:
         # Match `sqlite3.connect(...)` and `*.connect(...)` where the
@@ -883,14 +905,54 @@ def _run_check_storage_boundary() -> int:
                 return True
         return False
 
-    violations: list[tuple[str, int, str]] = []
+    def _is_chroma_persistent_client_call(node: ast.Call) -> bool:
+        # CR-6 (nexus-nphw): match `chromadb.PersistentClient(...)`.
+        # Match the import alias name explicitly (refuses lookalikes).
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "PersistentClient"
+        ):
+            value = func.value
+            if isinstance(value, ast.Name) and value.id in {
+                "chromadb",
+                "_chromadb",
+            }:
+                return True
+        return False
+
+    def _is_under_any(path: _Path, roots: tuple[_Path, ...]) -> bool:
+        for root in roots:
+            try:
+                path.relative_to(root)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    def _has_allow_marker(source_lines: list[str], lineno: int) -> bool:
+        # CR-6 (nexus-nphw): same-line OR contiguous comment preamble.
+        marker = "# storage-boundary-allow:"
+        if marker in source_lines[lineno - 1]:
+            return True
+        i = lineno - 2  # 0-indexed line above the call
+        while i >= 0:
+            stripped = source_lines[i].strip()
+            if not stripped:
+                i -= 1
+                continue
+            if stripped.startswith("#"):
+                if marker in stripped:
+                    return True
+                i -= 1
+                continue
+            break
+        return False
+
+    violations: list[tuple[str, int, str, str]] = []
     for py_path in sorted(pkg_root.rglob("*.py")):
-        # Anything under daemon/ is on the allowed side of the boundary.
-        try:
-            py_path.relative_to(daemon_root)
+        if _is_under_any(py_path, allowed_roots):
             continue
-        except ValueError:
-            pass
         try:
             source = py_path.read_text()
             tree = ast.parse(source, filename=str(py_path))
@@ -900,35 +962,60 @@ def _run_check_storage_boundary() -> int:
                 err=True,
             )
             continue
+        source_lines = source.splitlines()
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and _is_sqlite_connect_call(node):
-                snippet = source.splitlines()[node.lineno - 1].strip()
-                rel = py_path.relative_to(pkg_root.parent.parent)
-                violations.append((str(rel), node.lineno, snippet))
+            if not isinstance(node, ast.Call):
+                continue
+            if _is_sqlite_connect_call(node):
+                kind = "sqlite3.connect"
+            elif _is_chroma_persistent_client_call(node):
+                kind = "chromadb.PersistentClient"
+            else:
+                continue
+            if _has_allow_marker(source_lines, node.lineno):
+                continue
+            snippet = source_lines[node.lineno - 1].strip()
+            rel = py_path.relative_to(pkg_root.parent.parent)
+            violations.append((str(rel), node.lineno, snippet, kind))
 
     from nexus.db import is_daemon_mode as _is_daemon_mode
     daemon_mode = _is_daemon_mode()
     click.echo("Storage-boundary check (RDR-112 §5):")
     if not violations:
-        click.echo(_check("no direct sqlite3.connect outside daemon/", True))
+        click.echo(
+            _check(
+                "no direct sqlite3.connect / chromadb.PersistentClient "
+                "outside daemon/ + db/",
+                True,
+            )
+        )
         return 0
 
-    label = "direct sqlite3.connect outside src/nexus/daemon/"
+    label = (
+        "direct storage-substrate calls outside src/nexus/daemon/ + "
+        "src/nexus/db/ (without `# storage-boundary-allow:` marker)"
+    )
     click.echo(_check(label, False, f"{len(violations)} violation(s)"))
-    for path, line, snippet in violations:
-        click.echo(f"  {path}:{line}: {snippet}")
+    for path, line, snippet, kind in violations:
+        click.echo(f"  {path}:{line} [{kind}]: {snippet}")
 
-    if daemon_mode:
+    if daemon_mode or fail_on_violation:
         click.echo("")
+        reason = (
+            "NX_STORAGE_MODE=daemon is set"
+            if daemon_mode
+            else "--fail-on-violation passed"
+        )
         click.echo(
-            "NX_STORAGE_MODE=daemon is set; the violations above bypass "
-            "the daemon's single-writer guarantee. Exiting 2."
+            f"{reason}; the violations above bypass the daemon's "
+            "single-writer guarantee. Exiting 2."
         )
         return 2
     click.echo("")
     click.echo(
         "Advisory only (NX_STORAGE_MODE not 'daemon'). RDR-112 §5 calls "
-        "for staged remediation; this list scopes the remaining work."
+        "for staged remediation; this list scopes the remaining work. "
+        "Pass --fail-on-violation to make this a hard gate."
     )
     return 0
 
@@ -1212,6 +1299,8 @@ def _run_check_bridge() -> None:
             return
         import sqlite3 as _sqlite3
         try:
+            # storage-boundary-allow: read-only hook-events probe;
+            # daemon-mode is short-circuited via the except branch above.
             conn = _sqlite3.connect(f"file:{tuples_db}?mode=ro", uri=True)
             row = conn.execute(
                 "SELECT COUNT(*) FROM tuples "
@@ -1599,10 +1688,20 @@ def _run_check_mineru() -> None:
     "check_storage_boundary",
     is_flag=True,
     default=False,
-    help="AST-lint src/nexus for direct sqlite3.connect calls outside "
-         "src/nexus/daemon/ (RDR-112 §5). Advisory unless "
-         "NX_STORAGE_MODE=daemon, in which case any violation exits 2. "
-         "nexus-b7o1.",
+    help="AST-lint src/nexus for direct sqlite3.connect / "
+         "chromadb.PersistentClient calls outside src/nexus/daemon/ "
+         "and src/nexus/db/ (RDR-112 §5). Advisory unless "
+         "NX_STORAGE_MODE=daemon or --fail-on-violation is set; "
+         "either elevates the result to exit 2. nexus-b7o1.",
+)
+@click.option(
+    "--fail-on-violation",
+    "fail_on_violation",
+    is_flag=True,
+    default=False,
+    help="Make --check-storage-boundary exit 2 on any violation, "
+         "regardless of NX_STORAGE_MODE. Intended for CI gating "
+         "(RDR-112 §5, nexus-b43y).",
 )
 @click.option(
     "--check-autostart",
@@ -1637,6 +1736,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_t1: bool,
                check_bridge: bool,
                check_storage_boundary: bool,
+               fail_on_violation: bool,
                check_autostart: bool,
                check_tier_discipline: bool) -> None:
     """Verify that all required services and credentials are available."""
@@ -1698,7 +1798,9 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if check_storage_boundary:
-        exit_code = _run_check_storage_boundary()
+        exit_code = _run_check_storage_boundary(
+            fail_on_violation=fail_on_violation
+        )
         if exit_code != 0:
             raise SystemExit(exit_code)
         return
@@ -2299,6 +2401,7 @@ def _run_check_taxonomy() -> None:
 
     reject_under_daemon_mode("nx doctor (T2 probe)")
 
+    # storage-boundary-allow: doctor T2 probe; rejected under daemon mode above.
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")

@@ -90,6 +90,7 @@ def status_cmd(window: str, db_path_arg: Path | None) -> None:
     window_seconds = _parse_window(window)
     now = time.time()
 
+    # storage-boundary-allow: cockpit CLI read-only inspection of tuples.db.
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
@@ -257,6 +258,7 @@ def _render_active_claims() -> RenderedPanel:
             raise click.ClickException(
                 f"tuples.db not found at {db_path}; nothing to render."
             )
+        # storage-boundary-allow: cockpit CLI read-only inspection of tuples.db.
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
@@ -316,6 +318,7 @@ def _render_recent_events(*, limit: int) -> RenderedPanel:
             raise click.ClickException(
                 f"tuples.db not found at {db_path}; nothing to render."
             )
+        # storage-boundary-allow: cockpit CLI read-only inspection of tuples.db.
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:

@@ -261,6 +261,8 @@ def open_tuples_db(path: Path) -> sqlite3.Connection:
         schema applied.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    # storage-boundary-allow: canonical tuples.db opener used by both
+    # the daemon and direct-mode tuplespace consumers.
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.commit()

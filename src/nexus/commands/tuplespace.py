@@ -82,6 +82,8 @@ def _build_index(registry):
     cfg = load_config()
     nexus_dir = cfg.get("nexus_dir", "~/.config/nexus")
     chroma_dir = os.path.expanduser(f"{nexus_dir}/chroma")
+    # storage-boundary-allow: tuplespace CLI subcommand for direct-mode
+    # ops; daemon-mode callers go through TuplespaceService via T2Client.
     client = chromadb.PersistentClient(path=chroma_dir)
     return TupleIndex.from_registry(registry, client)
 

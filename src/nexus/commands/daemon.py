@@ -136,6 +136,8 @@ def start_cmd(
         # and a TupleIndex backed by the local persistent chroma.
         import chromadb
         chroma_dir = config_dir / "chroma"
+        # storage-boundary-allow: this IS the daemon-startup CLI; the
+        # chroma client it creates becomes the daemon's owned writer.
         chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
         tuplespace_service = TuplespaceService(
             tuples_db_path=tuples_db_path,

@@ -446,6 +446,8 @@ def _emit_direct_auto(
     conn = open_tuples_db(db_path)
     conn.row_factory = sqlite3.Row
 
+    # storage-boundary-allow: hook-bridge subprocess runs outside the daemon
+    # process and needs its own chroma client to embed bridged tuples.
     chroma_client = _chromadb.PersistentClient(path=str(chroma_dir))
     index = TupleIndex.from_registry(registry, chroma_client)
 
