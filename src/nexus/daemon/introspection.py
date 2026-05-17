@@ -192,10 +192,12 @@ class IntrospectionService:
 
             {"tables": [...], "indexes": [...], "fts": [...]}
 
-        .. deprecated::
+        .. deprecated:: 4.28
             Pass a ``db`` key or omit ``filters`` entirely to get both DBs.
             The flat legacy shape is preserved for existing callers (e.g.
             ``nx doctor``) that only know about memory.db.
+            (nexus-26b7 notable dim-15 N-2: version tag added so Sphinx
+            renders the directive correctly.)
 
         Args:
             filters: Optional dict. Recognised keys:
@@ -254,8 +256,11 @@ class IntrospectionService:
         include_fts = "fts" in f or not f
 
         table_name_filter: str | None = None
-        if "tables" in f and isinstance(f["tables"], str):
-            table_name_filter = f["tables"]
+        # nexus-26b7 (notable, dim-5 N3): hoist the lookup into a
+        # local so type-narrowing carries to the assignment.
+        _tval = f.get("tables")
+        if isinstance(_tval, str):
+            table_name_filter = _tval
 
         if not db_path.exists():
             # DB file has not been created yet (e.g. tuples.db before first write).
@@ -272,7 +277,9 @@ class IntrospectionService:
         conn: sqlite3.Connection | None = None
         try:
             conn = sqlite3.connect(uri, uri=True)
-            result = {}
+            # nexus-26b7 (notable, dim-5 N2): annotate to match the
+            # parallel construction in the not-exists branch above.
+            result: dict[str, Any] = {}
 
             if include_tables:
                 if table_name_filter is not None:

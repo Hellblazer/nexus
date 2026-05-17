@@ -131,6 +131,12 @@ DAEMON_PROTOCOL_VERSION: str = "1.0"
 #: nexus-w0et (RDR-112 P1.4): initial value = 1 (watcher_state era).
 DAEMON_SCHEMA_VERSION: int = 1
 
+# nexus-26b7 (notable, dim-13 N-4): discovery-file format version.
+# Bump on incompatible payload change so older readers can refuse
+# cleanly instead of silently picking the wrong fields. Pre-bump
+# files (no ``format_version``) are tolerated for backward-compat.
+DISCOVERY_FORMAT_VERSION: int = 1
+
 #: Nexus package version embedded in discovery file and pong responses.
 try:
     from importlib.metadata import version as _pkg_version
@@ -730,6 +736,35 @@ class T2Daemon:
         self._ensure_dirs()
         self._start_time = datetime.now(timezone.utc).isoformat()
 
+        # nexus-26b7 (notable, dim-6 N5): guarantee enough executor
+        # headroom for the HR-1 blocking_take cap plus non-blocking
+        # RPCs.  CPython's default ``min(32, cpu+4)`` on a 4-core
+        # box only allows ~8 workers, smaller than the 16-slot HR-1
+        # semaphore — under saturation, non-blocking RPCs queue
+        # behind in-flight blocking_take callers.
+        try:
+            from concurrent.futures import (  # noqa: PLC0415
+                ThreadPoolExecutor,
+            )
+
+            from nexus.daemon.tuplespace_service import (  # noqa: PLC0415
+                _BLOCKING_TAKE_MAX_CONCURRENT,
+            )
+
+            loop = asyncio.get_running_loop()
+            loop.set_default_executor(
+                ThreadPoolExecutor(
+                    max_workers=_BLOCKING_TAKE_MAX_CONCURRENT + 32,
+                    thread_name_prefix="t2-rpc-executor",
+                )
+            )
+        except Exception as exc:
+            _log.warning(
+                "default_executor_resize_failed",
+                error=str(exc),
+                error_type=type(exc).__qualname__,
+            )
+
         # --- Migration runner: BEFORE sockets are bound (RDR-112 P1.4) ---
         from nexus.db.migrations import run_daemon_migrations  # noqa: PLC0415
 
@@ -976,6 +1011,18 @@ class T2Daemon:
             import hashlib
             short = hashlib.shake_128(str(self._socket_dir).encode()).hexdigest(6)
             uds_path = Path(f"/tmp/nx-t2-{short}.sock")  # noqa: S108
+            # nexus-26b7 (notable, dim-8 FS-5): refuse a /tmp fallback
+            # whose path resolves through a symlink. On a multi-tenant
+            # host a co-tenant could predict the shake_128 path and
+            # symlink it elsewhere between unlink and bind/chmod, so
+            # the chmod ends up applied to the symlink target rather
+            # than the new socket. Fail-loud rather than chmod-someone-
+            # else's-file.
+            if uds_path.is_symlink():
+                raise RuntimeError(
+                    f"refusing /tmp UDS fallback at {uds_path}: path "
+                    "is a symlink (FS-5 TOCTOU mitigation)."
+                )
             if uds_path.exists():
                 uds_path.unlink()
 
@@ -1031,7 +1078,11 @@ class T2Daemon:
                 try:
                     writer.close()
                     await writer.wait_closed()
-                except Exception:
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    # nexus-26b7 (notable, dim-2 N2): narrow the swallow
+                    # to the expected transport-teardown error families
+                    # so a surprise exception still surfaces as an
+                    # unhandled task warning rather than a silent pass.
                     pass
 
         return _handler
@@ -1169,8 +1220,11 @@ class T2Daemon:
                 continue  # keep-alive: just poll again
             except asyncio.IncompleteReadError:
                 return  # client closed
-            except Exception as exc:
-                _log.warning("rpc_read_error", exc=str(exc))
+            except Exception:
+                # nexus-26b7 (notable, dim-4 LD-4): include traceback so
+                # mystery wire-protocol parse failures or rare async
+                # surprises do not lose their original frame.
+                _log.exception("rpc_read_error")
                 return
 
             # P1.3 nexus-m4gm: EventStream op hijacks the connection into
@@ -1541,6 +1595,10 @@ class T2Daemon:
             else None
         )
         return {
+            # nexus-26b7 (notable, dim-13 N-4): explicit format_version
+            # so a future incompatible discovery shape can be detected
+            # by older readers. Bumped on incompatible change only.
+            "format_version": DISCOVERY_FORMAT_VERSION,
             "uds_path": str(self._uds_path),
             "tcp_host": self._tcp_host,
             "tcp_port": self._tcp_port,

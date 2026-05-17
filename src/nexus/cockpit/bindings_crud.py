@@ -156,6 +156,22 @@ def create_binding(
     target_dir = _resolve_dir(profiles_dir)
     path = _profile_path(target_dir, profile)
 
+    # nexus-26b7 (notable, dim-8 FS-6): refuse the case-insensitive
+    # collision before any read/write. On APFS / NTFS (case-
+    # insensitive defaults) Foo.yml and foo.yml map to the same file
+    # and a second create_binding would silently overwrite the first.
+    if target_dir.is_dir():
+        for existing in target_dir.glob("*.yml"):
+            if (
+                existing.stem.casefold() == profile.casefold()
+                and existing.stem != profile
+            ):
+                raise BindingProfileError(
+                    f"profile {profile!r} collides case-insensitively "
+                    f"with existing file {existing.name!r}; refusing "
+                    "to write (FS-6 case-folding guard)."
+                )
+
     # nexus-uf3w (S360-uni S2): normalise the binding name to NFC so
     # macOS NFD ↔ Linux NFC round trips collapse as expected when
     # comparing or persisting.

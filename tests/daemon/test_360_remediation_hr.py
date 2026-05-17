@@ -89,12 +89,19 @@ class TestBlockingTakeConcurrencyCap:
 
         # Force a tiny cap for the test.
         monkeypatch.setattr(svc_mod, "_BLOCKING_TAKE_MAX_CONCURRENT", 2)
+        # nexus-26b7 (notable, dim-14 F6): sanity-check the patch took
+        # effect AND the service reads the patched value at construct
+        # time. Without this assertion the test could PASS for the
+        # wrong reason if the constant is somehow cached.
+        assert svc_mod._BLOCKING_TAKE_MAX_CONCURRENT == 2
 
         service = TuplespaceService(
             tuples_db_path=tmp_path / "tuples.db",
             chroma_client=_chroma,
             registry=_registry,
         )
+        # And that the service's semaphore actually has 2 slots.
+        assert service._blocking_take_sema._value == 2  # type: ignore[attr-defined]
         try:
             errors: list[Exception] = []
             done = threading.Event()

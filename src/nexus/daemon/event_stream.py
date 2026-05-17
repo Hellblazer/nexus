@@ -68,11 +68,15 @@ BACKFILL_BURST_LIMIT: int = 1_000
 #: Poll interval (seconds) while a subscriber is connected.
 _POLL_ACTIVE: float = 0.010  # 10 ms
 
-#: Allowed character set for the non-wildcard part of subspace_prefix. The
-#: subspace name is path-shaped (e.g. ``tuples/tasks/coordinator``) so we
-#: accept alphanumerics, slash, dash, underscore, and dot. The only allowed
-#: GLOB metacharacter is a single trailing ``*``.
-_SUBSPACE_PREFIX_BODY = re.compile(r"^[A-Za-z0-9_./-]+$")
+#: Allowed character set for the non-wildcard part of subspace_prefix.
+#: The subspace name is path-shaped (e.g. ``tuples/tasks/coordinator``).
+#: nexus-26b7 (notable, dim-10 U-4): ``\w`` is unicode-aware under
+#: Python 3, so this admits unicode letters / digits (matching the
+#: registry's ``[^/]+`` tolerance for ``<project>`` template segments)
+#: while still rejecting whitespace, GLOB metacharacters, quotes,
+#: semicolons, and other shell / injection-prone characters that the
+#: prior ASCII allowlist excluded.
+_SUBSPACE_PREFIX_BODY = re.compile(r"^[\w./-]+$")
 
 
 def _validate_subspace_prefix(prefix: str) -> str | None:

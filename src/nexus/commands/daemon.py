@@ -859,6 +859,20 @@ def install_cmd(autostart: bool, force: bool) -> None:
     # nexus-31cr: overwrite guard. Operator may have customised the file
     # (added EnvironmentVariables, changed log dir, etc.). Preserve it
     # unless --force is given.
+    #
+    # nexus-26b7 (notable, dim-8 FS-7): refuse to read/write through a
+    # symlink. Without this, the read_text + write_text pair below
+    # follows the symlink and our overwrite guard inspects (and then
+    # rewrites) the symlink target instead of the autostart file the
+    # operator believes they are installing.
+    if dest.is_symlink():
+        click.echo(
+            f"Error: {dest} is a symlink; refusing to install autostart "
+            "through it (FS-7 TOCTOU mitigation). Remove the symlink "
+            "first and re-run.",
+            err=True,
+        )
+        sys.exit(1)
     if dest.exists():
         try:
             existing = dest.read_text()

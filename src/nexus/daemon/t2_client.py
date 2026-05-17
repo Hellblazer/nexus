@@ -1211,7 +1211,12 @@ class T2Client:
             while True:
                 frame = _sock_read_frame(sock)
                 if "error" in frame:
-                    _log.debug("event_stream_server_error", error=frame["error"])
+                    # nexus-26b7 (notable, dim-4 LD-3): server-reported
+                    # error deserves WARNING visibility — the daemon
+                    # explicitly told us the stream ended in a way the
+                    # operator may want to investigate. DEBUG hid this
+                    # from default-level operator logs.
+                    _log.warning("event_stream_server_error", error=frame["error"])
                     return
                 event = frame.get("event")
                 if event is not None:

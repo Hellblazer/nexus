@@ -133,6 +133,25 @@ class DataVersionWatcher:
         self._wake_event = wake_event
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # nexus-26b7 (notables, dim-3 N-1 + dim-4 LD-2): observable
+        # poll-loop health.  ``_connect_failed`` is set if the read
+        # connection cannot be opened (silent-death symptom);
+        # ``_poll_error_count`` throttles repeated per-tick warnings
+        # under a persistent SQLite error.
+        self._connect_failed: bool = False
+        self._poll_error_count: int = 0
+
+    def is_alive_and_healthy(self) -> bool:
+        """Return True when the polling thread is running and connected.
+
+        Direct-mode callers can use this to surface a silent watcher
+        death (connect failure inside the poll loop). False means the
+        watcher will never fire wake_event — callers should treat the
+        wake mechanism as unavailable.
+        """
+        if self._thread is None or not self._thread.is_alive():
+            return False
+        return not self._connect_failed
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -154,6 +173,10 @@ class DataVersionWatcher:
             return
 
         self._stop_event.clear()
+        # Reset health flags so a restart can recover from a prior
+        # connect failure (nexus-26b7 dim-3 N-1).
+        self._connect_failed = False
+        self._poll_error_count = 0
         self._thread = threading.Thread(
             target=self._poll_loop,
             name="tuplespace-data-version-watcher",
@@ -180,6 +203,11 @@ class DataVersionWatcher:
             conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
         except Exception as exc:
+            # nexus-26b7 (notable, dim-3 N-1): record the failure so
+            # ``is_alive_and_healthy()`` can report it. Previously the
+            # thread returned silently and callers could not tell
+            # whether the wake mechanism was up.
+            self._connect_failed = True
             _log.error(
                 "data_version_watcher_connect_failed",
                 db=str(self._db_path),
@@ -210,11 +238,22 @@ class DataVersionWatcher:
                             data_version=version,
                         )
                 except Exception as exc:
-                    _log.warning(
-                        "data_version_watcher_poll_error",
-                        db=str(self._db_path),
-                        error=str(exc),
-                    )
+                    # nexus-26b7 (notable, dim-4 LD-2): the poll loop
+                    # runs at 1ms baseline; logging a WARNING per tick
+                    # under a persistent error (db locked, file
+                    # removed) would spam at 1000 lines/sec. Throttle
+                    # to first-occurrence + every 1000th repeat at
+                    # the active cadence.
+                    self._poll_error_count += 1
+                    if self._poll_error_count == 1 or (
+                        self._poll_error_count % 1000 == 0
+                    ):
+                        _log.warning(
+                            "data_version_watcher_poll_error",
+                            db=str(self._db_path),
+                            error=str(exc),
+                            occurrence=self._poll_error_count,
+                        )
 
                 if activity:
                     idle_polls = 0

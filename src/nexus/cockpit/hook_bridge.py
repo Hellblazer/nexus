@@ -714,9 +714,16 @@ def _build_content(hook_type: str, payload: dict[str, Any]) -> str:
 
     # Last-resort: minimal envelope with just the event name. Bounded by
     # construction (event name is a short identifier), guaranteed to fit.
+    #
+    # nexus-26b7 (notable, dim-10 U-5): cap on BYTES, not codepoints, so
+    # a future emoji-bearing event name (or any multi-byte unicode)
+    # cannot blow the envelope budget by 4x.
+    _event_name_raw = str(payload.get("hook_event_name", ""))
+    _event_name_bytes = _event_name_raw.encode("utf-8")[:64]
+    _event_name = _event_name_bytes.decode("utf-8", errors="ignore")
     minimal = {
         "_truncated": True,
         "_original_bytes": original_bytes,
-        "hook_event_name": str(payload.get("hook_event_name", ""))[:64],
+        "hook_event_name": _event_name,
     }
     return json.dumps(minimal, ensure_ascii=False)

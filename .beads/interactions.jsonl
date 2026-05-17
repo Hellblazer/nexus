@@ -902,3 +902,4 @@
 {"id":"int-f6acf4a5","kind":"field_change","created_at":"2026-05-17T15:51:11.433043Z","actor":"Hellblazer","issue_id":"nexus-1uni","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-f7e714e6","kind":"field_change","created_at":"2026-05-17T15:51:14.785007Z","actor":"Hellblazer","issue_id":"nexus-xc3w","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-9ce74be7","kind":"field_change","created_at":"2026-05-17T15:51:18.145928Z","actor":"Hellblazer","issue_id":"nexus-vao3","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-421b4340","kind":"field_change","created_at":"2026-05-17T16:17:15.507699Z","actor":"Hellblazer","issue_id":"nexus-26b7","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}

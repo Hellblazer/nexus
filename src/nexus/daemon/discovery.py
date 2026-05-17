@@ -69,6 +69,30 @@ def find_t2_daemon(config_dir: Optional[Path] = None) -> Optional[dict[str, Any]
         _log.warning("t2_discovery_read_failed", path=str(path), error=str(exc))
         return None
 
+    # nexus-26b7 (notable, dim-5 N1): a discovery file containing a
+    # non-dict JSON value would otherwise be returned as-is and the
+    # caller's ``payload.get(...)`` would AttributeError. Refuse.
+    if not isinstance(payload, dict):
+        _log.warning(
+            "t2_discovery_unexpected_shape",
+            path=str(path),
+            type=type(payload).__name__,
+        )
+        return None
+
+    # nexus-26b7 (notable, dim-13 N-4): refuse a discovery file whose
+    # ``format_version`` is newer than this wheel understands. Files
+    # written before the field landed have no ``format_version`` and
+    # are accepted as v1 for backward-compat.
+    discovery_format = payload.get("format_version", 1)
+    if isinstance(discovery_format, int) and discovery_format > 1:
+        _log.warning(
+            "t2_discovery_format_too_new",
+            path=str(path),
+            format_version=discovery_format,
+        )
+        return None
+
     # nexus-2kld.2 (HR-2, 2026-05-17): honour the shutdown marker.
     # ``T2Daemon._unlink_discovery`` stamps ``status: "shutting_down"``
     # into the file before attempting unlink. Combined with the PID-

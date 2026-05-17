@@ -80,7 +80,10 @@ def _collect_health_data() -> dict[str, Any]:
     cat_db = nexus_config_dir() / "catalog" / ".catalog.db"
     if cat_db.exists():
         mtime = cat_db.stat().st_mtime
-        age = time.time() - mtime
+        # nexus-26b7 (notable, dim-9 N1): clamp to 0 so a backward NTP
+        # slew between the file write and this read doesn't surface a
+        # negative age.
+        age = max(0.0, time.time() - mtime)
         data["catalog"] = {"exists": True, "age_seconds": int(age)}
     else:
         data["catalog"] = {"exists": False}
@@ -89,7 +92,10 @@ def _collect_health_data() -> dict[str, Any]:
     index_log = nexus_config_dir() / "index.log"
     if index_log.exists():
         mtime = index_log.stat().st_mtime
-        age = time.time() - mtime
+        # nexus-26b7 (notable, dim-9 N1): clamp to 0 so a backward NTP
+        # slew between the file write and this read doesn't surface a
+        # negative age.
+        age = max(0.0, time.time() - mtime)
         size_mb = index_log.stat().st_size / (1024 * 1024)
         data["index_log"] = {"exists": True, "age_seconds": int(age), "size_mb": round(size_mb, 1)}
     else:
@@ -99,7 +105,10 @@ def _collect_health_data() -> dict[str, Any]:
     dolt_log = nexus_config_dir() / "dolt-server.log"
     if dolt_log.exists():
         mtime = dolt_log.stat().st_mtime
-        age = time.time() - mtime
+        # nexus-26b7 (notable, dim-9 N1): clamp to 0 so a backward NTP
+        # slew between the file write and this read doesn't surface a
+        # negative age.
+        age = max(0.0, time.time() - mtime)
         data["dolt_server"] = {"exists": True, "age_seconds": int(age)}
     else:
         data["dolt_server"] = {"exists": False}

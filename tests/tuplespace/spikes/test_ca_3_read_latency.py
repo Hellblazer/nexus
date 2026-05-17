@@ -69,7 +69,13 @@ _SETUP_BATCH = 300   # Chroma quota MAX_RECORDS_PER_WRITE
 # Scaling pattern: roughly sub-linear (Chroma HNSW giving log-N-ish
 # growth). At 100x more tuples (1k -> 100k), p99 only grows ~6x.
 _P99_CEILING_MS_BY_N: dict[int, float] = {
-    1_000: 500.0,    # smoke run; default-included
+    # nexus-26b7 (notable, dim-14 F7): widen the 1k smoke ceiling so
+    # slow CI hosts (GitHub Actions standard runners, ~25% throughput
+    # of M-series local) don't intermittently red-bar on this
+    # default-included test.  41ms p99 baseline locally; widening to
+    # 1500ms keeps the ceiling discriminating against major regressions
+    # while absorbing single-digit second hiccups under CI load.
+    1_000: 1_500.0,
     10_000: 1_000.0,
     50_000: 2_000.0,
     100_000: 4_000.0,

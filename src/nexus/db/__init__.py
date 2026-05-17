@@ -11,7 +11,7 @@ tests can pass a fake client without hitting ChromaDB Cloud.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from nexus.config import get_credential
 
@@ -96,7 +96,14 @@ if TYPE_CHECKING:
     from nexus.db.t3 import T3Database
 
 
-def make_t3(*, _client=None, _ef_override=None) -> "T3Database":
+def make_t3(
+    *,
+    _client: "Any | None" = None,
+    _ef_override: "Any | None" = None,
+) -> "T3Database":
+    # nexus-26b7 (notable, dim-5 N6): public factory; type the
+    # injection points. ``Any`` (vs chromadb.ClientAPI / EmbeddingFunction)
+    # avoids paying the chromadb import cost on this module's import.
     """Return a :class:`T3Database` built from the current credentials.
 
     In local mode (``is_local_mode()`` returns True), returns a T3Database
@@ -145,7 +152,7 @@ def make_t3(*, _client=None, _ef_override=None) -> "T3Database":
     )
 
 
-def make_ephemeral_t3(*, ef=None) -> "T3Database":
+def make_ephemeral_t3(*, ef: "Any | None" = None) -> "T3Database":
     """Return a T3Database backed by an in-process ``EphemeralClient``.
 
     Used by ``nx index --dry-run`` and similar paths that need a

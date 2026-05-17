@@ -442,8 +442,14 @@ def _run_drain(
 
     t0 = time.perf_counter()
     start_event.set()
+    # nexus-26b7 (notable, dim-14 F5): cap per-worker join at 30 s so a
+    # single wedged worker doesn't multiply the timeout budget by
+    # N_WORKERS. The asserts that follow already catch missed-tuple
+    # cases; we just don't want a single hang to pessimise the suite
+    # by minutes.
+    per_worker_join = min(30.0, timeout_s)
     for t in workers:
-        t.join(timeout=timeout_s)
+        t.join(timeout=per_worker_join)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
     return {

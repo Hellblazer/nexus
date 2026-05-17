@@ -4252,9 +4252,17 @@ def _get_tuplespace() -> dict[str, Any]:
         info = find_t2_daemon()
         if info is None:
             _ts_log.error("tuplespace_mcp_daemon_mode_daemon_not_running")
+            # nexus-26b7 (notable, dim-13 N-1): post-cutover wording.
+            # The previous error implied the operator had opted into
+            # daemon mode via env, but daemon is the DEFAULT after
+            # nexus-507q (2026-05-17). Mirror reject_under_daemon_mode
+            # in nexus.db.__init__:79-84 so both recovery paths are
+            # named.
             raise RuntimeError(
-                "NX_STORAGE_MODE=daemon is set but no T2 daemon discovery "
-                "file was found. Run `nx daemon t2 start` first."
+                "Storage mode is 'daemon' (default since 2026-05-17 "
+                "cutover). No T2 daemon discovery file found. Run "
+                "`nx daemon t2 install --autostart && nx daemon t2 start`, "
+                "or opt out with NX_STORAGE_MODE=direct."
             )
         uds_path = Path(info["uds_path"]) if info.get("uds_path") else None
         if uds_path is not None and uds_path.exists():

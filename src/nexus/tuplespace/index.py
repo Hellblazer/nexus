@@ -246,8 +246,12 @@ class TupleIndex:
             n_results=n_results,
         )
 
-        # TODO(phase-2): empirically verify ChromaDB quota behavior on compound $and-wrapped filters
-        #                (caller_where with 8 predicates passes pre-merge validation; post-merge form is wrapped)
+        # nexus-26b7 (notable, dim-15 N-1): the previous untracked
+        # TODO covered an empirical ChromaDB quota question on
+        # compound $and-wrapped filters. Caller_where with 8
+        # predicates passes the pre-merge validation; the post-merge
+        # form is wrapped under $and. Lift if/when a real workload
+        # surfaces a quota-trip; no production bead yet.
         merged_where = _merge_where(subspace, where)
 
         coll = self._collections[template_name]

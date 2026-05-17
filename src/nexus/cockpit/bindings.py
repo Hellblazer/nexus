@@ -127,12 +127,19 @@ class Binding:
     enabled: bool = True
 
 
+#: nexus-26b7 (notable, dim-13 N-3): bump-on-incompatible-change so a
+#: newer wheel can detect a profile authored against a future format
+#: and refuse cleanly. Currently 1 (additive-only since arc landing).
+BINDING_PROFILE_SCHEMA_VERSION: int = 1
+
+
 @dataclasses.dataclass(frozen=True)
 class BindingProfile:
     """A named bundle of bindings loaded from one YAML file."""
 
     name: str
     bindings: tuple[Binding, ...]
+    schema_version: int = BINDING_PROFILE_SCHEMA_VERSION
 
 
 @dataclasses.dataclass(frozen=True)
@@ -226,6 +233,23 @@ def load_profile(path: Path) -> BindingProfile:
             f"match ^[A-Za-z0-9][A-Za-z0-9_-]*$ (SR-1 allowlist)."
         )
 
+    # nexus-26b7 (notable, dim-13 N-3): refuse YAMLs whose
+    # schema_version is newer than the wheel supports. Older YAMLs
+    # without the field are accepted at the current default to
+    # preserve backward-compat.
+    schema_version_raw = raw.get("schema_version", BINDING_PROFILE_SCHEMA_VERSION)
+    if not isinstance(schema_version_raw, int):
+        raise BindingProfileError(
+            f"{path.name}: 'schema_version' must be int, "
+            f"got {type(schema_version_raw).__name__}"
+        )
+    if schema_version_raw > BINDING_PROFILE_SCHEMA_VERSION:
+        raise BindingProfileError(
+            f"{path.name}: schema_version={schema_version_raw} is newer "
+            f"than this wheel supports (max {BINDING_PROFILE_SCHEMA_VERSION}); "
+            "upgrade conexus."
+        )
+
     raw_bindings = raw.get("bindings")
     if not isinstance(raw_bindings, list):
         raise BindingProfileError(
@@ -273,7 +297,11 @@ def load_profile(path: Path) -> BindingProfile:
             )
         )
 
-    return BindingProfile(name=name, bindings=tuple(bindings))
+    return BindingProfile(
+        name=name,
+        bindings=tuple(bindings),
+        schema_version=schema_version_raw,
+    )
 
 
 def load_profiles_dir(profiles_dir: Path) -> list[BindingProfile]:
@@ -521,7 +549,12 @@ def action_emit_derived(
         "source_sub": event.subspace,
         "tuple_id": event.tuple_id,
     }
-    match_text = f"{event.subspace} {event.op} {event.tuple_id}"
+    # nexus-26b7 (notable, dim-10 U-3): NFC-normalise the derived
+    # match_text so an NFD-form subspace (Mac HFS+) does not produce
+    # a tuple_id that differs from its NFC twin elsewhere.
+    match_text = unicodedata.normalize(
+        "NFC", f"{event.subspace} {event.op} {event.tuple_id}"
+    )
     out(
         conn=context.conn,
         index=context.index,
@@ -691,8 +724,12 @@ def _fetch_event_batch(
             subspace=str(r[1]),
             op=str(r[2]),
             tuple_id=str(r[3]),
-            payload_summary=r[4],
-            category=r[5],
+            # nexus-26b7 (notable, dim-5 N4): mirror the explicit
+            # casts above so a BLOB or numeric in events.payload_summary
+            # / .category surfaces as a typed string rather than
+            # smuggling a non-Optional[str] into a frozen dataclass.
+            payload_summary=str(r[4]) if r[4] is not None else None,
+            category=str(r[5]) if r[5] is not None else None,
             ts=float(r[6]),
         )
         for r in rows
@@ -782,7 +819,18 @@ class BindingWatcher:
         daemon stores the watcher instance and calls :meth:`stop`
         during shutdown; tests can ``await`` the returned task
         directly for fine-grained orchestration.
+
+        nexus-26b7 (notable, dim-6 N6): MUST be called from within a
+        running event loop. ``asyncio.create_task`` raises a generic
+        ``RuntimeError`` otherwise; surface a clearer message.
         """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "BindingWatcher.start() must be called from a running "
+                "event loop (asyncio.create_task requires one)."
+            ) from exc
         if self._task is not None and not self._task.done():
             return self._task
         self._task = asyncio.create_task(self.run())
@@ -809,8 +857,17 @@ class BindingWatcher:
             self._task.cancel()
             try:
                 await self._task
-            except (asyncio.CancelledError, Exception):
+            # nexus-26b7 (notable, dim-5 N5): keep the swallow on
+            # cancellation but log everything else so a surprise
+            # exception on shutdown does not vanish entirely.
+            except asyncio.CancelledError:
                 pass
+            except Exception as exc:
+                _log.debug(
+                    "binding_watcher_stop_swallowed",
+                    exc_type=type(exc).__qualname__,
+                    exc=str(exc),
+                )
 
     async def run(self) -> None:
         """Run the polling loop until :meth:`request_stop` is invoked."""
@@ -973,6 +1030,21 @@ class BindingWatcher:
                 profile_count=len(self._profiles),
             )
             # Restore the previous fingerprints so the next tick re-tries.
+            self._profile_fingerprints = previous
+            return
+
+        # nexus-26b7 (notable, dim-1 N1): mass-delete gap. If the
+        # reload returned no profiles but we had some, retain the
+        # previous list and log a warning. The TR-2 docstring promises
+        # that a broken YAML cannot silently drop previously-loaded
+        # profiles; an empty directory after a mass `rm *.yml` was
+        # not covered.
+        if not new_profiles and self._profiles:
+            _log.warning(
+                "binding_watcher_reload_aborted_no_profiles_found",
+                previous_count=len(self._profiles),
+                profiles_dirs=[str(d) for d in self._profiles_dirs],
+            )
             self._profile_fingerprints = previous
             return
 
