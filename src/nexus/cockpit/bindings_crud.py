@@ -23,6 +23,7 @@ Design notes:
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -98,8 +99,32 @@ def _read_profile_dict(path: Path) -> dict[str, Any]:
 
 
 def _write_profile_dict(path: Path, payload: dict[str, Any]) -> None:
-    """Write ``payload`` as YAML to ``path``. Stable key ordering."""
-    path.write_text(yaml.safe_dump(payload, sort_keys=False))
+    """Write ``payload`` as YAML to ``path`` atomically (tmp + os.replace).
+
+    nexus-bkvg (FS-2): the prior naked ``path.write_text(yaml.safe_dump(...))``
+    truncated the file in place, so an ENOSPC (or any IO failure)
+    midway through the dump left a partial YAML that ``load_profile``
+    rejects. The tmp-in-same-dir + ``os.replace`` pattern keeps the
+    prior file intact under failure.
+
+    Stable key ordering preserved via ``sort_keys=False``.
+    """
+    import tempfile  # noqa: PLC0415
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(yaml.safe_dump(payload, sort_keys=False))
+        os.replace(tmp_name, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def create_binding(

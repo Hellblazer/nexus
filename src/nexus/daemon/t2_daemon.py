@@ -1547,7 +1547,15 @@ class T2Daemon:
             marker_payload = self._discovery_payload()
             marker_payload["status"] = "shutting_down"
             marker_payload["shutdown_at"] = datetime.now(timezone.utc).isoformat()
-            self._discovery_path.write_text(json.dumps(marker_payload))
+            # nexus-bkvg (FS-1): atomic write via tmp + os.replace
+            # mirrors ``_write_discovery`` above. A crash mid-write
+            # with the prior in-place ``write_text`` left a truncated
+            # marker file that ``find_t2_daemon`` could not parse.
+            tmp = self._discovery_path.with_suffix(
+                self._discovery_path.suffix + ".tmp"
+            )
+            tmp.write_text(json.dumps(marker_payload))
+            os.replace(str(tmp), str(self._discovery_path))
         except Exception as exc:
             _log.warning(
                 "discovery_marker_write_failed",

@@ -1145,7 +1145,10 @@ def _run_check_bridge() -> None:
             )
 
     # 3. tuples.db
-    tuples_db = Path(os.path.expanduser("~/.config/nexus/tuples.db"))
+    # nexus-bkvg (FS-4): honour NEXUS_CONFIG_DIR via nexus_config_dir
+    # so sandbox runs / multi-profile installs probe the right file.
+    from nexus.config import nexus_config_dir as _nexus_config_dir
+    tuples_db = _nexus_config_dir() / "tuples.db"
     if tuples_db.exists():
         size = tuples_db.stat().st_size
         click.echo(
@@ -1375,7 +1378,9 @@ def _run_check_bridge() -> None:
     # Read recent drop events from the daemon's rotated log. Best-effort:
     # if the log is missing, unreadable, or the daemon mode never ran,
     # report a clean state.
-    daemon_log = Path(os.path.expanduser("~/.config/nexus/logs/daemon.log"))
+    # nexus-bkvg (FS-4): honour NEXUS_CONFIG_DIR via nexus_config_dir.
+    from nexus.config import nexus_config_dir as _nexus_config_dir
+    daemon_log = _nexus_config_dir() / "logs" / "daemon.log"
     recent_drops = 0
     if daemon_log.is_file():
         try:

@@ -977,5 +977,10 @@ def user_profiles_dir() -> Path:
     loads both dirs (builtin first, then user) and the user profiles
     can override builtin profiles by name.
     """
-    home = Path(os.path.expanduser("~"))
-    return home / ".config" / "nexus" / "bindings" / "profiles"
+    # nexus-bkvg (FS-3): route through nexus_config_dir() so
+    # NEXUS_CONFIG_DIR overrides apply here too. The previous direct
+    # expanduser("~") bypassed the TR-5 wiring, leaving sandboxed
+    # runs and multi-profile installs unable to redirect binding YAMLs.
+    from nexus.config import nexus_config_dir  # noqa: PLC0415
+
+    return nexus_config_dir() / "bindings" / "profiles"
