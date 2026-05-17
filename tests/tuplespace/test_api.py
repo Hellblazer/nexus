@@ -975,3 +975,74 @@ class TestMetadataOps:
         stats = subspace_stats(conn=db_conn, subspace="tasks/nexus")
         assert stats["total"] == 0
         assert stats["available"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Third 360° TEST C1 + C2: previously untested error-path branches
+# ---------------------------------------------------------------------------
+
+
+class TestThird360UntestedErrorPaths:
+    """Cover branches that had ZERO discriminating tests pre-third-360°.
+
+    Both branches could be mutated (deleted, condition flipped) without
+    any existing test failing, masking real bugs.
+    """
+
+    def test_ack_unknown_claim_id_raises_claim_not_found(
+        self, db_conn, index, registry
+    ):
+        """nexus-6m9i (third 360° TEST C-1): api.ack raises
+        ClaimNotFoundError when claim_id does not exist. Pre-fix the
+        branch at api.py:779-781 could be deleted without test failure.
+        """
+        from nexus.tuplespace.api import ack, ClaimNotFoundError
+
+        with pytest.raises(ClaimNotFoundError):
+            ack(
+                conn=db_conn,
+                claim_id="not-a-real-claim-id",
+                claimant="agent-X",
+            )
+
+    def test_nack_unknown_claim_id_raises_claim_not_found(
+        self, db_conn, index, registry
+    ):
+        """nexus-6m9i (third 360° TEST C-1): api.nack symmetric path."""
+        from nexus.tuplespace.api import nack, ClaimNotFoundError
+
+        with pytest.raises(ClaimNotFoundError):
+            nack(
+                conn=db_conn,
+                claim_id="not-a-real-claim-id",
+                claimant="agent-X",
+            )
+
+    def test_take_on_take_disabled_subspace_raises(
+        self, db_conn, index, registry
+    ):
+        """nexus-6m9i (third 360° TEST C-2): api.take raises
+        TakeDisabledError when schema.take.enabled is false.
+        Pre-fix the branch at api.py:612-615 could be deleted /
+        inverted with no test failure. ``signals/<channel>`` has
+        ``take.enabled: false`` in the test YAML.
+        """
+        from nexus.tuplespace.api import out, take, TakeDisabledError
+
+        out(
+            conn=db_conn,
+            index=index,
+            registry=registry,
+            subspace="signals/alerts",
+            content="ignored",
+            dimensions={"priority": "high"},
+        )
+        with pytest.raises(TakeDisabledError):
+            take(
+                conn=db_conn,
+                index=index,
+                registry=registry,
+                subspace="signals/alerts",
+                query="anything",
+                claimant="agent-X",
+            )
