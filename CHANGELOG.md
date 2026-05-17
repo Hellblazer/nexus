@@ -231,6 +231,62 @@ script preserved at
 `scripts/spikes/spike_rdr114_tuplespace_out_latency.py`
 (p99=48 ms local-mode, N=1000).
 
+### Changed (line-level review polish, nexus-z7hf Bundle E)
+
+Seven small follow-ups from the code-review critic. None changes
+behaviour for callers using the public API; the watcher rename is
+backed by a backwards-compat alias so external imports keep working.
+
+- **`route_payload` documented as a public extension point**
+  (nexus-kkp9). The helper at `nexus.cockpit.hook_bridge.route_payload`
+  has only one in-tree caller (`emit()`) but is intentionally exported
+  under its bare name (no leading underscore) so external bridge
+  scripts can decompose a Claude Code hook payload without
+  re-implementing the dispatch table. Docstring now spells this out
+  and pins the return-shape stability contract.
+- **`prune_expired_tuples` docstring corrected** (nexus-qu6t). The
+  prior text said `idx_tuples_expires` covers the full sweep; in fact
+  the partial index only covers `consumed_at IS NULL` rows. The SELECT
+  fetches all expired rows regardless of `consumed_at` (Chroma cleanup
+  is this sweeper's job), so consumed-but-expired rows fall through to
+  a full scan. Acceptable given typical TTLs and the six-hour sweep
+  cadence; docstring now states this explicitly.
+- **`TuplespaceService.close()` logs on failure** (nexus-dxap). The
+  prior `except Exception: pass` left operators with no signal when
+  shutdown didn't actually release the underlying SQLite handle. Now
+  emits a `tuplespace_service_close_failed` warning with the error
+  message and exception type, then returns. Clean-path callers see
+  no log line.
+- **`match_text=match_text or None` simplified** (nexus-4ivq).
+  `TuplespaceService.out()` passed `match_text or None` through to
+  `ts_api.out()`. The empty-string case (`'' or None -> None`) was
+  semantically identical to passing `''` through under the existing
+  `Optional[str]` contract, so the redundancy was type-misleading.
+  Dropped to `match_text=match_text`.
+- **`_TupleSpaceWatcher` -> `_DataVersionWatcher` rename** (nexus-zrk4).
+  Two unrelated classes used the "watcher" label
+  (`_TupleSpaceWatcher` for `PRAGMA data_version` polling,
+  `_BindingWatcher` for cockpit binding dispatch over the `events`
+  table). The new name makes the role self-evident. Existing imports
+  via `_TupleSpaceWatcher` keep working through a backwards-compat
+  alias (removed in the next major bump).
+- **`_DataVersionWatcher.start()` idempotency pinned** (nexus-fvww).
+  The guard `if self._thread is not None and self._thread.is_alive()`
+  was already present; this bundle adds two tests
+  (`TestDataVersionWatcherStartIdempotent`) that pin the behaviour as
+  a contract so a future refactor cannot silently regress to
+  double-spawning the poll thread.
+- **Adaptive idle backoff in `_DataVersionWatcher`** (nexus-o5tc).
+  Polling cadence stays at `_POLL_INTERVAL_BASELINE_SECONDS` (1 ms,
+  preserves the RDR-110 CA-5 reactive-take latency contract of p50
+  <= 5 ms). After `_POLL_IDLE_RAMP_THRESHOLD` (100) consecutive idle
+  polls (~100 ms of dead air), the interval doubles each tick up to
+  `_POLL_INTERVAL_MAX_SECONDS` (1 s); activity (any data_version
+  increment) resets the cadence to baseline. Steady-state CPU on a
+  quiet system drops by ~1000x relative to the always-on 1 ms loop.
+  `_next_poll_interval(*, idle_polls, current)` is the pure helper
+  tests exercise to pin the cadence shape.
+
 ### Tests (RDR-112 coverage gaps, nexus-hwy7 Bundle D)
 
 Two test-only additions closing coverage gaps surfaced by the

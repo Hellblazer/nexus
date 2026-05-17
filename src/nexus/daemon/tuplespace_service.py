@@ -133,7 +133,7 @@ class TuplespaceService:
                 subspace=subspace,
                 content=content,
                 dimensions=dimensions,
-                match_text=match_text or None,
+                match_text=match_text,
                 ttl_seconds=ttl_seconds,
             )
 
@@ -303,11 +303,24 @@ class TuplespaceService:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the SQLite connection. Idempotent."""
+        """Close the SQLite connection.
+
+        nexus-dxap: failure on close (e.g. ``sqlite3.OperationalError``
+        when the connection's thread is gone, or an EROFS on the
+        journal file) is logged as a warning. The previous behaviour
+        was a silent ``except Exception: pass`` that left operators
+        with no signal when shutdown didn't actually release the
+        underlying handle. Idempotent: a follow-up call on an
+        already-closed connection is harmless.
+        """
         try:
             self._conn.close()
-        except Exception:  # pragma: no cover — defensive
-            pass
+        except Exception as exc:
+            _log.warning(
+                "tuplespace_service_close_failed",
+                error=str(exc),
+                error_type=type(exc).__qualname__,
+            )
 
 
 # ---------------------------------------------------------------------------

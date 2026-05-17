@@ -185,10 +185,19 @@ def route_payload(
     PostCompact, SubagentStart, or any unknown type). The caller should
     silently skip emission in that case.
 
-    The four required dimensions -- ``actor``, ``session``, ``project``,
-    ``timestamp`` -- are always populated. Optional dimensions (``tool``,
+    The four required dimensions ``actor``, ``session``, ``project``,
+    ``timestamp`` are always populated. Optional dimensions (``tool``,
     ``workflow``, ``intent``, ``priority``) are populated when the payload
     provides the relevant field.
+
+    **Public extension point (nexus-kkp9).** Despite ``emit()`` being the
+    only in-tree caller, this helper is intentionally exported under its
+    bare name (no leading underscore) so external bridge scripts can
+    decompose a CC hook payload into the subspace/dimensions/match_text
+    triple without having to re-implement the dispatch table. Stability
+    expectation: the return shape and the four required dimensions are a
+    public contract; the supported hook-type set MAY grow but never
+    shrink without a major version bump.
 
     Args:
         hook_type: The CC hook type string (e.g. ``"PreToolUse"``).

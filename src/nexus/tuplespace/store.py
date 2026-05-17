@@ -283,10 +283,20 @@ def prune_expired_tuples(
 ) -> int:
     """Delete tuples whose ``expires_at`` has passed and their Chroma vectors.
 
-    Rows with ``expires_at IS NULL`` are NEVER deleted — NULL means "no
-    expiry" per the schema contract. Uses ``idx_tuples_expires`` (partial
-    index on ``expires_at IS NOT NULL AND consumed_at IS NULL``) for the
-    selection.
+    Rows with ``expires_at IS NULL`` are NEVER deleted: NULL means "no
+    expiry" per the schema contract.
+
+    nexus-qu6t: the partial index ``idx_tuples_expires`` is defined on
+    ``(expires_at, consumed_at IS NULL)`` and therefore only covers
+    rows that have not yet been consumed. The SELECT below fetches
+    every expired row regardless of ``consumed_at`` (Chroma cleanup
+    for consumed-and-expired rows is this sweep's responsibility:
+    ``ack()`` deletes the SQLite row claim metadata but not the
+    Chroma vector). Net effect: the partial index speeds up the
+    fast path (available tuples that timed out without ever being
+    claimed); consumed-but-expired rows fall through to a full
+    table scan. Acceptable given typical TTLs are minutes-to-hours
+    and the sweep runs every six hours.
 
     **Atomicity note (RDR-111).** Two-store atomicity between SQLite and
     Chroma is a separate concern (bead nexus-qmrr). This sweeper deletes
