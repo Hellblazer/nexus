@@ -231,6 +231,10 @@ class _DataVersionWatcher:
                 pass
 
 
-# nexus-zrk4: backwards-compat alias. Existing imports of
-# ``_TupleSpaceWatcher`` keep working until the next major bump.
-_TupleSpaceWatcher = _DataVersionWatcher
+# nexus-cgul.1 (CR-1, 2026-05-17): the ``_TupleSpaceWatcher``
+# backwards-compat alias introduced by nexus-zrk4 has been removed.
+# All 4 in-tree importers (mcp/core.py + 3 spike tests) and 1 unit
+# test file have been migrated to the canonical ``_DataVersionWatcher``
+# name. The rename has now been the de jure spelling for ~24 hours;
+# any out-of-tree consumer can ride this 24-hour deprecation window
+# or pin to the prior release.

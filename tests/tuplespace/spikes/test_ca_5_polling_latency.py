@@ -12,9 +12,9 @@ Design:
   pollers to drain the queue.  Measures per-take() latency from attempt to
   success, and overall drain throughput.  Uses autocommit connections
   (isolation_level=None) to avoid Python sqlite3 implicit-BEGIN lock contention.
-- block=True proxy path: _TupleSpaceWatcher data_version detection latency.
+- block=True proxy path: _DataVersionWatcher data_version detection latency.
   block=True is feature-flagged OFF in take() (RDR-112 §A2).  We instantiate
-  _TupleSpaceWatcher directly and time commit -> wake_event latency using raw
+  _DataVersionWatcher directly and time commit -> wake_event latency using raw
   SQLite writes, bypassing Chroma embed overhead.
   # storage-boundary-allow: spike-harness (RDR-110 Phase 1 Step 7 CA spike)
 - Report: p50 / p95 / p99 for both paths.
@@ -36,7 +36,7 @@ from nexus.tuplespace.api import out, take, ack
 from nexus.tuplespace.index import TupleIndex
 from nexus.tuplespace.registry import Registry
 from nexus.tuplespace.store import open_tuples_db
-from nexus.tuplespace.watcher import _TupleSpaceWatcher
+from nexus.tuplespace.watcher import _DataVersionWatcher
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -302,10 +302,10 @@ class TestPollingLatency:
         index: TupleIndex,
         registry: Registry,
     ) -> None:
-        """Measure _TupleSpaceWatcher data_version detection latency (block=True proxy).
+        """Measure _DataVersionWatcher data_version detection latency (block=True proxy).
 
         block=True is feature-flagged OFF in take() (RDR-112 §A2).  We instantiate
-        _TupleSpaceWatcher directly and time commit -> wake_event latency using
+        _DataVersionWatcher directly and time commit -> wake_event latency using
         raw SQLite writes (no Chroma embed overhead).
 
         # storage-boundary-allow: spike-harness (RDR-110 Phase 1 Step 7 CA spike)
@@ -314,7 +314,7 @@ class TestPollingLatency:
         init_conn.close()
 
         wake_event = threading.Event()
-        watcher = _TupleSpaceWatcher(db_path=db_path, wake_event=wake_event)
+        watcher = _DataVersionWatcher(db_path=db_path, wake_event=wake_event)
         watcher.start()
 
         # storage-boundary-allow: spike-harness (RDR-110 Phase 1 Step 7 CA spike)

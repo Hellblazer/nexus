@@ -4268,7 +4268,7 @@ def _get_tuplespace() -> dict[str, Any]:
 
     watcher = None
     try:
-        # nexus-zrk4: class renamed from _TupleSpaceWatcher to
+        # nexus-zrk4: class renamed from _DataVersionWatcher to
         # _DataVersionWatcher so its role (data_version polling for
         # take() wake-ups) is self-evident.
         from nexus.tuplespace.watcher import _DataVersionWatcher

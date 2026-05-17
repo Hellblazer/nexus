@@ -142,7 +142,7 @@ class TestDataVersionCost:
     def test_data_version_reused_conn_latency(self, tmp_path: Path) -> None:
         """Measure per-call PRAGMA data_version cost with a REUSED connection.
 
-        This is the actual cost path for _TupleSpaceWatcher (one connection
+        This is the actual cost path for _DataVersionWatcher (one connection
         held open for the lifetime of the poll loop).
 
         PASS: p50 <= 1ms (much tighter than fresh-conn because no open overhead).
@@ -180,5 +180,5 @@ class TestDataVersionCost:
         print(
             f"[CA-6 reused-conn] PASS{note} -- "
             f"p50={p50:.4f}ms p95={p95:.4f}ms p99={p99:.4f}ms. "
-            f"_TupleSpaceWatcher poll cost is negligible."
+            f"_DataVersionWatcher poll cost is negligible."
         )

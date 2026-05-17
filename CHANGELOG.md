@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed (360° remediation Bundle CR, nexus-cgul) — alias cleanup
+
+- **CR-1: `_TupleSpaceWatcher` backwards-compat alias dropped**
+  (nexus-cgul.1). The alias shipped with nexus-zrk4's rename ~24
+  hours ago; this bundle migrates the 4 in-tree importers
+  (`mcp/core.py`, `test_watcher.py`, `test_code_review_polish_bundle_e.py`,
+  CA-5 + CA-6 spike tests) to the canonical `_DataVersionWatcher`
+  name and drops the alias from `nexus/tuplespace/watcher.py`.
+  Out-of-tree consumers may pin to the prior release while updating.
+
+Regression: 674/674 PASS across daemon + cockpit + tuplespace + mcp.
+
 ### Docs (360° remediation Bundle DR, nexus-mlmu) — drift sweep + UX
 
 Seven documentation + UX findings from the 2026-05-17 360° review.
