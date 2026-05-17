@@ -10,7 +10,9 @@
 
 This document is a **proposal**, not an in-place edit of architecture or RDRs. The accompanying text-only spike (`scripts/colbert_recall_spike.py`) is a measurement scaffold — it does not change retrieval behavior in production.
 
-**Revision 2026-05-17:** the initial draft rejected the multi-modal path as "GPU-only." §5 has been rewritten to quantify hardware requirements component-by-component. The generator (Qwen2-VL 7B) is GPU-mandatory and still rejected; ColPali retrieval alone is feasible on Apple Silicon via MPS / MLX and is **reconsidered** for a scoped spike (§5b). A lighter figure-only path via SigLIP is added as a third spike candidate.
+**Revision 2026-05-17 (a):** the initial draft rejected the multi-modal path as "GPU-only." §5 was rewritten to quantify hardware requirements component-by-component. The generator (Qwen2-VL 7B) is GPU-mandatory; ColPali retrieval alone is feasible on Apple Silicon via MPS / MLX and is **reconsidered** for a scoped spike (§5b).
+
+**Revision 2026-05-17 (b):** the qwen-coprocessor survey in §5c was wrong. The qwentescence backend already runs Qwen 3.6-35B-A3B with a BF16 vision projector (image-text-to-text); accessible from nexus via OpenAI-compatible HTTP. The lead spike is no longer ColBERT or ColPali — it is **ingest-time VL text augmentation** (§5c) that closes M3DocRAG §5.1's visual-evidence gap by turning the visual signal into text in the chunk stream. Retrieval architecture stays single-vector Voyage; no new pipe, no new generator path. The two earlier-promoted retrieval-only spikes drop in priority.
 
 ---
 
@@ -105,25 +107,56 @@ The text-only ColBERT spike (§6) is unchanged in scope — it's about late-inte
 | ColPali retrieval on Apple Silicon (no generator) | **Reconsider** | Index a 20-PDF subset with ColPali via transformers+MPS. Measure: per-page index time, query latency, recall@10 vs Voyage on figure-heavy queries. File a bead if index time ≤ 60s/page and recall@10 lift on figure-bearing queries ≥ 10pp. |
 | Figure-only embeddings via SigLIP | **New, deferred** | Use Docling's figure bounding boxes (already extracted); embed via `sentence-transformers/clip-ViT-B-32` or SigLIP base; store as a parallel index per PDF. Test on the same figure-heavy query set. Lighter footprint (~400 MB model, CPU OK). |
 
-## 5c. Qwen coprocessor as a local VL backend — surveyed
+## 5c. Qwen coprocessor as a local VL backend — REVISED 2026-05-17
 
-**Repo:** `~/git/qwen-coprocessor-stack` — locally-hosted Qwen 3.6 wired into Claude Code as an MCP coprocessor. Supervisor is a TypeScript MCP server (`mcp-bridges/qwen-agent-server`) wrapping `@qwen-code/sdk`; backends are any OpenAI-compatible endpoint serving a Qwen 3.6 GGUF. Default deployments: llama.cpp Metal on Apple Silicon (Qwen 3.6 27B at `localhost:8080`) and llama.cpp Vulkan on Strix Halo (Qwen 3.6 35B-A3B remote). T2 memory entries `qwen-coprocessor-stack/*` document existing nexus integrations (`nx_tidy`, `nx_enrich_beads`, etc.).
+**Initial survey conclusion was wrong.** The first draft of this section concluded the qwen-coprocessor was text-only and irrelevant to M3DocRAG. Then the qwentescence operator reported the actual deployment:
 
-**What the stack supports today:** text-only Qwen 3.6 via `@qwen-code/sdk`. Searched the SDK type definitions (`node_modules/@qwen-code/sdk/dist/index.d.ts`): zero matches for `image`, `vision`, `mmproj`, or any multi-modal content shape. The supervisor's `session.ts` / `server.ts` carry no image-passthrough. Tier conclusion: **the supervisor is not a multi-modal path as it exists.**
+> Qwen 3.6-35B-A3B vision-language model — open-weight, Apache-2.0, released 2026-04-24 by the Qwen team as an image-text-to-text model. Hybrid Gated DeltaNet + Gated Attention backbone (3:1), 35B total / 3B active, 256-expert MoE, 262K native context. Running the unsloth `Qwen3.6-35B-A3B-UD-Q4_K_XL` GGUF (~21 GB, ~98 % of Q8 quality at ~1.5× throughput) on an AMD Strix Halo box (128 GB UMA, GPU offload 99 layers, flash-attn, q8_0 KV cache, 131K context). BF16 vision projector `mmproj-Qwen3.6-35B-A3B-BF16.gguf` (~0.85 GB) is on disk and being wired into the launch config. llama-server `/v1/chat/completions` accepts standard OpenAI image content arrays once the projector is loaded. Latency: 1k–5k prefill tokens per high-res image → ~5–15 s of prefill per image + ~30–50 tok/s text generation. Pure image-in / structured-text-out works; mid-loop tool-use during image processing is not wired.
 
-**Three ways it could be relevant anyway:**
+That changes the picture materially. The qwen-coprocessor stack is not the gating piece — **a multi-modal Qwen 3.6 backend is operational (or imminent) at `qwentescence`**, addressable from nexus directly over OpenAI-compatible HTTP. The supervisor doesn't need to know about it: nexus can POST to the backend itself for one-off image-in / text-out calls.
 
-1. **Post-retrieval enrichment (text-only, today).** A retrieved chunk that contains a figure caption + nearby prose could be passed through Qwen 3.6 27B to elaborate or summarise. This doesn't get us image understanding — it's a text-bulk-work path that the stack already does well, and it doesn't move the M3DocRAG needle. Not interesting for this proposal.
-2. **Parallel Qwen2-VL llama.cpp backend, called directly (not via supervisor).** llama.cpp supports Qwen2-VL / Qwen2.5-VL on Metal via the `--mmproj` image encoder flag. A separate llama.cpp instance serving a Qwen2-VL GGUF at, say, `localhost:8081/v1` would be reachable from nexus via OpenAI-compatible HTTP — same as any other endpoint. The supervisor doesn't need to be in the loop because nexus would call the backend directly for one-shot "describe this figure" requests. **This is the realistic local-VL path.** Caveats: Qwen2.5-VL 7B GGUF Q4_K_M is ~5 GB; latency on M-Max ~2–10 s per image; quality degrades materially at INT4 vs full precision.
-3. **Supervisor extension for VL passthrough (future).** Adding image-input support to the supervisor would need: (a) `@qwen-code/sdk` to grow multi-modal content support (it hasn't, and that's an upstream change), (b) the supervisor's `session.ts` to thread image payloads through `QueryOptions`, (c) a backend config flag marking which backends accept images, (d) one or more VL-capable backends. This is the "right" path but it's an upstream-dependent multi-PR change in the coprocessor stack, not a nexus change.
+This is bigger than the M3DocRAG question. The original M3DocRAG critique was "Qwen2-VL generator is GPU-mandatory and nexus has no generator." We don't need to add a *generator* — we can use the VL backend for **ingest-time text augmentation**: read figures out of PDFs (Docling already produces bounding boxes), POST each figure + its caption + surrounding prose to the VL backend, get back a structured text description, inject that into the chunk stream. The visual signal becomes text. Retrieval stays single-vector Voyage. No new retrieval pipe, no new generator pipe — just an enrichment hook.
 
-**Recommendation if any §5b spike clears its threshold:**
+### Revised spike priority
 
-- For the **ColPali retrieval-only path** — the qwen-coprocessor is irrelevant; ColPali is a retriever, not a generator.
-- For the **figure-only SigLIP path** — the qwen-coprocessor is irrelevant; SigLIP is a CPU embedder.
-- For a **future generator path** (which nexus does not have today) — option 2 above is the realistic Apple-Silicon shape: stand up a Qwen2-VL GGUF backend in llama.cpp Metal alongside the existing Qwen 3.6 backend, call it directly from nexus over OpenAI-compatible HTTP. Cost is mostly disk (~5 GB) and a few minutes of cold-start latency. No new generator pipe in nexus today, so this remains a "if we ever build a generator" note.
+The retrieval-only spikes (§5b) remain valid but **drop in priority** relative to a much simpler path:
 
-**Stance:** the qwen-coprocessor stack is a useful local-compute substrate for **text** work and an active integration target for nexus (per `qwen-offload-transition-plan.md`). It is **not** a shortcut around the M3DocRAG GPU problem because (a) nexus has no generator, and (b) the supervisor itself is text-only and would need upstream SDK support to handle images.
+| Priority | Spike | Why this priority |
+|---|---|---|
+| **NEW P0** | **VL-augmented chunk enrichment at ingest** | Closes M3DocRAG §5.1's visual-evidence gap by turning visual signal into text. No retrieval-architecture change. Leverages existing qwentescence backend. Smallest blast radius of any spike here. |
+| P1 | Text-only ColBERT (§6) | Independent of VL; addresses vocabulary mismatch on text corpora. Scaffold shipped. |
+| P2 | Figure-only SigLIP (§5b) | Lighter than ColPali; an alternative to VL-augmentation IF the VL endpoint is unavailable. Lower priority because VL gives richer text than image embeddings give vector matches. |
+| P3 | ColPali on Apple Silicon (§5b) | Heaviest spike; only relevant if both VL-augmentation and SigLIP underperform on figure-heavy queries. |
+
+### NEW P0 spike scope
+
+**Hypothesis:** for visually rich PDFs (architecture diagrams, charts, complex tables), VL-generated text descriptions added to the chunk stream meaningfully improve text-retrieval recall on figure-bearing queries vs the existing MinerU/Docling text-only extraction.
+
+**Implementation sketch (proposal-only, not coded yet):**
+
+1. Configuration: new `vl_backend` block in `.nexus.yml` / `~/.config/nexus/config.yml` — URL, model name, on/off flag, timeout, retries. No new dependency; uses `httpx` already in the tree.
+2. New post-extract hook: after Docling/MinerU produces page-level structured output, iterate figures and tables with bounding boxes, render each region to PNG (`pdf2image` already a dep), POST to the VL backend with a structured prompt requesting: (a) one-sentence description; (b) for charts: axes, units, trend summary; (c) for tables: row/column labels and any salient values.
+3. Output handling: append the returned text to the chunk that owns the figure's bounding-box region. Tag with `vl_augmented: true` metadata so retrieval can prefer / dispreference these chunks if needed. The augmentation text counts toward the chunk's byte budget so we don't exceed `MAX_DOCUMENT_BYTES`.
+4. Idempotency: deduplicate by figure chash (`sha256` of the rendered PNG) so re-indexing the same paper doesn't re-spend prefill cost.
+5. Failure mode: if the VL backend is unreachable or times out, the chunk lands without augmentation — fail-soft, log structured event.
+6. Cost / latency: 5–15 s per image × ~5–20 figures per paper = 25 s – 5 min per paper of one-time prefill cost at ingest. Acceptable for a background queue. Throughput bottleneck is the backend's single-image prefill, not nexus.
+
+**Decision rule:** index 5–10 figure-heavy papers from `knowledge__dt-papers` both with and without VL augmentation, build a query set targeting figure content ("which model has the highest F1 on OAEI Anatomy"; "what are the axes of Figure 3 in M3DocRAG"), measure recall@10. File a bead for a configurable VL-enrichment hook if recall@10 lift ≥ 10 pp on figure-bearing queries.
+
+**Constraints to surface in the eventual bead:**
+- VL backend is remote (qwentescence); nexus's enrichment must tolerate occasional unreachability and not block ingest.
+- The qwentescence operator flagged that tool-use during image processing is not wired. The proposed enrichment path is one-shot image-in / structured-text-out, which matches the supported mode. Do not design a mid-loop agentic flow.
+- Output should be JSON-schema-constrained via `response_format` so the structured-text payload is parseable without retries.
+
+### Three earlier "relevance paths" — restated under the new info
+
+1. **Post-retrieval text enrichment via the text supervisor** — still text-only, still not the M3DocRAG answer. Continue as the active text-offload integration target (per `qwen-offload-transition-plan.md`).
+2. **Parallel Qwen2-VL llama.cpp backend, called directly** — **operational at qwentescence (or imminent), not hypothetical.** This is the NEW P0 spike's backing infrastructure.
+3. **Adding VL support to the supervisor** — still upstream-dependent (`@qwen-code/sdk` has no image content type), still a future change in the coprocessor stack. Not needed for the P0 spike because direct HTTP works.
+
+### Stance — revised
+
+The qwen-coprocessor's text supervisor remains text-only. **But the backing inference infrastructure (llama-server on Strix Halo / qwentescence) already serves a vision-language Qwen 3.6 model that nexus can call directly via OpenAI-compatible HTTP, bypassing the supervisor entirely.** That's the path. Closing the M3DocRAG §5.1 visual-evidence gap via ingest-time VL text augmentation is now the highest-priority spike in this proposal.
 
 ## 6. The spike
 
@@ -157,11 +190,12 @@ Run instructions are in the script's docstring. The script is gated behind `--co
 
 ## 8. Decisions asked
 
-1. **Accept architecture.md + cli-reference.md citation** (§4.2)? — yes / no / modify.
-2. **Run the text-only ColBERT spike and decide on the +5 % rule** (§6)? — yes / no / defer.
-3. **If the spike passes the threshold, file a bead for an opt-in late-interaction parallel retriever**? — yes / conditional / defer.
-4. **Run the ColPali-on-Apple-Silicon retrieval spike** (§5b)? — yes / no / defer. Scope and threshold spelled out in the table; no Qwen2-VL involved.
-5. **Run the figure-only SigLIP spike** (§5b)? — yes / no / defer. Lighter footprint than ColPali; uses Docling's existing figure extraction.
-6. **Promote to RDR?** — only if any spike supports adoption; the proposal + spikes alone don't need one.
+1. **NEW P0: run the VL-augmented chunk-enrichment spike** (§5c)? — yes / no / defer. Closes M3DocRAG §5.1's visual-evidence gap via ingest-time text augmentation; uses the qwentescence Qwen 3.6-35B-A3B VL backend over OpenAI-compatible HTTP. Smallest blast radius of any spike in this proposal. Decision rule: recall@10 lift ≥ 10 pp on figure-bearing queries → file bead.
+2. **Accept architecture.md + cli-reference.md citation** (§4.2)? — yes / no / modify.
+3. **Run the text-only ColBERT spike and decide on the +5 % rule** (§6)? — yes / no / defer. Independent of VL; addresses vocabulary mismatch on text corpora.
+4. **If §6 ColBERT passes the threshold, file a bead for an opt-in late-interaction parallel retriever**? — yes / conditional / defer.
+5. **Run the figure-only SigLIP spike** (§5b)? — yes / no / defer. Lighter than ColPali but lower priority than VL-augmentation (VL gives richer text than vector matches).
+6. **Run the ColPali-on-Apple-Silicon retrieval spike** (§5b)? — yes / no / defer. Heaviest spike; only worth running if both VL-augmentation and SigLIP underperform.
+7. **Promote to RDR?** — likely yes if the §5c P0 spike clears the bar, given the ingest-pipeline change is non-trivial and crosses configuration / extraction / chunking layers.
 
-No code changes from this document. The text-only spike script (`scripts/colbert_recall_spike.py`) is measurement-only. The two new figure/page-image spikes (§5b) are not yet scaffolded — they're scoped here so the conversation can choose whether to invest in scaffolding them.
+No code changes from this document. The text-only spike script (`scripts/colbert_recall_spike.py`) is measurement-only. The three figure / page-image / VL-augmentation spikes (§5b, §5c) are not yet scaffolded — they're scoped here so the conversation can choose where to invest.
