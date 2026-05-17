@@ -231,6 +231,27 @@ script preserved at
 `scripts/spikes/spike_rdr114_tuplespace_out_latency.py`
 (p99=48 ms local-mode, N=1000).
 
+### Docs (UX + first-run, nexus-m0bw Bundle G)
+
+Two UX-doc follow-ups from the documentation critic, both
+discoverability fixes.
+
+- **Cockpit overview in README.md** (nexus-g5qe). The Security
+  section name-dropped RDR-113 (host-trust model) but never
+  introduced the cockpit substrate the trust model exists to
+  protect. New `## Cockpit substrate (RDR-110/111/112)` section
+  links each RDR with a paragraph summary: RDR-110 covers the ORB
+  tuplespace; RDR-111 the hook bridge + cockpit panels; RDR-112 the
+  T2 storage-as-service daemon plus the autostart install path.
+- **`tests/commands/test_help_completeness.py`** (nexus-fnhe). New
+  test file that walks the Click hierarchy under `nexus.cli.main`
+  and asserts every reachable (non-hidden) command has non-empty
+  `help` text AND its `--help` invocation exits 0 with a Usage
+  block. 388 parametrised cases run in <1 s. A third test scans
+  for placeholder tokens (`TODO`, `FIXME`, `TBD`) in any help
+  string. Hidden commands (the internal `hook` group) are skipped
+  by design.
+
 ### Changed (line-level review polish, nexus-z7hf Bundle E)
 
 Seven small follow-ups from the code-review critic. None changes

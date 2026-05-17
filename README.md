@@ -177,6 +177,39 @@ Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs
 - For cloud embeddings (optional): [ChromaDB Cloud](https://www.trychroma.com/) + [Voyage AI](https://www.voyageai.com/) accounts (free tiers available)
 - For hybrid search: [`ripgrep`](https://github.com/BurntSushi/ripgrep)
 
+## Cockpit substrate (RDR-110/111/112)
+
+nexus ships an agentic-cockpit substrate that runs alongside the
+core CLI. Three RDRs cover the moving parts:
+
+- **[RDR-110 Semantic Tuple Space](docs/rdr/rdr-110-semantic-tuple-space.md).**
+  An ORB (out / read / take / ack / nack) tuplespace lives in
+  `~/.config/nexus/tuples.db` next to `memory.db`. Subspaces declare a
+  schema (dimensions, embed source, take semantics, retention) in YAML
+  under `nx/tuplespace/builtin/`. `nx tuplespace ...` is the operator
+  surface; the matching MCP tools route through the daemon when
+  `NX_STORAGE_MODE=daemon`. Atomicity (Chroma + SQLite) and idempotent
+  retake are first-class contracts (CA-1 / CA-2).
+- **[RDR-111 ORB Hook Bridge and Cockpit](docs/rdr/rdr-111-orb-hook-bridge-cockpit.md).**
+  Claude Code hooks (PreToolUse, PostToolUse, Stop, SubagentStop,
+  UserPromptSubmit, Session, Notification) project into seven
+  `hook_events/*` subspaces via the `orb_bridge_*.py` scripts under
+  `nx/hooks/scripts/`. `nx cockpit` (`status` / `show` / `dashboard`
+  plus `recent-events` / `active-claims` / `active-bindings` panels)
+  is the read surface. Binding profiles under
+  `nx/tuplespace/builtin/bindings/profiles/` react to events with
+  configurable actions; the cockpit binding watcher in
+  `nexus.cockpit.bindings` drives the dispatch.
+- **[RDR-112 T2 Storage-as-Service](docs/rdr/rdr-112-t2-storage-service.md).**
+  A persistent local daemon (`nx daemon t2 start`) owns the single
+  SQLite writer for `memory.db` and `tuples.db`, exposing every
+  domain-store method over a UDS-primary / loopback-TCP-fallback RPC
+  surface. `nx daemon t2 install --autostart` wires up launchd
+  (macOS) or systemd user units (Linux). The fail-closed bridge
+  default + `EventStream` reconnect contract (RDR-114) close the
+  daemon-unavailability semantics so subscribers and emitters share a
+  uniform recoverable shape.
+
 ## Security
 
 nexus is designed for single-user host trust: the daemon owner and
