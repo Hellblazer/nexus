@@ -599,6 +599,166 @@ class TestSerializationRoundtrip:
 
 
 # ---------------------------------------------------------------------------
+# Security d-i-d: dataclass-tag allowlist (nexus-ac2l)
+# ---------------------------------------------------------------------------
+
+
+class TestDataclassTagAllowlist:
+    """Defence-in-depth: unknown ``__dataclass__`` tags must be rejected.
+
+    nexus-ac2l: ``_t2_decode`` previously unpacked any ``__dataclass__``-tagged
+    dict to a plain dict, silently discarding the qualname. A same-UID client
+    could feed an unexpected tag to bypass any "is this a dataclass-shaped
+    payload?" check downstream. Not exploitable today (admin ops are UDS-only
+    and the dispatcher does not introspect tag names) but the allowlist stance
+    is correct.
+    """
+
+    def test_allowlist_is_frozenset(self) -> None:
+        from nexus.daemon.t2_daemon import _ALLOWED_DATACLASS_TYPES
+        assert isinstance(_ALLOWED_DATACLASS_TYPES, frozenset)
+        assert len(_ALLOWED_DATACLASS_TYPES) > 0
+
+    def test_allowlist_includes_queuerow(self) -> None:
+        """QueueRow round-trips today (test_dataclass_roundtrip)."""
+        from nexus.daemon.t2_daemon import _ALLOWED_DATACLASS_TYPES
+        assert "QueueRow" in _ALLOWED_DATACLASS_TYPES
+
+    def test_allowlist_includes_catalog_types(self) -> None:
+        """Catalog reads return Tumbler / CatalogEntry / CatalogLink."""
+        from nexus.daemon.t2_daemon import _ALLOWED_DATACLASS_TYPES
+        for name in ("Tumbler", "CatalogEntry", "CatalogLink"):
+            assert name in _ALLOWED_DATACLASS_TYPES, (
+                f"{name} should be in the allowlist (returned by catalog RPCs)"
+            )
+
+    def test_unknown_dataclass_tag_rejected_top_level(self) -> None:
+        """An unknown ``__dataclass__`` tag at top level raises ValueError."""
+        import json
+        payload = json.dumps(
+            {"__dataclass__": "AttackerInjected", "fields": {"x": 1}}
+        ).encode()
+        with pytest.raises(ValueError, match="unknown.*dataclass.*AttackerInjected"):
+            t2_json_loads(payload)
+
+    def test_unknown_dataclass_tag_rejected_nested(self) -> None:
+        """An unknown ``__dataclass__`` tag nested in a list raises."""
+        import json
+        payload = json.dumps(
+            {
+                "args": [
+                    {"__dataclass__": "Spoofed", "fields": {"y": "hello"}},
+                ],
+            }
+        ).encode()
+        with pytest.raises(ValueError, match="unknown.*dataclass.*Spoofed"):
+            t2_json_loads(payload)
+
+    def test_unknown_dataclass_tag_rejected_inside_dict_value(self) -> None:
+        """An unknown ``__dataclass__`` tag inside a dict value raises."""
+        import json
+        payload = json.dumps(
+            {
+                "result": {
+                    "wrapped": {
+                        "__dataclass__": "Imposter",
+                        "fields": {"z": True},
+                    },
+                },
+            }
+        ).encode()
+        with pytest.raises(ValueError, match="unknown.*dataclass.*Imposter"):
+            t2_json_loads(payload)
+
+    def test_allowed_dataclass_still_unpacks_to_fields(self) -> None:
+        """Backwards-compatibility: allowed dataclass tags decode to fields dict."""
+        from nexus.db.t2.aspect_extraction_queue import QueueRow
+        row = QueueRow(
+            collection="code__demo",
+            source_path="/tmp/x.py",
+            content_hash="abc",
+            content="",
+            retry_count=0,
+        )
+        encoded = t2_json_dumps({"result": row})
+        decoded = t2_json_loads(encoded)
+        assert decoded["result"]["collection"] == "code__demo"
+        assert decoded["result"]["content_hash"] == "abc"
+
+
+# ---------------------------------------------------------------------------
+# Security d-i-d: lower default frame size (nexus-ex4r)
+# ---------------------------------------------------------------------------
+
+
+class TestFrameSizeLimit:
+    """Defence-in-depth: cap default RPC frame size at 1 MiB.
+
+    nexus-ex4r: 16 MiB was over-permissive given typical T2 payloads
+    (search params, single rows, small batches) are well under 1 MiB. A
+    misbehaving same-UID client could announce a 16 MiB length header and
+    force the daemon to allocate that buffer. Cross-UID requests are
+    already rejected before ``read_frame``, so the risk is bounded to
+    same-UID processes that could call the API directly anyway, but the
+    smaller cap is defensive.
+    """
+
+    def test_daemon_max_frame_is_1_mib(self) -> None:
+        from nexus.daemon import t2_daemon
+        assert t2_daemon._MAX_FRAME_BYTES == 1 * 1024 * 1024
+
+    def test_client_max_frame_is_1_mib(self) -> None:
+        from nexus.daemon import t2_client
+        assert t2_client._MAX_FRAME_BYTES == 1 * 1024 * 1024
+
+    def test_daemon_and_client_caps_match(self) -> None:
+        """Both ends MUST enforce the same cap or one side leaks."""
+        from nexus.daemon import t2_client, t2_daemon
+        assert t2_daemon._MAX_FRAME_BYTES == t2_client._MAX_FRAME_BYTES
+
+    def test_daemon_read_frame_rejects_oversize(self) -> None:
+        """A length header above the cap raises ProtocolError."""
+        import struct as _struct
+        from nexus.daemon.t2_daemon import (
+            ProtocolError,
+            _MAX_FRAME_BYTES,
+            read_frame,
+        )
+
+        async def _run() -> None:
+            reader = asyncio.StreamReader()
+            reader.feed_data(_struct.pack(">I", _MAX_FRAME_BYTES + 1))
+            reader.feed_eof()
+            with pytest.raises(ProtocolError, match="exceeds maximum"):
+                await read_frame(reader)
+
+        asyncio.run(_run())
+
+    def test_client_sock_read_frame_rejects_oversize(self) -> None:
+        """A length header above the cap raises T2DaemonError on the client."""
+        import socket as _socket
+        import struct as _struct
+        import threading as _threading
+        from nexus.daemon.t2_client import _MAX_FRAME_BYTES, _sock_read_frame
+
+        a, b = _socket.socketpair()
+        try:
+            def _send_oversized_header() -> None:
+                a.sendall(_struct.pack(">I", _MAX_FRAME_BYTES + 1))
+
+            t = _threading.Thread(target=_send_oversized_header)
+            t.start()
+            try:
+                with pytest.raises(T2DaemonError, match="exceeds maximum"):
+                    _sock_read_frame(b)
+            finally:
+                t.join()
+        finally:
+            a.close()
+            b.close()
+
+
+# ---------------------------------------------------------------------------
 # Connection pool concurrency test
 # ---------------------------------------------------------------------------
 

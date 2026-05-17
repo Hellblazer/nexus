@@ -231,6 +231,41 @@ script preserved at
 `scripts/spikes/spike_rdr114_tuplespace_out_latency.py`
 (p99=48 ms local-mode, N=1000).
 
+### Security (RDR-113 defence-in-depth, nexus-qh9k Bundle A)
+
+Three same-UID surface tightenings on the T2 daemon's wire path. None
+exploitable today (admin ops are UDS-only and the daemon's threat
+model already excludes cross-UID peers), all defensive against a
+buggy or compromised same-UID peer.
+
+- **Dataclass-tag allowlist** (nexus-ac2l). `_t2_decode` previously
+  unpacked any `__dataclass__`-tagged dict to a plain dict and
+  discarded the qualname. A same-UID client could feed an unexpected
+  tag to bypass downstream "is this a dataclass-shaped payload?"
+  checks. Decode now consults `_ALLOWED_DATACLASS_TYPES` (a frozenset
+  of known wire-traversing dataclass qualnames: `QueueRow`,
+  `AspectRecord`, `Tumbler`, `OwnerRecord`, `DocumentRecord`,
+  `LinkRecord`, `CatalogEntry`, `CatalogLink`, `ManifestRow`,
+  `OrphanPlan`, `DedupePlan`) and raises `ValueError` on unknown
+  tags. Encode stays permissive; the allowlist is the strict gate on
+  inbound payloads.
+- **Frame-size cap lowered to 1 MiB** (nexus-ex4r). Both
+  `t2_daemon._MAX_FRAME_BYTES` and `t2_client._MAX_FRAME_BYTES`
+  drop from 16 MiB to 1 MiB. Typical T2 RPC payloads (single rows,
+  small batches, search params) sit well under 64 KiB; the prior
+  cap let a misbehaving same-UID peer announce a 16 MiB header and
+  force the daemon to allocate that buffer per connection in
+  `readexactly`. Bulk ops that legitimately need a larger frame
+  (introspection export, schema dumps) must page their results or
+  lift the cap on a per-RPC basis after explicit review.
+- **macOS LOCAL_PEERCRED TOCTOU documented** (nexus-qyff).
+  `peer.py` module docstring now spells out that
+  Linux `SO_PEERCRED` re-derives per `getsockopt` call while macOS
+  `LOCAL_PEERCRED` snapshots at peer socket-creation time. Safe
+  under the same-UID threat model (the trusted UID is constant), but
+  the gap matters if a future trust model widens to "same UID and
+  same process binary". Inline note added to `_read_darwin`.
+
 ## [4.32.12] - 2026-05-13
 
 Patch on 4.32.11. Two CI-correctness fixes plus substantial RDR
