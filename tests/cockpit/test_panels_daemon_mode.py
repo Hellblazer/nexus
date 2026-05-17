@@ -256,7 +256,12 @@ class TestCockpitPanelsDaemonMode:
 
 
 class TestCockpitPanelsStandaloneMode:
-    """Without NX_STORAGE_MODE, the existing direct-read still works."""
+    """With NX_STORAGE_MODE=direct, the existing direct-read still works.
+
+    nexus-507q (RDR-112 P6.3 cutover, 2026-05-17): direct mode is now
+    an explicit opt-in; the test sets the env so the standalone
+    direct-read path is exercised.
+    """
 
     def test_standalone_active_claims_still_uses_direct_read(
         self, tmp_path: Path, monkeypatch
@@ -268,7 +273,7 @@ class TestCockpitPanelsStandaloneMode:
         c.close()  # schema only — empty DB renders cleanly
 
         monkeypatch.setenv("NX_COCKPIT_TUPLES_DB", str(db_path))
-        monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
+        monkeypatch.setenv("NX_STORAGE_MODE", "direct")
 
         runner = CliRunner()
         result = runner.invoke(cockpit_group, ["show", "active-claims"])

@@ -19,7 +19,7 @@ from nexus.config import get_credential
 class DaemonModeDiagnosticError(RuntimeError):
     """Raised when an admin/diagnostic path attempts a direct
     ``sqlite3.connect`` or ``chromadb.PersistentClient`` open while
-    ``NX_STORAGE_MODE=daemon`` is set.
+    the resolved storage mode is ``daemon``.
 
     Phase 1 (RDR-112 ``nexus-61x6``) hands T2 ownership to a daemon
     process that holds the SQLite WAL writer. A direct connect from a
@@ -29,21 +29,55 @@ class DaemonModeDiagnosticError(RuntimeError):
     """
 
 
+def default_storage_mode() -> str:
+    """Resolve the active storage mode, returning ``"daemon"`` by default.
+
+    nexus-507q (RDR-112 P6.3 cutover, 2026-05-17): the default flipped
+    from ``direct`` to ``daemon``. ``direct`` remains available as the
+    debug fallback by setting ``NX_STORAGE_MODE=direct`` explicitly.
+
+    Returns the env value (lowercased + stripped) when set, else
+    ``"daemon"``. Unknown values pass through unchanged; callers
+    compare against the literals ``"daemon"`` and ``"direct"``.
+    """
+    raw = os.environ.get("NX_STORAGE_MODE", "")
+    if raw is None:
+        return "daemon"
+    normalised = raw.strip().lower()
+    if not normalised:
+        return "daemon"
+    return normalised
+
+
+def is_daemon_mode() -> bool:
+    """Return True when the resolved storage mode is ``daemon``.
+
+    Equivalent to ``default_storage_mode() == "daemon"``. Provided as
+    a convenience for the dozens of call sites that gate on daemon
+    routing.
+    """
+    return default_storage_mode() == "daemon"
+
+
 def reject_under_daemon_mode(op_name: str) -> None:
-    """Raise :class:`DaemonModeDiagnosticError` when daemon mode is set.
+    """Raise :class:`DaemonModeDiagnosticError` when daemon mode is active.
 
     Used at every direct ``sqlite3.connect`` callsite outside
     ``src/nexus/db/`` that targets the T2 ``memory.db`` (or its T3
-    chroma equivalent). The function is a no-op when the env var is
-    unset or non-daemon — direct-mode behaviour is unchanged.
+    chroma equivalent). The function is a no-op only when the
+    resolved mode is non-daemon (i.e. ``NX_STORAGE_MODE=direct``).
 
-    RDR-112 P1 prereq (Phase-0-gate foundation review, 2026-05-14).
+    nexus-507q (2026-05-17): after the default flipped to daemon, an
+    unset ``NX_STORAGE_MODE`` env var now triggers this guard. Callers
+    that genuinely want direct-mode behaviour must set the env to
+    ``direct`` explicitly.
     """
-    if os.environ.get("NX_STORAGE_MODE", "").lower() == "daemon":
+    if is_daemon_mode():
         raise DaemonModeDiagnosticError(
             f"{op_name} cannot open T2/T3 storage directly while "
-            f"NX_STORAGE_MODE=daemon is set. Route through the daemon "
-            f"RPC surface or run the command in direct mode."
+            f"the active storage mode is daemon (set "
+            f"NX_STORAGE_MODE=direct to opt back in to direct opens, "
+            f"or route through the daemon RPC surface)."
         )
 
 if TYPE_CHECKING:

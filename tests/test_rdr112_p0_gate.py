@@ -37,19 +37,37 @@ def test_run_if_needed_skips_under_daemon_mode(
     assert not db_path.exists()
 
 
-def test_run_if_needed_runs_when_storage_mode_unset(
+def test_run_if_needed_skipped_when_storage_mode_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without the daemon-mode env, the existing behaviour stands."""
+    """nexus-507q (RDR-112 P6.3 cutover, 2026-05-17): unset env now
+    resolves to daemon mode, so client-side migrations are skipped
+    (the daemon owns the WAL writer)."""
     from nexus.db import migrations
 
     db_path = tmp_path / "memory.db"
     monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
-    # Clear the per-process upgrade cache so we observe a fresh call.
     migrations._upgrade_done.clear()
 
     migrations.run_if_needed(db_path)
-    assert db_path.exists()  # the connection was opened, schema applied.
+    assert not db_path.exists(), (
+        "post-cutover: unset env -> daemon mode -> no client-side migration "
+        "(daemon owns the WAL writer). The db file must NOT be created here."
+    )
+
+
+def test_run_if_needed_runs_when_storage_mode_direct(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit direct mode still runs the migration (direct-mode path)."""
+    from nexus.db import migrations
+
+    db_path = tmp_path / "memory.db"
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+    migrations._upgrade_done.clear()
+
+    migrations.run_if_needed(db_path)
+    assert db_path.exists()
 
 
 def test_run_if_needed_runs_under_non_daemon_storage_mode(
@@ -193,12 +211,29 @@ def test_reject_under_daemon_mode_raises_when_set(
         reject_under_daemon_mode("test op")
 
 
-def test_reject_under_daemon_mode_noop_when_unset(
+def test_reject_under_daemon_mode_raises_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from nexus.db import reject_under_daemon_mode
+    """nexus-507q (RDR-112 P6.3 cutover): unset env now resolves to
+    daemon, so the guard fires. The cutover doc reframes the
+    direct-mode behaviour as an explicit opt-in
+    (``NX_STORAGE_MODE=direct``).
+    """
+    from nexus.db import DaemonModeDiagnosticError, reject_under_daemon_mode
 
     monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
+    with pytest.raises(DaemonModeDiagnosticError):
+        reject_under_daemon_mode("test op")
+
+
+def test_reject_under_daemon_mode_noop_when_direct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit direct mode bypasses the guard (the legacy direct-open
+    callsites still work for operators that opt back in)."""
+    from nexus.db import reject_under_daemon_mode
+
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
     reject_under_daemon_mode("test op")  # must NOT raise
 
 

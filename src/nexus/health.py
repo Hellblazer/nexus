@@ -712,7 +712,8 @@ def _check_t2_integrity() -> list[HealthResult]:
 
     # RDR-112 P1 prereq: skip the direct integrity probe in daemon mode
     # (the daemon's own startup check is the authoritative path).
-    if os.environ.get("NX_STORAGE_MODE", "").lower() == "daemon":
+    from nexus.db import is_daemon_mode
+    if is_daemon_mode():
         return [HealthResult(
             label="T2 integrity",
             ok=True,

@@ -91,11 +91,41 @@ across three closely-coupled module groups.
 
 ### Process model and host trust (RDR-112, RDR-113)
 
-`NX_STORAGE_MODE=daemon` puts T2 behind a single-writer asyncio
-daemon. Clients reach it via JSON-RPC over Unix domain sockets
-(primary) or loopback TCP (fallback); direct sqlite connections to
-`memory.db` or `tuples.db` from any other process are then a
-boundary violation.
+The active storage mode is resolved by
+`nexus.db.default_storage_mode()`. As of the RDR-112 P6.3 cutover
+(2026-05-17, nexus-507q) the default flipped from `direct` to
+`daemon`: an unset `NX_STORAGE_MODE` env var now resolves to
+`daemon`. Operators who want the legacy direct-mode behaviour must
+opt back in with `NX_STORAGE_MODE=direct`.
+
+Daemon mode puts T2 behind a single-writer asyncio daemon. Clients
+reach it via JSON-RPC over Unix domain sockets (primary) or loopback
+TCP (fallback); direct sqlite connections to `memory.db` or
+`tuples.db` from any other process are then a boundary violation
+(the `reject_under_daemon_mode` guard in `nexus.db` raises
+`DaemonModeDiagnosticError` when the legacy direct-open paths fire
+while daemon mode is active).
+
+#### Migration from direct mode to daemon mode
+
+After upgrading to the cutover-bearing release:
+
+- **Install the daemon** with `nx daemon t2 install --autostart` so
+  it starts at login / boot (launchd on macOS, systemd user unit on
+  Linux). Then `nx daemon t2 start` for the current session.
+- **Verify the daemon is running** with `nx daemon t2 info` (returns
+  the discovery JSON). The MCP server and CLI commands look it up
+  via `nexus.daemon.discovery.find_t2_daemon()`.
+- **If you want to stay in direct mode** (e.g. on a host that does
+  not run the daemon, or for debugging), set
+  `NX_STORAGE_MODE=direct` in your shell profile. The CLI, MCP
+  server, and helper modules all honour the override.
+- **Fail-loud safety**: in daemon mode, the MCP `_get_tuplespace`
+  bootstrap raises `RuntimeError` if no daemon discovery file is
+  found, rather than silently falling back to a second in-process
+  SQLite writer that would race the daemon. The error message names
+  the recovery action (`nx daemon t2 start`).
+
 
 - **Discovery**: the daemon writes
   `<config_dir>/t2_addr.<uid>` with UDS path, TCP host/port, PID,

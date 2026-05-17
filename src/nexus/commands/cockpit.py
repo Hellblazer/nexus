@@ -192,8 +192,13 @@ def _render_one(panel: str, *, limit: int) -> RenderedPanel:
 
 
 def _is_daemon_mode() -> bool:
-    """Return True if ``NX_STORAGE_MODE=daemon`` is set."""
-    return os.environ.get("NX_STORAGE_MODE", "").strip().lower() == "daemon"
+    """Return True if the active storage mode is daemon.
+
+    nexus-507q (RDR-112 P6.3 cutover, 2026-05-17): the default flipped
+    to daemon, so an unset env var now returns True from here.
+    """
+    from nexus.db import is_daemon_mode
+    return is_daemon_mode()
 
 
 def _open_daemon_client() -> "T2Client":  # noqa: F821 — forward ref

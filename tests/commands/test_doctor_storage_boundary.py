@@ -58,7 +58,7 @@ class TestCheckStorageBoundary:
         monkeypatch.setattr(
             doctor_cmd, "__file__", str(pkg / "commands" / "doctor.py")
         )
-        monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
+        monkeypatch.setenv("NX_STORAGE_MODE", "direct")  # nexus-507q: post-cutover default is daemon
 
         exit_code = doctor_cmd._run_check_storage_boundary()
         assert exit_code == 0
@@ -70,7 +70,7 @@ class TestCheckStorageBoundary:
         monkeypatch.setattr(
             doctor_cmd, "__file__", str(pkg / "commands" / "doctor.py")
         )
-        monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
+        monkeypatch.setenv("NX_STORAGE_MODE", "direct")  # nexus-507q: post-cutover default is daemon
 
         runner = CliRunner()
         result = runner.invoke(
@@ -119,7 +119,7 @@ class TestCheckStorageBoundary:
         monkeypatch.setattr(
             doctor_cmd, "__file__", str(pkg / "commands" / "doctor.py")
         )
-        monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
+        monkeypatch.setenv("NX_STORAGE_MODE", "direct")  # nexus-507q: post-cutover default is daemon
 
         runner = CliRunner()
         result = runner.invoke(
@@ -151,7 +151,7 @@ class TestCheckStorageBoundary:
         monkeypatch.setattr(
             doctor_cmd, "__file__", str(pkg / "commands" / "doctor.py")
         )
-        monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
+        monkeypatch.setenv("NX_STORAGE_MODE", "direct")  # nexus-507q: post-cutover default is daemon
 
         exit_code = doctor_cmd._run_check_storage_boundary()
         assert exit_code == 0

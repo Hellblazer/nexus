@@ -906,7 +906,8 @@ def _run_check_storage_boundary() -> int:
                 rel = py_path.relative_to(pkg_root.parent.parent)
                 violations.append((str(rel), node.lineno, snippet))
 
-    daemon_mode = _os.environ.get("NX_STORAGE_MODE", "").strip().lower() == "daemon"
+    from nexus.db import is_daemon_mode as _is_daemon_mode
+    daemon_mode = _is_daemon_mode()
     click.echo("Storage-boundary check (RDR-112 §5):")
     if not violations:
         click.echo(_check("no direct sqlite3.connect outside daemon/", True))

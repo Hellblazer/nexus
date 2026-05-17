@@ -3772,9 +3772,9 @@ def run_if_needed(path: Path) -> None:
     race the daemon's writer. We make this a no-op client-side and
     let the daemon's own startup (nexus-w0et) be the sole caller.
     """
-    import os
+    from nexus.db import is_daemon_mode
 
-    if os.environ.get("NX_STORAGE_MODE", "").lower() == "daemon":
+    if is_daemon_mode():
         _log.debug(
             "run_if_needed_skipped_daemon_mode",
             path=path.name,

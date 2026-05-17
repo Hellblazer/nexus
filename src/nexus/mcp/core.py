@@ -4222,8 +4222,11 @@ def _get_tuplespace() -> dict[str, Any]:
 
     registry = Registry.load(default_builtin_dir())
 
-    storage_mode = _os.environ.get("NX_STORAGE_MODE", "").lower()
-    if storage_mode == "daemon":
+    # nexus-507q (RDR-112 P6.3 cutover, 2026-05-17): the default flipped
+    # to daemon. ``is_daemon_mode()`` returns True when env unset; the
+    # discovery probe below fail-louds if no daemon is running.
+    from nexus.db import is_daemon_mode as _is_daemon_mode  # noqa: PLC0415
+    if _is_daemon_mode():
         # nexus-6s8v (RDR-112): daemon-mode tuplespace routing.
         # Build a T2Client connected to the running daemon's UDS (or TCP
         # fallback), and stash it in _TUPLESPACE for the tool handlers to
