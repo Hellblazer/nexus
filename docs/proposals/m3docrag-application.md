@@ -105,6 +105,26 @@ The text-only ColBERT spike (§6) is unchanged in scope — it's about late-inte
 | ColPali retrieval on Apple Silicon (no generator) | **Reconsider** | Index a 20-PDF subset with ColPali via transformers+MPS. Measure: per-page index time, query latency, recall@10 vs Voyage on figure-heavy queries. File a bead if index time ≤ 60s/page and recall@10 lift on figure-bearing queries ≥ 10pp. |
 | Figure-only embeddings via SigLIP | **New, deferred** | Use Docling's figure bounding boxes (already extracted); embed via `sentence-transformers/clip-ViT-B-32` or SigLIP base; store as a parallel index per PDF. Test on the same figure-heavy query set. Lighter footprint (~400 MB model, CPU OK). |
 
+## 5c. Qwen coprocessor as a local VL backend — surveyed
+
+**Repo:** `~/git/qwen-coprocessor-stack` — locally-hosted Qwen 3.6 wired into Claude Code as an MCP coprocessor. Supervisor is a TypeScript MCP server (`mcp-bridges/qwen-agent-server`) wrapping `@qwen-code/sdk`; backends are any OpenAI-compatible endpoint serving a Qwen 3.6 GGUF. Default deployments: llama.cpp Metal on Apple Silicon (Qwen 3.6 27B at `localhost:8080`) and llama.cpp Vulkan on Strix Halo (Qwen 3.6 35B-A3B remote). T2 memory entries `qwen-coprocessor-stack/*` document existing nexus integrations (`nx_tidy`, `nx_enrich_beads`, etc.).
+
+**What the stack supports today:** text-only Qwen 3.6 via `@qwen-code/sdk`. Searched the SDK type definitions (`node_modules/@qwen-code/sdk/dist/index.d.ts`): zero matches for `image`, `vision`, `mmproj`, or any multi-modal content shape. The supervisor's `session.ts` / `server.ts` carry no image-passthrough. Tier conclusion: **the supervisor is not a multi-modal path as it exists.**
+
+**Three ways it could be relevant anyway:**
+
+1. **Post-retrieval enrichment (text-only, today).** A retrieved chunk that contains a figure caption + nearby prose could be passed through Qwen 3.6 27B to elaborate or summarise. This doesn't get us image understanding — it's a text-bulk-work path that the stack already does well, and it doesn't move the M3DocRAG needle. Not interesting for this proposal.
+2. **Parallel Qwen2-VL llama.cpp backend, called directly (not via supervisor).** llama.cpp supports Qwen2-VL / Qwen2.5-VL on Metal via the `--mmproj` image encoder flag. A separate llama.cpp instance serving a Qwen2-VL GGUF at, say, `localhost:8081/v1` would be reachable from nexus via OpenAI-compatible HTTP — same as any other endpoint. The supervisor doesn't need to be in the loop because nexus would call the backend directly for one-shot "describe this figure" requests. **This is the realistic local-VL path.** Caveats: Qwen2.5-VL 7B GGUF Q4_K_M is ~5 GB; latency on M-Max ~2–10 s per image; quality degrades materially at INT4 vs full precision.
+3. **Supervisor extension for VL passthrough (future).** Adding image-input support to the supervisor would need: (a) `@qwen-code/sdk` to grow multi-modal content support (it hasn't, and that's an upstream change), (b) the supervisor's `session.ts` to thread image payloads through `QueryOptions`, (c) a backend config flag marking which backends accept images, (d) one or more VL-capable backends. This is the "right" path but it's an upstream-dependent multi-PR change in the coprocessor stack, not a nexus change.
+
+**Recommendation if any §5b spike clears its threshold:**
+
+- For the **ColPali retrieval-only path** — the qwen-coprocessor is irrelevant; ColPali is a retriever, not a generator.
+- For the **figure-only SigLIP path** — the qwen-coprocessor is irrelevant; SigLIP is a CPU embedder.
+- For a **future generator path** (which nexus does not have today) — option 2 above is the realistic Apple-Silicon shape: stand up a Qwen2-VL GGUF backend in llama.cpp Metal alongside the existing Qwen 3.6 backend, call it directly from nexus over OpenAI-compatible HTTP. Cost is mostly disk (~5 GB) and a few minutes of cold-start latency. No new generator pipe in nexus today, so this remains a "if we ever build a generator" note.
+
+**Stance:** the qwen-coprocessor stack is a useful local-compute substrate for **text** work and an active integration target for nexus (per `qwen-offload-transition-plan.md`). It is **not** a shortcut around the M3DocRAG GPU problem because (a) nexus has no generator, and (b) the supervisor itself is text-only and would need upstream SDK support to handle images.
+
 ## 6. The spike
 
 This proposal ships a measurement scaffold, not a production change: `scripts/colbert_recall_spike.py`.
