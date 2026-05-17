@@ -2,12 +2,12 @@
 title: "tuples.db durability and recovery: backup, restore, and rebuild story"
 id: RDR-117
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hellblazer
 reviewed-by: self
 created: 2026-05-17
-accepted_date:
+accepted_date: 2026-05-17
 related_issues: [nexus-6m9i]
 ---
 
