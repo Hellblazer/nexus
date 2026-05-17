@@ -39,11 +39,12 @@ def default_storage_mode() -> str:
     Returns the env value (lowercased + stripped) when set, else
     ``"daemon"``. Unknown values pass through unchanged; callers
     compare against the literals ``"daemon"`` and ``"direct"``.
+
+    nexus-mlmu.7 (DR-7, 2026-05-17): the prior implementation included
+    an unreachable ``if raw is None`` guard (``os.environ.get(...)``
+    with an explicit default never returns None). Removed for clarity.
     """
-    raw = os.environ.get("NX_STORAGE_MODE", "")
-    if raw is None:
-        return "daemon"
-    normalised = raw.strip().lower()
+    normalised = os.environ.get("NX_STORAGE_MODE", "").strip().lower()
     if not normalised:
         return "daemon"
     return normalised
@@ -74,10 +75,12 @@ def reject_under_daemon_mode(op_name: str) -> None:
     """
     if is_daemon_mode():
         raise DaemonModeDiagnosticError(
-            f"{op_name} cannot open T2/T3 storage directly while "
-            f"the active storage mode is daemon (set "
-            f"NX_STORAGE_MODE=direct to opt back in to direct opens, "
-            f"or route through the daemon RPC surface)."
+            f"{op_name} cannot open T2/T3 storage directly while the "
+            f"active storage mode is daemon. Either run the daemon "
+            f"(`nx daemon t2 install --autostart && nx daemon t2 start "
+            f"--foreground`) so the CLI / MCP route through its RPC "
+            f"surface, OR set `NX_STORAGE_MODE=direct` to opt back in "
+            f"to the legacy direct-open path (nexus-mlmu.4)."
         )
 
 if TYPE_CHECKING:

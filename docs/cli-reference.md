@@ -1365,9 +1365,10 @@ environment variable for terminal width; override explicitly with
 Manage the T2 storage daemon (RDR-112). The daemon owns the SQLite
 handles for `memory.db` and `tuples.db` as the single writer; clients
 reach it via JSON-RPC over UDS (primary, mode 0600 with peer-cred
-enforced) or loopback TCP (fallback, 127.0.0.1 only). When
-`NX_STORAGE_MODE=daemon` is set the CLI and MCP route through this
-process rather than opening direct SQLite connections.
+enforced) or loopback TCP (fallback, 127.0.0.1 only). Daemon mode is
+the **default** as of the 2026-05-17 cutover (RDR-112 P6.3 /
+nexus-507q): an unset `NX_STORAGE_MODE` resolves to `daemon`. Set
+`NX_STORAGE_MODE=direct` to opt back into the legacy direct-open path.
 
 ```
 nx daemon t2 start --foreground       # run in foreground (recommended)
@@ -1379,16 +1380,23 @@ nx daemon t2 install --autostart      # launchd / systemd autostart
 ### t2 start
 
 ```
-nx daemon t2 start [--config-dir DIR] [--foreground]
+nx daemon t2 start [--config-dir DIR] [--foreground] [--announce-stdout]
 ```
 
 Bind UDS+TCP transports, run migrations against `memory.db` and
-`tuples.db`, write the discovery file at
-`<config_dir>/t2_addr.<uid>`, and announce on stdout. `--foreground`
-blocks until SIGTERM / SIGINT (the reliable path until the background
-fork mode ships). Without `--foreground` the process exits as soon as
-the discovery announce completes; background mode is currently
-best-effort, so prefer the autostart unit for production.
+`tuples.db`, and write the discovery file at
+`<config_dir>/t2_addr.<uid>`. `--foreground` blocks until SIGTERM /
+SIGINT (the reliable path until the background fork mode ships).
+Without `--foreground` the process exits as soon as the discovery
+announce completes; background mode is currently best-effort, so
+**prefer the autostart unit for production**.
+
+`--announce-stdout` (nexus-l712, default OFF): emits the discovery
+JSON on stdout for container orchestrators that capture stdout for
+service discovery. Default off avoids the PID + UDS-path + registry-
+digest leak into a shared stdout sink. The discovery file at
+`~/.config/nexus/t2_addr.<uid>` is always written and is the primary
+discovery channel; the flag is only needed for containerised use.
 
 ### t2 stop
 
@@ -1418,8 +1426,10 @@ nx daemon t2 exec --raw "SQL" [--json] [--config-dir DIR]
 
 Run a read-only SQL statement against the daemon's `memory.db`. Admin
 op, UDS-only (refuses over TCP). The daemon opens a `mode=ro`
-connection and caps rows at 50000 with a post-execution audit hash.
-`--json` emits structured output.
+connection and caps rows at 10000 (nexus-3tl3.4, tightened from
+50000 to fit the 1 MiB frame cap; paged `export` is the route for
+larger pulls) with a post-execution audit hash. `--json` emits
+structured output.
 
 ### t2 schema
 
@@ -1482,7 +1492,7 @@ does not trigger an instant respawn.
 | Flag | Description |
 |------|-------------|
 | `--autostart` | Required. Selects the autostart install mode. |
-| `--force` | Treat supervisor activation failures (`launchctl` / `systemctl` exit non-zero, or binary missing on PATH) as warnings instead of errors. The plist/unit file is still written. Useful in CI or shells without a GUI session where `launchctl bootstrap` cannot complete. |
+| `--force` | Two effects (nexus-31cr): (1) overwrite an existing plist/unit file even when its content differs from the freshly rendered template (without `--force` the install refuses with a diagnostic so operator customisations aren't clobbered); (2) treat supervisor activation failures (`launchctl` / `systemctl` exit non-zero, or binary missing on PATH) as warnings instead of errors. Useful in CI or shells without a GUI session where `launchctl bootstrap` cannot complete. |
 
 Exit codes: `0` on success or on activation failure with `--force`;
 `1` if the plist/unit file was written but supervisor activation
@@ -1510,6 +1520,84 @@ reserved-prefix list (`tuples/`, `daemon/`, `tasks/`, `mailbox/`,
 `hook_events/...`); duplicate names are rejected. On success the
 discovery file is rewritten so its `subspace_schema_digest` reflects
 the new registry state.
+
+### t2 RPC surface: blocking_take
+
+The daemon exposes `tuplespace.blocking_take` (nexus-73vq) for
+clients that want to wait for a candidate rather than poll. The
+typical client surface is `T2Client.tuplespace.take(block=True,
+timeout_seconds=...)` (nexus-ry0v), which dispatches to
+`blocking_take` and widens the per-call socket recv timeout to
+`timeout_seconds + 5s` so the legitimate wait does not trip
+`RpcTimeoutError`.
+
+Contract:
+- `timeout_seconds` capped at 30 s; `InvalidTimeoutError` on overshoot
+  (nexus-3tl3.2).
+- Daemon limits concurrent in-flight `blocking_take` to 16
+  (`_BLOCKING_TAKE_MAX_CONCURRENT`); overflow raises
+  `BlockingTakeResourceExhausted` so clients can back off rather
+  than silently queue (nexus-2kld.1).
+- Direct mode (`NX_STORAGE_MODE=direct`) does NOT have blocking
+  semantics: `api.take(block=True)` raises `BlockingNotSupported`.
+  The daemon is the only path with a real wake source.
+
+---
+
+## Bindings CRUD (MCP tools)
+
+The cockpit's binding watcher (RDR-111) honours operator-managed
+profile YAMLs in `~/.config/nexus/bindings/profiles/<profile>.yml`
+(shipped builtins live under `nx/tuplespace/builtin/bindings/profiles/`
+and are read-only via the MCP surface). The watcher polls per-file
+mtime each tick and reloads on change, so CRUD writes take effect
+without a daemon restart (nexus-7lb9).
+
+### Profile YAML schema
+
+```yaml
+profile: ops                              # required; matches the file stem
+bindings:
+  - name: alert-on-test-fail              # unique within the profile
+    enabled: true                         # default true; toggle to disable
+    match:
+      subspace: hook_events/posttooluse   # any EventRecord field
+      category: data
+    action:
+      kind: log                           # 'log' or 'python'
+      marker: test-failure-detected
+  - name: send-derivative
+    match:
+      subspace: tasks/build
+    action:
+      kind: python
+      callable: my_module.path:my_function
+```
+
+Action kinds:
+- `kind: log`: append a `marker` line to the daemon log when the
+  binding fires. Inherently idempotent.
+- `kind: python`: call the named module path. The callable receives
+  `(event, binding, context)`; idempotency is enforced by the
+  `action_idempotency` table.
+
+Profile names are validated against `^[A-Za-z0-9][A-Za-z0-9_-]*$`
+(nexus-3tl3.1); path separators, traversal sequences, and shell
+metacharacters are rejected.
+
+### MCP tools
+
+| Tool | Purpose |
+|---|---|
+| `binding_create` | Create a binding (creates the profile YAML if absent). Args: `profile`, `name`, `match` (JSON), `action` (JSON), `enabled` (bool). |
+| `binding_list` | List bindings across user profiles. Args: `profile` (filter), `enabled_only` (bool). |
+| `binding_toggle` | Flip the `enabled` flag on a binding. Args: `profile`, `name`, `enabled`. |
+| `binding_delete` | Remove a binding (also removes the profile YAML when the binding was the only one). Args: `profile`, `name`. |
+
+Verification: after a `binding_create` / `binding_toggle` /
+`binding_delete`, the watcher picks the change up on the next tick
+(default 50 ms cadence). Operators can grep the daemon log for
+`binding_watcher_profiles_reloaded` to confirm the reload fired.
 
 ---
 

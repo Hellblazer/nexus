@@ -1179,6 +1179,18 @@ def _run_check_bridge() -> None:
                     f"refresh the entry",
                 )
             )
+    else:
+        # nexus-mlmu.6 (DR-6, 2026-05-17): emit an explicit
+        # 'not installed' signal so operators can distinguish a
+        # healthy autostart from a never-installed one.
+        click.echo(
+            _check(
+                "autostart binary",
+                False,
+                "not installed (run `nx daemon t2 install --autostart` "
+                "to enable launch-at-login)",
+            )
+        )
 
     # 6. Recent tuple sanity (nexus-1xip: refuse the direct tuples.db open
     # under daemon mode — the daemon owns the WAL writer and a parallel

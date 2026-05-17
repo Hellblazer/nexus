@@ -108,11 +108,19 @@ while daemon mode is active).
 
 #### Migration from direct mode to daemon mode
 
-After upgrading to the cutover-bearing release:
+After upgrading to the cutover-bearing release (2026-05-17, nexus-507q):
+
+**What you'll see if you upgrade and run `nx <subcommand>` without
+acting**: the first time the CLI tries to open a SQLite file, it
+raises `DaemonModeDiagnosticError` (formerly silent in direct mode)
+with a message naming both supported recovery paths. This is the
+breadcrumb that points to either option below.
 
 - **Install the daemon** with `nx daemon t2 install --autostart` so
   it starts at login / boot (launchd on macOS, systemd user unit on
-  Linux). Then `nx daemon t2 start` for the current session.
+  Linux). Then `nx daemon t2 start --foreground` for the current
+  session (use `--foreground` because background mode is currently
+  best-effort; the autostart unit handles persistence).
 - **Verify the daemon is running** with `nx daemon t2 info` (returns
   the discovery JSON). The MCP server and CLI commands look it up
   via `nexus.daemon.discovery.find_t2_daemon()`.

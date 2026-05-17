@@ -6,6 +6,47 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Docs (360° remediation Bundle DR, nexus-mlmu) — drift sweep + UX
+
+Seven documentation + UX findings from the 2026-05-17 360° review.
+
+- **DR-1: docs/tuplespace-env.md** updated for the cutover. The
+  `NX_STORAGE_MODE` section now leads with daemon-as-default and
+  names `NX_STORAGE_MODE=direct` as the opt-in for the legacy path.
+  Quick-reference table corrected.
+- **DR-2: docs/cli-reference.md** gained:
+  - `--announce-stdout` flag on `nx daemon t2 start` (nexus-l712).
+  - `--force` overwrite semantics on `nx daemon t2 install --autostart`
+    (nexus-31cr).
+  - `t2 exec` row cap tightened to 10000 (nexus-3tl3.4).
+  - New `t2 RPC surface: blocking_take` section (nexus-73vq +
+    nexus-ry0v) documenting timeout cap + concurrency cap +
+    direct-mode behaviour.
+  - New `Bindings CRUD (MCP tools)` section with profile YAML
+    schema, action kinds, and tool surface (nexus-7lb9).
+- **DR-3: Bindings YAML schema** now documented in cli-reference.md
+  alongside the four MCP tools.
+- **DR-4: Migration narrative** for direct-mode operators upgrading
+  to the cutover release. `architecture.md` migration block now
+  explains what error the operator will see on first run and walks
+  them to either `nx daemon t2 install --autostart` or the
+  `NX_STORAGE_MODE=direct` opt-out. The `DaemonModeDiagnosticError`
+  message lists the daemon-install path first (the supported
+  post-cutover path), with the direct opt-out as the alternative.
+- **DR-5: Cross-subspace spurious-wake characteristic** documented
+  inline in `TuplespaceService.blocking_take` (covered alongside
+  HR-3) and cross-referenced from the cli-reference blocking_take
+  contract.
+- **DR-6: `nx doctor --check-bridge` autostart-not-installed signal**
+  added. Previously silent when no plist / unit exists; now emits a
+  red ✗ "not installed" line naming `nx daemon t2 install
+  --autostart` as the remediation. Updated test asserts the new
+  signal.
+- **DR-7: `default_storage_mode` dead branch** removed. The
+  `if raw is None` guard was unreachable (`os.environ.get(...)` with
+  an explicit default never returns None); cleaned up for reader
+  clarity.
+
 ### Tests (360° remediation Bundle TR, nexus-0cf1) — contract gaps + coverage
 
 Five test-quality findings from the 2026-05-17 360° review:

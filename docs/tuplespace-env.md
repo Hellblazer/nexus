@@ -6,15 +6,26 @@ session-start banner all read these.
 
 ## NX_STORAGE_MODE
 
-Values: unset (default), `direct`, `daemon`.
+Values: `direct`, `daemon`. **Default: `daemon`** (since the
+2026-05-17 cutover, RDR-112 P6.3 / nexus-507q). An unset env
+resolves to `daemon`.
 
-When set to `daemon`, the daemon owns `tuples.db` and runs the single
-SQLite writer. The CLI then refuses mutating subcommands (`out`, `read`,
-`take`, `ack`, `nack`, `stats`) rather than opening a competing
-connection. Read-only introspection (`list-subspaces`, `show-schema`)
-remains available because it only loads the registry from YAML.
+When the resolved mode is `daemon`, the daemon owns `tuples.db`
+and runs the single SQLite writer. The CLI then refuses mutating
+subcommands (`out`, `read`, `take`, `ack`, `nack`, `stats`) rather
+than opening a competing connection. Read-only introspection
+(`list-subspaces`, `show-schema`) remains available because it only
+loads the registry from YAML.
 
-In direct mode (the default), the CLI opens the SQLite file directly.
+In direct mode (operator sets `NX_STORAGE_MODE=direct` explicitly),
+the CLI opens the SQLite file directly. Direct mode remains
+available indefinitely as the debug fallback for hosts that don't
+run the daemon.
+
+Resolution lives in `nexus.db.default_storage_mode()` and
+`nexus.db.is_daemon_mode()`; all CLI commands, the MCP server, the
+hook bridge, and the doctor checks route through these helpers
+post-cutover.
 
 ## NX_TUPLES_DB
 
@@ -67,7 +78,7 @@ the given seconds; `BD_TIMEOUT` caps `bd` calls. Defaults are 10 s and
 
 | Variable | Default | Effect |
 |---|---|---|
-| `NX_STORAGE_MODE` | unset | `daemon` flips ownership of `tuples.db` |
+| `NX_STORAGE_MODE` | `daemon` | `direct` opts back into the legacy in-process opens (post-cutover, nexus-507q) |
 | `NX_TUPLES_DB` | `<nexus_dir>/tuples.db` | path override |
 | `NX_TUPLESPACE_BUILTIN_DIR` | `nx/tuplespace/builtin/` | subspace YAML directory |
 | `NX_T1_ISOLATED` | unset | skip T1 chroma session spawn |

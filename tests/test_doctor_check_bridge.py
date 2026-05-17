@@ -454,10 +454,16 @@ def test_check_bridge_reports_healthy_autostart_binary_macos(
     assert "exists" in result.output
 
 
-def test_check_bridge_skips_autostart_check_when_no_plist_installed(
+def test_check_bridge_signals_autostart_not_installed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No autostart installed: check is a no-op (no false positive)."""
+    """No autostart installed: doctor emits an explicit 'not installed' signal.
+
+    nexus-mlmu.6 (DR-6, 2026-05-17): prior behaviour was silent in this
+    case, leaving operators unable to distinguish 'healthy autostart'
+    from 'never configured'. Doctor now emits a red ✗ line naming
+    `nx daemon t2 install --autostart` as the remediation.
+    """
     plugin_root = tmp_path / "plugin"
     _stub_bridge_scripts(plugin_root)
     _write_plugin_manifest(plugin_root, "0.0.0-stale")
@@ -474,6 +480,10 @@ def test_check_bridge_skips_autostart_check_when_no_plist_installed(
     result = runner.invoke(doctor_cmd.doctor_cmd, ["--check-bridge"])
 
     assert result.exit_code == 0, result.output
+    out_lower = result.output.lower()
+    assert "autostart" in out_lower
+    assert "not installed" in out_lower
+    assert "install --autostart" in result.output
 
 
 def test_check_bridge_reports_stale_autostart_binary_linux(
