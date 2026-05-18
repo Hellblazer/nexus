@@ -69,6 +69,11 @@ def _store_entry(id="aabbccdd1234", title="doc.md", tags="", ttl_days=0,
 ])
 def test_store_put_missing_credential(runner, monkeypatch, tmp_path,
                                       missing_key, present, cred_override, expect):
+    # nexus-idqd (RDR-112 P4.1): the cloud credential gate is direct-mode-only
+    # post-flip — daemon mode is local-only and routes through ``get_t3`` /
+    # ``make_t3_client`` (which rejects cloud with its own message). Force
+    # NX_STORAGE_MODE=direct so the cloud credential check fires here.
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
     monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.delenv(missing_key, raising=False)
     if "CHROMA_TENANT" not in present:
