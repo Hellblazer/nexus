@@ -19,6 +19,8 @@ import json
 import os
 import signal
 import socket
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -74,6 +76,25 @@ def force_local_mode(monkeypatch):
     credentials. The chroma-subprocess tests are local-mode-only by
     design; cloud-mode rejection has its own dedicated test."""
     monkeypatch.setenv("NX_LOCAL", "1")
+
+
+def _wait_for_path(path: Path, timeout: float = 10.0) -> bool:
+    """Poll until *path* exists or *timeout* elapses."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _wait_for_path_gone(path: Path, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not path.exists():
+            return True
+        time.sleep(0.1)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +311,80 @@ class TestIdempotentStart:
             assert second["tcp_port"] == first["tcp_port"]
         finally:
             stop_t3_daemon(config_dir=config_dir)
+
+
+# ---------------------------------------------------------------------------
+# --foreground supervisor-friendly blocking mode (nexus-6j2f review C1)
+# ---------------------------------------------------------------------------
+
+
+class TestForegroundBlocking:
+    """The --foreground flag is mandatory under launchd/systemd
+    supervision: the CLI must stay alive so the supervisor sees a
+    long-running foreground process. Without it, the supervisor sees
+    the CLI exit 0 and never triggers KeepAlive.Crashed /
+    Restart=on-failure on chroma death.
+    """
+
+    def test_foreground_blocks_until_sigterm(
+        self, config_dir: Path, local_path: Path, tmp_path: Path
+    ) -> None:
+        """Spawn ``nx daemon t3 start --foreground`` as a subprocess;
+        verify it stays alive past the discovery-write point and exits
+        cleanly (code 0) only after SIGTERM.
+
+        Uses a small driver script that calls ``main()`` directly
+        because ``nexus.cli`` has no ``if __name__ == '__main__'`` guard
+        (``python -m nexus.cli`` is a no-op). Matches what the installed
+        ``nx`` entry-point does.
+        """
+        from nexus.daemon.t3_daemon import t3_discovery_path
+
+        driver = tmp_path / "nx_driver.py"
+        driver.write_text(
+            "from nexus.cli import main\nif __name__ == '__main__':\n    main()\n"
+        )
+
+        env = {**os.environ, "NX_LOCAL": "1"}
+        proc = subprocess.Popen(
+            [
+                sys.executable, str(driver),
+                "daemon", "t3", "start", "--foreground",
+                "--config-dir", str(config_dir),
+                "--local-path", str(local_path),
+            ],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        try:
+            # Wait for the discovery file to appear (chroma is up).
+            disc_path = t3_discovery_path(config_dir)
+            assert _wait_for_path(disc_path, timeout=15.0), (
+                f"discovery file did not appear at {disc_path} within 15s"
+            )
+
+            # CLI must STILL be running (this is the C1 guarantee — the
+            # CLI does not exit after writing discovery).
+            assert proc.poll() is None, (
+                "CLI exited prematurely; launchd/systemd would see no "
+                "supervised process. C1 regression."
+            )
+
+            # Send SIGTERM and verify graceful exit + cleanup.
+            proc.terminate()
+            return_code = proc.wait(timeout=10.0)
+            assert return_code == 0, (
+                f"--foreground CLI must exit 0 on SIGTERM; got {return_code}"
+            )
+            assert _wait_for_path_gone(disc_path, timeout=5.0), (
+                "discovery file should be unlinked after graceful stop"
+            )
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5.0)
 
 
 # ---------------------------------------------------------------------------

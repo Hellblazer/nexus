@@ -13,7 +13,7 @@ PartOf=default.target
 
 [Service]
 Type=simple
-ExecStart=__NX_BIN__ daemon t3 start
+ExecStart=__NX_BIN__ daemon t3 start --foreground
 Restart=on-failure
 RestartSec=5s
 ## nexus-o6g9 lesson (T2): SIGTERM-induced exits surface as code 143.

@@ -122,11 +122,32 @@ def _build_payload(
 
 
 def _write_discovery_atomic(path: Path, payload: dict[str, Any]) -> None:
-    """Mirror T2's atomic-write pattern (t2_daemon.py:1706-1718)."""
+    """Atomically write *path* with 0o600 permissions.
+
+    nexus-6j2f review S1 fix: a prior implementation called
+    ``tmp.write_text(...)`` (creating the file with umask-applied mode,
+    typically 0o644) and *then* ``os.chmod(0o600)``. In the brief
+    window between create and chmod, the tmp file was world-readable
+    in a 0o755 ``~/.config/nexus/`` parent directory; on multi-user
+    hosts this leaked the PID and TCP port to any local user.
+
+    Fix: create the file at mode 0o600 via ``os.open`` so the file is
+    never world-readable on disk. Then write + close + replace.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload))
-    os.chmod(str(tmp), 0o600)
+    body = json.dumps(payload).encode("utf-8")
+    # O_CREAT|O_TRUNC|O_WRONLY with mode 0o600 at create time; umask
+    # is applied as a SUBSET mask so 0o600 is preserved.
+    fd = os.open(
+        str(tmp),
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    try:
+        os.write(fd, body)
+    finally:
+        os.close(fd)
     os.replace(str(tmp), str(path))
 
 
