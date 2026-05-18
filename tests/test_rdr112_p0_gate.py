@@ -70,18 +70,22 @@ def test_run_if_needed_runs_when_storage_mode_direct(
     assert db_path.exists()
 
 
-def test_run_if_needed_runs_under_non_daemon_storage_mode(
+def test_unknown_storage_mode_raises_value_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Other ``NX_STORAGE_MODE`` values (e.g. ``in-process``) do not skip."""
-    from nexus.db import migrations
+    """nexus-8qat P3.review S2 (2026-05-18): ``NX_STORAGE_MODE`` values
+    other than ``direct`` / ``daemon`` (or unset) fail loud at the
+    ``default_storage_mode`` boundary. Previously a typo'd value
+    (e.g. ``in-process``) silently routed as direct mode because
+    ``is_daemon_mode()`` compares against the literal ``"daemon"``."""
+    from nexus.db import default_storage_mode
 
-    db_path = tmp_path / "memory.db"
     monkeypatch.setenv("NX_STORAGE_MODE", "in-process")
-    migrations._upgrade_done.clear()
-
-    migrations.run_if_needed(db_path)
-    assert db_path.exists()
+    with pytest.raises(ValueError) as excinfo:
+        default_storage_mode()
+    msg = str(excinfo.value)
+    assert "in-process" in msg
+    assert "direct" in msg or "daemon" in msg
 
 
 # ── nexus-cy3o: taxonomy_cmd._t2_ctx delegates to mcp_infra.t2_ctx ─────────
@@ -237,13 +241,18 @@ def test_reject_under_daemon_mode_noop_when_direct(
     reject_under_daemon_mode("test op")  # must NOT raise
 
 
-def test_reject_under_daemon_mode_noop_when_other_mode(
+def test_reject_under_daemon_mode_propagates_value_error_on_invalid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """nexus-8qat P3.review S2: ``reject_under_daemon_mode`` consults
+    ``is_daemon_mode``; an invalid env value (e.g. ``in-process``)
+    raises ``ValueError`` at the resolution boundary rather than
+    silently treating-as-direct."""
     from nexus.db import reject_under_daemon_mode
 
     monkeypatch.setenv("NX_STORAGE_MODE", "in-process")
-    reject_under_daemon_mode("test op")  # must NOT raise
+    with pytest.raises(ValueError):
+        reject_under_daemon_mode("test op")
 
 
 def test_t2_ctx_rejects_path_resolver_under_daemon_mode(

@@ -37,8 +37,12 @@ def default_storage_mode() -> str:
     debug fallback by setting ``NX_STORAGE_MODE=direct`` explicitly.
 
     Returns the env value (lowercased + stripped) when set, else
-    ``"daemon"``. Unknown values pass through unchanged; callers
-    compare against the literals ``"daemon"`` and ``"direct"``.
+    ``"daemon"``. Anything other than ``"direct"`` / ``"daemon"`` is a
+    typo and raises ``ValueError`` (RDR-112 P3.review S2 fix,
+    nexus-8qat 2026-05-18): the acceptance criterion is "anything
+    other than direct|daemon fails loud". Pre-fix an operator who
+    typo'd ``NX_STORAGE_MODE=damon`` would silently get direct-mode
+    routing because ``is_daemon_mode()`` compares against the literal.
 
     nexus-mlmu.7 (DR-7, 2026-05-17): the prior implementation included
     an unreachable ``if raw is None`` guard (``os.environ.get(...)``
@@ -47,6 +51,11 @@ def default_storage_mode() -> str:
     normalised = os.environ.get("NX_STORAGE_MODE", "").strip().lower()
     if not normalised:
         return "daemon"
+    if normalised not in ("direct", "daemon"):
+        raise ValueError(
+            f"NX_STORAGE_MODE={normalised!r} is invalid; expected "
+            f"'direct' or 'daemon' (unset for the default 'daemon')."
+        )
     return normalised
 
 

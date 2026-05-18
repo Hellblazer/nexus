@@ -21,8 +21,18 @@ def _t2_ctx():
     long-standing test pattern of patching
     ``nexus.commands.taxonomy_cmd._default_db_path`` via the
     ``_path_resolver`` kwarg.
+
+    RDR-112 P3 second-pass review S1 (nexus-8qat, 2026-05-18): under
+    daemon mode the daemon owns the path; passing ``_path_resolver``
+    would trip the safety guard in ``mcp_infra.t2_ctx`` and raise
+    ``RuntimeError`` on every invocation. Now we skip the kwarg in
+    daemon mode (test-pattern compatibility is direct-mode only, which
+    is when patching ``_default_db_path`` makes sense at all).
     """
+    from nexus.db import is_daemon_mode
     from nexus.mcp_infra import t2_ctx
+    if is_daemon_mode():
+        return t2_ctx()
     return t2_ctx(_path_resolver=_default_db_path)
 
 if TYPE_CHECKING:
