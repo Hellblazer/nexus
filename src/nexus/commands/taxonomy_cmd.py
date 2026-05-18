@@ -35,6 +35,26 @@ def _t2_ctx():
         return t2_ctx()
     return t2_ctx(_path_resolver=_default_db_path)
 
+
+def _make_t3():
+    """RDR-112 P4.3 (nexus-mmvf): daemon-aware T3 factory.
+
+    Routes through ``mcp_infra.get_t3`` so under
+    ``NX_STORAGE_MODE=daemon`` the returned ``T3Database`` wraps an
+    ``HttpClient`` to the live daemon; direct mode falls through to
+    ``make_t3`` unchanged. ``RuntimeError`` from the daemon resolver
+    (``T3DaemonError`` / ``DaemonNotRunningError``) carries a recovery
+    hint; translate to ``ClickException`` for the CLI. Mirrors the
+    ``_make_t3`` helpers in ``commands.catalog`` (uar6) and the
+    ``_t3`` helper in ``commands.store`` (idqd).
+    """
+    from nexus.mcp_infra import get_t3
+    try:
+        return get_t3()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 if TYPE_CHECKING:
     from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
 
@@ -404,7 +424,6 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
     from fnmatch import fnmatch
 
     from nexus.config import is_local_mode, load_config
-    from nexus.db import make_t3
 
     if not collection and not discover_all:
         click.echo("Specify --collection <name> or --all.")
@@ -415,7 +434,7 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         cfg.get("taxonomy", {}).get("local_exclude_collections", [])
         if is_local_mode() else []
     )
-    t3 = make_t3()
+    t3 = _make_t3()
 
     if discover_all:
         colls = t3.list_collections()
@@ -506,7 +525,6 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
 @click.option("-k", default=None, type=int, hidden=True, help="Deprecated: cluster count is automatic")
 def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
     """Rebuild topic taxonomy from scratch (alias for discover --force)."""
-    from nexus.db import make_t3
 
     # Backward compat: old --project flag maps to --collection
     if project and not collection:
@@ -524,7 +542,7 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
         click.echo("Note: -k is deprecated. Cluster count is now automatic (HDBSCAN).")
 
     with _t2_ctx() as db:
-        t3 = make_t3()
+        t3 = _make_t3()
         count = discover_for_collection(
             collection, db.taxonomy, t3._client, force=True,
         )
@@ -743,14 +761,13 @@ def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
 @click.option("--collection", "-c", default="", help="Collection scope for label lookup")
 def split_cmd(topic_label: str, k: int, collection: str) -> None:
     """Split a topic into k sub-topics via KMeans clustering."""
-    from nexus.db import make_t3
 
     with _t2_ctx() as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
             return
-        t3 = make_t3()
+        t3 = _make_t3()
         child_count = db.taxonomy.split_topic(topic_id, k=k, chroma_client=t3._client)
         click.echo(f"Split '{topic_label}' into {child_count} sub-topics.")
         if child_count:
@@ -1250,10 +1267,9 @@ def project_cmd(
       nx taxonomy project --backfill --persist
     """
     from nexus.corpus import default_projection_threshold
-    from nexus.db import make_t3
 
     db = _t2_ctx()
-    t3 = make_t3()
+    t3 = _make_t3()
 
     # Resolve threshold: explicit flag wins; otherwise per-corpus default
     # (defaults applied at the per-source level inside _run_backfill).
@@ -1699,7 +1715,6 @@ def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
     import json
     import sys
 
-    from nexus.db import make_t3
     from nexus.doc.ref_scanner import (
         VERDICT_DRIFT, VERDICT_MISSING, VERDICT_OK,
         scan_markdown, validate,
@@ -1708,7 +1723,7 @@ def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
     resolved_prefixes = _resolve_prefixes(prefixes)
 
     try:
-        t3 = make_t3()
+        t3 = _make_t3()
     except Exception as exc:
         click.echo(f"Error: T3 unavailable: {exc}", err=True)
         raise click.exceptions.Exit(2)

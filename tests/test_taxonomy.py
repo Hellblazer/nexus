@@ -2864,7 +2864,7 @@ class TestManualOpsCLI:
                 return_value=db_path,
             ),
             patch(
-                "nexus.db.make_t3",
+                "nexus.mcp_infra.get_t3",
                 return_value=mock_t3,
             ),
             patch(
@@ -2917,7 +2917,7 @@ class TestManualOpsCLI:
                 "nexus.commands.taxonomy_cmd._default_db_path",
                 return_value=db_path,
             ),
-            patch("nexus.db.make_t3", return_value=mock_t3),
+            patch("nexus.mcp_infra.get_t3", return_value=mock_t3),
             patch(
                 "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.split_topic",
                 MagicMock(return_value=3),
@@ -2952,7 +2952,7 @@ class TestManualOpsCLI:
                 "nexus.commands.taxonomy_cmd._default_db_path",
                 return_value=db_path,
             ),
-            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch("nexus.mcp_infra.get_t3", return_value=MagicMock()),
             patch(
                 "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.split_topic",
                 MagicMock(return_value=0),
@@ -3867,7 +3867,7 @@ class TestProjectCmd:
         with (
             patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=tmp_path / "memory.db"),
             patch("nexus.commands.taxonomy_cmd._t2_ctx", return_value=db),
-            patch("nexus.db.make_t3") as mock_t3,
+            patch("nexus.mcp_infra.get_t3") as mock_t3,
         ):
             mock_t3.return_value._client = chroma_client
             result = runner.invoke(taxonomy, [
@@ -3911,7 +3911,7 @@ class TestProjectCmd:
         with (
             patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=tmp_path / "memory.db"),
             patch("nexus.commands.taxonomy_cmd._t2_ctx", return_value=db),
-            patch("nexus.db.make_t3") as mock_t3,
+            patch("nexus.mcp_infra.get_t3") as mock_t3,
         ):
             mock_t3.return_value._client = chroma_client
             result = runner.invoke(taxonomy, [
@@ -3973,7 +3973,7 @@ class TestProjectCmd:
             patch("nexus.commands.taxonomy_cmd._default_db_path",
                   return_value=tmp_path / "db.sqlite"),
             patch("nexus.commands.taxonomy_cmd._t2_ctx", return_value=db),
-            patch("nexus.db.make_t3") as mock_t3,
+            patch("nexus.mcp_infra.get_t3") as mock_t3,
         ):
             mock_t3.return_value._client = chroma_client
             result = runner.invoke(taxonomy, ["project", src, "--threshold", "0.5"])

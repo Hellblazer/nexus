@@ -548,18 +548,29 @@ def _phase4_catalog_t3_chash() -> tuple[Any, Any, Any]:
 
     The Catalog is constructed from the conventional catalog path under
     ``default_db_path()``'s parent, matching ``mcp_infra.get_catalog``.
-    T3 comes from ``nexus.db.make_t3``. ChashIndex opens the same T2
-    path used by every other T2 store.
+    T3 comes via ``mcp_infra.get_t3`` so daemon mode hits the live
+    daemon's HttpClient rather than racing it on the on-disk path.
+    ChashIndex opens the same T2 path used by every other T2 store.
+
+    RDR-112 P4.3 (nexus-mmvf) flipped the T3 source. The ChashIndex
+    direct open is tracked separately under the broader catalog-port
+    follow-up (nexus-6shq): it opens T2's chash table directly and
+    would race the daemon writer under daemon mode. Reads currently
+    work but the write path needs the same Catalog -> T2Client.catalog
+    refactor.
     """
     from nexus.catalog import open_cached
-    from nexus.db import make_t3
     from nexus.db.t2.chash_index import ChashIndex
+    from nexus.mcp_infra import get_t3
 
     db_path = default_db_path()
     cat_path = db_path.parent / "catalog"
     # nexus-6xqk follow-up: read-mostly catalog accessor for doc query.
     cat: Any = open_cached(cat_path)
-    t3: Any = make_t3()
+    try:
+        t3: Any = get_t3()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     chash_index: Any = ChashIndex(db_path)
     return cat, t3, chash_index
 
