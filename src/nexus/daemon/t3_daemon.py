@@ -93,9 +93,14 @@ def t3_discovery_path(config_dir: Path) -> Path:
     (T2 daemon owns a separate addr file) and from T1's
     ``t1_addr.<claude_pid>`` (T1 chroma is per-Claude-session and uses a
     different naming key).
+
+    Delegates to ``nexus.daemon.discovery.discovery_path(tier='t3')`` so
+    the daemon's WRITE side and the client's READ side derive the path
+    from the same single source (nexus-6j2f review S1 fix — was a silent
+    drift risk when this module re-derived the path inline).
     """
-    uid = os.getuid()
-    return config_dir / f"t3_addr.{uid}"
+    from nexus.daemon.discovery import discovery_path as _disc_path
+    return _disc_path(config_dir, tier="t3")
 
 
 def _build_payload(

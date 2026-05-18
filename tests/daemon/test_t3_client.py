@@ -182,6 +182,37 @@ class TestHttpTimeoutApplied:
 # ---------------------------------------------------------------------------
 
 
+class TestMalformedDiscoveryPayload:
+    """nexus-6j2f review TV4: a discovery file that is otherwise valid
+    (live PID, format_version=1, no shutdown marker) but missing
+    tcp_host / tcp_port must surface T3DaemonError, not pass through
+    silently to chromadb.HttpClient(host=None, port=None)."""
+
+    def test_missing_tcp_port_raises_t3_daemon_error(
+        self, config_dir: Path, force_local_mode, monkeypatch
+    ) -> None:
+        import json
+        import os as _os
+        from nexus.daemon.discovery import discovery_path
+        from nexus.daemon.t3_client import T3DaemonError, make_t3_client
+
+        monkeypatch.delenv("NX_T3_ADDR", raising=False)
+        path = discovery_path(config_dir, tier="t3")
+        # Live PID, valid format, but tcp_port omitted entirely.
+        path.write_text(json.dumps({
+            "format_version": 1,
+            "tcp_host": "127.0.0.1",
+            "pid": _os.getpid(),
+            "daemon_version": "test",
+            "start_time": "1970-01-01T00:00:00",
+            "local_path": "/tmp/x",
+        }))
+        _os.chmod(str(path), 0o600)
+        with pytest.raises(T3DaemonError) as excinfo:
+            make_t3_client(config_dir=config_dir)
+        assert "tcp_host" in str(excinfo.value) or "tcp_port" in str(excinfo.value)
+
+
 class TestSurfaceParity:
     def test_public_method_set_matches_make_t3(
         self, live_t3_daemon, config_dir: Path
