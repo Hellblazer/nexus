@@ -1200,3 +1200,178 @@ def t3_info_cmd(config_dir_str: str | None, as_json: bool) -> None:
     for key, value in data.items():
         click.echo(f"  {key}: {value}")
 
+
+# ---------------------------------------------------------------------------
+# T3 autostart install / uninstall  (RDR-112 P1.5.4, nexus-v5hb)
+# ---------------------------------------------------------------------------
+#
+# Mirrors the T2 install/uninstall flow at daemon.py:896-1064. Templates
+# ship under src/nexus/_resources/daemon/com.nexus.t3.plist (macOS) and
+# nexus-t3.service (Linux). The launchd plist + systemd unit shape is
+# the battle-tested T2 template adapted for the T3 subcommand: the
+# supervisor invokes ``nx daemon t3 start`` instead of ``nx daemon t2
+# start --foreground``, because the T3 daemon's ``start`` already
+# blocks until SIGTERM (it foregrounds the chroma run subprocess).
+
+_T3_PLIST_NAME = "com.nexus.t3.plist"
+_T3_SERVICE_NAME = "nexus-t3.service"
+_T3_LAUNCHD_LABEL = "com.nexus.t3"
+
+
+def _autostart_filename_t3() -> str:
+    return _T3_PLIST_NAME if _autostart_platform() == "darwin" else _T3_SERVICE_NAME
+
+
+@t3_group.command("install")
+@click.option(
+    "--autostart",
+    is_flag=True,
+    required=True,
+    help=(
+        "Install OS autostart entry (launchd on macOS, systemd user "
+        "unit on Linux) so the T3 daemon starts at login / boot."
+    ),
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help=(
+        "Overwrite an existing plist/unit file even when its content "
+        "differs from the freshly rendered template; treat supervisor "
+        "activation failures as warnings instead of errors."
+    ),
+)
+def t3_install_cmd(autostart: bool, force: bool) -> None:
+    """Install the T3 daemon autostart entry for the current user.
+
+    macOS: writes ~/Library/LaunchAgents/com.nexus.t3.plist and
+    bootstraps it via ``launchctl bootstrap gui/$UID``.
+
+    Linux: writes ~/.config/systemd/user/nexus-t3.service and enables
+    it via ``systemctl --user enable --now nexus-t3.service``.
+
+    The shipped templates point the supervisor at ``nx daemon t3 start``;
+    the T3 ``start`` command spawns the managed chroma run subprocess
+    and the daemon-start helper exits once chroma is listening (process
+    group survives via ``start_new_session=True``).
+    """
+    if not autostart:  # pragma: no cover -- click enforces required=True
+        raise click.UsageError("--autostart is required")
+
+    install_dir = _autostart_install_dir()
+    install_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = _autostart_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    template_name = _autostart_filename_t3()
+    nx_bin = _resolve_nx_bin()
+    rendered = _render_template(
+        template_name,
+        nx_bin=nx_bin,
+        log_dir=str(log_dir),
+        path_env=os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+    )
+    dest = install_dir / template_name
+
+    # Symlink + overwrite-guard semantics mirror T2's install_cmd
+    # (daemon.py:957-990) exactly; the operator-customisation
+    # preservation contract is identical for T3.
+    if dest.is_symlink():
+        click.echo(
+            f"Error: {dest} is a symlink; refusing to install autostart "
+            "through it. Remove the symlink first and re-run.",
+            err=True,
+        )
+        sys.exit(1)
+    if dest.exists():
+        try:
+            existing = dest.read_text()
+        except OSError:
+            existing = None
+        if existing == rendered:
+            click.echo(f"{dest} already up to date; no changes")
+            return
+        if not force and existing is not None:
+            click.echo(
+                f"Error: {dest} exists and its content differs from the "
+                "rendered template; refusing to overwrite. Re-run with "
+                "--force to replace the existing file (your customisations "
+                "will be lost), or remove the file first.",
+                err=True,
+            )
+            sys.exit(1)
+
+    dest.write_text(rendered)
+    dest.chmod(0o644)
+    click.echo(f"Wrote {dest}")
+
+    platform = _autostart_platform()
+    if platform == "darwin":
+        uid = os.getuid()
+        cmd = ["launchctl", "bootstrap", f"gui/{uid}", str(dest)]
+    else:
+        cmd = ["systemctl", "--user", "enable", "--now", template_name]
+    label = "Warning" if force else "Error"
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        click.echo(
+            f"{label}: {cmd[0]} not found on PATH; file installed but not activated ({exc}).",
+            err=True,
+        )
+        if not force:
+            sys.exit(1)
+        return
+    if result.returncode != 0:
+        click.echo(
+            f"{label}: {' '.join(cmd)} exited {result.returncode}: "
+            f"{result.stderr.strip() or result.stdout.strip()}",
+            err=True,
+        )
+        if not force:
+            sys.exit(1)
+        return
+    click.echo(f"Activated via: {' '.join(cmd)}")
+
+
+@t3_group.command("uninstall")
+@click.option(
+    "--autostart",
+    is_flag=True,
+    required=True,
+    help="Remove OS autostart entry installed by ``install --autostart``.",
+)
+def t3_uninstall_cmd(autostart: bool) -> None:
+    """Remove the T3 daemon autostart entry for the current user."""
+    if not autostart:  # pragma: no cover
+        raise click.UsageError("--autostart is required")
+
+    install_dir = _autostart_install_dir()
+    template_name = _autostart_filename_t3()
+    dest = install_dir / template_name
+
+    if not dest.exists():
+        click.echo(f"Autostart not installed (nothing at {dest}).")
+        return
+
+    platform = _autostart_platform()
+    if platform == "darwin":
+        uid = os.getuid()
+        cmd = ["launchctl", "bootout", f"gui/{uid}/{_T3_LAUNCHD_LABEL}"]
+    else:
+        cmd = ["systemctl", "--user", "disable", "--now", template_name]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            click.echo(
+                f"Warning: {' '.join(cmd)} exited {result.returncode}: "
+                f"{result.stderr.strip() or result.stdout.strip()}",
+                err=True,
+            )
+    except FileNotFoundError as exc:
+        click.echo(f"Warning: {cmd[0]} not found ({exc}); removing file anyway.", err=True)
+
+    dest.unlink()
+    click.echo(f"Removed {dest}")
+
