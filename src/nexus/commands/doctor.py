@@ -76,16 +76,14 @@ class _T2Inspector:
         self._mode = "daemon" if is_daemon_mode() else "direct"
         self._db_path = db_path
         self._conn = None
-        self._client_ctx = None
         self._client = None
         if self._mode == "daemon":
             from nexus.mcp_infra import t2_ctx
-            self._client_ctx = t2_ctx()
-            # ``t2_ctx`` under daemon mode returns a T2Client (no
-            # ``__enter__`` needed in practice — the facade is reusable).
-            # Under direct mode it would return a T2Database context
+            # ``t2_ctx`` under daemon mode returns a T2Client (the
+            # facade is reusable; no ``__enter__`` required). Under
+            # direct mode it would return a T2Database context
             # manager which the daemon path does not exercise.
-            self._client = self._client_ctx
+            self._client = t2_ctx()
         else:
             import sqlite3
             # storage-boundary-allow: pac1 doctor T2 introspection
@@ -108,6 +106,17 @@ class _T2Inspector:
             except Exception:
                 pass
             self._conn = None
+        # nexus-pac1 review IMPORTANT-1: every other daemon-mode call
+        # site goes through ``with t2_ctx() as t2:`` which invokes
+        # ``T2Client.__exit__ -> close()``. The inspector wraps the
+        # client without using its context manager so it must drain
+        # the connection pool on close itself.
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
 
     @property
     def mode(self) -> str:
@@ -138,9 +147,15 @@ class _T2Inspector:
                 "SELECT name FROM sqlite_master WHERE type='index'"
             ).fetchall()
         elif section == "fts":
+            # nexus-pac1 review SUGGESTION: align with the daemon's
+            # IntrospectionService._schema_single which uses
+            # '%fts5%' (without the 'USING ' prefix). Every FTS5
+            # table's DDL contains 'fts5' so the broader pattern
+            # is functionally equivalent without splitting daemon/
+            # direct behaviour.
             rows = self._conn.execute(
                 "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND sql LIKE '%USING fts5%'"
+                "WHERE type='table' AND sql LIKE '%fts5%'"
             ).fetchall()
         else:
             raise ValueError(f"unknown schema section {section!r}")
@@ -2530,6 +2545,12 @@ def _run_check_taxonomy() -> None:
         # one production database, hanging the check past 30s). Pre-build
         # the linked-topic set with a UNION (uses the topic_links primary
         # key for both halves) and reduce to a single fast NOT IN.
+        # nexus-pac1 review IMPORTANT-2: cap the result set. The
+        # display logic shows at most 10 rows; ``exec_raw`` raises
+        # at 10_000 rows under daemon mode. Pre-cap at 200 so the
+        # daemon and direct paths return the same shape on a large
+        # corpus (~526k assignments) without the introspection-RPC
+        # cap firing.
         drift_rows = t2.execute(
             "SELECT DISTINCT ta.topic_id, t.label, t.collection "
             "  FROM topic_assignments ta "
@@ -2546,6 +2567,7 @@ def _run_check_taxonomy() -> None:
             "          AND ta2.topic_id    != ta.topic_id "
             "          AND ta2.assigned_by = 'projection' "
             "   )"
+            " LIMIT 200"
         )
 
         proj_rows = t2.execute(

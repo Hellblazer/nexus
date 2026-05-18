@@ -214,6 +214,29 @@ class TestCheckAspectQueueUnderDaemon:
         assert "aspect_extraction_queue" in result.output
 
 
+class TestCheckTierDisciplineUnderDaemon:
+    def test_check_tier_discipline_runs_under_daemon(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        live_t2_daemon,
+        t2db: T2Database,
+        reset_t3_singleton,
+        runner: CliRunner,
+    ) -> None:
+        """``nx doctor --check-tier-discipline`` against a fresh T2
+        (no ``tier_writes`` table yet) takes the "not yet initialised"
+        path. Confirms the daemon-mode seam reaches the check without
+        the prior ``reject_under_daemon_mode`` abort.
+
+        Pre-pac1 review SUGGESTION: this coverage was missing. A
+        fixed session ID via env var bypasses the live-session
+        resolver so the test is hermetic."""
+        monkeypatch.setenv("NX_SESSION_ID", "pac1-test-session")
+        result = runner.invoke(main, ["doctor", "--check-tier-discipline"])
+        assert result.exit_code == 0, result.output
+        assert "Tier-discipline check" in result.output
+
+
 class TestCheckTaxonomyUnderDaemon:
     def test_check_taxonomy_runs_under_daemon(
         self,
