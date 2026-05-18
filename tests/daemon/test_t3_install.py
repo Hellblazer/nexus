@@ -280,3 +280,34 @@ class TestGroupRegistration:
         t3 = daemon_cmd.daemon_group.commands["t3"]
         assert "install" in t3.commands
         assert "uninstall" in t3.commands
+
+
+class TestSymlinkGuard:
+    """nexus-6j2f review S3: install refuses to overwrite through a
+    symlink (FS-7 TOCTOU mitigation, mirrors T2 install behaviour)."""
+
+    def test_install_refuses_when_target_is_symlink(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_platform(monkeypatch, "darwin")
+        monkeypatch.setattr(
+            daemon_cmd, "_autostart_install_dir",
+            lambda: tmp_path / "LaunchAgents",
+        )
+        monkeypatch.setattr(
+            daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "Logs",
+        )
+        (tmp_path / "LaunchAgents").mkdir()
+        target = tmp_path / "real-plist-file"
+        target.write_text("<!-- real file -->\n")
+        symlink = tmp_path / "LaunchAgents" / "com.nexus.t3.plist"
+        symlink.symlink_to(target)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            daemon_cmd.daemon_group, ["t3", "install", "--autostart"]
+        )
+        assert result.exit_code == 1
+        assert "symlink" in result.output.lower()
+        # The symlink target is untouched.
+        assert target.read_text() == "<!-- real file -->\n"

@@ -137,6 +137,26 @@ def _validate_discovery_payload(
         # Live process under a different UID — treat as alive and let
         # the eventual connect surface a clearer error than we can here.
         pass
+    except OSError as exc:
+        # nexus-6j2f review S2 fix: on some Linux kernels, ``os.kill(pid, 0)``
+        # surfaces ``OSError(errno=ESRCH)`` instead of ``ProcessLookupError``
+        # for an unallocated PID. Treat ESRCH identically to
+        # ProcessLookupError; treat every other OSError (EINVAL, EFAULT, etc.)
+        # as "process exists, we can't probe" — matches the ``_pid_is_alive``
+        # behavior in t3_daemon.py:147-151.
+        import errno as _errno
+        if exc.errno == _errno.ESRCH:
+            _log.warning(f"{tier}_discovery_stale_pid", path=str(path), pid=pid)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as unlink_exc:
+                _log.warning(
+                    f"{tier}_discovery_unlink_failed",
+                    path=str(path),
+                    error=str(unlink_exc),
+                )
+            return None
+        # Unprobable but exists: treat as alive.
 
     return payload
 

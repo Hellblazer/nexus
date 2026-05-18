@@ -293,6 +293,79 @@ class TestIdempotentStart:
 
 
 # ---------------------------------------------------------------------------
+# Stop-time defensive paths (nexus-6j2f review TV1/TV2/TV3)
+# ---------------------------------------------------------------------------
+
+
+class TestStopEdgeCases:
+    """Cover the defensive paths in stop_t3_daemon and start_t3_daemon."""
+
+    def test_stop_with_non_integer_pid_unlinks_and_returns_none(
+        self, config_dir: Path
+    ) -> None:
+        from nexus.daemon.t3_daemon import stop_t3_daemon, t3_discovery_path
+
+        path = t3_discovery_path(config_dir)
+        path.write_text(json.dumps({
+            "format_version": 1,
+            "tcp_host": "127.0.0.1",
+            "tcp_port": 9999,
+            "pid": "not-an-int",  # malformed
+            "daemon_version": "test",
+            "start_time": "1970-01-01T00:00:00",
+            "local_path": "/tmp/x",
+        }))
+        os.chmod(str(path), 0o600)
+        assert stop_t3_daemon(config_dir=config_dir) is None
+        assert not path.exists(), "malformed-pid file must be unlinked"
+
+    def test_stop_when_pid_already_dead_unlinks_and_returns_pid(
+        self, config_dir: Path
+    ) -> None:
+        from nexus.daemon.t3_daemon import stop_t3_daemon, t3_discovery_path
+
+        path = t3_discovery_path(config_dir)
+        dead_pid = 2**31 - 1  # never a real PID
+        path.write_text(json.dumps({
+            "format_version": 1,
+            "tcp_host": "127.0.0.1",
+            "tcp_port": 9999,
+            "pid": dead_pid,
+            "daemon_version": "test",
+            "start_time": "1970-01-01T00:00:00",
+            "local_path": "/tmp/x",
+        }))
+        os.chmod(str(path), 0o600)
+        assert stop_t3_daemon(config_dir=config_dir) == dead_pid
+        assert not path.exists(), "stale-PID file must be unlinked at stop"
+
+    def test_start_skips_unparseable_discovery_file(
+        self, config_dir: Path, local_path: Path, force_local_mode
+    ) -> None:
+        """A discovery file containing non-JSON garbage must not crash
+        start_t3_daemon — the file is treated as absent (read warns +
+        returns None), a fresh daemon spawns, and the (now-valid)
+        discovery payload is written."""
+        from nexus.daemon.t3_daemon import (
+            start_t3_daemon,
+            stop_t3_daemon,
+            t3_discovery_path,
+        )
+
+        path = t3_discovery_path(config_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("<<< not json >>>")
+        os.chmod(str(path), 0o600)
+
+        payload = start_t3_daemon(config_dir=config_dir, local_path=local_path)
+        try:
+            on_disk = json.loads(path.read_text())
+            assert on_disk["pid"] == payload["pid"]
+        finally:
+            stop_t3_daemon(config_dir=config_dir)
+
+
+# ---------------------------------------------------------------------------
 # CLI surface (nx daemon t3 start/stop/info)
 # ---------------------------------------------------------------------------
 
