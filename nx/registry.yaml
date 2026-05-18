@@ -333,6 +333,17 @@ rdr_skills:
       - "periodic audit"
     dispatches_to: [deep-research-synthesizer]
 
+  phase-review-gate:
+    slash_command: /phase-review-gate
+    command_file: commands/phase-review-gate.md
+    description: "Cross-walk RDR §Approach against closing beads at a phase boundary — blocks silent scope reduction"
+    triggers:
+      - "phase review gate"
+      - "cross-walk approach"
+      - "close phase"
+      - "phase closeout"
+      - "verify phase scope"
+
   rdr-list:
     slash_command: /rdr-list
     command_file: commands/rdr-list.md

@@ -44,6 +44,10 @@ _STANDALONE_SKILLS = {
     "tuplespace-tasks", "tuplespace-mailbox", "tuplespace-lock",
     "tuplespace-events", "tuplespace-barriers",
     "tuplespace-list", "tuplespace-stats",
+    # nexus-j327 — phase closeout cross-walk gate. Pointer skill with Python
+    # preamble; no agent dispatch. Enforces §Approach coverage at phase
+    # boundaries.
+    "phase-review-gate",
 }
 
 
