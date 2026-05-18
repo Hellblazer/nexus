@@ -122,13 +122,29 @@ def get_t1():
 
 
 def get_t3():
-    """Return T3Database singleton — lazy init on first call."""
+    """Return T3Database singleton — lazy init on first call.
+
+    RDR-112 P3.1 (nexus-hpxl): under ``NX_STORAGE_MODE=daemon`` the
+    returned T3Database wraps a ``chromadb.HttpClient`` pointed at the
+    running ``nx daemon t3`` (via ``make_t3_client``). Under
+    ``NX_STORAGE_MODE=direct`` the existing direct-mode path is used.
+
+    Fail-loud-on-missing-daemon: in daemon mode with no daemon running,
+    ``make_t3_client`` raises ``T3DaemonError`` with a recovery hint.
+    No auto-spawn (matches T2 contract per RDR-112 §Incremental
+    adoption "no auto-spawn in daemon mode").
+    """
     global _t3_instance
     if _t3_instance is None:
         with _t3_lock:
             if _t3_instance is None:
-                from nexus.db import make_t3
-                _t3_instance = make_t3()
+                from nexus.db import is_daemon_mode
+                if is_daemon_mode():
+                    from nexus.daemon.t3_client import make_t3_client
+                    _t3_instance = make_t3_client()
+                else:
+                    from nexus.db import make_t3
+                    _t3_instance = make_t3()
     return _t3_instance
 
 
@@ -164,20 +180,50 @@ def t2_ctx(*, _path_resolver=None):
     callers leave this ``None`` and the module-level
     ``default_db_path`` binding wins.
     """
-    from nexus.db.migrations import run_if_needed
-    from nexus.db.t2 import T2Database
+    from nexus.db import is_daemon_mode as _is_daemon_mode
 
     # RDR-112 P1 prereq (foundation review, 2026-05-14): under daemon
     # mode the daemon owns the T2 path; a client-side ``_path_resolver``
     # override is meaningless and dangerous (it would silently pick a
     # different file). Reject so the contract is loud, not surprising.
-    from nexus.db import is_daemon_mode as _is_daemon_mode
     if _path_resolver is not None and _is_daemon_mode():
         raise RuntimeError(
             "t2_ctx(_path_resolver=...) is incompatible with "
             "NX_STORAGE_MODE=daemon: the daemon owns the path. "
             "Clear _path_resolver or run in direct mode."
         )
+
+    # RDR-112 P3.1 (nexus-hpxl): under daemon mode return a T2Client
+    # bound to the discovery-resolved address. The previous behaviour
+    # (returning T2Database even when daemon-mode was active) raced
+    # the daemon's writer on memory.db — fixed here.
+    if _is_daemon_mode():
+        from pathlib import Path
+        from nexus.daemon.discovery import discovery_resolve
+        from nexus.daemon.t2_client import T2Client
+
+        addr = discovery_resolve("t2")
+        # Prefer UDS when present (per RDR-112 §6: UDS-then-TCP fallback).
+        uds = addr.get("uds_path")
+        if uds:
+            return T2Client(uds_path=Path(uds))
+        host = addr.get("tcp_host")
+        port = addr.get("tcp_port")
+        if isinstance(host, str) and isinstance(port, int):
+            return T2Client(tcp_addr=(host, port))
+        # discovery_resolve raised DaemonNotRunningError above if
+        # nothing resolved; reaching here means the resolver returned
+        # a malformed payload. Fail loud rather than silently fall
+        # through to direct-mode (which would race the daemon).
+        raise RuntimeError(
+            f"discovery_resolve('t2') returned a payload lacking both "
+            f"uds_path and tcp_host/tcp_port: {addr!r}. Restart the "
+            f"daemon: `nx daemon t2 stop && nx daemon t2 start`."
+        )
+
+    # Direct mode: existing behaviour preserved verbatim.
+    from nexus.db.migrations import run_if_needed
+    from nexus.db.t2 import T2Database
 
     path = (_path_resolver or default_db_path)()
     run_if_needed(path)
