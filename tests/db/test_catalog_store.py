@@ -662,3 +662,109 @@ class TestRebuildFieldParity:
         assert store_meta == legacy_meta, (
             f"_meta row diverges:\nstore={store_meta}\nlegacy={legacy_meta}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Backfilled collections (nexus-m0hi, RDR-112 P2.review S2)
+# ---------------------------------------------------------------------------
+
+
+class TestBackfilledCollections:
+    """``CatalogStore._backfilled_collections`` mirror of the CatalogDB
+    contract (catalog_db.py:516-589). When ``_backfill_collections``
+    inserts rows for legacy ``physical_collection`` values that lacked
+    a ``collections`` row, the inserted names are stashed on
+    ``self._backfilled_collections`` so ``Catalog._emit_backfilled_
+    collection_events`` can emit synthetic ``CollectionCreated`` events
+    with ``legacy_grandfathered=True`` (otherwise the rows vanish on
+    ``Catalog.rebuild()``).
+
+    Phase 4 (nexus-uar6) reads the same set through
+    ``T2Client.catalog`` so the public ``backfilled_collections()``
+    method is also covered."""
+
+    def test_backfilled_set_populated_when_legacy_doc_seeded(
+        self, tmp_path: Path,
+    ) -> None:
+        db = tmp_path / "memory.db"
+        # Seed via a first CatalogStore so the documents schema is
+        # in place; then write a legacy row whose physical_collection
+        # has no matching collections row.
+        seed = CatalogStore(db)
+        try:
+            seed._conn.execute(
+                "INSERT INTO documents (tumbler, title, physical_collection) "
+                "VALUES (?, ?, ?)",
+                ("1.1.1", "legacy-doc", "code__legacy-m0hi"),
+            )
+            seed._conn.commit()
+        finally:
+            seed.close()
+
+        # Force a second migration on the same path by purging the
+        # process-level cache (init normally runs once per path).
+        from nexus.db.t2 import catalog_store as cs_module
+        cs_module._migrated_paths.clear()
+
+        store = CatalogStore(db)
+        try:
+            assert "code__legacy-m0hi" in store._backfilled_collections, (
+                f"expected the legacy collection in _backfilled_collections, "
+                f"got {store._backfilled_collections!r}"
+            )
+            # Public accessor returns the same set as a list (RPC-safe
+            # native type).
+            via_method = store.backfilled_collections()
+            assert isinstance(via_method, list)
+            assert set(via_method) == store._backfilled_collections
+        finally:
+            store.close()
+
+    def test_backfilled_set_empty_when_no_unregistered_collection(
+        self, tmp_path: Path,
+    ) -> None:
+        store = CatalogStore(tmp_path / "memory.db")
+        try:
+            assert store._backfilled_collections == set()
+            assert store.backfilled_collections() == []
+        finally:
+            store.close()
+
+    def test_backfilled_set_excludes_already_registered(
+        self, tmp_path: Path,
+    ) -> None:
+        """A legacy doc whose physical_collection already has a
+        ``collections`` row must NOT appear in
+        ``_backfilled_collections``. The ``INSERT OR IGNORE`` would
+        skip the row, so the set must skip it too — otherwise the
+        Catalog event emitter would double-emit
+        ``CollectionCreated`` for an already-known collection."""
+        db = tmp_path / "memory.db"
+        seed = CatalogStore(db)
+        try:
+            # Pre-register the collection so it exists.
+            seed._conn.execute(
+                "INSERT INTO collections (name, content_type, owner_id, "
+                "embedding_model, model_version, display_name, "
+                "legacy_grandfathered, superseded_by, superseded_at, "
+                "created_at) VALUES (?, '', '', '', '', '', 0, '', '', '')",
+                ("code__pre-registered",),
+            )
+            seed._conn.execute(
+                "INSERT INTO documents (tumbler, title, physical_collection) "
+                "VALUES (?, ?, ?)",
+                ("1.1.1", "doc-a", "code__pre-registered"),
+            )
+            seed._conn.commit()
+        finally:
+            seed.close()
+
+        from nexus.db.t2 import catalog_store as cs_module
+        cs_module._migrated_paths.clear()
+
+        store = CatalogStore(db)
+        try:
+            assert "code__pre-registered" not in store._backfilled_collections
+            assert store.backfilled_collections() == []
+        finally:
+            store.close()

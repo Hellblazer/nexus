@@ -303,11 +303,41 @@ class CatalogStore:
             _migrated_paths.add(path_key)
 
     def _backfill_collections(self) -> None:
-        """Insert legacy physical_collection values into collections (idempotent)."""
+        """Insert legacy physical_collection values into collections (idempotent).
+
+        nexus-m0hi (RDR-112 P2.review S2): mirrors the CatalogDB contract
+        — compute the candidate set BEFORE the INSERT (the post-INSERT
+        view would include pre-existing rows that we did not insert)
+        and stash it on ``self._backfilled_collections``. Catalog's
+        ``_emit_backfilled_collection_events`` reads this set
+        immediately after construction so the synthetic
+        ``CollectionCreated`` events with ``legacy_grandfathered=True``
+        survive ``Catalog.rebuild()`` (which truncates ``collections``
+        and replays from JSONL). Without the exposed set the Phase 4
+        catalog-port flip would silently drop the synthetic events and
+        lose the projection-replay invariant.
+        """
+        self._backfilled_collections: set[str] = set()
         with self._lock:
             try:
                 self._conn.execute("SELECT physical_collection FROM documents LIMIT 0")
             except sqlite3.OperationalError:
+                return
+            # Compute candidates BEFORE the INSERT: ``INSERT OR IGNORE``
+            # silently skips rows whose ``collections.name`` PK already
+            # exists, so a post-INSERT enumeration would include them
+            # too and emit duplicate events on the Catalog side.
+            candidates = {
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT DISTINCT physical_collection FROM documents "
+                    "WHERE physical_collection IS NOT NULL "
+                    "  AND physical_collection != '' "
+                    "  AND physical_collection NOT IN "
+                    "      (SELECT name FROM collections)"
+                ).fetchall()
+            }
+            if not candidates:
                 return
             self._conn.execute(
                 "INSERT OR IGNORE INTO collections "
@@ -321,10 +351,28 @@ class CatalogStore:
                 "  AND physical_collection != ''",
             )
             self._conn.commit()
+            self._backfilled_collections = candidates
 
     # -------------------------------------------------------------------------
     # Public API (identical signatures to CatalogDB)
     # -------------------------------------------------------------------------
+
+    def backfilled_collections(self) -> list[str]:
+        """Return the names backfilled by the most recent ``_backfill_collections`` call.
+
+        nexus-m0hi (RDR-112 P2.review S2): the underscore-prefixed
+        attribute ``_backfilled_collections`` mirrors the CatalogDB
+        contract used by ``Catalog._emit_backfilled_collection_events``,
+        which reads it directly when CatalogStore is constructed
+        in-process. Under Phase 4 the same emission path must work
+        when Catalog reads from ``T2Client.catalog`` (a daemon proxy
+        that skips underscore-prefixed methods by design — see
+        ``_StoreProxy`` in ``nexus.daemon.t2_client``); this public
+        accessor is the RPC-dispatchable equivalent. Returns a list
+        (not a set) so the JSON-RPC encoder has a native type;
+        callers convert back to a set as needed.
+        """
+        return list(self._backfilled_collections)
 
     def rebuild(
         self,

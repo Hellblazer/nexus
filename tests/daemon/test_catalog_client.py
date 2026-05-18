@@ -241,6 +241,38 @@ class TestCatalogClientRpc:
         results = client.catalog.search("zzznomatch")
         assert results == []
 
+    def test_backfilled_collections_via_rpc(
+        self, t2db: T2Database, daemon_and_client,
+    ) -> None:
+        """nexus-m0hi (RDR-112 P2.review S2): the public
+        ``backfilled_collections()`` accessor is RPC-dispatchable so
+        the Phase 4 catalog port (nexus-uar6) can read the synthetic-
+        event seed set from ``T2Client.catalog`` without reaching for
+        an underscore attribute that ``_StoreProxy`` would not
+        expose."""
+        _daemon, client = daemon_and_client
+        # Seed a legacy document via the daemon's T2Database directly
+        # so the backfill path runs at next CatalogStore construction.
+        # We re-trigger init by clearing the process-level migrated-
+        # paths cache and accessing the catalog store one more time.
+        t2db.catalog._conn.execute(
+            "INSERT INTO documents (tumbler, title, physical_collection) "
+            "VALUES (?, ?, ?)",
+            ("9.9.9", "m0hi-legacy", "code__m0hi-rpc-smoke"),
+        )
+        t2db.catalog._conn.commit()
+        # Force a re-init so the backfill captures the newly-seeded row.
+        from nexus.db.t2 import catalog_store as cs_module
+        cs_module._migrated_paths.clear()
+        t2db.catalog._backfill_collections()
+
+        names = client.catalog.backfilled_collections()
+        assert isinstance(names, list)
+        assert "code__m0hi-rpc-smoke" in names, (
+            f"expected the legacy collection to surface via RPC, "
+            f"got {names!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Legacy catalog.db import
