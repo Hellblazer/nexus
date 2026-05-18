@@ -116,7 +116,7 @@ class TestCoveragePasses:
                 return chroma_client.get_collection(name)
 
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
         )
@@ -145,7 +145,7 @@ class TestCoveragePasses:
                 return chroma_client.get_collection(name)
 
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
         )
@@ -178,7 +178,7 @@ class TestCoverageFails:
                 return chroma_client.get_collection(name)
 
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
         )
@@ -207,7 +207,7 @@ class TestCoverageFails:
                 return chroma_client.get_collection(name)
 
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
         )
@@ -244,7 +244,7 @@ class TestCoverageFails:
                 return chroma_client.get_collection(name)
 
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd,
             ["--t3-doc-id-coverage", "--strict-not-in-t3", "--json"],
@@ -287,7 +287,7 @@ class TestCombined:
                 return chroma_client.get_collection(name)
 
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd,
             ["--replay-equality", "--t3-doc-id-coverage", "--json"],
@@ -355,7 +355,7 @@ class TestOrphanRatioSurface:
             def get_collection(self, name):
                 return chroma_client.get_collection(name)
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
 
         # Text output assertions
         text_result = runner.invoke(doctor_cmd, ["--t3-doc-id-coverage"])
@@ -427,7 +427,7 @@ class TestOrphanRatioSurface:
             def get_collection(self, name):
                 return chroma_client.get_collection(name)
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
 
         text_result = runner.invoke(doctor_cmd, ["--t3-doc-id-coverage"])
         assert text_result.exit_code == 0, text_result.output
@@ -458,7 +458,7 @@ class TestOrphanRatioSurface:
             def get_collection(self, name):
                 return chroma_client.get_collection(name)
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
 
         json_result = runner.invoke(
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
@@ -528,7 +528,7 @@ class TestPhase3ManifestFallback:
                 return chroma_client.get_collection(name)
 
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
 
         result = runner.invoke(
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
@@ -581,7 +581,7 @@ class TestBypassSchemaSkipped:
                 return chroma_client.get_collection(name)
 
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
         )
@@ -635,7 +635,7 @@ class TestSupersededSkip:
                 return chroma_client.get_collection(name)
 
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--t3-doc-id-coverage", "--json"],
         )

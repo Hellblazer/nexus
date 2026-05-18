@@ -73,7 +73,7 @@ class TestNameVsEmbedDim:
         name = "code__myproj__minilm-l6-v2-384__v1"
         _seed(chroma_client, name)
         monkeypatch.setattr(
-            "nexus.db.make_t3", lambda: _fake_t3(chroma_client, [name]),
+            "nexus.mcp_infra.get_t3", lambda: _fake_t3(chroma_client, [name]),
         )
         result = runner.invoke(
             doctor_cmd, ["--name-vs-embed-dim", "--json"],
@@ -93,7 +93,7 @@ class TestNameVsEmbedDim:
         name = "code__myproj__voyage-code-3__v1"
         _seed(chroma_client, name)
         monkeypatch.setattr(
-            "nexus.db.make_t3", lambda: _fake_t3(chroma_client, [name]),
+            "nexus.mcp_infra.get_t3", lambda: _fake_t3(chroma_client, [name]),
         )
         result = runner.invoke(
             doctor_cmd, ["--name-vs-embed-dim", "--json"],
@@ -115,7 +115,7 @@ class TestNameVsEmbedDim:
         name = "docs__myproj__voyage-context-3__v1"
         _seed(chroma_client, name)
         monkeypatch.setattr(
-            "nexus.db.make_t3", lambda: _fake_t3(chroma_client, [name]),
+            "nexus.mcp_infra.get_t3", lambda: _fake_t3(chroma_client, [name]),
         )
         result = runner.invoke(
             doctor_cmd, ["--name-vs-embed-dim", "--json"],
@@ -135,7 +135,7 @@ class TestNameVsEmbedDim:
         name = "code__myproj-cafef00d"
         _seed(chroma_client, name)
         monkeypatch.setattr(
-            "nexus.db.make_t3", lambda: _fake_t3(chroma_client, [name]),
+            "nexus.mcp_infra.get_t3", lambda: _fake_t3(chroma_client, [name]),
         )
         result = runner.invoke(
             doctor_cmd, ["--name-vs-embed-dim", "--json"],
@@ -152,7 +152,7 @@ class TestNameVsEmbedDim:
         """``taxonomy__*`` carries centroid embeddings, out of scope."""
         _seed(chroma_client, "taxonomy__centroids")
         monkeypatch.setattr(
-            "nexus.db.make_t3",
+            "nexus.mcp_infra.get_t3",
             lambda: _fake_t3(chroma_client, ["taxonomy__centroids"]),
         )
         result = runner.invoke(
@@ -173,7 +173,7 @@ class TestNameVsEmbedDim:
             name=name, embedding_function=DefaultEmbeddingFunction(),
         )
         monkeypatch.setattr(
-            "nexus.db.make_t3", lambda: _fake_t3(chroma_client, [name]),
+            "nexus.mcp_infra.get_t3", lambda: _fake_t3(chroma_client, [name]),
         )
         result = runner.invoke(
             doctor_cmd, ["--name-vs-embed-dim", "--json"],
@@ -192,7 +192,7 @@ class TestNameVsEmbedDim:
         name = "code__myproj__voyage-code-3__v1"
         _seed(chroma_client, name)
         monkeypatch.setattr(
-            "nexus.db.make_t3", lambda: _fake_t3(chroma_client, [name]),
+            "nexus.mcp_infra.get_t3", lambda: _fake_t3(chroma_client, [name]),
         )
         result = runner.invoke(
             doctor_cmd, ["--name-vs-embed-dim"],

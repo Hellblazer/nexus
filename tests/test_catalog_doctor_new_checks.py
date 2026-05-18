@@ -111,7 +111,7 @@ class TestChunkSizeDistribution:
             def list_collections(self):
                 return [{"name": "code__ok"}]
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--chunk-size-distribution", "--json"],
         )
@@ -148,7 +148,7 @@ class TestChunkSizeDistribution:
             def list_collections(self):
                 return [{"name": "code__micros"}]
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--chunk-size-distribution", "--json"],
         )
@@ -183,7 +183,7 @@ class TestChunkSizeDistribution:
             def list_collections(self):
                 return [{"name": "code__big"}]
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--chunk-size-distribution", "--json"],
         )
@@ -214,7 +214,7 @@ class TestChunkSizeDistribution:
             def list_collections(self):
                 return [{"name": "taxonomy__centroids"}]
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--chunk-size-distribution", "--json"],
         )
@@ -245,7 +245,7 @@ class TestChunkTextDedup:
             def list_collections(self):
                 return [{"name": "code__cleanup"}]
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--chunk-text-dedup", "--json"],
         )
@@ -281,7 +281,7 @@ class TestChunkTextDedup:
             def list_collections(self):
                 return [{"name": "code__bug"}]
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--chunk-text-dedup", "--json"],
         )
@@ -316,7 +316,7 @@ class TestChunkTextDedup:
             def list_collections(self):
                 return [{"name": "code__a"}, {"name": "code__b"}]
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--chunk-text-dedup", "--json"],
         )
@@ -362,7 +362,7 @@ class TestT3VsCatalog:
             def list_collections(self):
                 return [{"name": "docs__clean"}]
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--t3-vs-catalog", "--json"],
         )
@@ -396,7 +396,7 @@ class TestT3VsCatalog:
             def list_collections(self):
                 return [{"name": "code__orphan"}]
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--t3-vs-catalog", "--json"],
         )
@@ -435,7 +435,7 @@ class TestT3VsCatalog:
             def list_collections(self):
                 return []  # no T3 collections at all
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: _FakeT3())
         result = runner.invoke(
             doctor_cmd, ["--t3-vs-catalog", "--json"],
         )
