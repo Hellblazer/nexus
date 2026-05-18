@@ -25,6 +25,8 @@ from nexus._locking import acquire_directory_lock, release_lock
 if TYPE_CHECKING:
     from chromadb.api import ClientAPI
 
+    from nexus.catalog.catalog_proxy import ExecuteProxy
+
 
 # Heartbeat cadence for long catalog operations. The first heartbeat
 # fires after this delay (so fast operations stay silent) and then every
@@ -519,9 +521,27 @@ class Catalog:
         detectable via ``link_audit()``.
     """
 
-    def __init__(self, catalog_dir: Path, db_path: Path) -> None:
+    def __init__(
+        self,
+        catalog_dir: Path,
+        db_path: Path,
+        *,
+        db: "CatalogDB | ExecuteProxy | None" = None,
+    ) -> None:
+        # RDR-112 6shq.1 (nexus-lj2l): ``db`` allows callers under
+        # NX_STORAGE_MODE=daemon to inject an ``ExecuteProxy`` over the
+        # daemon's CatalogStore instead of opening a local CatalogDB.
+        # When omitted, the legacy direct-mode path constructs a
+        # CatalogDB(db_path) so all existing call sites keep working
+        # unchanged.
         self._dir = catalog_dir
-        self._db = CatalogDB(db_path)
+        self._db = db if db is not None else CatalogDB(db_path)
+        # Flag for downstream paths (``_SyncOps._ensure_consistent``,
+        # any future write-path branch) to detect proxy mode without
+        # importing ExecuteProxy at every check site. The daemon owns
+        # the projection rebuild under proxy mode; clients trust the
+        # daemon's state.
+        self._daemon_proxy: bool = db is not None and not isinstance(db, CatalogDB)
         self._owners_path = catalog_dir / "owners.jsonl"
         self._documents_path = catalog_dir / "documents.jsonl"
         self._links_path = catalog_dir / "links.jsonl"
@@ -633,7 +653,12 @@ class Catalog:
         event-sourced mode) because the projection correctness depends on
         them being present -- they are structural, not optional telemetry.
         """
-        names = self._db._backfilled_collections
+        # RDR-112 6shq.1 (nexus-lj2l): use the public accessor instead of
+        # the underscored attribute. ``_StoreProxy`` skips underscored
+        # names by design (yfqv defect class), so direct attribute access
+        # would fail under NX_STORAGE_MODE=daemon. Both CatalogDB and
+        # CatalogStore expose ``backfilled_collections()`` for parity.
+        names = self._db.backfilled_collections()
         if not names:
             return
         dir_fd = self._acquire_lock()
