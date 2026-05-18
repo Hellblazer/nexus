@@ -1007,6 +1007,244 @@ class T2Client:
         self.close()
 
     # ------------------------------------------------------------------
+    # T2Database facade compatibility (RDR-112 P3.2, nexus-vm3t)
+    # ------------------------------------------------------------------
+    #
+    # 47 call sites across src/nexus use the pattern
+    # ``with t2_ctx() as db: db.put(...)`` — they expect T2Database's
+    # top-level facade methods that delegate to the per-domain stores
+    # (T2Database.put → self.memory.put, etc.; see t2/__init__.py:408+).
+    # Phase 3 (nexus-hpxl) flipped t2_ctx to return T2Client under
+    # daemon mode but T2Client only exposed store proxies — every
+    # facade call site broke silently with AttributeError. This
+    # section adds the facade delegates so T2Client is a drop-in
+    # replacement for T2Database at the call-site surface.
+    #
+    # Signature parity is locked by
+    # tests/daemon/test_t2_client_facade.py via inspect.signature.
+
+    # ── Memory facade ───────────────────────────────────────────────
+
+    def put(
+        self,
+        project: str,
+        title: str,
+        content: str,
+        tags: str = "",
+        ttl: int | None = 30,
+        agent: str | None = None,
+        session: str | None = None,
+    ) -> int:
+        return self.memory.put(
+            project=project,
+            title=title,
+            content=content,
+            tags=tags,
+            ttl=ttl,
+            agent=agent,
+            session=session,
+        )
+
+    def get(
+        self,
+        project: str | None = None,
+        title: str | None = None,
+        id: int | None = None,
+    ) -> Any:
+        return self.memory.get(project=project, title=title, id=id)
+
+    def resolve_title(
+        self,
+        project: str,
+        title: str,
+    ) -> Any:
+        return self.memory.resolve_title(project=project, title=title)
+
+    def search(
+        self,
+        query: str,
+        project: str | None = None,
+        access: str = "track",
+    ) -> Any:
+        return self.memory.search(query, project=project, access=access)
+
+    def list_entries(
+        self,
+        project: str | None = None,
+        agent: str | None = None,
+    ) -> Any:
+        return self.memory.list_entries(project=project, agent=agent)
+
+    def get_projects_with_prefix(self, prefix: str) -> Any:
+        return self.memory.get_projects_with_prefix(prefix)
+
+    def search_glob(self, query: str, project_glob: str) -> Any:
+        return self.memory.search_glob(query, project_glob)
+
+    def search_by_tag(self, query: str, tag: str) -> Any:
+        return self.memory.search_by_tag(query, tag)
+
+    def get_all(self, project: str) -> Any:
+        return self.memory.get_all(project)
+
+    def delete(
+        self,
+        project: str | None = None,
+        title: str | None = None,
+        id: int | None = None,
+    ) -> bool:
+        """Delete a memory entry.
+
+        Known difference from ``T2Database.delete``: the cross-domain
+        taxonomy cascade that T2Database performs after the memory row
+        is deleted (see t2/__init__.py:493-525) is NOT mirrored here.
+        That cascade reads memory.conn directly to resolve (project,
+        title) from a numeric id; T2Client has no direct connection
+        access (RPC only). Callers that need the cascade under daemon
+        mode should pass project + title explicitly so this method
+        forwards them, OR file a follow-up for a daemon-side cascade
+        RPC. Most CLI delete paths resolve project + title upstream
+        already.
+        """
+        return self.memory.delete(project=project, title=title, id=id)
+
+    def find_overlapping_memories(
+        self,
+        project: str,
+        min_similarity: float = 0.7,
+        limit: int = 50,
+    ) -> Any:
+        return self.memory.find_overlapping_memories(
+            project, min_similarity=min_similarity, limit=limit
+        )
+
+    def merge_memories(
+        self,
+        keep_id: int,
+        delete_ids: list[int],
+        merged_content: str,
+    ) -> Any:
+        return self.memory.merge_memories(keep_id, delete_ids, merged_content)
+
+    def flag_stale_memories(
+        self,
+        project: str,
+        idle_days: int = 30,
+    ) -> Any:
+        return self.memory.flag_stale_memories(project, idle_days=idle_days)
+
+    # ── Plan Library facade ─────────────────────────────────────────
+
+    def save_plan(
+        self,
+        query: str,
+        plan_json: str,
+        outcome: str = "success",
+        tags: str = "",
+        project: str = "",
+        ttl: int | None = None,
+        name: str | None = None,
+        verb: str | None = None,
+        scope: str | None = None,
+        dimensions: str | None = None,
+        default_bindings: str | None = None,
+        parent_dims: str | None = None,
+        scope_tags: str | None = None,
+    ) -> int:
+        return self.plans.save_plan(
+            query=query,
+            plan_json=plan_json,
+            outcome=outcome,
+            tags=tags,
+            project=project,
+            ttl=ttl,
+            name=name,
+            verb=verb,
+            scope=scope,
+            dimensions=dimensions,
+            default_bindings=default_bindings,
+            parent_dims=parent_dims,
+            scope_tags=scope_tags,
+        )
+
+    def search_plans(
+        self,
+        query: str,
+        limit: int = 5,
+        project: str = "",
+    ) -> Any:
+        return self.plans.search_plans(query, limit=limit, project=project)
+
+    def list_plans(self, limit: int = 20, project: str = "") -> Any:
+        return self.plans.list_plans(limit=limit, project=project)
+
+    def plan_exists(self, query: str, tag: str) -> bool:
+        return self.plans.plan_exists(query, tag)
+
+    # ── Telemetry facade ────────────────────────────────────────────
+
+    def log_relevance(
+        self,
+        query: str,
+        chunk_id: str,
+        action: str,
+        session_id: str = "",
+        collection: str = "",
+    ) -> int:
+        return self.telemetry.log_relevance(
+            query=query,
+            chunk_id=chunk_id,
+            action=action,
+            session_id=session_id,
+            collection=collection,
+        )
+
+    def log_relevance_batch(
+        self,
+        rows: list[tuple[str, str, str, str, str]],
+    ) -> int:
+        return self.telemetry.log_relevance_batch(rows)
+
+    def get_relevance_log(
+        self,
+        query: str = "",
+        chunk_id: str = "",
+        action: str = "",
+        session_id: str = "",
+        limit: int = 100,
+    ) -> Any:
+        return self.telemetry.get_relevance_log(
+            query=query,
+            chunk_id=chunk_id,
+            action=action,
+            session_id=session_id,
+            limit=limit,
+        )
+
+    def expire_relevance_log(self, days: int = 90) -> int:
+        return self.telemetry.expire_relevance_log(days=days)
+
+    # ── Housekeeping facade ─────────────────────────────────────────
+
+    def expire(self, relevance_log_days: int = 90) -> int:
+        """Delete TTL-expired entries — client-side composition of two RPCs.
+
+        T2Database.expire (t2/__init__.py:661) composes telemetry.expire_relevance_log
+        and memory.expire. The daemon doesn't expose ``database.expire`` as
+        a single bare op (``_T2_DATABASE_METHODS`` carries only
+        ``rename_collection_cascade``). Replicating the composition client-
+        side preserves the call-site contract without requiring a daemon-
+        side addition. Returns the number of memory rows expired (matches
+        T2Database.expire's return value).
+        """
+        try:
+            self.expire_relevance_log(days=relevance_log_days)
+        except Exception:  # noqa: BLE001 — mirrors T2Database.expire's swallow
+            pass
+        expired_ids = self.memory.expire()
+        return len(expired_ids) if expired_ids is not None else 0
+
+    # ------------------------------------------------------------------
     # Bare-op invocation (admin RPCs and introspection verbs)
     # ------------------------------------------------------------------
 
