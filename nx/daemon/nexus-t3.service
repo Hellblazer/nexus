@@ -1,0 +1,29 @@
+## systemd user unit for the nexus T3 daemon (RDR-112 P1.5.4, nexus-v5hb).
+## Installed by ``nx daemon t3 install --autostart``. The T3 daemon is a
+## managed ``chroma run`` subprocess; ``nx daemon t3 start`` blocks until
+## SIGTERM so systemd's supervision is the canonical lifecycle owner.
+##
+## ``StandardOutput`` / ``StandardError`` capture the supervisor stream
+## (interpreter crash diagnostics, chroma run stderr).
+
+[Unit]
+Description=Nexus T3 daemon (managed chroma run subprocess)
+After=network.target
+PartOf=default.target
+
+[Service]
+Type=simple
+ExecStart=__NX_BIN__ daemon t3 start
+Restart=on-failure
+RestartSec=5s
+## nexus-o6g9 lesson (T2): SIGTERM-induced exits surface as code 143.
+## ``nx daemon t3 stop`` sends SIGTERM; mark 143 as success so
+## Restart=on-failure does not immediately respawn after an operator
+## stop.
+SuccessExitStatus=143
+Environment=PATH=__PATH_ENV__
+StandardOutput=append:__LOG_DIR__/nexus-t3.log
+StandardError=append:__LOG_DIR__/nexus-t3.err
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for the nexus T3 daemon (RDR-112 P1.5.4, nexus-v5hb).
+  Installed by ``nx daemon t3 install --autostart``. The T3 daemon is a
+  managed ``chroma run`` subprocess; ``nx daemon t3 start --foreground``
+  spawns chroma and blocks until SIGTERM, so launchd's supervision is
+  the canonical lifecycle owner.
+
+  The ``__NX_BIN__`` placeholder is substituted at install time with the
+  resolved absolute path to the ``nx`` executable. ``__LOG_DIR__`` and
+  ``__PATH_ENV__`` are substituted at install time as well.
+
+  ``StandardOutPath`` / ``StandardErrorPath`` capture the launchd-
+  supervised stream (interpreter crash diagnostics, chroma run stderr).
+  No bounded rotation here — let it grow under inspection, then the
+  operator truncates.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nexus.t3</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NX_BIN__</string>
+        <string>daemon</string>
+        <string>t3</string>
+        <string>start</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/nexus-t3.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/nexus-t3.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__PATH_ENV__</string>
+    </dict>
+</dict>
+</plist>
