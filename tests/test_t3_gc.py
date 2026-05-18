@@ -201,7 +201,7 @@ def test_gc_dry_run_reports_orphans_no_mutation(t3_db, catalog, tmp_path, runner
         chunk_text_hash=orphan_chash, indexed_at=long_ago,
     )
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db), \
          patch("nexus.commands.t3._make_catalog", return_value=catalog):
         result = runner.invoke(
             main, ["t3", "gc", "-c", coll, "--dry-run"],
@@ -251,7 +251,7 @@ def test_gc_emits_chunk_orphaned_event_before_delete(
         chunk_text_hash="c" * 64, indexed_at=long_ago,
     )
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db), \
          patch("nexus.commands.t3._make_catalog", return_value=catalog):
         result = runner.invoke(
             main,
@@ -292,7 +292,7 @@ def test_gc_orphan_window_excludes_recent(t3_db, catalog, tmp_path, runner):
         chunk_text_hash="c" * 64, indexed_at=long_ago,
     )
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db), \
          patch("nexus.commands.t3._make_catalog", return_value=catalog):
         result = runner.invoke(
             main,
@@ -322,7 +322,7 @@ def test_gc_default_window_is_30_days(t3_db, catalog, tmp_path, runner):
         chunk_text_hash="c" * 64, indexed_at=forty_days,
     )
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db), \
          patch("nexus.commands.t3._make_catalog", return_value=catalog):
         result = runner.invoke(
             main,
@@ -347,7 +347,7 @@ def test_gc_no_orphans_clean_summary(t3_db, catalog, runner):
         chunk_text_hash=live_chash, indexed_at=long_ago,
     )
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db), \
          patch("nexus.commands.t3._make_catalog", return_value=catalog):
         result = runner.invoke(main, ["t3", "gc", "-c", coll])
 
@@ -375,7 +375,7 @@ def test_gc_chunk_with_missing_chunk_text_hash_skipped(
         metadatas=[{"indexed_at": long_ago}],  # no chunk_text_hash
     )
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db), \
          patch("nexus.commands.t3._make_catalog", return_value=catalog):
         result = runner.invoke(
             main,
@@ -399,7 +399,7 @@ def test_gc_aborts_on_uninitialized_catalog(t3_db, tmp_path, runner, monkeypatch
     monkeypatch.setattr(
         "nexus.config.catalog_path", lambda: bare_path,
     )
-    with patch("nexus.db.make_t3", return_value=t3_db):
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db):
         result = runner.invoke(
             main, ["t3", "gc", "-c", "knowledge__test", "--dry-run"],
         )
@@ -438,7 +438,7 @@ def test_gc_malformed_indexed_at_is_skipped(t3_db, catalog, tmp_path, runner):
         }],
     )
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db), \
          patch("nexus.commands.t3._make_catalog", return_value=catalog):
         result = runner.invoke(
             main,
@@ -473,7 +473,7 @@ def test_gc_paginates_above_300_chunk_boundary(
         ],
     )
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db), \
          patch("nexus.commands.t3._make_catalog", return_value=catalog):
         result = runner.invoke(
             main,
@@ -518,7 +518,7 @@ def test_gc_chunk_id_shape_irrelevant_under_manifest_path(
         chunk_text_hash="b" * 64, indexed_at=long_ago,
     )
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db), \
          patch("nexus.commands.t3._make_catalog", return_value=catalog):
         result = runner.invoke(
             main,
@@ -540,7 +540,7 @@ def test_gc_no_yes_flag_reports_only(t3_db, catalog, tmp_path, runner):
         chunk_text_hash="b" * 64, indexed_at=long_ago,
     )
 
-    with patch("nexus.db.make_t3", return_value=t3_db), \
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db), \
          patch("nexus.commands.t3._make_catalog", return_value=catalog):
         result = runner.invoke(
             main,

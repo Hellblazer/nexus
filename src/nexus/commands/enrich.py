@@ -168,6 +168,8 @@ def enrich_bib(
     Already-enriched chunks (the backend's ID field is non-empty) are
     skipped — the command is idempotent per backend.
     """
+    from nexus.config import get_credential, is_local_mode
+    from nexus.db import is_daemon_mode
     from nexus.mcp_infra import get_t3
     from nexus.retry import _chroma_with_retry
 
@@ -181,6 +183,28 @@ def enrich_bib(
     # ``make_t3`` unchanged. ``RuntimeError`` from the daemon resolver
     # (``T3DaemonError`` / ``DaemonNotRunningError``) carries a
     # recovery hint; translate to ``ClickException`` for the CLI.
+    #
+    # nexus-cj1a I2 remediation: cloud-mode credential pre-check
+    # parity with store._t3 / catalog._make_t3 / index._make_t3 /
+    # doc._make_t3. Pre-fix a missing chroma_api_key under cloud mode
+    # surfaced as a raw chromadb internals exception; this guard emits
+    # the same actionable ClickException as the other ports.
+    if not is_daemon_mode() and not is_local_mode():
+        database = get_credential("chroma_database")
+        api_key = get_credential("chroma_api_key")
+        voyage_api_key = get_credential("voyage_api_key")
+        if not api_key:
+            raise click.ClickException(
+                "chroma_api_key not set — run: nx config set chroma_api_key <value>"
+            )
+        if not voyage_api_key:
+            raise click.ClickException(
+                "voyage_api_key not set — run: nx config set voyage_api_key <value>"
+            )
+        if not database:
+            raise click.ClickException(
+                "chroma_database not set — run: nx config init"
+            )
     try:
         db = get_t3()
     except RuntimeError as exc:

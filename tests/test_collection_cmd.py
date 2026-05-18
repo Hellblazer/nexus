@@ -474,7 +474,12 @@ def test_run_collection_postprocessing_swallows_t2_t3_errors() -> None:
 
     from nexus.commands.index import run_collection_postprocessing
 
-    with patch("nexus.db.make_t3", side_effect=RuntimeError("boom")):
+    # nexus-cj1a: after uar6, ``run_collection_postprocessing`` calls
+    # ``mcp_infra.get_t3`` (not the legacy ``nexus.db.make_t3``). The
+    # prior patch target was vacuous — the test passed because the
+    # patch never intercepted the call, not because the chain swallowed
+    # the exception. Patch the actual seam.
+    with patch("nexus.mcp_infra.get_t3", side_effect=RuntimeError("boom")):
         # Must NOT raise; the chain logs and falls through.
         run_collection_postprocessing(
             ["docs__regression"], repo_path=None, quiet=True,
@@ -562,11 +567,14 @@ def test_run_collection_postprocessing_does_not_pass_alias_through(monkeypatch):
 
     fake_t3 = MagicMock()
     fake_t3._client = MagicMock()
-    monkeypatch.setattr(index_mod, "make_t3", lambda: fake_t3, raising=False)
-    # make_t3 lives in nexus.db; patch at the import site used inside
-    # run_collection_postprocessing.
-    import nexus.db as _db_mod
-    monkeypatch.setattr(_db_mod, "make_t3", lambda: fake_t3)
+    # nexus-cj1a: after uar6, ``run_collection_postprocessing`` calls
+    # ``mcp_infra.get_t3`` (not the legacy ``nexus.db.make_t3``).
+    # Patch the live seam; the prior patches at ``index_mod.make_t3``
+    # / ``nexus.db.make_t3`` were vestigial (the call site no longer
+    # routes through either name) and only worked because
+    # ``_discover_taxonomy`` is patched directly above.
+    import nexus.mcp_infra as _mcp_mod
+    monkeypatch.setattr(_mcp_mod, "get_t3", lambda: fake_t3)
 
     info = {
         "collection": "code__nexus-571b8edd",  # legacy non-conformant alias

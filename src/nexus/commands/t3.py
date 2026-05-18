@@ -134,13 +134,54 @@ def _make_catalog():
     return Catalog(path, path / ".catalog.db")
 
 
+def _make_t3():
+    """RDR-112 P4 (nexus-cj1a closeout): daemon-aware T3 factory.
+
+    The ``nx t3`` group (prune-stale, prune-orphans, gc, backfill)
+    previously called ``nexus.db.make_t3()`` directly, opening a
+    ``PersistentClient`` against the daemon's on-disk chroma path
+    under daemon mode and racing the daemon writer. This helper
+    routes through ``mcp_infra.get_t3`` so daemon mode hits the
+    HttpClient instead. Mirrors the equivalents in
+    ``commands.catalog`` (uar6) and ``commands.taxonomy_cmd`` (mmvf).
+    Cloud-mode credential pre-check pattern matches
+    ``commands.store._t3`` (idqd).
+    """
+    from nexus.config import get_credential, is_local_mode
+    from nexus.db import is_daemon_mode
+    from nexus.mcp_infra import get_t3
+
+    if not is_daemon_mode() and not is_local_mode():
+        database = get_credential("chroma_database")
+        api_key = get_credential("chroma_api_key")
+        voyage_api_key = get_credential("voyage_api_key")
+        if not api_key:
+            raise click.ClickException(
+                "chroma_api_key not set — run: nx config set chroma_api_key <value>"
+            )
+        if not voyage_api_key:
+            raise click.ClickException(
+                "voyage_api_key not set — run: nx config set voyage_api_key <value>"
+            )
+        if not database:
+            raise click.ClickException(
+                "chroma_database not set — run: nx config init"
+            )
+    try:
+        return get_t3()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 def _make_t3_for_backfill():
     """Construct the default T3Database for the backfill command.
 
-    Patched in tests for isolation.
+    Patched in tests for isolation. Delegates to the daemon-aware
+    ``_make_t3`` helper so test patches that target
+    ``nexus.commands.t3._make_t3_for_backfill`` keep working while
+    the production path stays daemon-safe.
     """
-    from nexus.db import make_t3  # noqa: PLC0415
-    return make_t3()
+    return _make_t3()
 
 
 @click.group()
@@ -186,8 +227,6 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
       nx t3 prune-stale -c rdr__nexus-571b8edd       # one collection
       nx t3 prune-stale --no-dry-run --confirm       # actually delete
     """
-    from nexus.db import make_t3  # noqa: PLC0415
-
     will_delete = (not dry_run) and confirm
     if (not dry_run) and not confirm:
         click.echo(
@@ -196,7 +235,7 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
         )
         will_delete = False
 
-    t3_db = make_t3()
+    t3_db = _make_t3()
 
     if collection:
         target_collections = [collection]
@@ -404,7 +443,6 @@ def gc_cmd(
         ChunkOrphanedPayload,
         make_event,
     )
-    from nexus.db import make_t3  # noqa: PLC0415
 
     window = _parse_orphan_window(orphan_window)
     cutoff = datetime.now(UTC) - window
@@ -417,7 +455,7 @@ def gc_cmd(
         )
         will_delete = False
 
-    t3_db = make_t3()
+    t3_db = _make_t3()
     cat = _make_catalog()
 
     try:

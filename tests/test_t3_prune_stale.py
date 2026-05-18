@@ -120,7 +120,7 @@ def test_prune_stale_dry_run_reports_stale_only(t3_db, tmp_path, runner):
     _seed_chunk(t3_db, collection=coll, chunk_id="s1", content="y", source_path=str(stale))
     _seed_chunk(t3_db, collection=coll, chunk_id="s2", content="z", source_path=str(stale))
 
-    with patch("nexus.db.make_t3", return_value=t3_db):
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db):
         result = runner.invoke(
             main, ["t3", "prune-stale", "-c", coll],
         )
@@ -143,7 +143,7 @@ def test_prune_stale_no_confirm_treated_as_report_only(t3_db, tmp_path, runner):
     stale = tmp_path / "ghost.md"
     _seed_chunk(t3_db, collection=coll, chunk_id="s1", content="x", source_path=str(stale))
 
-    with patch("nexus.db.make_t3", return_value=t3_db):
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db):
         result = runner.invoke(
             main, ["t3", "prune-stale", "-c", coll, "--no-dry-run"],
         )
@@ -165,7 +165,7 @@ def test_prune_stale_no_dry_run_with_confirm_actually_deletes(
     _seed_chunk(t3_db, collection=coll, chunk_id="s1", content="y", source_path=str(stale))
     _seed_chunk(t3_db, collection=coll, chunk_id="s2", content="z", source_path=str(stale))
 
-    with patch("nexus.db.make_t3", return_value=t3_db):
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db):
         result = runner.invoke(
             main,
             ["t3", "prune-stale", "-c", coll, "--no-dry-run", "--confirm"],
@@ -188,7 +188,7 @@ def test_prune_stale_no_stale_paths_emits_clean_summary(
     real.write_text("hi")
     _seed_chunk(t3_db, collection=coll, chunk_id="c1", content="x", source_path=str(real))
 
-    with patch("nexus.db.make_t3", return_value=t3_db):
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db):
         result = runner.invoke(main, ["t3", "prune-stale", "-c", coll])
     assert result.exit_code == 0
     assert "0 chunk(s)" in result.output
@@ -209,7 +209,7 @@ def test_prune_stale_no_collections_message(t3_db, runner):
         except Exception:
             pass
 
-    with patch("nexus.db.make_t3", return_value=t3_db):
+    with patch("nexus.mcp_infra.get_t3", return_value=t3_db):
         result = runner.invoke(main, ["t3", "prune-stale"])
     assert result.exit_code == 0
     assert "No collections" in result.output
