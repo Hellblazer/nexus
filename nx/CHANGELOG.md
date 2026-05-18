@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added: phase-review-gate (nexus-j327)
+
+- **`/nx:phase-review-gate` slash command**: two-pass cross-walk gate
+  for RDR §Approach items at phase boundaries. Pass 1 enumerates all
+  numbered §Approach items; Pass 2 validates each has a bead-shaped
+  evidence pointer. Blocks phase close when any approach item is
+  unaccounted for. Modeled on the RDR-065 Problem Statement Replay
+  gate (same Pass-1/Pass-2 preamble shape).
+- **Regression test**: `tests/test_phase_review_gate.py` includes a
+  direct regression against the actual RDR-112 Phase 1 (nexus-52lb,
+  2026-05-15) closing-bead set — the gate blocks because §Approach
+  item 2 (T3 daemon) had no closing bead, which is exactly the silent
+  scope reduction that was discovered three phases later.
+- **`docs/rdr/AGENTS.md`** updated to point operators at
+  `/nx:phase-review-gate` at every phase boundary.
+
 ### Added: RDR-110/111 user-facing surfaces
 
 - **Tuplespace skills**: seven `nx:tuplespace-*` cockpit skills land

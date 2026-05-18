@@ -38,6 +38,8 @@ If you need to find an RDR by topic, prefer the index in `docs/rdr/README.md` ov
 
 Use the lifecycle skills: `/nx:rdr-create` → `/nx:rdr-research` → `/nx:rdr-gate` → `/nx:rdr-accept` → `/nx:rdr-close`. List existing with `/nx:rdr-list`; show one with `/nx:rdr-show NNN`.
 
+At each phase boundary inside the implementation arc, run `/nx:phase-review-gate <id> --phase N` before closing the phase-review bead. This cross-walks the RDR §Approach sub-items against the closing beads and blocks the phase close if any planned work was silently dropped. Root cause it prevents: scope reduction discovered mid-implementation (RDR-112 Phase 1, nexus-52lb, 2026-05-15 — T3 daemon silently dropped from a 6-bead phase close, found three phases later).
+
 The numbering is monotonic; pick the next unused integer. The frontmatter shape is enforced by `/nx:rdr-audit`.
 
 ## Frontmatter quoting — `#` is comment-start in YAML
