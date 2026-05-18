@@ -9,17 +9,47 @@ through this helper. The mmvf flip routes the helper's T3 source
 through ``mcp_infra.get_t3`` so daemon mode returns the daemon's
 ``HttpClient``.
 
-The helper also constructs a Catalog (``open_cached``) and a
-``ChashIndex`` directly off ``default_db_path()``. Those two direct
-opens race the daemon under daemon mode and are tracked separately
-under nexus-6shq (the broader Catalog -> T2Client.catalog refactor);
-mmvf flips only the T3 source here.
+RDR-112 6shq.2 (nexus-3gdg) augmentation: the helper's Catalog open
+now also routes through the daemon (via ``open_cached`` ->
+``open_catalog`` -> ``ExecuteProxy``). The fixture spawns both a T2
+daemon and a T3 daemon so the helper resolves without raising
+``DaemonNotRunningError`` on the catalog side. ChashIndex remains
+out-of-scope for 3gdg (tracked under 6shq.4).
 """
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 
 import pytest
+
+from nexus.daemon.t2_daemon import T2Daemon
+from nexus.db.t2 import T2Database
+
+
+# ── In-thread T2 daemon harness (matches yfqv/idqd/lj2l pattern) ───────────
+
+
+def _run_daemon(daemon: T2Daemon) -> asyncio.AbstractEventLoop:
+    started = threading.Event()
+    loop = asyncio.new_event_loop()
+
+    def _thread() -> None:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(daemon.start())
+        started.set()
+        loop.run_forever()
+
+    t = threading.Thread(target=_thread, daemon=True)
+    t.start()
+    started.wait(timeout=5.0)
+    return loop
+
+
+def _stop_daemon(daemon: T2Daemon, loop: asyncio.AbstractEventLoop) -> None:
+    asyncio.run_coroutine_threadsafe(daemon.stop(), loop).result(timeout=5.0)
+    loop.call_soon_threadsafe(loop.stop)
 
 
 @pytest.fixture
@@ -56,6 +86,27 @@ def daemon_env(monkeypatch, config_dir: Path):
 
 
 @pytest.fixture
+def t2db(tmp_path: Path) -> T2Database:
+    db = T2Database(tmp_path / "memory.db")
+    yield db
+    db.close()
+
+
+@pytest.fixture
+def live_t2_daemon(t2db: T2Database, config_dir: Path, daemon_env):
+    # RDR-112 6shq.2 (nexus-3gdg): doc command's catalog open now
+    # routes through the daemon under daemon mode; T2 daemon required.
+    daemon = T2Daemon(config_dir, t2db=t2db)
+    loop = _run_daemon(daemon)
+    try:
+        yield daemon
+    finally:
+        from nexus.catalog import reset_cache
+        reset_cache()
+        _stop_daemon(daemon, loop)
+
+
+@pytest.fixture
 def live_t3_daemon(daemon_env, config_dir: Path, local_path: Path):
     from nexus.daemon.t3_daemon import start_t3_daemon, stop_t3_daemon
 
@@ -87,18 +138,25 @@ def initialized_catalog(config_dir: Path):
 class TestDocPhase4Factory:
     def test_phase4_factory_resolves_t3_via_daemon(
         self,
+        live_t2_daemon,
         live_t3_daemon,
         reset_t3_singleton,
         initialized_catalog: Path,
     ) -> None:
         """``_phase4_catalog_t3_chash`` returns a ``(catalog, t3,
-        chash_index)`` trio. Under daemon mode the ``t3`` slot must be
-        a ``T3Database`` whose underlying client is the daemon's
-        ``HttpClient``. The catalog + chash_index slots are out-of-
-        scope for mmvf (tracked under nexus-6shq); we only assert on
-        the T3 client class."""
+        chash_index)`` trio. Under daemon mode:
+
+        * the ``t3`` slot is a ``T3Database`` whose underlying client
+          is the daemon's ``HttpClient`` (mmvf scope)
+        * the ``catalog`` slot is a Catalog backed by an
+          ``ExecuteProxy`` over ``T2Client.catalog`` (RDR-112 6shq.2
+          / nexus-3gdg scope)
+
+        The ``chash_index`` slot still opens ``ChashIndex`` directly
+        and is out-of-scope until 6shq.4 (it tracks T2's chash table,
+        a separate seam from the catalog flip)."""
         from nexus.commands.doc import _phase4_catalog_t3_chash
-        _cat, t3, _chash = _phase4_catalog_t3_chash()
+        cat, t3, _chash = _phase4_catalog_t3_chash()
         # nexus-mmvf review Minor: chromadb factories return the same
         # Client class; use the client identifier (host:port vs path)
         # as the daemon-vs-persistent discriminator.
@@ -107,6 +165,16 @@ class TestDocPhase4Factory:
             f"client identifier {client_id!r} looks like a filesystem "
             f"path — the seam likely returned a PersistentClient under "
             f"daemon mode, racing the daemon writer."
+        )
+        # 3gdg review Suggestion-2: assert the catalog arrived via the
+        # daemon proxy. ``_daemon_proxy`` is the Catalog flag set in
+        # ``Catalog.__init__`` when ``db=`` is an ExecuteProxy
+        # instance. A False here would mean the factory bypassed
+        # ``open_cached`` / ``open_catalog`` and constructed a direct
+        # CatalogDB — a regression on the 3gdg flip.
+        assert getattr(cat, "_daemon_proxy", False), (
+            "catalog should be proxy-backed in daemon mode after "
+            "RDR-112 6shq.2 / nexus-3gdg; got direct CatalogDB"
         )
         # The helper's T3 read surface must work end-to-end against
         # the daemon (empty list is the correct answer for a fresh

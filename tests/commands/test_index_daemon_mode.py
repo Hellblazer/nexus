@@ -111,6 +111,11 @@ def live_t2_daemon(t2db: T2Database, config_dir: Path, daemon_env):
     try:
         yield daemon
     finally:
+        # RDR-112 6shq.2 (nexus-3gdg): drop the process-singleton
+        # T2Client before stopping the daemon — see the matching
+        # comment in tests/commands/test_catalog_daemon_mode.py.
+        from nexus.catalog import reset_cache
+        reset_cache()
         _stop_daemon(daemon, loop)
 
 
@@ -126,6 +131,73 @@ def live_t3_daemon(daemon_env, config_dir: Path, local_path: Path):
 
 
 # ── Tests ───────────────────────────────────────────────────────────────────
+
+
+class TestOpenCatalogOrNoneLogging:
+    """3gdg review IMPORTANT-3 regression: when ``_open_catalog_or_none``
+    catches an exception (e.g. ``DaemonNotRunningError`` under daemon
+    mode without a live daemon), it must emit a structured log
+    warning before returning ``None``. Pre-fix the silent return left
+    operators unable to tell that catalog-aware features had been
+    bypassed.
+    """
+
+    def test_open_catalog_or_none_logs_when_swallowing_exception(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        """When ``open_catalog`` raises any exception (e.g.
+        ``DaemonNotRunningError``), the helper returns ``None`` and
+        emits ``catalog_open_failed_returning_none`` so the silent
+        fallback is observable in logs.
+
+        Uses an injected fault rather than a real daemon-down
+        scenario so the test is fast and deterministic (no daemon
+        startup, no env-var dependency). Captures via ``capsys``
+        because structlog's default emit path writes to the
+        ConsoleRenderer (stdout/stderr) rather than the stdlib
+        logging handlers ``caplog`` taps.
+        """
+        from nexus.catalog import Catalog
+        from nexus.commands.index import _open_catalog_or_none
+
+        # Initialize a real catalog in direct mode so the
+        # ``Catalog.is_initialized`` check passes and the helper
+        # reaches the ``open_catalog`` call.
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+        Catalog.init(cat_dir)
+        monkeypatch.setattr("nexus.config.catalog_path", lambda: cat_dir)
+
+        # Inject the same RuntimeError shape ``DaemonNotRunningError``
+        # would raise. Using a generic RuntimeError keeps the test
+        # independent of the discovery module's internals. The
+        # function imports ``open_catalog`` from ``nexus.catalog``
+        # inside its body so we patch the source module.
+        def _boom(_cat_path):
+            raise RuntimeError("injected: no daemon")
+        monkeypatch.setattr("nexus.catalog.open_catalog", _boom)
+
+        result = _open_catalog_or_none()
+
+        assert result is None, (
+            "open_catalog failure should cause helper to return None"
+        )
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        assert "catalog_open_failed_returning_none" in combined, (
+            f"expected catalog_open_failed_returning_none in log "
+            f"output; saw stdout={captured.out!r}, stderr={captured.err!r}"
+        )
+        # The structured warning must carry the exception type so
+        # operators can distinguish daemon-down (RuntimeError) from
+        # catalog-corrupt (sqlite3.OperationalError) etc.
+        assert "RuntimeError" in combined, (
+            f"expected error_type=RuntimeError in log output; "
+            f"saw: {combined!r}"
+        )
 
 
 class TestPostIndexTaxonomyRouting:

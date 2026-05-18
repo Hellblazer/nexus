@@ -86,6 +86,16 @@ def daemon_client(t2db: T2Database, config_dir: Path):
     try:
         yield client
     finally:
+        # RDR-112 6shq.2 (nexus-3gdg): ``reset_cache`` clears the
+        # process-singleton T2Client if any test in this suite
+        # triggered ``open_catalog``. The parity tests construct the
+        # Catalog directly via ``Catalog(..., db=ExecuteProxy(client))``
+        # without going through ``open_catalog``, so ``_t2_client``
+        # is normally ``None`` here and ``reset_cache`` is a no-op.
+        # Kept for defence-in-depth against future test additions
+        # that exercise the open_catalog path.
+        from nexus.catalog import reset_cache
+        reset_cache()
         client.close()
         _stop_daemon(daemon, loop)
 

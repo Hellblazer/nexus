@@ -2,6 +2,7 @@
 
 import threading
 from pathlib import Path
+from typing import Any
 
 from nexus.catalog.catalog import Catalog, CatalogEntry, CatalogLink
 from nexus.catalog.tumbler import (
@@ -19,6 +20,7 @@ __all__ = [
     "LinkRecord",
     "OwnerRecord",
     "Tumbler",
+    "open_catalog",
     "open_cached",
     "reset_cache",
     "resolve_tumbler",
@@ -42,6 +44,75 @@ __all__ = [
 _cached: dict[tuple[Path, str], Catalog] = {}
 _cache_lock = threading.Lock()
 
+# RDR-112 6shq.2 (nexus-3gdg): process-singleton T2Client for daemon
+# mode. Every ``open_catalog`` call under daemon mode would otherwise
+# spawn a fresh ``T2Client`` (one socket pool per Catalog construction).
+# CLI verbs that don't cache their Catalog (the common case for
+# ``_get_catalog`` flows) would then leak the underlying sockets until
+# process exit; in test sequences that spin up + tear down a T2 daemon
+# repeatedly, the orphan client sockets prevent the daemon's
+# ``server.wait_closed`` from completing within its 5 s timeout.
+# Sharing one T2Client across Catalog instances mirrors the T3
+# singleton pattern at ``mcp_infra.get_t3`` and lets ``reset_cache``
+# close the client deterministically.
+_t2_client: Any = None
+_t2_client_lock = threading.Lock()
+
+
+def open_catalog(cat_path: Path) -> Catalog:
+    """Return a fresh, daemon-aware Catalog instance for *cat_path*.
+
+    RDR-112 6shq.2 (nexus-3gdg): the shared construction seam for CLI
+    verbs that need their own Catalog handle (write-heavy paths,
+    short-lived helpers, ``nx catalog setup``, the doc-id-coverage
+    audit). Read-mostly helpers (per-file lookups during indexing)
+    should prefer :func:`open_cached`, which keys on
+    ``(cat_path, mode)`` and reuses the constructed instance.
+
+    Under ``NX_STORAGE_MODE=daemon`` builds the Catalog with an
+    ``ExecuteProxy`` over a process-singleton ``T2Client`` (see
+    :func:`_get_t2_client`). Multiple ``open_catalog`` calls under
+    daemon mode return distinct Catalog wrappers but share one
+    underlying socket pool; the daemon serialises writes via its own
+    lock, so callers do not need to coordinate. The singleton is
+    torn down by :func:`reset_cache`. Under direct mode constructs a
+    fresh ``CatalogDB`` over ``cat_path / ".catalog.db"`` (the legacy
+    path).
+
+    Fail-loud-on-missing-daemon: in daemon mode with no daemon running,
+    ``t2_ctx()`` raises ``DaemonNotRunningError`` (a ``RuntimeError``
+    subclass). 3gdg review IMPORTANT-1: callers that cannot tolerate a
+    missing daemon must catch ``RuntimeError`` and translate to
+    ``click.ClickException``; otherwise the operator sees a Python
+    traceback rather than a clean error line.
+    """
+    from nexus.db import is_daemon_mode
+
+    cat_path = Path(cat_path)
+    if is_daemon_mode():
+        from nexus.catalog.catalog_proxy import ExecuteProxy
+        t2 = _get_t2_client()
+        return Catalog(cat_path, cat_path / ".catalog.db", db=ExecuteProxy(t2))
+    return Catalog(cat_path, cat_path / ".catalog.db")
+
+
+def _get_t2_client():
+    """Return the process-singleton T2Client for daemon mode.
+
+    Lazy-constructed on first call; subsequent calls reuse the same
+    instance so multiple Catalogs in one process share one socket
+    pool. ``reset_cache`` closes it.
+    """
+    global _t2_client
+    if _t2_client is not None:
+        return _t2_client
+    with _t2_client_lock:
+        if _t2_client is not None:
+            return _t2_client
+        from nexus.mcp_infra import t2_ctx
+        _t2_client = t2_ctx()
+        return _t2_client
+
 
 def open_cached(cat_path: Path) -> Catalog:
     """Return a process-cached Catalog instance for *cat_path*.
@@ -54,10 +125,10 @@ def open_cached(cat_path: Path) -> Catalog:
     storms.
 
     Under ``NX_STORAGE_MODE=daemon`` the cached Catalog is constructed
-    with an ``ExecuteProxy`` over a ``T2Client`` resolved via
-    ``mcp_infra.t2_ctx()``. The T2Client stays alive for the cache
-    entry's lifetime; ``reset_cache()`` tears down both the proxy and
-    the underlying client pool.
+    via :func:`open_catalog`, which uses the process-singleton
+    ``T2Client`` from :func:`_get_t2_client`. The singleton is shared
+    across every Catalog opened under daemon mode in this process, not
+    pinned per-cache-entry; ``reset_cache()`` tears it down.
 
     Callers that mutate the catalog should NOT use this accessor; they
     need a fresh instance because the singleton may have stale internal
@@ -76,17 +147,10 @@ def open_cached(cat_path: Path) -> Catalog:
         inst = _cached.get(key)
         if inst is not None:
             return inst
-        if mode == "daemon":
-            from nexus.catalog.catalog_proxy import ExecuteProxy
-            from nexus.mcp_infra import t2_ctx
-            # ``t2_ctx()`` returns a ``T2Client`` in daemon mode (a
-            # T2Database in direct mode, but we have already branched
-            # on ``mode``). Hold the client reference on the proxy so
-            # the connection pool survives the cache lifetime.
-            t2 = t2_ctx()
-            inst = Catalog(cat_path, cat_path / ".catalog.db", db=ExecuteProxy(t2))
-        else:
-            inst = Catalog(cat_path, cat_path / ".catalog.db")
+        # RDR-112 6shq.2 (nexus-3gdg): single construction seam.
+        # ``open_catalog`` encapsulates the direct-vs-daemon decision
+        # so the cache reuses the same logic as one-shot CLI verbs.
+        inst = open_catalog(cat_path)
         _cached[key] = inst
         return inst
 
@@ -96,22 +160,34 @@ def reset_cache() -> None:
     rebuild path that wants a fresh consistency check after a known
     catalog mutation in another process.
 
-    RDR-112 6shq.1 (nexus-lj2l): under daemon mode the cached Catalog
-    holds an ``ExecuteProxy`` that pins a ``T2Client`` (and its socket
-    pool). Closing the client on eviction prevents leaked connections
-    across rapid test resets. Failures during close are swallowed —
-    eviction must remain idempotent for safety paths.
+    RDR-112 6shq.2 (nexus-3gdg): also tears down the shared T2Client
+    singleton used by ``open_catalog`` so test sequences that stop and
+    restart a T2 daemon between cases do not leak socket pools holding
+    the previous daemon's connection open (which would block the new
+    daemon's ``server.wait_closed`` at teardown).
+
+    Note (3gdg review Minor-2): the cache and the singleton are
+    cleared under separate locks (``_cache_lock`` and
+    ``_t2_client_lock``). Between releasing the first and acquiring
+    the second, a concurrent ``open_cached`` / ``open_catalog`` call
+    can observe the cleared cache, get the not-yet-nulled stale
+    singleton, and cache a Catalog backed by a client that is about
+    to be closed. ``reset_cache`` is only called from test teardown
+    today; if a production caller ever invokes it under concurrent
+    Catalog construction, refactor to hold both locks across the
+    full operation.
     """
+    global _t2_client
     with _cache_lock:
-        for cat in _cached.values():
-            db = getattr(cat, "_db", None)
-            client = getattr(db, "_t2", None)
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
         _cached.clear()
+    with _t2_client_lock:
+        client = _t2_client
+        _t2_client = None
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 def resolve_tumbler(
