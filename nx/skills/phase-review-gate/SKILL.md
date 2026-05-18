@@ -118,6 +118,11 @@ Invoke before closing any phase-review bead — especially when:
 - The gate validates **coverage**, not **correctness**: `Item2=nexus-t3xx` passes even if nexus-t3xx's acceptance criteria are weak. The reviewer must verify the evidence manually.
 - The gate parses `N. **Label**: ...` formatted items. §Approach sections with non-standard numbering (e.g. roman numerals, lettered items) are not parsed. Use standard `1.` numbering in §Approach.
 - `none` is a valid evidence value. Over-use of `none` (e.g. `none` for every item) defeats the purpose; the reviewer is accountable for each `none` they supply.
+- The gate verifies §Approach items are accounted for; it does NOT verify the boundary-spanning code paths between accounted-for items work end-to-end. RDR-112 Phase 3 (2026-05-18) demonstrated this: the cross-walk PASSED on items (Item1 T2 service / Item2 T3 service / Item6 Discovery all evidence-pointed to nexus-hpxl), and a first-pass code review of the same nexus-hpxl diff returned PASS-WITH-FOLLOWUPS. A second-pass code review with explicit boundary-spanning prompt categories (see `/nx:code-review` § Prompt rigour) caught two Significant defects the first pass missed — including a production regression where `taxonomy_cmd._t2_ctx()` raised on every invocation under the new daemon default. The gate is a coverage check, not a code review; pair it with a boundary-spanning code-review-expert dispatch when the diff spans CLI ↔ daemon, daemon ↔ OS supervisor, or any process-boundary surface.
+
+## Recommended companion: boundary-spanning code review
+
+At a phase boundary that ships integration-seam code (process-spawning, supervisor interaction, RPC wiring, env-var resolution), the cross-walk alone is insufficient. After Pass 2 of this gate passes, dispatch `code-review-expert` with explicit suspect categories from `/nx:code-review` § Prompt rigour — process-group safety, race windows, security boundary, integration-boundary defects, lifecycle. The lesson the RDR-112 spine paid for is: friendly relays return friendly reviews; the suspect categories must be named in the prompt for the agent to probe them.
 
 ## Success Criteria
 
