@@ -99,10 +99,14 @@ class TestDocPhase4Factory:
         the T3 client class."""
         from nexus.commands.doc import _phase4_catalog_t3_chash
         _cat, t3, _chash = _phase4_catalog_t3_chash()
-        client_cls_name = type(t3._client).__name__
-        assert "Http" in client_cls_name or "Client" in client_cls_name, (
-            f"expected an HTTP-style client under daemon mode, got "
-            f"{type(t3._client).__module__}.{client_cls_name}"
+        # nexus-mmvf review Minor: chromadb factories return the same
+        # Client class; use the client identifier (host:port vs path)
+        # as the daemon-vs-persistent discriminator.
+        client_id = getattr(t3._client, "_identifier", "") or ""
+        assert "/" not in client_id, (
+            f"client identifier {client_id!r} looks like a filesystem "
+            f"path — the seam likely returned a PersistentClient under "
+            f"daemon mode, racing the daemon writer."
         )
         # The helper's T3 read surface must work end-to-end against
         # the daemon (empty list is the correct answer for a fresh

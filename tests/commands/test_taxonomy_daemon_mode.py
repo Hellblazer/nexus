@@ -147,13 +147,22 @@ class TestTaxonomyMakeT3Seam:
         future versions."""
         from nexus.commands.taxonomy_cmd import _make_t3
         t3 = _make_t3()
-        client_cls_name = type(t3._client).__name__
-        # HttpClient is what ``make_t3_client`` returns under daemon
-        # mode; a PersistentClient would indicate the flip did not
-        # take effect.
-        assert "Http" in client_cls_name or "Client" in client_cls_name, (
-            f"expected an HTTP-style client under daemon mode, got "
-            f"{type(t3._client).__module__}.{client_cls_name}"
+        # nexus-mmvf review Minor: chromadb's HttpClient and
+        # PersistentClient factories both wrap the same
+        # ``chromadb.api.client.Client`` class — ``type(...).__name__``
+        # is ``Client`` in both cases. Assert the regression shape
+        # via the module path of the underlying transport: an
+        # HttpClient's identifier reaches into ``chromadb.api.fastapi``
+        # while a PersistentClient uses ``chromadb.api.segment`` /
+        # local persistence. Pragmatic check: confirm the client
+        # answers ``list_collections()`` without raising (covered by
+        # the next test) and that the identifier does NOT name a
+        # filesystem path (an HttpClient's identifier is host:port).
+        client_id = getattr(t3._client, "_identifier", "") or ""
+        assert "/" not in client_id, (
+            f"client identifier {client_id!r} looks like a filesystem "
+            f"path — the seam likely returned a PersistentClient under "
+            f"daemon mode, racing the daemon writer."
         )
 
     def test_make_t3_list_collections_via_daemon(
@@ -169,6 +178,52 @@ class TestTaxonomyMakeT3Seam:
         t3 = _make_t3()
         cols = t3.list_collections()
         assert isinstance(cols, list)
+
+
+class TestValidateRefsClickExceptionPassthrough:
+    def test_validate_refs_propagates_make_t3_click_exception(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        runner: CliRunner,
+        tmp_path: Path,
+    ) -> None:
+        """nexus-mmvf review S1: ``validate_refs`` historically caught
+        ``Exception`` from ``make_t3()`` (which raised RuntimeError /
+        OSError) and emitted its own "T3 unavailable" + exit 2. After
+        the mmvf flip ``_make_t3()`` raises ``ClickException`` on the
+        daemon-resolver failure path; the outer handler would
+        previously have swallowed it, defeating Click's normal
+        error-formatter (exit code 1 with the recovery hint). The
+        in-place fix re-raises ``ClickException`` ahead of the generic
+        ``Exception`` arm.
+
+        This test pins the contract: when ``_make_t3()`` raises
+        ``ClickException``, ``validate_refs`` must let Click handle
+        it (exit code 1, message echoed by Click's formatter) rather
+        than re-wrapping with exit code 2.
+        """
+        import click as _click
+        from nexus.commands import taxonomy_cmd as _tax
+
+        def _raise_click(*_a, **_kw):
+            raise _click.ClickException("synthetic daemon-resolver failure")
+
+        monkeypatch.setattr(_tax, "_make_t3", _raise_click)
+
+        # validate-refs requires a markdown file argument (PATHS is
+        # ``dir_okay=False``). _make_t3 fires inside the command body
+        # before we reach any scan; an empty stub file is enough for
+        # the Click arg-gate to pass.
+        stub = tmp_path / "stub.md"
+        stub.write_text("# stub\n")
+        result = runner.invoke(
+            main, ["taxonomy", "validate-refs", str(stub)],
+        )
+        # Click's default ClickException formatter exits with code 1
+        # and writes "Error: <message>" to stderr. The regression
+        # would have been exit code 2 ("T3 unavailable: ...").
+        assert result.exit_code == 1, result.output
+        assert "synthetic daemon-resolver failure" in result.output
 
 
 class TestTaxonomyCliReadPath:

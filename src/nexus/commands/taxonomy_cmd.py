@@ -1724,6 +1724,12 @@ def validate_refs_cmd(paths, tolerance, strict, prefixes, fmt):
 
     try:
         t3 = _make_t3()
+    except click.ClickException:
+        # nexus-mmvf review S1: ``_make_t3()`` raises ``ClickException``
+        # under daemon-resolver failure. Let Click's own error formatter
+        # render it (exit code 1, "Error: <hint>") rather than wrapping
+        # it again with our exit-2 fallback below.
+        raise
     except Exception as exc:
         click.echo(f"Error: T3 unavailable: {exc}", err=True)
         raise click.exceptions.Exit(2)
