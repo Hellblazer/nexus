@@ -9,15 +9,30 @@ import structlog
 _log = structlog.get_logger(__name__)
 
 from nexus.corpus import t3_collection_name
-from nexus.db import make_t3
 from nexus.db.t3 import T3Database
 from nexus.ttl import parse_ttl
 
 
 def _t3() -> T3Database:
-    from nexus.config import get_credential, is_local_mode
+    """Resolve a ``T3Database`` honouring ``NX_STORAGE_MODE``.
 
-    if not is_local_mode():
+    nexus-idqd (RDR-112 P4.1): every store subcommand routes through
+    this helper. The inner factory is ``mcp_infra.get_t3`` so daemon
+    mode hits ``make_t3_client`` (HttpClient) — opening a
+    PersistentClient under daemon mode would race the daemon on the
+    same on-disk path. Singleton lifecycle (per-process cache) is
+    owned by ``mcp_infra``; do not ``close()`` the result.
+
+    Cloud-mode credential pre-check stays in place for the direct +
+    cloud configuration; daemon mode is local-only (``make_t3_client``
+    rejects cloud with the same recovery hint surfaced here), so the
+    check is skipped under ``NX_STORAGE_MODE=daemon``.
+    """
+    from nexus.config import get_credential, is_local_mode
+    from nexus.db import is_daemon_mode
+    from nexus.mcp_infra import get_t3
+
+    if not is_daemon_mode() and not is_local_mode():
         database = get_credential("chroma_database")
         api_key = get_credential("chroma_api_key")
         voyage_api_key = get_credential("voyage_api_key")
@@ -35,7 +50,7 @@ def _t3() -> T3Database:
                 "chroma_database not set — run: nx config init"
             )
     try:
-        return make_t3()
+        return get_t3()
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
 

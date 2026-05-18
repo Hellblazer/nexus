@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
 
 from nexus.config import get_credential
-from nexus.db.t3 import T3Database
 from nexus.mcp_infra import t2_ctx
 from nexus.ttl import parse_ttl
 
@@ -187,9 +185,14 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             raise click.ClickException(f"Entry {entry_id} not found in T2 memory.")
 
         from nexus.config import is_local_mode
-        from nexus.db import make_t3
+        from nexus.db import is_daemon_mode
+        from nexus.mcp_infra import get_t3
 
-        if not is_local_mode():
+        # Cloud-mode credential check only when neither daemon mode nor
+        # local mode is active. Daemon mode is local-only (make_t3_client
+        # rejects cloud); get_t3() routes there and fails loud with an
+        # actionable message if the daemon is unreachable.
+        if not is_daemon_mode() and not is_local_mode():
             missing = [
                 k
                 for k in ("chroma_api_key", "voyage_api_key", "chroma_database")
@@ -202,31 +205,28 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
 
         # nexus-hmxi: probe T3 so promote targets land in the same
         # collection that ``nx store list`` / ``nx search`` resolve to.
-        # Resolution runs AFTER the credential-missing fail-fast so
-        # operators with incomplete config see the actionable message
-        # instead of a generic T3 connection error.
-        t3_for_probe = make_t3()
-        try:
-            collection = t3_collection_name(collection, t3=t3_for_probe)
-        finally:
-            close = getattr(t3_for_probe, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
+        # nexus-idqd (RDR-112 P4.1): route through ``get_t3`` so daemon
+        # mode hits the HttpClient instead of opening a PersistentClient
+        # that races the daemon on the same on-disk path. ``get_t3``
+        # caches a process-wide singleton, so no explicit close() is
+        # needed (and would be incorrect — would close the shared
+        # instance the post-store hooks reuse below).
+        t3_for_probe = get_t3()
+        collection = t3_collection_name(collection, t3=t3_for_probe)
 
         # Translate TTL: T2 ttl=None (permanent) -> T3 ttl_days=0; T2 ttl=N -> T3 ttl_days=N
         ttl_days: int = entry["ttl"] if entry["ttl"] is not None else 0  # type: ignore[assignment]
         merged_tags = tags if tags else (entry.get("tags") or "")
 
-        # Compute expires_at from the T2 entry's original timestamp so that the
-        # promoted T3 entry honours the remaining TTL rather than resetting it.
-        if ttl_days > 0:
-            base_ts = datetime.fromisoformat(entry["timestamp"])
-            expires_at = (base_ts + timedelta(days=ttl_days)).isoformat()
-        else:
-            expires_at = ""  # permanent
+        # nexus-idqd (RDR-112 P4.1, 2026-05-18): T3Database.put removed
+        # the ``expires_at`` kwarg in the RDR-101 metadata refactor —
+        # expiry is computed Python-side from ``indexed_at + ttl_days``
+        # via ``metadata_schema.is_expired``. ``store.py`` already
+        # carries the matching note (line 211). Pre-fix, the promoted
+        # T3 row was passing through the t3.put mock in tests but
+        # raising ``TypeError: unexpected keyword argument 'expires_at'``
+        # against the real T3Database — surfaced by the daemon-mode
+        # end-to-end test added in this bead.
 
         # nexus-8g79.1: pre-register the catalog entry so the T3 chunk
         # carries the resulting tumbler as ``doc_id`` at write-time and
@@ -243,14 +243,17 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             collection_name=collection,
         )
 
-        with make_t3() as t3:
+        # nexus-idqd: ``get_t3`` returns the singleton (HttpClient under
+        # daemon mode, PersistentClient under direct mode). The context-
+        # manager protocol on ``T3Database`` is a no-op so reusing the
+        # singleton across nested ``with`` blocks is safe.
+        with get_t3() as t3:
             doc_id = t3.put(
                 collection=collection,
                 content=entry["content"],
                 title=entry["title"],
                 tags=merged_tags,
                 ttl_days=ttl_days,
-                expires_at=expires_at,
                 catalog_doc_id=catalog_doc_id,
             )
 
