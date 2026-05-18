@@ -530,16 +530,21 @@ def run_collection_postprocessing(
         return
 
     from nexus.config import load_config as _load_cfg
-    from nexus.db import make_t3
-    from nexus.mcp_infra import t2_ctx
+    from nexus.mcp_infra import get_t3, t2_ctx
 
     def _say(msg: str) -> None:
         if not quiet:
             click.echo(msg)
 
     cfg = _load_cfg()
+    # RDR-112 P4.4 (nexus-uar6): route through ``mcp_infra.get_t3``
+    # so daemon mode hits the HttpClient instead of racing the daemon
+    # on the on-disk path. Direct mode is unchanged.
     try:
-        t3 = make_t3()
+        try:
+            t3 = get_t3()
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
         total_topics = 0
         with t2_ctx() as db:
             for col_name in collections:

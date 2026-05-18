@@ -341,13 +341,12 @@ def backfill_collections_cmd(dry_run: bool) -> None:
       nx catalog backfill-collections --dry-run
       nx catalog backfill-collections
     """
-    from nexus.db import make_t3  # noqa: PLC0415
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
 
     cat = _get_catalog()
 
     try:
-        t3_db = make_t3()
+        t3_db = _make_t3()
         # nexus-o6aa.14: skip bypass-schema collections (``taxonomy__*``)
         # to keep the projection in sync with the drift check at
         # ``_run_collections_drift`` which excludes the same prefixes.
@@ -714,10 +713,9 @@ def rename_collection_cmd(
         is_conformant_collection_name,
         parse_conformant_collection_name,
     )
-    from nexus.db import make_t3  # noqa: PLC0415
 
     cat = _get_catalog()
-    t3_db = make_t3()
+    t3_db = _make_t3()
 
     if not is_conformant_collection_name(new) and not allow_legacy:
         raise click.ClickException(
@@ -3160,8 +3158,45 @@ def link_generate_cmd(ctx: click.Context, dry_run: bool) -> None:
 
 
 def _make_t3():
-    from nexus.db import make_t3
-    return make_t3()
+    """RDR-112 P4.4 (nexus-uar6): daemon-aware T3 factory.
+
+    Routes through ``mcp_infra.get_t3`` so under
+    ``NX_STORAGE_MODE=daemon`` the returned ``T3Database`` wraps an
+    ``HttpClient`` to the live daemon (no race with the daemon writer
+    on the on-disk chroma path). Direct mode falls through to
+    ``make_t3`` unchanged. ``RuntimeError`` from the daemon resolver
+    (``T3DaemonError`` / ``DaemonNotRunningError``) carries a recovery
+    hint; translate to ``ClickException`` for the CLI.
+
+    Cloud-mode credential pre-check: skipped under daemon mode
+    (``make_t3_client`` rejects cloud with the same recovery hint),
+    enforced under direct + cloud. Mirrors ``commands.store._t3``.
+    """
+    from nexus.config import get_credential, is_local_mode
+    from nexus.db import is_daemon_mode
+    from nexus.mcp_infra import get_t3
+
+    if not is_daemon_mode() and not is_local_mode():
+        database = get_credential("chroma_database")
+        api_key = get_credential("chroma_api_key")
+        voyage_api_key = get_credential("voyage_api_key")
+
+        if not api_key:
+            raise click.ClickException(
+                "chroma_api_key not set — run: nx config set chroma_api_key <value>"
+            )
+        if not voyage_api_key:
+            raise click.ClickException(
+                "voyage_api_key not set — run: nx config set voyage_api_key <value>"
+            )
+        if not database:
+            raise click.ClickException(
+                "chroma_database not set — run: nx config init"
+            )
+    try:
+        return get_t3()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _make_registry():
@@ -4508,12 +4543,11 @@ def _run_collections_drift() -> dict:
     absent from T3 (post-rename state). Bypass-schema collections
     (``taxonomy__*``) are out of scope for this check.
     """
-    from nexus.db import make_t3  # noqa: PLC0415
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
 
     cat = _get_catalog()
     try:
-        t3_db = make_t3()
+        t3_db = _make_t3()
         t3_names = {
             c["name"] for c in t3_db.list_collections()
             if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
@@ -4646,12 +4680,11 @@ def _run_chunk_size_distribution() -> dict:
     carry centroid embeddings, not chunked text, so size stats
     aren't meaningful.
     """
-    from nexus.db import make_t3  # noqa: PLC0415
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
     from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
 
     try:
-        t3 = make_t3()
+        t3 = _make_t3()
         collections = [
             c["name"] for c in t3.list_collections()
             if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
@@ -4761,12 +4794,11 @@ def _run_chunk_text_dedup() -> dict:
     Returns
     ``{"pass": bool, "within": {coll: {...}}, "cross": [{...}]}``.
     """
-    from nexus.db import make_t3  # noqa: PLC0415
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
     from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
 
     try:
-        t3 = make_t3()
+        t3 = _make_t3()
         collections = [
             c["name"] for c in t3.list_collections()
             if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
@@ -4886,12 +4918,11 @@ def _run_t3_vs_catalog() -> dict:
     All read-only. PASS when all three lists are empty. Bypass-schema
     collections (``taxonomy__*``) are skipped from all three.
     """
-    from nexus.db import make_t3  # noqa: PLC0415
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
 
     cat = _get_catalog()
     try:
-        t3_db = make_t3()
+        t3_db = _make_t3()
         t3_listing = {
             c["name"]: c for c in t3_db.list_collections()
             if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
@@ -5036,7 +5067,6 @@ def _run_name_vs_embed_dim() -> dict:
         is_conformant_collection_name,
         parse_conformant_collection_name,
     )
-    from nexus.db import make_t3  # noqa: PLC0415
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
 
     mismatches: list[dict] = []
@@ -5046,7 +5076,7 @@ def _run_name_vs_embed_dim() -> dict:
     unknown_token: list[dict] = []
 
     try:
-        t3_db = make_t3()
+        t3_db = _make_t3()
         cols = [
             c["name"] for c in t3_db.list_collections()
             if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
@@ -5541,7 +5571,6 @@ def _run_t3_doc_id_coverage(
     from nexus.catalog.event_log import EventLog
     from nexus.catalog import events as ev
     from nexus.config import catalog_path
-    from nexus.db import make_t3
 
     cat_dir = catalog_path()
     if not Catalog.is_initialized(cat_dir):
@@ -5587,7 +5616,7 @@ def _run_t3_doc_id_coverage(
         expected.setdefault(coll, {})[cid] = event.payload.doc_id
 
     try:
-        t3 = make_t3()
+        t3 = _make_t3()
     except Exception as exc:
         raise click.ClickException(
             f"Failed to open T3 client: {exc}. Check ChromaDB credentials."
@@ -6071,7 +6100,6 @@ def chash_reconcile_cmd(apply: bool) -> None:
     Filed under nexus-w9vq (RDR-108 Phase 5 follow-up).
     """
     from nexus.commands._helpers import default_db_path
-    from nexus.db import make_t3
     from nexus.db.t2.chash_index import ChashIndex
 
     db_path = default_db_path()
@@ -6083,7 +6111,7 @@ def chash_reconcile_cmd(apply: bool) -> None:
         raise SystemExit(1)
 
     try:
-        t3 = make_t3()
+        t3 = _make_t3()
         # nexus-l1yt: chromadb's list_collections shape varies by
         # backend version (Collection objects vs string names).
         # Every other call site in nexus uses the same defensive
@@ -6213,12 +6241,11 @@ def collection_gc_cmd(apply: bool) -> None:
     \b
     Filed under nexus-ks40 (catalog/T3 hygiene).
     """
-    from nexus.db import make_t3
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES
 
     cat = _get_catalog()
     try:
-        t3_db = make_t3()
+        t3_db = _make_t3()
         t3_collections = t3_db.list_collections()
     except Exception as exc:
         click.echo(f"Failed to list T3 collections: {exc}", err=True)
@@ -6396,13 +6423,12 @@ def dt_link_cmd(
     """
     from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
     from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
-    from nexus.db import make_t3  # noqa: PLC0415
 
     if not owner:
         owner = _get_owner_for(collection)
     owner_tumbler = Tumbler.parse(owner)
     cat = _get_catalog()
-    t3 = make_t3()
+    t3 = _make_t3()
 
     click.echo(f"Gathering chunks from T3 {collection}...")
     groups = ob.gather_titled_chunks(t3, collection)
@@ -6461,13 +6487,12 @@ def synthetic_cmd(
     """
     from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
     from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
-    from nexus.db import make_t3  # noqa: PLC0415
 
     if not owner:
         owner = _get_owner_for(collection)
     owner_tumbler = Tumbler.parse(owner)
     cat = _get_catalog()
-    t3 = make_t3()
+    t3 = _make_t3()
 
     click.echo(f"Gathering chunks from T3 {collection}...")
     groups = ob.gather_titled_chunks(t3, collection)
@@ -6514,7 +6539,6 @@ def dump_csv_cmd(
     """
     from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
     from nexus.config import nexus_config_dir  # noqa: PLC0415
-    from nexus.db import make_t3  # noqa: PLC0415
 
     out_path = (
         Path(out_dir) if out_dir
@@ -6522,7 +6546,7 @@ def dump_csv_cmd(
     )
     out_path.mkdir(parents=True, exist_ok=True)
 
-    t3 = make_t3()
+    t3 = _make_t3()
     click.echo(f"Gathering chunks from T3 {collection}...")
     groups = ob.gather_titled_chunks(t3, collection)
     click.echo(f"  {len(groups)} distinct titles")
@@ -6560,13 +6584,12 @@ def apply_csv_cmd(
     """
     from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
     from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
-    from nexus.db import make_t3  # noqa: PLC0415
 
     if not owner:
         owner = _get_owner_for(collection)
     owner_tumbler = Tumbler.parse(owner)
     cat = _get_catalog()
-    t3 = make_t3()
+    t3 = _make_t3()
 
     click.echo(f"Re-gathering T3 chunks for {collection} (chunk_lookup)...")
     groups = ob.gather_titled_chunks(t3, collection)
@@ -6627,10 +6650,9 @@ def link_existing_cmd(
     """
     from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415
     from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
-    from nexus.db import make_t3  # noqa: PLC0415
 
     cat = _get_catalog()
-    t3 = make_t3()
+    t3 = _make_t3()
 
     if dry_run:
         # Dry-run only: count without writing.

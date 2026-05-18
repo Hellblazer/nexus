@@ -22,7 +22,7 @@ def test_index_repo_triggers_taxonomy_discover(tmp_path) -> None:
         stack.enter_context(patch("nexus.commands.index._discover_taxonomy", side_effect=fake_discover))
         stack.enter_context(patch("nexus.indexer.index_repository", return_value={"code_indexed": 5}))
         stack.enter_context(patch("nexus.commands.index.tqdm", side_effect=lambda **kw: None))
-        stack.enter_context(patch("nexus.db.make_t3"))
+        stack.enter_context(patch("nexus.mcp_infra.get_t3"))
         stack.enter_context(patch("nexus.db.t2.T2Database"))
         # Disable auto-label to prevent taxonomy_cmd import from poisoning T2Database
         stack.enter_context(patch("nexus.config.load_config", return_value={"taxonomy": {"auto_label": False, "local_exclude_collections": []}}))
@@ -86,7 +86,7 @@ def test_index_repo_taxonomy_failure_nonfatal(tmp_path) -> None:
         stack.enter_context(patch("nexus.commands.index._discover_taxonomy", side_effect=bad_discover))
         stack.enter_context(patch("nexus.indexer.index_repository", return_value={"code_indexed": 1}))
         stack.enter_context(patch("nexus.commands.index.tqdm", side_effect=lambda **kw: None))
-        stack.enter_context(patch("nexus.db.make_t3"))
+        stack.enter_context(patch("nexus.mcp_infra.get_t3"))
         stack.enter_context(patch("nexus.db.t2.T2Database"))
         stack.enter_context(patch("nexus.config.load_config", return_value={"taxonomy": {"auto_label": False, "local_exclude_collections": []}}))
         mock_reg = stack.enter_context(patch("nexus.commands.index._registry"))

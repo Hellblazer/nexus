@@ -108,7 +108,7 @@ class TestChashReconcileCLI:
         import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: mem_db)
         monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: mem_db)
-        monkeypatch.setattr("nexus.db.make_t3", lambda: t3_db)
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: t3_db)
         return mem_db
 
     def test_no_ghosts_clean_summary(
@@ -296,7 +296,7 @@ class TestChashReconcileCLI:
         import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: mem_db)
         monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: mem_db)
-        monkeypatch.setattr("nexus.db.make_t3", lambda: t3)
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: t3)
 
         result = runner.invoke(main, ["catalog", "chash-reconcile"])
 

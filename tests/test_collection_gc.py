@@ -92,7 +92,7 @@ class TestCollectionGCCli:
                 metadatas=[{"title": "seed.md"}],
             )
 
-        monkeypatch.setattr("nexus.db.make_t3", lambda: t3_db)
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: t3_db)
 
     def test_no_zombies_clean_summary(
         self, monkeypatch, runner, t3_db, catalog_env,
@@ -214,7 +214,7 @@ class TestCollectionGCCli:
             ("9.9.9", empty_referenced),
         )
         catalog_env._db.commit()
-        monkeypatch.setattr("nexus.db.make_t3", lambda: t3_db)
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: t3_db)
 
         result = runner.invoke(main, ["catalog", "collection-gc", "--apply"])
         assert result.exit_code == 0, result.output
@@ -238,7 +238,7 @@ class TestCollectionGCCli:
         )
         # Plus one zombie that SHOULD be swept.
         t3_db._client.get_or_create_collection("rdr__zombie")
-        monkeypatch.setattr("nexus.db.make_t3", lambda: t3_db)
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: t3_db)
 
         result = runner.invoke(main, ["catalog", "collection-gc", "--apply"])
 
@@ -271,7 +271,7 @@ class TestCollectionGCCli:
         monkeypatch.setattr(
             "nexus.commands.catalog._get_catalog", lambda: fake_cat,
         )
-        monkeypatch.setattr("nexus.db.make_t3", lambda: t3_db)
+        monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: t3_db)
 
         result = runner.invoke(main, ["catalog", "collection-gc"])
 

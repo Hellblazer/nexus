@@ -158,7 +158,7 @@ class TestMemoryPromoteCli:
         )
         register_post_document_hook(lambda src, c, content: doc.append(src))
 
-        with patch("nexus.db.make_t3", _make_stub_t3()):
+        with patch("nexus.mcp_infra.get_t3", _make_stub_t3()):
             runner = CliRunner()
             result = runner.invoke(main, [
                 "memory", "promote", str(entry_id),
