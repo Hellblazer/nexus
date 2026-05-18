@@ -9,7 +9,7 @@ from click.testing import CliRunner
 from nexus.commands.enrich import enrich
 
 
-@patch("nexus.db.make_t3")
+@patch("nexus.mcp_infra.get_t3")
 @patch("nexus.bib_enricher.enrich")
 def test_enrich_empty_collection(mock_bib: MagicMock, mock_t3_factory: MagicMock) -> None:
     """Empty collection prints message and exits cleanly."""
@@ -26,7 +26,7 @@ def test_enrich_empty_collection(mock_bib: MagicMock, mock_t3_factory: MagicMock
     mock_bib.assert_not_called()
 
 
-@patch("nexus.db.make_t3")
+@patch("nexus.mcp_infra.get_t3")
 @patch("nexus.bib_enricher.enrich")
 def test_enrich_skips_already_enriched(mock_bib: MagicMock, mock_t3_factory: MagicMock) -> None:
     """Chunks with bib_semantic_scholar_id are skipped (idempotency)."""
@@ -51,7 +51,7 @@ def test_enrich_skips_already_enriched(mock_bib: MagicMock, mock_t3_factory: Mag
 
 
 @patch("nexus.retry._chroma_with_retry")
-@patch("nexus.db.make_t3")
+@patch("nexus.mcp_infra.get_t3")
 @patch("nexus.bib_enricher.enrich")
 def test_enrich_updates_metadata(
     mock_bib: MagicMock, mock_t3_factory: MagicMock, mock_retry: MagicMock
@@ -92,7 +92,7 @@ def test_enrich_updates_metadata(
     assert "enriched 2 chunks across 1 titles" in result.output
 
 
-@patch("nexus.db.make_t3")
+@patch("nexus.mcp_infra.get_t3")
 @patch("nexus.bib_enricher.enrich")
 def test_enrich_no_match_increments_skipped(mock_bib: MagicMock, mock_t3_factory: MagicMock) -> None:
     """When bib_enrich returns {}, the title is counted as skipped."""
@@ -113,7 +113,7 @@ def test_enrich_no_match_increments_skipped(mock_bib: MagicMock, mock_t3_factory
     assert "1 titles had no Semantic Scholar match" in result.output
 
 
-@patch("nexus.db.make_t3")
+@patch("nexus.mcp_infra.get_t3")
 @patch("nexus.bib_enricher.enrich")
 def test_enrich_limit_option(mock_bib: MagicMock, mock_t3_factory: MagicMock) -> None:
     """--limit caps the number of titles enriched."""
@@ -142,7 +142,7 @@ def test_enrich_limit_option(mock_bib: MagicMock, mock_t3_factory: MagicMock) ->
 # ── nexus-57mk: --source flag + auto fallback + OpenAlex backend ────────────
 
 
-@patch("nexus.db.make_t3")
+@patch("nexus.mcp_infra.get_t3")
 @patch("nexus.bib_enricher_openalex.enrich")
 def test_enrich_source_openalex_routes_to_openalex_backend(
     mock_oa: MagicMock, mock_t3_factory: MagicMock,
@@ -179,7 +179,7 @@ def test_enrich_source_openalex_routes_to_openalex_backend(
     assert "bib_semantic_scholar_id" not in metas[0]
 
 
-@patch("nexus.db.make_t3")
+@patch("nexus.mcp_infra.get_t3")
 @patch("nexus.bib_enricher_openalex.enrich")
 @patch("nexus.bib_enricher.enrich")
 def test_enrich_source_auto_falls_back_to_openalex_without_s2_key(
@@ -214,7 +214,7 @@ def test_enrich_source_auto_falls_back_to_openalex_without_s2_key(
 
 @patch("nexus.bib_enricher_openalex.enrich_by_doi")
 @patch("nexus.bib_enricher_openalex.enrich")
-@patch("nexus.db.make_t3")
+@patch("nexus.mcp_infra.get_t3")
 def test_enrich_openalex_prefers_doi_over_title_search(
     mock_t3_factory: MagicMock,
     mock_title: MagicMock,
@@ -264,7 +264,7 @@ def test_enrich_openalex_prefers_doi_over_title_search(
 @patch("nexus.bib_enricher_openalex.enrich_by_arxiv_id")
 @patch("nexus.bib_enricher_openalex.enrich_by_doi")
 @patch("nexus.bib_enricher_openalex.enrich")
-@patch("nexus.db.make_t3")
+@patch("nexus.mcp_infra.get_t3")
 def test_enrich_openalex_falls_back_to_arxiv_when_no_doi(
     mock_t3_factory: MagicMock,
     mock_title: MagicMock,
@@ -305,7 +305,7 @@ def test_enrich_openalex_falls_back_to_arxiv_when_no_doi(
     assert "via DOI/arXiv ID" in result.output
 
 
-@patch("nexus.db.make_t3")
+@patch("nexus.mcp_infra.get_t3")
 @patch("nexus.bib_enricher.enrich")
 @patch("nexus.bib_enricher_openalex.enrich")
 def test_enrich_source_auto_uses_s2_when_key_present(

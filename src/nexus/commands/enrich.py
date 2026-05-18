@@ -168,13 +168,23 @@ def enrich_bib(
     Already-enriched chunks (the backend's ID field is non-empty) are
     skipped — the command is idempotent per backend.
     """
-    from nexus.db import make_t3
+    from nexus.mcp_infra import get_t3
     from nexus.retry import _chroma_with_retry
 
     backend, bib_enrich, id_field = _resolve_bib_backend(source)
     click.echo(f"Backend: {backend} (id field: {id_field})")
 
-    db = make_t3()
+    # RDR-112 P4.2 (nexus-yfqv): route through ``mcp_infra.get_t3`` so
+    # daemon mode hits ``make_t3_client`` (HttpClient) instead of
+    # opening a PersistentClient that races the daemon on the same
+    # on-disk path. Direct mode falls through ``get_t3`` →
+    # ``make_t3`` unchanged. ``RuntimeError`` from the daemon resolver
+    # (``T3DaemonError`` / ``DaemonNotRunningError``) carries a
+    # recovery hint; translate to ``ClickException`` for the CLI.
+    try:
+        db = get_t3()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     col = db.get_or_create_collection(collection)
 
     # nexus-sbzr: also collect source_paths per title group so we can
@@ -1560,13 +1570,19 @@ def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
         # nexus-6xp2: post-drop, source_path-keyed lookup is unreliable
         # when the writer used a non-uri_for source_uri. Tumbler-keyed
         # get_by_doc_id is exact; fall back to legacy (coll, path) get
-        # only when doc_id PK isn't in place yet.
-        if db.document_aspects._has_doc_id_pk():
-            record = db.document_aspects.get_by_doc_id(str(entry.tumbler))
-        else:
-            record = db.document_aspects.get(
+        # when the doc_id PK isn't in place (yet). get_by_doc_id
+        # already returns None on the pre-migration schema (see
+        # DocumentAspects.get_by_doc_id), so a chained ``or`` is
+        # equivalent to the prior ``_has_doc_id_pk()`` branch — and it
+        # also works against the T2Client daemon-mode facade, which
+        # exposes only public methods through ``_StoreProxy`` (the
+        # underscore probe would AttributeError under daemon mode).
+        record = (
+            db.document_aspects.get_by_doc_id(str(entry.tumbler))
+            or db.document_aspects.get(
                 entry.physical_collection, entry.file_path,
             )
+        )
 
     if record is None:
         click.echo(
