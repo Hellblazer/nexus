@@ -26,6 +26,7 @@
         <string>daemon</string>
         <string>t3</string>
         <string>start</string>
+        <string>--foreground</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

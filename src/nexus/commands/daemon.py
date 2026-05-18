@@ -1107,10 +1107,24 @@ def t3_group() -> None:
         "~/.config/nexus/t3_addr.<uid> is the primary channel."
     ),
 )
+@click.option(
+    "--foreground",
+    is_flag=True,
+    default=False,
+    help=(
+        "Block until SIGTERM/SIGINT or chroma exits. Required when "
+        "launched under a supervisor (launchd, systemd) so the "
+        "supervisor sees the daemon stay up. Without this flag the "
+        "CLI exits after writing the discovery file, leaving chroma "
+        "as a session-detached subprocess (the supervisor sees a "
+        "zero-exit and never triggers KeepAlive / Restart=on-failure)."
+    ),
+)
 def t3_start_cmd(
     config_dir_str: str | None,
     local_path_str: str | None,
     announce_stdout: bool,
+    foreground: bool,
 ) -> None:
     """Start the T3 chroma daemon (local mode only).
 
@@ -1118,12 +1132,22 @@ def t3_start_cmd(
     still alive, prints the existing discovery payload without spawning a
     duplicate. Cloud mode (NX_LOCAL=0) fails loud — chromadb's CloudClient
     is already HTTP-served.
+
+    Without ``--foreground`` the CLI exits as soon as the chroma
+    subprocess is listening on its TCP port. ``--foreground`` blocks
+    until SIGTERM/SIGINT arrives (or chroma exits on its own); used by
+    the launchd/systemd autostart templates so the supervisor observes
+    a long-running foreground process and can react to crashes via
+    ``KeepAlive.Crashed`` / ``Restart=on-failure``. (nexus-6j2f
+    review C1.)
     """
     from nexus.config import _default_local_path
     from nexus.daemon.t3_daemon import (
         T3CloudModeError,
         T3StartError,
+        _pid_is_alive,
         start_t3_daemon,
+        stop_t3_daemon,
     )
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
@@ -1139,11 +1163,49 @@ def t3_start_cmd(
 
     if announce_stdout:
         click.echo(json.dumps(payload))
+    else:
+        click.echo(
+            f"T3 daemon running on {payload['tcp_host']}:{payload['tcp_port']} "
+            f"(pid={payload['pid']}, local_path={payload['local_path']})."
+        )
+
+    if not foreground:
         return
-    click.echo(
-        f"T3 daemon running on {payload['tcp_host']}:{payload['tcp_port']} "
-        f"(pid={payload['pid']}, local_path={payload['local_path']})."
-    )
+
+    # ── --foreground: supervisor-friendly blocking loop ──────────────────
+    # The chroma subprocess is in its OWN session (start_new_session=True
+    # in start_t3_daemon), so SIGTERM delivered to this CLI process does
+    # NOT propagate to chroma automatically. The signal handler below
+    # explicitly calls stop_t3_daemon to clean up.
+    import threading
+    import time
+    stop_requested = threading.Event()
+
+    def _on_signal(_signum, _frame) -> None:
+        stop_requested.set()
+
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+
+    pid = payload["pid"]
+    while not stop_requested.is_set():
+        if not _pid_is_alive(pid):
+            # Chroma exited on its own — return non-zero so the
+            # supervisor's crash-handler (launchd KeepAlive.Crashed
+            # / systemd Restart=on-failure) fires.
+            click.echo(
+                f"T3 chroma subprocess (pid={pid}) exited unexpectedly; "
+                "the supervisor will restart it.",
+                err=True,
+            )
+            sys.exit(3)
+        time.sleep(0.5)
+
+    # Graceful shutdown path: stop_t3_daemon signals the chroma session
+    # group and unlinks the discovery file. Exit 0 so the supervisor
+    # treats this as an operator-requested stop, not a crash.
+    stop_t3_daemon(config_dir=config_dir)
+    sys.exit(0)
 
 
 @t3_group.command("stop")

@@ -39,6 +39,10 @@ class TestTemplatesShipped:
         assert "RunAtLoad" in body
         # T3 unit invokes the t3 subcommand, not t2.
         assert "<string>t3</string>" in body
+        # nexus-6j2f review C1: launchd template MUST pass --foreground
+        # so the supervisor sees a long-running foreground process and
+        # can trigger KeepAlive.Crashed on chroma death.
+        assert "<string>--foreground</string>" in body
 
     def test_t3_service_template_present_with_placeholders(self) -> None:
         body = daemon_cmd._read_template("nexus-t3.service")
@@ -47,6 +51,9 @@ class TestTemplatesShipped:
         assert "Restart=on-failure" in body
         # T3 unit invokes the t3 subcommand.
         assert "daemon t3 start" in body
+        # nexus-6j2f review C1: systemd unit MUST pass --foreground so
+        # Restart=on-failure / SuccessExitStatus=143 actually fire.
+        assert "--foreground" in body
 
 
 # ---------------------------------------------------------------------------
