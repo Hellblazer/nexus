@@ -235,11 +235,14 @@ def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False
     mt3 = _mock_t3()
     t2 = _t2_cm(db) if use_cm else db
     args = ["memory", "promote", str(row_id), "--collection", col, *(extra or [])]
+    # nexus-idqd (RDR-112 P4.1): patch the get_t3 seam memory.promote
+    # now imports from mcp_infra; the previous ``nexus.db.make_t3``
+    # patch target no longer intercepts the call.
     with (
         patch("nexus.commands.memory.t2_ctx", return_value=t2),
         patch("nexus.commands.memory.get_credential", return_value="fake-key"),
         patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.db.make_t3", return_value=mt3),
+        patch("nexus.mcp_infra.get_t3", return_value=mt3),
     ):
         result = runner.invoke(main, args)
     return result, mt3
@@ -248,7 +251,14 @@ def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False
 # ── Promote tests ────────────────────────────────────────────────────────────
 
 
-def test_promote_no_credentials(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+def test_promote_no_credentials(
+    runner: CliRunner, mem_home: Path, db: T2Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # nexus-idqd (RDR-112 P4.1): credentials are only required in direct
+    # cloud mode. Force NX_STORAGE_MODE=direct so the credential gate
+    # fires deterministically — the default-daemon path skips this gate
+    # and would route through ``get_t3`` (DaemonNotRunningError instead).
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
     row_id = db.put(project="p", title="note.md", content="hello", ttl=30)
     with (
         patch("nexus.commands.memory.t2_ctx", return_value=db),
@@ -285,8 +295,10 @@ def test_promote_permanent_entry(runner: CliRunner, mem_home: Path, db: T2Databa
     row_id = db.put(project="proj", title="perm.md", content="forever", ttl=None)
     _, mt3 = _promote(runner, db, row_id)
     kw = mt3.put.call_args.kwargs
+    # nexus-idqd: permanent entries pass ttl_days=0 (no separate
+    # expires_at after RDR-101 metadata refactor).
     assert kw["ttl_days"] == 0
-    assert kw.get("expires_at", "MISSING") == ""
+    assert "expires_at" not in kw
 
 
 def test_promote_remove_deletes_t2(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
@@ -297,7 +309,12 @@ def test_promote_remove_deletes_t2(runner: CliRunner, mem_home: Path, db: T2Data
     assert "removed" in result.output.lower()
 
 
-def test_promote_missing_database(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+def test_promote_missing_database(
+    runner: CliRunner, mem_home: Path, db: T2Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # nexus-idqd (RDR-112 P4.1): same rationale as ``test_promote_no_credentials``
+    # — the credential gate is direct-cloud-only after the get_t3 flip.
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
     row_id = db.put(project="p", title="note.md", content="hello", ttl=30)
     cred = lambda key: "" if key == "chroma_database" else "fake-value"  # noqa: E731
     with (
@@ -310,18 +327,21 @@ def test_promote_missing_database(runner: CliRunner, mem_home: Path, db: T2Datab
     assert "chroma_database" in result.output and "not set" in result.output.lower()
 
 
-def test_promote_expires_at_from_t2_timestamp(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+def test_promote_passes_ttl_days_to_t3(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+    # nexus-idqd (RDR-112 P4.1, 2026-05-18): the RDR-101 metadata
+    # refactor dropped the ``expires_at`` field on T3 chunks — expiry
+    # is computed Python-side via ``metadata_schema.is_expired`` from
+    # ``indexed_at + ttl_days``. memory.promote was still passing the
+    # removed kwarg until the daemon-mode end-to-end test surfaced the
+    # ``TypeError: unexpected keyword argument 'expires_at'`` against
+    # the real T3Database (mocks accepted it silently). Lock the
+    # forward-going contract: ``ttl_days`` is the only TTL kwarg.
     row_id = db.put(project="proj", title="dated.md", content="content", ttl=10)
-    past = (datetime.now(UTC) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.memory.conn.execute("UPDATE memory SET timestamp=? WHERE id=?", (past, row_id))
-    db.memory.conn.commit()
     result, mt3 = _promote(runner, db, row_id)
     assert result.exit_code == 0, result.output
     kw = mt3.put.call_args.kwargs
-    assert kw.get("expires_at", "") != "", "expires_at must be set for TTL entry"
-    expires = datetime.fromisoformat(kw["expires_at"])
-    now = datetime.now(UTC)
-    assert now < expires < now + timedelta(days=7)
+    assert kw["ttl_days"] == 10
+    assert "expires_at" not in kw
 
 
 # ── Delete CLI command ───────────────────────────────────────────────────────
