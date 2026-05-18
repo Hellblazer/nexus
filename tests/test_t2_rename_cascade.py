@@ -191,3 +191,179 @@ def test_rename_cascade_owned_conn_closes_after_success(seeded_db: Path) -> None
     finally:
         raw.close()
     assert row[0] == "code__new"
+
+
+# -- nexus-fe2i: catalog table parity ----------------------------------------
+
+
+@pytest.fixture
+def seeded_db_with_catalog(tmp_path: Path) -> Path:
+    """Seed a memory.db that has BOTH the legacy six-store rows AND
+    catalog tables populated. Phase 4 (uar6) reads the catalog through
+    ``T2Client.catalog`` so the rename must keep both sides in sync."""
+    db_path = tmp_path / "memory.db"
+    with T2Database(db_path) as t2:
+        # Six-store seed (same as ``seeded_db``).
+        t2.chash_index.upsert(chash="aa", collection="code__old")
+        t2.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, centroid_hash, doc_count, "
+            "terms, created_at) "
+            "VALUES ('T', 'code__old', 'h1', 1, '[]', '2026-05-13T00:00:00Z')"
+        )
+        t2.taxonomy.conn.execute(
+            "INSERT INTO taxonomy_meta (collection, last_discover_at) "
+            "VALUES ('code__old', '2026-05-13T00:00:00Z')"
+        )
+        t2.taxonomy.conn.commit()
+        # Catalog seed: one document row + matching collections row.
+        t2.catalog._conn.execute(
+            "INSERT INTO documents (tumbler, title, physical_collection) "
+            "VALUES (?, ?, ?)",
+            ("1.1.1", "doc-fe2i", "code__old"),
+        )
+        t2.catalog._conn.execute(
+            "INSERT INTO collections (name, content_type, owner_id, "
+            "embedding_model, model_version, display_name, "
+            "legacy_grandfathered, superseded_by, superseded_at, "
+            "created_at) VALUES (?, '', '', '', '', '', 0, '', '', '')",
+            ("code__old",),
+        )
+        t2.catalog._conn.commit()
+    return db_path
+
+
+def test_rename_cascade_updates_catalog_documents_and_collections(
+    seeded_db_with_catalog: Path,
+) -> None:
+    """A rename updates ``documents.physical_collection`` and
+    ``collections.name`` in lockstep with the legacy six stores."""
+    with T2Database(seeded_db_with_catalog) as t2:
+        counts = t2.rename_collection_cascade(
+            old="code__old", new="code__new",
+        )
+    assert counts["catalog_documents"] == 1, counts
+    assert counts["catalog_collections"] == 1, counts
+    # Verify the rows actually moved.
+    raw = sqlite3.connect(str(seeded_db_with_catalog))
+    try:
+        doc_coll = raw.execute(
+            "SELECT physical_collection FROM documents WHERE tumbler='1.1.1'"
+        ).fetchone()[0]
+        old_count = raw.execute(
+            "SELECT COUNT(*) FROM collections WHERE name='code__old'"
+        ).fetchone()[0]
+        new_count = raw.execute(
+            "SELECT COUNT(*) FROM collections WHERE name='code__new'"
+        ).fetchone()[0]
+    finally:
+        raw.close()
+    assert doc_coll == "code__new"
+    assert old_count == 0
+    assert new_count == 1
+
+
+def test_rename_cascade_collections_collision_defense(
+    seeded_db_with_catalog: Path,
+) -> None:
+    """If ``collections.<new>`` already exists, the cascade drops it
+    first so the PRIMARY KEY UPDATE on ``collections.name`` does not
+    raise. Mirrors the chash_index DELETE-then-UPDATE pattern."""
+    # Pre-create a row for the NEW name so the rename collides.
+    raw = sqlite3.connect(str(seeded_db_with_catalog))
+    try:
+        raw.execute(
+            "INSERT INTO collections (name, content_type, owner_id, "
+            "embedding_model, model_version, display_name, "
+            "legacy_grandfathered, superseded_by, superseded_at, "
+            "created_at) VALUES (?, '', '', '', '', '', 0, '', '', '')",
+            ("code__new",),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    with T2Database(seeded_db_with_catalog) as t2:
+        t2.rename_collection_cascade(old="code__old", new="code__new")
+
+    raw = sqlite3.connect(str(seeded_db_with_catalog))
+    try:
+        rows = raw.execute(
+            "SELECT name FROM collections ORDER BY name"
+        ).fetchall()
+    finally:
+        raw.close()
+    # Only the renamed row remains; the pre-existing colliding row was
+    # dropped by the cascade's collision-defense DELETE.
+    assert rows == [("code__new",)], rows
+
+
+def test_rename_cascade_atomicity_includes_catalog(
+    seeded_db_with_catalog: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mid-cascade failure rolls back the catalog UPDATEs too. Uses the
+    same bombing-connection pattern as the document_aspects atomicity
+    test, but targets the LATER catalog statements so we know the
+    rollback unwinds the whole transaction (not just the post-failure
+    statements)."""
+    real_connect = sqlite3.connect
+
+    class _BombingConnection:
+        def __init__(self, real: sqlite3.Connection) -> None:
+            self._real = real
+            self._fail_armed = False
+
+        def execute(self, sql: str, params=(), **kw):
+            stripped = sql.strip()
+            if stripped.upper() == "BEGIN":
+                self._fail_armed = True
+                return self._real.execute(sql, params, **kw)
+            if (
+                self._fail_armed
+                and "collections" in stripped
+                and "UPDATE collections SET name" in stripped
+            ):
+                raise RuntimeError("simulated mid-cascade failure on catalog")
+            return self._real.execute(sql, params, **kw)
+
+        def rollback(self):
+            return self._real.rollback()
+
+        def commit(self):
+            return self._real.commit()
+
+        def close(self):
+            return self._real.close()
+
+    def _spawn_bombing(path: str, *args, **kwargs):
+        return _BombingConnection(real_connect(path, *args, **kwargs))
+
+    import nexus.db.t2 as t2_mod
+    with T2Database(seeded_db_with_catalog) as t2:
+        monkeypatch.setattr(t2_mod.sqlite3, "connect", _spawn_bombing)
+        with pytest.raises(RuntimeError, match="catalog"):
+            t2.rename_collection_cascade(old="code__old", new="code__new")
+
+    # Every table must still carry the OLD name — rollback unwound
+    # the earlier UPDATEs (chash, documents.physical_collection,
+    # collections insertions) as well as the failed one.
+    raw = real_connect(str(seeded_db_with_catalog))
+    try:
+        chash = raw.execute(
+            "SELECT physical_collection FROM chash_index WHERE chash='aa'"
+        ).fetchone()
+        doc = raw.execute(
+            "SELECT physical_collection FROM documents WHERE tumbler='1.1.1'"
+        ).fetchone()
+        old_coll = raw.execute(
+            "SELECT COUNT(*) FROM collections WHERE name='code__old'"
+        ).fetchone()
+        new_coll = raw.execute(
+            "SELECT COUNT(*) FROM collections WHERE name='code__new'"
+        ).fetchone()
+    finally:
+        raw.close()
+    assert chash[0] == "code__old", "chash_index must roll back"
+    assert doc[0] == "code__old", "documents.physical_collection must roll back"
+    assert old_coll[0] == 1, "collections row for old must still exist"
+    assert new_coll[0] == 0, "collections row for new must not have been created"

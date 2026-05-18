@@ -258,6 +258,9 @@ class T2Database:
             ``taxonomy_meta.collection``
           - ``search_telemetry.collection``
           - ``hook_failures.collection`` (if table exists)
+          - ``documents.physical_collection`` (catalog; nexus-fe2i)
+          - ``collections.name`` (catalog; nexus-fe2i, with collision-defense
+            DELETE; PRIMARY KEY rename)
 
         Returns a dict with counts per table. Raises on any failure --
         the SQLite transaction is rolled back automatically.
@@ -283,6 +286,9 @@ class T2Database:
             "tax_meta": 0,
             "search_telemetry": 0,
             "hook_failures": 0,
+            # nexus-fe2i (RDR-112 P2.review S4): catalog tables.
+            "catalog_documents": 0,
+            "catalog_collections": 0,
         }
 
         # Open a dedicated connection to the shared database file. All
@@ -384,6 +390,54 @@ class T2Database:
                     (new, old),
                 )
                 counts["hook_failures"] = cur.rowcount
+
+            # nexus-fe2i (RDR-112 P2.review S4): catalog tables.
+            # ``documents.physical_collection`` and ``collections.name``
+            # both move when a collection is renamed; Phase 4 (uar6)
+            # CLI flips read the catalog through ``T2Client.catalog``
+            # so a partial rename would leave the catalog projection
+            # stale relative to the rest of T2.
+            #
+            # Both UPDATEs run inside the existing BEGIN/COMMIT so the
+            # rename stays atomic across all eight stores.
+            #
+            # ``collections`` table is optional: tests that wire a
+            # T2Database against a bare memory.db skip the
+            # CatalogStore schema. Probe before issuing the UPDATEs
+            # so legacy / minimal fixtures still work.
+            collections_exists = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name='collections'"
+            ).fetchone()[0]
+            documents_exists = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name='documents'"
+            ).fetchone()[0]
+
+            if documents_exists:
+                # ``documents.physical_collection`` is not unique per
+                # document (many documents share one collection), so
+                # no collision defense is required.
+                cur = conn.execute(
+                    "UPDATE documents SET physical_collection = ? "
+                    "WHERE physical_collection = ?",
+                    (new, old),
+                )
+                counts["catalog_documents"] = cur.rowcount
+
+            if collections_exists:
+                # ``collections.name`` is PRIMARY KEY. Drop the target
+                # row first so the rename does not collide with an
+                # existing entry (mirrors the chash_index pattern).
+                conn.execute(
+                    "DELETE FROM collections WHERE name = ?",
+                    (new,),
+                )
+                cur = conn.execute(
+                    "UPDATE collections SET name = ? WHERE name = ?",
+                    (new, old),
+                )
+                counts["catalog_collections"] = cur.rowcount
 
             conn.commit()
 
