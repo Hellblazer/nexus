@@ -290,11 +290,17 @@ def test_rename_cascade_collections_collision_defense(
         rows = raw.execute(
             "SELECT name FROM collections ORDER BY name"
         ).fetchall()
+        # S1 from the uar6 review: assert the documents row moved too,
+        # so the two catalog tables stay consistent post-collision.
+        doc_row = raw.execute(
+            "SELECT physical_collection FROM documents WHERE tumbler='1.1.1'"
+        ).fetchone()
     finally:
         raw.close()
     # Only the renamed row remains; the pre-existing colliding row was
     # dropped by the cascade's collision-defense DELETE.
     assert rows == [("code__new",)], rows
+    assert doc_row[0] == "code__new"
 
 
 def test_rename_cascade_atomicity_includes_catalog(

@@ -730,6 +730,40 @@ class TestBackfilledCollections:
         finally:
             store.close()
 
+    def test_second_construction_without_clearing_migrated_paths(
+        self, tmp_path: Path,
+    ) -> None:
+        """Second ``CatalogStore`` against the same path hits the
+        ``_migrated_paths`` fast-path and skips ``_init_schema``, which
+        also skips ``_backfill_collections``. The accessor must still
+        work — i.e. ``self._backfilled_collections`` must be
+        initialized in ``__init__`` not inside the migration step.
+
+        Pre-fix (review C1): the second construction left the attribute
+        unset, so ``backfilled_collections()`` raised ``AttributeError``.
+        This regression test pins the fix."""
+        db = tmp_path / "memory.db"
+        # First construction: migrates, populates _migrated_paths.
+        store1 = CatalogStore(db)
+        try:
+            assert hasattr(store1, "_backfilled_collections")
+        finally:
+            store1.close()
+
+        # Second construction WITHOUT clearing _migrated_paths.
+        # This is the path that any reopen in a long-running process
+        # (e.g. the daemon's own MCP server pool, a CLI inside an MCP
+        # subagent, a test that just reopens by handle) takes.
+        store2 = CatalogStore(db)
+        try:
+            # Must not AttributeError.
+            assert store2.backfilled_collections() == []
+            # And the underscore-attribute is still present for legacy
+            # internal callers like Catalog._emit_backfilled_collection_events.
+            assert store2._backfilled_collections == set()
+        finally:
+            store2.close()
+
     def test_backfilled_set_excludes_already_registered(
         self, tmp_path: Path,
     ) -> None:

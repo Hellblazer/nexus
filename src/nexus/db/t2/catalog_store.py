@@ -247,6 +247,16 @@ class CatalogStore:
         # RLock: callers inside transaction() context re-acquire from the same
         # thread (same pattern as CatalogDB with its reentrant lock).
         self._lock = threading.RLock()
+        # nexus-m0hi (RDR-112 P2.review S2): initialize the backfill
+        # tracker BEFORE ``_init_schema`` so a second CatalogStore
+        # construction against the same path (which hits the
+        # ``_migrated_paths`` fast-path and skips ``_init_schema``,
+        # therefore skips ``_backfill_collections``) still has the
+        # attribute. Mirrors the CatalogDB pattern at catalog_db.py:522
+        # which sets this unconditionally in ``__init__``. The accessor
+        # ``backfilled_collections()`` reads this attribute; without
+        # init-time setup the second construction would AttributeError.
+        self._backfilled_collections: set[str] = set()
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -316,8 +326,11 @@ class CatalogStore:
         and replays from JSONL). Without the exposed set the Phase 4
         catalog-port flip would silently drop the synthetic events and
         lose the projection-replay invariant.
+
+        ``self._backfilled_collections`` is initialized in ``__init__``
+        so a CatalogStore on a path that already migrated (and thus
+        skips this method) still has the attribute.
         """
-        self._backfilled_collections: set[str] = set()
         with self._lock:
             try:
                 self._conn.execute("SELECT physical_collection FROM documents LIMIT 0")
@@ -371,8 +384,14 @@ class CatalogStore:
         accessor is the RPC-dispatchable equivalent. Returns a list
         (not a set) so the JSON-RPC encoder has a native type;
         callers convert back to a set as needed.
+
+        ``self._lock`` guards the read so a concurrent
+        ``_backfill_collections`` call (only fires during
+        construction, but defensive nonetheless) cannot publish a
+        torn intermediate value.
         """
-        return list(self._backfilled_collections)
+        with self._lock:
+            return list(self._backfilled_collections)
 
     def rebuild(
         self,
