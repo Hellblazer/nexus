@@ -40,13 +40,18 @@ class TestDefaultResolver:
         monkeypatch.setenv("NX_STORAGE_MODE", "daemon")
         assert default_storage_mode() == "daemon"
 
-    def test_unknown_value_returns_as_is(
+    def test_unknown_value_raises_value_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Unknown values pass through (callers compare to 'daemon'/'direct')."""
+        """Unknown values fail loud per the nexus-8qat strict-validation
+        contract (RDR-112 P3.review S2). Pre-fix an operator who typo'd
+        ``NX_STORAGE_MODE=damon`` would silently get direct-mode routing
+        because ``is_daemon_mode()`` compares against the literal; now
+        anything other than direct|daemon raises ``ValueError``."""
         from nexus.db import default_storage_mode
         monkeypatch.setenv("NX_STORAGE_MODE", "in-process")
-        assert default_storage_mode() == "in-process"
+        with pytest.raises(ValueError, match="invalid"):
+            default_storage_mode()
 
     def test_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from nexus.db import default_storage_mode
@@ -72,10 +77,16 @@ class TestIsDaemonMode:
         monkeypatch.setenv("NX_STORAGE_MODE", "direct")
         assert is_daemon_mode() is False
 
-    def test_unknown_is_not_daemon(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_unknown_value_raises_value_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``is_daemon_mode`` delegates to ``default_storage_mode`` so an
+        unknown env value raises ``ValueError`` (nexus-8qat strict
+        validation), not silently returns False."""
         from nexus.db import is_daemon_mode
         monkeypatch.setenv("NX_STORAGE_MODE", "in-process")
-        assert is_daemon_mode() is False
+        with pytest.raises(ValueError, match="invalid"):
+            is_daemon_mode()
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +148,9 @@ class TestMcpFailLoudOnMissingDaemon:
         _core._TUPLESPACE.clear()
         # The discovery probe consults find_t2_daemon(); when the discovery
         # file is missing it returns None, and the bootstrap is supposed to
-        # raise RuntimeError with the migration hint.
-        with pytest.raises(RuntimeError, match="NX_STORAGE_MODE=daemon"):
+        # raise RuntimeError with the migration hint. The error message
+        # surfaces both the active mode ("Storage mode is 'daemon'") and
+        # the opt-out hint ("NX_STORAGE_MODE=direct") — match the active
+        # mode phrase, which is the load-bearing diagnostic.
+        with pytest.raises(RuntimeError, match=r"Storage mode is 'daemon'"):
             _core._get_tuplespace()

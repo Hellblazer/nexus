@@ -118,12 +118,18 @@ def test_check_bridge_under_daemon_mode_skips_tuples_readback(
 
     # Create a tuples.db at the path the check looks for so the readback
     # branch is actually reachable absent the daemon-mode gate.
+    # NEXUS_CONFIG_DIR is the resolved path for ``nexus_config_dir()``
+    # (the autouse ``_isolate_config_dir`` fixture in conftest.py sets
+    # it to ``tmp_path/.config/nexus``). Seed tuples.db at THAT path so
+    # the doctor's ``tuples_db.exists()`` probe finds it.
     fake_home = tmp_path / "home"
-    fake_tuples = fake_home / ".config" / "nexus" / "tuples.db"
+    config_dir = tmp_path / ".config" / "nexus"
+    fake_tuples = config_dir / "tuples.db"
     _make_tuples_db(fake_tuples)
 
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
     monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("NX_STORAGE_MODE", "daemon")
 
     runner = CliRunner()
@@ -146,17 +152,25 @@ def test_check_bridge_direct_mode_opens_tuples_readback(
     an explicit opt-in; this test sets the env explicitly. The default
     (env unset) resolves to daemon mode, which skips the readback per
     nexus-1xip.
+
+    Seed tuples.db at the ``NEXUS_CONFIG_DIR`` location (autouse
+    ``_isolate_config_dir`` fixture in conftest.py sets it to
+    ``tmp_path/.config/nexus``) so the doctor's existence probe finds
+    it. The legacy ``HOME``-only redirect is not enough because
+    ``nexus_config_dir()`` honours ``NEXUS_CONFIG_DIR`` first.
     """
     plugin_root = tmp_path / "plugin"
     _stub_bridge_scripts(plugin_root)
     _write_plugin_manifest(plugin_root, "0.0.0-stale")
 
     fake_home = tmp_path / "home"
-    fake_tuples = fake_home / ".config" / "nexus" / "tuples.db"
+    config_dir = tmp_path / ".config" / "nexus"
+    fake_tuples = config_dir / "tuples.db"
     _make_tuples_db(fake_tuples)
 
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
     monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("NX_STORAGE_MODE", "direct")
 
     runner = CliRunner()
