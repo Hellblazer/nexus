@@ -15,6 +15,20 @@ effort: high
 
 ---
 
+## Output depth tracks prompt depth
+
+If the relay you receive is a friendly "review the diff, flag Critical / Significant / Minor" without naming concrete suspect categories, the routine output will be friendly too — and you will miss boundary-spanning defects that live between two files rather than inside either. This is documented behaviour from RDR-112 Phase 1.5: a first sonnet pass on the same code returned 3 Significant + 2 Minor; a second pass on the same code with an explicit "harder critique" prompt naming subprocess + OS-supervisor + integration-boundary categories returned BLOCKED on a Critical (broken launchd / systemd templates pointing at a non-blocking CLI command). Same model, same diff — only the prompt shape changed.
+
+Before substantive review, audit the relay:
+
+1. **Categories named?** A boundary-spanning diff (CLI ↔ daemon, daemon ↔ OS supervisor, env-var ↔ network constructor) should have suspect categories spelled out — process-group safety, race windows, security boundaries, integration-boundary defects, lifecycle. If the relay is silent on these, the diff likely warrants them anyway. Extrapolate from the diff shape.
+2. **Friendly framing?** "Routine review" / "look for issues" / "general best practices" are warning signs that the relay was generated reflexively. State your suspicion in the report: "the prompt did not name X but the diff touches X; here is what I found."
+3. **First-pass or second-pass?** If the relay says "first pass" on a phase-review-gate close, assume the prompt is the friendly default. Push depth even when not asked.
+
+Your job is not to satisfy the relay literally — it is to find the defects the diff would let through. A prompt that under-specifies is itself a finding worth surfacing in the report.
+
+---
+
 
 ## nx Tool Reference
 

@@ -10,12 +10,30 @@ Delegates to the **code-review-expert** agent.
 
 ## Model Selection
 
-Default: **haiku**. Escalate via `model` parameter on the Agent tool:
+The agent's frontmatter sets `model: sonnet`. Omit the `model` parameter on the Agent tool and you get sonnet. Override only when a faster model is acceptable for a routine glance (`model="haiku"` for a < 50 LOC docs-only diff, etc.) — never override upward; the agent is already at the workhorse tier.
 
-| Task Shape | Model | When |
-|-----------|-------|------|
-| Small diff, routine review | haiku (default) | <200 LOC, no security concerns |
-| Security-sensitive, >500 LOC, or architectural | sonnet | Auth code, crypto, API boundaries |
+A previous version of this skill claimed `Default: haiku`; that was wrong and is the kind of doc drift that lets silent regressions through. The agent has been sonnet-default since nx 4.x.
+
+## Prompt rigour (the actual variance lever)
+
+Within the sonnet-class tier, **prompt depth, not model selection, drives review depth**. A friendly "review the diff" relay returns a friendly review; the agent does not invent suspect categories the prompt did not name.
+
+Concrete lesson, RDR-112 Phase 1.5 (2026-05-17): two sonnet-class reviews of the same five commits. The first relayed a routine "review for Critical/Significant/Minor" framing and returned PASS-WITH-FOLLOWUPS (3 Significant + 2 Minor). The second relayed an explicit harder-critique framing that named concrete suspect categories (security boundary, process-group safety, race conditions beyond the named M1, API ergonomics, supervisor lifecycle) and returned BLOCKED on a Critical the first pass missed: the launchd / systemd templates pointed at a CLI command that did not block, so `KeepAlive.Crashed` / `Restart=on-failure` would never fire — a fully broken supervisor model that lived at the boundary between CLI and OS-supervisor config and was invisible to a line-by-line read.
+
+When you relay this agent, include explicit suspect categories appropriate to the diff:
+
+- **Subprocess / OS supervisor**: launchd plist / systemd unit interaction, process-group SIGTERM propagation, `start_new_session=True` consequences, exit-code semantics versus crash recovery
+- **Concurrency**: race windows beyond the named ones, TOCTOU between filesystem checks and writes, signal delivery timing, PID recycling
+- **Security boundary**: symlink races on parent directories not just direct targets, path-injection via CLI args, env-var content reaching network constructors (CRLF, request smuggling), discovery-file world-readable windows
+- **API ergonomics**: typed exceptions vs single string-discriminated type, missing constructor-injection points for testability, surface parity (real class vs shim)
+- **Integration boundary**: defects that live *between* two files and are invisible to either alone — CLI + plist, env-var resolver + factory consumer, daemon writer + client racing the same file
+- **Lifecycle**: singleton cache survival across upstream restarts, supervisor crash-recovery semantics, idempotent re-init paths
+
+The agent's prompt template (below in `Agent Invocation`) is the friendly default. For boundary-spanning changes, append a "What to scrutinise" section listing the suspect categories you want this specific diff probed against. The relay is the lever; the model is already set.
+
+## Second-pass discipline
+
+If a gate first-pass returns PASS or PASS-WITH-FOLLOWUPS on a boundary-spanning change (CLI ↔ daemon, daemon ↔ supervisor, anything spanning process boundaries) and the relay used the routine template, dispatch a second pass before treating the gate as cleared. The second pass costs ~3 minutes; the silent-defect cost discovered later is days.
 
 ## When This Skill Activates
 
