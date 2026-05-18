@@ -1062,3 +1062,141 @@ def uninstall_cmd(autostart: bool) -> None:
     dest.unlink()
     click.echo(f"Removed {dest}")
 
+
+# ---------------------------------------------------------------------------
+# t3 sub-group  (RDR-112 P1.5.1, nexus-s3dm)
+# ---------------------------------------------------------------------------
+#
+# The T3 daemon is a managed ``chroma run`` subprocess. chromadb's bundled
+# HTTP server is the production-quality RPC layer (RDR-112 §A1); this group
+# owns the subprocess lifecycle + discovery file. T3Client (P1.5.3 /
+# nexus-7yd2) and ``discovery_resolve('t3')`` (P1.5.2 / nexus-n8xg) ship in
+# follow-on beads.
+
+
+@daemon_group.group("t3")
+def t3_group() -> None:
+    """T3 daemon — managed chroma run subprocess (local mode only)."""
+
+
+@t3_group.command("start")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override (default: ~/.config/nexus/).",
+)
+@click.option(
+    "--local-path",
+    "local_path_str",
+    default=None,
+    help=(
+        "Override the chroma persistent path. Default: "
+        "``nexus.config._default_local_path()`` (XDG-aware, "
+        "~/.local/share/nexus/chroma)."
+    ),
+)
+@click.option(
+    "--announce-stdout",
+    "announce_stdout",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit the discovery JSON on stdout at startup. Default off "
+        "(mirrors T2 nexus-l712): the discovery file at "
+        "~/.config/nexus/t3_addr.<uid> is the primary channel."
+    ),
+)
+def t3_start_cmd(
+    config_dir_str: str | None,
+    local_path_str: str | None,
+    announce_stdout: bool,
+) -> None:
+    """Start the T3 chroma daemon (local mode only).
+
+    Idempotent on a live daemon: if a discovery file exists and its PID is
+    still alive, prints the existing discovery payload without spawning a
+    duplicate. Cloud mode (NX_LOCAL=0) fails loud — chromadb's CloudClient
+    is already HTTP-served.
+    """
+    from nexus.config import _default_local_path
+    from nexus.daemon.t3_daemon import (
+        T3CloudModeError,
+        T3StartError,
+        start_t3_daemon,
+    )
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    local_path = Path(local_path_str) if local_path_str else _default_local_path()
+    try:
+        payload = start_t3_daemon(config_dir=config_dir, local_path=local_path)
+    except T3CloudModeError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    except T3StartError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+    if announce_stdout:
+        click.echo(json.dumps(payload))
+        return
+    click.echo(
+        f"T3 daemon running on {payload['tcp_host']}:{payload['tcp_port']} "
+        f"(pid={payload['pid']}, local_path={payload['local_path']})."
+    )
+
+
+@t3_group.command("stop")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+def t3_stop_cmd(config_dir_str: str | None) -> None:
+    """Stop the running T3 daemon (graceful SIGTERM → SIGKILL escalation)."""
+    from nexus.daemon.t3_daemon import stop_t3_daemon
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    pid = stop_t3_daemon(config_dir=config_dir)
+    if pid is None:
+        click.echo("No T3 daemon discovery file found — already stopped.")
+        return
+    click.echo(f"T3 daemon stopped (pid={pid}).")
+
+
+@t3_group.command("info")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+@click.option(
+    "--json", "as_json", is_flag=True, default=False, help="Output raw JSON."
+)
+def t3_info_cmd(config_dir_str: str | None, as_json: bool) -> None:
+    """Print the T3 daemon discovery JSON (or formatted summary)."""
+    from nexus.daemon.t3_daemon import t3_discovery_path
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    disc = t3_discovery_path(config_dir)
+    if not disc.exists():
+        click.echo(
+            "No T3 daemon discovery file found — is the daemon running?",
+            err=True,
+        )
+        sys.exit(1)
+    try:
+        data = json.loads(disc.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        click.echo(f"Failed to read discovery file: {exc}", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(json.dumps(data, indent=2))
+        return
+    click.echo("T3 Daemon Info")
+    click.echo("-" * 40)
+    for key, value in data.items():
+        click.echo(f"  {key}: {value}")
+
