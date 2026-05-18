@@ -42,10 +42,147 @@ def _check(label: str, ok: bool, detail: str = "") -> str:
     return _check_line(label, ok, detail)
 
 
+class _T2Inspector:
+    """Daemon-aware T2 introspection adapter for doctor checks.
+
+    Doctor checks have historically opened a direct ``sqlite3``
+    connection against ``memory.db`` to query ``sqlite_master`` /
+    ``PRAGMA`` / scalar counts. Under ``NX_STORAGE_MODE=daemon`` that
+    races the daemon writer; the prior code called
+    ``reject_under_daemon_mode`` and refused to run, leaving operators
+    with no diagnostic surface in the daemon's default mode.
+
+    nexus-pac1 (RDR-112 P4.5): this adapter exposes a small,
+    uniform read interface that the check functions consume. Under
+    daemon mode it routes through the daemon's introspection RPCs
+    (``schema`` for ``sqlite_master`` lists; ``exec_raw`` for arbitrary
+    SELECT). Under direct mode it opens a local ``sqlite3.Connection``
+    and runs the same queries directly. The check bodies stay
+    identical.
+
+    Usage::
+
+        with _T2Inspector(db_path) as t2:
+            tables = t2.tables()
+            rows = t2.execute("SELECT COUNT(*) FROM plans WHERE ...")
+
+    Read-only by contract. The daemon's ``exec_raw`` opens its
+    connection with ``mode=ro``; direct mode is non-mutating by
+    convention (doctor checks never write to ``memory.db``).
+    """
+
+    def __init__(self, db_path: "Path") -> None:
+        from nexus.db import is_daemon_mode
+        self._mode = "daemon" if is_daemon_mode() else "direct"
+        self._db_path = db_path
+        self._conn = None
+        self._client_ctx = None
+        self._client = None
+        if self._mode == "daemon":
+            from nexus.mcp_infra import t2_ctx
+            self._client_ctx = t2_ctx()
+            # ``t2_ctx`` under daemon mode returns a T2Client (no
+            # ``__enter__`` needed in practice — the facade is reusable).
+            # Under direct mode it would return a T2Database context
+            # manager which the daemon path does not exercise.
+            self._client = self._client_ctx
+        else:
+            import sqlite3
+            # storage-boundary-allow: pac1 doctor T2 introspection
+            #   adapter; direct-mode branch only — daemon-mode goes
+            #   through the introspection RPCs.
+            self._conn = sqlite3.connect(str(db_path))
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute("PRAGMA journal_mode=WAL")
+
+    def __enter__(self) -> "_T2Inspector":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    def _schema_section(self, section: str) -> set[str]:
+        """Return names from ``sqlite_master`` for the given section.
+
+        Section is one of ``tables`` / ``indexes`` / ``fts``.
+        """
+        if self._mode == "daemon":
+            assert self._client is not None
+            # IntrospectionService.schema signature: schema(filters=None).
+            # The daemon expands args as kwargs, so pass the ``filters``
+            # arg explicitly. Asking for db=memory restricts the result
+            # to the memory.db side (no tuples.db touch).
+            schema = self._client.call(
+                "schema", {"filters": {"db": "memory"}}
+            )["memory"]
+            return {item["name"] for item in schema.get(section, [])}
+        assert self._conn is not None
+        if section == "tables":
+            rows = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        elif section == "indexes":
+            rows = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        elif section == "fts":
+            rows = self._conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND sql LIKE '%USING fts5%'"
+            ).fetchall()
+        else:
+            raise ValueError(f"unknown schema section {section!r}")
+        return {r[0] for r in rows}
+
+    def tables(self) -> set[str]:
+        return self._schema_section("tables")
+
+    def indexes(self) -> set[str]:
+        return self._schema_section("indexes")
+
+    def fts_tables(self) -> set[str]:
+        return self._schema_section("fts")
+
+    def execute(self, sql: str) -> list[tuple]:
+        """Execute a read-only SELECT and return rows as tuples.
+
+        Daemon mode uses ``exec_raw`` (returns list[dict]); we drop
+        the keys to match the sqlite3 ``.fetchall()`` shape so
+        existing check-function bodies stay drop-in compatible.
+
+        Direct mode runs against the local connection. The daemon's
+        ``exec_raw`` enforces read-only via ``mode=ro``; direct mode
+        relies on doctor's non-mutating convention.
+
+        Parameter binding is NOT supported: the daemon's exec_raw
+        accepts only a bare SQL string. Doctor checks never carry
+        user-supplied parameters, so interpolating static values into
+        the SQL string is acceptable and matches the historical
+        callers (which also embedded the values inline).
+        """
+        if self._mode == "daemon":
+            assert self._client is not None
+            # exec_raw signature: exec_raw(sql).
+            rows = self._client.call("exec_raw", {"sql": sql})
+            return [tuple(row.values()) for row in rows]
+        assert self._conn is not None
+        return self._conn.execute(sql).fetchall()
+
+
 def _run_check_schema() -> None:
     """Validate T2 database schema and report pending migrations (RDR-076)."""
-    import sqlite3
-
     from nexus.commands._helpers import default_db_path
     from nexus.db.migrations import MIGRATIONS, _parse_version
 
@@ -54,130 +191,105 @@ def _run_check_schema() -> None:
         click.echo("T2 database not found — nothing to check.")
         return
 
-    # RDR-112 P1 prereq (nexus-pyfg): refuse direct T2 open in daemon mode.
-
-    from nexus.db import reject_under_daemon_mode
-
-    reject_under_daemon_mode("nx doctor (T2 probe)")
-
-    # storage-boundary-allow: doctor T2 probe; rejected under daemon mode above.
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("PRAGMA busy_timeout=5000")
-    # CLI review: match the other T2 connection defaults. Opening without
-    # WAL here caused immediate lock errors when a concurrent MCP tool
-    # was writing during the check.
-    conn.execute("PRAGMA journal_mode=WAL")
+    # nexus-pac1 (RDR-112 P4.5): the previous code refused to run
+    # under daemon mode (reject_under_daemon_mode). The new
+    # ``_T2Inspector`` adapter routes through the daemon's
+    # introspection RPCs under daemon mode and opens a local
+    # sqlite3.Connection under direct mode, so the same check body
+    # works in both modes.
     lines: list[str] = []
     all_ok = True
-
-    # Check expected tables (base tables and every domain store).
-    tables = {
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-    }
-    for tbl in ("memory", "plans", "topics", "topic_assignments", "taxonomy_meta", "topic_links", "relevance_log", "search_telemetry", "chash_index", "hook_failures"):
-        ok = tbl in tables
-        lines.append(_check_line(f"Table {tbl}", ok))
-        if not ok:
-            all_ok = False
-
-    # CLI review: the FTS5 virtual tables are load-bearing for memory
-    # search + plan match. A schema without them passes the table
-    # check but fails at query time. Include them + critical indexes.
-    fts_names = {
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND sql LIKE '%USING fts5%'"
-        ).fetchall()
-    }
-    for fts in ("memory_fts",):
-        ok = fts in fts_names or fts in tables
-        lines.append(_check_line(f"FTS5 table {fts}", ok))
-        if not ok:
-            all_ok = False
-
-    index_names = {
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
-        ).fetchall()
-    }
-    expected_indexes = {
-        "idx_chash_index_collection",
-        "idx_topic_assignments_topic_id",
-    }
-    for idx in sorted(expected_indexes):
-        ok = idx in index_names
-        # Fail loud only for chash_index — the taxonomy index may not
-        # exist on pre-4.2 schemas that ran ad-hoc migrations; note it
-        # as a warning rather than a failure.
-        if idx == "idx_chash_index_collection":
-            lines.append(_check_line(f"Index {idx}", ok))
+    with _T2Inspector(db_path) as t2:
+        tables = t2.tables()
+        for tbl in ("memory", "plans", "topics", "topic_assignments", "taxonomy_meta", "topic_links", "relevance_log", "search_telemetry", "chash_index", "hook_failures"):
+            ok = tbl in tables
+            lines.append(_check_line(f"Table {tbl}", ok))
             if not ok:
                 all_ok = False
-        else:
+
+        # CLI review: the FTS5 virtual tables are load-bearing for memory
+        # search + plan match. A schema without them passes the table
+        # check but fails at query time. Include them + critical indexes.
+        fts_names = t2.fts_tables()
+        for fts in ("memory_fts",):
+            ok = fts in fts_names or fts in tables
+            lines.append(_check_line(f"FTS5 table {fts}", ok))
             if not ok:
-                lines.append(f"  note: optional index {idx} missing")
-
-    # Check _nexus_version
-    has_ver = "_nexus_version" in tables
-    lines.append(_check_line("Version tracking table", has_ver))
-
-    if has_ver:
-        row = conn.execute(
-            "SELECT value FROM _nexus_version WHERE key='cli_version'"
-        ).fetchone()
-        if row:
-            stored = row[0]
-            try:
-                from importlib.metadata import version as _pkg_version
-
-                cli_ver = _pkg_version("conexus")
-            except Exception:
-                cli_ver = "0.0.0"
-            stored_t = _parse_version(stored)
-            cli_t = _parse_version(cli_ver)
-            pending = [
-                m
-                for m in MIGRATIONS
-                if _parse_version(m.introduced) > stored_t
-                and _parse_version(m.introduced) <= cli_t
-            ]
-            if pending:
                 all_ok = False
-                lines.append(
-                    _check_line(
-                        "Pending migrations",
-                        False,
-                        f"{len(pending)} pending (stored: v{stored}, CLI: v{cli_ver})",
-                    )
-                )
-                # nexus-6m9i (third 360° UPGRADE U-CRIT-1): under
-                # daemon mode `nx upgrade` is rejected; the daemon
-                # applies migrations at its own startup. Surface
-                # both recovery paths.
-                from nexus.db import is_daemon_mode as _idm
-                if _idm():
-                    lines.append(
-                        "    Fix (daemon mode): `nx daemon t2 stop && "
-                        "nx daemon t2 start` (migrations apply at "
-                        "daemon startup)."
-                    )
-                else:
-                    lines.append("    Fix: run 'nx upgrade'")
+
+        index_names = t2.indexes()
+        expected_indexes = {
+            "idx_chash_index_collection",
+            "idx_topic_assignments_topic_id",
+        }
+        for idx in sorted(expected_indexes):
+            ok = idx in index_names
+            # Fail loud only for chash_index — the taxonomy index may not
+            # exist on pre-4.2 schemas that ran ad-hoc migrations; note it
+            # as a warning rather than a failure.
+            if idx == "idx_chash_index_collection":
+                lines.append(_check_line(f"Index {idx}", ok))
+                if not ok:
+                    all_ok = False
             else:
-                lines.append(_check_line("Schema version", True, f"v{stored}"))
+                if not ok:
+                    lines.append(f"  note: optional index {idx} missing")
+
+        # Check _nexus_version
+        has_ver = "_nexus_version" in tables
+        lines.append(_check_line("Version tracking table", has_ver))
+
+        if has_ver:
+            ver_rows = t2.execute(
+                "SELECT value FROM _nexus_version WHERE key='cli_version'"
+            )
+            row = ver_rows[0] if ver_rows else None
+            if row:
+                stored = row[0]
+                try:
+                    from importlib.metadata import version as _pkg_version
+
+                    cli_ver = _pkg_version("conexus")
+                except Exception:
+                    cli_ver = "0.0.0"
+                stored_t = _parse_version(stored)
+                cli_t = _parse_version(cli_ver)
+                pending = [
+                    m
+                    for m in MIGRATIONS
+                    if _parse_version(m.introduced) > stored_t
+                    and _parse_version(m.introduced) <= cli_t
+                ]
+                if pending:
+                    all_ok = False
+                    lines.append(
+                        _check_line(
+                            "Pending migrations",
+                            False,
+                            f"{len(pending)} pending (stored: v{stored}, CLI: v{cli_ver})",
+                        )
+                    )
+                    # nexus-6m9i (third 360° UPGRADE U-CRIT-1): under
+                    # daemon mode `nx upgrade` is rejected; the daemon
+                    # applies migrations at its own startup. Surface
+                    # both recovery paths.
+                    from nexus.db import is_daemon_mode as _idm
+                    if _idm():
+                        lines.append(
+                            "    Fix (daemon mode): `nx daemon t2 stop && "
+                            "nx daemon t2 start` (migrations apply at "
+                            "daemon startup)."
+                        )
+                    else:
+                        lines.append("    Fix: run 'nx upgrade'")
+                else:
+                    lines.append(_check_line("Schema version", True, f"v{stored}"))
+            else:
+                all_ok = False
+                lines.append(_check_line("Version row", False, "missing"))
         else:
             all_ok = False
-            lines.append(_check_line("Version row", False, "missing"))
-    else:
-        all_ok = False
-        lines.append("    Fix: run 'nx upgrade'")
-
-    conn.close()
+            lines.append("    Fix: run 'nx upgrade'")
 
     click.echo("T2 Schema Check:")
     for line in lines:
@@ -517,8 +629,6 @@ def _run_check_plan_library() -> None:
     loader never seeded (typically ``nx catalog setup`` was never
     re-run after the RDR-078 loader landed).
     """
-    import sqlite3
-
     from nexus.commands._helpers import default_db_path
 
     db_path = default_db_path()
@@ -527,21 +637,15 @@ def _run_check_plan_library() -> None:
         click.echo("Fix: run 'nx catalog setup' to initialise the library.")
         raise click.exceptions.Exit(1)
 
-    # Context manager guards against a raise inside the count loop
-    # leaking the connection (RDR-092 code-review S-3).
-    # RDR-112 P1 prereq (nexus-pyfg): refuse direct T2 open in daemon mode.
-    from nexus.db import reject_under_daemon_mode
-    reject_under_daemon_mode("nx doctor (T2 probe)")
-    # storage-boundary-allow: doctor T2 probe; rejected under daemon mode above.
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA journal_mode=WAL")
-
+    # nexus-pac1 (RDR-112 P4.5): replaces the prior
+    # ``reject_under_daemon_mode`` + direct sqlite3.connect path with
+    # the daemon-aware ``_T2Inspector`` adapter.
+    with _T2Inspector(db_path) as t2:
         def _count(where: str) -> int:
-            row = conn.execute(
+            rows = t2.execute(
                 f"SELECT COUNT(*) FROM plans WHERE {where}"
-            ).fetchone()
+            )
+            row = rows[0] if rows else (0,)
             return int(row[0] or 0)
 
         total = _count("1=1")
@@ -557,8 +661,6 @@ def _run_check_plan_library() -> None:
         global_builtin = _count(
             "project = '' AND tags LIKE '%builtin-template%'"
         )
-    finally:
-        conn.close()
 
     click.echo("Plan library check:")
     click.echo(f"  total rows:         {total}")
@@ -628,7 +730,6 @@ def _run_check_aspect_queue() -> None:
     enqueued_at as a lag indicator, (d) failed rows with their last
     error so a stuck worker is visible.
     """
-    import sqlite3 as _sqlite3
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415
 
     db_path = default_db_path()
@@ -636,30 +737,20 @@ def _run_check_aspect_queue() -> None:
         click.echo("aspect_extraction_queue: T2 database not found.")
         return
 
-    # RDR-112 P1 prereq (nexus-pyfg): refuse direct T2 open in daemon mode.
-
-    from nexus.db import reject_under_daemon_mode
-
-    reject_under_daemon_mode("nx doctor (T2 probe)")
-
-    # storage-boundary-allow: doctor T2 probe; rejected under daemon mode above.
-    conn = _sqlite3.connect(str(db_path))
-    try:
+    # nexus-pac1 (RDR-112 P4.5): daemon-aware introspection.
+    with _T2Inspector(db_path) as t2:
         # Confirm the table exists (pre-RDR-089 dbs won't have it).
-        has_table = conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='aspect_extraction_queue'"
-        ).fetchone()
-        if not has_table:
+        if "aspect_extraction_queue" not in t2.tables():
             click.echo(
                 "aspect_extraction_queue: table not present "
                 "(no aspect-extraction work has been queued)."
             )
             return
 
-        total = conn.execute(
+        total_rows = t2.execute(
             "SELECT COUNT(*) FROM aspect_extraction_queue"
-        ).fetchone()[0]
+        )
+        total = total_rows[0][0] if total_rows else 0
         click.echo(f"aspect_extraction_queue: {total} row(s) total")
 
         if total == 0:
@@ -667,21 +758,22 @@ def _run_check_aspect_queue() -> None:
 
         # Per-status breakdown.
         click.echo("\nBy status:")
-        rows = conn.execute(
+        rows = t2.execute(
             "SELECT status, COUNT(*) FROM aspect_extraction_queue "
             "GROUP BY status ORDER BY status"
-        ).fetchall()
+        )
         for status, count in rows:
             click.echo(f"  {status:<12} {count:>6}")
 
         # Oldest enqueued_at across all non-completed rows — the lag
         # indicator. ``processing`` and ``pending`` both contribute
         # to the worker's open-work view; we report MIN across them.
-        oldest = conn.execute(
+        oldest_rows = t2.execute(
             "SELECT MIN(enqueued_at), source_path "
             "FROM aspect_extraction_queue "
             "WHERE status IN ('pending', 'processing')"
-        ).fetchone()
+        )
+        oldest = oldest_rows[0] if oldest_rows else None
         if oldest and oldest[0]:
             click.echo(
                 f"\nOldest pending/processing: {oldest[0]} "
@@ -690,12 +782,12 @@ def _run_check_aspect_queue() -> None:
 
         # Surface failed rows with their last_error so the operator
         # sees stuck work without needing SQL.
-        failed = conn.execute(
+        failed = t2.execute(
             "SELECT collection, source_path, retry_count, last_error "
             "FROM aspect_extraction_queue "
             "WHERE status = 'failed' "
             "ORDER BY enqueued_at DESC LIMIT 20"
-        ).fetchall()
+        )
         if failed:
             click.echo(f"\nFailed rows (showing top {len(failed)}):")
             for collection, source_path, retry_count, last_error in failed:
@@ -708,8 +800,6 @@ def _run_check_aspect_queue() -> None:
                     # diagnose the failure class.
                     err = (last_error or "").replace("\n", " ").strip()
                     click.echo(f"    last_error: {err[:200]}")
-    finally:
-        conn.close()
 
 
 # ── --check-tier-discipline (nexus-a52i) ─────────────────────────────────────
@@ -727,7 +817,6 @@ def _run_check_tier_discipline() -> None:
     enforcement.
     """
     import os as _os
-    import sqlite3 as _sqlite3
     from pathlib import Path as _Path
 
     from nexus.commands._helpers import default_db_path as _default_db_path
@@ -748,30 +837,23 @@ def _run_check_tier_discipline() -> None:
         click.echo(f"  T2 database not found at {db_path} (skip).")
         return
 
-    # RDR-112 P1 prereq (nexus-pyfg): refuse direct T2 open in daemon mode.
-
-    from nexus.db import reject_under_daemon_mode
-
-    reject_under_daemon_mode("nx doctor (T2 probe)")
-
-    # storage-boundary-allow: doctor T2 probe; rejected under daemon mode above.
-    conn = _sqlite3.connect(str(db_path))
-    try:
-        has_table = conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='tier_writes'"
-        ).fetchone()
-        if not has_table:
+    # nexus-pac1 (RDR-112 P4.5): daemon-aware introspection.
+    # The daemon's exec_raw does not accept parameter binding, so we
+    # quote the session_id inline. session_id is read from
+    # NX_SESSION_ID or read_claude_session_id; both produce
+    # UUID-shaped strings that contain no single quotes in practice.
+    # Quote-escape defensively in case a future session source
+    # contains apostrophes.
+    quoted_session = "'" + session_id.replace("'", "''") + "'"
+    with _T2Inspector(db_path) as t2:
+        if "tier_writes" not in t2.tables():
             click.echo("Tier-discipline check:")
             click.echo("  tier_writes table not yet initialised (no writes seen).")
             return
-        rows = conn.execute(
+        rows = t2.execute(
             "SELECT tier, COUNT(*) FROM tier_writes "
-            "WHERE session_id = ? GROUP BY tier",
-            (session_id,),
-        ).fetchall()
-    finally:
-        conn.close()
+            f"WHERE session_id = {quoted_session} GROUP BY tier"
+        )
 
     by_tier = {tier: n for tier, n in rows}
     total = sum(by_tier.values())
@@ -1869,7 +1951,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         from nexus.catalog.catalog import make_relative
         from nexus.catalog.tumbler import Tumbler, read_owners
         from nexus.config import catalog_path
-        from nexus.db import make_t3
+        from nexus.mcp_infra import get_t3
 
         cat_p = catalog_path()
         if not Catalog.is_initialized(cat_p):
@@ -1901,7 +1983,11 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
         t3_db = None
         if not dry_run:
-            t3_db = make_t3()
+            # nexus-pac1 (RDR-112 P4.5): daemon-aware T3 factory.
+            try:
+                t3_db = get_t3()
+            except RuntimeError as exc:
+                raise click.ClickException(str(exc)) from exc
 
         fixed = 0
         chunks_updated = 0
@@ -2240,13 +2326,14 @@ def _collect_quota_report() -> dict:
     t3_detail = ""
     try:
         from nexus.config import is_local_mode
-        from nexus.db import make_t3
+        from nexus.mcp_infra import get_t3
 
         if is_local_mode():
             t3_reachable = True
             t3_detail = "local mode — cloud quotas are reference-only"
         else:
-            make_t3()
+            # nexus-pac1 (RDR-112 P4.5): daemon-aware reachability probe.
+            get_t3()
             t3_reachable = True
             t3_detail = "cloud tenant reachable"
     except Exception as exc:
@@ -2403,8 +2490,6 @@ def _run_check_taxonomy() -> None:
     ``assign_topic`` directly — or a test fixture that seeds rows — will
     silently re-break the invariant. This check detects the drift.
     """
-    import sqlite3
-
     from nexus.commands._helpers import default_db_path
 
     db_path = default_db_path()
@@ -2412,77 +2497,62 @@ def _run_check_taxonomy() -> None:
         click.echo("T2 database not found — nothing to check.")
         return
 
-    # RDR-112 P1 prereq (nexus-pyfg): refuse direct T2 open in daemon mode.
+    # nexus-pac1 (RDR-112 P4.5): daemon-aware introspection.
+    with _T2Inspector(db_path) as t2:
+        tables = t2.tables()
+        required = {"topic_assignments", "topic_links", "topics"}
+        missing = required - tables
+        if missing:
+            click.echo(
+                "Taxonomy tables missing: "
+                f"{', '.join(sorted(missing))} — run `nx catalog setup` to initialise."
+            )
+            return
 
-    from nexus.db import reject_under_daemon_mode
-
-    reject_under_daemon_mode("nx doctor (T2 probe)")
-
-    # storage-boundary-allow: doctor T2 probe; rejected under daemon mode above.
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA journal_mode=WAL")
-
-    tables = {
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-    }
-    required = {"topic_assignments", "topic_links", "topics"}
-    missing = required - tables
-    if missing:
-        click.echo(
-            "Taxonomy tables missing: "
-            f"{', '.join(sorted(missing))} — run `nx catalog setup` to initialise."
+        # Topics that have projection assignments but no row in topic_links
+        # (neither as source nor target) are drift — but only when a
+        # topic_links pair is structurally possible. A doc_id with exactly
+        # one projection assignment cannot produce a link (a link requires
+        # from + to), so flagging it as drift is a false positive. Same
+        # logic if the co-occurring topic was assigned via a non-projection
+        # path (centroid, bertopic) — refresh_projection_links only
+        # aggregates ``assigned_by='projection'`` rows, so a centroid
+        # partner does not contribute to topic_links. nexus-346q: require
+        # a co-occurring projection assignment on the same doc before
+        # flagging drift. Shakeout on live data: 15 of 20 residual drift
+        # rows after a backfill were isolated topics that could never
+        # produce a link.
+        # The NOT EXISTS form (``tl.from_topic_id = ta.topic_id OR
+        # tl.to_topic_id = ta.topic_id``) defeats SQLite's index planner —
+        # the OR forces a covering scan of topic_links per outer row, which
+        # multiplies with the topic_assignments scan into billions of row
+        # touches on real-size catalogs (~526k × 13k = ~7B comparisons in
+        # one production database, hanging the check past 30s). Pre-build
+        # the linked-topic set with a UNION (uses the topic_links primary
+        # key for both halves) and reduce to a single fast NOT IN.
+        drift_rows = t2.execute(
+            "SELECT DISTINCT ta.topic_id, t.label, t.collection "
+            "  FROM topic_assignments ta "
+            "  LEFT JOIN topics t ON t.id = ta.topic_id "
+            " WHERE ta.assigned_by = 'projection' "
+            "   AND ta.topic_id NOT IN ( "
+            "       SELECT from_topic_id FROM topic_links "
+            "       UNION "
+            "       SELECT to_topic_id   FROM topic_links "
+            "   ) "
+            "   AND EXISTS ( "
+            "       SELECT 1 FROM topic_assignments ta2 "
+            "        WHERE ta2.doc_id      = ta.doc_id "
+            "          AND ta2.topic_id    != ta.topic_id "
+            "          AND ta2.assigned_by = 'projection' "
+            "   )"
         )
-        return
 
-    # Topics that have projection assignments but no row in topic_links
-    # (neither as source nor target) are drift — but only when a
-    # topic_links pair is structurally possible. A doc_id with exactly
-    # one projection assignment cannot produce a link (a link requires
-    # from + to), so flagging it as drift is a false positive. Same
-    # logic if the co-occurring topic was assigned via a non-projection
-    # path (centroid, bertopic) — refresh_projection_links only
-    # aggregates ``assigned_by='projection'`` rows, so a centroid
-    # partner does not contribute to topic_links. nexus-346q: require
-    # a co-occurring projection assignment on the same doc before
-    # flagging drift. Shakeout on live data: 15 of 20 residual drift
-    # rows after a backfill were isolated topics that could never
-    # produce a link.
-    # The NOT EXISTS form (``tl.from_topic_id = ta.topic_id OR
-    # tl.to_topic_id = ta.topic_id``) defeats SQLite's index planner —
-    # the OR forces a covering scan of topic_links per outer row, which
-    # multiplies with the topic_assignments scan into billions of row
-    # touches on real-size catalogs (~526k × 13k = ~7B comparisons in
-    # one production database, hanging the check past 30s). Pre-build
-    # the linked-topic set with a UNION (uses the topic_links primary
-    # key for both halves) and reduce to a single fast NOT IN.
-    drift_rows = conn.execute(
-        """
-        SELECT DISTINCT ta.topic_id, t.label, t.collection
-          FROM topic_assignments ta
-          LEFT JOIN topics t ON t.id = ta.topic_id
-         WHERE ta.assigned_by = 'projection'
-           AND ta.topic_id NOT IN (
-               SELECT from_topic_id FROM topic_links
-               UNION
-               SELECT to_topic_id   FROM topic_links
-           )
-           AND EXISTS (
-               SELECT 1 FROM topic_assignments ta2
-                WHERE ta2.doc_id      = ta.doc_id
-                  AND ta2.topic_id    != ta.topic_id
-                  AND ta2.assigned_by = 'projection'
-           )
-        """
-    ).fetchall()
-
-    projection_total = conn.execute(
-        "SELECT COUNT(DISTINCT topic_id) FROM topic_assignments "
-        "WHERE assigned_by = 'projection'"
-    ).fetchone()[0]
+        proj_rows = t2.execute(
+            "SELECT COUNT(DISTINCT topic_id) FROM topic_assignments "
+            "WHERE assigned_by = 'projection'"
+        )
+        projection_total = proj_rows[0][0] if proj_rows else 0
 
     if not drift_rows:
         click.echo(

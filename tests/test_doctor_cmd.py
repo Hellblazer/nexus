@@ -416,7 +416,7 @@ class TestFixPaths:
         mock_t3 = MagicMock()
         with (
             patch("nexus.config.catalog_path", return_value=cat_dir),
-            patch("nexus.db.make_t3", return_value=mock_t3),
+            patch("nexus.mcp_infra.get_t3", return_value=mock_t3),
         ):
             result = runner.invoke(main, ["doctor", "--fix-paths", "--dry-run"])
         assert result.exit_code == 0
@@ -437,7 +437,7 @@ class TestFixPaths:
         mock_t3.update_source_path.return_value = 5
         with (
             patch("nexus.config.catalog_path", return_value=cat_dir),
-            patch("nexus.db.make_t3", return_value=mock_t3),
+            patch("nexus.mcp_infra.get_t3", return_value=mock_t3),
         ):
             result = runner.invoke(main, ["doctor", "--fix-paths"])
         assert result.exit_code == 0
@@ -453,7 +453,7 @@ class TestFixPaths:
         mock_t3 = MagicMock()
         with (
             patch("nexus.config.catalog_path", return_value=cat_dir),
-            patch("nexus.db.make_t3", return_value=mock_t3),
+            patch("nexus.mcp_infra.get_t3", return_value=mock_t3),
         ):
             result = runner.invoke(main, ["doctor", "--fix-paths"])
         assert result.exit_code == 0
@@ -467,7 +467,7 @@ class TestFixPaths:
         mock_t3 = MagicMock()
         with (
             patch("nexus.config.catalog_path", return_value=cat_dir),
-            patch("nexus.db.make_t3", return_value=mock_t3),
+            patch("nexus.mcp_infra.get_t3", return_value=mock_t3),
         ):
             result = runner.invoke(main, ["doctor", "--fix-paths"])
         assert result.exit_code == 0
@@ -499,7 +499,7 @@ class TestCheckQuotas:
     ) -> None:
         with (
             patch("nexus.config.is_local_mode", return_value=False),
-            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch("nexus.mcp_infra.get_t3", return_value=MagicMock()),
             patch("nexus.config.get_credential", return_value="sk-voyage-key"),
         ):
             result = runner.invoke(main, ["doctor", "--check-quotas"])
@@ -525,7 +525,7 @@ class TestCheckQuotas:
 
         with (
             patch("nexus.config.is_local_mode", return_value=False),
-            patch("nexus.db.make_t3", side_effect=_raise),
+            patch("nexus.mcp_infra.get_t3", side_effect=_raise),
             patch("nexus.config.get_credential", return_value="sk-voyage-key"),
         ):
             result = runner.invoke(main, ["doctor", "--check-quotas"])
@@ -554,7 +554,7 @@ class TestCheckQuotas:
         glance, even though cloud itself may be reachable."""
         with (
             patch("nexus.config.is_local_mode", return_value=False),
-            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch("nexus.mcp_infra.get_t3", return_value=MagicMock()),
             patch("nexus.config.get_credential", return_value=""),
         ):
             result = runner.invoke(main, ["doctor", "--check-quotas"])
@@ -574,7 +574,7 @@ class TestCheckQuotas:
 
         with (
             patch("nexus.config.is_local_mode", return_value=False),
-            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch("nexus.mcp_infra.get_t3", return_value=MagicMock()),
             patch("nexus.config.get_credential", return_value="sk-voyage-key"),
         ):
             result = runner.invoke(main, ["doctor", "--check-quotas"])
@@ -598,7 +598,7 @@ class TestCheckQuotas:
 
         with (
             patch("nexus.config.is_local_mode", return_value=False),
-            patch("nexus.db.make_t3", return_value=MagicMock()),
+            patch("nexus.mcp_infra.get_t3", return_value=MagicMock()),
             patch("nexus.config.get_credential", return_value="sk-voyage-key"),
         ):
             result = runner.invoke(
