@@ -283,14 +283,27 @@ process discipline actually failed.
   in P0; run the lint against a known-bad fixture and a known-good
   fixture; confirm zero false negatives on the seven existing patterns
   in `commands/`, `catalog/`, and top-level `nexus/`.
-- [ ] **A6** (new): **A daemon as sole migration runner eliminates the
+- [x] **A6** (new): **A daemon as sole migration runner eliminates the
   `_upgrade_lock` race class.** With a single daemon process holding the
   SQLite handle for the lifetime of the tier, multi-process migration
   concurrency cannot arise; the `nexus-9eaz` instrumentation is
-  unnecessary in daemon mode. **Status**: Unverified. **Method**:
-  Source Search of `apply_pending` once daemon owns the connection;
-  confirm no path exists for a second process to enter the lock-protected
-  window.
+  unnecessary in daemon mode. **Status**: Verified (High confidence).
+  **Method**: Source Search. **Evidence**: T2 entry `120-research-A6`.
+  Summary: `_upgrade_lock` is `threading.RLock` (process-local) at
+  `src/nexus/db/migrations.py:2877`; `_bootstrap_lock` docstring at
+  `:2886-2894` explicitly: "Process-level only". Caller pattern at
+  `src/nexus/db/t2/__init__.py:178-225` invokes `apply_pending` per
+  T2Database construction, so N processes opening T2 concurrently = N
+  concurrent migration runners with N independent locks. The nexus-9eaz
+  failure is the cross-process case; the thread-case test at
+  `tests/test_migrations.py:696-740` passes by construction because
+  RLock works within a process. In daemon mode the daemon calls
+  `apply_pending` once at startup before accepting connections; clients
+  never call it. Cross-process race surface is structurally absent.
+  P3 implementation: move `apply_pending` from `t2/__init__.py:211` to
+  daemon startup; remove from `T2Client` construction; reframe the
+  skipped stress test as a daemon-startup invariant ("daemon refuses
+  second start against the same path").
 - [ ] **A7** (new): **The moratorium is enforceable through finalization
   gates and review.** A written scope-boundary section plus a
   Finalization Gate scope-verification step is sufficient to block scope
