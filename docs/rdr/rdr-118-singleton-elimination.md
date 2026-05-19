@@ -139,10 +139,10 @@ Test-side survey:
 
 ### Critical Assumptions
 
-- [ ] Phased migration is feasible without a flag day, that is, intermediate states with mixed runtime-container and module-global accessors must compile and pass tests. Status: Unverified. Method: Phase 1 spike.
-- [ ] Removing the autouse fixtures after singleton elimination does not surface new test failures from other shared state (T3 EphemeralClient process sharing, structlog config, etc.). Status: Unverified. Method: Run full suite after Phase 4 with fixtures removed.
-- [ ] Test count drops materially (target: 8074 to roughly 3000 or below) because tests can construct one runtime per class instead of monkeypatching per test. Status: Unverified. Method: Sample ten high-fixture test files; rewrite against the new container; measure test count delta.
-- [ ] The dual-singleton (`_cached` plus `_catalog_instance`) is historical accident, not a designed split with hidden semantics. Status: Unverified. Method: Source-search the git history for the introduction of each; confirm no documented rationale for keeping them separate.
+- [x] **A1: Phased migration is feasible without a flag day.** Status: Verified (revised scope). Method: Source Search (codebase-deep-analyzer dispatch, 2026-05-19). FINDING: Phase 1 CANNOT ship catalog-only. Bidirectional call-time coupling at `catalog/__init__.py:112` (lazy `from nexus.mcp_infra import t2_ctx`) and `mcp_infra.py:914` (`manifest_write_batch_hook` calls `get_catalog()`) forces a minimum mcp_infra subset into Phase 1. See § Revised Phase 1 Boundary below. T2 record: `nexus_rdr/118-research-1-a1-phasing`.
+- [ ] **A2: Removing autouse fixtures after the migration surfaces no new failures.** Status: Partially Verified. Method: Source inspection of the 7 conftest fixtures. FINDING: 5 of 7 fixtures are deletable (the catalog/hook/env-config ones). 2 stay because they manage state outside RDR-118 scope: `_restore_structlog_config_each_test` (structlog is its own global) and `_auto_migrate_t2_in_tests` (RDR-112 P0.4 nexus-uqqy territory). Forward-looking residual: post-Phase-4 full-suite run is the final verification.
+- [ ] **A3: Test count drops materially.** Status: Likely Verified (with revised optimism). Method: MVV target pivot from `test_aspect_extractor.py` (env-config, Phase 3 territory) to `tests/test_post_store_hook.py` (16 tests, 28 singleton-coupling instances, redundant local `_reset_hooks` autouse). API sketch confirmed feasibility (T2 record: `nexus_rdr/118-research-3-a3-mvv`). REVISED LANDING: singleton fix alone takes 8074 → ~5500; reaching <3000 requires additional sweeps (closed-RDR pin deletion, slow-tier marker for integration tests, hotspot parametrize consolidation).
+- [x] **A4: The dual-singleton is historical accident.** Status: Verified. Method: Source Search (git history via deep-research-synthesizer dispatch, 2026-05-19). FINDING: `_catalog_instance` introduced 2026-04-08 commit 14c300d7 (mcp_server.py extraction, no bead/RDR). `_cached` introduced 2026-05-02 commit 5c0e303b PR #487 bead nexus-6xqk (SQLite write-lock storm fix). 24 days apart, separate motivations, no cross-reference. Safe to collapse. TWO SEMANTIC PRESERVATIONS REQUIRED: (a) `get_catalog()`'s mtime-refresh logic (mcp_infra.py:385-394, cross-process consistency for direct mode) must be absorbed by `runtime.get_catalog()` or explicitly retired with documented rationale; (b) `(cat_path, mode)` keying must be preserved (test isolation requirement). T2 record: `nexus_rdr/118-research-2-a4-singleton-origin`.
 
 ## Proposed Solution
 
@@ -309,11 +309,20 @@ The migration cost is real (~140 call sites, ~25 modules) but bounded. The phase
 
 ### Risks and Mitigations
 
+- **Risk** (HIGH, from A1 research): `src/nexus/mcp/core.py:29` `get_catalog as _get_catalog` is a TOP-LEVEL alias frozen at import time. Phase 1 shim only resolves correctly if `mcp/core.py` is imported AFTER the shim is installed.
+  **Mitigation**: Daemon restart required after Phase 1 deploys; document explicitly in the Phase 1 PR description. Alternatively, change the import to a function reference that resolves at call time.
+
+- **Risk** (HIGH, from A1 research): `mcp_infra.py:983-985` self-registers 3 batch hooks at module load. If Phase 1 moves the registry but `register_post_store_batch_hook` still appends to the legacy list, `manifest_write` + `chash_dual_write` + `taxonomy_assign` silently drop on all CLI ingest until the process is restarted with the correct wiring.
+  **Mitigation**: Move the 3 self-registrations into `install_default_hooks(runtime)` factory called by the CLI entry point AFTER runtime construction. Tests that need the default hooks call the factory explicitly; tests that don't (most of them) get a clean registry by default.
+
+- **Risk** (MEDIUM, active blocker, from A1 research): bead `nexus-qw21` unfixes `t2_ctx()` under `NX_STORAGE_MODE=daemon`. `_record_hook_failure` (mcp_infra.py:521) and `_record_batch_hook_failure` (line 676) both call `t2_ctx()`, both raise `RuntimeError`, masking the original hook exception.
+  **Mitigation**: Close `nexus-qw21` before Phase 1 ships, OR fold its fix into Phase 1 Step 5.
+
 - **Risk**: A subsystem outside the audited modules (worker threads, asyncio handlers, background daemons) holds a stale runtime reference after the test that constructed it has exited.
   **Mitigation**: `NexusRuntime.close()` actively closes its T2Client and clears its catalog cache; long-lived references see closed handles and raise. Spike during Phase 1 to confirm no daemon code path holds a runtime reference past its construction context.
 
-- **Risk**: ContextVar defaults do not propagate across `loop.run_in_executor` calls; an executor thread may see no runtime set.
-  **Mitigation**: Audit executor usage during Phase 1. Anywhere a runtime is needed in a background thread, capture it at thread-spawn and pass explicitly. Document the pattern.
+- **Risk**: ContextVar defaults do not propagate across `loop.run_in_executor` calls when using non-default executors; an executor thread may see no runtime set. (Default executor inherits context as of Python 3.7+.)
+  **Mitigation**: Audit executor usage during Phase 1. Anywhere a runtime is needed in a background thread, capture it at thread-spawn and pass explicitly. Document the pattern. `src/nexus/daemon/t2_daemon.py` and `src/nexus/commands/taxonomy_cmd.py` are known `run_in_executor` call sites.
 
 - **Risk**: A reviewer or future contributor reinstates a module-global singleton "for convenience."
   **Mitigation**: Add a lint check (ruff custom rule, or a grep test in `tests/test_singleton_freeze.py`) that fails CI on new module-level mutables in `nexus.catalog` and `nexus.mcp_infra`. Pin the rule in the RDR-118 close.
@@ -333,33 +342,62 @@ The migration cost is real (~140 call sites, ~25 modules) but bounded. The phase
 
 ### Minimum Viable Validation
 
-After Phase 1 ships, a single high-fixture test file (sample: `test_aspect_extractor.py`, 73 tests, monkeypatch-heavy) is rewritten to use the runtime fixture instead of monkeypatch. The rewritten file must:
+After Phase 1 ships, `tests/test_post_store_hook.py` (16 tests, 28 singleton-coupling instances, contains a redundant local `_reset_hooks` autouse fixture) is rewritten to use the runtime fixture. The rewritten file must:
 
-1. Pass with the seven autouse fixtures still in place.
-2. Pass with the seven autouse fixtures locally disabled via a marker.
-3. Show a clear LOC reduction in the rewritten test file (no monkeypatch setenv calls).
+1. Pass with the legacy autouse fixtures still in place.
+2. Pass with the legacy autouse fixtures locally disabled via a marker.
+3. Show a clear LOC reduction (the file's own `_reset_hooks` autouse, ~18 lines, deletes entirely).
 
-If MVV passes, the pattern works; Phases 2 to 4 are mechanical extensions. If MVV fails, the runtime API needs revision before scaling out.
+**MVV target pivot (research finding 2026-05-19):** Original draft named `test_aspect_extractor.py` (73 tests). Research found that file's monkeypatch usage is for `NEXUS_ASPECT_BACKEND` and `NEXUS_SCHOLARLY_PAPER_VERSION` env vars — Phase 3 (env-config) MVV territory, not Phase 1 (catalog/hooks). The pivoted target directly exercises `register_post_store_hook` / `fire_post_store_hooks` / `register_post_store_batch_hook` against the module globals, which is exactly the Phase 1/2 surface.
+
+If MVV passes, Phases 2 to 4 are mechanical extensions. If MVV fails, the runtime API needs revision before scaling out.
+
+### Revised Phase 1 Boundary (research finding 2026-05-19)
+
+A1 research surfaced that Phase 1 cannot ship catalog-only. The bidirectional call-time coupling at `catalog/__init__.py:112` (lazy `from nexus.mcp_infra import t2_ctx`) plus `mcp_infra.py:914` (`manifest_write_batch_hook` calls `get_catalog()`) forces a minimum mcp_infra subset into Phase 1, otherwise the manifest hook writes against a different catalog instance than the indexer reads (silent data divergence).
+
+**Phase 1 MUST include:**
+
+- `nexus.runtime.NexusRuntime` + `HookRegistry` + `ContextVar` machinery (new module).
+- `nexus.catalog` accessors: `open_cached`, `open_catalog`, `_get_t2_client`, `reset_cache` move to `NexusRuntime`.
+- `nexus.mcp_infra.get_catalog()` becomes a 1-line shim delegating to `runtime.catalog`.
+- `_post_store_batch_hooks` list + `_post_store_batch_hooks_with_catalog_doc_id` set move to `HookRegistry` (because the 3 self-registering hooks at `mcp_infra.py:983-985` run at module load and must populate the same registry that `fire_post_store_batch_hooks` reads).
+- `install_default_hooks(runtime)` factory function: extracts the 3 module-load self-registrations into an explicit factory called by the CLI entry point AFTER runtime construction.
+
+**Phase 1 MAY DEFER to Phase 2:**
+
+- `mcp_infra._post_store_hooks` single-doc chain (MCP-only, lower frequency, no correctness dependency vs catalog).
+- `mcp_infra._catalog_instance` / `_catalog_mtime` mtime-refresh logic — remains as a compatibility path through the shim. **A4 preservation S1:** the mtime-refresh logic (mcp_infra.py:385-394) must be absorbed by `runtime.get_catalog()` or explicitly retired with documented rationale before Phase 2 closes; silent removal breaks direct-mode clients that rely on cross-process refresh.
+
+**A4 preservation S2:** Runtime's catalog cache MUST adopt `(cat_path, mode)` keying (not global single-instance). Test isolation relies on per-path keying.
 
 ### Phase 1: Code Implementation
 
 #### Step 1: Introduce `nexus.runtime.NexusRuntime` and `HookRegistry`
 
-New module `src/nexus/runtime.py`. Defines the runtime container, the ContextVar machinery, and the public `current_runtime()` lookup. Adds `pytest` fixture `nexus_runtime` in `tests/conftest.py` that constructs a fresh runtime per test class (yield) and closes it on teardown.
+New module `src/nexus/runtime.py`. Defines the runtime container, the ContextVar machinery, and the public `current_runtime()` lookup. Adds `pytest` fixture `runtime` in `tests/conftest.py` that constructs a fresh runtime per test class (yield) and closes it on teardown.
 
 #### Step 2: Migrate `nexus.catalog` accessors
 
 `open_cached`, `open_catalog`, `_get_t2_client`, `reset_cache` become methods on `NexusRuntime`. Module-level `_cached`, `_t2_client`, `_cache_lock`, `_t2_client_lock` deleted. Module-level functions kept as thin redirectors that call `current_runtime().get_catalog(...)` for back-compat through Phase 4.
 
-#### Step 3: Run MVV (rewrite `test_aspect_extractor.py`)
+#### Step 3: Migrate `mcp_infra.get_catalog` + batch-hook registry
 
-Rewrite one test file against the new runtime fixture. Confirm pass with and without the legacy autouse `_isolate_catalog` fixture. Measure LOC delta and test count delta.
+`get_catalog` becomes a shim: `return current_runtime().catalog`. `_post_store_batch_hooks` and `_post_store_batch_hooks_with_catalog_doc_id` move to `HookRegistry`. `register_post_store_batch_hook` becomes shim. Self-registering hooks (chash dual-write, taxonomy assign, manifest write) move from module-load to `install_default_hooks(runtime)` factory called by CLI entry.
 
-### Phase 2: Post-store hooks migration
+#### Step 4: Run MVV (rewrite `tests/test_post_store_hook.py`)
 
-#### Step 1: Move `_post_store_hooks`, `_post_store_batch_hooks`, `_post_store_batch_hooks_with_catalog_doc_id` to `HookRegistry`
+Rewrite the file against the new runtime fixture. Confirm pass with and without the legacy autouse fixtures. Measure LOC delta (target: -18 LOC for the local `_reset_hooks` autouse deletion).
 
-`register_post_store_hook`, `register_post_store_batch_hook`, `fire_post_store_hooks`, `fire_post_store_batch_hooks` become methods on the registry. Self-registering hooks (chash dual-write, taxonomy assign, manifest write) move to `default_hooks(runtime)` factory.
+#### Step 5: Resolve nexus-qw21 blocker
+
+Active bead `nexus-qw21` (`t2_ctx()` unconditionally passes `_path_resolver` under daemon mode → raises `RuntimeError`) breaks `_record_hook_failure` and `_record_batch_hook_failure` in daemon mode. Either close `nexus-qw21` before Phase 1 ships, or fold its fix into Phase 1.
+
+### Phase 2: Single-doc hooks + mtime-refresh resolution
+
+#### Step 1: Move `_post_store_hooks` single-doc chain to `HookRegistry`
+
+`register_post_store_hook`, `fire_post_store_hooks` migrate to registry methods. Deferred from Phase 1 because the single-doc chain has no correctness coupling with catalog.
 
 #### Step 2: Delete `_restore_post_store_batch_hooks_after_test` autouse fixture
 
@@ -396,7 +434,7 @@ None. ContextVar is in the stdlib.
 - **Scenario**: After Phase 2, delete `_restore_post_store_batch_hooks_after_test` and run the full suite. **Verify**: No failures attributable to leaked hook state.
 - **Scenario**: After Phase 3, delete the five env-isolation fixtures and run the full suite. **Verify**: No failures attributable to env leak.
 - **Scenario**: Lint test that no new module-level mutables appear in `nexus.catalog` or `nexus.mcp_infra`. **Verify**: AST scan returns empty.
-- **Scenario**: After Phase 4 completion, count collected tests. **Verify**: Suite below 3000 collected tests, with no skipped or xfail bloat.
+- **Scenario**: After Phase 4 completion, count collected tests. **Verify**: Suite drops materially. Honest target (A3 research finding): 8074 → ~5500 from singleton elimination alone. Reaching the user's <3000 ceiling requires additional sweeps tracked in `nexus-wuerf` (closed-RDR pin deletion, slow-tier integration marker, hotspot parametrize consolidation).
 
 ## Validation
 
@@ -467,4 +505,16 @@ The RDR is large for the change but the change touches ~140 call sites and is th
 
 ## Revision History
 
-(Gate findings will be appended here.)
+### 2026-05-19 — Research round 1 (A1, A3, A4 verified; A2 partial)
+
+Three findings recorded in T2 (`nexus_rdr/118-research-{1,2,3}-*`):
+
+1. **A1 (phased migration feasibility)** verified with revised scope. Phase 1 cannot ship catalog-only; minimum mcp_infra subset must move together. Source: codebase-deep-analyzer dispatch enumerated bidirectional call-time coupling at `catalog/__init__.py:112` and `mcp_infra.py:914`. Three new HIGH/MEDIUM risks surfaced (top-level alias freezing, self-registration silent drop, nexus-qw21 blocker). RDR body updated.
+
+2. **A4 (dual-singleton origin)** verified. Source: deep-research-synthesizer git-history dispatch. `_catalog_instance` introduced 2026-04-08 (commit 14c300d7, no bead/RDR — mcp_server.py extraction). `_cached` introduced 2026-05-02 (commit 5c0e303b, PR #487, bead nexus-6xqk — SQLite write-lock storm fix). 24 days apart, independent motivations. Safe to collapse with TWO preservations: mtime-refresh logic (mcp_infra.py:385-394) and `(cat_path, mode)` keying. Both encoded into the Revised Phase 1 Boundary section.
+
+3. **A3 (test count drops materially)** partially verified. MVV target pivoted from `test_aspect_extractor.py` (env-config, Phase 3 territory) to `tests/test_post_store_hook.py` (16 tests, redundant local `_reset_hooks` autouse, direct singleton coupling). API sketch confirms feasibility. REVISED LANDING: singleton fix alone takes 8074 → ~5500. The user's <3000 target needs `nexus-wuerf` sweeps in addition. RDR body's "<3000" claim corrected throughout.
+
+4. **A2 (autouse fixture deletion)** partially verified. Of the 7 conftest autouse fixtures, 5 are deletable (catalog/hook/env-config). 2 stay: `_restore_structlog_config_each_test` (structlog's own global) and `_auto_migrate_t2_in_tests` (RDR-112 P0.4 territory). RDR body's "7 fixtures deletable" claim corrected to 5.
+
+Forward-looking residual: A2 final verification requires post-Phase-4 full-suite run; A3 final verification requires the actual MVV spike.
