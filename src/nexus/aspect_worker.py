@@ -66,6 +66,7 @@ from nexus.aspect_extractor import (
     extract_aspects as _extract_aspects,
     extract_aspects_batch as _extract_aspects_batch,
 )
+from nexus.config import nexus_config_dir
 
 _log = structlog.get_logger(__name__)
 
@@ -109,7 +110,8 @@ class DrainBlockedByActiveWorker(RuntimeError):
          ``nx upgrade``).
 
     SIG-5 (nexus-1091): lock-file path is
-    ``~/.config/nexus/locks/aspect_worker.<pid>``.
+    ``<nexus_config_dir>/locks/aspect_worker.<pid>`` — respects
+    ``NEXUS_CONFIG_DIR``; defaults to ``~/.config/nexus/locks``.
     """
 
     def __init__(self, blocking_pid: int, lock_file: Path) -> None:
@@ -515,7 +517,7 @@ def _worker_lock_path(locks_dir: Path | None = None) -> Path:
     import os
 
     base = locks_dir if locks_dir is not None else (
-        Path.home() / ".config" / "nexus" / "locks"
+        nexus_config_dir() / "locks"
     )
     return base / f"aspect_worker.{os.getpid()}"
 
@@ -711,7 +713,8 @@ def drain_worker(
         poll_interval: Seconds between is_drained() checks (default 0.1).
         _locks_dir: Override the locks directory for testing.  Production
             code should leave this as None (resolved to
-            ``~/.config/nexus/locks``).
+            ``nexus_config_dir() / "locks"`` — respects
+            ``NEXUS_CONFIG_DIR``).
 
     Raises:
         DrainBlockedByActiveWorker: An active MCP-process worker was
@@ -734,7 +737,7 @@ def drain_worker(
     # queue independently; the migration must not run while that worker is
     # alive or it will race against in_progress rows it cannot see.
     locks_dir = _locks_dir if _locks_dir is not None else (
-        Path.home() / ".config" / "nexus" / "locks"
+        nexus_config_dir() / "locks"
     )
     _check_mcp_worker_lock(locks_dir)
 
