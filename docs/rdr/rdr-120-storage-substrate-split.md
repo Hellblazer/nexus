@@ -115,14 +115,31 @@ Out of scope explicitly:
   Boundaries](#scope-boundaries) below.
 
 Direct-file-open call sites under `src/nexus/` outside `src/nexus/db/`
-(grepping `sqlite3.connect` + `PersistentClient`):
+(enumerated via grep + verified during A5; full inventory in T2 entry
+`120-research-A5`):
 
-- `src/nexus/commands/{tier_status,upgrade,plan}.py`
-- `src/nexus/{health,mcp_infra,search_engine,collection_audit,pipeline_buffer,_session_end_launcher}.py`
-- `src/nexus/catalog/{catalog_db.py,synthesizer.py}`
+- `src/nexus/commands/{plan,catalog,tier_status,upgrade,doctor,index}.py`
+  (9 SQLite + 1 chromadb)
+- `src/nexus/{health,mcp_infra,collection_audit,pipeline_buffer,_session_end_launcher}.py`
+  (5 SQLite + 4 chromadb)
+- `src/nexus/console/routes/health.py` (1 SQLite via `_sqlite3` alias)
+- `src/nexus/catalog/{catalog_db.py,synthesizer.py}` (2 SQLite, P0-P4
+  allowlisted, deleted at P5 cutover)
 
-P0's lint pass enumerates the full list and locks the inventory for P2/P4
-migration.
+Three current sites use module-aliased imports (`import sqlite3 as
+_sqlite3`): `commands/doctor.py` (lines 615, 720) and
+`console/routes/health.py:131`. The lint must track module aliases at
+import time, not only direct attribute references.
+
+The lint banlist covers all three chromadb client classes
+(`PersistentClient`, `CloudClient`, `EphemeralClient`) outside
+`src/nexus/db/`, not only `PersistentClient`. Cloud-mode T3 goes
+through the same `T3Client` abstraction for symmetry.
+
+P0's lint pass locks this inventory as the baseline. CI asserts the
+expected post-phase count of remaining direct opens at each phase
+boundary (P2: chromadb sites drop to 3; P4: SQLite outside `db/` and
+`catalog/` drops to 2; P5: SQLite outside `db/` drops to 0).
 
 ## Scope Boundaries
 
@@ -276,13 +293,29 @@ process discipline actually failed.
 - [x] **A4**: Discovery via per-host UID file is universally adequate.
   **Status**: Refuted (High confidence). Mitigation: dual-primary file +
   env-var discovery. **Evidence reused from**: tombstoned RDR-112 §A4.
-- [ ] **A5** (new): **Storage-boundary lint catches every regression
-  vector.** AST scan of `sqlite3.connect` and `PersistentClient` outside
-  `src/nexus/db/` is sufficient to prevent new direct-open call sites
-  during P2-P5 migration. **Status**: Unverified. **Method**: Spike
-  in P0; run the lint against a known-bad fixture and a known-good
-  fixture; confirm zero false negatives on the seven existing patterns
-  in `commands/`, `catalog/`, and top-level `nexus/`.
+- [~] **A5** (new): **Storage-boundary lint catches every regression
+  vector.** AST scan of `sqlite3.connect` (including module-aliased
+  forms like `_sqlite3.connect`), `chromadb.PersistentClient`,
+  `chromadb.CloudClient`, and `chromadb.EphemeralClient` outside
+  `src/nexus/db/`, with a phase-gated `src/nexus/catalog/` allowlist
+  removed at P5 cutover. **Status**: Partially Verified (High
+  confidence in feasibility and refinements). **Method**: Source Search
+  (ε-lint precedent + grep enumeration of call sites). **Evidence**:
+  T2 entry `120-research-A5`. Summary: the existing AST-lint at
+  `tests/test_no_direct_catalog_writes_outside_projector.py` is a 1:1
+  structural precedent (path-prefix allowlist, `# epsilon-allow:
+  <reason>` per-line override, alias-evasion handling). Current
+  inventory: 27 SQLite call sites (9 in `db/` allowlisted, 2 in
+  `catalog/` P0-P4 allowlisted then deleted at P5, 9 in `commands/`,
+  5 top-level, 1 in `console/routes/`, 1 missed in the original §
+  Technical Environment list); 8 chromadb call sites (3 in `db/`
+  allowlisted, 4 in `health.py`, 1 in `commands/index.py`). Three
+  refinements folded into the scope-boundary text above: cover all
+  three chromadb client classes (not just PersistentClient), implement
+  catalog two-phase allowlist (P0-P4 vs P5), track module-aliased
+  imports (`import sqlite3 as _sqlite3` used by 3 current sites).
+  Remaining 5% confidence gap: live spike against known-bad and
+  known-good fixtures; assigned to P0 implementation.
 - [x] **A6** (new): **A daemon as sole migration runner eliminates the
   `_upgrade_lock` race class.** With a single daemon process holding the
   SQLite handle for the lifetime of the tier, multi-process migration
