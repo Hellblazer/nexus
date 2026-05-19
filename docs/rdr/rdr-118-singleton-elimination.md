@@ -2,12 +2,12 @@
 title: "Eliminate Global Singletons in nexus.catalog and nexus.mcp_infra"
 id: RDR-118
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hellblazer
 reviewed-by: self
 created: 2026-05-19
-accepted_date:
+accepted_date: 2026-05-19
 related_issues: [nexus-o5ck, nexus-w1ip, nexus-wuerf]
 ---
 

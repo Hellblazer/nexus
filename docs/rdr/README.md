@@ -140,7 +140,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-115](rdr-115-t2-daemon-request-tracing.md) | T2 Daemon Request Tracing: Correlation IDs across Client → Daemon → Store Call | Architecture | Accepted | 2026-05-17 |
 | [RDR-116](rdr-116-tuplespace-service-lock-decomposition.md) | TuplespaceService Lock Decomposition: Reader-Conn Pool + Writer Lock | Architecture | Accepted | 2026-05-17 |
 | [RDR-117](rdr-117-tuples-db-durability-and-recovery.md) | tuples.db Durability and Recovery: Backup, Restore, and Rebuild Story | Architecture | Accepted | 2026-05-17 |
-| [RDR-118](rdr-118-singleton-elimination.md) | Eliminate Global Singletons in nexus.catalog and nexus.mcp_infra | Architecture | Draft | 2026-05-19 |
+| [RDR-118](rdr-118-singleton-elimination.md) | Eliminate Global Singletons in nexus.catalog and nexus.mcp_infra | Architecture | Accepted | 2026-05-19 |
 
 ---
 
