@@ -405,3 +405,94 @@ class TestEnrichList:
             ],
         )
         assert result.exit_code == 0, result.output
+
+
+# ── RDR-112 6shq.3 (nexus-siy7): enrich Catalog opens flipped to factory ─────
+
+
+@pytest.fixture
+def catalog_dir(tmp_path: Path, monkeypatch) -> Path:
+    """Initialize a real catalog under tmp_path and route
+    ``nexus.config.catalog_path`` at it for the test. Mirrors the
+    fixture in ``test_catalog_daemon_mode.py``."""
+    from nexus.catalog import Catalog
+    cd = tmp_path / "catalog"
+    cd.mkdir()
+    Catalog.init(cd)
+    monkeypatch.setattr(
+        "nexus.config.catalog_path",
+        lambda: cd,
+    )
+    monkeypatch.setattr(
+        "nexus.commands.enrich.catalog_path",
+        lambda: cd,
+        raising=False,
+    )
+    return cd
+
+
+class TestEnrichDaemonDownClickException:
+    """siy7 (3gdg-style) regression: ``DaemonNotRunningError`` is a
+    ``RuntimeError`` subclass; Click does NOT translate it automatically.
+    The flipped ``open_cached`` / ``open_catalog`` sites in
+    ``_resolve_catalog_entry`` + ``_select_entries`` + ``aspects-list
+    --missing`` must wrap the call in ``try/except RuntimeError`` and
+    re-raise ``click.ClickException`` so the operator sees a one-line
+    message instead of a Python traceback.
+    """
+
+    def test_aspects_show_under_daemon_no_daemon_is_click_exception(
+        self,
+        runner: CliRunner,
+        daemon_env,
+        catalog_dir: Path,
+    ) -> None:
+        """``nx enrich aspects-show <tumbler>`` under daemon mode with no
+        daemon running surfaces a ``ClickException`` via
+        ``_resolve_catalog_entry`` -> ``open_cached``."""
+        # A non-existent tumbler is fine — the open_cached call fails
+        # before tumbler resolution because the daemon is down.
+        result = runner.invoke(
+            main, ["enrich", "aspects-show", "x.0.0.0"],
+        )
+        assert result.exit_code == 1, (
+            f"daemon-down should exit 1 (ClickException), got "
+            f"{result.exit_code}; output: {result.output!r}; "
+            f"exc: {result.exception!r}"
+        )
+        assert result.output.startswith("Error:"), (
+            f"expected 'Error: ...' ClickException line; got: {result.output!r}"
+        )
+        assert "Traceback" not in result.output, (
+            f"daemon-down should NOT surface a Python traceback; got: {result.output!r}"
+        )
+        assert "daemon" in result.output.lower(), result.output
+
+    def test_aspects_list_missing_under_daemon_no_daemon_is_click_exception(
+        self,
+        runner: CliRunner,
+        daemon_env,
+        catalog_dir: Path,
+    ) -> None:
+        """``nx enrich aspects-list <coll> --missing`` flows through
+        ``open_catalog`` -> ClickException translation. Pins the
+        second of the two ClickException-translating siy7 sites in
+        enrich.py."""
+        result = runner.invoke(
+            main,
+            [
+                "enrich",
+                "aspects-list",
+                "--collection",
+                "knowledge__siy7-noop__minilm-l6-v2-384__v1",
+                "--missing",
+            ],
+        )
+        assert result.exit_code == 1, (
+            f"daemon-down should exit 1 (ClickException), got "
+            f"{result.exit_code}; output: {result.output!r}"
+        )
+        assert result.output.startswith("Error:"), (
+            f"expected 'Error: ...'; got: {result.output!r}"
+        )
+        assert "Traceback" not in result.output

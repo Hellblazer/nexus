@@ -172,6 +172,24 @@ class ExecuteProxy:
         """Commit any pending writes on the daemon's CatalogStore connection."""
         self._t2.catalog.commit()
 
+    def close(self) -> None:
+        """No-op under daemon mode — the proxy does not own a connection.
+
+        RDR-112 6shq.3 (nexus-siy7): ``CatalogDB.close()`` tears down the
+        ``sqlite3.Connection`` that the proxy's direct-mode peer owns. The
+        proxy borrows the daemon-side connection through the process-singleton
+        ``T2Client`` (see ``nexus.catalog.open_catalog``); closing here would
+        leave subsequent callers with a dead client and break the cache
+        invariant in :func:`nexus.catalog.open_cached`. Lifecycle is owned by
+        :func:`nexus.catalog.reset_cache`, which closes the singleton
+        deterministically. Existing CLI sites (``commands/dt.py`` finally
+        blocks; the doctor-replay path) call ``cat._db.close()`` to release
+        the WAL lock for back-to-back ``CliRunner`` invocations — under
+        daemon mode the daemon owns that lock, so the close is a no-op
+        without behaviour drift.
+        """
+        return None
+
     @contextmanager
     def transaction(self) -> Generator[object, None, None]:
         """Not implemented under daemon mode — write-path deferred.

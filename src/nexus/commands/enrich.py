@@ -360,14 +360,19 @@ def enrich_bib(
     # Auto-generate citation links if catalog is initialized
     if enriched_titles > 0:
         try:
-            from nexus.catalog import Catalog
+            from nexus.catalog import Catalog, open_catalog
             from nexus.config import catalog_path
 
             cat_path = catalog_path()
             if Catalog.is_initialized(cat_path):
                 from nexus.catalog.link_generator import generate_citation_links
 
-                cat = Catalog(cat_path, cat_path / ".catalog.db")
+                # RDR-112 6shq.3 (nexus-siy7): route through the daemon-aware
+                # factory so this site works under NX_STORAGE_MODE=daemon.
+                # Already inside try/except Exception, so the
+                # DaemonNotRunningError RuntimeError gets swallowed into the
+                # debug log without a separate translation layer.
+                cat = open_catalog(cat_path)
                 link_count = generate_citation_links(cat)
                 if link_count > 0:
                     click.echo(f"Auto-generated {link_count} citation links in catalog.")
@@ -522,7 +527,7 @@ def _catalog_enrich_hook(
     row to corrupt.
     """
     try:
-        from nexus.catalog import Catalog
+        from nexus.catalog import Catalog, open_catalog
         from nexus.catalog.tumbler import Tumbler
         from nexus.config import catalog_path
 
@@ -530,7 +535,11 @@ def _catalog_enrich_hook(
         if not Catalog.is_initialized(cat_path):
             return
 
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        # RDR-112 6shq.3 (nexus-siy7): route through the daemon-aware factory
+        # so this site works under NX_STORAGE_MODE=daemon. Already inside a
+        # try-block (the function tail catches Exception and logs), so the
+        # RuntimeError translation is redundant here.
+        cat = open_catalog(cat_path)
 
         target_tumblers: list[Tumbler] = []
 
@@ -765,7 +774,7 @@ def _select_entries(
 ) -> list | None:
     """Return the catalog entries to process, or None if the catalog
     is missing (terminal error already echoed)."""
-    from nexus.catalog import Catalog
+    from nexus.catalog import Catalog, open_catalog
     from nexus.commands._helpers import default_db_path
     from nexus.config import catalog_path
     from nexus.db.t2 import T2Database
@@ -775,7 +784,14 @@ def _select_entries(
     if not Catalog.is_initialized(cat_path):
         click.echo("Catalog not initialized — run 'nx catalog setup' first.")
         return None
-    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    # RDR-112 6shq.3 (nexus-siy7): route through the daemon-aware factory so
+    # this site works under NX_STORAGE_MODE=daemon. Translate RuntimeError
+    # (DaemonNotRunningError) -> ClickException so daemon-down surfaces as a
+    # one-line operator message instead of a Python traceback.
+    try:
+        cat = open_catalog(cat_path)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     entries = cat.list_by_collection(collection)
 
     if re_extract:
@@ -1474,7 +1490,7 @@ _ASPECT_FIELDS: tuple[str, ...] = (
 def _resolve_catalog_entry(tumbler_or_title: str):
     """Resolve a tumbler or title to (catalog, entry). Raises
     ClickException on miss."""
-    from nexus.catalog import Catalog, resolve_tumbler
+    from nexus.catalog import Catalog, open_cached, resolve_tumbler
     from nexus.config import catalog_path
 
     cat_path = catalog_path()
@@ -1482,7 +1498,15 @@ def _resolve_catalog_entry(tumbler_or_title: str):
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' first."
         )
-    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    # RDR-112 6shq.3 (nexus-siy7): route through the daemon-aware factory so
+    # this site works under NX_STORAGE_MODE=daemon. Read-only resolver
+    # (resolve_tumbler + cat.resolve) -> open_cached reuses the process
+    # singleton to avoid per-invocation reconstruction. Translate
+    # RuntimeError -> ClickException for clean daemon-down operator output.
+    try:
+        cat = open_cached(cat_path)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     t, err = resolve_tumbler(cat, tumbler_or_title)
     if err:
         raise click.ClickException(err)
@@ -1652,7 +1676,7 @@ def aspects_list_cmd(
     detail. With ``--missing`` the verb inverts to gap detection:
     catalog rows in COLLECTION that don't have a matching aspect row.
     """
-    from nexus.catalog import Catalog
+    from nexus.catalog import Catalog, open_catalog
     from nexus.commands._helpers import default_db_path
     from nexus.config import catalog_path
     from nexus.db.t2 import T2Database
@@ -1664,7 +1688,13 @@ def aspects_list_cmd(
             raise click.ClickException(
                 "Catalog not initialized. Run 'nx catalog setup' first."
             )
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        # RDR-112 6shq.3 (nexus-siy7): route through the daemon-aware factory
+        # so this site works under NX_STORAGE_MODE=daemon. Translate
+        # RuntimeError -> ClickException for clean daemon-down output.
+        try:
+            cat = open_catalog(cat_path)
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
         entries = cat.list_by_collection(collection)
         with t2_ctx() as db:
             existing = {
