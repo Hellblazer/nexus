@@ -14,13 +14,21 @@ concurrency:
 
 jobs:
   test:
-    name: pytest (Python ${{ matrix.python-version }})
+    # nexus-2ivn: split into two parallel partitions so wall-time is
+    # max(core, daemon) instead of sum. Suite grew from ~12 min to
+    # 20+ min as 387 new test files landed in the last 60 days
+    # (RDR-112 daemon-mode flips, RDR-108, RDR-110, etc.). Splitting
+    # preserves full coverage; daemon-mode tests stay together in
+    # one partition because they share UDS / chroma state and would
+    # race under intra-partition parallelism.
+    name: pytest ${{ matrix.partition }} (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.13"]
+        partition: [core, daemon]
 
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +59,32 @@ jobs:
         run: uv sync --group dev
 
       - name: Run tests
-        run: uv run pytest tests/ -v
+        # core: everything except daemon-mode files (the heavy daemon
+        # spawn/teardown work goes to the daemon partition).
+        # daemon: every tests/daemon/** file plus the daemon-mode
+        # CLI smokes in tests/commands/ and tests/catalog/.
+        # shopt -s nullglob so empty globs (e.g. tests/catalog/ on a
+        # branch where the daemon parity tests have not landed yet)
+        # do not pass a literal pattern to pytest.
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          case "${{ matrix.partition }}" in
+            core)
+              uv run pytest tests/ -v \
+                --ignore=tests/daemon \
+                --ignore-glob='tests/commands/test_*_daemon_mode.py' \
+                --ignore-glob='tests/catalog/test_*_daemon_*.py'
+              ;;
+            daemon)
+              daemon_files=(
+                tests/commands/test_*_daemon_mode.py
+                tests/catalog/test_*_daemon_*.py
+              )
+              uv run pytest tests/daemon "${daemon_files[@]}" -v
+              ;;
+          esac
 
   migration-race-probe:
     # nexus-9eaz: the two concurrent-migration tests below are skip-marked
