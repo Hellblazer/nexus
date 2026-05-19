@@ -23,7 +23,13 @@ jobs:
     # race under intra-partition parallelism.
     name: pytest ${{ matrix.partition }} (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Core partition still lands close to the 20-min mark on a fresh
+    # CI runner; bumping to 30 ensures pytest reaches the FAILURES
+    # summary so failed-test tracebacks surface in the log rather
+    # than being killed mid-summary by the timeout. nexus-2ivn
+    # follow-up: 3-way split (core-a / core-b) to bring this back
+    # down to ~15 min per partition.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
