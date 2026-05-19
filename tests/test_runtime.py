@@ -1,0 +1,668 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Tests for ``nexus.runtime``, the singleton-elimination container (RDR-118).
+
+Phase 1 Step 1 (bead nexus-atf8a). Pins the runtime container's constructor
+contract, the ContextVar discovery mechanism, the shared catalog cache keyed
+by (path, mode), and the three-chain HookRegistry that replaces the
+process-global hook lists. Failure isolation + T2 ``hook_failures`` persistence
+contracts are verified against the runtime's HookRegistry directly, not
+against the legacy mcp_infra dispatchers (those are migrated to thin shims in
+Step 3 / bead nexus-ipyfj, and rewritten end-to-end in Step 4 / bead
+nexus-rkkn2).
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from nexus.catalog import Catalog
+
+
+# ── Constructor + property surface ───────────────────────────────────────────
+
+
+def test_runtime_constructor_minimum_kwargs(tmp_path: Path) -> None:
+    """Minimum-kwargs path: config_dir alone is enough."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config" / "nexus")
+    try:
+        assert rt.config_dir == tmp_path / ".config" / "nexus"
+        assert rt.catalog_path is None
+        assert rt.storage_mode == "direct"
+        assert rt.dispatch_backend is None
+        assert rt.dispatch_qwen_operators is None
+        assert rt.dispatch_claude_operators is None
+        assert rt.aspect_backend is None
+        assert rt.scholarly_paper_version is None
+        assert rt.tier_b_dispatcher is None
+        assert rt.qwen_agent_supervisor is None
+        assert rt.skip_t1 is False
+    finally:
+        rt.close()
+
+
+def test_runtime_constructor_all_kwargs_roundtrip(tmp_path: Path) -> None:
+    """All 11 env-driven settings are accepted as kwargs and exposed as properties."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(
+        config_dir=tmp_path / ".config",
+        catalog_path=tmp_path / "catalog",
+        storage_mode="daemon",
+        dispatch_backend="auto",
+        dispatch_qwen_operators="extract,verify",
+        dispatch_claude_operators="rank",
+        aspect_backend="qwen",
+        scholarly_paper_version="v2",
+        tier_b_dispatcher="qwen_agent",
+        qwen_agent_supervisor="/tmp/supervisor",
+        skip_t1=True,
+    )
+    try:
+        assert rt.config_dir == tmp_path / ".config"
+        assert rt.catalog_path == tmp_path / "catalog"
+        assert rt.storage_mode == "daemon"
+        assert rt.dispatch_backend == "auto"
+        assert rt.dispatch_qwen_operators == "extract,verify"
+        assert rt.dispatch_claude_operators == "rank"
+        assert rt.aspect_backend == "qwen"
+        assert rt.scholarly_paper_version == "v2"
+        assert rt.tier_b_dispatcher == "qwen_agent"
+        assert rt.qwen_agent_supervisor == "/tmp/supervisor"
+        assert rt.skip_t1 is True
+    finally:
+        rt.close()
+
+
+def test_runtime_storage_mode_rejects_unknown_value(tmp_path: Path) -> None:
+    """storage_mode literal type is enforced at construction; anything other
+    than 'direct'/'daemon' raises before the runtime is built."""
+    from nexus.runtime import NexusRuntime
+
+    with pytest.raises(ValueError, match="storage_mode"):
+        NexusRuntime(
+            config_dir=tmp_path / ".config",
+            storage_mode="cloud",  # type: ignore[arg-type]
+        )
+
+
+def test_runtime_paths_coerced_to_path_objects(tmp_path: Path) -> None:
+    """String paths are coerced to Path objects at construction."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(
+        config_dir=str(tmp_path / ".config"),  # type: ignore[arg-type]
+        catalog_path=str(tmp_path / "catalog"),  # type: ignore[arg-type]
+    )
+    try:
+        assert isinstance(rt.config_dir, Path)
+        assert isinstance(rt.catalog_path, Path)
+    finally:
+        rt.close()
+
+
+# ── ContextVar discovery mechanism ───────────────────────────────────────────
+
+
+def test_current_runtime_raises_when_unset() -> None:
+    """current_runtime() raises RuntimeError with a clear diagnostic when
+    no NexusRuntime has been set in the current context."""
+    from nexus.runtime import _runtime_var, current_runtime
+
+    # Defensive: belt-and-braces clear the ContextVar in case another test
+    # leaked. The conftest fixture (added in this bead) does this in setUp.
+    token = _runtime_var.set(None)
+    try:
+        with pytest.raises(RuntimeError, match="No NexusRuntime"):
+            current_runtime()
+    finally:
+        _runtime_var.reset(token)
+
+
+def test_use_runtime_sets_contextvar_and_returns_token(tmp_path: Path) -> None:
+    """use_runtime(rt) sets the ContextVar to rt and returns a reset token
+    so the caller can restore the prior state."""
+    from nexus.runtime import (
+        NexusRuntime,
+        _runtime_var,
+        current_runtime,
+        use_runtime,
+    )
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        # Confirm initial state is None.
+        assert _runtime_var.get() is None
+        token = use_runtime(rt)
+        try:
+            assert current_runtime() is rt
+        finally:
+            _runtime_var.reset(token)
+        # After reset the ContextVar is back to None.
+        assert _runtime_var.get() is None
+    finally:
+        rt.close()
+
+
+# ── get_catalog with explicit cat_path (open_cached semantics) ───────────────
+
+
+def test_get_catalog_explicit_path_constructs_and_caches(tmp_path: Path) -> None:
+    """runtime.get_catalog(cat_path=...) constructs once and reuses the
+    cached instance on subsequent calls with the same (path, mode)."""
+    from nexus.runtime import NexusRuntime
+
+    catalog_dir = tmp_path / "cat"
+    Catalog.init(catalog_dir)
+    rt = NexusRuntime(config_dir=tmp_path / ".config", storage_mode="direct")
+    try:
+        first = rt.get_catalog(catalog_dir)
+        second = rt.get_catalog(catalog_dir)
+        assert first is not None
+        assert first is second
+    finally:
+        rt.close()
+
+
+def test_get_catalog_cache_keyed_by_path_and_mode(tmp_path: Path) -> None:
+    """A4 S2 preservation: cache key is (cat_path, mode). Different paths get
+    different instances; same path under different modes also do."""
+    from nexus.runtime import NexusRuntime
+
+    catalog_a = tmp_path / "cat_a"
+    catalog_b = tmp_path / "cat_b"
+    Catalog.init(catalog_a)
+    Catalog.init(catalog_b)
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config", storage_mode="direct")
+    try:
+        inst_a = rt.get_catalog(catalog_a)
+        inst_b = rt.get_catalog(catalog_b)
+        assert inst_a is not inst_b
+    finally:
+        rt.close()
+
+
+def test_get_catalog_no_cache_across_runtimes(tmp_path: Path) -> None:
+    """Each NexusRuntime owns its own catalog cache. Two runtimes pointed
+    at the same path return distinct Catalog instances. No shared
+    process-global cache."""
+    from nexus.runtime import NexusRuntime
+
+    catalog_dir = tmp_path / "cat"
+    Catalog.init(catalog_dir)
+
+    rt1 = NexusRuntime(config_dir=tmp_path / ".config_a")
+    rt2 = NexusRuntime(config_dir=tmp_path / ".config_b")
+    try:
+        inst1 = rt1.get_catalog(catalog_dir)
+        inst2 = rt2.get_catalog(catalog_dir)
+        assert inst1 is not None
+        assert inst2 is not None
+        assert inst1 is not inst2
+    finally:
+        rt1.close()
+        rt2.close()
+
+
+# ── get_catalog with no path (mcp_infra.get_catalog semantics) ───────────────
+
+
+def test_get_catalog_no_path_returns_none_when_runtime_has_no_catalog_path(
+    tmp_path: Path,
+) -> None:
+    """Without an explicit cat_path and without a catalog_path set on the
+    runtime, get_catalog() returns None, preserving the mcp_infra.get_catalog
+    'not initialised yet' contract."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")  # no catalog_path
+    try:
+        assert rt.get_catalog() is None
+    finally:
+        rt.close()
+
+
+def test_get_catalog_no_path_returns_none_when_path_uninitialised(
+    tmp_path: Path,
+) -> None:
+    """When self.catalog_path points at a directory that is not a catalog
+    repo, get_catalog() returns None rather than constructing an empty one,
+    preserving mcp_infra.get_catalog's is_initialized check."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(
+        config_dir=tmp_path / ".config",
+        catalog_path=tmp_path / "uninitialised",
+    )
+    try:
+        assert rt.get_catalog() is None
+    finally:
+        rt.close()
+
+
+def test_get_catalog_no_path_uses_runtime_catalog_path(tmp_path: Path) -> None:
+    """get_catalog() derives the path from self.catalog_path and returns
+    the cached Catalog when the directory is an initialised catalog repo."""
+    from nexus.runtime import NexusRuntime
+
+    catalog_dir = tmp_path / "cat"
+    Catalog.init(catalog_dir)
+    rt = NexusRuntime(
+        config_dir=tmp_path / ".config",
+        catalog_path=catalog_dir,
+    )
+    try:
+        first = rt.get_catalog()
+        second = rt.get_catalog()
+        assert first is not None
+        assert first is second
+    finally:
+        rt.close()
+
+
+def test_get_catalog_no_path_shares_cache_with_explicit_path(tmp_path: Path) -> None:
+    """The (path, mode) cache is unified across the no-arg and explicit-arg
+    call paths: requesting the same path either way returns the same Catalog
+    instance. This is the dual-singleton collapse RDR-118 ships."""
+    from nexus.runtime import NexusRuntime
+
+    catalog_dir = tmp_path / "cat"
+    Catalog.init(catalog_dir)
+    rt = NexusRuntime(
+        config_dir=tmp_path / ".config",
+        catalog_path=catalog_dir,
+    )
+    try:
+        via_default = rt.get_catalog()
+        via_explicit = rt.get_catalog(catalog_dir)
+        assert via_default is via_explicit
+    finally:
+        rt.close()
+
+
+# ── fresh_catalog (never cached) ─────────────────────────────────────────────
+
+
+def test_fresh_catalog_never_caches(tmp_path: Path) -> None:
+    """fresh_catalog returns a distinct Catalog instance on every call,
+    independent of the runtime's catalog cache."""
+    from nexus.runtime import NexusRuntime
+
+    catalog_dir = tmp_path / "cat"
+    Catalog.init(catalog_dir)
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        first = rt.fresh_catalog(catalog_dir)
+        second = rt.fresh_catalog(catalog_dir)
+        assert first is not None
+        assert second is not None
+        assert first is not second
+        # And neither populates the shared cache.
+        cached = rt.get_catalog(catalog_dir)
+        assert cached is not first
+        assert cached is not second
+    finally:
+        rt.close()
+
+
+# ── close() lifecycle ────────────────────────────────────────────────────────
+
+
+def test_close_drops_catalog_cache(tmp_path: Path) -> None:
+    """close() empties the catalog cache. A subsequent reopen on the same
+    runtime would build a fresh Catalog. We don't reopen (close is meant
+    to be terminal) but we assert the cache is empty so a leaked reference
+    cannot resurrect a stale instance."""
+    from nexus.runtime import NexusRuntime
+
+    catalog_dir = tmp_path / "cat"
+    Catalog.init(catalog_dir)
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    rt.get_catalog(catalog_dir)
+    assert rt._cached  # cache populated
+    rt.close()
+    assert not rt._cached  # cache emptied
+
+
+def test_close_is_idempotent(tmp_path: Path) -> None:
+    """Calling close() twice is a no-op."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    rt.close()
+    rt.close()  # must not raise
+
+
+def test_context_manager_protocol(tmp_path: Path) -> None:
+    """NexusRuntime supports ``with NexusRuntime(...) as rt:`` for scoped
+    construction + teardown."""
+    from nexus.runtime import NexusRuntime
+
+    with NexusRuntime(config_dir=tmp_path / ".config") as rt:
+        assert isinstance(rt, NexusRuntime)
+    assert rt._closed is True
+
+
+# ── HookRegistry: single chain ───────────────────────────────────────────────
+
+
+def test_hook_single_register_and_fire(tmp_path: Path) -> None:
+    """register_single appends, fire_single invokes every registered hook
+    with the (doc_id, collection, content) shape."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        calls: list[tuple] = []
+        rt.hooks.register_single(
+            lambda doc_id, collection, content: calls.append(
+                (doc_id, collection, content)
+            )
+        )
+        rt.hooks.fire_single("doc-1", "test__coll", "the content")
+        assert calls == [("doc-1", "test__coll", "the content")]
+    finally:
+        rt.close()
+
+
+def test_hook_single_failure_isolated(tmp_path: Path, monkeypatch) -> None:
+    """A raising hook does not break the second hook. T2 persistence path is
+    monkeypatched out; the persistence contract is exercised separately."""
+    import nexus.mcp_infra as _mod
+
+    def _no_t2():
+        raise RuntimeError("t2 unavailable")
+
+    monkeypatch.setattr(_mod, "t2_ctx", _no_t2)
+
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        survivor_calls: list = []
+
+        def raising(doc_id, collection, content):
+            raise RuntimeError("intentional")
+
+        rt.hooks.register_single(raising)
+        rt.hooks.register_single(
+            lambda doc_id, collection, content: survivor_calls.append(doc_id)
+        )
+        rt.hooks.fire_single("d1", "c1", "x")
+        assert survivor_calls == ["d1"]
+    finally:
+        rt.close()
+
+
+# ── HookRegistry: batch chain ────────────────────────────────────────────────
+
+
+def test_hook_batch_register_and_fire_legacy_shape(tmp_path: Path) -> None:
+    """A batch hook without a ``catalog_doc_id`` parameter is invoked with
+    the legacy 5-arg shape (no kwarg)."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        seen: list[tuple] = []
+
+        def legacy_hook(doc_ids, collection, contents, embeddings, metadatas):
+            seen.append((tuple(doc_ids), collection))
+
+        rt.hooks.register_batch(legacy_hook)
+        rt.hooks.fire_batch(
+            ["d1", "d2"], "c1", ["t1", "t2"], None, None,
+            catalog_doc_id="tumbler-xyz",
+        )
+        assert seen == [(("d1", "d2"), "c1")]
+    finally:
+        rt.close()
+
+
+def test_hook_batch_register_and_fire_phase3_shape(tmp_path: Path) -> None:
+    """A batch hook with a ``catalog_doc_id`` parameter receives it as a
+    kwarg. Classification is done at registration via inspect.signature."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        seen: list[str] = []
+
+        def phase3_hook(
+            doc_ids, collection, contents, embeddings, metadatas,
+            *, catalog_doc_id: str = "",
+        ):
+            seen.append(catalog_doc_id)
+
+        rt.hooks.register_batch(phase3_hook)
+        rt.hooks.fire_batch(
+            ["d1"], "c1", ["t1"], None, None,
+            catalog_doc_id="tumbler-xyz",
+        )
+        assert seen == ["tumbler-xyz"]
+    finally:
+        rt.close()
+
+
+def test_hook_batch_register_and_fire_var_keyword_shape(tmp_path: Path) -> None:
+    """A batch hook with **kwargs is classified as catalog_doc_id-aware.
+    Python cannot statically classify so passthrough is the conservative
+    choice (matches register_post_store_batch_hook semantics)."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        seen: list = []
+
+        def varkwarg_hook(
+            doc_ids, collection, contents, embeddings, metadatas, **kw,
+        ):
+            seen.append(kw.get("catalog_doc_id"))
+
+        rt.hooks.register_batch(varkwarg_hook)
+        rt.hooks.fire_batch(
+            ["d1"], "c1", ["t1"], None, None,
+            catalog_doc_id="tumbler-xyz",
+        )
+        assert seen == ["tumbler-xyz"]
+    finally:
+        rt.close()
+
+
+def test_hook_batch_empty_doc_ids_early_return(tmp_path: Path) -> None:
+    """An empty doc_ids list returns before invoking any hook, matching the
+    legacy fire_post_store_batch_hooks early-return."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        calls: list = []
+        rt.hooks.register_batch(
+            lambda doc_ids, collection, contents, embeddings, metadatas: calls.append(1)
+        )
+        rt.hooks.fire_batch([], "c", [], None, None)
+        assert calls == []
+    finally:
+        rt.close()
+
+
+def test_hook_batch_failure_isolated(tmp_path: Path, monkeypatch) -> None:
+    """A raising batch hook does not block the next hook from firing."""
+    import nexus.mcp_infra as _mod
+
+    def _no_t2():
+        raise RuntimeError("t2 unavailable")
+
+    monkeypatch.setattr(_mod, "t2_ctx", _no_t2)
+
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        survivor_calls: list = []
+
+        def raising(doc_ids, collection, contents, embeddings, metadatas):
+            raise RuntimeError("kaboom")
+
+        def survivor(doc_ids, collection, contents, embeddings, metadatas):
+            survivor_calls.append(tuple(doc_ids))
+
+        rt.hooks.register_batch(raising)
+        rt.hooks.register_batch(survivor)
+        rt.hooks.fire_batch(["d1", "d2"], "c", ["t1", "t2"], None, None)
+        assert survivor_calls == [("d1", "d2")]
+    finally:
+        rt.close()
+
+
+# ── HookRegistry: document chain ─────────────────────────────────────────────
+
+
+def test_hook_document_register_and_fire_legacy_shape(tmp_path: Path) -> None:
+    """A document hook without a ``doc_id`` parameter is invoked with the
+    legacy 3-arg shape (no kwarg)."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        seen: list[tuple] = []
+
+        def legacy_hook(source_path, collection, content):
+            seen.append((source_path, collection, content))
+
+        rt.hooks.register_document(legacy_hook)
+        rt.hooks.fire_document("/tmp/x.md", "knowledge__y", "hello", doc_id="d-1")
+        assert seen == [("/tmp/x.md", "knowledge__y", "hello")]
+    finally:
+        rt.close()
+
+
+def test_hook_document_register_and_fire_phase4_shape(tmp_path: Path) -> None:
+    """A document hook with a ``doc_id`` parameter receives it as a kwarg.
+    Classification is done at registration."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        seen: list[str] = []
+
+        def phase4_hook(source_path, collection, content, *, doc_id: str = ""):
+            seen.append(doc_id)
+
+        rt.hooks.register_document(phase4_hook)
+        rt.hooks.fire_document("/tmp/x.md", "knowledge__y", "hello", doc_id="d-1")
+        assert seen == ["d-1"]
+    finally:
+        rt.close()
+
+
+def test_hook_document_register_and_fire_var_keyword_shape(tmp_path: Path) -> None:
+    """A document hook with **kwargs is classified as doc_id-aware."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        seen: list = []
+
+        def varkwarg_hook(source_path, collection, content, **kw):
+            seen.append(kw.get("doc_id"))
+
+        rt.hooks.register_document(varkwarg_hook)
+        rt.hooks.fire_document("/tmp/x.md", "c", "hello", doc_id="d-1")
+        assert seen == ["d-1"]
+    finally:
+        rt.close()
+
+
+def test_hook_document_failure_isolated(tmp_path: Path, monkeypatch) -> None:
+    """A raising document hook does not block the next hook from firing."""
+    import nexus.mcp_infra as _mod
+
+    def _no_t2():
+        raise RuntimeError("t2 unavailable")
+
+    monkeypatch.setattr(_mod, "t2_ctx", _no_t2)
+
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        survivor_calls: list = []
+
+        def raising(source_path, collection, content):
+            raise RuntimeError("kaboom")
+
+        def survivor(source_path, collection, content):
+            survivor_calls.append(source_path)
+
+        rt.hooks.register_document(raising)
+        rt.hooks.register_document(survivor)
+        rt.hooks.fire_document("/tmp/x.md", "c", "hello")
+        assert survivor_calls == ["/tmp/x.md"]
+    finally:
+        rt.close()
+
+
+# ── HookRegistry: clear / list helpers ───────────────────────────────────────
+
+
+def test_hooks_isolation_between_runtimes(tmp_path: Path) -> None:
+    """Hooks registered on one runtime do not appear in another. This is
+    the per-test-isolation property RDR-118 is buying."""
+    from nexus.runtime import NexusRuntime
+
+    rt1 = NexusRuntime(config_dir=tmp_path / ".cfg1")
+    rt2 = NexusRuntime(config_dir=tmp_path / ".cfg2")
+    try:
+        rt1_calls: list = []
+        rt1.hooks.register_single(
+            lambda doc_id, collection, content: rt1_calls.append(doc_id)
+        )
+        rt2.hooks.fire_single("d", "c", "x")
+        assert rt1_calls == []
+    finally:
+        rt1.close()
+        rt2.close()
+
+
+# ── install_default_hooks factory stub (filled in Step 3, nexus-ipyfj) ──────
+
+
+def test_install_default_hooks_is_importable(tmp_path: Path) -> None:
+    """The factory symbol is exported from nexus.runtime as a no-op stub in
+    Step 1 so Step 3's mcp_infra shim can land without import shuffling.
+    Behaviour (registering the three load-bearing batch hooks + the aspect
+    extraction document hook) lands in nexus-ipyfj."""
+    from nexus.runtime import NexusRuntime, install_default_hooks
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        # No-op in Phase 1 Step 1; the real registrations land in Step 3.
+        install_default_hooks(rt)
+    finally:
+        rt.close()
+
+
+# ── Pytest runtime fixture (added in tests/conftest.py by this bead) ────────
+
+
+def test_runtime_fixture_provides_default_runtime(runtime) -> None:
+    """The ``runtime`` fixture constructs a NexusRuntime under tmp_path and
+    sets it as the current ContextVar runtime."""
+    from nexus.runtime import NexusRuntime, current_runtime
+
+    assert isinstance(runtime, NexusRuntime)
+    assert current_runtime() is runtime
+
+
+def test_runtime_fixture_cleans_up_contextvar(request) -> None:
+    """After the runtime fixture's teardown the ContextVar is reset back to
+    its prior state. The fixture's contract: opt-in for tests that use it,
+    no cross-test leakage."""
+    from nexus.runtime import _runtime_var
+
+    # Outside the fixture, ContextVar is None.
+    assert _runtime_var.get() is None

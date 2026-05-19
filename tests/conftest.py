@@ -380,6 +380,33 @@ def _isolate_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "test-catalog"))
 
 
+@pytest.fixture
+def runtime(tmp_path: Path):
+    """Construct a per-test ``NexusRuntime`` rooted at ``tmp_path`` and set
+    it as the current ContextVar runtime (RDR-118 Phase 1 Step 1).
+
+    Opt-in fixture. Only tests that explicitly request it use the new
+    runtime container. The legacy autouse fixtures (`_isolate_catalog`,
+    `_isolate_config_dir`, `_restore_post_store_batch_hooks_after_test`,
+    etc.) still run, so this fixture coexists with them through Phases
+    1-3 and only fully replaces them at the end of Phase 4. See
+    `docs/rdr/rdr-118-singleton-elimination.md`.
+    """
+    from nexus.runtime import NexusRuntime, _runtime_var
+
+    rt = NexusRuntime(
+        config_dir=tmp_path / ".config" / "nexus",
+        catalog_path=tmp_path / "test-catalog",
+        storage_mode="direct",
+    )
+    token = _runtime_var.set(rt)
+    try:
+        yield rt
+    finally:
+        _runtime_var.reset(token)
+        rt.close()
+
+
 def set_credentials(monkeypatch) -> None:
     """Set required T3/Voyage credential env vars for tests that call _has_credentials().
 
