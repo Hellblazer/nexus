@@ -38,7 +38,11 @@ jobs:
       - name: Cache uv wheel cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/uv
+          # nexus-2ivn: setup-uv@v5 sets UV_CACHE_DIR to
+          # ${{ runner.temp }}/setup-uv-cache regardless of
+          # enable-cache; cache that path so the wheel cache
+          # actually rehydrates between runs.
+          path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
             uv-${{ runner.os }}-${{ matrix.python-version }}-

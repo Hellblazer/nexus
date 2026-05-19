@@ -44,15 +44,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
           # setup-uv's bundled enable-cache only restored ~1 MB of
           # metadata in practice; the actual wheel cache was missing
-          # and torch (~847 MB) re-downloaded on every run. The
-          # explicit actions/cache@v4 step below targets
-          # ``~/.cache/uv`` directly so the wheel cache rehydrates.
+          # and torch (~847 MB) re-downloaded on every run. Disable
+          # the bundled cache and target the directory setup-uv
+          # actually uses (UV_CACHE_DIR = ${{ runner.temp }}/setup-
+          # uv-cache, not ~/.cache/uv) with an explicit cache step.
           enable-cache: false
 
       - name: Cache uv wheel cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/uv
+          path: ${{ runner.temp }}/setup-uv-cache
           # Key on uv.lock so a dep change rebuilds; restore-keys
           # falls back to the last cache for the same python so a
           # uv.lock bump still seeds most of the wheels and only
