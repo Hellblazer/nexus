@@ -817,6 +817,24 @@ class CatalogDB:
         ]
         return [dict(zip(columns, row)) for row in rows]
 
+    def backfilled_collections(self) -> list[str]:
+        """Return the names backfilled by the most recent ``_backfill_collections`` call.
+
+        RDR-112 6shq.1 (nexus-lj2l): mirrors the public accessor on
+        ``CatalogStore`` so ``Catalog._emit_backfilled_collection_events``
+        can read the set via a public method regardless of which backend
+        owns it. The underscored ``_backfilled_collections`` attribute is
+        still populated during ``__init__`` for the historical contract;
+        the public method exists so the daemon proxy (``ExecuteProxy``)
+        and direct mode share one call signature.
+
+        Returns a list (not a set) so the JSON-RPC encoder on the daemon
+        side has a native type; direct-mode callers can re-wrap as
+        needed.
+        """
+        with self._lock:
+            return list(self._backfilled_collections)
+
     def execute(self, sql: str, params: tuple | list = ()) -> sqlite3.Cursor:
         """Thread-safe execute wrapper. Acquires _lock before executing."""
         with self._lock:

@@ -231,6 +231,15 @@ class _SyncOps:
     def _ensure_consistent(self) -> None:
         """Rebuild SQLite from the canonical truth when its mtime has advanced.
 
+        RDR-112 6shq.1 (nexus-lj2l): under NX_STORAGE_MODE=daemon the
+        Catalog is backed by an ``ExecuteProxy`` over the daemon's
+        ``CatalogStore``. The daemon owns its projection rebuild
+        autonomously and does not expose a transactional
+        ``rebuild()`` over RPC (``transaction()`` and
+        ``bulk_load_documents()`` are in ``_RPC_DENY_OPS``). Skipping
+        the client-side rebuild is therefore the correct contract:
+        clients trust the daemon's state.
+
         With ``NEXUS_EVENT_SOURCED=1`` the canonical truth is
         ``events.jsonl`` (the event log IS the state per RDR-101 §"Core
         invariants"); the rebuild path replays the log through
@@ -266,6 +275,10 @@ class _SyncOps:
         per tool call.
         """
         cat = self._cat
+        # RDR-112 6shq.1 (nexus-lj2l): daemon owns its projection;
+        # client-side rebuild is a no-op.
+        if getattr(cat, "_daemon_proxy", False):
+            return
         try:
             # Track all canonical-truth sources for mtime detection so a
             # rebuild kicks in regardless of which path produced the

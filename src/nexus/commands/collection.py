@@ -163,12 +163,17 @@ def delete_cmd(name: str, yes: bool) -> None:
     catalog_docs_deleted = 0
     catalog_projection_deleted = 0
     try:
+        from nexus.catalog import open_catalog
         from nexus.catalog.catalog import Catalog
         from nexus.config import catalog_path
 
         cat_path = catalog_path()
         if Catalog.is_initialized(cat_path):
-            cat = Catalog(cat_path, cat_path / ".catalog.db")
+            # RDR-112 6shq.3 (nexus-siy7): route through the daemon-aware
+            # factory so this site works under NX_STORAGE_MODE=daemon.
+            # Inside the outer try/except Exception (warn on failure), so
+            # the RuntimeError translation is redundant here.
+            cat = open_catalog(cat_path)
             # Delete every document row pointing at the gone collection.
             # Use the public delete_document so the event log + JSONL
             # tombstone stay in sync with the SQLite projection.
@@ -348,11 +353,17 @@ def reindex_cmd(name: str, force: bool) -> None:
     # Build a one-shot catalog handle for the manifest fallback.
     _cat = None
     try:
-        from nexus.catalog import Catalog
+        from nexus.catalog import Catalog, open_cached
         from nexus.config import catalog_path
         _cp = catalog_path()
         if Catalog.is_initialized(_cp):
-            _cat = Catalog(_cp, _cp / ".catalog.db")
+            # RDR-112 6shq.3 (nexus-siy7): route through the daemon-aware
+            # factory so this site works under NX_STORAGE_MODE=daemon. Used
+            # read-mostly (docs_for_chashes per page batch) -> open_cached
+            # avoids per-page reconstruction. Inside try/except Exception
+            # (silent fallback to None), so the RuntimeError translation is
+            # redundant.
+            _cat = open_cached(_cp)
     except Exception:
         pass
     while True:

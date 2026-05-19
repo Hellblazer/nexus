@@ -33,15 +33,34 @@ def _open_catalog_or_none() -> Any:
     RDR-103 Phase 3a: callers that want to consult the catalog for
     conformant collection names but tolerate its absence (e.g. fresh
     operator workstation, pytest temp dirs) use this helper.
+
+    RDR-112 6shq.2 (nexus-3gdg): routes through the daemon-aware
+    factory ``open_catalog`` so the daemon mode flip is consistent
+    across CLI seams. The bare ``except Exception`` preserves the
+    tolerant behaviour: a missing T2 daemon (``DaemonNotRunningError``)
+    or a missing catalog dir both return ``None``, matching the
+    pre-fix semantics of "tolerate absence".
+
+    3gdg review IMPORTANT-3: emit a structured warning before
+    returning ``None`` so the silent fallback is observable in logs.
+    Pre-fix the silent return left operators unable to tell that the
+    catalog had been bypassed under daemon-mode-without-daemon, which
+    would silently drop catalog-aware collection naming.
     """
-    from nexus.catalog import Catalog
+    from nexus.catalog import Catalog, open_catalog
     from nexus.config import catalog_path
 
     try:
         cat_path = catalog_path()
         if Catalog.is_initialized(cat_path):
-            return Catalog(cat_path, cat_path / ".catalog.db")
-    except Exception:
+            return open_catalog(cat_path)
+    except Exception as exc:
+        _log.warning(
+            "catalog_open_failed_returning_none",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
         return None
     return None
 

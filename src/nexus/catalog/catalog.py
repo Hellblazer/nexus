@@ -25,6 +25,8 @@ from nexus._locking import acquire_directory_lock, release_lock
 if TYPE_CHECKING:
     from chromadb.api import ClientAPI
 
+    from nexus.catalog.catalog_proxy import ExecuteProxy
+
 
 # Heartbeat cadence for long catalog operations. The first heartbeat
 # fires after this delay (so fast operations stay silent) and then every
@@ -519,9 +521,27 @@ class Catalog:
         detectable via ``link_audit()``.
     """
 
-    def __init__(self, catalog_dir: Path, db_path: Path) -> None:
+    def __init__(
+        self,
+        catalog_dir: Path,
+        db_path: Path,
+        *,
+        db: "CatalogDB | ExecuteProxy | None" = None,
+    ) -> None:
+        # RDR-112 6shq.1 (nexus-lj2l): ``db`` allows callers under
+        # NX_STORAGE_MODE=daemon to inject an ``ExecuteProxy`` over the
+        # daemon's CatalogStore instead of opening a local CatalogDB.
+        # When omitted, the legacy direct-mode path constructs a
+        # CatalogDB(db_path) so all existing call sites keep working
+        # unchanged.
         self._dir = catalog_dir
-        self._db = CatalogDB(db_path)
+        self._db = db if db is not None else CatalogDB(db_path)
+        # Flag for downstream paths (``_SyncOps._ensure_consistent``,
+        # any future write-path branch) to detect proxy mode without
+        # importing ExecuteProxy at every check site. The daemon owns
+        # the projection rebuild under proxy mode; clients trust the
+        # daemon's state.
+        self._daemon_proxy: bool = db is not None and not isinstance(db, CatalogDB)
         self._owners_path = catalog_dir / "owners.jsonl"
         self._documents_path = catalog_dir / "documents.jsonl"
         self._links_path = catalog_dir / "links.jsonl"
@@ -633,7 +653,12 @@ class Catalog:
         event-sourced mode) because the projection correctness depends on
         them being present -- they are structural, not optional telemetry.
         """
-        names = self._db._backfilled_collections
+        # RDR-112 6shq.1 (nexus-lj2l): use the public accessor instead of
+        # the underscored attribute. ``_StoreProxy`` skips underscored
+        # names by design (yfqv defect class), so direct attribute access
+        # would fail under NX_STORAGE_MODE=daemon. Both CatalogDB and
+        # CatalogStore expose ``backfilled_collections()`` for parity.
+        names = self._db.backfilled_collections()
         if not names:
             return
         dir_fd = self._acquire_lock()
@@ -752,15 +777,68 @@ class Catalog:
         exists, prefer cloning so the new machine starts from the
         existing canonical history; otherwise initialise a local
         repo from scratch.
+
+        RDR-112 6shq.5 (nexus-o0pe): under
+        ``NX_STORAGE_MODE=daemon`` with a reachable T2 daemon the
+        returned Catalog wraps the daemon's CatalogStore via
+        ``open_catalog`` rather than opening a local ``CatalogDB``
+        against ``.catalog.db``. Pre-fix the ``cls(..., .catalog.db)``
+        call here created a split-store residue: setup_cmd's later
+        daemon-routed operations succeeded on the daemon's
+        ``memory.db`` while ``.catalog.db`` accumulated a parallel
+        state nobody read.
+
+        Daemon-down fallback: if daemon mode is active but no T2
+        daemon is reachable, fall back to legacy direct-mode
+        construction so the bootstrap path remains usable. CLI verbs
+        that subsequently need the catalog will surface a clean
+        ``ClickException`` via the 3gdg ``RuntimeError ->
+        ClickException`` translations; init itself must not fail
+        loud because the daemon may come online after the bootstrap
+        directory exists.
         """
         git_dir = catalog_path / ".git"
         if remote and not git_dir.exists():
             _git.clone_catalog(remote, catalog_path)
-            return cls(catalog_path, catalog_path / ".catalog.db")
-        _git.init_repo(catalog_path)
-        if remote:
-            _git.add_remote_origin_if_missing(catalog_path, remote)
-        return cls(catalog_path, catalog_path / ".catalog.db")
+        else:
+            _git.init_repo(catalog_path)
+            if remote:
+                _git.add_remote_origin_if_missing(catalog_path, remote)
+        # Defer to the module-level factory so the daemon-vs-direct
+        # decision lives in one place. Local import avoids the
+        # circular at module load (``nexus.catalog.__init__`` already
+        # depends on this file).
+        from nexus.catalog import open_catalog
+        try:
+            return open_catalog(catalog_path)
+        except RuntimeError as exc:
+            # o0pe review IMPORTANT-1: surface the silent fallback so
+            # operators can correlate later split-store residue with
+            # the bootstrap that produced it. The project rule
+            # ``feedback_no_silent_fallbacks_for_correctness.md``
+            # forbids unsignalled degraded paths.
+            _log.warning(
+                "catalog_init_daemon_down_fallback",
+                catalog_path=str(catalog_path),
+                error=str(exc),
+                detail=(
+                    "NX_STORAGE_MODE=daemon but T2 daemon unreachable; "
+                    "bootstrapping a local .catalog.db. Start the "
+                    "daemon (`nx daemon t2 start`) before subsequent "
+                    "catalog operations to avoid split-store residue."
+                ),
+            )
+            # chak review IMPORTANT-2 (substantive-critic S2): mark the
+            # fallback instance so callers (and ``nx catalog doctor``)
+            # can distinguish a degraded-mode Catalog from a
+            # genuinely-daemon-bound one without grepping logs. The
+            # ``bootstrap_fallback_active`` attribute was added by
+            # nexus-o6aa.9.7 for the event-sourced bootstrap fallback;
+            # the daemon-down bootstrap is the same shape of degraded
+            # state and reuses the signal.
+            fallback = cls(catalog_path, catalog_path / ".catalog.db")
+            fallback.bootstrap_fallback_active = True
+            return fallback
 
     @staticmethod
     def is_initialized(catalog_path: Path) -> bool:

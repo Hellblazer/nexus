@@ -312,15 +312,25 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str]) -> None:
     entry visible to ``nx catalog list`` until the next ``nx catalog gc``.
     Eventual consistency surprised users who expected delete to be atomic.
     Skipped silently when the catalog is uninitialised.
+
+    RDR-112 6shq.4 (nexus-w6hj): route through the daemon-aware
+    ``open_catalog`` factory so ``NX_STORAGE_MODE=daemon`` routes the
+    catalog writes through ``T2Client.catalog``. This is a mutator
+    (``delete_document``) so ``open_catalog`` (fresh instance) is the
+    right choice over ``open_cached`` (read-mostly singleton). The
+    surrounding ``except Exception`` already swallows daemon-down
+    ``RuntimeError`` along with any other failure; ``store delete``
+    remains best-effort on the catalog reap by design (the T3 deletion
+    has already succeeded by this point).
     """
-    from nexus.catalog import Catalog
+    from nexus.catalog import Catalog, open_catalog
     from nexus.config import catalog_path
 
     cat_path = catalog_path()
     if not Catalog.is_initialized(cat_path):
         return
     try:
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        cat = open_catalog(cat_path)
         for doc_id in doc_ids:
             entry = cat.by_doc_id(doc_id)
             if entry is not None:

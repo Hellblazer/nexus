@@ -105,17 +105,23 @@ def _default_catalog_stats_fn(col: str) -> dict[str, Any]:
     if cat is None:
         return {"last_indexed": None, "orphan_count": 0}
     try:
-        # Catalog's SQL cache lives behind private attributes; an
-        # explicit public accessor doesn't exist yet and isn't worth
-        # adding just for this read-only path.
-        conn = cat._db._conn  # noqa: SLF001
-        row = conn.execute(
+        # RDR-112 6shq.1 (nexus-lj2l): use ``cat._db.execute(...)`` (the
+        # public method on both CatalogDB and the daemon-mode
+        # ExecuteProxy) rather than reaching for ``_conn`` directly.
+        # Pre-fix the ``_conn`` reach-through worked in direct mode but
+        # raised AttributeError under NX_STORAGE_MODE=daemon (the proxy
+        # has no underlying sqlite3.Connection), which the bare
+        # ``except Exception`` below silently swallowed and returned
+        # ``{"last_indexed": None, "orphan_count": 0}`` for every
+        # collection; health checks would have silently shown zero
+        # catalog stats with the daemon running.
+        row = cat._db.execute(
             "SELECT MAX(indexed_at) "
             "FROM documents WHERE physical_collection = ?",
             (col,),
         ).fetchone()
         last_indexed = row[0] if row and row[0] else None
-        orphan_row = conn.execute(
+        orphan_row = cat._db.execute(
             "SELECT COUNT(*) FROM documents d "
             "LEFT JOIN links l ON d.tumbler = l.to_tumbler "
             "WHERE d.physical_collection = ? AND l.id IS NULL",

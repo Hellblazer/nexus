@@ -152,6 +152,18 @@ def _seed_plan_templates() -> int:
 
 
 def _get_catalog() -> Catalog:
+    # RDR-112 6shq.2 (nexus-3gdg): route through the daemon-aware
+    # factory ``nexus.catalog.open_catalog`` so ``NX_STORAGE_MODE=daemon``
+    # routes catalog SQL through ``T2Client.catalog`` instead of opening
+    # a local ``CatalogDB`` against ``.catalog.db``. Direct mode is
+    # unchanged.
+    #
+    # 3gdg review IMPORTANT-1: translate ``DaemonNotRunningError`` (a
+    # ``RuntimeError`` subclass) into ``click.ClickException`` so
+    # daemon-down scenarios surface as one-line operator messages
+    # instead of a Python traceback. Matches the ``_make_t3`` precedent
+    # used elsewhere in this file.
+    from nexus.catalog import open_catalog
     from nexus.config import catalog_path
 
     path = catalog_path()
@@ -159,7 +171,10 @@ def _get_catalog() -> Catalog:
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' to create and populate it."
         )
-    return Catalog(path, path / ".catalog.db")
+    try:
+        return open_catalog(path)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _resolve_tumbler(cat: Catalog, value: str) -> Tumbler:
@@ -232,7 +247,19 @@ def setup_cmd(remote: str) -> None:
     else:
         click.echo(f"Catalog already initialized at {path}")
 
-    cat = Catalog(path, path / ".catalog.db")
+    # RDR-112 6shq.2 (nexus-3gdg): route through the daemon-aware
+    # factory so ``nx catalog setup`` works under
+    # ``NX_STORAGE_MODE=daemon``. ``open_catalog`` is the shared
+    # construction seam (also used by ``_get_catalog`` above).
+    #
+    # 3gdg review IMPORTANT-1: translate the daemon-down ``RuntimeError``
+    # into ``ClickException`` so the operator sees a one-line message,
+    # not a Python traceback.
+    from nexus.catalog import open_catalog
+    try:
+        cat = open_catalog(path)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     try:
         registry = _make_registry()
@@ -5629,7 +5656,19 @@ def _run_t3_doc_id_coverage(
     # returns "" for every Phase-3 chunk. Without manifest
     # resolution the audit unconditionally reports near-100%
     # ``missing_doc_id``, masking real coverage problems.
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+    #
+    # RDR-112 6shq.2 (nexus-3gdg): route through the daemon-aware
+    # factory ``open_catalog`` so the manifest read works under
+    # ``NX_STORAGE_MODE=daemon``.
+    #
+    # 3gdg review IMPORTANT-1: translate the daemon-down ``RuntimeError``
+    # into ``ClickException`` so the operator sees a one-line message,
+    # not a Python traceback.
+    from nexus.catalog import open_catalog
+    try:
+        cat = open_catalog(cat_dir)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     # nexus-yrka: collections renamed via ``nx catalog rename-collection``
     # leave their old name in events.jsonl (events are append-only) but
