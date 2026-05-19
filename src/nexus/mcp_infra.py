@@ -25,6 +25,15 @@ _t3_lock = threading.Lock()
 _collections_cache: tuple[list[str], float] = ([], 0.0)
 _COLLECTIONS_CACHE_TTL = 60.0
 
+# RDR-118 P1.S3 (nexus-ipyfj): the catalog singleton moved onto
+# ``nexus.runtime.NexusRuntime``. ``get_catalog`` below is now a thin
+# shim resolving through ``_ensure_runtime_for_shim``; the legacy
+# module-level names below stay as compatibility surfaces so the
+# autouse fixture ``_restore_post_store_batch_hooks_after_test`` and
+# the public ``inject_catalog`` / ``reset_singletons`` test helpers
+# continue to function unchanged. Phase 4 (``nexus-yi9mq``) deletes
+# both the compat names and the fixture once every caller owns its
+# own runtime construction.
 _catalog_instance = None
 _catalog_lock = threading.Lock()
 _catalog_mtime: float = 0.0
@@ -357,32 +366,24 @@ def _max_jsonl_mtime(cat) -> float:
 
 
 def get_catalog():
-    """Return Catalog singleton or None if not initialized.
+    """Return the Catalog singleton or None if not initialised.
 
-    Checks catalog file mtimes on each access — if any of
-    ``owners.jsonl`` / ``documents.jsonl`` / ``links.jsonl`` /
-    ``events.jsonl`` advanced (cross-process write, git pull from
-    another process), triggers a rebuild.
+    RDR-118 P1.S3 thin redirector. Delegates to
+    ``nexus.runtime._ensure_runtime_for_shim().get_catalog()`` which
+    preserves the A4 S1 mtime-refresh path on the cached instance and
+    the A4 S2 ``(cat_path, mode)`` cache keying.
 
-    **Gate caveat:** ``Catalog._event_sourced_enabled`` and
-    ``_shadow_emit_enabled`` are read once at construction. Flipping
-    ``NEXUS_EVENT_SOURCED`` or ``NEXUS_EVENT_LOG_SHADOW`` while the MCP
-    server is running has NO effect on the singleton until the process
-    restarts. This is fine for the cutover (a deployment changes the
-    env var and restarts the service) but tests that toggle the gate
-    mid-run must call :func:`reset_singletons` between toggles.
+    Legacy fallback: if the module-level ``_catalog_instance`` has been
+    explicitly set (via ``inject_catalog`` or ``unittest.mock.patch``)
+    it takes precedence over the runtime path. The mtime-refresh logic
+    runs against the override for back-compat with tests that
+    monkeypatch the override + ``_max_jsonl_mtime`` to assert the
+    refresh path's error propagation. Phase 4 (``nexus-yi9mq``) deletes
+    this fallback once the affected tests migrate to construct an
+    explicit runtime.
     """
     global _catalog_instance, _catalog_mtime
-    if _catalog_instance is None:
-        with _catalog_lock:
-            if _catalog_instance is None:
-                from nexus.catalog import Catalog
-                from nexus.config import catalog_path
-                path = catalog_path()
-                if Catalog.is_initialized(path):
-                    _catalog_instance = Catalog(path, path / ".catalog.db")
-                    _catalog_mtime = _max_jsonl_mtime(_catalog_instance)
-    elif _catalog_instance is not None:
+    if _catalog_instance is not None:
         try:
             current_mtime = _max_jsonl_mtime(_catalog_instance)
             if current_mtime > _catalog_mtime:
@@ -392,7 +393,10 @@ def get_catalog():
                         _catalog_instance._ensure_consistent()
         except OSError:
             pass
-    return _catalog_instance
+        return _catalog_instance
+    from nexus.runtime import _ensure_runtime_for_shim
+
+    return _ensure_runtime_for_shim().get_catalog()
 
 
 def require_catalog():
@@ -540,47 +544,145 @@ def _record_hook_failure(
 # batched dependency calls (e.g. one ChromaDB query for N centroids vs N
 # sequential queries). Same per-hook failure-isolation pattern: exceptions
 # captured, persisted to T2 hook_failures, never propagated.
+#
+# RDR-118 P1.S3 (nexus-ipyfj): the storage moved to
+# ``NexusRuntime.hooks._batch`` (and ``_batch_with_catalog_doc_id``); the
+# functions and module-level names below are thin redirectors / proxies
+# that delegate to the runtime resolver. Phase 2 (``nexus-0zgb3``) retires
+# both the proxies and the autouse fixture that backs them.
 
-_post_store_batch_hooks: list = []
-#: Set of hook callables that accept the kwarg-only ``catalog_doc_id``
-#: parameter (RDR-108 Phase 3). Populated lazily by
-#: :func:`register_post_store_batch_hook` via
-#: :func:`inspect.signature`. The dispatch in
-#: :func:`fire_post_store_batch_hooks` uses this set to pick the call
-#: shape per hook, avoiding the fragile substring-match-on-TypeError
-#: fallback that the first cut of Phase 3 used.
-_post_store_batch_hooks_with_catalog_doc_id: set = set()
+
+class _BatchHooksListProxy:
+    """List-like view of the resolved runtime's batch hook list.
+
+    Existing code accesses ``mcp_infra._post_store_batch_hooks`` as a
+    list (iterate, len, indexed access, slice assignment, append, clear,
+    extend). After RDR-118 P1.S3 the underlying storage lives on the
+    runtime's ``HookRegistry``; this proxy forwards every list operation
+    to that storage so the autouse fixture
+    ``_restore_post_store_batch_hooks_after_test`` and the few tests
+    that mutate the list directly continue to work. Phase 2 deletes
+    both the proxy and the fixture (bead ``nexus-0zgb3``).
+    """
+
+    @staticmethod
+    def _live() -> list:
+        from nexus.runtime import _ensure_runtime_for_shim
+        return _ensure_runtime_for_shim().hooks._batch
+
+    def __iter__(self):
+        return iter(self._live())
+
+    def __len__(self) -> int:
+        return len(self._live())
+
+    def __getitem__(self, key):
+        return self._live()[key]
+
+    def __setitem__(self, key, value) -> None:
+        if isinstance(key, slice) and key == slice(None):
+            self.clear()
+            for fn in value:
+                self.append(fn)
+            return
+        self._live()[key] = value
+
+    def __contains__(self, item) -> bool:
+        return item in self._live()
+
+    def __eq__(self, other) -> bool:
+        return list(self._live()) == list(other)
+
+    def __repr__(self) -> str:
+        return repr(self._live())
+
+    def append(self, fn) -> None:
+        from nexus.runtime import _ensure_runtime_for_shim
+        _ensure_runtime_for_shim().hooks.register_batch(fn)
+
+    def extend(self, fns) -> None:
+        for fn in fns:
+            self.append(fn)
+
+    def clear(self) -> None:
+        from nexus.runtime import _ensure_runtime_for_shim
+        rt = _ensure_runtime_for_shim()
+        rt.hooks._batch.clear()
+        rt.hooks._batch_with_catalog_doc_id.clear()
+
+
+class _CatalogDocIdSetProxy:
+    """Set-like view of the resolved runtime's ``catalog_doc_id`` classification.
+
+    Same migration pattern as ``_BatchHooksListProxy``; forwards every
+    set operation to ``runtime.hooks._batch_with_catalog_doc_id``.
+    """
+
+    @staticmethod
+    def _live() -> set:
+        from nexus.runtime import _ensure_runtime_for_shim
+        return _ensure_runtime_for_shim().hooks._batch_with_catalog_doc_id
+
+    def __iter__(self):
+        return iter(self._live())
+
+    def __len__(self) -> int:
+        return len(self._live())
+
+    def __contains__(self, item) -> bool:
+        return item in self._live()
+
+    def __eq__(self, other) -> bool:
+        return set(self._live()) == set(other)
+
+    def __repr__(self) -> str:
+        return repr(self._live())
+
+    def add(self, item) -> None:
+        self._live().add(item)
+
+    def discard(self, item) -> None:
+        self._live().discard(item)
+
+    def update(self, other) -> None:
+        self._live().update(other)
+
+    def clear(self) -> None:
+        self._live().clear()
+
+
+_post_store_batch_hooks: _BatchHooksListProxy = _BatchHooksListProxy()
+#: Proxy view of the resolved runtime's ``_batch_with_catalog_doc_id`` set.
+#: Populated indirectly by :func:`register_post_store_batch_hook` via the
+#: runtime's signature-classification path (RDR-108 Phase 3 contract).
+_post_store_batch_hooks_with_catalog_doc_id: _CatalogDocIdSetProxy = (
+    _CatalogDocIdSetProxy()
+)
 
 
 def register_post_store_batch_hook(fn) -> None:
-    """Register a callable(doc_ids, collection, contents, embeddings, metadatas
-    [, *, catalog_doc_id]) to fire after batch CLI ingest.
+    """Register a batch hook on the resolved runtime's ``HookRegistry``.
 
-    The callable's signature is inspected once at registration time so
-    the dispatcher can pick the right call shape — hooks predating
-    RDR-108 Phase 3 do not accept ``catalog_doc_id`` and must be invoked
-    with the legacy 5-argument form.
+    RDR-118 P1.S3 thin redirector. Appends to
+    ``_post_store_batch_hooks`` (the proxy under normal operation;
+    a patched list under ``unittest.mock.patch``) and performs the
+    ``inspect.signature``-based ``catalog_doc_id`` classification
+    (RDR-108 Phase 3) into ``_post_store_batch_hooks_with_catalog_doc_id``.
+    The proxy implementation forwards both writes to the runtime's
+    HookRegistry; patched non-proxy state retains the legacy semantics
+    so existing ``patch("nexus.mcp_infra._post_store_batch_hooks", ...)``
+    tests continue to control which hooks fire.
     """
     _post_store_batch_hooks.append(fn)
     try:
         import inspect
         sig = inspect.signature(fn)
         params = sig.parameters
-        # Accept hooks that explicitly name catalog_doc_id OR accept arbitrary
-        # **kwargs (the latter cannot be statically classified, so passthrough
-        # is the conservative choice — no harm if the hook ignores).
         if "catalog_doc_id" in params or any(
             p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
         ):
             _post_store_batch_hooks_with_catalog_doc_id.add(id(fn))
     except (TypeError, ValueError):
-        # Built-in or C-extension callable with no introspectable
-        # signature — assume legacy shape so the dispatcher does not
-        # blow up on first call. Log at debug so the registration is
-        # visible when chasing a "hook never seems to fire correctly"
-        # symptom; if the underlying callable actually accepts
-        # catalog_doc_id, the legacy 5-arg dispatch will silently drop
-        # the value.
         import structlog
         structlog.get_logger().debug(
             "post_store_batch_hook_signature_unintrospectable",
@@ -597,22 +699,21 @@ def fire_post_store_batch_hooks(
     *,
     catalog_doc_id: str = "",
 ) -> None:
-    """Invoke all registered batch hooks. Per-hook failures captured and
-    persisted to T2 hook_failures, never raised.
+    """Invoke every batch hook in ``_post_store_batch_hooks``.
 
-    Empty doc_ids returns early: no hooks fire on empty batches.
+    RDR-118 P1.S3: iterates the module-level proxy
+    ``_post_store_batch_hooks`` which forwards to the resolved
+    runtime's ``HookRegistry`` storage by default. Legacy tests that
+    replace the proxy via ``unittest.mock.patch`` (substituting a
+    regular list) get the same iteration semantics because both
+    objects are iterable; the runtime registry stays untouched
+    inside the patch's scope. Per-hook failure isolation and T2
+    ``hook_failures`` persistence preserved verbatim.
 
-    Different consumers read different payload fields:
-    chash_dual_write_batch_hook reads metadatas, taxonomy_assign_batch_hook
-    reads embeddings. Hooks ignore parameters they don't need.
-
-    *catalog_doc_id* (RDR-108 Phase 3) — catalog ``Document.tumbler``
-    string for the document this batch belongs to. Required by
-    ``manifest_write_batch_hook`` after Phase 3 retired ``doc_id`` from
-    chunk metadata; the manifest hook can no longer derive it from the
-    chunks themselves. Empty string is the "unknown document" sentinel
-    — the manifest hook then falls back to legacy ``meta.doc_id`` reads
-    (still populated on pre-Phase-3 chunks).
+    *catalog_doc_id* (RDR-108 Phase 3) is the catalog
+    ``Document.tumbler`` for the document this batch belongs to.
+    Required by ``manifest_write_batch_hook`` after Phase 3 retired
+    ``doc_id`` from chunk metadata.
     """
     if not doc_ids:
         return
@@ -620,10 +721,6 @@ def fire_post_store_batch_hooks(
     _hook_log = structlog.get_logger()
     for hook in _post_store_batch_hooks:
         try:
-            # RDR-108 Phase 3: pick the call shape per hook based on the
-            # signature classification computed at registration time.
-            # Hooks predating Phase 3 do not accept ``catalog_doc_id``;
-            # we invoke them with the legacy 5-argument shape.
             if id(hook) in _post_store_batch_hooks_with_catalog_doc_id:
                 hook(
                     doc_ids, collection, contents, embeddings, metadatas,
@@ -971,18 +1068,16 @@ def manifest_write_batch_hook(
 
 # RDR-108 Phase 3 (nexus-bdag): the three batch hooks above are
 # load-bearing for catalog correctness across BOTH CLI ingest and MCP
-# tool calls (e.g. ``nx index repo`` populates ``chash_index``,
+# tool calls (``nx index repo`` populates ``chash_index``,
 # ``taxonomy_assignments``, and ``document_chunks`` on the catalog
-# manifest). Pre-Phase-3 the registrations lived in ``nexus.mcp.core``
-# so the hooks fired only when an MCP server started up; CLI-only
-# flows silently skipped them, leaving the catalog manifest empty for
-# ``nx index repo``-only corpora. Registering here at module load
-# keeps both paths honest — every code path that fires the batch
-# chain (every indexer goes through ``mcp_infra.fire_post_store_batch_hooks``)
-# is guaranteed to also have the hooks attached.
-register_post_store_batch_hook(chash_dual_write_batch_hook)
-register_post_store_batch_hook(taxonomy_assign_batch_hook)
-register_post_store_batch_hook(manifest_write_batch_hook)
+# manifest). Pre-RDR-118 the registrations fired at module load here;
+# RDR-118 P1.S3 (nexus-ipyfj) moves them into
+# ``nexus.runtime.install_default_hooks(runtime)`` which is called by
+# every entry point (CLI ``main``, MCP server startup) after the
+# runtime is constructed. Tests that need the load-bearing hooks call
+# ``install_default_hooks`` explicitly; tests that do not get a clean
+# registry by default (the per-test isolation property the runtime
+# container is buying).
 
 
 # ── Post-store document hooks (RDR-089, nexus-yyev) ──────────────────────────
@@ -1378,21 +1473,23 @@ def reset_singletons():
     """Reset lazy singletons (for tests only).
 
     Search review I-2: also resets the T1 plan-match cache. Previously
-    the plan cache survived ``reset_singletons()`` calls — tests that
+    the plan cache survived ``reset_singletons()`` calls (tests that
     injected a fresh T1 but kept the populated plan cache saw stale
     embeddings against the injected client and produced nondeterministic
-    matches.
+    matches).
 
-    NOTE: ``_post_store_hooks``, ``_post_store_batch_hooks``, and
-    ``_post_document_hooks`` are intentionally NOT cleared here.  Hooks
-    are registered at module-import time (e.g. ``register_post_store_hook`` /
-    ``register_post_store_batch_hook`` / ``register_post_document_hook`` in
-    ``nexus.mcp.core``).  Because Python only executes module-level code
-    once, clearing the lists here would permanently lose those
-    registrations for the remainder of the test session.  Tests that
-    need an empty hook list should clear the relevant ``_post_*_hooks``
-    list explicitly in their own fixture (e.g. via the autouse fixture
-    in ``tests/test_post_document_hooks.py``).
+    RDR-118 P1.S3: the legacy ``_catalog_instance`` override is cleared
+    here so a test that patched it returns to the runtime-resolved path
+    on the next ``get_catalog()`` call. The runtime's catalog cache is
+    also torn down via ``nexus.catalog.reset_cache`` so any cross-process
+    JSONL writes are picked up on next access.
+
+    NOTE: hook lists across the three chains (single, batch, document)
+    are NOT cleared here. The batch chain is owned by the runtime's
+    ``HookRegistry``; tearing it down at this point would unregister
+    the load-bearing default hooks installed at CLI / MCP entry. Tests
+    that need an empty hook list call ``runtime.hooks.clear()`` on the
+    test's runtime fixture instead.
     """
     global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance, _catalog_mtime
     _t1_instance = None
@@ -1401,6 +1498,8 @@ def reset_singletons():
     _collections_cache = ([], 0.0)
     _catalog_instance = None
     _catalog_mtime = 0.0
+    from nexus.catalog import reset_cache as _reset_catalog_cache
+    _reset_catalog_cache()
     clear_search_traces()
     reset_plan_cache_for_tests()
 

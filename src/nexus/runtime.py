@@ -480,12 +480,22 @@ class NexusRuntime:
         shared T2Client; in direct mode it constructs a plain
         ``CatalogDB`` over ``.catalog.db``. Mirrors
         ``nexus.catalog.open_catalog`` but with mode resolved from the
-        runtime instead of ``nexus.db.is_daemon_mode``."""
+        runtime instead of ``nexus.db.is_daemon_mode``.
+
+        The ``Catalog`` class is looked up lazily through
+        ``nexus.catalog`` on every call so existing tests that
+        ``patch.object(nexus.catalog, "Catalog", ...)`` still intercept
+        the construction here. The legacy ``open_catalog`` used the
+        module-level ``Catalog`` name in ``nexus.catalog``; this lazy
+        lookup keeps the same patch surface working through the shim.
+        """
+        from nexus.catalog import Catalog as _Catalog
+
         if self._storage_mode == "daemon":
             from nexus.catalog.catalog_proxy import ExecuteProxy
             t2 = self._get_t2_client()
-            return Catalog(cat_path, cat_path / ".catalog.db", db=ExecuteProxy(t2))
-        return Catalog(cat_path, cat_path / ".catalog.db")
+            return _Catalog(cat_path, cat_path / ".catalog.db", db=ExecuteProxy(t2))
+        return _Catalog(cat_path, cat_path / ".catalog.db")
 
     def _get_t2_client(self) -> Any:
         """Lazy-construct the runtime's shared T2Client for daemon mode.
@@ -587,6 +597,13 @@ def _ensure_runtime_for_shim() -> NexusRuntime:
     cached across calls until ``_close_process_default`` runs, mirroring
     the existing module-level singleton lifecycle that the shim layer
     replaces.
+
+    Auto-installs the load-bearing default hooks on the process-default
+    only (the "production-like" pathway: lazy construction matches
+    pre-RDR-118 module-load auto-registration semantics). Explicit
+    ``NexusRuntime(...)`` construction yields a clean registry so the
+    new ``runtime`` fixture and CLI entry points retain control over
+    when hooks attach.
     """
     rt = _runtime_var.get()
     if rt is not None and not rt._closed:
@@ -598,6 +615,7 @@ def _ensure_runtime_for_shim() -> NexusRuntime:
         if _process_default is not None and not _process_default._closed:
             return _process_default
         _process_default = _construct_process_default_from_env()
+        install_default_hooks(_process_default)
         return _process_default
 
 
@@ -666,12 +684,33 @@ def _construct_process_default_from_env() -> NexusRuntime:
 def install_default_hooks(runtime: NexusRuntime) -> None:
     """Register the load-bearing default hooks on *runtime*.
 
-    Phase 1 Step 1 ships a no-op stub so Step 3's ``mcp_infra`` shim can
-    land its ``install_default_hooks(runtime)`` call at the CLI entry
-    point without import shuffling. The real registrations (three batch
-    hooks: chash dual-write, taxonomy assign, manifest write; plus
-    the RDR-089 aspect-extraction document hook) move from their
-    current module-load self-registration sites into this factory in
-    bead ``nexus-ipyfj``.
+    RDR-118 P1.S3 (nexus-ipyfj). Moves the three module-load
+    self-registrations from ``nexus.mcp_infra:983-985`` into an explicit
+    factory called by CLI / MCP entry points after ``NexusRuntime``
+    construction. The hooks are load-bearing for catalog correctness
+    across both CLI ingest paths and MCP ``store_put``: dropping any
+    of them silently leaves chash_index, taxonomy_assignments, or the
+    catalog manifest stale (see RDR-108 Phase 3 / nexus-bdag).
+
+    Idempotent: calling more than once on the same runtime is a no-op
+    via duplicate-registration detection on each hook's identity. Tests
+    that need the default registry call this factory explicitly; tests
+    that need a clean registry skip it.
+
+    The RDR-089 aspect-extraction document hook stays in
+    ``nexus.mcp.core`` for Phase 1 and migrates to this factory in
+    Phase 2 (bead ``nexus-f2ufy``).
     """
-    return None
+    from nexus.mcp_infra import (
+        chash_dual_write_batch_hook,
+        manifest_write_batch_hook,
+        taxonomy_assign_batch_hook,
+    )
+
+    for hook in (
+        chash_dual_write_batch_hook,
+        taxonomy_assign_batch_hook,
+        manifest_write_batch_hook,
+    ):
+        if hook not in runtime.hooks._batch:
+            runtime.hooks.register_batch(hook)

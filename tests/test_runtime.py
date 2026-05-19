@@ -867,6 +867,204 @@ def test_catalog_reset_cache_drops_runtime_cache(
         _close_process_default()
 
 
+# ── install_default_hooks + mcp_infra shim (RDR-118 P1.S3, nexus-ipyfj) ─────
+
+
+def test_install_default_hooks_registers_three_batch_hooks(tmp_path: Path) -> None:
+    """``install_default_hooks(runtime)`` registers the load-bearing
+    chash-dual-write, taxonomy-assign, and manifest-write batch hooks
+    on the runtime's HookRegistry."""
+    from nexus.mcp_infra import (
+        chash_dual_write_batch_hook,
+        manifest_write_batch_hook,
+        taxonomy_assign_batch_hook,
+    )
+    from nexus.runtime import NexusRuntime, install_default_hooks
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        assert rt.hooks._batch == []
+        install_default_hooks(rt)
+        assert rt.hooks._batch == [
+            chash_dual_write_batch_hook,
+            taxonomy_assign_batch_hook,
+            manifest_write_batch_hook,
+        ]
+    finally:
+        rt.close()
+
+
+def test_install_default_hooks_is_idempotent(tmp_path: Path) -> None:
+    """Calling install_default_hooks a second time on the same runtime
+    is a no-op (no duplicate registration)."""
+    from nexus.runtime import NexusRuntime, install_default_hooks
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        install_default_hooks(rt)
+        install_default_hooks(rt)
+        assert len(rt.hooks._batch) == 3
+    finally:
+        rt.close()
+
+
+def test_install_default_hooks_no_auto_register_at_import(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """R2 regression guard: simply importing nexus.mcp_infra must NOT
+    register the load-bearing batch hooks. Only install_default_hooks
+    does. Catches the silent-drop class where the hooks live in mcp_infra
+    but never attach because the explicit factory call is missing.
+
+    Pre-RDR-118 the three hooks self-registered at module load; that
+    coupling is what RDR-118 P1.S3 retires."""
+    from nexus.runtime import (
+        NexusRuntime,
+        _close_process_default,
+        _runtime_var,
+    )
+
+    _close_process_default()
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / ".config"))
+    token = _runtime_var.set(None)
+    try:
+        rt = NexusRuntime(config_dir=tmp_path / ".config")
+        try:
+            # Re-import mcp_infra to confirm no side effect; the import
+            # is idempotent so we are really asserting that nothing fired
+            # the second time around either.
+            import nexus.mcp_infra  # noqa: F401
+            assert rt.hooks._batch == []
+        finally:
+            rt.close()
+    finally:
+        _runtime_var.reset(token)
+        _close_process_default()
+
+
+def test_mcp_infra_register_post_store_batch_hook_routes_through_runtime(
+    runtime,
+) -> None:
+    """``mcp_infra.register_post_store_batch_hook(fn)`` appends to the
+    runtime's HookRegistry via the shim, not to any module-level list."""
+    from nexus.mcp_infra import register_post_store_batch_hook
+
+    def probe(doc_ids, collection, contents, embeddings, metadatas):
+        return None
+
+    assert runtime.hooks._batch == []
+    register_post_store_batch_hook(probe)
+    assert runtime.hooks._batch == [probe]
+
+
+def test_mcp_infra_fire_post_store_batch_hooks_routes_through_runtime(
+    runtime,
+) -> None:
+    """``mcp_infra.fire_post_store_batch_hooks(...)`` iterates the
+    runtime's HookRegistry via the shim and invokes each registered
+    hook."""
+    from nexus.mcp_infra import (
+        fire_post_store_batch_hooks,
+        register_post_store_batch_hook,
+    )
+
+    seen: list = []
+
+    def hook(doc_ids, collection, contents, embeddings, metadatas):
+        seen.append((tuple(doc_ids), collection))
+
+    register_post_store_batch_hook(hook)
+    fire_post_store_batch_hooks(
+        ["d1", "d2"], "c1", ["t1", "t2"], None, None,
+    )
+    assert seen == [(("d1", "d2"), "c1")]
+
+
+def test_mcp_infra_post_store_batch_hooks_proxy_list_ops(runtime) -> None:
+    """``mcp_infra._post_store_batch_hooks`` proxies the runtime's
+    batch list: iter, len, clear, append, extend, slice-assignment
+    all forward to the live runtime storage."""
+    import nexus.mcp_infra as _mod
+    from nexus.mcp_infra import register_post_store_batch_hook
+
+    def probe_a(doc_ids, collection, contents, embeddings, metadatas):
+        return None
+
+    def probe_b(doc_ids, collection, contents, embeddings, metadatas):
+        return None
+
+    register_post_store_batch_hook(probe_a)
+    register_post_store_batch_hook(probe_b)
+
+    assert len(_mod._post_store_batch_hooks) == 2
+    assert list(_mod._post_store_batch_hooks) == [probe_a, probe_b]
+    assert probe_a in _mod._post_store_batch_hooks
+
+    # Slice assignment replaces the entire list and re-classifies.
+    def probe_c(doc_ids, collection, contents, embeddings, metadatas):
+        return None
+
+    _mod._post_store_batch_hooks[:] = [probe_c]
+    assert list(_mod._post_store_batch_hooks) == [probe_c]
+
+    _mod._post_store_batch_hooks.clear()
+    assert list(_mod._post_store_batch_hooks) == []
+
+
+def test_mcp_infra_get_catalog_shim_uses_runtime(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """``mcp_infra.get_catalog()`` resolves through the runtime layer
+    when no override is set. Sets up an initialised catalog under
+    tmp_path and verifies the shim returns it."""
+    from nexus.runtime import (
+        _close_process_default,
+        _runtime_var,
+    )
+
+    catalog_dir = tmp_path / "shim-cat"
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+    _close_process_default()
+    Catalog.init(catalog_dir)
+    # Init went through the open_catalog shim which built a
+    # process-default; tear it down so the test's get_catalog() call
+    # below reconstructs against the env we set above.
+    _close_process_default()
+    token = _runtime_var.set(None)
+    try:
+        import nexus.mcp_infra as _mod
+        from nexus.mcp_infra import get_catalog
+
+        # Clear any test-patched override.
+        _mod._catalog_instance = None
+
+        cat = get_catalog()
+        assert cat is not None
+        assert isinstance(cat, Catalog)
+    finally:
+        _runtime_var.reset(token)
+        _close_process_default()
+
+
+def test_mcp_infra_get_catalog_shim_legacy_override_wins(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """When ``_catalog_instance`` is set (test patch or
+    ``inject_catalog``), ``get_catalog`` returns it without going
+    through the runtime. Preserves the existing test surface."""
+    import nexus.mcp_infra as _mod
+    from nexus.mcp_infra import get_catalog
+
+    catalog_dir = tmp_path / "legacy-override"
+    Catalog.init(catalog_dir)
+    sentinel = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+    monkeypatch.setattr(_mod, "_catalog_instance", sentinel)
+    monkeypatch.setattr(_mod, "_catalog_mtime", 0.0)
+
+    assert get_catalog() is sentinel
+
+
 def test_catalog_open_cached_prefers_contextvar_runtime(
     tmp_path: Path, monkeypatch,
 ) -> None:

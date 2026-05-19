@@ -27,7 +27,8 @@ GUARDED_NAMES = frozenset({
 
 ALLOWED_FILES = frozenset({
     "src/nexus/mcp_infra.py",      # the definitions
-    "src/nexus/mcp/core.py",       # the single registration site
+    "src/nexus/mcp/core.py",       # the legacy single registration site
+    "src/nexus/runtime.py",        # RDR-118 P1.S3: install_default_hooks factory
 })
 
 

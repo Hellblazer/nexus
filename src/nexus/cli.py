@@ -156,6 +156,18 @@ def main(ctx: click.Context, verbose: bool) -> None:
     from nexus.commands._autostart_prompt import maybe_emit_autostart_prompt
     maybe_emit_autostart_prompt()
 
+    # RDR-118 P1.S3 (nexus-ipyfj): register the load-bearing default
+    # batch hooks (chash dual-write, taxonomy assign, manifest write)
+    # on the resolved runtime. Pre-RDR-118 these hooks self-registered
+    # at ``nexus.mcp_infra`` module load; now they only fire when a
+    # caller invokes ``install_default_hooks`` explicitly. CLI entry is
+    # the single binding point for direct-mode operator commands;
+    # ``nx index repo`` and every other CLI ingest path needs the 3
+    # hooks attached or chash_index, taxonomy_assignments, and the
+    # catalog manifest go stale silently.
+    from nexus.runtime import _ensure_runtime_for_shim, install_default_hooks
+    install_default_hooks(_ensure_runtime_for_shim())
+
 
 main.add_command(catalog)
 main.add_command(cockpit_group, name="cockpit")

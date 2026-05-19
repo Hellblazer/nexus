@@ -641,6 +641,12 @@ def main():
         pid=os.getpid(),
         ppid=os.getppid(),
     )
+    # RDR-118 P1.S3 (nexus-ipyfj): the catalog MCP server's
+    # `register_collection` tool feeds the catalog write path that the
+    # batch hooks back; install the load-bearing defaults on the
+    # resolved runtime before serving.
+    from nexus.runtime import _ensure_runtime_for_shim, install_default_hooks
+    install_default_hooks(_ensure_runtime_for_shim())
     try:
         check_version_compatibility()
         mcp.run(transport="stdio")

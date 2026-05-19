@@ -4789,6 +4789,14 @@ def main():
         pid=os.getpid(),
         ppid=os.getppid(),
     )
+    # RDR-118 P1.S3 (nexus-ipyfj): register the load-bearing default
+    # batch hooks on the resolved runtime before serving any MCP tool.
+    # The MCP server is the binding point for the MCP store_put path;
+    # without this call the chash dual-write / taxonomy assign /
+    # manifest write hooks never attach and every store_put silently
+    # drops them.
+    from nexus.runtime import _ensure_runtime_for_shim, install_default_hooks
+    install_default_hooks(_ensure_runtime_for_shim())
     # The FastMCP lifespan finally is the design's primary cleanup
     # path; the signal handlers below are belt-and-braces for the
     # cases where the lifespan does not fire. Empirically, FastMCP's
