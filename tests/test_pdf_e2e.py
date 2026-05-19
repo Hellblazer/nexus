@@ -19,6 +19,10 @@ from nexus.corpus import index_model_for_collection
 from nexus.doc_indexer import index_pdf
 from nexus.indexer import _git_metadata, _index_pdf_file
 
+# nexus-2ivn: real PDF extract + chunk + embed E2E (CPU-only on CI;
+# no GPU). Defer to nightly integration runs.
+pytestmark = pytest.mark.integration
+
 _local_ef = DefaultEmbeddingFunction()
 
 

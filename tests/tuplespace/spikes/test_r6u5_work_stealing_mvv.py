@@ -63,10 +63,18 @@ from nexus.tuplespace.store import open_tuples_db
 # ---------------------------------------------------------------------------
 
 N_WORKERS: int = 10
-N_TUPLES_DEFAULT: int = 200    # default run (~30s wall clock)
+N_TUPLES_DEFAULT: int = 200    # default run (~30s wall clock on dev)
 N_TUPLES_SLOW: int = 1_000     # full RDR-110 acceptance criterion (-m slow)
 POLL_SLEEP_S: float = 0.005    # 5 ms between empty-take retries
-TIMEOUT_S: float = 120.0
+# nexus-2ivn: GHA ubuntu-latest runners measure 1.0-1.5 s p50 per
+# take vs the dev-machine 0.2-0.4 s (CPU-only ONNX embed + WAL
+# contention scaled by runner core count). The original 120 s budget
+# left 200/10 workers no slack on a slow runner; observed drains
+# stopped 8-10 tuples short of N at the 120 s mark with no orphans
+# (workers genuinely ran out of time, not contention bugs). 240 s
+# gives a 2x safety margin without inflating the dev-machine
+# experience (typical local drain completes in ~30-60 s).
+TIMEOUT_S: float = 240.0
 
 _SUBSPACE = "tasks/r6u5"
 _TEMPLATE = "tasks/<project>"

@@ -8,7 +8,14 @@ RDR-021: replaces 3-tier stack with Docling primary + pymupdf_normalized fallbac
 """
 from pathlib import Path
 
+import pytest
+
 from nexus.pdf_extractor import PDFExtractor
+
+# nexus-2ivn: real Docling extraction on every test (CPU-only on CI;
+# no GPU). 1-2 s per test; ~23 s file-window. Defer to nightly
+# integration runs.
+pytestmark = pytest.mark.integration
 
 
 class TestExtractSimple:

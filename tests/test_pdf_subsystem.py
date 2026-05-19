@@ -20,6 +20,13 @@ from nexus.indexer import _git_metadata, _index_pdf_file
 from nexus.pdf_extractor import PDFExtractor
 from tests.conftest import set_credentials
 
+# nexus-2ivn: PDF subsystem tests run the real Docling + MinerU ML
+# pipeline (CPU-only on CI; no GPU). Per-test cost is 1-3 s and the
+# whole file lands at ~30 s of wall-clock. Move behind the
+# integration marker so the per-PR core suite stops paying that
+# tax; the scheduled integration workflow runs them nightly.
+pytestmark = pytest.mark.integration
+
 
 def _make_ruled_table_pdf(path: Path) -> None:
     """Create a PDF with a visible ruled table (borders drawn as lines).
