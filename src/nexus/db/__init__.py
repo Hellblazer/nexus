@@ -30,41 +30,25 @@ class DaemonModeDiagnosticError(RuntimeError):
 
 
 def default_storage_mode() -> str:
-    """Resolve the active storage mode, returning ``"daemon"`` by default.
+    """Resolve the active storage mode.
 
-    nexus-507q (RDR-112 P6.3 cutover, 2026-05-17): the default flipped
-    from ``direct`` to ``daemon``. ``direct`` remains available as the
-    debug fallback by setting ``NX_STORAGE_MODE=direct`` explicitly.
-
-    Returns the env value (lowercased + stripped) when set, else
-    ``"daemon"``. Anything other than ``"direct"`` / ``"daemon"`` is a
-    typo and raises ``ValueError`` (RDR-112 P3.review S2 fix,
-    nexus-8qat 2026-05-18): the acceptance criterion is "anything
-    other than direct|daemon fails loud". Pre-fix an operator who
-    typo'd ``NX_STORAGE_MODE=damon`` would silently get direct-mode
-    routing because ``is_daemon_mode()`` compares against the literal.
-
-    nexus-mlmu.7 (DR-7, 2026-05-17): the prior implementation included
-    an unreachable ``if raw is None`` guard (``os.environ.get(...)``
-    with an explicit default never returns None). Removed for clarity.
+    RDR-118 P3.S1 (nexus-s43yx) thin redirector. Returns
+    ``nexus.runtime._ensure_runtime_for_shim().storage_mode``. The
+    process-default lazy-built from env enforces the legacy
+    ``NX_STORAGE_MODE`` precedence and ``ValueError`` on typos
+    (nexus-507q / nexus-8qat); the runtime constructor itself rejects
+    anything other than ``'direct'`` or ``'daemon'``.
     """
-    normalised = os.environ.get("NX_STORAGE_MODE", "").strip().lower()
-    if not normalised:
-        return "daemon"
-    if normalised not in ("direct", "daemon"):
-        raise ValueError(
-            f"NX_STORAGE_MODE={normalised!r} is invalid; expected "
-            f"'direct' or 'daemon' (unset for the default 'daemon')."
-        )
-    return normalised
+    from nexus.runtime import _ensure_runtime_for_shim
+
+    return _ensure_runtime_for_shim().storage_mode
 
 
 def is_daemon_mode() -> bool:
     """Return True when the resolved storage mode is ``daemon``.
 
-    Equivalent to ``default_storage_mode() == "daemon"``. Provided as
-    a convenience for the dozens of call sites that gate on daemon
-    routing.
+    Convenience wrapper over :func:`default_storage_mode` for the
+    dozens of call sites that gate on daemon routing.
     """
     return default_storage_mode() == "daemon"
 

@@ -1065,6 +1065,106 @@ def test_mcp_infra_get_catalog_shim_legacy_override_wins(
     assert get_catalog() is sentinel
 
 
+# ── P3.S1: accessor shims (nexus-s43yx) ─────────────────────────────────────
+
+
+def test_config_nexus_config_dir_returns_runtime_value(runtime) -> None:
+    """``nexus.config.nexus_config_dir()`` returns the active runtime's
+    ``config_dir`` when a runtime is in context. P3.S1 consolidation:
+    the function is a thin redirector to ``_ensure_runtime_for_shim``."""
+    from nexus.config import nexus_config_dir
+
+    assert nexus_config_dir() == runtime.config_dir
+
+
+def test_config_catalog_path_returns_runtime_catalog_path(runtime) -> None:
+    """``nexus.config.catalog_path()`` returns the runtime's
+    ``catalog_path`` when set on the runtime."""
+    from nexus.config import catalog_path
+
+    assert runtime.catalog_path is not None
+    assert catalog_path() == runtime.catalog_path
+
+
+def test_config_default_db_path_derives_from_runtime(runtime) -> None:
+    """``nexus.config.default_db_path()`` returns
+    ``runtime.config_dir / "memory.db"`` through the shimmed
+    ``nexus_config_dir`` call."""
+    from nexus.config import default_db_path
+
+    assert default_db_path() == runtime.config_dir / "memory.db"
+
+
+def test_db_default_storage_mode_returns_runtime_mode(runtime) -> None:
+    """``nexus.db.default_storage_mode()`` returns the runtime's
+    ``storage_mode``."""
+    from nexus.db import default_storage_mode
+
+    assert default_storage_mode() == runtime.storage_mode
+
+
+def test_db_is_daemon_mode_returns_runtime_mode_flag(tmp_path: Path) -> None:
+    """``nexus.db.is_daemon_mode()`` returns True iff the runtime's
+    storage_mode is daemon. Cycles through both modes to confirm the
+    shim picks up the active runtime each time."""
+    from nexus.db import is_daemon_mode
+    from nexus.runtime import (
+        NexusRuntime,
+        _close_process_default,
+        _runtime_var,
+    )
+
+    _close_process_default()
+    rt_direct = NexusRuntime(
+        config_dir=tmp_path / ".cfg-direct", storage_mode="direct",
+    )
+    rt_daemon = NexusRuntime(
+        config_dir=tmp_path / ".cfg-daemon", storage_mode="daemon",
+    )
+    try:
+        token = _runtime_var.set(rt_direct)
+        try:
+            assert is_daemon_mode() is False
+        finally:
+            _runtime_var.reset(token)
+
+        token = _runtime_var.set(rt_daemon)
+        try:
+            assert is_daemon_mode() is True
+        finally:
+            _runtime_var.reset(token)
+    finally:
+        rt_direct.close()
+        rt_daemon.close()
+        _close_process_default()
+
+
+def test_construct_process_default_validates_storage_mode_env(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Invalid ``NX_STORAGE_MODE`` env value at process-default
+    construction raises ``ValueError``. Mirrors the legacy
+    ``default_storage_mode()`` strictness preserved through the
+    runtime layer (nexus-8qat)."""
+    from nexus.runtime import (
+        _close_process_default,
+        _ensure_runtime_for_shim,
+        _runtime_var,
+    )
+
+    _close_process_default()
+    monkeypatch.setenv("NX_STORAGE_MODE", "damon")
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / ".cfg"))
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "cat"))
+    token = _runtime_var.set(None)
+    try:
+        with pytest.raises(ValueError, match="NX_STORAGE_MODE.*'damon'"):
+            _ensure_runtime_for_shim()
+    finally:
+        _runtime_var.reset(token)
+        _close_process_default()
+
+
 # ── P2.S1 + P2.S1b: single-doc + document chain migration (nexus-kekrs, nexus-f2ufy) ──
 
 

@@ -605,34 +605,79 @@ def use_runtime(runtime: NexusRuntime) -> Token:
 
 _process_default: NexusRuntime | None = None
 _process_default_lock = threading.Lock()
+_process_default_env_snapshot: tuple[tuple[str, str], ...] = ()
+
+
+_RUNTIME_ENV_KEYS: tuple[str, ...] = (
+    "NEXUS_CONFIG_DIR",
+    "NEXUS_CATALOG_PATH",
+    "NX_STORAGE_MODE",
+    "NEXUS_DISPATCH_BACKEND",
+    "NEXUS_DISPATCH_QWEN_OPERATORS",
+    "NEXUS_DISPATCH_CLAUDE_OPERATORS",
+    "NEXUS_ASPECT_BACKEND",
+    "NEXUS_SCHOLARLY_PAPER_VERSION",
+    "NEXUS_TIER_B_DISPATCHER",
+    "QWEN_AGENT_SUPERVISOR",
+    "NX_T1_ISOLATED",
+    "NEXUS_SKIP_T1",
+)
+
+
+def _current_env_snapshot() -> tuple[tuple[str, str], ...]:
+    """Capture the current env-driven runtime config as a comparable
+    tuple. Used to detect env changes between shim calls so the
+    process-default can rebuild transparently for tests that flip env
+    mid-test."""
+    import os
+
+    return tuple((k, os.environ.get(k, "")) for k in _RUNTIME_ENV_KEYS)
 
 
 def _ensure_runtime_for_shim() -> NexusRuntime:
     """Return the active runtime for a legacy module-level shim caller.
 
-    Prefers the ContextVar runtime when set; otherwise lazy-constructs a
-    process-default from environment variables. The process-default is
-    cached across calls until ``_close_process_default`` runs, mirroring
-    the existing module-level singleton lifecycle that the shim layer
-    replaces.
+    Prefers the ContextVar runtime when set; otherwise returns a
+    process-default lazily constructed from environment variables. The
+    process-default rebuilds when any of the 12 runtime-relevant env
+    vars changes since the last construction: this makes the shim
+    transparent to test patterns that ``monkeypatch.setenv(...)`` mid-
+    test to override an autouse env fixture's default. Production CLI
+    and MCP entries set env once before construction, so the env-snapshot
+    check is a single dict lookup per shim call in steady state (no
+    rebuilds).
 
     Auto-installs the load-bearing default hooks on the process-default
-    only (the "production-like" pathway: lazy construction matches
-    pre-RDR-118 module-load auto-registration semantics). Explicit
-    ``NexusRuntime(...)`` construction yields a clean registry so the
-    new ``runtime`` fixture and CLI entry points retain control over
-    when hooks attach.
+    so legacy callers that bypass the explicit runtime fixture still
+    have the full set attached (matches pre-RDR-118 module-load auto-
+    registration semantics). Explicit ``NexusRuntime(...)`` construction
+    yields a clean registry.
     """
     rt = _runtime_var.get()
     if rt is not None and not rt._closed:
         return rt
-    global _process_default
-    if _process_default is not None and not _process_default._closed:
+    global _process_default, _process_default_env_snapshot
+    current_snapshot = _current_env_snapshot()
+    if (
+        _process_default is not None
+        and not _process_default._closed
+        and current_snapshot == _process_default_env_snapshot
+    ):
         return _process_default
     with _process_default_lock:
-        if _process_default is not None and not _process_default._closed:
+        if (
+            _process_default is not None
+            and not _process_default._closed
+            and current_snapshot == _process_default_env_snapshot
+        ):
             return _process_default
+        if _process_default is not None and not _process_default._closed:
+            try:
+                _process_default.close()
+            except Exception:  # pragma: no cover
+                pass
         _process_default = _construct_process_default_from_env()
+        _process_default_env_snapshot = current_snapshot
         install_default_hooks(_process_default)
         return _process_default
 
@@ -641,10 +686,11 @@ def _close_process_default() -> None:
     """Tear down the process-default runtime if one exists. Idempotent.
     Called by ``nexus.catalog.reset_cache()`` and by tests that flip env
     values between cases so the next access reads current env."""
-    global _process_default
+    global _process_default, _process_default_env_snapshot
     with _process_default_lock:
         rt = _process_default
         _process_default = None
+        _process_default_env_snapshot = ()
     if rt is not None and not rt._closed:
         try:
             rt.close()
@@ -655,22 +701,38 @@ def _close_process_default() -> None:
 def _construct_process_default_from_env() -> NexusRuntime:
     """Read the eleven previously-env-driven settings and build a runtime.
 
-    Source of truth for env names: this function is the one place where
-    the env-as-config pattern lives during Phases 1-3. Phase 3
-    (``nexus-s43yx``) consolidates all env reads into a single CLI-entry
-    construction; this helper retires alongside the autouse env-isolation
-    fixtures."""
+    RDR-118 P3.S1 (nexus-s43yx): this is the SINGLE point that reads env
+    for runtime construction. Production accessors
+    (``nexus.config.nexus_config_dir``, ``nexus.config.catalog_path``,
+    ``nexus.config.default_db_path``, ``nexus.db.default_storage_mode``,
+    ``nexus.db.is_daemon_mode``) are thin shims that route through
+    ``_ensure_runtime_for_shim().<attr>`` so the runtime owns the
+    config. This function reads env DIRECTLY to avoid the recursive
+    construction loop (shim -> _ensure_runtime_for_shim ->
+    _construct_process_default_from_env -> shim ...).
+    """
     import os
-    from nexus.config import catalog_path as _catalog_path
-    from nexus.config import nexus_config_dir
 
-    config_dir = nexus_config_dir()
-    cp_raw = os.environ.get("NEXUS_CATALOG_PATH", "").strip()
-    catalog_path = Path(cp_raw) if cp_raw else _catalog_path()
-    storage_mode_raw = os.environ.get("NX_STORAGE_MODE", "").strip() or "direct"
-    storage_mode: StorageMode = (
-        "daemon" if storage_mode_raw == "daemon" else "direct"
+    raw_config_dir = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    config_dir = (
+        Path(raw_config_dir) if raw_config_dir
+        else Path.home() / ".config" / "nexus"
     )
+    raw_catalog_path = os.environ.get("NEXUS_CATALOG_PATH", "").strip()
+    catalog_path = (
+        Path(raw_catalog_path) if raw_catalog_path
+        else config_dir / "catalog"
+    )
+    storage_mode_raw = os.environ.get("NX_STORAGE_MODE", "").strip().lower()
+    if not storage_mode_raw:
+        storage_mode: StorageMode = "daemon"
+    elif storage_mode_raw in _STORAGE_MODES:
+        storage_mode = storage_mode_raw  # type: ignore[assignment]
+    else:
+        raise ValueError(
+            f"NX_STORAGE_MODE={storage_mode_raw!r} is invalid; expected "
+            f"'direct' or 'daemon' (unset for the default 'daemon')."
+        )
     skip_t1_env = (
         os.environ.get("NX_T1_ISOLATED", "")
         or os.environ.get("NEXUS_SKIP_T1", "")

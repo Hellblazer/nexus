@@ -331,39 +331,35 @@ CREDENTIALS: dict[str, str] = {
 
 
 def nexus_config_dir() -> Path:
-    """Return the Nexus config / data directory, respecting ``NEXUS_CONFIG_DIR``.
+    """Return the Nexus config / data directory.
 
-    Single source of truth for every path under ``.config/nexus/`` so sandbox
-    runs, tests, and multi-profile installs can redirect the entire T2 +
-    catalog + session + log footprint with one environment variable.
+    RDR-118 P3.S1 (nexus-s43yx) thin redirector. Resolves through
+    ``nexus.runtime._ensure_runtime_for_shim().config_dir`` so the
+    runtime owns the value; the process-default lazy-built from env
+    preserves the legacy ``NEXUS_CONFIG_DIR`` env precedence.
 
-    Precedence:
-      1. ``NEXUS_CONFIG_DIR`` env var (explicit override)
-      2. ``~/.config/nexus`` (default)
+    Single source of truth for every path under ``.config/nexus/`` so
+    sandbox runs, tests, and multi-profile installs can redirect the
+    entire T2 + catalog + session + log footprint with one
+    environment variable.
 
-    Nothing is created here — callers either read or ``mkdir(parents=True,
-    exist_ok=True)`` as needed.
+    Nothing is created here; callers either read or ``mkdir(parents=
+    True, exist_ok=True)`` as needed.
     """
-    override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
-    if override:
-        return Path(override)
-    return Path.home() / ".config" / "nexus"
+    from nexus.runtime import _ensure_runtime_for_shim
+
+    return _ensure_runtime_for_shim().config_dir
 
 
 def default_db_path() -> Path:
     """Return the default path to the T2 SQLite database.
 
     nexus-8g79.10: promoted from ``commands/_helpers.py`` so non-CLI
-    modules (``mcp_infra``, ``health``, ``collection_health``,
-    ``collection_audit``, ``context``, ``operators/aspect_sql``,
-    ``merge_candidates``, ``console/routes/health``) can resolve the
-    canonical T2 path without reaching up to the CLI presentation
-    layer. The original location remains as a re-export for
-    backwards compatibility with CLI command modules.
-
-    Respects ``NEXUS_CONFIG_DIR`` via :func:`nexus_config_dir` so
-    sandbox / test / multi-profile runs can redirect T2 writes away
-    from the user's production ``memory.db``.
+    modules can resolve the canonical T2 path without reaching up to
+    the CLI presentation layer. Respects ``NEXUS_CONFIG_DIR`` via
+    :func:`nexus_config_dir` so sandbox / test / multi-profile runs
+    can redirect T2 writes away from the user's production
+    ``memory.db``.
     """
     return nexus_config_dir() / "memory.db"
 
@@ -391,13 +387,20 @@ def _default_local_path() -> Path:
 def catalog_path() -> Path:
     """Return the catalog directory path.
 
-    Priority: NEXUS_CATALOG_PATH env → NEXUS_CONFIG_DIR/catalog/
-    → ~/.config/nexus/catalog/
+    RDR-118 P3.S1 (nexus-s43yx) thin redirector. Resolves through
+    ``nexus.runtime._ensure_runtime_for_shim()``: returns the runtime's
+    explicit ``catalog_path`` when set, otherwise derives
+    ``runtime.config_dir / "catalog"``. The process-default lazy-built
+    from env preserves the legacy
+    ``NEXUS_CATALOG_PATH > NEXUS_CONFIG_DIR/catalog > ~/.config/nexus/catalog``
+    precedence.
     """
-    env = os.environ.get("NEXUS_CATALOG_PATH", "").strip()
-    if env:
-        return Path(env)
-    return nexus_config_dir() / "catalog"
+    from nexus.runtime import _ensure_runtime_for_shim
+
+    rt = _ensure_runtime_for_shim()
+    if rt.catalog_path is not None:
+        return rt.catalog_path
+    return rt.config_dir / "catalog"
 
 
 def is_local_mode() -> bool:
