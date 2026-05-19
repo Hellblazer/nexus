@@ -167,11 +167,11 @@ def _resolve_doc_id(record: AspectRecord) -> str:
     # primitives for FTS5 sanitisation), but the *behaviour* is no
     # longer reaching into Catalog internals.
     try:
-        from nexus.catalog import Catalog, open_cached
+        from nexus.catalog import Catalog
         from nexus.config import catalog_path
         cat_path = catalog_path()
         if Catalog.is_initialized(cat_path):
-            cat = open_cached(cat_path)
+            cat = Catalog(cat_path, cat_path / ".catalog.db")
             resolved = cat.lookup_doc_id_by_collection_and_path(
                 record.collection, record.source_path,
             )

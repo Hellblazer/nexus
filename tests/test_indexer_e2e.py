@@ -517,7 +517,6 @@ def test_migration_moves_prose_from_code_to_docs(
          and remove the seed chunk because README.md is in
          file_to_doc_id (catalog hook re-runs every index).
     """
-    from nexus.catalog import reset_cache
     from nexus.catalog.catalog import Catalog
     from nexus.config import catalog_path
 
@@ -526,7 +525,6 @@ def test_migration_moves_prose_from_code_to_docs(
     # README.md and the indexer threads its tumbler into file_to_doc_id.
     cat_path = catalog_path()
     Catalog.init(cat_path)
-    reset_cache()
 
     reg = RepoRegistry(tmp_path / "repos.json")
     reg.add(rich_repo)
@@ -536,7 +534,6 @@ def test_migration_moves_prose_from_code_to_docs(
     _index(rich_repo, reg, local_t3)
 
     # Step 2 — read the tumbler that _catalog_hook assigned.
-    reset_cache()
     cat = Catalog(cat_path, cat_path / ".catalog.db")
     row = cat._db.execute(
         "SELECT tumbler FROM documents WHERE file_path = ?",
