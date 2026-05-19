@@ -886,14 +886,21 @@ class TestManifestWriteBatchHook:
             f"captured: {cap}"
         )
 
-    def test_manifest_write_batch_hook_registered_in_mcp_core(self):
-        """manifest_write_batch_hook is registered in the post-store batch chain."""
-        # We just verify that importing mcp.core registers the hook.
-        # The registration happens at module import time.
-        import nexus.mcp.core  # noqa: F401  -- side effect: register hooks
-        from nexus.mcp_infra import _post_store_batch_hooks, manifest_write_batch_hook
+    def test_manifest_write_batch_hook_registered_by_install_default_hooks(self):
+        """manifest_write_batch_hook is wired onto every default HookRegistry.
 
-        assert manifest_write_batch_hook in _post_store_batch_hooks
+        Post-RDR-118-successor refactor: the three hook chains live on
+        per-invocation ``HookRegistry`` instances rather than module-level
+        globals. ``install_default_hooks(registry)`` wires the load-bearing
+        consumers — including ``manifest_write_batch_hook`` — onto every
+        registry the entry points construct.
+        """
+        from nexus.hook_registry import HookRegistry, install_default_hooks
+        from nexus.mcp_infra import manifest_write_batch_hook
+
+        registry = HookRegistry()
+        install_default_hooks(registry)
+        assert manifest_write_batch_hook in registry._batch
 
     def test_manifest_write_batch_hook_accumulates_across_batches(self, tmp_path):
         """RDR-108 Phase 3 (nexus-bdag) regression test: when the hook is

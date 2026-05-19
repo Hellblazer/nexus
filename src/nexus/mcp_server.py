@@ -35,7 +35,6 @@ from nexus.mcp_infra import (  # noqa: F401
     get_recent_search_traces as _get_recent_search_traces,
     get_t1 as _get_t1,
     get_t3 as _get_t3,
-    inject_catalog as _inject_catalog,
     inject_t1 as _inject_t1,
     inject_t3 as _inject_t3,
     record_search_trace as _record_search_trace,

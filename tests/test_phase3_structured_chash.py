@@ -24,7 +24,6 @@ from nexus.db.t1 import T1Database
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.mcp_server import (
-    _inject_catalog,
     _inject_t1,
     _inject_t3,
     _reset_singletons,

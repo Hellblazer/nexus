@@ -478,21 +478,16 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         # Post-store hook chains (RDR-095). Both single-doc and batch
         # chains fire from every storage event; the per-doc loop covers
         # single-shape consumers on CLI ingest.
-        from nexus.mcp_infra import (
-            fire_post_document_hooks,
-            fire_post_store_batch_hooks,
-            fire_post_store_hooks,
-        )
-        fire_post_store_batch_hooks(
+        ctx.hooks.fire_batch(
             ids, ctx.corpus, documents, embeddings, metadatas,
             catalog_doc_id=catalog_doc_id,
         )
         for _did, _doc in zip(ids, documents):
-            fire_post_store_hooks(_did, ctx.corpus, _doc)
+            ctx.hooks.fire_single(_did, ctx.corpus, _doc)
         # RDR-089 document-grain chain — once per code-file boundary.
         # content="" (chunk-level scope only); hook reads source_path.
         # nexus-tdgc: forward catalog doc_id when available.
-        fire_post_document_hooks(
+        ctx.hooks.fire_document(
             str(file_path), ctx.corpus, "",
             doc_id=catalog_doc_id,
         )

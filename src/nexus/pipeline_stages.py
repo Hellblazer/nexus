@@ -25,7 +25,10 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait, ALL_COMPLETED, FIRST_EXCEPTION
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from nexus.hook_registry import HookRegistry
 
 import structlog
 
@@ -395,12 +398,13 @@ def uploader_loop(
     chunking_done: threading.Event | None = None,
     *,
     catalog_doc_id: str = "",
+    hooks: "HookRegistry | None" = None,
 ) -> None:
     """Poll chunk buffer for embedded chunks and upsert to T3 ChromaDB.
 
     *catalog_doc_id* (RDR-108 Phase 3) — catalog ``Document.tumbler``
     string for the document this pipeline run is processing. Threaded
-    through to ``fire_post_store_batch_hooks`` so ``manifest_write_batch_hook``
+    through to ``HookRegistry.fire_batch`` so ``manifest_write_batch_hook``
     can write the manifest without having to read it from chunk metadata
     (which Phase 3 retired).
     """
@@ -445,16 +449,16 @@ def uploader_loop(
                 # Post-store hook chains (RDR-095). Both single-doc and
                 # batch chains fire from every storage event; the per-doc
                 # loop covers single-shape consumers on CLI ingest.
-                from nexus.mcp_infra import (
-                    fire_post_store_batch_hooks,
-                    fire_post_store_hooks,
-                )
-                fire_post_store_batch_hooks(
+                if hooks is None:
+                    from nexus.hook_registry import HookRegistry, install_default_hooks
+                    hooks = HookRegistry()
+                    install_default_hooks(hooks)
+                hooks.fire_batch(
                     ids, collection, documents, embeddings, metadatas,
                     catalog_doc_id=catalog_doc_id,
                 )
                 for _did, _doc in zip(ids, documents):
-                    fire_post_store_hooks(_did, collection, _doc)
+                    hooks.fire_single(_did, collection, _doc)
 
                 indices = [row["chunk_index"] for row in batch]
                 db.mark_uploaded(content_hash, indices)
@@ -586,6 +590,7 @@ def pipeline_index_pdf(
     git_meta: dict | None = None,
     force: bool = False,
     doc_id: str = "",
+    hooks: "HookRegistry | None" = None,
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
 
@@ -686,10 +691,15 @@ def pipeline_index_pdf(
             pdf_path=str(pdf_path), corpus=corpus, target_model=target_model,
             git_meta=git_meta, doc_id=doc_id,
         )
+        if hooks is None:
+            from nexus.hook_registry import HookRegistry, install_default_hooks
+            hooks = HookRegistry()
+            install_default_hooks(hooks)
         upload_future = pool.submit(
             uploader_loop, content_hash, db, t3, collection, cancel,
             chunking_done,
             catalog_doc_id=doc_id,
+            hooks=hooks,
         )
 
         all_futures: set[Future] = {extract_future, chunk_future, upload_future}
@@ -807,14 +817,13 @@ def pipeline_index_pdf(
     from nexus.catalog import Catalog
     from nexus.config import catalog_path
     from nexus.doc_indexer import _lookup_existing_doc_id
-    from nexus.mcp_infra import fire_post_document_hooks
     _cat_path = catalog_path()
     _cat = (
         Catalog(_cat_path, _cat_path / ".catalog.db")
         if Catalog.is_initialized(_cat_path)
         else None
     )
-    fire_post_document_hooks(
+    hooks.fire_document(
         str(pdf_path), collection, "",
         doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
     )

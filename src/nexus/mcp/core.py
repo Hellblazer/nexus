@@ -20,17 +20,14 @@ from nexus.corpus import (
 from nexus.db.t3 import verify_collection_deep
 from nexus.filters import parse_where_str as _parse_where_str
 from nexus.config import load_config
+from nexus.hook_registry import HookRegistry as _HookRegistry, install_default_hooks as _install_default_hooks
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
-    fire_post_document_hooks as _fire_post_document_hooks,
-    fire_post_store_batch_hooks as _fire_post_store_batch_hooks,
-    fire_post_store_hooks as _fire_post_store_hooks,
     get_catalog as _get_catalog,
     get_collection_names as _get_collection_names,
     get_recent_search_traces as _get_recent_search_traces,
     get_t1 as _get_t1,
     get_t3 as _get_t3,
-    inject_catalog as _inject_catalog,
     inject_t1 as _inject_t1,
     inject_t3 as _inject_t3,
     record_search_trace as _record_search_trace,
@@ -38,6 +35,14 @@ from nexus.mcp_infra import (
     t2_ctx as _t2_ctx,
 )
 from nexus.ttl import parse_ttl
+
+#: Process-local HookRegistry constructed at MCP-server startup.
+#: The MCP server is a long-running entry point — the registry's
+#: lifecycle matches the server process. ``install_default_hooks``
+#: wires the load-bearing default consumers (chash, taxonomy, manifest,
+#: aspect-extraction).
+_hooks = _HookRegistry()
+_install_default_hooks(_hooks)
 
 # ── T1 chroma lifecycle (RDR-105 P4) ────────────────────────────────────────
 #
@@ -412,41 +417,24 @@ def _record_tier_write(
         pass
 
 
-# ── Post-store hooks (register once at import) ──────────────────────────────
+# ── Post-store hooks (process-local registry constructed above) ─────────────
 #
-# RDR-095 + symmetric-fire follow-up: every storage event (MCP store_put or
-# CLI bulk ingest) fires BOTH chains. Hooks pick exactly one shape based on
-# their work pattern. Taxonomy registers batch-only because its dependency
-# call (assign_batch) collapses N ChromaDB queries into one; the hook handles
-# 1-element batches from MCP store_put by fetching the embedding inline.
-# Future single-doc-only consumers (e.g. RDR-089 aspect extraction with one
-# Haiku call per doc) register via register_post_store_hook and fire from
-# every path automatically.
+# RDR-095 + symmetric-fire follow-up: every storage event (MCP ``store_put``
+# or CLI bulk ingest) fires the three chains on a ``HookRegistry`` threaded
+# top-down from the entry point. For MCP the entry point is module load
+# time (long-running server process); ``_hooks`` is constructed above and
+# ``_install_default_hooks`` wires the load-bearing default consumers:
 #
-# Registration order within the batch chain is load-bearing: chash dual-write
-# must precede taxonomy assignment so chash rows exist before topic assignment
-# runs (mirroring the legacy chash-before-taxonomy CLI invariant).
-
-from nexus.mcp_infra import (
-    register_post_document_hook,
-)
-
-# RDR-108 Phase 3 (nexus-bdag): the three batch hooks
-# (chash_dual_write_batch_hook, taxonomy_assign_batch_hook,
-# manifest_write_batch_hook) now self-register at module load in
-# ``nexus.mcp_infra`` so CLI-only flows (``nx index repo``) also fire
-# them. Pre-Phase-3 the registrations lived here, which silently
-# skipped them for non-MCP code paths.
-
-# RDR-089 follow-up (nexus-qeo8): document-grain hook chain consumer.
-# The synchronous-inline shape was invalidated by the P1.3 spike
-# (median 26.5 s / p95 38.1 s per document). The enqueue hook writes
-# to aspect_extraction_queue (microsecond-scale) and lazy-spawns a
-# background worker that drains the queue and invokes the existing
-# synchronous extract_aspects.
-from nexus.aspect_worker import aspect_extraction_enqueue_hook
-
-register_post_document_hook(aspect_extraction_enqueue_hook)
+# * Three batch hooks (chash dual-write, taxonomy assign, manifest write)
+#   for the cross-cutting catalog / index correctness work.
+# * One document hook (RDR-089 aspect-extraction enqueue) which writes to
+#   aspect_extraction_queue (microsecond-scale) and lazy-spawns a
+#   background worker that drains the queue and invokes the synchronous
+#   extract_aspects.
+#
+# Registration order within the batch chain is load-bearing: chash
+# dual-write must precede taxonomy assignment so chash rows exist before
+# topic assignment runs.
 
 # ── Registered tools ─────────────────────────────────────────────────────────
 
@@ -1074,18 +1062,15 @@ def store_put(
                 structlog.get_logger().debug(
                     "store_put_auto_linked", doc_id=doc_id, link_count=n,
                 )
-        # Both post-store chains fire from every storage event (RDR-095
-        # symmetric-fire follow-up). Single-doc chain runs registered
-        # per-doc consumers; batch chain runs with a 1-element list so
-        # batch-shape consumers (taxonomy, chash) see MCP store_put as
-        # a single-document batch.
-        #
-        # Direct fire calls are required here (not the nexus-9099
-        # ``fire_store_chains`` helper) because ``test_hook_drift_guard``
-        # AST-counts these three names verbatim in mcp/core.py to enforce
-        # the 7-CLI + 1-MCP fire-site invariant.
-        _fire_post_store_hooks(doc_id, col_name, content)
-        _fire_post_store_batch_hooks(
+        # All three post-store chains fire from every storage event
+        # (RDR-095 symmetric-fire follow-up) via the process-local
+        # ``_hooks`` registry constructed at module load. Single-doc
+        # chain runs registered per-doc consumers; batch chain runs
+        # with a 1-element list so batch-shape consumers (taxonomy,
+        # chash, manifest) see MCP ``store_put`` as a single-document
+        # batch.
+        _hooks.fire_single(doc_id, col_name, content)
+        _hooks.fire_batch(
             [doc_id], col_name, [content], None, None,
             catalog_doc_id=catalog_doc_id,
         )
@@ -1099,7 +1084,7 @@ def store_put(
         # the hook uses for failure attribution.
         # nexus-tdgc: forward doc_id explicitly so the aspect-queue
         # hook can store it on the queue row alongside source_path.
-        _fire_post_document_hooks(doc_id, col_name, content, doc_id=doc_id)
+        _hooks.fire_document(doc_id, col_name, content, doc_id=doc_id)
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —
         # older traces are unlikely to have driven this store_put.

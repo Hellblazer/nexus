@@ -77,10 +77,12 @@ def test_mcp_store_put_writes_catalog_doc_id_into_t3_chunk_metadata(
     from nexus.mcp.core import store_put
     local_t3 = inject_local_t3
 
+    # Patch the process-local HookRegistry methods so the test focuses on
+    # the doc_id stamping contract rather than running real hook chains.
     with patch("nexus.mcp.core._get_t3", return_value=local_t3), \
-         patch("nexus.mcp.core._fire_post_store_hooks", side_effect=_no_op), \
-         patch("nexus.mcp.core._fire_post_store_batch_hooks", side_effect=_no_op), \
-         patch("nexus.mcp.core._fire_post_document_hooks", side_effect=_no_op), \
+         patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \
+         patch("nexus.mcp.core._hooks.fire_batch", side_effect=_no_op), \
+         patch("nexus.mcp.core._hooks.fire_document", side_effect=_no_op), \
          patch("nexus.mcp.core._catalog_auto_link", return_value=0):
         result = store_put(
             content="# MCP finding: nexus-mcp-doc-id\n\nSubagents need catalog backref.",
@@ -137,9 +139,9 @@ def test_mcp_store_put_doc_id_absent_when_catalog_uninitialized(
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "no-catalog"))
 
     with patch("nexus.mcp.core._get_t3", return_value=local_t3), \
-         patch("nexus.mcp.core._fire_post_store_hooks", side_effect=_no_op), \
-         patch("nexus.mcp.core._fire_post_store_batch_hooks", side_effect=_no_op), \
-         patch("nexus.mcp.core._fire_post_document_hooks", side_effect=_no_op), \
+         patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \
+         patch("nexus.mcp.core._hooks.fire_batch", side_effect=_no_op), \
+         patch("nexus.mcp.core._hooks.fire_document", side_effect=_no_op), \
          patch("nexus.mcp.core._catalog_auto_link", return_value=0):
         result = store_put(
             content="# MCP finding without catalog\n\nNo-catalog path test.",

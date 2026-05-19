@@ -555,7 +555,7 @@ class TestDualWriteHelper:
 
 class TestChashDualWriteBatchEntryPoint:
     """``mcp_infra.chash_dual_write_batch_hook`` is the registered batch
-    hook fired by ``fire_post_store_batch_hooks`` from every CLI indexing
+    hook fired by ``HookRegistry.fire_batch`` from every CLI indexing
     write site. It opens a fresh T2Database (matching
     ``taxonomy_assign_batch_hook``'s lifecycle) and delegates.
     """

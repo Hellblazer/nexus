@@ -231,10 +231,10 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
 
         # nexus-8g79.1: pre-register the catalog entry so the T3 chunk
         # carries the resulting tumbler as ``doc_id`` at write-time and
-        # the manifest hook in fire_store_chains populates document_chunks
-        # + documents.chunk_count for this promotion. Without this, the
-        # promoted entry lands in T3 with no catalog identity — same
-        # regression class as nexus-zq79 / nexus-lf8f.
+        # the manifest hook in HookRegistry.fire_store_chains populates
+        # document_chunks + documents.chunk_count for this promotion.
+        # Without this, the promoted entry lands in T3 with no catalog
+        # identity — same regression class as nexus-zq79 / nexus-lf8f.
         import hashlib
         from nexus.catalog.store_hook import catalog_store_hook
         chunk_chroma_id = hashlib.sha256(entry["content"].encode()).hexdigest()[:32]
@@ -260,8 +260,10 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # symmetric-fire; this path was missed by the original commit.
         # nexus-8g79.1: thread catalog_doc_id through so the manifest
         # hook can populate document_chunks + chunk_count.
-        from nexus.mcp_infra import fire_store_chains
-        fire_store_chains(
+        from nexus.hook_registry import HookRegistry, install_default_hooks
+        hooks = HookRegistry()
+        install_default_hooks(hooks)
+        hooks.fire_store_chains(
             [doc_id], collection, [entry["content"]],
             catalog_doc_id=catalog_doc_id,
         )

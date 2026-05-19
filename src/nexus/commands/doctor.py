@@ -770,35 +770,34 @@ def _run_check_tier_discipline() -> None:
 
 
 def _run_check_post_store_hooks() -> None:
-    """Enumerate post-store hooks registered on each of the three chains.
+    """Enumerate post-store hooks attached to a default ``HookRegistry``.
 
-    Importing :mod:`nexus.mcp.core` triggers the static
-    ``register_post_store_*_hook`` calls; this function then reads the
-    chain lists from :mod:`nexus.mcp_infra` and prints the
-    ``__name__`` attributes per chain.
+    The hook chains are no longer module-level globals (RDR-118
+    successor): each entry point constructs its own ``HookRegistry`` and
+    wires the load-bearing default consumers via
+    :func:`nexus.hook_registry.install_default_hooks`. This diagnostic
+    builds a fresh registry the same way and prints the consumers
+    attached to each chain so operators can confirm the install factory
+    is wiring the expected set.
 
     Use cases (from nexus-b0ka):
 
-      * Confirm RDR-089 aspect_extraction_enqueue_hook registered
-        after install.
+      * Confirm RDR-089 ``aspect_extraction_enqueue_hook`` registers
+        on the document chain.
       * Detect drift if a hook silently fails to register due to
-        import-order bugs.
-      * Smoke after upgrade: are the expected hooks still registered?
+        import-order bugs in the factory.
+      * Smoke after upgrade: does the install factory still wire the
+        expected default consumers?
     """
-    # Import for side-effects: registers the chash_dual_write +
-    # taxonomy_assign batch hooks and the aspect-extraction document
-    # hook (mcp/core.py:387-388 + the nexus-qeo8 follow-up).
-    import nexus.mcp.core  # noqa: F401, PLC0415
-    from nexus.mcp_infra import (  # noqa: PLC0415
-        _post_document_hooks,
-        _post_store_batch_hooks,
-        _post_store_hooks,
-    )
+    from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415
+
+    registry = HookRegistry()
+    install_default_hooks(registry)
 
     chains: list[tuple[str, list]] = [
-        ("Single-doc chain (RDR-070)", _post_store_hooks),
-        ("Batch chain (RDR-095)", _post_store_batch_hooks),
-        ("Document-grain chain (RDR-089)", _post_document_hooks),
+        ("Single-doc chain (RDR-070)", registry._single),
+        ("Batch chain (RDR-095)", registry._batch),
+        ("Document-grain chain (RDR-089)", registry._document),
     ]
     total = 0
     for label, hooks in chains:

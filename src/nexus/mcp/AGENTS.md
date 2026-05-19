@@ -9,17 +9,17 @@ Two FastMCP servers and the post-store hook framework that backs them. The singl
 | `core.py` | `nexus` | 14 tools: `search`, `query`, `store_put/get/list`, `memory_*`, `scratch*`, `collection_list`, `plan_save/search` |
 | `catalog.py` | `nexus-catalog` | 10 tools: `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` (the `catalog_` prefix is dropped — server namespace already provides context) |
 
-`mcp_infra.py` holds singletons (T2/T3 clients), test injection, post-store hook registries, and `check_version_compatibility`. `mcp_server.py` is a backward-compat shim re-exporting all 30 functions.
+`mcp_infra.py` holds singletons (T2/T3 clients), test injection, default post-store hook consumers, and `check_version_compatibility`. The three-chain hook registry itself lives in `nexus.hook_registry.HookRegistry` and is constructor-injected from each entry point (MCP server, CLI command, indexer). `mcp_server.py` is a backward-compat shim re-exporting all 30 functions.
 
 ## Post-store hook framework
 
-Three parallel chains — pick the one that matches your workload shape:
+Three parallel chains on `HookRegistry` — pick the one that matches your workload shape:
 
 | Shape | Register with | Fired from | When to use |
 |---|---|---|---|
-| **Single-doc** | `register_post_store_hook(fn)` | MCP `store_put` (1×); CLI ingest (per-doc) | Per-document work keyed on `doc_id`. **Currently empty by default.** |
-| **Batch** | `register_post_store_batch_hook(fn)` | CLI ingest (full batch); MCP `store_put` (1-element batch) | Work that benefits from batched dependency calls — one ChromaDB query for N centroids, one batched T2 upsert. |
-| **Document-grain** | `register_post_document_hook(fn)` | MCP `store_put` + 8 CLI ingest sites in 6 modules | Source-document boundary as stable identity (vs chunk-level `doc_id`). |
+| **Single-doc** | `registry.register_single(fn)` | MCP `store_put` (1×); CLI ingest (per-doc) | Per-document work keyed on `doc_id`. **Currently empty by default.** |
+| **Batch** | `registry.register_batch(fn)` | CLI ingest (full batch); MCP `store_put` (1-element batch) | Work that benefits from batched dependency calls — one ChromaDB query for N centroids, one batched T2 upsert. |
+| **Document-grain** | `registry.register_document(fn)` | MCP `store_put` + 8 CLI ingest sites in 6 modules | Source-document boundary as stable identity (vs chunk-level `doc_id`). |
 
 All three:
 
@@ -32,7 +32,8 @@ All three:
 - **Batch chain** (registration order is load-bearing):
   1. `chash_dual_write_batch_hook` (RDR-086) — must run first so chash rows exist before topic assignment.
   2. `taxonomy_assign_batch_hook` (RDR-070) — accepts `embeddings=None` from the MCP path and fetches them from T3 inline.
-- **Document-grain chain**: `aspect_extraction_enqueue_hook` (RDR-089). Defined in `aspect_worker.py`, registered in `mcp/core.py`. Enqueues to T2 `aspect_extraction_queue`; a daemon worker thread drains it and invokes `extract_aspects`. Async dispatch was necessary because the spike measured 26.5s median per document — blocking-inline would have been a non-starter on the ingest path.
+  3. `manifest_write_batch_hook` (RDR-108 D2) — populates the catalog `document_chunks` manifest.
+- **Document-grain chain**: `aspect_extraction_enqueue_hook` (RDR-089). Defined in `aspect_worker.py`, registered via `install_default_hooks` in `hook_registry.py`. Enqueues to T2 `aspect_extraction_queue`; a daemon worker thread drains it and invokes `extract_aspects`. Async dispatch was necessary because the spike measured 26.5s median per document — blocking-inline would have been a non-starter on the ingest path.
 
 ### Content-sourcing contract (document-grain chain)
 
@@ -44,10 +45,10 @@ All three:
 
 `tests/test_hook_drift_guard.py` uses `ast.walk` to enforce two guarded sets:
 
-- `GUARDED_NAMES = {taxonomy_assign_batch_hook, chash_dual_write_batch_hook}` — may only appear in `mcp_infra.py` (definition) and `mcp/core.py` (registration).
-- `DOCUMENT_HOOK_GUARDED_NAMES = {aspect_extraction_enqueue_hook}` — may only appear in `aspect_worker.py` (definition) and `mcp/core.py` (registration).
+- `GUARDED_NAMES = {taxonomy_assign_batch_hook, chash_dual_write_batch_hook}` — may only appear in `mcp_infra.py` (definition) and `hook_registry.py` (registration via `install_default_hooks`).
+- `DOCUMENT_HOOK_GUARDED_NAMES = {aspect_extraction_enqueue_hook}` — may only appear in `aspect_worker.py` (definition) and `hook_registry.py` (registration via `install_default_hooks`).
 
-**New consumers register through the `register_post_*_hook` API.** Direct calls fail CI.
+**New consumers register through `HookRegistry.register_single/batch/document` (or `install_default_hooks` for load-bearing defaults).** Direct calls fail CI.
 
 A separate runtime fire-once test (`test_index_pdf_fires_document_hook_exactly_once` in `tests/test_doc_indexer.py`) drives a sample PDF through `index_pdf` with a counting probe hook to assert the document chain fires exactly once per source document — the AST count guard alone cannot detect a regression that moves a fire site inside a per-chunk loop.
 
@@ -59,5 +60,5 @@ A separate runtime fire-once test (`test_index_pdf_fires_document_hook_exactly_o
 ## Hot rules
 
 - **Always use full MCP tool names.** `mcp__plugin_<plugin>_<server>__<tool>`. Short names fail at runtime (no resolution layer exists).
-- **Register, don't import.** Add new hook consumers via `register_post_*_hook`, not by direct call. CI's drift guard will reject the bypass.
+- **Register, don't import.** Add new hook consumers via `HookRegistry.register_*` (or extend `install_default_hooks` for load-bearing defaults), not by direct call. CI's drift guard will reject the bypass.
 - **Preserve registration order on the batch chain.** chash before taxonomy. Other orderings violate the chash-rows-exist invariant.

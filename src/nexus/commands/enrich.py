@@ -639,7 +639,7 @@ def enrich_aspects(
 
     Iterates the catalog (one entry per source document, NOT per
     chunk), calls extract_aspects directly (bypassing the
-    fire_post_document_hooks chain to avoid double-firing on
+    ``HookRegistry.fire_document`` chain to avoid double-firing on
     documents already triggered at ingest), and upserts AspectRecords
     to ``document_aspects``.
 

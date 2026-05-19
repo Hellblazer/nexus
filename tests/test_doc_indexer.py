@@ -523,33 +523,28 @@ def test_index_pdf_fires_document_hook_exactly_once(
     Significant #5). The AST drift guard counts call-sites
     statically; this test pins the runtime property.
 
-    A bug that moves ``fire_post_document_hooks`` inside a
-    per-chunk loop would have N invocations per document instead
-    of 1 — invisible to the AST count guard, expensive in API
-    calls, and produces single-chunk aspects for multi-chunk
-    documents (semantically wrong). Pin via a counting hook
-    registered for the duration of one ``index_pdf`` call.
+    A bug that moves ``fire_document`` inside a per-chunk loop would
+    have N invocations per document instead of 1 — invisible to the AST
+    count guard, expensive in API calls, and produces single-chunk
+    aspects for multi-chunk documents (semantically wrong). Pin via a
+    counting hook registered on a per-test ``HookRegistry`` instance
+    threaded through ``index_pdf(hooks=...)``.
     """
-    from nexus.mcp_infra import (
-        _post_document_hooks,
-        register_post_document_hook,
-    )
+    from nexus.hook_registry import HookRegistry
 
     fires: list[tuple[str, str, str]] = []
 
     def counting_hook(source_path: str, collection: str, content: str) -> None:
         fires.append((source_path, collection, content))
 
-    register_post_document_hook(counting_hook)
-    try:
-        set_credentials(monkeypatch)
-        with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
-            with pdf_extract_patches_ctx():
-                with patch("voyageai.Client", return_value=voyage_client):
-                    index_pdf(sample_pdf, corpus="mybook")
-    finally:
-        if counting_hook in _post_document_hooks:
-            _post_document_hooks.remove(counting_hook)
+    hooks = HookRegistry()
+    hooks.register_document(counting_hook)
+
+    set_credentials(monkeypatch)
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with pdf_extract_patches_ctx():
+            with patch("voyageai.Client", return_value=voyage_client):
+                index_pdf(sample_pdf, corpus="mybook", hooks=hooks)
 
     assert len(fires) == 1, (
         f"Document hook fired {len(fires)} times for one PDF — "
