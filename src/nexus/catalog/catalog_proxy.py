@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-112 6shq.1 (nexus-lj2l) — ``ExecuteProxy`` over ``T2Client.catalog``.
+"""RDR-112 6shq.1 (nexus-lj2l): ``ExecuteProxy`` over ``T2Client.catalog``.
 
 Substrate for the higher-level ``nexus.catalog.Catalog`` wrapper to
 operate under ``NX_STORAGE_MODE=daemon``. Phase 4 (nexus-uar6) flipped
 ``nx catalog`` CLI sites to the daemon-aware T3 path but deferred the
-Catalog wrapper itself — it still opened a local ``CatalogDB`` against
+Catalog wrapper itself; it still opened a local ``CatalogDB`` against
 ``.catalog.db`` independent of the daemon-owned ``memory.db``. This
 module ships the duck-typed handle that lets ``Catalog`` swap its
 backing store without forking the call sites.
@@ -18,21 +18,21 @@ Cursor-vs-list audit (catalog/**)
 materialised, per its docstring).
 
 Audited every ``cat._db.execute(...)`` and ``self._db.execute(...)``
-call site across the catalog package — catalog.py / catalog_writes.py
+call site across the catalog package; catalog.py / catalog_writes.py
 / catalog_links.py / catalog_sync.py / projector.py / catalog_docs.py /
 catalog_spans.py:
 
-* ``.fetchone()`` — heavily used; safe under list shape if the proxy
+* ``.fetchone()``: heavily used; safe under list shape if the proxy
   returns ``rows[0] if rows else None`` semantics.
-* ``.fetchall()`` — used in catalog_links / catalog_writes /
+* ``.fetchall()``: used in catalog_links / catalog_writes /
   catalog_sync; trivially compatible with a list return.
-* ``for row in cursor:`` — no call sites in the catalog package; safe
+* ``for row in cursor:``: no call sites in the catalog package; safe
   via direct list iteration.
-* ``.lastrowid`` — NOT used at any catalog/** site. The proxy
+* ``.lastrowid``: NOT used at any catalog/** site. The proxy
   intentionally does not expose it.
-* ``cursor.execute(...)`` direct re-entrancy — NOT used; only the
+* ``cursor.execute(...)`` direct re-entrancy; NOT used; only the
   initial ``self._db.execute(...)`` call returns the cursor.
-* ``executemany`` / ``executescript`` — only used inside
+* ``executemany`` / ``executescript``; only used inside
   ``CatalogDB._init_schema`` and ``CatalogStore._init_schema``; not
   reached from the Catalog wrapper.
 
@@ -44,24 +44,24 @@ localised; cursor-vs-list mismatches cannot surface at runtime.
 
 Supported surface (read-path + simple INSERTs/UPDATEs)
 ------------------------------------------------------
-* ``execute(sql, params)`` -> ``_ResultCursor`` — forwards to
+* ``execute(sql, params)`` -> ``_ResultCursor``; forwards to
   ``T2Client.catalog.execute`` (RPC) and wraps the response.
-* ``commit()`` — forwards to ``T2Client.catalog.commit`` (RPC).
-* ``search(query, *, content_type=None)`` — forwards to
+* ``commit()``: forwards to ``T2Client.catalog.commit`` (RPC).
+* ``search(query, *, content_type=None)``: forwards to
   ``T2Client.catalog.search``; FTS5 MATCH used by ``Catalog.find``.
-* ``descendants(prefix)`` — forwards to ``T2Client.catalog.descendants``;
+* ``descendants(prefix)``: forwards to ``T2Client.catalog.descendants``;
   used by ``_DocumentOps.descendants``.
-* ``next_document_number(owner_prefix)`` — forwards to
+* ``next_document_number(owner_prefix)``: forwards to
   ``T2Client.catalog.next_document_number``; legacy fallback for
   pre-migration owners during ``Catalog.register``. Modern callers hit
   the JSONL high-water mark first; the fallback only fires when
   ``owner_rec.next_seq == 0`` which happens only for pre-Phase-3 data.
-* ``backfilled_collections()`` — public accessor mirroring the
+* ``backfilled_collections()``: public accessor mirroring the
   underscored attribute so the daemon proxy can read the set.
-* ``transaction()`` — raises ``NotImplementedError``. CatalogStore's
+* ``transaction()``: raises ``NotImplementedError``. CatalogStore's
   ``transaction()`` is in ``_RPC_DENY_OPS`` (nexus-7ejx) because
   ``@contextmanager`` methods cannot meaningfully cross the JSON-RPC
-  boundary — the yielded ``sqlite3.Connection`` lives daemon-side and
+  boundary; the yielded ``sqlite3.Connection`` lives daemon-side and
   the with-block never runs there. Write-path call sites that depend on
   multi-statement atomicity (``catalog_sync._SyncOps`` rebuild path,
   ``catalog_links`` mutations) are deferred to 6shq.2-6shq.6 with the
@@ -69,13 +69,13 @@ Supported surface (read-path + simple INSERTs/UPDATEs)
 
 Explicitly NOT on the proxy (raises ``AttributeError``)
 -------------------------------------------------------
-* ``rebuild`` / ``bulk_load_documents`` — write-path; deferred. The
+* ``rebuild`` / ``bulk_load_documents``; write-path; deferred. The
   daemon owns its projection rebuild under
   ``NX_STORAGE_MODE=daemon`` and ``_SyncOps._ensure_consistent``
   short-circuits when ``Catalog._daemon_proxy`` is set.
-* ``_conn`` direct access — yfqv defect class; ``_StoreProxy`` already
+* ``_conn`` direct access; yfqv defect class; ``_StoreProxy`` already
   filters underscores by design.
-* ``_backfilled_collections`` attribute — replaced by the public
+* ``_backfilled_collections`` attribute; replaced by the public
   ``backfilled_collections()`` method (mirrored onto ``CatalogDB`` in
   this bead for parity).
 """
@@ -101,7 +101,7 @@ class _ResultCursor:
     Row-shape normalisation: JSON-RPC encodes tuples as JSON arrays and
     decodes them back as Python ``list``. Direct-mode callers receive
     ``sqlite3.Row`` (tuple-shaped). To preserve the contract uniformly,
-    rows are coerced to ``tuple`` on every accessor — production code
+    rows are coerced to ``tuple`` on every accessor; production code
     indexes positionally (``row[0]``) so the difference is invisible
     there, but tests asserting ``row == (value,)`` would otherwise see
     mode-dependent shapes.
@@ -110,7 +110,7 @@ class _ResultCursor:
     returns the first row each time rather than advancing through the
     result set. The audit (see module docstring) confirmed no
     catalog/** site calls ``.fetchone()`` more than once on the same
-    cursor — they all use it as "give me the only/first row" or fall
+    cursor; they all use it as "give me the only/first row" or fall
     through to ``.fetchall()`` for multi-row results. Iteration via
     ``__iter__`` walks the full list once.
     """
@@ -173,7 +173,7 @@ class ExecuteProxy:
         self._t2.catalog.commit()
 
     def close(self) -> None:
-        """No-op under daemon mode — the proxy does not own a connection.
+        """No-op under daemon mode; the proxy does not own a connection.
 
         RDR-112 6shq.3 (nexus-siy7): ``CatalogDB.close()`` tears down the
         ``sqlite3.Connection`` that the proxy's direct-mode peer owns. The
@@ -184,7 +184,7 @@ class ExecuteProxy:
         :func:`nexus.catalog.reset_cache`, which closes the singleton
         deterministically. Existing CLI sites (``commands/dt.py`` finally
         blocks; the doctor-replay path) call ``cat._db.close()`` to release
-        the WAL lock for back-to-back ``CliRunner`` invocations — under
+        the WAL lock for back-to-back ``CliRunner`` invocations; under
         daemon mode the daemon owns that lock, so the close is a no-op
         without behaviour drift.
         """
@@ -192,7 +192,7 @@ class ExecuteProxy:
 
     @contextmanager
     def transaction(self) -> Generator[object, None, None]:
-        """Not implemented under daemon mode — write-path deferred.
+        """Not implemented under daemon mode; write-path deferred.
 
         ``CatalogStore.transaction()`` is RPC-denied (nexus-7ejx,
         ``_RPC_DENY_OPS``): the yielded ``sqlite3.Connection`` lives on
@@ -214,7 +214,7 @@ class ExecuteProxy:
         yield None  # pragma: no cover
 
     def rebuild(self, *args: object, **kwargs: object) -> None:
-        """Not implemented under daemon mode — projection-rebuild deferred.
+        """Not implemented under daemon mode; projection-rebuild deferred.
 
         ``Catalog._SyncOps._ensure_consistent`` short-circuits under
         ``_daemon_proxy`` (the daemon owns its projection), so this
@@ -233,7 +233,7 @@ class ExecuteProxy:
         )
 
     def bulk_load_documents(self) -> None:
-        """Not implemented under daemon mode — FTS5 bulk-load fence deferred.
+        """Not implemented under daemon mode; FTS5 bulk-load fence deferred.
 
         ``CatalogStore.bulk_load_documents`` is RPC-denied (it is a
         ``@contextmanager`` whose yield is meaningless across RPC).

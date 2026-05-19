@@ -116,6 +116,15 @@ def live_t2_daemon(t2db: T2Database, config_dir: Path, daemon_env):
     try:
         yield daemon
     finally:
+        # chak review IMPORTANT-1: drop the process-singleton T2Client
+        # before stopping the daemon so the orphan socket pool does not
+        # hold the daemon's UDS open past ``server.wait_closed``'s 5 s
+        # timeout. Without this teardown a subsequent daemon-mode suite
+        # that starts a new T2Daemon flaps on the unrelated previous
+        # daemon's leaked sockets. Matches the pattern in
+        # test_catalog_daemon_mode.py / test_dt_daemon_mode.py.
+        from nexus.catalog import reset_cache
+        reset_cache()
         _stop_daemon(daemon, loop)
 
 
@@ -450,7 +459,7 @@ class TestEnrichDaemonDownClickException:
         """``nx enrich aspects-show <tumbler>`` under daemon mode with no
         daemon running surfaces a ``ClickException`` via
         ``_resolve_catalog_entry`` -> ``open_cached``."""
-        # A non-existent tumbler is fine — the open_cached call fails
+        # A non-existent tumbler is fine; the open_cached call fails
         # before tumbler resolution because the daemon is down.
         result = runner.invoke(
             main, ["enrich", "aspects-show", "x.0.0.0"],

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-112 6shq.4 (nexus-w6hj) — ``nx t3`` CLI under
+"""RDR-112 6shq.4 (nexus-w6hj): ``nx t3`` CLI under
 ``NX_STORAGE_MODE=daemon``.
 
 Scope: smoke coverage of the two direct ``Catalog`` opens in

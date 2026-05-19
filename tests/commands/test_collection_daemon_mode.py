@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-112 6shq.3 (nexus-siy7) — ``nx collection`` CLI under
+"""RDR-112 6shq.3 (nexus-siy7): ``nx collection`` CLI under
 ``NX_STORAGE_MODE=daemon``.
 
 Scope: the siy7 flip swaps two ``Catalog(cat_path, ...)`` direct opens
 in ``commands/collection.py`` for the daemon-aware
 ``nexus.catalog.open_catalog`` / ``open_cached`` factories:
 
-* line 171 (``delete_cmd`` cascade) — opens the catalog inside a
+* line 171 (``delete_cmd`` cascade): opens the catalog inside a
   try/except Exception block to delete document rows pointing at the
   gone collection. Daemon-mode flip lets the cascade route through
   ``ExecuteProxy`` so a missing daemon is absorbed by the existing
   warn handler rather than crashing the delete command.
-* line 355 (``reindex_cmd`` manifest fallback) — read-mostly per-page
+* line 355 (``reindex_cmd`` manifest fallback): read-mostly per-page
   ``docs_for_chashes`` lookup; uses ``open_cached`` to amortise the
   cost across the page loop. Daemon-down absorbs to ``_cat = None``
   and the loop continues without the manifest fallback (silent
@@ -194,7 +194,7 @@ class TestCollectionDeleteCascadeUnderDaemon:
         # taxonomy + pipeline cleanups are no-ops.
         assert result.exit_code == 0, result.output
         # T3 absent path emits the operator note via stderr; the cascade
-        # itself emits no error (which is what we want — the flip must
+        # itself emits no error (which is what we want; the flip must
         # not surface a Python traceback when the catalog is empty).
         assert "Traceback" not in result.output, (
             f"daemon-mode cascade should not surface a Python traceback; "
@@ -212,7 +212,7 @@ class TestCollectionDeleteCascadeUnderDaemon:
         """siy7 site 7 (collection.py:355): ``reindex_cmd`` opens the
         catalog via ``open_cached`` to amortise the per-page
         ``docs_for_chashes`` reverse-lookup. The smoke exercises the
-        flip by reindexing an empty collection — the helper opens the
+        flip by reindexing an empty collection; the helper opens the
         cached daemon-backed Catalog instance, finds nothing to
         manifest, and falls through cleanly.
 

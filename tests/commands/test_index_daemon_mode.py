@@ -112,7 +112,7 @@ def live_t2_daemon(t2db: T2Database, config_dir: Path, daemon_env):
         yield daemon
     finally:
         # RDR-112 6shq.2 (nexus-3gdg): drop the process-singleton
-        # T2Client before stopping the daemon — see the matching
+        # T2Client before stopping the daemon; see the matching
         # comment in tests/commands/test_catalog_daemon_mode.py.
         from nexus.catalog import reset_cache
         reset_cache()

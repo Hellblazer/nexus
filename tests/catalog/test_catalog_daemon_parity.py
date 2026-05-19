@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-112 6shq.1 (nexus-lj2l) — Catalog read-path parity across direct
+"""RDR-112 6shq.1 (nexus-lj2l): Catalog read-path parity across direct
 and daemon backends.
 
 Substrate test for the higher-level ``nexus.catalog.Catalog`` wrapper.
 Phase 4 (nexus-uar6) flipped ``nx catalog`` CLI sites to the daemon-aware
-T3 client but deferred the Catalog wrapper itself — it still opened a
+T3 client but deferred the Catalog wrapper itself; it still opened a
 local ``CatalogDB(.catalog.db)`` independent of the daemon-owned
 ``memory.db``. lj2l ships the duck-typed ``ExecuteProxy`` over
 ``T2Client.catalog`` so ``Catalog`` can swap its backing handle without
@@ -109,7 +109,7 @@ def disable_consistency_rebuild(monkeypatch):
     which are write-path methods deferred to 6shq.2-6shq.6. Without
     this fixture, fresh-construction would trip the consistency rebuild
     on the daemon-mode Catalog and fail with AttributeError on the
-    proxy. Read-path parity does not depend on the rebuild — both
+    proxy. Read-path parity does not depend on the rebuild; both
     backends start from empty SQLite + empty JSONL and accumulate
     state through the same ``register`` / ``link`` calls.
     """
@@ -355,12 +355,12 @@ class TestResolveSpanTextParity:
 
 
 class TestExecuteProxyContract:
-    """Direct tests of the proxy surface — independent of Catalog."""
+    """Direct tests of the proxy surface; independent of Catalog."""
 
     def test_execute_returns_cursor_like_result(self, daemon_client: T2Client) -> None:
         from nexus.catalog.catalog_proxy import ExecuteProxy
         proxy = ExecuteProxy(daemon_client)
-        # SELECT against the bare schema — documents table is empty.
+        # SELECT against the bare schema; documents table is empty.
         cursor = proxy.execute("SELECT COUNT(*) FROM documents")
         assert cursor.fetchone() == (0,)
         # fetchall on a fresh SELECT returns the full list.

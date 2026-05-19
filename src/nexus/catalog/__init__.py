@@ -166,23 +166,25 @@ def reset_cache() -> None:
     the previous daemon's connection open (which would block the new
     daemon's ``server.wait_closed`` at teardown).
 
-    Note (3gdg review Minor-2): the cache and the singleton are
-    cleared under separate locks (``_cache_lock`` and
-    ``_t2_client_lock``). Between releasing the first and acquiring
-    the second, a concurrent ``open_cached`` / ``open_catalog`` call
-    can observe the cleared cache, get the not-yet-nulled stale
-    singleton, and cache a Catalog backed by a client that is about
-    to be closed. ``reset_cache`` is only called from test teardown
-    today; if a production caller ever invokes it under concurrent
-    Catalog construction, refactor to hold both locks across the
-    full operation.
+    RDR-112 6shq.6 (nexus-chak): close the two-lock gap flagged in
+    the 3gdg review. Hold ``_cache_lock`` across the inner
+    ``_t2_client_lock`` acquisition so a concurrent
+    ``open_cached`` / ``open_catalog`` cannot observe a cleared
+    cache alongside a not-yet-nulled singleton, cache a fresh
+    Catalog backed by the about-to-die client, and then strand
+    that Catalog with a dead proxy. Lock order matches the
+    ``open_cached`` -> ``open_catalog`` -> ``_get_t2_client`` chain
+    (``_cache_lock`` then ``_t2_client_lock``), so no deadlock.
+    The actual ``client.close()`` runs outside both locks because
+    the socket close is a slow I/O call and nothing else needs the
+    locks held during it.
     """
     global _t2_client
     with _cache_lock:
         _cached.clear()
-    with _t2_client_lock:
-        client = _t2_client
-        _t2_client = None
+        with _t2_client_lock:
+            client = _t2_client
+            _t2_client = None
     if client is not None:
         try:
             client.close()

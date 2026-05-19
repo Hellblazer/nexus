@@ -828,7 +828,17 @@ class Catalog:
                     "catalog operations to avoid split-store residue."
                 ),
             )
-            return cls(catalog_path, catalog_path / ".catalog.db")
+            # chak review IMPORTANT-2 (substantive-critic S2): mark the
+            # fallback instance so callers (and ``nx catalog doctor``)
+            # can distinguish a degraded-mode Catalog from a
+            # genuinely-daemon-bound one without grepping logs. The
+            # ``bootstrap_fallback_active`` attribute was added by
+            # nexus-o6aa.9.7 for the event-sourced bootstrap fallback;
+            # the daemon-down bootstrap is the same shape of degraded
+            # state and reuses the signal.
+            fallback = cls(catalog_path, catalog_path / ".catalog.db")
+            fallback.bootstrap_fallback_active = True
+            return fallback
 
     @staticmethod
     def is_initialized(catalog_path: Path) -> bool:

@@ -113,7 +113,7 @@ def _default_catalog_stats_fn(col: str) -> dict[str, Any]:
         # has no underlying sqlite3.Connection), which the bare
         # ``except Exception`` below silently swallowed and returned
         # ``{"last_indexed": None, "orphan_count": 0}`` for every
-        # collection — health checks would have silently shown zero
+        # collection; health checks would have silently shown zero
         # catalog stats with the daemon running.
         row = cat._db.execute(
             "SELECT MAX(indexed_at) "

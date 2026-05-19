@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-112 6shq.3 (nexus-siy7) — ``nx dt`` Catalog opens under
+"""RDR-112 6shq.3 (nexus-siy7): ``nx dt`` Catalog opens under
 ``NX_STORAGE_MODE=daemon``.
 
 Scope: the siy7 flip swaps ``Catalog(cat_path, ...)`` in
@@ -15,7 +15,7 @@ site would crash with ``DaemonNotRunningError`` because ``Catalog(...)``
 itself does not consult ``NX_STORAGE_MODE``.
 
 These tests pin the helper's behaviour under daemon-mode directly
-because ``_stamp_dt_uri_on_entry`` is a private function — the public
+because ``_stamp_dt_uri_on_entry`` is a private function; the public
 ``nx dt index`` command depends on DEVONthink AppleScript bindings
 that are not available in CI. Direct calls avoid the macOS-only
 surface while still exercising the siy7 code path.
@@ -152,7 +152,7 @@ class TestDtStampUnderDaemon:
         """When daemon mode is configured but no daemon is running,
         ``open_catalog`` raises ``DaemonNotRunningError`` (a
         ``RuntimeError`` subclass). The siy7 wrap absorbs it into the
-        warning path so the helper returns False without raising —
+        warning path so the helper returns False without raising,
         consistent with the helper's "log and continue" contract for
         upstream callers iterating over a batch of records.
         """

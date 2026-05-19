@@ -103,6 +103,14 @@ def live_t2_daemon(t2db: T2Database, config_dir: Path, daemon_env):
     try:
         yield daemon
     finally:
+        # chak review NIT (defensive): doctor tests currently do not
+        # invoke ``open_catalog`` / ``open_cached`` (they use
+        # ``_T2Inspector`` directly), so no T2Client singleton is
+        # populated. Calling ``reset_cache`` here keeps the fixture
+        # symmetric with the other daemon-mode suites and is a no-op
+        # when the singleton is None.
+        from nexus.catalog import reset_cache
+        reset_cache()
         _stop_daemon(daemon, loop)
 
 

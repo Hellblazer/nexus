@@ -155,7 +155,7 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
     # so a daemon-down RuntimeError folds into the existing warning path
     # via the try/except Exception below rather than a ClickException
     # translation. The trailing ``cat._db.close()`` is a no-op under daemon
-    # mode (ExecuteProxy.close — singleton lifecycle is owned by reset_cache).
+    # mode (ExecuteProxy.close; singleton lifecycle is owned by reset_cache).
     try:
         cat = open_catalog(cat_path)
     except RuntimeError as e:

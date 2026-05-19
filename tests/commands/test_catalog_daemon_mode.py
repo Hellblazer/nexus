@@ -221,7 +221,7 @@ class TestDaemonDownClickException:
             f"daemon-down should NOT surface a Python traceback; got: {result.output!r}"
         )
         # The original DaemonNotRunningError message points operators
-        # at ``nx daemon t2 start`` — that hint must survive the
+        # at ``nx daemon t2 start``; that hint must survive the
         # translation.
         assert "daemon" in result.output.lower(), result.output
 
@@ -517,7 +517,7 @@ class TestCatalogBackfillCollections:
         )
         assert result.exit_code == 0, result.output
         # Either "Nothing to backfill" (empty T3 + empty catalog) or
-        # a candidate list — both indicate the round-trip succeeded
+        # a candidate list; both indicate the round-trip succeeded
         # without racing the daemon.
         assert (
             "Nothing to backfill" in result.output

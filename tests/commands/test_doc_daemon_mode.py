@@ -171,7 +171,7 @@ class TestDocPhase4Factory:
         # ``Catalog.__init__`` when ``db=`` is an ExecuteProxy
         # instance. A False here would mean the factory bypassed
         # ``open_cached`` / ``open_catalog`` and constructed a direct
-        # CatalogDB — a regression on the 3gdg flip.
+        # CatalogDB; a regression on the 3gdg flip.
         assert getattr(cat, "_daemon_proxy", False), (
             "catalog should be proxy-backed in daemon mode after "
             "RDR-112 6shq.2 / nexus-3gdg; got direct CatalogDB"
