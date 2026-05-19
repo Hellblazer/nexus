@@ -39,11 +39,12 @@ A reader cannot tell from `open_cached(some_path)` whether they get a brand-new 
 
 #### Gap 2: nexus.mcp_infra._catalog_instance and post-store hook lists
 
-`src/nexus/mcp_infra.py` declares a parallel, independent singleton plus three global hook collections:
+`src/nexus/mcp_infra.py` declares a parallel, independent singleton plus three global hook collections at three different document-granularity tiers:
 
-- `_catalog_instance: Catalog | None = None` and `_catalog_mtime: float` at module load. `get_catalog()` lazy-initialises on first call; subsequent calls return the cached instance, refreshing via `_max_jsonl_mtime` checks.
-- `_post_store_hooks: list = []` and `_post_store_batch_hooks: list = []` accept registrations via `register_post_store_hook()` and `register_post_store_batch_hook()`. Hooks self-register at module import.
-- `_post_store_batch_hooks_with_catalog_doc_id: set = set()` classifies which hooks expect the catalog_doc_id argument; populated by id() of the registered hook function.
+- `_catalog_instance: Catalog | None = None` and `_catalog_mtime: float` at module load (line 28). `get_catalog()` lazy-initialises on first call; subsequent calls return the cached instance, refreshing via `_max_jsonl_mtime` checks.
+- **Chain 1 (single-doc, MCP-only)**: `_post_store_hooks: list = []` at line 469 with `register_post_store_hook` / `fire_post_store_hooks`. Signature `fn(doc_id, collection, content)`. Fires once per MCP `store_put`.
+- **Chain 2 (batch, CLI ingest)**: `_post_store_batch_hooks: list = []` at line 544 + `_post_store_batch_hooks_with_catalog_doc_id: set = set()` at line 552 with `register_post_store_batch_hook` / `fire_post_store_batch_hooks`. Signature `fn(doc_ids, collection, contents, embeddings, metadatas[, *, catalog_doc_id])`. Fires once per CLI chunk batch. Three load-bearing self-registrations at module load: `chash_dual_write_batch_hook`, `taxonomy_assign_batch_hook`, `manifest_write_batch_hook`.
+- **Chain 3 (document-grain, both paths)**: `_post_document_hooks: list = []` at line 1011 + `_post_document_hooks_with_doc_id: set = set()` at line 1019 with `register_post_document_hook` / `fire_post_document_hooks`. Signature `fn(source_path, collection, content)`. Fires once per document from BOTH MCP `store_put` AND every CLI ingest path. RDR-089 aspect extraction is the canonical consumer. Synchronous-only contract; async callables are silently unsupported.
 
 The `_catalog_instance` global is independent of `nexus.catalog._cached`. A test that monkeypatches `NEXUS_CATALOG_PATH` clears `_cached` (via the `_isolate_catalog` fixture) but the `_catalog_instance` retains its reference to the prior tmp_path. The conftest's `_restore_post_store_batch_hooks_after_test` fixture documents the consequence: "the first test that initialises the singleton pins it to its own tmp_path, so subsequent tests' manifest writes target the wrong (deleted) tmp catalog and the assertion `cat.get_manifest(tumbler)` returns []".
 
@@ -209,16 +210,30 @@ def current_runtime() -> NexusRuntime:
 
 Existing module functions keep their public signature for one cycle but read `current_runtime()` internally. New call sites prefer explicit `runtime` argument passing.
 
-**HookRegistry**:
+**HookRegistry** (covers all three chains, not just two):
 
 ```text
 class HookRegistry:
-    def register(self, fn: PostStoreHook, *, batch: bool = False) -> None: ...
-    def fire(self, doc_id: str, collection: str, content: str) -> None: ...
+    # Chain 1: single-doc (MCP only)
+    def register_single(self, fn: SingleHook) -> None: ...
+    def fire_single(self, doc_id: str, collection: str, content: str) -> None: ...
+
+    # Chain 2: batch (CLI ingest)
+    def register_batch(
+        self, fn: BatchHook, *, with_catalog_doc_id: bool = False,
+    ) -> None: ...
     def fire_batch(self, records: list[...]) -> None: ...
+
+    # Chain 3: document-grain (both paths) — synchronous-only contract
+    def register_document(
+        self, fn: DocumentHook, *, with_doc_id: bool = False,
+    ) -> None: ...
+    def fire_document(
+        self, source_path: str, collection: str, content: str,
+    ) -> None: ...
 ```
 
-Replaces the three module-level lists plus the id()-keyed classification set.
+Replaces the six module-level mutables (three lists + three id()-keyed classification sets) across `_post_store_hooks`, `_post_store_batch_hooks`, `_post_store_batch_hooks_with_catalog_doc_id`, `_post_document_hooks`, `_post_document_hooks_with_doc_id`. Per-chain failure isolation + T2 `hook_failures` persistence semantics preserved verbatim from the existing dispatchers.
 
 **Migration shape**: each phase touches one subsystem at a time and leaves the others operating against the legacy module-global accessors.
 
@@ -237,7 +252,7 @@ Replaces the three module-level lists plus the id()-keyed classification set.
 A runtime container provides three things the current pattern does not:
 
 1. **Explicit lifecycle**: construction and `close()` are called by the entry points. Tests construct per class; CLI constructs per invocation. No more implicit module-load initialisation.
-2. **Per-test isolation by construction**: each test gets its own runtime; no shared mutable state between tests; the 7 autouse fixtures become unnecessary.
+2. **Per-test isolation by construction**: each test gets its own runtime; no shared mutable state between tests; 5 of 7 autouse fixtures become unnecessary (the catalog/hook/env-config ones; `_restore_structlog_config_each_test` and `_auto_migrate_t2_in_tests` stay, outside RDR-118 scope).
 3. **CLAUDE.md compliance**: "Constructor injection, no global singletons, no service locators" is the project's stated rule. This brings the source into compliance.
 
 The migration cost is real (~140 call sites, ~25 modules) but bounded. The phased approach keeps each phase independently shippable and revertable.
@@ -299,7 +314,7 @@ The migration cost is real (~140 call sites, ~25 modules) but bounded. The phase
 
 ### Consequences
 
-- **Positive**: 7 autouse fixtures deletable; 250 lines of conftest gone; per-test isolation becomes constructor-level not fixture-level.
+- **Positive**: 5 autouse fixtures deletable (catalog/hook/env-config); ~200 lines of conftest gone; per-test isolation becomes constructor-level not fixture-level. (Structlog and T2 auto-migrate fixtures stay — orthogonal concerns.)
 - **Positive**: Future tests do not need to learn the monkeypatch dance; they construct a runtime and pass it.
 - **Positive**: CLAUDE.md architectural rule honored; new contributors find injection patterns, not service locators.
 - **Positive**: Enables the user's <3000 test target by removing structural reasons for fixture-heavy test code.
@@ -339,6 +354,7 @@ The migration cost is real (~140 call sites, ~25 modules) but bounded. The phase
 
 - [ ] All Critical Assumptions verified (Phase 1 spike covers them).
 - [ ] PR #864 (nexus-w1ip Phase 1A) merged so the test-count baseline is 8074.
+- [ ] `nexus-qw21` closed, OR its `t2_ctx()` daemon-mode fix is folded into Phase 1 Step 5. Without one of these, `_record_hook_failure` / `_record_batch_hook_failure` raise `RuntimeError` under daemon mode and mask hook exceptions — implementers would misattribute the failure to the migration itself.
 
 ### Minimum Viable Validation
 
@@ -393,11 +409,19 @@ Rewrite the file against the new runtime fixture. Confirm pass with and without 
 
 Active bead `nexus-qw21` (`t2_ctx()` unconditionally passes `_path_resolver` under daemon mode → raises `RuntimeError`) breaks `_record_hook_failure` and `_record_batch_hook_failure` in daemon mode. Either close `nexus-qw21` before Phase 1 ships, or fold its fix into Phase 1.
 
-### Phase 2: Single-doc hooks + mtime-refresh resolution
+### Phase 2: Single-doc hooks + document-chain + mtime-refresh resolution
 
-#### Step 1: Move `_post_store_hooks` single-doc chain to `HookRegistry`
+#### Step 0 (gate condition): Decide and document the mtime-refresh disposition
 
-`register_post_store_hook`, `fire_post_store_hooks` migrate to registry methods. Deferred from Phase 1 because the single-doc chain has no correctness coupling with catalog.
+Before deleting `_catalog_instance`, the A4 preservation S1 must be resolved: either absorb the mtime-refresh logic (mcp_infra.py:385-394, cross-process JSONL re-`_ensure_consistent` on advance) into `runtime.get_catalog()`, or explicitly retire it under daemon-mode with documented rationale. Silent removal breaks direct-mode clients that rely on cross-process refresh. This decision gates Phase 2 closure.
+
+#### Step 1: Move `_post_store_hooks` (single-doc chain) to `HookRegistry`
+
+`register_post_store_hook`, `fire_post_store_hooks` migrate to `registry.register_single` / `registry.fire_single`. Deferred from Phase 1 because the single-doc chain has no correctness coupling with catalog.
+
+#### Step 1b: Move `_post_document_hooks` (document-grain chain) to `HookRegistry`
+
+`register_post_document_hook`, `fire_post_document_hooks`, `_post_document_hooks_with_doc_id` migrate to `registry.register_document` / `registry.fire_document`. RDR-089 aspect-extraction self-registration moves to `install_default_hooks` factory alongside the batch-chain registrations from Phase 1.
 
 #### Step 2: Delete `_restore_post_store_batch_hooks_after_test` autouse fixture
 
@@ -434,20 +458,22 @@ None. ContextVar is in the stdlib.
 - **Scenario**: After Phase 2, delete `_restore_post_store_batch_hooks_after_test` and run the full suite. **Verify**: No failures attributable to leaked hook state.
 - **Scenario**: After Phase 3, delete the five env-isolation fixtures and run the full suite. **Verify**: No failures attributable to env leak.
 - **Scenario**: Lint test that no new module-level mutables appear in `nexus.catalog` or `nexus.mcp_infra`. **Verify**: AST scan returns empty.
-- **Scenario**: After Phase 4 completion, count collected tests. **Verify**: Suite drops materially. Honest target (A3 research finding): 8074 → ~5500 from singleton elimination alone. Reaching the user's <3000 ceiling requires additional sweeps tracked in `nexus-wuerf` (closed-RDR pin deletion, slow-tier integration marker, hotspot parametrize consolidation).
+- **Scenario**: After Phase 4 completion, count collected tests. **Verify**: Suite drops materially. Honest target (A3 research finding): 8074 → ~7700 from RDR-118 phases alone; ~5500 combined with `nexus-wuerf` sweeps (closed-RDR pin deletion, slow-tier integration marker, hotspot parametrize consolidation). Reaching the user's <3000 ceiling requires both efforts.
 
 ## Validation
 
 ### Testing Strategy
 
-1. **Scenario**: Phase 1 MVV. Rewrite `test_aspect_extractor.py` against the runtime fixture.
-   **Expected**: All 73 tests pass; file LOC reduces; no `monkeypatch.setenv` calls remain.
-2. **Scenario**: Phase 2 hook migration. Replace `register_post_store_batch_hook` global with `runtime.hooks.register`.
-   **Expected**: Existing hook firing paths unchanged; `nexus-bdag` self-registration moved to factory.
+1. **Scenario**: Phase 1 MVV. Rewrite `tests/test_post_store_hook.py` against the runtime fixture (the research-pivoted target — directly exercises the hook registry surface).
+   **Expected**: All 16 tests pass; local `_reset_hooks` autouse (~18 LOC) deletes entirely; pass with and without legacy autouse `_restore_post_store_batch_hooks_after_test`.
+2. **Scenario**: Phase 2 single-doc + document-chain hook migration. Move `_post_store_hooks` and `_post_document_hooks` to `HookRegistry`.
+   **Expected**: Existing hook firing paths unchanged; `nexus-bdag` (chash dual-write) and RDR-089 aspect extraction (document chain) self-registrations moved to `install_default_hooks` factory.
 3. **Scenario**: Phase 3 env consolidation. CLI dispatch reads from runtime, not env.
    **Expected**: `NEXUS_CONFIG_DIR=/tmp/x nx search ...` still routes correctly via CLI entry point resolution; tests construct runtime directly.
-4. **Scenario**: Phase 4 full-suite run with seven fixtures deleted.
-   **Expected**: Suite passes; collected count below 3000.
+4. **Scenario**: Phase 4 full-suite run with five fixtures deleted (catalog/hook/env-config). Two fixtures (`_restore_structlog_config_each_test`, `_auto_migrate_t2_in_tests`) intentionally remain.
+   **Expected**: Suite passes; collected count drops to ~7700 from RDR-118 phases alone. Reaching <3000 requires nexus-wuerf sweeps in addition.
+
+(A `test_aspect_extractor.py` rewrite remains a Phase 3 validation candidate because its monkeypatch usage is for `NEXUS_ASPECT_BACKEND` env vars, but it is not the Phase 1 MVV.)
 
 ### Performance Expectations
 
@@ -460,7 +486,13 @@ ContextVar lookups are O(1) and cheap. The current code does dict lookups agains
 
 ### Contradiction Check
 
-To be completed during `/nx:rdr-gate`.
+No contradictions found between research findings, design principles, and proposed solution after gate-round-1 in-place fixes. Specifically:
+
+- A4's mtime-refresh preservation (mcp_infra.py:385-394) is now a gate condition on Phase 2 closure (Phase 2 Step 0), not an implicit hope.
+- The MVV target (`test_post_store_hook.py`) is consistent between §Minimum Viable Validation and §Validation Testing Strategy Scenario 1 after fix.
+- The HookRegistry design covers all three hook chains (`_post_store_hooks` + `_post_store_batch_hooks` + `_post_document_hooks`) — the original draft only covered two; gate-round-1 added the document chain.
+- RDR-112 storage-mode semantics are preserved via the A4 S2 `(cat_path, mode)` keying requirement on the runtime cache.
+- RDR-062's `_catalog_instance` design intent is respected: the collapse is explicitly justified by A4 evidence that the two singletons accreted independently 24 days apart with no documented unified design.
 
 ### Assumption Verification
 
@@ -518,3 +550,26 @@ Three findings recorded in T2 (`nexus_rdr/118-research-{1,2,3}-*`):
 4. **A2 (autouse fixture deletion)** partially verified. Of the 7 conftest autouse fixtures, 5 are deletable (catalog/hook/env-config). 2 stay: `_restore_structlog_config_each_test` (structlog's own global) and `_auto_migrate_t2_in_tests` (RDR-112 P0.4 territory). RDR body's "7 fixtures deletable" claim corrected to 5.
 
 Forward-looking residual: A2 final verification requires post-Phase-4 full-suite run; A3 final verification requires the actual MVV spike.
+
+### 2026-05-19 — Gate round 1 (PASSED with in-place fixes)
+
+`/nx:rdr-gate RDR-118` ran all three layers:
+
+- **Layer 1 (structural)**: PASS. Four `#### Gap N:` headings present, all required sections present, 3 research findings recorded in T2.
+- **Layer 2 (assumption audit)**: PASS. All four Critical Assumptions have explicit status, method, and evidence citations.
+- **Layer 3 (substantive critique)**: PASS with 0 Critical, 2 Significant, 3 Observations. Critic verdict: "the problem is real, the research findings are credible and correctly narrow the Phase 1 scope, the ContextVar approach is appropriate, and the phased migration plan is honest about its coupling constraints."
+
+Significant issues fixed in-place during gate round 1:
+
+1. **Third hook chain (`_post_document_hooks`) was missing from the HookRegistry scope.** mcp_infra.py:1011 declares a third independent chain (RDR-089 aspect-extraction consumer, signature `fn(source_path, collection, content)`, fires from both MCP and CLI ingest paths). Original Gap 2 enumerated only two chains. Fixed: Gap 2 now enumerates all three chains by tier; HookRegistry design block now exposes `register_single` / `register_batch` / `register_document` methods covering all six module-level mutables.
+
+2. **MVV target contradiction between §Minimum Viable Validation and §Validation Scenario 1.** §MVV named `test_post_store_hook.py` (the research-pivoted target); §Validation Scenario 1 still named `test_aspect_extractor.py` (the pre-research draft target). Implementers reading §Validation as their acceptance checklist would have rewritten the wrong file. Fixed: §Validation Scenario 1 now names `test_post_store_hook.py`; `test_aspect_extractor.py` moved to a Phase 3 validation note.
+
+Observations addressed:
+
+- **Test count delta**: tightened from "8074 → ~5500 from singleton fix alone" (overstated by ~400) to "8074 → ~7700 from RDR-118 phases alone; ~5500 combined with nexus-wuerf sweeps."
+- **nexus-qw21 as formal prerequisite**: added to §Prerequisites as a third checkbox (close OR fold-into-Phase-1).
+- **mtime-refresh forcing function**: added Phase 2 Step 0 gate condition requiring the disposition (absorb or retire) to be decided and documented before Phase 2 closes.
+- **Stale "7 autouse fixtures" wording**: corrected to "5 deletable (catalog/hook/env-config), 2 stay" in §Consequences.
+
+Gate outcome: **PASSED**. RDR-118 is ready for `/nx:rdr-accept` once user reviews the gate-round-1 in-place fixes (per project policy: pause between gate and accept).
