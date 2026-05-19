@@ -148,63 +148,46 @@ def _restore_structlog_after_test():
 
 
 @pytest.fixture(autouse=True)
-def _restore_post_store_batch_hooks_after_test(request: pytest.FixtureRequest):
-    """Snapshot and restore ``mcp_infra._post_store_batch_hooks`` around
-    every test, and clear the cached catalog singleton so per-test
-    ``NEXUS_CATALOG_PATH`` redirects take effect.
+def _reset_runtime_state_between_tests(request: pytest.FixtureRequest):
+    """RDR-118 P2.S2 (nexus-0zgb3): minimal replacement for the deleted
+    ``_restore_post_store_batch_hooks_after_test`` autouse.
 
-    RDR-108 Phase 3 (nexus-bdag) made the three batch hooks
-    (``chash_dual_write_batch_hook``, ``taxonomy_assign_batch_hook``,
-    ``manifest_write_batch_hook``) self-register at module load in
-    ``nexus.mcp_infra`` so CLI ingest fires them. Several legacy tests
-    inline-clear ``_post_store_batch_hooks`` to assert specific hooks
-    in isolation; without restoration, the cleared list permanently
-    loses those load-bearing registrations for the rest of the
-    session and downstream catalog-manifest assertions silently fail.
+    After Phase 2 the post-store hook chains (single, batch, document)
+    live on ``NexusRuntime.hooks``. The runtime fixture provides per-
+    test isolation when opted into; tests that do NOT use the fixture
+    share the process-default runtime that
+    ``_ensure_runtime_for_shim`` lazy-builds. Without an explicit
+    reset between tests, the process-default would persist across
+    cases: its catalog cache and HookRegistry would leak state, and
+    its ``catalog_path`` would lock in the env value seen at first
+    access (defeating per-test ``NEXUS_CATALOG_PATH`` redirection via
+    ``_isolate_catalog``).
 
-    The catalog singleton in ``mcp_infra._catalog_instance`` is also
-    cleared. ``manifest_write_batch_hook`` resolves the catalog via
-    ``get_catalog()``; without per-test reset the first test that
-    initialises the singleton pins it to its own tmp_path, so
-    subsequent tests' manifest writes target the wrong (deleted) tmp
-    catalog and the assertion ``cat.get_manifest(tumbler)`` returns
-    ``[]``.
+    This fixture closes the process-default at setup and teardown via
+    ``nexus.catalog.reset_cache`` (which calls
+    ``_close_process_default``), clears the legacy
+    ``mcp_infra._catalog_instance`` test-override slot, and yields.
+    The next shim access lazy-constructs a fresh process-default
+    against the current env and re-installs the load-bearing default
+    hooks.
 
-    RDR-118 P1.S5 (nexus-rkkn2): a test or file marked
-    ``no_legacy_isolation`` skips this fixture's snapshot / restore
-    entirely. Used by the runtime-fixture rewrite of
-    ``tests/test_post_store_hook.py`` to prove that the runtime
-    container provides hook isolation on its own. Phase 2
-    (``nexus-0zgb3``) deletes this fixture once the single-doc and
-    document-grain chains migrate to the runtime as well.
+    A test or file marked ``no_legacy_isolation`` skips this fixture
+    entirely. Used by tests whose runtime fixture provides its own
+    isolation (e.g. ``tests/test_post_store_hook.py``). Phase 3 + 4
+    retire the env autouse fixtures that this one complements; the
+    final cleanup deletes this fixture too once every caller
+    constructs an explicit runtime.
     """
     if request.node.get_closest_marker("no_legacy_isolation") is not None:
         yield
         return
     import nexus.mcp_infra as _mod
     from nexus.catalog import reset_cache as _reset_catalog_cache
-    snapshot_batch = list(_mod._post_store_batch_hooks)
-    snapshot_single = list(_mod._post_store_hooks)
-    # Snapshot the catalog_doc_id-aware classification set too: a test
-    # that registers a fresh batch hook adds its ``id(fn)`` here, and
-    # without restoration the entry leaks for the rest of the session.
-    # Python may recycle the id() for a later object, which would then
-    # be (wrongly) classified as catalog_doc_id-aware on first dispatch.
-    snapshot_catalog_doc_id_set = set(
-        _mod._post_store_batch_hooks_with_catalog_doc_id
-    )
+
     _mod._catalog_instance = None
     _mod._catalog_mtime = 0.0
     _reset_catalog_cache()
     yield
-    _mod._post_store_batch_hooks.clear()
-    _mod._post_store_batch_hooks.extend(snapshot_batch)
-    _mod._post_store_hooks.clear()
-    _mod._post_store_hooks.extend(snapshot_single)
-    _mod._post_store_batch_hooks_with_catalog_doc_id.clear()
-    _mod._post_store_batch_hooks_with_catalog_doc_id.update(
-        snapshot_catalog_doc_id_set
-    )
     _mod._catalog_instance = None
     _mod._catalog_mtime = 0.0
     _reset_catalog_cache()
