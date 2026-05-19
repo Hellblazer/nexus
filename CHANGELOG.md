@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.13] - 2026-05-19
+
+Plugin-only patch on 4.32.12. Restores the `/nx:phase-review-gate`
+slash command from the archived develop branch (built as bead
+`nexus-j327`, commit `122feaff`, 2026-05-17). The skill enforces a
+two-pass cross-walk of RDR §Approach items against closing beads at
+every phase boundary, blocking phase close when any item is
+unaccounted for. Originally lost to main when the develop branch was
+memorialized as `archive/develop-2026-05-19` before reconciliation.
+
+Restoration is a P0 prerequisite of RDR-120 (storage substrate split
+with co-shipped-consumer moratorium), which cites this skill in
+§ Enforcement Backstops as a load-bearing per-phase cross-walk
+mechanism. The skill itself is substrate-agnostic; useful for any
+RDR with a numbered §Approach section.
+
+No root-package code changes. Plugin files only: skill + command +
+tests + registry/structure entries + hook-injection updates to
+session-start and subagent-start surfaces.
+
+See `nx/CHANGELOG.md` § 4.32.13 for the full restoration footprint.
+
 ## [4.32.12] - 2026-05-13
 
 Patch on 4.32.11. Two CI-correctness fixes plus substantial RDR

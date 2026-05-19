@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.13] - 2026-05-19
+
 ### Added: phase-review-gate (restored from archive/develop-2026-05-19)
 
 - **`/nx:phase-review-gate` slash command**: two-pass cross-walk gate
@@ -18,9 +20,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   direct regression against the actual RDR-112 Phase 1 (nexus-52lb,
   2026-05-15) closing-bead set; the gate blocks because §Approach
   item 2 (T3 daemon) had no closing bead, which is exactly the silent
-  scope reduction that was discovered three phases later.
-- **`docs/rdr/AGENTS.md`** updated to point operators at
-  `/nx:phase-review-gate` at every phase boundary.
+  scope reduction that was discovered three phases later. Six tests
+  in `TestRDR112Regression` skip with an explicit reason when the
+  RDR-112 file is absent from `main` (e.g. before the companion
+  tombstone PR merges); they auto-reactivate once the file is present.
+- **`nx/skills/using-nx-skills/SKILL.md`** updated with a phase-
+  boundary paragraph in the RDR-lifecycle section, catted at
+  SessionStart by `nx/hooks/hooks.json`.
+- **`nx/hooks/scripts/subagent-start.sh`** updated with a conditional
+  injection that fires on tasks matching phase/close/review-gate/
+  cross-walk patterns, surfacing the gate to subagents doing phase-
+  adjacent work.
 - Originally built as bead `nexus-j327` on the (now scrapped) RDR-112
   arc (commit `122feaff`, 2026-05-17). Skill itself is substrate-
   agnostic and applies to any RDR. Restored to `main` as a P0
