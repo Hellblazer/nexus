@@ -777,15 +777,58 @@ class Catalog:
         exists, prefer cloning so the new machine starts from the
         existing canonical history; otherwise initialise a local
         repo from scratch.
+
+        RDR-112 6shq.5 (nexus-o0pe): under
+        ``NX_STORAGE_MODE=daemon`` with a reachable T2 daemon the
+        returned Catalog wraps the daemon's CatalogStore via
+        ``open_catalog`` rather than opening a local ``CatalogDB``
+        against ``.catalog.db``. Pre-fix the ``cls(..., .catalog.db)``
+        call here created a split-store residue: setup_cmd's later
+        daemon-routed operations succeeded on the daemon's
+        ``memory.db`` while ``.catalog.db`` accumulated a parallel
+        state nobody read.
+
+        Daemon-down fallback: if daemon mode is active but no T2
+        daemon is reachable, fall back to legacy direct-mode
+        construction so the bootstrap path remains usable. CLI verbs
+        that subsequently need the catalog will surface a clean
+        ``ClickException`` via the 3gdg ``RuntimeError ->
+        ClickException`` translations; init itself must not fail
+        loud because the daemon may come online after the bootstrap
+        directory exists.
         """
         git_dir = catalog_path / ".git"
         if remote and not git_dir.exists():
             _git.clone_catalog(remote, catalog_path)
+        else:
+            _git.init_repo(catalog_path)
+            if remote:
+                _git.add_remote_origin_if_missing(catalog_path, remote)
+        # Defer to the module-level factory so the daemon-vs-direct
+        # decision lives in one place. Local import avoids the
+        # circular at module load (``nexus.catalog.__init__`` already
+        # depends on this file).
+        from nexus.catalog import open_catalog
+        try:
+            return open_catalog(catalog_path)
+        except RuntimeError as exc:
+            # o0pe review IMPORTANT-1: surface the silent fallback so
+            # operators can correlate later split-store residue with
+            # the bootstrap that produced it. The project rule
+            # ``feedback_no_silent_fallbacks_for_correctness.md``
+            # forbids unsignalled degraded paths.
+            _log.warning(
+                "catalog_init_daemon_down_fallback",
+                catalog_path=str(catalog_path),
+                error=str(exc),
+                detail=(
+                    "NX_STORAGE_MODE=daemon but T2 daemon unreachable; "
+                    "bootstrapping a local .catalog.db. Start the "
+                    "daemon (`nx daemon t2 start`) before subsequent "
+                    "catalog operations to avoid split-store residue."
+                ),
+            )
             return cls(catalog_path, catalog_path / ".catalog.db")
-        _git.init_repo(catalog_path)
-        if remote:
-            _git.add_remote_origin_if_missing(catalog_path, remote)
-        return cls(catalog_path, catalog_path / ".catalog.db")
 
     @staticmethod
     def is_initialized(catalog_path: Path) -> bool:
