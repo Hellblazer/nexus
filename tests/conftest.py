@@ -148,7 +148,7 @@ def _restore_structlog_after_test():
 
 
 @pytest.fixture(autouse=True)
-def _restore_post_store_batch_hooks_after_test():
+def _restore_post_store_batch_hooks_after_test(request: pytest.FixtureRequest):
     """Snapshot and restore ``mcp_infra._post_store_batch_hooks`` around
     every test, and clear the cached catalog singleton so per-test
     ``NEXUS_CATALOG_PATH`` redirects take effect.
@@ -169,7 +169,18 @@ def _restore_post_store_batch_hooks_after_test():
     subsequent tests' manifest writes target the wrong (deleted) tmp
     catalog and the assertion ``cat.get_manifest(tumbler)`` returns
     ``[]``.
+
+    RDR-118 P1.S5 (nexus-rkkn2): a test or file marked
+    ``no_legacy_isolation`` skips this fixture's snapshot / restore
+    entirely. Used by the runtime-fixture rewrite of
+    ``tests/test_post_store_hook.py`` to prove that the runtime
+    container provides hook isolation on its own. Phase 2
+    (``nexus-0zgb3``) deletes this fixture once the single-doc and
+    document-grain chains migrate to the runtime as well.
     """
+    if request.node.get_closest_marker("no_legacy_isolation") is not None:
+        yield
+        return
     import nexus.mcp_infra as _mod
     from nexus.catalog import reset_cache as _reset_catalog_cache
     snapshot_batch = list(_mod._post_store_batch_hooks)

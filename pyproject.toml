@@ -182,6 +182,7 @@ markers = [
     "integration: end-to-end tests requiring real services (deselect with '-m not integration')",
     "slow: expensive benchmarks (deselect with '-m not slow')",
     "no_auto_migrate: opt out of the autouse T2Database constructor-migration shim (RDR-112 P0.4)",
+    "no_legacy_isolation: opt out of the autouse _restore_post_store_batch_hooks_after_test snapshot/restore (RDR-118 P1.S5; the runtime fixture provides isolation independently)",
 ]
 
 [dependency-groups]
