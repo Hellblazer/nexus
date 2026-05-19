@@ -1,0 +1,730 @@
+---
+title: "Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers"
+id: RDR-120
+type: Architecture
+status: draft
+priority: medium
+author: Hal Hildebrand
+reviewed-by: self
+created: 2026-05-19
+accepted_date:
+related_issues: []
+related_rdrs: [RDR-004, RDR-041, RDR-105, RDR-108, RDR-112]
+supersedes: [RDR-112]
+related_tests: []
+implementation_notes: ""
+---
+
+# RDR-120: Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers
+
+> Revise during planning; lock at implementation.
+> If wrong, abandon code and iterate RDR.
+
+## Problem Statement
+
+T2 and T3 are opened today as **library-mode file handles**. Inside a sandbox
+container (Claude Desktop's bundled MCP runtime, ext-app sandboxes, `claude
+-p` sub-processes with their own filesystem view), "open the file at
+`~/.nexus/t2.sqlite`" silently resolves to a copy or an empty path. Each
+container gets its own SQLite, its own chroma collections, its own memory
+tier, and knowledge fragments invisibly across silos. T1 is correct as-is
+(per-process working memory, RDR-105). T2 and T3 are the cross-session,
+cross-instance tiers whose entire value proposition is that co-located
+processes see the same state.
+
+This RDR addresses **exactly that problem and nothing else**. The previous
+attempt (RDR-110/111/112/113/118/119, scrapped 2026-05-19) bundled the
+substrate split with a tuplespace, an event-projection cockpit, a host-trust
+model, and a UI fabric. Six weeks in, the substrate's correctness was a
+moving target because new abstractions kept landing on top of it. Tombstoned
+designs preserved as historical reference; postmortem at
+[`docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md`](../postmortem/2026-05-16-rdr110-113-remediation-chain.md).
+
+### Enumerated gaps to close
+
+#### Gap 1: T2 and T3 leak the storage substrate as a file path
+
+`T2Database` and the T3 chroma client are opened by direct filesystem path.
+Any process with read access to the path is a peer writer. Inside a sandbox
+container that path either does not exist (silent fork to an empty DB) or
+resolves to a bind-mounted copy (silent fork to a stale DB). No enforced
+single-writer boundary, no liveness check, no version negotiation.
+
+#### Gap 2: Multi-instance co-work fragments knowledge into silos
+
+When Claude Desktop, a `claude -p` sub-process, and a separate IDE agent all
+run on the same host, each opens its own T2/T3 handles. T2 writes from one
+instance are invisible to the others until/unless they re-open the file
+(and WAL behavior across containers is not guaranteed). Memory put in one
+cockpit is unreachable from another. This is the same fragmentation problem
+RDR-105 solved for T1 with env passdown, except that T1 fragmentation is
+desired and T2/T3 fragmentation is broken by design.
+
+#### Gap 3: No single-writer arbiter for future concurrency primitives
+
+The previous attempt named several primitives this substrate would unlock
+(atomic take, blocking take with `data_version` wake, event projection,
+subspace registry). Those primitives are **out of scope** for this RDR by
+design; the moratorium below blocks them. The relevant fact for *this* RDR
+is that the file-handle access pattern leaves no place to hang them later
+either. Establishing a daemon owner is a precondition; building anything on
+top is a follow-on, after the substrate proves itself.
+
+## Context
+
+### Background
+
+Three RDRs frame the problem:
+
+- **RDR-105** moved T1 from on-disk session records to env-passdown of a
+  host-local chroma. Settled the per-process working-memory question and
+  proved the host-service-plus-env-discovery pattern.
+- **RDR-108** locked the catalog-as-tree / T3-as-content-addressed-blob
+  identity model. Doc identity is `Document.tumbler`; chunk natural ID is
+  `sha256(chunk_text)[:32]`. Boundary work needs to preserve this.
+- **RDR-112 (scrapped)** designed a service split with dual-primary
+  discovery, UDS+TCP transport, storage-boundary lint, and an
+  `NX_STORAGE_MODE` cutover flag. The design was sound; the arc around it
+  was not. This RDR inherits the substrate design wholesale and discards
+  the arc.
+
+### Technical Environment
+
+In scope: every persistent shared-state store opened by direct file path
+under `src/nexus/`:
+
+- **T2 (seven domain stores)** behind the `T2Database` facade:
+  `memory_store`, `plan_library`, `chash_index`, `catalog_taxonomy`,
+  `aspect_extraction_queue`, `document_aspects`, `telemetry`. SQLite +
+  FTS5, WAL enabled.
+- **T3 local mode**: `chromadb.PersistentClient(path)` + local ONNX
+  embedder.
+- **T3 cloud mode**: `chromadb.CloudClient`. Already service-shaped (remote
+  HTTPS). Goes through the same `T3Client` abstraction for symmetry; no
+  daemon needed.
+- **CatalogDB** (`src/nexus/catalog/catalog_db.py:255`): own SQLite file,
+  own `sqlite3.connect()`. Structurally identical to a T2 domain store and
+  equally vulnerable to the container silo problem. **In scope** as P5.
+
+Out of scope explicitly:
+
+- **T1** stays per-process. RDR-105's env passdown is correct.
+- **Cross-host federation**. TCP listeners are loopback-only by default;
+  cross-host is a future RDR after substrate ships.
+- **All RDR-110/111/113/118/119 consumer abstractions.** See [§ Scope
+  Boundaries](#scope-boundaries) below.
+
+Direct-file-open call sites under `src/nexus/` outside `src/nexus/db/`
+(grepping `sqlite3.connect` + `PersistentClient`):
+
+- `src/nexus/commands/{tier_status,upgrade,plan}.py`
+- `src/nexus/{health,mcp_infra,search_engine,collection_audit,pipeline_buffer,_session_end_launcher}.py`
+- `src/nexus/catalog/{catalog_db.py,synthesizer.py}`
+
+P0's lint pass enumerates the full list and locks the inventory for P2/P4
+migration.
+
+## Scope Boundaries
+
+This is the most important section of this RDR. It is **load-bearing**: the
+2026-05-19 scrap happened because the prior arc lacked an explicit
+moratorium and accreted consumer abstractions onto an in-flight substrate.
+
+### In scope (P0 through P6)
+
+- T2 daemon: long-lived process owning the seven domain-store SQLite
+  handle(s). Exposes the existing `T2Database` facade API over UDS + TCP.
+- T3 daemon: managed `chroma run` subprocess. Exposes the existing chroma
+  client API via `HttpClient`.
+- Discovery: dual-primary (file at `~/.config/nexus/<tier>_addr.<uid>` and
+  env vars `NX_T2_SOCK` / `NX_T2_ADDR` / `NX_T3_ADDR`).
+- Thin `T2Client` / `T3Client` mirroring the existing facade signatures.
+  Call sites do not change beyond constructor injection.
+- Daemon-owned schema migration. The daemon is the sole migration runner.
+- `NX_STORAGE_MODE=direct|daemon` cutover flag. `direct` retains library
+  mode for P0-P5 migration safety; deleted in P6.
+- Storage-boundary lint (`nx doctor --check-storage-boundary`): AST scan
+  that fails CI on `sqlite3.connect` / `PersistentClient` outside
+  `src/nexus/db/` daemon-internal code.
+- Day-2 introspection minimum: `nx daemon t2 exec --raw <SQL>` for
+  read-only SQL inspection.
+- CatalogDB collapses into T2 as the eighth domain store (P5).
+- MVV: two `claude -p` sub-processes in different working directories share
+  a `memory_put` / `memory_get` round trip.
+
+### Out of scope, blocked by moratorium until P6+30 days
+
+All of the following are valid future work. **None lands while substrate
+work is in flight.** Each requires its own RDR filed *after* the substrate
+has been on `main` continuously for ≥30 days under `NX_STORAGE_MODE=daemon`.
+
+- Tuple-space primitives: atomic `in`/`out`/`rd`, blocking `take`,
+  `data_version` polling wake (RDR-110 substance).
+- Event-stream RPC: `EventStream(subspace_prefix, since_cursor) →
+  Stream<Event>`, glob subspace matching, lifecycle events (RDR-110/111
+  substance).
+- Subspace registry: schema-validated tuple types, version handshake on
+  subspace digest, plugin-supplied subspaces.
+- Hook bridge writing into a daemon-owned tuplespace (RDR-111 substance).
+- Cockpit panels reading off the event stream (RDR-111/119 substance).
+- ORB bindings watcher reacting to tuples (RDR-111 substance).
+- Host-trust model: peer-credential check on accept, multi-user UID
+  separation, token-based auth (RDR-113 substance).
+- Surfaces-as-tuples generalization (RDR-118 substance).
+- UI fabric / A2UI realization (RDR-119 substance).
+- Adding a new T2 domain store beyond the existing seven plus catalog
+  (eight total).
+- Adding a new RPC method to the daemon beyond what the existing facades
+  already expose.
+- Cross-host federation, non-loopback TCP bind, network auth.
+
+### Enforcement
+
+- **§ Scope Boundaries is part of the Finalization Gate.** The gate
+  rejects any scope drift.
+- **PR-level**: any PR touching `src/nexus/db/` or the daemon entry points
+  that adds a method not present in the pre-RDR `T2Database` /
+  `chromadb.api` surface fails review.
+- **Bead-level**: no bead may reference RDR-110/111/113/118/119 substance
+  while RDR-120 is in flight. Such beads are filed as deferred against a
+  future RDR.
+- **Calendar-level**: the moratorium lifts P6 + 30 days, marked by a
+  follow-on RDR if any consumer is wanted.
+
+The moratorium is not a suggestion. It is the only structural difference
+between this attempt and the scrapped one.
+
+## Research Findings
+
+### Investigation
+
+RDR-112's research (conducted 2026-05-12 via deep-research-synthesizer,
+preserved in T2 entries `112-research-A1..A4` and `112-research-A3-spike`)
+covers the substrate-substantive questions and is cited here rather than
+re-conducted. This RDR adds a postmortem-derived findings layer on what
+process discipline actually failed.
+
+### Key Discoveries (substrate, cited from tombstoned RDR-112)
+
+- T2 daemon is structurally required for the container case: Docker
+  overlayfs blocks the `mmap` semantics SQLite WAL requires, so a
+  bind-mounted host path opened from inside a container produces a
+  separate WAL per process. Silent silo failure mode.
+- T1's existing service shape (chroma HTTP over loopback, spawned at
+  `session.py:494-504`, discovered via `~/.config/nexus/t1_addr.<pid>`
+  + PPID walk) is a live production precedent.
+- `chroma run` is FastAPI + uvicorn with a configurable thread pool
+  (default 40). chromadb's "not for production" disclaimer attaches to
+  `EphemeralClient` / `PersistentClient`; `HttpClient` is explicitly the
+  "recommended production configuration."
+- RDR-105's PPID-walk + discovery-file pattern fails in
+  PID-namespace-isolated containers. The walk terminates at container
+  init (PID 1) and `~/.config` is not bind-mounted in typical sandbox
+  configurations. `NX_T2_ADDR` / `NX_T3_ADDR` env-var override is a
+  co-primary discovery path, not a fallback.
+
+### Key Discoveries (process, from 2026-05-16 postmortem)
+
+- **`run_until_signal()` hang** (60 minutes lost, 3 CI cycles): a local
+  `stop_event` only signal handlers could set wasn't shared with
+  `daemon.stop()`. Fix landed in PR #795. Lock-in: any daemon stop signal
+  must be hoisted to an instance attribute reachable from both signal
+  handlers and direct callers, or replaced with `asyncio.Event` shared
+  between them.
+- **CLAUDECODE env-var gate**: bridge `emit()` early-returned when env
+  var unset. All darwin dev shells had it; no CI runner did. Tests passed
+  locally, failed only on CI, looked PR-introduced. Lock-in: any test
+  that asserts on env-gated behavior must explicitly set the env via
+  fixture.
+- **Cross-contamination via worktrees**: parallel agents working on
+  adjacent files in worktrees produced sibling PRs (#787, #788, #789)
+  carrying portions of each other's code via git 3-way merge auto-resolve.
+  Lock-in: substrate work runs on a single branch, serial commits, no
+  parallel-agent fan-out across worktrees.
+- **The 30-file unrebaseable PR (#786)**: y0nb audit follow-ups grew to
+  1870 insertions while develop moved through ten daughter PRs. 70%
+  overlap with merged work; extracted (#803) and closed as superseded.
+  Lock-in: phase boundary = PR boundary. A PR that's still growing closes
+  no phase.
+- **Pre-existing develop failures masquerading as PR-introduced** (seven
+  tests dragged in by y0nb merge artifacts). Lock-in: every substrate PR
+  is gated on green CI on the base branch before the PR opens.
+- **Migration race (`nexus-9eaz`)**: `_upgrade_lock` semantics under
+  concurrent multi-process daemon startup, un-reproducible on darwin.
+  Skipped, instrumented, never bottomed. Lock-in: daemon is the **sole**
+  migration runner from day one. Multi-process migration concurrency is
+  not a problem the daemon design has to solve, because by design only
+  one process ever runs migrations.
+
+### Critical Assumptions
+
+- [x] **A1**: `chroma run` is production-quality enough to be the T3
+  service. **Status**: Documented (High confidence). **Method**:
+  Source Search of `chromadb/app.py` plus live T1 precedent. **Evidence
+  reused from**: tombstoned RDR-112 §A1.
+- [x] **A2**: SQLite WAL is not an acceptable substitute for a
+  single-writer daemon in the container case. **Status**: Verified
+  (High confidence). **Method**: Source Search +
+  sqlite.org/wal.html. **Evidence reused from**: tombstoned RDR-112 §A2.
+- [x] **A3**: Daemon-per-tier latency overhead is acceptable for common
+  reads. **Status**: Verified (High confidence). **Method**: Spike
+  (`/tmp/rdr112_a3_spike.py`, 2000 iters on real `MemoryStore`). Results:
+  direct p50=85 µs / p99=286 µs; UDS p50=100 µs / p99=300 µs (+15 µs);
+  TCP loopback p50=114 µs / p99=620 µs (+29 µs). All sub-ms. **Evidence
+  reused from**: tombstoned RDR-112 §A3 (T2 entry
+  `112-research-A3-spike`).
+- [x] **A4**: Discovery via per-host UID file is universally adequate.
+  **Status**: Refuted (High confidence). Mitigation: dual-primary file +
+  env-var discovery. **Evidence reused from**: tombstoned RDR-112 §A4.
+- [ ] **A5** (new): **Storage-boundary lint catches every regression
+  vector.** AST scan of `sqlite3.connect` and `PersistentClient` outside
+  `src/nexus/db/` is sufficient to prevent new direct-open call sites
+  during P2-P5 migration. **Status**: Unverified. **Method**: Spike
+  in P0; run the lint against a known-bad fixture and a known-good
+  fixture; confirm zero false negatives on the seven existing patterns
+  in `commands/`, `catalog/`, and top-level `nexus/`.
+- [ ] **A6** (new): **A daemon as sole migration runner eliminates the
+  `_upgrade_lock` race class.** With a single daemon process holding the
+  SQLite handle for the lifetime of the tier, multi-process migration
+  concurrency cannot arise; the `nexus-9eaz` instrumentation is
+  unnecessary in daemon mode. **Status**: Unverified. **Method**:
+  Source Search of `apply_pending` once daemon owns the connection;
+  confirm no path exists for a second process to enter the lock-protected
+  window.
+- [ ] **A7** (new): **The moratorium is enforceable through finalization
+  gates and review.** A written scope-boundary section plus a
+  Finalization Gate scope-verification step is sufficient to block scope
+  drift across the six phases. **Status**: Unverified (this is the
+  novel discipline this RDR is testing). **Method**: Per-phase
+  cross-walk of merged PRs against § Scope Boundaries at each phase
+  closeout; lock the result in the phase's review gate before the next
+  phase opens.
+
+## Proposed Solution
+
+### Approach
+
+Six phases. Each ships as one branch, one PR, one cutover. Each phase must
+be on `main` for **≥7 days** under real usage before the next opens.
+Linear, not parallel. The release of each phase is its own validation
+point.
+
+**Phase 0: Lint + cutover flag scaffolding**
+
+- Implement `nx doctor --check-storage-boundary`: AST scan of
+  `sqlite3.connect` + `PersistentClient` outside an allowlisted prefix
+  (`src/nexus/db/`). Modeled on
+  `tests/test_no_direct_catalog_writes_outside_projector.py` (RDR-101
+  Phase 3 ε-lint).
+- Add `NX_STORAGE_MODE` env-var honor as a **no-op** (only `direct` is a
+  valid value at this phase; `daemon` is rejected with "not yet
+  supported").
+- CI step runs the lint with `--fail-on-violation`. Initial run reports
+  the existing 30+ direct-open sites; baseline is recorded as the
+  allowlist for P1-P5 migration progress.
+- No client API changes. No daemon code yet.
+
+**Phase 1: T3 daemon (managed `chroma run`)**
+
+- `nx daemon t3 {start,stop,status,install,uninstall}` CLI verbs.
+- Daemon process: spawn-and-supervise `chroma run` with explicit port and
+  data path. Loopback TCP only (chromadb upstream constraint).
+- Discovery file: `~/.config/nexus/t3_addr.<uid>` containing the chroma
+  HTTP address. Env override: `NX_T3_ADDR`.
+- `T3Client` factory: returns an `HttpClient`-backed wrapper whose API
+  signature matches the current `T3Database` PersistentClient surface.
+- T3 call sites do **not** flip yet. `NX_STORAGE_MODE=direct` remains the
+  only valid value; daemon mode is exercised via direct construction in
+  the daemon-mode E2E test.
+- MVV variant: two `claude -p` sub-processes, both pointing at the
+  running T3 daemon via `NX_T3_ADDR`, share a T3 collection round trip.
+
+**Phase 2: T3 cutover**
+
+- All T3 call sites use `T3Client`. The `PersistentClient` direct opens
+  inside `src/nexus/db/t3.py` are deleted (or fenced behind
+  daemon-internal access).
+- `NX_STORAGE_MODE=daemon` becomes valid for T3 reads/writes.
+- Full pytest + integration suite green under `NX_STORAGE_MODE=daemon`.
+- ≥7 days on `main` under real usage before P3 opens.
+
+**Phase 3: T2 daemon**
+
+- `nx daemon t2 {start,stop,status,install,uninstall}` CLI verbs.
+- Daemon process: owns the seven domain-store SQLite handles (one per
+  store path, all under the daemon's process). Binds both UDS
+  (`~/.config/nexus/t2.sock`) and loopback TCP (announced via discovery
+  file).
+- Discovery: `~/.config/nexus/t2_addr.<uid>` carries both UDS path and
+  TCP host:port. Env overrides: `NX_T2_SOCK`, `NX_T2_ADDR`.
+- `T2Client`: thin RPC client mirroring the existing `T2Database` facade.
+  UDS preferred, TCP fallback when UDS unreachable.
+- **Daemon owns migration**. On startup, checks schema version, applies
+  pending, then accepts connections. Clients carry an
+  expected-schema-version constant; handshake fails loud on mismatch.
+- T2 call sites do not flip yet. Daemon mode exercised via the daemon
+  E2E suite.
+- MVV: two `claude -p` sub-processes in different working dirs share
+  `memory_put` / `memory_get`.
+
+**Phase 4: T2 cutover**
+
+- All T2 call sites use `T2Client`. Direct `sqlite3.connect` outside
+  `src/nexus/db/` daemon-internal becomes a hard lint violation (was
+  allowlisted in P0; allowlist removed for all migrated sites).
+- `NX_STORAGE_MODE=daemon` is the default for new installs; `direct` is
+  retained as a debug fallback.
+- 7-day soak under daemon mode.
+
+**Phase 5: Catalog collapse into T2**
+
+- `CatalogDB` (`src/nexus/catalog/catalog_db.py`) ports its schema and
+  read/write surface into T2 as the eighth domain store. Catalog client
+  goes through `T2Client`.
+- Direct `sqlite3.connect` in `catalog_db.py:255` and `synthesizer.py:792`
+  deleted.
+- Catalog test suite plus indexer-pipeline dogfood validates.
+
+**Phase 6: Decommission `direct` mode**
+
+- `NX_STORAGE_MODE` flag removed. Library-mode code paths deleted.
+- Release. The substrate ships.
+- **The moratorium lifts 30 days after P6 ships on `main`.** Any consumer
+  RDR may then be filed.
+
+### Existing Infrastructure Audit
+
+| Proposed Component | Existing Module | Decision |
+|---|---|---|
+| `nx daemon t3` | `chromadb` upstream `chroma run` | Wrap and supervise; no new HTTP code. |
+| `nx daemon t2` | `nexus.db.t2.T2Database` (seven domain stores) | Extend: wrap existing facade in a socket server; do not rewrite store logic. |
+| `T2Client` | `T2Database` facade | New: thin RPC client mirroring facade signature. |
+| `T3Client` | `T3Database` PersistentClient surface | New: `HttpClient`-backed wrapper. |
+| Discovery file | RDR-105's `~/.config/nexus/t1_addr.<claude_pid>` | Extend pattern; one address file per tier. |
+| Storage-boundary lint | `tests/test_no_direct_catalog_writes_outside_projector.py` (RDR-101 ε-lint) | Extend pattern; new check function in `commands/doctor.py`. |
+| Migration ownership | `nexus.db.migrations.apply_pending` | Move call site to daemon startup only; remove client-side `apply_pending` invocations. |
+| `nx daemon t2 exec --raw` | (none) | New: read-only SQL pass-through over RPC. |
+| Catalog into T2 (P5) | `nexus.catalog.catalog_db.CatalogDB` | Migrate schema; reuse store-internal patterns; delete `CatalogDB`. |
+
+### Decision Rationale
+
+**T3 ships first because the upstream gives us a free service.** `chroma
+run` is a documented, vendored, production-recommended HTTP server. Our
+P1 work is spawn-and-supervise + discovery + client wrapper. Zero novel
+concurrency. Zero new SQLite semantics. Zero migration ownership
+question. We prove the discovery mechanism, the cutover flag, and the
+client-shim pattern against a substrate we don't own. Then T2 ships into
+the same shape against a substrate where the concurrency story is ours.
+
+**T2 second because the migration race is solved by construction once
+the daemon owns the SQLite handle.** The `nexus-9eaz` `_upgrade_lock`
+race that the previous attempt could not bottom is a problem only if
+multiple processes can race on `apply_pending`. The daemon model makes
+that impossible: one process, one connection, one migration runner. The
+race class disappears; the instrumentation is unnecessary.
+
+**Catalog third because it's the largest blast radius.** 22k lines
+across the catalog package, the most heavily-used code in the project.
+Migrating after T2 daemon is proven means catalog gets a substrate that's
+been on `main` for ≥14 days under real usage before the catalog flip
+begins.
+
+**Serial PR chain, not parallel-agent fan-out.** Cross-contamination via
+shared worktrees is one of the documented failure modes from the
+previous attempt. Substrate commits land on one branch in order. Parallel
+agents may only work on orthogonal consumers of the substrate, after the
+substrate is merged.
+
+**Cutover, not dual-mode forever.** `NX_STORAGE_MODE=direct` is a
+migration safety valve, deleted in P6. The previous attempt's open-ended
+dual-mode is what kept schema-blindness in the inline planner alive.
+
+**No new primitives.** This is the moratorium. It is the only structural
+difference between this attempt and the scrapped one. Without it, the
+substrate's correctness becomes a moving target again.
+
+## Alternatives Considered
+
+### Alternative 1: Resurrect RDR-112 as the live design
+
+**Description**: Restore RDR-112 from git history, amend its scope to drop
+the RDR-110/111/113 consumer prerequisites, accept and implement against
+that document.
+
+**Pros**:
+- Less writing upfront.
+- Preserves the A1-A4 research findings as part of an accepted RDR.
+
+**Cons**:
+- RDR-112's prose is structurally entangled with the scrapped peers.
+  Problem Statement, Decision Rationale, Approach §7 (event stream), §8
+  (subspace registry), and the "Sequencing constraint vs RDR-110"
+  subsection exist specifically to serve RDR-110's atomic-take and
+  RDR-111's event projection. Stripping those leaves a different
+  document.
+- The new attempt's discipline (substrate-only scope, moratorium on
+  co-shipped consumers) is the single most important property. It must
+  be in the title and Problem Statement, not a §Revision History
+  footnote.
+- Phase 1/2 placeholders ("to be expanded during /nx:create-plan") are
+  exactly the softness that let scope creep in. The new RDR encodes
+  P0-P6 phasing and the ≥7-day cadence as RDR-level commitments.
+
+**Reason for rejection**: The most load-bearing change is the
+*discipline*. A fresh document carries it visibly; an amended document
+relegates it to a revision note.
+
+### Alternative 2: Status quo, hope WAL holds across containers
+
+**Description**: Keep opening T2 and T3 by path; rely on SQLite WAL and
+chroma's filesystem locking.
+
+**Cons**: Does not work across container boundaries; overlayfs blocks
+WAL `mmap`. Silent fork-into-empty-DB persists. The container fragmentation
+class of bugs (every "memory I saved isn't there" report) continues.
+
+**Reason for rejection**: Does not solve the stated problem.
+
+### Alternative 3: Single mega-daemon owning T1+T2+T3
+
+**Cons**: T1 must stay per-session; collapsing it breaks RDR-105's
+sibling-visibility model. T2 and T3 have very different scaling and
+crash-isolation profiles; a chroma OOM should not take down memory.
+
+**Reason for rejection**: Conflates tiers that RDR-105 deliberately
+separated.
+
+### Alternative 4: Cloud-only T3 (skip the T3 daemon, mandate `CloudClient`)
+
+**Cons**: Reintroduces a network-required dependency for local
+development; breaks air-gapped use cases; T3 cloud mode requires Voyage
+API credentials.
+
+**Reason for rejection**: Local mode is a first-class requirement.
+
+### Briefly Rejected
+
+- **Database-as-MCP-server only**: conflates the storage boundary with the
+  tool boundary. The tool layer already exists; we want a layer below it.
+- **Co-ship a minimal tuplespace primitive in P3**: this is the previous
+  attempt's failure mode in miniature. Hard no.
+
+## Trade-offs
+
+### Consequences
+
+- (+) Closes the cross-container silo class of bugs structurally.
+- (+) Forces the discipline future tiers (T4? cross-host?) will need
+  anyway.
+- (+) Multi-user host isolation is free via UDS file permissions; no
+  in-process auth code in v1.
+- (+) Migration race class (`_upgrade_lock`) disappears by construction.
+- (−) Two new long-lived processes per nexus install.
+- (−) Adds an RPC hop to every T2/T3 call: +15 µs p50 (UDS) / +29 µs p50
+  (TCP loopback) per A3 spike. Both sub-ms.
+- (−) Daemon ↔ client version handshake is a new operational concern.
+- (−) Containerised consumers require an orchestration step (UDS
+  bind-mount or TCP port allow-list + env-var injection).
+- (−) Ad-hoc DB access (`sqlite3 ~/.nexus/t2.db`, DBeaver, Datasette)
+  disappears when nexus runs in its own container. `nx daemon t2 exec
+  --raw <SQL>` is the supported replacement.
+- (−) Six phases × ≥7 days each = ~6 weeks calendar minimum. Slower than
+  the previous attempt's intended pace by ~2x, and ~10x more confident.
+
+### Risks and Mitigations
+
+- **Risk**: Daemon crash leaves clients hanging.
+  **Mitigation**: Health-check + auto-respawn; clients fail loud with
+  recovery instructions, no silent fallback to direct file.
+- **Risk**: Auto-spawn races between concurrent first-use clients.
+  **Mitigation**: Filesystem-lock-mediated spawn (spawner takes a lock
+  on the discovery file before forking).
+- **Risk**: Sandbox containers with no host filesystem visibility.
+  **Mitigation**: `NX_T2_SOCK` / `NX_T2_ADDR` / `NX_T3_ADDR` env-var
+  injection as co-primary discovery; daemon binds both UDS and TCP and
+  announces both on stdout for orchestrator capture.
+- **Risk**: A consumer slips through the moratorium.
+  **Mitigation**: § Scope Boundaries is part of the Finalization Gate;
+  per-phase cross-walk at each phase closeout; a written rule reviewers
+  can cite when rejecting drift.
+
+### Failure Modes
+
+- **Daemon down, client connects**: fail loud, suggest `nx daemon start`.
+  Do not silently degrade.
+- **Version mismatch**: client refuses to connect; report both versions.
+- **Daemon healthy, data corrupt**: same as today (SQLite/chroma surface
+  their own errors); daemon does not mask them.
+- **Phase exceeds ≥7-day soak with a regression**: do not open the next
+  phase; fix or revert.
+
+## Implementation Plan
+
+### Prerequisites
+
+- [x] RDR-112 tombstoned (this RDR's parent). Done 2026-05-19.
+- [x] Postmortem available on `main`. Done 2026-05-19 (this PR).
+- [ ] CI baseline: green on `main` at PR-open time. Tooling-level gate.
+- [ ] Storage-boundary lint passes against the current main without
+  daemon-internal allowlist (P0 baseline).
+
+### Minimum Viable Validation
+
+A single end-to-end demo, per phase:
+
+| Phase | MVV |
+|---|---|
+| P0 | Lint detects all 30+ direct-open sites; `direct` mode unchanged. |
+| P1 | Two `claude -p` sub-processes pointing at `NX_T3_ADDR` share a T3 round trip. |
+| P2 | Full pytest + integration green under `NX_STORAGE_MODE=daemon` for T3. |
+| P3 | Two `claude -p` sub-processes in different working dirs share `memory_put` / `memory_get`. |
+| P4 | Full pytest + integration green under `NX_STORAGE_MODE=daemon` for T2. |
+| P5 | Catalog read/write round trip through the T2 daemon; indexer pipeline dogfood. |
+| P6 | `NX_STORAGE_MODE` removed; full suite green. |
+
+### Day 2 Operations
+
+| Resource | List | Info | Stop | Verify | Backup |
+|---|---|---|---|---|---|
+| T2 daemon | `nx daemon list` | `nx daemon info t2` | `nx daemon stop t2` | health-check RPC | snapshot of underlying SQLite |
+| T3 daemon | `nx daemon list` | `nx daemon info t3` | `nx daemon stop t3` | health-check RPC | snapshot of chroma dir |
+| Discovery files | `ls ~/.config/nexus/*_addr.*` | `cat <file>` | rm on daemon stop | daemon startup writes | n/a |
+
+`nx daemon t2 exec --raw <SQL>` is the read-only inspection surface. A
+second `mode=ro` SQLite connection is opened by the daemon for `--raw`
+execution; SQL pattern matching is brittle and not used. Write surfaces
+(`exec --write`, `export`, `import`) are deferred to a follow-on RDR.
+
+### New Dependencies
+
+Probably none. Stdlib `socketserver` / `multiprocessing.connection` for
+T2 transport; `chromadb` itself for T3 (already a dep). Confirm in P0.
+
+## Test Plan
+
+- **Scenario**: Two processes, distinct working dirs, same host:
+  `memory_put` in one, `memory_get` in the other. **Verify**: value
+  reads back. *(Original MVV, the proof-of-correctness.)*
+- **Scenario**: Daemon killed mid-operation. **Verify**: client reports
+  a clear error, no silent fallback to direct file.
+- **Scenario**: Two clients race to auto-spawn. **Verify**: exactly one
+  daemon runs; the loser connects to the winner.
+- **Scenario**: Client built against daemon version N+1 connects to
+  daemon version N. **Verify**: handshake refuses with clear version
+  message.
+- **Scenario**: Cross-*container* memory visibility (Claude Desktop ↔
+  host `nx` CLI). **Verify**: visible.
+- **Scenario**: Daemon restart preserves data and notifies clients.
+  **Verify**: clients reconnect transparently or fail-loud per policy.
+- **Scenario**: Storage-boundary lint against a known-bad fixture (a
+  test file with a fresh `sqlite3.connect` outside `src/nexus/db/`).
+  **Verify**: lint fails with `file:line` of the violation. *(A5
+  verification.)*
+- **Scenario**: Migration race regression test. Spawn two
+  daemon-startup attempts in parallel against the same data path.
+  **Verify**: exactly one applies the migration; the other refuses to
+  start. *(A6 verification.)*
+- **Scenario**: Scope-boundary cross-walk per phase. After each
+  phase's PR merges, run a diff of merged code against § Scope
+  Boundaries. **Verify**: no out-of-scope work landed. *(A7
+  verification.)*
+
+## Validation
+
+### Testing Strategy
+
+1. **Scenario**: cross-process memory visibility (MVV). **Expected**:
+   visible.
+2. **Scenario**: cross-*container* memory visibility (Claude Desktop ↔
+   host `nx` CLI). **Expected**: visible.
+3. **Scenario**: daemon restart preserves data and notifies clients.
+   **Expected**: clients reconnect transparently or fail-loud per
+   policy.
+
+### Performance Expectations
+
+RPC overhead measured in RDR-112 §A3 spike: direct in-process p50 = 85
+µs; UDS p50 = 100 µs (+15 µs); TCP loopback p50 = 114 µs (+29 µs). All
+sub-millisecond. T3 store ops dominated by embedding latency (ONNX
+10-50 ms, Voyage 100-300 ms); transport hop below noise. Full data in
+T2 `nexus_rdr/112-research-A3-spike`.
+
+## Finalization Gate
+
+> Complete each item with a written response before marking this RDR as
+> **Accepted**.
+
+### Contradiction Check
+
+To be completed during gate.
+
+### Assumption Verification
+
+All four pre-existing assumptions (A1-A4) closed by RDR-112's gate; cited
+by reference. Three new assumptions added: A5 (lint coverage), A6
+(migration race elimination by construction), A7 (moratorium
+enforceability). All must reach Verified status before acceptance.
+
+### Scope Verification
+
+The Minimum Viable Validation (two `claude -p` sub-processes on the same
+host share memory via `memory_put` / `memory_get`) is in scope, not
+deferred.
+
+**§ Scope Boundaries is itself a gate item.** Gate must explicitly verify
+that no out-of-scope work has been added to the proposed solution. This
+gate item recurs at each phase closeout, not only at RDR acceptance.
+
+### Cross-Cutting Concerns
+
+- **Versioning**: daemon-client handshake required; mismatch fails loud.
+- **Build tool compatibility**: no new build-time deps anticipated.
+- **Licensing**: no new third-party libs anticipated.
+- **Deployment model**: daemons run on host; clients run anywhere with a
+  route to the host's UDS path or loopback TCP.
+- **IDE compatibility**: N/A.
+- **Incremental adoption**: `NX_STORAGE_MODE=direct|daemon`; `direct` is
+  the default during P0-P5 and is deleted in P6.
+- **Secret/credential lifecycle**: N/A in v1. Localhost-only, UDS uses
+  unix file permissions, TCP loopback-only. Multi-user trust deferred to
+  a post-substrate RDR.
+- **Memory management**: daemon long-lived; needs a budget (set during
+  planning based on expected concurrent client count and result-set
+  sizes).
+
+### Proportionality
+
+Document covers a structural shift in how every persistent shared-state
+store is accessed. Size justified. § Scope Boundaries is the
+proportionality control: it bounds what this RDR commits to and what it
+explicitly defers. The previous attempt's six-week scope creep is the
+counterfactual.
+
+## Open Questions
+
+- **Authentication beyond v1**: localhost-only + UDS permissions covers
+  single-user single-host. Multi-user and cross-host trust is deferred
+  to a post-substrate RDR. Naming it explicitly here so the deferral is
+  documented, not implicit.
+- **Daemon-as-MCP-server**: should the T2 daemon eventually *be* the MCP
+  server, collapsing two layers? Out of scope for this RDR; flagged for
+  a follow-on.
+- **Existing on-disk migration**: how do existing on-disk T2/T3 stores
+  get picked up by the new daemons? Presumably "the daemon opens the
+  same path the old direct client did," verified in P1 and P3.
+- **What signals lifting the moratorium**: P6 + 30 days under real
+  usage is the floor. Any other criteria? Open for the gate to settle.
+
+## References
+
+- Tombstoned RDR-112: [`docs/rdr/rdr-112-storage-as-service-container-boundary.md`](rdr-112-storage-as-service-container-boundary.md): substrate design source and A1-A4 research evidence.
+- Postmortem: [`docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md`](../postmortem/2026-05-16-rdr110-113-remediation-chain.md): what failed and why.
+- Tombstoned RDR-110/111/113/118/119: same directory: historical record
+  of the consumer arc that was scrapped alongside RDR-112.
+- RDR-105: T1 chroma architecture; live precedent for the
+  host-service-plus-env-discovery pattern this RDR generalizes.
+- RDR-108: Catalog/T3 identity model that P5 must preserve.
+
+## Revision History
+
+- 2026-05-19: Draft. Authored on `feature/rdr-120-storage-substrate-tombstones` immediately after tombstoning RDR-110/111/112/113/118/119.
