@@ -273,34 +273,67 @@ def _gather_chroma_chunks_by_field(
                 position = row.get("position")
             if chash and position is not None:
                 chash_position[chash] = int(position)
+    # nexus-m8a7: when the catalog manifest is available, select chunks
+    # by id (chash[:32]) rather than by ``where={doc_id: ...}``. Post
+    # RDR-108 Phase 3 chunks no longer carry ``doc_id`` metadata; the
+    # where-filter returns zero rows even though the manifest knows the
+    # exact chashes. Chroma's natural id IS chash[:32] (RDR-108), so a
+    # batched ``coll.get(ids=...)`` fetches them deterministically.
+    use_manifest_ids = bool(chash_position) and identity_field == "doc_id"
     try:
-        while True:
-            page = coll.get(
-                where={identity_field: match_value},
-                limit=page_limit,
-                offset=offset,
-                include=["documents", "metadatas"],
-            )
-            docs = page.get("documents") or []
-            mds = page.get("metadatas") or []
-            if not docs:
-                break
-            for md, doc in zip(mds, docs):
-                if not doc:
-                    continue
-                if isinstance(md, dict):
-                    chash = md.get("chunk_text_hash", "")
-                    if chash_position and chash in chash_position:
-                        ci = chash_position[chash]
+        if use_manifest_ids:
+            ids = [chash[:32] for chash in chash_position]
+            for batch_start in range(0, len(ids), page_limit):
+                page = coll.get(
+                    ids=ids[batch_start : batch_start + page_limit],
+                    include=["documents", "metadatas"],
+                )
+                docs = page.get("documents") or []
+                mds = page.get("metadatas") or []
+                for md, doc in zip(mds, docs):
+                    if not doc:
+                        continue
+                    if isinstance(md, dict):
+                        chash = md.get("chunk_text_hash", "")
+                        ci = chash_position.get(
+                            chash, int(md.get("chunk_index", 0) or 0)
+                        )
                     else:
-                        ci = int(md.get("chunk_index", 0) or 0)
-                else:
-                    ci = 0
-                chunks.append((ci, seq, doc))
-                seq += 1
-            if len(docs) < page_limit:
-                break
-            offset += page_limit
+                        ci = 0
+                    chunks.append((ci, seq, doc))
+                    seq += 1
+        if not use_manifest_ids or not chunks:
+            # Either no manifest available, or manifest-ids returned
+            # nothing (chunk id ≠ chash[:32] — pre-RDR-108 ingest, or
+            # tests that seed synthetic ids). Fall back to where-filter.
+            offset = 0
+            while True:
+                page = coll.get(
+                    where={identity_field: match_value},
+                    limit=page_limit,
+                    offset=offset,
+                    include=["documents", "metadatas"],
+                )
+                docs = page.get("documents") or []
+                mds = page.get("metadatas") or []
+                if not docs:
+                    break
+                for md, doc in zip(mds, docs):
+                    if not doc:
+                        continue
+                    if isinstance(md, dict):
+                        chash = md.get("chunk_text_hash", "")
+                        if chash_position and chash in chash_position:
+                            ci = chash_position[chash]
+                        else:
+                            ci = int(md.get("chunk_index", 0) or 0)
+                    else:
+                        ci = 0
+                    chunks.append((ci, seq, doc))
+                    seq += 1
+                if len(docs) < page_limit:
+                    break
+                offset += page_limit
     except Exception as e:
         return ReadFail(
             reason="unreachable",

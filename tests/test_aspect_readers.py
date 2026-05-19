@@ -341,6 +341,58 @@ class TestReadChromaUri:
         assert result.text == "first\n\nsecond\n\nthird"
         assert result.metadata["manifest_ordered"] is True
 
+    def test_manifest_ids_select_chunks_when_doc_id_metadata_absent(self, t3_client):
+        """nexus-m8a7: post-RDR-108 Phase 3, chunks have no ``doc_id``
+        in metadata. The reader must select chunks by their natural
+        Chroma id (chash[:32]) from the manifest instead of relying on
+        ``where={doc_id: ...}`` which returns zero rows.
+        """
+        from nexus.aspect_readers import ReadOk, _read_chroma_uri
+
+        col_name = "knowledge__phase3-no-doc-id"
+        col = t3_client.get_or_create_collection(col_name)
+        # Seed chunks with NO doc_id and NO source_path metadata — the
+        # exact shape DT-indexed PDFs land with. Chroma id == chash[:32].
+        chashes = ["a" * 64, "b" * 64, "c" * 64]
+        col.upsert(
+            ids=[c[:32] for c in chashes],
+            documents=["first", "second", "third"],
+            metadatas=[
+                {"chunk_text_hash": chashes[0], "title": "paper"},
+                {"chunk_text_hash": chashes[1], "title": "paper"},
+                {"chunk_text_hash": chashes[2], "title": "paper"},
+            ],
+        )
+
+        from dataclasses import dataclass
+
+        @dataclass
+        class _Row:
+            chash: str
+            position: int
+
+        def manifest_lookup(doc_id: str) -> list[_Row]:
+            assert doc_id == "1.99.2"
+            return [
+                _Row(chash=chashes[0], position=0),
+                _Row(chash=chashes[1], position=1),
+                _Row(chash=chashes[2], position=2),
+            ]
+
+        def doc_id_lookup(_coll: str, _sid: str) -> str:
+            return "1.99.2"
+
+        result = _read_chroma_uri(
+            f"chroma://{col_name}/anything",
+            t3=t3_client,
+            doc_id_lookup=doc_id_lookup,
+            manifest_lookup=manifest_lookup,
+        )
+        assert isinstance(result, ReadOk), result
+        assert result.text == "first\n\nsecond\n\nthird"
+        assert result.metadata["chunk_count"] == 3
+        assert result.metadata["manifest_ordered"] is True
+
     def test_no_matching_chunks_returns_read_fail_empty(self, t3_client):
         from nexus.aspect_readers import ReadFail, _read_chroma_uri
 
