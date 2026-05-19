@@ -42,7 +42,6 @@ import pytest
 
 from nexus.catalog.catalog import Catalog
 from nexus.mcp_server import (
-    _inject_catalog,
     _reset_singletons,
     catalog_list,
     catalog_search,
@@ -148,8 +147,13 @@ def test_mcp_catalog_list_under_fallback_returns_legacy_rows(
 ):
     """``catalog_list`` MCP tool must return all 10 legacy documents
     via the fallback read path, not an error stub.
+
+    The ``_isolate_catalog`` autouse fixture points ``NEXUS_CATALOG_PATH``
+    at ``tmp_path / "test-catalog"``, which is exactly where the
+    ``fallback_catalog`` fixture builds its on-disk state — so the MCP
+    tool's ``get_catalog()`` call constructs a fresh Catalog at the same
+    location and sees the fallback rows.
     """
-    _inject_catalog(fallback_catalog)
     capsys.readouterr()  # drain prior output
 
     result = catalog_list()
@@ -190,7 +194,6 @@ def test_mcp_catalog_show_under_fallback_returns_doc(
     """``catalog_show`` against a known legacy tumbler must return
     the document's full metadata, not an error stub.
     """
-    _inject_catalog(fallback_catalog)
     capsys.readouterr()
 
     # The first registered doc is at 1.1.1.
@@ -217,7 +220,6 @@ def test_mcp_catalog_search_under_fallback_does_not_crash(
     with predictable titles (``doc-N.md``) so a substring query has
     something to match against.
     """
-    _inject_catalog(fallback_catalog)
     capsys.readouterr()
 
     result = catalog_search(query="doc")

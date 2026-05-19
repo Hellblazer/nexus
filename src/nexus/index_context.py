@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from nexus.config import TuningConfig
+    from nexus.hook_registry import HookRegistry
     from nexus.indexer_utils import StalenessCache
 
 
@@ -85,6 +86,22 @@ class IndexContext:
     # current) from O(N) round-trips into a single paginated sweep.
     # ``None`` is the legacy / fall-through path.
     staleness_cache: "StalenessCache | None" = field(default=None)
+
+    # Post-store HookRegistry threaded down from the entry point so the
+    # per-file indexer fires the single / batch / document chains via the
+    # explicit instance rather than reaching into module-level globals.
+    # ``None`` is the contract signal that the caller did not wire a
+    # registry; ``__post_init__`` materialises a fresh empty
+    # ``HookRegistry`` so callers downstream can always assume the field
+    # is populated without an Optional check. Entry points wire
+    # load-bearing default consumers via
+    # :func:`nexus.hook_registry.install_default_hooks`.
+    hooks: "HookRegistry | None" = field(default=None)
+
+    def __post_init__(self) -> None:
+        if self.hooks is None:
+            from nexus.hook_registry import HookRegistry
+            self.hooks = HookRegistry()
 
 
 if TYPE_CHECKING:

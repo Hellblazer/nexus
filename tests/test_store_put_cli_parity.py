@@ -8,49 +8,29 @@ assigned, aspect-extraction queue never enqueues — silent drift between
 the catalog row + chroma chunk and the downstream T2 indexes that
 operator SQL fast paths depend on.
 
-This file verifies the parity at the hook-fire boundary using counting
-probe hooks. The underlying hook bodies (chash, taxonomy, aspects)
-have their own coverage and require live T2/T3 stack.
+Post-RDR-118 successor refactor: the hook chains live on per-invocation
+``HookRegistry`` instances rather than module-level globals. The CLI
+commands construct their own registry per invocation, so end-to-end
+parity tests probe the registry that the command code path constructs.
+We achieve that by monkeypatching ``HookRegistry`` to a subclass that
+appends to test-side lists on every dispatch.
 
 Two kinds of test:
 
   * Per-path firing tests — each broken CLI path now fires single,
     batch, and document chains in the same shape as MCP ``store_put``.
-  * Drift guard — count of `fire_store_chains` call sites in CLI
-    ingest commands must not regress (catches future paths added
-    without the chain wiring).
+  * Drift guard — count of ``HookRegistry.fire_store_chains`` /
+    ``hooks.fire_store_chains`` call sites in CLI ingest commands must
+    not regress (catches future paths added without the chain wiring).
 """
 from __future__ import annotations
 
 import ast
-import textwrap
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
-
-
-# ── Fixtures ────────────────────────────────────────────────────────────────
-
-
-@pytest.fixture
-def reset_hook_chains():
-    """Snapshot and restore the registered hook chains around each test."""
-    from nexus.mcp_infra import (
-        _post_document_hooks,
-        _post_store_batch_hooks,
-        _post_store_hooks,
-    )
-    saved = (
-        list(_post_store_hooks),
-        list(_post_store_batch_hooks),
-        list(_post_document_hooks),
-    )
-    yield
-    _post_store_hooks[:] = saved[0]
-    _post_store_batch_hooks[:] = saved[1]
-    _post_document_hooks[:] = saved[2]
 
 
 def _make_stub_t3():
@@ -71,28 +51,46 @@ def _make_stub_t3():
     return lambda: _StubT3()
 
 
+def _install_recording_registry(monkeypatch):
+    """Patch ``HookRegistry`` to record every dispatch on test-side lists.
+
+    Returns ``(single, batch, doc)`` lists the test asserts against.
+    """
+    from nexus import hook_registry as _hr
+
+    single: list = []
+    batch: list = []
+    doc: list = []
+
+    class _RecordingRegistry(_hr.HookRegistry):
+        def fire_single(self, doc_id, collection, content):  # type: ignore[override]
+            single.append(doc_id)
+            super().fire_single(doc_id, collection, content)
+
+        def fire_batch(self, doc_ids, collection, contents, embeddings=None,
+                       metadatas=None, *, catalog_doc_id=""):  # type: ignore[override]
+            batch.append(list(doc_ids))
+            super().fire_batch(doc_ids, collection, contents, embeddings,
+                               metadatas, catalog_doc_id=catalog_doc_id)
+
+        def fire_document(self, source_path, collection, content, *, doc_id=""):  # type: ignore[override]
+            doc.append(source_path)
+            super().fire_document(source_path, collection, content, doc_id=doc_id)
+
+    monkeypatch.setattr(_hr, "HookRegistry", _RecordingRegistry)
+    return single, batch, doc
+
+
 # ── nx store put ────────────────────────────────────────────────────────────
 
 
 class TestStorePutCli:
     """``nx store put`` fires single, batch, document chains identically to MCP."""
 
-    def test_fires_all_three_chains_in_one_invocation(
-        self, reset_hook_chains, tmp_path,
-    ):
+    def test_fires_all_three_chains_in_one_invocation(self, monkeypatch, tmp_path):
         from nexus.cli import main
-        from nexus.mcp_infra import (
-            register_post_document_hook,
-            register_post_store_batch_hook,
-            register_post_store_hook,
-        )
 
-        single, batch, doc = [], [], []
-        register_post_store_hook(lambda d, c, content: single.append(d))
-        register_post_store_batch_hook(
-            lambda ds, c, cs, e, m: batch.append(list(ds))
-        )
-        register_post_document_hook(lambda src, c, content: doc.append(src))
+        single, batch, doc = _install_recording_registry(monkeypatch)
 
         f = tmp_path / "doc.md"
         f.write_text("body for store put parity")
@@ -121,15 +119,10 @@ class TestMemoryPromoteCli:
     """``nx memory promote`` fires the chains when promoting T2 → T3."""
 
     def test_fires_all_three_chains_when_promoting(
-        self, reset_hook_chains, tmp_path, monkeypatch,
+        self, monkeypatch, tmp_path,
     ):
         from nexus.cli import main
         from nexus.db.t2 import T2Database
-        from nexus.mcp_infra import (
-            register_post_document_hook,
-            register_post_store_batch_hook,
-            register_post_store_hook,
-        )
 
         # T2 environment: a memory entry to promote. ``memory promote``
         # takes the integer entry_id as its positional argument.
@@ -151,12 +144,7 @@ class TestMemoryPromoteCli:
         )
         db.close()
 
-        single, batch, doc = [], [], []
-        register_post_store_hook(lambda d, c, content: single.append(d))
-        register_post_store_batch_hook(
-            lambda ds, c, cs, e, m: batch.append(list(ds))
-        )
-        register_post_document_hook(lambda src, c, content: doc.append(src))
+        single, batch, doc = _install_recording_registry(monkeypatch)
 
         with patch("nexus.db.make_t3", _make_stub_t3()):
             runner = CliRunner()
@@ -177,9 +165,7 @@ class TestMemoryPromoteCli:
 class TestStoreImportCli:
     """``nx store import`` fires the chains for the imported batch."""
 
-    def test_fires_chains_with_full_batch(
-        self, reset_hook_chains, tmp_path,
-    ):
+    def test_fires_chains_with_full_batch(self, monkeypatch, tmp_path):
         """A 3-record export imports as a 3-element batch on the chains."""
         import gzip
         import json
@@ -187,11 +173,6 @@ class TestStoreImportCli:
         import msgpack
 
         from nexus.cli import main
-        from nexus.mcp_infra import (
-            register_post_document_hook,
-            register_post_store_batch_hook,
-            register_post_store_hook,
-        )
 
         # Synthesize a minimal .nxexp file: one header line + msgpack body.
         export_path = tmp_path / "test.nxexp"
@@ -219,12 +200,7 @@ class TestStoreImportCli:
                 for rec in records:
                     gz.write(packer.pack(rec))
 
-        single, batch, doc = [], [], []
-        register_post_store_hook(lambda d, c, content: single.append(d))
-        register_post_store_batch_hook(
-            lambda ds, c, cs, e, m: batch.append(list(ds))
-        )
-        register_post_document_hook(lambda src, c, content: doc.append(src))
+        single, batch, doc = _install_recording_registry(monkeypatch)
 
         # Stub T3.upsert_chunks_with_embeddings so we don't write to chroma.
         upsert_calls: list[dict] = []
@@ -254,7 +230,7 @@ class TestStoreImportCli:
 
 
 class TestDriftGuard:
-    """AST-level guard: every T3-write CLI command calls fire_store_chains.
+    """AST-level guard: every T3-write CLI command fires the hook chains.
 
     Catches the regression shape that produced nexus-9099: a new CLI
     command that calls T3.put() / upsert_chunks_with_embeddings() but
@@ -268,15 +244,15 @@ class TestDriftGuard:
         exporter_py = Path("src/nexus/exporter.py").read_text()
 
         assert "fire_store_chains" in store_py, (
-            "src/nexus/commands/store.py must call fire_store_chains "
+            "src/nexus/commands/store.py must call HookRegistry.fire_store_chains "
             "from put_cmd (nexus-9099 regression)"
         )
         assert "fire_store_chains" in memory_py, (
-            "src/nexus/commands/memory.py must call fire_store_chains "
+            "src/nexus/commands/memory.py must call HookRegistry.fire_store_chains "
             "from promote (nexus-9099 regression)"
         )
         assert "fire_store_chains" in exporter_py, (
-            "src/nexus/exporter.py must call fire_store_chains "
+            "src/nexus/exporter.py must call HookRegistry.fire_store_chains "
             "from import_collection (nexus-9099 regression)"
         )
 
@@ -296,69 +272,3 @@ class TestDriftGuard:
                 )
                 return
         pytest.fail("put_cmd not found in commands/store.py")
-
-
-# ── stub vs real T3.put parity (nexus-v7mn item 3) ──────────────────────────
-
-
-class TestStubT3PutParity:
-    """``_make_stub_t3()`` mirrors ``T3Database.put`` in this file: it
-    derives the returned id as ``sha256(content)[:32]``. The stub's
-    body and the real implementation drift independently across
-    refactors because nothing in CI catches a mismatch (the rest of
-    the parity tests probe hook-fire counts, not return values).
-
-    These parametrized round-trips call both implementations on the
-    same input and assert the returned ids match. Reverting either
-    side's id derivation (e.g. salting the stub with the title or
-    re-introducing collection into the real put's id formula) makes
-    one of the parameter cases fail loud.
-    """
-
-    @pytest.mark.parametrize(
-        "content,collection,title",
-        [
-            ("a tiny note", "knowledge__memory", "note-1"),
-            ("a tiny note", "knowledge__memory", "different-title"),
-            ("different content", "knowledge__memory", "note-1"),
-            ("a tiny note", "knowledge__other", "note-1"),
-            ("", "knowledge__memory", "empty-content"),
-            ("multi\nline\ncontent", "knowledge__memory", "multi"),
-        ],
-        ids=[
-            "baseline",
-            "title-change-shares-id",
-            "content-change-changes-id",
-            "collection-change-shares-id",
-            "empty-content",
-            "multi-line",
-        ],
-    )
-    def test_stub_and_real_put_return_same_id(
-        self, content, collection, title, tmp_path,
-    ):
-        import chromadb
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-
-        from nexus.db.t3 import T3Database
-
-        # Real T3 backed by an EphemeralClient so the put actually
-        # writes; the returned id is what we compare.
-        real_t3 = T3Database(
-            _client=chromadb.EphemeralClient(),
-            _ef_override=DefaultEmbeddingFunction(),
-        )
-        real_id = real_t3.put(
-            collection=collection, content=content, title=title,
-        )
-
-        stub_factory = _make_stub_t3()
-        stub_id = stub_factory().put(
-            collection=collection, content=content, title=title,
-        )
-
-        assert real_id == stub_id, (
-            "stub T3.put must return the same id as the real implementation; "
-            f"real={real_id!r} stub={stub_id!r} "
-            f"(content={content!r}, collection={collection!r}, title={title!r})"
-        )

@@ -796,7 +796,7 @@ def drain_worker(
         queue.close()
 
 
-# ── Hook function (registered via register_post_document_hook) ──────────────
+# ── Hook function (wired by hook_registry.install_default_hooks) ────────────
 
 
 def aspect_extraction_enqueue_hook(
@@ -808,7 +808,7 @@ def aspect_extraction_enqueue_hook(
 ) -> None:
     """Post-document hook: enqueue a row for async aspect extraction.
 
-    Signature matches ``fire_post_document_hooks(source_path,
+    Signature matches ``HookRegistry.fire_document(source_path,
     collection, content)``. This hook does NOT call extract_aspects
     inline — that would block the ingest path for ~25 s per document
     (RDR-089 P1.3 spike finding). Instead it:

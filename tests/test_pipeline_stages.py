@@ -405,14 +405,11 @@ class TestUploaderLoop:
         def _capture_batch(doc_ids, collection, contents, embeddings, metadatas, **_kwargs):
             seen_in_hook.append([dict(m) for m in metadatas])
 
-        with patch(
-            "nexus.mcp_infra._post_store_batch_hooks",
-            [_capture_batch],
-        ), patch(
-            "nexus.mcp_infra._post_store_batch_hooks_with_catalog_doc_id",
-            {id(_capture_batch)},
-        ):
-            uploader_loop("h1", db, t3, "docs__test", threading.Event())
+        from nexus.hook_registry import HookRegistry
+        hooks = HookRegistry()
+        hooks.register_batch(_capture_batch)
+
+        uploader_loop("h1", db, t3, "docs__test", threading.Event(), hooks=hooks)
 
         # Two batches expected: 128 + 72.
         assert [len(b) for b in seen_in_hook] == [128, 72]

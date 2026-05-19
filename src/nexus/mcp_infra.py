@@ -25,14 +25,6 @@ _t3_lock = threading.Lock()
 _collections_cache: tuple[list[str], float] = ([], 0.0)
 _COLLECTIONS_CACHE_TTL = 60.0
 
-# Test-injection slot only — production never reads from this except as a
-# test-override hook (see ``inject_catalog``). The process-level Catalog
-# cache that lived here was eliminated; ``get_catalog()`` now constructs
-# fresh per call. Tests that want to assert against a specific Catalog
-# call ``inject_catalog(cat)`` to populate this slot; ``reset_singletons``
-# clears it.
-_catalog_instance = None
-
 # ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────
 # Session-keyed cache of recent search results. Populated by the search tool,
 # consumed by store_put and catalog_link to correlate agent actions with the
@@ -265,12 +257,12 @@ def get_catalog():
     once and pass the result down (top-down DI) — see also
     ``commands/catalog.py:_get_catalog`` for the established pattern.
 
-    Test override: ``inject_catalog(cat)`` populates a slot that this
-    function returns in preference to constructing fresh; used by
-    tests that need to assert against a specific Catalog instance.
+    Tests that need a specific Catalog instance under test set
+    ``NEXUS_CATALOG_PATH`` (which ``catalog_path()`` reads) so this
+    function constructs at the test's location; the autouse
+    ``_isolate_catalog`` fixture in ``tests/conftest.py`` provides
+    a per-test default.
     """
-    if _catalog_instance is not None:
-        return _catalog_instance
     from nexus.catalog import Catalog
     from nexus.config import catalog_path
     path = catalog_path()
@@ -346,287 +338,15 @@ def resolve_tumbler_mcp(cat, value):
     return resolve_tumbler(cat, value)
 
 
-# ── Post-store hooks (RDR-070, nexus-7h2) ────────────────────────────────────
-# Synchronous hooks that fire after every store_put. Exceptions are caught per-
-# hook and logged, never propagated — same non-fatal pattern as auto_linker.
-
-_post_store_hooks: list = []
-
-
-def register_post_store_hook(fn) -> None:
-    """Register a callable(doc_id, collection, content) to fire after store_put."""
-    _post_store_hooks.append(fn)
-
-
-def fire_post_store_hooks(doc_id: str, collection: str, content: str) -> None:
-    """Invoke all registered post-store hooks. Exceptions logged, never raised.
-
-    Failures are additionally persisted to T2 ``hook_failures`` (GH #251) so
-    ``nx taxonomy status`` can surface them with an Action line. The persist
-    path is itself guarded — if the T2 write fails, the store_put still
-    succeeds and structlog still carries the original warning.
-    """
-    import structlog
-    _hook_log = structlog.get_logger()
-    for hook in _post_store_hooks:
-        try:
-            hook(doc_id, collection, content)
-        except Exception as exc:
-            hook_name = getattr(hook, "__name__", "?")
-            _hook_log.warning(
-                "post_store_hook_failed",
-                hook=hook_name,
-                exc_info=True,
-            )
-            _record_hook_failure(
-                doc_id=doc_id,
-                collection=collection,
-                hook_name=hook_name,
-                error=str(exc),
-            )
-
-
-def _record_hook_failure(
-    *,
-    doc_id: str,
-    collection: str,
-    hook_name: str,
-    error: str,
-) -> None:
-    """Persist a post-store hook failure to T2 ``hook_failures`` (GH #251).
-
-    Populates ``chain='single'`` (RDR-089 4.14.2 schema) when the column
-    is present, falling back to a chain-less insert on pre-4.14.2 DBs.
-    Secondary best-effort path: if the T2 write itself fails, swallow
-    the second failure (the primary warning already reached structlog)
-    rather than mask the original hook exception.
-    """
-    import sqlite3
-    truncated = error[:2000]
-    try:
-        with t2_ctx() as t2:
-            # ``hook_failures`` is cross-cutting — any domain's connection
-            # points at the same SQLite file. Use the taxonomy conn because
-            # the status line that surfaces these rows already reads there.
-            conn = t2.taxonomy.conn
-            with t2.taxonomy._lock:
-                try:
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error, chain) "
-                        "VALUES (?, ?, ?, ?, 'single')",
-                        (doc_id, collection, hook_name, truncated),
-                    )
-                except sqlite3.OperationalError as exc:
-                    msg = str(exc)
-                    if "no column named" not in msg and "no such column" not in msg:
-                        raise
-                    # Pre-4.14.2 schema: chain column absent.
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error) VALUES (?, ?, ?, ?)",
-                        (doc_id, collection, hook_name, truncated),
-                    )
-                conn.commit()
-    except Exception:
-        import structlog
-        structlog.get_logger().debug(
-            "hook_failure_persist_failed",
-            hook=hook_name,
-            collection=collection,
-            exc_info=True,
-        )
-
-
-# ── Post-store batch hooks (RDR-095, nexus-wxcb) ─────────────────────────────
-# Parallel batch-shape contract for bulk-ingest enrichment. Single-document
-# hooks above fire from MCP store_put; batch hooks fire from CLI indexing
-# paths where N docs land in one operation and consumers benefit from
-# batched dependency calls (e.g. one ChromaDB query for N centroids vs N
-# sequential queries). Same per-hook failure-isolation pattern: exceptions
-# captured, persisted to T2 hook_failures, never propagated.
-
-_post_store_batch_hooks: list = []
-#: Set of hook callables that accept the kwarg-only ``catalog_doc_id``
-#: parameter (RDR-108 Phase 3). Populated lazily by
-#: :func:`register_post_store_batch_hook` via
-#: :func:`inspect.signature`. The dispatch in
-#: :func:`fire_post_store_batch_hooks` uses this set to pick the call
-#: shape per hook, avoiding the fragile substring-match-on-TypeError
-#: fallback that the first cut of Phase 3 used.
-_post_store_batch_hooks_with_catalog_doc_id: set = set()
-
-
-def register_post_store_batch_hook(fn) -> None:
-    """Register a callable(doc_ids, collection, contents, embeddings, metadatas
-    [, *, catalog_doc_id]) to fire after batch CLI ingest.
-
-    The callable's signature is inspected once at registration time so
-    the dispatcher can pick the right call shape — hooks predating
-    RDR-108 Phase 3 do not accept ``catalog_doc_id`` and must be invoked
-    with the legacy 5-argument form.
-    """
-    _post_store_batch_hooks.append(fn)
-    try:
-        import inspect
-        sig = inspect.signature(fn)
-        params = sig.parameters
-        # Accept hooks that explicitly name catalog_doc_id OR accept arbitrary
-        # **kwargs (the latter cannot be statically classified, so passthrough
-        # is the conservative choice — no harm if the hook ignores).
-        if "catalog_doc_id" in params or any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-        ):
-            _post_store_batch_hooks_with_catalog_doc_id.add(id(fn))
-    except (TypeError, ValueError):
-        # Built-in or C-extension callable with no introspectable
-        # signature — assume legacy shape so the dispatcher does not
-        # blow up on first call. Log at debug so the registration is
-        # visible when chasing a "hook never seems to fire correctly"
-        # symptom; if the underlying callable actually accepts
-        # catalog_doc_id, the legacy 5-arg dispatch will silently drop
-        # the value.
-        import structlog
-        structlog.get_logger().debug(
-            "post_store_batch_hook_signature_unintrospectable",
-            hook=getattr(fn, "__name__", repr(fn)),
-        )
-
-
-def fire_post_store_batch_hooks(
-    doc_ids: list[str],
-    collection: str,
-    contents: list[str],
-    embeddings: list[list[float]] | None = None,
-    metadatas: list[dict] | None = None,
-    *,
-    catalog_doc_id: str = "",
-) -> None:
-    """Invoke all registered batch hooks. Per-hook failures captured and
-    persisted to T2 hook_failures, never raised.
-
-    Empty doc_ids returns early: no hooks fire on empty batches.
-
-    Different consumers read different payload fields:
-    chash_dual_write_batch_hook reads metadatas, taxonomy_assign_batch_hook
-    reads embeddings. Hooks ignore parameters they don't need.
-
-    *catalog_doc_id* (RDR-108 Phase 3) — catalog ``Document.tumbler``
-    string for the document this batch belongs to. Required by
-    ``manifest_write_batch_hook`` after Phase 3 retired ``doc_id`` from
-    chunk metadata; the manifest hook can no longer derive it from the
-    chunks themselves. Empty string is the "unknown document" sentinel
-    — the manifest hook then falls back to legacy ``meta.doc_id`` reads
-    (still populated on pre-Phase-3 chunks).
-    """
-    if not doc_ids:
-        return
-    import structlog
-    _hook_log = structlog.get_logger()
-    for hook in _post_store_batch_hooks:
-        try:
-            # RDR-108 Phase 3: pick the call shape per hook based on the
-            # signature classification computed at registration time.
-            # Hooks predating Phase 3 do not accept ``catalog_doc_id``;
-            # we invoke them with the legacy 5-argument shape.
-            if id(hook) in _post_store_batch_hooks_with_catalog_doc_id:
-                hook(
-                    doc_ids, collection, contents, embeddings, metadatas,
-                    catalog_doc_id=catalog_doc_id,
-                )
-            else:
-                hook(doc_ids, collection, contents, embeddings, metadatas)
-        except Exception as exc:
-            hook_name = getattr(hook, "__name__", "?")
-            _hook_log.warning(
-                "post_store_batch_hook_failed",
-                hook=hook_name,
-                exc_info=True,
-            )
-            _record_batch_hook_failure(
-                doc_ids=doc_ids,
-                collection=collection,
-                hook_name=hook_name,
-                error=str(exc),
-            )
-
-
-def _record_batch_hook_failure(
-    *,
-    doc_ids: list[str],
-    collection: str,
-    hook_name: str,
-    error: str,
-) -> None:
-    """Persist a batch-shape post-store hook failure to T2 ``hook_failures``.
-
-    Writes the JSON-encoded doc_id list to ``batch_doc_ids`` and sets
-    ``is_batch=1``; stores a representative scalar (first doc_id) in the
-    legacy ``doc_id`` column so existing scalar readers continue to render
-    something meaningful (RDR-095 schema migration adds the two new columns
-    in 4.14.1).
-
-    Falls back to scalar-only insert if the new columns don't exist yet
-    (P1.1 merged before P1.2 migration ran). Same secondary best-effort
-    semantics as ``_record_hook_failure``: persistence failure cannot
-    break ingest.
-    """
-    import json
-    import sqlite3
-    representative = doc_ids[0] if doc_ids else ""
-    payload = json.dumps(doc_ids)
-    truncated = error[:2000]
-    try:
-        with t2_ctx() as t2:
-            conn = t2.taxonomy.conn
-            with t2.taxonomy._lock:
-                try:
-                    # 4.14.2 schema: dual-write chain alongside is_batch
-                    # so RDR-089 readers can classify rows by chain while
-                    # legacy readers still see is_batch=1.
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error, "
-                        " batch_doc_ids, is_batch, chain) "
-                        "VALUES (?, ?, ?, ?, ?, 1, 'batch')",
-                        (representative, collection, hook_name, truncated, payload),
-                    )
-                except sqlite3.OperationalError as exc:
-                    # Pre-4.14.x schema: chain and/or batch columns may be
-                    # absent. Narrow catch to schema errors so transient
-                    # lock or I/O failures bubble up to the outer guard
-                    # rather than silently degrading the captured row.
-                    msg = str(exc)
-                    if "no column named" not in msg and "no such column" not in msg:
-                        raise
-                    # Try the 4.14.1 shape (is_batch + batch_doc_ids, no chain)
-                    # before falling back to scalar-only.
-                    try:
-                        conn.execute(
-                            "INSERT INTO hook_failures "
-                            "(doc_id, collection, hook_name, error, "
-                            " batch_doc_ids, is_batch) VALUES (?, ?, ?, ?, ?, 1)",
-                            (representative, collection, hook_name, truncated, payload),
-                        )
-                    except sqlite3.OperationalError as exc2:
-                        msg2 = str(exc2)
-                        if "no column named" not in msg2 and "no such column" not in msg2:
-                            raise
-                        conn.execute(
-                            "INSERT INTO hook_failures "
-                            "(doc_id, collection, hook_name, error) "
-                            "VALUES (?, ?, ?, ?)",
-                            (representative, collection, hook_name, truncated),
-                        )
-                conn.commit()
-    except Exception:
-        import structlog
-        structlog.get_logger().debug(
-            "batch_hook_failure_persist_failed",
-            hook=hook_name,
-            collection=collection,
-            exc_info=True,
-        )
+# ── Default post-store hook consumers ────────────────────────────────────────
+# Pure functions used as default registrations on every HookRegistry the
+# CLI / MCP entry points build. The HookRegistry class + its three
+# dispatchers (single / batch / document) live in nexus.hook_registry; the
+# install_default_hooks(registry) factory there wires the consumers below
+# onto every freshly constructed registry. Registration order within the
+# batch chain is load-bearing: chash dual-write must precede taxonomy
+# assignment so chash rows exist before topic assignment runs (mirrors
+# the legacy chash-before-taxonomy invariant).
 
 
 def taxonomy_assign_batch_hook(
@@ -640,7 +360,7 @@ def taxonomy_assign_batch_hook(
 ) -> None:
     """Registered batch hook: assign indexed docs to their nearest topics.
 
-    Called via ``fire_post_store_batch_hooks`` from every storage event:
+    Called via ``HookRegistry.fire_batch`` from every storage event:
     CLI bulk ingest passes the embeddings already computed by the upsert;
     MCP ``store_put`` passes ``embeddings=None`` and the hook fetches them
     from T3 inline (one ChromaDB get per doc). The fetch falls back to
@@ -651,8 +371,8 @@ def taxonomy_assign_batch_hook(
     No-op when centroids don't exist (no discover run yet) or the
     collection is excluded.
 
-    Registered once via ``register_post_store_batch_hook`` in
-    ``mcp/core.py``.
+    Wired by :func:`nexus.hook_registry.install_default_hooks` onto every
+    runtime-constructed registry.
     """
     from fnmatch import fnmatch
 
@@ -770,7 +490,7 @@ def chash_dual_write_batch_hook(
     """Registered batch hook (RDR-095): best-effort dual-write of
     ``chash_index`` rows after a T3 upsert.
 
-    Called via ``fire_post_store_batch_hooks`` from every CLI indexing
+    Called via ``HookRegistry.fire_batch`` from every CLI indexing
     path immediately after ``t3.upsert_chunks_with_embeddings(...)``.
     Reads ``metadatas``; ignores ``contents`` and ``embeddings``. Opens a
     fresh T2Database (matching ``taxonomy_assign_batch_hook``'s
@@ -779,8 +499,8 @@ def chash_dual_write_batch_hook(
     on any outer failure: a T2 failure must never abort the enclosing
     T3 write path.
 
-    Registered via ``register_post_store_batch_hook`` in
-    ``mcp/core.py``.
+    Wired by :func:`nexus.hook_registry.install_default_hooks` onto every
+    runtime-constructed registry.
     """
     if not doc_ids or not metadatas:
         return
@@ -810,7 +530,7 @@ def manifest_write_batch_hook(
     Calls ``Catalog.append_manifest_chunks`` (UPSERT keyed on
     ``(doc_id, position)``) once per batch. Multi-batch indexing paths
     (streaming PDF pipeline, doc_indexer incremental loop, anything
-    that splits a document across multiple ``fire_post_store_batch_hooks``
+    that splits a document across multiple ``HookRegistry.fire_batch``
     calls for the same ``catalog_doc_id``) accumulate the manifest
     correctly across batches because UPSERT on the primary key does not
     DELETE prior rows. Re-indexing with fewer chunks than before may
@@ -907,321 +627,6 @@ def manifest_write_batch_hook(
             structlog.get_logger().warning(
                 "manifest_write_hook_failed", doc_id=doc_id, exc_info=True
             )
-
-
-# RDR-108 Phase 3 (nexus-bdag): the three batch hooks above are
-# load-bearing for catalog correctness across BOTH CLI ingest and MCP
-# tool calls (e.g. ``nx index repo`` populates ``chash_index``,
-# ``taxonomy_assignments``, and ``document_chunks`` on the catalog
-# manifest). Pre-Phase-3 the registrations lived in ``nexus.mcp.core``
-# so the hooks fired only when an MCP server started up; CLI-only
-# flows silently skipped them, leaving the catalog manifest empty for
-# ``nx index repo``-only corpora. Registering here at module load
-# keeps both paths honest — every code path that fires the batch
-# chain (every indexer goes through ``mcp_infra.fire_post_store_batch_hooks``)
-# is guaranteed to also have the hooks attached.
-register_post_store_batch_hook(chash_dual_write_batch_hook)
-register_post_store_batch_hook(taxonomy_assign_batch_hook)
-register_post_store_batch_hook(manifest_write_batch_hook)
-
-
-# ── Post-store document hooks (RDR-089, nexus-yyev) ──────────────────────────
-# Third hook chain — fires once per *document* after every storage event
-# (MCP store_put and every CLI ingest path). Signature is
-# ``fn(source_path, collection, content)`` rather than the doc_id-keyed
-# single chain or the doc_ids-list batch chain — document-grain enrichment
-# (e.g. RDR-089 aspect extraction) needs the full document text and a
-# stable on-disk identifier, not chunk-level references.
-#
-# Content-sourcing contract (audit F4):
-#   * MCP store_put has the full doc text in scope and passes ``content=<text>``.
-#   * CLI sites accumulate chunks rather than full documents and pass
-#     ``content=""`` as the contract signal that the hook may need to
-#     read source_path itself.
-#   * Hooks treat ``content`` as primary, falling back to file read when empty.
-#
-# Synchronous all the way down — zero asyncio in the dispatcher (RDR-089
-# load-bearing contract: routing through async operator_extract from this
-# sync chain silently drops the coroutine). Hooks registered here MUST be
-# synchronous callables; async hooks are explicitly unsupported.
-#
-# Per-hook failures are captured, logged, and persisted to T2
-# ``hook_failures`` with ``chain='document'``. Failures never propagate.
-
-_post_document_hooks: list = []
-#: nexus-8g79.12: set of hook ids that accept the ``doc_id`` kwarg
-#: (RDR-101 Phase 4). Classified by signature inspection at
-#: registration time so the dispatcher picks the right shape without
-#: a fragile TypeError-retry probe at every call. Pre-fix the dispatcher
-#: caught TypeError and retried — any hook that raised TypeError for an
-#: unrelated reason (wrong-type arg inside its body) was misclassified
-#: as a back-compat signal and silently invoked with the wrong shape.
-_post_document_hooks_with_doc_id: set[int] = set()
-
-
-def register_post_document_hook(fn) -> None:
-    """Register a synchronous ``fn(source_path, collection, content) -> None``
-    to fire after every document-level storage event.
-
-    The callable MUST be synchronous. Async callables are silently
-    unsupported — the dispatcher would drop the returned coroutine.
-    Phase 1 hook authors: see ``test_async_hooks_silently_unsupported_by_dispatcher``
-    for the contract test.
-
-    nexus-8g79.12: callable's signature is inspected once at
-    registration so :func:`fire_post_document_hooks` picks the right
-    call shape — hooks that accept ``doc_id`` or **kwargs receive it;
-    older registrations are called without it. Mirrors the pattern
-    used by :func:`register_post_store_batch_hook` for ``catalog_doc_id``.
-    """
-    _post_document_hooks.append(fn)
-    try:
-        import inspect
-        sig = inspect.signature(fn)
-        params = sig.parameters
-        if "doc_id" in params or any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-        ):
-            _post_document_hooks_with_doc_id.add(id(fn))
-    except (TypeError, ValueError):
-        # Builtin/C-extension callable with no introspectable signature.
-        # Treat as legacy shape (no doc_id) so the dispatcher does not
-        # blow up on first call.
-        import structlog
-        structlog.get_logger().debug(
-            "post_document_hook_signature_unintrospectable",
-            hook=getattr(fn, "__name__", repr(fn)),
-        )
-
-
-def fire_post_document_hooks(
-    source_path: str, collection: str, content: str,
-    *,
-    doc_id: str = "",
-) -> None:
-    """Invoke all registered document-grain hooks. Per-hook failures are
-    captured, logged, and persisted to T2 ``hook_failures`` with
-    ``chain='document'`` — never raised to the caller.
-
-    Synchronous dispatch: no ``asyncio.to_thread``, no ``await``. Hooks
-    that need async work must run their own event loop internally.
-
-    Content-sourcing contract:
-
-    * ``content`` non-empty (MCP path) — passed through to the hook
-      verbatim; the hook reads ``content`` directly.
-    * ``content == ""`` (CLI path) — the contract signal that the hook
-      may need to read ``source_path`` itself. The framework forwards
-      both arguments unchanged; content-sourcing is the hook's
-      responsibility, not the framework's.
-
-    ``doc_id`` (nexus-tdgc / RDR-101 Phase 4) is the catalog identity
-    of the source document. Forwarded to every registered hook as a
-    keyword arg; hooks that don't accept the kw are called without it
-    so older registrations keep working during the migration window.
-    """
-    import structlog
-    _hook_log = structlog.get_logger()
-    for hook in _post_document_hooks:
-        try:
-            # nexus-8g79.12: dispatch by signature classification done at
-            # registration time. Pre-fix the inner try/except TypeError
-            # caught any TypeError from inside the hook body and silently
-            # retried with the legacy shape — misclassifying unrelated
-            # type bugs as a back-compat signal.
-            if id(hook) in _post_document_hooks_with_doc_id:
-                hook(source_path, collection, content, doc_id=doc_id)
-            else:
-                hook(source_path, collection, content)
-        except Exception as exc:
-            hook_name = getattr(hook, "__name__", "?")
-            _hook_log.warning(
-                "post_document_hook_failed",
-                hook=hook_name,
-                source_path=source_path,
-                collection=collection,
-                exc_info=True,
-            )
-            _record_document_hook_failure(
-                source_path=source_path,
-                collection=collection,
-                hook_name=hook_name,
-                error=str(exc),
-            )
-
-
-def _record_document_hook_failure(
-    *,
-    source_path: str,
-    collection: str,
-    hook_name: str,
-    error: str,
-) -> None:
-    """Persist a document-grain hook failure to T2 ``hook_failures``.
-
-    Stores ``source_path`` in the legacy ``doc_id`` column (the column
-    carries 'subject of failure' regardless of chain shape) and sets
-    ``chain='document'`` so readers can render the row appropriately.
-
-    Falls back to a chain-less insert when the 4.14.2 migration has not
-    yet run (mixed-version operator scenario): the outer guard
-    propagates schema errors to the secondary ``except`` only, so
-    transient lock or I/O failures bubble up where the outer
-    best-effort wrapper can swallow them. Same secondary best-effort
-    semantics as ``_record_hook_failure`` and
-    ``_record_batch_hook_failure``: persistence failure cannot break
-    ingest.
-
-    Two-tier fallback (vs. three-tier in ``_record_batch_hook_failure``)
-    is correct: the document chain is new in 4.14.2, so there is no
-    intermediate 4.14.1-shape schema to handle — the row either has
-    ``chain`` (post-4.14.2) or it does not (pre-4.14.2 generic shape).
-    """
-    import sqlite3
-    truncated = error[:2000]
-    try:
-        with t2_ctx() as t2:
-            conn = t2.taxonomy.conn
-            with t2.taxonomy._lock:
-                try:
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error, chain) "
-                        "VALUES (?, ?, ?, ?, 'document')",
-                        (source_path, collection, hook_name, truncated),
-                    )
-                except sqlite3.OperationalError as exc:
-                    msg = str(exc)
-                    if "no column named" not in msg and "no such column" not in msg:
-                        raise
-                    # Pre-4.14.2 schema: chain column absent. Persist
-                    # without the chain marker — the row is still useful
-                    # for triage even if it cannot be classified by chain.
-                    conn.execute(
-                        "INSERT INTO hook_failures "
-                        "(doc_id, collection, hook_name, error) "
-                        "VALUES (?, ?, ?, ?)",
-                        (source_path, collection, hook_name, truncated),
-                    )
-                conn.commit()
-    except Exception:
-        import structlog
-        structlog.get_logger().debug(
-            "document_hook_failure_persist_failed",
-            hook=hook_name,
-            collection=collection,
-            exc_info=True,
-        )
-
-
-# ── Combined post-store fire helper (nexus-9099) ─────────────────────────────
-#
-# RDR-095 established symmetric-fire for the bulk CLI ingest paths
-# (``nx index repo / pdf / rdr``) so every storage event invokes the
-# single, batch, and document-grain hook chains. Three CLI paths were
-# overlooked by the symmetric-fire commit and shipped firing zero
-# chains: ``nx store put``, ``nx memory promote``, and
-# ``nx store import``. The downstream effect is silent drift between
-# the catalog row + chroma chunk and the T2 indexes that operator SQL
-# fast paths depend on (chash_index, taxonomy assignments, aspect
-# extraction queue). nexus-9099 surfaced the bug; this helper closes
-# the gap by giving every T3-write path a single call site that fires
-# all three chains in the correct order.
-#
-# Used by:
-#   * MCP ``store_put`` (mcp/core.py)
-#   * CLI ``nx store put`` (commands/store.py)
-#   * CLI ``nx memory promote`` (commands/memory.py)
-#   * CLI ``nx store import`` (commands/store.py)
-#
-# Bulk ``nx index *`` ingest paths still call the three fire functions
-# directly (see ``code_indexer.py``, ``prose_indexer.py``,
-# ``doc_indexer.py``, ``pipeline_stages.py``, ``indexer.py``) — the AST
-# drift guard in ``tests/test_hook_drift_guard.py`` enforces 7 CLI
-# fire sites + 1 MCP fire site for the document chain. This helper is
-# additive; it does not rewire the bulk paths.
-
-
-def fire_store_chains(
-    doc_ids: list[str],
-    collection: str,
-    contents: list[str],
-    *,
-    source_paths: list[str] | None = None,
-    embeddings: list[list[float]] | None = None,
-    metadatas: list[dict] | None = None,
-    catalog_doc_id: str = "",
-) -> None:
-    """Fire all three post-store hook chains for a batch of just-stored docs.
-
-    Single, batch, and document-grain chains run in that order. Errors
-    are caught per-hook and persisted to T2 ``hook_failures``; nothing
-    is propagated to the caller (matching the existing fire functions'
-    semantics).
-
-    Parameters
-    ----------
-    doc_ids:
-        Stable identifiers for each just-stored document.
-    collection:
-        Physical collection name (e.g. ``knowledge__knowledge``).
-    contents:
-        Document text per doc_id. Length must match ``doc_ids``.
-    source_paths:
-        On-disk source path per document, or ``None`` to use ``doc_ids``
-        as the source identity (the MCP ``store_put`` shape — there is
-        no on-disk source). Length must match ``doc_ids`` when given.
-    embeddings:
-        Optional dense vectors per doc; forwarded to the batch chain.
-        ``taxonomy_assign_batch_hook`` accepts ``None`` and fetches
-        embeddings from T3 inline.
-    metadatas:
-        Optional metadata dicts per doc; forwarded to the batch chain.
-        ``chash_dual_write_batch_hook`` reads from this.
-    catalog_doc_id:
-        nexus-lf8f: the catalog ``Document.tumbler`` for these chunks
-        (RDR-108 Phase 3). Post-Phase-3, chunk metadata no longer
-        carries ``doc_id`` so the manifest-write hook needs the tumbler
-        passed explicitly via this kwarg or it short-circuits silently
-        (the exact symptom nexus-zq79 fixed for the indexer paths in
-        4.32.4; this kwarg closes the same gap for the store-path
-        callers — MCP ``store_put``, ``nx store put``,
-        ``nx memory promote``, ``nx store import``). Default ``""``
-        preserves the legacy "no catalog identity" shape for callers
-        that genuinely have no tumbler (raw scratch writes pre-catalog
-        registration); those callers' chunks remain catalog-orphaned by
-        design.
-    """
-    n = len(doc_ids)
-    if len(contents) != n:
-        raise ValueError(
-            f"contents length {len(contents)} != doc_ids length {n}"
-        )
-    if source_paths is None:
-        source_paths = list(doc_ids)
-    elif len(source_paths) != n:
-        raise ValueError(
-            f"source_paths length {len(source_paths)} != doc_ids length {n}"
-        )
-
-    # Single-doc chain — once per (doc_id, content).
-    for doc_id, content in zip(doc_ids, contents):
-        fire_post_store_hooks(doc_id, collection, content)
-
-    # Batch chain — one call with the whole batch.
-    fire_post_store_batch_hooks(
-        doc_ids, collection, contents,
-        embeddings=embeddings, metadatas=metadatas,
-        catalog_doc_id=catalog_doc_id,
-    )
-
-    # Document-grain chain — once per (source_path, content).
-    # nexus-tdgc: doc_id is forwarded so the aspect-queue hook can
-    # capture it at enqueue time. The doc_ids list is the same one
-    # the post_store + batch chains use; for the document chain it is
-    # the catalog identity.
-    for did, sp, content in zip(doc_ids, source_paths, contents):
-        fire_post_document_hooks(sp, collection, content, doc_id=did)
 
 
 # ── Version compatibility check (RDR-076) ─────────────────────────────────────
@@ -1337,23 +742,15 @@ def reset_singletons():
     embeddings against the injected client and produced nondeterministic
     matches.
 
-    NOTE: ``_post_store_hooks``, ``_post_store_batch_hooks``, and
-    ``_post_document_hooks`` are intentionally NOT cleared here.  Hooks
-    are registered at module-import time (e.g. ``register_post_store_hook`` /
-    ``register_post_store_batch_hook`` / ``register_post_document_hook`` in
-    ``nexus.mcp.core``).  Because Python only executes module-level code
-    once, clearing the lists here would permanently lose those
-    registrations for the remainder of the test session.  Tests that
-    need an empty hook list should clear the relevant ``_post_*_hooks``
-    list explicitly in their own fixture (e.g. via the autouse fixture
-    in ``tests/test_post_document_hooks.py``).
+    Post-store hook chains are owned by per-invocation ``HookRegistry``
+    instances (see ``nexus.hook_registry``); they are no longer
+    module-globals on ``mcp_infra`` and therefore not cleared here.
     """
-    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance
+    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
     _collections_cache = ([], 0.0)
-    _catalog_instance = None
     clear_search_traces()
     reset_plan_cache_for_tests()
 
@@ -1369,15 +766,3 @@ def inject_t3(t3):
     """Inject a T3Database for testing."""
     global _t3_instance
     _t3_instance = t3
-
-
-def inject_catalog(cat):
-    """Inject a Catalog for testing.
-
-    Sets ``_catalog_instance`` so subsequent ``get_catalog()`` calls
-    return this catalog instead of constructing fresh. Used by tests
-    that need to assert against a specific Catalog instance; clear
-    with ``inject_catalog(None)`` or ``reset_singletons()``.
-    """
-    global _catalog_instance
-    _catalog_instance = cat

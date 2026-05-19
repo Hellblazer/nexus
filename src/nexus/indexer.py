@@ -53,6 +53,7 @@ _log = structlog.get_logger(__name__)
 if TYPE_CHECKING:
     from nexus.catalog.catalog import Catalog
     from nexus.catalog.tumbler import Tumbler
+    from nexus.hook_registry import HookRegistry
     from nexus.indexer_utils import StalenessCache
     from nexus.registry import RepoRegistry
     from nexus.stage_timers import StageTimers
@@ -866,6 +867,7 @@ def index_repository(
     on_file: Callable[[Path, int, float], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
     on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
+    hooks: "HookRegistry | None" = None,
 ) -> dict[str, int]:
     """Index all files in *repo* into T3 code__ and docs__ collections.
 
@@ -912,6 +914,11 @@ def index_repository(
             lock_fd.close()
             return {}
 
+    if hooks is None:
+        from nexus.hook_registry import HookRegistry, install_default_hooks
+        hooks = HookRegistry()
+        install_default_hooks(hooks)
+
     try:
         registry.update(repo, status="indexing")
         try:
@@ -919,7 +926,7 @@ def index_repository(
                 _run_index_frecency_only(repo, registry)
                 stats: dict[str, int] = {}
             else:
-                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_start=on_start, on_file=on_file, on_phase=on_phase, on_stage_timers=on_stage_timers)
+                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_start=on_start, on_file=on_file, on_phase=on_phase, on_stage_timers=on_stage_timers, hooks=hooks)
                 registry.update(repo, head_hash=_current_head(repo))
             registry.update(repo, status="ready")
             return stats
@@ -1122,6 +1129,7 @@ def _index_code_file(
     stage_timers: "StageTimers | None" = None,
     doc_id_resolver: Callable[[Path], str] | None = None,
     staleness_cache: "StalenessCache | None" = None,
+    hooks: "HookRegistry | None" = None,
 ) -> int:
     """Index a single code file.  Delegates to nexus.code_indexer.index_code_file.
 
@@ -1161,6 +1169,7 @@ def _index_code_file(
         stage_timers=stage_timers,
         doc_id_resolver=doc_id_resolver,
         staleness_cache=staleness_cache,
+        hooks=hooks,
     )
     return index_code_file(ctx, file)
 
@@ -1183,6 +1192,7 @@ def _index_prose_file(
     stage_timers: "StageTimers | None" = None,
     doc_id_resolver: Callable[[Path], str] | None = None,
     staleness_cache: "StalenessCache | None" = None,
+    hooks: "HookRegistry | None" = None,
 ) -> int:
     """Index a single prose file.  Delegates to nexus.prose_indexer.index_prose_file.
 
@@ -1218,6 +1228,7 @@ def _index_prose_file(
         stage_timers=stage_timers,
         doc_id_resolver=doc_id_resolver,
         staleness_cache=staleness_cache,
+        hooks=hooks,
     )
     return index_prose_file(ctx, file)
 
@@ -1240,6 +1251,7 @@ def _index_pdf_file(
     embed_fn: Callable | None = None,
     stage_timers: "StageTimers | None" = None,
     doc_id_resolver: Callable[[Path], str] | None = None,
+    hooks: "HookRegistry | None" = None,
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
@@ -1370,22 +1382,22 @@ def _index_pdf_file(
         # batch one document at a time so per-doc hooks (e.g. RDR-089
         # aspect extraction) cover CLI ingest the same way they cover
         # MCP store_put.
-        from nexus.mcp_infra import (
-            fire_post_document_hooks,
-            fire_post_store_batch_hooks,
-            fire_post_store_hooks,
-        )
-        fire_post_store_batch_hooks(
+        if hooks is None:
+            from nexus.hook_registry import HookRegistry, install_default_hooks
+            hooks = HookRegistry()
+            install_default_hooks(hooks)
+        hooks.fire_batch(
             ids, collection_name, documents, embeddings, metadatas,
+            catalog_doc_id=catalog_doc_id,
         )
         for _did, _doc in zip(ids, documents):
-            fire_post_store_hooks(_did, collection_name, _doc)
+            hooks.fire_single(_did, collection_name, _doc)
         # RDR-089 document-grain chain — once per PDF file boundary in
         # the `nx index repo` PDF path. content="" (chunk-level scope
         # only); the hook reads source_path itself per the P0.1
         # content-sourcing contract.
         # nexus-tdgc: forward catalog doc_id when available.
-        fire_post_document_hooks(
+        hooks.fire_document(
             str(file), collection_name, "",
             doc_id=catalog_doc_id,
         )
@@ -1402,6 +1414,7 @@ def _discover_and_index_rdrs(
     *,
     force: bool = False,
     embed_fn: Callable | None = None,
+    hooks: "HookRegistry | None" = None,
 ) -> tuple[int, int, int]:
     """Find .md files under RDR paths and index them via batch_index_markdowns.
 
@@ -1444,7 +1457,7 @@ def _discover_and_index_rdrs(
     _log.info("indexing RDR files", count=len(md_paths), collection=collection)
     results = batch_index_markdowns(md_paths, corpus=basename, t3=db,
                                     collection_name=collection, force=force,
-                                    embed_fn=embed_fn)
+                                    embed_fn=embed_fn, hooks=hooks)
     indexed = sum(1 for s in results.values() if s == "indexed")
     skipped = sum(1 for s in results.values() if s == "skipped")
     failed = sum(1 for s in results.values() if s == "failed")
@@ -1863,6 +1876,7 @@ def _run_index(
     on_file: Callable[[Path, int, float], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
     on_stage_timers: Callable[[Path, "StageTimers"], None] | None = None,
+    hooks: "HookRegistry | None" = None,
 ) -> dict[str, int]:
     """Full indexing pipeline: classify → route → embed → upsert → prune.
 
@@ -2299,6 +2313,7 @@ def _run_index(
             stage_timers=timers,
             doc_id_resolver=_doc_id_resolver,
             staleness_cache=code_staleness,
+            hooks=hooks,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
@@ -2325,6 +2340,7 @@ def _run_index(
             stage_timers=timers,
             doc_id_resolver=_doc_id_resolver,
             staleness_cache=docs_staleness,
+            hooks=hooks,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
@@ -2350,6 +2366,7 @@ def _run_index(
             embed_fn=_embed_fn,
             stage_timers=timers,
             doc_id_resolver=_doc_id_resolver,
+            hooks=hooks,
         )
         if on_file:
             on_file(file, chunks, time.monotonic() - t0)
@@ -2389,7 +2406,7 @@ def _run_index(
         _t = time.monotonic()
         rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(
             repo, rdr_abs_paths, db, voyage_key, now_iso, force=force,
-            embed_fn=_embed_fn_doc,
+            embed_fn=_embed_fn_doc, hooks=hooks,
         )
         _phase(
             f"RDR indexing done — {rdr_indexed} indexed, {rdr_current} current, "

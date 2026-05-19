@@ -1,16 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-095 drift guard: registered batch hooks must only be referenced
-inside ``src/nexus/mcp_infra.py`` (definitions) and ``src/nexus/mcp/core.py``
-(the single registration site).
+inside their definition modules and the single registration site
+(``src/nexus/hook_registry.py``'s ``install_default_hooks``).
 
 The guard catches the original debt-accretion pattern from RDR-070 + RDR-086:
 new per-document batch enrichment landing as hardcoded calls in five CLI
-indexer files. Every other module fires through ``fire_post_store_batch_hooks``;
+indexer files. Every other module fires through ``HookRegistry.fire_batch``;
 no third file imports or calls the hooks directly.
 
 If this test fails on a future commit, the fix is almost always to register
-a new batch hook via ``register_post_store_batch_hook`` in ``mcp/core.py``
-rather than importing the hook function in the new module.
+a new batch hook via ``install_default_hooks`` rather than importing the
+hook function in the new module.
+
+Post-RDR-118-successor refactor: the chain dispatchers are method calls
+on per-invocation ``HookRegistry`` instances rather than module-level
+function calls. The AST guards below count method-call invocations
+(``hooks.fire_batch(...)``, ``hooks.fire_single(...)``,
+``hooks.fire_document(...)``) by attribute name.
 """
 from __future__ import annotations
 
@@ -27,7 +33,7 @@ GUARDED_NAMES = frozenset({
 
 ALLOWED_FILES = frozenset({
     "src/nexus/mcp_infra.py",      # the definitions
-    "src/nexus/mcp/core.py",       # the single registration site
+    "src/nexus/hook_registry.py",  # the single registration site (install_default_hooks)
 })
 
 
@@ -41,7 +47,7 @@ DOCUMENT_HOOK_GUARDED_NAMES = frozenset({
 
 DOCUMENT_HOOK_ALLOWED_FILES = frozenset({
     "src/nexus/aspect_worker.py",  # the definition
-    "src/nexus/mcp/core.py",       # the single registration site
+    "src/nexus/hook_registry.py",  # the single registration site (install_default_hooks)
 })
 
 
@@ -90,11 +96,11 @@ def _scan_file_for_hook_refs(
     return refs
 
 
-def test_batch_hooks_not_called_outside_mcp_infra() -> None:
+def test_batch_hooks_not_called_outside_allowed_files() -> None:
     """RDR-095 drift guard: no source file outside the allowlist may
     semantically reference taxonomy_assign_batch_hook or
     chash_dual_write_batch_hook. Every other module fires through
-    fire_post_store_batch_hooks.
+    HookRegistry.fire_batch.
     """
     offenders: dict[str, list[str]] = {}
     for py in SRC_ROOT.rglob("*.py"):
@@ -113,10 +119,10 @@ def test_batch_hooks_not_called_outside_mcp_infra() -> None:
         raise AssertionError(
             "RDR-095 drift guard: registered batch hooks may only be "
             "referenced inside src/nexus/mcp_infra.py (definitions) and "
-            "src/nexus/mcp/core.py (registration). New consumers should "
-            "register via register_post_store_batch_hook in mcp/core.py "
-            "and fire through fire_post_store_batch_hooks. Offenders:\n"
-            f"{formatted}"
+            "src/nexus/hook_registry.py (install_default_hooks). New "
+            "consumers should register via install_default_hooks in "
+            "hook_registry.py and fire through HookRegistry.fire_batch. "
+            f"Offenders:\n{formatted}"
         )
 
 
@@ -164,12 +170,29 @@ CLI_SITE_FILES = [
 ]
 
 
+def _count_method_calls(tree: ast.AST, attr_name: str) -> int:
+    """Count Call nodes invoking ``something.<attr_name>(...)`` — i.e. the
+    callee is an ``ast.Attribute`` whose ``.attr`` equals *attr_name*.
+
+    Used to count method invocations like ``hooks.fire_batch(...)`` /
+    ``ctx.hooks.fire_single(...)`` where the receiver may be a bare
+    name or a chained attribute access.
+    """
+    count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr == attr_name:
+            count += 1
+    return count
+
+
 def test_every_cli_ingest_site_fires_both_chains() -> None:
-    """Both `fire_post_store_batch_hooks` AND `fire_post_store_hooks` must
+    """Both `HookRegistry.fire_batch` AND `HookRegistry.fire_single` must
     be invoked from every CLI indexer module. Pins the symmetric-fire
-    coverage: a single-doc consumer registered via
-    register_post_store_hook (e.g. RDR-089 aspect extraction) is visible
-    from MCP store_put AND from every CLI ingest path.
+    coverage: a single-doc consumer registered via ``register_single``
+    (e.g. RDR-089 aspect extraction) is visible from MCP store_put AND
+    from every CLI ingest path.
 
     The test asserts a Call node count rather than text presence so
     docstring or comment mentions do not satisfy the invariant. A future
@@ -179,25 +202,13 @@ def test_every_cli_ingest_site_fires_both_chains() -> None:
     for rel in CLI_SITE_FILES:
         path = PROJECT_ROOT / rel
         tree = ast.parse(path.read_text(), filename=str(path))
-        batch_calls = 0
-        single_calls = 0
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            fn_name = None
-            if isinstance(node.func, ast.Name):
-                fn_name = node.func.id
-            elif isinstance(node.func, ast.Attribute):
-                fn_name = node.func.attr
-            if fn_name == "fire_post_store_batch_hooks":
-                batch_calls += 1
-            elif fn_name == "fire_post_store_hooks":
-                single_calls += 1
+        batch_calls = _count_method_calls(tree, "fire_batch")
+        single_calls = _count_method_calls(tree, "fire_single")
         problems: list[str] = []
         if batch_calls == 0:
-            problems.append("missing fire_post_store_batch_hooks call")
+            problems.append("missing fire_batch call")
         if single_calls == 0:
-            problems.append("missing fire_post_store_hooks call")
+            problems.append("missing fire_single call")
         if batch_calls != single_calls:
             problems.append(
                 f"chain-call mismatch: {batch_calls} batch fires vs "
@@ -208,7 +219,7 @@ def test_every_cli_ingest_site_fires_both_chains() -> None:
 
     assert not offenders, (
         "RDR-095 symmetric-fire invariant: every CLI indexer site must "
-        "call both fire_post_store_batch_hooks and fire_post_store_hooks "
+        "call both HookRegistry.fire_batch and HookRegistry.fire_single "
         "the same number of times. Offenders:\n  "
         + "\n  ".join(f"{p}: {ps}" for p, ps in sorted(offenders.items()))
     )
@@ -232,50 +243,27 @@ DOCUMENT_HOOK_FIRE_SITES: dict[str, int] = {
 }
 
 
-def _count_fire_calls(tree: ast.AST, fn_name: str) -> int:
-    """Count direct Call nodes whose callee is `fn_name` (matched by Name
-    or Attribute attr).
-    """
-    count = 0
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if isinstance(node.func, ast.Name) and node.func.id == fn_name:
-            count += 1
-        elif isinstance(node.func, ast.Attribute) and node.func.attr == fn_name:
-            count += 1
-    return count
-
-
 def test_every_cli_ingest_site_fires_document_hook() -> None:
     """RDR-089 P0.2 wiring invariant: each CLI ingest module + the MCP
-    store_put boundary must call ``fire_post_document_hooks`` exactly
+    store_put boundary must call ``HookRegistry.fire_document`` exactly
     the documented number of times. Total: 7 fire-statement instances
     across 6 modules.
 
     The call counts are pinned per-module so a future contributor who
     drops a fire site (or accidentally double-fires inside a chunk
     loop) fails CI here, not at runtime.
-
-    Either the alias name (``fire_post_document_hooks``) or the
-    privatised import name (``_fire_post_document_hooks`` in
-    ``mcp/core.py``) counts toward the total — they are the same
-    callable.
     """
     offenders: dict[str, str] = {}
     for rel, expected in sorted(DOCUMENT_HOOK_FIRE_SITES.items()):
         path = PROJECT_ROOT / rel
         tree = ast.parse(path.read_text(), filename=str(path))
-        actual = (
-            _count_fire_calls(tree, "fire_post_document_hooks")
-            + _count_fire_calls(tree, "_fire_post_document_hooks")
-        )
+        actual = _count_method_calls(tree, "fire_document")
         if actual != expected:
             offenders[rel] = f"expected {expected} call(s), got {actual}"
 
     assert not offenders, (
         "RDR-089 document-chain call-site invariant: each ingest "
-        "module must fire fire_post_document_hooks the documented "
+        "module must fire HookRegistry.fire_document the documented "
         "number of times. If this fails, the wiring drifted from the "
         "P0.2 fire-site map. Offenders:\n  "
         + "\n  ".join(f"{p}: {ps}" for p, ps in sorted(offenders.items()))
@@ -284,15 +272,15 @@ def test_every_cli_ingest_site_fires_document_hook() -> None:
 
 def test_mcp_store_put_calls_document_hook_synchronously() -> None:
     """RDR-089 load-bearing contract (audit F1): the call to
-    ``fire_post_document_hooks`` from ``mcp/core.py:store_put`` must be
-    a *plain sync* invocation. No ``await``, no ``asyncio.to_thread``
+    ``HookRegistry.fire_document`` from ``mcp/core.py:store_put`` must
+    be a *plain sync* invocation. No ``await``, no ``asyncio.to_thread``
     wrapping. ``store_put`` is ``def``, not ``async def``; FastMCP
     wraps sync ``@mcp.tool()`` bodies in worker threads at the
     framework level. Routing through ``async`` here would silently
     drop the returned coroutine — exactly the original RDR-089 defect.
 
     Pin via AST inspection: walk every ``Call`` node whose callee
-    targets ``fire_post_document_hooks`` (or its alias), then assert no
+    targets ``fire_document`` (the method attr), then assert no
     enclosing parent is an ``await`` or an ``asyncio.to_thread`` call.
     """
     rel = "src/nexus/mcp/core.py"
@@ -308,14 +296,9 @@ def test_mcp_store_put_calls_document_hook_synchronously() -> None:
     def _is_doc_hook_call(node: ast.AST) -> bool:
         if not isinstance(node, ast.Call):
             return False
-        if isinstance(node.func, ast.Name):
-            return node.func.id in {
-                "fire_post_document_hooks", "_fire_post_document_hooks",
-            }
+        # hooks.fire_document(...) — Attribute access on a name/attribute receiver
         if isinstance(node.func, ast.Attribute):
-            return node.func.attr in {
-                "fire_post_document_hooks", "_fire_post_document_hooks",
-            }
+            return node.func.attr == "fire_document"
         return False
 
     def _is_to_thread_call(node: ast.AST) -> bool:
@@ -342,12 +325,12 @@ def test_mcp_store_put_calls_document_hook_synchronously() -> None:
                 break
             if isinstance(cur, ast.Await):
                 offending_calls.append(
-                    f"line {line}: fire_post_document_hooks wrapped in await"
+                    f"line {line}: fire_document wrapped in await"
                 )
                 break
             if _is_to_thread_call(cur):
                 offending_calls.append(
-                    f"line {line}: fire_post_document_hooks routed through "
+                    f"line {line}: fire_document routed through "
                     f"asyncio.to_thread"
                 )
                 break
@@ -355,7 +338,7 @@ def test_mcp_store_put_calls_document_hook_synchronously() -> None:
 
     assert not offending_calls, (
         "RDR-089 sync-all-the-way-down contract (audit F1): "
-        "fire_post_document_hooks at MCP store_put must be a plain "
+        "HookRegistry.fire_document at MCP store_put must be a plain "
         "synchronous call. await / asyncio.to_thread wrapping silently "
         "drops the dispatch (store_put is `def`, not `async def`). "
         "Offenders:\n  " + "\n  ".join(offending_calls)
@@ -365,12 +348,12 @@ def test_mcp_store_put_calls_document_hook_synchronously() -> None:
 # ── Document-chain GUARDED_NAMES wave 2 (nexus-qeo8) ─────────────────────────
 
 
-def test_document_hook_not_called_outside_aspect_worker_and_core() -> None:
+def test_document_hook_not_called_outside_aspect_worker_and_install_default() -> None:
     """RDR-089 follow-up drift guard: the document-grain hook
     ``aspect_extraction_enqueue_hook`` may only be referenced inside
     its definition module (``src/nexus/aspect_worker.py``) and the
-    single registration site (``src/nexus/mcp/core.py``). Every
-    other module fires through ``fire_post_document_hooks`` — the
+    single registration site (``src/nexus/hook_registry.py``). Every
+    other module fires through ``HookRegistry.fire_document`` — the
     framework dispatches.
 
     The same anti-pattern caught by the batch-chain guard above:
@@ -402,8 +385,8 @@ def test_document_hook_not_called_outside_aspect_worker_and_core() -> None:
             "RDR-089 follow-up drift guard: "
             "aspect_extraction_enqueue_hook may only be referenced "
             "inside src/nexus/aspect_worker.py (definition) and "
-            "src/nexus/mcp/core.py (registration). New consumers "
-            "should fire through fire_post_document_hooks. "
+            "src/nexus/hook_registry.py (registration). New consumers "
+            "should fire through HookRegistry.fire_document. "
             "Offenders:\n" + formatted
         )
 
@@ -437,11 +420,12 @@ def test_document_hook_drift_guard_catches_synthetic_offender(
 # T3-write paths that the bulk-indexer guard couldn't reach because
 # they live in ``commands/`` and ``exporter.py``, not the indexer
 # files. The fix wires those three paths through ``fire_store_chains``
-# (mcp_infra). This guard ensures any future CLI T3-write path also
-# fires the chains: a function that calls ``X.put(collection=...)`` or
+# (now ``HookRegistry.fire_store_chains``). This guard ensures any
+# future CLI T3-write path also fires the chains: a function that
+# calls ``X.put(collection=...)`` or
 # ``X.upsert_chunks_with_embeddings(collection_name=...)`` in
 # ``src/nexus/commands/`` or ``src/nexus/exporter.py`` must also call
-# ``fire_store_chains`` in the same function body.
+# ``fire_store_chains`` (the method) in the same function body.
 #
 # The kwarg-shape heuristic is what distinguishes T3 writes from T2
 # writes:
