@@ -14,13 +14,27 @@ concurrency:
 
 jobs:
   test:
-    name: pytest (Python ${{ matrix.python-version }})
+    # nexus-2ivn: split into two parallel partitions so wall-time is
+    # max(core, daemon) instead of sum. Suite grew from ~12 min to
+    # 20+ min as 387 new test files landed in the last 60 days
+    # (RDR-112 daemon-mode flips, RDR-108, RDR-110, etc.). Splitting
+    # preserves full coverage; daemon-mode tests stay together in
+    # one partition because they share UDS / chroma state and would
+    # race under intra-partition parallelism.
+    name: pytest ${{ matrix.partition }} (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Core partition still lands close to the 20-min mark on a fresh
+    # CI runner; bumping to 30 ensures pytest reaches the FAILURES
+    # summary so failed-test tracebacks surface in the log rather
+    # than being killed mid-summary by the timeout. nexus-2ivn
+    # follow-up: 3-way split (core-a / core-b) to bring this back
+    # down to ~15 min per partition.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.13"]
+        partition: [core, daemon]
 
     steps:
       - uses: actions/checkout@v4
@@ -28,12 +42,25 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-          # nexus-2fyb: cache ~/.cache/uv to avoid cold-downloading torch
-          # (~2.8 GB CPU wheel) every CI run. mineru[all] was promoted to
-          # a default dep, so without cache the install + sync takes ~10m
-          # and risks exceeding the job timeout. Key on uv.lock.
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          # setup-uv's bundled enable-cache only restored ~1 MB of
+          # metadata in practice; the actual wheel cache was missing
+          # and torch (~847 MB) re-downloaded on every run. Disable
+          # the bundled cache and target the directory setup-uv
+          # actually uses (UV_CACHE_DIR = ${{ runner.temp }}/setup-
+          # uv-cache, not ~/.cache/uv) with an explicit cache step.
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          # Key on uv.lock so a dep change rebuilds; restore-keys
+          # falls back to the last cache for the same python so a
+          # uv.lock bump still seeds most of the wheels and only
+          # the changed packages re-download.
+          key: uv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Cache ChromaDB ONNX model
         uses: actions/cache@v4
@@ -51,7 +78,32 @@ jobs:
         run: uv sync --group dev
 
       - name: Run tests
-        run: uv run pytest tests/ -v
+        # core: everything except daemon-mode files (the heavy daemon
+        # spawn/teardown work goes to the daemon partition).
+        # daemon: every tests/daemon/** file plus the daemon-mode
+        # CLI smokes in tests/commands/ and tests/catalog/.
+        # shopt -s nullglob so empty globs (e.g. tests/catalog/ on a
+        # branch where the daemon parity tests have not landed yet)
+        # do not pass a literal pattern to pytest.
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          case "${{ matrix.partition }}" in
+            core)
+              uv run pytest tests/ -v \
+                --ignore=tests/daemon \
+                --ignore-glob='tests/commands/test_*_daemon_mode.py' \
+                --ignore-glob='tests/catalog/test_*_daemon_*.py'
+              ;;
+            daemon)
+              daemon_files=(
+                tests/commands/test_*_daemon_mode.py
+                tests/catalog/test_*_daemon_*.py
+              )
+              uv run pytest tests/daemon "${daemon_files[@]}" -v
+              ;;
+          esac
 
   migration-race-probe:
     # nexus-9eaz: the two concurrent-migration tests below are skip-marked
@@ -100,83 +152,6 @@ jobs:
             tests/test_migrations.py::TestApplyPending::test_concurrent_apply_pending_stress \
             -v \
             --log-cli-level=INFO
-
-  migration-race-bisect:
-    # nexus-9eaz Phase C: bisect the pre-test_migrations cohort to find the
-    # contaminating test(s). The four chunks divide tests/*.py alphabetically
-    # into quarters that precede test_migrations.py. Each chunk job runs its
-    # chunk followed by the two flaky concurrent-migration tests, with the
-    # un-skip env var enabled. Whichever chunk fails identifies the cohort
-    # containing the polluter; we can then sub-bisect.
-    #
-    # Non-blocking (continue-on-error) so a flake here does not red-bar PRs.
-    name: migration race bisect chunk ${{ matrix.chunk }} (nexus-9eaz, non-blocking)
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        chunk: [4c-h1, 4c-h2, 4c-rev, 4c-0]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Cache ChromaDB ONNX model
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/chroma
-          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
-
-      - name: Install ripgrep
-        run: sudo apt-get install -y ripgrep
-
-      - name: Install project + dev deps
-        run: uv sync --group dev
-
-      - name: Compute chunk file list
-        id: chunk
-        run: |
-          # All tests/*.py files alphabetically before test_migrations.py,
-          # split into 4 chunks of ~46 files each. Then append the flaky
-          # tests so contamination from the chunk surfaces as a failure.
-          ls tests/*.py | sort > /tmp/all.txt
-          # Phase 3 cumulative-pressure check. 4c (12 files) reproduced the
-          # race; 4c1/2/3/4 (3 files each) all passed. Hypothesis: race is
-          # intensity-based, not single-file leak. Test halves (6 files) +
-          # a no-prior control to confirm the dose-response curve.
-          case "${{ matrix.chunk }}" in
-            4c-h1)   START=163; END=168 ;;  # first half: liveness..mcp_server
-            4c-h2)   START=169; END=174 ;;  # second half: mcp_store..memory_put_attribution
-            4c-rev)  START=163; END=174 ;;  # full 4c repro check (control)
-            4c-0)    START=174; END=163 ;;  # empty (sed reverse range): just the two flaky tests
-          esac
-          sed -n "${START},${END}p" /tmp/all.txt > /tmp/chunk.txt
-          echo "sub-chunk ${{ matrix.chunk }}: $(wc -l < /tmp/chunk.txt) files (lines $START..$END)"
-          cat /tmp/chunk.txt
-          # Emit pytest argv: chunk files + flaky tests pinned at end.
-          {
-            cat /tmp/chunk.txt
-            echo "tests/test_migrations.py::TestApplyPending::test_concurrent_apply_pending_runs_once"
-            echo "tests/test_migrations.py::TestApplyPending::test_concurrent_apply_pending_stress"
-          } | tr '\n' ' ' > /tmp/argv.txt
-          echo "argv=$(cat /tmp/argv.txt)" >> "$GITHUB_OUTPUT"
-
-      - name: Run chunk + flaky tests
-        env:
-          NEXUS_RUN_FLAKY_MIGRATION_TESTS: "1"
-        run: |
-          # -p no:randomly preserves alphabetical order so the chunk runs
-          # before the flaky tests deterministically. -x stops at first
-          # failure so we get the contaminating test's name in the log.
-          uv run pytest -p no:randomly -x --tb=short \
-            $(cat /tmp/argv.txt)
 
   storage-boundary-lint:
     # RDR-112 §5 (nexus-b43y): static lint for direct sqlite3.connect /
