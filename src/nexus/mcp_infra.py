@@ -25,9 +25,13 @@ _t3_lock = threading.Lock()
 _collections_cache: tuple[list[str], float] = ([], 0.0)
 _COLLECTIONS_CACHE_TTL = 60.0
 
+# Test-injection slot only — production never reads from this except as a
+# test-override hook (see ``inject_catalog``). The process-level Catalog
+# cache that lived here was eliminated; ``get_catalog()`` now constructs
+# fresh per call. Tests that want to assert against a specific Catalog
+# call ``inject_catalog(cat)`` to populate this slot; ``reset_singletons``
+# clears it.
 _catalog_instance = None
-_catalog_lock = threading.Lock()
-_catalog_mtime: float = 0.0
 
 # ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────
 # Session-keyed cache of recent search results. Populated by the search tool,
@@ -251,59 +255,28 @@ def reset_plan_cache_for_tests() -> None:
 # ── Catalog management ────────────────────────────────────────────────────────
 
 
-def _max_jsonl_mtime(cat) -> float:
-    """Return max mtime across every catalog file written by a mutator.
-
-    Includes ``events.jsonl`` (RDR-101 Phase 3) — without it, a
-    cross-process event-sourced write would not invalidate this
-    process's catalog cache and the singleton would serve stale state.
-    """
-    mtime = 0.0
-    for path in cat.mtime_paths():
-        try:
-            mtime = max(mtime, path.stat().st_mtime) if path.exists() else mtime
-        except OSError:
-            pass
-    return mtime
-
-
 def get_catalog():
-    """Return Catalog singleton or None if not initialized.
+    """Return a fresh Catalog or None when not initialised.
 
-    Checks catalog file mtimes on each access — if any of
-    ``owners.jsonl`` / ``documents.jsonl`` / ``links.jsonl`` /
-    ``events.jsonl`` advanced (cross-process write, git pull from
-    another process), triggers a rebuild.
+    No process-level caching; each call constructs a Catalog at
+    ``catalog_path()``. ``Catalog.__init__`` runs ``_ensure_consistent``
+    so cross-process JSONL refreshes are picked up automatically.
+    Callers that issue many lookups in tight loops should construct
+    once and pass the result down (top-down DI) — see also
+    ``commands/catalog.py:_get_catalog`` for the established pattern.
 
-    **Gate caveat:** ``Catalog._event_sourced_enabled`` and
-    ``_shadow_emit_enabled`` are read once at construction. Flipping
-    ``NEXUS_EVENT_SOURCED`` or ``NEXUS_EVENT_LOG_SHADOW`` while the MCP
-    server is running has NO effect on the singleton until the process
-    restarts. This is fine for the cutover (a deployment changes the
-    env var and restarts the service) but tests that toggle the gate
-    mid-run must call :func:`reset_singletons` between toggles.
+    Test override: ``inject_catalog(cat)`` populates a slot that this
+    function returns in preference to constructing fresh; used by
+    tests that need to assert against a specific Catalog instance.
     """
-    global _catalog_instance, _catalog_mtime
-    if _catalog_instance is None:
-        with _catalog_lock:
-            if _catalog_instance is None:
-                from nexus.catalog import Catalog
-                from nexus.config import catalog_path
-                path = catalog_path()
-                if Catalog.is_initialized(path):
-                    _catalog_instance = Catalog(path, path / ".catalog.db")
-                    _catalog_mtime = _max_jsonl_mtime(_catalog_instance)
-    elif _catalog_instance is not None:
-        try:
-            current_mtime = _max_jsonl_mtime(_catalog_instance)
-            if current_mtime > _catalog_mtime:
-                with _catalog_lock:
-                    if current_mtime > _catalog_mtime:
-                        _catalog_mtime = current_mtime
-                        _catalog_instance._ensure_consistent()
-        except OSError:
-            pass
-    return _catalog_instance
+    if _catalog_instance is not None:
+        return _catalog_instance
+    from nexus.catalog import Catalog
+    from nexus.config import catalog_path
+    path = catalog_path()
+    if not Catalog.is_initialized(path):
+        return None
+    return Catalog(path, path / ".catalog.db")
 
 
 def require_catalog():
@@ -1375,13 +1348,12 @@ def reset_singletons():
     list explicitly in their own fixture (e.g. via the autouse fixture
     in ``tests/test_post_document_hooks.py``).
     """
-    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance, _catalog_mtime
+    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _catalog_instance
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
     _collections_cache = ([], 0.0)
     _catalog_instance = None
-    _catalog_mtime = 0.0
     clear_search_traces()
     reset_plan_cache_for_tests()
 
@@ -1402,13 +1374,10 @@ def inject_t3(t3):
 def inject_catalog(cat):
     """Inject a Catalog for testing.
 
-    Resets ``_catalog_mtime`` so the next ``get_catalog()`` call sees
-    the injected catalog's current mtime and skips the (irrelevant)
-    rebuild path. Without this reset the prior catalog's mtime would
-    survive the swap and the next ``get_catalog()`` could either
-    rebuild the injected catalog needlessly (if old mtime > new) or
-    skip a needed rebuild (if old mtime < new).
+    Sets ``_catalog_instance`` so subsequent ``get_catalog()`` calls
+    return this catalog instead of constructing fresh. Used by tests
+    that need to assert against a specific Catalog instance; clear
+    with ``inject_catalog(None)`` or ``reset_singletons()``.
     """
-    global _catalog_instance, _catalog_mtime
+    global _catalog_instance
     _catalog_instance = cat
-    _catalog_mtime = 0.0

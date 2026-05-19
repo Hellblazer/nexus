@@ -182,7 +182,6 @@ def _restore_post_store_batch_hooks_after_test():
         _mod._post_store_batch_hooks_with_catalog_doc_id
     )
     _mod._catalog_instance = None
-    _mod._catalog_mtime = 0.0
     yield
     _mod._post_store_batch_hooks.clear()
     _mod._post_store_batch_hooks.extend(snapshot_batch)
@@ -193,7 +192,6 @@ def _restore_post_store_batch_hooks_after_test():
         snapshot_catalog_doc_id_set
     )
     _mod._catalog_instance = None
-    _mod._catalog_mtime = 0.0
 
 
 @pytest.fixture(autouse=True)
