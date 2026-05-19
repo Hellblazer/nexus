@@ -111,6 +111,22 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+@pytest.fixture
+def catalog_dir(tmp_path: Path, monkeypatch) -> Path:
+    """Initialize a real catalog under tmp_path and route
+    ``nexus.config.catalog_path`` at it for the test. Mirrors the
+    fixture in ``test_catalog_daemon_mode.py``."""
+    from nexus.catalog import Catalog
+    cd = tmp_path / "catalog"
+    cd.mkdir()
+    Catalog.init(cd)
+    monkeypatch.setattr(
+        "nexus.config.catalog_path",
+        lambda: cd,
+    )
+    return cd
+
+
 # ── _T2Inspector seam tests ────────────────────────────────────────────────
 
 
@@ -255,3 +271,42 @@ class TestCheckTaxonomyUnderDaemon:
             "topic_links invariant holds" in result.output
             or "Taxonomy tables missing" in result.output
         ), result.output
+
+
+# ── Daemon-down ClickException regression (nexus-w6hj) ─────────────────────
+
+
+class TestFixPathsDaemonDownClickException:
+    """RDR-112 6shq.4 (nexus-w6hj): mirror of the
+    ``test_catalog_daemon_mode.TestDaemonDownClickException`` pattern
+    for the ``doctor --fix-paths`` flip. ``DaemonNotRunningError`` is
+    a ``RuntimeError`` subclass; Click does NOT translate it
+    automatically. The ``open_catalog`` call inside ``fix_paths`` must
+    wrap in ``try/except RuntimeError`` and re-raise
+    ``click.ClickException`` so the operator sees a one-line error
+    instead of a Python traceback.
+    """
+
+    def test_fix_paths_under_daemon_no_daemon_is_click_exception(
+        self,
+        runner: CliRunner,
+        daemon_env,
+        catalog_dir: Path,
+    ) -> None:
+        """``nx doctor --fix-paths`` under daemon mode with no daemon
+        running surfaces a ``ClickException`` (exit 1, single error
+        line), not a Python traceback. The catalog is initialized so
+        the function reaches the ``open_catalog`` call site."""
+        result = runner.invoke(main, ["doctor", "--fix-paths", "--dry-run"])
+        assert result.exit_code == 1, (
+            f"daemon-down should exit 1 (ClickException), got "
+            f"{result.exit_code}; output: {result.output!r}; "
+            f"exc: {result.exception!r}"
+        )
+        assert result.output.startswith("Error:"), (
+            f"expected 'Error: ...' ClickException line; got: {result.output!r}"
+        )
+        assert "Traceback" not in result.output, (
+            f"daemon-down should NOT surface a Python traceback; got: {result.output!r}"
+        )
+        assert "daemon" in result.output.lower(), result.output

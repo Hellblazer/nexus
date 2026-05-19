@@ -358,14 +358,27 @@ def search_cmd(
     # Pre-Phase-3 chunks that still carry chunk_count fall back to
     # the metadata read so the legacy contract still works.
     if max_file_chunks is not None:
-        from nexus.catalog import Catalog
+        # RDR-112 6shq.4 (nexus-w6hj): route through the daemon-aware
+        # ``open_cached`` factory so this read-mostly site reuses the
+        # process-singleton Catalog under direct mode and routes catalog
+        # SQL through ``T2Client.catalog`` under ``NX_STORAGE_MODE=daemon``.
+        # Read-mostly: ``_doc_chunk_count`` only calls ``cat.get_manifest``
+        # so the cached singleton is the right default (matches the
+        # nexus-dxly scoring use below).
+        #
+        # Translate ``DaemonNotRunningError`` (a ``RuntimeError`` subclass)
+        # into ``click.ClickException`` so daemon-down scenarios surface as
+        # one-line operator messages instead of a Python traceback. Matches
+        # the ``_get_catalog`` precedent from nexus-3gdg.
+        from nexus.catalog import Catalog, open_cached
         from nexus.config import catalog_path
         _cp = catalog_path()
-        _cat = (
-            Catalog(_cp, _cp / ".catalog.db")
-            if Catalog.is_initialized(_cp)
-            else None
-        )
+        _cat = None
+        if Catalog.is_initialized(_cp):
+            try:
+                _cat = open_cached(_cp)
+            except RuntimeError as exc:
+                raise click.ClickException(str(exc)) from exc
         chunk_count_cache: dict[str, int] = {}
 
         def _doc_chunk_count(r: SearchResult) -> int | None:
@@ -410,13 +423,23 @@ def search_cmd(
     # nexus-dxly: pass catalog so the code__ file-size penalty can
     # resolve chunk_count via documents.chunk_count for Phase-3 chunks
     # (RDR-108 dropped chunk_count from chunk metadata).
+    #
+    # RDR-112 6shq.4 (nexus-w6hj): route through the daemon-aware
+    # ``open_cached`` factory so ``NX_STORAGE_MODE=daemon`` routes the
+    # catalog SQL through ``T2Client.catalog``. The surrounding
+    # try/except already catches Exception (silent fallback to no
+    # scoring catalog is the documented behaviour), so the daemon-down
+    # ``RuntimeError`` falls into the same branch and the search still
+    # ranks results, without a ClickException wrapper that would break
+    # the "scoring catalog is best-effort" contract.
     from nexus.catalog import Catalog as _Catalog
+    from nexus.catalog import open_cached as _open_cached
     from nexus.config import catalog_path as _catalog_path
     _scoring_cat = None
     try:
         _scoring_cp = _catalog_path()
         if _Catalog.is_initialized(_scoring_cp):
-            _scoring_cat = _Catalog(_scoring_cp, _scoring_cp / ".catalog.db")
+            _scoring_cat = _open_cached(_scoring_cp)
     except Exception:
         _scoring_cat = None
     results = apply_hybrid_scoring(

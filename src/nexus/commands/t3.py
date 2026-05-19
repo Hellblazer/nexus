@@ -121,8 +121,18 @@ def _make_catalog():
     or, worse, silently produces an empty alive-set so every chunk is
     treated as orphan (catastrophic when paired with --no-dry-run --yes).
 
+    RDR-112 6shq.4 (nexus-w6hj): route through the daemon-aware
+    ``nexus.catalog.open_catalog`` factory so ``nx t3 gc`` works under
+    ``NX_STORAGE_MODE=daemon``. ``t3 gc`` is a mutator (deletes
+    orphaned chunks + catalog rows) so ``open_catalog`` is the right
+    choice over ``open_cached``. Translate ``DaemonNotRunningError``
+    (a ``RuntimeError`` subclass) into ``click.ClickException`` at the
+    factory boundary so daemon-down scenarios surface as a single
+    operator message; matches ``commands/catalog.py:_get_catalog``.
+
     Patched in tests for isolation.
     """
+    from nexus.catalog import open_catalog  # noqa: PLC0415
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415
     from nexus.config import catalog_path  # noqa: PLC0415
 
@@ -131,7 +141,10 @@ def _make_catalog():
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' before 'nx t3 gc'."
         )
-    return Catalog(path, path / ".catalog.db")
+    try:
+        return open_catalog(path)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _make_t3():
@@ -258,6 +271,18 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
     # nexus-6ims: relative source_paths must resolve against the
     # owning catalog document's owner.repo_root, not against the
     # running process's cwd. Open the catalog so we can join.
+    #
+    # RDR-112 6shq.4 (nexus-w6hj): route through the daemon-aware
+    # ``open_cached`` factory so ``nx t3 prune-stale`` reads the owners
+    # table via ``T2Client.catalog`` under ``NX_STORAGE_MODE=daemon``.
+    # Read-only path (single SELECT against ``owners``), so the cached
+    # singleton is fine. The surrounding ``except Exception`` already
+    # treats a missing catalog as "no anchor, skip"; the daemon-down
+    # ``RuntimeError`` falls into the same branch and the prune-stale
+    # pass continues for absolute-path entries; relative paths are
+    # marked skipped_unverifiable, which is the documented degraded
+    # mode.
+    from nexus.catalog import open_cached
     from nexus.catalog.catalog import Catalog
     from nexus.config import catalog_path as _catalog_path
     cat_dir = _catalog_path()
@@ -265,7 +290,7 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
     owner_roots: dict[str, str] = {}
     if (cat_dir / "documents.jsonl").exists():
         try:
-            cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+            cat = open_cached(cat_dir)
             owner_roots = dict(cat._db.execute(
                 "SELECT tumbler_prefix, repo_root FROM owners "
                 "WHERE repo_root != ''"
