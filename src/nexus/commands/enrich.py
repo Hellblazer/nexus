@@ -35,13 +35,13 @@ def _build_catalog_manifest_lookup() -> Callable[[str], list[Any]] | None:
     insertion order, the pre-fix behaviour).
     """
     try:
-        from nexus.catalog import Catalog, open_cached
+        from nexus.catalog import Catalog
         from nexus.config import catalog_path
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return None
-        cat = open_cached(cat_path)
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
     except Exception:
         return None
 
@@ -69,16 +69,13 @@ def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
     lookups stay consistent across the Phase 4 prune.
     """
     try:
-        from nexus.catalog import Catalog, open_cached
+        from nexus.catalog import Catalog
         from nexus.config import catalog_path
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return None
-        # nexus-6xqk follow-up: process-cached Catalog so the closure
-        # this function returns reuses one instance across every
-        # call (per-entry during enrich-aspects on a large collection).
-        cat = open_cached(cat_path)
+        cat = Catalog(cat_path, cat_path / ".catalog.db")
     except Exception:
         return None
 

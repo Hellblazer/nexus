@@ -171,7 +171,6 @@ def _restore_post_store_batch_hooks_after_test():
     ``[]``.
     """
     import nexus.mcp_infra as _mod
-    from nexus.catalog import reset_cache as _reset_catalog_cache
     snapshot_batch = list(_mod._post_store_batch_hooks)
     snapshot_single = list(_mod._post_store_hooks)
     # Snapshot the catalog_doc_id-aware classification set too: a test
@@ -184,7 +183,6 @@ def _restore_post_store_batch_hooks_after_test():
     )
     _mod._catalog_instance = None
     _mod._catalog_mtime = 0.0
-    _reset_catalog_cache()
     yield
     _mod._post_store_batch_hooks.clear()
     _mod._post_store_batch_hooks.extend(snapshot_batch)
@@ -196,7 +194,6 @@ def _restore_post_store_batch_hooks_after_test():
     )
     _mod._catalog_instance = None
     _mod._catalog_mtime = 0.0
-    _reset_catalog_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -383,6 +380,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     "test_catalog_consolidation.py",
     "test_catalog_db.py",
     "test_catalog_doctor_collections_drift.py",
+    # RDR-103 / nexus-j9ey + b03o advisor: voyage tokens appear in
+    # synthetic collection names being asserted against, not as
+    # cloud-mode behaviour under test.
+    "test_catalog_doctor_name_vs_embed_dim.py",
+    "test_upgrade_name_vs_embed_dim_advisory.py",
     "test_catalog_incremental_rebuild.py",
     "test_catalog_manifest_backfill.py",
     "test_catalog_migrate_fallback.py",

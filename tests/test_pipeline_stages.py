@@ -566,13 +566,11 @@ class TestPipelineIndexPdf:
         would continue regressing source_path post-Phase-B.
         """
         import chromadb
-        from nexus.catalog import reset_cache
         from nexus.catalog.catalog import Catalog
         from nexus.db.t3 import T3Database
 
         cat_dir = tmp_path / "test-catalog"
         Catalog.init(cat_dir)
-        reset_cache()
         monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
         monkeypatch.delenv("CHROMA_API_KEY", raising=False)
         monkeypatch.setattr(
@@ -622,13 +620,11 @@ class TestPipelineIndexPdf:
         Verify chunks lack doc_id and the manifest carries it instead.
         """
         import chromadb
-        from nexus.catalog import reset_cache
         from nexus.catalog.catalog import Catalog
         from nexus.db.t3 import T3Database
 
         cat_dir = tmp_path / "test-catalog"
         Catalog.init(cat_dir)
-        reset_cache()
         monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
         monkeypatch.delenv("CHROMA_API_KEY", raising=False)
         monkeypatch.setattr(
@@ -668,8 +664,7 @@ class TestPipelineIndexPdf:
             assert "doc_id" not in m
 
         # Manifest carries the doc-to-chunk binding instead.
-        from nexus.catalog import open_cached
-        cat = open_cached(cat_dir)
+        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
         documents = cat._db.execute(
             "SELECT tumbler FROM documents WHERE physical_collection = ?",
             (f"docs__rdr102-stream__{_local_token()}__v1",),

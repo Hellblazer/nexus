@@ -72,16 +72,13 @@ def _open_catalog():
     means the collection has no documents on record yet — health rows
     for such collections show zero chunks / no links / no orphans.
     """
-    from nexus.catalog import open_cached
     from nexus.catalog.catalog import Catalog
     from nexus.config import catalog_path
 
     path = catalog_path()
     if not Catalog.is_initialized(path):
         return None
-    # nexus-6xqk follow-up: read-only stats accessor uses the process
-    # singleton; called per-collection during health checks.
-    return open_cached(path)
+    return Catalog(path, path / ".catalog.db")
 
 
 def _default_catalog_stats_fn(col: str) -> dict[str, Any]:

@@ -10,11 +10,15 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import chromadb
 import structlog
 
 from nexus.config import default_db_path
+
+if TYPE_CHECKING:
+    from nexus.catalog import Catalog
 
 _log = structlog.get_logger(__name__)
 
@@ -770,17 +774,9 @@ def _check_chroma_pagination(client: object, db_name: str) -> list[HealthResult]
         )]
 
 
-def _check_catalog() -> list[HealthResult]:
+def _check_catalog(cat: "Catalog | None", cat_path: "Path") -> list[HealthResult]:
     try:
-        from nexus.catalog import open_cached
-        from nexus.catalog.catalog import Catalog
-        from nexus.config import catalog_path
-
-        cat_path = catalog_path()
-        if Catalog.is_initialized(cat_path):
-            # nexus-6xqk follow-up: read-only health check uses the
-            # process-cached singleton, avoiding the rebuild contention.
-            cat = open_cached(cat_path)
+        if cat is not None:
             doc_count = cat._db.execute("SELECT count(*) FROM documents").fetchone()[0]
             link_count = cat._db.execute("SELECT count(*) FROM links").fetchone()[0]
             return [HealthResult(
@@ -846,6 +842,14 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
                     detail="skipped (client unavailable)",
                 ))
 
-    results.extend(_check_catalog())
+    from nexus.catalog import Catalog
+    from nexus.config import catalog_path
+    _cat_path = catalog_path()
+    _cat = (
+        Catalog(_cat_path, _cat_path / ".catalog.db")
+        if Catalog.is_initialized(_cat_path)
+        else None
+    )
+    results.extend(_check_catalog(_cat, _cat_path))
 
     return results, _local

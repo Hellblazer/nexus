@@ -230,13 +230,11 @@ def test_batch_index_markdowns_skips_malformed_frontmatter_and_continues(
     ``failed`` with its path; sibling files complete normally; the whole
     call returns within a wall-clock bound."""
     import chromadb
-    from nexus.catalog import reset_cache
     from nexus.catalog.catalog import Catalog
     from nexus.db.t3 import T3Database
 
     cat_dir = tmp_path / "test-catalog"
     Catalog.init(cat_dir)
-    reset_cache()
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -297,12 +295,10 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     detect "unchanged" — re-index would proceed every time.
     """
     import chromadb
-    from nexus.catalog import reset_cache
     from nexus.catalog.catalog import Catalog
 
     cat_dir = tmp_path / "test-catalog"
     Catalog.init(cat_dir)
-    reset_cache()
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -373,7 +369,6 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
     """
     import chromadb
 
-    from nexus.catalog import reset_cache
     from nexus.catalog.catalog import Catalog
     from nexus.config import catalog_path
     from nexus.db.t3 import T3Database
@@ -385,7 +380,6 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
         "NEXUS_CATALOG_PATH but does not initialize the catalog."
     )
 
-    reset_cache()
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -412,8 +406,7 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
     assert metas_before, "expected chunks after first index"
     # RDR-108 Phase 3 retired doc_id from chunk metadata. Verify the
     # catalog manifest covers the chunks instead.
-    from nexus.catalog import open_cached
-    cat = open_cached(cat_path)
+    cat = Catalog(cat_path, cat_path / ".catalog.db")
     documents = cat._db.execute(
         "SELECT tumbler FROM documents WHERE physical_collection = ?",
         (f"docs__autoinit-probe__{_local_token()}__v1",),
@@ -1716,13 +1709,11 @@ def _setup_phase_a_catalog(tmp_path, monkeypatch):
     indexer does not attempt to call the real cloud APIs.
     """
     import chromadb
-    from nexus.catalog import reset_cache
     from nexus.catalog.catalog import Catalog
     from nexus.db.t3 import T3Database
 
     cat_dir = tmp_path / "test-catalog"
     Catalog.init(cat_dir)
-    reset_cache()
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -1846,8 +1837,8 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
     # authoritative — verify the catalog has manifest rows for this PDF.
     for m in rows["metadatas"]:
         assert "doc_id" not in m
-    from nexus.catalog import open_cached
-    cat = open_cached(cat_dir)
+    from nexus.catalog.catalog import Catalog
+    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
     documents = cat._db.execute(
         "SELECT tumbler FROM documents WHERE physical_collection = ?",
         (f"docs__rdr102-pdf__{_local_token()}__v1",),
@@ -1881,8 +1872,8 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
     )
     for m in rows["metadatas"]:
         assert "doc_id" not in m
-    from nexus.catalog import open_cached
-    cat = open_cached(cat_dir)
+    from nexus.catalog.catalog import Catalog
+    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
     documents = cat._db.execute(
         "SELECT tumbler FROM documents WHERE physical_collection = ?",
         (f"docs__rdr102-md__{_local_token()}__v1",),
@@ -1924,8 +1915,8 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
     )
     for m in rows["metadatas"]:
         assert "doc_id" not in m
-    from nexus.catalog import open_cached
-    cat = open_cached(cat_dir)
+    from nexus.catalog.catalog import Catalog
+    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
     documents = cat._db.execute(
         "SELECT tumbler FROM documents WHERE physical_collection = ?",
         (f"rdr__rdr102-rdrmode__{_local_token()}__v1",),
@@ -1951,7 +1942,6 @@ def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
     invisible to operators who never read the Document row but a
     structural drift between catalog + T3 chunk counts.
     """
-    from nexus.catalog import reset_cache
     from nexus.catalog.catalog import Catalog
 
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
@@ -1959,7 +1949,6 @@ def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
     n = index_markdown(sample_md, corpus="rdr102-chunkcount", t3=t3)
     assert n > 0, "expected index_markdown to upsert at least one chunk"
 
-    reset_cache()
     cat = Catalog(cat_dir, cat_dir / ".catalog.db")
     rows = cat._db.execute(
         "SELECT chunk_count FROM documents WHERE file_path = ?",
@@ -2004,7 +1993,6 @@ def test_preflight_registration_idempotent_on_staleness_skip(
 
     from click.testing import CliRunner
 
-    from nexus.catalog import reset_cache
     from nexus.commands.catalog import doctor_cmd
 
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
@@ -2032,7 +2020,6 @@ def test_preflight_registration_idempotent_on_staleness_skip(
     # Drop the process-cached Catalog so the second call re-reads the
     # owner row written by the first call's _catalog_markdown_hook
     # rather than reusing a stale in-memory snapshot.
-    reset_cache()
 
     n2 = index_markdown(sample_md, corpus="rdr102-idem", t3=t3)
     assert n2 == 0, (
@@ -2057,7 +2044,6 @@ def test_preflight_registration_idempotent_on_staleness_skip(
     # single DocumentRegistered + (post-impl) the pre-flight Document
     # row; the projector must produce the identical state from
     # events.jsonl.
-    reset_cache()
     runner = CliRunner()
     result = runner.invoke(
         doctor_cmd, ["--replay-equality", "--json"],
