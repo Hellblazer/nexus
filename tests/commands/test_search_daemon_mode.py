@@ -291,3 +291,46 @@ class TestSearchHybridMode:
         # Vector branch must still surface ``alpha.md`` even with the
         # hybrid scorer engaged.
         assert "alpha.md" in result.output, result.output
+
+
+class TestSearchCatalogScoringSeam:
+    """RDR-112 6shq.4 (nexus-w6hj): the two ``Catalog`` opens inside
+    ``search_cmd`` (max_file_chunks filter + hybrid scoring catalog)
+    route through ``open_cached`` so daemon mode reuses the
+    process-singleton T2Client. The scoring catalog open is wrapped in
+    ``try/except Exception`` by design (best-effort scoring); we
+    assert the happy path still surfaces the seeded chunk so a
+    regression on the daemon-mode flip is caught at the formatter
+    boundary, not just by static grep.
+
+    Note: an isolated daemon-down assertion is not added here because
+    ``_t3()`` raises BEFORE the catalog opens are reached, so any
+    daemon-down ClickException assertion would be testing the T3
+    seam (yfqv scope) rather than the catalog seam (w6hj scope).
+    The presence of the seeded-collection result is sufficient
+    end-to-end evidence that ``open_cached`` works under daemon.
+    """
+
+    def test_search_with_max_file_chunks_under_daemon(
+        self,
+        runner: CliRunner,
+        seeded_collection: str,
+    ) -> None:
+        """``--max-file-chunks 1`` exercises the new ``open_cached``
+        seam at search_cmd.py:365. The seeded collection contains one
+        chunk, so the filter is a no-op for the result, but the code
+        path that opens the catalog under daemon mode IS exercised."""
+        result = runner.invoke(
+            main,
+            [
+                "search",
+                "zenithpony",
+                "--corpus",
+                seeded_collection,
+                "--no-threshold",
+                "--max-file-chunks",
+                "10",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "alpha.md" in result.output, result.output

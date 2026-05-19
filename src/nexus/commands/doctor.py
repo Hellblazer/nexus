@@ -1962,7 +1962,23 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if fix_paths:
-        from nexus.catalog import Catalog
+        # RDR-112 6shq.4 (nexus-w6hj): route through the daemon-aware
+        # ``open_catalog`` factory so ``nx doctor --fix-paths`` works
+        # under ``NX_STORAGE_MODE=daemon``. Mutator path (UPDATE-by-
+        # tumbler against ``documents``) so ``open_catalog`` (fresh
+        # instance) is the right choice over ``open_cached`` (read-
+        # mostly singleton).
+        #
+        # Translate ``DaemonNotRunningError`` (a ``RuntimeError``
+        # subclass) into ``click.ClickException`` so daemon-down
+        # scenarios surface as a single error line, not a Python
+        # traceback. Matches the ``get_t3`` translation at the T3 site
+        # immediately below (nexus-pac1) and the ``_get_catalog``
+        # precedent from nexus-3gdg. Doctor as a verb operates against
+        # potentially-broken state, but ``--fix-paths`` is an explicit
+        # mutation action: the operator wants a clean failure when
+        # the daemon is unavailable, not a silent skip.
+        from nexus.catalog import Catalog, open_catalog
         from nexus.catalog.catalog import make_relative
         from nexus.catalog.tumbler import Tumbler, read_owners
         from nexus.config import catalog_path
@@ -1973,7 +1989,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             click.echo("Catalog not initialized — run: nx catalog setup")
             return
 
-        cat = Catalog(cat_p, cat_p / ".catalog.db")
+        try:
+            cat = open_catalog(cat_p)
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
 
         # Find all entries with absolute file_path
         rows = cat._db.execute(
