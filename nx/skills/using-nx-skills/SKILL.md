@@ -54,7 +54,9 @@ After a successful pipeline:
 - 3+ validated findings to keep → `/nx:knowledge-tidy`
 - PDF to index → `/nx:pdf-process`
 
-**RDR lifecycle:** `/nx:rdr-create` → `/nx:rdr-research` → `/nx:rdr-gate` → `/nx:rdr-accept` → `/nx:rdr-close`. List/show: `/nx:rdr-list`, `/nx:rdr-show NNN`. Audit: `/nx:rdr-audit`.
+**RDR lifecycle:** `/nx:rdr-create` → `/nx:rdr-research` → `/nx:rdr-gate` → `/nx:rdr-accept` → (implementation phases) → `/nx:rdr-close`. List/show: `/nx:rdr-list`, `/nx:rdr-show NNN`. Audit: `/nx:rdr-audit`.
+
+**Phase boundary inside an implementation arc:** every phase-review bead, before close, runs `/nx:phase-review-gate <rdr-id> --phase N`. Pass 1 enumerates the RDR's numbered §Approach items; Pass 2 validates each has a closing-bead pointer (`ItemN=nexus-xxxx`) or explicit `none` deferral. BLOCKED on any unaccounted item. Not optional. Prevents the silent scope reduction class (RDR-112 Phase 1 / nexus-52lb, 2026-05-15: T3 daemon silently dropped from a 6-bead close, found three phases later, 2-3 days of replanning).
 
 **Git:** isolation → `/nx:git-worktrees`. Done → `/nx:finishing-branch`. Receiving review → `/nx:receiving-review`.
 
