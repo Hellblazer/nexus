@@ -64,22 +64,22 @@ Configuration is communicated via process environment variables read at every ac
 
 228 of 435 test files (52%) use `monkeypatch` to manage these. Per the project's TDD rule the test files are not the problem; the env-as-config pattern forces each test to manage process-global state because the source has nowhere else to put it.
 
-#### Gap 4: Seven autouse conftest fixtures resetting singletons
+#### Gap 4: Eight autouse conftest fixtures resetting singletons
 
-`tests/conftest.py` lines 150 to 380 define seven `autouse=True` fixtures whose sole purpose is resetting the state above on every test boundary:
+`tests/conftest.py` lines 128 to 380 define eight `autouse=True` fixtures whose sole purpose is resetting the state above on every test boundary:
 
-| Fixture | Lines | Resets |
-| --- | --- | --- |
-| `_restore_structlog_config_each_test` | 130 to 147 | `structlog` global config |
-| `_restore_post_store_batch_hooks_after_test` | 150 to 199 | `_post_store_hooks`, `_post_store_batch_hooks`, `_post_store_batch_hooks_with_catalog_doc_id`, `_catalog_instance`, `_cached` (via reset_cache) |
-| `_isolate_dispatch_routing` | 202 to 241 | 7 env vars |
-| `_pin_storage_mode_direct_for_tests` | 244 to 267 | `NX_STORAGE_MODE` |
-| `_isolate_t1_sessions` | 270 to 285 | `NEXUS_SKIP_T1` |
-| `_auto_migrate_t2_in_tests` | 288 to 321 | wraps `T2Database.__init__` to re-introduce migration that was severed in nexus-uqqy |
-| `_isolate_config_dir` | 324 to 362 | `NEXUS_CONFIG_DIR` |
-| `_isolate_catalog` | 365 to 380 | `NEXUS_CATALOG_PATH` |
+| Fixture | Lines | Resets | RDR-118 disposition |
+| --- | --- | --- | --- |
+| `_restore_structlog_after_test` | 128 to 147 | `structlog` global config | STAYS (orthogonal) |
+| `_restore_post_store_batch_hooks_after_test` | 150 to 199 | `_post_store_hooks`, `_post_store_batch_hooks`, `_post_store_batch_hooks_with_catalog_doc_id`, `_catalog_instance`, `_cached` (via reset_cache) | DELETED in Phase 2 |
+| `_isolate_dispatch_routing` | 202 to 241 | 7 env vars | DELETED in Phase 3 |
+| `_pin_storage_mode_direct_for_tests` | 244 to 267 | `NX_STORAGE_MODE` | DELETED in Phase 3 |
+| `_isolate_t1_sessions` | 270 to 285 | `NEXUS_SKIP_T1` | DELETED in Phase 3 |
+| `_auto_migrate_t2_in_tests` | 288 to 321 | wraps `T2Database.__init__` to re-introduce migration severed in nexus-uqqy | DELETED in Phase 4 (after absorbing `run_if_needed` into runtime T2 construction) |
+| `_isolate_config_dir` | 324 to 362 | `NEXUS_CONFIG_DIR` | DELETED in Phase 3 |
+| `_isolate_catalog` | 365 to 380 | `NEXUS_CATALOG_PATH` | DELETED in Phase 3 |
 
-Each fixture docstring cites a past incident (orphan owners, leaked sockets, dropped hooks, escaped subprocess writes) that motivated its addition. They are not paranoid: they exist because real test pollution happened. The autouse pressure adds 250 lines of conftest boilerplate that future contributors must understand, and every new test inherits the cost.
+Each fixture docstring cites a past incident (orphan owners, leaked sockets, dropped hooks, escaped subprocess writes) that motivated its addition. They are not paranoid: they exist because real test pollution happened. The autouse pressure adds ~250 lines of conftest boilerplate that future contributors must understand, and every new test inherits the cost. RDR-118 eliminates 7 of the 8 fixtures by removing the source-side state they exist to reset.
 
 ## Context
 
@@ -91,7 +91,7 @@ Discovery sequence (this session, nexus-w1ip):
 2. Phase 1A parametrize collapse on `test_plugin_structure.py` (679 to 45) and `tests/commands/test_help_completeness.py` (402 to 4) saved 1032 tests with zero coverage change. Sweep landed at 8074. Shipped on PR #864.
 3. Investigation of remaining bloat showed 423 files with average 19 tests each. The 67 thinnest files only hold 218 tests; bloat is broadly distributed.
 4. Inspection of test_aspect_*, test_plan_*, test_t1/t2/t3*, test_catalog* file families showed each file pins specific feature surface or specific RDR-phase decisions. Naive merging loses regression protection.
-5. Inspection of conftest revealed the seven autouse fixtures, each documenting a past incident. The singletons they reset are the root cause; the user's "tangled mess" complaint is symptomatic.
+5. Inspection of conftest revealed the eight autouse fixtures, each documenting a past incident. The singletons they reset are the root cause; the user's "tangled mess" complaint is symptomatic.
 6. Source inspection via Serena confirmed two independent singletons (`nexus.catalog._cached` and `nexus.mcp_infra._catalog_instance`) and three global hook collections.
 
 The arithmetic is straightforward. To drop from 8074 to below 3000 by deletion alone, ~63% of remaining tests must go. The architecture fix is the only path that does not destroy regression coverage; remove the singletons and the autouse fixtures disappear, which removes the structural reason tests need 250 lines of isolation ceremony.
@@ -110,7 +110,7 @@ The arithmetic is straightforward. To drop from 8074 to below 3000 by deletion a
 Source files read:
 - `src/nexus/catalog/__init__.py` (218 lines) confirmed `_cached`, `_cache_lock`, `_t2_client`, `_t2_client_lock`, `open_catalog`, `open_cached`, `reset_cache`.
 - `src/nexus/mcp_infra.py` confirmed `_catalog_instance`, `_catalog_mtime`, `_post_store_hooks`, `_post_store_batch_hooks`, `_post_store_batch_hooks_with_catalog_doc_id`, `register_post_store_hook`, `register_post_store_batch_hook`, `fire_post_store_hooks`, `fire_post_store_batch_hooks`, `get_catalog`.
-- `tests/conftest.py` (698 lines, 7 autouse fixtures) read end-to-end. Each fixture docstring cites motivating incident.
+- `tests/conftest.py` (698 lines, 8 autouse fixtures at lines 128, 150, 202, 244, 270, 288, 324, 365) read end-to-end. Each fixture docstring cites motivating incident.
 - `src/nexus/mcp_server.py` sample showed existing `_inject_catalog` / `_inject_t3` / `_reset_singletons` precedent for one module.
 
 Call-site survey via grep across `src/nexus/`:
@@ -128,7 +128,7 @@ Test-side survey:
 | --- | --- | --- |
 | python `threading.Lock` | Yes | `Lock()` is reentrant-unsafe; current pattern uses double-checked locking correctly. No change needed. |
 | `chromadb.EphemeralClient` | Project memory only | Shared-process-state warning noted (project_chromadb_ephemeral_shared_state.md). Means T3 isolation also needs container-level coordination. |
-| `pytest` autouse fixture cost | Documented | Autouse runs per test; 7 fixtures times ~8000 tests is ~56k fixture executions per CI run. Real overhead but not the primary motivator. |
+| `pytest` autouse fixture cost | Documented | Autouse runs per test; 8 fixtures times ~8000 tests is ~64k fixture executions per CI run. Real overhead but not the primary motivator. |
 
 ### Key Discoveries
 
@@ -141,7 +141,7 @@ Test-side survey:
 ### Critical Assumptions
 
 - [x] **A1: Phased migration is feasible without a flag day.** Status: Verified (revised scope). Method: Source Search (codebase-deep-analyzer dispatch, 2026-05-19). FINDING: Phase 1 CANNOT ship catalog-only. Bidirectional call-time coupling at `catalog/__init__.py:112` (lazy `from nexus.mcp_infra import t2_ctx`) and `mcp_infra.py:914` (`manifest_write_batch_hook` calls `get_catalog()`) forces a minimum mcp_infra subset into Phase 1. See § Revised Phase 1 Boundary below. T2 record: `nexus_rdr/118-research-1-a1-phasing`.
-- [ ] **A2: Removing autouse fixtures after the migration surfaces no new failures.** Status: Partially Verified. Method: Source inspection of the 7 conftest fixtures. FINDING: 5 of 7 fixtures are deletable (the catalog/hook/env-config ones). 2 stay because they manage state outside RDR-118 scope: `_restore_structlog_config_each_test` (structlog is its own global) and `_auto_migrate_t2_in_tests` (RDR-112 P0.4 nexus-uqqy territory). Forward-looking residual: post-Phase-4 full-suite run is the final verification.
+- [ ] **A2: Removing autouse fixtures after the migration surfaces no new failures.** Status: Partially Verified. Method: Source inspection of the 8 conftest autouse fixtures (recount during accept gate, 2026-05-19). FINDING: 7 of 8 fixtures are deletable across the four phases. Phase 2 deletes 1 (`_restore_post_store_batch_hooks_after_test`). Phase 3 deletes 5 env-config fixtures (`_isolate_config_dir`, `_isolate_catalog`, `_isolate_dispatch_routing`, `_pin_storage_mode_direct_for_tests`, `_isolate_t1_sessions`). Phase 4 deletes 1 (`_auto_migrate_t2_in_tests` — by absorbing `run_if_needed` into the runtime's T2 construction path). Only `_restore_structlog_after_test` stays permanently (structlog is its own global, orthogonal to RDR-118). Forward-looking residual: post-Phase-4 full-suite run is the final verification.
 - [ ] **A3: Test count drops materially.** Status: Likely Verified (with revised optimism). Method: MVV target pivot from `test_aspect_extractor.py` (env-config, Phase 3 territory) to `tests/test_post_store_hook.py` (16 tests, 28 singleton-coupling instances, redundant local `_reset_hooks` autouse). API sketch confirmed feasibility (T2 record: `nexus_rdr/118-research-3-a3-mvv`). REVISED LANDING: singleton fix alone takes 8074 → ~5500; reaching <3000 requires additional sweeps (closed-RDR pin deletion, slow-tier marker for integration tests, hotspot parametrize consolidation).
 - [x] **A4: The dual-singleton is historical accident.** Status: Verified. Method: Source Search (git history via deep-research-synthesizer dispatch, 2026-05-19). FINDING: `_catalog_instance` introduced 2026-04-08 commit 14c300d7 (mcp_server.py extraction, no bead/RDR). `_cached` introduced 2026-05-02 commit 5c0e303b PR #487 bead nexus-6xqk (SQLite write-lock storm fix). 24 days apart, separate motivations, no cross-reference. Safe to collapse. TWO SEMANTIC PRESERVATIONS REQUIRED: (a) `get_catalog()`'s mtime-refresh logic (mcp_infra.py:385-394, cross-process consistency for direct mode) must be absorbed by `runtime.get_catalog()` or explicitly retired with documented rationale; (b) `(cat_path, mode)` keying must be preserved (test isolation requirement). T2 record: `nexus_rdr/118-research-2-a4-singleton-origin`.
 
@@ -252,7 +252,7 @@ Replaces the six module-level mutables (three lists + three id()-keyed classific
 A runtime container provides three things the current pattern does not:
 
 1. **Explicit lifecycle**: construction and `close()` are called by the entry points. Tests construct per class; CLI constructs per invocation. No more implicit module-load initialisation.
-2. **Per-test isolation by construction**: each test gets its own runtime; no shared mutable state between tests; 5 of 7 autouse fixtures become unnecessary (the catalog/hook/env-config ones; `_restore_structlog_config_each_test` and `_auto_migrate_t2_in_tests` stay, outside RDR-118 scope).
+2. **Per-test isolation by construction**: each test gets its own runtime; no shared mutable state between tests; 7 of 8 autouse fixtures become unnecessary across the four phases (1 in Phase 2, 5 in Phase 3, 1 in Phase 4). Only `_restore_structlog_after_test` stays — structlog is its own global, orthogonal to RDR-118.
 3. **CLAUDE.md compliance**: "Constructor injection, no global singletons, no service locators" is the project's stated rule. This brings the source into compliance.
 
 The migration cost is real (~140 call sites, ~25 modules) but bounded. The phased approach keeps each phase independently shippable and revertable.
@@ -314,7 +314,7 @@ The migration cost is real (~140 call sites, ~25 modules) but bounded. The phase
 
 ### Consequences
 
-- **Positive**: 5 autouse fixtures deletable (catalog/hook/env-config); ~200 lines of conftest gone; per-test isolation becomes constructor-level not fixture-level. (Structlog and T2 auto-migrate fixtures stay — orthogonal concerns.)
+- **Positive**: 7 of 8 autouse fixtures deletable across the four phases (1 in Phase 2 + 5 in Phase 3 + 1 in Phase 4); ~230 lines of conftest gone; per-test isolation becomes constructor-level not fixture-level. Only `_restore_structlog_after_test` stays — orthogonal concern.
 - **Positive**: Future tests do not need to learn the monkeypatch dance; they construct a runtime and pass it.
 - **Positive**: CLAUDE.md architectural rule honored; new contributors find injection patterns, not service locators.
 - **Positive**: Enables the user's <3000 test target by removing structural reasons for fixture-heavy test code.
@@ -529,7 +529,7 @@ The RDR is large for the change but the change touches ~140 call sites and is th
 - `CLAUDE.md` (project): "Composition over inheritance ... Constructor injection, no global singletons, no service locators."
 - `src/nexus/catalog/__init__.py` lines 44 to 192 (singleton declarations and lifecycle).
 - `src/nexus/mcp_infra.py` lines 28 to 395 (catalog instance, post-store hooks).
-- `tests/conftest.py` lines 130 to 380 (seven autouse fixtures, each docstring cites motivating incident).
+- `tests/conftest.py` (eight autouse fixtures at lines 128, 150, 202, 244, 270, 288, 324, 365; each docstring cites motivating incident).
 - `src/nexus/mcp_server.py` (existing `_inject_catalog`/`_inject_t3` precedent).
 - PR #864 (nexus-w1ip Phase 1A): test count 9106 to 8074 via parametrize collapse.
 - Bead nexus-o5ck (this RDR's tracking bead).
@@ -547,7 +547,7 @@ Three findings recorded in T2 (`nexus_rdr/118-research-{1,2,3}-*`):
 
 3. **A3 (test count drops materially)** partially verified. MVV target pivoted from `test_aspect_extractor.py` (env-config, Phase 3 territory) to `tests/test_post_store_hook.py` (16 tests, redundant local `_reset_hooks` autouse, direct singleton coupling). API sketch confirms feasibility. REVISED LANDING: singleton fix alone takes 8074 → ~5500. The user's <3000 target needs `nexus-wuerf` sweeps in addition. RDR body's "<3000" claim corrected throughout.
 
-4. **A2 (autouse fixture deletion)** partially verified. Of the 7 conftest autouse fixtures, 5 are deletable (catalog/hook/env-config). 2 stay: `_restore_structlog_config_each_test` (structlog's own global) and `_auto_migrate_t2_in_tests` (RDR-112 P0.4 territory). RDR body's "7 fixtures deletable" claim corrected to 5.
+4. **A2 (autouse fixture deletion)** partially verified. Of the 8 conftest autouse fixtures (recount during accept gate), 7 are deletable across the four phases: Phase 2 deletes 1 (post-store-batch), Phase 3 deletes 5 (env-config), Phase 4 deletes 1 (T2 auto-migrate, absorbed into runtime). Only `_restore_structlog_after_test` stays. RDR body's earlier "7 fixtures deletable" and "5 of 7" framings were both off-by-one; corrected to "7 of 8 deletable" throughout.
 
 Forward-looking residual: A2 final verification requires post-Phase-4 full-suite run; A3 final verification requires the actual MVV spike.
 
@@ -570,6 +570,6 @@ Observations addressed:
 - **Test count delta**: tightened from "8074 → ~5500 from singleton fix alone" (overstated by ~400) to "8074 → ~7700 from RDR-118 phases alone; ~5500 combined with nexus-wuerf sweeps."
 - **nexus-qw21 as formal prerequisite**: added to §Prerequisites as a third checkbox (close OR fold-into-Phase-1).
 - **mtime-refresh forcing function**: added Phase 2 Step 0 gate condition requiring the disposition (absorb or retire) to be decided and documented before Phase 2 closes.
-- **Stale "7 autouse fixtures" wording**: corrected to "5 deletable (catalog/hook/env-config), 2 stay" in §Consequences.
+- **Stale "7 autouse fixtures" wording**: corrected to "7 of 8 deletable, 1 stays" after the post-accept audit recount caught the off-by-one in the actual conftest fixture count.
 
 Gate outcome: **PASSED**. RDR-118 is ready for `/nx:rdr-accept` once user reviews the gate-round-1 in-place fixes (per project policy: pause between gate and accept).
