@@ -194,89 +194,57 @@ def _reset_runtime_state_between_tests(request: pytest.FixtureRequest):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_dispatch_routing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Strip NEXUS_DISPATCH_* env so tests don't inherit operator mode.
+def _isolate_runtime_env_per_test(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """RDR-118 P3.S2 (nexus-ca669): consolidates the five env-isolation
+    autouse fixtures that retired in P3.S2:
 
-    The dispatch router consults ``NEXUS_DISPATCH_BACKEND`` and the
-    ``NEXUS_DISPATCH_{QWEN,CLAUDE}_OPERATORS`` env sets at every call.
-    If the test runner inherits ``NEXUS_DISPATCH_BACKEND=auto`` from a
-    shell where the operator activated qwen routing, every bundle test
-    that mocks ``claude_dispatch`` silently switches to the qwen path
-    and the assertion ``patch.object(..., 'claude_dispatch', fake)``
-    never fires. The pre-existing shell env can leak the operator's
-    production routing into the suite. Strip them at session start;
-    individual tests that exercise routing opt in via
-    ``monkeypatch.setenv`` as they already do.
+    * ``_isolate_dispatch_routing`` (7 dispatch / aspect / tier-B / qwen
+      env vars stripped so the test suite never inherits an operator's
+      routing config).
+    * ``_pin_storage_mode_direct_for_tests`` (``NX_STORAGE_MODE=direct``
+      pinned so the post-RDR-112-P6.3 daemon default does not silently
+      route every test through a non-existent daemon; nexus-507q).
+    * ``_isolate_t1_sessions`` (``NEXUS_SKIP_T1=1`` pinned so the
+      RDR-105 four-branch fail-loud gate hands tests an
+      EphemeralClient; nexus-jnx7).
+    * ``_isolate_config_dir`` (``NEXUS_CONFIG_DIR`` pointed at
+      ``tmp_path/.config/nexus`` so child processes never write into the
+      operator's real config dir; nexus-mrmq).
+    * ``_isolate_catalog`` (``NEXUS_CATALOG_PATH`` pointed at
+      ``tmp_path/test-catalog`` so catalog write paths guard on
+      ``Catalog.is_initialized`` and never pollute the operator's real
+      catalog; RDR-060 / nexus-dqr3).
+
+    All five values resolve at the same point (``NexusRuntime``
+    construction via ``_construct_process_default_from_env``), so they
+    consolidate cleanly into a single autouse. The marker
+    ``no_legacy_isolation`` skips this fixture for tests that own
+    isolation through the explicit ``runtime`` fixture (e.g.
+    ``tests/test_post_store_hook.py``).
+
+    Phase 4 (``nexus-yi9mq``) retires this fixture once every test
+    path constructs an explicit runtime.
     """
+    if request.node.get_closest_marker("no_legacy_isolation") is not None:
+        return
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / ".config" / "nexus"))
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "test-catalog"))
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+    monkeypatch.setenv("NEXUS_SKIP_T1", "1")
     for var in (
         "NEXUS_DISPATCH_BACKEND",
         "NEXUS_DISPATCH_QWEN_OPERATORS",
         "NEXUS_DISPATCH_CLAUDE_OPERATORS",
-        # Aspect-extractor backend (PR #780) and scholarly-paper prompt
-        # version (feature/scholarly-paper-v2): both are read at every
-        # call into ``aspect_extractor``. A shell that has the
-        # ``v2`` toggle exported for an operator session would
-        # otherwise silently flip every aspect test off the default
-        # prompt body, masking v1-shaped assertions.
         "NEXUS_ASPECT_BACKEND",
         "NEXUS_SCHOLARLY_PAPER_VERSION",
-        # Tier-B dispatcher routing (qwen_agent_dispatch). A shell that
-        # exports ``NEXUS_TIER_B_DISPATCHER=qwen_agent`` for an operator
-        # session would otherwise silently flip every nx_enrich_beads
-        # test off the default claude path. Same isolation reasoning as
-        # NEXUS_DISPATCH_BACKEND above.
         "NEXUS_TIER_B_DISPATCHER",
-        # Supervisor-binary override for the qwen-agent transport — kept
-        # out of band so tests that exercise resolution can ``setenv`` it
-        # explicitly without inheriting an operator's real supervisor
-        # path.
         "QWEN_AGENT_SUPERVISOR",
     ):
         monkeypatch.delenv(var, raising=False)
-
-
-@pytest.fixture(autouse=True)
-def _pin_storage_mode_direct_for_tests(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """nexus-507q: pin ``NX_STORAGE_MODE=direct`` as the test default.
-
-    The RDR-112 P6.3 cutover (2026-05-17) flipped the production default
-    for ``NX_STORAGE_MODE`` from ``direct`` to ``daemon``: an unset env
-    var resolves to ``daemon``. The test suite has thousands of cases
-    that don't set the env var and assume direct-mode behaviour
-    (in-process SQLite opens, no daemon RPC routing). Flipping the
-    production default without preserving the test contract would
-    silently route every such test through a non-existent daemon and
-    cascade-fail.
-
-    This autouse fixture pins ``NX_STORAGE_MODE=direct`` before each
-    test runs, so direct-mode behaviour is the test default. Tests
-    that exercise daemon-mode opt in with ``monkeypatch.setenv("NX_
-    STORAGE_MODE", "daemon")`` (as many already do). Tests that
-    exercise the new default explicitly (``tests/test_default_storage
-    _mode.py``) ``delenv`` the var inside the test body to probe the
-    production resolver.
-    """
-    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
-
-
-@pytest.fixture(autouse=True)
-def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force tests onto the explicit-isolation T1 path.
-
-    RDR-105 P4 (nexus-jnx7) collapsed T1 discovery to a single
-    four-branch fail-loud gate. With no env vars and no addr file,
-    the constructor raises ``T1ServerNotFoundError``. Tests that
-    previously relied on the legacy EphemeralClient fallback opt
-    in via the ``NX_T1_ISOLATED=1`` (or its deprecated
-    ``NEXUS_SKIP_T1=1`` alias) Path C; this autouse fixture sets
-    the alias process-wide so the suite gets a per-test
-    EphemeralClient by default. Tests that need a different mode
-    (env-passdown, addr file, fail-loud raise) override the env
-    inside the test.
-    """
-    monkeypatch.setenv("NEXUS_SKIP_T1", "1")
 
 
 @pytest.fixture(autouse=True)
@@ -313,65 +281,6 @@ def _auto_migrate_t2_in_tests(
         original_init(self, path)
 
     monkeypatch.setattr(T2Database, "__init__", migrating_init)
-
-
-@pytest.fixture(autouse=True)
-def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Redirect NEXUS_CONFIG_DIR so child processes write under tmp_path.
-
-    nexus-mrmq: integration tests that dispatch ``claude -p`` subprocesses
-    (the operator dispatch path, plan-runner, nx_answer equivalence
-    suite) inherit the parent's ``os.environ``. Without this fixture
-    the child resolves ``nexus_config_dir()`` to the user's real
-    ``~/.config/nexus/`` and writes ``current_session`` /
-    ``t1_addr.<claude_pid>`` files there. Reproduced 2026-05-08 during
-    4.27.1 shakeout: a transient ``claude_dispatch -p`` subprocess
-    rewrote the live MCP's session file and unlinked its addr file
-    mid-session.
-
-    Setting ``NEXUS_CONFIG_DIR`` here is read at call time inside
-    ``nexus.config.nexus_config_dir()`` and propagates to children
-    via ``os.environ`` inheritance, so every spawned subprocess
-    (regardless of operator-dispatch mode) writes its config files
-    under the per-test tmp dir.
-
-    Tests that need to assert the default path (``Path.home() /
-    .config / nexus``) explicitly ``monkeypatch.delenv`` first; that
-    still works because this fixture's ``monkeypatch.setenv`` is
-    overridden by any later test-local ``setenv`` / ``delenv`` call.
-
-    Path layout mirrors the natural ``~/.config/nexus`` relative
-    layout (``tmp_path/.config/nexus``) so per-test fixtures that
-    set ``HOME=tmp_path`` and write into ``tmp_path/.config/nexus/``
-    (e.g. ``test_scratch_cmd.fake_home``) land at the same path
-    ``read_claude_session_id`` resolves to via ``NEXUS_CONFIG_DIR``.
-
-    The directory itself is *not* pre-created — write helpers
-    (``write_claude_session_id``, ``write_t1_addr``, etc.) all do
-    ``parents=True, exist_ok=True`` themselves, and tests that
-    explicitly call ``mkdir(parents=True)`` without ``exist_ok``
-    on the same path would otherwise hit ``FileExistsError``.
-    """
-    config_dir = tmp_path / ".config" / "nexus"
-    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
-
-
-@pytest.fixture(autouse=True)
-def _isolate_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Redirect NEXUS_CATALOG_PATH so tests never pollute the real user catalog.
-
-    Without this, integration tests that trigger _catalog_hook() (via index_repo,
-    index_markdown, or similar) register documents in the user's live catalog at
-    ~/.config/nexus/. Before this fixture landed (RDR-060, 2026-04-08), 64
-    orphan ``int-cce-*`` curator owners accumulated from
-    ``test_cce_query_retrieves_cce_indexed_markdown`` alone.
-
-    The fixture works because catalog write paths guard on
-    ``Catalog.is_initialized(cat_path)`` — the tmp path is never initialised,
-    so hooks return early. See ``tests/test_catalog_isolation.py`` for the
-    regression tests that lock this behaviour in (nexus-dqr3 / nexus-b34f).
-    """
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "test-catalog"))
 
 
 @pytest.fixture
