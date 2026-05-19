@@ -172,42 +172,41 @@ async def test_traverse_step_accepts_purpose_only() -> None:
 
 
 @pytest.fixture()
-def fake_catalog(tmp_path: Path):
-    """A real Catalog seeded with a small graph for end-to-end traverse tests."""
+def fake_catalog(tmp_path: Path, monkeypatch):
+    """A real Catalog seeded with a small graph for end-to-end traverse tests.
+
+    Sets ``NEXUS_CATALOG_PATH`` so production code paths that call
+    ``get_catalog()`` resolve to this on-disk catalog.
+    """
     from nexus.catalog.catalog import Catalog
 
     cat_dir = tmp_path / "catalog"
-    cat_dir.mkdir(parents=True, exist_ok=True)
-    cat = Catalog(catalog_dir=cat_dir, db_path=tmp_path / "catalog.db")
+    cat = Catalog.init(cat_dir)
     owner = cat.register_owner("p", "test")
     rdr = cat.register(owner, "RDR", physical_collection="rdr__test")
     impl_a = cat.register(owner, "ImplA", physical_collection="code__test")
     impl_b = cat.register(owner, "ImplB", physical_collection="code__test")
     cat.link(rdr, impl_a, "implements", created_by="t")
     cat.link(rdr, impl_b, "implements-heuristic", created_by="t")
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
     return cat, rdr, impl_a, impl_b
 
 
 def test_traverse_mcp_tool_resolves_purpose_and_calls_graph_many(
-    fake_catalog, monkeypatch,
+    fake_catalog,
 ) -> None:
     """The traverse MCP tool resolves ``purpose`` to link_types,
     calls ``graph_many``, and returns the canonical step output
     ``{tumblers, ids, collections}``."""
     from nexus.mcp import core as mcp_core
-    from nexus.mcp_infra import inject_catalog
 
     cat, rdr, impl_a, impl_b = fake_catalog
-    inject_catalog(cat)
-    try:
-        result = mcp_core.traverse(
-            seeds=[str(rdr)],
-            purpose="find-implementations",
-            depth=1,
-            direction="out",
-        )
-    finally:
-        inject_catalog(None)
+    result = mcp_core.traverse(
+        seeds=[str(rdr)],
+        purpose="find-implementations",
+        depth=1,
+        direction="out",
+    )
 
     assert isinstance(result, dict)
     assert "tumblers" in result
@@ -221,19 +220,14 @@ def test_traverse_mcp_tool_accepts_explicit_link_types(
     fake_catalog,
 ) -> None:
     from nexus.mcp import core as mcp_core
-    from nexus.mcp_infra import inject_catalog
 
     cat, rdr, impl_a, impl_b = fake_catalog
-    inject_catalog(cat)
-    try:
-        result = mcp_core.traverse(
-            seeds=[str(rdr)],
-            link_types=["implements"],
-            depth=1,
-            direction="out",
-        )
-    finally:
-        inject_catalog(None)
+    result = mcp_core.traverse(
+        seeds=[str(rdr)],
+        link_types=["implements"],
+        depth=1,
+        direction="out",
+    )
 
     assert str(impl_a) in result["tumblers"]
     # 'implements-heuristic' was excluded → impl_b should not appear.
@@ -245,18 +239,13 @@ def test_traverse_mcp_tool_rejects_link_types_and_purpose_together(
 ) -> None:
     """SC-16 enforced at the MCP-tool boundary."""
     from nexus.mcp import core as mcp_core
-    from nexus.mcp_infra import inject_catalog
 
     cat, rdr, *_ = fake_catalog
-    inject_catalog(cat)
-    try:
-        result = mcp_core.traverse(
-            seeds=[str(rdr)],
-            link_types=["implements"],
-            purpose="find-implementations",
-        )
-    finally:
-        inject_catalog(None)
+    result = mcp_core.traverse(
+        seeds=[str(rdr)],
+        link_types=["implements"],
+        purpose="find-implementations",
+    )
     # MCP tools surface errors as strings rather than raising.
     assert isinstance(result, dict)
     assert result.get("error"), f"expected error, got {result}"
@@ -266,13 +255,16 @@ def test_traverse_mcp_tool_rejects_link_types_and_purpose_together(
 
 
 @pytest.fixture()
-def fake_catalog_with_paths(tmp_path: Path):
-    """Catalog seeded with file_path so T3 ID lookup can be tested."""
+def fake_catalog_with_paths(tmp_path: Path, monkeypatch):
+    """Catalog seeded with file_path so T3 ID lookup can be tested.
+
+    Sets ``NEXUS_CATALOG_PATH`` so production code paths that call
+    ``get_catalog()`` resolve to this on-disk catalog.
+    """
     from nexus.catalog.catalog import Catalog
 
     cat_dir = tmp_path / "catalog"
-    cat_dir.mkdir(parents=True, exist_ok=True)
-    cat = Catalog(catalog_dir=cat_dir, db_path=tmp_path / "catalog.db")
+    cat = Catalog.init(cat_dir)
     owner = cat.register_owner("p", "test")
     rdr = cat.register(
         owner, "RDR",
@@ -285,6 +277,7 @@ def fake_catalog_with_paths(tmp_path: Path):
         file_path="src/foo.py",
     )
     cat.link(rdr, impl, "implements", created_by="t")
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
     return cat, rdr, impl
 
 
@@ -292,7 +285,7 @@ def test_traverse_ids_populated_from_t3(fake_catalog_with_paths) -> None:
     """traverse populates ``ids`` by querying T3 with each node's file_path."""
     from unittest.mock import MagicMock
     from nexus.mcp import core as mcp_core
-    from nexus.mcp_infra import inject_catalog, inject_t3
+    from nexus.mcp_infra import inject_t3
 
     cat, rdr, impl = fake_catalog_with_paths
 
@@ -306,7 +299,6 @@ def test_traverse_ids_populated_from_t3(fake_catalog_with_paths) -> None:
 
     mock_t3.ids_for_source.side_effect = _ids_for_source
 
-    inject_catalog(cat)
     inject_t3(mock_t3)
     try:
         result = mcp_core.traverse(
@@ -316,7 +308,6 @@ def test_traverse_ids_populated_from_t3(fake_catalog_with_paths) -> None:
             direction="out",
         )
     finally:
-        inject_catalog(None)
         inject_t3(None)
 
     # The seed RDR is not in the result nodes (only traversed nodes), but
@@ -330,14 +321,13 @@ def test_traverse_ids_gracefully_degrade_when_t3_unavailable(
     """ids=[] when T3 raises — no exception propagated to caller."""
     from unittest.mock import MagicMock
     from nexus.mcp import core as mcp_core
-    from nexus.mcp_infra import inject_catalog, inject_t3
+    from nexus.mcp_infra import inject_t3
 
     cat, rdr, _ = fake_catalog_with_paths
 
     mock_t3 = MagicMock()
     mock_t3.ids_for_source.side_effect = RuntimeError("T3 unavailable")
 
-    inject_catalog(cat)
     inject_t3(mock_t3)
     try:
         result = mcp_core.traverse(
@@ -346,7 +336,6 @@ def test_traverse_ids_gracefully_degrade_when_t3_unavailable(
             depth=1,
         )
     finally:
-        inject_catalog(None)
         inject_t3(None)
 
     assert result["ids"] == []
@@ -356,7 +345,7 @@ def test_traverse_ids_dedup_across_nodes(fake_catalog_with_paths) -> None:
     """Duplicate chunk IDs across nodes are deduplicated in output."""
     from unittest.mock import MagicMock
     from nexus.mcp import core as mcp_core
-    from nexus.mcp_infra import inject_catalog, inject_t3
+    from nexus.mcp_infra import inject_t3
 
     cat, rdr, impl = fake_catalog_with_paths
 
@@ -365,7 +354,6 @@ def test_traverse_ids_dedup_across_nodes(fake_catalog_with_paths) -> None:
     # the dedup guard should handle it).
     mock_t3.ids_for_source.return_value = ["shared-chunk"]
 
-    inject_catalog(cat)
     inject_t3(mock_t3)
     try:
         result = mcp_core.traverse(
@@ -375,7 +363,6 @@ def test_traverse_ids_dedup_across_nodes(fake_catalog_with_paths) -> None:
             direction="out",
         )
     finally:
-        inject_catalog(None)
         inject_t3(None)
 
     assert result["ids"].count("shared-chunk") == 1

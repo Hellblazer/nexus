@@ -11,7 +11,7 @@ from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
-from nexus.mcp_server import _inject_catalog, _inject_t3, _reset_singletons, query
+from nexus.mcp_server import _inject_t3, _reset_singletons, query
 
 
 @pytest.fixture(autouse=True)
@@ -31,10 +31,9 @@ def t3():
 
 
 @pytest.fixture()
-def catalog(tmp_path):
+def catalog(tmp_path, monkeypatch):
     catalog_dir = tmp_path / "catalog"
-    catalog_dir.mkdir()
-    cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+    cat = Catalog.init(catalog_dir)
     repo_owner = cat.register_owner("nexus", "repo", repo_hash="aabb1122")
     paper_owner = cat.register_owner("papers", "curator")
     cat.register(repo_owner, "indexer.py", content_type="code",
@@ -52,7 +51,7 @@ def catalog(tmp_path):
     fagin_t = cat.find("Schema Mappings")[0].tumbler
     vaswani_t = cat.find("Attention")[0].tumbler
     cat.link(fagin_t, vaswani_t, "cites", created_by="test")
-    _inject_catalog(cat)
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
     return cat
 
 

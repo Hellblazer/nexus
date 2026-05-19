@@ -32,6 +32,7 @@ from nexus.retry import _chroma_with_retry
 
 if TYPE_CHECKING:
     from nexus.db.t3 import T3Database
+    from nexus.hook_registry import HookRegistry
 
 _log = structlog.get_logger(__name__)
 
@@ -97,6 +98,7 @@ def _fire_store_chains_grouped_by_doc(
     documents: list[str],
     embeddings: list[list[float]],
     metadatas: list[dict],
+    hooks: "HookRegistry",
 ) -> None:
     """nexus-8g79.1: fire post-store chains per-doc so the manifest
     hook can attribute chunks to the right catalog tumbler.
@@ -111,13 +113,12 @@ def _fire_store_chains_grouped_by_doc(
     Phase-3 exports.
 
     Records are partitioned by ``meta.get("doc_id", "")``; each group
-    fires its own ``fire_store_chains`` call with that group key as
-    ``catalog_doc_id`` so the manifest hook attributes the chunks
-    correctly. Insertion order within each group is preserved so
-    ``chunk_index`` re-injection sees a stable position.
+    fires its own ``HookRegistry.fire_store_chains`` call with that
+    group key as ``catalog_doc_id`` so the manifest hook attributes
+    the chunks correctly. Insertion order within each group is
+    preserved so ``chunk_index`` re-injection sees a stable position.
     """
     from collections import defaultdict
-    from nexus.mcp_infra import fire_store_chains
 
     groups: dict[str, list[int]] = defaultdict(list)
     for i, m in enumerate(metadatas):
@@ -129,7 +130,7 @@ def _fire_store_chains_grouped_by_doc(
         sub_embs = [embeddings[i] for i in indices] if embeddings else None
         sub_metas = [metadatas[i] for i in indices]
         sub_paths = [(metadatas[i] or {}).get("source_path", "") for i in indices]
-        fire_store_chains(
+        hooks.fire_store_chains(
             sub_ids, collection_name, sub_docs,
             source_paths=sub_paths,
             embeddings=sub_embs,
@@ -279,6 +280,8 @@ def import_collection(
     input_path: Path,
     target_collection: str | None = None,
     remaps: list[tuple[str, str]] | None = None,
+    *,
+    hooks: "HookRegistry | None" = None,
 ) -> dict:
     """Import a ``.nxexp`` file into T3.
 
@@ -309,6 +312,10 @@ def import_collection(
     """
     t0 = time.monotonic()
     remaps = remaps or []
+    if hooks is None:
+        from nexus.hook_registry import HookRegistry, install_default_hooks
+        hooks = HookRegistry()
+        install_default_hooks(hooks)
 
     # Phase 1: read and validate header.
     with open(input_path, "rb") as f:
@@ -430,7 +437,7 @@ def import_collection(
                     )
                     _fire_store_chains_grouped_by_doc(
                         ids, collection_name, documents,
-                        embeddings, metadatas,
+                        embeddings, metadatas, hooks,
                     )
                     imported_count += len(ids)
                     _log.debug("import_batch_written", count=len(ids), total_so_far=imported_count)
@@ -446,7 +453,7 @@ def import_collection(
             metadatas=metadatas,
         )
         _fire_store_chains_grouped_by_doc(
-            ids, collection_name, documents, embeddings, metadatas,
+            ids, collection_name, documents, embeddings, metadatas, hooks,
         )
         imported_count += len(ids)
 

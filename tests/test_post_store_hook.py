@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for post_store_hook taxonomy assignment (RDR-070, nexus-7h2)."""
+"""Tests for post_store_hook taxonomy assignment (RDR-070, nexus-7h2).
+
+Post-RDR-118-successor refactor: the three hook chains live on per-invocation
+``HookRegistry`` instances (``nexus.hook_registry``) rather than module-level
+globals on ``nexus.mcp_infra``. Each test constructs its own registry and
+asserts against that instance directly — no shared mutable state to clean
+up between tests.
+"""
 from __future__ import annotations
 
 from pathlib import Path
 
 import chromadb
-import numpy as np
 import pytest
 
 from nexus.db.t2 import T2Database
+from nexus.hook_registry import HookRegistry
 
 
 @pytest.fixture()
@@ -16,58 +23,37 @@ def chroma_client() -> chromadb.ClientAPI:
     return chromadb.EphemeralClient()
 
 
-@pytest.fixture(autouse=True)
-def _reset_hooks():
-    """Clear post_store_hooks between tests to prevent cross-test leakage.
-
-    Snapshots the load-bearing batch-hook list (chash dual-write,
-    taxonomy assign, manifest write — registered at module load in
-    ``mcp_infra``) and restores it on teardown so subsequent tests
-    that depend on the catalog manifest hook firing do not see an
-    empty hook list.
-    """
-    from nexus.mcp_infra import _post_store_batch_hooks, _post_store_hooks
-    snapshot = list(_post_store_batch_hooks)
-    _post_store_hooks.clear()
-    _post_store_batch_hooks.clear()
-    yield
-    _post_store_hooks.clear()
-    _post_store_batch_hooks.clear()
-    _post_store_batch_hooks.extend(snapshot)
-
-
 # ── Hook mechanism ───────────────────────────────────────────────────────────
 
 
-def test_fire_post_store_hooks_calls_registered(
+def test_fire_single_calls_registered(
     tmp_path: Path, chroma_client: chromadb.ClientAPI,
 ) -> None:
-    """fire_post_store_hooks invokes all registered callables."""
-    from nexus.mcp_infra import fire_post_store_hooks, register_post_store_hook
-
+    """HookRegistry.fire_single invokes all registered callables."""
+    registry = HookRegistry()
     calls: list[tuple] = []
-    register_post_store_hook(lambda doc_id, collection, content: calls.append((doc_id, collection)))
+    registry.register_single(lambda doc_id, collection, content: calls.append((doc_id, collection)))
 
-    fire_post_store_hooks("doc-1", "test__coll", "some content")
+    registry.fire_single("doc-1", "test__coll", "some content")
     assert len(calls) == 1
     assert calls[0] == ("doc-1", "test__coll")
 
 
-def test_fire_post_store_hooks_exception_nonfatal(
+def test_fire_single_exception_nonfatal(
     tmp_path: Path,
 ) -> None:
     """Hook exceptions are caught and logged, never propagate."""
-    from nexus.mcp_infra import fire_post_store_hooks, register_post_store_hook
+    registry = HookRegistry()
 
     def bad_hook(doc_id, collection, content):
         raise RuntimeError("hook failure")
 
-    register_post_store_hook(bad_hook)
+    registry.register_single(bad_hook)
     # Should not raise
-    fire_post_store_hooks("doc-1", "test__coll", "content")
+    registry.fire_single("doc-1", "test__coll", "content")
 
 
-def test_fire_post_store_hooks_persists_failure_to_t2(
+def test_fire_single_persists_failure_to_t2(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GH #251: hook failures are persisted to T2 hook_failures for status surfacing.
@@ -80,7 +66,6 @@ def test_fire_post_store_hooks_persists_failure_to_t2(
 
     import nexus.mcp_infra as mod
     from nexus.db.migrations import migrate_hook_failures
-    from nexus.mcp_infra import fire_post_store_hooks, register_post_store_hook
 
     db_path = tmp_path / "hook_failures.db"
     T2Database(db_path).close()  # run base migrations first
@@ -94,8 +79,9 @@ def test_fire_post_store_hooks_persists_failure_to_t2(
     def bad_hook(doc_id, collection, content):
         raise RuntimeError("simulated centroid failure")
 
-    register_post_store_hook(bad_hook)
-    fire_post_store_hooks("doc-xyz", "knowledge__thing", "content")
+    registry = HookRegistry()
+    registry.register_single(bad_hook)
+    registry.fire_single("doc-xyz", "knowledge__thing", "content")
 
     with T2Database(db_path) as db:
         rows = db.taxonomy.conn.execute(
@@ -110,13 +96,12 @@ def test_fire_post_store_hooks_persists_failure_to_t2(
     assert "simulated centroid failure" in error
 
 
-def test_fire_post_store_hooks_persist_swallowed_when_table_missing(
+def test_fire_single_persist_swallowed_when_table_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GH #251: if hook_failures table is absent (pre-4.9.10 DB), store_put
     is never blocked — the insert failure is caught silently."""
     import nexus.mcp_infra as mod
-    from nexus.mcp_infra import fire_post_store_hooks, register_post_store_hook
 
     db_path = tmp_path / "no_hook_table.db"
     T2Database(db_path).close()  # base schema only — no hook_failures table
@@ -125,17 +110,17 @@ def test_fire_post_store_hooks_persist_swallowed_when_table_missing(
     def bad_hook(doc_id, collection, content):
         raise RuntimeError("primary failure")
 
-    register_post_store_hook(bad_hook)
+    registry = HookRegistry()
+    registry.register_single(bad_hook)
     # Must not raise even though the persist path will hit "no such table".
-    fire_post_store_hooks("d", "c", "content")
+    registry.fire_single("d", "c", "content")
 
 
-def test_fire_post_store_hooks_persist_failure_is_best_effort(
+def test_fire_single_persist_failure_is_best_effort(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GH #251: if the persist path itself raises, the hook contract still holds."""
     import nexus.mcp_infra as mod
-    from nexus.mcp_infra import fire_post_store_hooks, register_post_store_hook
 
     def _broken_ctx():
         raise RuntimeError("t2 offline")
@@ -145,33 +130,30 @@ def test_fire_post_store_hooks_persist_failure_is_best_effort(
     def bad_hook(doc_id, collection, content):
         raise RuntimeError("original failure")
 
-    register_post_store_hook(bad_hook)
+    registry = HookRegistry()
+    registry.register_single(bad_hook)
     # Must not raise even though both the hook AND the persist path failed.
-    fire_post_store_hooks("d", "c", "content")
+    registry.fire_single("d", "c", "content")
 
 
 # ── Batch hook mechanism (RDR-095, nexus-wxcb) ───────────────────────────────
 
 
-def test_register_post_store_batch_hook_appends() -> None:
-    """register_post_store_batch_hook appends to the module-level list."""
-    from nexus.mcp_infra import _post_store_batch_hooks, register_post_store_batch_hook
+def test_register_batch_appends() -> None:
+    """HookRegistry.register_batch appends to the registry's internal list."""
+    registry = HookRegistry()
 
     def probe(doc_ids, collection, contents, embeddings, metadatas):
         return None
 
-    assert _post_store_batch_hooks == []
-    register_post_store_batch_hook(probe)
-    assert _post_store_batch_hooks == [probe]
+    assert registry._batch == []
+    registry.register_batch(probe)
+    assert registry._batch == [probe]
 
 
-def test_fire_post_store_batch_hooks_invokes_registered() -> None:
+def test_fire_batch_invokes_registered() -> None:
     """fire forwards all five parameters unchanged to each registered hook."""
-    from nexus.mcp_infra import (
-        fire_post_store_batch_hooks,
-        register_post_store_batch_hook,
-    )
-
+    registry = HookRegistry()
     seen: list[tuple] = []
 
     def hook_a(doc_ids, collection, contents, embeddings, metadatas):
@@ -182,12 +164,12 @@ def test_fire_post_store_batch_hooks_invokes_registered() -> None:
         seen.append(("b", tuple(doc_ids), collection,
                      tuple(contents), embeddings, metadatas))
 
-    register_post_store_batch_hook(hook_a)
-    register_post_store_batch_hook(hook_b)
+    registry.register_batch(hook_a)
+    registry.register_batch(hook_b)
 
     embeddings = [[0.1, 0.2], [0.3, 0.4]]
     metadatas = [{"k": "v1"}, {"k": "v2"}]
-    fire_post_store_batch_hooks(
+    registry.fire_batch(
         ["d1", "d2"], "code__nexus", ["c1", "c2"], embeddings, metadatas,
     )
 
@@ -197,23 +179,19 @@ def test_fire_post_store_batch_hooks_invokes_registered() -> None:
     ]
 
 
-def test_fire_post_store_batch_hooks_empty_doc_ids_early_return() -> None:
+def test_fire_batch_empty_doc_ids_early_return() -> None:
     """Empty doc_ids returns early: no hooks fire on empty batches."""
-    from nexus.mcp_infra import (
-        fire_post_store_batch_hooks,
-        register_post_store_batch_hook,
-    )
-
+    registry = HookRegistry()
     calls: list = []
-    register_post_store_batch_hook(
+    registry.register_batch(
         lambda doc_ids, collection, contents, embeddings, metadatas: calls.append(1)
     )
 
-    fire_post_store_batch_hooks([], "x", [], None, None)
+    registry.fire_batch([], "x", [], None, None)
     assert calls == []
 
 
-def test_fire_post_store_batch_hooks_isolation(tmp_path: Path, monkeypatch) -> None:
+def test_fire_batch_isolation(tmp_path: Path, monkeypatch) -> None:
     """First hook raising must not block the second hook from firing.
 
     Uses a synthetic raising probe (the real taxonomy_assign_batch_hook
@@ -224,10 +202,6 @@ def test_fire_post_store_batch_hooks_isolation(tmp_path: Path, monkeypatch) -> N
     from nexus.db.migrations import (
         migrate_hook_failures,
         migrate_hook_failures_batch_columns,
-    )
-    from nexus.mcp_infra import (
-        fire_post_store_batch_hooks,
-        register_post_store_batch_hook,
     )
     import sqlite3
 
@@ -247,10 +221,11 @@ def test_fire_post_store_batch_hooks_isolation(tmp_path: Path, monkeypatch) -> N
     def survivor(doc_ids, collection, contents, embeddings, metadatas):
         second_calls.append(tuple(doc_ids))
 
-    register_post_store_batch_hook(raising_probe)
-    register_post_store_batch_hook(survivor)
+    registry = HookRegistry()
+    registry.register_batch(raising_probe)
+    registry.register_batch(survivor)
 
-    fire_post_store_batch_hooks(
+    registry.fire_batch(
         ["doc-1", "doc-2", "doc-3"], "code__nexus", ["c1", "c2", "c3"], None, None,
     )
 
@@ -272,7 +247,7 @@ def test_fire_post_store_batch_hooks_isolation(tmp_path: Path, monkeypatch) -> N
     assert is_batch == 1
 
 
-def test_fire_post_store_batch_hooks_partial_commit_failure_mode(
+def test_fire_batch_partial_commit_failure_mode(
     tmp_path: Path, monkeypatch,
 ) -> None:
     """A batch hook may commit sub-step A, then raise on sub-step B.
@@ -285,10 +260,6 @@ def test_fire_post_store_batch_hooks_partial_commit_failure_mode(
     from nexus.db.migrations import (
         migrate_hook_failures,
         migrate_hook_failures_batch_columns,
-    )
-    from nexus.mcp_infra import (
-        fire_post_store_batch_hooks,
-        register_post_store_batch_hook,
     )
     import sqlite3
 
@@ -308,9 +279,10 @@ def test_fire_post_store_batch_hooks_partial_commit_failure_mode(
         # assignment landed.
         raise RuntimeError("cross_collection_projection_failed")
 
-    register_post_store_batch_hook(two_step_hook)
+    registry = HookRegistry()
+    registry.register_batch(two_step_hook)
 
-    fire_post_store_batch_hooks(
+    registry.fire_batch(
         ["doc-a", "doc-b"], "knowledge__delos", ["c1", "c2"], None, None,
     )
 
@@ -328,7 +300,7 @@ def test_fire_post_store_batch_hooks_partial_commit_failure_mode(
     assert "cross_collection_projection_failed" in error
 
 
-def test_fire_post_store_batch_hooks_falls_back_to_scalar_when_columns_absent(
+def test_fire_batch_falls_back_to_scalar_when_columns_absent(
     tmp_path: Path, monkeypatch,
 ) -> None:
     """If batch_doc_ids/is_batch columns aren't present on the live DB
@@ -345,10 +317,6 @@ def test_fire_post_store_batch_hooks_falls_back_to_scalar_when_columns_absent(
     import threading
     import nexus.mcp_infra as mod
     from nexus.db.migrations import migrate_hook_failures
-    from nexus.mcp_infra import (
-        fire_post_store_batch_hooks,
-        register_post_store_batch_hook,
-    )
     import sqlite3
 
     db_path = tmp_path / "pre_migration.db"
@@ -380,8 +348,9 @@ def test_fire_post_store_batch_hooks_falls_back_to_scalar_when_columns_absent(
     def raising(doc_ids, collection, contents, embeddings, metadatas):
         raise RuntimeError("kaboom")
 
-    register_post_store_batch_hook(raising)
-    fire_post_store_batch_hooks(
+    registry = HookRegistry()
+    registry.register_batch(raising)
+    registry.fire_batch(
         ["d1", "d2"], "code__nexus", ["c1", "c2"], None, None,
     )
 
@@ -411,7 +380,7 @@ def test_record_batch_hook_failure_non_schema_operational_error_propagates(
         migrate_hook_failures,
         migrate_hook_failures_batch_columns,
     )
-    from nexus.mcp_infra import _record_batch_hook_failure
+    from nexus.hook_registry import _record_batch_hook_failure
     import sqlite3
 
     db_path = tmp_path / "lock_propagate.db"
@@ -464,16 +433,12 @@ def test_record_batch_hook_failure_non_schema_operational_error_propagates(
     assert rows == (0,)
 
 
-def test_fire_post_store_batch_hooks_persist_failure_is_best_effort(
+def test_fire_batch_persist_failure_is_best_effort(
     monkeypatch,
 ) -> None:
-    """If the persist path itself raises, fire_post_store_batch_hooks
-    still returns and ingest continues."""
+    """If the persist path itself raises, fire_batch still returns and ingest
+    continues."""
     import nexus.mcp_infra as mod
-    from nexus.mcp_infra import (
-        fire_post_store_batch_hooks,
-        register_post_store_batch_hook,
-    )
 
     monkeypatch.setattr(mod, "t2_ctx", lambda: (_ for _ in ()).throw(
         RuntimeError("t2 offline"),
@@ -482,9 +447,10 @@ def test_fire_post_store_batch_hooks_persist_failure_is_best_effort(
     def raising(doc_ids, collection, contents, embeddings, metadatas):
         raise RuntimeError("primary failure")
 
-    register_post_store_batch_hook(raising)
+    registry = HookRegistry()
+    registry.register_batch(raising)
     # Must not raise even though both hook AND persist path fail.
-    fire_post_store_batch_hooks(["d1"], "c", ["x"], None, None)
+    registry.fire_batch(["d1"], "c", ["x"], None, None)
 
 
 # ── Taxonomy batch hook fallback (MCP path with embeddings=None) ─────────────

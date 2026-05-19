@@ -148,53 +148,6 @@ def _restore_structlog_after_test():
 
 
 @pytest.fixture(autouse=True)
-def _restore_post_store_batch_hooks_after_test():
-    """Snapshot and restore ``mcp_infra._post_store_batch_hooks`` around
-    every test, and clear the cached catalog singleton so per-test
-    ``NEXUS_CATALOG_PATH`` redirects take effect.
-
-    RDR-108 Phase 3 (nexus-bdag) made the three batch hooks
-    (``chash_dual_write_batch_hook``, ``taxonomy_assign_batch_hook``,
-    ``manifest_write_batch_hook``) self-register at module load in
-    ``nexus.mcp_infra`` so CLI ingest fires them. Several legacy tests
-    inline-clear ``_post_store_batch_hooks`` to assert specific hooks
-    in isolation; without restoration, the cleared list permanently
-    loses those load-bearing registrations for the rest of the
-    session and downstream catalog-manifest assertions silently fail.
-
-    The catalog singleton in ``mcp_infra._catalog_instance`` is also
-    cleared. ``manifest_write_batch_hook`` resolves the catalog via
-    ``get_catalog()``; without per-test reset the first test that
-    initialises the singleton pins it to its own tmp_path, so
-    subsequent tests' manifest writes target the wrong (deleted) tmp
-    catalog and the assertion ``cat.get_manifest(tumbler)`` returns
-    ``[]``.
-    """
-    import nexus.mcp_infra as _mod
-    snapshot_batch = list(_mod._post_store_batch_hooks)
-    snapshot_single = list(_mod._post_store_hooks)
-    # Snapshot the catalog_doc_id-aware classification set too: a test
-    # that registers a fresh batch hook adds its ``id(fn)`` here, and
-    # without restoration the entry leaks for the rest of the session.
-    # Python may recycle the id() for a later object, which would then
-    # be (wrongly) classified as catalog_doc_id-aware on first dispatch.
-    snapshot_catalog_doc_id_set = set(
-        _mod._post_store_batch_hooks_with_catalog_doc_id
-    )
-    _mod._catalog_instance = None
-    yield
-    _mod._post_store_batch_hooks.clear()
-    _mod._post_store_batch_hooks.extend(snapshot_batch)
-    _mod._post_store_hooks.clear()
-    _mod._post_store_hooks.extend(snapshot_single)
-    _mod._post_store_batch_hooks_with_catalog_doc_id.clear()
-    _mod._post_store_batch_hooks_with_catalog_doc_id.update(
-        snapshot_catalog_doc_id_set
-    )
-    _mod._catalog_instance = None
-
-
-@pytest.fixture(autouse=True)
 def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Force tests onto the explicit-isolation T1 path.
 

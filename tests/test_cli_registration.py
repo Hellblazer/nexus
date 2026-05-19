@@ -68,7 +68,13 @@ def test_taxonomy_subcommands_exist():
 
 
 def test_mcp_hooks_registered():
-    """Post-store hooks land in their declared chains after core import.
+    """Post-store hooks land in their declared chains after install_default_hooks.
+
+    Post-RDR-118-successor refactor: the three hook chains live on
+    per-invocation ``HookRegistry`` instances rather than module-level
+    globals. ``install_default_hooks(registry)`` wires the load-bearing
+    default consumers onto every registry the entry points construct;
+    this test pins their order on a fresh registry built the same way.
 
     RDR-095 + symmetric-fire follow-up: taxonomy + chash dual-write are
     batch-only registrations (the batch hook handles single-document MCP
@@ -76,10 +82,12 @@ def test_mcp_hooks_registered():
     future single-doc-only consumers (RDR-089 aspect extraction) will
     add themselves here.
     """
-    import nexus.mcp.core  # noqa: F401 — triggers registration
-    from nexus.mcp_infra import _post_store_batch_hooks, _post_store_hooks
+    from nexus.hook_registry import HookRegistry, install_default_hooks
 
-    batch_names = [h.__name__ for h in _post_store_batch_hooks]
+    registry = HookRegistry()
+    install_default_hooks(registry)
+
+    batch_names = [h.__name__ for h in registry._batch]
     # RDR-108 D2 (nexus-572g): manifest_write_batch_hook joins the chain
     # so chunk batches landing in T3 update the catalog manifest at the
     # same boundary that chash_dual_write and taxonomy_assign run on.
@@ -89,7 +97,7 @@ def test_mcp_hooks_registered():
         "manifest_write_batch_hook",
     ], f"unexpected batch chain order: {batch_names}"
 
-    single_names = [h.__name__ for h in _post_store_hooks]
+    single_names = [h.__name__ for h in registry._single]
     # Single-doc chain may be empty or carry only future hooks; assert
     # the legacy taxonomy_assign_hook is gone.
     assert "taxonomy_assign_hook" not in single_names

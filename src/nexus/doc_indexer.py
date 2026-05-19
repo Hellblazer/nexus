@@ -18,6 +18,7 @@ import structlog
 
 if TYPE_CHECKING:
     from nexus.catalog import Catalog
+    from nexus.hook_registry import HookRegistry
 
 _log = structlog.get_logger(__name__)
 
@@ -541,6 +542,7 @@ def _index_document(
     return_metadata: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
     source_key: str | None = None,
+    hooks: "HookRegistry | None" = None,
 ) -> int | list[dict]:
     """Shared indexing pipeline: credential check, staleness, embed, upsert, prune.
 
@@ -664,11 +666,10 @@ def _index_document(
     # Post-store hook chains (RDR-095). Both single-doc and batch chains
     # fire from every storage event; the per-doc loop covers single-shape
     # consumers on CLI ingest.
-    from nexus.mcp_infra import (
-        fire_post_document_hooks,
-        fire_post_store_batch_hooks,
-        fire_post_store_hooks,
-    )
+    if hooks is None:
+        from nexus.hook_registry import HookRegistry, install_default_hooks
+        hooks = HookRegistry()
+        install_default_hooks(hooks)
     # nexus-zq79 F2: use _register_or_lookup_doc_id, NOT _lookup_existing_doc_id.
     # The read-only lookup returns "" for first-time indexes; post-Phase-3
     # chunks have no doc_id fallback so the manifest hook short-circuits and
@@ -680,18 +681,18 @@ def _index_document(
         content_type=_ct_for_register,
         physical_collection=collection_name,
     )
-    fire_post_store_batch_hooks(
+    hooks.fire_batch(
         ids, collection_name, documents, embeddings, metadatas,
         catalog_doc_id=_catalog_doc_id_for_batch,
     )
     for _did, _doc in zip(ids, documents):
-        fire_post_store_hooks(_did, collection_name, _doc)
+        hooks.fire_single(_did, collection_name, _doc)
     # RDR-089 document-grain chain — fires once per file boundary.
     # content="" because only chunk text is in scope here; the hook
     # reads source_path itself per the P0.1 content-sourcing contract.
     # nexus-tdgc: pre-flight catalog lookup so the aspect-queue hook
     # can capture the doc_id alongside source_path.
-    fire_post_document_hooks(
+    hooks.fire_document(
         sp, collection_name, "",
         doc_id=_catalog_doc_id_for_batch,
     )
@@ -740,6 +741,7 @@ def _index_pdf_incremental(
     *,
     embed_fn: EmbedFn | None = None,
     on_progress: Callable[[int, int], None] | None = None,
+    hooks: "HookRegistry | None" = None,
 ) -> int:
     """Embed and upsert chunks in batches with checkpoint support.
 
@@ -790,7 +792,7 @@ def _index_pdf_incremental(
 
     # Resolve catalog doc_id once outside the per-batch loop (RDR-108
     # Phase 3: chunk metadata no longer carries it; manifest hook reads
-    # via the fire_post_store_batch_hooks kwarg).
+    # via the HookRegistry.fire_batch kwarg).
     # nexus-zq79 F2: register-or-lookup, not pure lookup (see _index_document
     # for the rationale — fresh indexes returned "" pre-fix).
     _ct_for_register = (metadatas_all[0].get("content_type") if metadatas_all else "") or "pdf"
@@ -841,16 +843,16 @@ def _index_pdf_incremental(
         # Post-store hook chains (RDR-095). Both single-doc and batch
         # chains fire from every storage event; the per-doc loop covers
         # single-shape consumers on CLI ingest.
-        from nexus.mcp_infra import (
-            fire_post_store_batch_hooks,
-            fire_post_store_hooks,
-        )
-        fire_post_store_batch_hooks(
+        if hooks is None:
+            from nexus.hook_registry import HookRegistry, install_default_hooks
+            hooks = HookRegistry()
+            install_default_hooks(hooks)
+        hooks.fire_batch(
             batch_ids, collection_name, batch_docs, embeddings, batch_metas,
             catalog_doc_id=_catalog_doc_id_for_batch,
         )
         for _did, _doc in zip(batch_ids, batch_docs):
-            fire_post_store_hooks(_did, collection_name, _doc)
+            hooks.fire_single(_did, collection_name, _doc)
 
         # Checkpoint
         write_checkpoint(CheckpointData(
@@ -1102,6 +1104,7 @@ def index_pdf(
     enrich: bool = False,
     extractor: str = "auto",
     streaming: str = "auto",
+    hooks: "HookRegistry | None" = None,
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
@@ -1233,6 +1236,7 @@ def index_pdf(
                 corpus=corpus, target_model=target_model,
                 force=force,
                 doc_id=doc_id,
+                hooks=hooks,
             )
             if return_metadata:
                 # Query T3 for metadata after streaming upload.
@@ -1285,9 +1289,13 @@ def index_pdf(
 
     # Route: incremental for large documents, original path for small ones
     if len(prepared) > _INCREMENTAL_THRESHOLD:
+        if hooks is None:
+            from nexus.hook_registry import HookRegistry, install_default_hooks
+            hooks = HookRegistry()
+            install_default_hooks(hooks)
         count = _index_pdf_incremental(
             pdf_path, corpus, prepared, content_hash, col_name, db,
-            embed_fn=embed_fn, on_progress=on_progress,
+            embed_fn=embed_fn, on_progress=on_progress, hooks=hooks,
         )
         metadatas = [p[2] for p in prepared]
         _register_in_catalog(metadatas, len(metadatas))
@@ -1299,14 +1307,13 @@ def index_pdf(
         # so the entry exists by this point in the incremental path).
         from nexus.catalog import Catalog  # noqa: PLC0415
         from nexus.config import catalog_path  # noqa: PLC0415
-        from nexus.mcp_infra import fire_post_document_hooks  # noqa: PLC0415
         _cat_path = catalog_path()
         _cat = (
             Catalog(_cat_path, _cat_path / ".catalog.db")
             if Catalog.is_initialized(_cat_path)
             else None
         )
-        fire_post_document_hooks(
+        hooks.fire_document(
             str(pdf_path), col_name, "",
             doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
         )
@@ -1341,11 +1348,10 @@ def index_pdf(
     # Post-store hook chains (RDR-095). Both single-doc and batch chains
     # fire from every storage event; the per-doc loop covers single-shape
     # consumers on CLI ingest.
-    from nexus.mcp_infra import (
-        fire_post_document_hooks,
-        fire_post_store_batch_hooks,
-        fire_post_store_hooks,
-    )
+    if hooks is None:
+        from nexus.hook_registry import HookRegistry, install_default_hooks
+        hooks = HookRegistry()
+        install_default_hooks(hooks)
     # nexus-zq79 F2: register-or-lookup (fresh indexes returned "" pre-fix).
     _ct_for_register = (metadatas_list[0].get("content_type") if metadatas_list else "") or "pdf"
     _catalog_doc_id_for_batch = _register_or_lookup_doc_id(
@@ -1353,17 +1359,17 @@ def index_pdf(
         content_type=_ct_for_register,
         physical_collection=col_name,
     )
-    fire_post_store_batch_hooks(
+    hooks.fire_batch(
         ids, col_name, documents, embeddings, metadatas_list,
         catalog_doc_id=_catalog_doc_id_for_batch,
     )
     for _did, _doc in zip(ids, documents):
-        fire_post_store_hooks(_did, col_name, _doc)
+        hooks.fire_single(_did, col_name, _doc)
     # RDR-089 document-grain chain — fires once per small-doc PDF boundary.
     # content="" (full document text not retained in this path); the hook
     # reads source_path itself.
     # nexus-tdgc: forward the catalog doc_id post-register.
-    fire_post_document_hooks(
+    hooks.fire_document(
         str(pdf_path), col_name, "",
         doc_id=_catalog_doc_id_for_batch,
     )
@@ -1518,6 +1524,7 @@ def index_markdown(
     on_progress: Callable[[int, int], None] | None = None,
     content_type: str = "prose",
     base_path: Path | None = None,
+    hooks: "HookRegistry | None" = None,
 ) -> int | dict:
     """Index *md_path* into a T3 collection.
 
@@ -1584,6 +1591,7 @@ def index_markdown(
         collection_name=collection_name, embed_fn=embed_fn,
         force=force, return_metadata=return_metadata, on_progress=on_progress,
         source_key=source_key,
+        hooks=hooks,
     )
     if not return_metadata:
         assert isinstance(raw, int)
@@ -1608,6 +1616,7 @@ def batch_index_pdfs(
     force: bool = False,
     on_file: Callable[[Path, int, float], None] | None = None,
     extractor: str = "auto",
+    hooks: "HookRegistry | None" = None,
 ) -> dict[str, str]:
     """Index multiple PDFs sequentially, returning per-file status.
 
@@ -1625,7 +1634,7 @@ def batch_index_pdfs(
         count: int = 0
         t0 = time.monotonic()
         try:
-            raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor)
+            raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor, hooks=hooks)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:
@@ -1647,6 +1656,7 @@ def batch_index_markdowns(
     on_file: Callable[[Path, int, float], None] | None = None,
     base_path: Path | None = None,
     embed_fn: EmbedFn | None = None,
+    hooks: "HookRegistry | None" = None,
 ) -> dict[str, str]:
     """Index multiple Markdown files sequentially, returning per-file status.
 
@@ -1675,7 +1685,7 @@ def batch_index_markdowns(
         try:
             raw = index_markdown(path, corpus, t3=t3, collection_name=collection_name,
                                  content_type=content_type, force=force,
-                                 base_path=base_path, embed_fn=embed_fn)
+                                 base_path=base_path, embed_fn=embed_fn, hooks=hooks)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:

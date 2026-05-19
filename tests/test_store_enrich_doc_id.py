@@ -61,8 +61,7 @@ def _isolate_t3_singleton():
     test. Other tests in the suite (notably ``test_mcp_server.py::t3``)
     inject a T3 instance into this global without resetting it; the
     leak masks our ``patch("nexus.commands.store._t3", ...)`` because
-    downstream hooks (``fire_post_store_hooks`` etc.) read the global
-    directly. Belt-and-suspenders isolation."""
+    downstream hooks read the global directly. Belt-and-suspenders isolation."""
     from nexus.mcp_infra import inject_t3
     inject_t3(None)
     yield
@@ -87,11 +86,15 @@ def test_store_put_cli_writes_catalog_doc_id_into_t3_chunk_metadata(
         encoding="utf-8",
     )
 
+    # Patch HookRegistry's fire methods so no real hooks run for these
+    # doc_id-stamping contract tests. The CLI constructs its own
+    # registry per invocation; patching the class methods covers any
+    # fresh instance the command code creates.
     with patch("nexus.commands.store._t3", return_value=local_t3), \
-         patch("nexus.mcp_infra.fire_store_chains", side_effect=_no_op_post_store), \
-         patch("nexus.mcp_infra.fire_post_store_hooks", side_effect=_no_op_post_store), \
-         patch("nexus.mcp_infra.fire_post_store_batch_hooks", side_effect=_no_op_post_store), \
-         patch("nexus.mcp_infra.fire_post_document_hooks", side_effect=_no_op_post_store):
+         patch("nexus.hook_registry.HookRegistry.fire_store_chains", side_effect=_no_op_post_store), \
+         patch("nexus.hook_registry.HookRegistry.fire_single", side_effect=_no_op_post_store), \
+         patch("nexus.hook_registry.HookRegistry.fire_batch", side_effect=_no_op_post_store), \
+         patch("nexus.hook_registry.HookRegistry.fire_document", side_effect=_no_op_post_store):
         runner = CliRunner()
         result = runner.invoke(store, [
             "put",
@@ -160,11 +163,15 @@ def test_store_put_doc_id_absent_when_catalog_uninitialized(
         encoding="utf-8",
     )
 
+    # Patch HookRegistry's fire methods so no real hooks run for these
+    # doc_id-stamping contract tests. The CLI constructs its own
+    # registry per invocation; patching the class methods covers any
+    # fresh instance the command code creates.
     with patch("nexus.commands.store._t3", return_value=local_t3), \
-         patch("nexus.mcp_infra.fire_store_chains", side_effect=_no_op_post_store), \
-         patch("nexus.mcp_infra.fire_post_store_hooks", side_effect=_no_op_post_store), \
-         patch("nexus.mcp_infra.fire_post_store_batch_hooks", side_effect=_no_op_post_store), \
-         patch("nexus.mcp_infra.fire_post_document_hooks", side_effect=_no_op_post_store):
+         patch("nexus.hook_registry.HookRegistry.fire_store_chains", side_effect=_no_op_post_store), \
+         patch("nexus.hook_registry.HookRegistry.fire_single", side_effect=_no_op_post_store), \
+         patch("nexus.hook_registry.HookRegistry.fire_batch", side_effect=_no_op_post_store), \
+         patch("nexus.hook_registry.HookRegistry.fire_document", side_effect=_no_op_post_store):
         runner = CliRunner()
         result = runner.invoke(store, [
             "put",

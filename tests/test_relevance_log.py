@@ -327,7 +327,6 @@ def test_catalog_link_logs_relevance_with_collection_match(t1, tmp_path, monkeyp
     from nexus.catalog import Catalog
     from nexus.catalog.tumbler import Tumbler
     from nexus.mcp.catalog import catalog_link
-    from nexus.mcp_infra import inject_catalog
 
     # Set up a catalog with two documents in the same collection
     catalog_dir = tmp_path / "catalog"
@@ -337,7 +336,7 @@ def test_catalog_link_logs_relevance_with_collection_match(t1, tmp_path, monkeyp
                          physical_collection="knowledge__ml")
     doc_b = cat.register(owner, "target", content_type="knowledge",
                          physical_collection="knowledge__ml")
-    inject_catalog(cat)
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
 
     t2_path = tmp_path / "t2.db"
     monkeypatch.setattr("nexus.mcp.catalog._t2_ctx", lambda: T2Database(t2_path))
@@ -369,7 +368,6 @@ def test_catalog_link_no_log_when_collection_mismatch(t1, tmp_path, monkeypatch)
     """catalog_link does NOT log when no trace chunks match the target collection."""
     from nexus.catalog import Catalog
     from nexus.mcp.catalog import catalog_link
-    from nexus.mcp_infra import inject_catalog
 
     catalog_dir = tmp_path / "catalog"
     cat = Catalog.init(catalog_dir)
@@ -378,7 +376,7 @@ def test_catalog_link_no_log_when_collection_mismatch(t1, tmp_path, monkeypatch)
                          physical_collection="knowledge__ml")
     doc_b = cat.register(owner, "dst", content_type="knowledge",
                          physical_collection="knowledge__ml")
-    inject_catalog(cat)
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
 
     t2_path = tmp_path / "t2.db"
     monkeypatch.setattr("nexus.mcp.catalog._t2_ctx", lambda: T2Database(t2_path))
