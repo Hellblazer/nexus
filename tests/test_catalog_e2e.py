@@ -120,11 +120,15 @@ def indexed_catalog(catalog_repo, registry, local_t3, catalog_env, monkeypatch):
 
 @pytest.fixture
 def injected_catalog(indexed_catalog):
-    from nexus.mcp_server import _inject_catalog, _reset_singletons
+    """Return the indexed catalog. NEXUS_CATALOG_PATH is already set by the
+    ``catalog_env`` fixture (transitively required), so ``get_catalog()``
+    in production code will construct a fresh Catalog at the same path
+    and read the test's data — no explicit injection needed.
+    """
+    from nexus.mcp_server import _reset_singletons
 
     cat, local_t3 = indexed_catalog
     _reset_singletons()
-    _inject_catalog(cat)
     return cat, local_t3
 
 

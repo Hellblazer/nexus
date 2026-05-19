@@ -7,7 +7,7 @@ Single public entrypoint: ``extract_aspects(content, source_path,
 collection) -> AspectRecord | ExtractFail | None``. The function is
 synchronous top to bottom — no ``async def``, no ``await``, no
 event loop. The RDR-089 load-bearing contract requires this so the
-document-grain hook chain (``fire_post_document_hooks``) can call it
+document-grain hook chain (``HookRegistry.fire_document``) can call it
 from a sync dispatcher without dropping a coroutine.
 
 **Going-forward writer contract** (RDR-096 P2.2 binds this; gate-

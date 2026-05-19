@@ -879,6 +879,7 @@ def _reembed_collection(
     *,
     dry_run: bool,
     on_progress=None,
+    hooks=None,
 ) -> tuple[int, int]:
     """Re-embed every chunk in *col_name* with *target_model*.
 
@@ -977,9 +978,12 @@ def _reembed_collection(
             # position, so the chain's hooks (chash_dual_write,
             # taxonomy_assign, manifest_write) re-touch existing rows
             # idempotently.
-            from nexus.mcp_infra import fire_store_chains
+            if hooks is None:
+                from nexus.hook_registry import HookRegistry, install_default_hooks
+                hooks = HookRegistry()
+                install_default_hooks(hooks)
 
-            fire_store_chains(
+            hooks.fire_store_chains(
                 v_ids, col_name, v_docs,
                 source_paths=[
                     (m.get("source_path", "") if isinstance(m, dict) else "")

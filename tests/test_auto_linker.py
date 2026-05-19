@@ -18,9 +18,11 @@ def git_identity(monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
 
-def _make_catalog(tmp_path: Path) -> Catalog:
+def _make_catalog(tmp_path: Path, monkeypatch=None) -> Catalog:
     catalog_dir = tmp_path / "catalog"
     cat = Catalog.init(catalog_dir)
+    if monkeypatch is not None:
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
     return cat
 
 
@@ -257,20 +259,19 @@ class TestAutoLinkResult:
 class TestCatalogAutoLinkIntegration:
     """Integration test: _catalog_auto_link wired through store_put path."""
 
-    def test_store_put_creates_link_from_scratch_context(self, tmp_path):
+    def test_store_put_creates_link_from_scratch_context(self, tmp_path, monkeypatch):
         """Full pipeline: T1 scratch link-context + store_put → catalog link."""
         import json
         from nexus.db.t1 import T1Database
         from nexus.mcp_server import (
             _catalog_auto_link,
-            _inject_catalog,
             _inject_t1,
             _reset_singletons,
         )
 
         _reset_singletons()
 
-        cat = _make_catalog(tmp_path)
+        cat = _make_catalog(tmp_path, monkeypatch)
         owner = cat.register_owner("knowledge", "curator")
         target_t = cat.register(owner, "Target RDR", content_type="rdr")
 
@@ -279,8 +280,6 @@ class TestCatalogAutoLinkIntegration:
             owner, "Agent Finding", content_type="knowledge",
             meta={"doc_id": "test-doc-001"},
         )
-
-        _inject_catalog(cat)
 
         t1 = T1Database(session_id="test-auto-link-session")
         _inject_t1(t1)
@@ -303,26 +302,24 @@ class TestCatalogAutoLinkIntegration:
 
         _reset_singletons()
 
-    def test_store_put_no_crash_without_context(self, tmp_path):
+    def test_store_put_no_crash_without_context(self, tmp_path, monkeypatch):
         """_catalog_auto_link with no link-context in scratch → 0, no crash."""
         from nexus.db.t1 import T1Database
         from nexus.mcp_server import (
             _catalog_auto_link,
-            _inject_catalog,
             _inject_t1,
             _reset_singletons,
         )
 
         _reset_singletons()
 
-        cat = _make_catalog(tmp_path)
+        cat = _make_catalog(tmp_path, monkeypatch)
         owner = cat.register_owner("knowledge", "curator")
         cat.register(
             owner, "Some Doc", content_type="knowledge",
             meta={"doc_id": "test-doc-002"},
         )
 
-        _inject_catalog(cat)
         t1 = T1Database(session_id="test-no-context-session")
         _inject_t1(t1)
 
@@ -340,20 +337,19 @@ class TestCatalogAutoLinkIntegration:
         assert count == 0
         _reset_singletons()
 
-    def test_link_context_persists_across_stores(self, tmp_path):
+    def test_link_context_persists_across_stores(self, tmp_path, monkeypatch):
         """Link-context entries apply to every store_put in the session (by design)."""
         import json
         from nexus.db.t1 import T1Database
         from nexus.mcp_server import (
             _catalog_auto_link,
-            _inject_catalog,
             _inject_t1,
             _reset_singletons,
         )
 
         _reset_singletons()
 
-        cat = _make_catalog(tmp_path)
+        cat = _make_catalog(tmp_path, monkeypatch)
         owner = cat.register_owner("knowledge", "curator")
         target_t = cat.register(owner, "Target RDR", content_type="rdr")
         doc1_t = cat.register(
@@ -365,7 +361,6 @@ class TestCatalogAutoLinkIntegration:
             meta={"doc_id": "multi-doc-002"},
         )
 
-        _inject_catalog(cat)
         t1 = T1Database(session_id="test-multi-store-session")
         _inject_t1(t1)
 

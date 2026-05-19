@@ -570,8 +570,8 @@ def migrate_review_columns(conn: sqlite3.Connection) -> None:
 def migrate_hook_failures(conn: sqlite3.Connection) -> None:
     """Create the ``hook_failures`` table for GH #251.
 
-    ``fire_post_store_hooks`` and ``fire_post_store_batch_hooks`` in
-    ``mcp_infra.py`` wrap every post-store hook in a per-hook
+    ``HookRegistry.fire_single`` / ``fire_batch`` / ``fire_document``
+    in ``nexus.hook_registry`` wrap every post-store hook in a per-hook
     ``try/except`` — a failing hook (e.g.
     ``taxonomy_assign_batch_hook`` raising on missing centroids or a
     ChromaDB timeout) logs a warning and moves on so the enclosing

@@ -25,7 +25,6 @@ from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database, VerifyResult
 from nexus.mcp_server import (
     _get_collection_names,
-    _inject_catalog,
     _inject_t1,
     _inject_t3,
     _reset_singletons,
@@ -714,11 +713,10 @@ def test_plan_search_empty(t2_path):
 # ── Query catalog-routing ────────────────────────────────────────────────────
 
 @pytest.fixture()
-def catalog_with_docs(tmp_path):
+def catalog_with_docs(tmp_path, monkeypatch):
     from nexus.catalog.catalog import Catalog
     catalog_dir = tmp_path / "catalog"
-    catalog_dir.mkdir()
-    cat = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+    cat = Catalog.init(catalog_dir)
     o1 = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
     o2 = cat.register_owner("papers", "curator")
     cat.register(o1, "indexer.py", content_type="code", file_path="src/nexus/indexer.py",
@@ -731,7 +729,7 @@ def catalog_with_docs(tmp_path):
                  physical_collection="knowledge__papers__voyage-context-3__v1", chunk_count=15, author="Devlin")
     cat.link(cat.find("Attention Paper")[0].tumbler,
              cat.find("BERT Paper")[0].tumbler, "cites", created_by="test")
-    _inject_catalog(cat)
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
     return cat
 
 
@@ -949,7 +947,7 @@ def test_mcp_shim_imports():
         catalog_update, catalog_link, catalog_links, catalog_unlink,
         catalog_link_audit, catalog_link_bulk, catalog_link_query,
         catalog_resolve, catalog_stats,
-        _inject_t1, _inject_t3, _inject_catalog, _reset_singletons,
+        _inject_t1, _inject_t3, _reset_singletons,
         _get_t1, _get_t3, _get_catalog,
     )
     for fn in (search, query, store_put, catalog_search, _inject_t1, _reset_singletons):

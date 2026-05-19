@@ -7,7 +7,6 @@ import pytest
 
 from nexus.catalog.catalog import Catalog
 from nexus.mcp_server import (
-    _inject_catalog,
     _reset_singletons,
     catalog_link,
     catalog_link_audit,
@@ -40,10 +39,11 @@ def clean_singletons():
 
 
 @pytest.fixture
-def cat(tmp_path: Path) -> Catalog:
-    c = Catalog.init(tmp_path / "catalog")
+def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
+    catalog_dir = tmp_path / "catalog"
+    c = Catalog.init(catalog_dir)
     c.register_owner("test-repo", "repo", repo_hash="abcd1234")
-    _inject_catalog(c)
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
     return c
 
 
