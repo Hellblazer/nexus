@@ -666,3 +666,241 @@ def test_runtime_fixture_cleans_up_contextvar(request) -> None:
 
     # Outside the fixture, ContextVar is None.
     assert _runtime_var.get() is None
+
+
+# ── Process-default runtime + shim resolver (RDR-118 P1.S2, nexus-2bino) ────
+#
+# The legacy module-level accessors (``nexus.catalog.open_cached``,
+# ``nexus.catalog.open_catalog``, ``nexus.catalog.reset_cache``) become
+# thin redirectors that prefer the ContextVar runtime when set and fall
+# back to a lazy-constructed process-default runtime otherwise. The
+# process-default reads its config from env at first use so the
+# existing autouse fixtures (``_isolate_catalog``, ``_isolate_config_dir``,
+# ``_pin_storage_mode_direct_for_tests``) continue to drive per-test
+# isolation. ``reset_cache()`` tears down the process-default so the
+# next access reconstructs it against current env values.
+
+
+def test_close_releases_t2_client(tmp_path: Path) -> None:
+    """close() actively closes the runtime's shared T2Client. Mocks the
+    T2 client via daemon-mode injection so we can assert .close() fired."""
+    from nexus.runtime import NexusRuntime
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config", storage_mode="daemon")
+    closed: list = []
+
+    class _StubClient:
+        def close(self) -> None:
+            closed.append(True)
+
+    rt._t2_client = _StubClient()
+    rt.close()
+    assert closed == [True]
+    assert rt._t2_client is None
+
+
+def test_ensure_runtime_for_shim_returns_contextvar_runtime(tmp_path: Path) -> None:
+    """When a runtime is in context, the shim resolver returns that runtime
+    rather than lazy-constructing a process default."""
+    from nexus.runtime import (
+        NexusRuntime,
+        _close_process_default,
+        _ensure_runtime_for_shim,
+        _runtime_var,
+    )
+
+    _close_process_default()  # ensure clean slate
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    token = _runtime_var.set(rt)
+    try:
+        assert _ensure_runtime_for_shim() is rt
+    finally:
+        _runtime_var.reset(token)
+        rt.close()
+
+
+def test_ensure_runtime_for_shim_constructs_process_default_from_env(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """With no contextvar runtime, the shim resolver lazy-constructs a
+    process-default runtime from env. Subsequent calls return the same
+    instance until ``_close_process_default`` runs."""
+    from nexus.runtime import (
+        _close_process_default,
+        _ensure_runtime_for_shim,
+        _runtime_var,
+    )
+
+    _close_process_default()
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / ".config"))
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "cat"))
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+    # Defensive: defeat any leaked contextvar runtime.
+    token = _runtime_var.set(None)
+    try:
+        first = _ensure_runtime_for_shim()
+        second = _ensure_runtime_for_shim()
+        assert first is second
+        assert first.config_dir == tmp_path / ".config"
+        assert first.catalog_path == tmp_path / "cat"
+        assert first.storage_mode == "direct"
+    finally:
+        _runtime_var.reset(token)
+        _close_process_default()
+
+
+def test_close_process_default_allows_reconstruction(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """``_close_process_default`` tears down the process-default; the next
+    ``_ensure_runtime_for_shim`` call reads current env. Pinning this so
+    tests that flip env between cases see fresh process defaults."""
+    from nexus.runtime import (
+        _close_process_default,
+        _ensure_runtime_for_shim,
+        _runtime_var,
+    )
+
+    _close_process_default()
+    token = _runtime_var.set(None)
+    try:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg-a"))
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "cat-a"))
+        monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+        first = _ensure_runtime_for_shim()
+        assert first.catalog_path == tmp_path / "cat-a"
+
+        _close_process_default()
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg-b"))
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "cat-b"))
+        second = _ensure_runtime_for_shim()
+        assert second is not first
+        assert second.catalog_path == tmp_path / "cat-b"
+    finally:
+        _runtime_var.reset(token)
+        _close_process_default()
+
+
+def test_close_process_default_idempotent() -> None:
+    """Calling ``_close_process_default`` twice in a row is a no-op."""
+    from nexus.runtime import _close_process_default
+
+    _close_process_default()
+    _close_process_default()  # must not raise
+
+
+# ── nexus.catalog module-level shims (RDR-118 P1.S2) ────────────────────────
+
+
+def test_catalog_open_cached_shim_uses_runtime(tmp_path: Path, monkeypatch) -> None:
+    """``nexus.catalog.open_cached(path)`` resolves through the runtime
+    layer rather than a module-global cache. Two calls return the same
+    Catalog (cached by ``(path, mode)`` on the resolved runtime)."""
+    from nexus.runtime import _close_process_default, _runtime_var
+
+    _close_process_default()
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "cat-shim"))
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+    token = _runtime_var.set(None)
+    try:
+        catalog_dir = tmp_path / "cat-shim"
+        Catalog.init(catalog_dir)
+
+        from nexus.catalog import open_cached
+
+        first = open_cached(catalog_dir)
+        second = open_cached(catalog_dir)
+        assert first is second
+    finally:
+        _runtime_var.reset(token)
+        _close_process_default()
+
+
+def test_catalog_open_catalog_shim_returns_fresh(tmp_path: Path, monkeypatch) -> None:
+    """``nexus.catalog.open_catalog(path)`` returns a fresh Catalog on every
+    call; not cached. Mirrors the legacy ``open_catalog`` contract."""
+    from nexus.runtime import _close_process_default, _runtime_var
+
+    _close_process_default()
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "cat-fresh"))
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+    token = _runtime_var.set(None)
+    try:
+        catalog_dir = tmp_path / "cat-fresh"
+        Catalog.init(catalog_dir)
+
+        from nexus.catalog import open_catalog
+
+        first = open_catalog(catalog_dir)
+        second = open_catalog(catalog_dir)
+        assert first is not second
+    finally:
+        _runtime_var.reset(token)
+        _close_process_default()
+
+
+def test_catalog_reset_cache_drops_runtime_cache(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """``nexus.catalog.reset_cache()`` tears down the process-default runtime
+    so the next ``open_cached`` constructs fresh. Pins the historical
+    contract that tests rely on for between-case isolation."""
+    from nexus.runtime import _close_process_default, _runtime_var
+
+    _close_process_default()
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "cat-reset"))
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+    token = _runtime_var.set(None)
+    try:
+        catalog_dir = tmp_path / "cat-reset"
+        Catalog.init(catalog_dir)
+
+        from nexus.catalog import open_cached, reset_cache
+
+        first = open_cached(catalog_dir)
+        reset_cache()
+        second = open_cached(catalog_dir)
+        assert first is not second
+    finally:
+        _runtime_var.reset(token)
+        _close_process_default()
+
+
+def test_catalog_open_cached_prefers_contextvar_runtime(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """When a runtime is in context, ``nexus.catalog.open_cached`` resolves
+    via that runtime (not the process-default). Ensures the new
+    ``runtime`` fixture wins over any lazy fallback."""
+    from nexus.runtime import (
+        NexusRuntime,
+        _close_process_default,
+        _runtime_var,
+    )
+
+    _close_process_default()
+    # Pollute env to a different path so the process-default would diverge
+    # if the shim resolved through it.
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "wrong"))
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+    catalog_dir = tmp_path / "right"
+    Catalog.init(catalog_dir)
+    rt = NexusRuntime(
+        config_dir=tmp_path / ".config",
+        catalog_path=catalog_dir,
+        storage_mode="direct",
+    )
+    token = _runtime_var.set(rt)
+    try:
+        from nexus.catalog import open_cached
+
+        cat = open_cached(catalog_dir)
+        # The Catalog must come from the context runtime's cache, not from
+        # the process default.
+        assert (catalog_dir, "direct") in rt._cached
+        assert rt._cached[(catalog_dir, "direct")] is cat
+    finally:
+        _runtime_var.reset(token)
+        rt.close()
+        _close_process_default()

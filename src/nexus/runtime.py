@@ -43,6 +43,9 @@ __all__ = [
 ]
 
 
+_BOOL_TRUE: tuple[str, ...] = ("1", "true", "yes", "on")
+
+
 _STORAGE_MODES: tuple[str, ...] = ("direct", "daemon")
 StorageMode = Literal["direct", "daemon"]
 
@@ -486,8 +489,8 @@ class NexusRuntime:
 
     def _get_t2_client(self) -> Any:
         """Lazy-construct the runtime's shared T2Client for daemon mode.
-        Mirrors ``nexus.catalog._get_t2_client`` but scoped per-runtime.
-        Released by ``close()``."""
+        Replaces the legacy module-level ``nexus.catalog._get_t2_client``
+        singleton with a per-runtime instance. Released by ``close()``."""
         if self._t2_client is not None:
             return self._t2_client
         with self._t2_client_lock:
@@ -557,6 +560,104 @@ def use_runtime(runtime: NexusRuntime) -> Token:
     the reset token. Callers MUST pass the token to ``_runtime_var.reset``
     in a ``finally`` block to keep the per-context binding scoped."""
     return _runtime_var.set(runtime)
+
+
+# ── Process-default runtime + shim resolver (RDR-118 P1.S2) ─────────────────
+#
+# Legacy module-level accessors (``nexus.catalog.open_cached``, etc.) become
+# thin redirectors that resolve through ``_ensure_runtime_for_shim()``. With
+# a runtime in the current context the shim uses it directly; without one a
+# process-default runtime is lazy-constructed from environment variables so
+# the existing autouse fixtures (``_isolate_catalog``,
+# ``_isolate_config_dir``, ``_pin_storage_mode_direct_for_tests``) continue
+# to drive per-test isolation. ``_close_process_default()`` tears the
+# default down so a subsequent access reconstructs it against the current
+# env. Tests call this via ``nexus.catalog.reset_cache()`` at the per-test
+# boundaries; Phase 4 retires the fallback entirely.
+
+_process_default: NexusRuntime | None = None
+_process_default_lock = threading.Lock()
+
+
+def _ensure_runtime_for_shim() -> NexusRuntime:
+    """Return the active runtime for a legacy module-level shim caller.
+
+    Prefers the ContextVar runtime when set; otherwise lazy-constructs a
+    process-default from environment variables. The process-default is
+    cached across calls until ``_close_process_default`` runs, mirroring
+    the existing module-level singleton lifecycle that the shim layer
+    replaces.
+    """
+    rt = _runtime_var.get()
+    if rt is not None and not rt._closed:
+        return rt
+    global _process_default
+    if _process_default is not None and not _process_default._closed:
+        return _process_default
+    with _process_default_lock:
+        if _process_default is not None and not _process_default._closed:
+            return _process_default
+        _process_default = _construct_process_default_from_env()
+        return _process_default
+
+
+def _close_process_default() -> None:
+    """Tear down the process-default runtime if one exists. Idempotent.
+    Called by ``nexus.catalog.reset_cache()`` and by tests that flip env
+    values between cases so the next access reads current env."""
+    global _process_default
+    with _process_default_lock:
+        rt = _process_default
+        _process_default = None
+    if rt is not None and not rt._closed:
+        try:
+            rt.close()
+        except Exception:  # pragma: no cover
+            pass
+
+
+def _construct_process_default_from_env() -> NexusRuntime:
+    """Read the eleven previously-env-driven settings and build a runtime.
+
+    Source of truth for env names: this function is the one place where
+    the env-as-config pattern lives during Phases 1-3. Phase 3
+    (``nexus-s43yx``) consolidates all env reads into a single CLI-entry
+    construction; this helper retires alongside the autouse env-isolation
+    fixtures."""
+    import os
+    from nexus.config import catalog_path as _catalog_path
+    from nexus.config import nexus_config_dir
+
+    config_dir = nexus_config_dir()
+    cp_raw = os.environ.get("NEXUS_CATALOG_PATH", "").strip()
+    catalog_path = Path(cp_raw) if cp_raw else _catalog_path()
+    storage_mode_raw = os.environ.get("NX_STORAGE_MODE", "").strip() or "direct"
+    storage_mode: StorageMode = (
+        "daemon" if storage_mode_raw == "daemon" else "direct"
+    )
+    skip_t1_env = (
+        os.environ.get("NX_T1_ISOLATED", "")
+        or os.environ.get("NEXUS_SKIP_T1", "")
+    ).strip().lower()
+    return NexusRuntime(
+        config_dir=config_dir,
+        catalog_path=catalog_path,
+        storage_mode=storage_mode,
+        dispatch_backend=os.environ.get("NEXUS_DISPATCH_BACKEND") or None,
+        dispatch_qwen_operators=os.environ.get(
+            "NEXUS_DISPATCH_QWEN_OPERATORS",
+        ) or None,
+        dispatch_claude_operators=os.environ.get(
+            "NEXUS_DISPATCH_CLAUDE_OPERATORS",
+        ) or None,
+        aspect_backend=os.environ.get("NEXUS_ASPECT_BACKEND") or None,
+        scholarly_paper_version=os.environ.get(
+            "NEXUS_SCHOLARLY_PAPER_VERSION",
+        ) or None,
+        tier_b_dispatcher=os.environ.get("NEXUS_TIER_B_DISPATCHER") or None,
+        qwen_agent_supervisor=os.environ.get("QWEN_AGENT_SUPERVISOR") or None,
+        skip_t1=skip_t1_env in _BOOL_TRUE,
+    )
 
 
 # ── Default-hooks factory (filled in Step 3, nexus-ipyfj) ────────────────────
