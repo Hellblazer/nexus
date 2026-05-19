@@ -14,6 +14,10 @@ from nexus.doc_indexer import _pdf_chunks, _sha256
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import PDFExtractor
 
+# nexus-2ivn: real PDFExtractor + PDFChunker on every test (CPU-only
+# Docling/MinerU on CI; no GPU). Defer to nightly integration runs.
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture(scope="module")
 def multipage_result(multipage_pdf: Path):

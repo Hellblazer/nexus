@@ -540,7 +540,18 @@ class TestCR3DataVersionWakeMechanism:
     def test_blocking_take_wakes_via_watcher_not_polling(
         self, tmp_path, _cr3_registry, _cr3_chroma
     ) -> None:
-        """blocking_take must use the wake_event, not the prior 10ms sleep."""
+        """blocking_take must wake via the watcher's wake_event.
+
+        Verifies the wake mechanism by instrumenting wake_event.set()
+        and asserting it fires at least once during the timed phase.
+        A wall-time-only assertion cannot reliably distinguish the
+        wake path (~1-2 ms detection) from a hypothetical polling
+        fallback when the per-call ``service.out()`` embedding cost
+        is 150-500 ms warm and CI scheduler jitter spans similar
+        magnitudes. Counting set() proves the watcher observed the
+        sibling commit and fired the event regardless of how long
+        the embedding pipeline took to produce that commit.
+        """
         from nexus.daemon.tuplespace_service import TuplespaceService
 
         service = TuplespaceService(
@@ -549,6 +560,61 @@ class TestCR3DataVersionWakeMechanism:
             registry=_cr3_registry,
         )
         try:
+            # Warm-up so the first timed out() does not pay ONNX
+            # cold-load. The wake_event swap below replaces the
+            # service's event AFTER this so any set() the warm-up
+            # commit triggers lands on the original event and does
+            # not pollute the timed-phase count.
+            warmup_out = service.out(
+                subspace="tasks/cr3",
+                content="warmup",
+                dimensions={
+                    "status": "open",
+                    "priority": "P1",
+                    "created_by": "x",
+                },
+            )
+            warmup_take = service.blocking_take(
+                subspace="tasks/cr3",
+                query="warmup",
+                claimant="warmup",
+                timeout_seconds=5.0,
+            )
+            assert warmup_take is not None, "warm-up take never resolved"
+            service.ack(claim_id=warmup_take["claim_id"], claimant="warmup")
+            del warmup_out
+
+            # Drop in a pass-through wrapper that counts set() calls
+            # without changing semantics. Both the watcher thread
+            # (``_wake_watcher_loop``) and ``blocking_take`` access
+            # the event via ``self._wake_event`` each iteration, so
+            # the swap takes effect immediately for both producers
+            # and consumers.
+            class _CountingEvent:
+                def __init__(self, inner):
+                    self._inner = inner
+                    self.set_count = 0
+
+                def set(self):
+                    self.set_count += 1
+                    return self._inner.set()
+
+                def clear(self):
+                    return self._inner.clear()
+
+                def wait(self, timeout=None):
+                    return self._inner.wait(timeout)
+
+                def is_set(self):
+                    return self._inner.is_set()
+
+            counting = _CountingEvent(service._wake_event)
+            service._wake_event = counting
+            # Let any in-flight watcher iteration finish reading the
+            # old reference before the timed commit fires.
+            _time.sleep(0.02)
+            counting._inner.clear()
+
             sleep_seconds = 0.05
 
             def _delayed_out() -> None:
@@ -573,14 +639,27 @@ class TestCR3DataVersionWakeMechanism:
                 timeout_seconds=5.0,
             )
             elapsed_ms = (_time.perf_counter() - t0) * 1000.0
-            assert result is not None
-            # Ceiling generous enough to absorb embedding cost on cold
-            # chroma but tight enough that 10ms polling cadence on each
-            # idle tick would push past it after a few cycles.
-            assert elapsed_ms < 200.0, (
+            assert result is not None, "blocking_take never resolved"
+            # Wake mechanism: the watcher must have observed the
+            # sibling commit and fired the wake_event at least once.
+            # ``set()`` is invoked from the watcher loop (the only
+            # producer during normal operation; ``close()`` also
+            # invokes it but is not called during the timed phase).
+            assert counting.set_count >= 1, (
+                f"wake_event.set was never invoked during blocking_take; "
+                f"the watcher did not observe the sibling commit "
+                f"(set_count={counting.set_count})."
+            )
+            # Coarse wall-time sanity check: a wake mechanism that
+            # is wired up correctly returns within at most a couple
+            # seconds even on a slow runner; a broken wake path
+            # would block for the full timeout (5 s) because the
+            # loop has no polling fallback. The ceiling is loose
+            # enough to absorb CI variance on a cold chroma session.
+            assert elapsed_ms < 2500.0, (
                 f"blocking_take total elapsed {elapsed_ms:.1f}ms is "
-                "high; wake-event path should keep this well under the "
-                "polling-only baseline."
+                "uncomfortably close to the 5s timeout; wake-event "
+                "may not be firing on every commit."
             )
             service.ack(claim_id=result["claim_id"], claimant="solo")
         finally:

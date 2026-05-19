@@ -50,9 +50,19 @@ class TestP0skHealthSurfacesDaemonModeHint:
 
         from nexus import health as h
 
-        # Re-route the local path probe.
+        # Re-route the local path probe. ``_check_t3_local`` imports
+        # ``_default_local_path`` from ``nexus.config`` on every call
+        # (the import lives inside the function body) so patching the
+        # source module is what actually steers the lookup; an
+        # ``h._local_chroma_path`` patch would be a no-op against the
+        # real call site. Without this redirection the probe falls
+        # through to the developer's real local chroma path, which on
+        # a fresh CI runner does not exist; ``path_exists`` is False;
+        # the ``Local collections`` branch is never reached; the
+        # assertion below fails with only the three pre-branch
+        # results (T3 mode / Local ChromaDB path / Embedding model).
         monkeypatch.setattr(
-            h, "_local_chroma_path", lambda: local_dir, raising=False
+            "nexus.config._default_local_path", lambda: local_dir, raising=True
         )
         # Re-route credential lookup so the local branch is taken.
         monkeypatch.setattr(
