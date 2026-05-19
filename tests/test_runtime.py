@@ -1065,6 +1065,184 @@ def test_mcp_infra_get_catalog_shim_legacy_override_wins(
     assert get_catalog() is sentinel
 
 
+# ── P2.S1 + P2.S1b: single-doc + document chain migration (nexus-kekrs, nexus-f2ufy) ──
+
+
+def test_install_default_hooks_registers_aspect_extraction_document_hook(
+    tmp_path: Path,
+) -> None:
+    """RDR-118 P2.S1b: ``install_default_hooks`` registers the
+    RDR-089 aspect-extraction enqueue hook on the document chain.
+    Pre-P2.S1b the registration self-fired at ``mcp/core.py`` module
+    load; the factory is now the single binding point."""
+    from nexus.aspect_worker import aspect_extraction_enqueue_hook
+    from nexus.runtime import NexusRuntime, install_default_hooks
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        assert rt.hooks._document == []
+        install_default_hooks(rt)
+        assert aspect_extraction_enqueue_hook in rt.hooks._document
+    finally:
+        rt.close()
+
+
+def test_install_default_hooks_aspect_hook_is_idempotent(tmp_path: Path) -> None:
+    """Calling ``install_default_hooks`` twice does not double-register
+    the document hook."""
+    from nexus.aspect_worker import aspect_extraction_enqueue_hook
+    from nexus.runtime import NexusRuntime, install_default_hooks
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        install_default_hooks(rt)
+        install_default_hooks(rt)
+        assert rt.hooks._document.count(aspect_extraction_enqueue_hook) == 1
+    finally:
+        rt.close()
+
+
+def test_hook_register_document_rejects_async_callable(tmp_path: Path) -> None:
+    """RDR-118 P2.S1b: register_document raises on coroutine-returning
+    callables. The legacy dispatcher silently dropped async hooks
+    (the contract is synchronous-only and load-bearing for RDR-089).
+    The new contract surfaces the violation at registration time
+    instead of letting the async call return a dropped coroutine."""
+    from nexus.runtime import NexusRuntime
+
+    async def async_hook(source_path, collection, content):
+        return None
+
+    rt = NexusRuntime(config_dir=tmp_path / ".config")
+    try:
+        with pytest.raises(TypeError, match="async"):
+            rt.hooks.register_document(async_hook)
+    finally:
+        rt.close()
+
+
+def test_mcp_infra_register_post_store_hook_routes_through_runtime(
+    runtime,
+) -> None:
+    """``mcp_infra.register_post_store_hook(fn)`` appends to the
+    runtime's HookRegistry via the shim, not to any module-level list."""
+    from nexus.mcp_infra import register_post_store_hook
+
+    def probe(doc_id, collection, content):
+        return None
+
+    assert runtime.hooks._single == []
+    register_post_store_hook(probe)
+    assert runtime.hooks._single == [probe]
+
+
+def test_mcp_infra_fire_post_store_hooks_routes_through_runtime(
+    runtime,
+) -> None:
+    """``mcp_infra.fire_post_store_hooks(...)`` iterates the runtime's
+    HookRegistry via the shim."""
+    from nexus.mcp_infra import (
+        fire_post_store_hooks,
+        register_post_store_hook,
+    )
+
+    seen: list[tuple] = []
+
+    def hook(doc_id, collection, content):
+        seen.append((doc_id, collection, content))
+
+    register_post_store_hook(hook)
+    fire_post_store_hooks("doc-7", "c1", "hello")
+    assert seen == [("doc-7", "c1", "hello")]
+
+
+def test_mcp_infra_post_store_hooks_proxy_list_ops(runtime) -> None:
+    """``mcp_infra._post_store_hooks`` is a proxy over the runtime's
+    single-chain list. Iter, len, append, extend, clear forward to
+    the live runtime storage so the legacy autouse fixture's
+    snapshot / restore keeps working."""
+    import nexus.mcp_infra as _mod
+
+    def probe_a(doc_id, collection, content):
+        return None
+
+    def probe_b(doc_id, collection, content):
+        return None
+
+    _mod._post_store_hooks.append(probe_a)
+    _mod._post_store_hooks.append(probe_b)
+
+    assert len(_mod._post_store_hooks) == 2
+    assert list(_mod._post_store_hooks) == [probe_a, probe_b]
+    assert probe_a in _mod._post_store_hooks
+
+    _mod._post_store_hooks.clear()
+    assert list(_mod._post_store_hooks) == []
+
+
+def test_mcp_infra_register_post_document_hook_routes_through_runtime(
+    runtime,
+) -> None:
+    """``mcp_infra.register_post_document_hook(fn)`` appends to the
+    runtime's document chain via the shim."""
+    from nexus.mcp_infra import register_post_document_hook
+
+    def probe(source_path, collection, content):
+        return None
+
+    assert runtime.hooks._document == []
+    register_post_document_hook(probe)
+    assert runtime.hooks._document == [probe]
+
+
+def test_mcp_infra_fire_post_document_hooks_routes_through_runtime(
+    runtime,
+) -> None:
+    """``mcp_infra.fire_post_document_hooks(...)`` iterates the
+    runtime's HookRegistry via the shim with the doc_id passed
+    through to ``doc_id``-aware hooks."""
+    from nexus.mcp_infra import (
+        fire_post_document_hooks,
+        register_post_document_hook,
+    )
+
+    seen: list = []
+
+    def hook(source_path, collection, content, *, doc_id: str = ""):
+        seen.append((source_path, doc_id))
+
+    register_post_document_hook(hook)
+    fire_post_document_hooks(
+        "/tmp/file.md", "knowledge__x", "body", doc_id="d-1",
+    )
+    assert seen == [("/tmp/file.md", "d-1")]
+
+
+def test_mcp_infra_post_document_hooks_proxy_list_ops(runtime) -> None:
+    """``mcp_infra._post_document_hooks`` and
+    ``_post_document_hooks_with_doc_id`` are proxies over the runtime's
+    document chain storage."""
+    import nexus.mcp_infra as _mod
+
+    def probe_legacy(source_path, collection, content):
+        return None
+
+    def probe_with_doc_id(source_path, collection, content, *, doc_id: str = ""):
+        return None
+
+    _mod._post_document_hooks.append(probe_legacy)
+    _mod._post_document_hooks.append(probe_with_doc_id)
+
+    assert len(_mod._post_document_hooks) == 2
+    assert list(_mod._post_document_hooks) == [probe_legacy, probe_with_doc_id]
+    assert id(probe_with_doc_id) in _mod._post_document_hooks_with_doc_id
+    assert id(probe_legacy) not in _mod._post_document_hooks_with_doc_id
+
+    _mod._post_document_hooks.clear()
+    assert list(_mod._post_document_hooks) == []
+    assert list(_mod._post_document_hooks_with_doc_id) == []
+
+
 def test_catalog_open_cached_prefers_contextvar_runtime(
     tmp_path: Path, monkeypatch,
 ) -> None:

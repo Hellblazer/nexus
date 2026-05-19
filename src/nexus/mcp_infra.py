@@ -467,24 +467,94 @@ def resolve_tumbler_mcp(cat, value):
 
 
 # ── Post-store hooks (RDR-070, nexus-7h2) ────────────────────────────────────
-# Synchronous hooks that fire after every store_put. Exceptions are caught per-
-# hook and logged, never propagated — same non-fatal pattern as auto_linker.
+# Synchronous hooks that fire after every store_put. Exceptions are caught
+# per-hook and logged, never propagated (same non-fatal pattern as auto_linker).
+#
+# RDR-118 P2.S1 (nexus-kekrs): the storage moved to
+# ``NexusRuntime.hooks._single``; the functions and module-level name below
+# are thin redirectors / a proxy that delegate to the runtime resolver.
+# Phase 2 (``nexus-0zgb3``) retires the proxy + the legacy autouse fixture
+# that snapshots it.
 
-_post_store_hooks: list = []
+
+class _SingleHooksListProxy:
+    """List-like view of the resolved runtime's single-chain hook list.
+
+    Forwards every list operation to ``runtime.hooks._single`` so the
+    legacy autouse ``_restore_post_store_batch_hooks_after_test``
+    (which also snapshots / restores this list) and any direct-access
+    test code continue to work. Phase 2 (``nexus-0zgb3``) deletes both
+    the proxy and the fixture.
+    """
+
+    @staticmethod
+    def _live() -> list:
+        from nexus.runtime import _ensure_runtime_for_shim
+        return _ensure_runtime_for_shim().hooks._single
+
+    def __iter__(self):
+        return iter(self._live())
+
+    def __len__(self) -> int:
+        return len(self._live())
+
+    def __getitem__(self, key):
+        return self._live()[key]
+
+    def __setitem__(self, key, value) -> None:
+        if isinstance(key, slice) and key == slice(None):
+            self.clear()
+            for fn in value:
+                self.append(fn)
+            return
+        self._live()[key] = value
+
+    def __contains__(self, item) -> bool:
+        return item in self._live()
+
+    def __eq__(self, other) -> bool:
+        return list(self._live()) == list(other)
+
+    def __repr__(self) -> str:
+        return repr(self._live())
+
+    def append(self, fn) -> None:
+        from nexus.runtime import _ensure_runtime_for_shim
+        _ensure_runtime_for_shim().hooks.register_single(fn)
+
+    def extend(self, fns) -> None:
+        for fn in fns:
+            self.append(fn)
+
+    def remove(self, fn) -> None:
+        self._live().remove(fn)
+
+    def clear(self) -> None:
+        self._live().clear()
+
+
+_post_store_hooks: _SingleHooksListProxy = _SingleHooksListProxy()
 
 
 def register_post_store_hook(fn) -> None:
-    """Register a callable(doc_id, collection, content) to fire after store_put."""
+    """Register a single-doc hook on the resolved runtime's HookRegistry.
+
+    RDR-118 P2.S1 thin redirector. ``_post_store_hooks.append(fn)``
+    forwards to ``runtime.hooks.register_single(fn)`` via the proxy.
+    """
     _post_store_hooks.append(fn)
 
 
 def fire_post_store_hooks(doc_id: str, collection: str, content: str) -> None:
-    """Invoke all registered post-store hooks. Exceptions logged, never raised.
+    """Invoke every single-doc hook in ``_post_store_hooks``.
 
-    Failures are additionally persisted to T2 ``hook_failures`` (GH #251) so
-    ``nx taxonomy status`` can surface them with an Action line. The persist
-    path is itself guarded — if the T2 write fails, the store_put still
-    succeeds and structlog still carries the original warning.
+    RDR-118 P2.S1: iterates the module-level proxy which forwards to
+    the resolved runtime's HookRegistry. Legacy tests that replace
+    ``_post_store_hooks`` via ``unittest.mock.patch`` with a regular
+    list still drive the fire path (the proxy and a plain list are
+    both iterable; the runtime registry stays untouched inside the
+    patch's scope). Per-hook failure isolation + T2 ``hook_failures``
+    persistence preserved verbatim from the legacy dispatcher.
     """
     import structlog
     _hook_log = structlog.get_logger()
@@ -603,6 +673,12 @@ class _BatchHooksListProxy:
     def extend(self, fns) -> None:
         for fn in fns:
             self.append(fn)
+
+    def remove(self, fn) -> None:
+        from nexus.runtime import _ensure_runtime_for_shim
+        rt = _ensure_runtime_for_shim()
+        rt.hooks._batch.remove(fn)
+        rt.hooks._batch_with_catalog_doc_id.discard(id(fn))
 
     def clear(self) -> None:
         from nexus.runtime import _ensure_runtime_for_shim
@@ -1081,12 +1157,12 @@ def manifest_write_batch_hook(
 
 
 # ── Post-store document hooks (RDR-089, nexus-yyev) ──────────────────────────
-# Third hook chain — fires once per *document* after every storage event
+# Third hook chain. Fires once per *document* after every storage event
 # (MCP store_put and every CLI ingest path). Signature is
 # ``fn(source_path, collection, content)`` rather than the doc_id-keyed
-# single chain or the doc_ids-list batch chain — document-grain enrichment
-# (e.g. RDR-089 aspect extraction) needs the full document text and a
-# stable on-disk identifier, not chunk-level references.
+# single chain or the doc_ids-list batch chain. Document-grain enrichment
+# (RDR-089 aspect extraction is the canonical consumer) needs the full
+# document text and a stable on-disk identifier, not chunk-level references.
 #
 # Content-sourcing contract (audit F4):
 #   * MCP store_put has the full doc text in scope and passes ``content=<text>``.
@@ -1095,58 +1171,144 @@ def manifest_write_batch_hook(
 #     read source_path itself.
 #   * Hooks treat ``content`` as primary, falling back to file read when empty.
 #
-# Synchronous all the way down — zero asyncio in the dispatcher (RDR-089
+# Synchronous all the way down. Zero asyncio in the dispatcher (RDR-089
 # load-bearing contract: routing through async operator_extract from this
-# sync chain silently drops the coroutine). Hooks registered here MUST be
-# synchronous callables; async hooks are explicitly unsupported.
+# sync chain silently drops the coroutine). RDR-118 P2.S1b tightens the
+# contract: ``HookRegistry.register_document`` raises ``TypeError`` on
+# coroutine callables at registration time instead of accepting and
+# silently dropping at fire time.
 #
 # Per-hook failures are captured, logged, and persisted to T2
 # ``hook_failures`` with ``chain='document'``. Failures never propagate.
+#
+# RDR-118 P2.S1b (nexus-f2ufy): the storage moved to
+# ``NexusRuntime.hooks._document`` (and ``_document_with_doc_id``); the
+# functions and module-level names below are thin redirectors / proxies
+# that delegate to the runtime resolver. The RDR-089 aspect-extraction
+# enqueue hook self-registration moved from ``mcp/core.py:557`` to the
+# ``install_default_hooks`` factory in ``nexus.runtime``.
 
-_post_document_hooks: list = []
-#: nexus-8g79.12: set of hook ids that accept the ``doc_id`` kwarg
-#: (RDR-101 Phase 4). Classified by signature inspection at
-#: registration time so the dispatcher picks the right shape without
-#: a fragile TypeError-retry probe at every call. Pre-fix the dispatcher
-#: caught TypeError and retried — any hook that raised TypeError for an
-#: unrelated reason (wrong-type arg inside its body) was misclassified
-#: as a back-compat signal and silently invoked with the wrong shape.
-_post_document_hooks_with_doc_id: set[int] = set()
+
+class _DocumentHooksListProxy:
+    """List-like view of the resolved runtime's document-chain hook list.
+
+    Forwards every list operation to ``runtime.hooks._document``. Same
+    migration pattern as ``_BatchHooksListProxy`` and
+    ``_SingleHooksListProxy``. Phase 2 (``nexus-0zgb3``) deletes the
+    proxy alongside the autouse fixture that backs it.
+    """
+
+    @staticmethod
+    def _live() -> list:
+        from nexus.runtime import _ensure_runtime_for_shim
+        return _ensure_runtime_for_shim().hooks._document
+
+    def __iter__(self):
+        return iter(self._live())
+
+    def __len__(self) -> int:
+        return len(self._live())
+
+    def __getitem__(self, key):
+        return self._live()[key]
+
+    def __setitem__(self, key, value) -> None:
+        if isinstance(key, slice) and key == slice(None):
+            self.clear()
+            for fn in value:
+                self.append(fn)
+            return
+        self._live()[key] = value
+
+    def __contains__(self, item) -> bool:
+        return item in self._live()
+
+    def __eq__(self, other) -> bool:
+        return list(self._live()) == list(other)
+
+    def __repr__(self) -> str:
+        return repr(self._live())
+
+    def append(self, fn) -> None:
+        from nexus.runtime import _ensure_runtime_for_shim
+        _ensure_runtime_for_shim().hooks.register_document(fn)
+
+    def extend(self, fns) -> None:
+        for fn in fns:
+            self.append(fn)
+
+    def remove(self, fn) -> None:
+        from nexus.runtime import _ensure_runtime_for_shim
+        rt = _ensure_runtime_for_shim()
+        rt.hooks._document.remove(fn)
+        rt.hooks._document_with_doc_id.discard(id(fn))
+
+    def clear(self) -> None:
+        from nexus.runtime import _ensure_runtime_for_shim
+        rt = _ensure_runtime_for_shim()
+        rt.hooks._document.clear()
+        rt.hooks._document_with_doc_id.clear()
+
+
+class _DocumentDocIdSetProxy:
+    """Set-like view of the resolved runtime's ``_document_with_doc_id``
+    classification set. Mirrors ``_CatalogDocIdSetProxy``."""
+
+    @staticmethod
+    def _live() -> set:
+        from nexus.runtime import _ensure_runtime_for_shim
+        return _ensure_runtime_for_shim().hooks._document_with_doc_id
+
+    def __iter__(self):
+        return iter(self._live())
+
+    def __len__(self) -> int:
+        return len(self._live())
+
+    def __contains__(self, item) -> bool:
+        return item in self._live()
+
+    def __eq__(self, other) -> bool:
+        return set(self._live()) == set(other)
+
+    def __repr__(self) -> str:
+        return repr(self._live())
+
+    def add(self, item) -> None:
+        self._live().add(item)
+
+    def discard(self, item) -> None:
+        self._live().discard(item)
+
+    def update(self, other) -> None:
+        self._live().update(other)
+
+    def clear(self) -> None:
+        self._live().clear()
+
+
+_post_document_hooks: _DocumentHooksListProxy = _DocumentHooksListProxy()
+#: Proxy view of the resolved runtime's ``_document_with_doc_id`` set.
+#: Populated indirectly by :func:`register_post_document_hook` via the
+#: runtime's signature-classification path (RDR-101 Phase 4 contract).
+_post_document_hooks_with_doc_id: _DocumentDocIdSetProxy = _DocumentDocIdSetProxy()
 
 
 def register_post_document_hook(fn) -> None:
-    """Register a synchronous ``fn(source_path, collection, content) -> None``
-    to fire after every document-level storage event.
+    """Register a synchronous document-grain hook on the resolved
+    runtime's HookRegistry.
 
-    The callable MUST be synchronous. Async callables are silently
-    unsupported — the dispatcher would drop the returned coroutine.
-    Phase 1 hook authors: see ``test_async_hooks_silently_unsupported_by_dispatcher``
-    for the contract test.
+    RDR-118 P2.S1b thin redirector. ``_post_document_hooks.append(fn)``
+    forwards to ``runtime.hooks.register_document(fn)`` which raises
+    ``TypeError`` on coroutine callables (the dispatcher contract is
+    synchronous-only; the pre-RDR-118 module-level dispatcher silently
+    dropped coroutines, the new contract is louder).
 
-    nexus-8g79.12: callable's signature is inspected once at
-    registration so :func:`fire_post_document_hooks` picks the right
-    call shape — hooks that accept ``doc_id`` or **kwargs receive it;
-    older registrations are called without it. Mirrors the pattern
-    used by :func:`register_post_store_batch_hook` for ``catalog_doc_id``.
+    The doc_id-aware classification (RDR-101 Phase 4) runs inside
+    ``register_document`` via ``inspect.signature``; hooks that accept
+    ``doc_id`` or ``**kwargs`` are invoked with the kwarg at fire time.
     """
     _post_document_hooks.append(fn)
-    try:
-        import inspect
-        sig = inspect.signature(fn)
-        params = sig.parameters
-        if "doc_id" in params or any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-        ):
-            _post_document_hooks_with_doc_id.add(id(fn))
-    except (TypeError, ValueError):
-        # Builtin/C-extension callable with no introspectable signature.
-        # Treat as legacy shape (no doc_id) so the dispatcher does not
-        # blow up on first call.
-        import structlog
-        structlog.get_logger().debug(
-            "post_document_hook_signature_unintrospectable",
-            hook=getattr(fn, "__name__", repr(fn)),
-        )
 
 
 def fire_post_document_hooks(
@@ -1154,36 +1316,30 @@ def fire_post_document_hooks(
     *,
     doc_id: str = "",
 ) -> None:
-    """Invoke all registered document-grain hooks. Per-hook failures are
-    captured, logged, and persisted to T2 ``hook_failures`` with
-    ``chain='document'`` — never raised to the caller.
+    """Invoke every document-grain hook in ``_post_document_hooks``.
 
-    Synchronous dispatch: no ``asyncio.to_thread``, no ``await``. Hooks
-    that need async work must run their own event loop internally.
+    RDR-118 P2.S1b: iterates the proxy which forwards to the resolved
+    runtime's HookRegistry. Synchronous dispatch (no ``asyncio.to_thread``,
+    no ``await``); per-hook failure isolation + T2 ``hook_failures``
+    persistence preserved verbatim from the legacy dispatcher.
 
     Content-sourcing contract:
 
-    * ``content`` non-empty (MCP path) — passed through to the hook
-      verbatim; the hook reads ``content`` directly.
-    * ``content == ""`` (CLI path) — the contract signal that the hook
+    * ``content`` non-empty (MCP path): passed through verbatim; the
+      hook reads ``content`` directly.
+    * ``content == ""`` (CLI path): the contract signal that the hook
       may need to read ``source_path`` itself. The framework forwards
-      both arguments unchanged; content-sourcing is the hook's
-      responsibility, not the framework's.
+      both arguments unchanged.
 
     ``doc_id`` (nexus-tdgc / RDR-101 Phase 4) is the catalog identity
-    of the source document. Forwarded to every registered hook as a
-    keyword arg; hooks that don't accept the kw are called without it
-    so older registrations keep working during the migration window.
+    of the source document. Forwarded to every registered hook whose
+    signature includes ``doc_id`` or ``**kwargs``; older registrations
+    are called without it.
     """
     import structlog
     _hook_log = structlog.get_logger()
     for hook in _post_document_hooks:
         try:
-            # nexus-8g79.12: dispatch by signature classification done at
-            # registration time. Pre-fix the inner try/except TypeError
-            # caught any TypeError from inside the hook body and silently
-            # retried with the legacy shape — misclassifying unrelated
-            # type bugs as a back-compat signal.
             if id(hook) in _post_document_hooks_with_doc_id:
                 hook(source_path, collection, content, doc_id=doc_id)
             else:

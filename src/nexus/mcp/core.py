@@ -535,26 +535,13 @@ def _record_tier_write(
 # must precede taxonomy assignment so chash rows exist before topic assignment
 # runs (mirroring the legacy chash-before-taxonomy CLI invariant).
 
-from nexus.mcp_infra import (
-    register_post_document_hook,
-)
-
-# RDR-108 Phase 3 (nexus-bdag): the three batch hooks
-# (chash_dual_write_batch_hook, taxonomy_assign_batch_hook,
-# manifest_write_batch_hook) now self-register at module load in
-# ``nexus.mcp_infra`` so CLI-only flows (``nx index repo``) also fire
-# them. Pre-Phase-3 the registrations lived here, which silently
-# skipped them for non-MCP code paths.
-
-# RDR-089 follow-up (nexus-qeo8): document-grain hook chain consumer.
-# The synchronous-inline shape was invalidated by the P1.3 spike
-# (median 26.5 s / p95 38.1 s per document). The enqueue hook writes
-# to aspect_extraction_queue (microsecond-scale) and lazy-spawns a
-# background worker that drains the queue and invokes the existing
-# synchronous extract_aspects.
-from nexus.aspect_worker import aspect_extraction_enqueue_hook
-
-register_post_document_hook(aspect_extraction_enqueue_hook)
+# RDR-118 P2.S1b (nexus-f2ufy): the RDR-089 aspect-extraction enqueue
+# hook moved from this module-load self-registration site into the
+# ``nexus.runtime.install_default_hooks(runtime)`` factory alongside
+# the three batch hooks that migrated in P1.S3 (nexus-ipyfj). Every
+# entry point that constructs a runtime now calls install_default_hooks
+# after construction; CLI / MCP server startup paths get the same
+# document-hook coverage as the pre-RDR-118 module-load semantics.
 
 # ── Registered tools ─────────────────────────────────────────────────────────
 

@@ -42,7 +42,8 @@ DOCUMENT_HOOK_GUARDED_NAMES = frozenset({
 
 DOCUMENT_HOOK_ALLOWED_FILES = frozenset({
     "src/nexus/aspect_worker.py",  # the definition
-    "src/nexus/mcp/core.py",       # the single registration site
+    "src/nexus/mcp/core.py",       # the legacy single registration site
+    "src/nexus/runtime.py",        # RDR-118 P2.S1b: install_default_hooks factory
 })
 
 

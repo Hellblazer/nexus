@@ -188,10 +188,28 @@ class HookRegistry:
 
     def register_document(self, fn: Callable[..., None]) -> None:
         """Register a synchronous ``fn(source_path, collection, content)``
-        callable. Async callables are silently unsupported (the
-        synchronous-only contract is load-bearing for RDR-089 aspect
-        extraction). Classifies whether the callable accepts ``doc_id``
-        at registration. Mirrors ``register_post_document_hook``."""
+        callable. The synchronous-only contract is load-bearing for
+        RDR-089 aspect extraction; coroutine-returning callables would
+        be silently dropped by the dispatcher.
+
+        RDR-118 P2.S1b: registration raises ``TypeError`` on coroutine
+        functions instead of accepting them and dropping the returned
+        coroutine at fire time. Surfaces the contract violation at the
+        registration site, where the diagnostic points at the buggy
+        caller. The legacy mcp_infra dispatcher accepted async hooks
+        silently; the new contract is louder.
+
+        Classifies whether the callable accepts ``doc_id`` at
+        registration. Mirrors ``register_post_document_hook``.
+        """
+        if inspect.iscoroutinefunction(fn):
+            raise TypeError(
+                f"register_document(fn={getattr(fn, '__name__', repr(fn))}): "
+                "async callables are not supported. The dispatcher fires "
+                "synchronously and would drop the returned coroutine. "
+                "Hooks that need async work must run their own event loop "
+                "internally."
+            )
         self._document.append(fn)
         try:
             sig = inspect.signature(fn)
@@ -684,23 +702,26 @@ def _construct_process_default_from_env() -> NexusRuntime:
 def install_default_hooks(runtime: NexusRuntime) -> None:
     """Register the load-bearing default hooks on *runtime*.
 
-    RDR-118 P1.S3 (nexus-ipyfj). Moves the three module-load
-    self-registrations from ``nexus.mcp_infra:983-985`` into an explicit
-    factory called by CLI / MCP entry points after ``NexusRuntime``
-    construction. The hooks are load-bearing for catalog correctness
-    across both CLI ingest paths and MCP ``store_put``: dropping any
-    of them silently leaves chash_index, taxonomy_assignments, or the
-    catalog manifest stale (see RDR-108 Phase 3 / nexus-bdag).
+    RDR-118 P1.S3 (nexus-ipyfj) + P2.S1b (nexus-f2ufy). The factory
+    is the single binding point for hooks that were previously
+    self-registered at module load:
+
+    * Three batch hooks (chash dual-write, taxonomy assign, manifest
+      write) from ``nexus.mcp_infra:983-985``.
+    * One document hook (RDR-089 aspect-extraction enqueue) from
+      ``nexus.mcp.core:557``.
+
+    All four are load-bearing for catalog / index correctness across
+    both CLI ingest paths and MCP ``store_put``; dropping any of them
+    silently leaves ``chash_index``, ``taxonomy_assignments``, the
+    catalog manifest, or the aspect-extraction queue stale.
 
     Idempotent: calling more than once on the same runtime is a no-op
-    via duplicate-registration detection on each hook's identity. Tests
-    that need the default registry call this factory explicitly; tests
-    that need a clean registry skip it.
-
-    The RDR-089 aspect-extraction document hook stays in
-    ``nexus.mcp.core`` for Phase 1 and migrates to this factory in
-    Phase 2 (bead ``nexus-f2ufy``).
+    via duplicate-registration detection on each hook's identity.
+    Tests that need the default registry call this factory explicitly;
+    tests that need a clean registry skip it.
     """
+    from nexus.aspect_worker import aspect_extraction_enqueue_hook
     from nexus.mcp_infra import (
         chash_dual_write_batch_hook,
         manifest_write_batch_hook,
@@ -714,3 +735,6 @@ def install_default_hooks(runtime: NexusRuntime) -> None:
     ):
         if hook not in runtime.hooks._batch:
             runtime.hooks.register_batch(hook)
+
+    if aspect_extraction_enqueue_hook not in runtime.hooks._document:
+        runtime.hooks.register_document(aspect_extraction_enqueue_hook)
