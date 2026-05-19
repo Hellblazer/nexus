@@ -12,9 +12,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import structlog
+
+if TYPE_CHECKING:
+    from nexus.catalog import Catalog
 
 _log = structlog.get_logger(__name__)
 
@@ -55,32 +58,26 @@ def _has_credentials() -> bool:
     return bool(get_credential("voyage_api_key") and get_credential("chroma_api_key"))
 
 
-def _lookup_existing_doc_id(file_path: str, corpus: str) -> str:
-    """nexus-dcym: pre-flight catalog lookup for an already-indexed file.
+def _lookup_existing_doc_id(
+    cat: "Catalog | None", file_path: str, corpus: str,
+) -> str:
+    """Pre-flight catalog lookup for an already-indexed file (nexus-dcym).
 
-    Returns the catalog ``doc_id`` (str) if a registration already exists
-    under the corpus's owner; empty string otherwise (catalog absent,
-    owner missing, or first-time registration). Best-effort: any failure
+    Returns the catalog ``doc_id`` if a registration exists under the
+    corpus's owner; empty string otherwise (catalog absent, owner
+    missing, or first-time registration). Best-effort: any failure
     silently returns "" so callers fall back to the legacy
     ``source_path``-keyed chunk lookup.
 
-    The pipeline registers PDFs in the catalog *after* the staleness
-    check, so on a fresh index this returns "" (no entry yet) and the
-    legacy lookup keeps working. On a re-index, the prior registration
-    is found and the chunk lookup keys on ``doc_id``.
+    Callers construct *cat* once and pass it in (RDR-120 DI substrate);
+    ``None`` indicates the catalog has not been initialised at this
+    location.
     """
+    if cat is None:
+        return ""
     try:
-        from nexus.catalog import Catalog, open_cached  # noqa: PLC0415
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
-        from nexus.config import catalog_path  # noqa: PLC0415
 
-        cat_path = catalog_path()
-        if not Catalog.is_initialized(cat_path):
-            return ""
-        # nexus-6xqk follow-up: use the process-cached Catalog so per-
-        # file lookups during a force-reindex don't storm the SQLite
-        # write lock with concurrent _ensure_consistent rebuilds.
-        cat = open_cached(cat_path)
         owner_name = corpus or "standalone-pdfs"
         # Curator-only lookup — see _register_or_lookup_doc_id for
         # rationale (repo and curator owners can share names; lookups
@@ -1300,10 +1297,18 @@ def index_pdf(
         # content-sourcing contract.
         # nexus-tdgc: forward the catalog doc_id (lookup is post-register
         # so the entry exists by this point in the incremental path).
-        from nexus.mcp_infra import fire_post_document_hooks
+        from nexus.catalog import Catalog  # noqa: PLC0415
+        from nexus.config import catalog_path  # noqa: PLC0415
+        from nexus.mcp_infra import fire_post_document_hooks  # noqa: PLC0415
+        _cat_path = catalog_path()
+        _cat = (
+            Catalog(_cat_path, _cat_path / ".catalog.db")
+            if Catalog.is_initialized(_cat_path)
+            else None
+        )
         fire_post_document_hooks(
             str(pdf_path), col_name, "",
-            doc_id=_lookup_existing_doc_id(str(pdf_path), corpus),
+            doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
         )
         if return_metadata:
             return {

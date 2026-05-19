@@ -804,11 +804,19 @@ def pipeline_index_pdf(
     # reads source_path itself per the P0.1 content-sourcing contract.
     # nexus-tdgc: _catalog_pdf_hook ran above so the catalog entry now
     # exists; resolve the doc_id and forward it to the document chain.
+    from nexus.catalog import Catalog
+    from nexus.config import catalog_path
     from nexus.doc_indexer import _lookup_existing_doc_id
     from nexus.mcp_infra import fire_post_document_hooks
+    _cat_path = catalog_path()
+    _cat = (
+        Catalog(_cat_path, _cat_path / ".catalog.db")
+        if Catalog.is_initialized(_cat_path)
+        else None
+    )
     fire_post_document_hooks(
         str(pdf_path), collection, "",
-        doc_id=_lookup_existing_doc_id(str(pdf_path), corpus),
+        doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
     )
 
     return total_chunks

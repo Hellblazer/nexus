@@ -161,13 +161,12 @@ def voyage_client():
 # ── nexus-dcym: doc_id-keyed identity helpers ──────────────────────────────
 
 
-def test_lookup_existing_doc_id_returns_empty_when_catalog_absent(tmp_path, monkeypatch):
-    """nexus-dcym: catalog uninitialized → "". Caller falls back to source_path."""
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "no-catalog"))
-    assert _lookup_existing_doc_id("/some/file.pdf", "any-corpus") == ""
+def test_lookup_existing_doc_id_returns_empty_when_catalog_is_none(tmp_path):
+    """Catalog uninitialised (caller passes None) → "". Caller falls back."""
+    assert _lookup_existing_doc_id(None, "/some/file.pdf", "any-corpus") == ""
 
 
-def test_lookup_existing_doc_id_finds_registered_entry(tmp_path, monkeypatch):
+def test_lookup_existing_doc_id_finds_registered_entry(tmp_path):
     """When the catalog already registered *file_path* under *corpus*'s
     owner, the helper returns the tumbler stringified as the doc_id."""
     from nexus.catalog.catalog import Catalog
@@ -181,8 +180,7 @@ def test_lookup_existing_doc_id_finds_registered_entry(tmp_path, monkeypatch):
         physical_collection="docs__mybook",
     )
 
-    monkeypatch.setattr("nexus.config.catalog_path", lambda: cat_dir)
-    result = _lookup_existing_doc_id(file_path, "mybook")
+    result = _lookup_existing_doc_id(cat, file_path, "mybook")
     assert result == str(doc)
 
 
