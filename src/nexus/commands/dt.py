@@ -135,7 +135,7 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
     aborting the whole batch. ``nx catalog update --source-uri`` can
     recover after the fact.
     """
-    from nexus.catalog import resolve_tumbler  # noqa: PLC0415
+    from nexus.catalog import open_catalog, resolve_tumbler  # noqa: PLC0415
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415
     from nexus.config import catalog_path  # noqa: PLC0415
 
@@ -149,7 +149,23 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
         )
         return False
 
-    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    # RDR-112 6shq.3 (nexus-siy7): route through the daemon-aware factory so
+    # this site works under NX_STORAGE_MODE=daemon. The function contract
+    # (logged warning, returns False) absorbs failures rather than raising,
+    # so a daemon-down RuntimeError folds into the existing warning path
+    # via the try/except Exception below rather than a ClickException
+    # translation. The trailing ``cat._db.close()`` is a no-op under daemon
+    # mode (ExecuteProxy.close — singleton lifecycle is owned by reset_cache).
+    try:
+        cat = open_catalog(cat_path)
+    except RuntimeError as e:
+        _log.warning(
+            "dt_stamp_failed",
+            file_path=str(file_path),
+            uuid=uuid,
+            error=str(e),
+        )
+        return False
     try:
         # Globally find the entry by file_path — no owner constraint
         # because we don't know it from here. ``documents`` is keyed
