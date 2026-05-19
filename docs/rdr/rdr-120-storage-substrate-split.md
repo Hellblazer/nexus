@@ -197,8 +197,10 @@ has been on `main` continuously for ≥30 days under `NX_STORAGE_MODE=daemon`.
 
 ### Enforcement
 
-- **§ Scope Boundaries is part of the Finalization Gate.** The gate
-  rejects any scope drift.
+- **§ Scope Boundaries is part of the Finalization Gate.** The gate's
+  Layer 3 substantive-critic relay evaluates "Scope Verification:
+  pass/warn/fail" against this section. Layer 1 structurally validates
+  that the section exists and is non-placeholder.
 - **PR-level**: any PR touching `src/nexus/db/` or the daemon entry points
   that adds a method not present in the pre-RDR `T2Database` /
   `chromadb.api` surface fails review.
@@ -210,6 +212,62 @@ has been on `main` continuously for ≥30 days under `NX_STORAGE_MODE=daemon`.
 
 The moratorium is not a suggestion. It is the only structural difference
 between this attempt and the scrapped one.
+
+### Enforcement backstops (and known tooling gaps)
+
+A7's verification (T2 entry `120-research-A7`) surfaced that the
+enforcement chain rests on four working mechanisms and three tooling
+gaps. Recording both so the discipline is honest about what it can and
+cannot catch.
+
+**Working mechanisms (solo-author context):**
+
+- **Author self-policing.** Hal authored the moratorium. Before
+  scaffolding any new substrate-adjacent RDR during P0-P5, Hal reads
+  RDR-120 §Scope Boundaries first. Solo-author is single-point-of-
+  awareness as well as single-point-of-failure; the moratorium being in
+  the title and Problem Statement makes it hard to miss.
+- **Per-phase cross-walk.** At each phase-close review gate, the
+  reviewer (the author, in solo context) cross-walks closing PRs and
+  beads against §Scope Boundaries. Catches both scope loss (X' ⊂ X) per
+  the documented protocol in
+  `feedback_phase_closeout_scope_audit.md`, and scope gain (X' ⊃ X via
+  "while we're in here" additions) which RDR-120 adds as a symmetric
+  check.
+- **PR-level review.** Each PR's diff is read against §Scope Boundaries.
+  Any new method on `T2Database` / `chromadb.api` beyond the pre-RDR
+  surface fails. In solo context, the author re-reads their own diff.
+- **Bead-level enforcement.** `bd create` for substrate work requires
+  the author to confirm the bead's substance is not in §Out of scope.
+
+**Tooling gaps (block multi-author adoption):**
+
+- **`/nx:rdr-create` has no awareness of in-flight moratoriums.** A new
+  RDR scaffolds without checking other active RDRs' §Scope Boundaries
+  for topic matches. Mitigation in solo context: author self-check.
+  Follow-on: add a `moratorium_blocks: <topic-list>` frontmatter field
+  to active RDRs and have the skill grep new RDR's content against it.
+- **`/nx:rdr-gate` Layer 3 critique is single-RDR-scoped.** The
+  substantive-critic receives only the RDR being gated; it does not
+  enumerate active in-flight others. A new RDR can land cleanly through
+  the gate while violating a peer's moratorium. Follow-on: extend the
+  Layer 3 relay's Input Artifacts to include "active in-flight RDRs'
+  §Scope Boundaries sections."
+- **`bd create` does not grep description against moratorium banned-
+  topic lists.** Bead-level enforcement is currently author discipline
+  only.
+
+These gaps are dormant during RDR-120's solo-author implementation
+window. If substrate-adjacent work passes to another author, or if
+moratorium discipline is generalized as a project pattern beyond
+RDR-120, the tooling gaps must be closed first.
+
+**Residual confidence gap.** A7 carries a 30% residual gap that no
+ex-ante verification can close: "moratorium discipline holds across
+six phases of actual implementation work." The previous attempt's
+baseline was one new substrate-adjacent RDR every 3-5 days; RDR-120's
+success criterion is zero such RDRs across P0-P5. Closed only by
+doing the work.
 
 ## Research Findings
 
@@ -337,14 +395,28 @@ process discipline actually failed.
   daemon startup; remove from `T2Client` construction; reframe the
   skipped stress test as a daemon-startup invariant ("daemon refuses
   second start against the same path").
-- [ ] **A7** (new): **The moratorium is enforceable through finalization
-  gates and review.** A written scope-boundary section plus a
-  Finalization Gate scope-verification step is sufficient to block scope
-  drift across the six phases. **Status**: Unverified (this is the
-  novel discipline this RDR is testing). **Method**: Per-phase
-  cross-walk of merged PRs against § Scope Boundaries at each phase
-  closeout; lock the result in the phase's review gate before the next
-  phase opens.
+- [~] **A7** (new): **The moratorium is enforceable through written
+  scope boundaries, per-phase cross-walks, and author self-policing,
+  scoped to solo-author work.** A multi-mechanism enforcement chain
+  (§ Scope Boundaries in the RDR + per-phase cross-walk of PRs against
+  the boundaries at each phase closeout + PR/bead-level author review)
+  is sufficient to block scope drift across six phases under solo
+  authorship. The general (multi-author) case has unaddressed tooling
+  gaps. **Status**: Partially Verified (Medium-High confidence at solo-
+  author scope; Unverified for multi-author general case). **Method**:
+  Counterfactual Analysis (4 of 4 documented scope-drift events from
+  the scrapped RDR-110-119 arc would have been blocked by §Scope
+  Boundaries + author self-check before filing) + Tooling Inspection
+  (rdr-gate skill at nx plugin 4.32.12). **Evidence**: T2 entry
+  `120-research-A7`. **Tooling gaps named**: (i) `/nx:rdr-create` has
+  no awareness of in-flight moratoriums; (ii) `/nx:rdr-gate` Layer 3
+  critique is scoped to single RDR and does not cross-check against
+  active in-flight others; (iii) `bd create` does not grep against
+  active moratorium banned-topic lists. These are dormant in solo-
+  author context but block general adoption of the pattern.
+  **Residual 30% confidence gap**: only proof of "moratorium holds
+  across six phases of actual implementation work" is doing the work
+  without violating it. Captured in § Enforcement Backstops below.
 
 ## Proposed Solution
 
@@ -760,6 +832,12 @@ counterfactual.
   same path the old direct client did," verified in P1 and P3.
 - **What signals lifting the moratorium**: P6 + 30 days under real
   usage is the floor. Any other criteria? Open for the gate to settle.
+- **Cross-RDR moratorium tooling**: should the nx plugin gain a
+  `moratorium_blocks: <topic-list>` frontmatter field on active RDRs
+  plus a pre-scaffold check in `/nx:rdr-create` and a cross-check in
+  `/nx:rdr-gate` Layer 3? Required before multi-author substrate work
+  in any future RDR; dormant for RDR-120's solo-author implementation
+  window. File as a follow-on bead against the nx plugin if pursued.
 
 ## References
 
