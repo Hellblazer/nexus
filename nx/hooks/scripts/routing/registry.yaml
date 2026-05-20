@@ -32,4 +32,23 @@
 #     escape_token: "# routing-allow:"
 #     fail_closed: false
 
-rules: {}
+rules:
+  grep_for_symbols_redirects_to_serena:
+    hook_script: grep_for_symbols_redirects_to_serena.py
+    matcher: Bash
+    mode: redirect
+    rationale: >-
+      grep / rg on code files for identifier-shaped patterns is a
+      symbol-navigation task; use Serena
+      (jet_brains_find_symbol / jet_brains_find_referencing_symbols).
+    escape_token: "# routing-allow:"
+    fail_closed: false
+  git_add_all_redirects_to_explicit_paths:
+    hook_script: git_add_all_redirects_to_explicit_paths.py
+    matcher: Bash
+    mode: redirect
+    rationale: >-
+      git add wildcard forms (-A, ., --all) pull in unrelated untracked
+      drafts; stage by explicit path (feedback_no_git_add_all).
+    escape_token: "# routing-allow:"
+    fail_closed: false
