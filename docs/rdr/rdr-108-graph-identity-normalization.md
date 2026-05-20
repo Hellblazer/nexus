@@ -2,8 +2,9 @@
 title: "Graph Identity Normalization: Catalog Holds the Tree, T3 is a Content-Addressed Blob Store"
 id: RDR-108
 type: Architecture
-status: accepted
+status: closed
 accepted_date: 2026-05-08
+closed_date: 2026-05-20
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
@@ -12,6 +13,21 @@ revised: 2026-05-08
 related_issues: [nexus-jc63, nexus-b5mh, nexus-je0b, nexus-mmf5, nexus-17wf]
 related_rdrs: [RDR-053, RDR-101, RDR-103, RDR-106, RDR-107]
 supersedes: [RDR-107]
+implementation_notes: |
+  Implemented in five phases across 2026-05-08 to 2026-05-15 via the
+  related_issues epic. Problem Statement gap closures (per /nx:rdr-close
+  pass-2 validation 2026-05-20):
+  - Gap 1 (chunk_chroma_id position-derived) -> src/nexus/db/migrations.py:2449
+    (_drop_chash_index_chunk_chroma_id, Phase 4a, nexus-mmf5)
+  - Gap 2 (documents.physical_collection TEXT not FK) -> src/nexus/catalog/catalog_db.py:441
+    (idx_documents_physical_collection index; FK enforcement Phase 4, nexus-dyxe)
+  - Gap 3 (document_aspects PK is (collection, source_path)) -> src/nexus/db/migrations.py:2486
+    (_migrate_document_aspects_pk_via_apply_pending, Phase 1c, nexus-je0b)
+  - Gap 4 (cascade-on-rename works for chash_index only) -> src/nexus/db/t2/__init__.py:270
+    (rename_collection_cascade extended)
+  - Gap 5 (chunk_index not stable identity) -> src/nexus/catalog/catalog_db.py:245
+    (idx_document_chunks_chash; chash-based natural ID + manifest authority)
+  No deviations from the accepted approach. Closing as `implemented`.
 ---
 
 # RDR-108: Graph Identity Normalization
