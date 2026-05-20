@@ -1078,6 +1078,27 @@ Hooks run `nx index repo` in the background after each qualifying git operation,
 
 **Hook status values:** `not installed` · `owned` (nexus-created) · `appended` (added to existing hook) · `unmanaged` (no nexus sentinel)
 
+### nx hook routing-stats
+
+```
+nx hook routing-stats [--log-path PATH] [--json]
+```
+
+Aggregates the per-rule JSONL log written by the RDR-121 routing-hook
+framework (`nx/hooks/scripts/routing/_lib.log_routing_event`). Reports
+fire counts, deny / allow / escape outcomes, block-rate, and
+escape-rate per rule.
+
+| Flag | Description |
+|------|-------------|
+| `--log-path PATH` | Read from this path instead of the default |
+| `--json` | Emit aggregated stats as JSON instead of a table |
+
+Default log path resolves to `$NX_ROUTING_LOG_PATH`, falling back to
+`~/.config/nexus/routing_log.jsonl`. Used at the 30-day soak review
+(RDR-121 §Phase 4) to spot false positives (high escape rate), inert
+matchers (zero fires), or overly broad blocks (high block rate).
+
 ---
 
 ## nx config

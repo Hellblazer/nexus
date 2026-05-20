@@ -159,3 +159,55 @@ def session_end_detach_cmd() -> None:
     except Exception:
         pass
     os._exit(0)
+
+
+@hook_group.command("routing-stats")
+@click.option(
+    "--log-path",
+    type=click.Path(path_type=str, dir_okay=False),
+    default=None,
+    help="Path to the routing log JSONL. Defaults to NX_ROUTING_LOG_PATH "
+    "or ~/.config/nexus/routing_log.jsonl.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit aggregated stats as JSON instead of a human table.",
+)
+def routing_stats_cmd(log_path: str | None, as_json: bool) -> None:
+    """Aggregate the routing-hook log into per-rule fire / deny / escape stats.
+
+    RDR-121 Phase 3. Reads JSONL records produced by the routing hook
+    framework (`nx/hooks/scripts/routing/_lib.log_routing_event`) and
+    reports per-rule outcomes. Used at the 30-day soak review to spot
+    false positives (high escape rate), inert matchers (zero fires), or
+    overly broad blocks (high block rate).
+    """
+    import pathlib as _pathlib
+
+    from nexus.routing_stats import aggregate, default_log_path, stats_to_json
+
+    path = _pathlib.Path(log_path) if log_path else default_log_path()
+    stats = aggregate(path)
+
+    if as_json:
+        click.echo(json.dumps(stats_to_json(stats), indent=2, sort_keys=True))
+        return
+
+    if not stats:
+        click.echo(f"No routing-hook events recorded at {path}.")
+        return
+
+    header = f"{'rule':<48} {'total':>6} {'allow':>6} {'deny':>6} {'escape':>6} {'block%':>7} {'esc%':>6}"
+    click.echo(header)
+    click.echo("-" * len(header))
+    for rule in sorted(stats):
+        s = stats[rule]
+        click.echo(
+            f"{rule[:48]:<48} {s.total:>6d} {s.allow:>6d} {s.deny:>6d} "
+            f"{s.escape:>6d} {s.block_rate * 100:>6.1f}% {s.escape_rate * 100:>5.1f}%"
+        )
+    click.echo()
+    click.echo(f"Source: {path}")
