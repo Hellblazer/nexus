@@ -217,16 +217,12 @@ def test_embed_with_fallback_voyage_client_has_timeout() -> None:
         mock_ctor.assert_called_once_with(api_key="test-key", timeout=75.0, max_retries=0)
 
 
-def test_scoring_voyage_client_has_timeout() -> None:
-    import nexus.scoring as scoring
-    scoring._reset_voyage_client()
-    with patch("voyageai.Client") as mock_ctor, \
-         patch("nexus.config.get_credential", return_value="test-key"), \
-         patch("nexus.config.load_config", return_value={"voyageai": {"read_timeout_seconds": 55}}):
-        mock_ctor.return_value = MagicMock()
-        scoring._voyage_client()
-        mock_ctor.assert_called_once_with(api_key="test-key", timeout=55, max_retries=0)
-    scoring._reset_voyage_client()
+# Note: test_scoring_voyage_client_has_timeout removed as part of the
+# _voyage_instance singleton elimination (nexus-12v7c). The Voyage client
+# is now constructed by T3Database.__init__ from voyage_api_key + config
+# timeout; test_t3_voyage_client_has_timeout above covers that path. The
+# scoring module no longer constructs its own client; it reads
+# t3._voyage_client from the T3Database passed by the caller.
 
 
 # ── _voyage_with_retry wraps all call sites ─────────────────────────────────
@@ -309,31 +305,22 @@ def test_index_code_file_embed_retries(tmp_path) -> None:
 
 def test_rerank_retries_then_degrades() -> None:
     import nexus.scoring as scoring
-    scoring._reset_voyage_client()
     from nexus.types import SearchResult
     results = [SearchResult(id="1", content="text", collection="code__repo", distance=0.1, metadata={})]
     mock_client = MagicMock()
     mock_client.rerank.side_effect = _ve.APIConnectionError("persistent")
-    with patch("voyageai.Client", return_value=mock_client), \
-         patch("nexus.config.get_credential", return_value="test-key"), \
-         patch("nexus.config.load_config", return_value={"voyageai": {"read_timeout_seconds": 120}}), \
-         patch("nexus.retry.time.sleep"):
-        returned = scoring.rerank_results(results, "query", top_k=1)
+    stub_t3 = MagicMock()
+    stub_t3._voyage_client = mock_client
+    with patch("nexus.retry.time.sleep"):
+        returned = scoring.rerank_results(results, "query", top_k=1, t3=stub_t3)
     assert mock_client.rerank.call_count == 3
     assert returned == results
-    scoring._reset_voyage_client()
 
 
-# ── _reset_voyage_client singleton ──────────────────────────────────────────
-
-def test_reset_clears_singleton() -> None:
-    import nexus.scoring as scoring
-    scoring._reset_voyage_client()
-    assert scoring._voyage_instance is None
-    scoring._voyage_instance = sentinel = MagicMock()
-    assert scoring._voyage_instance is sentinel
-    scoring._reset_voyage_client()
-    assert scoring._voyage_instance is None
+# Note: test_reset_clears_singleton removed as part of the
+# _voyage_instance singleton elimination (nexus-12v7c). No singleton
+# to reset; tests construct stub T3 instances with a mocked
+# _voyage_client attribute and pass them explicitly to rerank_results.
 
 
 # ── Integration: propagation and exhaustion ─────────────────────────────────

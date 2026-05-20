@@ -437,7 +437,7 @@ def search_cmd(
     from nexus.config import is_local_mode
     if not no_rerank and not is_local_mode() and len(set(r.collection for r in results)) > 1:
         try:
-            results = rerank_results(results, query=query, model=reranker_model, top_k=n)
+            results = rerank_results(results, query=query, model=reranker_model, top_k=n, t3=db)
         except Exception as exc:
             click.echo(f"Warning: reranking failed ({exc}), using raw order", err=True)
     else:

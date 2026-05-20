@@ -151,9 +151,11 @@ def test_rerank_routes_to_cloud_in_cloud_mode(cloud_mode, monkeypatch) -> None:
         def rerank(self, **kw):
             return fake_rerank(**kw)
 
-    monkeypatch.setattr("nexus.scoring._voyage_client", lambda: _FakeClient())
+    from unittest.mock import MagicMock as _MM
+    stub_t3 = _MM()
+    stub_t3._voyage_client = _FakeClient()
 
-    out = scoring.rerank_results(results, query="q")
+    out = scoring.rerank_results(results, query="q", t3=stub_t3)
     assert [r.id for r in out] == ["r2", "r0", "r1"]
     assert captured["model"] == "rerank-2.5"
 

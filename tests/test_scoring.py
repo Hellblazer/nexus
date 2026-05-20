@@ -78,8 +78,9 @@ def test_rerank_empty():
 def test_rerank_degrades_on_error(exc):
     mock_client = MagicMock()
     mock_client.rerank.side_effect = exc
-    with patch("nexus.scoring._voyage_client", return_value=mock_client):
-        results = rerank_results([_r()], "query", top_k=1)
+    stub_t3 = MagicMock()
+    stub_t3._voyage_client = mock_client
+    results = rerank_results([_r()], "query", top_k=1, t3=stub_t3)
     assert len(results) == 1
 
 

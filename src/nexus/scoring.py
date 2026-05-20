@@ -2,7 +2,6 @@
 """Pure scoring primitives: normalization, hybrid scoring, reranking, interleaving."""
 from __future__ import annotations
 
-import threading
 from typing import Any
 
 import structlog
@@ -368,46 +367,23 @@ def apply_topic_boost(
     return results
 
 
-_voyage_instance: object | None = None
-_voyage_lock = threading.Lock()
-
-
-def _voyage_client():
-    """Return a cached voyageai.Client instance."""
-    global _voyage_instance
-    if _voyage_instance is not None:
-        return _voyage_instance
-    with _voyage_lock:
-        if _voyage_instance is None:
-            import voyageai
-            from nexus.config import get_credential, load_config
-            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-            _voyage_instance = voyageai.Client(
-                api_key=get_credential("voyage_api_key"),
-                timeout=timeout,
-                max_retries=0,
-            )
-    return _voyage_instance
-
-
-def _reset_voyage_client() -> None:
-    """Reset the cached Voyage AI client singleton (for test isolation only)."""
-    global _voyage_instance
-    with _voyage_lock:
-        _voyage_instance = None
-
-
 def rerank_results(
     results: list[SearchResult],
     query: str,
     model: str = _RERANK_MODEL,
     top_k: int | None = None,
+    *,
+    t3: Any = None,
 ) -> list[SearchResult]:
     """Rerank *results* by cross-encoder relevance for *query*.
 
     RDR-109 Phase 3 mode-aware dispatch:
 
-    - Cloud mode: Voyage AI reranker (``rerank-2.5``).
+    - Cloud mode: Voyage AI reranker (``rerank-2.5``). Requires *t3*,
+      a T3Database whose ``_voyage_client`` attribute is the
+      constructed ``voyageai.Client`` (set by ``T3Database.__init__``
+      when ``voyage_api_key`` is provided). Cloud-mode call sites
+      MUST pass ``t3``; without it the cloud reranker fails loud.
     - Local mode: ONNX cross-encoder via
       :class:`nexus.cross_encoder.LocalCrossEncoder` (default
       ``cross-encoder/ms-marco-MiniLM-L-6-v2``, ~80MB lazy download).
@@ -428,7 +404,7 @@ def rerank_results(
 
     if is_local_mode():
         return _rerank_local(results, query, documents, n)
-    return _rerank_cloud(results, query, documents, model, n)
+    return _rerank_cloud(results, query, documents, model, n, t3=t3)
 
 
 def _rerank_cloud(
@@ -437,10 +413,25 @@ def _rerank_cloud(
     documents: list[str],
     model: str,
     top_n: int,
+    *,
+    t3: Any = None,
 ) -> list[SearchResult]:
     """Cloud reranker via Voyage AI. Best-effort: any exception falls
-    back to the original order truncated to *top_n*."""
-    client = _voyage_client()
+    back to the original order truncated to *top_n*.
+
+    The Voyage client is sourced from ``t3._voyage_client`` (set by
+    ``T3Database.__init__`` when configured in cloud mode). Callers
+    in cloud mode must pass *t3*; without it the reranker logs a
+    warning and returns the input order unchanged.
+    """
+    client = getattr(t3, "_voyage_client", None) if t3 is not None else None
+    if client is None:
+        _log.warning(
+            "rerank_skipped_no_voyage_client",
+            reason="cloud reranker requires t3 with a configured _voyage_client; "
+                   "caller did not pass t3 or t3._voyage_client is None",
+        )
+        return results[:top_n]
     try:
         rerank_response = _voyage_with_retry(
             client.rerank,
