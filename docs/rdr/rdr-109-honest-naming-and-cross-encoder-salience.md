@@ -2,16 +2,47 @@
 title: "Honest Local-Mode Naming and Cross-Encoder Salience: Two Naming/Scoring Designs Touching the Same Test-Suite Mode-Default Surface"
 id: RDR-109
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-10
 revised: 2026-05-11
 accepted_date: 2026-05-11
-related_issues: [nexus-59vl, nexus-2wc1]
+closed_date: 2026-05-20
+related_issues: [nexus-59vl, nexus-2wc1, nexus-7kf7]
 related_rdrs: [RDR-038, RDR-059, RDR-089, RDR-097, RDR-101, RDR-103]
 github_issues: [667]
+implementation_notes: |
+  Implemented across multiple phases between 2026-05-10 and
+  2026-05-20. Problem Statement gap closures (per /nx:rdr-close
+  pass-2 validation 2026-05-20):
+  - Gap 1 (nexus-59vl GH #667: local-ONNX collections falsely
+    labeled voyage-*) -> src/nexus/catalog/collection_name.py:100
+    (CollectionName validates against CANONICAL_EMBEDDING_MODELS |
+    LOCAL_EMBEDDING_MODELS so local-ONNX gets a local-shaped token)
+  - Gap 2 (nexus-2wc1: cross-encoder salient-sentence aspect,
+    RDR-097 follow-up) -> src/nexus/salience.py:58
+    (extract_salient_sentences, Phase 5; salient_sentences column
+    added to document_aspects via the registered migration)
+  - Gap 3 (test suite has no first-class concept of mode-under-test)
+    -> tests/conftest.py:251 (cloud_mode fixture; complemented by
+    _MODE_LINT_EXCLUDE_FILES / _MODE_LINT_EXCLUDE_NODEIDS lint guard)
+
+  Fallout closed:
+  - nexus-7kf7 (RDR-109 Phase 2 fallout, originally mis-diagnosed
+    as RDR-109-tied): actually RDR-108 Phase 3 fallout; fixed in
+    PR #884 (commit e306da8d). See nexus-7kf7 close note for the
+    real root cause (PDF staleness_cache + misclass-prune
+    doc_id-keyed where filter).
+
+  Process win from the close cycle: the gap-3 cloud_mode fixture
+  caught the CI-vs-local mode-dispatch defect class that produced
+  the #881 main-red and was later applied across the post-merge
+  review follow-ups (PR #883). feedback_pin_local_mode_in_cloud_tests.md
+  records the discipline.
+
+  No deviations from the accepted approach. Closing as `implemented`.
 ---
 
 # RDR-109: Honest Local-Mode Naming and Cross-Encoder Salience
