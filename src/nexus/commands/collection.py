@@ -566,7 +566,21 @@ def verify_cmd(name: str, deep: bool) -> None:
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
-        raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
+        # RDR-103 follow-up: a legacy two-segment name should still
+        # resolve when the on-disk collection is the conformant
+        # auto-promoted form (``foo__voyage-context-3__v1``). Same
+        # fallback as ``resolve_corpus`` in nexus.corpus.
+        from nexus.corpus import resolve_corpus
+
+        candidates = resolve_corpus(name, [c["name"] for c in cols])
+        if len(candidates) == 1:
+            resolved = candidates[0]
+            match = next(c for c in cols if c["name"] == resolved)
+            name = resolved
+        else:
+            raise click.ClickException(
+                f"collection not found: {name!r} — use: nx collection list"
+            )
 
     if not deep:
         click.echo(f"Collection '{name}': {match['count']} chunks — OK")

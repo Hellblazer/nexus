@@ -6,6 +6,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.33.0] - 2026-05-20
+
+Plugin version aligned with conexus 4.33.0. RDR-121 lands the routing-
+hook substrate in `nx/hooks/scripts/routing/` plus three PreToolUse
+hooks and a sentinel writer in `nx/skills/phase-review-gate/`. See
+the top-level CHANGELOG for the full list.
+
+### Added (RDR-121)
+
+- `nx/hooks/scripts/routing/_lib.py` and `registry.yaml`: framework
+  for Python-native PreToolUse routing hooks.
+- `nx/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py`:
+  redirects `grep` / `rg` of symbol-shaped patterns on code files to
+  the Serena `find_symbol` / `find_referencing_symbols` MCP tools.
+- `nx/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py`:
+  blocks `git add -A` / `git add .` / `git add --all`.
+- `nx/hooks/scripts/routing/phase_review_close_requires_gate.py`
+  (fail-closed): blocks `bd close` on phase-review beads unless
+  `/nx:phase-review-gate` has written a PASSED sentinel for the
+  bead's `(rdr-id, phase)`.
+- `nx/skills/phase-review-gate/SKILL.md` and the command preamble
+  now write the PASSED sentinel that the routing hook reads.
+
+### Notes
+
+- All three routing hooks honor the `# routing-allow: <reason>=8 chars>`
+  escape token. The escape is logged for audit.
+
 ## [4.32.14] - 2026-05-20
 
 Plugin version aligned with conexus 4.32.14. One repo-local skill

@@ -6,6 +6,52 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.33.0] - 2026-05-20
+
+Minor release. RDR-121 hook-enforced tool routing: a PreToolUse backstop
+that converts repeatedly-violated guidance ("use Serena for symbol
+search", "don't `git add -A`", "phase-review beads need a passed gate
+before close") into deterministic Claude Code hooks. Plus a UX fix for
+the post-RDR-103 collection-name shape.
+
+### Added (nexus-mzvwa, RDR-121)
+
+- Routing-hook framework at `nx/hooks/scripts/routing/`:
+  - `_lib.py`: shared envelope builders (`allow` / `deny` / `warn`),
+    stdin parser, `# routing-allow:` escape token parser, JSONL
+    telemetry, and a fail-open / fail-closed `run_hook` wrapper.
+  - `registry.yaml`: per-rule metadata including the `fail_closed`
+    opt-in flag.
+  - `README.md`: authoring template + contract documentation.
+- Three PreToolUse Bash hooks registered in `nx/hooks/hooks.json`:
+  - `grep_for_symbols_redirects_to_serena.py`: detects identifier-
+    shaped patterns in `grep` / `rg` against code files and redirects
+    to Serena's `find_symbol` / `find_referencing_symbols` MCP tools.
+  - `git_add_all_redirects_to_explicit_paths.py`: blocks `git add -A`
+    / `git add .` / `git add --all` and asks for explicit paths.
+  - `phase_review_close_requires_gate.py` (fail-closed): blocks
+    `bd close` on phase-review beads unless `/nx:phase-review-gate`
+    has written a fresh PASSED sentinel for the `(rdr-id, phase)`
+    tuple. The sentinel writer lives in
+    `nx/skills/phase-review-gate/SKILL.md` via
+    `src/nexus/phase_review_sentinel.py`. Closes the silent-scope-
+    reduction class that surfaced on RDR-112 Phase 1.
+- `nx hook routing-stats`: aggregates the per-rule JSONL log into a
+  table (or `--json`) with allow / deny / escape counts, block-rate,
+  and escape-rate per rule. Used for the 30-day soak review.
+
+### Fixed (post-RDR-103 UX)
+
+- `resolve_corpus` now falls back to prefix match when an exact match
+  on a `__`-containing argument yields nothing. Lets users keep
+  typing the legacy two-segment name (`knowledge__foo`) when the
+  on-disk collection is the conformant four-segment auto-promoted
+  form (`knowledge__foo__voyage-context-3__v1`). Previously
+  `nx search --corpus knowledge__foo` and `nx collection verify
+  knowledge__foo` both emitted "no collections match" / "collection
+  not found" even though the collection existed. `nx collection
+  verify` gets the same fallback so the two surfaces stay in sync.
+
 ## [4.32.14] - 2026-05-20
 
 Patch on 4.32.13. Singleton elimination, PDF-indexer correctness fix,
