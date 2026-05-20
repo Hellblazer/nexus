@@ -100,8 +100,9 @@ def test_rerank_results_returns_unified_ranking(cloud_mode):
             MagicMock(index=1, relevance_score=0.3),
         ]
     )
-    with patch("nexus.scoring._voyage_client", return_value=mock_client):
-        reranked = rerank_results(results, query="test", model="rerank-2.5", top_k=3)
+    stub_t3 = MagicMock()
+    stub_t3._voyage_client = mock_client
+    reranked = rerank_results(results, query="test", model="rerank-2.5", top_k=3, t3=stub_t3)
     assert reranked[0].id == "3"
     assert reranked[1].id == "1"
     assert reranked[2].id == "2"
