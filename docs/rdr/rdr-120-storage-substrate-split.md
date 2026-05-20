@@ -461,6 +461,30 @@ process discipline actually failed.
   holds across six phases of actual implementation work" still comes
   only from doing the work without violating it. Captured in §
   Enforcement Backstops below.
+- [x] **A8** (new): **The substrate-vs-consumer boundary holds for test
+  infrastructure: tests must not depend on prod T3 content as a
+  substrate-provided service.** During 4.33.0 release prep (2026-05-20),
+  `uv run pytest -m integration` surfaced 7 failures in
+  `test_hybrid_plan_factual_qa.py` (5 fixtures) and
+  `tests/integration/test_rdr_093_groupby_aggregate_pipelines.py`
+  (2 tests) because their `TARGET_COLLECTION` constants pointed at
+  `knowledge__hybridrag` and `knowledge__delos` — production corpora
+  rotated or removed before the test rerun. The same failures
+  reproduced on `v4.32.14`, so the regression rode through the prior
+  release; nobody had re-run `-m integration` before tagging.
+  **Status**: Verified (High confidence). **Method**: Source Search
+  (`grep TARGET_COLLECTION`, `nx collection list`) + counterfactual
+  against `v4.32.14`. **Evidence**: T2 entry `120-research-A8`.
+  **Implication for the substrate design**: the daemon provides
+  storage shape (single-writer arbiter, version negotiation,
+  discovery), not content. A test fixture that needs corpus X must
+  seed corpus X deterministically at session setup; a fixture pinned
+  to a corpus name that "the daemon should make available"
+  reintroduces the silo problem that broke RDR-105's container case
+  (each container assumes prod state present, each gets a different
+  empty / stale view). Captured separately as bead `nexus-ntacy` for
+  fixture-corpus standup work; this finding records the architectural
+  lesson: substrate provides handle, consumer owns content.
 
 ## Proposed Solution
 
