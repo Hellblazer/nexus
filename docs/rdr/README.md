@@ -131,7 +131,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-106](rdr-106-soft-delete-tombstone-column.md) | Soft-Delete via Tombstone Columns on Catalog Projection | Architecture | Draft | 2026-05-08 |
 | [RDR-107](rdr-107-t3-chunk-soft-delete.md) | T3 Chunk Soft-Delete via Tombstone Metadata | Architecture | Superseded by RDR-108 | 2026-05-08 |
 | [RDR-108](rdr-108-graph-identity-normalization.md) | Graph Identity Normalization: Catalog Holds the Tree, T3 is a Content-Addressed Blob Store | Architecture | Closed 2026-05-20 | 2026-05-08 |
-| [RDR-109](rdr-109-honest-naming-and-cross-encoder-salience.md) | Honest Local-Mode Naming and Cross-Encoder Salience: Two Naming/Scoring Designs Touching the Same Test-Suite Mode-Default Surface | Architecture | Accepted | 2026-05-10 |
+| [RDR-109](rdr-109-honest-naming-and-cross-encoder-salience.md) | Honest Local-Mode Naming and Cross-Encoder Salience: Two Naming/Scoring Designs Touching the Same Test-Suite Mode-Default Surface | Architecture | Closed 2026-05-20 | 2026-05-10 |
 | [RDR-110](rdr-110-semantic-tuple-space.md) | Semantic Tuple Space: Unified Coordination Primitive over ChromaDB + SQLite | Architecture | **Scrapped 2026-05-19** | 2026-05-09 |
 | [RDR-111](rdr-111-orb-agentic-cockpit-substrate.md) | The ORB: Observable Relay Bus — Hook Projection, Bindings, and C2 Cockpit Substrate | Architecture | **Scrapped 2026-05-19** | 2026-05-11 |
 | [RDR-112](rdr-112-storage-as-service-container-boundary.md) | Storage-as-Service: Every Persistent Shared-State Store Behind a Daemon, T1 Stays In-Container | Architecture | **Scrapped 2026-05-19** (superseded by RDR-120) | 2026-05-12 |
