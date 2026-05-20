@@ -2,16 +2,46 @@
 title: "Hook-Enforced Tool Routing: PreToolUse as Backstop for Soft Guidance"
 id: RDR-121
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-19
 accepted_date: 2026-05-20
+closed_date: 2026-05-20
+close_reason: implemented
+shipped_in: 4.33.0
 related_issues: []
 related_rdrs: [RDR-008, RDR-024, RDR-045, RDR-105, RDR-120]
-related_tests: []
-implementation_notes: ""
+related_tests:
+  - tests/test_routing_hooks.py
+  - tests/test_routing_phase_review_close.py
+  - tests/test_routing_grep_for_symbols.py
+  - tests/test_routing_git_add_all.py
+  - tests/test_phase_review_sentinel.py
+  - tests/test_hook_routing_stats.py
+implementation_notes: |
+  Shipped in conexus 4.33.0 (2026-05-20). Six implementation beads
+  closed (mzvwa.1 through .6); mzvwa.7 (P4 30-day soak review) left
+  open as a tracked follow-up, fires +30 days post-merge (~2026-06-19).
+  The soak runs against a closed RDR by design; observations either
+  get a small RDR addendum or follow-on beads.
+
+  Problem Statement closure pointers (Pass 2):
+  - Gap 1 (session-start guidance bypassable): enforcement at
+    nx/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py:1
+    (and the other two cohort hooks). PreToolUse fires regardless of
+    whether the session-start preamble was read.
+  - Gap 2 (memory-loaded guidance is optional context):
+    nx/hooks/scripts/routing/phase_review_close_requires_gate.py:1.
+    The phase-review-close rule was a recurring memory feedback entry
+    (feedback_phase_closeout_scope_audit); the hook makes the
+    cross-walk a deterministic precondition for `bd close`.
+  - Gap 3 (no enforcement layer at the action boundary):
+    nx/hooks/scripts/routing/_lib.py:1 + nx/hooks/hooks.json.
+    The framework gives every rule a PreToolUse action-boundary
+    enforcement surface with the contract documented in
+    nx/hooks/scripts/routing/README.md.
 ---
 
 # RDR-121: Hook-Enforced Tool Routing: PreToolUse as Backstop for Soft Guidance
