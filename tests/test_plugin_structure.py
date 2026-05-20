@@ -39,6 +39,11 @@ _STANDALONE_SKILLS = {
     # RDR-078 verb skills — dispatch plan_match + plan_run directly, no agent relay
     "research", "review", "analyze", "debug", "document",
     "plan-author", "plan-inspect", "plan-promote", "plan-first",
+    # nexus-j327 — phase closeout cross-walk gate. Pointer skill with Python
+    # preamble; no agent dispatch. Enforces §Approach coverage at phase
+    # boundaries. Restored from archive/develop-2026-05-19 as RDR-120 P0
+    # prerequisite (2026-05-19).
+    "phase-review-gate",
 }
 
 

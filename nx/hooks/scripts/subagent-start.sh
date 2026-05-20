@@ -186,6 +186,18 @@ If link-context already in scratch (sibling agent did 1+2), skip to step 3.
 AGENT TAG: pass agent="<your-role>" to memory_put so nx tier-status slices writes by agent (nexus-9clx).
 NX_AUTOLINK
 
+# Phase boundary enforcement: inject for tasks that close, review, or
+# audit phase work. Hard-enforcement preamble at gate invocation; this
+# block tells the subagent the gate exists and when to invoke it.
+if echo "$TASK_TEXT" | grep -qiE "close.*phase|phase.*clos|phase.*review|review.*gate|approach.*cross.walk|cross.walk.*approach|phase.*close|closeout|rdr.*phase|phase.*rdr|silent.scope|scope.reduc"; then
+cat <<'PHASE_GATE'
+
+## Phase Boundary Gate (mandatory)
+
+If your task closes a phase-review bead, run `/nx:phase-review-gate <rdr-id> --phase N` BEFORE close. Pass 1 enumerates §Approach items; Pass 2 validates each has a closing-bead pointer (`ItemN=nexus-xxxx`) or explicit `none`. BLOCKED on any unaccounted item; phase close is gated on PASSED. Skipping the gate is the silent-scope-reduction failure mode that cost RDR-112 Phase 1 (nexus-52lb, 2026-05-15) 2-3 days of replanning when T3 daemon was silently dropped and discovered three phases later.
+PHASE_GATE
+fi
+
 # L1 Knowledge Map (per-repo, RDR-072) — outside the heredoc so $(…) expands
 CONTEXT_DIR="$HOME/.config/nexus/context"
 REPO_HASH=$(echo -n "$(pwd -P)" | shasum -a 1 | cut -c1-8)
