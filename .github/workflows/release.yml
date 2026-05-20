@@ -29,9 +29,18 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-          # nexus-2fyb: see ci.yml for rationale (cache torch et al.).
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          # nexus-2ivn: see ci.yml. Bundled enable-cache caches metadata
+          # only; the wheel cache lives at ${{ runner.temp }}/setup-uv-
+          # cache and needs an explicit actions/cache@v4 step.
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Cache ChromaDB ONNX model
         uses: actions/cache@v4
@@ -64,8 +73,18 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          # nexus-2ivn: see ci.yml. Bundled enable-cache caches metadata
+          # only; explicit actions/cache@v4 step below targets the
+          # wheel-cache directory setup-uv actually uses.
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
 
       - name: Verify tag matches pyproject.toml version
         run: |

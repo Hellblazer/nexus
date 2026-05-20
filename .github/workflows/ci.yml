@@ -28,12 +28,26 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-          # nexus-2fyb: cache ~/.cache/uv to avoid cold-downloading torch
-          # (~2.8 GB CPU wheel) every CI run. mineru[all] was promoted to
-          # a default dep, so without cache the install + sync takes ~10m
-          # and risks exceeding the job timeout. Key on uv.lock.
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          # nexus-2ivn: setup-uv's bundled enable-cache only restored
+          # ~1 MB of metadata in practice; the actual wheel cache was
+          # missing and torch (~847 MB) re-downloaded on every run.
+          # Disable the bundled cache and target the directory setup-uv
+          # actually uses (UV_CACHE_DIR = ${{ runner.temp }}/setup-uv-
+          # cache, not ~/.cache/uv) with an explicit actions/cache@v4
+          # step below.
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          # Key on uv.lock so a dep change rebuilds; restore-keys
+          # falls back to the last cache for the same python so a
+          # uv.lock bump still seeds most of the wheels and only
+          # the changed packages re-download.
+          key: uv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Cache ChromaDB ONNX model
         uses: actions/cache@v4
