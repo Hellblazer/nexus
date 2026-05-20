@@ -1251,6 +1251,7 @@ def _index_pdf_file(
     embed_fn: Callable | None = None,
     stage_timers: "StageTimers | None" = None,
     doc_id_resolver: Callable[[Path], str] | None = None,
+    staleness_cache: "StalenessCache | None" = None,
     hooks: "HookRegistry | None" = None,
 ) -> int:
     """Index a single PDF file into the docs__ collection.
@@ -1288,6 +1289,7 @@ def _index_pdf_file(
     if not force and check_staleness(
         col, file, content_hash_hex, target_model,
         doc_id=catalog_doc_id_for_staleness,
+        cache=staleness_cache,
     ):
         return 0
 
@@ -1619,22 +1621,35 @@ def _prune_misclassified_in_collection(
                     count=len(present_ids),
                     doc_id_batch_size=len(batch_ids),
                 )
-    else:
-        # Legacy where-filter path: kept for catalog-absent callers
-        # (correct only for pre-Phase-3 chunks). For Phase-3 chunks
-        # this returns nothing because the where keys are gone.
+    # Legacy where-filter path: complements the manifest-chash path
+    # above. The manifest path catches Phase-3+ chunks (chroma natural-id
+    # == chash[:32], no doc_id in metadata). The where={"doc_id"} path
+    # catches Phase-2 chunks (doc_id in metadata, arbitrary chroma id)
+    # AND any chunk seeded with explicit doc_id metadata (e.g. the
+    # migration test that injects a misclassified chunk with the README
+    # tumbler as doc_id but an arbitrary string id). Catalog-absent
+    # callers (catalog is None) reach this via the doc_ids list still
+    # being populated. For Phase-3 chunks with no doc_id metadata the
+    # where-filter is a no-op (returns nothing), so running it alongside
+    # the manifest path is safe.
+    if doc_ids:
         for i in range(0, len(doc_ids), _CHROMA_PAGE_SIZE):
             batch = doc_ids[i : i + _CHROMA_PAGE_SIZE]
             if not batch:
                 continue
-            existing = _paginated_get(
-                col, include=[], where={"doc_id": {"$in": batch}},
-            )
+            try:
+                existing = _paginated_get(
+                    col, include=[], where={"doc_id": {"$in": batch}},
+                )
+            except Exception:
+                # Some Chroma deployments reject ``$in`` on absent keys;
+                # treat as empty result.
+                continue
             if existing["ids"]:
                 _batched_delete(col, existing["ids"])
                 pruned += len(existing["ids"])
                 _log.debug(
-                    f"pruned misclassified chunks from {kind} collection",
+                    f"pruned misclassified chunks from {kind} collection (doc_id-keyed)",
                     count=len(existing["ids"]),
                     doc_id_batch_size=len(batch),
                 )
@@ -2366,6 +2381,7 @@ def _run_index(
             embed_fn=_embed_fn,
             stage_timers=timers,
             doc_id_resolver=_doc_id_resolver,
+            staleness_cache=docs_staleness,
             hooks=hooks,
         )
         if on_file:
