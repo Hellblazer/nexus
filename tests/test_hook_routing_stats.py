@@ -154,7 +154,7 @@ def test_cli_routing_stats_json_output(tmp_path, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(main, ["hook", "routing-stats", "--json"])
     assert result.exit_code == 0
-    parsed = json.loads(result.output)
+    parsed = json.loads(result.stdout)
     assert parsed["r"]["total"] == 2
     assert parsed["r"]["deny"] == 1
 
