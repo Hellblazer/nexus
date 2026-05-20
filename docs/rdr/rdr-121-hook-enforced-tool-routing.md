@@ -128,14 +128,22 @@ Three phases. Each ships independently and is reversible.
 
 **Phase 1: Hook framework**
 
+Design lifted from in-tree precedent `nx/hooks/scripts/pre_close_verification_hook.sh` (245 LOC production hook; same JSON-envelope contract; see A1 evidence in T2 `121-research-A1`).
+
 - New directory `nx/hooks/scripts/routing/` for routing hooks.
 - Shared bash helper `nx/hooks/scripts/routing/_lib.sh` providing:
-  - `should_skip_for_reason(<reason>)`: checks the last command in the agent's call log for a `# routing-allow: <reason>` token (≥8-char reason), mirroring the ε-lint allowlist pattern from `tests/test_no_direct_catalog_writes_outside_projector.py` (RDR-101 Phase 3).
-  - `emit_block(<message>)`: emits a structured stderr block telling the agent what to do instead; exits 2.
-  - `emit_warn(<message>)`: emits to stderr but exits 0.
-  - `log_routing_event(<rule>, <outcome>)`: appends a JSON line to `~/.config/nexus/routing_log.jsonl` for telemetry on which rules fire and how often.
-- A `nx/hooks/scripts/routing/registry.yaml` enumerating active rules with metadata: rule name, hook script path, matcher, mode (`block` / `warn`), rationale, escape token.
-- Test fixtures at `tests/test_routing_hooks.py` for each rule: positive case (preferred tool path) + negative case (default tool path with redirect) + escape case (allowlisted with reason).
+  - `allow([context])`: emits `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "additionalContext": "<text>"}}` to stdout; exits 0. Pass-through case, with optional advisory message injected into agent context.
+  - `deny(<reason>)`: emits `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "reason": "<multi-line markdown>"}}` to stdout; exits 0. Blocks the tool call; agent sees the reason.
+  - `warn(<message>)`: alias of `allow(<message>)`; named for the "advisory but not blocking" case. § Decision Rationale's "Block, not warn" rule maps to deny-vs-warn at the per-rule level.
+  - `should_skip_for_reason(<command>)`: checks the agent's tool input for a `# routing-allow: <reason ≥8 chars>` token, mirroring the ε-lint allowlist pattern from `tests/test_no_direct_catalog_writes_outside_projector.py` (RDR-101 Phase 3). Returns 0 if escape valid; non-zero otherwise.
+  - `log_routing_event(<rule>, <outcome>)`: appends a JSON line to `~/.config/nexus/routing_log.jsonl` for telemetry. Mirrors the audit-line pattern in `pre_close_verification_hook.sh`.
+  - Defensive JSON escaping via `python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))"` with shell-quoting fallback.
+- **Hook script discipline** (lifted from `pre_close_verification_hook.sh`):
+  - `set -e`, `set -u`, `set -o pipefail` are PROHIBITED. Every code path must produce valid JSON on stdout and exit 0. A failed hook (non-zero exit, malformed JSON) is treated by Claude Code as a hook error and the tool call proceeds silently. That fails open but produces no enforcement, which is worse than no hook at all.
+  - Tool-name short-circuit at the top: parse `tool_name` from stdin first; if not the matcher target, `allow()` immediately. Fast no-op for unrelated calls.
+  - Tool-input parsing: extract `tool_input.command` (Bash) or `tool_input.file_path` (Edit/Write) from stdin. Pattern-match against the actual call, not just the tool name.
+- A `nx/hooks/scripts/routing/registry.yaml` enumerating active rules with metadata: rule name, hook script path, matcher, mode (`deny` / `warn`), rationale, escape token.
+- Test fixtures at `tests/test_routing_hooks.py` for each rule: positive case (preferred tool path then `allow`), negative case (default tool path then `deny` with redirect message), escape case (allowlisted with reason then `allow`), error case (malformed input then `allow`, fail-open is the only safe degradation).
 
 **Phase 2: Initial cohort**
 
@@ -347,10 +355,11 @@ To be completed.
 ### Assumption Verification
 
 Critical assumptions to verify:
-- **A1**: PreToolUse hooks can block tool execution via stderr exit code 2. **Status**: Documented (Claude Code hook contract). **Method**: Source Search of Claude Code hook documentation + existing nexus hook scripts (pre_close_verification_hook.sh).
-- **A2**: Hook chain latency is bounded; <50ms per hook is achievable. **Status**: Unverified. **Method**: Spike against the stub hook in P1.
-- **A3**: Tight matchers for symbol-grep detection achieve low false-positive rate. **Status**: Unverified. **Method**: Build the matcher, run against a representative corpus of historical grep calls (e.g. from this session's transcript), measure false-positive rate.
-- **A4**: Escape mechanism is sufficient to handle edge cases without rules being silenced wholesale. **Status**: Unverified. **Method**: 30-day telemetry post-P2; escape-rate per rule below some threshold (TBD) signals the mechanism works.
+
+- [x] **A1** (REVISED): PreToolUse hooks can block tool execution via JSON `permissionDecision: "deny"` envelope with `exit 0`, NOT via stderr exit code 2. **Status**: Verified (High confidence). **Method**: Source Search of `nx/hooks/scripts/pre_close_verification_hook.sh` and three sibling production hooks (all use the JSON envelope pattern); empirical: the pre-close hook is registered as PreToolUse on `Bash` matcher and has been denying `bd close` calls missing required metadata since at least 2026-04. **Evidence**: T2 entry `121-research-A1`. **Design implications folded into § Approach Phase 1 above**: helpers renamed (`emit_block` to `deny`, `emit_warn` to `warn`); helpers emit JSON with `permissionDecision` field + `reason` (deny) or `additionalContext` (allow) and exit 0; `set -e`/`set -u` PROHIBITED (every code path produces valid JSON); defensive python3 JSON escaping with shell-quoting fallback; tool-name + tool-input short-circuit at the top of every hook. The stderr-exit-2 mechanism is dropped from the design.
+- [~] **A2** (REVISED): Hook chain latency is bounded. Original <50ms/hook budget is NOT achievable with the bash + python3-per-call pattern; revised to either <100ms p95/hook (accept measured reality with bash) OR <50ms p95/hook (commit to Python-native hook implementation). **Status**: Partially Verified (Spike, 50 iters per path on macOS darwin Py3.13.13). **Method**: Stub hook at `/tmp/rdr121_stub_routing_hook.sh` modeled byte-for-byte on `pre_close_verification_hook.sh`. **Measured**: non-Bash short-circuit p95 52ms; allow path p95 74ms; deny path p95 89ms. The 40ms baseline is python3 subprocess startup. **Evidence**: T2 entry `121-research-A2`. **Design implication**: § Approach Phase 1 must commit to a hook language up front. Python-native (`#!/usr/bin/env python3` shebang, single process per hook) is the cleanest path to staying under the original budget; bash + python3-per-call requires budget revision and a hook-chain cap.
+- [~] **A3** (REVISED): Matchers achieve high precision AND adequate recall on representative corpus. Original spec ("identifier search, no spaces, no regex metacharacters") REFUTED: 80% precision, 33% recall on n=20 corpus replay. Refined three-shape spec (single id + dotted-id chain + pipe-alternation, with disqualifier list including all-uppercase-short-token) predicted to reach 92%+ recall, ~100% precision. **Status**: Partially Verified at refined spec (corpus replay only; live matcher not yet built). **Method**: Corpus Replay (n=20: 12 actual session grep/rg invocations + 8 plausible negative-case variants). **Evidence**: T2 entry `121-research-A3` + `/tmp/rdr121_a3_corpus.txt`. **Design implication**: § Approach Phase 2 hook 1 (`grep_for_symbols_redirects_to_serena`) must adopt the refined three-shape matcher; original "no regex metacharacters" spec misses the dominant real-world shapes (dotted attrs, alternation of identifiers).
+- [?] **A4** (ASSUMED): Escape mechanism is sufficient to handle edge cases without rules being silenced wholesale. **Status**: Assumed (acknowledged unverifiable pre-implementation). **Method**: Original method "30-day telemetry post-P2" is the only verification path; pre-implementation design audit cannot substitute. P3 telemetry loop is the closure path. **Acknowledged risk**: if escape-rate per rule exceeds an actionable threshold (TBD during P3), the rule is producing too many false positives and must be refined or removed. The matcher refinement from A3 (recall improvement) should reduce escape pressure on the symbol-grep rule specifically.
 
 ### Scope Verification
 
