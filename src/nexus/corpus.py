@@ -393,15 +393,33 @@ def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
 def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
     """Resolve a --corpus argument to a list of matching collection names.
 
-    If *corpus* contains ``__`` it is treated as an exact collection name.
-    Otherwise it is treated as a prefix — all collections starting with
-    ``{corpus}__`` are returned.
+    Three-stage match:
+
+    1. Exact match (covers fully-qualified conformant names from RDR-103,
+       e.g. ``knowledge__foo__voyage-context-3__v1``).
+    2. Prefix match if *corpus* does not contain ``__`` (covers the
+       short-form ``knowledge__foo`` typed by humans -- wait, this case
+       has ``__`` -- so see step 3).
+    3. Prefix match if *corpus* DOES contain ``__`` but exact returned
+       nothing. This is the post-RDR-103 case: a user types
+       ``knowledge__foo`` expecting the legacy name; the on-disk
+       collection is now ``knowledge__foo__voyage-context-3__v1``.
+       Treating the partial form as a prefix recovers the intent
+       without forcing users to know the embedder + version suffix.
+
+    The structlog debug record reports which stage matched, useful when
+    tracing why a corpus argument resolved to a particular collection.
     """
-    if "__" in corpus:
-        matches = [c for c in all_collections if c == corpus]
-    else:
-        prefix = f"{corpus}__"
-        matches = [c for c in all_collections if c.startswith(prefix)]
+    # Stage 1: exact match.
+    matches = [c for c in all_collections if c == corpus]
+    if matches:
+        return matches
+
+    # Stage 2 + 3: prefix match. The conformant name shape always
+    # introduces ``__`` between segments, so ``{corpus}__`` is the
+    # invariant boundary whether *corpus* itself contains ``__`` or not.
+    prefix = f"{corpus}__"
+    matches = [c for c in all_collections if c.startswith(prefix)]
     if not matches:
         structlog.get_logger().debug("resolve_corpus: no collections matched", corpus=corpus)
     return matches

@@ -93,6 +93,31 @@ def test_resolve_corpus_docs_prefix() -> None:
     assert resolve_corpus("docs", all_cols) == ["docs__papers", "docs__books"]
 
 
+def test_resolve_corpus_two_segment_matches_conformant_suffix() -> None:
+    """RDR-103 follow-up: a user typing the legacy two-segment name
+    (`knowledge__security`) should still match the conformant
+    `knowledge__security__voyage-context-3__v1` collection that the
+    store auto-promotes to. Without this fallback, `nx store put` and
+    `nx search` disagree on the name and the search silently misses.
+    """
+    all_cols = [
+        "knowledge__security__voyage-context-3__v1",
+        "knowledge__other__voyage-context-3__v1",
+    ]
+    assert resolve_corpus("knowledge__security", all_cols) == [
+        "knowledge__security__voyage-context-3__v1",
+    ]
+
+
+def test_resolve_corpus_exact_wins_over_prefix() -> None:
+    """When an exact match exists, it is preferred and prefix is not used."""
+    all_cols = [
+        "knowledge__foo",
+        "knowledge__foo__voyage-context-3__v1",
+    ]
+    assert resolve_corpus("knowledge__foo", all_cols) == ["knowledge__foo"]
+
+
 # ── validate_collection_name ──────────────────────────────────────────────────
 
 def test_validate_collection_name_valid() -> None:
