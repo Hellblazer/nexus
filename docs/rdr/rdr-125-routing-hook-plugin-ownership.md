@@ -139,27 +139,56 @@ without sn it would dead-end the user.
 
 ### Critical Assumptions
 
-- [ ] **A1**: **Each plugin can author and register PreToolUse
+- [x] **A1**: **Each plugin can author and register PreToolUse
   hooks via its own `hooks.json`.** Claude Code's plugin loader
   merges hook registrations from every loaded plugin. **Status**:
-  Unverified. **Method**: read the Claude Code plugin loader source;
-  smoke-test with a trivial sn-side hook that just prints
-  `additionalContext`. **Verification owner**: P0 spike.
-- [ ] **A2**: **A hook in plugin Y can import a Python module from
-  plugin X at runtime.** sn's `grep_for_symbols_redirects_to_serena.py`
-  needs `_lib.py` which ships in nx. The simplest mechanism is a
-  filesystem path relative to a shared install root; the harder
-  mechanism is a Python package both plugins depend on. **Status**:
-  Unverified. **Method**: inspect how the existing nx hook scripts
-  import `_lib.py` (relative-path `sys.path.insert(0, dirname)`); see
-  whether the same trick works across plugin install directories.
-  **Verification owner**: P0 spike.
-- [ ] **A3**: **Vendoring `_lib.py` in sn is unacceptable.** Two
-  copies of the framework drift; the JSON envelope contract could
-  silently diverge. **Status**: Asserted (Medium confidence).
-  **Method**: argument from RDR-101 catalog/T3 split precedent
-  (single source of truth wins over drift-prone duplication).
-- [ ] **A4**: **The ownership rule generalizes cleanly.** Any future
+  VERIFIED (High confidence). **Method**: Source Search.
+  **Evidence**: T2 entry `125-research-A1`. sn plugin 4.33.0 already
+  ships `hooks.json` at
+  `~/.claude/plugins/cache/nexus-plugins/sn/4.33.0/hooks/hooks.json`
+  with three event types (SessionStart, SubagentStart,
+  PermissionRequest with matcher `mcp__plugin_sn_.*`). Both nx and
+  sn hooks fire in the current session, confirming Claude Code
+  merges registrations. Adding a PreToolUse:Bash matcher to sn's
+  hooks.json is structurally identical to the entries already
+  present.
+- [~] **A2**: **A hook in plugin Y can import a Python module from
+  plugin X at runtime.** **Status**: PARTIALLY REFUTED (High
+  confidence on the constraint, Medium on the chosen mitigation).
+  **Method**: Source Search of `nx/hooks/scripts/_run_python_hook.sh`.
+  **Evidence**: T2 entry `125-research-A2`. The wrapper selects
+  system `python3.13` / `python3.12` directly (`for py in
+  python3.13 python3.12; do command -v "$py" && exec "$py" "$@";
+  done`). It does NOT use `uv run`. Comment explicitly says "hooks
+  are stdlib-only". Why: the 40ms python startup is a budgeted line
+  item under RDR-121 § Locked Contracts (per-hook <50ms p95). `uv
+  run` adds ~30-100ms (venv resolution). Therefore the clean
+  `import nexus.routing_hook_lib` path is blocked: the hook runs
+  under a system python with no `conexus` venv on `sys.path`.
+  **Cross-plugin import options surveyed:**
+  1. Relative-path traversal from sn's `$CLAUDE_PLUGIN_ROOT` up to
+     `~/.claude/plugins/cache/nexus-plugins/nx/<version>/hooks/scripts/routing/_lib.py`.
+     Fragile: version selection is implicit; marketplaces upgrade
+     independently.
+  2. Vendor `_lib.py` in sn with a CI byte-equality check. Small
+     file (~250 lines), frozen contract. Drift becomes loud at PR
+     time, not silent divergence.
+  3. Move framework into `conexus` and switch hooks to `uv run`.
+     Clean imports but blows the 40ms startup budget. Rejected.
+  **Chosen mitigation: option 2**, with A3 softened accordingly.
+- [x] **A3** (revised): **Vendoring `_lib.py` in sn is acceptable
+  WITH a CI byte-equality guard.** **Status**: Asserted (High
+  confidence). **Method**: pragmatic refinement after A2 evidence.
+  The original A3 prohibited vendoring on drift grounds. A2 showed
+  the clean import path is structurally blocked by the stdlib-only
+  startup-budget constraint, leaving vendoring as the best of the
+  imperfect options. The drift risk is mitigated, not eliminated,
+  by a `tests/test_routing_lib_drift.py` byte-equality test: any
+  divergence between `nx/hooks/scripts/routing/_lib.py` and
+  `sn/hooks/scripts/routing/_lib.py` fails CI loudly. The framework
+  contract is frozen per RDR-121 § Locked Contracts; the rate of
+  legitimate changes is low.
+- [x] **A4**: **The ownership rule generalizes cleanly.** Any future
   rule that names a plugin-specific tool ID in its redirect message
   should live in the plugin that ships that tool. **Status**: Asserted
   (High confidence). **Method**: argument by symmetry with RDR-120
@@ -171,32 +200,40 @@ without sn it would dead-end the user.
 
 Three phases.
 
-1. **P0 Spike**: verify A1 and A2. Smoke-test a trivial sn-side
-   PreToolUse hook that imports nx's `_lib.py`. If A2 fails under
-   plugin isolation, fall back to vendoring `_lib.py` in sn (a
-   reluctant A3 override) OR move `_lib.py` to a marketplace-shared
-   location (escalation to a follow-on RDR). Document the chosen
-   import mechanism.
+A1 and A2 are resolved at draft time (see § Critical Assumptions).
+The previously-planned P0 spike collapses into the P1 migration
+since the chosen mechanism (vendored `_lib.py` + byte-equality CI)
+needs no separate verification.
 
-2. **P1 Migration**: move `grep_for_symbols_redirects_to_serena.py`
+1. **P1 Migration**: move `grep_for_symbols_redirects_to_serena.py`
    from nx to sn.
-   - Copy script to `sn/hooks/scripts/routing/`
-   - Adjust the import path for `_lib.py` per P0's verified mechanism
+   - Copy script to `sn/hooks/scripts/routing/`. Import path stays
+     identical (`sys.path.insert(0, os.path.dirname(__file__))` then
+     `import _lib`) because `_lib.py` is vendored next to it.
+   - Vendor `_lib.py` into `sn/hooks/scripts/routing/` (byte-identical
+     copy of nx's).
    - Create `sn/hooks/scripts/routing/registry.yaml` with the rule
-     entry
-   - Create or extend `sn/hooks/hooks.json` with a PreToolUse Bash
-     matcher entry
-   - Delete the script + registry entry + hooks.json entry from nx
-   - Update RDR-121's frontmatter `implementation_notes` to record
-     the migration
-   - Update `tests/test_routing_grep_for_symbols.py` to assert
-     against the new sn location
+     entry (lift the entry from nx's registry).
+   - Extend `sn/hooks/hooks.json` with a PreToolUse Bash matcher
+     entry that points at the new script path.
+   - Delete the script + registry entry + hooks.json entry from nx.
+   - Add `tests/test_routing_lib_drift.py`: asserts byte-equality
+     between `nx/hooks/scripts/routing/_lib.py` and
+     `sn/hooks/scripts/routing/_lib.py`. Any divergence fails CI.
+   - Update `tests/test_routing_grep_for_symbols.py` to point at the
+     new sn-side script path.
+   - Update RDR-121's frontmatter `implementation_notes` with a
+     back-reference to RDR-125.
 
-3. **P2 Convention**: document the ownership rule in
-   `nx/hooks/scripts/routing/README.md`. The rule: "If your redirect
-   message names a `mcp__plugin_<owner>_*` tool, the hook lives in
-   the `<owner>` plugin. The framework (`_lib.py` + the
-   `nx hook routing-stats` CLI) stays in nx."
+2. **P2 Convention**: document the ownership rule in
+   `nx/hooks/scripts/routing/README.md` AND in
+   `sn/hooks/scripts/routing/README.md` (new file). The rule: "If
+   your redirect message names a `mcp__plugin_<owner>_*` tool, the
+   hook lives in the `<owner>` plugin. The framework (`_lib.py`) is
+   vendored into each plugin's routing directory; a CI byte-equality
+   test guards drift. The `nx hook routing-stats` CLI stays in nx
+   and reads from the shared `~/.config/nexus/routing_log.jsonl` so
+   it sees every plugin's events."
 
 ### Anti-goals
 
@@ -228,11 +265,14 @@ import from it. **Rejected**: premature. Marketplaces are cheap; the
 extra plugin install step is not. Revisit when a third plugin needs
 the framework.
 
-### Alt 3: Vendor `_lib.py` in sn
+### Alt 3: Vendor `_lib.py` in sn (chosen, after A3 revision)
 
-sn ships its own copy. **Rejected**: A3 says no. The JSON envelope
-contract is RDR-121 § Locked Contracts; two copies of it WILL drift
-the first time someone touches one.
+sn ships its own copy with a `tests/test_routing_lib_drift.py`
+byte-equality guard. Originally rejected on drift grounds; A2
+investigation showed the clean import path is structurally blocked
+by the stdlib-only hook startup budget, leaving this as the best
+practical option. The drift risk is controlled by the CI check, not
+prevented. Chosen for P1.
 
 ### Alt 4: Status quo — leave it in nx, accept the bad UX
 
@@ -254,22 +294,31 @@ fix now than to accumulate a second mis-placed rule before noticing.
 
 ## Implementation Plan
 
-### Phase 0: Spike (1 bead)
-
-Verify A1 (sn can register PreToolUse hooks) and A2 (sn's hook can
-import nx's `_lib.py`). Smoke test ships in a worktree, no PR.
-Outcome captured as T2 research finding `125-research-A1A2`.
+A1 and A2 resolved at draft time (T2 entries `125-research-A1` and
+`125-research-A2`). No P0 spike required.
 
 ### Phase 1: Migration (1 bead)
 
-Move the script per the approach. Single PR. Tests updated to
-reference the new path. Closes the RDR.
+Move the script and vendor `_lib.py` per the approach. Single PR
+landing:
+- `sn/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py` (new)
+- `sn/hooks/scripts/routing/_lib.py` (vendored from nx)
+- `sn/hooks/scripts/routing/registry.yaml` (new)
+- `sn/hooks/scripts/routing/README.md` (new)
+- `sn/hooks/hooks.json` (extended with PreToolUse Bash matcher)
+- `nx/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py` (deleted)
+- `nx/hooks/scripts/routing/registry.yaml` (rule entry removed)
+- `nx/hooks/hooks.json` (matcher entry removed)
+- `tests/test_routing_lib_drift.py` (new — byte-equality guard)
+- `tests/test_routing_grep_for_symbols.py` (path-updated)
+- `docs/rdr/rdr-121-hook-enforced-tool-routing.md` (frontmatter
+  cross-reference)
 
 ### Phase 2: Convention (folded into P1's PR)
 
-Update `nx/hooks/scripts/routing/README.md` with the ownership rule
-and update RDR-121's frontmatter `implementation_notes` with a back-
-reference to RDR-125.
+`nx/hooks/scripts/routing/README.md` + new
+`sn/hooks/scripts/routing/README.md` document the ownership rule and
+the vendor-with-byte-equality pattern.
 
 ## Test Plan
 
@@ -311,3 +360,7 @@ To be run before acceptance. See `/nx:rdr-gate`.
 
 - 2026-05-20: created (draft), surfaced during v4.33.0 live shakeout
   when the no-sn UX gap became concrete.
+- 2026-05-20: A1 verified, A2 partially refuted, A3 revised, P0
+  spike collapsed into P1. T2 evidence at `125-research-A1`
+  (id=1384) and `125-research-A2` (id=1385). Chosen mechanism:
+  vendor `_lib.py` with byte-equality CI guard.
