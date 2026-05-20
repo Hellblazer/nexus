@@ -6,6 +6,62 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.14] - 2026-05-20
+
+Patch on 4.32.13. Singleton elimination, PDF-indexer correctness fix,
+CI infrastructure, and repo-local skill discovery.
+
+### Changed (nexus-12v7c + nexus-sl69o, #881)
+
+- Voyage embedder is no longer accessed through the `_voyage_instance`
+  module global. Constructor-injection path is now the only path;
+  the singleton scaffolding (and its leak through test fixtures) is
+  gone. Same shape for the plan-cache singleton (`_plan_cache_instance`):
+  the global is encapsulated behind an explicit accessor and no longer
+  consulted from arbitrary call sites. Net effect: tests can construct
+  their own instances without monkeypatching globals.
+
+### Fixed (nexus-7kf7, #884)
+
+- `index pdf` staleness check now consults the local PDF cache when
+  determining whether re-indexing is needed; previously the check was
+  doc-id-blind and would re-index unchanged PDFs on every run. Also
+  restores doc_id-keyed misclassification prune (regressed in the
+  RDR-108 Phase 3 rollout). PDFs that were prune-eligible but
+  skipped due to the regression are now correctly handled.
+
+### Fixed (post-#881 follow-ups, #882 + #883)
+
+- `test_rerank_retries_then_degrades` pins `is_local_mode` to `False`
+  at the correct patch target (`nexus.config.is_local_mode`, not the
+  re-export in `nexus.scoring`); the original cloud-mode pin was
+  brittle on CI runners without API credentials. See
+  `feedback_pin_local_mode_in_cloud_tests.md`.
+- Populate-failure path now suppresses the spurious-warning case that
+  surfaced after the singleton refactor; degradation test now exercises
+  the real code path rather than the singleton stub.
+
+### Changed (CI infrastructure)
+
+- Skip the nexus-9eaz flaky test family (`test_migration_guard_*`,
+  `test_concurrent_apply_pending_*`, `test_concurrent_bootstrap`,
+  `test_concurrent_t2database_construction`,
+  `test_stop_claiming_on_running_worker_causes_exit`) on GitHub
+  Actions by default (`@_skip_on_gha_flake`); they remain runnable
+  locally for diagnosis. nexus-lfphz (#876).
+- UV cache directory points at the actual location `setup-uv@v5`
+  populates, reducing CI cold-cache misses. nexus-2ivn (#879).
+
+### Documentation
+
+- `.claude/skills/release/SKILL.md`: moved from `.claude/skills/release.md`
+  to the standard Claude Code repo-local skill layout
+  (`<name>/SKILL.md` directory). Now discoverable by the `Skill` tool
+  as `release`. Content unchanged.
+- Release skill content gaps closed against CLAUDE.md § Release Process
+  (#877). RDR docs: RDR-121 draft + Critical Assumption verification
+  (#875, #878). RDR-108 and RDR-109 closes folded in.
+
 ## [4.32.13] - 2026-05-19
 
 Plugin-only patch on 4.32.12. Restores the `/nx:phase-review-gate`

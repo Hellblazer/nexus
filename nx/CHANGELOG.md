@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.32.14] - 2026-05-20
+
+Plugin version aligned with conexus 4.32.14. One repo-local skill
+discovery fix; otherwise no plugin-side behavior changes.
+
+### Fixed
+
+- Repo-local skill discovery: `.claude/skills/release.md` moved to
+  `.claude/skills/release/SKILL.md` so the `Skill` tool can find it
+  by name. This is the repo-local equivalent of the standard
+  `nx/skills/<name>/SKILL.md` plugin layout. Flat `.md` files in the
+  parent directory are invisible to auto-discovery.
+
 ## [4.32.13] - 2026-05-19
 
 ### Added: phase-review-gate (restored from archive/develop-2026-05-19)
