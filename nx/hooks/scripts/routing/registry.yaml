@@ -52,3 +52,14 @@ rules:
       drafts; stage by explicit path (feedback_no_git_add_all).
     escape_token: "# routing-allow:"
     fail_closed: false
+  phase_review_close_requires_gate:
+    hook_script: phase_review_close_requires_gate.py
+    matcher: Bash
+    mode: block
+    rationale: >-
+      bd close on a phase-review bead requires a fresh PASSED
+      /nx:phase-review-gate sentinel; the cross-walk catches silent
+      scope reduction that test-validator and code-review-expert miss
+      by construction (see feedback_phase_closeout_scope_audit).
+    escape_token: "# routing-allow:"
+    fail_closed: true

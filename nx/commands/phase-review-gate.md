@@ -289,6 +289,15 @@ try:
 except Exception:
     pass
 
+# RDR-121 P2 co-requirement: write the PASSED sentinel that the
+# phase_review_close_requires_gate PreToolUse hook reads. Sweep dead-pid
+# sentinels as a side effect. Best-effort; never raises.
+try:
+    from nexus.phase_review_sentinel import write_sentinel
+    write_sentinel(rdr_id_label, str(phase_arg or "1"))
+except Exception:
+    pass
+
 PYEOF
 }
 

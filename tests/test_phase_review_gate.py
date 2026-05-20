@@ -197,6 +197,63 @@ class TestPass2Validate:
         )
         assert "BLOCKED" in out or "ERROR" in out or "empty" in out.lower()
 
+
+# ---------------------------------------------------------------------------
+# RDR-121 P2 co-requirement: PASSED writes a sentinel; BLOCKED does not.
+# ---------------------------------------------------------------------------
+
+class TestSentinelSideEffect:
+    """The PASSED path writes the sentinel the routing hook reads."""
+
+    def _run_with_tmpdir(self, args: str, *, rdr_dir, tmpdir) -> str:
+        text = COMMAND_FILE.read_text()
+        m = re.search(r"python3\s+<<\s+'PYEOF'\n(.*?)PYEOF", text, re.DOTALL)
+        assert m
+        script = m.group(1)
+        env = os.environ.copy()
+        env["NEXUS_RDR_ARGS"] = args
+        env["NEXUS_RDR_DIR_OVERRIDE"] = str(rdr_dir)
+        env["TMPDIR"] = str(tmpdir)
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, env=env, timeout=15,
+        )
+        return (result.stdout + result.stderr).strip()
+
+    def test_passed_writes_sentinel(self, tmp_path):
+        rdr_dir = _make_minimal_rdr(tmp_path, 99, ["T2 service", "T3 service"])
+        sentinels = tmp_path / "sentinels"
+        sentinels.mkdir()
+        out = self._run_with_tmpdir(
+            "99 --phase 1 --evidence 'Item1=nexus-a,Item2=nexus-b'",
+            rdr_dir=rdr_dir, tmpdir=sentinels,
+        )
+        assert "PASSED" in out or "validation passed" in out.lower()
+        sentinel_dir = sentinels / "nx-phase-gate-sentinel"
+        assert sentinel_dir.exists(), "PASSED outcome must create sentinel dir"
+        files = list(sentinel_dir.glob("*-099-1.json"))
+        assert len(files) == 1, f"expected one sentinel for RDR-99 phase 1, got {files}"
+        import json as _json
+        payload = _json.loads(files[0].read_text())
+        assert payload["outcome"] == "PASSED"
+        assert payload["rdr_id"] == "099"
+        assert payload["phase"] == "1"
+
+    def test_blocked_does_not_write_sentinel(self, tmp_path):
+        rdr_dir = _make_minimal_rdr(tmp_path, 99, ["T2 service", "T3 service"])
+        sentinels = tmp_path / "sentinels"
+        sentinels.mkdir()
+        out = self._run_with_tmpdir(
+            "99 --phase 1 --evidence 'Item1=nexus-a'",  # Item2 missing
+            rdr_dir=rdr_dir, tmpdir=sentinels,
+        )
+        assert "BLOCKED" in out or "blocked" in out.lower()
+        sentinel_dir = sentinels / "nx-phase-gate-sentinel"
+        if sentinel_dir.exists():
+            assert not list(sentinel_dir.glob("*-099-1.json")), (
+                "BLOCKED outcome must not write a sentinel"
+            )
+
     def test_pass2_names_the_missing_item(self, tmp_path: pytest.fixture) -> None:
         """Blocked output must name which approach item is missing evidence."""
         _make_minimal_rdr(tmp_path, 99, ["T2 service", "T3 service"])
