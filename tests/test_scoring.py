@@ -75,13 +75,41 @@ def test_rerank_empty():
 
 
 @pytest.mark.parametrize("exc", [Exception("API error"), RuntimeError("timeout")])
-def test_rerank_degrades_on_error(exc):
+def test_rerank_degrades_on_error(exc, cloud_mode):
+    """Cloud reranker degrades to input order when the Voyage call raises.
+
+    Uses the ``cloud_mode`` fixture (tests/conftest.py:250) to pin
+    is_local_mode=False. Without that pin, CI runners with no .env
+    fall into the ONNX local path and never call mock_client.rerank;
+    the assertion on len(results) alone passes for the wrong reason.
+    The ``assert mock_client.rerank.called`` check below is the
+    boundary-spanning probe that catches the wrong-path regression.
+    """
     mock_client = MagicMock()
     mock_client.rerank.side_effect = exc
     stub_t3 = MagicMock()
     stub_t3._voyage_client = mock_client
     results = rerank_results([_r()], "query", top_k=1, t3=stub_t3)
     assert len(results) == 1
+    assert mock_client.rerank.called, (
+        "mock_client.rerank was not called; the cloud rerank path did "
+        "not run. Likely cause: is_local_mode is not pinned and the "
+        "ONNX local fallback ran instead. See "
+        "feedback_pin_local_mode_in_cloud_tests.md."
+    )
+
+
+def test_rerank_cloud_mode_no_t3_degrades(cloud_mode):
+    """Cloud path with t3=None degrades to input order with a warning log.
+
+    Documents the intentional behavior change from the _voyage_instance
+    elimination (nexus-12v7c): rerank_results no longer constructs a
+    Voyage client itself. Cloud-mode callers must pass t3; missing t3
+    is not an exception path but a degraded-pass-through.
+    """
+    results = [_r(), _r(), _r()]
+    out = rerank_results(results, "query", top_k=2, t3=None)
+    assert out == results[:2]
 
 
 # ── round_robin_interleave ───────────────────────────────────────────────────

@@ -137,9 +137,24 @@ class PlanCacheRegistry:
                     or (current_mtime > 0.0 and current_mtime > self._mtime)
                 )
                 if stale:
+                    # Only mark populated/mtime on success. Pre-refactor
+                    # code used `try/finally` which permanently suppressed
+                    # populate failures (a transient network blip during
+                    # plan-embedding would set `_populated = True` and
+                    # `_mtime = current_mtime`, so the next call saw
+                    # stale=False and never retried). The fix keeps the
+                    # cache instance available (we don't reset
+                    # `self._cache`) but leaves `_populated` / `_mtime`
+                    # unchanged so the next call retries the populate.
                     try:
                         self._cache.populate(populate_from)
-                    finally:
+                    except Exception:
+                        _log.warning(
+                            "plan_cache_populate_failed",
+                            library=str(populate_from),
+                            exc_info=True,
+                        )
+                    else:
                         self._populated = True
                         self._mtime = current_mtime
         return self._cache
