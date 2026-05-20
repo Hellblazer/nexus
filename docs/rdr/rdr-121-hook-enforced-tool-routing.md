@@ -2,12 +2,12 @@
 title: "Hook-Enforced Tool Routing: PreToolUse as Backstop for Soft Guidance"
 id: RDR-121
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-19
-accepted_date:
+accepted_date: 2026-05-20
 related_issues: []
 related_rdrs: [RDR-008, RDR-024, RDR-045, RDR-105, RDR-120]
 related_tests: []
