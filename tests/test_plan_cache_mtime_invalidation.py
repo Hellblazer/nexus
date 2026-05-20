@@ -175,3 +175,41 @@ def test_missing_path_attr_falls_back_safely(tmp_path: Path) -> None:
     # Without a path → no mtime tracking → behaves like the legacy
     # populate-once contract. Acceptable fallback.
     assert fake_cache.populate.call_count == 1
+
+
+def test_populate_failure_does_not_suppress_retry(tmp_path: Path) -> None:
+    """Transient populate failure must NOT permanently mark the cache populated.
+
+    Regression test for code-review finding 2 on PR #881: the pre-
+    refactor try/finally suppressed populate exceptions while still
+    setting _populated=True and _mtime=current_mtime, so the NEXT call
+    saw stale=False and never retried. A network blip during the
+    first populate became permanent for the server process lifetime.
+
+    The fix (plan_cache_registry.PlanCacheRegistry.get) only updates
+    state on success; failures log and leave _populated/_mtime
+    unchanged so the next call retries.
+    """
+    from nexus.db.t2.plan_library import PlanLibrary
+    from nexus.mcp_infra import get_t1_plan_cache
+
+    db_path = tmp_path / "plans.sqlite"
+    lib = PlanLibrary(path=db_path)
+
+    fake_cache = MagicMock()
+    fake_cache.populate.side_effect = [RuntimeError("transient"), 0]
+    with patch("nexus.mcp_infra.get_t1", return_value=_stub_t1()), \
+         patch("nexus.plans.session_cache.PlanSessionCache",
+               return_value=fake_cache):
+        # First call: populate raises; cache returned anyway (instance
+        # still valid, only the populate failed). _populated/_mtime
+        # must remain unset so next call retries.
+        get_t1_plan_cache(populate_from=lib)
+        # Second call: populate succeeds; same library, same mtime,
+        # but stale=True because _populated never got set.
+        get_t1_plan_cache(populate_from=lib)
+
+    assert fake_cache.populate.call_count == 2, (
+        f"expected retry on the second call after first failure, "
+        f"got {fake_cache.populate.call_count}"
+    )
