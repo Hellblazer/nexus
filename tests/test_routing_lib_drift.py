@@ -35,10 +35,22 @@ import pathlib
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 
-CANONICAL_PATH = REPO_ROOT / "nx" / "hooks" / "scripts" / "routing" / "_lib.py"
-
-_VENDOR_PATHS: tuple[pathlib.Path, ...] = (
-    REPO_ROOT / "sn" / "hooks" / "scripts" / "routing" / "_lib.py",
+# Files vendored from nx into sibling plugins. Each entry is
+# (canonical_path, [vendor_path, vendor_path, ...]). The canonical
+# path lives in nx; vendored copies must be byte-identical.
+_VENDORED_FILES: tuple[tuple[pathlib.Path, tuple[pathlib.Path, ...]], ...] = (
+    (
+        REPO_ROOT / "nx" / "hooks" / "scripts" / "routing" / "_lib.py",
+        (
+            REPO_ROOT / "sn" / "hooks" / "scripts" / "routing" / "_lib.py",
+        ),
+    ),
+    (
+        REPO_ROOT / "nx" / "hooks" / "scripts" / "_run_python_hook.sh",
+        (
+            REPO_ROOT / "sn" / "hooks" / "scripts" / "_run_python_hook.sh",
+        ),
+    ),
 )
 
 
@@ -46,37 +58,37 @@ def _sha256(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_canonical_lib_exists() -> None:
-    """The nx-side _lib.py is the source of truth and must exist."""
-    assert CANONICAL_PATH.exists(), (
-        f"Canonical _lib.py missing at {CANONICAL_PATH}. "
-        "Did the nx routing-hook framework move? Update this test's "
-        "CANONICAL_PATH if so."
+def test_canonical_files_exist() -> None:
+    """Every canonical (nx-side) file in the drift table must exist."""
+    missing = [str(c) for c, _ in _VENDORED_FILES if not c.exists()]
+    assert not missing, (
+        "Canonical files missing from nx side; did the routing-hook "
+        f"framework move? Update _VENDORED_FILES.\nMissing: {missing}"
     )
 
 
 def test_vendored_copies_byte_equal_canonical() -> None:
-    """Every vendored copy must be byte-identical to the canonical."""
-    canonical_bytes = CANONICAL_PATH.read_bytes()
-    canonical_sha = hashlib.sha256(canonical_bytes).hexdigest()
+    """Every vendored copy must be byte-identical to its canonical."""
     failures: list[str] = []
-    for vendor in _VENDOR_PATHS:
-        if not vendor.exists():
-            failures.append(
-                f"Vendor copy missing: {vendor} "
-                "(the plugin that ships this copy hasn't been migrated yet, "
-                "or someone deleted it without updating this test)"
-            )
-            continue
-        vendor_sha = _sha256(vendor)
-        if vendor_sha != canonical_sha:
-            failures.append(
-                f"Drift detected: {vendor} (sha256={vendor_sha[:16]}...) "
-                f"differs from {CANONICAL_PATH} (sha256={canonical_sha[:16]}...). "
-                "Resolution: copy the canonical version over the vendored one "
-                "and commit, or update _lib.py in BOTH locations atomically."
-            )
+    for canonical, vendors in _VENDORED_FILES:
+        canonical_sha = _sha256(canonical)
+        for vendor in vendors:
+            if not vendor.exists():
+                failures.append(
+                    f"Vendor copy missing: {vendor} "
+                    "(the plugin that ships this copy hasn't been migrated "
+                    "yet, or someone deleted it without updating this test)"
+                )
+                continue
+            vendor_sha = _sha256(vendor)
+            if vendor_sha != canonical_sha:
+                failures.append(
+                    f"Drift detected: {vendor} (sha256={vendor_sha[:16]}...) "
+                    f"differs from {canonical} (sha256={canonical_sha[:16]}...). "
+                    "Resolution: copy the canonical version over the vendored "
+                    "one and commit, or update both locations atomically."
+                )
     if failures:
         raise AssertionError(
-            "Routing-hook _lib.py drift:\n  - " + "\n  - ".join(failures)
+            "Routing-hook framework drift:\n  - " + "\n  - ".join(failures)
         )

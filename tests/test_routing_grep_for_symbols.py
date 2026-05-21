@@ -26,7 +26,20 @@ import sys
 import pytest
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
+
+# RDR-125: the grep_for_symbols hook moved from nx to sn (the plugin
+# that ships Serena, the redirect target). The nx-side path must no
+# longer exist; see test_hook_not_in_nx below.
 HOOK_SCRIPT = (
+    PROJECT_ROOT
+    / "sn"
+    / "hooks"
+    / "scripts"
+    / "routing"
+    / "grep_for_symbols_redirects_to_serena.py"
+)
+
+_LEGACY_NX_PATH = (
     PROJECT_ROOT
     / "nx"
     / "hooks"
@@ -63,6 +76,14 @@ def _isolate_log(tmp_path, monkeypatch):
 
 def test_script_exists():
     assert HOOK_SCRIPT.exists()
+
+
+def test_hook_not_in_nx():
+    """RDR-125: the hook lives in sn now; the nx-side copy must be gone."""
+    assert not _LEGACY_NX_PATH.exists(), (
+        f"Hook still present at legacy nx path {_LEGACY_NX_PATH}. "
+        "RDR-125 migrated this rule to sn; the nx copy must be deleted."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -203,20 +224,43 @@ def test_non_json_stdin_allows():
 
 
 def test_registry_has_rule():
+    """RDR-125: rule lives in sn's registry, not nx's."""
     yaml = pytest.importorskip("yaml")
-    reg = PROJECT_ROOT / "nx" / "hooks" / "scripts" / "routing" / "registry.yaml"
-    parsed = yaml.safe_load(reg.read_text()) or {}
+    sn_reg = PROJECT_ROOT / "sn" / "hooks" / "scripts" / "routing" / "registry.yaml"
+    parsed = yaml.safe_load(sn_reg.read_text()) or {}
     rule = (parsed.get("rules") or {}).get("grep_for_symbols_redirects_to_serena")
-    assert rule is not None
+    assert rule is not None, "Expected the rule in sn's registry.yaml after RDR-125 migration"
+
+    # And it must NOT be in nx's registry anymore.
+    nx_reg = PROJECT_ROOT / "nx" / "hooks" / "scripts" / "routing" / "registry.yaml"
+    nx_parsed = yaml.safe_load(nx_reg.read_text()) or {}
+    assert "grep_for_symbols_redirects_to_serena" not in (nx_parsed.get("rules") or {}), (
+        "Rule still present in nx/hooks/scripts/routing/registry.yaml; "
+        "RDR-125 migrated it to sn — nx entry must be removed."
+    )
 
 
 def test_hooks_json_registers():
-    hooks_json = PROJECT_ROOT / "nx" / "hooks" / "hooks.json"
-    data = json.loads(hooks_json.read_text())
-    bash_hooks = data["hooks"]["PreToolUse"]
-    found = any(
+    """RDR-125: PreToolUse:Bash hook is registered in sn, not nx."""
+    sn_hooks_json = PROJECT_ROOT / "sn" / "hooks" / "hooks.json"
+    sn_data = json.loads(sn_hooks_json.read_text())
+    sn_bash_hooks = sn_data["hooks"].get("PreToolUse", [])
+    sn_found = any(
         "grep_for_symbols_redirects_to_serena.py" in h.get("command", "")
-        for entry in bash_hooks if entry.get("matcher") == "Bash"
+        for entry in sn_bash_hooks if entry.get("matcher") == "Bash"
         for h in entry.get("hooks", [])
     )
-    assert found
+    assert sn_found, "Expected sn/hooks/hooks.json PreToolUse:Bash to register the script"
+
+    nx_hooks_json = PROJECT_ROOT / "nx" / "hooks" / "hooks.json"
+    nx_data = json.loads(nx_hooks_json.read_text())
+    nx_bash_hooks = nx_data["hooks"].get("PreToolUse", [])
+    nx_found = any(
+        "grep_for_symbols_redirects_to_serena.py" in h.get("command", "")
+        for entry in nx_bash_hooks if entry.get("matcher") == "Bash"
+        for h in entry.get("hooks", [])
+    )
+    assert not nx_found, (
+        "Hook still registered in nx/hooks/hooks.json after RDR-125 migration; "
+        "nx PreToolUse:Bash entry must be removed."
+    )

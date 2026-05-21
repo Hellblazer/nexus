@@ -12,7 +12,7 @@ closed_date: 2026-05-20
 close_reason: implemented
 shipped_in: 4.33.0
 related_issues: []
-related_rdrs: [RDR-008, RDR-024, RDR-045, RDR-105, RDR-120]
+related_rdrs: [RDR-008, RDR-024, RDR-045, RDR-105, RDR-120, RDR-125]
 related_tests:
   - tests/test_routing_hooks.py
   - tests/test_routing_phase_review_close.py
@@ -20,12 +20,25 @@ related_tests:
   - tests/test_routing_git_add_all.py
   - tests/test_phase_review_sentinel.py
   - tests/test_hook_routing_stats.py
+  - tests/test_routing_lib_drift.py
+  - tests/test_routing_registry_aggregate_cap.py
 implementation_notes: |
   Shipped in conexus 4.33.0 (2026-05-20). Six implementation beads
   closed (mzvwa.1 through .6); mzvwa.7 (P4 30-day soak review) left
   open as a tracked follow-up, fires +30 days post-merge (~2026-06-19).
   The soak runs against a closed RDR by design; observations either
   get a small RDR addendum or follow-on beads.
+
+  RDR-125 follow-up (2026-05-21): the
+  grep_for_symbols_redirects_to_serena rule migrated from
+  nx/hooks/scripts/routing/ to sn/hooks/scripts/routing/ because it
+  redirects to Serena MCP tools that ship in the sn plugin. The
+  routing-hook framework (_lib.py + _run_python_hook.sh) is now
+  vendored into each plugin that ships a routing rule, guarded by
+  tests/test_routing_lib_drift.py (byte-equality CI guard). The
+  4-hook PreToolUse:Bash cap becomes an aggregate across all
+  installed plugins; tests/test_routing_registry_aggregate_cap.py
+  enforces the cap as a CI lint.
 
   Problem Statement closure pointers (Pass 2):
   - Gap 1 (session-start guidance bypassable): enforcement at

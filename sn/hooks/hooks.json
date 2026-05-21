@@ -35,6 +35,18 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
