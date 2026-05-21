@@ -52,49 +52,72 @@ def plan() -> None:
     """Plan library maintenance commands."""
 
 
-@plan.command("repair")
-def repair_cmd() -> None:
-    """Re-run plan-dimension backfill and list low-conf rows for review.
+@plan.group("repair")
+def repair() -> None:
+    """Consumer-side content-repair verbs for the plan library.
 
-    Idempotent: once every plan row has a populated ``dimensions``
-    column, subsequent runs report "0 backfilled" and exit cleanly.
-    Low-confidence rows (those that reached the wh-fallback during the
-    RDR-092 Phase 0d.1 backfill heuristic) are listed with their
-    inferred verb so the operator can update them via SQL or future
-    editor commands.
+    Under RDR-120 §A8 the substrate's migration chain runs DDL only;
+    legacy backfills that mutated row content moved out of
+    ``apply_pending`` and into these explicit consumer-driven
+    subcommands. Operators run them after `nx upgrade` (or whenever
+    legacy rows surface that need repair). Each subcommand is
+    idempotent.
+
+    See RDR-120 §A8-exempt table for which substrate writes still
+    stay in the migration chain.
     """
+
+
+def _open_plans_db():
+    """Open memory.db with WAL pragmas. Returns the connection, or
+    None when the database does not exist."""
     from nexus.commands._helpers import default_db_path
-    from nexus.db.migrations import _backfill_plan_dimensions
 
     db_path = default_db_path()
     if not db_path.exists():
-        click.echo(
-            f"T2 database not found at {db_path}; nothing to do."
-        )
-        return
-
-    # Context manager guards against a raise in _backfill_plan_dimensions
-    # leaking the connection (RDR-092 code-review S-3).
+        click.echo(f"T2 database not found at {db_path}; nothing to do.")
+        return None
     conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+@repair.command("scope-tags")
+def repair_scope_tags_cmd() -> None:
+    """Backfill empty ``scope_tags`` rows and rewash legacy ``'all'`` sentinels.
+
+    Combines the substantive work of the pre-RDR-120 4.8.0 and 4.8.1
+    migrations into one idempotent pass.
+    """
+    from nexus.plans.repair import repair_scope_tags
+
+    conn = _open_plans_db()
+    if conn is None:
+        return
     try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA journal_mode=WAL")
+        result = repair_scope_tags(conn)
+    finally:
+        conn.close()
+    _emit(result)
 
-        # Count NULL-dimension rows before the run so the report reflects
-        # reality even when the migration itself is a no-op.
-        pending_before = conn.execute(
-            "SELECT COUNT(*) FROM plans WHERE dimensions IS NULL"
-        ).fetchone()[0]
 
-        _backfill_plan_dimensions(conn)
+@repair.command("dimensions")
+def repair_dimensions_cmd() -> None:
+    """Backfill verb / name / dimensions on NULL-dimension plan rows.
 
-        pending_after = conn.execute(
-            "SELECT COUNT(*) FROM plans WHERE dimensions IS NULL"
-        ).fetchone()[0]
-        backfilled = pending_before - pending_after
+    Heuristic verb inference; rows that reached the wh-fallback are
+    tagged ``backfill-low-conf`` for operator review. Re-runs report
+    "0 backfilled" once every row carries dimensions.
+    """
+    from nexus.plans.repair import repair_dimensions
 
-        # Surface low-confidence rows for operator review, oldest first so
-        # a re-run reports a stable order.
+    conn = _open_plans_db()
+    if conn is None:
+        return
+    try:
+        result = repair_dimensions(conn)
+        # Surface low-confidence rows for operator review.
         low_conf_rows = conn.execute(
             "SELECT id, query, verb FROM plans "
             "WHERE tags LIKE '%backfill-low-conf%' "
@@ -102,11 +125,7 @@ def repair_cmd() -> None:
         ).fetchall()
     finally:
         conn.close()
-
-    click.echo(f"{backfilled} backfilled")
-    if backfilled == 0 and pending_before == 0:
-        click.echo("Nothing to do; every plan already carries dimensions.")
-
+    _emit(result)
     if low_conf_rows:
         click.echo(
             f"\n{len(low_conf_rows)} low-conf row(s) need review "
@@ -119,6 +138,87 @@ def repair_cmd() -> None:
             )
     else:
         click.echo("\n0 rows need review.")
+
+
+@repair.command("match-text")
+def repair_match_text_cmd() -> None:
+    """Populate ``plans.match_text`` (and refresh ``plans_fts``) for rows
+    with empty ``match_text``. The schema (column + FTS5 table +
+    triggers) was created by ``apply_pending``; this verb fills in
+    the content the legacy migration used to populate.
+    """
+    from nexus.plans.repair import repair_match_text
+
+    conn = _open_plans_db()
+    if conn is None:
+        return
+    try:
+        result = repair_match_text(conn)
+    finally:
+        conn.close()
+    _emit(result)
+
+
+@repair.command("retire-legacy")
+def repair_retire_legacy_cmd() -> None:
+    """Delete plan rows whose ``plan_json`` uses the pre-RDR-078
+    ``operation`` shape. Such rows cannot be dispatched by ``plan_run``
+    and only pollute plan-match results.
+    """
+    from nexus.plans.repair import repair_retire_legacy
+
+    conn = _open_plans_db()
+    if conn is None:
+        return
+    try:
+        result = repair_retire_legacy(conn)
+    finally:
+        conn.close()
+    _emit(result)
+
+
+@repair.command("builtin-bindings")
+def repair_builtin_bindings_cmd() -> None:
+    """Patch ``required_bindings`` / ``optional_bindings`` into builtin
+    plan rows whose stored ``plan_json`` predates the 4.10.1 seed
+    loader fix.
+    """
+    from nexus.plans.repair import repair_builtin_bindings
+
+    conn = _open_plans_db()
+    if conn is None:
+        return
+    try:
+        result = repair_builtin_bindings(conn)
+    finally:
+        conn.close()
+    _emit(result)
+
+
+@repair.command("all")
+def repair_all_cmd() -> None:
+    """Run every repair pass in dependency order."""
+    from nexus.plans.repair import repair_all
+
+    conn = _open_plans_db()
+    if conn is None:
+        return
+    try:
+        results = repair_all(conn)
+    finally:
+        conn.close()
+    for name, result in results.items():
+        click.echo(f"[{name}]")
+        _emit(result, indent="  ")
+
+
+def _emit(result: dict, *, indent: str = "") -> None:
+    """Pretty-print a repair-verb result dict."""
+    if not result:
+        click.echo(f"{indent}(no-op)")
+        return
+    for key, value in result.items():
+        click.echo(f"{indent}{key}: {value}")
 
 
 @plan.command("list")

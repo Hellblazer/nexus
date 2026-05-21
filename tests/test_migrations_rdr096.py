@@ -34,11 +34,14 @@ import pytest
 
 
 class TestDocumentAspectsSourceUriMigration:
+    """RDR-120 §A8 / nexus-6y2a9: the migration is DDL-only now
+    (adds the ``source_uri`` column). The per-row backfill body that
+    used to run here moved to the ``nx aspects backfill-source-uri``
+    consumer verb; backfill-behaviour tests live in
+    ``tests/test_aspects_consumer_verbs.py``.
+    """
+
     def _seed_legacy_table(self, conn: sqlite3.Connection) -> None:
-        """Create a ``document_aspects`` table at the pre-4.16.0
-        schema (no source_uri column) so the migration has something
-        to widen.
-        """
         from nexus.db.migrations import migrate_document_aspects_table
         migrate_document_aspects_table(conn)
 
@@ -79,97 +82,30 @@ class TestDocumentAspectsSourceUriMigration:
         assert "source_uri" in cols
         assert cols["source_uri"] == ("TEXT", 0)  # nullable
 
-    def test_backfill_filesystem_collections_use_file_scheme(
+    def test_migration_does_not_backfill_source_uri(
         self, tmp_path: Path,
     ) -> None:
+        """RDR-120 §A8 / nexus-6y2a9: backfill moved to consumer verb.
+        After the migration runs, rows still have NULL ``source_uri``;
+        the operator must run ``nx aspects backfill-source-uri --apply``
+        to populate them."""
         from nexus.db.migrations import migrate_document_aspects_source_uri
 
-        db = tmp_path / "fs.db"
+        db = tmp_path / "noop.db"
         conn = sqlite3.connect(str(db))
         self._seed_legacy_table(conn)
-        # rdr__ + docs__ + code__: all use file:// with abspath.
-        self._insert_row(conn, collection="rdr__nexus", source_path="docs/rdr/rdr-090.md")
-        self._insert_row(conn, collection="docs__corpus", source_path="docs/architecture.md")
-        self._insert_row(conn, collection="code__nexus", source_path="src/nexus/cli.py")
-
-        migrate_document_aspects_source_uri(conn)
-
-        rows = dict(conn.execute(
-            "SELECT collection, source_uri FROM document_aspects",
-        ).fetchall())
-        conn.close()
-        # Each URI is file:// + abspath of the registered path.
-        for coll, sp in [
-            ("rdr__nexus", "docs/rdr/rdr-090.md"),
-            ("docs__corpus", "docs/architecture.md"),
-            ("code__nexus", "src/nexus/cli.py"),
-        ]:
-            assert rows[coll] == "file://" + os.path.abspath(sp)
-
-    def test_backfill_knowledge_collections_use_chroma_scheme(
-        self, tmp_path: Path,
-    ) -> None:
-        from nexus.db.migrations import migrate_document_aspects_source_uri
-
-        db = tmp_path / "kn.db"
-        conn = sqlite3.connect(str(db))
-        self._seed_legacy_table(conn)
-        # knowledge__*: chroma:// with literal source_path (slug-shaped
-        # AND filesystem-shaped both work; the reader's identity-field
-        # fallback handles it).
-        self._insert_row(
-            conn, collection="knowledge__knowledge",
-            source_path="decision-bfdb-update-capture-rdr005",
-        )
-        self._insert_row(
-            conn, collection="knowledge__delos",
-            source_path="/Users/me/papers/aleph-bft.pdf",
-        )
-
-        migrate_document_aspects_source_uri(conn)
-
-        rows = dict(conn.execute(
-            "SELECT collection, source_uri FROM document_aspects",
-        ).fetchall())
-        conn.close()
-        assert rows["knowledge__knowledge"] == (
-            "chroma://knowledge__knowledge/decision-bfdb-update-capture-rdr005"
-        )
-        assert rows["knowledge__delos"] == (
-            "chroma://knowledge__delos//Users/me/papers/aleph-bft.pdf"
-        )
-
-    def test_backfill_skips_empty_source_path(self, tmp_path: Path) -> None:
-        """Research-2 mitigation (id 1009): one row in
-        ``code__int-crossmodel-ba3a85dc`` has empty source_path.
-        Cannot be backfilled — left at NULL with a logged warning.
-        """
-        from nexus.db.migrations import migrate_document_aspects_source_uri
-
-        db = tmp_path / "skip.db"
-        conn = sqlite3.connect(str(db))
-        self._seed_legacy_table(conn)
-        # Empty source_path violates NOT NULL on source_path? Let me
-        # use a single space — the migration's "if not source_path"
-        # guard treats empty string as the trigger; tests here use ""
-        # to simulate the canonical mitigation case.
-        # The schema requires non-empty source_path, so insert with a
-        # non-empty value but flip the column to "" via UPDATE post-
-        # insert (mimicking the corrupt-data shape research-2 found).
-        self._insert_row(conn, collection="code__shadow", source_path="placeholder")
-        conn.execute(
-            "UPDATE document_aspects SET source_path = '' WHERE collection = 'code__shadow'",
-        )
-        conn.commit()
+        self._insert_row(conn, collection="rdr__nexus", source_path="docs/x.md")
 
         migrate_document_aspects_source_uri(conn)
 
         row = conn.execute(
-            "SELECT source_uri FROM document_aspects WHERE collection = 'code__shadow'",
+            "SELECT source_uri FROM document_aspects",
         ).fetchone()
         conn.close()
-        # NULL — the migration declined to invent a URI for an empty path.
-        assert row[0] is None
+        assert row[0] is None, (
+            "Migration must NOT backfill source_uri anymore; that work "
+            "moved to nx aspects backfill-source-uri"
+        )
 
     def test_migration_is_idempotent(self, tmp_path: Path) -> None:
         from nexus.db.migrations import migrate_document_aspects_source_uri
@@ -191,44 +127,6 @@ class TestDocumentAspectsSourceUriMigration:
         conn.close()
         assert cols.count("source_uri") == 1
 
-    def test_migration_does_not_overwrite_pre_populated_source_uri(
-        self, tmp_path: Path,
-    ) -> None:
-        """``WHERE source_uri IS NULL`` guard: rows that already have
-        a source_uri (written by post-P2.1 callers between migration
-        passes) are not stomped.
-        """
-        from nexus.db.migrations import migrate_document_aspects_source_uri
-
-        db = tmp_path / "preserve.db"
-        conn = sqlite3.connect(str(db))
-        self._seed_legacy_table(conn)
-        migrate_document_aspects_source_uri(conn)  # add column first
-        # Insert a row with an explicit source_uri (mimicking a
-        # post-migration writer).
-        explicit_uri = "chroma://knowledge__custom/some-source"
-        conn.execute(
-            "INSERT INTO document_aspects "
-            "(collection, source_path, extracted_at, model_version, "
-            " extractor_name, source_uri) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("knowledge__custom", "different-path-on-disk",
-             "2026-04-27T00:00:00+00:00", "claude-haiku-4-5-20251001",
-             "scholarly-paper-v1", explicit_uri),
-        )
-        conn.commit()
-
-        # Re-run the migration; the explicit URI must not be replaced
-        # with the derived ``chroma://knowledge__custom/different-path-on-disk``.
-        migrate_document_aspects_source_uri(conn)
-
-        row = conn.execute(
-            "SELECT source_uri FROM document_aspects "
-            "WHERE collection = 'knowledge__custom'",
-        ).fetchone()
-        conn.close()
-        assert row[0] == explicit_uri
-
     def test_migration_no_op_when_table_missing(self, tmp_path: Path) -> None:
         """Defensive: if document_aspects has not been created yet
         (fresh install, migration order swapped), the migration must
@@ -242,134 +140,36 @@ class TestDocumentAspectsSourceUriMigration:
         migrate_document_aspects_source_uri(conn)  # must not raise
         conn.close()
 
-    def test_backfill_empty_string_rows_in_addition_to_null(
-        self, tmp_path: Path,
-    ) -> None:
-        """nexus-pnje: the original P2.1 migration only touched NULL
-        rows. Subsequent writer paths landed empty-string rows; the
-        live audit on production found 61 of 579 rows (10.5%) with
-        empty source_uri. The follow-up migration must backfill BOTH
-        NULL and '' rows.
-        """
+    def test_backfill_empty_migration_is_noop(self, tmp_path: Path) -> None:
+        """RDR-120 §A8 / nexus-6y2a9:
+        ``migrate_document_aspects_source_uri_backfill_empty`` is now a
+        pure no-op. The backfill body moved to ``nx aspects
+        backfill-source-uri``; verb-tests in
+        ``tests/test_aspects_consumer_verbs.py`` exercise the
+        substantive behaviour."""
         from nexus.db.migrations import (
             migrate_document_aspects_source_uri,
             migrate_document_aspects_source_uri_backfill_empty,
         )
 
-        db = tmp_path / "empty_backfill.db"
+        db = tmp_path / "noop.db"
         conn = sqlite3.connect(str(db))
         self._seed_legacy_table(conn)
-        # Insert 3 rows BEFORE P2.1 so they have NULL source_uri after
-        # the column is added.
         self._insert_row(conn, collection="rdr__a", source_path="x.md")
-        self._insert_row(conn, collection="rdr__b", source_path="y.md")
-        self._insert_row(conn, collection="rdr__c", source_path="z.md")
-
-        # Apply P2.1 — backfills all NULL rows.
         migrate_document_aspects_source_uri(conn)
-
-        # Simulate the production gap: a writer path lands empty-string
-        # source_uri AFTER P2.1 ran. Mirrors the 61 rows seen on prod.
-        conn.execute(
-            "UPDATE document_aspects SET source_uri = '' "
-            "WHERE collection = 'rdr__a'"
-        )
-        # And one row that's still NULL (didn't get migrated for some
-        # reason — defensive: the new migration must catch this too).
-        conn.execute(
-            "UPDATE document_aspects SET source_uri = NULL "
-            "WHERE collection = 'rdr__b'"
-        )
-        # Third row keeps its valid URI from P2.1.
-        conn.commit()
-
-        # Pre-condition: 1 empty + 1 NULL + 1 valid.
-        before = conn.execute(
-            "SELECT collection, source_uri FROM document_aspects "
-            "ORDER BY collection",
-        ).fetchall()
-        # rdr__a empty, rdr__b NULL, rdr__c populated.
-        assert before[0] == ("rdr__a", "")
-        assert before[1] == ("rdr__b", None)
-        assert before[2][0] == "rdr__c"
-        assert before[2][1] and before[2][1].startswith("file://")
-
-        # Apply the new backfill migration.
-        migrate_document_aspects_source_uri_backfill_empty(conn)
-
-        # Post-condition: rdr__a + rdr__b backfilled to file:// URIs;
-        # rdr__c untouched.
-        after = dict(conn.execute(
-            "SELECT collection, source_uri FROM document_aspects",
-        ).fetchall())
-        conn.close()
-        assert after["rdr__a"].startswith("file://") and after["rdr__a"].endswith("x.md")
-        assert after["rdr__b"].startswith("file://") and after["rdr__b"].endswith("y.md")
-        assert after["rdr__c"] == before[2][1]  # unchanged
-
-    def test_backfill_empty_skips_when_source_path_also_empty(
-        self, tmp_path: Path,
-    ) -> None:
-        """Edge case: row with both source_uri='' AND source_path=''
-        cannot be backfilled. The migration leaves it alone for
-        manual triage rather than synthesising a bad URI.
-        """
-        from nexus.db.migrations import (
-            migrate_document_aspects_source_uri,
-            migrate_document_aspects_source_uri_backfill_empty,
-        )
-
-        db = tmp_path / "edge.db"
-        conn = sqlite3.connect(str(db))
-        self._seed_legacy_table(conn)
-        # P2.1's _insert_row helper requires non-empty source_path; do
-        # the empty insert directly so we exercise the both-empty case.
-        conn.execute(
-            "INSERT INTO document_aspects "
-            "(collection, source_path, extracted_at, model_version, extractor_name) "
-            "VALUES (?, '', ?, ?, ?)",
-            ("rdr__edge", "2026-04-27T00:00:00+00:00",
-             "claude-haiku-4-5-20251001", "scholarly-paper-v1"),
-        )
-        conn.commit()
-
-        migrate_document_aspects_source_uri(conn)
-        # Force empty-string rather than NULL.
         conn.execute("UPDATE document_aspects SET source_uri = ''")
         conn.commit()
 
         migrate_document_aspects_source_uri_backfill_empty(conn)
 
         row = conn.execute(
-            "SELECT source_path, source_uri FROM document_aspects",
+            "SELECT source_uri FROM document_aspects",
         ).fetchone()
         conn.close()
-        # Both still empty — migration left the row for triage.
-        assert row == ("", "")
-
-    def test_backfill_empty_idempotent(self, tmp_path: Path) -> None:
-        """Re-running the backfill is a no-op (no UPDATE on already-
-        populated rows)."""
-        from nexus.db.migrations import (
-            migrate_document_aspects_source_uri,
-            migrate_document_aspects_source_uri_backfill_empty,
+        assert row[0] == "", (
+            "Migration must be a no-op now; the backfill belongs to "
+            "nx aspects backfill-source-uri"
         )
-
-        db = tmp_path / "idem.db"
-        conn = sqlite3.connect(str(db))
-        self._seed_legacy_table(conn)
-        self._insert_row(conn, collection="rdr__a", source_path="x.md")
-        migrate_document_aspects_source_uri(conn)
-        conn.execute("UPDATE document_aspects SET source_uri = ''")
-        conn.commit()
-
-        migrate_document_aspects_source_uri_backfill_empty(conn)
-        first = conn.execute("SELECT source_uri FROM document_aspects").fetchone()[0]
-        migrate_document_aspects_source_uri_backfill_empty(conn)  # re-run
-        second = conn.execute("SELECT source_uri FROM document_aspects").fetchone()[0]
-        conn.close()
-        assert first == second
-        assert first.startswith("file://")
 
 
 # ── catalog documents inline migration ──────────────────────────────────────
@@ -582,34 +382,30 @@ class TestNullRowDeleteMigration:
             extras='{"venue":"OSDI"}', confidence=0.9,
         )
 
-    def test_drops_only_read_failure_nulls(self, tmp_path: Path) -> None:
+    def test_migration_is_noop(self, tmp_path: Path) -> None:
+        """RDR-120 §A8 / nexus-6y2a9: the DELETE body moved to
+        ``nx aspects gc-pre-rdr096``. Running the migration must not
+        delete read-failure rows; the verb-tests in
+        ``tests/test_aspects_consumer_verbs.py`` cover the
+        substantive seven-clause discriminator behaviour."""
         from nexus.db.migrations import migrate_drop_null_aspect_rows
 
-        db = tmp_path / "drop.db"
+        db = tmp_path / "drop_noop.db"
         conn = sqlite3.connect(str(db))
         self._seed_legacy_table(conn)
         self._seed_three_categories(conn)
-        # Pre: 6 rows (3 read-failure variants + 1 structured-zero +
-        # 1 partial + 1 full).
+        # Pre: 6 rows seeded.
         assert conn.execute(
             "SELECT COUNT(*) FROM document_aspects",
         ).fetchone()[0] == 6
 
         migrate_drop_null_aspect_rows(conn)
 
-        # Post: 3 rows (all 3 read-failure variants dropped — including
-        # the legacy-ghost with extras IS NULL; structured-zero,
-        # partial, and full are retained).
-        rows = conn.execute(
-            "SELECT collection, source_path FROM document_aspects "
-            "ORDER BY collection, source_path",
-        ).fetchall()
+        # Post: all 6 rows still present; migration is a no-op.
+        assert conn.execute(
+            "SELECT COUNT(*) FROM document_aspects",
+        ).fetchone()[0] == 6
         conn.close()
-        assert rows == [
-            ("knowledge__delos", "aleph-bft.pdf"),         # partial
-            ("knowledge__delos", "lightweight-smr.pdf"),    # full
-            ("rdr__nexus", "docs/rdr/readme.md"),           # structured-zero
-        ]
 
     def test_extras_null_clause_is_load_bearing(self, tmp_path: Path) -> None:
         """``extras IS NULL`` is the third load-bearing widening
@@ -706,26 +502,6 @@ class TestNullRowDeleteMigration:
         # Bare IS NULL matched ZERO rows because writer stored '[]' not NULL.
         # Production-shaped data would also see zero matches under this SQL.
         assert count == 6  # original count unchanged
-
-    def test_idempotent_on_re_run(self, tmp_path: Path) -> None:
-        from nexus.db.migrations import migrate_drop_null_aspect_rows
-
-        db = tmp_path / "idem.db"
-        conn = sqlite3.connect(str(db))
-        self._seed_legacy_table(conn)
-        self._seed_three_categories(conn)
-
-        migrate_drop_null_aspect_rows(conn)
-        first_count = conn.execute(
-            "SELECT COUNT(*) FROM document_aspects",
-        ).fetchone()[0]
-        # Second invocation: 0 read-failure rows remain → no-op.
-        migrate_drop_null_aspect_rows(conn)
-        second_count = conn.execute(
-            "SELECT COUNT(*) FROM document_aspects",
-        ).fetchone()[0]
-        conn.close()
-        assert first_count == second_count == 3
 
     def test_no_op_when_table_missing(self, tmp_path: Path) -> None:
         from nexus.db.migrations import migrate_drop_null_aspect_rows

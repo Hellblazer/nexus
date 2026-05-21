@@ -1255,10 +1255,7 @@ class TestMigrateChashIndex:
         with the legacy ``doc_id`` column, the rename migration renames
         it to ``chunk_chroma_id``. Test reflects the production end state.
         """
-        from nexus.db.migrations import (
-            migrate_chash_index,
-            migrate_chash_index_rename_doc_id,
-        )
+        from nexus.db.migrations import migrate_chash_index, migrate_chash_index_rename_doc_id
 
         conn = sqlite3.connect(":memory:")
         migrate_chash_index(conn)
@@ -1283,10 +1280,7 @@ class TestMigrateChashIndex:
         Issue 1: knowledge__delos + knowledge__delos_docling both ingest a
         paper; every chunk's SHA-256 is identical.
         """
-        from nexus.db.migrations import (
-            migrate_chash_index,
-            migrate_chash_index_rename_doc_id,
-        )
+        from nexus.db.migrations import migrate_chash_index, migrate_chash_index_rename_doc_id
 
         conn = sqlite3.connect(":memory:")
         migrate_chash_index(conn)
@@ -1378,10 +1372,7 @@ class TestMigrateChashIndex:
         idempotent so a re-attempted upgrade after a partial failure
         does not double-mutate.
         """
-        from nexus.db.migrations import (
-            migrate_chash_index,
-            migrate_chash_index_rename_doc_id,
-        )
+        from nexus.db.migrations import migrate_chash_index, migrate_chash_index_rename_doc_id
 
         conn = sqlite3.connect(":memory:")
         migrate_chash_index(conn)
@@ -1410,10 +1401,7 @@ class TestMigrateChashIndex:
         idempotency contract: table present with legacy ``doc_id`` column
         → ALTER TABLE renames in place.
         """
-        from nexus.db.migrations import (
-            migrate_chash_index,
-            migrate_chash_index_rename_doc_id,
-        )
+        from nexus.db.migrations import migrate_chash_index, migrate_chash_index_rename_doc_id
 
         conn = sqlite3.connect(":memory:")
         # Install creates the legacy ``doc_id`` column.
@@ -1462,11 +1450,7 @@ class TestMigrateChashIndex:
         ``chunk_chroma_id`` column from the post-rename schema. Other
         columns and the secondary index are preserved; data on remaining
         columns survives."""
-        from nexus.db.migrations import (
-            _drop_chash_index_chunk_chroma_id,
-            migrate_chash_index,
-            migrate_chash_index_rename_doc_id,
-        )
+        from nexus.db.migrations import _drop_chash_index_chunk_chroma_id, migrate_chash_index, migrate_chash_index_rename_doc_id
 
         conn = sqlite3.connect(":memory:")
         migrate_chash_index(conn)
@@ -1504,11 +1488,7 @@ class TestMigrateChashIndex:
     def test_chash_index_drop_chunk_chroma_id_idempotent_and_absent_safe(self) -> None:
         """The drop migration is a no-op when the column is already gone
         and when the table itself does not exist."""
-        from nexus.db.migrations import (
-            _drop_chash_index_chunk_chroma_id,
-            migrate_chash_index,
-            migrate_chash_index_rename_doc_id,
-        )
+        from nexus.db.migrations import _drop_chash_index_chunk_chroma_id, migrate_chash_index, migrate_chash_index_rename_doc_id
 
         # No table → no-op.
         conn1 = sqlite3.connect(":memory:")
@@ -1769,7 +1749,7 @@ class TestMigrateHookFailuresBatchColumns:
         )
 
 
-# ── _backfill_plan_dimensions (RDR-092 Phase 0d.1) ──────────────────────────
+# ── repair_dimensions (RDR-092 Phase 0d.1) ──────────────────────────
 
 
 def _make_plans_schema(conn: sqlite3.Connection) -> None:
@@ -1827,7 +1807,7 @@ class TestBackfillPlanDimensions:
 
     def test_backfill_plan_dimensions_infers_verb(self) -> None:
         """Stem matches select the expected verb for each rule family."""
-        from nexus.db.migrations import _backfill_plan_dimensions
+        from nexus.plans.repair import repair_dimensions
 
         conn = sqlite3.connect(":memory:")
         _make_plans_schema(conn)
@@ -1845,7 +1825,7 @@ class TestBackfillPlanDimensions:
         for query, _verb, label in fixtures:
             ids[label] = _insert_plan(conn, query=query)
 
-        _backfill_plan_dimensions(conn)
+        repair_dimensions(conn)
 
         for query, expected_verb, label in fixtures:
             row = conn.execute(
@@ -1861,13 +1841,13 @@ class TestBackfillPlanDimensions:
 
     def test_backfill_plan_dimensions_idempotent(self) -> None:
         """Re-running the migration is a no-op on already-backfilled rows."""
-        from nexus.db.migrations import _backfill_plan_dimensions
+        from nexus.plans.repair import repair_dimensions
 
         conn = sqlite3.connect(":memory:")
         _make_plans_schema(conn)
         rid = _insert_plan(conn, query="analyze the ranker output")
 
-        _backfill_plan_dimensions(conn)
+        repair_dimensions(conn)
         first = conn.execute(
             "SELECT verb, name, dimensions, tags FROM plans WHERE id = ?",
             (rid,),
@@ -1876,7 +1856,7 @@ class TestBackfillPlanDimensions:
         assert "backfill" in (first[3] or "")
 
         # Second run: state must be stable and tags must not duplicate.
-        _backfill_plan_dimensions(conn)
+        repair_dimensions(conn)
         second = conn.execute(
             "SELECT verb, name, dimensions, tags FROM plans WHERE id = ?",
             (rid,),
@@ -1887,7 +1867,7 @@ class TestBackfillPlanDimensions:
 
     def test_backfill_preserves_authored_verbs(self) -> None:
         """Rows with dimensions IS NOT NULL are untouched."""
-        from nexus.db.migrations import _backfill_plan_dimensions
+        from nexus.plans.repair import repair_dimensions
 
         conn = sqlite3.connect(":memory:")
         _make_plans_schema(conn)
@@ -1902,7 +1882,7 @@ class TestBackfillPlanDimensions:
             dimensions='{"scope":"global","verb":"research"}',
         )
 
-        _backfill_plan_dimensions(conn)
+        repair_dimensions(conn)
 
         row = conn.execute(
             "SELECT verb, name, dimensions, tags FROM plans WHERE id = ?",
@@ -1917,14 +1897,14 @@ class TestBackfillPlanDimensions:
 
     def test_backfill_low_conf_flagging(self) -> None:
         """Rows that hit only the wh-fallback carry backfill-low-conf."""
-        from nexus.db.migrations import _backfill_plan_dimensions
+        from nexus.plans.repair import repair_dimensions
 
         conn = sqlite3.connect(":memory:")
         _make_plans_schema(conn)
         # A query with no stem match — only the wh-word triggers.
         rid = _insert_plan(conn, query="what about the graph")
 
-        _backfill_plan_dimensions(conn)
+        repair_dimensions(conn)
 
         row = conn.execute(
             "SELECT verb, tags FROM plans WHERE id = ?", (rid,),
@@ -1955,7 +1935,7 @@ class TestBackfillPlanDimensions:
         The second row lands with its strategy suffixed by row id
         so both rows land with distinct, deterministic identities.
         """
-        from nexus.db.migrations import _backfill_plan_dimensions
+        from nexus.plans.repair import repair_dimensions
 
         conn = sqlite3.connect(":memory:")
         _make_plans_schema(conn)
@@ -1964,7 +1944,7 @@ class TestBackfillPlanDimensions:
         rid1 = _insert_plan(conn, query="find the documents for author")
         rid2 = _insert_plan(conn, query="find documents by author")
 
-        _backfill_plan_dimensions(conn)  # must not raise
+        repair_dimensions(conn)  # must not raise
 
         rows = conn.execute(
             "SELECT id, name, dimensions FROM plans ORDER BY id ASC"
@@ -1991,7 +1971,7 @@ class TestBackfillPlanDimensions:
         queries whose raw-token fallback still differed; replace with
         queries whose ``tokens`` list is actually empty).
         """
-        from nexus.db.migrations import _backfill_plan_dimensions
+        from nexus.plans.repair import repair_dimensions
 
         conn = sqlite3.connect(":memory:")
         _make_plans_schema(conn)
@@ -2001,7 +1981,7 @@ class TestBackfillPlanDimensions:
         rid2 = _insert_plan(conn, query="...")
         rid3 = _insert_plan(conn, query="???")
 
-        _backfill_plan_dimensions(conn)
+        repair_dimensions(conn)
 
         rows = conn.execute(
             "SELECT id, name, dimensions FROM plans ORDER BY id ASC"
@@ -2026,7 +2006,7 @@ class TestBackfillPlanDimensions:
         SELECT pre-check runs, so the ``key in claimed`` branch is
         the one that catches the 3rd.
         """
-        from nexus.db.migrations import _backfill_plan_dimensions
+        from nexus.plans.repair import repair_dimensions
 
         conn = sqlite3.connect(":memory:")
         _make_plans_schema(conn)
@@ -2036,7 +2016,7 @@ class TestBackfillPlanDimensions:
         _insert_plan(conn, query="find documents by author")
         _insert_plan(conn, query="find documents about author")
 
-        _backfill_plan_dimensions(conn)
+        repair_dimensions(conn)
 
         rows = conn.execute(
             "SELECT dimensions FROM plans ORDER BY id ASC"
@@ -2051,20 +2031,20 @@ class TestBackfillPlanDimensions:
         collision-resolved row must leave the suffixed identity
         unchanged: the NULL-dimension filter skips it entirely.
         """
-        from nexus.db.migrations import _backfill_plan_dimensions
+        from nexus.plans.repair import repair_dimensions
 
         conn = sqlite3.connect(":memory:")
         _make_plans_schema(conn)
         _insert_plan(conn, query="find the documents for author")
         rid2 = _insert_plan(conn, query="find documents by author")
 
-        _backfill_plan_dimensions(conn)
+        repair_dimensions(conn)
         first = conn.execute(
             "SELECT name, dimensions, tags FROM plans WHERE id = ?",
             (rid2,),
         ).fetchone()
 
-        _backfill_plan_dimensions(conn)
+        repair_dimensions(conn)
         second = conn.execute(
             "SELECT name, dimensions, tags FROM plans WHERE id = ?",
             (rid2,),
@@ -2159,7 +2139,11 @@ class TestAddPlanMatchTextColumn:
         )
         conn.commit()
 
+        from nexus.plans.repair import repair_match_text
+
         _add_plan_match_text_column(conn)
+        # RDR-120 §A8 / nexus-rv7x6: per-row backfill is consumer-side.
+        repair_match_text(conn)
 
         dimensional = conn.execute(
             "SELECT match_text FROM plans WHERE name = 'find-by-author'"
@@ -2191,10 +2175,14 @@ class TestAddPlanMatchTextColumn:
         )
         conn.commit()
 
+        from nexus.plans.repair import repair_match_text
+
         _add_plan_match_text_column(conn)
+        repair_match_text(conn)
         first = conn.execute("SELECT match_text FROM plans").fetchone()[0]
 
         _add_plan_match_text_column(conn)
+        repair_match_text(conn)
         second = conn.execute("SELECT match_text FROM plans").fetchone()[0]
 
         assert first == second
@@ -2266,9 +2254,13 @@ class TestAddPlanMatchTextColumn:
         ).fetchone()
         assert row[0] == "", "setup invariant: match_text must be ''"
 
-        # Re-run the migration. The has_fts guard should detect the
-        # mid-state and fall through to rebuild FTS + backfill.
+        # Re-run the migration. The has_fts guard detects the mid-state
+        # and falls through to rebuild FTS. Per RDR-120 §A8 the per-row
+        # match_text backfill is the consumer verb's responsibility, so
+        # we drive both legs here to validate end-to-end recovery.
+        from nexus.plans.repair import repair_match_text
         _add_plan_match_text_column(conn)
+        repair_match_text(conn)
 
         fts_row = conn.execute(
             "SELECT name FROM sqlite_master "
@@ -2285,7 +2277,7 @@ class TestAddPlanMatchTextColumn:
         )
 
 
-# ── _retire_legacy_operation_shape_plans (nexus-4m9b) ────────────────────────
+# ── repair_retire_legacy (nexus-4m9b) ────────────────────────
 
 
 class TestRetireLegacyOperationShapePlans:
@@ -2311,7 +2303,7 @@ class TestRetireLegacyOperationShapePlans:
         conn.commit()
 
     def test_deletes_legacy_operation_shape(self) -> None:
-        from nexus.db.migrations import _retire_legacy_operation_shape_plans
+        from nexus.plans.repair import repair_retire_legacy
 
         conn = sqlite3.connect(":memory:")
         self._schema(conn)
@@ -2333,7 +2325,7 @@ class TestRetireLegacyOperationShapePlans:
         )
         conn.commit()
 
-        _retire_legacy_operation_shape_plans(conn)
+        repair_retire_legacy(conn)
 
         remaining = [r[0] for r in conn.execute(
             "SELECT query FROM plans ORDER BY id"
@@ -2341,7 +2333,7 @@ class TestRetireLegacyOperationShapePlans:
         assert remaining == ["modern"]
 
     def test_idempotent(self) -> None:
-        from nexus.db.migrations import _retire_legacy_operation_shape_plans
+        from nexus.plans.repair import repair_retire_legacy
 
         conn = sqlite3.connect(":memory:")
         self._schema(conn)
@@ -2352,8 +2344,8 @@ class TestRetireLegacyOperationShapePlans:
         )
         conn.commit()
 
-        _retire_legacy_operation_shape_plans(conn)
-        _retire_legacy_operation_shape_plans(conn)  # no raise
+        repair_retire_legacy(conn)
+        repair_retire_legacy(conn)  # no raise
 
         count = conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
         assert count == 0
@@ -2363,7 +2355,7 @@ class TestRetireLegacyOperationShapePlans:
         ``operation`` (e.g. a ``purpose: reference-operation`` string)
         must not be retired. The post-parse ``has_tool`` check decides.
         """
-        from nexus.db.migrations import _retire_legacy_operation_shape_plans
+        from nexus.plans.repair import repair_retire_legacy
 
         conn = sqlite3.connect(":memory:")
         self._schema(conn)
@@ -2379,7 +2371,7 @@ class TestRetireLegacyOperationShapePlans:
         )
         conn.commit()
 
-        _retire_legacy_operation_shape_plans(conn)
+        repair_retire_legacy(conn)
 
         count = conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
         assert count == 1
@@ -2399,7 +2391,7 @@ class TestRetireLegacyOperationShapePlans:
         )
 
 
-# ── _backfill_builtin_bindings (nexus-uyc6) ──────────────────────────────────
+# ── repair_builtin_bindings (nexus-uyc6) ──────────────────────────────────
 
 
 class TestBackfillBuiltinBindings:
@@ -2444,7 +2436,7 @@ class TestBackfillBuiltinBindings:
         path.write_text(_yaml.safe_dump(doc))
 
     def test_backfills_matching_row_by_dimensions(self, tmp_path, monkeypatch):
-        from nexus.db.migrations import _backfill_builtin_bindings
+        from nexus.plans.repair import repair_builtin_bindings
 
         yaml_dir = tmp_path / "nx" / "plans" / "builtin"
         yaml_dir.mkdir(parents=True)
@@ -2523,7 +2515,7 @@ class TestBackfillBuiltinBindings:
         )
         conn.commit()
 
-        _backfill_builtin_bindings(conn)
+        repair_builtin_bindings(conn)
 
         row = conn.execute(
             "SELECT plan_json FROM plans WHERE name='default'"
@@ -2533,7 +2525,7 @@ class TestBackfillBuiltinBindings:
         assert parsed["optional_bindings"] == ["limit"]
 
     def test_idempotent_when_row_already_has_bindings(self, tmp_path, monkeypatch):
-        from nexus.db.migrations import _backfill_builtin_bindings
+        from nexus.plans.repair import repair_builtin_bindings
 
         conn = sqlite3.connect(":memory:")
         self._schema(conn)
@@ -2551,7 +2543,7 @@ class TestBackfillBuiltinBindings:
         )
         conn.commit()
 
-        _backfill_builtin_bindings(conn)
+        repair_builtin_bindings(conn)
 
         row = conn.execute(
             "SELECT plan_json FROM plans WHERE name='default'"
@@ -2562,7 +2554,7 @@ class TestBackfillBuiltinBindings:
         """User ad-hoc rows (no ``builtin`` in tags) must not be touched
         even if a dimension match exists in the shipping YAMLs.
         """
-        from nexus.db.migrations import _backfill_builtin_bindings
+        from nexus.plans.repair import repair_builtin_bindings
 
         conn = sqlite3.connect(":memory:")
         self._schema(conn)
@@ -2579,7 +2571,7 @@ class TestBackfillBuiltinBindings:
 
         # Even with missing YAMLs the migration should no-op cleanly
         # on non-builtin rows. Call it without fixture YAMLs.
-        _backfill_builtin_bindings(conn)
+        repair_builtin_bindings(conn)
 
         row = conn.execute(
             "SELECT plan_json FROM plans WHERE name='default'"

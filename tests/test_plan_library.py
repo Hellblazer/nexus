@@ -498,13 +498,16 @@ def test_save_plan_scope_tags_column_default_empty(plan_db: T2Database) -> None:
 
 
 def test_migration_idempotent_on_populated_table(tmp_path: Path) -> None:
-    """Running the scope_tags migration twice is a no-op on the second run."""
+    """RDR-120 §A8: the migration adds the column; the backfill body
+    runs via ``nx plan repair scope-tags`` (``repair_scope_tags``).
+    Both layers are idempotent.
+    """
     import sqlite3
 
     from nexus.db.migrations import _add_plan_scope_tags
+    from nexus.plans.repair import repair_scope_tags
 
     db_path = tmp_path / "mig.db"
-    # Seed an older-schema plans table (pre-scope_tags).
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
         """
@@ -531,13 +534,15 @@ def test_migration_idempotent_on_populated_table(tmp_path: Path) -> None:
     )
     conn.commit()
 
+    # Substrate (migration): DDL only, adds the column.
     _add_plan_scope_tags(conn)
+    repair_scope_tags(conn)
     first = conn.execute("SELECT scope_tags FROM plans WHERE query='q'").fetchone()
     assert first[0] == "rdr__arcaneum"
 
-    # Second run is a no-op: column already present, backfill re-runs
-    # safely because inference is deterministic.
+    # Re-running both is a no-op (idempotent).
     _add_plan_scope_tags(conn)
+    repair_scope_tags(conn)
     second = conn.execute("SELECT scope_tags FROM plans WHERE query='q'").fetchone()
     assert second[0] == "rdr__arcaneum"
 
@@ -672,7 +677,7 @@ def test_rewash_migration_fixes_all_sentinel_rows(tmp_path: Path) -> None:
     pre-fix backfill."""
     import sqlite3
 
-    from nexus.db.migrations import _rewash_plan_scope_tags_all_sentinel
+    from nexus.plans.repair import repair_scope_tags
 
     db_path = tmp_path / "rewash.db"
     conn = sqlite3.connect(str(db_path))
@@ -712,7 +717,7 @@ def test_rewash_migration_fixes_all_sentinel_rows(tmp_path: Path) -> None:
     )
     conn.commit()
 
-    _rewash_plan_scope_tags_all_sentinel(conn)
+    repair_scope_tags(conn)
 
     q1 = conn.execute("SELECT scope_tags FROM plans WHERE query='q1'").fetchone()
     q2 = conn.execute("SELECT scope_tags FROM plans WHERE query='q2'").fetchone()
@@ -722,7 +727,7 @@ def test_rewash_migration_fixes_all_sentinel_rows(tmp_path: Path) -> None:
     assert q3[0] == "rdr__delos", "clean row must be untouched"
 
     # Idempotent: running again finds nothing to rewash.
-    _rewash_plan_scope_tags_all_sentinel(conn)
+    repair_scope_tags(conn)
     q1 = conn.execute("SELECT scope_tags FROM plans WHERE query='q1'").fetchone()
     assert q1[0] == ""
     conn.close()
@@ -732,7 +737,7 @@ def test_rewash_migration_no_op_when_no_all_rows(tmp_path: Path) -> None:
     """Rewash migration is a safe no-op when no row contains 'all'."""
     import sqlite3
 
-    from nexus.db.migrations import _rewash_plan_scope_tags_all_sentinel
+    from nexus.plans.repair import repair_scope_tags
 
     db_path = tmp_path / "clean.db"
     conn = sqlite3.connect(str(db_path))
@@ -751,7 +756,7 @@ def test_rewash_migration_no_op_when_no_all_rows(tmp_path: Path) -> None:
         """
     )
     conn.commit()
-    _rewash_plan_scope_tags_all_sentinel(conn)  # must not crash
+    repair_scope_tags(conn)  # must not crash
     conn.close()
 
 
@@ -790,7 +795,7 @@ def test_rewash_migration_fixes_trailing_all_variant(tmp_path: Path) -> None:
     '%,all' branch (RDR-091 code-review finding I-7)."""
     import sqlite3
 
-    from nexus.db.migrations import _rewash_plan_scope_tags_all_sentinel
+    from nexus.plans.repair import repair_scope_tags
 
     db_path = tmp_path / "trailing_all.db"
     conn = sqlite3.connect(str(db_path))
@@ -823,7 +828,7 @@ def test_rewash_migration_fixes_trailing_all_variant(tmp_path: Path) -> None:
         ),
     )
     conn.commit()
-    _rewash_plan_scope_tags_all_sentinel(conn)
+    repair_scope_tags(conn)
     row = conn.execute("SELECT scope_tags FROM plans WHERE query='q'").fetchone()
     assert row[0] == "rdr__arcaneum"
     conn.close()
@@ -833,11 +838,11 @@ def test_rewash_migration_no_op_without_plans_table(tmp_path: Path) -> None:
     """Rewash migration is a safe no-op on a DB without a plans table."""
     import sqlite3
 
-    from nexus.db.migrations import _rewash_plan_scope_tags_all_sentinel
+    from nexus.plans.repair import repair_scope_tags
 
     db_path = tmp_path / "empty.db"
     conn = sqlite3.connect(str(db_path))
-    _rewash_plan_scope_tags_all_sentinel(conn)  # must not crash
+    repair_scope_tags(conn)  # must not crash
     conn.close()
 
 
