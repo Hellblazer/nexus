@@ -41,6 +41,7 @@ from nexus.commands.collection import collection
 from nexus.commands.console import console
 from nexus.commands.context_cmd import context
 from nexus.commands.config_cmd import config_group
+from nexus.commands.daemon import daemon_group
 from nexus.commands.doc import doc
 from nexus.commands.doctor import doctor_cmd
 from nexus.commands.dt import dt
@@ -89,6 +90,7 @@ main.add_command(collection)
 main.add_command(console)
 main.add_command(context)
 main.add_command(config_group, name="config")
+main.add_command(daemon_group, name="daemon")
 main.add_command(doc)
 main.add_command(dt)
 main.add_command(enrich)
