@@ -403,6 +403,14 @@ process discipline actually failed.
   imports (`import sqlite3 as _sqlite3` used by 3 current sites).
   Remaining 5% confidence gap: live spike against known-bad and
   known-good fixtures; assigned to P0 implementation.
+  **Inventory refresh 2026-05-21 (conexus 4.33.1):** re-ran the
+  AST/grep enumeration; counts unchanged (27 SQLite + 8 chromadb +
+  3 module-aliased imports, same files). Line numbers of aliased
+  imports shifted due to unrelated upstream edits
+  (`commands/doctor.py` 615->607, 720->699;
+  `console/routes/health.py` 131->122); alias mechanism unchanged.
+  No regression vector has appeared that the proposed lint would
+  miss. Evidence: T2 entry `120-research-A5-refresh` (id=1395).
 - [x] **A6** (new): **A daemon as sole migration runner eliminates the
   `_upgrade_lock` race class.** With a single daemon process holding the
   SQLite handle for the lifetime of the tier, multi-process migration
