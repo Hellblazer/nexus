@@ -466,29 +466,45 @@ process discipline actually failed.
   yet eliminated in P3 — the daemon's `apply_pending` is one more
   concurrent runner alongside the direct-open ones.
 
-  **P3 transition mitigation (revised after gate pass 3, 2026-05-21):**
+  **P3 transition mitigation (revised after gate pass 4, 2026-05-21):**
   the P3 race is NOT prevented during the transition window; it is
   acknowledged and the design is safe under it. systemd / launchctl
   ordering helps for systemd-managed clients but cannot constrain
   `claude -p` subprocesses (forked by an active Claude Code session
   outside systemd's dependency graph) that open T2 directly while
-  the daemon is mid-startup. The actual safety story is SQLite's own
-  concurrency model: `apply_pending` wraps DDL in `BEGIN EXCLUSIVE`,
-  so only one writer at a time can hold the DB-level lock; the loser
-  gets `SQLITE_BUSY` and retries. Migrations are idempotent (each
-  step is `IF NOT EXISTS` / `version_check` guarded), so a retry
-  after another process applied the same step is a no-op. The
-  `nexus-9eaz` stress test is RE-ARMED for the P3 window, recast as:
-  "daemon startup running concurrently with a direct-open
-  `T2Database` construction must converge to the expected schema
-  version without corruption; SQLITE_BUSY retries are acceptable;
-  partial migrations are unacceptable." If the test surfaces
-  non-idempotent migration steps, those must be fixed before P3 ships
-  (the idempotency requirement is on the migration code, not on the
-  daemon). A future option, deferred to follow-on RDR if needed: wrap
-  the call site with `_locking.acquire_directory_lock` for a hard
-  cross-process serialization — not adopted now because SQLite's own
-  locking already provides the safety guarantee that matters.
+  the daemon is mid-startup. **The actual cross-process safety story
+  is:** (a) SQLite's statement-level write serialization — only one
+  writer holds a write lock at a time at the OS level, so two
+  processes racing on DDL get serialized by SQLite itself with the
+  loser receiving `SQLITE_BUSY` and retrying — and (b) migration
+  step idempotency — every step in `_MIGRATIONS` uses `IF NOT EXISTS`,
+  `PRAGMA table_info`, or `INSERT OR IGNORE` guards, so a step
+  already applied by the winner is a no-op when the loser retries.
+  Note: `_upgrade_lock` in `src/nexus/db/migrations.py:2877` is a
+  `threading.RLock` and provides ONLY within-process serialization;
+  the docstring at `:2886-2894` explicitly states "Process-level
+  only — cross-process safety relies on `INSERT OR IGNORE`". There
+  is no `BEGIN EXCLUSIVE` wrap in `apply_pending`. Step idempotency
+  is therefore the load-bearing invariant for cross-process safety
+  during the P3 window — any migration step that violates it (e.g.
+  a bare `INSERT INTO ... VALUES` without `OR IGNORE` or version
+  guard) silently breaks this guarantee. The `nexus-9eaz` stress
+  test is RE-ARMED for the P3 window, recast as: "daemon startup
+  running concurrently with a direct-open `T2Database` construction
+  must converge to the expected schema version without corruption;
+  SQLITE_BUSY retries are acceptable; partial migrations are
+  unacceptable." The test must verify step-level idempotency, not
+  just aggregate convergence. If the test surfaces non-idempotent
+  migration steps, those must be fixed before P3 ships (the
+  idempotency requirement is on the migration code, not on the
+  daemon). A CI lint that flags `INSERT INTO` / `CREATE TABLE` /
+  `ALTER TABLE` in migration functions without an accompanying
+  guard is a future option, deferred until empirically needed.
+  Hard cross-process serialization via
+  `_locking.acquire_directory_lock` around the `apply_pending` call
+  site is also documented as a deferred option — not adopted now
+  because step idempotency + SQLite statement-level locking
+  already provides the safety guarantee that matters.
 
   **P4 implementation: flip `NX_STORAGE_MODE` default to `daemon`,
   remove `apply_pending` from `T2Client` and direct-open `T2Database`
@@ -1197,3 +1213,6 @@ counterfactual.
   - **O6** §Risks adds "no substrate-side retry budget; retry orchestration is RDR-115 territory" to the daemon-crash mitigation.
   - **O7** P5 explicit `count == 0` assertion added (alongside the monotonic rule).
   - **O8** Phase 1 T3 description notes the phasing: C2 applies to `T3Client` callers; raw chromadb in `health.py` bypasses by construction until P2 migrates those four sites.
+- 2026-05-21: Fourth gate pass. 0 Critical, 1 Significant. The single Significant was a precision error in pass-3's own fix-in-place: the C4 prose asserted `BEGIN EXCLUSIVE` as the cross-process safety mechanism, but the code uses `threading.RLock` (process-local) + step idempotency + SQLite statement-level write serialization. Safety story is real and sufficient; the cited mechanism was wrong. Folded:
+  - **C4-correction** A6 P3 transition prose rewritten to cite the accurate safety story: SQLite statement-level write locking serializes DDL writers (loser gets SQLITE_BUSY and retries); step idempotency (every `_MIGRATIONS` entry uses `IF NOT EXISTS` / `PRAGMA table_info` / `INSERT OR IGNORE` guards) makes retries no-ops. `_upgrade_lock` is `threading.RLock`, process-local only, per the docstring at `migrations.py:2886-2894`. Step idempotency is the load-bearing cross-process invariant — a future non-idempotent migration step would silently break P3 safety; CI lint flagging unguarded DDL in migration functions is a deferred option.
+  - **A5 inventory accuracy confirmed** by pass 4: the only `sqlite3.connect` sites in `src/nexus/catalog/` are `catalog_db.py:255` and `synthesizer.py:792`. `catalog_sync.py` imports `sqlite3` for exception classes only; not a connect site. P5 `count == 0` assertion is achievable as stated.
