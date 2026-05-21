@@ -1,0 +1,33 @@
+## systemd user unit for the nexus T2 daemon (RDR-112, nexus-6w0c).
+## Installed by ``nx daemon t2 install --autostart``. The ``__NX_BIN__``
+## placeholder is substituted at install time with the resolved absolute
+## path to the ``nx`` executable.
+##
+## nexus-uuuh: ``StandardOutput`` / ``StandardError`` below capture the
+## supervisor stream — used for interpreter crash diagnostics. The
+## bounded primary daemon log is at ``~/.config/nexus/logs/daemon.log``
+## (10 MB rotation, 5 backups, written via
+## nexus.logging_setup.configure_logging("daemon")). systemd-journald
+## or ``append:`` capture has no built-in rotation; the rotated log is
+## the canonical source of recent events.
+
+[Unit]
+Description=Nexus T2 daemon (memory + tuplespace)
+After=network.target
+PartOf=default.target
+
+[Service]
+Type=simple
+ExecStart=__NX_BIN__ daemon t2 start --foreground
+Restart=on-failure
+RestartSec=5s
+## nexus-o6g9: SIGTERM-induced exits surface as code 143. Mark them as
+## success so ``nx daemon t2 stop`` (which sends SIGTERM) does not
+## immediately respawn through Restart=on-failure.
+SuccessExitStatus=143
+Environment=PATH=__PATH_ENV__
+StandardOutput=append:__LOG_DIR__/nexus-t2.log
+StandardError=append:__LOG_DIR__/nexus-t2.err
+
+[Install]
+WantedBy=default.target

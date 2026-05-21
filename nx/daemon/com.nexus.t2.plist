@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for the nexus T2 daemon (RDR-112, nexus-6w0c).
+  Installed by ``nx daemon t2 install --autostart``. The ``__NX_BIN__``
+  placeholder is substituted at install time with the resolved absolute
+  path to the ``nx`` executable.
+
+  nexus-uuuh: ``StandardOutPath`` / ``StandardErrorPath`` here are the
+  launchd-captured supervisor stream — used for interpreter crash
+  diagnostics (tracebacks, fork failures). The bounded primary daemon
+  log is ``~/.config/nexus/logs/daemon.log`` (10 MB rotation, 5 backups,
+  written via nexus.logging_setup.configure_logging("daemon")). launchd
+  does not rotate its capture file; if it grows large, the rotated log
+  is the canonical source of recent events.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nexus.t2</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NX_BIN__</string>
+        <string>daemon</string>
+        <string>t2</string>
+        <string>start</string>
+        <string>--foreground</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/nexus-t2.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/nexus-t2.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__PATH_ENV__</string>
+    </dict>
+</dict>
+</plist>
