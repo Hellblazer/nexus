@@ -75,6 +75,14 @@ for the map.
    path (the existing stores show the pattern — a module-level
    `_migrated_paths: set[str]` guard + `_migrated_lock`, checked
    in `__init__`).
+   - **Substrate boundary (RDR-120 §A8):** the migration body must
+     ship DDL only. Any work beyond DDL (per-row backfills, sweeps,
+     content seeding) belongs in a consumer verb under the matching
+     `nx <area>` command group, not in `migrations.py`. The narrow
+     set of exceptions lives in RDR-120 §Research Findings ("§A8-
+     exempt substrate-owned writes"); if your migration is not on
+     that list, it ships DDL-only and the data work moves to a
+     consumer verb.
 3. If external callers should be able to use the method via the
    `T2Database` facade for backward compatibility, add a one-line
    delegate on `T2Database` in `src/nexus/db/t2/__init__.py`.
