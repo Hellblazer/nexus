@@ -1,0 +1,30 @@
+## systemd user unit for the nexus T2 daemon (RDR-120 P3a.A, nexus-7aayk).
+## Installed by ``nx daemon t2 install --autostart``. The ``__NX_BIN__``
+## placeholder is substituted at install time with the resolved absolute
+## path to the ``nx`` executable.
+##
+## ``nx daemon t2 start`` IS the daemon process (asyncio loop owning
+## the SQLite handles + sockets); it always runs in the foreground so
+## systemd's supervision is the canonical lifecycle owner. There is no
+## ``--foreground`` flag because there is no detached mode.
+
+[Unit]
+Description=Nexus T2 daemon (memory + plans + chash + taxonomy + telemetry + aspects + queue + catalog)
+After=network.target
+PartOf=default.target
+
+[Service]
+Type=simple
+ExecStart=__NX_BIN__ daemon t2 start
+Restart=on-failure
+RestartSec=5s
+## SIGTERM-induced exits surface as code 143. Mark them as success so
+## ``nx daemon t2 stop`` (which sends SIGTERM) does not immediately
+## respawn through Restart=on-failure.
+SuccessExitStatus=143
+Environment=PATH=__PATH_ENV__
+StandardOutput=append:__LOG_DIR__/nexus-t2.log
+StandardError=append:__LOG_DIR__/nexus-t2.err
+
+[Install]
+WantedBy=default.target
