@@ -423,20 +423,25 @@ class StorageModeError(click.ClickException):
 def storage_mode() -> str:
     """Return the validated ``NX_STORAGE_MODE`` value.
 
-    RDR-120 P0.B scaffolding. Single source of truth for the storage
-    backend mode flag. Currently:
+    RDR-120 single source of truth for the storage backend mode flag:
 
     - unset / empty / whitespace -> ``"direct"`` (default)
     - ``"direct"`` (any case) -> ``"direct"``
-    - ``"daemon"`` (any case) -> raises ``StorageModeError`` with
-      "not yet supported at phase 0"
+    - ``"daemon"`` (any case) -> ``"daemon"`` (valid for T3 since
+      P2 cutover; T2 still routes library-mode until P4)
     - anything else -> raises ``StorageModeError`` naming the bad
       value and listing :data:`VALID_STORAGE_MODES`
 
-    The function exists at P0 to lock the env-var name and the
-    validation contract before any client wires the mode to actual
-    behavior. P3 / P4 will switch the daemon branch from rejection
-    to a daemon-client construction.
+    Phasing of the daemon branch:
+
+    - P0 (4.34): rejected with "not yet supported".
+    - P2 (4.35+): accepted for T3 reads/writes. ``make_t3()``
+      honours it and dispatches through ``make_t3_client()`` in
+      local mode. Cloud mode is unaffected (chromadb's CloudClient
+      is already HTTP-served; there is no local daemon to route
+      through).
+    - P4: accepted for T2 reads/writes as well; becomes the default
+      for new installs.
     """
     raw = os.environ.get("NX_STORAGE_MODE", "")
     normalized = raw.strip().lower()
@@ -445,12 +450,7 @@ def storage_mode() -> str:
     if normalized == "direct":
         return "direct"
     if normalized == "daemon":
-        raise StorageModeError(
-            "NX_STORAGE_MODE=daemon is not yet supported at phase 0 of "
-            "RDR-120 (storage substrate split). Set NX_STORAGE_MODE=direct "
-            "or unset the variable to use the current library-mode T2/T3 "
-            "backend. Daemon mode lands in P3."
-        )
+        return "daemon"
     raise StorageModeError(
         f"NX_STORAGE_MODE={raw!r} is not a recognized value. "
         f"Valid values: {', '.join(VALID_STORAGE_MODES)}."

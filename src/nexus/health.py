@@ -212,7 +212,20 @@ def _check_t3_local() -> list[HealthResult]:
     # a 0-chunk collection lingering after `nx store delete` of every entry.
     if path_exists:
         try:
-            client = chromadb.PersistentClient(path=str(local_path))
+            # RDR-120 P2: the probe is local-mode-by-contract (caller
+            # gated on is_local_mode()). In daemon mode the probe must
+            # NOT open a second PersistentClient against the same store
+            # because chromadb's WAL races between processes. Route
+            # through the T3 daemon's HttpClient instead. In direct
+            # mode the PersistentClient is the right call; epsilon-allow
+            # because this site is a contract-bound local probe rather
+            # than a substrate boundary violation.
+            from nexus.config import storage_mode
+            if storage_mode() == "daemon":
+                from nexus.daemon.t3_client import make_t3_client
+                client = make_t3_client()._client
+            else:
+                client = chromadb.PersistentClient(path=str(local_path))  # epsilon-allow: local-mode doctor probe by contract
             cols = client.list_collections()
             col_count = len(cols)
             empty_count = sum(1 for c in cols if c.count() == 0)
@@ -283,9 +296,12 @@ def _check_t3_cloud() -> list[HealthResult]:
     # ChromaDB reachability
     if chroma_key and chroma_database:
         try:
-            chromadb.CloudClient(
-                tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
-            )
+            # RDR-120 P2: route through make_t3 so the reachability
+            # probe exercises the same code path the indexer takes.
+            # Daemon mode is local-only; this branch only fires in
+            # cloud mode, so make_t3 dispatches to CloudClient.
+            from nexus.db import make_t3
+            make_t3()
             results.append(HealthResult(
                 label=f"ChromaDB  ({chroma_database})", ok=True, detail="reachable",
             ))
@@ -328,9 +344,11 @@ def _check_t3_cloud() -> list[HealthResult]:
         stale_count = 0
         pipeline_results: list[HealthResult] = []
         try:
-            client = chromadb.CloudClient(
-                tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
-            )
+            # RDR-120 P2: route through make_t3 for the cloud-mode
+            # pipeline-version sweep. Cloud-only branch; daemon does
+            # not apply.
+            from nexus.db import make_t3
+            client = make_t3()._client
             cols = client.list_collections()
             for col in cols:
                 # taxonomy__* collections are BERTopic aggregates (RDR-070),
@@ -828,9 +846,10 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
         chroma_tenant = get_credential("chroma_tenant")
         if chroma_key and chroma_database:
             try:
-                client = chromadb.CloudClient(
-                    tenant=chroma_tenant or None, database=chroma_database, api_key=chroma_key
-                )
+                # RDR-120 P2: route through make_t3. Cloud-only branch
+                # (gated by ``not _local``); daemon does not apply.
+                from nexus.db import make_t3
+                client = make_t3()._client
                 results.extend(_check_chroma_pagination(client, chroma_database))
             except Exception as exc:
                 _log.debug(
