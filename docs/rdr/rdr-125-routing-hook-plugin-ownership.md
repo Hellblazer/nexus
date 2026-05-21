@@ -2,12 +2,12 @@
 title: "Routing-Hook Plugin Ownership: Each Plugin Ships Its Own Rules"
 id: RDR-125
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-20
-accepted_date:
+accepted_date: 2026-05-20
 related_issues: []
 related_rdrs: [RDR-121, RDR-120]
 related_tests: []
@@ -177,17 +177,31 @@ without sn it would dead-end the user.
      Clean imports but blows the 40ms startup budget. Rejected.
   **Chosen mitigation: option 2**, with A3 softened accordingly.
 - [x] **A3** (revised): **Vendoring `_lib.py` in sn is acceptable
-  WITH a CI byte-equality guard.** **Status**: Asserted (High
-  confidence). **Method**: pragmatic refinement after A2 evidence.
-  The original A3 prohibited vendoring on drift grounds. A2 showed
-  the clean import path is structurally blocked by the stdlib-only
-  startup-budget constraint, leaving vendoring as the best of the
-  imperfect options. The drift risk is mitigated, not eliminated,
-  by a `tests/test_routing_lib_drift.py` byte-equality test: any
+  WITH a CI byte-equality guard, scoped to the monorepo
+  development model.** **Status**: Asserted (High confidence).
+  **Method**: pragmatic refinement after A2 evidence. The original
+  A3 prohibited vendoring on drift grounds. A2 showed the clean
+  import path is structurally blocked by the stdlib-only startup-
+  budget constraint, leaving vendoring as the best of the imperfect
+  options. The drift risk is mitigated, not eliminated, by a
+  `tests/test_routing_lib_drift.py` byte-equality test: any
   divergence between `nx/hooks/scripts/routing/_lib.py` and
   `sn/hooks/scripts/routing/_lib.py` fails CI loudly. The framework
   contract is frozen per RDR-121 § Locked Contracts; the rate of
   legitimate changes is low.
+  **Enforcement perimeter (gate critique fix-in-place):** the
+  byte-equality test runs in the nexus monorepo CI pipeline.
+  Because `nx/` and `sn/` both live in `/Users/hal.hildebrand/git/nexus/`
+  and ship through the same release pipeline (4.32.x, 4.33.0, ...
+  publish both plugins from the same tag), an sn-side modification
+  to `_lib.py` is caught by the same test that catches an nx-side
+  one — the test reads both files from a single working tree. The
+  guard is symmetric within this monorepo model. **Known
+  limitation**: if nx and sn ever split into separate marketplaces
+  or separate CI pipelines, the guard becomes one-directional (nx
+  CI catches nx-side edits; sn CI catches sn-side edits; neither
+  catches cross-edits). The current model holds for the foreseeable
+  release horizon; revisit if the split happens.
 - [x] **A4**: **The ownership rule generalizes cleanly.** Any future
   rule that names a plugin-specific tool ID in its redirect message
   should live in the plugin that ships that tool. **Status**: Asserted
@@ -234,6 +248,34 @@ needs no separate verification.
    test guards drift. The `nx hook routing-stats` CLI stays in nx
    and reads from the shared `~/.config/nexus/routing_log.jsonl` so
    it sees every plugin's events."
+
+   **Cross-plugin hook-count cap (gate critique fix-in-place):**
+   RDR-121 § Performance Expectations imposes a 4-hook cap on
+   PreToolUse:Bash. After RDR-125, that cap is an **aggregate**
+   across all installed plugins, not a per-plugin count: Claude
+   Code merges hook registrations from every plugin and fires them
+   sequentially on each matched call. The 4-hook cap protects the
+   <300ms p95 cumulative budget. Post-migration, the count is:
+   nx contributes 2 routing hooks (`git_add_all`,
+   `phase_review_close`) plus `pre_close_verification_hook.sh`;
+   sn contributes 1 (`grep_for_symbols`). Aggregate: 4. **At the
+   cap as of P1.** The P2 README in each plugin's routing/ directory
+   must state explicitly: "aggregate cap is 4 routing hooks across
+   nx + sn + any future plugin; current aggregate count is shown
+   below." A combined-registry audit script (`scripts/audit_routing_registry.py`)
+   reads both plugins' `registry.yaml` files and refuses to commit
+   when the union exceeds 4 — that lint is invoked in CI as a
+   sibling to `test_routing_lib_drift.py`. Adding a fifth hook in
+   ANY plugin requires consolidation or a budget revision in this
+   RDR's successor.
+
+   **Ownership rule scope (gate critique fix-in-place):** the rule
+   is stated for single-target hooks (one `mcp__plugin_<owner>_*`
+   tool in the redirect message). Multi-target hooks (a deny
+   message that names tools from two plugins) are out of scope for
+   this RDR; the README must say so explicitly so the first future
+   author who needs that case files a follow-on RDR rather than
+   silently inventing a convention.
 
 ### Anti-goals
 
@@ -310,6 +352,10 @@ landing:
 - `nx/hooks/scripts/routing/registry.yaml` (rule entry removed)
 - `nx/hooks/hooks.json` (matcher entry removed)
 - `tests/test_routing_lib_drift.py` (new — byte-equality guard)
+- `tests/test_routing_registry_aggregate_cap.py` (new — refuses to
+  commit when union of plugin registries exceeds 4 PreToolUse:Bash
+  rules; covers the cross-plugin cap that RDR-121 § Performance
+  Expectations imposed)
 - `tests/test_routing_grep_for_symbols.py` (path-updated)
 - `docs/rdr/rdr-121-hook-enforced-tool-routing.md` (frontmatter
   cross-reference)
@@ -364,3 +410,13 @@ To be run before acceptance. See `/nx:rdr-gate`.
   spike collapsed into P1. T2 evidence at `125-research-A1`
   (id=1384) and `125-research-A2` (id=1385). Chosen mechanism:
   vendor `_lib.py` with byte-equality CI guard.
+- 2026-05-20: gate-driven fix-in-place. Two Significant findings
+  from `/nx:rdr-gate 125` substantive-critic pass folded in:
+  (1) A3 enforcement perimeter scoped to monorepo development
+  model (symmetric guard within the current nexus monorepo; would
+  become one-directional if nx + sn ever split into separate
+  CI pipelines); (2) cross-plugin hook-count cap acknowledged in
+  P2 convention; new `tests/test_routing_registry_aggregate_cap.py`
+  added to Implementation Plan; ownership rule scoped explicitly
+  to single-target hooks with multi-target case deferred to a
+  follow-on RDR.
