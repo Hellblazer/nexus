@@ -2,16 +2,59 @@
 title: "Routing-Hook Plugin Ownership: Each Plugin Ships Its Own Rules"
 id: RDR-125
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-20
 accepted_date: 2026-05-20
+closed_date: 2026-05-21
+close_reason: implemented
+shipped_in: 4.33.1
 related_issues: []
 related_rdrs: [RDR-121, RDR-120]
-related_tests: []
-implementation_notes: ""
+related_tests:
+  - tests/test_routing_lib_drift.py
+  - tests/test_routing_registry_aggregate_cap.py
+  - tests/test_routing_grep_for_symbols.py
+implementation_notes: |
+  Shipped in conexus 4.33.1 (2026-05-21). All seven implementation
+  beads under epic nexus-z0yd2 closed:
+  - nexus-yxywl (Bead A): vendor _lib.py + drift guard (PR #898)
+  - nexus-i7mn2 (Bead B): copy hook to sn (PR #899)
+  - nexus-o0tth (Bead C): delete from nx (PR #899)
+  - nexus-2zeva (Bead D): aggregate-cap CI lint (PR #899)
+  - nexus-hnmfr (Bead E): repoint tests (PR #899)
+  - nexus-9hfcu (Bead F): READMEs + RDR-121 frontmatter cross-ref
+    (PR #899)
+  - nexus-pwq18 (Bead G): closeout — this RDR-close PR
+
+  Problem Statement closure pointers (Pass 2):
+  - Gap 1 (nx ships rules whose targets it does not control) ->
+    sn/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py:1
+    is now the home of the rule (moved out of nx).
+  - Gap 2 (no ownership rule for routing-hook placement) ->
+    nx/hooks/scripts/routing/README.md and
+    sn/hooks/scripts/routing/README.md document the rule:
+    "hook lives in the plugin that ships the redirect target".
+  - Gap 3 (no story for cross-plugin framework consumption) ->
+    tests/test_routing_lib_drift.py enforces byte-equality between
+    nx/hooks/scripts/routing/_lib.py and
+    sn/hooks/scripts/routing/_lib.py; vendoring is now the
+    documented mechanism.
+
+  Live shakeout (2026-05-21, conexus 4.33.1):
+  - Symbol-shaped `grep MyClass src/foo.py` correctly denied; deny
+    fires from sn-side hook (nx 4.33.1 has no grep script and no
+    registration).
+  - `nx hook routing-stats` reports the rule firing.
+  - No-sn case verified by file-layout: nx 4.33.1's
+    routing/ directory has only git_add_all and phase_review_close;
+    sessions loading nx without sn get no grep enforcement.
+
+  Cross-plugin aggregate-cap (RDR-121 + RDR-125): 4 PreToolUse:Bash
+  hooks at cap; tests/test_routing_registry_aggregate_cap.py refuses
+  commits past the cap.
 ---
 
 # RDR-125: Routing-Hook Plugin Ownership: Each Plugin Ships Its Own Rules
