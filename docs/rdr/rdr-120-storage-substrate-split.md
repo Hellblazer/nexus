@@ -579,6 +579,55 @@ process discipline actually failed.
   fixture-corpus standup work; this finding records the architectural
   lesson: substrate provides handle, consumer owns content.
 
+### §A8-exempt substrate-owned writes (authoritative list)
+
+Recorded 2026-05-21 from `nexus-q2t5t` following the A9 content audit
+(`120-research-A9-content-audit`, T2 id=1404). This is the canonical
+authority list: any future migration that would write rows beyond DDL
+must either land on this table with explicit justification or be
+rejected at gate-review time. The list is the symmetric companion to
+the §A9 remediation beads (`nexus-rv7x6`, `nexus-6y2a9`, `nexus-yulol`):
+the remediation beads move 10 substrate-violating migrations out to
+consumer verbs; the exemption table below names the writes that stay
+in the substrate and why.
+
+| Site (file:line) | Class | Justification |
+|---|---|---|
+| `src/nexus/db/migrations.py:2900-2938` (`_bootstrap_version` `INSERT OR IGNORE` of the `cli_version` singleton into `_nexus_version`) | substrate-required, deterministic-from-package | `apply_pending` cannot operate without this singleton row. Value is derived from package metadata, not from corpus state, so daemon-startup writes are reproducible across hosts. Singleton + `INSERT OR IGNORE` makes repeated startup writes idempotent. |
+| `migrate_document_aspects_pk_to_doc_id` PK-swap body proper (`src/nexus/db/migrations.py` v4.30.0; **excluding** the fixture-DELETE block at lines 1948-1954) | structurally-bound-to-schema | The new primary key cannot be populated without the catalog-JOIN backfill of `doc_id`; the backfill is structurally bound to the schema change in the same step. The fixture-DELETE block carved out separately under `nexus-yulol` is not exempt and ships as `nx aspects gc-fixtures`. |
+| `migrate_aspect_extraction_queue_pk_to_doc_id` PK-swap body proper (companion to the above, same release) | structurally-bound-to-schema | Same justification class. The backfill is structurally bound to the PK change. |
+| `migrate_hook_failures_chain_column` (`src/nexus/db/migrations.py` v4.14.2): `UPDATE` chain backfill bound to the `ADD COLUMN` step | structurally-bound-to-schema (marginal) | The chain-id backfill computes deterministically from existing row state at the same step that adds the column. Audited as a marginal case; kept exempt because the backfill cannot succeed at a later consumer-verb point: the new column would be NULL for the pre-existing rows and downstream consumers would have to defend against the NULL forever. Idempotent on re-run. |
+| `migrate_drop_source_path_column` (`src/nexus/db/migrations.py` v4.31.0): pre-flight audit-only abort | structural-gate-no-mutation | The step reads to detect unmigrated rows and refuses to proceed if any exist; it never mutates content. Counted under §A8 as a structural safeguard rather than a content write. |
+
+**Justification class glossary:**
+
+- *substrate-required*: `apply_pending` cannot complete its own work
+  without the write (typically a singleton bootstrap row).
+- *deterministic-from-package*: the written value derives from package
+  metadata or build artifacts, not from corpus / user / runtime state.
+  Reproducible across hosts.
+- *structurally-bound-to-schema*: the write is in the same step as a
+  DDL change and the DDL cannot ship without the data movement (e.g.,
+  populating a new PK column from a JOIN before the constraint is
+  enforced).
+- *structural-gate-no-mutation*: read-only audit pass that aborts the
+  step if a precondition fails. Counted as substrate work because it
+  guards substrate operations.
+
+**Authoring rule for future migrations.** A migration that wants to
+land a write beyond DDL must:
+
+1. Justify the write against one of the four classes above and PR-
+   open a patch to this table naming the site, the class, and the
+   reason in the same diff that introduces the migration.
+2. If no class fits, the write does not belong in `migrations.py`:
+   the work moves to a consumer verb (`nx <area> <verb>`) and the
+   migration ships DDL-only.
+
+Storage-boundary lint (`nx doctor --check-storage-boundary`) does not
+currently parse this table; enforcement is reviewer discipline at gate
+time until tooling closes the gap.
+
 ## Proposed Solution
 
 ### Approach
