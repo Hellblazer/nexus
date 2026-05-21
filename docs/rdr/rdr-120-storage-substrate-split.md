@@ -458,7 +458,8 @@ process discipline actually failed.
   cross-process-race-elimination invariant holds from P4+ steady
   state, NOT from P3 ship. P3 ships the T2 daemon but does NOT flip
   call sites: `NX_STORAGE_MODE=direct` remains the default for the
-  ≥7-day P3 soak, so direct-open `T2Database` construction continues
+  P3 validation window (stress harness only, no calendar gate), so
+  direct-open `T2Database` construction continues
   to call `apply_pending` per the existing pattern at
   `src/nexus/db/t2/__init__.py:178-225`. During the P3 window, daemon
   AND direct-open clients both run `apply_pending` via their own
@@ -633,28 +634,46 @@ time until tooling closes the gap.
 ### Approach
 
 Six phases (Phase 3 is split into 3a and 3b internally; see below).
-Each phase ships as one branch, one PR, one cutover. Each phase must
-be on `main` for **≥7 days** under real usage before the next opens.
-Linear, not parallel. The release of each phase is its own validation
-point.
+Each phase ships as one branch, one PR, one cutover. Linear, not
+parallel. The release of each phase is its own validation point.
 
-**P1 soak-gate exception (decision 2026-05-21):** the soak rule is
-suspended at the P1 -> P2 boundary specifically. P1 leaves the
-daemon dormant (`NX_STORAGE_MODE=direct` remains the only valid
-value; no call sites flip), so the soak window does not exercise
-the daemon and cannot surface the lifecycle bugs the rule was
-designed to catch. P1 collapses into P2; P2.A opens as soon as
-the last P1 PR merges. See the per-phase block below for the full
-rationale. The rule continues to apply unchanged at every later
-boundary (P2 / P3a / P3b / P4 / P5) where real traffic exercises
-the daemon and the soak buys runtime-bug exposure.
+**Validation regime (decision 2026-05-21, supersedes earlier
+calendar-soak text):** each phase must satisfy two gates before the
+next opens:
 
-**Soak-duration exception (gate critique fix-in-place, 2026-05-21):**
-the P3a sub-phase soaks ≥3 days because P3b is permitted to land
-within the P3a soak window. The COMBINED P3 soak — from P3a ship to
-P4 open — is ≥7 days end-to-end, matching the invariant for every
-other phase. The 3-day floor on P3a is the minimum interval before
-P3b may land; it is not a substitute for the full P3 soak window.
+1. **Stress harness passes**: the per-phase scenario suite in
+   `tests/stress/` runs to completion under a containerized daemon
+   with all scenarios green. The harness covers concurrency storms,
+   connection churn, daemon crash + supervisor respawn, spawn-lock
+   contention, malformed input, slow / dead clients, process
+   suspend/resume (sleep/wake analogue), memory profile, discovery
+   file lifecycle, and HttpClient/HttpServer timeout invariants. CI
+   runs the harness on every phase PR; merge is gated on green.
+2. **Phase-review-gate cross-walk PASSED**: structural verification
+   that every `§Approach` item for the phase has a closing bead (or
+   is explicitly deferred) and no closing bead implements anything
+   on the `§Out of scope` banlist.
+
+That is the full list. The earlier intermediate amendment kept a
+24-hour shakedown window after merge as "residual catch for what
+the harness misses"; further reflection retired it. Same critique
+as the original 7-day soak: passive observation only catches what
+the operator happens to surface. If the harness covers the failure
+class, the shakedown adds nothing; if it does not, calendar time
+does not fill the gap. The honest move is to make the harness
+cover the surface and gate purely on it. Operator-observed
+regressions remain a normal `revert or fix forward` event; they
+just are not formalised as a phase gate.
+
+**P1 -> P2 soak-gate exception (decision 2026-05-21):** P1 collapses
+into P2 (separate amendment). The P1 daemon was dormant by design;
+no traffic, no soak value. The stress-harness regime above applies
+from P2 onward.
+
+**P3 sub-phase composition (gate critique fix-in-place, 2026-05-21):**
+P3a and P3b are bisectability splits, not validation splits. P3b
+may land immediately once the P3a harness passes; there is no
+calendar interval between them.
 
 **Phase 0: Lint + cutover flag scaffolding**
 
@@ -724,7 +743,8 @@ exposure.
   daemon-internal access).
 - `NX_STORAGE_MODE=daemon` becomes valid for T3 reads/writes.
 - Full pytest + integration suite green under `NX_STORAGE_MODE=daemon`.
-- ≥7 days on `main` under real usage before P3 opens.
+- Stress harness `tests/stress/test_t3_daemon_stress.py` green
+  before P3 opens (per §Approach validation regime).
 
 **Phase 3a: T2 daemon ships (transport only)**
 
@@ -746,15 +766,15 @@ exposure.
   `apply_pending` per A6's P3 transition mitigation.**
 - T2 call sites do not flip yet (`NX_STORAGE_MODE=direct` is still
   the default). Daemon mode exercised via the daemon E2E suite.
-- **The P3 MVV runs during the P3a soak** (gate critique fix-in-place):
-  two `claude -p` sub-processes in different working dirs construct
-  `T2Client` against the live daemon and share `memory_put` /
-  `memory_get` (cross-process daemon-mediated state). The MVV
-  validates client-traffic against the daemon — only the global
-  call-site flip is deferred to P4.
-- Soak: ≥3 days minimum before P3b may land. (See §Approach soak-
-  duration exception: combined P3 soak is ≥7 days from P3a ship to
-  P4 open.)
+- **The P3 MVV runs during the P3a shakedown**: two `claude -p`
+  sub-processes in different working dirs construct `T2Client`
+  against the live daemon and share `memory_put` / `memory_get`
+  (cross-process daemon-mediated state). The MVV validates
+  client-traffic against the daemon; only the global call-site flip
+  is deferred to P4.
+- Validation: stress harness `tests/stress/test_t2_daemon_stress.py`
+  green. P3b may land as soon as the P3a harness passes (per §Approach
+  P3 sub-phase composition; no calendar interval).
 
 **Phase 3b: Migration ownership transfer**
 
@@ -775,7 +795,9 @@ exposure.
   allowlisted in P0; allowlist removed for all migrated sites).
 - `NX_STORAGE_MODE=daemon` is the default for new installs; `direct` is
   retained as a debug fallback.
-- 7-day soak under daemon mode.
+- Stress harness `tests/stress/test_t2_daemon_stress.py` green
+  before P5 opens. Full pytest + integration suite green under
+  `NX_STORAGE_MODE=daemon`.
 
 **Phase-boundary forcing function: catalog-allowlist non-increase**
 (gate critique fix-in-place, 2026-05-21). At each phase-review-gate
@@ -904,7 +926,9 @@ that document.
   footnote.
 - Phase 1/2 placeholders ("to be expanded during /nx:create-plan") are
   exactly the softness that let scope creep in. The new RDR encodes
-  P0-P6 phasing and the ≥7-day cadence as RDR-level commitments.
+  P0-P6 phasing and the per-phase validation regime (stress harness +
+  per-phase stress harness, per the 2026-05-21 amendments) as RDR-level
+  commitments.
 
 **Reason for rejection**: The most load-bearing change is the
 *discipline*. A fresh document carries it visibly; an amended document
@@ -964,8 +988,13 @@ API credentials.
 - (−) Ad-hoc DB access (`sqlite3 ~/.nexus/t2.db`, DBeaver, Datasette)
   disappears when nexus runs in its own container. `nx daemon t2 exec
   --raw <SQL>` is the supported replacement.
-- (−) Six phases × ≥7 days each = ~6 weeks calendar minimum. Slower than
-  the previous attempt's intended pace by ~2x, and ~10x more confident.
+- (−) Six phases × stress harness runtime = ~minutes per phase
+  after the substrate work itself completes (the original
+  `≥7 days each = ~6 weeks` calendar burden was retired in the
+  2026-05-21 stress-harness amendment, and the residual 24h
+  shakedown window was retired in a follow-on amendment the same
+  day; cadence is now bounded purely by harness runtime, not by
+  calendar observation).
 
 ### Risks and Mitigations
 
@@ -1016,8 +1045,11 @@ API credentials.
 - **Version mismatch**: client refuses to connect; report both versions.
 - **Daemon healthy, data corrupt**: same as today (SQLite/chroma surface
   their own errors); daemon does not mask them.
-- **Phase exceeds ≥7-day soak with a regression**: do not open the next
-  phase; fix or revert.
+- **Stress harness regression**: do not open the next phase; fix the
+  regression or revert the phase commit.
+- **Operator-observed regression after merge**: normal `revert or fix
+  forward` event; not a phase gate (the 24h shakedown gate that used
+  to formalise this was retired same-day as the harness amendment).
 
 ## Implementation Plan
 
@@ -1294,3 +1326,5 @@ counterfactual.
   - **C4-correction** A6 P3 transition prose rewritten to cite the accurate safety story: SQLite statement-level write locking serializes DDL writers (loser gets SQLITE_BUSY and retries); step idempotency (every `_MIGRATIONS` entry uses `IF NOT EXISTS` / `PRAGMA table_info` / `INSERT OR IGNORE` guards) makes retries no-ops. `_upgrade_lock` is `threading.RLock`, process-local only, per the docstring at `migrations.py:2886-2894`. Step idempotency is the load-bearing cross-process invariant — a future non-idempotent migration step would silently break P3 safety; CI lint flagging unguarded DDL in migration functions is a deferred option.
   - **A5 inventory accuracy confirmed** by pass 4: the only `sqlite3.connect` sites in `src/nexus/catalog/` are `catalog_db.py:255` and `synthesizer.py:792`. `catalog_sync.py` imports `sqlite3` for exception classes only; not a connect site. P5 `count == 0` assertion is achievable as stated.
 - 2026-05-21: P1 soak-gate exception. P1 -> P2 boundary soak removed; P1 collapses into P2 once the last P1 PR merges. Rationale: P1 leaves the daemon dormant (`NX_STORAGE_MODE=direct` only; no call sites flip), so the soak window does not exercise the daemon and cannot surface the lifecycle bugs it was designed to catch. The scope-discipline class motivating the soak in the RDR-110-113 postmortem was caught by the phase-review-gate cross-walk and the 4-pass adversarial critic, not by calendar exposure. Those gates already ran on P1 (gate PASSED via `nexus-ldztl` + cross-PR review folded as `cfaab35d`). Closes `nexus-6ret6`. Rule preserved at every later boundary (P2 / P3a / P3b / P4 / P5) where real traffic does exercise the daemon. §Approach Phase 1 block carries the per-phase note.
+- 2026-05-21: Stress-harness validation regime (supersedes the per-phase `≥7 days under real usage` rule for all remaining phases). The calendar soak relied on operators happening to exercise the failure modes during the window; deterministic stress scenarios in a containerized harness catch the same bugs in minutes and add coverage for cases passive observation never reaches (concurrency storms, process kill recovery, spawn-lock contention, malformed-input edge cases, suspend/resume sleep-wake analogue, memory profile over insert/delete cycles, discovery file lifecycle, HttpClient timeout invariants). Each phase ships a section of the harness covering its new code paths; merge gates on the harness passing in CI plus 24h of shakedown on `main`. P3 sub-phase composition simplified: P3b may land inside the 24h P3a shakedown window once the P3a harness passes; combined P3 shakedown clock starts at P3b ship. The `nexus-ow1ao` / `nexus-89pp7` / `nexus-4901f` / `nexus-qeywv` / `nexus-b5ezj` / `nexus-o3s8i` beads retain their gate role with the new acceptance (harness + 24h). §Approach intro carries the validation-regime paragraph; per-phase blocks updated to cite the harness file name. §Trade-offs cadence row updated. §Failure Modes regression entries split into stress-harness and shakedown columns.
+- 2026-05-21: 24h shakedown retired (same-day follow-on amendment). Same critique as the original 7-day soak applied: passive operator observation only catches what the operator happens to surface; if the harness covers the failure class the shakedown adds nothing, and if it does not, calendar time does not fill the gap. Phase gates are now purely (1) stress harness passes + (2) phase-review-gate cross-walk PASSED. Operator-observed regressions remain a normal `revert or fix forward` event; they are not formalised as a phase gate. The six soak beads (`nexus-ow1ao` / `nexus-89pp7` / `nexus-4901f` / `nexus-qeywv` / `nexus-b5ezj` / `nexus-o3s8i`) become redundant: each phase already has a phase-review-gate bead that performs the cross-walk against the harness deliverable. The soak beads close as deprecated by this amendment; only the P6 moratorium-lift portion of `nexus-o3s8i` (the 30-day post-P6 window before consumer RDRs may file) is a separate governance concern and remains tracked. §Approach intro / per-phase blocks / §Trade-offs / §Failure Modes all updated.
