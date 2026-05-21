@@ -1749,31 +1749,20 @@ def migrate_drop_null_aspect_rows(conn: sqlite3.Connection) -> None:
 
 # ── RDR-108 Phase 1c: Aspect PK migration helpers ───────────────────────────
 
-#: Fixture collection prefixes to hard-delete during aspect PK migration.
-#: These collections were created by the test suite and should never have
-#: persisted into production; dropping them is safe.
-_FIXTURE_COLLECTION_PATTERNS: tuple[str, ...] = (
-    "knowledge__cli-",
-    "knowledge__nexus-integration-test",
-    "knowledge__reproducer",
-    "knowledge__pagtest",
-    "knowledge__pagend",
-)
-
 #: Default row count above which an unmapped orphan collection triggers a
 #: fail-loud error rather than a silent hard-delete. Operators must curate
-#: ``collections.superseded_by`` for these before running the migration.
+#: ``collections.superseded_by`` for these (or run ``nx aspects gc-fixtures``
+#: for known test-fixture prefixes) before running the migration.
 #: OBS-4: Override at runtime with NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD
 #: env var (read fresh on each call to _check_high_volume_orphans).
+#:
+#: RDR-120 §A8 / nexus-yulol: the fixture-DELETE block that previously
+#: ran at Step 2 of each PK-swap migration was carved out to the
+#: consumer verb ``nx aspects gc-fixtures``. The substrate retains
+#: only the structurally-required PK swap; operators run the fixture
+#: cleanup explicitly against named patterns. ``_FIXTURE_COLLECTION_PATTERNS``
+#: and ``_is_fixture_collection`` moved to ``nexus.commands.aspects``.
 _HIGH_VOLUME_ORPHAN_THRESHOLD: int = 10
-
-
-def _is_fixture_collection(collection: str) -> bool:
-    """Return True iff *collection* is a test-fixture collection to hard-delete."""
-    for prefix_or_name in _FIXTURE_COLLECTION_PATTERNS:
-        if collection.startswith(prefix_or_name) or collection == prefix_or_name:
-            return True
-    return False
 
 
 def _attach_catalog(conn: sqlite3.Connection, catalog_db_path: Path) -> None:
@@ -1920,20 +1909,26 @@ def migrate_document_aspects_pk_to_doc_id(
     ``(collection, source_path)`` to ``(doc_id)``.
 
     SQLite does not support ``DROP CONSTRAINT`` or ``ADD PRIMARY KEY``, so
-    this uses the 12-step ALTER pattern:
+    this uses an ALTER pattern:
 
     1. Add ``doc_id TEXT NOT NULL DEFAULT ''`` to the existing table.
-    2. Delete test-fixture collection rows (hard-delete, safe).
-    3. Backfill ``doc_id`` via JOIN against catalog ``documents``.
+    2. Backfill ``doc_id`` via JOIN against catalog ``documents``.
        Pass 1: direct (collection, file_path) match.
        Pass 2: one-hop ``collections.superseded_by`` chain.
-    4. Raise ``MigrationError`` if any non-fixture collection has
-       >10 unmapped rows (operator must curate supersede mappings first).
-    5. Hard-delete remaining low-volume unmapped rows.
-    6. CREATE TABLE ``document_aspects_new`` with ``PRIMARY KEY (doc_id)``
+    3. Raise ``MigrationError`` if any collection has >10 unmapped rows
+       (operator must curate supersede mappings first; for known test-
+       fixture prefixes run ``nx aspects gc-fixtures --yes`` first).
+    4. Hard-delete remaining low-volume unmapped rows.
+    5. CREATE TABLE ``document_aspects_new`` with ``PRIMARY KEY (doc_id)``
        and current columns; INSERT from old (deduplicating by latest
        ``extracted_at`` when two old rows collapse to same doc_id).
-    7. DROP TABLE old; RENAME new; recreate indexes.
+    6. DROP TABLE old; RENAME new; recreate indexes.
+
+    RDR-120 §A8 (nexus-yulol): the fixture-row hard-delete that used
+    to run as Step 2 moved to the consumer verb ``nx aspects gc-fixtures``.
+    Operators with known test-fixture collections must run the verb
+    before the migration; otherwise high-volume fixture rows trip
+    Step 3.
 
     Idempotent: if ``doc_id`` is already the sole PK, returns immediately.
 
@@ -1959,31 +1954,19 @@ def migrate_document_aspects_pk_to_doc_id(
         )
         conn.commit()
 
-    # Step 2: hard-delete test-fixture rows first (before catalog JOIN)
-    for pattern in _FIXTURE_COLLECTION_PATTERNS:
-        if pattern.endswith("-"):
-            conn.execute(
-                "DELETE FROM document_aspects WHERE collection LIKE ?",
-                (pattern + "%",),
-            )
-        else:
-            conn.execute(
-                "DELETE FROM document_aspects WHERE collection = ?",
-                (pattern,),
-            )
-    conn.commit()
-
-    # Steps 3: backfill doc_id via catalog JOIN
+    # Step 2: backfill doc_id via catalog JOIN
+    # (RDR-120 §A8 / nexus-yulol: the fixture-DELETE pre-step that
+    # previously ran here moved to ``nx aspects gc-fixtures``.)
     _attach_catalog(conn, catalog_db_path)
     try:
         _backfill_doc_ids_via_catalog(conn, table="document_aspects")
 
-        # Step 4: fail-loud for high-volume unmapped collections
+        # Step 3: fail-loud for high-volume unmapped collections
         _check_high_volume_orphans(conn, table="document_aspects")
     finally:
         _detach_catalog(conn)
 
-    # Step 5: hard-delete remaining low-volume unmapped rows
+    # Step 4: hard-delete remaining low-volume unmapped rows
     dropped = _hard_delete_unmapped(conn, table="document_aspects")
     if dropped:
         _log.info(
@@ -1991,7 +1974,7 @@ def migrate_document_aspects_pk_to_doc_id(
             count=dropped,
         )
 
-    # Steps 6-7: CREATE new table with (doc_id) PK, INSERT deduped rows,
+    # Steps 5-6: CREATE new table with (doc_id) PK, INSERT deduped rows,
     # DROP old, RENAME, recreate indexes.
     #
     # K3 fix (RDR-108 Phase 1, nexus-lh8c): atomic table swap via explicit
@@ -2086,9 +2069,14 @@ def migrate_aspect_extraction_queue_pk_to_doc_id(
     PK swap and the worker would silently lose those extractions. Raises
     ``MigrationError`` if the precondition fails.
 
-    Uses the same 12-step ALTER pattern as ``migrate_document_aspects_pk_to_doc_id``.
+    Uses the same ALTER pattern as ``migrate_document_aspects_pk_to_doc_id``.
     The queue is typically empty in production at migration time, but the
     migration handles non-empty queues (of failed rows only) correctly.
+
+    RDR-120 §A8 (nexus-yulol): the fixture-row hard-delete that used
+    to run as Step 2 moved to ``nx aspects gc-fixtures``. Operators
+    with known test-fixture collections must run the verb before the
+    migration.
 
     Idempotent: if ``doc_id`` is already the sole PK, returns immediately.
 
@@ -2127,21 +2115,9 @@ def migrate_aspect_extraction_queue_pk_to_doc_id(
         )
         conn.commit()
 
-    # Step 2: hard-delete test-fixture rows
-    for pattern in _FIXTURE_COLLECTION_PATTERNS:
-        if pattern.endswith("-"):
-            conn.execute(
-                "DELETE FROM aspect_extraction_queue WHERE collection LIKE ?",
-                (pattern + "%",),
-            )
-        else:
-            conn.execute(
-                "DELETE FROM aspect_extraction_queue WHERE collection = ?",
-                (pattern,),
-            )
-    conn.commit()
-
-    # Step 3: backfill doc_id via catalog JOIN (only for failed rows at this point)
+    # Step 2: backfill doc_id via catalog JOIN (only for failed rows at this point).
+    # (RDR-120 §A8 / nexus-yulol: fixture-DELETE pre-step moved to
+    # ``nx aspects gc-fixtures``.)
     _attach_catalog(conn, catalog_db_path)
     try:
         _backfill_doc_ids_via_catalog(conn, table="aspect_extraction_queue")
@@ -2149,7 +2125,7 @@ def migrate_aspect_extraction_queue_pk_to_doc_id(
     finally:
         _detach_catalog(conn)
 
-    # Step 4: hard-delete remaining unmapped low-volume rows
+    # Step 3: hard-delete remaining unmapped low-volume rows
     dropped = _hard_delete_unmapped(conn, table="aspect_extraction_queue")
     if dropped:
         _log.info(
@@ -2157,7 +2133,7 @@ def migrate_aspect_extraction_queue_pk_to_doc_id(
             count=dropped,
         )
 
-    # Steps 5-7: CREATE new table with (doc_id) PK; dedup by latest enqueued_at.
+    # Steps 4-6: CREATE new table with (doc_id) PK; dedup by latest enqueued_at.
     #
     # K3 fix (RDR-108 Phase 1, nexus-lh8c): atomic table swap via explicit
     # conn.execute() inside "with conn:". See migrate_document_aspects_pk_to_doc_id
