@@ -2,12 +2,12 @@
 title: "Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers"
 id: RDR-120
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-19
-accepted_date:
+accepted_date: 2026-05-21
 related_issues: []
 related_rdrs: [RDR-004, RDR-041, RDR-105, RDR-108, RDR-112]
 supersedes: [RDR-112]
@@ -208,6 +208,10 @@ has been on `main` continuously for ≥30 days under `NX_STORAGE_MODE=daemon`.
   and any new abstraction that wraps the migration step itself. The
   daemon owns `apply_pending`; that is the substrate's entire migration
   responsibility. Generalized migration helpers are a consumer concern.
+  **Exception**: the daemon's own startup sequence calling
+  `apply_pending` across the seven domain stores is substrate-internal
+  and not subject to this moratorium — that's the daemon doing its job,
+  not an externalized helper.
 - Telemetry / breadcrumb instrumentation crossing the daemon boundary.
   The substrate may emit structured logs about its own lifecycle (start,
   stop, migration, RPC handler errors). It must not introduce a
@@ -462,15 +466,45 @@ process discipline actually failed.
   yet eliminated in P3 — the daemon's `apply_pending` is one more
   concurrent runner alongside the direct-open ones.
 
-  **P3 transition mitigation:** enforce daemon-starts-before-clients
-  ordering via the systemd / launchctl unit. The daemon's
-  `apply_pending` fires once at startup; direct-open clients still
-  run their own `apply_pending` on construction but are unlikely to
-  collide with a daemon that has already finished startup migrations
-  before any client opens. The `nexus-9eaz` stress test is RE-ARMED
-  for the P3 window, recast as: "daemon startup running concurrently
-  with a direct-open `T2Database` construction must not produce a
-  migration collision."
+  **P3 transition mitigation (revised after gate pass 4, 2026-05-21):**
+  the P3 race is NOT prevented during the transition window; it is
+  acknowledged and the design is safe under it. systemd / launchctl
+  ordering helps for systemd-managed clients but cannot constrain
+  `claude -p` subprocesses (forked by an active Claude Code session
+  outside systemd's dependency graph) that open T2 directly while
+  the daemon is mid-startup. **The actual cross-process safety story
+  is:** (a) SQLite's statement-level write serialization — only one
+  writer holds a write lock at a time at the OS level, so two
+  processes racing on DDL get serialized by SQLite itself with the
+  loser receiving `SQLITE_BUSY` and retrying — and (b) migration
+  step idempotency — every step in `_MIGRATIONS` uses `IF NOT EXISTS`,
+  `PRAGMA table_info`, or `INSERT OR IGNORE` guards, so a step
+  already applied by the winner is a no-op when the loser retries.
+  Note: `_upgrade_lock` in `src/nexus/db/migrations.py:2877` is a
+  `threading.RLock` and provides ONLY within-process serialization;
+  the docstring at `:2886-2894` explicitly states "Process-level
+  only — cross-process safety relies on `INSERT OR IGNORE`". There
+  is no `BEGIN EXCLUSIVE` wrap in `apply_pending`. Step idempotency
+  is therefore the load-bearing invariant for cross-process safety
+  during the P3 window — any migration step that violates it (e.g.
+  a bare `INSERT INTO ... VALUES` without `OR IGNORE` or version
+  guard) silently breaks this guarantee. The `nexus-9eaz` stress
+  test is RE-ARMED for the P3 window, recast as: "daemon startup
+  running concurrently with a direct-open `T2Database` construction
+  must converge to the expected schema version without corruption;
+  SQLITE_BUSY retries are acceptable; partial migrations are
+  unacceptable." The test must verify step-level idempotency, not
+  just aggregate convergence. If the test surfaces non-idempotent
+  migration steps, those must be fixed before P3 ships (the
+  idempotency requirement is on the migration code, not on the
+  daemon). A CI lint that flags `INSERT INTO` / `CREATE TABLE` /
+  `ALTER TABLE` in migration functions without an accompanying
+  guard is a future option, deferred until empirically needed.
+  Hard cross-process serialization via
+  `_locking.acquire_directory_lock` around the `apply_pending` call
+  site is also documented as a deferred option — not adopted now
+  because step idempotency + SQLite statement-level locking
+  already provides the safety guarantee that matters.
 
   **P4 implementation: flip `NX_STORAGE_MODE` default to `daemon`,
   remove `apply_pending` from `T2Client` and direct-open `T2Database`
@@ -549,10 +583,18 @@ process discipline actually failed.
 
 ### Approach
 
-Six phases. Each ships as one branch, one PR, one cutover. Each phase must
+Six phases (Phase 3 is split into 3a and 3b internally; see below).
+Each phase ships as one branch, one PR, one cutover. Each phase must
 be on `main` for **≥7 days** under real usage before the next opens.
 Linear, not parallel. The release of each phase is its own validation
 point.
+
+**Soak-duration exception (gate critique fix-in-place, 2026-05-21):**
+the P3a sub-phase soaks ≥3 days because P3b is permitted to land
+within the P3a soak window. The COMBINED P3 soak — from P3a ship to
+P4 open — is ≥7 days end-to-end, matching the invariant for every
+other phase. The 3-day floor on P3a is the minimum interval before
+P3b may land; it is not a substitute for the full P3 soak window.
 
 **Phase 0: Lint + cutover flag scaffolding**
 
@@ -567,6 +609,12 @@ point.
 - CI step runs the lint with `--fail-on-violation`. Initial run reports
   the existing 30+ direct-open sites; baseline is recorded as the
   allowlist for P1-P5 migration progress.
+- **P0 lint also emits the catalog-allowlist count as a structlog
+  metric** on each run, recorded to T2 at key
+  `120-phase-0-catalog-allowlist-count` (baseline 2). The
+  phase-boundary forcing function from P1 onward reads this baseline
+  and asserts non-increase. See the catalog-allowlist non-increase
+  paragraph after Phase 4 for the schema and per-phase keys.
 - No client API changes. No daemon code yet.
 
 **Phase 1: T3 daemon (managed `chroma run`)**
@@ -575,7 +623,15 @@ point.
 - Daemon process: spawn-and-supervise `chroma run` with explicit port and
   data path. Loopback TCP only (chromadb upstream constraint).
 - Discovery file: `~/.config/nexus/t3_addr.<uid>` containing the chroma
-  HTTP address. Env override: `NX_T3_ADDR`.
+  HTTP address. Env override: `NX_T3_ADDR`. The C2 precedence rule
+  applies to `T3Client` constructions: env var wins when set and
+  non-empty; file is the fallback; fail-loud on unreachable env-var
+  target. **Phasing note**: until P2 migrates the four direct
+  `chromadb.PersistentClient` / `CloudClient` call sites in
+  `src/nexus/health.py` to go through `T3Client`, those sites
+  bypass C2 by construction (they are allowlisted A5 sites awaiting
+  migration). C2 is enforced for all callers reaching T3 via
+  `T3Client`, not for raw chromadb construction.
 - `T3Client` factory: returns an `HttpClient`-backed wrapper whose API
   signature matches the current `T3Database` PersistentClient surface.
 - T3 call sites do **not** flip yet. `NX_STORAGE_MODE=direct` remains the
@@ -613,9 +669,15 @@ point.
   `apply_pending` per A6's P3 transition mitigation.**
 - T2 call sites do not flip yet (`NX_STORAGE_MODE=direct` is still
   the default). Daemon mode exercised via the daemon E2E suite.
-- MVV: two `claude -p` sub-processes in different working dirs share
-  `memory_put` / `memory_get` (cross-process daemon-mediated state).
-- Soak: ≥3 days.
+- **The P3 MVV runs during the P3a soak** (gate critique fix-in-place):
+  two `claude -p` sub-processes in different working dirs construct
+  `T2Client` against the live daemon and share `memory_put` /
+  `memory_get` (cross-process daemon-mediated state). The MVV
+  validates client-traffic against the daemon — only the global
+  call-site flip is deferred to P4.
+- Soak: ≥3 days minimum before P3b may land. (See §Approach soak-
+  duration exception: combined P3 soak is ≥7 days from P3a ship to
+  P4 open.)
 
 **Phase 3b: Migration ownership transfer**
 
@@ -649,17 +711,37 @@ the call site is genuinely required and P5 cutover must absorb the
 additional removal, or the call site was added in error and must be
 removed before phase close. The P0 lint emits the catalog-allowlist
 count as a structlog metric on each run; the phase-review-gate
-records the metric to T2 (key `120-phase-N-catalog-allowlist-count`)
-and asserts non-increase against the previous phase's recorded
-value.
+records the metric to T2 and asserts non-increase against the
+previous phase's recorded value.
+
+**Metric key schema:** keys are
+`120-phase-<id>-catalog-allowlist-count` where `<id>` is the phase
+designator (`0`, `1`, `2`, `3a`, `3b`, `4`, `5`). P3a writes
+`120-phase-3a-catalog-allowlist-count`; P3b writes
+`120-phase-3b-catalog-allowlist-count`. The non-increase assertion
+compares P3a against P2's recorded value and P3b against P3a's
+recorded value. P4 compares against P3b. P5 expects 0.
 
 **Phase 5: Catalog collapse into T2**
 
+- **Pre-P5 prerequisite (gate critique fix-in-place):** the A9
+  content-seeding audit (P0 prerequisite, originally covering the
+  seven T2 domain stores) MUST be re-run against CatalogDB and
+  `catalog/synthesizer.py` before P5 opens. Any content seeding
+  uncovered in the catalog code path follows the same A8 policy:
+  either migrate to a consumer RDR (the rule owns its content) or
+  demote to DDL-only (the consumer writes the seed on first use).
+  Audit output recorded as `120-research-A9-catalog-extension`.
 - `CatalogDB` (`src/nexus/catalog/catalog_db.py`) ports its schema and
   read/write surface into T2 as the eighth domain store. Catalog client
   goes through `T2Client`.
 - Direct `sqlite3.connect` in `catalog_db.py:255` and `synthesizer.py:792`
   deleted.
+- **Catalog-allowlist metric assertion at P5: `count == 0`
+  explicitly** (not just "≤ P4's recorded value"). The monotonic-
+  non-increase rule plus an explicit zero assertion at P5 catches
+  the case where the count has decreased but a residual call site
+  remains.
 - Catalog test suite plus indexer-pipeline dogfood validates.
 
 **Phase 6: Decommission `direct` mode**
@@ -812,10 +894,35 @@ API credentials.
 
 - **Risk**: Daemon crash leaves clients hanging.
   **Mitigation**: Health-check + auto-respawn; clients fail loud with
-  recovery instructions, no silent fallback to direct file.
+  recovery instructions, no silent fallback to direct file. **No
+  client-side retry budget within the substrate**: clients see the
+  failure and surface it; retry orchestration is a consumer concern
+  and belongs in RDR-115 (T2 daemon request tracing) territory, not
+  in the substrate.
+- **Risk**: Daemon killed (SIGTERM/SIGKILL) mid-`apply_pending` on
+  first ever start.
+  **Mitigation**: SQLite's WAL durability handles this by construction.
+  An interrupted DDL transaction is rolled back on next open; partial
+  schema state is not persisted. The daemon needs no signal-aware
+  checkpointing for migration safety; idempotent migration steps
+  (per A6's recast nexus-9eaz test) make resumption a no-op for
+  already-applied steps.
 - **Risk**: Auto-spawn races between concurrent first-use clients.
-  **Mitigation**: Filesystem-lock-mediated spawn (spawner takes a lock
-  on the discovery file before forking).
+  **Mitigation**: Filesystem-lock-mediated spawn. The spawner calls
+  `acquire_directory_lock` (see `src/nexus/_locking.py`) on
+  `~/.config/nexus/` — flock on the directory fd on Unix, sentinel
+  `.lock` file on Windows — before forking the daemon, releasing
+  only after the discovery file is written. The discovery file
+  itself does not exist when auto-spawn is needed, so the lock
+  target must be the parent directory, not the discovery file.
+  **Auto-spawn precondition (gate critique fix-in-place, 2026-05-21):**
+  auto-spawn fires only when the env var (`NX_T<n>_SOCK` /
+  `NX_T<n>_ADDR`) is UNSET and the discovery file does not exist.
+  When the env var IS set but its target is unreachable, the client
+  fails loud per the C2 precedence rule rather than attempting
+  spawn. Operator-set env vars are an explicit override — an
+  unreachable target points at operator misconfiguration, not at
+  a missing daemon, and silent spawn would mask the misconfig.
 - **Risk**: Sandbox containers with no host filesystem visibility.
   **Mitigation**: `NX_T2_SOCK` / `NX_T2_ADDR` / `NX_T3_ADDR` env-var
   injection as co-primary discovery; daemon binds both UDS and TCP and
@@ -903,9 +1010,15 @@ hand-rolled JSON-on-the-wire framing, or
 reachable by any process whose UID can open the socket file; pickle
 over that surface is an arbitrary-code-execution primitive. The
 chosen transport is `socketserver` with length-prefixed JSON frames.
-A T2 transport design note (length prefix, JSON envelope shape,
-error frame schema, max frame size, timeout semantics) ships
-alongside the daemon scaffold at P0.
+A T2 transport design note ships alongside the daemon scaffold at
+P0 covering: length prefix, JSON envelope shape, error frame
+schema, max frame size, timeout semantics, and **binary-column
+encoding** (e.g. base64 for SQLite BLOB results from `sqlite_master`
+or any future BLOB-typed column — JSON cannot natively represent
+bytes). The seven T2 domain stores currently do not store binary
+payloads (chash values are hex strings; embedding vectors live in
+T3, not T2), so binary encoding is a forward-compatibility concern
+rather than a Phase 3 hot-path issue.
 
 ## Test Plan
 
@@ -939,8 +1052,14 @@ alongside the daemon scaffold at P0.
   daemon (which calls `apply_pending` at startup) and concurrently
   construct a direct-open `T2Database` (which also calls
   `apply_pending`). **Verify**: no migration collision; both paths
-  complete successfully against the same schema. *(A6 P3-transition
-  verification, gate critique fix-in-place.)*
+  complete successfully against the same schema; **post-test
+  schema_version query returns the expected target version**
+  (idempotency, not just non-error). *(A6 P3-transition verification,
+  gate critique fix-in-place.)*
+- **Scenario**: Discovery happy path (modal usage). Unset
+  `NX_T2_ADDR`; the addr file points at a live daemon. **Verify**:
+  client connects and completes a `memory_put` / `memory_get` round
+  trip. *(C2 happy-path verification.)*
 - **Scenario**: Discovery split-brain. Set `NX_T2_ADDR` to a live
   daemon and write `~/.config/nexus/t2_addr.<uid>` pointing at a
   different live daemon. **Verify**: client connects to the env-var
@@ -1075,3 +1194,25 @@ counterfactual.
   - **S3** P3 split into P3a (daemon ships, transport only) and P3b (migration ownership transfer); both share the soak window; the split is for bisectability.
   - **S4** Daemon-init content-seeding audit added as a P0 prerequisite; the seven T2 domain stores' initialization paths enumerated; output recorded as `120-research-A9-content-audit`.
   - **O4** Two moratorium entries added: schema migration helpers beyond `apply_pending`, and telemetry/breadcrumb instrumentation crossing the daemon boundary (RDR-115 is the right home).
+- 2026-05-21: Second gate run after first fix-in-place. BLOCKED with 1 new Critical (C3: soak-duration contradiction from S3 split) + 5 Significant (S5-S9: seam issues from P3a/P3b split and C2 fail-loud semantic) + 4 Observations. All folded in this revision:
+  - **C3** §Approach amended with the soak-duration exception (P3a ≥3 days minimum; combined P3 soak ≥7 days from P3a ship to P4 open).
+  - **S5** P3 MVV explicitly placed in P3a's soak; only call-site flip is deferred to P4.
+  - **S6** Missing happy-path discovery test scenario added (env unset + live file → success).
+  - **S7** Migration-helpers moratorium bullet got an explicit exception for the daemon's own internal `apply_pending` coordination across the seven domain stores.
+  - **S8** Auto-spawn precondition documented: fires only when env var is UNSET and discovery file does not exist; unreachable env-var target is operator misconfig → fail-loud, no spawn.
+  - **S9** Metric key schema defined per phase including P3a / P3b sub-phases.
+  - **O1** P3 transition test scenario adds schema-version idempotency assertion.
+  - **O2** Phase 1 T3 daemon description restates C2 precedence rule for fail-loud semantic.
+  - **O3** Transport design note covers binary-column encoding (base64 fallback for SQLite BLOB; forward-compatibility, not Phase 3 hot path).
+  - **O4** Phase 0 description explicitly references the catalog-allowlist metric emission and the baseline recorded as `120-phase-0-catalog-allowlist-count`.
+- 2026-05-21: Third gate pass (adversarial deep-pass framing, named suspect categories). BLOCKED with 1 new Critical (C4) + 2 Significant (S10, S11) + 4 Observations. All folded:
+  - **C4** A6 P3 transition mitigation prose corrected. Previous text credited systemd ordering with blocking the cross-process race — true for systemd-managed clients but not for `claude -p` subprocesses outside the dependency graph. Revised: race is acknowledged and design is safe via SQLite `BEGIN EXCLUSIVE` + idempotent migration steps. nexus-9eaz test recast to verify convergence-to-expected-schema (idempotency), not prevention. Cross-process flock via `_locking.acquire_directory_lock` documented as a deferred option, not adopted now because SQLite already provides the safety guarantee that matters.
+  - **S10** Auto-spawn mitigation cites `_locking.acquire_directory_lock` on `~/.config/nexus/` as the actual lock target. Wording corrected from "lock on the discovery file" (which doesn't exist when needed) to "lock on the parent directory."
+  - **S11** P5 prerequisite added: re-run the A9 content-seeding audit against CatalogDB and `catalog/synthesizer.py` before P5 opens; output recorded as `120-research-A9-catalog-extension`. P5 catalog-allowlist metric assertion strengthened from monotonic non-increase to explicit `count == 0`.
+  - **O5** §Risks adds explicit SIGTERM-during-apply_pending safety note (SQLite WAL durability handles it by construction).
+  - **O6** §Risks adds "no substrate-side retry budget; retry orchestration is RDR-115 territory" to the daemon-crash mitigation.
+  - **O7** P5 explicit `count == 0` assertion added (alongside the monotonic rule).
+  - **O8** Phase 1 T3 description notes the phasing: C2 applies to `T3Client` callers; raw chromadb in `health.py` bypasses by construction until P2 migrates those four sites.
+- 2026-05-21: Fourth gate pass. 0 Critical, 1 Significant. The single Significant was a precision error in pass-3's own fix-in-place: the C4 prose asserted `BEGIN EXCLUSIVE` as the cross-process safety mechanism, but the code uses `threading.RLock` (process-local) + step idempotency + SQLite statement-level write serialization. Safety story is real and sufficient; the cited mechanism was wrong. Folded:
+  - **C4-correction** A6 P3 transition prose rewritten to cite the accurate safety story: SQLite statement-level write locking serializes DDL writers (loser gets SQLITE_BUSY and retries); step idempotency (every `_MIGRATIONS` entry uses `IF NOT EXISTS` / `PRAGMA table_info` / `INSERT OR IGNORE` guards) makes retries no-ops. `_upgrade_lock` is `threading.RLock`, process-local only, per the docstring at `migrations.py:2886-2894`. Step idempotency is the load-bearing cross-process invariant — a future non-idempotent migration step would silently break P3 safety; CI lint flagging unguarded DDL in migration functions is a deferred option.
+  - **A5 inventory accuracy confirmed** by pass 4: the only `sqlite3.connect` sites in `src/nexus/catalog/` are `catalog_db.py:255` and `synthesizer.py:792`. `catalog_sync.py` imports `sqlite3` for exception classes only; not a connect site. P5 `count == 0` assertion is achievable as stated.
