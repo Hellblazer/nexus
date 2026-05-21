@@ -1020,31 +1020,15 @@ def _add_plan_disabled_at(conn: sqlite3.Connection) -> None:
 
 
 def _add_plan_scope_tags(conn: sqlite3.Connection) -> None:
-    """Add the ``scope_tags`` column to ``plans`` and backfill default rows.
+    """Add the ``scope_tags`` column to ``plans``.
 
-    RDR-091 Phase 2a (bead ``nexus-x6pr``). ``scope_tags`` captures which
-    corpora / collections a plan actually touched — a comma-separated,
-    sorted, deduplicated, hash-suffix-normalized string. Phase 2b consumes
-    this column during match-time re-ranking; this migration only ensures
-    the column exists and carries a best-effort value for every row.
+    RDR-091 Phase 2a (bead ``nexus-x6pr``). DDL-only now (RDR-120 §A8
+    / nexus-rv7x6): the per-row inference backfill body moved to
+    ``nx plan repair scope-tags``. Operators upgrading from pre-4.8.0
+    must run the verb to populate the column.
 
-    The backfill intentionally guards on ``WHERE scope_tags = ''`` so
-    explicitly-authored values (passed via ``save_plan(scope_tags=...)``)
-    survive process restarts. Without this guard (RDR-091 critic
-    follow-up, nexus-dfok), every process start would overwrite
-    explicit tags with inference output, defeating the explicit-override
-    path documented in the authoring guide.
-
-    Idempotent via a ``PRAGMA table_info`` column guard. The backfill is
-    safe to re-run because inference is deterministic.
-
-    No-op on a DB that has no ``plans`` table (fresh install without
-    :mod:`nexus.db.t2.plan_library` ever instantiated).
-
-    The ``DEFAULT ''`` at column-creation time is load-bearing: any code
-    path that inserts into ``plans`` without naming ``scope_tags`` (pre
-    the plan_library update in the same PR) produces ``""``, not ``NULL``,
-    which Phase 2b treats as the scope-agnostic marker.
+    Idempotent via the column guard. No-op on a DB without a
+    ``plans`` table.
     """
     has_table = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='plans'"
@@ -1058,266 +1042,32 @@ def _add_plan_scope_tags(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE plans ADD COLUMN scope_tags TEXT NOT NULL DEFAULT ''"
         )
-
-    # Backfill only rows where scope_tags is still the default ''.
-    # Explicit values survive; partial-failure retries pick up where
-    # they left off.
-    from nexus.plans.scope import _infer_scope_tags
-
-    rows = conn.execute(
-        "SELECT id, plan_json FROM plans WHERE scope_tags = ''"
-    ).fetchall()
-    for row_id, plan_json in rows:
-        inferred = _infer_scope_tags(plan_json or "")
-        if inferred:
-            conn.execute(
-                "UPDATE plans SET scope_tags = ? WHERE id = ? AND scope_tags = ''",
-                (inferred, row_id),
-            )
-    conn.commit()
-
-
-def _rewash_plan_scope_tags_all_sentinel(conn: sqlite3.Connection) -> None:
-    """Rewash rows whose ``scope_tags`` contains ``'all'`` from pre-fix backfill.
-
-    RDR-091 critic follow-up (bead ``nexus-dfok``). The first-cut
-    ``_infer_scope_tags`` treated ``corpus: "all"`` as a concrete
-    scope tag, so the 4.8.0 backfill wrote ``scope_tags='all'`` onto
-    every builtin plan that uses ``corpus: all`` (7 of 9 builtins).
-    At match time those plans prefix-matched no real scope and were
-    filtered out of the candidate pool — inverting RDR-091's whole
-    purpose for any scoped ``nx_answer`` call.
-
-    The inference fix (``"all"`` is now a skipped sentinel) takes
-    effect on new saves, but existing rows carry the broken value.
-    This migration re-runs inference on any row whose ``scope_tags``
-    contains the token ``all``, replacing it with the corrected value
-    (typically ``""`` for agnostic plans, or the subset of real tags
-    when a multi-corpus plan mixed ``all`` with specific corpora).
-
-    No-op on fresh installs or on DBs where every row already has
-    clean tags. Idempotent: a second run finds no matching rows.
-    """
-    has_table = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='plans'"
-    ).fetchone()
-    if not has_table:
-        return
-
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
-    if "scope_tags" not in cols:
-        return
-
-    from nexus.plans.scope import _infer_scope_tags
-
-    rows = conn.execute(
-        """
-        SELECT id, plan_json FROM plans
-        WHERE scope_tags = 'all'
-           OR scope_tags LIKE 'all,%'
-           OR scope_tags LIKE '%,all'
-           OR scope_tags LIKE '%,all,%'
-        """
-    ).fetchall()
-    for row_id, plan_json in rows:
-        inferred = _infer_scope_tags(plan_json or "")
-        conn.execute(
-            "UPDATE plans SET scope_tags = ? WHERE id = ?",
-            (inferred, row_id),
-        )
-    if rows:
-        _log.info("Rewashed plan scope_tags 'all' sentinel", row_count=len(rows))
         conn.commit()
 
 
-# ── RDR-092 Phase 0d.1 (plan-dimensions backfill) ──────────────────────────
-
-
-#: Verb-from-stem dictionary (29 stems across 5 verb families). Keyed
-#: on lowercased tokens that commonly appear in plan ``query`` text.
-#: A match is high-confidence (tagged ``backfill``); zero matches fall
-#: through to the wh-fallback and get tagged ``backfill-low-conf``.
-_BACKFILL_VERB_STEMS: dict[str, str] = {
-    # research family (8 stems)
-    "find": "research", "search": "research", "list": "research",
-    "get": "research", "show": "research", "enumerate": "research",
-    "fetch": "research", "retrieve": "research",
-    # analyze family (8 stems)
-    "analyze": "analyze", "analyse": "analyze",
-    "compare": "analyze", "contrast": "analyze",
-    "rank": "analyze", "synthesize": "analyze",
-    "summarize": "analyze", "summarise": "analyze",
-    # review family (5 stems)
-    "review": "review", "audit": "review",
-    "evaluate": "review", "critique": "review",
-    "assess": "review",
-    # debug family (5 stems)
-    "debug": "debug", "trace": "debug",
-    "investigate": "debug", "fix": "debug",
-    "troubleshoot": "debug",
-    # document family (3 stems)
-    "document": "document", "describe": "document",
-    "explain": "document",
-}
-
-#: Wh-fallback table. Low confidence because a wh-question can map to
-#: any verb; the best guess is research for explanatory questions,
-#: review for causal "why" questions.
-_BACKFILL_WH_FALLBACK: dict[str, str] = {
-    "how": "research", "what": "research",
-    "why": "review",
-    "when": "research", "where": "research", "who": "research",
-    "which": "research",
-}
-
-#: Stop-words skipped when deriving the plan ``name`` from query text.
-_BACKFILL_NAME_STOP_WORDS: frozenset[str] = frozenset({
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-    "to", "of", "for", "in", "on", "at", "by", "with", "from", "about",
-    "and", "or", "but", "so", "as",
-    "how", "what", "why", "when", "where", "who", "which",
-    "do", "does", "did", "can", "could", "should", "would", "will",
-    "this", "that", "these", "those",
-    "i", "we", "you", "they", "it", "he", "she",
-})
-
-
-def _infer_plan_verb_from_query(query: str) -> tuple[str, bool]:
-    """Heuristic verb classifier for RDR-092 plan-dimension backfill.
-
-    Returns ``(verb, is_confident)``. High-confidence matches come
-    from :data:`_BACKFILL_VERB_STEMS`; wh-fallback matches are
-    low-confidence; the ultimate default is ``("research", False)``.
+def _rewash_plan_scope_tags_all_sentinel(conn: sqlite3.Connection) -> None:
+    """RDR-091 critic follow-up (``nexus-dfok``). Pure data rewash;
+    moved to ``nx plan repair scope-tags`` (RDR-120 §A8 / nexus-rv7x6).
+    No-op now; step retained so the version chain remains monotone.
     """
-    import re
-
-    tokens = re.findall(r"[a-z][a-z-]+", (query or "").lower())
-    for token in tokens:
-        if token in _BACKFILL_VERB_STEMS:
-            return _BACKFILL_VERB_STEMS[token], True
-    for token in tokens:
-        if token in _BACKFILL_WH_FALLBACK:
-            return _BACKFILL_WH_FALLBACK[token], False
-    return "research", False
+    return
 
 
-def _derive_plan_name_from_query(query: str, *, max_words: int = 5) -> str:
-    """Kebab-case name from the first 3-5 content tokens of *query*."""
-    import re
-
-    tokens = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_]*", (query or "").lower())
-    content = [t for t in tokens if t not in _BACKFILL_NAME_STOP_WORDS]
-    take = content[:max_words] if content else tokens[:max_words]
-    return "-".join(take) or "backfilled-plan"
+# ── RDR-092 Phase 0d.1 (plan-dimensions backfill) ──────────────────────────
+#
+# RDR-120 §A8 / nexus-rv7x6: the inference helpers
+# (_BACKFILL_VERB_STEMS, _infer_plan_verb_from_query,
+# _derive_plan_name_from_query, etc.) moved to nexus.plans.repair
+# alongside the dispatch body. The migration step below is a no-op
+# now; the verb owns the work.
 
 
 def _backfill_plan_dimensions(conn: sqlite3.Connection) -> None:
-    """Backfill verb / name / dimensions on NULL-dimension plan rows.
-
-    RDR-092 Phase 0d.1. Touches only rows where ``dimensions IS NULL``;
-    authored rows (shipped YAML seeds, already-dimensional grown
-    plans, previously-backfilled rows) are left alone. The
-    :func:`_infer_plan_verb_from_query` heuristic decides the verb,
-    and :func:`_derive_plan_name_from_query` supplies the name. Rows
-    whose verb came from a stem match get tagged ``backfill``; rows
-    that fell through to the wh-fallback get tagged
-    ``backfill-low-conf`` so ``nx plan repair`` can prioritise them.
-
-    The canonical dimensions JSON is ``{"scope":<scope>,"strategy":
-    <name>,"verb":<verb>}`` where ``<scope>`` is ``"personal"`` for
-    tagged grown rows and ``"global"`` for everything else (legacy
-    builtin shapes pre-RDR-078). Idempotent: a second run skips rows
-    whose ``dimensions`` is no longer NULL.
-
-    **Collision handling (RDR-092 code-review C-1).** Two NULL-
-    dimension rows in the same project whose queries collapse to the
-    same kebab name produce identical canonical dimensions JSON and
-    would violate the partial UNIQUE ``(project, dimensions) WHERE
-    dimensions IS NOT NULL`` index on the second UPDATE. The loop
-    catches :class:`sqlite3.IntegrityError` and retries the row with
-    the strategy suffixed by the row id (which is monotonic + stable
-    within a DB, preserving idempotency across reruns).
+    """RDR-092 Phase 0d.1. Pure data backfill; moved to
+    ``nx plan repair dimensions`` (RDR-120 §A8 / nexus-rv7x6).
+    No-op now; step retained so the version chain remains monotone.
     """
-    has_table = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='plans'"
-    ).fetchone()
-    if not has_table:
-        return
-
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(plans)").fetchall()}
-    if "dimensions" not in cols:
-        return
-
-    rows = conn.execute(
-        "SELECT id, query, tags FROM plans WHERE dimensions IS NULL"
-    ).fetchall()
-    if not rows:
-        return
-
-    from nexus.plans.schema import canonical_dimensions_json
-
-    backfilled = 0
-    low_conf = 0
-    collisions = 0
-    # Track identities set during this run so within-loop collisions
-    # also get the row_id suffix treatment (the DB-level partial
-    # UNIQUE index would only catch cross-run collisions because the
-    # legacy rows all share dimensions IS NULL until we write).
-    claimed: set[tuple[str, str]] = set()
-    for row_id, query, tags in rows:
-        verb, confident = _infer_plan_verb_from_query(query or "")
-        base_name = _derive_plan_name_from_query(query or "")
-        scope = "personal" if (tags or "").find("grown") >= 0 else "global"
-        project = ""  # Backfill applies to the legacy global project.
-
-        def _dims(name_value: str) -> str:
-            return canonical_dimensions_json({
-                "scope": scope,
-                "strategy": name_value,
-                "verb": verb,
-            })
-
-        # Pre-check for collision against both already-persisted rows
-        # and rows we updated earlier in this same loop.
-        name = base_name
-        dims_json = _dims(name)
-        key = (project, dims_json)
-        db_hit = conn.execute(
-            "SELECT 1 FROM plans "
-            "WHERE project = ? AND dimensions = ? AND id != ? LIMIT 1",
-            (project, dims_json, row_id),
-        ).fetchone()
-        if db_hit or key in claimed:
-            # RDR-092 code-review C-1: resolve via a deterministic
-            # row-id suffix so reruns produce the same identity.
-            name = f"{base_name}-{row_id}"
-            dims_json = _dims(name)
-            key = (project, dims_json)
-            collisions += 1
-        claimed.add(key)
-
-        tag_flag = "backfill" if confident else "backfill-low-conf"
-        existing_tags = [t for t in (tags or "").split(",") if t]
-        if tag_flag not in existing_tags:
-            existing_tags.append(tag_flag)
-        new_tags = ",".join(existing_tags)
-
-        conn.execute(
-            "UPDATE plans SET verb = ?, scope = ?, name = ?, "
-            "dimensions = ?, tags = ? WHERE id = ?",
-            (verb, scope, name, dims_json, new_tags, row_id),
-        )
-        if confident:
-            backfilled += 1
-        else:
-            low_conf += 1
-
-    conn.commit()
-    _log.info(
-        "Backfilled plan dimensions",
-        backfilled=backfilled, low_conf=low_conf,
-        total_rows=len(rows), collisions=collisions,
-    )
+    return
 
 
 # ── RDR-092 Phase 3.1 (plans.match_text column + FTS rebuild) ──────────────
@@ -1383,35 +1133,19 @@ def _add_plan_match_text_column(conn: sqlite3.Connection) -> None:
             "ALTER TABLE plans ADD COLUMN match_text TEXT NOT NULL DEFAULT ''"
         )
 
-    # Drop the legacy triggers + FTS table up-front so the backfill
-    # UPDATE below does not fan out into an external-content FTS that
-    # is about to be rebuilt anyway.
+    # Drop legacy triggers + FTS table; recreate against match_text.
+    # RDR-120 §A8 / nexus-rv7x6: the per-row backfill UPDATE that
+    # populated match_text from query/verb/name/scope moved to
+    # ``nx plan repair match-text``. After this migration runs the
+    # column exists at DEFAULT '' and the FTS rebuild produces empty
+    # entries; the verb populates rows on the consumer's terms and
+    # the AFTER UPDATE trigger refreshes FTS per row.
     conn.executescript("""
         DROP TRIGGER IF EXISTS plans_ai;
         DROP TRIGGER IF EXISTS plans_ad;
         DROP TRIGGER IF EXISTS plans_au;
         DROP TABLE  IF EXISTS plans_fts;
-    """)
 
-    # Backfill existing rows from query / verb / name / scope using the
-    # same hybrid shape save_plan produces on new inserts.
-    from nexus.db.t2.plan_library import _synthesize_match_text
-
-    rows = conn.execute(
-        "SELECT id, query, verb, name, scope FROM plans"
-    ).fetchall()
-    for row_id, query, verb, name, scope in rows:
-        synthesised = _synthesize_match_text(
-            description=query, verb=verb, name=name, scope=scope,
-        )
-        conn.execute(
-            "UPDATE plans SET match_text = ? WHERE id = ?",
-            (synthesised, row_id),
-        )
-
-    # Recreate plans_fts + triggers on the populated match_text column
-    # and rebuild the FTS index from existing rows.
-    conn.executescript("""
         CREATE VIRTUAL TABLE plans_fts USING fts5(
             match_text, tags, project,
             content=plans, content_rowid='id'
@@ -1434,186 +1168,25 @@ def _add_plan_match_text_column(conn: sqlite3.Connection) -> None:
     """)
     conn.execute("INSERT INTO plans_fts(plans_fts) VALUES('rebuild')")
     conn.commit()
-    _log.info(
-        "plans.match_text migration complete",
-        backfilled=len(rows),
-    )
+    _log.info("plans.match_text DDL migration complete")
 
 
 def _retire_legacy_operation_shape_plans(conn: sqlite3.Connection) -> None:
-    """Delete plans whose plan_json uses the pre-RDR-078 ``operation`` shape.
-
-    RDR-092 Phase 0a retired the ``_PLAN_TEMPLATES`` seed array but did
-    not migrate the rows it had previously seeded. Those rows — plus
-    user ad-hoc plans saved before the RDR-078 runner landed — carry
-    step dicts like ``{"step": 1, "operation": "search", "params":
-    {...}}`` rather than the current ``{"tool": "search", "args":
-    {...}}``. ``plan_run`` cannot dispatch them; they exist only to
-    pollute plan-match results and mask modern replacements (e.g.
-    legacy ``find-documents-author`` beating the YAML builtin
-    ``find-by-author``).
-
-    Idempotent: after the first run, no legacy-shape rows remain; the
-    guarded SELECT returns 0 rows on retry.
+    """RDR-092 Phase 0a legacy-shape DELETE. Pure data sweep; moved
+    to ``nx plan repair retire-legacy`` (RDR-120 §A8 / nexus-rv7x6).
+    No-op now; step retained so the version chain remains monotone.
     """
-    import json as _json
-
-    candidates = conn.execute(
-        "SELECT id, plan_json FROM plans WHERE plan_json LIKE '%\"operation\"%'"
-    ).fetchall()
-    if not candidates:
-        return
-
-    legacy_ids: list[int] = []
-    for row_id, plan_json_text in candidates:
-        try:
-            parsed = _json.loads(plan_json_text or "{}")
-        except _json.JSONDecodeError:
-            continue
-        steps = parsed.get("steps") if isinstance(parsed, dict) else None
-        if not isinstance(steps, list) or not steps:
-            continue
-        # Legacy shape: any step has "operation" key AND no step has
-        # "tool" key. A plan_json that happens to mention "operation"
-        # inside an args payload but uses "tool" correctly is not
-        # legacy — the check above (LIKE) is a pre-filter only.
-        has_operation = any(
-            isinstance(s, dict) and "operation" in s for s in steps
-        )
-        has_tool = any(
-            isinstance(s, dict) and "tool" in s for s in steps
-        )
-        if has_operation and not has_tool:
-            legacy_ids.append(int(row_id))
-
-    if not legacy_ids:
-        return
-
-    placeholders = ",".join("?" * len(legacy_ids))
-    conn.execute(
-        f"DELETE FROM plans WHERE id IN ({placeholders})",
-        legacy_ids,
-    )
-    conn.commit()
-    _log.info(
-        "retired_legacy_operation_shape_plans",
-        deleted=len(legacy_ids),
-        ids=legacy_ids,
-    )
+    return
 
 
 def _backfill_builtin_bindings(conn: sqlite3.Connection) -> None:
-    """Patch required_bindings/optional_bindings into existing builtin rows.
-
-    The 4.10.1 seed_loader fix (nexus-80tk) merges YAML binding
-    declarations into plan_json at save_plan time, but rows seeded
-    before 4.10.1 short-circuit the seed loader on re-run because
-    their ``(project, dimensions)`` pair already exists. Without
-    this backfill, ``_validate_bindings`` still sees an empty list
-    on upgraded installs and unresolved ``$var`` literals leak into
-    operator prompts.
-
-    For each builtin row whose plan_json lacks a ``required_bindings``
-    key, resolve the shipping YAML by ``(verb, scope, strategy)``
-    and patch the binding lists into the stored JSON. Idempotent
-    via the ``NOT LIKE '%required_bindings%'`` pre-filter.
-
-    Silent no-op when the shipping YAMLs are unreachable (exotic
-    install layouts) — the seed loader's fail-loud guard at
-    ``nx catalog setup`` is the escalation path for that case.
+    """RDR-091 nexus-80tk follow-up. Patches required_bindings /
+    optional_bindings into legacy builtin rows. Pure data backfill;
+    moved to ``nx plan repair builtin-bindings`` (RDR-120 §A8 /
+    nexus-rv7x6). No-op now; step retained so the version chain
+    remains monotone.
     """
-    import json as _json
-
-    try:
-        import yaml as _yaml
-        from importlib.resources import as_file, files
-    except ModuleNotFoundError:
-        return
-
-    rows = conn.execute(
-        "SELECT id, plan_json, dimensions FROM plans "
-        "WHERE tags LIKE '%builtin%' "
-        "AND plan_json NOT LIKE '%required_bindings%'"
-    ).fetchall()
-    if not rows:
-        return
-
-    # Resolve the shipping YAML directory via package resources, with
-    # a repo-root fallback for dev-mode runs. Mirrors
-    # ``catalog._resolve_plugin_root`` but inlined so this migration
-    # stays in the db layer.
-    yaml_dir = None
-    try:
-        resource = files("nexus") / "_resources" / "plans" / "builtin"
-        with as_file(resource) as resolved:
-            from pathlib import Path as _Path
-            if _Path(resolved).is_dir():
-                yaml_dir = _Path(resolved)
-    except (ModuleNotFoundError, FileNotFoundError, TypeError):
-        pass
-    if yaml_dir is None:
-        from pathlib import Path as _Path
-        repo_candidate = _Path(__file__).resolve().parents[3] / "nx" / "plans" / "builtin"
-        if repo_candidate.is_dir():
-            yaml_dir = repo_candidate
-    if yaml_dir is None:
-        _log.warning(
-            "backfill_builtin_bindings_skip",
-            reason="shipping YAMLs unreachable; run 'nx catalog setup' to re-seed",
-        )
-        return
-
-    bindings_index: dict[tuple[str, str, str], tuple[list, list]] = {}
-    for entry in yaml_dir.iterdir():
-        if not entry.is_file() or entry.suffix not in (".yml", ".yaml"):
-            continue
-        try:
-            template = _yaml.safe_load(entry.read_text()) or {}
-        except Exception:
-            continue
-        dims = template.get("dimensions") or {}
-        key = (
-            str(dims.get("verb", "")),
-            str(dims.get("scope", "")),
-            str(dims.get("strategy", "")),
-        )
-        required = list(template.get("required_bindings") or [])
-        optional = list(template.get("optional_bindings") or [])
-        if required or optional:
-            bindings_index[key] = (required, optional)
-
-    if not bindings_index:
-        return
-
-    backfilled = 0
-    for row_id, plan_json_text, dims_text in rows:
-        try:
-            parsed = _json.loads(plan_json_text or "{}")
-            dims = _json.loads(dims_text or "{}")
-        except _json.JSONDecodeError:
-            continue
-        key = (
-            str(dims.get("verb", "")),
-            str(dims.get("scope", "")),
-            str(dims.get("strategy", "")),
-        )
-        bindings = bindings_index.get(key)
-        if not bindings:
-            continue
-        required, optional = bindings
-        if required:
-            parsed["required_bindings"] = required
-        if optional:
-            parsed["optional_bindings"] = optional
-        conn.execute(
-            "UPDATE plans SET plan_json = ? WHERE id = ?",
-            (_json.dumps(parsed), row_id),
-        )
-        backfilled += 1
-
-    if backfilled:
-        conn.commit()
-        _log.info("backfill_builtin_bindings", rows=backfilled)
+    return
 
 
 def migrate_document_aspects_source_uri(conn: sqlite3.Connection) -> None:
