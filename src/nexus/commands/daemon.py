@@ -50,6 +50,10 @@ _T3_PLIST_NAME = "com.nexus.t3.plist"
 _T3_SERVICE_NAME = "nexus-t3.service"
 _T3_LAUNCHD_LABEL = "com.nexus.t3"
 
+_T2_PLIST_NAME = "com.nexus.t2.plist"
+_T2_SERVICE_NAME = "nexus-t2.service"
+_T2_LAUNCHD_LABEL = "com.nexus.t2"
+
 
 def _autostart_platform() -> str:
     """Indirection point so tests can stub the platform."""
@@ -142,6 +146,10 @@ def _resolve_nx_bin() -> list[str]:
 
 def _autostart_filename_t3() -> str:
     return _T3_PLIST_NAME if _autostart_platform() == "darwin" else _T3_SERVICE_NAME
+
+
+def _autostart_filename_t2() -> str:
+    return _T2_PLIST_NAME if _autostart_platform() == "darwin" else _T2_SERVICE_NAME
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +477,284 @@ def t3_uninstall_cmd(autostart: bool) -> None:
     if platform == "darwin":
         uid = os.getuid()
         cmd = ["launchctl", "bootout", f"gui/{uid}/{_T3_LAUNCHD_LABEL}"]
+    else:
+        cmd = ["systemctl", "--user", "disable", "--now", template_name]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            click.echo(
+                f"Warning: {' '.join(cmd)} exited {result.returncode}: "
+                f"{result.stderr.strip() or result.stdout.strip()}",
+                err=True,
+            )
+    except FileNotFoundError as exc:
+        click.echo(f"Warning: {cmd[0]} not found ({exc}); removing file anyway.", err=True)
+
+    dest.unlink()
+    click.echo(f"Removed {dest}")
+
+
+# ---------------------------------------------------------------------------
+# t2 sub-group (RDR-120 P3a.A, nexus-7aayk)
+# ---------------------------------------------------------------------------
+
+
+@daemon_group.group("t2")
+def t2_group() -> None:
+    """T2 daemon: single-writer process owning the seven domain-store SQLite handles."""
+
+
+@t2_group.command("start")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override (default: ~/.config/nexus/).",
+)
+@click.option(
+    "--db-path",
+    "db_path_str",
+    default=None,
+    help=(
+        "Override the memory.db path. Default: ``nexus.config.default_db_path()``."
+    ),
+)
+def t2_start_cmd(config_dir_str: str | None, db_path_str: str | None) -> None:
+    """Start the T2 daemon (always foreground; supervisor blocks on this process).
+
+    Unlike ``nx daemon t3 start`` which spawns a managed ``chroma run``
+    subprocess and may exit early, the T2 daemon IS this Python process.
+    ``start`` runs the asyncio event loop until SIGTERM/SIGINT and
+    cleans up sockets + discovery file on exit. Run under launchd /
+    systemd via ``nx daemon t2 install --autostart`` for production
+    use; the foreground requirement is what the supervisor watches.
+
+    Refuses to start if another T2 daemon already holds the spawn
+    lock on the same config_dir (raises T2DaemonError fail-loud).
+    """
+    from nexus.commands._helpers import default_db_path
+    from nexus.daemon.t2_daemon import T2DaemonError, run_t2_daemon
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    db_path = Path(db_path_str) if db_path_str else default_db_path()
+
+    click.echo(
+        f"T2 daemon starting (config_dir={config_dir}, db_path={db_path})..."
+    )
+    try:
+        run_t2_daemon(config_dir=config_dir, db_path=db_path)
+    except T2DaemonError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(2)
+
+
+@t2_group.command("stop")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+def t2_stop_cmd(config_dir_str: str | None) -> None:
+    """Stop the running T2 daemon by reading the discovery file's PID
+    and sending SIGTERM.
+
+    Returns 0 on success or when no daemon is running. SIGTERM is the
+    canonical stop signal; the daemon's asyncio loop catches it,
+    closes sockets, unlinks the discovery file, and exits 0
+    (rendered as code 143 to launchd / systemd; both supervisor
+    templates list 143 as a non-failure exit).
+    """
+    import json as _json
+
+    from nexus.daemon.t2_daemon import t2_discovery_path
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    disc = t2_discovery_path(config_dir)
+    if not disc.exists():
+        click.echo("No T2 daemon discovery file found; already stopped.")
+        return
+    try:
+        payload = _json.loads(disc.read_text())
+    except (OSError, _json.JSONDecodeError) as exc:
+        click.echo(
+            f"Failed to read discovery file: {exc}. Removing stale file.",
+            err=True,
+        )
+        disc.unlink(missing_ok=True)
+        return
+    pid = payload.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        click.echo(f"Invalid pid in discovery file: {pid!r}", err=True)
+        disc.unlink(missing_ok=True)
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        click.echo(f"T2 daemon (pid={pid}) already gone; cleaning discovery file.")
+        disc.unlink(missing_ok=True)
+        return
+    except OSError as exc:
+        click.echo(f"Failed to signal pid {pid}: {exc}", err=True)
+        sys.exit(1)
+    click.echo(f"Sent SIGTERM to T2 daemon (pid={pid}).")
+
+
+@t2_group.command("status")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+@click.option(
+    "--json", "as_json", is_flag=True, default=False, help="Output raw JSON.",
+)
+def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
+    """Print the T2 daemon discovery JSON (PID + UDS path + TCP address)."""
+    import json as _json
+    from nexus.daemon.t2_daemon import t2_discovery_path
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    disc = t2_discovery_path(config_dir)
+    if not disc.exists():
+        click.echo(
+            "No T2 daemon discovery file found; is the daemon running?",
+            err=True,
+        )
+        sys.exit(1)
+    try:
+        data = _json.loads(disc.read_text())
+    except (OSError, _json.JSONDecodeError) as exc:
+        click.echo(f"Failed to read discovery file: {exc}", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    click.echo("T2 Daemon Status")
+    click.echo("-" * 40)
+    for key, value in data.items():
+        click.echo(f"  {key}: {value}")
+
+
+@t2_group.command("install")
+@click.option(
+    "--autostart",
+    is_flag=True,
+    required=True,
+    help=(
+        "Install OS autostart entry (launchd on macOS, systemd user "
+        "unit on Linux) so the T2 daemon starts at login / boot."
+    ),
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite an existing plist/unit file even when its content "
+    "differs from the freshly rendered template.",
+)
+def t2_install_cmd(autostart: bool, force: bool) -> None:
+    """Install the T2 daemon autostart entry for the current user."""
+    if not autostart:  # pragma: no cover
+        raise click.UsageError("--autostart is required")
+
+    install_dir = _autostart_install_dir()
+    install_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = _autostart_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    template_name = _autostart_filename_t2()
+    nx_bin = _resolve_nx_bin()
+    rendered = _render_template(
+        template_name,
+        nx_bin=nx_bin,
+        log_dir=str(log_dir),
+        path_env=os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+    )
+    dest = install_dir / template_name
+
+    if dest.is_symlink():
+        click.echo(
+            f"Error: {dest} is a symlink; refusing to install autostart "
+            "through it. Remove the symlink first and re-run.",
+            err=True,
+        )
+        sys.exit(1)
+    if dest.exists():
+        try:
+            existing = dest.read_text()
+        except OSError:
+            existing = None
+        if existing == rendered:
+            click.echo(f"{dest} already up to date; no changes")
+            return
+        if not force and existing is not None:
+            click.echo(
+                f"Error: {dest} exists and its content differs from the "
+                "rendered template; refusing to overwrite. Re-run with "
+                "--force to replace.",
+                err=True,
+            )
+            sys.exit(1)
+
+    dest.write_text(rendered)
+    dest.chmod(0o644)
+    click.echo(f"Wrote {dest}")
+
+    platform = _autostart_platform()
+    if platform == "darwin":
+        uid = os.getuid()
+        cmd = ["launchctl", "bootstrap", f"gui/{uid}", str(dest)]
+    else:
+        cmd = ["systemctl", "--user", "enable", "--now", template_name]
+    label = "Warning" if force else "Error"
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        click.echo(
+            f"{label}: {cmd[0]} not found on PATH; file installed but not activated ({exc}).",
+            err=True,
+        )
+        if not force:
+            sys.exit(1)
+        return
+    if result.returncode != 0:
+        click.echo(
+            f"{label}: {' '.join(cmd)} exited {result.returncode}: "
+            f"{result.stderr.strip() or result.stdout.strip()}",
+            err=True,
+        )
+        if not force:
+            sys.exit(1)
+        return
+    click.echo(f"Activated via: {' '.join(cmd)}")
+
+
+@t2_group.command("uninstall")
+@click.option(
+    "--autostart",
+    is_flag=True,
+    required=True,
+    help="Remove OS autostart entry installed by ``install --autostart``.",
+)
+def t2_uninstall_cmd(autostart: bool) -> None:
+    """Remove the T2 daemon autostart entry for the current user."""
+    if not autostart:  # pragma: no cover
+        raise click.UsageError("--autostart is required")
+
+    install_dir = _autostart_install_dir()
+    template_name = _autostart_filename_t2()
+    dest = install_dir / template_name
+
+    if not dest.exists():
+        click.echo(f"Autostart not installed (nothing at {dest}).")
+        return
+
+    platform = _autostart_platform()
+    if platform == "darwin":
+        uid = os.getuid()
+        cmd = ["launchctl", "bootout", f"gui/{uid}/{_T2_LAUNCHD_LABEL}"]
     else:
         cmd = ["systemctl", "--user", "disable", "--now", template_name]
     try:

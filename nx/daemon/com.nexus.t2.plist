@@ -1,10 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  launchd agent for the nexus T2 daemon (RDR-112, nexus-6w0c).
+  launchd agent for the nexus T2 daemon (RDR-120 P3a.A, nexus-7aayk).
   Installed by ``nx daemon t2 install --autostart``. The ``__NX_BIN__``
   placeholder is substituted at install time with the resolved absolute
   path to the ``nx`` executable.
+
+  ``nx daemon t2 start`` IS the daemon process (asyncio loop owning
+  the SQLite handles + sockets); it always runs in the foreground so
+  launchd's supervision is the canonical lifecycle owner. No
+  ``--foreground`` flag exists because there is no detached mode.
 
   nexus-uuuh: ``StandardOutPath`` / ``StandardErrorPath`` here are the
   launchd-captured supervisor stream — used for interpreter crash
@@ -24,7 +29,6 @@
         <string>daemon</string>
         <string>t2</string>
         <string>start</string>
-        <string>--foreground</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

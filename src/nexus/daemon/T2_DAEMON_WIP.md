@@ -1,144 +1,114 @@
-# T2 Daemon — RDR-120 P3a.A archive port (WIP)
+# T2 Daemon: RDR-120 P3a.A status
 
-This file documents the preemptive port of the T2 daemon from
-`archive/develop-2026-05-19` into `feature/nexus-7aayk-rdr-120-p3a-t2-daemon`.
-**Do not merge as-is.** The strip + wiring pending in follow-up commits.
+Branch: `feature/nexus-7aayk-rdr-120-p3a-t2-daemon` / PR #916.
 
-## What landed in commit 1 (verbatim port)
+## Status: substrate-only scaffold shipped (2026-05-21)
 
-- `src/nexus/daemon/t2_daemon.py` (1862 lines, archive 2026-05-19)
-- `src/nexus/daemon/t2_client.py` (1530 lines, archive 2026-05-19)
-- `src/nexus/daemon/introspection.py` (676 lines, archive 2026-05-19)
-- `nx/daemon/com.nexus.t2.plist` (launchd template)
-- `nx/daemon/nexus-t2.service` (systemd user unit)
+Path 2 (fresh rewrite from archive reference) chosen and executed.
+Archive port deleted; clean substrate-only modules in place.
 
-Transport is already correct per RDR-120 S2 lock: length-prefixed JSON
-frames via `t2_json_dumps` / `t2_json_loads` at `t2_daemon.py:399-461`.
-NOT pickle. NOT multiprocessing.connection. The S2 fix-in-place locked
-this at RDR-120 P0; the archive predates the lock but happens to
-satisfy it.
+## What ships
 
-## What follow-up commits MUST strip (RDR-120 §Out of scope)
+- `src/nexus/daemon/t2_daemon.py` (~560 LOC)
+  - `T2Daemon` class with full lifecycle: start / run_until_signal /
+    stop. UDS bind + loopback TCP bind via separate sockets; both
+    served by the same asyncio dispatch handler.
+  - `t2_json_dumps` / `t2_json_loads` / `write_frame` / `read_frame`
+    plus the type-tagged encoder, ported verbatim from archive.
+  - `_build_dispatch_table` for the seven domain stores plus the
+    `database.*` pseudo-store. NO admin ops, NO UDS-only gate (per
+    moratorium; daemon will not accept admin RPCs until those land
+    in a future RDR).
+  - Spawn lock via `fcntl.flock` on `~/.config/nexus/t2_spawn.lock`.
+  - Discovery file `~/.config/nexus/t2_addr.<uid>` with both
+    `uds_path` and `tcp_host` + `tcp_port`.
+  - `run_t2_daemon()` sync entrypoint for the CLI verb.
 
-The archive carries imports and methods for surfaces explicitly banned
-by the RDR-120 moratorium. They must be removed before the PR leaves
-draft state.
+- `src/nexus/daemon/t2_client.py` (~250 LOC)
+  - `T2Client` class with `__enter__` / `__exit__` / `close`.
+  - `_StoreProxy` attribute-driven RPC dispatch:
+    `client.<store>.<method>(*args, **kwargs)` builds the op string
+    and ships a framed request.
+  - C2 precedence: env-first (`NX_T2_SOCK` then `NX_T2_ADDR`),
+    file-fallback, UDS preferred when both available, fail-loud on
+    unreachable target.
+  - `make_t2_client()` factory.
+  - `T2DaemonNotReachableError` (transport) and `T2ClientError`
+    (daemon-side exception round-trip).
 
-### Module-level bans (delete entire imports + call sites)
+- `src/nexus/commands/daemon.py`
+  - `nx daemon t2 {start,stop,status,install,uninstall}` verbs
+    wired through the new `T2Daemon` API. `start` is always
+    foreground (the daemon IS this Python process; no detached
+    mode); supervisors (launchd / systemd) treat it as their
+    supervised foreground process.
 
-- `nexus.daemon.peer` (PeerCredentials) — **host-trust** (banned)
-- `nexus.daemon.tuplespace_service` — **tuplespace** (banned)
-- `nexus.daemon.event_stream` — **event-stream RPC** (banned)
-- `nexus.daemon.subspace_registry` — **subspace registry** (banned)
-- `nexus.cockpit.bindings` — **cockpit panels** (banned, plus does not
-  exist on main as of 4.33.x)
-- `nexus.tuplespace.api` / `.registry` / `.store` — **tuplespace** (banned)
+- `nx/daemon/com.nexus.t2.plist` + `nx/daemon/nexus-t2.service`
+  - Templates updated to remove the `--foreground` arg (no such
+    flag exists on `nx daemon t2 start` because the start command
+    always foregrounds).
 
-### t2_daemon.py methods to strip
+- Tests
+  - `tests/daemon/test_t2_daemon_lifecycle.py` (15 tests): discovery
+    file shape, frame protocol round-trip, dispatch-table build,
+    start/stop happy path with real UDS + TCP sockets, spawn-lock
+    invariant, public-surface assertions.
+  - `tests/daemon/test_t2_client.py` (7 tests): construction, store
+    proxies, fail-loud no-daemon, end-to-end memory.put / search
+    round-trip, unknown-op surfaces T2ClientError.
 
-- `_handle_event_stream` (line ~1434) — event-stream RPC
-- `_subspace_add_handler` (closure ~635) and the subspace dispatch
-  branches around it
-- `_start_binding_watcher` (~1473) — cockpit hook-bridge wiring
-- Any tuplespace dispatch lines (the `from nexus.tuplespace.*` imports
-  at 813 / 1356 / 1596 sit inside conditional branches; check each)
-- The `_cockpit_bindings_disabled()` helper (~104) becomes vestigial
-  once binding-watcher is gone
+## What is intentionally NOT here (RDR-120 §Out of scope moratorium)
 
-### t2_client.py methods to strip
+- NO peer-credentials module (host-trust)
+- NO event_stream subscription RPC
+- NO subspace registry
+- NO tuplespace service
+- NO cockpit binding watcher
+- NO introspection RPCs (the archive's introspection.py is gone)
+- NO admin-ops UDS gate (no admin ops exist; gate will be designed
+  fresh if/when one is added post-moratorium)
+- NO eighth domain store yet (`catalog` joins at P5)
 
-- Tuplespace API methods (around line 403-406)
-- Any subspace-related client methods
+## What still ships in a follow-up bead (not P3a.A)
 
-### introspection.py
+- **P3a soak validation script**: `scripts/rdr120_p3_mvv.py` mirroring
+  `scripts/rdr120_p2_mvv.py`. The P3 MVV per §MVV table: two
+  `claude -p` subprocesses in different working dirs share
+  `memory_put` / `memory_get` via the T2 daemon. Tracked under the
+  P3a soak marker bead, not under P3a.A.
 
-Substrate-internal RPCs (schema / quotas / store_info). Probably keeps
-as-is, but audit each RPC for tuplespace / event-stream coupling.
+- **P3b migration ownership transfer** (`nexus-e9x4l`): remove
+  `apply_pending` from `T2Database.__init__` so the daemon is the
+  sole `apply_pending` caller. Currently the daemon's
+  `T2Database(self._db_path)` still triggers `apply_pending` per
+  RDR-120 §A6 P3 transition mitigation. P3b lifts that.
 
-## Wiring pending
+- **P3a.C P3 MVV bead** (`nexus-uai7p`): the two-subprocess MVV
+  itself; runs during the P3a soak window.
 
-- `src/nexus/commands/daemon.py` extends with `nx daemon t2
-  {start,stop,status,install,uninstall}` verbs. Port from archive
-  `commands/daemon.py` lines 53-1075 (T2 portion); strip subspace
-  subcommands.
-- `src/nexus/daemon/__init__.py` documentation updated to mention
-  `t2_client`, `t2_daemon`, `discovery.find_t2_daemon`.
+- **Call-site cutover (P4)**: `nexus-2ngox` flips T2 call sites
+  through `T2Client`. Not part of P3a.
 
-## Tests pending
+## Local verification
 
-- `tests/daemon/test_t2_daemon_lifecycle.py` (parallel to
-  `test_t3_daemon_lifecycle.py`).
-- `tests/daemon/test_t2_client.py` (parallel to `test_t3_client.py`).
-- `tests/daemon/test_t2_install.py` (parallel to `test_t3_install.py`).
-- Migration-ownership tests (RDR-120 §Approach Phase 3a: "Daemon owns
-  migration on its own path"; clients carry expected-schema-version,
-  handshake fails loud on mismatch).
+```
+uv run pytest tests/daemon/
+  -> 78 passed
+uv run nx doctor --check-storage-boundary --phase 3a
+  -> violations 16; catalog-allowlist 2; unchanged from P2 baseline.
+uv run nx daemon t2 --help
+  -> shows start / stop / status / install / uninstall
+uv run nx daemon t2 start &        # foreground daemon
+uv run nx daemon t2 status         # reads discovery file
+uv run nx daemon t2 stop           # SIGTERM
+```
 
-## Soak invariant
+## Soak posture
 
-P3a.A is "transport only". T2 call sites do NOT flip in this phase;
-`NX_STORAGE_MODE=direct` remains the default. P3a soaks ≥3 days before
-P3b may land; combined P3 soak from P3a ship to P4 open is ≥7 days
-end-to-end.
+Branch was preemptively staged ahead of the P2 soak. P3a.A may
+formally OPEN as an active bead only after the P2 soak completes
+(≥7 days under `NX_STORAGE_MODE=daemon` on main following #914's
+merge). This PR's merge does not move the soak clock; it just
+ensures the implementation is ready when the soak does clear.
 
-## P3 MVV
-
-Two `claude -p` subprocesses in different working dirs construct
-`T2Client` against the live daemon and share `memory_put` / `memory_get`
-(cross-process daemon-mediated state). Validates client-traffic
-against the daemon; the global call-site flip is deferred to P4.
-Companion script: `scripts/rdr120_p3_mvv.py` (deferred; mirror
-`scripts/rdr120_p2_mvv.py`).
-
-## Why preemptive?
-
-P3a.A is structurally the largest implementation bead in RDR-120 (T2
-daemon owns 7 domain-store SQLite handles, dispatch table for ~50+
-RPC methods, migration ownership transfer, UDS + TCP transport,
-discovery file, autostart). Landing the archive port verbatim now —
-with the strip + wiring pending — establishes the branch surface so
-follow-up commits can review the strip diff in isolation rather than
-mixing it with the import. Independent of the P2 soak (which gates
-when `nexus-7aayk` may *open* as a bead, not when this WIP branch
-may *exist*).
-
-## Strip strategy decision (pending)
-
-The archive carries ~60 banlist references spread across imports,
-admin-op tables, constructor parameters, dispatch-table builders,
-closure handlers, and inline-imported helpers. Two paths:
-
-**Surgical strip** of the archive port (in place):
-- Remove banned imports
-- Delete methods that reference them (e.g. `_handle_event_stream`,
-  `_subspace_add_handler`, `_start_binding_watcher`)
-- Trim constructor parameters (`event_stream_handler`,
-  `tuplespace_service`, etc.)
-- Risk: cross-cutting concerns leave orphaned references, comments,
-  helpers that are now dead. Strip diff is large and unreviewable.
-
-**Fresh rewrite** of substrate-only core:
-- Keep the archive's frame protocol (`t2_json_dumps`, `t2_json_loads`,
-  `write_frame`, `read_frame`) and the type-tagged encoder verbatim.
-- Write a minimal `T2Daemon` class: `__init__`, `start`, `stop`,
-  `run_until_signal`, UDS + TCP bind, connection handler, dispatch
-  table built only from `_T2_STORE_ATTRS` + `_T2_DATABASE_METHODS`.
-- Same shape for `T2Client`: connect, send-frame, receive-frame,
-  method-proxy for each of the 8 stores' methods.
-- Target ~600 LOC per module; archive lives as reference material.
-- Cleaner diff but more original code to land + test.
-
-Decision deferred to the next session. The verbatim archive port
-exists in commit 1 of this branch as reference. The strip / rewrite
-work is a clean follow-up.
-
-## Branch state
-
-- Commit 1 (this commit): verbatim archive port + templates + WIP doc.
-- Branch will NOT import on its own (banned modules are referenced
-  but absent from main).
-- No tests, no CLI wiring.
-- DRAFT PR #916 for tracking; not for merge as-is.
-
-Bead: nexus-7aayk (still OPEN; this branch is preemptive structure,
-not a closing commit set).
+Bead: nexus-7aayk
