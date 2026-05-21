@@ -268,3 +268,244 @@ def aspects_gc_fixtures(yes: bool) -> None:
         click.echo("No fixture rows found.")
     elif not yes:
         click.echo("Re-run with --yes to actually delete the fixture rows.")
+@aspects_group.command(name="backfill-source-uri")
+@click.option(
+    "--apply",
+    is_flag=True,
+    default=False,
+    help="Actually write the source_uri backfill. Without this flag "
+    "the command is a dry-run report only.",
+)
+def aspects_backfill_source_uri(apply: bool) -> None:
+    """Backfill empty/NULL ``source_uri`` rows in ``document_aspects``.
+
+    \b
+    RDR-096 introduced ``document_aspects.source_uri`` (4.16.0) and
+    the writer began emitting it on every new row from that point.
+    Pre-existing rows and a transient writer-path gap left some rows
+    with NULL or empty ``source_uri``; ``migrate_drop_source_path_column``
+    (4.31.0) refuses to drop the legacy column until every row has a
+    URI, so operators must run this verb before the next upgrade if
+    their database has any unbackfilled rows.
+
+    \b
+    The verb is idempotent: only touches rows where ``source_uri`` is
+    NULL or empty AND ``source_path`` is populated. Rows with empty
+    ``source_path`` (research-2 mitigation, very rare) are skipped
+    and reported separately for manual triage.
+
+    \b
+    URI scheme rules (matches the writer at
+    ``nexus.aspect_extractor._build_record``):
+
+      file://    rdr__* / docs__* / code__* (filesystem-backed)
+      chroma://  knowledge__* and other chroma-backed prefixes
+
+    \b
+    Examples:
+      nx aspects backfill-source-uri            # dry-run report
+      nx aspects backfill-source-uri --apply    # actually write
+
+    \b
+    RDR-120 §A8 / nexus-6y2a9: carved out of
+    ``migrate_document_aspects_source_uri`` and
+    ``migrate_document_aspects_source_uri_backfill_empty``.
+    """
+    import sqlite3
+    from nexus.aspect_readers import uri_for
+    from nexus.commands._helpers import default_db_path
+
+    mem_path = default_db_path()
+    if not mem_path.exists():
+        click.echo(f"No T2 database at {mem_path}; nothing to do.")
+        return
+
+    # Direct sqlite3 connection (epsilon-allow: RDR-120 §A8 verb).
+    # T2Database.__init__ runs the migration chain on open; if any
+    # downstream migration fails (e.g., migrate_drop_source_path_column
+    # blocks on unbackfilled rows) the facade cannot open, leaving the
+    # operator unable to run the very verb that fixes the precondition.
+    # The verb's whole purpose is to operate when the migration chain
+    # is stuck on this exact state, so opening sqlite3 directly is
+    # correct here.
+    conn = sqlite3.connect(str(mem_path))  # epsilon-allow: pre-migration repair verb
+    try:
+        cols = {
+            r[1]
+            for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()
+        }
+        if not cols:
+            click.echo(
+                "document_aspects table not present; nothing to do."
+            )
+            return
+        if "source_uri" not in cols:
+            click.echo(
+                "document_aspects.source_uri column not present; the "
+                "schema migration that adds it has not run yet. Run "
+                "`nx upgrade` first.",
+                err=True,
+            )
+            raise SystemExit(1)
+        if "source_path" not in cols:
+            click.echo(
+                "document_aspects.source_path column already dropped; "
+                "nothing to backfill from."
+            )
+            return
+
+        rows = conn.execute(
+            "SELECT rowid, collection, source_path FROM document_aspects "
+            "WHERE (source_uri IS NULL OR source_uri = '') "
+            "  AND source_path IS NOT NULL "
+            "  AND source_path != ''",
+        ).fetchall()
+        empty_source_path = conn.execute(
+            "SELECT COUNT(*) FROM document_aspects "
+            "WHERE (source_uri IS NULL OR source_uri = '') "
+            "  AND (source_path IS NULL OR source_path = '')",
+        ).fetchone()[0]
+
+        backfilled = 0
+        skipped = 0
+        if apply and rows:
+            conn.execute("BEGIN")
+            try:
+                for rowid, collection, source_path in rows:
+                    uri = uri_for(collection, source_path)
+                    if uri is None:
+                        skipped += 1
+                        continue
+                    conn.execute(
+                        "UPDATE document_aspects SET source_uri = ? "
+                        "WHERE rowid = ?",
+                        (uri, rowid),
+                    )
+                    backfilled += 1
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        else:
+            for _, collection, source_path in rows:
+                if uri_for(collection, source_path) is None:
+                    skipped += 1
+                else:
+                    backfilled += 1
+
+        verb = "backfilled" if apply else "would backfill"
+        click.echo(
+            f"document_aspects: {verb} {backfilled} row(s); "
+            f"{skipped} row(s) had unresolvable URI; "
+            f"{empty_source_path} row(s) have empty source_path "
+            "(manual triage required)"
+        )
+        if backfilled > 0 and not apply:
+            click.echo(
+                "Re-run with --apply to actually write the backfill."
+            )
+    finally:
+        conn.close()
+
+
+_GC_PRE_RDR096_PREDICATE = (
+    "WHERE problem_formulation IS NULL "
+    "  AND proposed_method IS NULL "
+    "  AND (experimental_datasets IS NULL OR experimental_datasets = '[]') "
+    "  AND (experimental_baselines IS NULL OR experimental_baselines = '[]') "
+    "  AND experimental_results IS NULL "
+    "  AND (extras IS NULL OR extras = '{}')"
+    "  AND confidence IS NULL"
+)
+
+
+@aspects_group.command(name="gc-pre-rdr096")
+@click.option(
+    "--apply",
+    is_flag=True,
+    default=False,
+    help="Actually delete pre-RDR-096 read-failure rows. Without this "
+    "flag the command is a dry-run report only.",
+)
+def aspects_gc_pre_rdr096(apply: bool) -> None:
+    """Delete pre-RDR-096 read-failure rows from ``document_aspects``.
+
+    \b
+    The seven-clause discriminator from RDR-096 research-3 (id 1010)
+    identifies rows that pre-RDR-096 extractors emitted as the
+    fingerprint of a read failure: every aspect field empty plus
+    ``confidence IS NULL``. The going-forward writer contract is that
+    structured-zero successes (parser ran, no scholarly structure)
+    write ``confidence = 1.0`` explicitly, so ``confidence IS NULL``
+    combined with all-empty fields is structurally reachable only
+    from a pre-RDR-096 read failure.
+
+    \b
+    Two clauses are load-bearing:
+
+      * ``confidence IS NULL`` — without it, the verb silently drops
+        ``rdr-frontmatter-v1`` structured-zero successes (51 such rows
+        on live nexus_rdr at RDR-096 ship time).
+      * ``(experimental_datasets IS NULL OR = '[]')`` and analogous
+        for baselines / extras — the writer stores ``json.dumps([])``
+        which is the literal string ``'[]'``, not SQL NULL.
+
+    \b
+    Idempotent: re-running on a cleaned database deletes 0 rows.
+    Safe on a missing table or empty database.
+
+    \b
+    Examples:
+      nx aspects gc-pre-rdr096            # dry-run report
+      nx aspects gc-pre-rdr096 --apply    # actually delete
+
+    \b
+    RDR-120 §A8 / nexus-6y2a9: carved out of
+    ``migrate_drop_null_aspect_rows``.
+    """
+    import sqlite3
+    from nexus.commands._helpers import default_db_path
+
+    mem_path = default_db_path()
+    if not mem_path.exists():
+        click.echo(f"No T2 database at {mem_path}; nothing to do.")
+        return
+
+    # Direct sqlite3 (epsilon-allow): same rationale as
+    # backfill-source-uri above. Pre-migration repair verbs cannot
+    # depend on T2Database.__init__'s migration chain succeeding.
+    conn = sqlite3.connect(str(mem_path))  # epsilon-allow: pre-migration repair verb
+    try:
+        cols = {
+            r[1]
+            for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()
+        }
+        if not cols:
+            click.echo("document_aspects table not present; nothing to do.")
+            return
+
+        matched = conn.execute(
+            "SELECT COUNT(*) FROM document_aspects "
+            + _GC_PRE_RDR096_PREDICATE,
+        ).fetchone()[0]
+
+        if matched == 0:
+            click.echo("document_aspects: 0 pre-RDR-096 read-failure rows.")
+            return
+
+        if apply:
+            cur = conn.execute(
+                "DELETE FROM document_aspects " + _GC_PRE_RDR096_PREDICATE,
+            )
+            conn.commit()
+            click.echo(
+                f"document_aspects: deleted {cur.rowcount} pre-RDR-096 "
+                "read-failure row(s)."
+            )
+        else:
+            click.echo(
+                f"document_aspects: would delete {matched} pre-RDR-096 "
+                "read-failure row(s). Re-run with --apply."
+            )
+    finally:
+        conn.close()

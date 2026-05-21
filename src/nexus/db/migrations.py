@@ -1617,162 +1617,44 @@ def _backfill_builtin_bindings(conn: sqlite3.Connection) -> None:
 
 
 def migrate_document_aspects_source_uri(conn: sqlite3.Connection) -> None:
-    """RDR-096 P2.1: add ``source_uri`` TEXT column to ``document_aspects``
-    and backfill from existing ``(collection, source_path)`` pairs.
+    """RDR-096 P2.1: add ``source_uri`` TEXT column to ``document_aspects``.
 
-    Backfill rules (matches the going-forward writer contract):
+    DDL-only (substrate boundary, RDR-120 §A8 / nexus-6y2a9). The
+    per-row backfill body that previously ran here moved to the
+    consumer verb ``nx aspects backfill-source-uri``. Operators
+    upgrading from a pre-4.16.0 install must run the verb before the
+    next upgrade pass; ``migrate_drop_source_path_column`` (4.31.0)
+    refuses to drop ``source_path`` until every row has a non-empty
+    ``source_uri``, and the error message names the verb.
 
-    * filesystem-backed collections (``rdr__*``, ``docs__*``,
-      ``code__*``): ``source_uri = 'file://' || abspath(source_path)``.
-    * chroma-backed collections (``knowledge__*`` and any other
-      prefix): ``source_uri = 'chroma://' || collection || '/' ||
-      source_path``. ``knowledge__*`` chunks may be reassembled from
-      T3 either by ``source_path`` or ``title`` (RDR-096 P2.0
-      research-5); the URI's path component is whatever was stored
-      in ``source_path`` at extraction time.
-    * Empty ``source_path`` rows are SKIPPED — they cannot be
-      backfilled (research-2 mitigation, id 1009: 1 chunk in
-      ``code__int-crossmodel-ba3a85dc`` has empty source_path).
-      A WARN is logged with the count for triage; ``nx doctor
-      --check-schema`` surfaces this in steady state.
+    Idempotent:
 
-    Idempotent on three axes:
-
-    * ``ALTER TABLE`` — gated by ``PRAGMA table_info`` so re-runs
-      don't re-add the column.
-    * Backfill ``UPDATE`` — guarded by ``WHERE source_uri IS NULL``
-      so re-runs only touch unfilled rows. New writes that arrived
-      after the first migration pass are not stomped.
+    * ``ALTER TABLE`` is gated by ``PRAGMA table_info`` so re-runs
+      do not re-add the column.
     * No-op when the table doesn't exist (defensive, matches the
       pattern of older RDR-089 migrations on this same registry).
     """
-    # Import the single source of truth for URI construction so this
-    # migration and the going-forward writers in
-    # ``nexus.aspect_extractor._build_record`` / ``_empty_record`` stay
-    # in lockstep on prefix rules. ``uri_for`` returns ``None`` for
-    # empty source_path — matches the NULL-on-empty backfill behavior
-    # this migration's research-2 mitigation requires.
-    from nexus.aspect_readers import uri_for  # noqa: PLC0415
-
     cols = {r[1] for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()}
     if not cols:
-        # Table doesn't exist (fresh install before
-        # migrate_document_aspects_table runs).
         return
     if "source_uri" not in cols:
         conn.execute("ALTER TABLE document_aspects ADD COLUMN source_uri TEXT")
         conn.commit()
 
-    if "source_path" not in cols:
-        # ocu9.11 (4.31.0) dropped source_path. When apply_pending re-runs
-        # because a later MigrationRetry blocked the version-bump, this
-        # backfill is reached again with source_path absent. Idempotent
-        # no-op in that case.
-        return
-
-    # Two-pass backfill. Loop in Python (SQL has no abspath helper);
-    # wrap in an explicit transaction so 100K rows don't produce 100K
-    # round-trips against the WAL — autocommit would slow this from
-    # seconds to minutes on large catalogs.
-    rows = conn.execute(
-        "SELECT rowid, collection, source_path FROM document_aspects "
-        "WHERE source_uri IS NULL",
-    ).fetchall()
-
-    backfilled = 0
-    skipped_empty = 0
-    conn.execute("BEGIN")
-    try:
-        for rowid, collection, source_path in rows:
-            uri = uri_for(collection, source_path)
-            if uri is None:
-                skipped_empty += 1
-                continue
-            conn.execute(
-                "UPDATE document_aspects SET source_uri = ? WHERE rowid = ?",
-                (uri, rowid),
-            )
-            backfilled += 1
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-
-    if backfilled or skipped_empty:
-        _log.info(
-            "migrate_document_aspects_source_uri",
-            backfilled=backfilled,
-            skipped_empty_source_path=skipped_empty,
-        )
-
 
 def migrate_document_aspects_source_uri_backfill_empty(conn: sqlite3.Connection) -> None:
-    """nexus-pnje: backfill ``document_aspects`` rows where
-    ``source_uri = ''`` (in addition to NULL).
+    """nexus-pnje (4.26.2): pure-data backfill of empty ``source_uri``
+    rows. Now a no-op (RDR-120 §A8 / nexus-6y2a9): the body moved to
+    ``nx aspects backfill-source-uri``.
 
-    The original RDR-096 P2.1 migration (``migrate_document_aspects_
-    source_uri`` above) only touched rows where ``source_uri IS NULL``.
-    Subsequent writer paths landed empty-string rows after the
-    migration ran; the live audit on production T2 (2026-05-06)
-    showed 61 of 579 rows (10.5%) with empty ``source_uri`` and
-    populated ``source_path``.
-
-    Prerequisite for ``nexus-ocu9.11`` (RDR-096 P5.2 — DROP COLUMN
-    ``source_path`` in 4.27.0). That migration's strict-audit step
-    blocks if any row has ``source_uri`` NULL or empty; this backfill
-    drops the count to zero so 4.27.0 ships cleanly without manual
-    triage.
-
-    Idempotent: only updates rows where source_uri is NULL OR ''
-    AND source_path is populated. Skipped rows (empty source_path
-    too) are left for manual triage and surfaced in the WARN log.
+    The migration step stays registered so the version chain remains
+    monotone; running it on an upgrade-from-pre-4.26.2 install is
+    legal and produces no writes. Operators with rows that still
+    have NULL/empty ``source_uri`` must run the consumer verb
+    explicitly; ``migrate_drop_source_path_column`` (4.31.0) raises
+    MigrationError until they do.
     """
-    from nexus.aspect_readers import uri_for  # noqa: PLC0415
-
-    cols = {
-        r[1]
-        for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()
-    }
-    if not cols or "source_uri" not in cols:
-        return
-
-    if "source_path" not in cols:
-        # ocu9.11 (4.31.0) dropped source_path. Re-runs after that point
-        # have nothing to backfill from; idempotent no-op.
-        return
-
-    rows = conn.execute(
-        "SELECT rowid, collection, source_path FROM document_aspects "
-        "WHERE (source_uri IS NULL OR source_uri = '') "
-        "  AND source_path IS NOT NULL "
-        "  AND source_path != ''",
-    ).fetchall()
-
-    backfilled = 0
-    skipped_uri_for_returned_none = 0
-    conn.execute("BEGIN")
-    try:
-        for rowid, collection, source_path in rows:
-            uri = uri_for(collection, source_path)
-            if uri is None:
-                skipped_uri_for_returned_none += 1
-                continue
-            conn.execute(
-                "UPDATE document_aspects SET source_uri = ? WHERE rowid = ?",
-                (uri, rowid),
-            )
-            backfilled += 1
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-
-    if backfilled or skipped_uri_for_returned_none:
-        _log.info(
-            "migrate_document_aspects_source_uri_backfill_empty",
-            backfilled=backfilled,
-            skipped_uri_for_returned_none=skipped_uri_for_returned_none,
-        )
+    return
 
 
 def migrate_drop_source_path_column(conn: sqlite3.Connection) -> None:
@@ -1819,9 +1701,10 @@ def migrate_drop_source_path_column(conn: sqlite3.Connection) -> None:
             f"nexus-ocu9.11: refusing to drop document_aspects.source_path "
             f"because {bad_rows} row(s) still have NULL or empty "
             f"source_uri. After dropping the column those rows would be "
-            f"unaddressable. Run "
-            f"``migrate_document_aspects_source_uri_backfill_empty`` "
-            f"first or repair the rows manually, then re-run."
+            f"unaddressable. Run `nx aspects backfill-source-uri --apply` "
+            f"to populate the URIs, then re-run `nx upgrade`. (Per "
+            f"RDR-120 §A8 / nexus-6y2a9 the backfill is consumer-driven; "
+            f"the substrate no longer runs it at startup.)"
         )
 
     pk_cols = {
@@ -1852,92 +1735,16 @@ def migrate_drop_source_path_column(conn: sqlite3.Connection) -> None:
 
 
 def migrate_drop_null_aspect_rows(conn: sqlite3.Connection) -> None:
-    """RDR-096 P2.2: drop pre-RDR-096 read-failure rows from
-    ``document_aspects`` using the seven-clause discriminator from
-    research-3 (id 1010).
+    """RDR-096 P2.2: drop pre-RDR-096 read-failure rows. Now a no-op
+    (RDR-120 §A8 / nexus-6y2a9): the seven-clause-discriminator DELETE
+    body moved to ``nx aspects gc-pre-rdr096``.
 
-    Two clauses are load-bearing:
-
-    * ``confidence IS NULL`` — without it, the migration silently
-      drops ``rdr-frontmatter-v1`` "structured-zero" successes
-      (parser ran, document has no scholarly structure, extractor
-      wrote ``confidence=1.0`` with all aspect fields empty). On
-      live nexus_rdr, that's 51 rows that must be retained.
-    * ``(experimental_datasets IS NULL OR = '[]')`` and
-      ``(experimental_baselines IS NULL OR = '[]')`` — the writer
-      stores ``json.dumps([])`` which is the literal string ``'[]'``,
-      not SQL NULL. Bare ``IS NULL`` predicates would match zero
-      rows in production despite the spike's 15-row empirical
-      finding. The Python-side discriminator in
-      ``scripts/spikes/spike_rdr096_a3_partial_success.py`` is
-      JSON-aware (parses the column then checks for empty list);
-      the SQL form must be too.
-    * ``(extras IS NULL OR = '{}')`` — same shape as the array
-      clauses but for the ``extras`` JSON object column. The current
-      writer always emits ``json.dumps({}) == '{}'`` so the
-      ``IS NULL`` half is defensive against legacy / hand-crafted
-      rows that predate the writer's normalization. The gap was
-      caught in code review of P2.2 — without the OR clause, a
-      hand-crafted ``extras=NULL`` ghost row would silently survive
-      the migration.
-
-    Going-forward writer contract (RDR-096 Phase 2):
-    any extractor recording a "structured-zero" success MUST set
-    non-NULL ``confidence``. Only ``ExtractFail`` paths emit no row
-    at all. The combination guarantees ``confidence IS NULL ∧ all-
-    empty-aspect-fields ∧ extras='{}'`` is structurally reachable
-    only from a pre-RDR-096 read failure — exactly what this
-    migration cleans up.
-
-    Empirical baseline (research-3, id 1010): 15 rows match across
-    the live nexus_rdr at ship time (12 rdr-frontmatter-v1 catalog-
-    stale paths from RDR-090 research-1003 + 3 scholarly-paper-v1
-    read-failures on knowledge__hybridrag).
-
-    Idempotent: re-running on a cleaned database deletes 0 rows
-    (no-op). Safe on a missing table (no-op).
+    The migration step stays registered so the version chain remains
+    monotone; running it on an upgrade-from-pre-4.16.0 install is
+    legal and produces no writes. Operators who want the historical
+    cleanup must run the consumer verb explicitly.
     """
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(document_aspects)").fetchall()}
-    if not cols:
-        return
-
-    # Audit pass: count first so the operator log line shows the
-    # impact before the DELETE applies. Audit + DELETE run inside
-    # the ``apply_pending`` ``_upgrade_lock`` so no concurrent
-    # writer can interleave between the two statements; the count
-    # is exact, not approximate.
-    audit = conn.execute(
-        "SELECT COUNT(*) FROM document_aspects "
-        "WHERE problem_formulation IS NULL "
-        "  AND proposed_method IS NULL "
-        "  AND (experimental_datasets IS NULL OR experimental_datasets = '[]') "
-        "  AND (experimental_baselines IS NULL OR experimental_baselines = '[]') "
-        "  AND experimental_results IS NULL "
-        "  AND (extras IS NULL OR extras = '{}')"
-        "  AND confidence IS NULL",
-    ).fetchone()
-    matched = audit[0] if audit else 0
-
-    if matched == 0:
-        # No-op: either fresh install or all read-failures already cleaned.
-        return
-
-    cur = conn.execute(
-        "DELETE FROM document_aspects "
-        "WHERE problem_formulation IS NULL "
-        "  AND proposed_method IS NULL "
-        "  AND (experimental_datasets IS NULL OR experimental_datasets = '[]') "
-        "  AND (experimental_baselines IS NULL OR experimental_baselines = '[]') "
-        "  AND experimental_results IS NULL "
-        "  AND (extras IS NULL OR extras = '{}')"
-        "  AND confidence IS NULL",
-    )
-    conn.commit()
-    _log.info(
-        "migrate_drop_null_aspect_rows",
-        matched=matched,
-        deleted=cur.rowcount,
-    )
+    return
 
 
 # ── RDR-108 Phase 1c: Aspect PK migration helpers ───────────────────────────
