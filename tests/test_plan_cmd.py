@@ -69,7 +69,7 @@ class TestPlanRepair:
         with patch(
             "nexus.commands._helpers.default_db_path", return_value=db_path,
         ):
-            first = runner.invoke(main, ["plan", "repair"])
+            first = runner.invoke(main, ["plan", "repair", "dimensions"])
         assert first.exit_code == 0, first.output
         assert "backfilled" in first.output.lower()
 
@@ -77,11 +77,13 @@ class TestPlanRepair:
         with patch(
             "nexus.commands._helpers.default_db_path", return_value=db_path,
         ):
-            second = runner.invoke(main, ["plan", "repair"])
+            second = runner.invoke(main, ["plan", "repair", "dimensions"])
         assert second.exit_code == 0, second.output
         # "nothing to do" / "0 backfilled" — must not assert the exact
         # phrasing, but the number must be zero.
-        assert "0 backfilled" in second.output.lower() or (
+        assert "backfilled: 0" in second.output.lower() or (
+            "0 backfilled" in second.output.lower()
+        ) or (
             "nothing" in second.output.lower()
         )
 
@@ -100,7 +102,7 @@ class TestPlanRepair:
         with patch(
             "nexus.commands._helpers.default_db_path", return_value=db_path,
         ):
-            result = runner.invoke(main, ["plan", "repair"])
+            result = runner.invoke(main, ["plan", "repair", "dimensions"])
         assert result.exit_code == 0, result.output
         output = result.output.lower()
         # The low-conf row is named and appears in the review section.
@@ -108,7 +110,11 @@ class TestPlanRepair:
         assert "what about the graph" in output
         # The high-conf row is counted but not individually listed in
         # the review surface.
-        assert "1 low-conf row" in output or "1 row needs review" in output
+        assert (
+            "1 low-conf row" in output
+            or "1 row needs review" in output
+            or "low_conf: 1" in output
+        )
 
     def test_repair_no_db_file(
         self, runner: CliRunner, tmp_path: Path,
@@ -120,7 +126,7 @@ class TestPlanRepair:
         with patch(
             "nexus.commands._helpers.default_db_path", return_value=db_path,
         ):
-            result = runner.invoke(main, ["plan", "repair"])
+            result = runner.invoke(main, ["plan", "repair", "dimensions"])
         assert result.exit_code == 0
         assert "not found" in result.output.lower()
 
