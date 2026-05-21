@@ -104,7 +104,18 @@ def make_t3_client(*, config_dir: Optional[Path] = None) -> "T3Database":
         model_name=model_override if model_override else None,
     )
 
-    local_path_str = payload.get("local_path", "")
+    # Discovery payloads from the file branch carry the daemon's
+    # actual on-disk path; the env branch (NX_T3_ADDR) does not, since
+    # the operator may be pointing at a daemon under a foreign data
+    # path or even a remote-bridged loopback. Fall back to the
+    # configured XDG default so T3Database's defensive ``local_path``
+    # mkdir does not receive an empty string and silently chmod cwd.
+    # The daemon owns the on-disk store; T3Database.local_path is
+    # diagnostic-only when ``_client`` is injected.
+    local_path_str = payload.get("local_path") or ""
+    if not local_path_str:
+        from nexus.config import _default_local_path
+        local_path_str = str(_default_local_path())
     _log.info(
         "t3_client_constructed",
         host=host,

@@ -23,25 +23,28 @@ from textwrap import dedent
 import pytest
 
 
+# The MVV exercises T3Database's public surface (put / search) over
+# the daemon, not the raw chromadb.HttpClient. P1.B's surface-parity
+# claim is that make_t3_client returns the same T3Database class as
+# direct-mode make_t3; the MVV is the end-to-end check that the
+# claim holds when the injected _client is an HttpClient.
 WRITER = dedent("""
     import json
     from nexus.daemon.t3_client import make_t3_client
     t3 = make_t3_client()
-    coll = t3._client.get_or_create_collection("rdr120_p1c_mvv")
-    coll.upsert(
-        documents=["alpha from writer", "beta from writer"],
-        ids=["alpha", "beta"],
-    )
-    print(json.dumps({"role": "writer", "count": coll.count()}))
+    id_a = t3.put("knowledge__rdr120_p1c_mvv", "alpha doc from writer", title="alpha")
+    id_b = t3.put("knowledge__rdr120_p1c_mvv", "beta doc from writer", title="beta")
+    info = t3.collection_info("knowledge__rdr120_p1c_mvv")
+    print(json.dumps({"role": "writer", "count": info["count"], "ids": [id_a, id_b]}))
 """)
 
 READER = dedent("""
     import json
     from nexus.daemon.t3_client import make_t3_client
     t3 = make_t3_client()
-    coll = t3._client.get_collection("rdr120_p1c_mvv")
-    res = coll.query(query_texts=["alpha"], n_results=2)
-    print(json.dumps({"role": "reader", "ids": res["ids"][0]}))
+    hits = t3.search("alpha", ["knowledge__rdr120_p1c_mvv"], n_results=2)
+    titles = sorted([h.get("title", "") for h in hits])
+    print(json.dumps({"role": "reader", "count": len(hits), "titles": titles}))
 """)
 
 
@@ -108,7 +111,8 @@ class TestTwoSubprocessRoundTrip:
 
         reader_out = _run(READER, env, "reader")
         assert reader_out["role"] == "reader"
-        assert sorted(reader_out["ids"]) == ["alpha", "beta"]
+        assert reader_out["count"] == 2
+        assert reader_out["titles"] == ["alpha", "beta"]
 
     def test_subprocesses_fail_loud_without_env_or_file(
         self, force_local_mode, tmp_path

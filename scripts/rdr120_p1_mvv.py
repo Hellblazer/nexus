@@ -33,25 +33,27 @@ from pathlib import Path
 from textwrap import dedent
 
 
+# Exercise T3Database public surface (put / search) over the daemon,
+# not the raw chromadb.HttpClient — the MVV's value is verifying the
+# P1.B surface-parity claim end-to-end, which is invisible if the
+# scripts unwrap to the underlying client.
 WRITER_SCRIPT = dedent("""
-    import json, sys
+    import json
     from nexus.daemon.t3_client import make_t3_client
     t3 = make_t3_client()
-    coll = t3._client.get_or_create_collection("rdr120_p1_mvv")
-    coll.upsert(
-        documents=["alpha from writer", "beta from writer"],
-        ids=["alpha", "beta"],
-    )
-    print(json.dumps({"role": "writer", "count": coll.count()}))
+    id_a = t3.put("knowledge__rdr120_p1_mvv", "alpha doc from writer", title="alpha")
+    id_b = t3.put("knowledge__rdr120_p1_mvv", "beta doc from writer", title="beta")
+    info = t3.collection_info("knowledge__rdr120_p1_mvv")
+    print(json.dumps({"role": "writer", "count": info["count"], "ids": [id_a, id_b]}))
 """)
 
 READER_SCRIPT = dedent("""
-    import json, sys
+    import json
     from nexus.daemon.t3_client import make_t3_client
     t3 = make_t3_client()
-    coll = t3._client.get_collection("rdr120_p1_mvv")
-    res = coll.query(query_texts=["alpha"], n_results=2)
-    print(json.dumps({"role": "reader", "ids": res["ids"][0]}))
+    hits = t3.search("alpha", ["knowledge__rdr120_p1_mvv"], n_results=2)
+    titles = sorted([h.get("title", "") for h in hits])
+    print(json.dumps({"role": "reader", "count": len(hits), "titles": titles}))
 """)
 
 
@@ -121,10 +123,10 @@ def main() -> int:
         print("[demo] subprocess B (reader) connecting via NX_T3_ADDR")
         reader_result = _run_subprocess("reader", READER_SCRIPT, sub_env)
         print(f"[demo]   reader -> {reader_result}")
-        ids = reader_result.get("ids") or []
-        if sorted(ids) != ["alpha", "beta"]:
+        titles = reader_result.get("titles") or []
+        if titles != ["alpha", "beta"]:
             failures.append(
-                f"reader ids={ids} expected ['alpha', 'beta']"
+                f"reader titles={titles} expected ['alpha', 'beta']"
             )
     finally:
         if args.keep_daemon:
