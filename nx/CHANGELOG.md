@@ -6,6 +6,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.33.1] - 2026-05-21
+
+Plugin version aligned with conexus 4.33.1. RDR-125 routing-hook
+ownership migration: `grep_for_symbols_redirects_to_serena.py`
+moved out of nx into the sn plugin (its rightful home — it
+redirects to Serena MCP tools that sn ships).
+
+### Removed (RDR-125 P1)
+
+- `nx/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py`
+  (moved to sn — see sn/CHANGELOG.md if it exists)
+- Corresponding entry in `nx/hooks/scripts/routing/registry.yaml`
+- Corresponding PreToolUse:Bash entry in `nx/hooks/hooks.json`
+
+### Updated (RDR-125 P2)
+
+- `nx/hooks/scripts/routing/README.md` documents the ownership
+  rule (each plugin owns rules whose deny message redirects to its
+  own tools) and the cross-plugin aggregate-cap accounting.
+
+### Notes
+
+- Two new monorepo-level CI lints landed under `tests/`:
+  `test_routing_lib_drift.py` (byte-equality between vendored
+  framework copies) and `test_routing_registry_aggregate_cap.py`
+  (cross-plugin 4-hook cap + no-duplicate-names enforcement).
+
 ## [4.33.0] - 2026-05-20
 
 Plugin version aligned with conexus 4.33.0. RDR-121 lands the routing-

@@ -6,6 +6,48 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.33.1] - 2026-05-21
+
+Patch release. Architectural follow-up to RDR-121 (4.33.0): the
+routing-hook framework now applies ownership boundaries cleanly.
+The `grep_for_symbols_redirects_to_serena` rule moved from the nx
+plugin to the sn plugin because its deny message redirects to
+Serena MCP tools that sn ships. Users who install nx without sn no
+longer get a hook that denies grep and points at tools they do not
+have; the hook simply does not exist for them.
+
+### Architecture (RDR-125)
+
+- Routing-rule ownership rule: each plugin owns the rules whose
+  deny message redirects to a tool the plugin ships. Documented in
+  `nx/hooks/scripts/routing/README.md` and `sn/hooks/scripts/routing/README.md`.
+- Framework files (`_lib.py`, `_run_python_hook.sh`) remain
+  canonical in nx and are vendored byte-identical into each plugin
+  that ships a routing rule. `tests/test_routing_lib_drift.py`
+  refuses any divergence at PR time.
+- The RDR-121 4-hook cap on PreToolUse:Bash is now an aggregate
+  across all installed plugins. `tests/test_routing_registry_aggregate_cap.py`
+  enforces the cap as a CI lint and forbids duplicate rule names
+  across plugins.
+
+### Moved (RDR-125 P1)
+
+- `grep_for_symbols_redirects_to_serena.py` migrated from
+  `nx/hooks/scripts/routing/` to `sn/hooks/scripts/routing/`.
+- `_run_python_hook.sh` vendored from `nx/hooks/scripts/` into
+  `sn/hooks/scripts/` (byte-identical; sn needed it because it now
+  ships a Python hook).
+- nx `hooks.json` and `registry.yaml` no longer carry the grep
+  entry; sn `hooks.json` and `registry.yaml` carry it now.
+
+### Notes
+
+- Aggregate hook count post-migration: nx 3 (`pre_close_verification_hook`,
+  `git_add_all`, `phase_review_close`) + sn 1 (`grep_for_symbols`)
+  = 4, at cap.
+- RDR-125 is accepted; closeout happens after this release ships
+  and the migration verifies live.
+
 ## [4.33.0] - 2026-05-20
 
 Minor release. RDR-121 hook-enforced tool routing: a PreToolUse backstop
