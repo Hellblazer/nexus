@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# RDR-125 routing-hook registry (sn plugin).
+#
+# Per RDR-125, rules whose deny message redirects to a plugin-specific
+# tool live in the plugin that ships that tool. This file is sn's
+# registry; nx ships its own at nx/hooks/scripts/routing/registry.yaml.
+#
+# Aggregate cap (RDR-121 + RDR-125): the union of routing rules
+# across all plugins must stay <= 4 PreToolUse:Bash entries to honor
+# the <300ms p95 cumulative budget. Current aggregate count:
+#   nx: 2 routing rules (git_add_all, phase_review_close)
+#       + pre_close_verification_hook = 3 PreToolUse:Bash entries
+#   sn: 1 (grep_for_symbols_redirects_to_serena)
+#   total: 4, AT CAP. Adding a fifth rule in ANY plugin requires
+#   either consolidation or a budget revision in a successor RDR.
+#
+# The schema mirrors nx's registry.yaml exactly. See
+# nx/hooks/scripts/routing/registry.yaml for field documentation.
+
+rules:
+  grep_for_symbols_redirects_to_serena:
+    hook_script: grep_for_symbols_redirects_to_serena.py
+    matcher: Bash
+    mode: redirect
+    rationale: >-
+      grep / rg on code files for identifier-shaped patterns is a
+      symbol-navigation task; use Serena
+      (jet_brains_find_symbol / jet_brains_find_referencing_symbols).
+    escape_token: "# routing-allow:"
+    fail_closed: false
