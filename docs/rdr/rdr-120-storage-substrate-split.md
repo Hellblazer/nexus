@@ -638,6 +638,17 @@ be on `main` for **≥7 days** under real usage before the next opens.
 Linear, not parallel. The release of each phase is its own validation
 point.
 
+**P1 soak-gate exception (decision 2026-05-21):** the soak rule is
+suspended at the P1 -> P2 boundary specifically. P1 leaves the
+daemon dormant (`NX_STORAGE_MODE=direct` remains the only valid
+value; no call sites flip), so the soak window does not exercise
+the daemon and cannot surface the lifecycle bugs the rule was
+designed to catch. P1 collapses into P2; P2.A opens as soon as
+the last P1 PR merges. See the per-phase block below for the full
+rationale. The rule continues to apply unchanged at every later
+boundary (P2 / P3a / P3b / P4 / P5) where real traffic exercises
+the daemon and the soak buys runtime-bug exposure.
+
 **Soak-duration exception (gate critique fix-in-place, 2026-05-21):**
 the P3a sub-phase soaks ≥3 days because P3b is permitted to land
 within the P3a soak window. The COMBINED P3 soak — from P3a ship to
@@ -667,6 +678,23 @@ P3b may land; it is not a substitute for the full P3 soak window.
 - No client API changes. No daemon code yet.
 
 **Phase 1: T3 daemon (managed `chroma run`)**
+
+**Soak-gate exception (decision 2026-05-21):** the P1 soak marker
+(originally `nexus-6ret6`) is REMOVED. P1 collapses into P2 once
+the last P1 PR (#910 / #911) merges; P2.A may open immediately.
+Rationale: P1 leaves `NX_STORAGE_MODE=direct` as the only valid
+value and call sites do not flip, so the daemon is dormant for the
+soak window. A dormant daemon does not surface the lifecycle bugs
+(port collision, supervisor flap, sleep/wake races) the soak was
+introduced to catch. The scope-discipline class that motivated the
+soak gate in the RDR-110-113 postmortem was caught by the
+phase-review-gate cross-walk and the 4-pass adversarial critic, not
+by calendar exposure. Those gates ran on P1 already (gate PASSED
+2026-05-21 / `nexus-ldztl` + cross-PR review on #905 / #906 / #907
+caught 4 Significants folded as `cfaab35d`). The soak-gate rule
+still applies at the P2 / P3a / P3b / P4 / P5 boundaries, where
+real traffic hits the daemon and the soak buys runtime-bug
+exposure.
 
 - `nx daemon t3 {start,stop,status,install,uninstall}` CLI verbs.
 - Daemon process: spawn-and-supervise `chroma run` with explicit port and
@@ -1265,3 +1293,4 @@ counterfactual.
 - 2026-05-21: Fourth gate pass. 0 Critical, 1 Significant. The single Significant was a precision error in pass-3's own fix-in-place: the C4 prose asserted `BEGIN EXCLUSIVE` as the cross-process safety mechanism, but the code uses `threading.RLock` (process-local) + step idempotency + SQLite statement-level write serialization. Safety story is real and sufficient; the cited mechanism was wrong. Folded:
   - **C4-correction** A6 P3 transition prose rewritten to cite the accurate safety story: SQLite statement-level write locking serializes DDL writers (loser gets SQLITE_BUSY and retries); step idempotency (every `_MIGRATIONS` entry uses `IF NOT EXISTS` / `PRAGMA table_info` / `INSERT OR IGNORE` guards) makes retries no-ops. `_upgrade_lock` is `threading.RLock`, process-local only, per the docstring at `migrations.py:2886-2894`. Step idempotency is the load-bearing cross-process invariant — a future non-idempotent migration step would silently break P3 safety; CI lint flagging unguarded DDL in migration functions is a deferred option.
   - **A5 inventory accuracy confirmed** by pass 4: the only `sqlite3.connect` sites in `src/nexus/catalog/` are `catalog_db.py:255` and `synthesizer.py:792`. `catalog_sync.py` imports `sqlite3` for exception classes only; not a connect site. P5 `count == 0` assertion is achievable as stated.
+- 2026-05-21: P1 soak-gate exception. P1 -> P2 boundary soak removed; P1 collapses into P2 once the last P1 PR merges. Rationale: P1 leaves the daemon dormant (`NX_STORAGE_MODE=direct` only; no call sites flip), so the soak window does not exercise the daemon and cannot surface the lifecycle bugs it was designed to catch. The scope-discipline class motivating the soak in the RDR-110-113 postmortem was caught by the phase-review-gate cross-walk and the 4-pass adversarial critic, not by calendar exposure. Those gates already ran on P1 (gate PASSED via `nexus-ldztl` + cross-PR review folded as `cfaab35d`). Closes `nexus-6ret6`. Rule preserved at every later boundary (P2 / P3a / P3b / P4 / P5) where real traffic does exercise the daemon. §Approach Phase 1 block carries the per-phase note.
