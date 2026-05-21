@@ -142,11 +142,18 @@ exclude = [
 # from a uv-tool / pipx / Homebrew install. Editable installs use a
 # ``src/nexus/_resources/dt-scripts`` symlink back into ``dt/scripts``.
 "dt/scripts" = "nexus/_resources/dt-scripts"
+# RDR-120 nexus-41unl: ship launchd plist + systemd unit templates so
+# ``nx daemon t3 install --autostart`` can resolve them via
+# ``importlib.resources.files("nexus") / "_resources" / "daemon"``.
+# Editable installs use a ``src/nexus/_resources/daemon`` symlink back
+# into ``nx/daemon``.
+"nx/daemon" = "nexus/_resources/daemon"
 
 [tool.hatch.build.targets.sdist]
 include = [
     "src",
     "nx/plans",
+    "nx/daemon",
     "dt/scripts",
     "README.md",
     "LICENSE",
