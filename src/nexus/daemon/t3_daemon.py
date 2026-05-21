@@ -216,6 +216,13 @@ def _wait_for_ready(
     )
 
 
+#: Spawn-lock file: serialises parallel ``start_t3_daemon`` calls so
+#: two callers do not race to spawn two chroma subprocesses against
+#: the same config_dir, both writing the same discovery path (the
+#: stress harness ``TestSpawnLockContention`` surfaces this).
+_T3_SPAWN_LOCK_FILE: str = "t3_spawn.lock"
+
+
 def start_t3_daemon(*, config_dir: Path, local_path: Path) -> dict[str, Any]:
     """Start the T3 chroma daemon (local mode only). Returns the
     discovery payload that was written to
@@ -223,13 +230,18 @@ def start_t3_daemon(*, config_dir: Path, local_path: Path) -> dict[str, Any]:
 
     Idempotent on a live daemon: if a discovery file exists and its PID
     is still alive, returns the existing payload without spawning a
-    duplicate.
+    duplicate. Parallel callers are serialised via an fcntl exclusive
+    lock on ``~/.config/nexus/t3_spawn.lock`` so two threads / processes
+    racing into a fresh-spawn branch do not both spawn separate chroma
+    subprocesses.
 
     Raises:
         T3CloudModeError: when ``is_local_mode()`` is False.
         T3StartError: when chroma cannot be located or fails to become
             ready within ``_READY_TIMEOUT``.
     """
+    import fcntl
+
     from nexus.config import is_local_mode
 
     if not is_local_mode():
@@ -240,62 +252,80 @@ def start_t3_daemon(*, config_dir: Path, local_path: Path) -> dict[str, Any]:
         )
 
     disc_path = t3_discovery_path(config_dir)
-    existing = _read_discovery(disc_path)
-    if existing is not None:
-        existing_pid = existing.get("pid")
-        if isinstance(existing_pid, int) and _pid_is_alive(existing_pid):
+    # Acquire the spawn lock before BOTH the discovery-check and the
+    # subprocess spawn so two parallel callers either both find the
+    # discovery file (the second after the first wrote it) or both go
+    # through the spawn path serialised.
+    config_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = config_dir / _T3_SPAWN_LOCK_FILE
+    lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        existing = _read_discovery(disc_path)
+        if existing is not None:
+            existing_pid = existing.get("pid")
+            if isinstance(existing_pid, int) and _pid_is_alive(existing_pid):
+                _log.info(
+                    "t3_daemon_already_running",
+                    pid=existing_pid,
+                    tcp_port=existing.get("tcp_port"),
+                )
+                return existing
             _log.info(
-                "t3_daemon_already_running",
+                "t3_daemon_stale_discovery",
                 pid=existing_pid,
-                tcp_port=existing.get("tcp_port"),
+                path=str(disc_path),
             )
-            return existing
-        _log.info(
-            "t3_daemon_stale_discovery",
-            pid=existing_pid,
-            path=str(disc_path),
+
+        local_path.mkdir(parents=True, exist_ok=True)
+        chroma = _find_chroma()
+        port = _allocate_free_port()
+
+        proc = subprocess.Popen(
+            [
+                chroma, "run",
+                "--host", _T3_HOST,
+                "--port", str(port),
+                "--path", str(local_path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
 
-    local_path.mkdir(parents=True, exist_ok=True)
-    chroma = _find_chroma()
-    port = _allocate_free_port()
+        try:
+            _wait_for_ready(_T3_HOST, port, proc, _READY_TIMEOUT)
+        except T3StartError:
+            # Either timeout (proc.kill called inside _wait_for_ready) or
+            # exit-before-ready (proc already terminated). Clean up the
+            # possibly-half-written discovery file so a follow-up start
+            # does not trip stale-detection with a confusing payload.
+            disc_path.unlink(missing_ok=True)
+            raise
 
-    proc = subprocess.Popen(
-        [
-            chroma, "run",
-            "--host", _T3_HOST,
-            "--port", str(port),
-            "--path", str(local_path),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-
-    try:
-        _wait_for_ready(_T3_HOST, port, proc, _READY_TIMEOUT)
-    except T3StartError:
-        # Either timeout (proc.kill called inside _wait_for_ready) or
-        # exit-before-ready (proc already terminated). Clean up the
-        # possibly-half-written discovery file so a follow-up start
-        # does not trip stale-detection with a confusing payload.
-        disc_path.unlink(missing_ok=True)
-        raise
-
-    payload = _build_payload(
-        tcp_port=port,
-        pid=proc.pid,
-        local_path=local_path,
-        daemon_version=_daemon_version(),
-    )
-    _write_discovery_atomic(disc_path, payload)
-    _log.info(
-        "t3_daemon_started",
-        pid=proc.pid,
-        tcp_port=port,
-        local_path=str(local_path),
-    )
-    return payload
+        payload = _build_payload(
+            tcp_port=port,
+            pid=proc.pid,
+            local_path=local_path,
+            daemon_version=_daemon_version(),
+        )
+        _write_discovery_atomic(disc_path, payload)
+        _log.info(
+            "t3_daemon_started",
+            pid=proc.pid,
+            tcp_port=port,
+            local_path=str(local_path),
+        )
+        return payload
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
 
 
 def stop_t3_daemon(*, config_dir: Path) -> int | None:

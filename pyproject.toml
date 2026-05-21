@@ -170,10 +170,11 @@ log_level = "WARNING"
 # Voyage / Chroma APIs in retry loops without credentials and hangs
 # pytest indefinitely (239+ CLOSE_WAIT TCP sockets observed locally).
 # Run them explicitly with ``pytest -m integration`` or ``-m slow``.
-addopts = "-m 'not integration and not slow'"
+addopts = "-m 'not integration and not slow and not stress'"
 markers = [
     "integration: end-to-end tests requiring real services (deselect with '-m not integration')",
     "slow: expensive benchmarks (deselect with '-m not slow')",
+    "stress: RDR-120 stress harness scenarios (run with 'pytest -m stress')",
 ]
 
 [dependency-groups]
