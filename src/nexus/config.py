@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import click
 import structlog
 import yaml
 
@@ -398,6 +399,62 @@ def catalog_path() -> Path:
     if env:
         return Path(env)
     return nexus_config_dir() / "catalog"
+
+
+#: RDR-120 P0.B — accepted values for ``NX_STORAGE_MODE``. ``direct``
+#: is the only mode wired today; ``daemon`` is reserved for the P3
+#: cutover and is rejected at P0 with an explicit not-yet-supported
+#: error so operators do not silently land in a half-built state.
+VALID_STORAGE_MODES: tuple[str, ...] = ("direct", "daemon")
+
+
+class StorageModeError(click.ClickException):
+    """Raised when ``NX_STORAGE_MODE`` is set to an unsupported value.
+
+    Subclasses ``click.ClickException`` so a CLI invocation surfaces
+    the message cleanly. Constructor signature matches the parent so
+    downstream code can catch it as either.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
+def storage_mode() -> str:
+    """Return the validated ``NX_STORAGE_MODE`` value.
+
+    RDR-120 P0.B scaffolding. Single source of truth for the storage
+    backend mode flag. Currently:
+
+    - unset / empty / whitespace -> ``"direct"`` (default)
+    - ``"direct"`` (any case) -> ``"direct"``
+    - ``"daemon"`` (any case) -> raises ``StorageModeError`` with
+      "not yet supported at phase 0"
+    - anything else -> raises ``StorageModeError`` naming the bad
+      value and listing :data:`VALID_STORAGE_MODES`
+
+    The function exists at P0 to lock the env-var name and the
+    validation contract before any client wires the mode to actual
+    behavior. P3 / P4 will switch the daemon branch from rejection
+    to a daemon-client construction.
+    """
+    raw = os.environ.get("NX_STORAGE_MODE", "")
+    normalized = raw.strip().lower()
+    if not normalized:
+        return "direct"
+    if normalized == "direct":
+        return "direct"
+    if normalized == "daemon":
+        raise StorageModeError(
+            "NX_STORAGE_MODE=daemon is not yet supported at phase 0 of "
+            "RDR-120 (storage substrate split). Set NX_STORAGE_MODE=direct "
+            "or unset the variable to use the current library-mode T2/T3 "
+            "backend. Daemon mode lands in P3."
+        )
+    raise StorageModeError(
+        f"NX_STORAGE_MODE={raw!r} is not a recognized value. "
+        f"Valid values: {', '.join(VALID_STORAGE_MODES)}."
+    )
 
 
 def is_local_mode() -> bool:
