@@ -155,6 +155,15 @@ moratorium and accreted consumer abstractions onto an in-flight substrate.
   client API via `HttpClient`.
 - Discovery: dual-primary (file at `~/.config/nexus/<tier>_addr.<uid>` and
   env vars `NX_T2_SOCK` / `NX_T2_ADDR` / `NX_T3_ADDR`).
+  **Precedence rule (gate critique fix-in-place, 2026-05-21):** env
+  var wins when set and non-empty; the file is the fallback when
+  the env var is unset. If the env-var-named address is unreachable,
+  the client fails loud rather than silently falling through to the
+  file — operator-set env vars are an explicit override that we
+  honor or report, never quietly route around. Container
+  orchestrators set env vars; host-local daemons write files. Both
+  can be live simultaneously; the precedence rule determines which
+  the client uses, not the daemon's existence.
 - Thin `T2Client` / `T3Client` mirroring the existing facade signatures.
   Call sites do not change beyond constructor injection.
 - Daemon-owned schema migration. The daemon is the sole migration runner.
@@ -194,6 +203,17 @@ has been on `main` continuously for ≥30 days under `NX_STORAGE_MODE=daemon`.
 - Adding a new RPC method to the daemon beyond what the existing facades
   already expose.
 - Cross-host federation, non-loopback TCP bind, network auth.
+- Schema migration helpers beyond `apply_pending`. Includes cross-tier
+  migration coordinators, dependent-store migration ordering frameworks,
+  and any new abstraction that wraps the migration step itself. The
+  daemon owns `apply_pending`; that is the substrate's entire migration
+  responsibility. Generalized migration helpers are a consumer concern.
+- Telemetry / breadcrumb instrumentation crossing the daemon boundary.
+  The substrate may emit structured logs about its own lifecycle (start,
+  stop, migration, RPC handler errors). It must not introduce a
+  breadcrumb / request-id / span concept that consumers thread through
+  their calls. RDR-115 (T2 daemon request tracing) is the right home for
+  that work.
 
 ### Enforcement
 
@@ -427,11 +447,42 @@ process discipline actually failed.
   `tests/test_migrations.py:696-740` passes by construction because
   RLock works within a process. In daemon mode the daemon calls
   `apply_pending` once at startup before accepting connections; clients
-  never call it. Cross-process race surface is structurally absent.
-  P3 implementation: move `apply_pending` from `t2/__init__.py:211` to
-  daemon startup; remove from `T2Client` construction; reframe the
-  skipped stress test as a daemon-startup invariant ("daemon refuses
-  second start against the same path").
+  never call it. Cross-process race surface is structurally absent
+  **once the cutover lands**.
+
+  **Invariant scope (gate critique fix-in-place, 2026-05-21):** A6's
+  cross-process-race-elimination invariant holds from P4+ steady
+  state, NOT from P3 ship. P3 ships the T2 daemon but does NOT flip
+  call sites: `NX_STORAGE_MODE=direct` remains the default for the
+  ≥7-day P3 soak, so direct-open `T2Database` construction continues
+  to call `apply_pending` per the existing pattern at
+  `src/nexus/db/t2/__init__.py:178-225`. During the P3 window, daemon
+  AND direct-open clients both run `apply_pending` via their own
+  RLock instances. The cross-process race surface is therefore NOT
+  yet eliminated in P3 — the daemon's `apply_pending` is one more
+  concurrent runner alongside the direct-open ones.
+
+  **P3 transition mitigation:** enforce daemon-starts-before-clients
+  ordering via the systemd / launchctl unit. The daemon's
+  `apply_pending` fires once at startup; direct-open clients still
+  run their own `apply_pending` on construction but are unlikely to
+  collide with a daemon that has already finished startup migrations
+  before any client opens. The `nexus-9eaz` stress test is RE-ARMED
+  for the P3 window, recast as: "daemon startup running concurrently
+  with a direct-open `T2Database` construction must not produce a
+  migration collision."
+
+  **P4 implementation: flip `NX_STORAGE_MODE` default to `daemon`,
+  remove `apply_pending` from `T2Client` and direct-open `T2Database`
+  paths, reframe the skipped stress test as a daemon-startup
+  invariant ("daemon refuses second start against the same path").**
+  From P4+ the daemon is the sole `apply_pending` caller; the
+  cross-process race surface is structurally absent and the
+  `nexus-9eaz` invariant holds as the verified state of A6.
+
+  Net: A6 stays `[x]` Verified — but for the P4+ steady state. P3 is
+  a transition window with the mitigations above, not a state in
+  which the invariant is already true.
 - [~] **A7** (new): **The moratorium is enforceable through written
   scope boundaries, per-phase cross-walks (tooled), and author self-
   policing, scoped to solo-author work.** A multi-mechanism enforcement
@@ -542,7 +593,7 @@ point.
 - Full pytest + integration suite green under `NX_STORAGE_MODE=daemon`.
 - ≥7 days on `main` under real usage before P3 opens.
 
-**Phase 3: T2 daemon**
+**Phase 3a: T2 daemon ships (transport only)**
 
 - `nx daemon t2 {start,stop,status,install,uninstall}` CLI verbs.
 - Daemon process: owns the seven domain-store SQLite handles (one per
@@ -550,16 +601,33 @@ point.
   (`~/.config/nexus/t2.sock`) and loopback TCP (announced via discovery
   file).
 - Discovery: `~/.config/nexus/t2_addr.<uid>` carries both UDS path and
-  TCP host:port. Env overrides: `NX_T2_SOCK`, `NX_T2_ADDR`.
+  TCP host:port. Env overrides: `NX_T2_SOCK`, `NX_T2_ADDR`. Precedence
+  rule per §In scope: env var wins when set and non-empty; file is
+  the fallback. Fail-loud on unreachable env-var target.
 - `T2Client`: thin RPC client mirroring the existing `T2Database` facade.
   UDS preferred, TCP fallback when UDS unreachable.
-- **Daemon owns migration**. On startup, checks schema version, applies
-  pending, then accepts connections. Clients carry an
-  expected-schema-version constant; handshake fails loud on mismatch.
-- T2 call sites do not flip yet. Daemon mode exercised via the daemon
-  E2E suite.
+- **Daemon owns migration on its own path**. On startup, checks schema
+  version, applies pending, then accepts connections. Clients carry
+  an expected-schema-version constant; handshake fails loud on
+  mismatch. **Direct-open `T2Database` construction continues to call
+  `apply_pending` per A6's P3 transition mitigation.**
+- T2 call sites do not flip yet (`NX_STORAGE_MODE=direct` is still
+  the default). Daemon mode exercised via the daemon E2E suite.
 - MVV: two `claude -p` sub-processes in different working dirs share
-  `memory_put` / `memory_get`.
+  `memory_put` / `memory_get` (cross-process daemon-mediated state).
+- Soak: ≥3 days.
+
+**Phase 3b: Migration ownership transfer**
+
+- `apply_pending` removed from `T2Database.__init__` and `T2Client`
+  construction. Daemon is the sole `apply_pending` caller.
+- `nexus-9eaz` cross-process stress test reframed as a daemon-startup
+  invariant test ("daemon refuses second start against the same
+  path"); previously skipped, now re-enabled under the new framing.
+- May land within the Phase 3a soak window (no calendar gating) — the
+  split is for bisectability, not cadence. A daemon bug surfacing
+  after 3a is in transport; a migration bug surfacing after 3b is in
+  ownership transfer.
 
 **Phase 4: T2 cutover**
 
@@ -569,6 +637,21 @@ point.
 - `NX_STORAGE_MODE=daemon` is the default for new installs; `direct` is
   retained as a debug fallback.
 - 7-day soak under daemon mode.
+
+**Phase-boundary forcing function: catalog-allowlist non-increase**
+(gate critique fix-in-place, 2026-05-21). At each phase-review-gate
+from P1 onward, the cross-walk reports the current count of direct
+`sqlite3.connect` / `_sqlite3.connect` call sites in
+`src/nexus/catalog/`. The count is monotonically non-increasing
+across phases (baseline at P0: 2; target at P5: 0). Any increase is
+a P5 risk that the phase cannot close without justification — either
+the call site is genuinely required and P5 cutover must absorb the
+additional removal, or the call site was added in error and must be
+removed before phase close. The P0 lint emits the catalog-allowlist
+count as a structlog metric on each run; the phase-review-gate
+records the metric to T2 (key `120-phase-N-catalog-allowlist-count`)
+and asserts non-increase against the previous phase's recorded
+value.
 
 **Phase 5: Catalog collapse into T2**
 
@@ -765,6 +848,20 @@ API credentials.
 - [ ] CI baseline: green on `main` at PR-open time. Tooling-level gate.
 - [ ] Storage-boundary lint passes against the current main without
   daemon-internal allowlist (P0 baseline).
+- [ ] **Daemon-init content-seeding audit** (gate critique fix-in-place,
+  2026-05-21). Enumerate the seven T2 domain stores'
+  initialization paths (`memory_store`, `plan_library`,
+  `chash_index`, `catalog_taxonomy`, `aspect_extraction_queue`,
+  `document_aspects`, `telemetry`) for content-seeding. Anything
+  that inserts rows beyond DDL — default taxonomy entries,
+  reserved-prefix registrations, telemetry-bootstrap seeds, etc.
+  — violates A8 when it runs on daemon startup. Each instance is
+  either (a) moved to a consumer RDR (the rule that seeds the
+  content owns its own initialization, not the substrate) or (b)
+  demoted to DDL-only (the consumer must write the seed itself on
+  first use). Audit output recorded as T2
+  `120-research-A9-content-audit`. Must complete before any daemon
+  code lands.
 
 ### Minimum Viable Validation
 
@@ -795,8 +892,20 @@ execution; SQL pattern matching is brittle and not used. Write surfaces
 
 ### New Dependencies
 
-Probably none. Stdlib `socketserver` / `multiprocessing.connection` for
-T2 transport; `chromadb` itself for T3 (already a dep). Confirm in P0.
+Probably none. Stdlib only for T2 transport; `chromadb` itself for T3
+(already a dep).
+
+**T2 transport decision (locked at P0, gate critique fix-in-place
+2026-05-21):** the candidates were stdlib `socketserver` with a
+hand-rolled JSON-on-the-wire framing, or
+`multiprocessing.connection` with default pickle serialization.
+**Pickle is forbidden.** UDS sockets on shared-user hosts are
+reachable by any process whose UID can open the socket file; pickle
+over that surface is an arbitrary-code-execution primitive. The
+chosen transport is `socketserver` with length-prefixed JSON frames.
+A T2 transport design note (length prefix, JSON envelope shape,
+error frame schema, max frame size, timeout semantics) ships
+alongside the daemon scaffold at P0.
 
 ## Test Plan
 
@@ -826,6 +935,30 @@ T2 transport; `chromadb` itself for T3 (already a dep). Confirm in P0.
   phase's PR merges, run a diff of merged code against § Scope
   Boundaries. **Verify**: no out-of-scope work landed. *(A7
   verification.)*
+- **Scenario**: P3 transition window migration race. Start the T2
+  daemon (which calls `apply_pending` at startup) and concurrently
+  construct a direct-open `T2Database` (which also calls
+  `apply_pending`). **Verify**: no migration collision; both paths
+  complete successfully against the same schema. *(A6 P3-transition
+  verification, gate critique fix-in-place.)*
+- **Scenario**: Discovery split-brain. Set `NX_T2_ADDR` to a live
+  daemon and write `~/.config/nexus/t2_addr.<uid>` pointing at a
+  different live daemon. **Verify**: client connects to the env-var
+  target (precedence rule). *(C2 verification.)*
+- **Scenario**: Discovery stale env var. Set `NX_T2_ADDR` to a dead
+  address; the addr file points at a live daemon. **Verify**: client
+  fails loud rather than silently falling through to the file.
+  *(C2 fail-loud semantics.)*
+- **Scenario**: Discovery stale file. Unset `NX_T2_ADDR`; the addr
+  file points at a dead address. **Verify**: client fails loud with
+  a useful message naming the file path. *(C2 fallback semantics.)*
+- **Scenario**: Catalog-allowlist non-increase across phase
+  boundaries. Run the storage-boundary lint with the allowlist count
+  metric enabled at P0; record baseline. At each phase-review-gate
+  from P1 onward, fetch the recorded T2 value
+  `120-phase-N-catalog-allowlist-count` and assert the current count
+  is ≤ the previous phase's count. **Verify**: monotonically
+  non-increasing through P4; 0 at P5. *(S1 forcing function.)*
 
 ## Validation
 
@@ -932,3 +1065,13 @@ counterfactual.
 ## Revision History
 
 - 2026-05-19: Draft. Authored on `feature/rdr-120-storage-substrate-tombstones` immediately after tombstoning RDR-110/111/112/113/118/119.
+- 2026-05-20: A8 added (substrate-vs-consumer applies to test fixtures) after v4.33.0 release prep surfaced corpus-fixture pinning failures.
+- 2026-05-21: A5 inventory refresh against conexus 4.33.1 main. Counts unchanged; lint design holds.
+- 2026-05-21: First gate run. BLOCKED with 2 Critical, 4 Significant, 5 Observations (T2 `120-gate-latest` id=1397). All findings folded in-place:
+  - **C1** A6 invariant scope clarified to P4+; P3 transition mitigation documented; `nexus-9eaz` test re-armed for the P3 window.
+  - **C2** Discovery precedence rule added (env var wins when set and non-empty; file is fallback; fail-loud on unreachable env-var target). Three test scenarios added.
+  - **S1** Catalog-allowlist non-increase forcing function added to §Approach as a phase-boundary cross-walk requirement; T2 metric recorded per phase.
+  - **S2** T2 transport pickle forbidden; `socketserver` + length-prefixed JSON locked as the P0 design decision.
+  - **S3** P3 split into P3a (daemon ships, transport only) and P3b (migration ownership transfer); both share the soak window; the split is for bisectability.
+  - **S4** Daemon-init content-seeding audit added as a P0 prerequisite; the seven T2 domain stores' initialization paths enumerated; output recorded as `120-research-A9-content-audit`.
+  - **O4** Two moratorium entries added: schema migration helpers beyond `apply_pending`, and telemetry/breadcrumb instrumentation crossing the daemon boundary (RDR-115 is the right home).
