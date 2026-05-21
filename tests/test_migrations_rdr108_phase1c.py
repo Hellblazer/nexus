@@ -7,7 +7,10 @@ Tests cover:
 - Schema target: PRIMARY KEY (doc_id), denorm cache columns retained
 - Backfill via direct (collection, file_path) JOIN against catalog docs
 - Backfill via supersede-chain JOIN for legacy-but-mapped collections
-- Test-fixture rows hard-deleted (5 fixture collection prefixes)
+- Test-fixture rows: legacy behaviour was an in-migration hard-delete;
+  RDR-120 §A8 / nexus-yulol moved it to ``nx aspects gc-fixtures``.
+  The migration now treats fixture rows as ordinary unmapped orphans
+  (low-volume → silent drop via Step 4; high-volume → MigrationError).
 - High-volume unmapped rows trigger fail-loud (MigrationError)
 - Drain precondition: migration BLOCKS if queue has pending/in_progress rows
 - Drain precondition: migration RUNS if queue is empty or only has failed rows
@@ -287,10 +290,19 @@ class TestDocumentAspectsPKMigration:
         "knowledge__pagtest",
         "knowledge__pagend",
     ])
-    def test_fixture_rows_hard_deleted(
+    def test_low_volume_fixture_rows_dropped_as_orphans(
         self, tmp_path: Path, fixture_collection: str
     ) -> None:
-        """Test-fixture collections are hard-deleted, never migrated."""
+        """Low-volume fixture rows are dropped as ordinary unmapped
+        orphans by Step 4 of the PK swap.
+
+        RDR-120 §A8 / nexus-yulol: the migration's old Step 2 fixture-
+        DELETE-by-pattern block moved to ``nx aspects gc-fixtures``.
+        Fixture rows are no longer special-cased inside the migration;
+        with one row per fixture collection (below the high-volume
+        threshold of 10) Step 4's hard_delete_unmapped pass removes
+        them, so the post-migration count is still 0.
+        """
         from nexus.db.migrations import migrate_document_aspects_pk_to_doc_id
 
         mem_db = tmp_path / "memory.db"
@@ -306,6 +318,39 @@ class TestDocumentAspectsPKMigration:
             "SELECT COUNT(*) FROM document_aspects"
         ).fetchone()[0]
         assert count == 0, f"Expected 0 rows, got {count} for fixture {fixture_collection}"
+        mem_conn.close()
+
+    def test_high_volume_fixture_rows_raise_migration_error(
+        self, tmp_path: Path
+    ) -> None:
+        """High-volume fixture rows now trigger the unmapped-orphan
+        fail-loud error rather than being silently dropped.
+
+        RDR-120 §A8 / nexus-yulol changes the operator contract: the
+        substrate no longer special-cases fixture prefixes. A user with
+        >10 rows in a fixture-prefixed collection must run
+        ``nx aspects gc-fixtures --yes`` before re-running the
+        migration. This test pins the new behaviour.
+        """
+        from nexus.db.migrations import (
+            MigrationError,
+            migrate_document_aspects_pk_to_doc_id,
+        )
+
+        mem_db = tmp_path / "memory.db"
+        cat_db = tmp_path / ".catalog.db"
+        mem_conn = _make_memory_db(mem_db)
+        _make_catalog_db(cat_db)
+
+        for i in range(12):
+            _insert_aspect(
+                mem_conn,
+                collection="knowledge__cli-bulk",
+                source_path=f"/doc-{i}.pdf",
+            )
+
+        with pytest.raises(MigrationError):
+            migrate_document_aspects_pk_to_doc_id(mem_conn, catalog_db_path=cat_db)
         mem_conn.close()
 
     def test_high_volume_unmapped_raises_migration_error(self, tmp_path: Path) -> None:
