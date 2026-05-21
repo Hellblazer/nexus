@@ -814,6 +814,93 @@ def _run_check_post_store_hooks() -> None:
     click.echo(f"\nTotal: {total} hook(s) registered across 3 chains.")
 
 
+# ── --check-storage-boundary (RDR-120 P0.A / nexus-7xxxg) ────────────────────
+
+
+def _run_check_storage_boundary(
+    fail_on_violation: bool, phase: str | None
+) -> None:
+    """Run the storage-boundary lint and emit a structlog metric.
+
+    Records the catalog-allowlist count to T2 at key
+    ``120-phase-<phase>-catalog-allowlist-count`` when ``phase`` is
+    set. The phase-boundary forcing function in RDR-120 §Approach
+    reads this on each subsequent phase and asserts monotonic
+    non-increase across phases.
+    """
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    from nexus.storage_boundary_lint import scan_repo
+
+    log = structlog.get_logger(__name__)
+
+    # Discover repo root by walking up from CWD looking for .git/.
+    # The installed `nx` lives in a uv-cache prefix; the lint targets
+    # the working tree the user is operating against, which is the
+    # current working directory's enclosing repo.
+    cwd = _Path.cwd().resolve()
+    repo_root: _Path | None = None
+    for parent in (cwd, *cwd.parents):
+        if (parent / ".git").exists():
+            repo_root = parent
+            break
+    if repo_root is None:
+        click.echo(
+            f"storage-boundary lint: could not locate a git repo rooted at "
+            f"or above {cwd}. Run from inside the nexus checkout.",
+            err=True,
+        )
+        _sys.exit(2)
+
+    result = scan_repo(repo_root=repo_root)
+
+    click.echo(
+        f"Storage-boundary lint (RDR-120 P0.A):\n"
+        f"  violations:                {result.total_violations}\n"
+        f"  catalog-allowlist count:   {result.catalog_allowlist_count}"
+    )
+
+    if result.violations:
+        click.echo("\nViolations:")
+        for v in result.violations:
+            click.echo(f"  {v.file}:{v.line}  {v.symbol}")
+
+    log.info(
+        "storage_boundary_lint",
+        violations=result.total_violations,
+        catalog_allowlist_count=result.catalog_allowlist_count,
+        phase=phase or "unset",
+    )
+
+    if phase:
+        try:
+            from nexus.commands._helpers import default_db_path
+            from nexus.db.t2 import T2Database
+
+            with T2Database(default_db_path()) as db:
+                db.memory.put(
+                    project="nexus_rdr",
+                    title=f"120-phase-{phase}-catalog-allowlist-count",
+                    content=str(result.catalog_allowlist_count),
+                    tags="rdr-120,phase-metric,catalog-allowlist",
+                    ttl=None,  # permanent
+                )
+        except Exception as exc:
+            log.warning(
+                "storage_boundary_lint_metric_write_failed",
+                error=str(exc),
+                phase=phase,
+            )
+
+    if fail_on_violation and result.violations:
+        click.echo(
+            f"\nFAIL: {result.total_violations} violation(s) found.",
+            err=True,
+        )
+        _sys.exit(1)
+
+
 # ── --check-mineru (nexus-2fyb code-review R3-3) ────────────────────────────
 
 
@@ -992,6 +1079,38 @@ def _run_check_mineru() -> None:
          "Phase 1B nexus-a52i.",
 )
 @click.option(
+    "--check-storage-boundary",
+    "check_storage_boundary",
+    is_flag=True,
+    default=False,
+    help="RDR-120 P0.A. AST-scan for direct sqlite3.connect / "
+         "chromadb.{PersistentClient,CloudClient,EphemeralClient} "
+         "calls outside src/nexus/db/ (daemon-internal). P0-P4 also "
+         "allowlists src/nexus/catalog/. Per-line override via "
+         "`# epsilon-allow: <reason>` (reason >=8 chars). Records "
+         "catalog-allowlist count to T2 key 120-phase-<N>-catalog-"
+         "allowlist-count for the phase-boundary forcing function. "
+         "Exits 1 with --fail-on-violation when violations exist.",
+)
+@click.option(
+    "--fail-on-violation",
+    "fail_on_violation",
+    is_flag=True,
+    default=False,
+    help="With --check-storage-boundary, exit 1 if any violation is "
+         "found. Without this flag the lint is informational.",
+)
+@click.option(
+    "--phase",
+    "phase",
+    type=str,
+    default=None,
+    help="With --check-storage-boundary, the RDR-120 phase identifier "
+         "for the T2 metric key (e.g. `0`, `1`, `2`, `3a`, `3b`, "
+         "`4`, `5`). Used to record `120-phase-<phase>-catalog-"
+         "allowlist-count`. Omit to skip the metric write.",
+)
+@click.option(
     "--mcp-log-hours",
     "mcp_log_hours",
     default=24,
@@ -1082,8 +1201,17 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_post_store_hooks: bool,
                check_aspect_queue: bool,
                check_t1: bool,
-               check_tier_discipline: bool) -> None:
+               check_tier_discipline: bool,
+               check_storage_boundary: bool,
+               fail_on_violation: bool,
+               phase: str | None) -> None:
     """Verify that all required services and credentials are available."""
+    if check_storage_boundary:
+        _run_check_storage_boundary(
+            fail_on_violation=fail_on_violation, phase=phase
+        )
+        return
+
     if check_schema:
         _run_check_schema()
         return
