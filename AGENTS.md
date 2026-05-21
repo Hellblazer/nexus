@@ -80,7 +80,7 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 ## Hot rules (don'ts paired with dos)
 
 - **Never `print()` in library code.** Use `structlog.get_logger(__name__).info(event=..., **fields)`.
-- **Never push directly to `main`.** Open a PR. The only exception is the version-bump commit during a release (`docs/contributing.md` § Release Process).
+- **Integration branch is `develop`.** Open PRs against `develop`, not `main`. `main` carries the plugin marketplace surface; the develop split protects it from in-flight churn. Releases promote `develop` to `main` via merge. The only direct-to-`main` commit allowed is the version-bump during a release (`docs/contributing.md` § Release Process).
 - **Never `git add -A` or `git add .`.** Stage by explicit path so untracked drafts don't sneak in.
 - **Never include AI attribution in commits.** No "Generated with Claude", no `Co-Authored-By: Claude`. Bead references and `Closes #N` only.
 - **Never delete RDR files.** Closing an RDR is a frontmatter `status: closed` flip — the file stays. See [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md).

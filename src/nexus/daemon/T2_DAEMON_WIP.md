@@ -69,13 +69,7 @@ Archive port deleted; clean substrate-only modules in place.
   fresh if/when one is added post-moratorium)
 - NO eighth domain store yet (`catalog` joins at P5)
 
-## What still ships in a follow-up bead (not P3a.A)
-
-- **P3a soak validation script**: `scripts/rdr120_p3_mvv.py` mirroring
-  `scripts/rdr120_p2_mvv.py`. The P3 MVV per §MVV table: two
-  `claude -p` subprocesses in different working dirs share
-  `memory_put` / `memory_get` via the T2 daemon. Tracked under the
-  P3a soak marker bead, not under P3a.A.
+## What still ships in a follow-up bead (not P3a)
 
 - **P3b migration ownership transfer** (`nexus-e9x4l`): remove
   `apply_pending` from `T2Database.__init__` so the daemon is the
@@ -83,11 +77,25 @@ Archive port deleted; clean substrate-only modules in place.
   `T2Database(self._db_path)` still triggers `apply_pending` per
   RDR-120 §A6 P3 transition mitigation. P3b lifts that.
 
-- **P3a.C P3 MVV bead** (`nexus-uai7p`): the two-subprocess MVV
-  itself; runs during the P3a soak window.
-
 - **Call-site cutover (P4)**: `nexus-2ngox` flips T2 call sites
   through `T2Client`. Not part of P3a.
+
+## What shipped alongside P3a.A (this branch, follow-up commits)
+
+- **T2 stress harness** (`tests/stress/test_t2_daemon_stress.py`,
+  12 scenarios): lifecycle stress, spawn-lock contention, kill -9
+  recovery, discovery file corruption, 30-parallel-client storm,
+  100-cycle connection churn, SIGSTOP/SIGCONT suspend/resume,
+  fail-loud after daemon death, frame protocol robustness (oversized
+  frame + garbage bytes), mixed UDS + TCP traffic, repeated SIGTERM
+  idempotency. Closes the validation requirement for the P3a
+  phase-review-gate (per RDR-120 amendment: harness pass is the
+  sole runtime-bug gate; no calendar component).
+
+- **P3 MVV script** (`scripts/rdr120_p3_mvv.py`): two `python -c`
+  subprocesses share T2 memory state via the daemon. Mirrors the
+  P1 and P2 MVV scripts; supports `--auto-start` for one-shot
+  ad-hoc daemon spawning. Closes `nexus-uai7p`.
 
 ## Local verification
 
