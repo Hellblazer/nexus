@@ -102,4 +102,43 @@ mixing it with the import. Independent of the P2 soak (which gates
 when `nexus-7aayk` may *open* as a bead, not when this WIP branch
 may *exist*).
 
-Bead: nexus-7aayk
+## Strip strategy decision (pending)
+
+The archive carries ~60 banlist references spread across imports,
+admin-op tables, constructor parameters, dispatch-table builders,
+closure handlers, and inline-imported helpers. Two paths:
+
+**Surgical strip** of the archive port (in place):
+- Remove banned imports
+- Delete methods that reference them (e.g. `_handle_event_stream`,
+  `_subspace_add_handler`, `_start_binding_watcher`)
+- Trim constructor parameters (`event_stream_handler`,
+  `tuplespace_service`, etc.)
+- Risk: cross-cutting concerns leave orphaned references, comments,
+  helpers that are now dead. Strip diff is large and unreviewable.
+
+**Fresh rewrite** of substrate-only core:
+- Keep the archive's frame protocol (`t2_json_dumps`, `t2_json_loads`,
+  `write_frame`, `read_frame`) and the type-tagged encoder verbatim.
+- Write a minimal `T2Daemon` class: `__init__`, `start`, `stop`,
+  `run_until_signal`, UDS + TCP bind, connection handler, dispatch
+  table built only from `_T2_STORE_ATTRS` + `_T2_DATABASE_METHODS`.
+- Same shape for `T2Client`: connect, send-frame, receive-frame,
+  method-proxy for each of the 8 stores' methods.
+- Target ~600 LOC per module; archive lives as reference material.
+- Cleaner diff but more original code to land + test.
+
+Decision deferred to the next session. The verbatim archive port
+exists in commit 1 of this branch as reference. The strip / rewrite
+work is a clean follow-up.
+
+## Branch state
+
+- Commit 1 (this commit): verbatim archive port + templates + WIP doc.
+- Branch will NOT import on its own (banned modules are referenced
+  but absent from main).
+- No tests, no CLI wiring.
+- DRAFT PR #916 for tracking; not for merge as-is.
+
+Bead: nexus-7aayk (still OPEN; this branch is preemptive structure,
+not a closing commit set).
