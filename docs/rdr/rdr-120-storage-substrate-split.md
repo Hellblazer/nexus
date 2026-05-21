@@ -2,12 +2,12 @@
 title: "Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers"
 id: RDR-120
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-19
-accepted_date:
+accepted_date: 2026-05-21
 related_issues: []
 related_rdrs: [RDR-004, RDR-041, RDR-105, RDR-108, RDR-112]
 supersedes: [RDR-112]
