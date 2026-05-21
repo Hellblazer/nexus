@@ -828,7 +828,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
         click.echo("Dry-run mode — local ONNX embeddings, no cloud writes.")
         ef = DefaultEmbeddingFunction()
-        local_t3 = make_t3(_client=chromadb.EphemeralClient(), _ef_override=ef)
+        local_t3 = make_t3(_client=chromadb.EphemeralClient(), _ef_override=ef)  # epsilon-allow: --dry-run indexing requires in-memory ephemeral client by design
 
         def _local_embed(texts: list[str], model: str) -> tuple[list[list[float]], str]:
             return [v.tolist() for v in ef(texts)], model

@@ -28,26 +28,48 @@ if TYPE_CHECKING:
 
 
 def make_t3(*, _client=None, _ef_override=None) -> "T3Database":
-    """Return a :class:`T3Database` built from the current credentials.
+    """Return a :class:`T3Database` built from the current credentials
+    and the active ``NX_STORAGE_MODE``.
 
-    In local mode (``is_local_mode()`` returns True), returns a T3Database
-    backed by ``chromadb.PersistentClient`` with a ``LocalEmbeddingFunction``.
-    No API keys required.
+    Dispatch (RDR-120 P2):
 
-    In cloud mode, returns a T3Database backed by ``chromadb.CloudClient``
-    with Voyage AI embeddings.
+    - ``NX_STORAGE_MODE=daemon`` + local mode + no injected ``_client``:
+      route via ``nexus.daemon.t3_client.make_t3_client`` to the running
+      T3 daemon (``chromadb.HttpClient`` against
+      ``~/.config/nexus/t3_addr.<uid>`` or ``NX_T3_ADDR``).
+    - ``NX_STORAGE_MODE=direct`` + local mode (or daemon mode with an
+      injected ``_client`` for tests): backed by
+      ``chromadb.PersistentClient`` with a ``LocalEmbeddingFunction``.
+      No API keys required.
+    - Cloud mode: backed by ``chromadb.CloudClient`` with Voyage AI
+      embeddings, regardless of ``NX_STORAGE_MODE``. The daemon model
+      does not apply in cloud mode; CloudClient is already HTTP-served.
 
     Keyword-only injection points (for tests):
 
-    * ``_client`` — substitute an ``EphemeralClient`` or ``MagicMock`` to
-      avoid real CloudClient connections.
+    * ``_client`` — substitute an ``EphemeralClient`` or ``MagicMock``
+      to avoid real CloudClient / HttpClient connections. Passing
+      ``_client`` short-circuits the daemon-mode dispatch.
     * ``_ef_override`` — override the embedding function (e.g.
       ``DefaultEmbeddingFunction()``) to avoid Voyage AI API calls.
     """
-    from nexus.config import is_local_mode, load_config, _default_local_path
+    from nexus.config import (
+        is_local_mode, load_config, _default_local_path, storage_mode,
+    )
     # Runtime import of T3Database (was moved out of module-scope to
     # break the eager torch-import chain during CLI startup).
     from nexus.db.t3 import T3Database
+
+    if (
+        is_local_mode()
+        and _client is None
+        and storage_mode() == "daemon"
+    ):
+        # Daemon-mode dispatch (RDR-120 P2). T3Client construction
+        # raises T3DaemonError when the daemon is unreachable; the
+        # message names ``nx daemon t3 start`` as the operator fix.
+        from nexus.daemon.t3_client import make_t3_client
+        return make_t3_client()
 
     if is_local_mode() and _client is None:
         from nexus.db.local_ef import LocalEmbeddingFunction
