@@ -178,10 +178,15 @@ def _daemon_version() -> str:
 
 
 def _allocate_free_port() -> int:
-    """Bind a free loopback port, then close it. The TOCTOU window
-    between close and chroma binding the port is negligible on loopback."""
+    """Bind a free loopback port, then close it.
+
+    No ``SO_REUSEADDR`` on the probe: with REUSEADDR another listener
+    can steal the same port between close and chroma's bind. The probe
+    is closed immediately so the kernel TIME_WAIT window suffices to
+    guard against double-allocation; the TOCTOU window between close
+    and chroma binding the port is negligible on loopback.
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((_T3_HOST, 0))
     port: int = sock.getsockname()[1]
     sock.close()
@@ -332,6 +337,26 @@ def stop_t3_daemon(*, config_dir: Path) -> int | None:
                 os.waitpid(pid, os.WNOHANG)
             except (ChildProcessError, OSError):
                 pass
+            # Confirm SIGKILL took effect before removing the discovery
+            # file. If the process survives a brief window (Linux
+            # uninterruptible sleep, foreign-uid race), unlinking would
+            # orphan a chroma still bound to its port: the next ``start``
+            # would allocate a fresh port and the old daemon would leak.
+            # Brief polling, then leave the discovery file in place and
+            # surface a loud warning.
+            confirm_deadline = time.monotonic() + 1.0
+            while time.monotonic() < confirm_deadline:
+                if not _pid_is_alive(pid):
+                    break
+                time.sleep(0.05)
+            if _pid_is_alive(pid):
+                _log.warning(
+                    "t3_daemon_stop_kill_failed",
+                    pid=pid,
+                    msg="SIGKILL did not reap process; discovery file "
+                        "preserved to avoid orphaning a bound port",
+                )
+                return pid
 
     disc_path.unlink(missing_ok=True)
     _log.info("t3_daemon_stopped", pid=pid)
