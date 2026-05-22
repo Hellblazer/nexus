@@ -59,6 +59,34 @@ class T2DaemonNotReachableError(RuntimeError):
     connection fails (daemon crashed mid-transit, address stale)."""
 
 
+class T2SchemaVersionMismatchError(RuntimeError):
+    """Raised when the daemon's stored schema version differs from the
+    version the client was built against.
+
+    RDR-120 P3b (nexus-e9x4l): client carries
+    :func:`nexus.db.migrations.expected_t2_schema_version` as the
+    expected value and exchanges it with the daemon via
+    ``database.hello`` on first connect. A mismatch means client and
+    daemon are running different ``conexus`` wheels; the substrate
+    refuses to operate rather than silently apply migrations across
+    the boundary or read against a newer schema.
+
+    Attributes:
+        client_version: Schema version the client was built against.
+        daemon_version: Schema version the daemon reports.
+    """
+
+    def __init__(self, *, client_version: str, daemon_version: str) -> None:
+        super().__init__(
+            f"T2 schema version mismatch: client built against "
+            f"{client_version!r}, daemon reports {daemon_version!r}. "
+            f"Re-install conexus so both sides match, then restart the "
+            f"T2 daemon: `nx daemon t2 stop && nx daemon t2 start`."
+        )
+        self.client_version = client_version
+        self.daemon_version = daemon_version
+
+
 class T2ClientError(RuntimeError):
     """Raised when the daemon returns an error frame for an RPC call.
 
@@ -198,11 +226,21 @@ class T2Client:
             (defaults to ``nexus.config.nexus_config_dir()``).
     """
 
-    def __init__(self, *, config_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        *,
+        config_dir: Optional[Path] = None,
+        skip_handshake: bool = False,
+    ) -> None:
         self._config_dir = config_dir
         self._sock: Optional[socket.socket] = None
         self._request_id = 0
         self._lock = threading.Lock()
+        # RDR-120 P3b: handshake runs lazily on first ``call`` so
+        # construction stays cheap. ``skip_handshake`` exists for tests
+        # that exercise the connection plumbing without a real daemon.
+        self._skip_handshake = skip_handshake
+        self._handshake_done = False
         # Stores enumerated by the daemon dispatch builder. Public
         # attribute names mirror T2Database for surface parity.
         # Seven stores at P3a; catalog joins at P5.
@@ -229,6 +267,7 @@ class T2Client:
                 except OSError:
                     pass
                 self._sock = None
+            self._handshake_done = False
 
     # ── RPC ─────────────────────────────────────────────────────────────
 
@@ -237,12 +276,92 @@ class T2Client:
             self._sock = _open_connection(config_dir=self._config_dir)
         return self._sock
 
+    def _do_handshake_locked(self, sock: socket.socket) -> None:
+        """Send ``database.hello`` and verify version agreement.
+
+        Caller holds ``self._lock`` and must pass the established
+        socket. Raises ``T2SchemaVersionMismatchError`` on mismatch;
+        propagates transport / protocol errors unchanged so the caller
+        tears down the socket the same way as any other RPC failure.
+        """
+        from nexus.db.migrations import expected_t2_schema_version
+
+        client_version = expected_t2_schema_version()
+        self._request_id += 1
+        request_id = self._request_id
+        frame = {
+            "op": "database.hello",
+            "args": [],
+            "kwargs": {"client_schema_version": client_version},
+            "request_id": request_id,
+        }
+        _send_frame_sync(sock, frame)
+        response = _recv_frame_sync(sock)
+        if response.get("request_id") != request_id:
+            raise ProtocolError(
+                f"handshake response request_id mismatch: "
+                f"sent {request_id}, got {response.get('request_id')!r}"
+            )
+        if not response.get("ok", False):
+            err = response.get("error") or {}
+            raise T2ClientError(
+                op="database.hello",
+                error_type=str(err.get("type", "Unknown")),
+                message=str(err.get("message", "<no message>")),
+            )
+        result = response.get("result") or {}
+        daemon_version = str(result.get("daemon_schema_version") or "")
+        # ``"0.0.0"`` / empty daemon side means the daemon never completed
+        # ``apply_pending`` (deferred steps, e.g. catalog absent). The
+        # schema is still functionally OK for daemon ops — log a warning
+        # and proceed. A genuine non-trivial mismatch is the fail-loud
+        # case (client and daemon are running different wheels).
+        if (
+            daemon_version
+            and daemon_version != "0.0.0"
+            and daemon_version != client_version
+        ):
+            raise T2SchemaVersionMismatchError(
+                client_version=client_version,
+                daemon_version=daemon_version,
+            )
+        if daemon_version in ("", "0.0.0"):
+            _log.warning(
+                "t2_client_handshake_daemon_version_unset",
+                client_version=client_version,
+                daemon_version=daemon_version,
+            )
+        self._handshake_done = True
+
     def call(self, op: str, *args: Any, **kwargs: Any) -> Any:
         """Invoke *op* with positional + keyword args; return the
         decoded result. Raises ``T2ClientError`` on daemon-side
-        failure, ``T2DaemonNotReachableError`` on transport failure."""
+        failure, ``T2DaemonNotReachableError`` on transport failure,
+        ``T2SchemaVersionMismatchError`` if the lazy handshake detects
+        a client/daemon schema-version skew on first connect.
+        """
         with self._lock:
             sock = self._ensure_sock()
+            if not self._skip_handshake and not self._handshake_done:
+                try:
+                    self._do_handshake_locked(sock)
+                except (OSError, T2DaemonNotReachableError):
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                    self._sock = None
+                    self._handshake_done = False
+                    raise
+                except T2SchemaVersionMismatchError:
+                    # Tear down so a retry after reinstall reconnects.
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                    self._sock = None
+                    self._handshake_done = False
+                    raise
             self._request_id += 1
             request_id = self._request_id
             frame = {
@@ -261,6 +380,7 @@ class T2Client:
                 except OSError:
                     pass
                 self._sock = None
+                self._handshake_done = False
                 if isinstance(exc, T2DaemonNotReachableError):
                     raise
                 raise T2DaemonNotReachableError(

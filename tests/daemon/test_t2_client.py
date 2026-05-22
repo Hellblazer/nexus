@@ -168,3 +168,154 @@ class TestEndToEndRpc:
             assert excinfo.value.op == "nonexistent.op"
             assert "ProtocolError" in excinfo.value.error_type or \
                    "unknown op" in excinfo.value.message
+
+
+# ---------------------------------------------------------------------------
+# RDR-120 P3b: schema-version handshake
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaHandshake:
+    """RDR-120 P3b (nexus-e9x4l): T2Client invokes ``database.hello`` on
+    first connect; mismatch raises ``T2SchemaVersionMismatchError``.
+    """
+
+    def test_hello_round_trip_returns_daemon_schema_version(
+        self, config_dir: Path, live_daemon,
+    ) -> None:
+        from nexus.daemon.t2_client import T2Client
+
+        with T2Client(config_dir=config_dir) as client:
+            result = client.database.hello(client_schema_version="probe")
+            assert isinstance(result, dict)
+            assert "daemon_schema_version" in result
+            assert result["client_schema_version"] == "probe"
+
+    def test_handshake_runs_once_per_connection(
+        self, config_dir: Path, live_daemon,
+    ) -> None:
+        """Two RPCs in a row over a single connection produce exactly
+        one handshake; second call skips via ``_handshake_done``."""
+        from nexus.daemon.t2_client import T2Client
+
+        with T2Client(config_dir=config_dir) as client:
+            client.memory.put(content="a", project="p", title="t1")
+            assert client._handshake_done is True
+            # A second call must not raise; handshake gate stays set.
+            client.memory.put(content="b", project="p", title="t2")
+            assert client._handshake_done is True
+
+    def test_handshake_mismatch_raises_schema_version_mismatch(
+        self, config_dir: Path, live_daemon, monkeypatch,
+    ) -> None:
+        """Force the client to claim a fake build-version that diverges
+        from the daemon's actual stored ``cli_version``; the handshake
+        must raise ``T2SchemaVersionMismatchError`` before any
+        substrate op runs.
+        """
+        from nexus.daemon import t2_client as _t2c
+        from nexus.daemon.t2_client import (
+            T2Client,
+            T2SchemaVersionMismatchError,
+        )
+
+        # Pin a non-trivial daemon-side stored schema version directly
+        # in _nexus_version so the handshake fail-loud branch (both
+        # sides non-trivial AND disagreeing) is the one under test.
+        import sqlite3 as _sqlite3
+
+        with T2Client(config_dir=config_dir) as warm:
+            warm.database.hello()  # ensure _nexus_version table exists
+        daemon_db_path = live_daemon._db_path
+        conn = _sqlite3.connect(str(daemon_db_path))
+        try:
+            conn.execute(
+                "UPDATE _nexus_version SET value=? WHERE key='cli_version'",
+                ("9.99.99",),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        from nexus.db.migrations import expected_t2_schema_version
+        fake_version = expected_t2_schema_version() + "-mismatch"
+        monkeypatch.setattr(
+            "nexus.db.migrations.expected_t2_schema_version",
+            lambda: fake_version,
+        )
+        # The handshake imports expected_t2_schema_version inside
+        # _do_handshake_locked, so the monkeypatch takes effect on
+        # the next client.
+        client = T2Client(config_dir=config_dir)
+        try:
+            with pytest.raises(T2SchemaVersionMismatchError) as excinfo:
+                client.memory.put(content="x", project="p", title="t")
+            assert excinfo.value.client_version == fake_version
+            # Daemon side may report real_version OR "0.0.0" when
+            # migrations deferred; either is fine — the mismatch only
+            # fires when daemon side is non-trivial AND disagrees.
+            assert excinfo.value.daemon_version != fake_version
+        finally:
+            client.close()
+
+
+# ---------------------------------------------------------------------------
+# RDR-120 P3b: T2Database direct-open no longer auto-migrates
+# ---------------------------------------------------------------------------
+
+
+class TestDirectOpenNoMigrate:
+    """Direct-open ``T2Database`` construction in production code paths
+    must NOT call ``apply_pending``. Verified by inspecting the
+    ``_upgrade_done`` registry after a default construction with the
+    test-suite's auto-migrate flag temporarily off.
+    """
+
+    def test_default_init_skips_apply_pending(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from nexus.db import t2 as _t2
+        from nexus.db.migrations import _upgrade_done
+        from nexus.db.t2 import T2Database
+
+        # Temporarily restore production semantics for this assertion.
+        monkeypatch.setattr(_t2, "_DEFAULT_RUN_MIGRATIONS", False)
+
+        db_path = tmp_path / "no-migrate.db"
+        try:
+            path_key = str(db_path.resolve())
+        except OSError:
+            path_key = str(db_path)
+        # Pre-condition: path not yet registered.
+        _upgrade_done.discard(path_key)
+
+        db = T2Database(db_path)
+        try:
+            # Post-condition: path STILL not registered — apply_pending
+            # was skipped entirely (the direct-open path no longer
+            # triggers it).
+            assert path_key not in _upgrade_done
+        finally:
+            db.close()
+
+    def test_run_migrations_true_invokes_apply_pending(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from nexus.db import t2 as _t2
+        from nexus.db.migrations import _upgrade_done
+        from nexus.db.t2 import T2Database
+
+        monkeypatch.setattr(_t2, "_DEFAULT_RUN_MIGRATIONS", False)
+
+        db_path = tmp_path / "yes-migrate.db"
+        try:
+            path_key = str(db_path.resolve())
+        except OSError:
+            path_key = str(db_path)
+        _upgrade_done.discard(path_key)
+
+        db = T2Database(db_path, run_migrations=True)
+        try:
+            assert path_key in _upgrade_done
+        finally:
+            db.close()

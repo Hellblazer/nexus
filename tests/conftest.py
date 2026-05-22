@@ -11,6 +11,23 @@ from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 
 
+def _enable_t2_test_auto_migrate() -> None:
+    """RDR-120 P3b: T2Database.__init__ no longer auto-runs migrations
+    in production (the daemon owns ``apply_pending``). The test suite
+    has hundreds of direct-open call sites that rely on a freshly-
+    migrated schema, so we flip the module-level default ON for
+    pytest. Production code paths (CLI, MCP servers) keep the
+    daemon-owns-migration semantic; only the test process sees the
+    flipped default.
+    """
+    from nexus.db import t2 as _t2
+
+    _t2._DEFAULT_RUN_MIGRATIONS = True
+
+
+_enable_t2_test_auto_migrate()
+
+
 def pytest_configure(config):
     """Configure structlog level to match pytest's --log-level.
 

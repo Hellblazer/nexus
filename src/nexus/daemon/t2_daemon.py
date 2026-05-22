@@ -266,7 +266,9 @@ _T2_STORE_ATTRS: tuple[str, ...] = (
 )
 
 #: Top-level T2Database methods exposed under the "database" pseudo-store.
-_T2_DATABASE_METHODS: tuple[str, ...] = ("rename_collection_cascade",)
+#: ``hello`` is the RDR-120 P3b connection handshake — T2Client invokes
+#: it on first connect to validate schema-version compatibility.
+_T2_DATABASE_METHODS: tuple[str, ...] = ("rename_collection_cascade", "hello")
 
 #: Methods filtered from every store. ``close`` is denied to prevent a
 #: client from tearing down the daemon's SQLite handles via RPC;
@@ -454,11 +456,12 @@ class T2Daemon:
         self._ensure_dirs()
         self._acquire_spawn_lock()
 
-        # Open the T2Database. apply_pending runs in its __init__ per
-        # RDR-120 §A6 P3 transition mitigation; daemon is the sole
-        # opener at this path during its lifetime.
+        # RDR-120 P3b (nexus-e9x4l): daemon is the sole ``apply_pending``
+        # caller. T2Database.__init__ no longer auto-runs migrations; the
+        # daemon passes ``run_migrations=True`` so its construction
+        # bootstraps the schema before any client connects.
         from nexus.db.t2 import T2Database
-        self._t2db = T2Database(self._db_path)
+        self._t2db = T2Database(self._db_path, run_migrations=True)
         self._dispatch_table = _build_dispatch_table(self._t2db)
 
         uds_sock = self._bind_uds()
