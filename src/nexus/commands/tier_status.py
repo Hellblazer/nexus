@@ -169,7 +169,7 @@ def tier_status_cmd(
                 )
             raise click.exceptions.Exit(1)
 
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path))  # epsilon-allow: nx tier-status diagnostic — must operate when daemon offline; read-only tier_writes count
     try:
         # Migration is lazy in the recorder path; if no writes have ever
         # been recorded the table won't exist. Treat as zero.

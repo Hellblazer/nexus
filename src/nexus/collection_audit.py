@@ -367,7 +367,7 @@ def _open_catalog_conn() -> sqlite3.Connection | None:
     path = catalog_path()
     if not Catalog.is_initialized(path):
         return None
-    return sqlite3.connect(str(path / ".catalog.db"))
+    return sqlite3.connect(str(path / ".catalog.db"))  # epsilon-allow: catalog substrate (.catalog.db); P5 catalog-collapse handles cutover
 
 
 # ── Section 5: chash_index coverage (RDR-087 Phase 4.6 / nexus-c2op) ────────

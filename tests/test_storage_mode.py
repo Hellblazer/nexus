@@ -20,12 +20,15 @@ import os
 import pytest
 
 
-def test_default_is_direct(monkeypatch):
-    """Unset NX_STORAGE_MODE defaults to `direct`."""
+def test_default_is_daemon(monkeypatch):
+    """RDR-120 P4 (nexus-2ngox): unset NX_STORAGE_MODE defaults to
+    ``daemon``. ``direct`` is retained as a debug fallback that
+    operators opt into explicitly.
+    """
     monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
     from nexus.config import storage_mode
 
-    assert storage_mode() == "direct"
+    assert storage_mode() == "daemon"
 
 
 def test_direct_is_accepted(monkeypatch):
@@ -71,17 +74,18 @@ def test_unknown_value_lists_valid_options(monkeypatch):
 
 
 def test_empty_string_treated_as_unset(monkeypatch):
+    """Empty / whitespace-only resolves to the default (``daemon`` since P4)."""
     monkeypatch.setenv("NX_STORAGE_MODE", "")
     from nexus.config import storage_mode
 
-    assert storage_mode() == "direct"
+    assert storage_mode() == "daemon"
 
 
 def test_whitespace_only_treated_as_unset(monkeypatch):
     monkeypatch.setenv("NX_STORAGE_MODE", "   ")
     from nexus.config import storage_mode
 
-    assert storage_mode() == "direct"
+    assert storage_mode() == "daemon"
 
 
 def test_case_normalization(monkeypatch):

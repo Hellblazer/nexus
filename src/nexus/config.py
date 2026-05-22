@@ -425,10 +425,9 @@ def storage_mode() -> str:
 
     RDR-120 single source of truth for the storage backend mode flag:
 
-    - unset / empty / whitespace -> ``"direct"`` (default)
-    - ``"direct"`` (any case) -> ``"direct"``
-    - ``"daemon"`` (any case) -> ``"daemon"`` (valid for T3 since
-      P2 cutover; T2 still routes library-mode until P4)
+    - unset / empty / whitespace -> ``"daemon"`` (default since P4)
+    - ``"direct"`` (any case) -> ``"direct"`` (retained as debug fallback)
+    - ``"daemon"`` (any case) -> ``"daemon"``
     - anything else -> raises ``StorageModeError`` naming the bad
       value and listing :data:`VALID_STORAGE_MODES`
 
@@ -440,13 +439,14 @@ def storage_mode() -> str:
       local mode. Cloud mode is unaffected (chromadb's CloudClient
       is already HTTP-served; there is no local daemon to route
       through).
-    - P4: accepted for T2 reads/writes as well; becomes the default
-      for new installs.
+    - P4 (4.36+): accepted for T2 reads/writes; **default for new
+      installs**. ``direct`` remains a documented debug fallback for
+      operators who explicitly opt out.
     """
     raw = os.environ.get("NX_STORAGE_MODE", "")
     normalized = raw.strip().lower()
     if not normalized:
-        return "direct"
+        return "daemon"
     if normalized == "direct":
         return "direct"
     if normalized == "daemon":

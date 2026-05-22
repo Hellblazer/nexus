@@ -157,7 +157,7 @@ def _print_tier_status_summary() -> None:
         db_path = default_db_path()
         if not Path(db_path).exists():
             return
-        conn = sqlite3.connect(str(db_path))
+        conn = sqlite3.connect(str(db_path))  # epsilon-allow: session-end best-effort observation — must not block on daemon availability; read-only tier_writes check
         try:
             has_table = conn.execute(
                 "SELECT name FROM sqlite_master "

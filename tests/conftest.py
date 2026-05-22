@@ -171,6 +171,17 @@ def _restore_structlog_after_test():
 
 
 @pytest.fixture(autouse=True)
+def _pin_storage_mode_direct(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RDR-120 P4 (nexus-2ngox): production default is ``daemon`` but
+    the test suite has hundreds of T3 fixtures that expect direct-mode
+    semantics (no daemon spawned). Pin every test to ``direct`` by
+    default; daemon-mode tests (``tests/daemon/``) override via their
+    own fixtures that spin up a real daemon and set the env explicitly.
+    """
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Force tests onto the explicit-isolation T1 path.
 
