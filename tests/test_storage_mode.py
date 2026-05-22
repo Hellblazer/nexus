@@ -1,59 +1,49 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-120 P2: NX_STORAGE_MODE cutover-flag (T3 daemon mode unlocked).
+"""RDR-120 P6 (nexus-qg86h): NX_STORAGE_MODE post-decommission tests.
 
-P0 introduced the flag as a no-op (only `direct` valid, `daemon`
-rejected with "not yet supported"). P2 (nexus-ut8zy) unblocks the
-`daemon` branch so ``make_t3()`` can dispatch through the daemon
-``T3Client`` in local + daemon mode.
+The env-var is retained for one release as a deprecation shim;
+``storage_mode()`` now always returns ``"daemon"`` regardless of the
+caller's value. ``direct`` triggers a ``DeprecationWarning`` and is
+silently re-mapped to daemon. Other non-daemon values still raise
+``StorageModeError`` so a typo doesn't slip through silently.
 
-Validation matrix:
+Historical phases:
 
-- unset / empty / whitespace -> "direct" (default)
-- "direct" (any case) -> "direct"
-- "daemon" (any case) -> "daemon"  (P2 onward)
-- anything else -> StorageModeError naming the bad value
+- P0: flag introduced (only ``direct`` valid).
+- P2: ``daemon`` unlocked for T3.
+- P4: ``daemon`` became the default.
+- P6 (this): ``direct`` decommissioned; deprecation-warning shim.
 """
 from __future__ import annotations
 
-import os
+import warnings
 
 import pytest
 
 
 def test_default_is_daemon(monkeypatch):
-    """RDR-120 P4 (nexus-2ngox): unset NX_STORAGE_MODE defaults to
-    ``daemon``. ``direct`` is retained as a debug fallback that
-    operators opt into explicitly.
-    """
+    """Unset NX_STORAGE_MODE resolves to ``daemon`` (no warning)."""
     monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
     from nexus.config import storage_mode
 
-    assert storage_mode() == "daemon"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert storage_mode() == "daemon"
+    assert not [w for w in caught if issubclass(w.category, DeprecationWarning)]
 
 
-def test_direct_is_accepted(monkeypatch):
-    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
-    from nexus.config import storage_mode
-
-    assert storage_mode() == "direct"
-
-
-def test_daemon_is_accepted_at_phase_2(monkeypatch):
-    """RDR-120 P2 (nexus-ut8zy): daemon mode is valid for T3 dispatch.
-
-    Pre-P2 this asserted rejection with "not yet supported"; that
-    behaviour shipped from P0 through 4.33.1. The P2 cutover flipped
-    the rejection to acceptance so make_t3() can route through the
-    T3 daemon.
-    """
+def test_explicit_daemon_is_accepted(monkeypatch):
     monkeypatch.setenv("NX_STORAGE_MODE", "daemon")
     from nexus.config import storage_mode
 
-    assert storage_mode() == "daemon"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert storage_mode() == "daemon"
+    assert not [w for w in caught if issubclass(w.category, DeprecationWarning)]
 
 
 def test_daemon_case_normalization(monkeypatch):
-    """`DAEMON` and `Daemon` accepted; case shouldn't trip operators."""
+    """``DAEMON``, ``Daemon``, ``daemon`` all resolve identically."""
     for val in ("DAEMON", "Daemon", "daemon"):
         monkeypatch.setenv("NX_STORAGE_MODE", val)
         from nexus.config import storage_mode
@@ -61,7 +51,24 @@ def test_daemon_case_normalization(monkeypatch):
         assert storage_mode() == "daemon"
 
 
-def test_unknown_value_lists_valid_options(monkeypatch):
+def test_direct_emits_deprecation_warning_and_returns_daemon(monkeypatch):
+    """RDR-120 P6: ``direct`` is decommissioned. Setting it to the
+    legacy value fires a ``DeprecationWarning`` and resolves to
+    ``daemon`` so existing scripts don't break on this release; the
+    env-var itself is removed in the next release.
+    """
+    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+    from nexus.config import storage_mode
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert storage_mode() == "daemon"
+    deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert len(deprecations) == 1
+    assert "NX_STORAGE_MODE=direct is decommissioned" in str(deprecations[0].message)
+
+
+def test_unknown_value_raises_storage_mode_error(monkeypatch):
     monkeypatch.setenv("NX_STORAGE_MODE", "bogus")
     from nexus.config import StorageModeError, storage_mode
 
@@ -69,12 +76,10 @@ def test_unknown_value_lists_valid_options(monkeypatch):
         storage_mode()
     msg = str(exc.value)
     assert "bogus" in msg
-    assert "direct" in msg
     assert "daemon" in msg
 
 
 def test_empty_string_treated_as_unset(monkeypatch):
-    """Empty / whitespace-only resolves to the default (``daemon`` since P4)."""
     monkeypatch.setenv("NX_STORAGE_MODE", "")
     from nexus.config import storage_mode
 
@@ -88,28 +93,21 @@ def test_whitespace_only_treated_as_unset(monkeypatch):
     assert storage_mode() == "daemon"
 
 
-def test_case_normalization(monkeypatch):
-    """`DIRECT` and `Direct` accepted; case shouldn't trip operators."""
-    for val in ("DIRECT", "Direct", "direct"):
-        monkeypatch.setenv("NX_STORAGE_MODE", val)
-        from nexus.config import storage_mode
-
-        assert storage_mode() == "direct"
-
-
-def test_valid_modes_constant_is_exported():
-    """The accepted-values list is callable for tooling."""
+def test_valid_modes_constant_is_daemon_only():
+    """RDR-120 P6: only ``daemon`` is supported. ``direct`` was
+    removed from VALID_STORAGE_MODES at this release.
+    """
     from nexus.config import VALID_STORAGE_MODES
 
-    assert "direct" in VALID_STORAGE_MODES
-    assert "daemon" in VALID_STORAGE_MODES
+    assert VALID_STORAGE_MODES == ("daemon",)
 
 
-def test_storage_mode_error_is_nexus_error():
-    """StorageModeError should be importable and a click-friendly exception."""
+def test_storage_mode_error_is_click_friendly():
+    """``StorageModeError`` remains a ``ClickException`` so CLI
+    surfacing works unchanged.
+    """
     from nexus.config import StorageModeError
 
-    # ClickException family is friendly to CLI surfacing
     err = StorageModeError("test")
     assert hasattr(err, "args")
     assert err.args == ("test",)

@@ -172,21 +172,21 @@ def _restore_structlog_after_test():
 
 @pytest.fixture(autouse=True)
 def _pin_storage_mode_direct(monkeypatch: pytest.MonkeyPatch) -> None:
-    """RDR-120 P4 (nexus-2ngox): production default is ``daemon`` but
-    the test suite has hundreds of T3 fixtures that expect direct-mode
-    semantics (no daemon spawned). Pin every test to ``direct`` by
-    default; daemon-mode tests (``tests/daemon/``) override via their
-    own fixtures that spin up a real daemon and set the env explicitly.
+    """RDR-120 P6 (nexus-qg86h): direct mode decommissioned.
+    ``storage_mode()`` always returns ``"daemon"`` now and the
+    NX_STORAGE_MODE env-var is a deprecation-warning shim. The
+    test conftest no longer pins a mode — any test that previously
+    relied on direct semantics (``make_t3()`` without ``_client``
+    injection getting a ``PersistentClient``) must now inject
+    ``_client=chromadb.EphemeralClient()`` explicitly.
 
-    Opt-out: set ``NX_PYTEST_DAEMON_MODE=1`` in the parent shell to
-    skip the pin and honour the ambient ``NX_STORAGE_MODE``. Used by
-    the P5.A.4 daemon-mode integration verification run.
+    Kept as a (mostly) no-op autouse fixture so test files that
+    reference the symbol via ``request.getfixturevalue`` still
+    resolve; ``monkeypatch.delenv`` clears any caller-set value so
+    ``storage_mode()`` doesn't fire the deprecation warning during
+    normal pytest runs.
     """
-    import os
-
-    if os.environ.get("NX_PYTEST_DAEMON_MODE", "").strip() == "1":
-        return
-    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+    monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
 
 
 @pytest.fixture(autouse=True)
