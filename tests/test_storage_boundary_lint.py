@@ -48,17 +48,19 @@ def test_lint_reports_zero_violations_after_p4_cutover():
     zero violations. Pre-P4 there were 16 direct opens outside ``db/``
     and ``catalog/`` (baseline captured by P0); P4 migrated mcp_infra
     to T2Client and epsilon-allowed the remaining operator/debug
-    paths with documented reasons. The catalog-allowlist count stays
-    at the P3b value of 2 (catalog substrate moves at P5).
+    paths with documented reasons.
+
+    P5.A.2 (nexus-2t7o5) moved the catalog SQLite layer into T2 and
+    dropped the catalog-allowlist count from 2 to 1; P5.A.3 retires
+    the last site (synthesizer.py) and asserts ``== 0``.
     """
     result = _check()
     assert result.total_violations == 0, (
         f"expected zero violations after P4 cutover; got: "
         f"{[(v.file, v.line, v.symbol) for v in result.violations]}"
     )
-    # Catalog substrate is deferred to P5; allowlist count unchanged
-    # from the P3b gate recorded value.
-    assert result.catalog_allowlist_count == 2
+    # Catalog substrate is partially migrated; P5.A.3 takes this to 0.
+    assert result.catalog_allowlist_count == 1
 
 
 def test_db_directory_is_allowlisted_by_default():
@@ -83,11 +85,14 @@ def test_catalog_allowlist_count_metric():
     """The lint reports the count of catalog-allowlist call sites.
 
     Per the phase-boundary forcing function (RDR-120 §Approach), this
-    metric is recorded per phase. P0 baseline should be 2 (catalog_db.py
-    + synthesizer.py) per the A5-refresh inventory.
+    metric is monotonically non-increasing across phases. P0 baseline
+    was 2 (``catalog_db.py`` + ``synthesizer.py``). RDR-120 P5.A.2
+    (nexus-2t7o5) moved the catalog SQLite layer into
+    ``nexus.db.t2.catalog`` and reduced the count to 1 (``synthesizer.py``
+    only). P5.A.3 will retire that last site and assert ``== 0``.
     """
     result = _check()
-    assert result.catalog_allowlist_count == 2
+    assert result.catalog_allowlist_count == 1
 
 
 # ---------------------------------------------------------------------------
