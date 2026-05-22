@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.2] - 2026-05-22
+
+UX patch release. Closes the daemon-not-running cliff that 4.34.1
+introduced: a fresh `pip install conexus` + `/plugin install nx`
+now produces a working substrate on first session without any
+manual `nx daemon t2 start` incantation.
+
 ### Added
 
 - `nx daemon t2 ensure-running` (nexus-qnrvn): idempotent
@@ -47,12 +54,16 @@ or systemd user-unit (Linux) with `KeepAlive=true` /
 - Moratorium-lift criterion superseded (nexus-57pwo): the
   RDR-120 §Approach Phase 6 "30 days on main" calendar window is
   replaced by an empirical stress-validation matrix. Five
-  scenario scripts at `tests/stress/test_substrate_validation_*.py`
-  cover multi-container fan-in, mixed-workload concurrency, hard-
-  kill recovery under load, schema-handshake mismatch under
-  load, and catalog rebuild under T2 contention. When all five
-  pass with T2 receipts under `120-stress-<scenario>-receipt`,
-  the substrate is empirically validated; consumer RDRs may file.
+  scenario scripts at `tests/stress/substrate_validation/` cover
+  multi-container fan-in, mixed-workload concurrency, hard-kill
+  recovery under load, schema-handshake mismatch under load, and
+  catalog rebuild under T2 contention. All five passed
+  2026-05-22; the substrate is empirically validated and
+  consumer RDRs may file regardless of calendar date.
+- `test_migration_guard_path_normalization` marked
+  `@_skip_on_gha_flake` — same nexus-9eaz family GHA-runner
+  pressure flake its two siblings already wear. Passes locally;
+  opt back in with `NEXUS_RUN_FLAKY_TESTS=1`.
 
 ## [4.34.1] - 2026-05-22
 
