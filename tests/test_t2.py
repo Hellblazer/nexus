@@ -620,7 +620,6 @@ def test_expire_also_purges_relevance_log(db: T2Database) -> None:
     assert db.get_relevance_log() == []
 
 
-@_skip_on_gha_flake
 def test_migration_guard_sequential_construction(tmp_path: Path, monkeypatch) -> None:
     """Two T2Database instances on the same path do not re-run migrations sequentially."""
     from nexus.db.t2 import plan_library
@@ -717,7 +716,6 @@ def test_migration_guard_path_normalization(tmp_path: Path, monkeypatch) -> None
     )
 
 
-@_skip_on_gha_flake
 def test_migration_guard_concurrent_threads(tmp_path: Path, monkeypatch) -> None:
     """10 threads constructing T2Database on the same path run migrations exactly once.
 

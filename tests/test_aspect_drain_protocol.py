@@ -139,7 +139,6 @@ class TestIsDrained:
 
 
 class TestStopSignal:
-    @_skip_on_gha_flake
     def test_stop_claiming_on_running_worker_causes_exit(
         self, queue_path: Path, locks_dir: Path
     ) -> None:
