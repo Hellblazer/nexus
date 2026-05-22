@@ -126,12 +126,6 @@ class TestMemoryPromoteCli:
 
         # T2 environment: a memory entry to promote. ``memory promote``
         # takes the integer entry_id as its positional argument.
-        # NEXUS_CONFIG_DIR is the documented isolation knob — patching
-        # ``nexus.commands._helpers.default_db_path`` does NOT reach
-        # ``memory._default_db_path`` because memory.py captures the
-        # function via ``from … import … as`` at module-load time.
-        # Setting the env var is read at call time inside
-        # ``nexus_config_dir()``, so it isolates every CLI subcommand.
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr(
             "nexus.config.is_local_mode", lambda: True,
@@ -142,11 +136,18 @@ class TestMemoryPromoteCli:
             project="proj-test", title="m-1", content="memory body",
             tags="", ttl=None,
         )
-        db.close()
 
+        # RDR-120 P6 follow-up (nexus-w6txl): ``memory promote`` (and
+        # every other nx memory command) now routes through
+        # ``t2_handle()`` -> ``T2Client``. Tests inject a T2Database
+        # by patching the helper to return the test fixture as the
+        # context-managed handle.
         single, batch, doc = _install_recording_registry(monkeypatch)
 
-        with patch("nexus.db.make_t3", _make_stub_t3()):
+        with (
+            patch("nexus.db.make_t3", _make_stub_t3()),
+            patch("nexus.commands.memory.t2_handle", return_value=db),
+        ):
             runner = CliRunner()
             result = runner.invoke(main, [
                 "memory", "promote", str(entry_id),
