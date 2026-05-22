@@ -243,10 +243,11 @@ class T2Client:
         self._handshake_done = False
         # Stores enumerated by the daemon dispatch builder. Public
         # attribute names mirror T2Database for surface parity.
-        # Seven stores at P3a; catalog joins at P5.
+        # Eight stores as of RDR-120 P5.A.1 (nexus-9zmpl):
+        # seven shared-nexus.db stores + catalog (its own .catalog.db).
         for store_name in (
             "memory", "plans", "chash_index", "taxonomy", "telemetry",
-            "document_aspects", "aspect_queue", "database",
+            "document_aspects", "aspect_queue", "catalog", "database",
         ):
             setattr(self, store_name, _StoreProxy(self, store_name))
 

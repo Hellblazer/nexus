@@ -269,10 +269,9 @@ async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
 #: table. Order matters: client expectations follow the documented
 #: store list in src/nexus/db/t2/__init__.py.
 #:
-#: Seven stores at P3a. The ``catalog`` eighth store is added at P5
-#: (catalog collapse into T2); the entry is intentionally absent here
-#: so the dispatch table reflects what the daemon can actually serve
-#: today.
+#: Eight stores as of RDR-120 P5.A.1 (nexus-9zmpl): the seven shared-
+#: nexus.db stores plus the catalog store (which uniquely opens
+#: ``.catalog.db`` under ``catalog_path()``).
 _T2_STORE_ATTRS: tuple[str, ...] = (
     "memory",
     "plans",
@@ -281,6 +280,7 @@ _T2_STORE_ATTRS: tuple[str, ...] = (
     "telemetry",
     "document_aspects",
     "aspect_queue",
+    "catalog",
 )
 
 #: Top-level T2Database methods exposed under the "database" pseudo-store.
@@ -294,15 +294,25 @@ _T2_DATABASE_METHODS: tuple[str, ...] = ("rename_collection_cascade", "hello")
 _RPC_DENY_METHODS: frozenset[str] = frozenset({"close"})
 
 #: Per-op denylist (qualified ``<store>.<method>``). Methods whose
-#: signature accepts a typed dataclass instance can't round-trip JSON
-#: until a typed-arg reconstructor lands. (The catalog @contextmanager
-#: methods are not on this list yet because the catalog isn't in
-#: :data:`_T2_STORE_ATTRS` until P5; re-add when the eighth store
-#: lands.)
+#: signature or return type don't round-trip framed JSON (typed
+#: dataclasses, context managers, raw ``sqlite3.Cursor`` handles).
 _RPC_DENY_OPS: frozenset[str] = frozenset({
     "document_aspects.upsert",
     "document_aspects.get",
     "document_aspects.get_by_doc_id",
+    # RDR-120 P5.A.1 (nexus-9zmpl) — catalog op denylist:
+    # ``execute`` returns a live ``sqlite3.Cursor`` that cannot be
+    # serialised across the framed-JSON boundary. ``transaction`` and
+    # ``bulk_load_documents`` are ``@contextmanager`` generators that
+    # likewise have no JSON shape — clients that need them must hold
+    # a local CatalogStore instance (the P5.A.2 shim will route
+    # local-mode catalog operations directly without going over RPC).
+    "catalog.execute",
+    "catalog.transaction",
+    "catalog.bulk_load_documents",
+    # ``rebuild`` is event-replay scoped to the catalog process tree
+    # and not suitable for RPC mediation — keep it client-local.
+    "catalog.rebuild",
 })
 
 
