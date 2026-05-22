@@ -139,6 +139,27 @@ def __getattr__(name: str) -> Any:  # PEP 562
 #: so existing direct-open fixtures keep migrating their fresh tmp DBs.
 _DEFAULT_RUN_MIGRATIONS: bool = False
 
+#: Env-var override for :data:`_DEFAULT_RUN_MIGRATIONS`. Set to ``"1"`` to
+#: opt every direct-open ``T2Database`` construction into running
+#: ``apply_pending`` even when the in-process module global is False.
+#: Used by the test conftest to propagate auto-migrate semantics into
+#: subprocess children (``subprocess.run`` / ``claude -p`` dispatches /
+#: MCP children) which inherit ``os.environ`` but not Python module state.
+_RUN_MIGRATIONS_ENV: str = "NX_T2_AUTO_MIGRATE"
+
+
+def _resolve_default_run_migrations() -> bool:
+    """Read the effective default from the env var first, the module
+    global second. The env-var path is what propagates into spawned
+    subprocesses (RDR-120 P3b review item 1).
+    """
+    import os as _os
+
+    raw = _os.environ.get(_RUN_MIGRATIONS_ENV, "").strip()
+    if raw:
+        return raw not in ("0", "false", "False", "no", "")
+    return _DEFAULT_RUN_MIGRATIONS
+
 
 # ── Database facade ───────────────────────────────────────────────────────────
 
@@ -182,7 +203,9 @@ class T2Database:
         # production; conftest flips it to True so the test suite stays
         # green without touching 300+ direct-open call sites).
         effective = (
-            _DEFAULT_RUN_MIGRATIONS if run_migrations is None else run_migrations
+            _resolve_default_run_migrations()
+            if run_migrations is None
+            else run_migrations
         )
         if effective:
             T2Database.bootstrap_schema(path)

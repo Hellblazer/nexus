@@ -133,6 +133,48 @@ class TestDaemonRefusesSecondStartAgainstSamePath:
             stop2.set()
             t2.join(timeout=10.0)
 
+    def test_second_start_different_config_dir_same_db_path_fails_loud(
+        self, db_path: Path,
+    ) -> None:
+        """Cross-config_dir collision on the same data file: the
+        db_path-scoped spawn lock (RDR-120 P3b code-review item 2)
+        must prevent two daemons against the same db_path from
+        running concurrently even when started with different
+        config_dirs.
+        """
+        import shutil
+        import tempfile
+
+        from nexus.daemon.t2_daemon import T2Daemon, T2DaemonError
+
+        cd1 = Path(tempfile.mkdtemp(prefix="nxt2inv-a-", dir="/tmp"))
+        cd2 = Path(tempfile.mkdtemp(prefix="nxt2inv-b-", dir="/tmp"))
+        try:
+            first = T2Daemon(config_dir=cd1, db_path=db_path)
+            ready = threading.Event()
+            stop = threading.Event()
+            thread = threading.Thread(
+                target=_run_daemon_in_thread, args=(first, ready, stop),
+            )
+            thread.start()
+            try:
+                assert ready.wait(timeout=10.0), "first daemon did not start"
+
+                second = T2Daemon(config_dir=cd2, db_path=db_path)
+                with pytest.raises(T2DaemonError) as excinfo:
+                    asyncio.run(second.start())
+                msg = str(excinfo.value)
+                assert "db_path spawn lock" in msg, (
+                    f"expected db_path-scoped lock error; got {msg!r}"
+                )
+                assert "same data file" in msg
+            finally:
+                stop.set()
+                thread.join(timeout=10.0)
+        finally:
+            shutil.rmtree(cd1, ignore_errors=True)
+            shutil.rmtree(cd2, ignore_errors=True)
+
     def test_spawn_lock_error_includes_lock_path(
         self, config_dir: Path, db_path: Path,
     ) -> None:

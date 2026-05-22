@@ -278,8 +278,11 @@ class TestDirectOpenNoMigrate:
         from nexus.db.migrations import _upgrade_done
         from nexus.db.t2 import T2Database
 
-        # Temporarily restore production semantics for this assertion.
+        # Temporarily restore production semantics for this assertion:
+        # clear both the module global and the env-var fallback that
+        # conftest sets to propagate auto-migrate into subprocesses.
         monkeypatch.setattr(_t2, "_DEFAULT_RUN_MIGRATIONS", False)
+        monkeypatch.delenv(_t2._RUN_MIGRATIONS_ENV, raising=False)
 
         db_path = tmp_path / "no-migrate.db"
         try:
