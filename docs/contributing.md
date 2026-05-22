@@ -137,20 +137,21 @@ Do not bump these without testing the full chunking pipeline.
 ## Git Workflow
 
 - Branch naming: `feature/<bead-id>-<short-description>`
-- Never push directly to `main` — all changes via PR (exception: version-bump release commits, see Release Process below)
-- Use `bd` (beads, **≥ 1.0.0** — `brew install beads` or `brew upgrade beads`) for task tracking. Earlier 0.x versions reject the comma-separated `--status` flag the close-skill preamble uses; the bead advisory will silently report no open beads on stale installs.
-- **Code review**: Plans include review tasks after implementation phases. Use `/nx:review-code` or dispatch `code-review-expert` at the designated plan steps
+- **Integration branch is `develop`.** Open PRs against `develop`, not `main`. `main` carries the plugin marketplace surface; the develop split protects it from in-flight churn. Releases promote `develop` to `main` via merge (or merge-then-tag).
+- Direct pushes to `main` are reserved for the version-bump commit during a release. See Release Process below.
+- Use `bd` (beads, **≥ 1.0.0**: `brew install beads` or `brew upgrade beads`) for task tracking. Earlier 0.x versions reject the comma-separated `--status` flag the close-skill preamble uses; the bead advisory will silently report no open beads on stale installs.
+- **Code review**: Plans include review tasks after implementation phases. Use `/nx:review-code` or dispatch `code-review-expert` at the designated plan steps.
 
-The `main` branch requires CI to pass before merging. Configure branch protection at
+Both `main` and `develop` carry branch protection. Configure at
 https://github.com/Hellblazer/nexus/settings/branches:
 
-- **Rule**: `main`
-- Require a pull request before merging
-- Require status checks to pass before merging:
-  - `pytest (3.12)`
-  - `pytest (3.13)`
-- Require branches to be up to date before merging
-- Do not allow bypassing the above settings
+- **Rules** (apply to both `main` and `develop`):
+  - Require a pull request before merging
+  - Require status checks to pass before merging:
+    - `pytest (Python 3.12)`
+    - `pytest (Python 3.13)`
+  - Require branches to be up to date before merging
+  - Do not allow force-pushes (the develop reset on 2026-05-21 was a one-time bypass via the API; routine resets are not permitted).
 
 ## License
 
