@@ -6,6 +6,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Docs
+
+- `docs/container-integration.md` (nexus-ai5ic): operator-facing
+  guide covering the three container-to-host connection paths
+  (TCP loopback, UDS mount, operator-side forward) + the Claude
+  Cowork SDK-transport pattern + a diagnostic recipe table.
+  Linked from `docs/architecture.md` § Storage tiers.
+
+### Process
+
+- Moratorium-lift criterion superseded (nexus-57pwo): the
+  RDR-120 §Approach Phase 6 "30 days on main" calendar window is
+  replaced by an empirical stress-validation matrix. Five
+  scenario scripts at `tests/stress/test_substrate_validation_*.py`
+  cover multi-container fan-in, mixed-workload concurrency, hard-
+  kill recovery under load, schema-handshake mismatch under
+  load, and catalog rebuild under T2 contention. When all five
+  pass with T2 receipts under `120-stress-<scenario>-receipt`,
+  the substrate is empirically validated; consumer RDRs may file.
+
 ## [4.34.1] - 2026-05-22
 
 Patch release. RDR-120 P6 follow-up (nexus-w6txl): the user-facing
