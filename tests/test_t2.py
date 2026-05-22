@@ -11,19 +11,9 @@ from nexus.db.t2 import T2Database, _sanitize_fts5
 from nexus.db.t2.plan_library import PlanLibrary
 
 
-# nexus-9eaz family: threading/migration-guard tests pass in isolation
-# and locally but fail intermittently on GHA Ubuntu runners under
-# shared-runner pressure. The race is a CI infrastructure artefact
-# (dose-response: pass at 0-3 prior files, fail at 6+), not a real
-# code bug. Skip on GHA by default; opt in with NEXUS_RUN_FLAKY_TESTS=1.
-_skip_on_gha_flake = pytest.mark.skipif(
-    os.environ.get("GITHUB_ACTIONS") == "true"
-    and not os.environ.get("NEXUS_RUN_FLAKY_TESTS"),
-    reason=(
-        "GHA-runner pressure flake (nexus-9eaz family). Passes locally "
-        "and in isolation; opt in with NEXUS_RUN_FLAKY_TESTS=1."
-    ),
-)
+# nexus-9eaz family flake-skip helper retired 2026-05-22: RDR-120 P3b
+# made the daemon the sole apply_pending caller, removing the
+# cross-process migration race surface these tests were guarding.
 
 _OLD_FTS_SCHEMA = """PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS memory (
@@ -620,7 +610,6 @@ def test_expire_also_purges_relevance_log(db: T2Database) -> None:
     assert db.get_relevance_log() == []
 
 
-@_skip_on_gha_flake
 def test_migration_guard_sequential_construction(tmp_path: Path, monkeypatch) -> None:
     """Two T2Database instances on the same path do not re-run migrations sequentially."""
     from nexus.db.t2 import plan_library
@@ -717,7 +706,6 @@ def test_migration_guard_path_normalization(tmp_path: Path, monkeypatch) -> None
     )
 
 
-@_skip_on_gha_flake
 def test_migration_guard_concurrent_threads(tmp_path: Path, monkeypatch) -> None:
     """10 threads constructing T2Database on the same path run migrations exactly once.
 

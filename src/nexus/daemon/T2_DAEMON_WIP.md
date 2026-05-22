@@ -71,11 +71,25 @@ Archive port deleted; clean substrate-only modules in place.
 
 ## What still ships in a follow-up bead (not P3a)
 
-- **P3b migration ownership transfer** (`nexus-e9x4l`): remove
-  `apply_pending` from `T2Database.__init__` so the daemon is the
-  sole `apply_pending` caller. Currently the daemon's
-  `T2Database(self._db_path)` still triggers `apply_pending` per
-  RDR-120 §A6 P3 transition mitigation. P3b lifts that.
+- **P3b migration ownership transfer** (`nexus-e9x4l` — DONE 2026-05-22):
+  `apply_pending` removed from `T2Database.__init__` direct-open path.
+  The daemon explicitly opts in via `T2Database(path, run_migrations=True)`;
+  all other direct-open call sites get the production default
+  (`_DEFAULT_RUN_MIGRATIONS=False`) and run against whatever schema
+  the daemon (or `nx upgrade`) last left in place. **Operator contract
+  during the P3b→P4 window**: keep the T2 daemon running OR run
+  `nx upgrade` after every conexus version bump before invoking
+  direct-open CLI commands. P4 (`nexus-2ngox`) flips these call sites
+  to `T2Client` and the contract goes away.
+
+- **Spawn-lock scope** (RDR-120 P3b code-review item 2): two locks
+  held for the daemon's lifetime — the legacy `<config_dir>/t2_spawn.lock`
+  (preserves the "one daemon per config_dir" invariant operators
+  rely on) and a new `<db_path>.spawn_lock` sibling of the data file
+  (prevents two daemons against the same data file from different
+  `config_dir`s both running `apply_pending`). Either lock failing
+  causes the second daemon to fail loud with a message naming the
+  contended lock file.
 
 - **Call-site cutover (P4)**: `nexus-2ngox` flips T2 call sites
   through `T2Client`. Not part of P3a.

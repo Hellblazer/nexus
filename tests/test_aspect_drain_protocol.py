@@ -27,24 +27,9 @@ import pytest
 from nexus.db.t2 import T2Database
 
 
-# nexus-9eaz family: a small set of threading/concurrency tests pass
-# consistently in isolation and on local machines but fail intermittently
-# on GitHub Actions Ubuntu runners under shared-runner pressure. The race
-# is correctly diagnosed as a CI infrastructure artefact (see nexus-9eaz
-# bead notes for the full dose-response evidence: pass at 0-3 prior test
-# files, fail at 6+). The lock and stop-signal semantics are verified
-# correct under load locally. Standing mitigation: skip on GHA by default;
-# opt in via NEXUS_RUN_FLAKY_TESTS=1 to run the test in CI (used by the
-# isolation-runner race-probe pattern).
-_GHA_FLAKE_SKIP_REASON = (
-    "GHA-runner pressure flake (nexus-9eaz family). Passes locally and "
-    "in isolation; opt in with NEXUS_RUN_FLAKY_TESTS=1."
-)
-_skip_on_gha_flake = pytest.mark.skipif(
-    os.environ.get("GITHUB_ACTIONS") == "true"
-    and not os.environ.get("NEXUS_RUN_FLAKY_TESTS"),
-    reason=_GHA_FLAKE_SKIP_REASON,
-)
+# nexus-9eaz family flake-skip helper retired 2026-05-22: RDR-120 P3b
+# made the daemon the sole apply_pending caller, removing the
+# cross-process migration race surface these tests were guarding.
 
 
 # -- Shared fixtures ----------------------------------------------------------
@@ -139,7 +124,6 @@ class TestIsDrained:
 
 
 class TestStopSignal:
-    @_skip_on_gha_flake
     def test_stop_claiming_on_running_worker_causes_exit(
         self, queue_path: Path, locks_dir: Path
     ) -> None:
