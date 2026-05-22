@@ -31,6 +31,8 @@ Picking a path:
 
 ## Prerequisites on the host
 
+For one-shot starts:
+
 ```
 # Always
 nx daemon t2 start
@@ -38,6 +40,27 @@ nx daemon t2 start
 # Local-mode T3 only (cloud-mode T3 is already HTTP-served; no daemon)
 nx daemon t3 start
 ```
+
+For durable always-running daemons (recommended for any host that
+runs Claude Code regularly):
+
+```
+nx daemon t2 install --autostart          # writes the LaunchAgent / systemd unit
+nx daemon t3 install --autostart          # local-mode T3 only
+```
+
+This installs `~/Library/LaunchAgents/com.nexus.t2.plist` on macOS or
+`~/.config/systemd/user/nexus-t2.service` on Linux, with `KeepAlive=true`
+/ `Restart=on-failure` so the daemon survives crashes and reboots.
+Uninstall with `nx daemon t2 uninstall --autostart`.
+
+When Claude Code is the primary consumer, the nx plugin's
+**SessionStart hook** also runs `nx daemon t2 ensure-running --quiet`
+on every Claude session start, so the daemon is auto-spawned on the
+first session after `pip install conexus` even if you haven't yet
+run `nx daemon t2 install`. The hook is idempotent — when the daemon
+is already running (from the LaunchAgent or a manual start) it's a
+silent no-op.
 
 Confirm the daemons:
 

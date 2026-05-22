@@ -637,6 +637,106 @@ def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         click.echo(f"  {key}: {value}")
 
 
+@t2_group.command("ensure-running")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+@click.option(
+    "--timeout",
+    default=5.0,
+    type=float,
+    help=(
+        "Seconds to wait for the daemon to become reachable after a "
+        "cold spawn. Default: 5.0. macOS Docker Desktop boot adds "
+        "VM-layer latency; raise this to 10+ on slow hosts."
+    ),
+)
+@click.option(
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Suppress 'already running' / 'spawned' messages; print only errors.",
+)
+def t2_ensure_running_cmd(
+    config_dir_str: str | None, timeout: float, quiet: bool,
+) -> None:
+    """Ensure the T2 daemon is running; spawn it in the background if not.
+
+    Idempotent — safe to invoke from session-start hooks, post-install
+    scripts, or as a defensive prelude to any operation that needs the
+    daemon. The daemon's own spawn-lock arbitrates concurrent invocations
+    so a race between the plugin hook and a manual ``nx daemon t2 start``
+    can't double-start.
+
+    Exit codes:
+      0 — daemon is reachable (already running, or successfully spawned).
+      1 — daemon was spawned but did not become reachable within ``--timeout``.
+    """
+    import time as _time
+    from nexus.daemon.t2_daemon import t2_discovery_path
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    disc = t2_discovery_path(config_dir)
+
+    def _daemon_is_alive() -> bool:
+        if not disc.exists():
+            return False
+        try:
+            data = json.loads(disc.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        pid = data.get("pid")
+        if not isinstance(pid, int):
+            return False
+        # Probe the PID — stale discovery files outlive crashed daemons.
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+
+    if _daemon_is_alive():
+        if not quiet:
+            click.echo("T2 daemon already running.")
+        return
+
+    # Cold spawn. Use the same nx binary the operator invoked (preserves
+    # PATH/virtualenv assumptions). start_new_session detaches the child
+    # so this command can exit while the daemon keeps running.
+    nx_bin = _resolve_nx_bin()
+    argv = [*nx_bin, "daemon", "t2", "start"]
+    if config_dir_str is not None:
+        argv.extend(["--config-dir", config_dir_str])
+    if not quiet:
+        click.echo(f"Spawning T2 daemon: {' '.join(argv)}")
+    subprocess.Popen(
+        argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        if _daemon_is_alive():
+            if not quiet:
+                click.echo("T2 daemon is reachable.")
+            return
+        _time.sleep(0.1)
+
+    click.echo(
+        f"Warning: T2 daemon did not become reachable within {timeout}s. "
+        "Check ~/Library/Logs/nexus-t2.err (macOS) or "
+        "`journalctl --user -u nexus-t2.service` (Linux) for the failure.",
+        err=True,
+    )
+    sys.exit(1)
+
+
 @t2_group.command("install")
 @click.option(
     "--autostart",

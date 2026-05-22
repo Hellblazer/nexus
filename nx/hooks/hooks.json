@@ -11,6 +11,11 @@
           },
           {
             "type": "command",
+            "command": "nx daemon t2 ensure-running --quiet --timeout=5 2>/dev/null || true",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/preflight.py",
             "timeout": 5
           },

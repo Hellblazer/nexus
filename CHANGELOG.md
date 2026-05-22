@@ -6,6 +6,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `nx daemon t2 ensure-running` (nexus-qnrvn): idempotent
+  daemon-spawn helper. Silent no-op if a T2 daemon is already
+  running on the named config_dir; otherwise spawns one in the
+  background and polls the discovery file until reachable
+  (or `--timeout`, default 5s, expires with exit 1 + a log-
+  pointer message). The probe is `os.kill(pid, 0)` against the
+  discovery-file PID, so stale discovery files left behind by
+  crashed daemons trigger a fresh spawn rather than a false-
+  positive.
+
+- nx plugin `SessionStart` hook runs the new
+  `ensure-running --quiet` on every Claude Code session start
+  (`startup|resume|clear|compact`). This closes the
+  daemon-not-running cliff that 4.34.1 introduced: a fresh
+  `pip install conexus` + `/plugin install nx` now produces a
+  working substrate on first session without any manual
+  daemon-start incantation.
+
+For users who want a durable always-running daemon independent
+of Claude Code (recommended for any host with regular nx use):
+`nx daemon t2 install --autostart` writes a LaunchAgent (macOS)
+or systemd user-unit (Linux) with `KeepAlive=true` /
+`Restart=on-failure`. This install path was already shipped in
+4.34.0; 4.34.1 documents it explicitly in
+`docs/container-integration.md`.
+
 ### Docs
 
 - `docs/container-integration.md` (nexus-ai5ic): operator-facing
