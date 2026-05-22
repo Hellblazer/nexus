@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.3] - 2026-05-22
+
+Plugin version aligned with conexus 4.34.3 — documentation-only
+release. ``nx/README.md`` gains a SessionStart-hook explainer
+showing how the plugin auto-spawns the T2 daemon on every Claude
+Code session start, plus a cross-link to ``docs/container-integration.md``
+for the full multi-process / Claude Cowork integration story.
+
+No agent / skill / hook / MCP-server changes. See the conexus
+4.34.3 entry in the root CHANGELOG for the full doc-sweep details.
+
 ## [4.34.2] - 2026-05-22
 
 Plugin SessionStart hook now runs

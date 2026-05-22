@@ -6,6 +6,60 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.3] - 2026-05-22
+
+Documentation-only release. Sweep of user-facing surfaces for the
+RDR-120 storage substrate shift that shipped in 4.34.0/4.34.1/4.34.2.
+
+Pre-audit the docs were silent on the daemon model — README,
+getting-started, cli-reference, contributing, configuration, and
+mcp-servers had zero mentions. New users hitting
+``T2DaemonNotReachableError`` on first install had no documentation
+to fall back on.
+
+This release closes the gap:
+
+- **README.md**: Quick Start includes ``nx daemon t2 install
+  --autostart``; at-a-glance table notes daemon-mediated storage;
+  CLI commands table gets an ``nx daemon`` row; Documentation
+  table cross-links Container Integration and Upgrading to 4.34.x.
+- **docs/getting-started.md**: New "First-time setup: the T2
+  daemon" section between Install and Update. Three new
+  Troubleshooting entries (``T2DaemonNotReachableError``,
+  ``T2SchemaVersionMismatchError``, the launchctl-bootout-race
+  for "discovery file not found") with copy-paste recovery commands.
+- **docs/cli-reference.md**: Complete ``nx daemon`` section
+  documenting all 11 subcommands (t2 + t3 start/stop/status,
+  ensure-running, install/uninstall --autostart), with flags,
+  exit codes, log paths, and the LaunchAgent / systemd unit
+  filenames.
+- **docs/configuration.md**: New "Daemon environment variables"
+  section covering ``NX_T2_ADDR`` / ``NX_T2_SOCK`` / ``NX_T3_ADDR``
+  / ``NX_LOCAL`` with operator-facing semantics and discovery-file
+  fallback rules.
+- **docs/storage-tiers.md**: Rewrote the canonical tier table to
+  add a Daemon column and Transport column; added "one
+  arbitrator per tier" callout explaining the multi-process
+  arbitration model.
+- **docs/mcp-servers.md**: Substrate-dependency callout right
+  after the two-servers intro.
+- **docs/contributing.md**: Development Setup updated with the
+  daemon-install step + "hacking on the daemon itself" foreground
+  workflow.
+- **nx/README.md**: SessionStart-hook explainer + cross-link to
+  Container Integration.
+- **docs/migration/upgrading-to-4.34.md**: NEW comprehensive
+  upgrade guide. TL;DR is one command; full explainer covers
+  what changed, what happens if you skip the upgrade step,
+  container/Cowork integration, schema-version handshake,
+  empirical validation receipts, and rollback procedure.
+- **docs/migration/README.md**: split into "Active operator-facing
+  guides" and "Historical forensic records" sections.
+
+No code changes. Existing 4.34.2 installations continue working;
+this release exists to notify operators that the substrate-shift
+docs are now comprehensive.
+
 ## [4.34.2] - 2026-05-22
 
 UX patch release. Closes the daemon-not-running cliff that 4.34.1
