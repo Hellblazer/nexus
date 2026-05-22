@@ -6,23 +6,134 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Architecture (RDR-120 P6 — direct mode decommissioned)
+## [4.34.0] - 2026-05-22
 
-- `NX_STORAGE_MODE=direct` is deprecated. The flag is honoured as
-  `daemon` for one release (with a `DeprecationWarning`) and will
-  be removed in the next. Local mode now always routes through the
-  T2 / T3 daemons; the legacy `chromadb.PersistentClient` direct-
-  open code path in `nexus.db.make_t3()` has been deleted, and the
-  doctor's `Local collections` probe routes through the daemon's
-  `HttpClient` rather than opening a second `PersistentClient`
-  against the same chroma store (which would race the WAL).
-  Operators on local mode must start the daemons explicitly via
-  `nx daemon t2 start` and `nx daemon t3 start`. Cloud mode is
-  unaffected (`CloudClient` is already HTTP-served; there is no
-  local daemon to route through).
-- `VALID_STORAGE_MODES` now contains only `("daemon",)`.
-  `nexus.config.storage_mode()` is retained as a deprecation shim
-  and is slated for removal in the release following this one.
+RDR-120 Storage Substrate Split — the full P0 → P6 substrate-only
+arc, no co-shipped consumers. Daemon-mediated storage is now the
+only supported mode in local installs.
+
+### Architecture (RDR-120 P0 → P6)
+
+**Behavior change for local-mode users.** ``NX_STORAGE_MODE=direct``
+is decommissioned. Local mode now requires the T2 and T3 daemons to
+be running. Cloud mode is unaffected (``CloudClient`` is already
+HTTP-served; there is no local daemon to route through).
+
+Bootstrap:
+```
+nx daemon t2 start   # always required in local mode
+nx daemon t3 start   # required when NX_LOCAL=1
+```
+
+The legacy flag is honoured-as-``daemon`` for one release with a
+``DeprecationWarning``; ``VALID_STORAGE_MODES`` is now
+``("daemon",)``. ``nexus.config.storage_mode()`` is a deprecation
+shim and is slated for removal in 4.35.
+
+### What shipped
+
+- **P0** — A9 content-seeding audit + storage-boundary lint
+  (RDR-120 Phase 0).
+- **P1** — T3 daemon (chromadb ``HttpClient``) + ``T3Client``
+  factory. Cloud mode unaffected.
+- **P2** — ``NX_STORAGE_MODE=daemon`` cutover-flag for T3.
+- **P3a** — T2 daemon (single-writer SQLite arbiter) + framed-JSON
+  socketserver + UDS / 127.0.0.1 loopback TCP transport.
+- **P3b** — Migration ownership transferred to the daemon.
+  ``T2Database.__init__`` no longer auto-runs ``apply_pending``;
+  the daemon is the sole caller. ``T2Client`` carries
+  ``expected_t2_schema_version`` and runs a lazy
+  ``database.hello`` handshake; non-trivial mismatch raises
+  ``T2SchemaVersionMismatchError``.
+- **P4** — T2 call-site cutover. ``mcp_infra`` schema-drift check
+  routes through ``T2Client.database.hello``; remaining 13
+  operator/debug paths get ``# epsilon-allow`` annotations with
+  documented reasons. ``NX_STORAGE_MODE`` default flipped from
+  ``"direct"`` to ``"daemon"``.
+- **P5.A** — ``CatalogDB`` collapsed into T2 as the eighth domain
+  store. ``nexus.db.t2.catalog.CatalogStore`` owns the
+  ``.catalog.db`` handle; ``nexus.catalog.catalog_db.CatalogDB`` is
+  a thin re-export alias for backward compatibility. RDR-108
+  invariants preserved (``Document.tumbler`` PK identity;
+  chunk natural ID = ``sha256(chunk_text)[:32]``;
+  ``document_chunks`` manifest authoritative).
+- **P6** — Direct mode decommissioned. ``storage_mode()`` always
+  returns ``"daemon"``. Library-mode dead code paths deleted from
+  ``nexus.db.make_t3()`` and ``nexus.health._check_t3_local()``.
+
+### Storage-boundary lint
+
+Terminal state on ``main``:
+
+```
+violations:              0
+catalog-allowlist count: 0   (was 2 at P0)
+```
+
+All direct ``sqlite3.connect`` / ``chromadb.PersistentClient`` /
+``chromadb.CloudClient`` / ``chromadb.EphemeralClient`` calls live
+exclusively under ``src/nexus/db/`` (daemon-internal substrate).
+Operator/debug paths (``nx upgrade``, ``nx doctor``, the
+session-end launcher, the console health probe, pipeline_buffer)
+that must work when the daemon is offline carry per-line
+``# epsilon-allow:`` tokens with documented reasons.
+
+### Container deployment
+
+The daemon's loopback TCP transport supports container ↔ host
+sharing without exposing non-loopback TCP (still banlisted).
+Validated patterns (see ``docs/architecture.md`` § Storage tiers):
+
+```
+# macOS Docker Desktop
+docker run --rm \
+    -e NX_T2_ADDR=host.docker.internal:<port> \
+    -e NX_T3_ADDR=host.docker.internal:<t3_port> \
+    <image-with-conexus>
+
+# Linux (default bridge)
+docker run --rm \
+    --add-host=host.docker.internal:host-gateway \
+    -e NX_T2_ADDR=host.docker.internal:<port> \
+    <image>
+```
+
+UDS-mount works on native Linux Docker (UID-gated 0o600; container
+must run as the daemon-owner UID via ``--user $(id -u):$(id -g)``).
+Docker Desktop on macOS/Windows cannot pass UDS through its VM
+file-sharing layer; use the TCP path on those hosts.
+
+### Migration / upgrade path
+
+Existing direct-mode installs upgrade transparently:
+
+1. ``conexus 4.34.0`` is installed.
+2. First ``nx`` command in local mode emits the
+   ``NX_STORAGE_MODE=direct is decommissioned`` deprecation
+   warning if the env-var is set.
+3. Operator starts the daemons (``nx daemon t2 start`` and, if
+   local-mode T3, ``nx daemon t3 start``).
+4. Existing nexus.db / .catalog.db files are read by the daemon;
+   schema migrations run daemon-side on startup (the daemon is
+   the sole ``apply_pending`` caller).
+
+### Storage substrate cap
+
+T2 now has exactly 8 domain stores
+(``memory · plans · chash_index · taxonomy · telemetry ·
+document_aspects · aspect_queue · catalog``). Per the RDR-120
+moratorium, no new T2 stores until the moratorium lifts 30 days
+after this release ships on ``main``.
+
+### Known issues
+
+- 7 integration tests in ``test_hybrid_plan_factual_qa.py`` and
+  ``test_rdr_093_groupby_aggregate_pipelines.py`` fail when the
+  pinned ``TARGET_COLLECTION`` corpora (``knowledge__hybridrag``,
+  ``knowledge__delos``) are not available in the operator's T3
+  store. Failures predate this release and are tracked by
+  ``nexus-ntacy`` (fixture-corpus standup); the substrate itself
+  is unaffected.
 
 ## [4.33.1] - 2026-05-21
 

@@ -51,30 +51,42 @@ class TestDaemonDispatch:
         assert result is sentinel
         assert called["count"] == 1
 
-    def test_direct_mode_does_not_route_through_daemon(
+    def test_legacy_direct_env_still_routes_through_daemon(
         self, monkeypatch
     ) -> None:
-        """NX_STORAGE_MODE=direct (the default) must NOT call
-        make_t3_client; make_t3 falls through to the PersistentClient
-        path so the existing direct-mode code path is unchanged."""
+        """RDR-120 P6 (nexus-qg86h): direct mode decommissioned.
+        ``NX_STORAGE_MODE=direct`` no longer produces a different
+        dispatch — it emits a ``DeprecationWarning`` and falls through
+        to the daemon path like every other value. This test pins
+        that semantic so a future regression doesn't quietly reintroduce
+        the legacy PersistentClient branch.
+        """
+        import warnings
+
         monkeypatch.setenv("NX_STORAGE_MODE", "direct")
+        sentinel = object()
         called = {"count": 0}
 
         def fake_make_t3_client():
             called["count"] += 1
-            raise AssertionError(
-                "make_t3_client must not be called in direct mode"
-            )
+            return sentinel
 
         monkeypatch.setattr(
             "nexus.daemon.t3_client.make_t3_client", fake_make_t3_client
         )
         from nexus.db import make_t3
-        from nexus.db.t3 import T3Database
 
-        result = make_t3()
-        assert isinstance(result, T3Database)
-        assert called["count"] == 0
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = make_t3()
+        assert result is sentinel
+        assert called["count"] == 1
+        # The deprecation warning fires on the storage_mode() call
+        # that the surrounding plumbing performs; we don't pin that
+        # the warning fires *here* because make_t3 itself no longer
+        # calls storage_mode(). The legacy env-var simply has no
+        # behavioural effect; the deprecation surface is asserted in
+        # tests/test_storage_mode.py.
 
     def test_injected_client_short_circuits_daemon_dispatch(
         self, monkeypatch

@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.0] - 2026-05-22
+
+Plugin version aligned with conexus 4.34.0. No plugin-side changes
+in this release — RDR-120 is a substrate-only arc. The substrate
+ships behind a daemon model; the nx plugin's MCP tools and skills
+continue to work unchanged because they call through the same
+``T2Database`` / ``T3Database`` factories that now route to the
+daemons automatically.
+
+See the conexus 4.34.0 entry in the root CHANGELOG for the full
+RDR-120 P0 → P6 details.
+
 ## [4.33.1] - 2026-05-21
 
 Plugin version aligned with conexus 4.33.1. RDR-125 routing-hook

@@ -124,11 +124,19 @@ def injected_catalog(indexed_catalog):
     ``catalog_env`` fixture (transitively required), so ``get_catalog()``
     in production code will construct a fresh Catalog at the same path
     and read the test's data — no explicit injection needed.
+
+    RDR-120 P6 (nexus-qg86h): direct-mode dispatch removed. The MCP
+    ``get_t3()`` singleton now routes through ``make_t3_client()``
+    which needs a running daemon. Tests don't have a daemon, so we
+    pre-seed ``_t3_instance`` with the fixture's local T3 so the
+    singleton skips ``make_t3()`` entirely.
     """
     from nexus.mcp_server import _reset_singletons
+    from nexus import mcp_infra
 
     cat, local_t3 = indexed_catalog
     _reset_singletons()
+    mcp_infra._t3_instance = local_t3
     return cat, local_t3
 
 
