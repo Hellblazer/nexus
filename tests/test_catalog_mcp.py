@@ -301,7 +301,17 @@ def test_link_bulk_dry_run(cat) -> None:
     assert len(catalog_link_query(link_type="cites")) == 1
 
 
-def test_link_audit(cat) -> None:
+def test_link_audit(cat, monkeypatch) -> None:
+    """RDR-120 P6 (nexus-qg86h): ``catalog_link_audit()`` reaches
+    through to T3 via ``get_t3()``; post-direct-mode-decommission
+    that routes to the daemon. Tests don't have a daemon; stub
+    ``mcp_infra._t3_instance`` with a MagicMock whose ``_client``
+    attribute is what the audit reaches into.
+    """
+    from unittest.mock import MagicMock
+    from nexus import mcp_infra
+    monkeypatch.setattr(mcp_infra, "_t3_instance", MagicMock())
+
     _setup_two_docs(cat)
     catalog_link(from_tumbler="1.1.1", to_tumbler="1.1.2", link_type="cites")
     result = catalog_link_audit()

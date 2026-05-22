@@ -293,6 +293,23 @@ class TestSuccessfulExtraction:
 
 
 class TestContentSourcing:
+    @pytest.fixture(autouse=True)
+    def _stub_get_t3(self, monkeypatch):
+        """RDR-120 P6 (nexus-qg86h): aspect_extractor calls
+        ``get_t3()`` before dispatching to ``read_source``. After
+        direct mode was decommissioned, ``get_t3`` routes through
+        the T3 daemon — which doesn't exist in unit tests, so the
+        exception path runs and the test sees
+        ``ExtractFail(reason='infra_unavailable')`` instead of
+        whatever ``read_source`` was monkeypatched to return.
+        Stub ``get_t3`` with a MagicMock so the test's
+        ``read_source`` monkeypatch is what actually drives the
+        result.
+        """
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.get_t3", lambda: MagicMock(),
+        )
+
     def test_passes_through_content_when_populated(self, monkeypatch) -> None:
         from nexus.aspect_extractor import extract_aspects
 
@@ -447,6 +464,20 @@ class TestUriDispatch:
     chunk reassembly works end-to-end, and read failures surface as
     ``ExtractFail`` (no row written).
     """
+
+    @pytest.fixture(autouse=True)
+    def _stub_get_t3(self, monkeypatch):
+        """RDR-120 P6 (nexus-qg86h): see TestContentSourcing for the
+        rationale. ``extract_aspects`` calls ``get_t3()`` before
+        dispatching to ``read_source``; tests that monkeypatch only
+        ``read_source`` would otherwise short-circuit on the daemon-
+        unreachable path. Tests that need a specific ``get_t3``
+        behaviour override this fixture by monkeypatching the same
+        symbol later in the test body.
+        """
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.get_t3", lambda: MagicMock(),
+        )
 
     def test_succeeds_via_chroma_for_knowledge_collection(
         self, monkeypatch,
