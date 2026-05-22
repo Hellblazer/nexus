@@ -43,17 +43,22 @@ def _check(extra_files=None, allowlist_prefixes=None):
 # ---------------------------------------------------------------------------
 
 
-def test_lint_reports_baseline_inventory():
-    """Against current main, the lint identifies the existing direct opens."""
+def test_lint_reports_zero_violations_after_p4_cutover():
+    """RDR-120 P4 (nexus-2ngox): after the T2 cutover, the lint reports
+    zero violations. Pre-P4 there were 16 direct opens outside ``db/``
+    and ``catalog/`` (baseline captured by P0); P4 migrated mcp_infra
+    to T2Client and epsilon-allowed the remaining operator/debug
+    paths with documented reasons. The catalog-allowlist count stays
+    at the P3b value of 2 (catalog substrate moves at P5).
+    """
     result = _check()
-    # 27 SQLite + 8 chromadb per the A5-refresh audit. The lint with the
-    # default allowlist (db/ + catalog/) should leave a known non-empty
-    # set of migration targets; that's the baseline P0 captures.
-    assert result.total_violations > 0
-    # Some of the well-known migration targets must show up.
-    files = {v.file for v in result.violations}
-    assert any("commands/doctor.py" in f for f in files)
-    assert any("health.py" in f for f in files)
+    assert result.total_violations == 0, (
+        f"expected zero violations after P4 cutover; got: "
+        f"{[(v.file, v.line, v.symbol) for v in result.violations]}"
+    )
+    # Catalog substrate is deferred to P5; allowlist count unchanged
+    # from the P3b gate recorded value.
+    assert result.catalog_allowlist_count == 2
 
 
 def test_db_directory_is_allowlisted_by_default():

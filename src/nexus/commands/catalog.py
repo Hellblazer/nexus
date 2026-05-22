@@ -5379,7 +5379,7 @@ def _run_replay_equality() -> dict:
     # mcp_infra.manifest_write_batch_hook.
     DOCUMENTS_EXCLUDE = ["chunk_count"]
     live_uri = f"file:{live_db_path}?mode=ro"
-    with closing(sqlite3.connect(live_uri, uri=True)) as live_conn:
+    with closing(sqlite3.connect(live_uri, uri=True)) as live_conn:  # epsilon-allow: catalog substrate live-vs-projected replay check; P5 catalog-collapse handles cutover
         live_snap = {
             "owners": _snapshot_table(live_conn, "owners"),
             "documents": _snapshot_table(
@@ -5411,7 +5411,7 @@ def _run_replay_equality() -> dict:
         finally:
             proj_db.close()
 
-        with closing(sqlite3.connect(str(projected_path))) as proj_conn:
+        with closing(sqlite3.connect(str(projected_path))) as proj_conn:  # epsilon-allow: catalog substrate projection snapshot; P5 catalog-collapse handles cutover
             projected_snap = {
                 "owners": _snapshot_table(proj_conn, "owners"),
                 "documents": _snapshot_table(

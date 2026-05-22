@@ -77,7 +77,13 @@ def _open_plans_db():
     if not db_path.exists():
         click.echo(f"T2 database not found at {db_path}; nothing to do.")
         return None
-    conn = sqlite3.connect(str(db_path))
+    # epsilon-allow: nx repair plans — ad-hoc operator-invoked
+    # backfill / migration-helper-style maintenance against the plans
+    # store. Bound to the same SQLite file the daemon serves; the
+    # daemon-RPC equivalent would require exposing every legacy
+    # repair shape, which the RDR-120 §Out of scope moratorium
+    # forbids ("migration helpers beyond apply_pending").
+    conn = sqlite3.connect(str(db_path))  # epsilon-allow: nx repair plans operator-invoked maintenance (moratorium on new migration helpers)
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")
     return conn

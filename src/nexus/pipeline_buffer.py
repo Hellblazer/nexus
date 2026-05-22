@@ -99,7 +99,7 @@ class PipelineDB:
         """Return (or create) the per-thread connection."""
         conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
         if conn is None:
-            conn = sqlite3.connect(str(self._path))
+            conn = sqlite3.connect(str(self._path))  # epsilon-allow: pipeline_buffer owns its own substrate (pipeline.db); distinct from T2 nexus.db — not in scope for the T2 daemon
             conn.execute("PRAGMA journal_mode=WAL")
             conn.row_factory = sqlite3.Row
             self._local.conn = conn

@@ -603,7 +603,6 @@ def check_version_compatibility() -> None:
     Never blocks startup — both checks log warnings only.
     """
     import json
-    import sqlite3
     from pathlib import Path
 
     import structlog
@@ -616,34 +615,47 @@ def check_version_compatibility() -> None:
         cli_ver = _pkg_version("conexus")
 
         # ── (1) CLI ↔ T2 schema drift ────────────────────────────────────
+        # RDR-120 P4: routed through T2Client when the daemon is reachable;
+        # silently skipped when it isn't (best-effort drift warning, not a
+        # gate). The daemon's ``database.hello`` op surfaces its stored
+        # _nexus_version row.
         db_path = default_db_path()
+        stored_ver: str | None = None
         if db_path.exists():
-            conn = sqlite3.connect(str(db_path))
             try:
-                row = conn.execute(
-                    "SELECT value FROM _nexus_version WHERE key='cli_version'"
-                ).fetchone()
-            except sqlite3.OperationalError:
-                row = None  # table doesn't exist yet — fresh install
-            finally:
-                conn.close()
-            if row is not None:
-                stored_ver = row[0]
-                cli_t = _parse_version(cli_ver)
-                stored_t = _parse_version(stored_ver)
-                # Warn on minor or major divergence, not patch.
-                # Tuple slicing is safe for short tuples — (4,)[:2] == (4,).
-                if cli_t[:2] != stored_t[:2]:
-                    if cli_t > stored_t:
-                        hint = "run 'nx upgrade' to apply pending migrations"
-                    else:
-                        hint = "DB was upgraded by a newer CLI version"
-                    log.warning(
-                        "version_mismatch",
-                        cli_version=cli_ver,
-                        stored_version=stored_ver,
-                        hint=hint,
-                    )
+                from nexus.daemon.t2_client import (
+                    T2DaemonNotReachableError,
+                    make_t2_client,
+                )
+
+                client = make_t2_client()
+                try:
+                    hello = client.database.hello()
+                    raw = (hello or {}).get("daemon_schema_version") or ""
+                    stored_ver = raw if raw and raw != "0.0.0" else None
+                finally:
+                    client.close()
+            except (T2DaemonNotReachableError, Exception):
+                # Daemon unreachable or RPC failed — drift check is
+                # best-effort. Operator can run `nx doctor` for the
+                # full diagnostic.
+                stored_ver = None
+        if stored_ver is not None:
+            cli_t = _parse_version(cli_ver)
+            stored_t = _parse_version(stored_ver)
+            # Warn on minor or major divergence, not patch.
+            # Tuple slicing is safe for short tuples — (4,)[:2] == (4,).
+            if cli_t[:2] != stored_t[:2]:
+                if cli_t > stored_t:
+                    hint = "run 'nx upgrade' to apply pending migrations"
+                else:
+                    hint = "DB was upgraded by a newer CLI version"
+                log.warning(
+                    "version_mismatch",
+                    cli_version=cli_ver,
+                    stored_version=stored_ver,
+                    hint=hint,
+                )
 
         # ── (2) Plugin ↔ CLI version drift ──────────────────────────────
         plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")

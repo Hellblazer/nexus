@@ -128,7 +128,7 @@ def _collect_aspect_queue_data() -> dict[str, Any]:
         return {"present": False}
 
     try:
-        conn = _sqlite3.connect(str(db_path))
+        conn = _sqlite3.connect(str(db_path))  # epsilon-allow: console health probe — must operate when daemon offline; read-only schema-presence check
     except _sqlite3.Error:
         return {"present": False}
 

@@ -69,7 +69,12 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
         return
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    # epsilon-allow: nx upgrade is the chicken-and-egg substrate
+    # bootstrap path — schema migration cannot route through the
+    # daemon when the daemon's startup requires the schema to be
+    # migrated. Operator coordinates by stopping the daemon, running
+    # nx upgrade, restarting the daemon.
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)  # epsilon-allow: nx upgrade chicken-and-egg substrate bootstrap (cannot route through daemon)
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")
 

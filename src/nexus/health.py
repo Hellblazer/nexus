@@ -725,7 +725,7 @@ def _check_t2_integrity() -> list[HealthResult]:
         return [HealthResult(label="T2 integrity", ok=True, detail="not created yet")]
 
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = sqlite3.connect(str(db_path))  # epsilon-allow: health PRAGMA integrity_check diagnostic — must operate when daemon offline; read-only
         try:
             rows = conn.execute("PRAGMA integrity_check").fetchall()
             pragma_ok = len(rows) == 1 and rows[0][0] == "ok"
