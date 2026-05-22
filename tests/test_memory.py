@@ -236,7 +236,7 @@ def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False
     t2 = _t2_cm(db) if use_cm else db
     args = ["memory", "promote", str(row_id), "--collection", col, *(extra or [])]
     with (
-        patch("nexus.commands.memory.T2Database", return_value=t2),
+        patch("nexus.commands.memory.t2_handle", return_value=t2),
         patch("nexus.commands.memory.get_credential", return_value="fake-key"),
         patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.db.make_t3", return_value=mt3),
@@ -251,7 +251,7 @@ def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False
 def test_promote_no_credentials(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
     row_id = db.put(project="p", title="note.md", content="hello", ttl=30)
     with (
-        patch("nexus.commands.memory.T2Database", return_value=db),
+        patch("nexus.commands.memory.t2_handle", return_value=db),
         patch("nexus.commands.memory.get_credential", return_value=""),
         patch("nexus.config.is_local_mode", return_value=False),
     ):
@@ -261,7 +261,7 @@ def test_promote_no_credentials(runner: CliRunner, mem_home: Path, db: T2Databas
 
 
 def test_promote_entry_not_found(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
-    with patch("nexus.commands.memory.T2Database", return_value=db):
+    with patch("nexus.commands.memory.t2_handle", return_value=db):
         result = runner.invoke(main, ["memory", "promote", "9999", "--collection", "knowledge__p"])
     assert result.exit_code != 0
     assert "not found" in result.output.lower() or "9999" in result.output
@@ -301,7 +301,7 @@ def test_promote_missing_database(runner: CliRunner, mem_home: Path, db: T2Datab
     row_id = db.put(project="p", title="note.md", content="hello", ttl=30)
     cred = lambda key: "" if key == "chroma_database" else "fake-value"  # noqa: E731
     with (
-        patch("nexus.commands.memory.T2Database", return_value=db),
+        patch("nexus.commands.memory.t2_handle", return_value=db),
         patch("nexus.commands.memory.get_credential", side_effect=cred),
         patch("nexus.config.is_local_mode", return_value=False),
     ):
@@ -329,7 +329,7 @@ def test_promote_expires_at_from_t2_timestamp(runner: CliRunner, mem_home: Path,
 
 def test_delete_cmd_by_project_title(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
     db.put(project="proj", title="note.md", content="content to delete")
-    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+    with patch("nexus.commands.memory.t2_handle", return_value=_t2_cm(db)):
         result = runner.invoke(main, ["memory", "delete", "--project", "proj", "--title", "note.md", "--yes"])
     assert result.exit_code == 0 and "Deleted" in result.output
     assert db.get(project="proj", title="note.md") is None
@@ -337,7 +337,7 @@ def test_delete_cmd_by_project_title(runner: CliRunner, mem_home: Path, db: T2Da
 
 def test_delete_cmd_by_id(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
     row_id = db.put(project="proj", title="note.md", content="delete by id content")
-    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+    with patch("nexus.commands.memory.t2_handle", return_value=_t2_cm(db)):
         result = runner.invoke(main, ["memory", "delete", "--id", str(row_id), "--yes"])
     assert result.exit_code == 0 and "proj/note.md" in result.output
     assert db.get(id=row_id) is None
@@ -347,7 +347,7 @@ def test_delete_cmd_all(runner: CliRunner, mem_home: Path, db: T2Database) -> No
     db.put(project="proj", title="a.md", content="a")
     db.put(project="proj", title="b.md", content="b")
     db.put(project="other", title="c.md", content="c")
-    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+    with patch("nexus.commands.memory.t2_handle", return_value=_t2_cm(db)):
         result = runner.invoke(main, ["memory", "delete", "--project", "proj", "--all", "--yes"])
     assert result.exit_code == 0 and "Deleted 2" in result.output
     assert db.list_entries(project="proj") == []
@@ -364,7 +364,7 @@ def test_delete_cmd_rejected(runner: CliRunner, mem_home: Path, args: list, expe
 
 
 def test_delete_cmd_not_found(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
-    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+    with patch("nexus.commands.memory.t2_handle", return_value=_t2_cm(db)):
         result = runner.invoke(main, ["memory", "delete", "--project", "no", "--title", "such.md", "--yes"])
     assert result.exit_code != 0 and "not found" in result.output
 
@@ -377,7 +377,7 @@ def test_get_cmd_exact_title_match(
 ) -> None:
     """Exact title match returns the content (regression guard — baseline)."""
     db.put(project="p", title="note.md", content="content-body-sentinel")
-    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+    with patch("nexus.commands.memory.t2_handle", return_value=_t2_cm(db)):
         result = runner.invoke(
             main, ["memory", "get", "--project", "p", "--title", "note.md"],
         )
@@ -394,7 +394,7 @@ def test_get_cmd_unique_prefix_match_resolves(
         title="088-research-1: RDR-092 baseline for Gap 4 spike",
         content="baseline-body-xyz",
     )
-    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+    with patch("nexus.commands.memory.t2_handle", return_value=_t2_cm(db)):
         result = runner.invoke(
             main, ["memory", "get", "--project", "nexus_rdr",
                    "--title", "088-research-1"],
@@ -409,7 +409,7 @@ def test_get_cmd_ambiguous_prefix_lists_candidates(
     """Multiple prefix matches must list candidates and fail loud (not silent-pick)."""
     db.put(project="p", title="088-research-1: first", content="one")
     db.put(project="p", title="088-research-1b: second", content="two")
-    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+    with patch("nexus.commands.memory.t2_handle", return_value=_t2_cm(db)):
         result = runner.invoke(
             main, ["memory", "get", "--project", "p",
                    "--title", "088-research-1"],
@@ -425,7 +425,7 @@ def test_get_cmd_no_match_still_fails_loud(
     runner: CliRunner, mem_home: Path, db: T2Database,
 ) -> None:
     """Zero-match continues to fail — behaviour preserved from baseline."""
-    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+    with patch("nexus.commands.memory.t2_handle", return_value=_t2_cm(db)):
         result = runner.invoke(
             main, ["memory", "get", "--project", "none", "--title", "missing"],
         )
@@ -439,7 +439,7 @@ def test_get_cmd_exact_wins_over_prefix(
     """When an exact entry exists alongside a longer-title match, exact wins."""
     db.put(project="p", title="088-research-1", content="short-entry")
     db.put(project="p", title="088-research-1: full-suffix", content="long-entry")
-    with patch("nexus.commands.memory.T2Database", return_value=_t2_cm(db)):
+    with patch("nexus.commands.memory.t2_handle", return_value=_t2_cm(db)):
         result = runner.invoke(
             main, ["memory", "get", "--project", "p",
                    "--title", "088-research-1"],

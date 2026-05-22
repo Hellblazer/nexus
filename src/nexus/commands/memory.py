@@ -6,6 +6,7 @@ from pathlib import Path
 import click
 
 from nexus.commands._helpers import default_db_path as _default_db_path
+from nexus.commands._helpers import t2_handle
 from nexus.config import get_credential
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
@@ -27,6 +28,11 @@ def put_cmd(content: str, project: str, title: str, tags: str, ttl: str) -> None
     """Write content to the T2 memory bank.
 
     Use '-' as CONTENT to read from stdin.
+
+    RDR-120 P6 follow-up (nexus-w6txl): routes through the T2 daemon
+    so host CLI + Cowork-bridged MCP + dev-container CLI all share
+    the same arbitrated state. Requires the T2 daemon running; start
+    it with ``nx daemon t2 start``.
     """
     if content == "-":
         content = sys.stdin.read()
@@ -34,8 +40,10 @@ def put_cmd(content: str, project: str, title: str, tags: str, ttl: str) -> None
         ttl_days = parse_ttl(ttl)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    with T2Database(_default_db_path()) as db:
-        row_id = db.put(project=project, title=title, content=content, tags=tags, ttl=ttl_days)
+    with t2_handle() as db:
+        row_id = db.memory.put(
+            project=project, title=title, content=content, tags=tags, ttl=ttl_days,
+        )
     click.echo(f"Stored: {project}/{title} (id={row_id})")
 
 
@@ -52,9 +60,9 @@ def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> Non
     """
     if entry_id is None and not (project and title):
         raise click.UsageError("provide an ID or --project and --title")
-    with T2Database(_default_db_path()) as db:
+    with t2_handle() as db:
         if entry_id is not None:
-            result = db.get(id=entry_id)
+            result = db.memory.get(id=entry_id)
             if result is None:
                 raise click.ClickException(
                     f"entry not found — id={entry_id}. "
@@ -62,7 +70,7 @@ def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> Non
                 )
             click.echo(result["content"])
             return
-        resolved, candidates = db.resolve_title(project=project, title=title)
+        resolved, candidates = db.memory.resolve_title(project=project, title=title)
     if resolved is not None:
         click.echo(resolved["content"])
         return
@@ -85,8 +93,8 @@ def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> Non
 @click.option("--project", "-p", default=None, help="Scope search to a project")
 def search_cmd(query: str, project: str | None) -> None:
     """FTS5 keyword search across T2 memory entries."""
-    with T2Database(_default_db_path()) as db:
-        results = db.search(query=query, project=project)
+    with t2_handle() as db:
+        results = db.memory.search(query=query, project=project)
     if not results:
         click.echo("No results found.")
         return
@@ -102,8 +110,8 @@ def search_cmd(query: str, project: str | None) -> None:
 @click.option("--agent", "-a", default=None, help="Filter by agent name")
 def list_cmd(project: str | None, agent: str | None) -> None:
     """List memory entries."""
-    with T2Database(_default_db_path()) as db:
-        entries = db.list_entries(project=project, agent=agent)
+    with t2_handle() as db:
+        entries = db.memory.list_entries(project=project, agent=agent)
     if not entries:
         click.echo("No entries found.")
         return
@@ -136,9 +144,9 @@ def delete_cmd(
     if entry_id is None and not all_entries and not (project and title):
         raise click.UsageError("provide --id, or --project and --title, or --project and --all")
 
-    with T2Database(_default_db_path()) as db:
+    with t2_handle() as db:
         if all_entries:
-            entries = db.list_entries(project=project)
+            entries = db.memory.list_entries(project=project)
             count = len(entries)
             if count == 0:
                 raise click.ClickException(f"No entries found in project {project!r}")
@@ -147,10 +155,16 @@ def delete_cmd(
                 click.echo(f"Found {count} {n} in {project!r}.")
                 click.confirm(f"Delete {count} {n} from {project!r}?", abort=True)
             for e in entries:
-                db.delete(project=project, title=e["title"])
+                _delete_with_taxonomy_cascade(
+                    db, project=project, title=e["title"],
+                )
             click.echo(f"Deleted {count} {'entry' if count == 1 else 'entries'} from {project!r}.")
         else:
-            entry = db.get(id=entry_id) if entry_id is not None else db.get(project=project, title=title)
+            entry = (
+                db.memory.get(id=entry_id)
+                if entry_id is not None
+                else db.memory.get(project=project, title=title)
+            )
             if entry is None:
                 raise click.ClickException("entry not found — use: nx memory list to see available entries")
             if not yes:
@@ -158,18 +172,57 @@ def delete_cmd(
                 click.echo(f"{entry['project']}/{entry['title']}")
                 click.echo(f"  {preview}")
                 click.confirm("Delete?", abort=True)
-            if entry_id is not None:
-                db.delete(id=entry_id)
-            else:
-                db.delete(project=entry["project"], title=entry["title"])
+            _delete_with_taxonomy_cascade(
+                db,
+                project=entry["project"],
+                title=entry["title"],
+                id=entry_id,
+            )
             click.echo(f"Deleted: {entry['project']}/{entry['title']}")
+
+
+def _delete_with_taxonomy_cascade(
+    db,
+    *,
+    project: str | None = None,
+    title: str | None = None,
+    id: int | None = None,
+) -> bool:
+    """Memory + taxonomy cascade — replaces the facade-side cascade.
+
+    The pre-RDR-120 ``T2Database.delete`` ran (1) ``memory.delete`` and
+    (2) ``taxonomy.purge_assignments_for_doc`` in sequence. T2Client's
+    ``database`` proxy doesn't expose the facade method, so the CLI
+    drives the cascade itself with two store-level RPC calls. In direct
+    mode (tests injecting a T2Database via the handle), the same two
+    calls hit the in-process facade and produce identical state.
+    """
+    deleted = db.memory.delete(project=project, title=title, id=id)
+    if deleted and project and title:
+        db.taxonomy.purge_assignments_for_doc(project=project, title=title)
+    return deleted
 
 
 @memory.command("expire")
 def expire_cmd() -> None:
-    """Remove TTL-expired memory entries."""
-    with T2Database(_default_db_path()) as db:
-        count = db.expire()
+    """Remove TTL-expired memory entries.
+
+    Cross-domain operation: also purges the relevance_log table
+    older than 90 days. RDR-120 P6 follow-up (nexus-w6txl): the
+    cascade runs client-side via two store-level calls when the CLI
+    is talking to the daemon; in direct mode (tests) the same calls
+    land on the in-process facade.
+    """
+    with t2_handle() as db:
+        count = db.memory.expire()
+        try:
+            db.telemetry.expire_relevance_log(days=90)
+        except Exception:  # noqa: BLE001
+            # The relevance_log purge is best-effort; the facade
+            # logged a structured ``relevance_log_error`` event for
+            # this. Without the daemon-side facade we lose that
+            # signal, but the memory-side expiry still landed.
+            pass
     click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
 
 
@@ -182,8 +235,8 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
     """Promote a T2 memory entry to T3 ChromaDB permanent storage."""
     from nexus.corpus import t3_collection_name
 
-    with T2Database(_default_db_path()) as db:
-        entry = db.get(id=entry_id)
+    with t2_handle() as db:
+        entry = db.memory.get(id=entry_id)
         if entry is None:
             raise click.ClickException(f"Entry {entry_id} not found in T2 memory.")
 
@@ -269,7 +322,9 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         )
 
         if remove:
-            db.delete(entry["project"], entry["title"])
+            _delete_with_taxonomy_cascade(
+                db, project=entry["project"], title=entry["title"],
+            )
             click.echo(
                 f"Promoted and removed: {entry['project']}/{entry['title']} -> {collection} (id={doc_id})"
             )
