@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.1] - 2026-05-22
+
+Plugin version aligned with conexus 4.34.1. No plugin-side changes;
+this is a substrate patch release fixing the CLI-vs-daemon gap
+that 4.34.0 left open. See the conexus 4.34.1 entry in the root
+CHANGELOG for the full RDR-120 P6 follow-up details.
+
 ## [4.34.0] - 2026-05-22
 
 Plugin version aligned with conexus 4.34.0. No plugin-side changes

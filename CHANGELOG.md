@@ -6,6 +6,74 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.1] - 2026-05-22
+
+Patch release. RDR-120 P6 follow-up (nexus-w6txl): the user-facing
+``nx memory put / get / search / list / delete / expire / promote``
+CLI commands now route through ``T2Client`` and the running T2
+daemon instead of opening the SQLite file directly.
+
+### Architecture (RDR-120 follow-up)
+
+4.34.0 shipped the substrate split (daemon-mediated storage) but
+left the user-facing CLI memory commands on direct ``T2Database``
+opens with ``# epsilon-allow`` annotations. The lint count went to
+zero but the daemon's runtime arbitration was only exercised by
+the MCP server path. The container smoke surfaced the gap:
+``nx memory put`` from a Docker container with ``NX_T2_ADDR`` set
+silently wrote to a container-local SQLite file (row id=1) and
+never touched the host daemon.
+
+This release closes the gap.
+
+- New ``nexus.commands._helpers.t2_handle()`` context manager
+  returns a ``T2Client`` connected to the running T2 daemon.
+  Raises ``T2DaemonNotReachableError`` with the
+  ``nx daemon t2 start`` operator hint if the daemon isn't
+  running — same UX as T3's daemon-required model.
+- ``src/nexus/commands/memory.py``: every command migrated from
+  ``T2Database(default_db_path())`` to ``t2_handle()``. Call sites
+  use ``.memory.<method>`` (works identically against ``T2Client``
+  and ``T2Database``).
+- Cross-domain cascades (memory + taxonomy on ``delete``,
+  memory + telemetry on ``expire``) now run client-side via two
+  store-level calls. Pre-migration, the ``T2Database.delete``
+  facade did the cascade in-process; ``T2Client.database`` doesn't
+  expose the facade, so the CLI drives both stores explicitly.
+
+### Validated end-to-end
+
+Container ↔ host shared state via the CLI:
+
+```
+# Host
+$ nx daemon t2 start
+$ # daemon listens on 127.0.0.1:<port>
+
+# Container (python:3.13-slim + pip install conexus==4.34.1)
+$ NX_T2_ADDR=host.docker.internal:<port> \
+    nx memory put -p nexus_rdr -t example "from container"
+Stored: nexus_rdr/example (id=1443)            ← host id-space
+
+# Host
+$ nx memory get -p nexus_rdr -t example
+from container
+```
+
+Row IDs land in the host's id-space (vs. id=1 in the pre-fix
+container-local DB), confirming the write reached the host's
+nexus.db via the daemon.
+
+### Out of scope (still open follow-ups)
+
+- ``nx plan repair *`` (uses raw ``execute()`` — needs separate
+  RPC method additions for the migration-helper-style backfills).
+- ``nx tier-status`` (read-only diagnostic; low priority).
+- Operator/debug paths (``nx upgrade``, ``nx doctor``, the
+  session-end launcher, ``nx health`` PRAGMA integrity_check)
+  stay on direct ``T2Database`` with ``# epsilon-allow`` — those
+  legitimately must work when the daemon is offline.
+
 ## [4.34.0] - 2026-05-22
 
 RDR-120 Storage Substrate Split — the full P0 → P6 substrate-only
