@@ -177,7 +177,15 @@ def _pin_storage_mode_direct(monkeypatch: pytest.MonkeyPatch) -> None:
     semantics (no daemon spawned). Pin every test to ``direct`` by
     default; daemon-mode tests (``tests/daemon/``) override via their
     own fixtures that spin up a real daemon and set the env explicitly.
+
+    Opt-out: set ``NX_PYTEST_DAEMON_MODE=1`` in the parent shell to
+    skip the pin and honour the ambient ``NX_STORAGE_MODE``. Used by
+    the P5.A.4 daemon-mode integration verification run.
     """
+    import os
+
+    if os.environ.get("NX_PYTEST_DAEMON_MODE", "").strip() == "1":
+        return
     monkeypatch.setenv("NX_STORAGE_MODE", "direct")
 
 
