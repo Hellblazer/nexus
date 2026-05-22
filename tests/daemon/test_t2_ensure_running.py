@@ -24,6 +24,16 @@ from click.testing import CliRunner
 from nexus.cli import main
 
 
+def _discovery_path(config_dir: Path) -> Path:
+    """Mirror ``nexus.daemon.t2_daemon.t2_discovery_path`` — the
+    discovery file is keyed by the current UID, not a hardcoded
+    501. macOS dev UIDs are usually 501; Linux GHA runner UIDs are
+    1001. Hardcoding either fails on the other.
+    """
+    from nexus.daemon.t2_daemon import t2_discovery_path
+    return t2_discovery_path(config_dir)
+
+
 def _write_discovery(config_dir: Path, pid: int) -> None:
     """Pre-seed a discovery file shaped like the real daemon writes."""
     payload = {
@@ -35,7 +45,9 @@ def _write_discovery(config_dir: Path, pid: int) -> None:
         "daemon_version": "4.34.1",
         "start_time": "2026-05-22T19:00:00+00:00",
     }
-    (config_dir / "t2_addr.501").write_text(json.dumps(payload))
+    dest = _discovery_path(config_dir)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(payload))
 
 
 class TestEnsureRunning:
@@ -140,7 +152,9 @@ class TestEnsureRunning:
         self, tmp_path, monkeypatch,
     ) -> None:
         # Discovery file present but not valid JSON — probe treats as dead.
-        (tmp_path / "t2_addr.501").write_text("not json {{{")
+        dest = _discovery_path(tmp_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("not json {{{")
 
         spawn_calls: list[list[str]] = []
         monkeypatch.setattr(
