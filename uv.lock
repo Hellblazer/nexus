@@ -538,7 +538,6 @@ dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' or sys_platform == 'linux'" },
     { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' and sys_platform != 'linux'" },
     { name = "opencv-python-headless" },
-    { name = "palinex" },
     { name = "pymupdf" },
     { name = "python-pptx" },
     { name = "pyyaml" },
@@ -580,7 +579,6 @@ requires-dist = [
     { name = "msgpack", specifier = ">=1.0" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "opencv-python-headless", specifier = ">=4.0.0" },
-    { name = "palinex", specifier = ">=0.0.6,<0.1" },
     { name = "pymupdf", specifier = ">=1.26.6" },
     { name = "python-pptx", specifier = ">=1.0.0" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -2809,15 +2807,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/65/ee/299d360cdc32edc7d2cf530f3accf79c4fca01e96ffc950d8a52213bd8e4/packaging-26.0.tar.gz", hash = "sha256:00243ae351a257117b6a241061796684b084ed1c516a08c48a3f7e147a9d80b4", size = 143416, upload-time = "2026-01-21T20:50:39.064Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/b9/c538f279a4e237a006a2c98387d081e9eb060d203d8ed34467cc0f0b9b53/packaging-26.0-py3-none-any.whl", hash = "sha256:b36f1fef9334a5588b4166f8bcd26a14e521f2b55e6b9de3aaa80d3ff7a37529", size = 74366, upload-time = "2026-01-21T20:50:37.788Z" },
-]
-
-[[package]]
-name = "palinex"
-version = "0.0.6"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/0b/7d/3b9ba10574e3cf4645593a5720b86a916f2878fa416d7b5d6d58c44ce223/palinex-0.0.6.tar.gz", hash = "sha256:c512ce4e08fb93c582bc18982a13eb63e2a97dc804ef35b72a7826d5c6c63ff3", size = 31861, upload-time = "2026-05-22T23:15:19.68Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/50/57/f34d5b54677dc7ca51749dc0ba00bd34286ccabf821336b6830a8edf6a97/palinex-0.0.6-py3-none-any.whl", hash = "sha256:deace0b4cce9066b6b8cfd5dc0a4969f4fa28ffbd7709bb9bb3b18405731de13", size = 16956, upload-time = "2026-05-22T23:15:18.237Z" },
 ]
 
 [[package]]

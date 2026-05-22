@@ -26,9 +26,6 @@ from nexus.mcp.catalog import (  # noqa: F401
     catalog_resolve, catalog_stats,
 )
 
-# Surface tool (RDR-127 — palinex a2ui v0.9 surface emission)
-from nexus.mcp.surfaces import render_surface  # noqa: F401
-
 # Injection helpers — tests import these with underscore aliases
 from nexus.mcp_infra import (  # noqa: F401
     catalog_auto_link as _catalog_auto_link,

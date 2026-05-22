@@ -92,12 +92,6 @@ dependencies = [
     # the gradio XSS surface. Verified locally: ``do_parse`` succeeds
     # with ``[pipeline]`` only.
     "mineru[pipeline]",
-    # RDR-127: palinex provides the a2ui v0.9 producer-side builders and the
-    # wrap_as_mcp_ui_resource helper that nexus's render_surface MCP tool
-    # uses to emit surface payloads as Claude-Code-renderable UI resources.
-    # Pinned <0.1 because 0.0.x tracks a2ui v0.9; major bumps will track
-    # spec changes (per palinex RDR-001 versioning policy).
-    "palinex>=0.0.6,<0.1",
 ]
 
 [project.optional-dependencies]
