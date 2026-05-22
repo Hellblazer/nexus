@@ -5308,9 +5308,7 @@ def _run_replay_equality() -> dict:
     projected SQLite is ephemeral and discarded with the
     TemporaryDirectory.
     """
-    import sqlite3
     import tempfile
-    from contextlib import closing
 
     from nexus.catalog.catalog import Catalog
     from nexus.catalog.catalog_db import CatalogDB
@@ -5378,19 +5376,27 @@ def _run_replay_equality() -> dict:
     # non-event-sourced and the boundary is documented at
     # mcp_infra.manifest_write_batch_hook.
     DOCUMENTS_EXCLUDE = ["chunk_count"]
-    live_uri = f"file:{live_db_path}?mode=ro"
-    with closing(sqlite3.connect(live_uri, uri=True)) as live_conn:  # epsilon-allow: catalog substrate live-vs-projected replay check; P5 catalog-collapse handles cutover
+    # RDR-120 P5.A.3 (nexus-nbsng): the live snapshot routes through the
+    # T2 ``CatalogStore`` in read-only mode (``mode=ro`` URI) rather
+    # than a direct ``sqlite3.connect`` so all catalog SQLite traffic
+    # flows through the substrate-allowlisted path.
+    from nexus.db.t2.catalog import CatalogStore as _CatalogStore
+
+    live_store = _CatalogStore(live_db_path, read_only=True)
+    try:
         live_snap = {
-            "owners": _snapshot_table(live_conn, "owners"),
+            "owners": _snapshot_table(live_store, "owners"),
             "documents": _snapshot_table(
-                live_conn, "documents", exclude_cols=DOCUMENTS_EXCLUDE,
+                live_store, "documents", exclude_cols=DOCUMENTS_EXCLUDE,
             ),
-            "links": _snapshot_table(live_conn, "links", exclude_cols=LINKS_EXCLUDE),
+            "links": _snapshot_table(live_store, "links", exclude_cols=LINKS_EXCLUDE),
             # RDR-101 Phase 6 prophylactic-review fix: include the
             # collections projection in replay-equality. Pre-fix this
             # gate was blind to Phase 6's new projection state.
-            "collections": _snapshot_table(live_conn, "collections"),
+            "collections": _snapshot_table(live_store, "collections"),
         }
+    finally:
+        live_store.close()
 
     # ── Project + snapshot ────────────────────────────────────────────
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -5408,18 +5414,18 @@ def _run_replay_equality() -> dict:
                 applied = Projector(proj_db).apply_all(
                     synthesize_from_jsonl(cat_dir)
                 )
+            # Snapshot the projected DB through the same CatalogDB
+            # instance — no second direct sqlite3 open required.
+            projected_snap = {
+                "owners": _snapshot_table(proj_db, "owners"),
+                "documents": _snapshot_table(
+                    proj_db, "documents", exclude_cols=DOCUMENTS_EXCLUDE,
+                ),
+                "links": _snapshot_table(proj_db, "links", exclude_cols=LINKS_EXCLUDE),
+                "collections": _snapshot_table(proj_db, "collections"),
+            }
         finally:
             proj_db.close()
-
-        with closing(sqlite3.connect(str(projected_path))) as proj_conn:  # epsilon-allow: catalog substrate projection snapshot; P5 catalog-collapse handles cutover
-            projected_snap = {
-                "owners": _snapshot_table(proj_conn, "owners"),
-                "documents": _snapshot_table(
-                    proj_conn, "documents", exclude_cols=DOCUMENTS_EXCLUDE,
-                ),
-                "links": _snapshot_table(proj_conn, "links", exclude_cols=LINKS_EXCLUDE),
-                "collections": _snapshot_table(proj_conn, "collections"),
-            }
 
     # ── Diff ──────────────────────────────────────────────────────────
     table_diffs: dict[str, dict] = {}

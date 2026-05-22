@@ -44,23 +44,26 @@ def _check(extra_files=None, allowlist_prefixes=None):
 
 
 def test_lint_reports_zero_violations_after_p4_cutover():
-    """RDR-120 P4 (nexus-2ngox): after the T2 cutover, the lint reports
-    zero violations. Pre-P4 there were 16 direct opens outside ``db/``
-    and ``catalog/`` (baseline captured by P0); P4 migrated mcp_infra
-    to T2Client and epsilon-allowed the remaining operator/debug
-    paths with documented reasons.
+    """RDR-120 P4 (nexus-2ngox) + P5.A (nexus-kvn44): after the T2
+    cutover and the catalog collapse, the lint reports zero
+    violations AND zero catalog-allowlist sites.
 
-    P5.A.2 (nexus-2t7o5) moved the catalog SQLite layer into T2 and
-    dropped the catalog-allowlist count from 2 to 1; P5.A.3 retires
-    the last site (synthesizer.py) and asserts ``== 0``.
+    Pre-P4 there were 16 direct opens outside ``db/`` and ``catalog/``;
+    P4 migrated mcp_infra to T2Client and epsilon-allowed the
+    operator/debug paths. P5.A.2 moved the catalog SQLite layer into
+    ``nexus.db.t2.catalog``; P5.A.3 retired the remaining
+    ``catalog/synthesizer.py`` site and the two replay-equality gate
+    sites in ``commands/catalog.py``. Catalog-allowlist count is now
+    explicitly **0** per RDR §Approach Phase 5
+    ('``count == 0`` explicitly').
     """
     result = _check()
     assert result.total_violations == 0, (
         f"expected zero violations after P4 cutover; got: "
         f"{[(v.file, v.line, v.symbol) for v in result.violations]}"
     )
-    # Catalog substrate is partially migrated; P5.A.3 takes this to 0.
-    assert result.catalog_allowlist_count == 1
+    # P5.A.3 explicit assertion (count == 0).
+    assert result.catalog_allowlist_count == 0
 
 
 def test_db_directory_is_allowlisted_by_default():
@@ -86,13 +89,14 @@ def test_catalog_allowlist_count_metric():
 
     Per the phase-boundary forcing function (RDR-120 §Approach), this
     metric is monotonically non-increasing across phases. P0 baseline
-    was 2 (``catalog_db.py`` + ``synthesizer.py``). RDR-120 P5.A.2
-    (nexus-2t7o5) moved the catalog SQLite layer into
-    ``nexus.db.t2.catalog`` and reduced the count to 1 (``synthesizer.py``
-    only). P5.A.3 will retire that last site and assert ``== 0``.
+    was 2 (``catalog_db.py`` + ``synthesizer.py``); P5.A.2 (nexus-2t7o5)
+    moved the catalog SQLite layer into ``nexus.db.t2.catalog`` and
+    dropped to 1; P5.A.3 (nexus-nbsng) retired
+    ``catalog/synthesizer.py`` and asserts ``count == 0`` explicitly
+    per RDR §Approach Phase 5.
     """
     result = _check()
-    assert result.catalog_allowlist_count == 1
+    assert result.catalog_allowlist_count == 0
 
 
 # ---------------------------------------------------------------------------

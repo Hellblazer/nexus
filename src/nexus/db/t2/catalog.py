@@ -295,8 +295,9 @@ class CatalogStore:
     so existing imports continue to resolve unchanged.
     """
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, read_only: bool = False) -> None:
         self._path = db_path
+        self._read_only = read_only
         # The other seven T2 stores live under the nexus config dir
         # which is auto-materialised. The catalog dir is NOT
         # auto-created in production (Catalog initialisation is the
@@ -305,7 +306,15 @@ class CatalogStore:
         # parent here so ``sqlite3.connect`` does not raise "unable
         # to open database file" on a fresh install.
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        if read_only:
+            # ``mode=ro`` URI form guards against accidental writes
+            # when the caller intends to inspect the live catalog
+            # while indexers run. Used by the doctor's replay-equality
+            # gate against the in-flight catalog file.
+            uri = f"file:{db_path}?mode=ro"
+            self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        else:
+            self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         # Reentrant: ``execute()`` callers inside a ``transaction()``
         # context (RDR-101 round-3) re-acquire the lock from the same
         # thread. With a plain ``Lock()`` the nested ``with self._lock:``
@@ -334,6 +343,11 @@ class CatalogStore:
         # before manual ``PRAGMA wal_checkpoint(TRUNCATE)``). 64 MiB
         # caps the steady-state size after each successful checkpoint;
         # SQLite reuses the space rather than growing the file.
+        if read_only:
+            # Read-only opens skip schema / migration setup — the file
+            # is opened for inspection and any write would raise.
+            self._backfilled_collections = set()
+            return
         self._conn.execute("PRAGMA journal_size_limit=67108864")
         self._conn.executescript(_SCHEMA_SQL)
         # Migration: add repo_root column if missing (pre-RDR-060 databases)
