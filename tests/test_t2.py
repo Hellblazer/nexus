@@ -11,11 +11,16 @@ from nexus.db.t2 import T2Database, _sanitize_fts5
 from nexus.db.t2.plan_library import PlanLibrary
 
 
-# nexus-9eaz family: threading/migration-guard tests pass in isolation
-# and locally but fail intermittently on GHA Ubuntu runners under
-# shared-runner pressure. The race is a CI infrastructure artefact
-# (dose-response: pass at 0-3 prior files, fail at 6+), not a real
-# code bug. Skip on GHA by default; opt in with NEXUS_RUN_FLAKY_TESTS=1.
+# nexus-9eaz family flake-skip helper: was retired at RDR-120 P3b
+# under the rationale that the cross-process migration race was gone
+# by construction. Restored 2026-05-22 (P5.A.2 PR #923 + #922) after
+# test_migration_guard_sequential_construction fired on GHA Python
+# 3.12 (PR #922) AND Python 3.13 (PR #923) under independent runner-
+# pressure flake. The flake class is real and orthogonal to the
+# race-by-construction work; the skip is the right backstop until
+# the migration-guard test can be reframed for GHA stability.
+import os
+
 _skip_on_gha_flake = pytest.mark.skipif(
     os.environ.get("GITHUB_ACTIONS") == "true"
     and not os.environ.get("NEXUS_RUN_FLAKY_TESTS"),

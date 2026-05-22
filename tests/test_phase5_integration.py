@@ -106,25 +106,35 @@ class TestMcpVersionCheck:
             check_version_compatibility()  # patch only — no warning
 
     def test_minor_version_divergence_warns(self, tmp_path: Path) -> None:
-        """Minor version mismatch should emit a structured warning."""
-        import structlog
+        """Minor version mismatch should emit a structured warning.
 
+        RDR-120 P4 (nexus-2ngox): the schema-version read routes
+        through ``T2Client.database.hello`` rather than a direct
+        sqlite open. Stub the daemon round trip with a fake client
+        whose ``hello`` reports the divergent version.
+        """
         from nexus.mcp_infra import check_version_compatibility
 
         db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute(
-            "CREATE TABLE _nexus_version (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        )
-        conn.execute(
-            "INSERT INTO _nexus_version VALUES ('cli_version', '4.1.2')"
-        )
-        conn.commit()
-        conn.close()
+        db_path.touch()  # check_version_compatibility gates on db_path.exists()
+
+        class _FakeStore:
+            def hello(self):
+                return {"daemon_schema_version": "4.1.2"}
+
+        class _FakeClient:
+            database = _FakeStore()
+
+            def close(self) -> None:
+                pass
 
         with (
             patch("nexus.mcp_infra.default_db_path", return_value=db_path),
             patch("importlib.metadata.version", return_value="4.2.0"),
+            patch(
+                "nexus.daemon.t2_client.make_t2_client",
+                return_value=_FakeClient(),
+            ),
             patch("structlog.get_logger") as mock_get_logger,
         ):
             mock_log = mock_get_logger.return_value

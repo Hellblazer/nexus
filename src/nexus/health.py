@@ -212,20 +212,16 @@ def _check_t3_local() -> list[HealthResult]:
     # a 0-chunk collection lingering after `nx store delete` of every entry.
     if path_exists:
         try:
-            # RDR-120 P2: the probe is local-mode-by-contract (caller
-            # gated on is_local_mode()). In daemon mode the probe must
-            # NOT open a second PersistentClient against the same store
-            # because chromadb's WAL races between processes. Route
-            # through the T3 daemon's HttpClient instead. In direct
-            # mode the PersistentClient is the right call; epsilon-allow
-            # because this site is a contract-bound local probe rather
-            # than a substrate boundary violation.
-            from nexus.config import storage_mode
-            if storage_mode() == "daemon":
-                from nexus.daemon.t3_client import make_t3_client
-                client = make_t3_client()._client
-            else:
-                client = chromadb.PersistentClient(path=str(local_path))  # epsilon-allow: local-mode doctor probe by contract
+            # RDR-120 P6 (nexus-qg86h): direct mode decommissioned. The
+            # local-mode probe always routes through the T3 daemon's
+            # HttpClient; the legacy PersistentClient direct-open
+            # branch is deleted. (chromadb's WAL races between
+            # processes when two PersistentClients open the same store
+            # simultaneously, which is why the daemon path was added
+            # at P2 in the first place; P6 makes it the only path.)
+            from nexus.daemon.t3_client import make_t3_client
+
+            client = make_t3_client()._client
             cols = client.list_collections()
             col_count = len(cols)
             empty_count = sum(1 for c in cols if c.count() == 0)
@@ -725,7 +721,7 @@ def _check_t2_integrity() -> list[HealthResult]:
         return [HealthResult(label="T2 integrity", ok=True, detail="not created yet")]
 
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = sqlite3.connect(str(db_path))  # epsilon-allow: health PRAGMA integrity_check diagnostic — must operate when daemon offline; read-only
         try:
             rows = conn.execute("PRAGMA integrity_check").fetchall()
             pragma_ok = len(rows) == 1 and rows[0][0] == "ok"

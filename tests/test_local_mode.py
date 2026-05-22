@@ -182,12 +182,47 @@ class TestT3DatabaseLocalMode:
 
 
 class TestMakeT3Local:
-    def test_make_t3_local_mode(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_make_t3_local_mode_routes_to_daemon(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RDR-120 P6 (nexus-qg86h): local mode without injected
+        ``_client`` always routes through the T3 daemon. The legacy
+        ``PersistentClient`` direct-open path was deleted; this test
+        now verifies that ``make_t3`` dispatches to ``make_t3_client``
+        rather than constructing a ``T3Database`` in-process.
+        """
         monkeypatch.setenv("NX_LOCAL", "1")
         monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma"))
         monkeypatch.setenv("HOME", str(tmp_path))
+
+        sentinel = MagicMock(name="t3-client-stub")
+        monkeypatch.setattr(
+            "nexus.daemon.t3_client.make_t3_client", lambda: sentinel,
+        )
         from nexus.db import make_t3
-        assert make_t3()._local_mode is True
+
+        assert make_t3() is sentinel
+
+    def test_make_t3_local_mode_with_injected_client_skips_daemon(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The ``_client`` injection path stays open as the canonical
+        test substitute (EphemeralClient / MagicMock). Verifies that
+        passing ``_client`` short-circuits the daemon dispatch."""
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # If make_t3_client gets called the test would fail (no daemon
+        # running). The assertion below confirms the injected client
+        # path was taken instead.
+        monkeypatch.setattr(
+            "nexus.daemon.t3_client.make_t3_client",
+            lambda: pytest.fail("daemon dispatch must not fire when _client is injected"),
+        )
+        from nexus.db import make_t3
+
+        result = make_t3(_client=MagicMock(), _ef_override=MagicMock())
+        assert result._local_mode is False  # injected path = cloud-like construction
 
     def test_make_t3_cloud_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NX_LOCAL", "0")
@@ -353,6 +388,26 @@ class TestFrecencyOnlyLocalMode:
         monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma"))
         monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
         monkeypatch.delenv("CHROMA_API_KEY", raising=False)
+
+        # RDR-120 P6 (nexus-qg86h): local mode without injected
+        # _client now routes through the T3 daemon. Stub the daemon
+        # dispatch so this test exercises the frecency code path
+        # without spinning up a real daemon.
+        import chromadb
+        from nexus.db.t3 import T3Database
+
+        def _stub_make_t3_client():
+            ef = MagicMock()
+            ef.return_value = [[0.1, 0.2, 0.3]]
+            return T3Database(
+                _client=chromadb.EphemeralClient(),
+                _ef_override=ef,
+                local_mode=True,
+            )
+
+        monkeypatch.setattr(
+            "nexus.daemon.t3_client.make_t3_client", _stub_make_t3_client,
+        )
 
         from nexus.indexer import _run_index_frecency_only
 

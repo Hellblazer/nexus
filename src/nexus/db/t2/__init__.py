@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     # nexus.catalog.catalog_db -> from nexus.db.t2 import _sanitize_fts5)
     # therefore stops here without pulling sklearn -> scipy -> numpy
     # via CatalogTaxonomy.
+    from nexus.db.t2.catalog import CatalogStore
     from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
     from nexus.db.t2.chash_index import ChashIndex
     from nexus.db.t2.memory_store import AccessPolicy, MemoryStore
@@ -96,6 +97,7 @@ _log = structlog.get_logger()
 __all__ = [
     "AccessPolicy",
     "AspectExtractionQueue",
+    "CatalogStore",
     "CatalogTaxonomy",
     "ChashIndex",
     "DocumentAspects",
@@ -117,6 +119,7 @@ def __getattr__(name: str) -> Any:  # PEP 562
     _MAP = {
         "AccessPolicy":          "nexus.db.t2.memory_store",
         "AspectExtractionQueue": "nexus.db.t2.aspect_extraction_queue",
+        "CatalogStore":          "nexus.db.t2.catalog",
         "MemoryStore":           "nexus.db.t2.memory_store",
         "CatalogTaxonomy":       "nexus.db.t2.catalog_taxonomy",
         "ChashIndex":            "nexus.db.t2.chash_index",
@@ -133,22 +136,68 @@ def __getattr__(name: str) -> Any:  # PEP 562
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+#: RDR-120 P3b: process-wide default for ``T2Database(run_migrations=...)``
+#: when the caller leaves the parameter unspecified. Production code keeps
+#: this False (daemon owns migrations). The test conftest flips it to True
+#: so existing direct-open fixtures keep migrating their fresh tmp DBs.
+_DEFAULT_RUN_MIGRATIONS: bool = False
+
+#: Env-var override for :data:`_DEFAULT_RUN_MIGRATIONS`. Set to ``"1"`` to
+#: opt every direct-open ``T2Database`` construction into running
+#: ``apply_pending`` even when the in-process module global is False.
+#: Used by the test conftest to propagate auto-migrate semantics into
+#: subprocess children (``subprocess.run`` / ``claude -p`` dispatches /
+#: MCP children) which inherit ``os.environ`` but not Python module state.
+_RUN_MIGRATIONS_ENV: str = "NX_T2_AUTO_MIGRATE"
+
+
+def _resolve_default_run_migrations() -> bool:
+    """Read the effective default from the env var first, the module
+    global second. The env-var path is what propagates into spawned
+    subprocesses (RDR-120 P3b review item 1).
+    """
+    import os as _os
+
+    raw = _os.environ.get(_RUN_MIGRATIONS_ENV, "").strip()
+    if raw:
+        return raw not in ("0", "false", "False", "no", "")
+    return _DEFAULT_RUN_MIGRATIONS
+
+
 # ── Database facade ───────────────────────────────────────────────────────────
 
 
 class T2Database:
     """T2 SQLite memory bank with FTS5 full-text search.
 
-    Pure composition over the seven domain stores (``memory``,
-    ``plans``, ``taxonomy``, ``telemetry``, ``chash_index``,
-    ``document_aspects``, ``aspect_queue``). Each store owns its own
-    connection, lock, schema init, and migration guard; the facade
-    forwards legacy public methods to the appropriate store and owns
-    only the cross-domain ``expire()`` composition and the context
-    manager.
+    Composition over eight domain stores (``memory``, ``plans``,
+    ``taxonomy``, ``telemetry``, ``chash_index``, ``document_aspects``,
+    ``aspect_queue``, ``catalog``). Each store owns its own connection,
+    lock, schema init, and migration guard; the facade forwards legacy
+    public methods to the appropriate store and owns only the
+    cross-domain ``expire()`` composition and the context manager.
+
+    The seven domain stores share the single ``nexus.db`` SQLite file
+    passed at construction. The eighth — ``catalog`` — is unique in
+    that it opens a separate ``.catalog.db`` file under
+    ``catalog_path()``. The path split is preserved through P5.A.1 by
+    the Hal-approved thin-shim design; collapsing the files is
+    explicitly out of scope.
+
+    The ``catalog`` store is constructed lazily on first attribute
+    access (RDR-120 P5.A.1) so tests that never touch the catalog do
+    not eagerly open ``.catalog.db`` and contend with separately-
+    constructed ``CatalogDB`` instances during the P5.A.1 to P5.A.2
+    cutover window.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        run_migrations: bool | None = None,
+        catalog_db_path: Path | None = None,
+    ) -> None:
         # Lazy-load the seven store classes here rather than at module
         # import time so the CLI cold-start path (which only needs
         # ``_sanitize_fts5``) does not pull sklearn/scipy/numpy through
@@ -165,64 +214,22 @@ class T2Database:
         # Store path for cross-domain operations (e.g. rename_collection_cascade).
         self._path: Path = path
 
-        # ── Transient connection: run pending migrations (RDR-076) ────
-        from nexus.db.migrations import _upgrade_done, _upgrade_lock, apply_pending
-
-        try:
-            path_key = str(path.resolve())
-        except OSError:
-            path_key = str(path)
-
-        # Serialise the check-then-migrate to prevent concurrent
-        # transient connections racing the WAL write lock.
-        with _upgrade_lock:
-            if path_key not in _upgrade_done:
-                try:
-                    from importlib.metadata import version as _pkg_version
-
-                    current_version = _pkg_version("conexus")
-                except Exception:
-                    current_version = "0.0.0"
-
-                # OBS-2: emit a brief migration notice so operators see
-                # progress rather than a silent hang on first post-upgrade
-                # invocation. Suppressed when stderr is not a TTY
-                # (CI, pipes, click.testing.CliRunner) because CliRunner
-                # mixes stderr into result.output and tests parsing
-                # JSON output break otherwise. The interactive operator
-                # case (running `nx <verb>` from a real terminal) keeps
-                # the visibility benefit; the headless case stays
-                # quiet.
-                import sys as _sys
-                _stderr_is_tty = (
-                    hasattr(_sys.stderr, "isatty") and _sys.stderr.isatty()
-                )
-                if _stderr_is_tty:
-                    print(
-                        f"Migrating database {path.name!r} to schema "
-                        f"version {current_version} ...",
-                        file=_sys.stderr,
-                    )
-
-                conn = sqlite3.connect(str(path), check_same_thread=False)
-                try:
-                    conn.execute("PRAGMA busy_timeout=5000")
-                    conn.execute("PRAGMA journal_mode=WAL")
-                    apply_pending(conn, current_version)
-                finally:
-                    conn.close()
-                # apply_pending() keys _upgrade_done by
-                # _connection_path_key(conn) (Path(row[2]).resolve() from
-                # PRAGMA database_list). The fast-path check above keys by
-                # str(path.resolve()) on the Path argument. The two forms
-                # are equivalent in nearly all cases but diverge in CI
-                # path-resolution edge cases (nexus-avwe), leaving the
-                # T2Database-form path_key absent from _upgrade_done after
-                # apply_pending populated only its own form. Recording the
-                # T2Database form here ensures a second construction with
-                # the same Path argument short-circuits without re-opening
-                # the connection.
-                _upgrade_done.add(path_key)
+        # RDR-120 P3b: migration ownership transferred to the T2 daemon.
+        # ``T2Database.__init__`` no longer auto-runs ``apply_pending``.
+        # Callers that need to materialise the schema (daemon startup,
+        # ``nx upgrade``, conftest bootstrap) must either pass
+        # ``run_migrations=True`` here or call
+        # :meth:`T2Database.bootstrap_schema` explicitly. The default is
+        # the module-level :data:`_DEFAULT_RUN_MIGRATIONS` (False in
+        # production; conftest flips it to True so the test suite stays
+        # green without touching 300+ direct-open call sites).
+        effective = (
+            _resolve_default_run_migrations()
+            if run_migrations is None
+            else run_migrations
+        )
+        if effective:
+            T2Database.bootstrap_schema(path)
 
         # ── Construct domain stores ───────────────────────────────────
         self.memory: MemoryStore = MemoryStore(path)
@@ -244,6 +251,122 @@ class T2Database:
         # an enqueue); the worker drains in a background thread.
         self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(path)
 
+        # RDR-120 P5.A.1 (nexus-9zmpl): catalog is the eighth domain
+        # store. Constructed lazily via the ``catalog`` property so
+        # the ``.catalog.db`` file is not opened on every T2Database
+        # construction (tests that never touch the catalog stay
+        # isolated). Caller may pin ``catalog_db_path`` explicitly to
+        # avoid the default resolution through ``nexus.config``.
+        self._catalog_db_path_override: Path | None = catalog_db_path
+        self._catalog: Any = None
+
+    @property
+    def catalog(self) -> "CatalogStore":
+        """Lazy-construct the eighth domain store on first access.
+
+        Resolution order for the catalog file path:
+
+        1. Explicit ``catalog_db_path`` argument passed to
+           :meth:`T2Database.__init__`.
+        2. ``nexus.config.catalog_path()/.catalog.db`` (production default).
+        """
+        if self._catalog is None:
+            from nexus.db.t2.catalog import CatalogStore as _CatalogStore
+
+            if self._catalog_db_path_override is not None:
+                db_path = self._catalog_db_path_override
+            else:
+                from nexus.config import catalog_path as _catalog_path
+                db_path = _catalog_path() / ".catalog.db"
+            self._catalog = _CatalogStore(db_path)
+        return self._catalog
+
+    def stored_schema_version(self) -> str:
+        """Return the ``_nexus_version`` row's ``cli_version`` value.
+
+        RDR-120 P3b: surfaced via the daemon's ``database.hello`` op so
+        clients can validate version compatibility on first connect.
+        Returns ``"0.0.0"`` when the row is missing (uninitialised DB).
+        """
+        conn = sqlite3.connect(str(self._path), check_same_thread=False)
+        try:
+            try:
+                row = conn.execute(
+                    "SELECT value FROM _nexus_version WHERE key='cli_version'"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return "0.0.0"
+            return row[0] if row else "0.0.0"
+        finally:
+            conn.close()
+
+    def hello(self, client_schema_version: str | None = None) -> dict[str, str]:
+        """Connection handshake: report the daemon's stored schema version.
+
+        RDR-120 P3b (nexus-e9x4l): T2Client invokes ``database.hello``
+        on first connect with its built-against schema version. The
+        daemon echoes the daemon-side version; the client compares and
+        raises ``T2SchemaVersionMismatchError`` on disagreement. The
+        ``client_schema_version`` argument is accepted but not validated
+        daemon-side — the comparison happens on the client because the
+        client is the layer that knows what wire shape it expects.
+        """
+        return {
+            "daemon_schema_version": self.stored_schema_version(),
+            "client_schema_version": client_schema_version or "",
+        }
+
+    @staticmethod
+    def bootstrap_schema(path: Path) -> None:
+        """Run ``apply_pending`` against *path*.
+
+        RDR-120 P3b: lifted out of ``__init__`` so the T2 daemon is the
+        sole substrate-owner that runs migrations in steady state.
+        ``nx upgrade`` and the test conftest also call this directly.
+
+        Idempotent: subsequent calls against the same resolved path
+        short-circuit via the ``_upgrade_done`` set in
+        :mod:`nexus.db.migrations`.
+        """
+        from nexus.db.migrations import _upgrade_done, _upgrade_lock, apply_pending
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path_key = str(path.resolve())
+        except OSError:
+            path_key = str(path)
+
+        with _upgrade_lock:
+            if path_key in _upgrade_done:
+                return
+            try:
+                from importlib.metadata import version as _pkg_version
+
+                current_version = _pkg_version("conexus")
+            except Exception:
+                current_version = "0.0.0"
+
+            import sys as _sys
+            if hasattr(_sys.stderr, "isatty") and _sys.stderr.isatty():
+                print(
+                    f"Migrating database {path.name!r} to schema "
+                    f"version {current_version} ...",
+                    file=_sys.stderr,
+                )
+
+            conn = sqlite3.connect(str(path), check_same_thread=False)
+            try:
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("PRAGMA journal_mode=WAL")
+                apply_pending(conn, current_version)
+            finally:
+                conn.close()
+            # Mirror the T2Database-form path_key into _upgrade_done so
+            # a second construction with the same Path argument
+            # short-circuits without re-opening the connection
+            # (nexus-avwe — CI path-resolution edge cases).
+            _upgrade_done.add(path_key)
+
     def __enter__(self) -> "T2Database":
         return self
 
@@ -251,12 +374,21 @@ class T2Database:
         self.close()
 
     def close(self) -> None:
-        """Close all seven domain connections.
+        """Close all eight domain connections.
 
         Each store closes its own connection under its own lock. The
-        close order is reverse of construction so that the most
-        recently opened connection (aspect_queue) is released first.
+        close order is reverse of construction so the most recently
+        opened connection is released first. The ``catalog`` store
+        is only closed when it was actually constructed (lazy
+        property — never opened means never to close).
         """
+        # RDR-120 P5.A.1: close catalog only if it was materialised.
+        if self._catalog is not None:
+            try:
+                self._catalog.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._catalog = None
         self.aspect_queue.close()
         self.document_aspects.close()
         self.chash_index.close()

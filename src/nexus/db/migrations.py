@@ -2214,6 +2214,25 @@ T3_UPGRADES: list[T3UpgradeStep] = [
 
 # ── Constants ───────────────────────────────────────────────────────────────
 
+def expected_t2_schema_version() -> str:
+    """Return the T2 schema version this client was built against.
+
+    RDR-120 P3b (nexus-e9x4l): T2Client surfaces this to the daemon
+    during the connection handshake; the daemon compares against the
+    schema version recorded in its own ``_nexus_version`` row and
+    fails loud on mismatch. Derived from the installed ``conexus``
+    package version (the same source ``apply_pending`` uses to gate
+    pending migrations) so client + daemon agree by construction
+    when running the same wheel.
+    """
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        return _pkg_version("conexus")
+    except Exception:
+        return "0.0.0"
+
+
 PRE_REGISTRY_VERSION = "4.1.2"
 """Last release before the migration registry shipped.
 

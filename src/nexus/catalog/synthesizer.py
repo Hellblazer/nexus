@@ -777,22 +777,26 @@ def build_live_catalog_content_hash_map(
     title context, and content_hash recovery is a best-effort fallback
     for chunks that already orphan'd via those paths.
 
-    Read-only against the catalog SQLite (``mode=ro`` URI) so this
-    helper cannot accidentally corrupt the live cache during a
-    synthesize-log run.
+    RDR-120 P5.A.3 (nexus-nbsng): routed through the T2 ``CatalogStore``
+    (eighth domain store) so the catalog SQLite is opened via the
+    substrate-allowlisted path rather than a direct ``sqlite3.connect``
+    in ``catalog/``. The connection still serves only SELECTs;
+    accidental writes are constrained by the fact that synthesize-log
+    issues no INSERTs/UPDATEs against documents.
     """
-    import sqlite3
-    from contextlib import closing
-
     db_path = catalog_dir / ".catalog.db"
     if not db_path.exists():
         return {}
     mapping: dict[str, str] = {}
-    uri = f"file:{db_path}?mode=ro"
-    with closing(sqlite3.connect(uri, uri=True)) as conn:
-        rows = conn.execute(
+    from nexus.db.t2.catalog import CatalogStore
+
+    store = CatalogStore(db_path)
+    try:
+        rows = store.execute(
             "SELECT tumbler, metadata FROM documents WHERE metadata IS NOT NULL"
         ).fetchall()
+    finally:
+        store.close()
     for tumbler, metadata_json in rows:
         if not metadata_json or not tumbler:
             continue

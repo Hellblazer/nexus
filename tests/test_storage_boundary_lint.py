@@ -43,17 +43,27 @@ def _check(extra_files=None, allowlist_prefixes=None):
 # ---------------------------------------------------------------------------
 
 
-def test_lint_reports_baseline_inventory():
-    """Against current main, the lint identifies the existing direct opens."""
+def test_lint_reports_zero_violations_after_p4_cutover():
+    """RDR-120 P4 (nexus-2ngox) + P5.A (nexus-kvn44): after the T2
+    cutover and the catalog collapse, the lint reports zero
+    violations AND zero catalog-allowlist sites.
+
+    Pre-P4 there were 16 direct opens outside ``db/`` and ``catalog/``;
+    P4 migrated mcp_infra to T2Client and epsilon-allowed the
+    operator/debug paths. P5.A.2 moved the catalog SQLite layer into
+    ``nexus.db.t2.catalog``; P5.A.3 retired the remaining
+    ``catalog/synthesizer.py`` site and the two replay-equality gate
+    sites in ``commands/catalog.py``. Catalog-allowlist count is now
+    explicitly **0** per RDR §Approach Phase 5
+    ('``count == 0`` explicitly').
+    """
     result = _check()
-    # 27 SQLite + 8 chromadb per the A5-refresh audit. The lint with the
-    # default allowlist (db/ + catalog/) should leave a known non-empty
-    # set of migration targets; that's the baseline P0 captures.
-    assert result.total_violations > 0
-    # Some of the well-known migration targets must show up.
-    files = {v.file for v in result.violations}
-    assert any("commands/doctor.py" in f for f in files)
-    assert any("health.py" in f for f in files)
+    assert result.total_violations == 0, (
+        f"expected zero violations after P4 cutover; got: "
+        f"{[(v.file, v.line, v.symbol) for v in result.violations]}"
+    )
+    # P5.A.3 explicit assertion (count == 0).
+    assert result.catalog_allowlist_count == 0
 
 
 def test_db_directory_is_allowlisted_by_default():
@@ -78,11 +88,15 @@ def test_catalog_allowlist_count_metric():
     """The lint reports the count of catalog-allowlist call sites.
 
     Per the phase-boundary forcing function (RDR-120 §Approach), this
-    metric is recorded per phase. P0 baseline should be 2 (catalog_db.py
-    + synthesizer.py) per the A5-refresh inventory.
+    metric is monotonically non-increasing across phases. P0 baseline
+    was 2 (``catalog_db.py`` + ``synthesizer.py``); P5.A.2 (nexus-2t7o5)
+    moved the catalog SQLite layer into ``nexus.db.t2.catalog`` and
+    dropped to 1; P5.A.3 (nexus-nbsng) retired
+    ``catalog/synthesizer.py`` and asserts ``count == 0`` explicitly
+    per RDR §Approach Phase 5.
     """
     result = _check()
-    assert result.catalog_allowlist_count == 2
+    assert result.catalog_allowlist_count == 0
 
 
 # ---------------------------------------------------------------------------

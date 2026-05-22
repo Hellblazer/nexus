@@ -86,8 +86,26 @@ _LISTEN_BACKLOG: int = 64
 #: Discovery file template (uid-suffixed so multi-user hosts don't collide).
 _DISCOVERY_FILE_TEMPLATE: str = "t2_addr.{uid}"
 
-#: Spawn-lock file name (fcntl exclusive lock held for daemon lifetime).
+#: Legacy spawn-lock file name (fcntl exclusive lock held for daemon
+#: lifetime). The lock is now keyed on a hash of the resolved db_path
+#: so two daemons against the same data file collide regardless of
+#: which config_dir they were started from (RDR-120 P3b code-review
+#: item 2). The legacy ``t2_spawn.lock`` filename is still acquired
+#: alongside the path-scoped lock to preserve the "same config_dir"
+#: invariant operators already rely on.
 _SPAWN_LOCK_FILE: str = "t2_spawn.lock"
+
+
+def _spawn_lock_path_for_db(db_path: Path) -> Path:
+    """Return the path-scoped spawn-lock file for *db_path*.
+
+    The lock lives as a sibling of the data file
+    (``<db_path>.spawn_lock``) so daemons started against the same
+    ``db_path`` from different ``config_dir``s contend on the same
+    lock file. The actual race surface is the data file, so the lock
+    is anchored where the race exists.
+    """
+    return db_path.parent / f"{db_path.name}.spawn_lock"
 
 #: Subdirectory under config_dir holding the UDS path. Mode 0o700 at
 #: create time so other UIDs cannot stat() into it.
@@ -251,10 +269,9 @@ async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
 #: table. Order matters: client expectations follow the documented
 #: store list in src/nexus/db/t2/__init__.py.
 #:
-#: Seven stores at P3a. The ``catalog`` eighth store is added at P5
-#: (catalog collapse into T2); the entry is intentionally absent here
-#: so the dispatch table reflects what the daemon can actually serve
-#: today.
+#: Eight stores as of RDR-120 P5.A.1 (nexus-9zmpl): the seven shared-
+#: nexus.db stores plus the catalog store (which uniquely opens
+#: ``.catalog.db`` under ``catalog_path()``).
 _T2_STORE_ATTRS: tuple[str, ...] = (
     "memory",
     "plans",
@@ -263,10 +280,13 @@ _T2_STORE_ATTRS: tuple[str, ...] = (
     "telemetry",
     "document_aspects",
     "aspect_queue",
+    "catalog",
 )
 
 #: Top-level T2Database methods exposed under the "database" pseudo-store.
-_T2_DATABASE_METHODS: tuple[str, ...] = ("rename_collection_cascade",)
+#: ``hello`` is the RDR-120 P3b connection handshake — T2Client invokes
+#: it on first connect to validate schema-version compatibility.
+_T2_DATABASE_METHODS: tuple[str, ...] = ("rename_collection_cascade", "hello")
 
 #: Methods filtered from every store. ``close`` is denied to prevent a
 #: client from tearing down the daemon's SQLite handles via RPC;
@@ -274,15 +294,25 @@ _T2_DATABASE_METHODS: tuple[str, ...] = ("rename_collection_cascade",)
 _RPC_DENY_METHODS: frozenset[str] = frozenset({"close"})
 
 #: Per-op denylist (qualified ``<store>.<method>``). Methods whose
-#: signature accepts a typed dataclass instance can't round-trip JSON
-#: until a typed-arg reconstructor lands. (The catalog @contextmanager
-#: methods are not on this list yet because the catalog isn't in
-#: :data:`_T2_STORE_ATTRS` until P5; re-add when the eighth store
-#: lands.)
+#: signature or return type don't round-trip framed JSON (typed
+#: dataclasses, context managers, raw ``sqlite3.Cursor`` handles).
 _RPC_DENY_OPS: frozenset[str] = frozenset({
     "document_aspects.upsert",
     "document_aspects.get",
     "document_aspects.get_by_doc_id",
+    # RDR-120 P5.A.1 (nexus-9zmpl) — catalog op denylist:
+    # ``execute`` returns a live ``sqlite3.Cursor`` that cannot be
+    # serialised across the framed-JSON boundary. ``transaction`` and
+    # ``bulk_load_documents`` are ``@contextmanager`` generators that
+    # likewise have no JSON shape — clients that need them must hold
+    # a local CatalogStore instance (the P5.A.2 shim will route
+    # local-mode catalog operations directly without going over RPC).
+    "catalog.execute",
+    "catalog.transaction",
+    "catalog.bulk_load_documents",
+    # ``rebuild`` is event-replay scoped to the catalog process tree
+    # and not suitable for RPC mediation — keep it client-local.
+    "catalog.rebuild",
 })
 
 
@@ -421,6 +451,7 @@ class T2Daemon:
         self._tcp_port: int | None = None
         self._discovery_path: Path | None = None
         self._spawn_lock_fd: int | None = None
+        self._spawn_lock_fd_path: int | None = None
         self._stop_event: asyncio.Event | None = None
 
     # ── public properties ───────────────────────────────────────────────
@@ -454,11 +485,12 @@ class T2Daemon:
         self._ensure_dirs()
         self._acquire_spawn_lock()
 
-        # Open the T2Database. apply_pending runs in its __init__ per
-        # RDR-120 §A6 P3 transition mitigation; daemon is the sole
-        # opener at this path during its lifetime.
+        # RDR-120 P3b (nexus-e9x4l): daemon is the sole ``apply_pending``
+        # caller. T2Database.__init__ no longer auto-runs migrations; the
+        # daemon passes ``run_migrations=True`` so its construction
+        # bootstraps the schema before any client connects.
         from nexus.db.t2 import T2Database
-        self._t2db = T2Database(self._db_path)
+        self._t2db = T2Database(self._db_path, run_migrations=True)
         self._dispatch_table = _build_dispatch_table(self._t2db)
 
         uds_sock = self._bind_uds()
@@ -662,10 +694,19 @@ class T2Daemon:
             pass
 
     def _acquire_spawn_lock(self) -> None:
-        """Acquire an fcntl exclusive lock on a spawn-lock file. Held
-        for the daemon's lifetime; released in :meth:`stop`. Prevents
-        a second daemon from starting against the same config_dir."""
+        """Acquire exclusive fcntl locks on both the config_dir-scoped
+        and the db_path-scoped spawn-lock files. Both are held for the
+        daemon's lifetime; both are released in :meth:`stop`.
+
+        Two locks because the race surface is the data file but
+        operators still rely on the "one daemon per config_dir"
+        invariant. The db_path-scoped lock (RDR-120 P3b code-review
+        item 2) prevents two daemons against the same data file from
+        different ``config_dir``s both running ``apply_pending``.
+        """
         import fcntl
+
+        # 1. Legacy config_dir-scoped lock.
         lock_path = self._config_dir / _SPAWN_LOCK_FILE
         fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
         try:
@@ -680,19 +721,48 @@ class T2Daemon:
             raise
         self._spawn_lock_fd = fd
 
+        # 2. db_path-scoped lock. Anchored where the race exists so
+        # two daemons against the same data file from different
+        # config_dirs still collide.
+        path_lock = _spawn_lock_path_for_db(self._db_path)
+        path_lock.parent.mkdir(parents=True, exist_ok=True)
+        fd2 = os.open(str(path_lock), os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd2, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(fd2)
+            # Release the first lock so we don't leak it on failure.
+            try:
+                fcntl.flock(self._spawn_lock_fd, fcntl.LOCK_UN)
+                os.close(self._spawn_lock_fd)
+            except OSError:
+                pass
+            self._spawn_lock_fd = None
+            if exc.errno in (errno.EAGAIN, errno.EACCES):
+                raise T2DaemonError(
+                    f"another T2 daemon already holds the db_path spawn "
+                    f"lock at {path_lock}; refusing to start a second "
+                    f"instance against the same data file"
+                ) from exc
+            raise
+        self._spawn_lock_fd_path = fd2
+
     def _release_spawn_lock(self) -> None:
         import fcntl
-        if self._spawn_lock_fd is None:
-            return
-        try:
-            fcntl.flock(self._spawn_lock_fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        try:
-            os.close(self._spawn_lock_fd)
-        except OSError:
-            pass
-        self._spawn_lock_fd = None
+
+        for attr in ("_spawn_lock_fd_path", "_spawn_lock_fd"):
+            fd = getattr(self, attr, None)
+            if fd is None:
+                continue
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            setattr(self, attr, None)
 
 
 # ---------------------------------------------------------------------------
