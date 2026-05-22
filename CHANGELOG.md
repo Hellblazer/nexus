@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Architecture (RDR-120 P6 — direct mode decommissioned)
+
+- `NX_STORAGE_MODE=direct` is deprecated. The flag is honoured as
+  `daemon` for one release (with a `DeprecationWarning`) and will
+  be removed in the next. Local mode now always routes through the
+  T2 / T3 daemons; the legacy `chromadb.PersistentClient` direct-
+  open code path in `nexus.db.make_t3()` has been deleted, and the
+  doctor's `Local collections` probe routes through the daemon's
+  `HttpClient` rather than opening a second `PersistentClient`
+  against the same chroma store (which would race the WAL).
+  Operators on local mode must start the daemons explicitly via
+  `nx daemon t2 start` and `nx daemon t3 start`. Cloud mode is
+  unaffected (`CloudClient` is already HTTP-served; there is no
+  local daemon to route through).
+- `VALID_STORAGE_MODES` now contains only `("daemon",)`.
+  `nexus.config.storage_mode()` is retained as a deprecation shim
+  and is slated for removal in the release following this one.
+
 ## [4.33.1] - 2026-05-21
 
 Patch release. Architectural follow-up to RDR-121 (4.33.0): the

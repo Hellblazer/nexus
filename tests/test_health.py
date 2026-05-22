@@ -102,7 +102,13 @@ def test_local_collections_reports_empty_count(tmp_path, monkeypatch) -> None:
     every doc from a collection doesn't leave callers wondering why the
     collection still appears in `nx collection list`. (Empty collections are
     intentional — they preserve the embedding-model binding for fast next
-    store_put.)"""
+    store_put.)
+
+    RDR-120 P6 (nexus-qg86h): the probe now routes through the T3
+    daemon's HttpClient; stub ``make_t3_client`` to return a wrapper
+    over the test's PersistentClient so the test exercises the new
+    routing path without requiring a running daemon.
+    """
     import chromadb
     from nexus.health import _check_t3_local
 
@@ -114,6 +120,12 @@ def test_local_collections_reports_empty_count(tmp_path, monkeypatch) -> None:
     client.get_or_create_collection("knowledge__empty1")
     client.get_or_create_collection("knowledge__empty2")
 
+    class _Stub:
+        _client = client
+
+    monkeypatch.setattr(
+        "nexus.daemon.t3_client.make_t3_client", lambda: _Stub(),
+    )
     results = _check_t3_local()
     local_collections_line = next(
         (r for r in results if r.label == "Local collections"), None
@@ -124,7 +136,10 @@ def test_local_collections_reports_empty_count(tmp_path, monkeypatch) -> None:
 
 
 def test_local_collections_omits_empty_note_when_none(tmp_path, monkeypatch) -> None:
-    """No `(including N empty)` note when every collection has data."""
+    """No `(including N empty)` note when every collection has data.
+
+    RDR-120 P6: same daemon-stub pattern as the preceding test.
+    """
     import chromadb
     from nexus.health import _check_t3_local
 
@@ -133,6 +148,12 @@ def test_local_collections_omits_empty_note_when_none(tmp_path, monkeypatch) -> 
     populated = client.get_or_create_collection("knowledge__has_data")
     populated.add(ids=["a"], documents=["hello"], embeddings=[[0.1] * 384])
 
+    class _Stub:
+        _client = client
+
+    monkeypatch.setattr(
+        "nexus.daemon.t3_client.make_t3_client", lambda: _Stub(),
+    )
     results = _check_t3_local()
     local_collections_line = next(
         (r for r in results if r.label == "Local collections"), None

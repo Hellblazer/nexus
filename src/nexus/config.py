@@ -401,55 +401,60 @@ def catalog_path() -> Path:
     return nexus_config_dir() / "catalog"
 
 
-#: RDR-120 P0.B — accepted values for ``NX_STORAGE_MODE``. ``direct``
-#: is the only mode wired today; ``daemon`` is reserved for the P3
-#: cutover and is rejected at P0 with an explicit not-yet-supported
-#: error so operators do not silently land in a half-built state.
-VALID_STORAGE_MODES: tuple[str, ...] = ("direct", "daemon")
+#: RDR-120 P0.B → P6 (nexus-qg86h): accepted values for the legacy
+#: ``NX_STORAGE_MODE`` env-var. ``daemon`` is now the only supported
+#: mode (``direct`` was decommissioned at P6); the constant is retained
+#: for one release so external callers reading the public symbol get a
+#: deprecation signal rather than an ``ImportError``.
+VALID_STORAGE_MODES: tuple[str, ...] = ("daemon",)
 
 
 class StorageModeError(click.ClickException):
-    """Raised when ``NX_STORAGE_MODE`` is set to an unsupported value.
-
-    Subclasses ``click.ClickException`` so a CLI invocation surfaces
-    the message cleanly. Constructor signature matches the parent so
-    downstream code can catch it as either.
-    """
+    """Raised when ``NX_STORAGE_MODE`` is set to a value other than
+    ``daemon``. Kept for backwards compatibility — see
+    :func:`storage_mode` for the deprecation window."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
 
 
 def storage_mode() -> str:
-    """Return the validated ``NX_STORAGE_MODE`` value.
+    """Return the storage backend mode.
 
-    RDR-120 single source of truth for the storage backend mode flag:
+    **RDR-120 P6 (nexus-qg86h): direct mode decommissioned.** This
+    function always returns ``"daemon"``. The legacy
+    ``NX_STORAGE_MODE`` env-var is retained for one release with the
+    following semantics:
 
-    - unset / empty / whitespace -> ``"daemon"`` (default since P4)
-    - ``"direct"`` (any case) -> ``"direct"`` (retained as debug fallback)
-    - ``"daemon"`` (any case) -> ``"daemon"``
-    - anything else -> raises ``StorageModeError`` naming the bad
-      value and listing :data:`VALID_STORAGE_MODES`
+    - unset / empty / whitespace / ``"daemon"`` → ``"daemon"``
+      (no warning).
+    - ``"direct"`` → ``"daemon"`` + ``DeprecationWarning``. Operators
+      who relied on direct mode must now run ``nx daemon t2 start``
+      and ``nx daemon t3 start`` (local mode only; cloud mode is
+      unaffected).
+    - any other value → ``StorageModeError`` (unchanged shape).
 
-    Phasing of the daemon branch:
-
-    - P0 (4.34): rejected with "not yet supported".
-    - P2 (4.35+): accepted for T3 reads/writes. ``make_t3()``
-      honours it and dispatches through ``make_t3_client()`` in
-      local mode. Cloud mode is unaffected (chromadb's CloudClient
-      is already HTTP-served; there is no local daemon to route
-      through).
-    - P4 (4.36+): accepted for T2 reads/writes; **default for new
-      installs**. ``direct`` remains a documented debug fallback for
-      operators who explicitly opt out.
+    The function itself is also slated for removal in the release
+    following the deprecation cycle; new code should not call it
+    (the storage mode is no longer a meaningful runtime branch).
     """
     raw = os.environ.get("NX_STORAGE_MODE", "")
     normalized = raw.strip().lower()
-    if not normalized:
+    if not normalized or normalized == "daemon":
         return "daemon"
     if normalized == "direct":
-        return "direct"
-    if normalized == "daemon":
+        import warnings
+
+        warnings.warn(
+            "NX_STORAGE_MODE=direct is decommissioned (RDR-120 P6). "
+            "Direct mode is gone; daemon mode is the only supported "
+            "backend. Start the daemons via `nx daemon t2 start` and "
+            "(in local mode) `nx daemon t3 start`. The env-var itself "
+            "is honoured-as-daemon for this release and will be "
+            "removed in the next.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return "daemon"
     raise StorageModeError(
         f"NX_STORAGE_MODE={raw!r} is not a recognized value. "

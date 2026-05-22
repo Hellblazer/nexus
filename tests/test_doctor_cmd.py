@@ -350,6 +350,11 @@ def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
 
 
 def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
+    """RDR-120 P6: the local-collections probe routes through the T3
+    daemon's HttpClient. Stub ``make_t3_client`` to wrap an existing
+    PersistentClient against the test's chroma path so the probe
+    sees the collection the test seeded.
+    """
     chroma_path = tmp_path / "chroma"
     import chromadb
     from nexus.db.local_ef import LocalEmbeddingFunction
@@ -358,11 +363,18 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
     col = client.get_or_create_collection("knowledge__test", embedding_function=ef)
     col.add(ids=["doc1"], documents=["test content"])
 
+    # Stub the daemon-client factory to return a thin wrapper that
+    # exposes the existing PersistentClient as ``._client`` — that's
+    # the attribute the probe reaches into.
+    class _Stub:
+        _client = client
+
     with (
         patch("nexus.config.is_local_mode", return_value=True),
         patch("nexus.config._default_local_path", return_value=chroma_path),
         patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
         patch("nexus.registry.RepoRegistry", return_value=mock_reg),
+        patch("nexus.daemon.t3_client.make_t3_client", return_value=_Stub()),
     ):
         result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0
