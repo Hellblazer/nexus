@@ -66,16 +66,51 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     │     CLI: nx catalog setup/search/show/links/link/unlink/stats
     │     Demoted to CLI-only: catalog_unlink, catalog_link_audit, catalog_link_bulk
     │
-    └── Storage tiers
+    └── Storage tiers (RDR-120 substrate split, daemon-mediated)
           T1: ChromaDB HTTP server (session scratch, shared across agent processes)
-          T2: SQLite + FTS5 (persistent memory, project context)
-          T3: ChromaDB PersistentClient + ONNX (local, zero-config)
-              OR ChromaDB Cloud + Voyage AI (cloud, higher quality)
+          T2: SQLite + FTS5 daemon ── nx daemon t2 start
+                Eight domain stores behind T2Database / T2Client
+                Transport: UDS (UID-gated) + 127.0.0.1 loopback TCP
+                memory · plans · chash_index · taxonomy · telemetry ·
+                document_aspects · aspect_queue · catalog
+          T3: ChromaDB daemon ── nx daemon t3 start  (local mode only)
+              OR ChromaDB Cloud + Voyage AI (cloud, higher quality;
+                                              daemon does not apply)
                 code__*       voyage-code-3 index + query
                 docs__*       voyage-context-3 (CCE) index + query
                 rdr__*        voyage-context-3 (CCE) index + query
                 knowledge__*  voyage-context-3 (CCE) index + query
 ```
+
+**Daemon-mediated storage (RDR-120, 4.34.0+).** Local mode now
+requires the T2 + T3 daemons to be running. Cloud mode is
+unaffected (CloudClient is already HTTP-served). The previous
+``NX_STORAGE_MODE=direct`` flag is honoured-as-daemon with a
+``DeprecationWarning`` for one release; the env-var itself is
+removed in the release after.
+
+For container deployments (Claude Co-Work and similar): containers
+reach the host's daemon via the loopback TCP socket exposed by
+``nx daemon t2 status``. Pattern:
+
+```
+# macOS Docker Desktop:
+docker run --rm \
+    -e NX_T2_ADDR=host.docker.internal:<port> \
+    -e NX_T3_ADDR=host.docker.internal:<t3_port> \
+    <image-with-conexus>
+
+# Linux (default bridge):
+docker run --rm \
+    --add-host=host.docker.internal:host-gateway \
+    -e NX_T2_ADDR=host.docker.internal:<port> \
+    <image>
+```
+
+UDS-mount works on native Linux Docker (validated by nexus-3d1ph
+MVV) but NOT through Docker Desktop's macOS/Windows VM file-
+sharing layer (returns ``ENOTSUP``); use the TCP path when the
+host is macOS or Windows.
 
 Data flows upward (T1 → T2 → T3).
 

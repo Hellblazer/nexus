@@ -1430,14 +1430,24 @@ def test_discover_for_collection_force(
 
 
 def test_discover_cli_invocation() -> None:
-    """nx taxonomy discover --collection <name> exits 0 in local mode."""
-    from unittest.mock import patch
+    """nx taxonomy discover --collection <name> exits 0 in local mode.
+
+    RDR-120 P6 (nexus-qg86h): the command's bootstrapping path
+    constructs a T3 handle via ``make_t3()`` before reaching the
+    mocked ``discover_for_collection``. Post-direct-mode-decommission
+    that needs the T3 daemon. Stub ``make_t3_client`` so the CLI
+    invocation gets a valid T3 stand-in.
+    """
+    from unittest.mock import MagicMock, patch
 
     from click.testing import CliRunner
     from nexus.commands.taxonomy_cmd import taxonomy
 
     runner = CliRunner()
-    with patch("nexus.commands.taxonomy_cmd.discover_for_collection", return_value=3) as mock_fn:
+    with (
+        patch("nexus.commands.taxonomy_cmd.discover_for_collection", return_value=3) as mock_fn,
+        patch("nexus.daemon.t3_client.make_t3_client", return_value=MagicMock()),
+    ):
         result = runner.invoke(taxonomy, ["discover", "--collection", "test__coll"])
 
     assert result.exit_code == 0, result.output
@@ -1446,14 +1456,20 @@ def test_discover_cli_invocation() -> None:
 
 
 def test_rebuild_cli_is_discover_force_alias() -> None:
-    """nx taxonomy rebuild --collection <name> delegates to discover --force."""
-    from unittest.mock import patch
+    """nx taxonomy rebuild --collection <name> delegates to discover --force.
+
+    RDR-120 P6: see test_discover_cli_invocation for the rationale.
+    """
+    from unittest.mock import MagicMock, patch
 
     from click.testing import CliRunner
     from nexus.commands.taxonomy_cmd import taxonomy
 
     runner = CliRunner()
-    with patch("nexus.commands.taxonomy_cmd.discover_for_collection", return_value=2) as mock_fn:
+    with (
+        patch("nexus.commands.taxonomy_cmd.discover_for_collection", return_value=2) as mock_fn,
+        patch("nexus.daemon.t3_client.make_t3_client", return_value=MagicMock()),
+    ):
         result = runner.invoke(taxonomy, ["rebuild", "--collection", "test__coll"])
 
     assert result.exit_code == 0, result.output
