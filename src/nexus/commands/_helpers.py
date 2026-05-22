@@ -14,13 +14,51 @@ monkeypatches on ``nexus.config.default_db_path`` reach the live
 binding via attribute access at call time. The ``from x import y``
 form captures ``y`` at import time and silently bypasses the patch.
 """
+from contextlib import contextmanager
 from pathlib import Path  # noqa: F401  -- preserved for back-compat callers
+from typing import Any, Iterator
 
 from nexus import config as _config
 
-__all__ = ["default_db_path"]
+__all__ = ["default_db_path", "t2_handle"]
 
 
 def default_db_path() -> Path:
     """Delegate to :func:`nexus.config.default_db_path` at call time."""
     return _config.default_db_path()
+
+
+@contextmanager
+def t2_handle() -> Iterator[Any]:
+    """Open a T2 handle via the running T2 daemon.
+
+    RDR-120 P6 follow-up (nexus-w6txl): user-facing CLI memory / plan
+    commands route through ``T2Client`` so multi-process operators
+    (host CLI + Cowork-bridged MCP server + dev-container CLI) share
+    a single arbitrated SQLite writer rather than each opening their
+    own connection and racing the WAL.
+
+    Returns a context-managed ``T2Client`` connected to the running
+    T2 daemon. Raises ``T2DaemonNotReachableError`` if the daemon is
+    not running; the message names ``nx daemon t2 start`` as the
+    operator fix.
+
+    Tests monkeypatch this helper to yield an in-process
+    ``T2Database`` fixture; the call sites use ``.memory.<method>``
+    on the yielded object, which is identical between
+    ``T2Database.memory`` (a :class:`MemoryStore`) and
+    ``T2Client.memory`` (a :class:`_StoreProxy`).
+
+    Operator/debug paths that MUST work when the daemon is offline
+    (``nx upgrade``, ``nx doctor``, ``_session_end_launcher``, etc.)
+    continue to construct ``T2Database(default_db_path())`` directly
+    with ``# epsilon-allow`` tokens — this helper is for the user-
+    facing memory/plan surface only.
+    """
+    from nexus.daemon.t2_client import make_t2_client
+
+    client = make_t2_client()
+    try:
+        yield client
+    finally:
+        client.close()
