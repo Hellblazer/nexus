@@ -2,16 +2,22 @@
 title: "Subagent Result Surfaces: Return A2UI Cards from Subagents to Relieve Orchestrator Context"
 id: RDR-124
 type: Architecture
-status: draft
+status: superseded
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-19
 accepted_date:
+superseded_date: 2026-05-22
+superseded_by: RDR-127
 related_issues: []
-related_rdrs: [RDR-118, RDR-119, RDR-123]
+related_rdrs: [RDR-118, RDR-119, RDR-123, RDR-127]
 related_tests: []
 implementation_notes: ""
+---
+
+> **TOMBSTONE 2026-05-22.** Superseded by [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md). The intent (subagents emit surfaces; orchestrator receives pointer + summary instead of full prose) is preserved as Item 9 of RDR-127, reframed onto the `SurfaceBroker` Protocol (in-process v1, tuple-space vN) instead of the scrapped `surface_cell` subspace. Do not implement against this RDR.
+
 ---
 
 # RDR-124: Subagent Result Surfaces — Return A2UI Cards from Subagents to Relieve Orchestrator Context
