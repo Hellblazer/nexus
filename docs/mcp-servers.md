@@ -38,6 +38,16 @@ Both servers are bundled in the `nx` plugin's `.mcp.json`. Installing the
 plugin (`/plugin install nx@nexus-plugins`) registers both with Claude Code
 automatically. No separate install step.
 
+**Substrate dependency**: Since conexus 4.34.0 (RDR-120), the MCP servers'
+storage tools route through the T2 daemon (and the T3 daemon in local mode).
+The plugin's SessionStart hook auto-spawns `nx daemon t2 ensure-running` on
+every Claude Code session start, so first-call-after-install works without
+any manual setup. For a daemon that survives reboots independent of Claude
+Code, run `nx daemon t2 install --autostart` once. See
+[Container Integration](container-integration.md) for the multi-process /
+multi-host story (host CLI + multiple Claude Code sessions + Cowork agents +
+dev containers all sharing one arbitrated SQLite writer).
+
 ## `nexus` — retrieval + storage (26 tools)
 
 Full tool names follow Claude Code's convention: `mcp__plugin_nx_nexus__<tool>`.

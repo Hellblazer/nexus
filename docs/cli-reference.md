@@ -1320,6 +1320,153 @@ Introduced 4.18.0 (`nexus-mrzp`). `disable` flips `outcome=disabled` on the plan
 
 ---
 
+## nx daemon
+
+T2 and T3 daemon lifecycle (RDR-120). Since conexus 4.34.0, all
+user-facing CLI commands that touch persistent state (`nx memory`,
+`nx index`, `nx store`, `nx catalog`, `nx_answer` and the MCP
+tools) route through the T2 daemon process so multi-process
+consumers — host CLI + Cowork sessions + dev containers + the
+nx-mcp server — share one arbitrated SQLite writer instead of
+each opening their own connection.
+
+The daemons are infrastructure: start them once at login and
+leave them running. For a brand-new install the recommended setup
+sequence is:
+
+```
+uv tool install conexus
+nx daemon t2 install --autostart           # writes LaunchAgent/systemd unit
+nx daemon t2 status                        # confirm running
+# (local-mode T3 only)
+nx daemon t3 install --autostart
+```
+
+Cloud-mode T3 uses HTTP transport directly to ChromaDB Cloud and
+has no daemon; only `t2` is needed in that configuration.
+
+When the nx Claude Code plugin is installed, the plugin's
+SessionStart hook auto-spawns the T2 daemon via
+`nx daemon t2 ensure-running` on every Claude Code session start,
+so first-session-after-install works without any manual incantation.
+For long-lived background daemons that survive across reboots
+independent of Claude Code, use `install --autostart` as above.
+
+### nx daemon t2 start
+
+Start the T2 daemon in the foreground. The daemon IS this Python
+process (asyncio event loop until SIGTERM/SIGINT). Run under
+launchd / systemd via `nx daemon t2 install --autostart` for
+production use; direct foreground invocation is for debugging or
+explicit one-shot starts.
+
+| Flag | Description |
+|------|-------------|
+| `--config-dir PATH` | Config directory override (default: `~/.config/nexus/`) |
+| `--db-path PATH` | Override the memory.db path (default: `nexus.config.default_db_path()`) |
+
+Fails fast with `T2DaemonError` if another T2 daemon already holds
+the spawn lock on the same config_dir.
+
+### nx daemon t2 stop
+
+Send SIGTERM to the running T2 daemon. Reads the PID from the
+discovery file at `~/.config/nexus/t2_addr.<uid>` and signals it.
+Idempotent — exits cleanly if no daemon is running.
+
+| Flag | Description |
+|------|-------------|
+| `--config-dir PATH` | Config directory override |
+
+### nx daemon t2 status
+
+Print the T2 daemon discovery JSON: PID, UDS path, TCP host/port,
+daemon version, start time.
+
+| Flag | Description |
+|------|-------------|
+| `--config-dir PATH` | Config directory override |
+| `--json` | Output raw JSON (default: pretty-print) |
+
+Exit code 1 if no daemon is running.
+
+### nx daemon t2 ensure-running
+
+Idempotent: silent no-op if the T2 daemon is already running on the
+named config_dir, otherwise spawns it in the background (detached
+subprocess) and polls the discovery file until reachable (or the
+timeout expires).
+
+Stale discovery files left behind by crashed daemons trigger a
+fresh spawn rather than a false-positive — the probe is
+`os.kill(pid, 0)` against the discovery-file PID.
+
+| Flag | Description |
+|------|-------------|
+| `--config-dir PATH` | Config directory override |
+| `--timeout SECONDS` | Wait up to N seconds for spawn (default: 5.0) |
+| `--quiet` | Suppress "already running" / "spawned" messages; only print errors |
+
+Exit codes:
+- `0`: reachable (already running OR successfully spawned)
+- `1`: spawned but did not become reachable within `--timeout`
+
+Used by the nx plugin's SessionStart hook; safe to invoke from any
+post-install script that needs the daemon up before running other
+commands.
+
+### nx daemon t2 install --autostart
+
+Write a launchd plist (macOS) or systemd user unit (Linux) so the
+T2 daemon starts at login / boot and respawns on crash.
+
+| Flag | Description |
+|------|-------------|
+| `--autostart` | Required. Confirms intent to write an OS autostart entry. |
+| `--force` | Overwrite an existing plist / unit file when its content differs from the freshly rendered template. |
+
+The plist / unit file lands in the per-user autostart directory:
+
+- macOS: `~/Library/LaunchAgents/com.nexus.t2.plist` (`KeepAlive=true`, `RunAtLoad=true`)
+- Linux: `~/.config/systemd/user/nexus-t2.service` (`Restart=on-failure`, `WantedBy=default.target`)
+
+After write, the command activates the unit:
+
+- macOS: `launchctl bootstrap gui/<uid> ~/Library/LaunchAgents/com.nexus.t2.plist`
+- Linux: `systemctl --user enable --now nexus-t2.service`
+
+Logs:
+- macOS: `~/Library/Logs/nexus-t2.log` / `nexus-t2.err`
+- Linux: `journalctl --user -u nexus-t2.service`
+
+Idempotent — running twice doesn't duplicate the plist or the
+service unit. Re-render and re-activate on `conexus` upgrades by
+running `nx daemon t2 install --autostart` again (the rendered
+template's `__NX_BIN__` resolves to the current `nx` binary path).
+
+### nx daemon t2 uninstall --autostart
+
+Reverse of `install --autostart`: deactivate via
+`launchctl bootout` (macOS) / `systemctl --user disable --now`
+(Linux) then unlink the plist / unit file.
+
+| Flag | Description |
+|------|-------------|
+| `--autostart` | Required. |
+
+### nx daemon t3 start / stop / status / install / uninstall
+
+Same shape as the `t2` subcommands, applies to the T3 daemon.
+**Only used in local mode (`NX_LOCAL=1` or no cloud credentials).**
+Cloud-mode T3 talks directly to ChromaDB Cloud via HTTP and has no
+daemon process — `nx daemon t3` is a no-op there.
+
+Local-mode T3 wraps the upstream `chroma run` server lifecycle
+under launchd / systemd supervision; templates ship as
+`com.nexus.t3.plist` / `nexus-t3.service`.
+
+---
+
 ## nx upgrade
 
 Run pending database migrations and T3 upgrade steps.
