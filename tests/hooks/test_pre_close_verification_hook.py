@@ -15,7 +15,7 @@ import pytest
 
 SCRIPT = (
     Path(__file__).resolve().parents[2]
-    / "nx"
+    / "conexus"
     / "hooks"
     / "scripts"
     / "pre_close_verification_hook.sh"

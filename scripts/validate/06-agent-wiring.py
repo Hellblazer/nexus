@@ -73,7 +73,7 @@ def case(name: str):
 
 
 REPO = Path(__file__).resolve().parent.parent.parent
-NX = REPO / "nx"
+NX = REPO / "conexus"
 
 #: RDR-080 P3: these agents were removed; their references must not persist.
 DELETED_AGENTS = frozenset({

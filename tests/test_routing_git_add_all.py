@@ -19,7 +19,7 @@ import pytest
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 HOOK_SCRIPT = (
     PROJECT_ROOT
-    / "nx"
+    / "conexus"
     / "hooks"
     / "scripts"
     / "routing"
