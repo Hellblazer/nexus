@@ -630,6 +630,7 @@ def main():
     import structlog
 
     from nexus.logging_setup import configure_logging
+    from nexus.mcp._first_run import ensure_installed_and_running
     from nexus.mcp_infra import check_version_compatibility
 
     configure_logging("mcp")
@@ -641,6 +642,8 @@ def main():
         pid=os.getpid(),
         ppid=os.getppid(),
     )
+    # RDR-126 P2 (nexus-bsjro): see nexus/mcp/core.py for rationale.
+    ensure_installed_and_running()
     try:
         check_version_compatibility()
         mcp.run(transport="stdio")

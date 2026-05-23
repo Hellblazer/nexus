@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New: Claude Desktop Extension (`.mcpb`) for chat-only users (nexus-bsjro, RDR-126)
+
+Nexus is now installable as a one-click `.mcpb` Desktop Extension for Claude Desktop chat users who don't have Claude Code installed. The bundle is a 1.5 KB artifact (manifest + pyproject + entry point); uv resolves Nexus's full compiled-dep stack on first launch (~20s cold, ~5s warm).
+
+- **Install**: download `conexus.mcpb` from a GitHub release, double-click. Claude Desktop registers it as a Connector ("Conexus") with all 31 MCP tools.
+- **First launch auto-installs the host T2 daemon** (LaunchAgent on macOS, systemd user unit on Linux) so the MCP server has a daemon to talk to. Idempotent: existing installs are detected and the install step is skipped.
+- **State is shared with the Claude Code plugin, the `nx` CLI, and Cowork sessions** — all surfaces hit the same host daemons (per RDR-120's substrate model).
+- **Audience**: this is for Claude Desktop users WITHOUT Claude Code. Claude Code users already get Nexus in Claude Desktop chat via the plugin's local-agent-mode path; no second install needed.
+
+Release workflow gains a `mcpb pack` step that produces `conexus.mcpb` and uploads it as a GitHub release asset alongside the wheel and sdist. CI parity test (`test_mcpb_manifest_version_matches_pyproject`) ensures the bundle's manifest.json version stays in lock-step with pyproject.toml.
+
+Pre-requisite for users: `uv` on PATH (`brew install uv` / `pipx install uv`).
+
+New documentation: `docs/desktop-deployment.md` covers install, first-run, drift detection, and uninstall across all three surfaces (Claude Code, Cowork, Claude Desktop chat) plus CLI coexistence.
+
 ### Breaking: plugin renamed `nx` → `conexus` (nexus-mkj6u)
 
 The Claude Code plugin name changed from `nx` to `conexus` to eliminate the namespace collision with Nx (nrwl)'s Q1 2026 plugin of the same name. This is a breaking change for existing installs.

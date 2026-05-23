@@ -122,6 +122,19 @@ jobs:
       - name: Build wheel and sdist
         run: uv build --sdist --wheel
 
+      - name: Pack .mcpb Desktop Extension (RDR-126 nexus-bsjro)
+        run: |
+          # The Claude Desktop .mcpb bundle is a tiny artifact (~1-2 KB)
+          # carrying manifest.json + pyproject.toml + src/server.py.
+          # Users on Claude Desktop chat double-click it to install.
+          # `npx @anthropic-ai/mcpb pack` zips the mcpb/ directory and
+          # validates manifest.json against the v0.4 schema.
+          npm install -g @anthropic-ai/mcpb
+          cd mcpb
+          mcpb pack . conexus.mcpb
+          ls -la conexus.mcpb
+          mv conexus.mcpb ../dist/
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         # No api-token needed — uses OIDC trusted publisher
@@ -139,4 +152,5 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
+            dist/conexus.mcpb
           prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}

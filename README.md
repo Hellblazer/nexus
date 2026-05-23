@@ -118,18 +118,30 @@ Each research finding is tagged with its evidence quality (verified against sour
 
 RDR is fully optional. See [RDR Overview](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-overview.md) for the full process.
 
-## Claude Code plugin
+## Claude integrations
 
-The `conexus/` directory is a Claude Code plugin that gives agents access to everything above. Install via the marketplace:
+Nexus runs in three Claude surfaces, all backed by the same host daemons so state is shared across them and with the CLI.
+
+### Claude Code (terminal)
 
 ```bash
 /plugin marketplace add Hellblazer/nexus
 /plugin install conexus@nexus-plugins
 ```
 
-The plugin provides 13 specialized agents, 43 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows, session hooks for automatic context initialization, and 36 MCP tools split across two focused servers: `nexus` (26 tools: search, store, memory, scratch, plans, 5 operator tools for structured extract/rank/compare/summarize/generate, plus 4 orchestration tools including `nx_answer` for plan-matched multi-step retrieval) and `nexus-catalog` (10 catalog tools: search, show, link, resolve, stats, etc.). The plan-centric retrieval layer (`nx_answer`) matches questions against a library of scenario templates, executes the matched plan, and records every run, so the library compounds with use. Agents search indexed code before proposing changes, check prior RDR decisions before designing new features, and coordinate through standard pipelines (plan → implement → review → test) with built-in quality gates.
+The plugin provides 13 specialized agents, 43 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows, session hooks for automatic context initialization, and 36 MCP tools split across two focused servers: `nexus` (26 tools: search, store, memory, scratch, plans, 5 operator tools for structured extract/rank/compare/summarize/generate, plus 4 orchestration tools including `nx_answer` for plan-matched multi-step retrieval) and `nexus-catalog` (10 catalog tools: search, show, link, resolve, stats, etc.). See [conexus/README.md](https://github.com/Hellblazer/nexus/blob/main/conexus/README.md) for the full plugin documentation.
 
-The plugin integrates with [Beads](https://github.com/BeadsProject/beads) for task tracking. See [conexus/README.md](https://github.com/Hellblazer/nexus/blob/main/conexus/README.md) for the full plugin documentation.
+### Claude Desktop chat (Desktop Extension)
+
+Download `conexus.mcpb` from the [latest GitHub release](https://github.com/Hellblazer/nexus/releases/latest) and double-click to install. Claude Desktop registers it as a Connector (visible under Settings → Connectors → Desktop). uv resolves the deps on first launch (~20s); subsequent starts are ~5s. Pre-requisite: [uv](https://docs.astral.sh/uv/) on host PATH.
+
+This is the right path for Claude Desktop users WITHOUT Claude Code installed. Claude Code users already get Nexus in Claude Desktop chat via the local-agent-mode plugin path; no second install needed.
+
+### Claude Cowork (cloud agents)
+
+Works automatically once the conexus plugin is installed in Claude Code on the host. Claude Desktop passes the configured MCP servers into the Cowork VM via the Anthropic SDK transport. State round-trips bidirectionally with the host CLI through the T2 daemon. See [docs/container-integration.md](https://github.com/Hellblazer/nexus/blob/main/docs/container-integration.md) § Cowork.
+
+For the full three-surface deployment story (install, daemon lifecycle, drift detection, uninstall), see [docs/desktop-deployment.md](https://github.com/Hellblazer/nexus/blob/main/docs/desktop-deployment.md).
 
 ## CLI Reference
 

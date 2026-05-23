@@ -1,0 +1,15 @@
+# Files/dirs excluded from the .mcpb bundle. mcpb pack does NOT honor
+# .gitignore; this is the ignore mechanism for the bundle itself.
+#
+# Without these, the bundle balloons from ~1 KB (the intended manifest
+# + pyproject + entry point) to ~500 MB (every uv-resolved dep landed
+# in .venv during local testing).
+
+*.mcpb
+uv.lock
+.venv/
+.uv-cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+SPIKE.md
