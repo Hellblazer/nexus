@@ -27,11 +27,11 @@ Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
 
 ## Pre-Dispatch: Seed Link Context
 
-Before dispatching the strategic-planner agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores planning artifacts. See `/nx:catalog` skill for full reference.
+Before dispatching the strategic-planner agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores planning artifacts. See `/conexus:catalog` skill for full reference.
 
-1. If the task references an RDR (pattern `RDR-\d+`), resolve it: `mcp__plugin_nx_nexus-catalog__search(query="RDR-NNN")`
+1. If the task references an RDR (pattern `RDR-\d+`), resolve it: `mcp__plugin_conexus_nexus-catalog__search(query="RDR-NNN")`
 2. Check T1 scratch for `rdr-planning-context` (set by rdr-accept for RDR-driven plans)
-3. Seed: `mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<tumbler>", "link_type": "relates"}], "source_agent": "strategic-planner"}', tags="link-context")`
+3. Seed: `mcp__plugin_conexus_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<tumbler>", "link_type": "relates"}], "source_agent": "strategic-planner"}', tags="link-context")`
 4. If no RDR/document reference found, skip seeding (auto-linker handles empty context gracefully)
 
 ## Agent Invocation
@@ -60,7 +60,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Planning Methodology
 
-The agent uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
+The agent uses `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
 1. Analyze codebase to understand context and constraints
 2. Form hypothesis about optimal architecture approach
 3. Validate approach against existing patterns
@@ -69,7 +69,7 @@ The agent uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
 6. Create beads for trackable work items
 7. Define success criteria and test strategy
 
-**REQUIRED STEP:** Call `mcp__plugin_nx_nexus__nx_plan_audit` after creating any plan (RDR-080 — no agent spawn needed).
+**REQUIRED STEP:** Call `mcp__plugin_conexus_nexus__nx_plan_audit` after creating any plan (RDR-080 — no agent spawn needed).
 
 ## Success Criteria
 
@@ -79,7 +79,7 @@ The agent uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
 - [ ] Beads created for all tasks
 - [ ] Success criteria defined per task
 - [ ] Risks identified and mitigated
-- [ ] Plan validated via `mcp__plugin_nx_nexus__nx_plan_audit` (RDR-080)
+- [ ] Plan validated via `mcp__plugin_conexus_nexus__nx_plan_audit` (RDR-080)
 
 ## Agent-Specific PRODUCE
 

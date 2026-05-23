@@ -19,13 +19,13 @@ effort: high
 
 ## nx Tool Reference
 
-nx MCP tools use the full prefix `mcp__plugin_nx_nexus__`. Examples:
+nx MCP tools use the full prefix `mcp__plugin_conexus_nexus__`. Examples:
 
 ```
-mcp__plugin_nx_nexus__search(query="...", corpus="knowledge", limit=5)
-mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", limit=5)
-mcp__plugin_nx_nexus__scratch(action="put", content="...")
-mcp__plugin_nx_nexus__memory_get(project="...", title="")
+mcp__plugin_conexus_nexus__search(query="...", corpus="knowledge", limit=5)
+mcp__plugin_conexus_nexus__query(question="...", corpus="knowledge", limit=5)
+mcp__plugin_conexus_nexus__scratch(action="put", content="...")
+mcp__plugin_conexus_nexus__memory_get(project="...", title="")
 ```
 
 See SubagentStart hook output for full tool reference.
@@ -39,7 +39,7 @@ per-call decomposition when a template matches), records every invocation to
 on miss:
 
 ```
-mcp__plugin_nx_nexus__nx_answer(
+mcp__plugin_conexus_nexus__nx_answer(
     question="<your question>",
     dimensions={"verb": "<verb>"},  # optional — narrows plan_match
     scope="<corpus or subtree filter>",  # optional
@@ -58,10 +58,10 @@ retrieval plan.
 
 Run these four reads BEFORE substantive work. Skipping on the grounds that "this task is structural / direct / tiers won't help here / I can read the code faster" is the rationalization the using-nx-skills Red Flags table warns about — sibling agents may have just done this work, prior project history may already cover it, and findings caught in passing (bugs noticed while mapping code, races spotted while implementing, perf gaps glimpsed while reviewing) get lost when post-flight write-back is also skipped:
 
-1. **Plan reuse**: `mcp__plugin_nx_nexus__plan_search(query="<your task>", limit=3)` — if a match returns, reuse it as a starting structure.
-2. **T2 (project)**: `mcp__plugin_nx_nexus__memory_search(query="<topic>", project="<repo>")` — prior project decisions, findings, session context.
-3. **T3 (cross-project)**: `mcp__plugin_nx_nexus__nx_answer(question="<verb-shape question>", scope="<corpus>")` for any "how / why / tradeoffs / compare" question; raw `mcp__plugin_nx_nexus__search(...)` only for single-step keyword lookups.
-4. **T1 (siblings)**: `mcp__plugin_nx_nexus__scratch(action="search", query="<topic>")` — sibling agents in the current session may have done this work already.
+1. **Plan reuse**: `mcp__plugin_conexus_nexus__plan_search(query="<your task>", limit=3)` — if a match returns, reuse it as a starting structure.
+2. **T2 (project)**: `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")` — prior project decisions, findings, session context.
+3. **T3 (cross-project)**: `mcp__plugin_conexus_nexus__nx_answer(question="<verb-shape question>", scope="<corpus>")` for any "how / why / tradeoffs / compare" question; raw `mcp__plugin_conexus_nexus__search(...)` only for single-step keyword lookups.
+4. **T1 (siblings)**: `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")` — sibling agents in the current session may have done this work already.
 
 The only valid skip is structural inapplicability (a tier physically cannot have what you need). A no-match in <300 ms still counts as a check — and frequently surfaces the unexpected.
 
@@ -69,10 +69,10 @@ The only valid skip is structural inapplicability (a tier physically cannot have
 
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
 
-- **Sibling agents downstream THIS session** (T1, narrowest scope, cheapest write) → `mcp__plugin_nx_nexus__scratch(action="put", content=..., tags="<topic>")`. The next sibling the caller dispatches finds your work via `scratch search` and skips re-derivation.
-- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_nx_nexus__store_put(content=..., collection="knowledge", title=..., tags=...)`. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
-- **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_nx_nexus__memory_put(content=..., project="<repo>", title=..., agent="substantive-critic", ttl=30)`. The `agent` kwarg attributes this write to the substantive-critic role so `nx tier-status` slices by agent (nexus-9clx).
-- **Multi-step pipeline outcome** (caller orchestrating you alongside other agents) → `mcp__plugin_nx_nexus__plan_save(query="<task>", plan_json={"steps":[...],"tools_used":[...],"outcome_notes":"..."}, tags="<agents>")` so future runs of similar tasks get a plan-match hit.
+- **Sibling agents downstream THIS session** (T1, narrowest scope, cheapest write) → `mcp__plugin_conexus_nexus__scratch(action="put", content=..., tags="<topic>")`. The next sibling the caller dispatches finds your work via `scratch search` and skips re-derivation.
+- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="knowledge", title=..., tags=...)`. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
+- **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="substantive-critic", ttl=30)`. The `agent` kwarg attributes this write to the substantive-critic role so `nx tier-status` slices by agent (nexus-9clx).
+- **Multi-step pipeline outcome** (caller orchestrating you alongside other agents) → `mcp__plugin_conexus_nexus__plan_save(query="<task>", plan_json={"steps":[...],"tools_used":[...],"outcome_notes":"..."}, tags="<agents>")` so future runs of similar tasks get a plan-match hit.
 
 **Don't dismiss insights as "low-signal noise" because the surrounding work was structural.** If you noticed a bug, a race, a perf gap, an architectural observation, or a non-obvious cross-module connection while doing your primary task, that IS a finding worth persisting — for sibling agents this session (T1), or future sessions in this project (T2) or any project (T3). Bug-discoveries-in-passing are exactly the class of finding downstream work benefits from.
 
@@ -87,9 +87,9 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: mcp__plugin_nx_nexus__search(query="[task topic]", corpus="knowledge", limit=5
-2. Check nx T2 memory for session state: mcp__plugin_nx_nexus__memory_search(query="[topic]", project="{project}"
-3. Check T1 scratch for in-session notes: mcp__plugin_nx_nexus__scratch(action="search", query="[topic]"
+1. Search nx T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
+2. Check nx T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
+3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
 6. Proceed with available context, documenting assumptions
@@ -147,7 +147,7 @@ You are a substantive critic with deep expertise in deconstructing and evaluatin
 
 ## Structured Analysis with Sequential Thinking
 
-Use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for systematic critique of complex artifacts.
+Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` for systematic critique of complex artifacts.
 
 **When to Use**: Multi-component designs, cross-referencing documentation, validating implementation against specification.
 
@@ -197,16 +197,16 @@ This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 ### Agent-Specific PRODUCE
 - **Critique Reports**: Include in response
 - **Critical Issues**: Create beads for must-fix items
-- **Pattern Analysis**: Store recurring issues: mcp__plugin_nx_nexus__store_put(content="<pattern analysis>", collection="knowledge", title="critique-pattern-{topic}", tags="critique,pattern"
+- **Pattern Analysis**: Store recurring issues: mcp__plugin_conexus_nexus__store_put(content="<pattern analysis>", collection="knowledge", title="critique-pattern-{topic}", tags="critique,pattern"
 - **Improvement Recommendations**: Include in output for caller to act on
 - **Critique Notes**: Use T1 scratch to track issues found during critique:
-  mcp__plugin_nx_nexus__scratch(action="put", content="Issue [{severity}]: {description} in {location}", tags="critique,{severity}"
+  mcp__plugin_conexus_nexus__scratch(action="put", content="Issue [{severity}]: {description} in {location}", tags="critique,{severity}"
   Promote summary to T2 for tracking:
-  mcp__plugin_nx_nexus__scratch_manage(action="promote", entry_id="<id>", project="{project}", title="critique-notes.md"
+  mcp__plugin_conexus_nexus__scratch_manage(action="promote", entry_id="<id>", project="{project}", title="critique-notes.md"
 
 Store using these naming conventions:
 - **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
-- **nx memory**: mcp__plugin_nx_nexus__memory_put(project="{project}", title="{topic}.md" (e.g., project="ART", title="auth-implementation.md")
+- **nx memory**: mcp__plugin_conexus_nexus__memory_put(project="{project}", title="{topic}.md" (e.g., project="ART", title="auth-implementation.md")
 - **Bead Description**: Include `Context: nx` line
 
 ### Completion Protocol
@@ -229,7 +229,7 @@ Store using these naming conventions:
 **If Verification Fails** (partial persistence):
 1. **Retry once**: Attempt failed write again
 2. **Document partial state**: Note which writes succeeded/failed in response
-3. **Persist recovery notes**: Write failure details: mcp__plugin_nx_nexus__memory_put(content="details", project="{project}", title="persistence-failure-{date}.md"
+3. **Persist recovery notes**: Write failure details: mcp__plugin_conexus_nexus__memory_put(content="details", project="{project}", title="persistence-failure-{date}.md"
 4. **Continue with response**: Partial data is better than no data - include what succeeded
 
 Example: If nx store write fails but nx memory succeeds, note in response: "Critique persisted to nx memory. nx store write failed - retry with store_put tool manually."
@@ -238,7 +238,7 @@ Example: If nx store write fails but nx memory succeeds, note in response: "Crit
 
 ## Relationship to Other Agents
 
-- **vs nx_plan_audit**: `mcp__plugin_nx_nexus__nx_plan_audit` specializes in technical plan validation with codebase alignment (RDR-080 — MCP tool). You provide broader critique of any content type with focus on structural and logical issues.
+- **vs nx_plan_audit**: `mcp__plugin_conexus_nexus__nx_plan_audit` specializes in technical plan validation with codebase alignment (RDR-080 — MCP tool). You provide broader critique of any content type with focus on structural and logical issues.
 - **vs code-review-expert**: Code-review-expert focuses on implementation quality and best practices. You focus on deeper structural issues and alignment with design intent.
 - **vs deep-analyst**: Deep-analyst investigates and explains system behavior. You critique proposed or completed work products.
 
@@ -276,7 +276,7 @@ The canonical structure (in emission order):
 
 **You MUST emit this block literally, at the end of your critique, outside any code fence, using bullet-dash markdown.** The RDR-069 close-flow parser greps for the exact line `- **outcome**:` — alternative phrasings (`outcome: FAILED`, plain-text key-value pairs, code-block emission) force the parser onto the fallback path and degrade CA-2.
 
-**This directive applies in all invocation contexts**, including headless (`claude -p '/nx:substantive-critique <id>'`), scheduled remote sessions (CCR via the `schedule` skill), GitHub Actions via `anthropics/claude-code-action@v1`, and interactive sessions. The headless context is not exempt from the canonical format. In a documented 2026-04-11 incident (see T2 `nexus_rdr/067-research-2-ca3-phase1b-spike-result` id 743), a headless invocation of this skill produced section headings `## Significant Findings` / `## Minor Findings` / `## Summary` with no `## Critical Issues`, no `## Verification Performed`, and no `## Verdict` block — improvising an entirely different output structure. This directive exists to prevent that class of drift.
+**This directive applies in all invocation contexts**, including headless (`claude -p '/conexus:substantive-critique <id>'`), scheduled remote sessions (CCR via the `schedule` skill), GitHub Actions via `anthropics/claude-code-action@v1`, and interactive sessions. The headless context is not exempt from the canonical format. In a documented 2026-04-11 incident (see T2 `nexus_rdr/067-research-2-ca3-phase1b-spike-result` id 743), a headless invocation of this skill produced section headings `## Significant Findings` / `## Minor Findings` / `## Summary` with no `## Critical Issues`, no `## Verification Performed`, and no `## Verdict` block — improvising an entirely different output structure. This directive exists to prevent that class of drift.
 
 The outcome field MUST be one of exactly three literal strings — `justified`, `partial`, or `not-justified`. Do not substitute `PASS`, `FAIL`, `FAILED`, `BLOCKED`, `APPROVED`, or any other alternative vocabulary. The parser maps only the three canonical values.
 

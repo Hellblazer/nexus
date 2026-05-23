@@ -110,7 +110,7 @@ if not rdr_path.exists():
 id_match = re.search(r'\d+', args)
 
 if not id_match:
-    print("> **Usage**: `/nx:rdr-accept <id>` — e.g. `/nx:rdr-accept 003` or `/nx:rdr-accept RDR-003`")
+    print("> **Usage**: `/conexus:rdr-accept <id>` — e.g. `/conexus:rdr-accept 003` or `/conexus:rdr-accept RDR-003`")
     print()
     rdrs = get_all_rdrs(rdr_path)
     draft_rdrs = [r for r in rdrs if r['status'].lower() == 'draft']
@@ -151,7 +151,7 @@ print("### T2 Lookups (call these before executing Action steps)")
 print()
 print(f"1. **T2 metadata**: Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}\"")
 print(f"2. **T2 gate result**: Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}-gate-latest\"")
-print(f"   If no gate record exists, run `/nx:rdr-gate {t2_key}` first.")
+print(f"   If no gate record exists, run `/conexus:rdr-gate {t2_key}` first.")
 print()
 print(f"**RDR file path:** `{rdr_file}`")
 print()
@@ -217,7 +217,7 @@ $ARGUMENTS
 > is the exact behavior this prohibition exists to prevent.
 >
 > If the Agent tool is not available (e.g., you are a subagent), report:
-> "Cannot dispatch planning chain — Agent tool unavailable. Run /nx:rdr-accept from the main conversation."
+> "Cannot dispatch planning chain — Agent tool unavailable. Run /conexus:rdr-accept from the main conversation."
 
 All RDR metadata is pre-loaded above. Step 8 requires additional tool calls for planning dispatch.
 
@@ -230,7 +230,7 @@ All RDR metadata is pre-loaded above. Step 8 requires additional tool calls for 
   - **File shows `accepted`, T2 does not**: Self-healing — update T2 to match file. Print `> Self-healing: file shows accepted but T2 shows <actual-T2-status>. Updating T2.` Use memory_put to set T2 status to `accepted`. Then stop (no further steps needed).
   - **T2 shows `accepted`, file shows `draft`**: Self-healing — update file to match T2. Print `> Self-healing: T2 shows accepted but file shows draft. Updating file.` Change file frontmatter to `status: accepted` and `git add` the updated file. Then stop.
   - **File shows `draft` and T2 shows `draft` (or T2 record not found)**: Normal flow — proceed to Step 2.
-- **Step 2 — Verify gate**: Check that the T2 gate result (from your memory_get call) shows `outcome: "PASSED"`. If the record exists but `outcome` is absent or is not `"PASSED"`, treat as BLOCKED. If no gate record exists at all, also BLOCKED. Report **BLOCKED** and stop. Print: `> Run /nx:rdr-gate <ID> first.`
+- **Step 2 — Verify gate**: Check that the T2 gate result (from your memory_get call) shows `outcome: "PASSED"`. If the record exists but `outcome` is absent or is not `"PASSED"`, treat as BLOCKED. If no gate record exists at all, also BLOCKED. Report **BLOCKED** and stop. Print: `> Run /conexus:rdr-gate <ID> first.`
 - **Step 3 — Update T2** (T2 is the process authority):
   Use **memory_put** tool: content="status: accepted\naccepted_date: <today YYYY-MM-DD>\ntitle: <title>\ntype: <type>\n(preserve other fields from T2 Metadata lookup)", project="<repo-name>_rdr" (same project as in the T2 Lookups above), title="<ID>", ttl="permanent", tags="rdr,<type>"
 - **Step 4 — Update the RDR file**: Change `status: draft` to `status: accepted` in the YAML frontmatter. Add `accepted_date: YYYY-MM-DD` if not present.
@@ -258,22 +258,22 @@ Dispatch `nx:strategic-planner` agent (via Agent tool, subagent_type="nx:strateg
 
 **Wait for the planner to complete before proceeding.**
 Note the plan file path and bead IDs from the planner's output.
-**If the planner did not create beads, this is a failure — report it and stop. The RDR acceptance is still valid. To retry the planning chain only, run `/nx:create-plan` manually with the RDR file path.**
+**If the planner did not create beads, this is a failure — report it and stop. The RDR acceptance is still valid. To retry the planning chain only, run `/conexus:create-plan` manually with the RDR file path.**
 
-**Step 8c — Call `mcp__plugin_nx_nexus__nx_plan_audit` (MANDATORY — do NOT skip):**
+**Step 8c — Call `mcp__plugin_conexus_nexus__nx_plan_audit` (MANDATORY — do NOT skip):**
 After the planner completes, call:
 ```
-mcp__plugin_nx_nexus__nx_plan_audit(
+mcp__plugin_conexus_nexus__nx_plan_audit(
     plan_json="<serialized plan from planner output>",
     context="RDR-<ID>: <title>. T1 scratch has rdr-planning-context tag."
 )
 ```
 (RDR-080 — no agent spawn; MCP tool executes in-process)
 
-**Step 8d — Call `mcp__plugin_nx_nexus__nx_enrich_beads` (MANDATORY — do NOT skip):**
+**Step 8d — Call `mcp__plugin_conexus_nexus__nx_enrich_beads` (MANDATORY — do NOT skip):**
 After the audit completes, call:
 ```
-mcp__plugin_nx_nexus__nx_enrich_beads(
+mcp__plugin_conexus_nexus__nx_enrich_beads(
     bead_description="RDR-<ID>: <title>",
     context="<audit findings from step 8c, if any>"
 )

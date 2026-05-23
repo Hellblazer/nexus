@@ -12,9 +12,9 @@ Wraps the canonical audit pattern proven in Phase 1b (RDR-067) as a one-command 
 
 ## When This Skill Activates
 
-- User invokes `/nx:rdr-audit` (no argument → current project) or `/nx:rdr-audit <project>` — runs the audit
+- User invokes `/conexus:rdr-audit` (no argument → current project) or `/conexus:rdr-audit <project>` — runs the audit
 - User says "audit this project", "run the silent-scope-reduction audit", "check the base rate on `<project>`"
-- Periodic audit trigger fires headlessly: external cron or launchd invokes `claude -p '/nx:rdr-audit <project>'` on the user's local machine (see Phase 4 scheduling templates)
+- Periodic audit trigger fires headlessly: external cron or launchd invokes `claude -p '/conexus:rdr-audit <project>'` on the user's local machine (see Phase 4 scheduling templates)
 - User invokes a management subcommand: `list` / `status <project>` / `history <project>` / `schedule <project>` / `unschedule <project>` (Phase 2b)
 
 ## Inputs
@@ -46,7 +46,7 @@ Derivation happens in the skill body before anything else runs. The derived name
 
 The skill body resolves the **absolute filesystem path** to the target project's worktree so the canonical prompt can Glob files via fully-qualified paths. There is no universal convention for where users keep project worktrees, so the resolution precedence is:
 
-1. **Explicit path argument**: if the positional project argument is already an absolute path (e.g. `/nx:rdr-audit /srv/work/ART`) OR a path containing a `/`, use it directly and derive the project name from its basename.
+1. **Explicit path argument**: if the positional project argument is already an absolute path (e.g. `/conexus:rdr-audit /srv/work/ART`) OR a path containing a `/`, use it directly and derive the project name from its basename.
 2. **`NEXUS_PROJECT_ROOTS` env var**: colon-separated list of directories under which the user keeps project worktrees. Example: `NEXUS_PROJECT_ROOTS="$HOME/src:$HOME/work"`. The skill body expands `~` and `$HOME`, probes each root for a child directory matching the project name, and uses the first existing match.
 3. **Default candidate roots** (probed in order, used only if `NEXUS_PROJECT_ROOTS` is unset): `$HOME/git`, `$HOME/src`, `$HOME/projects`, `$HOME/code`, `$HOME/work`, `$HOME/dev`, `$HOME/Documents/git`. None of these are authoritative — they are common conventions, not assumptions. Users whose project roots are elsewhere should set `NEXUS_PROJECT_ROOTS`.
 4. **Not found**: if no root/project combination resolves, the audit still runs — it skips the file-based evidence layer and relies on T2 `rdr_process` + RDR cross-references. Surface a user-visible note: "No local worktree for `<project>` found under `NEXUS_PROJECT_ROOTS` or default candidates; proceeding with T2 evidence only. Set `NEXUS_PROJECT_ROOTS` to restore file-based evidence."
@@ -75,7 +75,7 @@ This invariant was verified in RDR-067 Phase 1b (T2 `nexus_rdr/067-spike-disposi
 
 The skill embeds the pinned canonical prompt from T2 at dispatch time:
 
-1. `mcp__plugin_nx_nexus__memory_get(project="nexus_rdr", title="067-canonical-prompt-v1")` — loads the v1 prompt (ttl=0 permanent; reference by stable title only — do not pass any runtime numeric id as a parameter)
+1. `mcp__plugin_conexus_nexus__memory_get(project="nexus_rdr", title="067-canonical-prompt-v1")` — loads the v1 prompt (ttl=0 permanent; reference by stable title only — do not pass any runtime numeric id as a parameter)
 2. Substitute `{project}` with the derived project name (bare name, for display)
 3. Substitute `{project_path}` with the resolved absolute worktree path (see §Project Worktree Path Resolution) — this MUST be an absolute path with no tilde, no `$HOME`, no relative components. The canonical prompt uses `{project_path}` wherever it Globs evidence files.
 4. Substitute `{transcript_excerpts}` with the pre-step block (empty if fast path)
@@ -88,7 +88,7 @@ Do NOT inline the canonical prompt text into this skill file — the prompt is t
 1. **Derive project name** (see Current-Project Derivation)
 2. **Seed T1 link context** so the auto-linker ties findings to RDR-067:
    ```
-   mcp__plugin_nx_nexus__scratch(
+   mcp__plugin_conexus_nexus__scratch(
      action="put",
      content='{"targets": [{"tumbler": "1.1.771", "link_type": "cites"}], "source_agent": "deep-research-synthesizer"}',
      tags="link-context"
@@ -101,7 +101,7 @@ Do NOT inline the canonical prompt text into this skill file — the prompt is t
 7. **Parse the output** — extract the verdict category (VERIFIED / PARTIALLY VERIFIED / INCONCLUSIVE / FALSIFIED), incident count, confidence level, and drift-category distribution
 8. **Skill body owns persistence** (critical — see Persistence Ownership note below): after the subagent returns, the main session calls `memory_put` to persist the full output. Subagents do NOT reliably self-persist; this was observed in 3/3 Phase 1b spike runs where subagents acknowledged persistence instructions but never called `memory_put`. The skill body itself must own this step.
    ```
-   mcp__plugin_nx_nexus__memory_put(
+   mcp__plugin_conexus_nexus__memory_put(
      project="rdr_process",
      title="audit-<project>-<YYYY-MM-DD>",
      ttl=0,
@@ -114,7 +114,7 @@ Do NOT inline the canonical prompt text into this skill file — the prompt is t
 
 ## Management Subcommands
 
-Five management subcommands let users and agents inspect and manage scheduled audits from inside Claude Code without shelling out to OS primitives manually. Invoked as the first positional argument: `/nx:rdr-audit list`, `/nx:rdr-audit status <project>`, etc. If the first token is not one of the reserved subcommand words, the argument is treated as a project name and the skill routes to the default audit-dispatch flow instead.
+Five management subcommands let users and agents inspect and manage scheduled audits from inside Claude Code without shelling out to OS primitives manually. Invoked as the first positional argument: `/conexus:rdr-audit list`, `/conexus:rdr-audit status <project>`, etc. If the first token is not one of the reserved subcommand words, the argument is treated as a project name and the skill routes to the default audit-dispatch flow instead.
 
 ### Safety Split (core user-protection invariant)
 
@@ -153,8 +153,8 @@ Show next-fire time + last-run outcome for a specific project's audit.
 
 Behavior:
 1. Parse `launchctl print com.nexus.rdr-audit.<project>.90d` (macOS) OR parse the matching `crontab -l` line (Linux) to extract the next-fire timestamp. If neither finds a trigger, the subcommand reports `No audit scheduled for <project>` and exits 0.
-2. `mcp__plugin_nx_nexus__memory_search(project="rdr_process", query="audit-<project>")` — find the most recent entry
-3. `mcp__plugin_nx_nexus__memory_get(project="rdr_process", title=<found title>)` — read the last-run content
+2. `mcp__plugin_conexus_nexus__memory_search(project="rdr_process", query="audit-<project>")` — find the most recent entry
+3. `mcp__plugin_conexus_nexus__memory_get(project="rdr_process", title=<found title>)` — read the last-run content
 4. Extract the verdict category, rate, confidence, and drift distribution from the T2 record
 5. Display side-by-side:
    ```
@@ -171,7 +171,7 @@ Read-only: no `memory_put`, no `launchctl load`, no crontab edit, no file writes
 List the last N audit findings for a project from T2.
 
 Behavior:
-1. `mcp__plugin_nx_nexus__memory_search(project="rdr_process", query="audit-<project>")` — enumerate matching entries
+1. `mcp__plugin_conexus_nexus__memory_search(project="rdr_process", query="audit-<project>")` — enumerate matching entries
 2. Take the most recent **N entries** (default N=5; accept `--count N` override)
 3. For each: `memory_get` the entry content
 4. Display a compact list: date, verdict, rate, confidence, drift distribution, T2 id
@@ -188,7 +188,7 @@ Behavior:
 3. On Linux: render the crontab line (see template below) with `<PROJECT>` substituted, and print together with the `crontab -e` instruction the user will run
 4. Print to stdout only
 
-**Cadence note (macOS vs Linux)**: launchd's `StartCalendarInterval` does not support exact 90-day intervals natively. The macOS plist template below fires on the 1st of each month at 03:00 local time — **approximately 30-day cadence**, not the RDR-067 target 90-day cadence. This is the closest practical approximation launchd supports without manual month-list scheduling. The Linux crontab template (shown after the plist) uses `0 3 1 */3 *` which IS a true 90-day cadence (1st of every 3rd month). macOS users who want true quarterly cadence have three options: (a) accept the monthly approximation (the failure mode occurs ~1-2× per month, so monthly sampling is strictly finer-grained than the target, not coarser), (b) add a month-list `StartCalendarInterval` with explicit Jan/Apr/Jul/Oct entries, or (c) switch to a user-level cron daemon (`pcron`, `gcron`) and use the Linux crontab template instead. When the skill prints this plist via `/nx:rdr-audit schedule <project>`, it prints this cadence note alongside the template so the user is not surprised.
+**Cadence note (macOS vs Linux)**: launchd's `StartCalendarInterval` does not support exact 90-day intervals natively. The macOS plist template below fires on the 1st of each month at 03:00 local time — **approximately 30-day cadence**, not the RDR-067 target 90-day cadence. This is the closest practical approximation launchd supports without manual month-list scheduling. The Linux crontab template (shown after the plist) uses `0 3 1 */3 *` which IS a true 90-day cadence (1st of every 3rd month). macOS users who want true quarterly cadence have three options: (a) accept the monthly approximation (the failure mode occurs ~1-2× per month, so monthly sampling is strictly finer-grained than the target, not coarser), (b) add a month-list `StartCalendarInterval` with explicit Jan/Apr/Jul/Oct entries, or (c) switch to a user-level cron daemon (`pcron`, `gcron`) and use the Linux crontab template instead. When the skill prints this plist via `/conexus:rdr-audit schedule <project>`, it prints this cadence note alongside the template so the user is not surprised.
 
 **macOS plist template** (substitute `<PROJECT>` with the target project name; coordinate with `scripts/launchd/com.nexus.rdr-audit.PROJECT.plist` from Phase 4):
 
@@ -203,7 +203,7 @@ Behavior:
   <array>
     <string>/usr/local/bin/claude</string>
     <string>-p</string>
-    <string>/nx:rdr-audit <PROJECT></string>
+    <string>/conexus:rdr-audit <PROJECT></string>
   </array>
   <key>StartCalendarInterval</key>
   <dict>
@@ -222,7 +222,7 @@ Behavior:
 **Linux crontab template** (substitute `<PROJECT>`; coordinate with `scripts/cron/rdr-audit.crontab` from Phase 4):
 
 ```cron
-0 3 1 */3 * /usr/local/bin/claude -p '/nx:rdr-audit <PROJECT>' >> ~/.local/state/rdr-audit-<PROJECT>.log 2>&1
+0 3 1 */3 * /usr/local/bin/claude -p '/conexus:rdr-audit <PROJECT>' >> ~/.local/state/rdr-audit-<PROJECT>.log 2>&1
 ```
 
 **Printed installation instructions** (what the user then runs themselves):
@@ -263,7 +263,7 @@ rm ~/Library/LaunchAgents/com.nexus.rdr-audit.<PROJECT>.90d.plist
 **Linux uninstall instructions** (printed for user to run):
 ```
 1. Run: crontab -e
-2. Remove the line matching: /nx:rdr-audit <PROJECT>
+2. Remove the line matching: /conexus:rdr-audit <PROJECT>
 3. Save and exit
 4. Verify: crontab -l | grep rdr-audit   # should show nothing
 ```
@@ -272,7 +272,7 @@ The skill body itself **must not execute** `launchctl unload`, **must not write*
 
 ### Subcommand-to-project-name disambiguation
 
-The first positional argument may be either a reserved subcommand word or a project name. Rule: check the reserved subcommand set first (`list`, `status`, `history`, `schedule`, `unschedule`) — if the first token matches any of these exactly, route to the named subcommand. Otherwise treat the first token as a project-name argument and route to the default audit-dispatch flow. This prevents a project literally named `list` from being hijacked to the listing subcommand (the user can use `/nx:rdr-audit <full-qualified-name>` or rename the project).
+The first positional argument may be either a reserved subcommand word or a project name. Rule: check the reserved subcommand set first (`list`, `status`, `history`, `schedule`, `unschedule`) — if the first token matches any of these exactly, route to the named subcommand. Otherwise treat the first token as a project-name argument and route to the default audit-dispatch flow. This prevents a project literally named `list` from being hijacked to the listing subcommand (the user can use `/conexus:rdr-audit <full-qualified-name>` or rename the project).
 
 ### Format coordination with Phase 4 scheduling templates
 

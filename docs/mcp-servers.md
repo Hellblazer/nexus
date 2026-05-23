@@ -35,7 +35,7 @@ servers was driven by three problems the monolith created:
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 Both servers are bundled in the `nx` plugin's `.mcp.json`. Installing the
-plugin (`/plugin install nx@nexus-plugins`) registers both with Claude Code
+plugin (`/plugin install conexus@nexus-plugins`) registers both with Claude Code
 automatically. No separate install step.
 
 **Substrate dependency**: Since conexus 4.34.0 (RDR-120), the MCP servers'
@@ -50,7 +50,7 @@ dev containers all sharing one arbitrated SQLite writer).
 
 ## `nexus` — retrieval + storage (26 tools)
 
-Full tool names follow Claude Code's convention: `mcp__plugin_nx_nexus__<tool>`.
+Full tool names follow Claude Code's convention: `mcp__plugin_conexus_nexus__<tool>`.
 
 ### Retrieval (T3)
 
@@ -128,7 +128,7 @@ All four `nx_*` tools are async (`claude -p` subprocess) with configurable `time
 
 ## `nexus-catalog` — document catalog (10 tools)
 
-Full tool names follow the same convention: `mcp__plugin_nx_nexus-catalog__<tool>`.
+Full tool names follow the same convention: `mcp__plugin_conexus_nexus-catalog__<tool>`.
 The tool name (the part after `__`) is short — no redundant `catalog_` prefix.
 
 | Tool | Purpose |
@@ -193,7 +193,7 @@ ChromaDB for `search`.
 ## Permission auto-approval
 
 The plugin installs a `PermissionRequest` hook that auto-approves any tool
-call matching `mcp__plugin_nx_.*`. This covers both servers (`nexus` and
+call matching `mcp__plugin_conexus_.*`. This covers both servers (`nexus` and
 `nexus-catalog`) plus the bundled `sequential-thinking` server. Dangerous
 system operations — force-push, `bd delete`, deploys — are **not** matched
 by this hook and remain subject to the normal confirmation flow.
@@ -248,6 +248,6 @@ References:
 
 - [Architecture § Module Map (MCP Servers row)](architecture.md#module-map) — developer-oriented internals
 - [Document Catalog](catalog.md) — conceptual introduction to what the catalog is
-- [Querying Guide](querying-guide.md) — when to use `nx search` vs `query()` MCP vs `/nx:query` skill
+- [Querying Guide](querying-guide.md) — when to use `nx search` vs `query()` MCP vs `/conexus:query` skill
 - [CLI Reference — nx catalog](cli-reference.md#nx-catalog) — CLI equivalents for the 10 catalog tools
 - [nx plugin README](../nx/README.md) — plugin installation, hooks, auto-approval

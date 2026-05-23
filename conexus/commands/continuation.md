@@ -153,7 +153,7 @@ Compose a 9-section handoff document. Each section is load-bearing for a cold pi
    - `git fetch && git checkout <branch> && git pull` (or equivalent)
    - `git status --short` clean-state check
    - `bd ready` or specific `bd show <id>` if a bead is the entry point
-   - Any specific T2 reads (`mcp__plugin_nx_nexus__memory_get(project=..., title=...)`)
+   - Any specific T2 reads (`mcp__plugin_conexus_nexus__memory_get(project=..., title=...)`)
    - Any specific file reads required to come up to speed
 
 5. **Open work / bead graph.** If multiple beads are in flight, draw the dependency graph as an ASCII tree. Mark the READY entry point.
@@ -193,7 +193,7 @@ Clipboard auto-prime was tried (pbcopy, launchctl asuser pbcopy, OSC 52 plain an
 - **No em dashes (`—`).** Use commas, colons, periods, or parentheses. Grep before writing.
 - **Imperative voice.** "Read X first. Run Y. Pick up Z." not "you might want to consider...".
 - **Concrete over general.** file:line, commit SHA, bead ID, date. Never "the relevant file" or "the recent work".
-- **Tool names in full form.** `mcp__plugin_nx_nexus__memory_get`, not "the memory tool".
+- **Tool names in full form.** `mcp__plugin_conexus_nexus__memory_get`, not "the memory tool".
 
 ### Bail-out
 

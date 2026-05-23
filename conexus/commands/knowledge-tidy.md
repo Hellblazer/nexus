@@ -1,5 +1,5 @@
 ---
-description: Persist and organize knowledge into nx store using mcp__plugin_nx_nexus__nx_tidy (RDR-080)
+description: Persist and organize knowledge into nx store using mcp__plugin_conexus_nexus__nx_tidy (RDR-080)
 ---
 
 # Knowledge Tidying Request
@@ -44,10 +44,10 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **knowledge-tidying** skill (calls `mcp__plugin_nx_nexus__nx_tidy` directly — RDR-080, no agent spawn):
+Invoke the **knowledge-tidying** skill (calls `mcp__plugin_conexus_nexus__nx_tidy` directly — RDR-080, no agent spawn):
 
 ```
-mcp__plugin_nx_nexus__nx_tidy(
+mcp__plugin_conexus_nexus__nx_tidy(
     topic="<topic from $ARGUMENTS>",
     collection="knowledge"
 )
@@ -55,7 +55,7 @@ mcp__plugin_nx_nexus__nx_tidy(
 
 Then store the organized knowledge:
 ```
-mcp__plugin_nx_nexus__store_put(
+mcp__plugin_conexus_nexus__store_put(
     content="<knowledge to persist>",
     collection="knowledge",
     title="<research-*|decision-*|pattern-*|debug-*>",
@@ -63,4 +63,4 @@ mcp__plugin_nx_nexus__store_put(
 )
 ```
 
-Verify searchability: `mcp__plugin_nx_nexus__search(query="<topic>", corpus="knowledge")`
+Verify searchability: `mcp__plugin_conexus_nexus__search(query="<topic>", corpus="knowledge")`

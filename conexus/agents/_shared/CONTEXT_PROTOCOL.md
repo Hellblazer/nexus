@@ -4,7 +4,7 @@ This file documents the standard context exchange protocol used by all agents fo
 
 ## Degraded Mode
 
-If nexus MCP tools (`mcp__plugin_nx_nexus__*`) are unavailable (e.g., MCP server not started, plugin not loaded), fall back to the `nx` CLI via Bash tool. MCP tools are the primary interface; CLI is the fallback.
+If nexus MCP tools (`mcp__plugin_conexus_nexus__*`) are unavailable (e.g., MCP server not started, plugin not loaded), fall back to the `nx` CLI via Bash tool. MCP tools are the primary interface; CLI is the fallback.
 
 ## RECEIVE (Before Starting Work)
 
@@ -19,23 +19,23 @@ These agents **MUST proactively search** for context before starting:
 **Search Sources in Order**:
 1. **Bead**: `/beads:show <id>` for task context, design field, dependencies
 2. **Project Infrastructure**: T2 memory and beads context is auto-injected by SessionStart and SubagentStart hooks
-3. **nx T3 store**: mcp__plugin_nx_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
-4. **Catalog link graph**: `mcp__plugin_nx_nexus__query( question="[topic]", follow_links="implements" )` — the `query` tool automatically boosts results from documents with precise `implements` links
-5. **nx T2 memory**: mcp__plugin_nx_nexus__memory_get( `project="{project}", title="ACTIVE_INDEX.md"`
-6. **T1 scratch** (current session): mcp__plugin_nx_nexus__scratch( `action="search", query="[topic]"`
+3. **nx T3 store**: mcp__plugin_conexus_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
+4. **Catalog link graph**: `mcp__plugin_conexus_nexus__query( question="[topic]", follow_links="implements" )` — the `query` tool automatically boosts results from documents with precise `implements` links
+5. **nx T2 memory**: mcp__plugin_conexus_nexus__memory_get( `project="{project}", title="ACTIVE_INDEX.md"`
+6. **T1 scratch** (current session): mcp__plugin_conexus_nexus__scratch( `action="search", query="[topic]"`
 
 ### Relay-Reliant Agents (Execution & Validation)
 
 These agents **rely on relays** for context (do not proactively search):
 - **developer**: Expects architecture/plan in relay
 - **code-review-expert**: Expects files to review in relay
-- **nx_plan_audit** (`mcp__plugin_nx_nexus__nx_plan_audit`): call with `plan_json` + `context` (RDR-080 — no relay needed)
+- **nx_plan_audit** (`mcp__plugin_conexus_nexus__nx_plan_audit`): call with `plan_json` + `context` (RDR-080 — no relay needed)
 - **test-validator**: Expects code/test paths in relay
 - **debugger**: Expects failure description in relay
 
 **Sibling context (SHOULD, not MUST):** Before starting work, relay-reliant agents SHOULD search scratch for predecessor findings:
 
-mcp__plugin_nx_nexus__scratch( action="search", query="[task topic]", limit=5
+mcp__plugin_conexus_nexus__scratch( action="search", query="[task topic]", limit=5
 
 If results exist, incorporate them as supplementary context. If scratch is empty, proceed normally. This adds one MCP call (~100ms) and provides context that relays may omit.
 
@@ -78,12 +78,12 @@ Tags are comma-separated. Combine with domain tags: `failed-approach,auth,retry`
 
 **T1 MCP Tools:**
 ```
-mcp__plugin_nx_nexus__scratch(action="put", content="<content>", tags="TAG1,TAG2")
-mcp__plugin_nx_nexus__scratch(action="get", entry_id="<id>")
-mcp__plugin_nx_nexus__scratch(action="search", query="<query>", limit=10)
-mcp__plugin_nx_nexus__scratch(action="list")
-mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>", project="PROJECT", title="TITLE")
-mcp__plugin_nx_nexus__scratch_manage(action="promote", entry_id="<id>", project="PROJECT", title="TITLE")
+mcp__plugin_conexus_nexus__scratch(action="put", content="<content>", tags="TAG1,TAG2")
+mcp__plugin_conexus_nexus__scratch(action="get", entry_id="<id>")
+mcp__plugin_conexus_nexus__scratch(action="search", query="<query>", limit=10)
+mcp__plugin_conexus_nexus__scratch(action="list")
+mcp__plugin_conexus_nexus__scratch_manage(action="flag", entry_id="<id>", project="PROJECT", title="TITLE")
+mcp__plugin_conexus_nexus__scratch_manage(action="promote", entry_id="<id>", project="PROJECT", title="TITLE")
 ```
 
 The SessionEnd hook runs automatically at session close and auto-promotes flagged T1 items to T2. Flagging items with scratch_manage `action="flag"` is how you opt in.
@@ -95,7 +95,7 @@ The SessionEnd hook runs automatically at session close and auto-promotes flagge
 
 ## Storage Tier Quick Reference
 
-nx MCP tools use the full prefix `mcp__plugin_nx_nexus__` (e.g. `mcp__plugin_nx_nexus__search`).
+nx MCP tools use the full prefix `mcp__plugin_conexus_nexus__` (e.g. `mcp__plugin_conexus_nexus__search`).
 
 | Tier | Name | Scope | MCP Tools | Use Cases | TTL |
 |------|------|-------|-----------|-----------|-----|
@@ -114,21 +114,21 @@ Use the right search form for the task:
 
 | Goal | Tool Call |
 |---|---|
-| Find related prior knowledge | mcp__plugin_nx_nexus__search( `query="topic", corpus="knowledge", limit=5` |
-| Research question (which documents match?) | mcp__plugin_nx_nexus__query( `question="topic", corpus="knowledge"` |
-| Filter by year, tag, or metadata | mcp__plugin_nx_nexus__query( `question="topic", where="bib_year>=2023"` |
-| Filter by multiple criteria | mcp__plugin_nx_nexus__query( `question="topic", where="bib_year>=2020,tags=arch"` |
+| Find related prior knowledge | mcp__plugin_conexus_nexus__search( `query="topic", corpus="knowledge", limit=5` |
+| Research question (which documents match?) | mcp__plugin_conexus_nexus__query( `question="topic", corpus="knowledge"` |
+| Filter by year, tag, or metadata | mcp__plugin_conexus_nexus__query( `question="topic", where="bib_year>=2023"` |
+| Filter by multiple criteria | mcp__plugin_conexus_nexus__query( `question="topic", where="bib_year>=2020,tags=arch"` |
 | Research with uncertain vocabulary | Run 2 queries: primary term, then alternate framing |
-| Conceptual code search (unfamiliar codebase) | mcp__plugin_nx_nexus__search( `query="concept", corpus="code", limit=15` |
-| Documentation search | mcp__plugin_nx_nexus__search( `query="topic", corpus="docs", limit=10` |
+| Conceptual code search (unfamiliar codebase) | mcp__plugin_conexus_nexus__search( `query="concept", corpus="code", limit=15` |
+| Documentation search | mcp__plugin_conexus_nexus__search( `query="topic", corpus="docs", limit=10` |
 | Exact code navigation | Use Grep tool instead — faster and more precise |
-| Search by author | mcp__plugin_nx_nexus__query( `question="topic", author="Fagin"` |
-| Search by content type | mcp__plugin_nx_nexus__query( `question="topic", content_type="rdr"` |
-| Follow citation links | mcp__plugin_nx_nexus__query( `question="topic", follow_links="cites", depth=1` |
-| Search document subtree | mcp__plugin_nx_nexus__query( `question="topic", subtree="1.1"` |
-| Search within a topic cluster | mcp__plugin_nx_nexus__search( `query="question", topic="PDF Extraction"` |
+| Search by author | mcp__plugin_conexus_nexus__query( `question="topic", author="Fagin"` |
+| Search by content type | mcp__plugin_conexus_nexus__query( `question="topic", content_type="rdr"` |
+| Follow citation links | mcp__plugin_conexus_nexus__query( `question="topic", follow_links="cites", depth=1` |
+| Search document subtree | mcp__plugin_conexus_nexus__query( `question="topic", subtree="1.1"` |
+| Search within a topic cluster | mcp__plugin_conexus_nexus__search( `query="question", topic="PDF Extraction"` |
 | Cross-corpus research | Use query tool with `corpus="all"` or multiple query calls |
-| List documents in a collection | mcp__plugin_nx_nexus__store_list( `collection="knowledge__art-1-1__voyage-context-3__v1", docs=true` (RDR-103 4-segment shape) |
+| List documents in a collection | mcp__plugin_conexus_nexus__store_list( `collection="knowledge__art-1-1__voyage-context-3__v1", docs=true` (RDR-103 4-segment shape) |
 
 **When NOT to use search:**
 - When the relay already contains the information needed
@@ -145,11 +145,11 @@ Agents produce artifacts based on their specialization:
 - **Interim Working Notes**: Use T1 scratch for session-scoped state; promote to T2 when validated:
   ```
   # Store ephemeral working note
-  mcp__plugin_nx_nexus__scratch( action="put", content="<hypothesis or interim finding>", tags="hypothesis"
+  mcp__plugin_conexus_nexus__scratch( action="put", content="<hypothesis or interim finding>", tags="hypothesis"
   # Flag for auto-flush to T2 at session end
-  mcp__plugin_nx_nexus__scratch_manage( action="flag", entry_id="<id>", project="{project}", title="interim-notes.md"
+  mcp__plugin_conexus_nexus__scratch_manage( action="flag", entry_id="<id>", project="{project}", title="interim-notes.md"
   # Or promote immediately
-  mcp__plugin_nx_nexus__scratch_manage( action="promote", entry_id="<id>", project="{project}", title="interim-findings.md"
+  mcp__plugin_conexus_nexus__scratch_manage( action="promote", entry_id="<id>", project="{project}", title="interim-findings.md"
   ```
 
 ### Naming Conventions
@@ -192,9 +192,9 @@ See [RELAY_TEMPLATE.md](./RELAY_TEMPLATE.md) for the full template, extended tem
 ## RECOVER (If Context Missing)
 
 If expected context not received:
-1. Search nx T3 store for related prior work: mcp__plugin_nx_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
-2. Check nx T2 memory for session state: mcp__plugin_nx_nexus__memory_search( `query="[topic]", project="{project}"`
-3. Check T1 scratch for in-session notes: mcp__plugin_nx_nexus__scratch( `action="search", query="[topic]"`
+1. Search nx T3 store for related prior work: mcp__plugin_conexus_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
+2. Check nx T2 memory for session state: mcp__plugin_conexus_nexus__memory_search( `query="[topic]", project="{project}"`
+3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch( `action="search", query="[topic]"`
 4. Query active work via `/beads:list` with status=in_progress
 5. Document assumption in bead notes
 6. Flag incomplete context in downstream relay
@@ -221,13 +221,13 @@ All agents should:
 ### Storage Tools
 ```
 # Store a document
-mcp__plugin_nx_nexus__store_put( content="content", collection="knowledge", title="research-topic-date", tags="category"
+mcp__plugin_conexus_nexus__store_put( content="content", collection="knowledge", title="research-topic-date", tags="category"
 
 # Search stored knowledge
-mcp__plugin_nx_nexus__search( query="query", corpus="knowledge", limit=5
+mcp__plugin_conexus_nexus__search( query="query", corpus="knowledge", limit=5
 
 # List stored documents
-mcp__plugin_nx_nexus__store_list( collection="knowledge"
+mcp__plugin_conexus_nexus__store_list( collection="knowledge"
 ```
 
 ### Metadata
@@ -248,16 +248,16 @@ Common titles under `{repo}`:
 ### Memory Tools
 ```
 # Write to memory
-mcp__plugin_nx_nexus__memory_put( content="content", project="{project}", title="findings.md", ttl=30
+mcp__plugin_conexus_nexus__memory_put( content="content", project="{project}", title="findings.md", ttl=30
 
 # Read from memory
-mcp__plugin_nx_nexus__memory_get( project="{project}", title="findings.md"
+mcp__plugin_conexus_nexus__memory_get( project="{project}", title="findings.md"
 
 # Search memory
-mcp__plugin_nx_nexus__memory_search( query="query", project="{project}"
+mcp__plugin_conexus_nexus__memory_search( query="query", project="{project}"
 
 # List memory files
-mcp__plugin_nx_nexus__memory_get( project="{project}", title=""
+mcp__plugin_conexus_nexus__memory_get( project="{project}", title=""
 ```
 
 ## Usage in Agent Files

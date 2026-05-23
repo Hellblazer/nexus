@@ -9,12 +9,12 @@ effort: low
 ## When This Skill Activates
 
 - User says "list RDRs", "show RDRs", "what RDRs exist"
-- User invokes `/nx:rdr-list`
+- User invokes `/conexus:rdr-list`
 - User asks about the state of planning documents
 
 ## Behavior
 
-**All data is pre-loaded in the command context.** Do NOT make additional Bash, Read, or tool calls — the `/nx:rdr-list` command already gathered:
+**All data is pre-loaded in the command context.** Do NOT make additional Bash, Read, or tool calls — the `/conexus:rdr-list` command already gathered:
 
 - Repo name and RDR directory (from `.nexus.yml` or default `docs/rdr`)
 - All RDR files with parsed metadata (title, status, type, priority)

@@ -11,7 +11,7 @@ Optionally delegates to **deep-research-synthesizer** (sonnet) for evidence gath
 ## When This Skill Activates
 
 - User says "add research finding", "update RDR research", "verify assumption"
-- User invokes `/nx:rdr-research`
+- User invokes `/conexus:rdr-research`
 - User wants to record or classify a discovery during RDR planning
 
 ## Path Detection
@@ -20,7 +20,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 
 ## Subcommands
 
-### `/nx:rdr-research add <id>`
+### `/conexus:rdr-research add <id>`
 
 **Inputs** (prompt the user):
 1. **Finding text**: What was discovered
@@ -30,10 +30,10 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 
 **Behavior:**
 
-1. **Determine next sequence number**: mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title=""
+1. **Determine next sequence number**: mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title=""
    Filter entries where title matches `NNN-research-*`. Parse sequence numbers. Next seq = max + 1. If none exist, start at 1.
 
-2. **Write T2 record**: mcp__plugin_nx_nexus__memory_put(content="rdr_id: NNN\nseq: {seq}\nfinding: Finding text here\nclassification: verified\nverification_method: source_search\nsource: Source description here\nacknowledged: false", project="{repo}_rdr", title="NNN-research-{seq}", ttl="permanent", tags="rdr,research,{classification}"
+2. **Write T2 record**: mcp__plugin_conexus_nexus__memory_put(content="rdr_id: NNN\nseq: {seq}\nfinding: Finding text here\nclassification: verified\nverification_method: source_search\nsource: Source description here\nacknowledged: false", project="{repo}_rdr", title="NNN-research-{seq}", ttl="permanent", tags="rdr,research,{classification}"
 
 3. **Append to RDR markdown**: Add a formatted entry to the Research Findings > Key Discoveries section:
    ```markdown
@@ -44,17 +44,17 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 4. **Catalog citation link** (optional, if catalog initialized and source is a paper/URL):
    If the source references a paper title or URL that may be indexed in the knowledge store:
    ```
-   mcp__plugin_nx_nexus-catalog__search(query="<source title or keywords>")
+   mcp__plugin_conexus_nexus-catalog__search(query="<source title or keywords>")
    ```
-   If a matching catalog entry is found, resolve the RDR's tumbler too (`mcp__plugin_nx_nexus-catalog__search(query="RDR-NNN")`), then link:
+   If a matching catalog entry is found, resolve the RDR's tumbler too (`mcp__plugin_conexus_nexus-catalog__search(query="RDR-NNN")`), then link:
    ```
-   mcp__plugin_nx_nexus-catalog__link(from_tumbler="<rdr-tumbler>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-research")
+   mcp__plugin_conexus_nexus-catalog__link(from_tumbler="<rdr-tumbler>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-research")
    ```
    Skip silently if catalog not initialized, RDR not indexed, or no match found. This enriches the citation graph incrementally as research findings are added.
 
-### `/nx:rdr-research status <id>`
+### `/conexus:rdr-research status <id>`
 
-1. List T2 entries: mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title=""
+1. List T2 entries: mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title=""
 2. Filter titles matching `NNN-research-*`
 3. Parse and display summary:
    ```
@@ -66,9 +66,9 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
      - [seq 6] "Latency under 100ms" (docs only)
    ```
 
-### `/nx:rdr-research verify <id> <finding-seq>`
+### `/conexus:rdr-research verify <id> <finding-seq>`
 
-1. Read T2 record: mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="NNN-research-{seq}"
+1. Read T2 record: mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title="NNN-research-{seq}"
 2. Prompt for new classification (verified or documented) and updated verification method
 3. Update T2 record (overwrite with updated content)
 4. Update the emoji marker in the RDR markdown file (e.g., ❓ → ✅)
@@ -84,10 +84,10 @@ When the user asks to *investigate* something (not just record a finding):
 
 Before dispatching an agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings:
 
-1. Resolve the RDR's tumbler: `mcp__plugin_nx_nexus-catalog__search(query="RDR-NNN", content_type="rdr")`
+1. Resolve the RDR's tumbler: `mcp__plugin_conexus_nexus-catalog__search(query="RDR-NNN", content_type="rdr")`
 2. Write link context to scratch:
    ```
-   mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "cites"}], "source_agent": "rdr-research"}', tags="link-context")
+   mcp__plugin_conexus_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "cites"}], "source_agent": "rdr-research"}', tags="link-context")
    ```
 3. If catalog search returns no result, skip seeding (the auto-linker handles empty context gracefully)
 

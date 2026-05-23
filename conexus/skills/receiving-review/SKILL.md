@@ -41,7 +41,7 @@ If can't verify: say so. "I can't verify this without [X]. Should I investigate?
 
 ## YAGNI Check
 
-When reviewer suggests "implement properly": use `/nx:serena-code-nav` to find all callers before accepting. If unused: "This isn't called anywhere. Remove it (YAGNI)?"
+When reviewer suggests "implement properly": use `/conexus:serena-code-nav` to find all callers before accepting. If unused: "This isn't called anywhere. Remove it (YAGNI)?"
 
 ## Implementation Order
 

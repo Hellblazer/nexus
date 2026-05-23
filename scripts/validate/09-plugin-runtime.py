@@ -114,15 +114,15 @@ _META_PREFIX = (
 # dimensions={verb: <skill>}.
 _VERB_SKILLS = [
     Case("research",      _META_PREFIX + "How does the projection quality mechanism work?",
-         ["nx_answer", "mcp__plugin_nx_nexus__nx_answer"]),
+         ["nx_answer", "mcp__plugin_conexus_nexus__nx_answer"]),
     Case("review",        _META_PREFIX + "Review a diff that added `def add(a,b): return a+b`.",
-         ["nx_answer", "mcp__plugin_nx_nexus__nx_answer"]),
+         ["nx_answer", "mcp__plugin_conexus_nexus__nx_answer"]),
     Case("analyze",       _META_PREFIX + "Compare BM25 vs dense retrieval across our corpora.",
-         ["nx_answer", "mcp__plugin_nx_nexus__nx_answer"]),
+         ["nx_answer", "mcp__plugin_conexus_nexus__nx_answer"]),
     Case("debug",         _META_PREFIX + "Test `test_foo` fails with ImportError.",
-         ["nx_answer", "mcp__plugin_nx_nexus__nx_answer"]),
+         ["nx_answer", "mcp__plugin_conexus_nexus__nx_answer"]),
     Case("document",      _META_PREFIX + "Audit doc coverage for the retrieval module.",
-         ["nx_answer", "mcp__plugin_nx_nexus__nx_answer"]),
+         ["nx_answer", "mcp__plugin_conexus_nexus__nx_answer"]),
     Case("plan-author",   _META_PREFIX + "Draft a plan template for verb=migrate.",
          ["plan_match", "plan_run", "plan_author", "author"]),
     Case("plan-inspect",  _META_PREFIX + "Inspect plan metrics for verb=research.",
@@ -136,13 +136,13 @@ _VERB_SKILLS = [
 # Category 2: Pointer skills — delegate to a specific MCP tool.
 _POINTER_SKILLS = [
     Case("query",              _META_PREFIX + "I have an analytical question: 'What did we decide about retrieval?'",
-         ["nx_answer", "mcp__plugin_nx_nexus__nx_answer"]),
+         ["nx_answer", "mcp__plugin_conexus_nexus__nx_answer"]),
     Case("enrich-plan",        _META_PREFIX + "Enrich bead 'nexus-abc' with execution context.",
-         ["nx_enrich_beads", "mcp__plugin_nx_nexus__nx_enrich_beads"]),
+         ["nx_enrich_beads", "mcp__plugin_conexus_nexus__nx_enrich_beads"]),
     Case("knowledge-tidying",  _META_PREFIX + "Consolidate knowledge on topic 'chromadb quotas'.",
-         ["nx_tidy", "mcp__plugin_nx_nexus__nx_tidy"]),
+         ["nx_tidy", "mcp__plugin_conexus_nexus__nx_tidy"]),
     Case("plan-validation",    _META_PREFIX + "Audit plan `{\"steps\":[{\"tool\":\"search\"}]}`.",
-         ["nx_plan_audit", "mcp__plugin_nx_nexus__nx_plan_audit"]),
+         ["nx_plan_audit", "mcp__plugin_conexus_nexus__nx_plan_audit"]),
 ]
 
 # Category 3: Agent-dispatcher skills — invoke a specific agent.
@@ -238,11 +238,11 @@ _AGENT_META = (
 _AGENT_CASES = [
     # Stubs — must direct the caller to the replacement MCP tool.
     Case("knowledge-tidier", "Consolidate knowledge on topic 'chromadb quotas'.  What tool should I call?",
-         ["nx_tidy", "mcp__plugin_nx_nexus__nx_tidy"], kind="agent"),
+         ["nx_tidy", "mcp__plugin_conexus_nexus__nx_tidy"], kind="agent"),
     Case("plan-auditor",     "Audit this plan. What tool should I call?",
-         ["nx_plan_audit", "mcp__plugin_nx_nexus__nx_plan_audit"], kind="agent"),
+         ["nx_plan_audit", "mcp__plugin_conexus_nexus__nx_plan_audit"], kind="agent"),
     Case("plan-enricher",    "Enrich this bead: 'Add --tag flag'.",
-         ["nx_enrich_beads", "mcp__plugin_nx_nexus__nx_enrich_beads"], kind="agent"),
+         ["nx_enrich_beads", "mcp__plugin_conexus_nexus__nx_enrich_beads"], kind="agent"),
 
     # Active agents — assert on their core output contracts.
     Case("substantive-critic",        _AGENT_META + "Critique: 'A plan library is useful.'",

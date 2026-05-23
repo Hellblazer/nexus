@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-090 spike: 5-query benchmark on rdr__nexus corpus, three paths.
 
-Verifies three RDR-090 critical assumptions before /nx:rdr-gate:
+Verifies three RDR-090 critical assumptions before /conexus:rdr-gate:
 
 1. Human-labeled GT is feasible at 30-query scale (extrapolated from a
    5-query timed labeling exercise).

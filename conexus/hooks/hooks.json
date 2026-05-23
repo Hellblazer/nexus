@@ -139,7 +139,7 @@
     ],
     "PermissionRequest": [
       {
-        "matcher": "mcp__plugin_nx_.*",
+        "matcher": "mcp__plugin_conexus_.*",
         "hooks": [
           {
             "type": "command",

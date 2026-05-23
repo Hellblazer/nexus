@@ -14,22 +14,22 @@ Given a file path, title, or RDR name, find its catalog tumbler.
 
 ```
 # By file path (relative — post-RDR-060)
-mcp__plugin_nx_nexus-catalog__search(query="src/nexus/scoring.py")
+mcp__plugin_conexus_nexus-catalog__search(query="src/nexus/scoring.py")
 # → Extract tumbler from first result
 
 # By title or RDR name
-mcp__plugin_nx_nexus-catalog__search(query="RDR-060")
+mcp__plugin_conexus_nexus-catalog__search(query="RDR-060")
 # → Extract tumbler from first result
 
 # By content type
-mcp__plugin_nx_nexus-catalog__search(query="catalog", content_type="code")
+mcp__plugin_conexus_nexus-catalog__search(query="catalog", content_type="code")
 ```
 
 The result includes `tumbler`, `title`, `content_type`, `file_path`. Use the `tumbler` for all subsequent operations.
 
 **Quick resolve pattern** (copy-paste):
 ```
-result = mcp__plugin_nx_nexus-catalog__search(query="<file-or-title>", limit=1)
+result = mcp__plugin_conexus_nexus-catalog__search(query="<file-or-title>", limit=1)
 # Parse tumbler from result
 ```
 
@@ -44,9 +44,9 @@ nx catalog links-for-file src/nexus/scoring.py
 
 ```
 # MCP (for agents)
-mcp__plugin_nx_nexus-catalog__search(query="src/nexus/scoring.py", limit=1)
+mcp__plugin_conexus_nexus-catalog__search(query="src/nexus/scoring.py", limit=1)
 # → get tumbler
-mcp__plugin_nx_nexus-catalog__links(tumbler="<tumbler>", direction="both")
+mcp__plugin_conexus_nexus-catalog__links(tumbler="<tumbler>", direction="both")
 # → {"nodes": [...], "edges": [...]}
 ```
 
@@ -54,7 +54,7 @@ This shows which RDRs discuss the file, what other code it's linked to, and thro
 
 **To retrieve linked RDR *content*** (not just the graph structure), use query with link traversal:
 ```
-mcp__plugin_nx_nexus__query(question="<topic>", follow_links="implements", subtree="<owner>")
+mcp__plugin_conexus_nexus__query(question="<topic>", follow_links="implements", subtree="<owner>")
 ```
 This returns document content from linked RDRs ranked by relevance — typically more useful than raw graph metadata.
 
@@ -64,7 +64,7 @@ Create a typed link between documents. Accepts tumblers or titles.
 
 ```
 # By tumbler
-mcp__plugin_nx_nexus-catalog__link(
+mcp__plugin_conexus_nexus-catalog__link(
     from_tumbler="1.1.115",
     to_tumbler="1.1.440",
     link_type="implements",
@@ -72,9 +72,9 @@ mcp__plugin_nx_nexus-catalog__link(
 )
 
 # By title (resolve first)
-# 1. Search for source: mcp__plugin_nx_nexus-catalog__search(query="scoring.py") → tumbler "1.1.115"
-# 2. Search for target: mcp__plugin_nx_nexus-catalog__search(query="RDR-060") → tumbler "1.1.440"
-# 3. Link: mcp__plugin_nx_nexus-catalog__link(from_tumbler="1.1.115", to_tumbler="1.1.440", ...)
+# 1. Search for source: mcp__plugin_conexus_nexus-catalog__search(query="scoring.py") → tumbler "1.1.115"
+# 2. Search for target: mcp__plugin_conexus_nexus-catalog__search(query="RDR-060") → tumbler "1.1.440"
+# 3. Link: mcp__plugin_conexus_nexus-catalog__link(from_tumbler="1.1.115", to_tumbler="1.1.440", ...)
 ```
 
 **Link types** (use the right one):
@@ -94,18 +94,18 @@ Before storing findings via `store_put`, seed T1 scratch so the auto-linker crea
 
 ```
 # 1. Resolve the target document
-mcp__plugin_nx_nexus-catalog__search(query="RDR-060", limit=1)
+mcp__plugin_conexus_nexus-catalog__search(query="RDR-060", limit=1)
 # → tumbler "1.1.440"
 
 # 2. Seed link-context in T1 scratch
-mcp__plugin_nx_nexus__scratch(
+mcp__plugin_conexus_nexus__scratch(
     action="put",
     content='{"targets": [{"tumbler": "1.1.440", "link_type": "relates"}], "source_agent": "<agent-name>"}',
     tags="link-context"
 )
 
 # 3. Now store_put — auto-linker fires automatically
-mcp__plugin_nx_nexus__store_put(content="...", collection="knowledge", title="...")
+mcp__plugin_conexus_nexus__store_put(content="...", collection="knowledge", title="...")
 # → auto-linker reads link-context and creates: new_doc → 1.1.440 (relates)
 ```
 

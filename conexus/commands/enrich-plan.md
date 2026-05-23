@@ -1,5 +1,5 @@
 ---
-description: Enrich beads with execution context using mcp__plugin_nx_nexus__nx_enrich_beads (RDR-080)
+description: Enrich beads with execution context using mcp__plugin_conexus_nexus__nx_enrich_beads (RDR-080)
 ---
 
 # Enrich Plan
@@ -27,10 +27,10 @@ $ARGUMENTS
 
 ## Action
 
-Invoke the **enrich-plan** skill (calls `mcp__plugin_nx_nexus__nx_enrich_beads` directly — RDR-080, no agent spawn):
+Invoke the **enrich-plan** skill (calls `mcp__plugin_conexus_nexus__nx_enrich_beads` directly — RDR-080, no agent spawn):
 
 ```
-mcp__plugin_nx_nexus__nx_enrich_beads(
+mcp__plugin_conexus_nexus__nx_enrich_beads(
     bead_description="<plan title + description from $ARGUMENTS>",
     context="<audit findings from T1 scratch if present>"
 )

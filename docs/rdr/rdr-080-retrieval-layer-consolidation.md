@@ -14,9 +14,9 @@ reviewed-by: self
 
 # RDR-080: Retrieval Layer Consolidation
 
-RDR-042 established a three-layer retrieval architecture: user-facing skill (`/nx:query`) → planner agent (`query-planner`) → operator agent (`analytical-operator`), with step outputs relayed through T1 scratch. The three layers exist because RDR-042 chose to keep the MCP server LLM-free — operators couldn't live inside MCP tools without coupling the server to `ANTHROPIC_API_KEY`, and the planner couldn't call the operators directly without being an agent itself. RDR-079's empirical Finding 4 formally dissolved that constraint: the `claude` CLI inherits OAuth session auth, so an MCP tool can spawn a worker with no new secret. **The three-layer architecture survives only as inertia.** This RDR consolidates it into a single `nx_answer(question, ...)` MCP tool and prunes the agents/skills that exist solely to wire it together.
+RDR-042 established a three-layer retrieval architecture: user-facing skill (`/conexus:query`) → planner agent (`query-planner`) → operator agent (`analytical-operator`), with step outputs relayed through T1 scratch. The three layers exist because RDR-042 chose to keep the MCP server LLM-free — operators couldn't live inside MCP tools without coupling the server to `ANTHROPIC_API_KEY`, and the planner couldn't call the operators directly without being an agent itself. RDR-079's empirical Finding 4 formally dissolved that constraint: the `claude` CLI inherits OAuth session auth, so an MCP tool can spawn a worker with no new secret. **The three-layer architecture survives only as inertia.** This RDR consolidates it into a single `nx_answer(question, ...)` MCP tool and prunes the agents/skills that exist solely to wire it together.
 
-The center of gravity moves from "agent-orchestrated retrieval DAG" to "MCP tool with internal dispatch." The plan-first discipline survives, but is enforced by the tool contract rather than duplicated across ten agent preambles. Users still call `/nx:query` or dispatch retrieval-shaped agents; the skill/agent now resolves to one MCP call instead of a four-layer coordination dance.
+The center of gravity moves from "agent-orchestrated retrieval DAG" to "MCP tool with internal dispatch." The plan-first discipline survives, but is enforced by the tool contract rather than duplicated across ten agent preambles. Users still call `/conexus:query` or dispatch retrieval-shaped agents; the skill/agent now resolves to one MCP call instead of a four-layer coordination dance.
 
 ## As-Built Corrections (2026-04-16)
 
@@ -44,7 +44,7 @@ The center of gravity moves from "agent-orchestrated retrieval DAG" to "MCP tool
 
 Today's path for a question like *"how does projection quality work in nexus?"*:
 
-1. User invokes `/nx:query` skill (257 lines of orchestration in `nx/skills/query/SKILL.md`).
+1. User invokes `/conexus:query` skill (257 lines of orchestration in `nx/skills/query/SKILL.md`).
 2. Skill dispatches `query-planner` agent (279 lines; writes plan JSON to T1 scratch).
 3. For each step, skill dispatches `analytical-operator` agent (reads step inputs from scratch tag `query-step,step-N-1`; writes outputs to `query-step,step-N`).
 4. Skill reads final scratch entry, formats response.
@@ -119,10 +119,10 @@ Internal flow (all in-process; no subagent spawn):
 
 | Tool | Replaces | Skill wrapper |
 |---|---|---|
-| `nx_answer` | `/nx:query` skill + `query-planner` + `analytical-operator` | `/nx:query` shrinks to a 10-line pointer |
-| `nx_tidy` | `knowledge-tidier` agent | `/nx:knowledge-tidying` shrinks to trigger pointer |
-| `nx_enrich_beads` | `plan-enricher` agent | `/nx:enrich-plan` shrinks to trigger pointer |
-| `nx_plan_audit` | `plan-auditor` agent | `/nx:plan-validation` shrinks to trigger pointer |
+| `nx_answer` | `/conexus:query` skill + `query-planner` + `analytical-operator` | `/conexus:query` shrinks to a 10-line pointer |
+| `nx_tidy` | `knowledge-tidier` agent | `/conexus:knowledge-tidying` shrinks to trigger pointer |
+| `nx_enrich_beads` | `plan-enricher` agent | `/conexus:enrich-plan` shrinks to trigger pointer |
+| `nx_plan_audit` | `plan-auditor` agent | `/conexus:plan-validation` shrinks to trigger pointer |
 
 Each new MCP tool:
 - Dispatches via `claude_dispatch(prompt, schema, timeout)` in `src/nexus/operators/dispatch.py` — a fresh `claude -p --json-schema` subprocess per call. No warm-worker reuse. *(The OperatorPool/RewindPool design was abandoned — see DEV-1.)*
@@ -199,11 +199,11 @@ The discipline itself moves inside `nx_answer`; an agent that calls `nx_answer` 
 
 ### RF-1 — `nx_answer` is not a new pattern; it's the deletion of an intermediate layer
 
-The three components `nx_answer` subsumes — `/nx:query`, `query-planner`, `analytical-operator` — already pass data to each other via scratch. Moving from "scratch relay between agents" to "in-process dict between function calls" is a transport swap, not a semantic change. The plan_match-first gate, the plan_run execution loop, and the operator dispatch interfaces are all stable. This RDR does not re-derive any algorithm; it removes the coordination overhead around them.
+The three components `nx_answer` subsumes — `/conexus:query`, `query-planner`, `analytical-operator` — already pass data to each other via scratch. Moving from "scratch relay between agents" to "in-process dict between function calls" is a transport swap, not a semantic change. The plan_match-first gate, the plan_run execution loop, and the operator dispatch interfaces are all stable. This RDR does not re-derive any algorithm; it removes the coordination overhead around them.
 
 ### RF-2 — The current test suite masks the cost of the relay
 
-RDR-078 and RDR-042 tests use stubbed dispatchers for `plan_run` and mocked subagent spawns for `/nx:query`. End-to-end `/nx:query` with real agent spawning has no unit-level regression coverage. The consolidation is effectively "make the common path testable" — `nx_answer` is directly unit-testable because it has no subagent spawns; only the operator worker calls are boundary I/O.
+RDR-078 and RDR-042 tests use stubbed dispatchers for `plan_run` and mocked subagent spawns for `/conexus:query`. End-to-end `/conexus:query` with real agent spawning has no unit-level regression coverage. The consolidation is effectively "make the common path testable" — `nx_answer` is directly unit-testable because it has no subagent spawns; only the operator worker calls are boundary I/O.
 
 ### RF-3 — RDR-079's cost baseline generalizes
 
@@ -255,11 +255,11 @@ RDR-079 shipped `operator_*` tools, `store_get_many`, `plan_match` (calibrated a
 
 Three options evaluated for auto-hydrating retrieval→operator transitions. Option C (at `runner.py:514`, after `_OPERATOR_TOOL_MAP` resolution, before dispatch) is the recommended insertion point. When the resolved tool is an operator AND args contain an `ids` key, call `store_get_many(ids, collections)` and replace IDs with texts. No plan structure changes, no step renumbering, already async. Options A (in `_resolve_value`) and B (synthetic step injection) were rejected for architectural contamination and step-numbering breakage respectively.
 
-### RF-10 — `/nx:query` path analysis: 4 paths, 3 already covered (2026-04-15)
+### RF-10 — `/conexus:query` path analysis: 4 paths, 3 already covered (2026-04-15)
 
 **Source**: codebase-deep-analyzer Q1. T2 memory: `nexus_rdr/080-research-2-implementation-gaps`.
 
-`/nx:query` has four execution paths. Path 1 (catalog/single) and Path 2 (template match) are fully covered by `plan_match → plan_run`. Path 3 (full planning via query-planner) requires the one new capability `nx_answer` adds: inline LLM decomposition on plan miss. Path 4 (direct search fallback) is the single-step guard. `nx_answer` must add: (a) LLM decomposition, (b) `plan_save(ttl=30)` auto-cache, (c) single-step guard, (d) partial-failure tracking. Estimated: ~100 lines of Python.
+`/conexus:query` has four execution paths. Path 1 (catalog/single) and Path 2 (template match) are fully covered by `plan_match → plan_run`. Path 3 (full planning via query-planner) requires the one new capability `nx_answer` adds: inline LLM decomposition on plan miss. Path 4 (direct search fallback) is the single-step guard. `nx_answer` must add: (a) LLM decomposition, (b) `plan_save(ttl=30)` auto-cache, (c) single-step guard, (d) partial-failure tracking. Estimated: ~100 lines of Python.
 
 ### RF-11 — `confidence=None` FTS5 sentinel must be a hit in `nx_answer`'s gate (2026-04-15)
 
@@ -286,7 +286,7 @@ The `analytical-operator` agent accepted `params.template` (JSON dict `{"field":
 ## Proposed Questions
 
 - **PQ-1** — RESOLVED. `nx_answer` persists each run to T2 `nx_answer_runs` (new table at P1, TTL 7 days, fields: `id, question, plan_id, matched_confidence, step_count, final_text, cost_usd, duration_ms, created_at`). T2 migration added to P1 deliverables. Users inspect runs via `nx memory search --project nx_answer_runs "<query>"`. Privacy-sensitive questions opt out via `nx_answer(..., trace=false)`.
-- **PQ-2** — What's the right default for `max_steps`? RDR-078 plans are 3-6 steps; `/nx:query` has no documented cap. Propose 6; cap configurable.
+- **PQ-2** — What's the right default for `max_steps`? RDR-078 plans are 3-6 steps; `/conexus:query` has no documented cap. Propose 6; cap configurable.
 - **PQ-3** — Should `budget_usd` default 0.25 be global (per call) or cumulative (per session)? Per-call simpler and scopes the blast radius of a broken plan; cumulative better for whole-session accounting. Propose per-call.
 - **PQ-4** — Should the plan-miss planner call go to Haiku (cheap, fast) or Sonnet (better at structured decomposition)? Propose Haiku for P1; allow override via `.nexus.yml: operators.planner_model`.
 
@@ -300,7 +300,7 @@ The `analytical-operator` agent accepted `params.template` (JSON dict `{"field":
 
 **Rejected.** The ten "keep" agents earn their keep (RF-4). `debugger_diagnose(bug)` as a single MCP call loses the iteration value. Folding them would be a category error: MCP tools are one-shot; agent conversations are multi-turn with human interjection.
 
-### Keep `/nx:query` skill as an agent-dispatch orchestrator, just move operators to MCP
+### Keep `/conexus:query` skill as an agent-dispatch orchestrator, just move operators to MCP
 
 **Rejected.** The three-layer relay is the thing this RDR is deleting. Keeping the relay but swapping the leaves keeps the fragility (scratch-tag drift, per-spawn overhead). Half-measure.
 
@@ -313,7 +313,7 @@ The `analytical-operator` agent accepted `params.template` (JSON dict `{"field":
 - **Latency on warm pool**: wins — measured 20-25s savings per complex query (current worst case ~33s with 70% spent on process spawning; `nx_answer` worst case ~6-9s with 0 subagent spawns). **Latency on cold pool**: neutral (first operator dispatch incurs the same ~5s cold-worker cost either way).
 - **Cost**: neutral for most workloads (same operators; same model). Wins when warm pool has >1 cached operator across multi-step plans (agent-to-agent path re-pays cache tax per subagent).
 - **Surface area**: fewer files, more per-tool code. Net LOC likely neutral; net moving parts strictly fewer.
-- **User-facing behaviour change**: skills still trigger the same way (`/nx:query`, etc.). Agents still exist where they add value. The consolidation is internal.
+- **User-facing behaviour change**: skills still trigger the same way (`/conexus:query`, etc.). Agents still exist where they add value. The consolidation is internal.
 - **Testability**: strictly wins. `nx_answer` has no subagent spawns to stub, so unit-level regression coverage is tractable.
 
 ## Success Criteria (SC-1..SC-10, see above)
@@ -321,12 +321,12 @@ The `analytical-operator` agent accepted `params.template` (JSON dict `{"field":
 ## Risks / Open Questions
 
 - **Plan-first discipline relocation**: enforcing it in `nx_answer` means an agent that calls `search` directly bypasses `plan_match`. This is the correct behaviour (raw tool vs plan-aware tool), but it needs documentation in `docs/architecture.md` so future agents don't get confused.
-- **Run-trace cost**: PQ-1's "persist every answer run to T2" could balloon. Mitigate with TTL 7 days default and a `/nx:query --no-trace` override.
+- **Run-trace cost**: PQ-1's "persist every answer run to T2" could balloon. Mitigate with TTL 7 days default and a `/conexus:query --no-trace` override.
 - **Agent authors confusion**: "when do I make an agent vs an MCP tool?" — the boundary rule answers this, but needs to land in `docs/architecture.md` and in the agent-creator plugin's guidance so new agents don't inadvertently become the next thin-wrapper deletion target.
 - **Auth assumption creep**: `nx_answer` requires auth for plan-miss questions (the planner call). If a user has no auth and a question doesn't match any plan, they see "operator pool unavailable." Mitigate via a `plan_search` fallback that returns the top 5 plan descriptions so the user can disambiguate manually.
 - **Nested MCP-tool-calls-MCP-tool observability**: when `nx_answer` internally calls `operator_extract` which internally spawns a worker, tracing across the layers needs structured logging with a shared correlation ID. Not a blocker for P1 but required before external adopters.
 - **Stale internal dispatches in `deep-research-synthesizer`**: the agent currently mandates `knowledge-tidier` and `pdf-chromadb-processor`. Both are deleted in P3/P4. P2 updates `deep-research-synthesizer.md` to cite `nx_tidy` and `nx index pdf` in their place before the deletions land.
-- **Plan-miss path latency opacity**: on plan-miss questions, `nx_answer` dispatches a planning call (~5-10s cold per RDR-079 Finding 5) inside a single blocking MCP invocation. Callers receive no progress signal during that window — a UX regression relative to the current `/nx:query` skill's step-by-step announcements. Mitigation: structured-log emission at each phase (match, plan, hydrate, operator-N, synthesize) tagged with a correlation ID; `nx doctor --operators` can surface in-flight calls. Streaming output to callers remains out of scope (see §Out of Scope).
+- **Plan-miss path latency opacity**: on plan-miss questions, `nx_answer` dispatches a planning call (~5-10s cold per RDR-079 Finding 5) inside a single blocking MCP invocation. Callers receive no progress signal during that window — a UX regression relative to the current `/conexus:query` skill's step-by-step announcements. Mitigation: structured-log emission at each phase (match, plan, hydrate, operator-N, synthesize) tagged with a correlation ID; `nx doctor --operators` can surface in-flight calls. Streaming output to callers remains out of scope (see §Out of Scope).
 
 ## Assumptions
 
@@ -352,7 +352,7 @@ The `analytical-operator` agent accepted `params.template` (JSON dict `{"field":
 
 ## References
 
-- RDR-042 — AgenticScholar-Inspired Enhancements. §Alternatives Considered contains the three-concern framing that this RDR's Key Insight formally dissolves. Design of `query-planner`, `analytical-operator`, `/nx:query` all originate here.
+- RDR-042 — AgenticScholar-Inspired Enhancements. §Alternatives Considered contains the three-concern framing that this RDR's Key Insight formally dissolves. Design of `query-planner`, `analytical-operator`, `/conexus:query` all originate here.
 - RDR-067 — Cross-Project RDR Audit Loop. Finding 4 established `claude -p` headless dispatch; RDR-079 extended it; RDR-080 uses the pattern transitively.
 - RDR-070 — Cross-Collection Topic Projection. `nx_answer`'s plan-miss planner may use the topic taxonomy for scope inference (`scope: topic=...`); the corpus-level projection is the enabler.
 - RDR-078 — Plan-Centric Retrieval. Infrastructure this RDR reuses (plan library, schema, loader, runner, catalog traversal).

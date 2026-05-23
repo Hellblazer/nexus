@@ -29,7 +29,7 @@ description: Thorough analysis of complex problems using deep-analyst agent
 
   echo "### Tip"
   echo ""
-  echo "The deep-analyst uses mcp__plugin_nx_sequential-thinking__sequentialthinking: hypothesis → evidence → evaluation → conclusion."
+  echo "The deep-analyst uses mcp__plugin_conexus_sequential-thinking__sequentialthinking: hypothesis → evidence → evaluation → conclusion."
   echo "For cross-cutting issues, this agent explores multiple components before converging on root cause."
 
 }
@@ -70,7 +70,7 @@ Root cause analysis with hypothesis chain, evidence inventory, confidence-rated 
 - [ ] Each conclusion supported by specific cited evidence
 - [ ] Recommendations are actionable and prioritized by impact
 
-**IMPORTANT**: After analysis completes, persist findings using `mcp__plugin_nx_nexus__store_put` directly (RDR-080 — no agent spawn needed).
+**IMPORTANT**: After analysis completes, persist findings using `mcp__plugin_conexus_nexus__store_put` directly (RDR-080 — no agent spawn needed).
 ```
 
 For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).

@@ -12,7 +12,7 @@ Delegates to the **substantive-critic** agent. See [registry.yaml](../../registr
 
 - After completing a design document or specification
 - When reviewing architectural decisions
-- After `mcp__plugin_nx_nexus__nx_plan_audit` for additional depth (RDR-080)
+- After `mcp__plugin_conexus_nexus__nx_plan_audit` for additional depth (RDR-080)
 - When validating implementation against specification
 - When cross-referencing documentation for consistency
 - When verifying claims against evidence
@@ -20,7 +20,7 @@ Delegates to the **substantive-critic** agent. See [registry.yaml](../../registr
 
 ## Pre-Dispatch: Seed Link Context (optional)
 
-If the critique targets an RDR or architectural artifact, seed link-context so critique findings stored to T3 auto-link. See `/nx:catalog` for details.
+If the critique targets an RDR or architectural artifact, seed link-context so critique findings stored to T3 auto-link. See `/conexus:catalog` for details.
 
 ## Model Selection
 
@@ -60,7 +60,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Critique Methodology
 
-The agent uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
+The agent uses `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
 1. Establish context and purpose of artifact
 2. Identify criteria/specifications it should conform to
 3. Gather evidence from nx store (search tool: corpus="knowledge") and related artifacts

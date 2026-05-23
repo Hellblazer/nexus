@@ -11,85 +11,85 @@ effort: low
 ## Plan Reuse
 
 Before any multi-agent pipeline:
-1. `mcp__plugin_nx_nexus__plan_search(query="<task description>", limit=3)`
+1. `mcp__plugin_conexus_nexus__plan_search(query="<task description>", limit=3)`
 2. If a match returns, present it as a starting structure
 3. If "No matching plans.", route normally
 
 After a successful pipeline:
-- `mcp__plugin_nx_nexus__plan_save(query="<task>", plan_json={"steps":[...],"tools_used":[...],"outcome_notes":"..."}, tags="<agents>")`
+- `mcp__plugin_conexus_nexus__plan_save(query="<task>", plan_json={"steps":[...],"tools_used":[...],"outcome_notes":"..."}, tags="<agents>")`
 
 ## Routing
 
 **Before code:**
-- About to implement → `/nx:brainstorming-gate` (mandatory)
-- Multi-step → `/nx:create-plan`
-- Needs design across modules → `/nx:architecture` then `/nx:create-plan`
+- About to implement → `/conexus:brainstorming-gate` (mandatory)
+- Multi-step → `/conexus:create-plan`
+- Needs design across modules → `/conexus:architecture` then `/conexus:create-plan`
 
 **Something broken:**
-- Failure / exception / unexpected behaviour → `/nx:debug` immediately
-- 2 failed fix attempts without `/nx:debug` → invoke now
+- Failure / exception / unexpected behaviour → `/conexus:debug` immediately
+- 2 failed fix attempts without `/conexus:debug` → invoke now
 
 **Analyzing code:**
-- Structure / dependencies → `/nx:analyze-code`
-- Why something behaves a certain way → `/nx:deep-analysis`
+- Structure / dependencies → `/conexus:analyze-code`
+- Why something behaves a certain way → `/conexus:deep-analysis`
 
 **Executing:**
-- Plan approved → `/nx:implement`
-- Beads need enrichment → `/nx:enrich-plan`
+- Plan approved → `/conexus:implement`
+- Beads need enrichment → `/conexus:enrich-plan`
 
 **Quality gates:**
-- Code ready → `/nx:review-code`
-- Plan ready → `/nx:plan-audit` (validates against codebase)
-- Critique reasoning soundness → `/nx:substantive-critique`
-- Tests written → `/nx:test-validate`
+- Code ready → `/conexus:review-code`
+- Plan ready → `/conexus:plan-audit` (validates against codebase)
+- Critique reasoning soundness → `/conexus:substantive-critique`
+- Tests written → `/conexus:test-validate`
 
 **ALL analytical questions go through `nx_answer`.** A verb-shaped question ("how does X work", "what tradeoffs in Y", "compare X across projects", "why was Z designed this way") routes to a skill that calls `nx_answer`. `nx_answer` composes search/query/operators under a plan-match-first gate — composed retrieval is strictly more useful than raw chunks. Raw `search` is for keyword lookup only ("find X in collection Y").
 
-- "how does…" / "tradeoffs…" / "compare…" / "why was this designed…" → `/nx:query`
-- Design walks from concept to code → `/nx:research`
-- Critique a change set → `/nx:review`
-- Cross-corpus synthesis or ranking → `/nx:analyze`
-- Why was this written this way → `/nx:debug`
-- Documentation gaps → `/nx:document`
-- 3+ validated findings to keep → `/nx:knowledge-tidy`
-- PDF to index → `/nx:pdf-process`
+- "how does…" / "tradeoffs…" / "compare…" / "why was this designed…" → `/conexus:query`
+- Design walks from concept to code → `/conexus:research`
+- Critique a change set → `/conexus:review`
+- Cross-corpus synthesis or ranking → `/conexus:analyze`
+- Why was this written this way → `/conexus:debug`
+- Documentation gaps → `/conexus:document`
+- 3+ validated findings to keep → `/conexus:knowledge-tidy`
+- PDF to index → `/conexus:pdf-process`
 
-**RDR lifecycle:** `/nx:rdr-create` → `/nx:rdr-research` → `/nx:rdr-gate` → `/nx:rdr-accept` → (implementation phases) → `/nx:rdr-close`. List/show: `/nx:rdr-list`, `/nx:rdr-show NNN`. Audit: `/nx:rdr-audit`.
+**RDR lifecycle:** `/conexus:rdr-create` → `/conexus:rdr-research` → `/conexus:rdr-gate` → `/conexus:rdr-accept` → (implementation phases) → `/conexus:rdr-close`. List/show: `/conexus:rdr-list`, `/conexus:rdr-show NNN`. Audit: `/conexus:rdr-audit`.
 
-**Phase boundary inside an implementation arc:** every phase-review bead, before close, runs `/nx:phase-review-gate <rdr-id> --phase N`. Pass 1 enumerates the RDR's numbered §Approach items; Pass 2 validates each has a closing-bead pointer (`ItemN=nexus-xxxx`) or explicit `none` deferral. BLOCKED on any unaccounted item. Not optional. Prevents the silent scope reduction class (RDR-112 Phase 1 / nexus-52lb, 2026-05-15: T3 daemon silently dropped from a 6-bead close, found three phases later, 2-3 days of replanning).
+**Phase boundary inside an implementation arc:** every phase-review bead, before close, runs `/conexus:phase-review-gate <rdr-id> --phase N`. Pass 1 enumerates the RDR's numbered §Approach items; Pass 2 validates each has a closing-bead pointer (`ItemN=nexus-xxxx`) or explicit `none` deferral. BLOCKED on any unaccounted item. Not optional. Prevents the silent scope reduction class (RDR-112 Phase 1 / nexus-52lb, 2026-05-15: T3 daemon silently dropped from a 6-bead close, found three phases later, 2-3 days of replanning).
 
-**Git:** isolation → `/nx:git-worktrees`. Done → `/nx:finishing-branch`. Receiving review → `/nx:receiving-review`.
+**Git:** isolation → `/conexus:git-worktrees`. Done → `/conexus:finishing-branch`. Receiving review → `/conexus:receiving-review`.
 
-**Catalog/linking:** entries, links, tumblers, link-context seeding → `/nx:catalog`.
+**Catalog/linking:** entries, links, tumblers, link-context seeding → `/conexus:catalog`.
 
-**Reference (no agent dispatch):** `/nx:serena-code-nav`, `/nx:nexus`, `/nx:cli-controller`, `/nx:writing-nx-skills`.
+**Reference (no agent dispatch):** `/conexus:serena-code-nav`, `/conexus:nexus`, `/conexus:cli-controller`, `/conexus:writing-nx-skills`.
 
 ## Essential MCP Tools (always available)
 
-**Sequential Thinking** (`mcp__plugin_nx_sequential-thinking__sequentialthinking`) — use for any non-trivial decision: debugging hypotheses, design choices, plan evaluation, risk assessment. Workflow: hypothesis → evidence → evaluate → branch or proceed. `needsMoreThoughts: true` to continue, `isRevision: true` to correct, `branchFromThought: N` + `branchId` to explore alternatives.
+**Sequential Thinking** (`mcp__plugin_conexus_sequential-thinking__sequentialthinking`) — use for any non-trivial decision: debugging hypotheses, design choices, plan evaluation, risk assessment. Workflow: hypothesis → evidence → evaluate → branch or proceed. `needsMoreThoughts: true` to continue, `isRevision: true` to correct, `branchFromThought: N` + `branchId` to explore alternatives.
 
 **nx Storage Tiers — check before any work, write your findings back.** Read widest → narrowest:
 - **T3** `nx search` / `nx_answer`: permanent knowledge across all sessions and projects — **check before researching from scratch**.
 - **T2** `nx memory`: project decisions, findings, session context — **check before project work**.
 - **T1** `nx scratch`: this session's discoveries, shared across all sibling agents — **check before duplicating sibling work**.
 
-Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (survives session) → `/nx:knowledge-tidy` to T3 (permanent, cross-project). **Findings not stored are findings lost** — call `store_put` (T3) or `memory_put` (T2) before returning a result you'd want a future session to know.
+Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (survives session) → `/conexus:knowledge-tidy` to T3 (permanent, cross-project). **Findings not stored are findings lost** — call `store_put` (T3) or `memory_put` (T2) before returning a result you'd want a future session to know.
 
 ## Common Mistakes
 
 | Mistake | Correction |
 |---------|------------|
-| `search(query="how does X work", …)` for an analytical question | `nx_answer(question="how does X work", …)` via `/nx:query` or a verb skill |
-| `search(query="tradeoffs in Y")` | `nx_answer` via `/nx:analyze` — `search` returns chunks, you need composition |
-| `search(query="compare X across projects")` | `nx_answer` via `/nx:analyze` — cross-corpus compare is what plan operators do |
+| `search(query="how does X work", …)` for an analytical question | `nx_answer(question="how does X work", …)` via `/conexus:query` or a verb skill |
+| `search(query="tradeoffs in Y")` | `nx_answer` via `/conexus:analyze` — `search` returns chunks, you need composition |
+| `search(query="compare X across projects")` | `nx_answer` via `/conexus:analyze` — cross-corpus compare is what plan operators do |
 | Researching from scratch without checking T3 | `nx search` / `nx_answer` first — prior sessions may have already answered |
 | Returning findings without storing them | `store_put` (T3) or `memory_put` (T2) before returning |
-| Test fails → try a different fix | `/nx:debug` |
+| Test fails → try a different fix | `/conexus:debug` |
 | Implement without brainstorming-gate | `brainstorming-gate` first |
-| Plan exists, start implementing | `/nx:plan-audit` first |
-| Symbol callers via grep | `/nx:serena-code-nav` |
-| Implement review feedback blindly | `/nx:receiving-review` first |
-| Manual worktree setup | `isolation: "worktree"` on Agent tool, or `/nx:git-worktrees` |
+| Plan exists, start implementing | `/conexus:plan-audit` first |
+| Symbol callers via grep | `/conexus:serena-code-nav` |
+| Implement review feedback blindly | `/conexus:receiving-review` first |
+| Manual worktree setup | `isolation: "worktree"` on Agent tool, or `/conexus:git-worktrees` |
 
 ## Red Flags
 

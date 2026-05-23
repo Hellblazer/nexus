@@ -77,7 +77,7 @@ For Claude Code, install the plugin:
 
 ```bash
 /plugin marketplace add Hellblazer/nexus
-/plugin install nx@nexus-plugins
+/plugin install conexus@nexus-plugins
 ```
 
 See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for the full walkthrough.
@@ -124,7 +124,7 @@ The `nx/` directory is a Claude Code plugin that gives agents access to everythi
 
 ```bash
 /plugin marketplace add Hellblazer/nexus
-/plugin install nx@nexus-plugins
+/plugin install conexus@nexus-plugins
 ```
 
 The plugin provides 13 specialized agents, 43 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows, session hooks for automatic context initialization, and 36 MCP tools split across two focused servers: `nexus` (26 tools: search, store, memory, scratch, plans, 5 operator tools for structured extract/rank/compare/summarize/generate, plus 4 orchestration tools including `nx_answer` for plan-matched multi-step retrieval) and `nexus-catalog` (10 catalog tools: search, show, link, resolve, stats, etc.). The plan-centric retrieval layer (`nx_answer`) matches questions against a library of scenario templates, executes the matched plan, and records every run, so the library compounds with use. Agents search indexed code before proposing changes, check prior RDR decisions before designing new features, and coordinate through standard pipelines (plan → implement → review → test) with built-in quality gates.

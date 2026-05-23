@@ -66,4 +66,4 @@ The Agent tool supports `isolation: "worktree"` natively — it creates a tempor
 | Tests fail baseline | Report + ask |
 | Parallel agents | Use `isolation: "worktree"` on Agent tool |
 
-**Pairs with:** `/nx:finishing-branch` for merge/PR/cleanup after work is done.
+**Pairs with:** `/conexus:finishing-branch` for merge/PR/cleanup after work is done.

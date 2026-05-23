@@ -148,7 +148,7 @@ if [[ $SKIP_STORAGE_DOCS -eq 0 ]]; then
 # already sees in the live MCP tool list.
 cat <<'NX_TIERS'
 
-## nx storage (call as mcp__plugin_nx_nexus__<tool>; paged: footer shows offset=N)
+## nx storage (call as mcp__plugin_conexus_nexus__<tool>; paged: footer shows offset=N)
 
 Read widest -> narrowest BEFORE any work; check before duplicating effort:
   T3 search/nx_answer  all sessions/projects   <- check before researching
@@ -194,7 +194,7 @@ cat <<'PHASE_GATE'
 
 ## Phase Boundary Gate (mandatory)
 
-If your task closes a phase-review bead, run `/nx:phase-review-gate <rdr-id> --phase N` BEFORE close. Pass 1 enumerates §Approach items; Pass 2 validates each has a closing-bead pointer (`ItemN=nexus-xxxx`) or explicit `none`. BLOCKED on any unaccounted item; phase close is gated on PASSED. Skipping the gate is the silent-scope-reduction failure mode that cost RDR-112 Phase 1 (nexus-52lb, 2026-05-15) 2-3 days of replanning when T3 daemon was silently dropped and discovered three phases later.
+If your task closes a phase-review bead, run `/conexus:phase-review-gate <rdr-id> --phase N` BEFORE close. Pass 1 enumerates §Approach items; Pass 2 validates each has a closing-bead pointer (`ItemN=nexus-xxxx`) or explicit `none`. BLOCKED on any unaccounted item; phase close is gated on PASSED. Skipping the gate is the silent-scope-reduction failure mode that cost RDR-112 Phase 1 (nexus-52lb, 2026-05-15) 2-3 days of replanning when T3 daemon was silently dropped and discovered three phases later.
 PHASE_GATE
 fi
 
@@ -216,7 +216,7 @@ cat <<'SEQTHINK'
 
 ## Sequential Thinking
 
-Tool: mcp__plugin_nx_sequential-thinking__sequentialthinking
+Tool: mcp__plugin_conexus_sequential-thinking__sequentialthinking
 Use for: debugging hypotheses, design choices, plan evaluation, risk assessment.
 Params: needsMoreThoughts=true (continue), isRevision=true+revisesThought=N (correct), branchFromThought=N+branchId="alt" (explore).
 SEQTHINK
@@ -240,7 +240,7 @@ if echo "$TASK_TEXT" | grep -qiE "author|cit(e|ation|es|ed)|who wrote|what did.*
     cat <<'CATALOG_TOOLS'
 
 ## Catalog - metadata-first queries (author, corpus, citations, provenance)
-(call as mcp__plugin_nx_nexus-catalog__<tool>)
+(call as mcp__plugin_conexus_nexus-catalog__<tool>)
 
   search, show, resolve
   links (direction="in"|"out", link_type, depth=2 -> nodes+edges; live docs only)
@@ -254,7 +254,7 @@ fallback "L-L" or "C:S-E" (positional, may go stale). chash via search chunk_tex
 
 Link types: cites, implements, implements-heuristic, supersedes, quotes, relates, comments.
 
-For full plan execution use /nx:query.
+For full plan execution use /conexus:query.
 CATALOG_LINKING
   fi
 fi

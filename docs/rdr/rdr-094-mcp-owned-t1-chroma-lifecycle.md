@@ -1216,7 +1216,7 @@ issue-#40207 mid-session SIGTERM case.
 
 ## Finalization Gate
 
-_To be completed during /nx:rdr-gate._
+_To be completed during /conexus:rdr-gate._
 
 ## References
 

@@ -200,7 +200,7 @@ def catalog() -> None:
 
     \b
     Agents use the catalog via MCP tools (catalog_search, catalog_links,
-    catalog_link). Use /nx:query for multi-step citation and provenance queries.
+    catalog_link). Use /conexus:query for multi-step citation and provenance queries.
     """
 
 

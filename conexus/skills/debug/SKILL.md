@@ -1,21 +1,21 @@
 ---
 name: debug
-description: Use when debugging a failing code path (intentionally flat — Serena handles symbol navigation) — tries the debug plan library first for per-file authoring context and summarises design intent, falls through to /nx:query if nothing matches
+description: Use when debugging a failing code path (intentionally flat — Serena handles symbol navigation) — tries the debug plan library first for per-file authoring context and summarises design intent, falls through to /conexus:query if nothing matches
 effort: medium
 ---
 
 **Tier-aware discipline** — apply at session start and before every major step:
 
 1. **Read** widest → narrowest before duplicating effort:
-   - T3 (cross-project): `mcp__plugin_nx_nexus__nx_answer(...)` for verb-shape questions; `mcp__plugin_nx_nexus__search(...)` for keyword lookup.
-   - T2 (project): `mcp__plugin_nx_nexus__memory_search(query="<topic>", project="<repo>")`.
-   - T1 (siblings, this session): `mcp__plugin_nx_nexus__scratch(action="search", query="<topic>")`.
-2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_nx_nexus__plan_search(query="<task>", limit=3)`.
+   - T3 (cross-project): `mcp__plugin_conexus_nexus__nx_answer(...)` for verb-shape questions; `mcp__plugin_conexus_nexus__search(...)` for keyword lookup.
+   - T2 (project): `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`.
+   - T1 (siblings, this session): `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`.
+2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_conexus_nexus__plan_search(query="<task>", limit=3)`.
 3. **Write back at end** — findings not stored are findings lost. Pick the tier that matches the audience:
-   - `mcp__plugin_nx_nexus__scratch(action="put", ..., tags="<topic>")` for sibling agents downstream THIS session (T1, narrowest scope, cheapest write).
-   - `mcp__plugin_nx_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2).
-   - `mcp__plugin_nx_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
-   - `mcp__plugin_nx_nexus__plan_save(...)` for multi-agent pipeline outcomes (so future callers hit plan-match).
+   - `mcp__plugin_conexus_nexus__scratch(action="put", ..., tags="<topic>")` for sibling agents downstream THIS session (T1, narrowest scope, cheapest write).
+   - `mcp__plugin_conexus_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2).
+   - `mcp__plugin_conexus_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
+   - `mcp__plugin_conexus_nexus__plan_save(...)` for multi-agent pipeline outcomes (so future callers hit plan-match).
 
 # debug
 
@@ -32,7 +32,7 @@ traversal). Serena handles symbol-level navigation separately.
 ## The call
 
 ```
-mcp__plugin_nx_nexus__nx_answer(
+mcp__plugin_conexus_nexus__nx_answer(
     question=<caller's phrasing>,
     dimensions={"verb": "debug"},
     context=<failing_path + symptom — as JSON string if needed>,
@@ -59,14 +59,14 @@ falls through to an inline `claude -p` planner.
   `jet_brains_find_referencing_symbols`, etc.). The debug plan
   surfaces design context; Serena surfaces code structure. Use them
   together.
-- **`/nx:debugging`** — once the design context is known, the
+- **`/conexus:debugging`** — once the design context is known, the
   hypothesis-driven debugging skill guides the iterative fix loop.
 
 ## When direct `search` is fine
 
 A single-corpus RDR lookup — e.g. "find the RDR that covers this
 module's error-handling approach" — is fine via
-`mcp__plugin_nx_nexus__search(query=..., corpus="rdr__<owner>__voyage-context-3__v1")`
+`mcp__plugin_conexus_nexus__search(query=..., corpus="rdr__<owner>__voyage-context-3__v1")`
 (or the bare `rdr` prefix to fan out to all matching collections).
 Fast, cheap, and the chunks often contain the design rationale directly.
 
@@ -88,4 +88,4 @@ multiple design notes rather than surface a single chunk.
 - **Running `debug` without a `failing_path`.** No reasonable
   default; raises `PlanRunBindingError`.
 
-See `/nx:plan-first` and `docs/plan-authoring-guide.md`.
+See `/conexus:plan-first` and `docs/plan-authoring-guide.md`.

@@ -6,12 +6,12 @@ effort: medium
 
 # RDR Close Skill
 
-Gates on open bead status before closing. Archives post-mortem directly via `mcp__plugin_nx_nexus__store_put`. See [registry.yaml](../../registry.yaml).
+Gates on open bead status before closing. Archives post-mortem directly via `mcp__plugin_conexus_nexus__store_put`. See [registry.yaml](../../registry.yaml).
 
 ## When This Skill Activates
 
 - User says "close this RDR", "RDR done", "finish RDR"
-- User invokes `/nx:rdr-close`
+- User invokes `/conexus:rdr-close`
 - Implementation is complete and the RDR should be finalized
 
 ## Inputs
@@ -25,7 +25,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 
 ## Pre-Check
 
-1. Read T2 record: mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="NNN"
+1. Read T2 record: mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title="NNN"
 2. If status is not "accepted" (or "final") and reason is "Implemented":
    - Warn: "RDR NNN status is '{current_status}' — expected 'accepted'. Close anyway?"
    - Require `--force` or explicit user confirmation to proceed
@@ -52,7 +52,7 @@ Branch on what the preamble emitted:
 - Show the gap list to the user
 - Conversationally collect closure pointers from the user, one gap at a time
 - Format as: `Gap1=file.py:123,Gap2=other.py:45`
-- Re-invoke: `/nx:rdr-close NNN --reason implemented --pointers 'Gap1=...,Gap2=...'`
+- Re-invoke: `/conexus:rdr-close NNN --reason implemented --pointers 'Gap1=...,Gap2=...'`
 - The re-invocation will run Pass 2 of the preamble
 - On Pass 2 success, surface the validation-passed message and jump to branch A
 
@@ -73,7 +73,7 @@ Also clear the T1 scratch `rdr-close-active` marker after Step 4 (Update State) 
 
 ### Step 1.75: Automatic Critique
 
-Dispatch `/nx:substantive-critique <rdr-id>` via the Agent tool and parse the `## Verdict` block from the response. This is the authoritative gate signal (CA-1 verified n=4 for outcome-category determinism; finding-level variance is expected).
+Dispatch `/conexus:substantive-critique <rdr-id>` via the Agent tool and parse the `## Verdict` block from the response. This is the authoritative gate signal (CA-1 verified n=4 for outcome-category determinism; finding-level variance is expected).
 
 **Verdict extraction** — try in order, take the first hit:
 
@@ -96,7 +96,7 @@ All three paths map to the same 3-valued enum (`justified` / `partial` / `not-ju
 ### Input Artifacts
 - nx memory: {repo}_rdr/{rdr_id} (status, research records, planning chain)
 - Files: docs/rdr/rdr-{rdr_id}-*.md
-- Catalog: mcp__plugin_nx_nexus-catalog__search query "RDR-{rdr_id}"
+- Catalog: mcp__plugin_conexus_nexus-catalog__search query "RDR-{rdr_id}"
 
 ### Deliverable
 Critique report with canonical `## Verdict` block (outcome, confidence, critical_count, significant_count, summary).
@@ -120,7 +120,7 @@ Branch on `Verdict.outcome`:
 **E. Override audit entry** (runs for every `--force-implemented` invocation, regardless of critic outcome):
 
 ```
-mcp__plugin_nx_nexus__memory_put(
+mcp__plugin_conexus_nexus__memory_put(
     project="{repo}_rdr",
     title="{rdr_id}-close-override-{YYYY-MM-DD}",
     content="critic_verdict: {outcome|skipped}\nuser_reason: {force_implemented_reason}\nfinal_close_reason: {close_reason}\ntimestamp: {ISO8601}\nrdr_id: {rdr_id}",
@@ -155,7 +155,7 @@ Create `$RDR_DIR/post-mortem/NNN-kebab-title.md` from the post-mortem template. 
 ### Step 3: Bead Status Gate
 
 If T2 record has an `epic_bead` field (set during accept-time planning):
-1. Read epic bead ID from T2: mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="NNN"
+1. Read epic bead ID from T2: mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title="NNN"
 2. Run `/beads:show <epic-id>` to get child bead statuses
 3. Display bead status table to user:
    - Bead ID, title, status (open/in_progress/closed)
@@ -173,8 +173,8 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 ### Step 4: Update State
 
-1. Update T2 record: mcp__plugin_nx_nexus__memory_put(content="... (same fields, status: Implemented, closed: YYYY-MM-DD, close_reason: Implemented, archived: true)", project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,{type},closed"
-   If T3 archive fails, set `archived: false` — retryable by re-running `/nx:rdr-close`
+1. Update T2 record: mcp__plugin_conexus_nexus__memory_put(content="... (same fields, status: Implemented, closed: YYYY-MM-DD, close_reason: Implemented, archived: true)", project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,{type},closed"
+   If T3 archive fails, set `archived: false` — retryable by re-running `/conexus:rdr-close`
 
 2. Update status in RDR markdown metadata
 3. Regenerate `docs/rdr/README.md` index
@@ -199,17 +199,17 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 The RDR already has a catalog entry from the original accept-time indexing. Create links to capture implementation provenance (if catalog is initialized):
 
-1. **Code→RDR links**: The indexer hook auto-generates `implements-heuristic` links via title substring matching. These are created automatically. Review with `nx catalog links <rdr-tumbler> --type implements-heuristic` — promote high-confidence ones to `implements` via `mcp__plugin_nx_nexus-catalog__link` for link-boost scoring benefit (heuristic links have zero search boost weight).
+1. **Code→RDR links**: The indexer hook auto-generates `implements-heuristic` links via title substring matching. These are created automatically. Review with `nx catalog links <rdr-tumbler> --type implements-heuristic` — promote high-confidence ones to `implements` via `mcp__plugin_conexus_nexus-catalog__link` for link-boost scoring benefit (heuristic links have zero search boost weight).
 
 2. **RDR→prior-RDR links**: If the RDR's T2 record has a `supersedes` field, create the catalog link:
    ```
-   mcp__plugin_nx_nexus-catalog__link(from_tumbler="<this-rdr-title>", to_tumbler="<superseded-rdr-title>", link_type="supersedes", created_by="rdr-close")
+   mcp__plugin_conexus_nexus-catalog__link(from_tumbler="<this-rdr-title>", to_tumbler="<superseded-rdr-title>", link_type="supersedes", created_by="rdr-close")
    ```
 
 3. **RDR→research links**: If research findings reference indexed papers, create `cites` links:
    - Read T2 research findings for this RDR
-   - For each finding with a URL or paper title as source, search catalog: `mcp__plugin_nx_nexus-catalog__search(query="<source>")`
-   - If found, resolve the RDR tumbler (`mcp__plugin_nx_nexus-catalog__search(query="RDR-NNN")`), then: `mcp__plugin_nx_nexus-catalog__link(from_tumbler="<rdr-tumbler>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-close")`
+   - For each finding with a URL or paper title as source, search catalog: `mcp__plugin_conexus_nexus-catalog__search(query="<source>")`
+   - If found, resolve the RDR tumbler (`mcp__plugin_conexus_nexus-catalog__search(query="RDR-NNN")`), then: `mcp__plugin_conexus_nexus-catalog__link(from_tumbler="<rdr-tumbler>", to_tumbler="<paper-tumbler>", link_type="cites", created_by="rdr-close")`
 
 Skip all catalog steps silently if catalog is not initialized. The T2 record and markdown are the authorities — catalog links are supplementary graph enrichment.
 
@@ -228,12 +228,12 @@ KNOWLEDGE_COLL=$(nx catalog collection-name --content-type knowledge)
 
 Seed link-context so the post-mortem auto-links to the RDR:
 ```
-mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<rdr-tumbler>", "link_type": "relates"}], "source_agent": "rdr-close"}', tags="link-context")
+mcp__plugin_conexus_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<rdr-tumbler>", "link_type": "relates"}], "source_agent": "rdr-close"}', tags="link-context")
 ```
 
 Archive the post-mortem directly (substitute `$KNOWLEDGE_COLL` from above):
 ```
-mcp__plugin_nx_nexus__store_put(
+mcp__plugin_conexus_nexus__store_put(
     content=(contents of $RDR_DIR/post-mortem/NNN-kebab-title.md),
     collection="<$KNOWLEDGE_COLL>",
     title="PREFIX-NNN Title (post-mortem)",
@@ -244,7 +244,7 @@ mcp__plugin_nx_nexus__store_put(
 
 Post-mortems are then queryable as a slice of the knowledge collection:
 ```
-mcp__plugin_nx_nexus__search(query="...", corpus="<$KNOWLEDGE_COLL>", where='category=rdr_postmortem')
+mcp__plugin_conexus_nexus__search(query="...", corpus="<$KNOWLEDGE_COLL>", where='category=rdr_postmortem')
 ```
 
 #### One-time migration (legacy `knowledge__rdr_postmortem__<repo>` collections)
@@ -258,7 +258,7 @@ nx catalog rename-collection "knowledge__rdr_postmortem__<repo>" "$NEW" --yes
 
 If the target collection already has documents (rare, only when `nx index repo` ran before the rename), use `nx catalog migrate-fallback` per-document instead so existing rows survive.
 
-Renamed documents do not automatically gain `category="rdr_postmortem"` on their chunk metadata, since the chunks were written before the category field was stamped at write time. Pre-RDR-103 post-mortems remain findable via their original `tags="rdr,post-mortem,..."` field (which is searchable as a string contain). The cleanest backfill is to re-archive each post-mortem by rerunning `mcp__plugin_nx_nexus__store_put` with `category="rdr_postmortem"` against the conformant collection, overwriting the legacy chunk by title. Operators that do not need the category-filtered slice can leave the legacy chunks as-is.
+Renamed documents do not automatically gain `category="rdr_postmortem"` on their chunk metadata, since the chunks were written before the category field was stamped at write time. Pre-RDR-103 post-mortems remain findable via their original `tags="rdr,post-mortem,..."` field (which is searchable as a string contain). The cleanest backfill is to re-archive each post-mortem by rerunning `mcp__plugin_conexus_nexus__store_put` with `category="rdr_postmortem"` against the conformant collection, overwriting the legacy chunk by title. Operators that do not need the category-filtered slice can leave the legacy chunks as-is.
 
 ## Flow: Reverted or Abandoned
 
@@ -280,7 +280,7 @@ Renamed documents do not automatically gain `category="rdr_postmortem"` on their
 4. **Catalog link** (if catalog initialized): Create `supersedes` link in the catalog so the graph reflects the relationship:
    ```
    # Find both RDRs by title in catalog
-   mcp__plugin_nx_nexus-catalog__link(from_tumbler="<new-rdr-title>", to_tumbler="<old-rdr-title>", link_type="supersedes", created_by="rdr-close")
+   mcp__plugin_conexus_nexus-catalog__link(from_tumbler="<new-rdr-title>", to_tumbler="<old-rdr-title>", link_type="supersedes", created_by="rdr-close")
    ```
    If catalog is not initialized or either RDR is not found, skip silently — the T2 record is the authority.
 5. Regenerate index
@@ -290,16 +290,16 @@ Renamed documents do not automatically gain `category="rdr_postmortem"` on their
 The close operation performs multiple state mutations. If any step fails:
 - Each step emits clear status (e.g., "T2 updated ✓", "Bead gate ✓", "T3 archive ✗ FAILED")
 - T2 `archived` flag tracks whether T3 archival succeeded
-- Re-running `/nx:rdr-close` is idempotent: checks T2 state and skips completed steps
+- Re-running `/conexus:rdr-close` is idempotent: checks T2 state and skips completed steps
 
 ## Agent Invocation
 
 **Only one agent is dispatched by this skill:** `substantive-critic` (Step 1.75, implemented close only). All other operations use MCP tools directly (RDR-080).
 
-Post-mortem archival calls `mcp__plugin_nx_nexus__store_put` directly (RDR-080, no agent spawn needed). Resolve the conformant target collection via `nx catalog collection-name --content-type knowledge` (Step 6) and stamp `category="rdr_postmortem"` so the post-mortem is queryable as a slice of the knowledge collection:
+Post-mortem archival calls `mcp__plugin_conexus_nexus__store_put` directly (RDR-080, no agent spawn needed). Resolve the conformant target collection via `nx catalog collection-name --content-type knowledge` (Step 6) and stamp `category="rdr_postmortem"` so the post-mortem is queryable as a slice of the knowledge collection:
 
 ```
-mcp__plugin_nx_nexus__store_put(
+mcp__plugin_conexus_nexus__store_put(
     content=(read $RDR_DIR/post-mortem/NNN-kebab-title.md),
     collection="<knowledge collection from `nx catalog collection-name --content-type knowledge`>",
     title="RDR-NNN: {title} (post-mortem)",
@@ -333,7 +333,7 @@ Outputs produced by this skill directly:
 - **T3 semantic index**: Conditionally refreshed via `nx index rdr` (CCE embeddings, section-level chunks) — only when the RDR body changed during close; frontmatter-only edits are skipped
 - **Filesystem**: Post-mortem at `$RDR_DIR/post-mortem/NNN-kebab-title.md`, updated README
 
-- **T3 knowledge**: Post-mortem archive via `mcp__plugin_nx_nexus__store_put`: content=(post-mortem contents), collection=(conformant knowledge collection resolved via `nx catalog collection-name --content-type knowledge`), title="RDR-NNN: {title} (post-mortem)", category="rdr_postmortem" (RDR-080, called directly, no agent spawn)
+- **T3 knowledge**: Post-mortem archive via `mcp__plugin_conexus_nexus__store_put`: content=(post-mortem contents), collection=(conformant knowledge collection resolved via `nx catalog collection-name --content-type knowledge`), title="RDR-NNN: {title} (post-mortem)", category="rdr_postmortem" (RDR-080, called directly, no agent spawn)
 
 ## Does NOT
 

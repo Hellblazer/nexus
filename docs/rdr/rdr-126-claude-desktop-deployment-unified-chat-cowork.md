@@ -24,7 +24,7 @@ related_rdrs:
 
 Nexus is consumed today through three MCP surfaces, all of which terminate at the same `nx-mcp` server and the same host T2 / T3 daemons (the substrate landed in RDR-120). The three surfaces are:
 
-1. **Claude Code (terminal)**, installed via `/plugin marketplace add Hellblazer/nexus && /plugin install nx@nexus-plugins`. Shipping.
+1. **Claude Code (terminal)**, installed via `/plugin marketplace add Hellblazer/nexus && /plugin install conexus@nexus-plugins`. Shipping.
 2. **Claude Cowork (cloud agents in Anthropic's VM)**, reached via the Anthropic SDK transport. Documented as working in `docs/container-integration.md` § Cowork, but no end-to-end verification artifact exists.
 3. **Claude Desktop chat (the desktop app)**, no install path. Users with no Claude Code install have no way to use Nexus from Claude Desktop chat.
 
@@ -42,7 +42,7 @@ A user who has Claude Desktop installed and wants to use Nexus has no install pa
 
 #### Gap 3: Claude Code plugin SessionStart hook installs no persistent daemon
 
-The current plugin hook calls `nx daemon t2 ensure-running --quiet`, which spawns a daemon process for the current session but does not install the LaunchAgent (macOS) or systemd user unit (Linux). After a reboot, the daemon is gone until the next Claude Code session starts. The user who runs `/plugin install nx@nexus-plugins` and never reads the README never gets a persistent daemon. The first-run install logic developed for `.mcpb` should activate here too as a side-effect benefit.
+The current plugin hook calls `nx daemon t2 ensure-running --quiet`, which spawns a daemon process for the current session but does not install the LaunchAgent (macOS) or systemd user unit (Linux). After a reboot, the daemon is gone until the next Claude Code session starts. The user who runs `/plugin install conexus@nexus-plugins` and never reads the README never gets a persistent daemon. The first-run install logic developed for `.mcpb` should activate here too as a side-effect benefit.
 
 #### Gap 4: No in-chat uninstall path
 
@@ -282,12 +282,12 @@ The `daemon_uninstall` tool with default `confirm=false` matches MCP destructive
 ### Prerequisites
 
 - [ ] All Critical Assumptions verified (A1, A2, A5 — currently unverified)
-- [ ] RDR-126 accepted via `/nx:rdr-gate` + `/nx:rdr-accept`
+- [ ] RDR-126 accepted via `/conexus:rdr-gate` + `/conexus:rdr-accept`
 - [ ] Strategic-synthesis rename decision (`nexus-mkj6u`) made and shipped, OR explicitly deferred to a later RDR (decoupled scope)
 
 ### Minimum Viable Validation
 
-A user with no prior Nexus install on a fresh macOS user account can: (1) double-click a downloaded `nexus.mcpb`, (2) see the install banner in their first Claude Desktop chat turn, (3) successfully execute `mcp__plugin_nx_nexus__memory_put` and `memory_get`, (4) ask Claude to uninstall via the `daemon_uninstall` tool, (5) observe that the LaunchAgent is gone after restart.
+A user with no prior Nexus install on a fresh macOS user account can: (1) double-click a downloaded `nexus.mcpb`, (2) see the install banner in their first Claude Desktop chat turn, (3) successfully execute `mcp__plugin_conexus_nexus__memory_put` and `memory_get`, (4) ask Claude to uninstall via the `daemon_uninstall` tool, (5) observe that the LaunchAgent is gone after restart.
 
 ### Phase 1: Spike (RDR-126 §1, §2, §3, §7)
 

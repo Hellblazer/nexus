@@ -15,7 +15,7 @@ This is the phase-level analogue of the RDR-065 Problem Statement Replay gate: t
 ## When This Skill Activates
 
 - User says "phase review gate", "cross-walk the approach", "close phase N"
-- User invokes `/nx:phase-review-gate`
+- User invokes `/conexus:phase-review-gate`
 - A phase-review bead (title contains "P{N}.review" or "Phase {N} gate") is about to close
 - Any time phases are being closed and the closer wants to verify no work was silently dropped
 
@@ -66,7 +66,7 @@ RDR-112 has 9 §Approach items. Phase 1 closed beads covered items 1, 3, 6, 7, 8
 
 **Pass 1 invocation:**
 ```
-/nx:phase-review-gate 112 --phase 1
+/conexus:phase-review-gate 112 --phase 1
 ```
 
 **Pass 1 output** (abridged):
@@ -78,7 +78,7 @@ RDR-112 has 9 §Approach items. Phase 1 closed beads covered items 1, 3, 6, 7, 8
 
 **Pass 2 invocation (with the nexus-52lb gap — would BLOCK):**
 ```
-/nx:phase-review-gate 112 --phase 1 --evidence 'Item1=nexus-61x6,Item3=nexus-7ejx,...'
+/conexus:phase-review-gate 112 --phase 1 --evidence 'Item1=nexus-61x6,Item3=nexus-7ejx,...'
 ```
 
 Output:
@@ -93,16 +93,16 @@ Output:
 
 **Pass 2 invocation (complete — would PASS):**
 ```
-/nx:phase-review-gate 112 --phase 1 --evidence 'Item1=nexus-61x6,Item2=nexus-t3xx,...,Item9=nexus-w0et'
+/conexus:phase-review-gate 112 --phase 1 --evidence 'Item1=nexus-61x6,Item2=nexus-t3xx,...,Item9=nexus-w0et'
 ```
 
 ## Relationship to Other Gates
 
 | Gate | Scope | When |
 |------|-------|------|
-| `/nx:rdr-gate` | Whole RDR structure + assumptions + AI critique | Before RDR acceptance |
-| `/nx:rdr-close --reason implemented` | Problem Statement gaps (file:line pointers) | At RDR close time |
-| `/nx:phase-review-gate` | §Approach items (bead pointers) | At each phase boundary |
+| `/conexus:rdr-gate` | Whole RDR structure + assumptions + AI critique | Before RDR acceptance |
+| `/conexus:rdr-close --reason implemented` | Problem Statement gaps (file:line pointers) | At RDR close time |
+| `/conexus:phase-review-gate` | §Approach items (bead pointers) | At each phase boundary |
 
 Phase review gate is NOT a substitute for rdr-close's Problem Statement Replay. Both gates run at their respective lifecycle points.
 
@@ -118,11 +118,11 @@ Invoke before closing any phase-review bead — especially when:
 - The gate validates **coverage**, not **correctness**: `Item2=nexus-t3xx` passes even if nexus-t3xx's acceptance criteria are weak. The reviewer must verify the evidence manually.
 - The gate parses `N. **Label**: ...` formatted items. §Approach sections with non-standard numbering (e.g. roman numerals, lettered items) are not parsed. Use standard `1.` numbering in §Approach.
 - `none` is a valid evidence value. Over-use of `none` (e.g. `none` for every item) defeats the purpose; the reviewer is accountable for each `none` they supply.
-- The gate verifies §Approach items are accounted for; it does NOT verify the boundary-spanning code paths between accounted-for items work end-to-end. RDR-112 Phase 3 (2026-05-18) demonstrated this: the cross-walk PASSED on items (Item1 T2 service / Item2 T3 service / Item6 Discovery all evidence-pointed to nexus-hpxl), and a first-pass code review of the same nexus-hpxl diff returned PASS-WITH-FOLLOWUPS. A second-pass code review with explicit boundary-spanning prompt categories (see `/nx:code-review` § Prompt rigour) caught two Significant defects the first pass missed — including a production regression where `taxonomy_cmd._t2_ctx()` raised on every invocation under the new daemon default. The gate is a coverage check, not a code review; pair it with a boundary-spanning code-review-expert dispatch when the diff spans CLI ↔ daemon, daemon ↔ OS supervisor, or any process-boundary surface.
+- The gate verifies §Approach items are accounted for; it does NOT verify the boundary-spanning code paths between accounted-for items work end-to-end. RDR-112 Phase 3 (2026-05-18) demonstrated this: the cross-walk PASSED on items (Item1 T2 service / Item2 T3 service / Item6 Discovery all evidence-pointed to nexus-hpxl), and a first-pass code review of the same nexus-hpxl diff returned PASS-WITH-FOLLOWUPS. A second-pass code review with explicit boundary-spanning prompt categories (see `/conexus:code-review` § Prompt rigour) caught two Significant defects the first pass missed — including a production regression where `taxonomy_cmd._t2_ctx()` raised on every invocation under the new daemon default. The gate is a coverage check, not a code review; pair it with a boundary-spanning code-review-expert dispatch when the diff spans CLI ↔ daemon, daemon ↔ OS supervisor, or any process-boundary surface.
 
 ## Recommended companion: boundary-spanning code review
 
-At a phase boundary that ships integration-seam code (process-spawning, supervisor interaction, RPC wiring, env-var resolution), the cross-walk alone is insufficient. After Pass 2 of this gate passes, dispatch `code-review-expert` with explicit suspect categories from `/nx:code-review` § Prompt rigour — process-group safety, race windows, security boundary, integration-boundary defects, lifecycle. The lesson the RDR-112 spine paid for is: friendly relays return friendly reviews; the suspect categories must be named in the prompt for the agent to probe them.
+At a phase boundary that ships integration-seam code (process-spawning, supervisor interaction, RPC wiring, env-var resolution), the cross-walk alone is insufficient. After Pass 2 of this gate passes, dispatch `code-review-expert` with explicit suspect categories from `/conexus:code-review` § Prompt rigour — process-group safety, race windows, security boundary, integration-boundary defects, lifecycle. The lesson the RDR-112 spine paid for is: friendly relays return friendly reviews; the suspect categories must be named in the prompt for the agent to probe them.
 
 ## Success Criteria
 

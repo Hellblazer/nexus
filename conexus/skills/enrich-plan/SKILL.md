@@ -9,5 +9,5 @@ effort: low
 Calls the `nx_enrich_beads` MCP tool. No agent spawn needed.
 
 ```
-mcp__plugin_nx_nexus__nx_enrich_beads(bead_description="<title + description>", context="<audit findings if any>")
+mcp__plugin_conexus_nexus__nx_enrich_beads(bead_description="<title + description>", context="<audit findings if any>")
 ```

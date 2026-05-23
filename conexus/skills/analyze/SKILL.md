@@ -1,21 +1,21 @@
 ---
 name: analyze
-description: Use when synthesising across prose and code corpora or ranking candidates by a criterion — tries the analyze plan library first (search prose + code → reference-chain traversal → rank → generate), falls through to /nx:query if nothing matches
+description: Use when synthesising across prose and code corpora or ranking candidates by a criterion — tries the analyze plan library first (search prose + code → reference-chain traversal → rank → generate), falls through to /conexus:query if nothing matches
 effort: medium
 ---
 
 **Tier-aware discipline** — apply at session start and before every major step:
 
 1. **Read** widest → narrowest before duplicating effort:
-   - T3 (cross-project): `mcp__plugin_nx_nexus__nx_answer(...)` for verb-shape questions; `mcp__plugin_nx_nexus__search(...)` for keyword lookup.
-   - T2 (project): `mcp__plugin_nx_nexus__memory_search(query="<topic>", project="<repo>")`.
-   - T1 (siblings, this session): `mcp__plugin_nx_nexus__scratch(action="search", query="<topic>")`.
-2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_nx_nexus__plan_search(query="<task>", limit=3)`.
+   - T3 (cross-project): `mcp__plugin_conexus_nexus__nx_answer(...)` for verb-shape questions; `mcp__plugin_conexus_nexus__search(...)` for keyword lookup.
+   - T2 (project): `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`.
+   - T1 (siblings, this session): `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`.
+2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_conexus_nexus__plan_search(query="<task>", limit=3)`.
 3. **Write back at end** — findings not stored are findings lost. Pick the tier that matches the audience:
-   - `mcp__plugin_nx_nexus__scratch(action="put", ..., tags="<topic>")` for sibling agents downstream THIS session (T1, narrowest scope, cheapest write).
-   - `mcp__plugin_nx_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2).
-   - `mcp__plugin_nx_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
-   - `mcp__plugin_nx_nexus__plan_save(...)` for multi-agent pipeline outcomes (so future callers hit plan-match).
+   - `mcp__plugin_conexus_nexus__scratch(action="put", ..., tags="<topic>")` for sibling agents downstream THIS session (T1, narrowest scope, cheapest write).
+   - `mcp__plugin_conexus_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2).
+   - `mcp__plugin_conexus_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
+   - `mcp__plugin_conexus_nexus__plan_save(...)` for multi-agent pipeline outcomes (so future callers hit plan-match).
 
 # analyze
 
@@ -29,7 +29,7 @@ a 3-op chain collapses from ~45s of per-step spawns to ~15s in a single
 ## The call
 
 ```
-mcp__plugin_nx_nexus__nx_answer(
+mcp__plugin_conexus_nexus__nx_answer(
     question=<caller's phrasing>,
     dimensions={"verb": "analyze"},
     context=<area, criterion, limit — as JSON string if needed>,
@@ -59,7 +59,7 @@ operator-bundle optimization. Plan-miss falls through to an inline
 ## When direct `search` is fine
 
 If the question is a single-corpus lookup — e.g. "find the chunks that
-mention algorithm X" — use `mcp__plugin_nx_nexus__search`. Analyze
+mention algorithm X" — use `mcp__plugin_conexus_nexus__search`. Analyze
 earns its latency cost when the question requires multi-corpus
 alignment, ranking by a semantic criterion, or structured extraction
 before synthesis.
@@ -75,8 +75,8 @@ before synthesis.
 - **Using `analyze` when `research` would suffice.** `research` is
   single-concept; `analyze` implies cross-corpus / cross-approach
   synthesis. If the caller only wants to understand one thing, use
-  `/nx:research`.
+  `/conexus:research`.
 - **Using bare `criterion`.** "important" is not a criterion; pick
   an axis the ranker can actually sort by.
 
-See `/nx:plan-first` and `docs/plan-authoring-guide.md`.
+See `/conexus:plan-first` and `docs/plan-authoring-guide.md`.

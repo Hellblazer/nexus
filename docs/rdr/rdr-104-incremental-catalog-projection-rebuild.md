@@ -494,7 +494,7 @@ Substantive critic ran via `Agent` tool; T2 record `nexus_rdr/RDR-104-gate-lates
 | Header-hash window stored alongside hash | Observation | **Addressed.** `_meta` schema gains `last_applied_event_header_window`; mismatch falls through to full rebuild. |
 | Test scenario "0 new events" conflates two cases | Observation | **Addressed.** Test Plan separates "events.jsonl unchanged but legacy JSONL ticked mtime" (empty-delta fast path) from "events.jsonl appended only with malformed garbage" (skip-and-advance path). |
 
-Re-gate with `/nx:rdr-gate 104` after the operator confirms the revised design.
+Re-gate with `/conexus:rdr-gate 104` after the operator confirms the revised design.
 
 ### Round 2 — 2026-05-05 — Gate result: BLOCKED
 
@@ -512,7 +512,7 @@ Substantive critic ran via `Agent` tool against the Round 1 revision. Two new Cr
 | Audit existing `replay()` callers if `replay_from(0)` becomes the wrapper | Observation | Phase 1 Step 1 notes the audit; binary-mode behaviour difference observable only on Windows/autocrlf, but a regression note in CI is cheap. |
 | Cross-process race notes inaccurate ("empty delta") | Observation | **Addressed.** Concurrency notes subsection rewritten: B's delta is non-empty (`M0..E_b`); the M0..E_a window is a benign idempotent re-apply; B's marker advance to E_b correctly subsumes A's E_a marker. |
 
-Re-gate with `/nx:rdr-gate 104` after the operator confirms.
+Re-gate with `/conexus:rdr-gate 104` after the operator confirms.
 
 ### Round 3 — 2026-05-05 — Gate result: **PASSED** (3 Significant addressed in-place)
 
@@ -526,7 +526,7 @@ Substantive critic ran a third time against the Round 2 revisions. **0 Critical*
 | `limit_offset` boundary-value test fixture | Observation | Recorded for the implementer: use `f.tell()` after writing event N's line, not a computed sum, to nail the half-open boundary. |
 | COALESCE on `created_at` not addressed in walkthrough | Observation | **Addressed.** Walkthrough now covers `created_at` alongside `superseded_by`/`superseded_at`. The full-rebuild path is unchanged (event freezes original timestamp); the degraded-retry path is where the COALESCE earns its keep. |
 
-**Gate outcome**: **PASSED**. Significant items were corrected in this revision pass; no further blockers. RDR is ready for `/nx:rdr-accept 104`.
+**Gate outcome**: **PASSED**. Significant items were corrected in this revision pass; no further blockers. RDR is ready for `/conexus:rdr-accept 104`.
 
 ## Close — 2026-05-08
 

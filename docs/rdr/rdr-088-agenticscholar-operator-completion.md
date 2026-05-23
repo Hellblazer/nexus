@@ -424,7 +424,7 @@ into compare discards that distinction.
   precision on the plans that *do* match. This is acceptable and
   intentional for verb skills that opt in — each such skill has
   validated that a precision-first posture fits its workload (e.g.
-  `/nx:query` pins `min_confidence=0.50` already per RDR-092 Phase 2).
+  `/conexus:query` pins `min_confidence=0.50` already per RDR-092 Phase 2).
   But it is not a free improvement: every opt-in verb skill that
   enables `plan_match.llm_rerank` should expect *more* fall-throughs
   to dynamic planning at the same cost budget, and the Phase 3
@@ -555,7 +555,7 @@ hard-code counts.
 
 ## Finalization Gate
 
-Gated 2026-04-24 via `/nx:rdr-gate 088`. First pass surfaced one
+Gated 2026-04-24 via `/conexus:rdr-gate 088`. First pass surfaced one
 critical and three significant issues — all documentation-level.
 Fixed in-place before the re-gate:
 

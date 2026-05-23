@@ -161,7 +161,7 @@ def _redirect_message(rdr_id: str | None, phase: str | None, reason: str) -> str
     phase_part = phase if phase else "N"
     return (
         f"Phase-review close blocked: {reason}. Run the gate first:\n"
-        f"  /nx:phase-review-gate {rdr_part} --phase {phase_part}\n"
+        f"  /conexus:phase-review-gate {rdr_part} --phase {phase_part}\n"
         f"Then re-run `bd close ...`. To override, append "
         f"`# routing-allow: <reason>` (>=8 chars) to the command."
     )

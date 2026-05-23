@@ -107,11 +107,11 @@ src/nexus/
 
 ### Tool Name Migration
 
-Catalog tools moved from the `nexus` server to the `nexus-catalog` server with the redundant `catalog_` prefix dropped. The MCP tool names are now bare (`search`, `show`, `link`, `stats`, etc.) within the `nexus-catalog` namespace — e.g., `mcp__plugin_nx_nexus-catalog__search` (was `mcp__plugin_nx_nexus__catalog_search`). Python function names retain the `catalog_` prefix for backward compatibility via the shim.
+Catalog tools moved from the `nexus` server to the `nexus-catalog` server with the redundant `catalog_` prefix dropped. The MCP tool names are now bare (`search`, `show`, `link`, `stats`, etc.) within the `nexus-catalog` namespace — e.g., `mcp__plugin_conexus_nexus-catalog__search` (was `mcp__plugin_conexus_nexus__catalog_search`). Python function names retain the `catalog_` prefix for backward compatibility via the shim.
 
 This required two mechanical renames across ~24 agent/skill/hook files:
-1. `mcp__plugin_nx_nexus__catalog_*` → `mcp__plugin_nx_nexus-catalog__catalog_*` (server prefix change)
-2. `mcp__plugin_nx_nexus-catalog__catalog_*` → `mcp__plugin_nx_nexus-catalog__*` (drop redundant `catalog_` within namespace)
+1. `mcp__plugin_conexus_nexus__catalog_*` → `mcp__plugin_conexus_nexus-catalog__catalog_*` (server prefix change)
+2. `mcp__plugin_conexus_nexus-catalog__catalog_*` → `mcp__plugin_conexus_nexus-catalog__*` (drop redundant `catalog_` within namespace)
 
 **Decision log**: The prefix drop was a post-acceptance refinement. With tools on their own server, `catalog_search` on the `nexus-catalog` server is redundant — `search` is unambiguous in context.
 
@@ -141,7 +141,7 @@ This required two mechanical renames across ~24 agent/skill/hook files:
 - `uv run pytest -m integration` — round-trip tests pass for both servers
 - Both `nx-mcp` and `nx-mcp-catalog` start and register correct tool counts
 - Auto-approve hook accepts both prefixes
-- `grep -r 'mcp__plugin_nx_nexus__catalog' nx/` returns 0 matches
+- `grep -r 'mcp__plugin_conexus_nexus__catalog' nx/` returns 0 matches
 - No demoted tool names appear in injected agent guidance (`subagent-start.sh`, `CONTEXT_PROTOCOL.md`)
 
 ## Key Files

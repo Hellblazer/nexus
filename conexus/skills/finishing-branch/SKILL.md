@@ -101,4 +101,4 @@ If beads are active, push state to remote after closing:
 bd dolt push
 ```
 
-**Pairs with:** `/nx:git-worktrees` for initial workspace setup.
+**Pairs with:** `/conexus:git-worktrees` for initial workspace setup.

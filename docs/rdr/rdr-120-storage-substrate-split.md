@@ -251,8 +251,8 @@ cannot catch.
   RDR-120 §Scope Boundaries first. Solo-author is single-point-of-
   awareness as well as single-point-of-failure; the moratorium being in
   the title and Problem Statement makes it hard to miss.
-- **`/nx:phase-review-gate` cross-walk (tooled).** At each phase
-  closeout, the reviewer runs `/nx:phase-review-gate 120 --phase N`.
+- **`/conexus:phase-review-gate` cross-walk (tooled).** At each phase
+  closeout, the reviewer runs `/conexus:phase-review-gate 120 --phase N`.
   Pass 1 enumerates all §Approach items; Pass 2 validates each item has
   a closing-bead pointer or explicit `none` deferral. BLOCKED on any
   unaccounted item. This is a hard-enforcement preamble (Python script
@@ -263,7 +263,7 @@ cannot catch.
   would have blocked that close. **Currently lives only on
   `archive/develop-2026-05-19`**; P0 prerequisite is restoring it to
   main before any phase opens.
-- **Symmetric scope-gain check (manual).** `/nx:phase-review-gate`
+- **Symmetric scope-gain check (manual).** `/conexus:phase-review-gate`
   catches scope LOSS (§Approach item with no closing bead) by design.
   Scope GAIN (closing bead that implements something from § Out of
   scope) is not currently tooled. RDR-120 adds a manual symmetric
@@ -280,18 +280,18 @@ cannot catch.
 
 **Tooling gaps (block multi-author adoption):**
 
-- **`/nx:rdr-create` has no awareness of in-flight moratoriums.** A new
+- **`/conexus:rdr-create` has no awareness of in-flight moratoriums.** A new
   RDR scaffolds without checking other active RDRs' §Scope Boundaries
   for topic matches. Mitigation in solo context: author self-check.
   Follow-on: add a `moratorium_blocks: <topic-list>` frontmatter field
   to active RDRs and have the skill grep new RDR's content against it.
-- **`/nx:rdr-gate` Layer 3 critique is single-RDR-scoped.** The
+- **`/conexus:rdr-gate` Layer 3 critique is single-RDR-scoped.** The
   substantive-critic receives only the RDR being gated; it does not
   enumerate active in-flight others. A new RDR can land cleanly through
   the gate while violating a peer's moratorium. Follow-on: extend the
   Layer 3 relay's Input Artifacts to include "active in-flight RDRs'
   §Scope Boundaries sections."
-- **`/nx:phase-review-gate` is scope-loss-only.** Catches §Approach
+- **`/conexus:phase-review-gate` is scope-loss-only.** Catches §Approach
   items missing closing beads (silent scope reduction). Does NOT catch
   closing beads that implement § Out of scope work (silent scope
   expansion). Follow-on: a Pass 3 that enumerates closing beads and
@@ -306,7 +306,7 @@ window. If substrate-adjacent work passes to another author, or if
 moratorium discipline is generalized as a project pattern beyond
 RDR-120, the tooling gaps must be closed first.
 
-**P0 prerequisite: restore `/nx:phase-review-gate` from archive.**
+**P0 prerequisite: restore `/conexus:phase-review-gate` from archive.**
 The skill exists at `archive/develop-2026-05-19` commit `122feaff`.
 Files to restore: `nx/commands/phase-review-gate.md` (307 LOC),
 `nx/skills/phase-review-gate/SKILL.md` (128 LOC),
@@ -521,7 +521,7 @@ process discipline actually failed.
 - [~] **A7** (new): **The moratorium is enforceable through written
   scope boundaries, per-phase cross-walks (tooled), and author self-
   policing, scoped to solo-author work.** A multi-mechanism enforcement
-  chain (§ Scope Boundaries in the RDR + `/nx:phase-review-gate`
+  chain (§ Scope Boundaries in the RDR + `/conexus:phase-review-gate`
   hard-enforcement cross-walk at each phase closeout + PR/bead-level
   author review) is sufficient to block scope drift across six phases
   under solo authorship. The general (multi-author) case has
@@ -532,9 +532,9 @@ process discipline actually failed.
   scope-drift events from the scrapped RDR-110-119 arc would have been
   blocked by §Scope Boundaries + author self-check before filing) +
   Tooling Inspection (rdr-gate skill at nx plugin 4.32.12 +
-  `/nx:phase-review-gate` skill at `archive/develop-2026-05-19`
+  `/conexus:phase-review-gate` skill at `archive/develop-2026-05-19`
   commit `122feaff`). **Evidence**: T2 entry `120-research-A7`.
-  **Tooling that exists**: `/nx:phase-review-gate` (bead `nexus-j327`,
+  **Tooling that exists**: `/conexus:phase-review-gate` (bead `nexus-j327`,
   791 LOC + 312 LOC tests including a regression for the nexus-52lb
   silent-drop incident) implements a two-pass hard-enforcement
   cross-walk: Pass 1 enumerates §Approach items; Pass 2 validates
@@ -542,11 +542,11 @@ process discipline actually failed.
   or explicit `none` deferral. Currently on `archive/develop-2026-05-19`
   only; not on main. P0 prerequisite: restore this skill to main
   before any phase opens. **Tooling gaps remaining**: (i)
-  `/nx:rdr-create` has no awareness of in-flight moratoriums;
-  (ii) `/nx:rdr-gate` Layer 3 critique is scoped to single RDR and
+  `/conexus:rdr-create` has no awareness of in-flight moratoriums;
+  (ii) `/conexus:rdr-gate` Layer 3 critique is scoped to single RDR and
   does not cross-check against active in-flight others; (iii) `bd
   create` does not grep against active moratorium banned-topic lists;
-  (iv) `/nx:phase-review-gate` catches scope LOSS (§Approach item with
+  (iv) `/conexus:phase-review-gate` catches scope LOSS (§Approach item with
   no closing bead) but not scope GAIN (closing bead that lands work
   from § Out of scope). The first three are dormant in solo-author
   context; (iv) is partially mitigated by author re-reading the diff
@@ -924,7 +924,7 @@ that document.
   co-shipped consumers) is the single most important property. It must
   be in the title and Problem Statement, not a §Revision History
   footnote.
-- Phase 1/2 placeholders ("to be expanded during /nx:create-plan") are
+- Phase 1/2 placeholders ("to be expanded during /conexus:create-plan") are
   exactly the softness that let scope creep in. The new RDR encodes
   P0-P6 phasing and the per-phase validation regime (stress harness +
   per-phase stress harness, per the 2026-05-21 amendments) as RDR-level
@@ -1057,7 +1057,7 @@ API credentials.
 
 - [x] RDR-112 tombstoned (this RDR's parent). Done 2026-05-19.
 - [x] Postmortem available on `main`. Done 2026-05-19 (this PR).
-- [ ] `/nx:phase-review-gate` skill restored from
+- [ ] `/conexus:phase-review-gate` skill restored from
   `archive/develop-2026-05-19` (commit `122feaff`, bead `nexus-j327`)
   to main. Required for the per-phase cross-walk discipline encoded in
   A7's enforcement chain. Docs-and-tooling PR; ships before P0 opens.
@@ -1275,8 +1275,8 @@ counterfactual.
   usage is the floor. Any other criteria? Open for the gate to settle.
 - **Cross-RDR moratorium tooling**: should the nx plugin gain a
   `moratorium_blocks: <topic-list>` frontmatter field on active RDRs
-  plus a pre-scaffold check in `/nx:rdr-create` and a cross-check in
-  `/nx:rdr-gate` Layer 3? Required before multi-author substrate work
+  plus a pre-scaffold check in `/conexus:rdr-create` and a cross-check in
+  `/conexus:rdr-gate` Layer 3? Required before multi-author substrate work
   in any future RDR; dormant for RDR-120's solo-author implementation
   window. File as a follow-on bead against the nx plugin if pursued.
 

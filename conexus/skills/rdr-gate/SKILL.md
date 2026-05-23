@@ -13,7 +13,7 @@ Delegates Layer 3 to the **substantive-critic** agent (sonnet). See [registry.ya
 ## When This Skill Activates
 
 - User says "gate this RDR", "finalization check", "is this RDR ready?"
-- User invokes `/nx:rdr-gate`
+- User invokes `/conexus:rdr-gate`
 - User wants to validate an RDR before locking it as Final
 
 ## Input
@@ -41,7 +41,7 @@ Read the RDR markdown file. Check that these sections are present AND non-empty 
 
 **Heading matching**: RDRs use varied heading names. Match any of the variants listed above (separated by `/`). If none of the variants match, report the section as missing — do NOT silently skip it.
 
-**Gap-structure sub-check (post-65 RDRs only)**: the `## Problem Statement` (or `## Problem`) section must contain one or more `#### Gap N: <title>` headings (regex `^#{3,5} Gap \d+:`). The command preamble script emits a BLOCKED outcome automatically when this check fails — the gate skill should not attempt to run Layers 2 or 3 after that block. Legacy RDRs with `id < 65` are grandfathered and skip the gap check. Use `/nx:rdr-gate <id> --skip-gaps` to override for the rare RDR where the structure does not fit; the override is recorded in the gate audit trail.
+**Gap-structure sub-check (post-65 RDRs only)**: the `## Problem Statement` (or `## Problem`) section must contain one or more `#### Gap N: <title>` headings (regex `^#{3,5} Gap \d+:`). The command preamble script emits a BLOCKED outcome automatically when this check fails — the gate skill should not attempt to run Layers 2 or 3 after that block. Legacy RDRs with `id < 65` are grandfathered and skip the gap check. Use `/conexus:rdr-gate <id> --skip-gaps` to override for the rare RDR where the structure does not fit; the override is recorded in the gate audit trail.
 
 **If any section is missing or contains only placeholder text** (e.g., `[What is the specific challenge]`):
 - Report which sections are incomplete
@@ -50,7 +50,7 @@ Read the RDR markdown file. Check that these sections are present AND non-empty 
 
 ### Layer 2 — Assumption Audit (from T2, no AI)
 
-mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title=""
+mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title=""
 
 Filter entries matching `NNN-research-*`. Analyze:
 
@@ -77,7 +77,7 @@ If assumed findings remain:
 
 Before dispatch, seed link-context so the gate critique auto-links to the RDR:
 ```
-mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<rdr-tumbler>", "link_type": "relates"}], "source_agent": "rdr-gate"}', tags="link-context")
+mcp__plugin_conexus_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<rdr-tumbler>", "link_type": "relates"}], "source_agent": "rdr-gate"}', tags="link-context")
 ```
 
 Dispatch the `substantive-critic` agent via Agent tool with this relay:
@@ -108,11 +108,11 @@ Structured critique with pass/warn/fail per finalization gate criterion:
 ```
 
 **Prior-art search** (within the agent): Use catalog if available, fall back to raw search:
-- First, try catalog (structured metadata): `mcp__plugin_nx_nexus-catalog__search(query="relevant terms from problem statement", content_type="rdr")`
-  - If results found, use `mcp__plugin_nx_nexus-catalog__links(tumbler="<result>", direction="both")` to discover related RDRs in the graph
+- First, try catalog (structured metadata): `mcp__plugin_conexus_nexus-catalog__search(query="relevant terms from problem statement", content_type="rdr")`
+  - If results found, use `mcp__plugin_conexus_nexus-catalog__links(tumbler="<result>", direction="both")` to discover related RDRs in the graph
 - If catalog empty or not initialized, fall back to T3 semantic search:
   - Use store_list tool to enumerate collections, filter by the `rdr__` prefix (RDR-103 conformant names start `rdr__<owner>__voyage-context-3__v1`)
-  - mcp__plugin_nx_nexus__search(query="relevant query terms from RDR problem statement", corpus="{each_collection}", limit=5
+  - mcp__plugin_conexus_nexus__search(query="relevant query terms from RDR problem statement", corpus="{each_collection}", limit=5
 If no collections found: "No prior RDRs indexed. Cross-project prior-art search will improve as RDRs are indexed and closed."
 
 ### Gate Aggregation
@@ -125,17 +125,17 @@ If no collections found: "No prior RDRs indexed. Cross-project prior-art search 
 
 ### On Pass
 
-1. Write gate result to T2: mcp__plugin_nx_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nsummary: One-sentence summary", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"
-2. Store gate critique to T3: mcp__plugin_nx_nexus__store_put(content="# Gate: RDR NNN\n\n{critique}", collection="knowledge", title="gate-rdr-NNN-{date}", tags="rdr,gate,critique")
+1. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nsummary: One-sentence summary", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"
+2. Store gate critique to T3: mcp__plugin_conexus_nexus__store_put(content="# Gate: RDR NNN\n\n{critique}", collection="knowledge", title="gate-rdr-NNN-{date}", tags="rdr,gate,critique")
 3. Append gate findings to the RDR's Revision History section
-4. Print: `> Run '/nx:rdr-accept <id>' to accept this RDR.`
+4. Print: `> Run '/conexus:rdr-accept <id>' to accept this RDR.`
 
-Status remains **Draft** until the author explicitly accepts via `/nx:rdr-accept`.
+Status remains **Draft** until the author explicitly accepts via `/conexus:rdr-accept`.
 
 ### On Fail
 
 1. Write gate result to T2 (same format, `outcome: "BLOCKED"`)
-2. Store gate critique to T3: mcp__plugin_nx_nexus__store_put(content="# Gate BLOCKED: RDR NNN\n\n{critique}", collection="knowledge", title="gate-rdr-NNN-{date}", tags="rdr,gate,critique,blocked")
+2. Store gate critique to T3: mcp__plugin_conexus_nexus__store_put(content="# Gate BLOCKED: RDR NNN\n\n{critique}", collection="knowledge", title="gate-rdr-NNN-{date}", tags="rdr,gate,critique,blocked")
 3. Display the critique with specific sections to address
 4. Status remains Draft
 

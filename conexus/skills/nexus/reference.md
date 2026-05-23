@@ -9,7 +9,7 @@ Nexus provides MCP tools for semantic search, persistent memory, and knowledge m
 
 ## MCP Tool Reference
 
-Core tools are prefixed `mcp__plugin_nx_nexus__`; catalog tools are prefixed `mcp__plugin_nx_nexus-catalog__`.
+Core tools are prefixed `mcp__plugin_conexus_nexus__`; catalog tools are prefixed `mcp__plugin_conexus_nexus-catalog__`.
 
 There are 29 core tools: `search`, `query`, `store_put`, `store_get`, `store_get_many`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`, `traverse`, `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`, `operator_summarize`, `operator_extract`, `operator_rank`, `operator_compare`, `operator_generate`, `operator_filter`, `operator_check`, `operator_verify`.
 There are 10 catalog tools (nexus-catalog server): `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`.
@@ -28,13 +28,13 @@ Semantic search across T3 knowledge collections.
 | `cluster_by` | str | `""` | Set to `"semantic"` to group results by Ward hierarchical clustering. Each result gets `_cluster_label` metadata |
 
 ```
-mcp__plugin_nx_nexus__search(query="query"                                  # knowledge + code + docs (default)
-mcp__plugin_nx_nexus__search(query="query", corpus="all"                    # all T3 collections
-mcp__plugin_nx_nexus__search(query="query", corpus="code"                   # code collections only
-mcp__plugin_nx_nexus__search(query="query", corpus="knowledge__art-1-1__voyage-context-3__v1", limit=15  # specific collection (RDR-103: 4-segment)
-mcp__plugin_nx_nexus__search(query="query", where="bib_year>=2023"          # filter by year
-mcp__plugin_nx_nexus__search(query="query", where="section_type!=references" # exclude reference sections
-mcp__plugin_nx_nexus__search(query="query", cluster_by="semantic"           # group results by topic
+mcp__plugin_conexus_nexus__search(query="query"                                  # knowledge + code + docs (default)
+mcp__plugin_conexus_nexus__search(query="query", corpus="all"                    # all T3 collections
+mcp__plugin_conexus_nexus__search(query="query", corpus="code"                   # code collections only
+mcp__plugin_conexus_nexus__search(query="query", corpus="knowledge__art-1-1__voyage-context-3__v1", limit=15  # specific collection (RDR-103: 4-segment)
+mcp__plugin_conexus_nexus__search(query="query", where="bib_year>=2023"          # filter by year
+mcp__plugin_conexus_nexus__search(query="query", where="section_type!=references" # exclude reference sections
+mcp__plugin_conexus_nexus__search(query="query", cluster_by="semantic"           # group results by topic
 ```
 
 **Automatic quality features**: Results are automatically filtered by per-corpus distance thresholds (cloud/Voyage only), knowledge/docs/rdr collections over-fetch at 4x, and high-selectivity metadata filters route through the catalog for faster retrieval.
@@ -51,9 +51,9 @@ Document-level semantic search for analytical questions. Unlike `search` which r
 | `limit` | int | `10` | Maximum documents to return |
 
 ```
-mcp__plugin_nx_nexus__query(question="adaptive resonance theory cortical maps"
-mcp__plugin_nx_nexus__query(question="speech processing", corpus="knowledge__art-1-1__voyage-context-3__v1", where="page_count>=50"
-mcp__plugin_nx_nexus__query(question="error handling patterns", corpus="code", limit=5
+mcp__plugin_conexus_nexus__query(question="adaptive resonance theory cortical maps"
+mcp__plugin_conexus_nexus__query(question="speech processing", corpus="knowledge__art-1-1__voyage-context-3__v1", where="page_count>=50"
+mcp__plugin_conexus_nexus__query(question="error handling patterns", corpus="code", limit=5
 ```
 
 Returns per-document: title, relevance score, bibliographic metadata (year, authors, venue, citations), technical metadata (pages, chunks, extraction method, formulas), collection, and best matching snippet.
@@ -75,10 +75,10 @@ Plan-match-first analytical retrieval (RDR-080). Primary front door for research
 | `dimensions` | dict/null | `null` | Dimensional filter for the matcher. Verb skills pin `{"verb": "research"}` etc. |
 
 ```
-mcp__plugin_nx_nexus__nx_answer(question="how does plan matching work"
-mcp__plugin_nx_nexus__nx_answer(question="...", dimensions={"verb":"research"}
-mcp__plugin_nx_nexus__nx_answer(question="...", scope="1.2"
-mcp__plugin_nx_nexus__nx_answer(question="...", trace=False            # redact in run log
+mcp__plugin_conexus_nexus__nx_answer(question="how does plan matching work"
+mcp__plugin_conexus_nexus__nx_answer(question="...", dimensions={"verb":"research"}
+mcp__plugin_conexus_nexus__nx_answer(question="...", scope="1.2"
+mcp__plugin_conexus_nexus__nx_answer(question="...", trace=False            # redact in run log
 ```
 
 ### traverse
@@ -94,8 +94,8 @@ Walk the catalog link graph from seed tumblers (RDR-078 P3). Accepts `link_types
 | `direction` | str | `"both"` | `"out"`, `"in"`, or `"both"` |
 
 ```
-mcp__plugin_nx_nexus__traverse(seeds=["1.1.635"], link_types=["implements","cites"], depth=2
-mcp__plugin_nx_nexus__traverse(seeds="1.1.635", purpose="find-implementations"
+mcp__plugin_conexus_nexus__traverse(seeds=["1.1.635"], link_types=["implements","cites"], depth=2
+mcp__plugin_conexus_nexus__traverse(seeds="1.1.635", purpose="find-implementations"
 ```
 
 Returns `{"tumblers": [...], "ids": [...], "collections": [...]}`.
@@ -112,8 +112,8 @@ Batch-hydrate document content by ID past the ChromaDB 300-record read cap (RDR-
 | `structured` | bool | `false` | Return `{contents, missing}` dict when True; human-readable string when False |
 
 ```
-mcp__plugin_nx_nexus__store_get_many(ids=["id1","id2"], collections="knowledge__art-1-1__voyage-context-3__v1"
-mcp__plugin_nx_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus-1-1__voyage-context-3__v1", structured=True
+mcp__plugin_conexus_nexus__store_get_many(ids=["id1","id2"], collections="knowledge__art-1-1__voyage-context-3__v1"
+mcp__plugin_conexus_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus-1-1__voyage-context-3__v1", structured=True
 ```
 
 ### operator_summarize
@@ -121,8 +121,8 @@ mcp__plugin_nx_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus-1-1_
 Summarize content via `claude -p` (default timeout 120s). Set `cited=True` for a citations list in the output.
 
 ```
-mcp__plugin_nx_nexus__operator_summarize(content="<text>"
-mcp__plugin_nx_nexus__operator_summarize(content="<text>", cited=True
+mcp__plugin_conexus_nexus__operator_summarize(content="<text>"
+mcp__plugin_conexus_nexus__operator_summarize(content="<text>", cited=True
 ```
 
 ### operator_extract
@@ -130,7 +130,7 @@ mcp__plugin_nx_nexus__operator_summarize(content="<text>", cited=True
 Extract named fields from each input item. `inputs` accepts a list or a JSON-array string. `fields` is a comma-separated list of field names.
 
 ```
-mcp__plugin_nx_nexus__operator_extract(inputs=["doc1","doc2"], fields="title,year,author"
+mcp__plugin_conexus_nexus__operator_extract(inputs=["doc1","doc2"], fields="title,year,author"
 ```
 
 Returns `{"extractions": [{...}, {...}]}`.
@@ -140,7 +140,7 @@ Returns `{"extractions": [{...}, {...}]}`.
 Rank items by a natural-language criterion.
 
 ```
-mcp__plugin_nx_nexus__operator_rank(items=["a","b","c"], criterion="relevance to X"
+mcp__plugin_conexus_nexus__operator_rank(items=["a","b","c"], criterion="relevance to X"
 ```
 
 Returns `{"ranked": [...]}`.
@@ -150,7 +150,7 @@ Returns `{"ranked": [...]}`.
 Compare items; optional `focus` narrows the comparison dimension.
 
 ```
-mcp__plugin_nx_nexus__operator_compare(items=["x","y"], focus="scalability"
+mcp__plugin_conexus_nexus__operator_compare(items=["x","y"], focus="scalability"
 ```
 
 Returns `{"comparison": "<markdown>"}`.
@@ -160,8 +160,8 @@ Returns `{"comparison": "<markdown>"}`.
 Generate output from a template + context. Template is a natural-language description or named template; `context` is source material. `cited=True` to include a citations list.
 
 ```
-mcp__plugin_nx_nexus__operator_generate(template="release note", context="v4.4.0 adds ..."
-mcp__plugin_nx_nexus__operator_generate(template="..", context="..", cited=True
+mcp__plugin_conexus_nexus__operator_generate(template="release note", context="v4.4.0 adds ..."
+mcp__plugin_conexus_nexus__operator_generate(template="..", context="..", cited=True
 ```
 
 Returns `{"output": "<generated>"}`.
@@ -171,7 +171,7 @@ Returns `{"output": "<generated>"}`.
 Narrow items by a natural-language criterion (RDR-088 §D.4). `items` is a JSON array of prior-step outputs; `criterion` is the keep predicate. Output `items` is a subset of the input; `rationale` carries one `{id, reason}` per input explaining the keep / reject decision.
 
 ```
-mcp__plugin_nx_nexus__operator_filter(items='[{"id": "a", ...}, ...]', criterion="peer-reviewed only")
+mcp__plugin_conexus_nexus__operator_filter(items='[{"id": "a", ...}, ...]', criterion="peer-reviewed only")
 ```
 
 Returns `{"items": [...], "rationale": [{"id": str, "reason": str}, ...]}`.
@@ -181,7 +181,7 @@ Returns `{"items": [...], "rationale": [{"id": str, "reason": str}, ...]}`.
 Cross-item consistency probe (RDR-088 §D.2). Given N peer items and a claim, returns a composable boolean plus grounding evidence. Downstream plan steps can branch on `ok`.
 
 ```
-mcp__plugin_nx_nexus__operator_check(items='[{"id": "p1", ...}, ...]', check_instruction="do the papers agree on the baseline?")
+mcp__plugin_conexus_nexus__operator_check(items='[{"id": "p1", ...}, ...]', check_instruction="do the papers agree on the baseline?")
 ```
 
 Returns `{"ok": bool, "evidence": [{"item_id": str, "quote": str, "role": "supports" | "contradicts" | "neutral"}, ...]}`.
@@ -191,7 +191,7 @@ Returns `{"ok": bool, "evidence": [{"item_id": str, "quote": str, "role": "suppo
 Single-claim verification against an evidence source (RDR-088 §D.2). 1-claim / 1-evidence cardinality (distinct from `operator_check`'s 1-claim / N-items shape). Citations are span anchors in the evidence text that ground the verdict.
 
 ```
-mcp__plugin_nx_nexus__operator_verify(claim="X uses attention", evidence="Section 2.1: X builds on transformer layers...")
+mcp__plugin_conexus_nexus__operator_verify(claim="X uses attention", evidence="Section 2.1: X builds on transformer layers...")
 ```
 
 Returns `{"verified": bool, "reason": str, "citations": [str, ...]}`.
@@ -205,9 +205,9 @@ Background hygiene tools — each spawns a long-lived `claude -p` subprocess. Ca
 - **`nx_plan_audit`** — plan library quality audit (missing required fields, low match confidence, stale entries).
 
 ```
-mcp__plugin_nx_nexus__nx_tidy()
-mcp__plugin_nx_nexus__nx_enrich_beads()
-mcp__plugin_nx_nexus__nx_plan_audit()
+mcp__plugin_conexus_nexus__nx_tidy()
+mcp__plugin_conexus_nexus__nx_enrich_beads()
+mcp__plugin_conexus_nexus__nx_plan_audit()
 ```
 
 ### store_put
@@ -223,8 +223,8 @@ Store content in the T3 permanent knowledge store.
 | `ttl` | str | `"permanent"` | TTL: `Nd`, `Nw`, or `"permanent"` |
 
 ```
-mcp__plugin_nx_nexus__store_put(content="finding text", collection="knowledge", title="research-topic", tags="arch"
-mcp__plugin_nx_nexus__store_put(content="notes", collection="knowledge", title="sprint-notes", ttl="30d"
+mcp__plugin_conexus_nexus__store_put(content="finding text", collection="knowledge", title="research-topic", tags="arch"
+mcp__plugin_conexus_nexus__store_put(content="notes", collection="knowledge", title="sprint-notes", ttl="30d"
 ```
 
 **TTL formats**: `30d` (30 days), `4w` (4 weeks), `permanent` or `never` (no expiry).
@@ -239,7 +239,7 @@ Retrieve the full content and metadata of a T3 entry by document ID.
 | `collection` | str | `"knowledge"` | Collection name or prefix |
 
 ```
-mcp__plugin_nx_nexus__store_get(doc_id="a1b2c3d4e5f6g7h8", collection="knowledge__notes"
+mcp__plugin_conexus_nexus__store_get(doc_id="a1b2c3d4e5f6g7h8", collection="knowledge__notes"
 ```
 
 ### store_list
@@ -254,9 +254,9 @@ List entries in a T3 knowledge collection.
 | `docs` | bool | `false` | Show unique documents instead of individual chunks. Deduplicates by content_hash, shows title, chunk count, page count, extraction method |
 
 ```
-mcp__plugin_nx_nexus__store_list(collection="knowledge"                       # auto-promoted to conformant
-mcp__plugin_nx_nexus__store_list(collection="knowledge__art-1-1__voyage-context-3__v1", docs=true  # document-level view (RDR-103: 4-segment)
-mcp__plugin_nx_nexus__store_list(collection="knowledge__notes-1-1__voyage-context-3__v1", limit=50, offset=100
+mcp__plugin_conexus_nexus__store_list(collection="knowledge"                       # auto-promoted to conformant
+mcp__plugin_conexus_nexus__store_list(collection="knowledge__art-1-1__voyage-context-3__v1", docs=true  # document-level view (RDR-103: 4-segment)
+mcp__plugin_conexus_nexus__store_list(collection="knowledge__notes-1-1__voyage-context-3__v1", limit=50, offset=100
 ```
 
 ### memory_put
@@ -272,8 +272,8 @@ Store a memory entry in T2 (SQLite). Upserts by (project, title).
 | `ttl` | int | `30` | Time-to-live in days (0 for permanent) |
 
 ```
-mcp__plugin_nx_nexus__memory_put(content="content", project="{repo}", title="findings.md"
-mcp__plugin_nx_nexus__memory_put(content="content", project="{repo}", title="findings.md", ttl=0
+mcp__plugin_conexus_nexus__memory_put(content="content", project="{repo}", title="findings.md"
+mcp__plugin_conexus_nexus__memory_put(content="content", project="{repo}", title="findings.md", ttl=0
 ```
 
 **Project naming**: Use purpose-specific suffixes:
@@ -292,8 +292,8 @@ When title is empty, lists all entries for the project (titles only — a second
 | `title` | str | `""` | Entry title. Leave empty to LIST entries (titles only) |
 
 ```
-mcp__plugin_nx_nexus__memory_get(project="{repo}", title="findings.md"       # get content
-mcp__plugin_nx_nexus__memory_get(project="{repo}", title=""                   # list titles only
+mcp__plugin_conexus_nexus__memory_get(project="{repo}", title="findings.md"       # get content
+mcp__plugin_conexus_nexus__memory_get(project="{repo}", title=""                   # list titles only
 ```
 
 ### memory_delete
@@ -306,7 +306,7 @@ Delete a T2 memory entry by project and title.
 | `title` | str | required | Entry title to delete |
 
 ```
-mcp__plugin_nx_nexus__memory_delete(project="{repo}", title="stale-finding"
+mcp__plugin_conexus_nexus__memory_delete(project="{repo}", title="stale-finding"
 ```
 
 ### memory_search
@@ -321,8 +321,8 @@ Full-text search across T2 memory entries. Searches title, content, and tags fie
 | `offset` | int | `0` | Skip this many results. Footer shows `next: offset=N` for next page |
 
 ```
-mcp__plugin_nx_nexus__memory_search(query="query"
-mcp__plugin_nx_nexus__memory_search(query="query", project="{repo}"
+mcp__plugin_conexus_nexus__memory_search(query="query"
+mcp__plugin_conexus_nexus__memory_search(query="query", project="{repo}"
 ```
 
 ### memory_consolidate
@@ -342,11 +342,11 @@ T2 memory hygiene (RDR-061 E6): find overlapping entries, merge duplicates, flag
 | `confirm_destructive` | bool | `False` | Required when merging > 1 entry |
 
 ```
-mcp__plugin_nx_nexus__memory_consolidate(action="find-overlaps", project="{repo}"
-mcp__plugin_nx_nexus__memory_consolidate(action="flag-stale", project="{repo}", idle_days=30
-mcp__plugin_nx_nexus__memory_consolidate(action="merge", project="{repo}",
+mcp__plugin_conexus_nexus__memory_consolidate(action="find-overlaps", project="{repo}"
+mcp__plugin_conexus_nexus__memory_consolidate(action="flag-stale", project="{repo}", idle_days=30
+mcp__plugin_conexus_nexus__memory_consolidate(action="merge", project="{repo}",
     keep_id=42, delete_ids="43", merged_content="...", dry_run=True
-mcp__plugin_nx_nexus__memory_consolidate(action="merge", project="{repo}",
+mcp__plugin_conexus_nexus__memory_consolidate(action="merge", project="{repo}",
     keep_id=42, delete_ids="43,44,45", merged_content="...", confirm_destructive=True
 ```
 
@@ -366,11 +366,11 @@ T1 session scratch pad — ephemeral within-session storage.
 | `limit` | int | `10` | Max results for search |
 
 ```
-mcp__plugin_nx_nexus__scratch(action="put", content="working hypothesis: the cache is stale"
-mcp__plugin_nx_nexus__scratch(action="search", query="cache"
-mcp__plugin_nx_nexus__scratch(action="list"
-mcp__plugin_nx_nexus__scratch(action="get", entry_id="<id>"
-mcp__plugin_nx_nexus__scratch(action="delete", entry_id="<id>"
+mcp__plugin_conexus_nexus__scratch(action="put", content="working hypothesis: the cache is stale"
+mcp__plugin_conexus_nexus__scratch(action="search", query="cache"
+mcp__plugin_conexus_nexus__scratch(action="list"
+mcp__plugin_conexus_nexus__scratch(action="get", entry_id="<id>"
+mcp__plugin_conexus_nexus__scratch(action="delete", entry_id="<id>"
 ```
 
 ### scratch_manage
@@ -385,8 +385,8 @@ Manage scratch entries: flag for persistence or promote to T2.
 | `title` | str | `""` | Target title (required for promote) |
 
 ```
-mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>"
-mcp__plugin_nx_nexus__scratch_manage(action="promote", entry_id="<id>", project="{repo}", title="findings.md"
+mcp__plugin_conexus_nexus__scratch_manage(action="flag", entry_id="<id>"
+mcp__plugin_conexus_nexus__scratch_manage(action="promote", entry_id="<id>", project="{repo}", title="findings.md"
 ```
 
 **Promote return value** (RDR-057 Phase 1c): The promote action returns a `PromotionReport` rendered in the response string:
@@ -400,7 +400,7 @@ mcp__plugin_nx_nexus__scratch_manage(action="promote", entry_id="<id>", project=
 List all T3 collections with document counts.
 
 ```
-mcp__plugin_nx_nexus__collection_list()
+mcp__plugin_conexus_nexus__collection_list()
 ```
 
 Returns collection names, document counts, and embedding models for every collection in the T3 database.
@@ -460,10 +460,10 @@ nx mineru stop                             # stop server
 ## Workflow — when and why to use each tier
 
 **Session lifecycle:**
-1. Search T3 for prior art before starting work: mcp__plugin_nx_nexus__search(`query="topic", corpus="knowledge"`
+1. Search T3 for prior art before starting work: mcp__plugin_conexus_nexus__search(`query="topic", corpus="knowledge"`
 2. Index the codebase once per repo: `nx index repo <path>` (CLI)
 3. Use T1 scratch for working notes during the session
-4. Flag important scratch items for auto-promote to T2: mcp__plugin_nx_nexus__scratch_manage(`action="flag", entry_id="<id>"`
+4. Flag important scratch items for auto-promote to T2: mcp__plugin_conexus_nexus__scratch_manage(`action="flag", entry_id="<id>"`
 5. Persist validated findings to T3 at session end: Use store_put tool
 
 **Tier selection:**

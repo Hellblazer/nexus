@@ -111,7 +111,7 @@ if not rdr_path.exists():
 id_match = re.search(r'\d+', args)
 
 if not id_match:
-    print("> **Usage**: `/nx:rdr-gate <id>` — e.g. `/nx:rdr-gate 003` or `/nx:rdr-gate RDR-003`")
+    print("> **Usage**: `/conexus:rdr-gate <id>` — e.g. `/conexus:rdr-gate 003` or `/conexus:rdr-gate RDR-003`")
     print()
     rdrs = get_all_rdrs(rdr_path)
     print("### Available RDRs")
@@ -170,7 +170,7 @@ if _rdr_id_int >= 65 and len(_gap_headings) == 0 and not _skip_gaps:
           f"headings in `## Problem Statement` or `## Problem`.")
     print(r"> Expected format: `#### Gap 1: <gap title>` (regex: `^#{3,5} Gap \d+:`).")
     print(">")
-    print("> The close skill enforces the same structure and will block `/nx:rdr-close "
+    print("> The close skill enforces the same structure and will block `/conexus:rdr-close "
           "--reason implemented`. Add the headings now before accept, or re-run the gate "
           "with `--skip-gaps` to record an intentional override in the audit trail.")
     sys.exit(0)
@@ -218,7 +218,7 @@ print()
 # T2 research findings
 print("### T2 Research Findings")
 print(f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"\" to list all entries, then filter for {t2_key}-research* titles.")
-print(f"If no research findings exist, run `/nx:rdr-research add {t2_key}` to record findings before gating.")
+print(f"If no research findings exist, run `/conexus:rdr-research add {t2_key}` to record findings before gating.")
 print(f"Use `--skip-research` in your gate command to override.")
 PYEOF
 }
@@ -248,5 +248,5 @@ All data is pre-loaded above — no additional tool calls needed.
   summary: "One-sentence summary of gate result"
   ```
   This overwrites any previous gate result for this RDR, so only the latest gate run is stored.
-- **If PASSED**, print: `> Run '/nx:rdr-accept <id>' to accept this RDR.`
+- **If PASSED**, print: `> Run '/conexus:rdr-accept <id>' to accept this RDR.`
 - If no ID given, show the available RDR table above and prompt for an ID.

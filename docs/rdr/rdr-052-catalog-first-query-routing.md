@@ -24,7 +24,7 @@ related_issues:
 
 ## Problem Statement
 
-The `/nx:query` skill dispatches an LLM-powered query-planner agent to decompose every analytical question into a step-by-step JSON plan. This made sense before the catalog existed — the only way to route a query was to ask an LLM to decide which collections to search. Now the catalog provides deterministic routing via metadata (author, content_type, corpus, file_path) and link traversal (cites, implements, relates). The planner is computing answers the catalog already knows.
+The `/conexus:query` skill dispatches an LLM-powered query-planner agent to decompose every analytical question into a step-by-step JSON plan. This made sense before the catalog existed — the only way to route a query was to ask an LLM to decide which collections to search. Now the catalog provides deterministic routing via metadata (author, content_type, corpus, file_path) and link traversal (cites, implements, relates). The planner is computing answers the catalog already knows.
 
 Current cost of a simple scoped query ("papers by Fagin on schema mappings"):
 1. Skill fires
@@ -127,7 +127,7 @@ Seed the T2 plan library with deterministic templates for common query patterns.
 
 Templates are seeded at `nx catalog setup` time via `plan_search` + `plan_save` — check existence first, skip if already present (idempotent). They have no TTL — they're structural, not cached results. Re-running `nx catalog setup` does not duplicate templates.
 
-### Component 3: Simplified `/nx:query` Skill
+### Component 3: Simplified `/conexus:query` Skill
 
 The skill becomes a thin dispatcher with three paths:
 
@@ -161,7 +161,7 @@ Path 3 — Novel analytical pipeline (5% of queries):
 Auto-cache lives in the **skill** (Path 3), not the MCP server. The skill calls `plan_save()` — a T2 MCP tool — after the query-planner agent returns a successful plan and execution completes:
 
 ```python
-# In /nx:query skill, Path 3, after successful execution:
+# In /conexus:query skill, Path 3, after successful execution:
 plan_save(
     query=original_question,
     plan_json=plan,
@@ -210,8 +210,8 @@ Multi-step analytical pipelines need inter-step state (extract results feed into
 - [x] Tumbler index on documents table: `idx_documents_tumbler`
 - [x] `descendants()`, `ancestors()`, `lca()` helpers implemented and tested
 - [x] Pre-built templates seeded at `nx catalog setup` (idempotent — no duplicates on re-run)
-- [x] `/nx:query` routes simple questions to enhanced `query` MCP (no agent dispatch)
-- [x] `/nx:query` matches template patterns before falling back to planner
+- [x] `/conexus:query` routes simple questions to enhanced `query` MCP (no agent dispatch)
+- [x] `/conexus:query` matches template patterns before falling back to planner
 - [x] Novel plans auto-saved by skill on success (no user prompt) — `plan_save()` in Path 3
 - [x] Cached plans auto-expire after 30 days (graceful degradation to planner)
 - [x] Query planner agent dispatched only for multi-step analytical pipelines
@@ -236,10 +236,10 @@ Multi-step analytical pipelines need inter-step state (extract results feed into
 
 ### Phase 2: Plugin Layer (nx/)
 
-5. **Simplify `/nx:query` skill** (`nx/skills/query/SKILL.md`): three-path dispatch (single-tool / template / planner). Remove manual collection extraction instructions. Remove "save plan?" prompt. Add auto-cache: Path 3 calls `plan_save()` on successful planner execution (TTL 30 days).
+5. **Simplify `/conexus:query` skill** (`nx/skills/query/SKILL.md`): three-path dispatch (single-tool / template / planner). Remove manual collection extraction instructions. Remove "save plan?" prompt. Add auto-cache: Path 3 calls `plan_save()` on successful planner execution (TTL 30 days).
 6. **Update query-planner agent** (`nx/agents/query-planner.md`): reduce scope to exception-path. Add note that simple scoped queries go through enhanced `query` MCP directly. Update few-shot examples to emphasize catalog-first patterns.
 7. **Update analytical-operator agent** (`nx/agents/analytical-operator.md`): no functional changes, but update references to the query pipeline flow.
-8. **Update orchestrator agent** (`nx/agents/orchestrator.md`): when the task is a simple search question (no extract/compare/generate signals), call enhanced `query` MCP with appropriate params instead of dispatching `/nx:query` skill. Decision: if the question can be answered by a single `query()` call with catalog params, use it directly. If it needs multi-step analysis, dispatch the skill.
+8. **Update orchestrator agent** (`nx/agents/orchestrator.md`): when the task is a simple search question (no extract/compare/generate signals), call enhanced `query` MCP with appropriate params instead of dispatching `/conexus:query` skill. Decision: if the question can be answered by a single `query()` call with catalog params, use it directly. If it needs multi-step analysis, dispatch the skill.
 9. **Update SubagentStart hook** (`nx/hooks/scripts/subagent-start.sh`): update `query` tool signature in the nx Storage Tools block to show new params (`author`, `content_type`, `follow_links`, `depth`, `subtree`).
 10. **Update related skills** that reference the query pipeline:
     - `nx/skills/research-synthesis/SKILL.md` — reference enhanced `query` for scoped search
@@ -262,7 +262,7 @@ Multi-step analytical pipelines need inter-step state (extract results feed into
 19. **End-to-end test**: scoped query via enhanced `query` MCP → verify <2s latency, correct collection scoping.
 20. **Template match test**: question with author signal → verify template selected, no planner dispatch.
 21. **Auto-cache test**: novel plan execution → verify plan_save called automatically.
-22. **Regression test**: existing `/nx:query` multi-step flows still work (extract → compare → generate).
+22. **Regression test**: existing `/conexus:query` multi-step flows still work (extract → compare → generate).
 
 ## Research Findings
 
@@ -288,7 +288,7 @@ Full audit of the current query pipeline implementation:
 
 **`query` MCP tool** (`mcp_server.py`): params `question`, `corpus`, `where`, `limit`. Over-fetches chunks (limit×10), groups by document, returns best snippet per doc. **No routing intelligence** — catalog-blind, same `search_cross_corpus()` as `search`. This is the tool to enhance.
 
-**`/nx:query` skill**: 308 lines, 5 top-level steps, 8 execution paths. **71 lines (23%) are mechanical orchestration** — collection extraction from catalog results, `$step_N` reference resolution via scratch, fanout dedup for multi-tumbler catalog_links, redundant scratch re-writes. This is deterministic pipeline logic encoded as LLM-interpreted markdown.
+**`/conexus:query` skill**: 308 lines, 5 top-level steps, 8 execution paths. **71 lines (23%) are mechanical orchestration** — collection extraction from catalog results, `$step_N` reference resolution via scratch, fanout dedup for multi-tumbler catalog_links, redundant scratch re-writes. This is deterministic pipeline logic encoded as LLM-interpreted markdown.
 
 **Query planner agent**: knows 9 operations, has 5 few-shot examples. The catalog-first routing decision is **purely heuristic** — the LLM reads prose instructions and decides. This is the sole non-deterministic branch point with correctness risk.
 

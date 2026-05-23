@@ -863,7 +863,7 @@ Concrete actions:
    `docs/contributing.md`: `pyproject.toml`, `uv.lock`,
    `CHANGELOG.md`, `nx/CHANGELOG.md`, `.claude-plugin/marketplace.json`.
 4. Run `scripts/reinstall-tool.sh` to install the new plugin locally.
-5. Verify by creating a test RDR via `/nx:rdr-create` and confirming
+5. Verify by creating a test RDR via `/conexus:rdr-create` and confirming
    the new scaffold includes the `### Enumerated gaps to close`
    subsection.
 
@@ -879,7 +879,7 @@ preamble — per HA-5 this is the hard-enforcement surface) AND
 `nx/skills/rdr-close/SKILL.md` (the instruction text the agent follows).
 
 **Architectural constraint** (from NI-2 in Gate Round 1 review): the
-Python preamble is one-shot. It runs ONCE at `/nx:rdr-close`
+Python preamble is one-shot. It runs ONCE at `/conexus:rdr-close`
 invocation, prints its output into the conversation context, and does
 not re-execute after SKILL.md runs. There is no bidirectional handoff
 mechanism — the preamble cannot "wait" for SKILL.md to collect
@@ -943,7 +943,7 @@ SKILL.md body proceeds with the rest of the close flow.
 3. For Pass 1, the skill body does NOT run (the preamble exits before
    the skill executes). The agent sees the Pass 1 exit message in
    conversation context and must collect closure pointers from the
-   user conversationally, then re-invoke `/nx:rdr-close NNN --reason
+   user conversationally, then re-invoke `/conexus:rdr-close NNN --reason
    implemented --pointers 'Gap1=file.py:123,...'`.
 4. User-facing framing (emitted by preamble): "The gate verifies you
    have committed to a specific `file:line` pointer per gap. It does
@@ -1018,7 +1018,7 @@ fires immediately when the post-mortem is created, which is the
 correct decision point.
 
 **Rationale** for PostToolUse rather than integrating into the
-command preamble: the preamble runs at `/nx:rdr-close` invocation,
+command preamble: the preamble runs at `/conexus:rdr-close` invocation,
 BEFORE the skill body has created the post-mortem. It cannot grep a
 file that doesn't yet exist. Post-mortem creation happens during the
 skill body's Step 2. The PostToolUse Write hook fires at exactly
@@ -1038,7 +1038,7 @@ already:
 The extension adds:
 - New regex: match `bd create` commands alongside `bd close|done`
 - New T1 scratch check: look for `rdr-close-active` marker (set by
-  the `/nx:rdr-close` command preamble at Pass 2 validation success)
+  the `/conexus:rdr-close` command preamble at Pass 2 validation success)
 - If `bd create` detected AND `rdr-close-active` marker exists AND
   the `bd create` command lacks `--reopens-rdr`, `--sprint` or
   `--due`, and `--drift-condition` fields: emit
@@ -1046,7 +1046,7 @@ The extension adds:
 - If any of those conditions is absent, fall through to existing
   behavior (allow)
 
-**T1 scratch active-close marker**: set by the `/nx:rdr-close` command
+**T1 scratch active-close marker**: set by the `/conexus:rdr-close` command
 preamble at the end of Pass 2 (after pointer validation passes, before
 skill body runs). Marker content: `rdr-close-active` tag with RDR ID.
 Cleared by the close skill's Step 4 (Update State) after the T2 record
@@ -1089,7 +1089,7 @@ is the correct extension point. Gap 3 enforcement will:
 is the only enforcement surface. No wrapper script is needed; the
 hook inspects the `bd create` command text and decides.
 
-**Scratch marker lifecycle**: the `/nx:rdr-close` command preamble
+**Scratch marker lifecycle**: the `/conexus:rdr-close` command preamble
 sets a scratch entry tagged `rdr-close-active` with the RDR ID as the
 content. The marker is set at the end of Pass 2 (pointer validation
 success) and cleared by the close skill's Step 4 (Update State) after

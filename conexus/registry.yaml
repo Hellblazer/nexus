@@ -165,9 +165,9 @@ agents:
     color: mint
     skill: knowledge-tidying
     slash_command: /knowledge-tidy
-    description: "STUB — superseded by mcp__plugin_nx_nexus__nx_tidy MCP tool (RDR-080)"
+    description: "STUB — superseded by mcp__plugin_conexus_nexus__nx_tidy MCP tool (RDR-080)"
     triggers:
-      - "call mcp__plugin_nx_nexus__nx_tidy directly instead"
+      - "call mcp__plugin_conexus_nexus__nx_tidy directly instead"
     strengths:
       - "See nx_tidy MCP tool"
     typical_runtime: "n/a — stub"
@@ -180,9 +180,9 @@ agents:
     color: orange
     skill: plan-validation
     slash_command: /plan-audit
-    description: "STUB — superseded by mcp__plugin_nx_nexus__nx_plan_audit MCP tool (RDR-080)"
+    description: "STUB — superseded by mcp__plugin_conexus_nexus__nx_plan_audit MCP tool (RDR-080)"
     triggers:
-      - "call mcp__plugin_nx_nexus__nx_plan_audit directly instead"
+      - "call mcp__plugin_conexus_nexus__nx_plan_audit directly instead"
     strengths:
       - "See nx_plan_audit MCP tool"
     typical_runtime: "n/a — stub"
@@ -195,9 +195,9 @@ agents:
     color: emerald
     skill: enrich-plan
     slash_command: /enrich-plan
-    description: "STUB — superseded by mcp__plugin_nx_nexus__nx_enrich_beads MCP tool (RDR-080)"
+    description: "STUB — superseded by mcp__plugin_conexus_nexus__nx_enrich_beads MCP tool (RDR-080)"
     triggers:
-      - "call mcp__plugin_nx_nexus__nx_enrich_beads directly instead"
+      - "call mcp__plugin_conexus_nexus__nx_enrich_beads directly instead"
     strengths:
       - "See nx_enrich_beads MCP tool"
     typical_runtime: "n/a — stub"
@@ -320,7 +320,7 @@ rdr_skills:
       - "close this RDR"
       - "RDR done"
       - "finish RDR"
-    dispatches_to: []  # knowledge-tidier superseded by mcp__plugin_nx_nexus__nx_tidy MCP tool
+    dispatches_to: []  # knowledge-tidier superseded by mcp__plugin_conexus_nexus__nx_tidy MCP tool
 
   rdr-audit:
     slash_command: /rdr-audit
@@ -369,7 +369,7 @@ rdr_skills:
 
 standalone_skills:
   query:
-    description: "Use when a question needs multi-step retrieval via mcp__plugin_nx_nexus__nx_answer"
+    description: "Use when a question needs multi-step retrieval via mcp__plugin_conexus_nexus__nx_answer"
     triggers:
       - "analytical question over nx knowledge"
       - "plan-match-first retrieval"
@@ -476,12 +476,12 @@ standalone_skills:
       - "run composition probe on bead X"
       - "verify coordinator bead composition"
       - "check composition before next bead"
-      - "/nx:composition-probe <bead-id>"
+      - "/conexus:composition-probe <bead-id>"
     tools: [Bash, Read, Grep, Glob]
     dispatches_to: [general-purpose]
 
   plan-first:
-    description: "Gate skill at the top of every retrieval task — tries plan_match first, executes via plan_run if a match clears the threshold, falls through to /nx:query otherwise"
+    description: "Gate skill at the top of every retrieval task — tries plan_match first, executes via plan_run if a match clears the threshold, falls through to /conexus:query otherwise"
     triggers:
       - "before any retrieval task"
       - "before dispatching search/query"
@@ -579,7 +579,7 @@ pipelines:
     description: "Research with knowledge persistence"
     sequence:
       - deep-research-synthesizer
-      # use mcp__plugin_nx_nexus__nx_tidy directly after research
+      # use mcp__plugin_conexus_nexus__nx_tidy directly after research
 
   onboarding:
     description: "New codebase understanding"

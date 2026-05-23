@@ -1,6 +1,6 @@
 ---
 name: review
-description: Use when critiquing / auditing / reviewing a change set against decision history — tries the review plan library first (catalog lookup → decision-evolution traversal → extract → compare), falls through to /nx:query if nothing matches
+description: Use when critiquing / auditing / reviewing a change set against decision history — tries the review plan library first (catalog lookup → decision-evolution traversal → extract → compare), falls through to /conexus:query if nothing matches
 effort: medium
 ---
 
@@ -13,7 +13,7 @@ and extract → compare pipeline that reviews actually need.**
 ## The call
 
 ```
-mcp__plugin_nx_nexus__nx_answer(
+mcp__plugin_conexus_nexus__nx_answer(
     question=<caller's phrasing>,
     dimensions={"verb": "review"},
     context=<changed_paths + depth, as JSON string if needed>,
@@ -52,7 +52,7 @@ when it exists, falling back to `strategy:default` otherwise.
 
 If you just need to find the RDR or chunk that defines something — e.g.
 "show me where RDR-053 states the auth middleware contract" —
-`mcp__plugin_nx_nexus__search` against `rdr__<owner>__voyage-context-3__v1`
+`mcp__plugin_conexus_nexus__search` against `rdr__<owner>__voyage-context-3__v1`
 (or the bare `rdr` prefix, which expands to all matching collections)
 is the right tool.
 This skill earns its cost when the review has to *align* multiple
@@ -70,8 +70,8 @@ RDRs against a change set and extract drift claims.
   has no sensible default — missing `changed_paths` raises
   `PlanRunBindingError(missing=["changed_paths"])`. Surface the
   error to the user rather than passing empty list.
-- **Using `review` for bug triage.** That's `/nx:debug`; the two
+- **Using `review` for bug triage.** That's `/conexus:debug`; the two
   verbs differ on what drives the walk (`review` starts from a
   diff, `debug` starts from a failing path).
 
-See `/nx:plan-first` and `docs/plan-authoring-guide.md`.
+See `/conexus:plan-first` and `docs/plan-authoring-guide.md`.

@@ -45,7 +45,7 @@ digraph review_flow {
 
 ## Pre-Dispatch: Seed Link Context (optional)
 
-If the review references an RDR or bead, seed link-context so any patterns the agent stores to T3 auto-link. See `/nx:catalog` for details. Skip if the review is purely ad-hoc.
+If the review references an RDR or bead, seed link-context so any patterns the agent stores to T3 auto-link. See `/conexus:catalog` for details. Skip if the review is purely ad-hoc.
 
 ## Agent Invocation
 
@@ -79,7 +79,7 @@ The code-review-expert agent uses hypothesis-driven review:
 3. Validate against best practices and security requirements
 4. Document findings with file:line references
 
-**REQUIRED BACKGROUND:** Use `/nx:receiving-review` when acting on review output.
+**REQUIRED BACKGROUND:** Use `/conexus:receiving-review` when acting on review output.
 
 ## Agent-Specific PRODUCE
 

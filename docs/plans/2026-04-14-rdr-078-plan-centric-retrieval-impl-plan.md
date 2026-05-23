@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-RDR-078 ships in **six phases** (Phase 4 fans out into 4a-4e). Every phase is additive on top of shipped substrate (RDR-041 T1 HTTP server, RDR-042 plan library + `/nx:query`, RDR-070 HDBSCAN taxonomies, RDR-077 projection quality). The architectural glue: a dimensional plan template registry, semantic plan matching via T1 cosine, a `traverse` plan operator over the existing catalog typed-link graph, scenario seeds, and plan-first agent priming.
+RDR-078 ships in **six phases** (Phase 4 fans out into 4a-4e). Every phase is additive on top of shipped substrate (RDR-041 T1 HTTP server, RDR-042 plan library + `/conexus:query`, RDR-070 HDBSCAN taxonomies, RDR-077 projection quality). The architectural glue: a dimensional plan template registry, semantic plan matching via T1 cosine, a `traverse` plan operator over the existing catalog typed-link graph, scenario seeds, and plan-first agent priming.
 
 The quality lever is **Phase 3** (typed-graph traversal). The efficiency lever is **Phase 1** (semantic plan matching, ~40% compute reduction at ≥0.85 confidence). The shipping-velocity lever is **Phase 6** (git-tracked YAML scopes).
 
@@ -50,7 +50,7 @@ The five scenario seeds (4b) and four meta-seeds (4d) all reference `traverse` s
 
 ### Why Phase 5 depends on Phases 1, 3, 4b being mergeable
 
-The 9 skills' template body is `plan_match(intent, dimensions={verb:<v>}, n=1) → plan_run(match, bindings)`. Each skill needs at least one matching plan in the library — five verb skills need five scenario seeds (4b); three plan-mgmt skills need three meta-seeds (4d). Without these, the skills fall through to `/nx:query` 100% of the time, defeating the demo.
+The 9 skills' template body is `plan_match(intent, dimensions={verb:<v>}, n=1) → plan_run(match, bindings)`. Each skill needs at least one matching plan in the library — five verb skills need five scenario seeds (4b); three plan-mgmt skills need three meta-seeds (4d). Without these, the skills fall through to `/conexus:query` 100% of the time, defeating the demo.
 
 The hook edits could in principle land before the skills, but the SessionStart "## Plan Library" block lists the scenario names — wrong listing if seeds aren't shipped.
 
@@ -85,7 +85,7 @@ The scoped loader's idempotency mechanism is `INSERT … ON CONFLICT(project, di
 
 ## Per-Bead Detail
 
-Each bead below maps to one phase deliverable. Beads include: file touchpoints, test cases, dependencies, and a reminder to use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for the design-of-DAG tasks (Phase 1 runner contract, Phase 3 traverse merge invariants, Phase 4a canonical-JSON dedup).
+Each bead below maps to one phase deliverable. Beads include: file touchpoints, test cases, dependencies, and a reminder to use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` for the design-of-DAG tasks (Phase 1 runner contract, Phase 3 traverse merge invariants, Phase 4a canonical-JSON dedup).
 
 ### Epic — RDR-078 Plan-Centric Retrieval
 
@@ -124,7 +124,7 @@ Tracks all phase beads. Closes when SC-1..SC-19 all pass and the ART end-to-end 
 5. `test_plan_runner_rejects_cross_embedding_step` — step with `scope.taxonomy_domain=prose` dispatched to a code corpus → `PlanRunEmbeddingDomainError` (SC-10).
 6. `test_plan_save_visible_within_session` — save, then `plan_match` from same process resolves it.
 
-**Reminder**: use `mcp__plugin_nx_sequential-thinking__sequentialthinking` to design the `$stepN.<field>` resolution contract — multi-hop reference resolution interacts with T1 scratch tagging (RDR-041 pattern, tag `plan_run,step-N`).
+**Reminder**: use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` to design the `$stepN.<field>` resolution contract — multi-hop reference resolution interacts with T1 scratch tagging (RDR-041 pattern, tag `plan_run,step-N`).
 
 ### P2 — Domain-scoped retrieval steps
 
@@ -250,8 +250,8 @@ The epic closes when:
 
 - All phase beads are `closed`.
 - All SC-1..SC-19 verified — checklist run as part of close gate.
-- ART end-to-end demo (SC-8) recorded: cold-library run → `/nx:query` planner → plan saved; warm-library run → `plan_match` ≥ threshold → `plan_run` succeeds, includes ≥1 `traverse` step traversing typed links from RDR to implementing code.
-- Zero regressions on `plan_save` / `plan_search` / `/nx:query` / `search()` / `query()` (SC-9).
+- ART end-to-end demo (SC-8) recorded: cold-library run → `/conexus:query` planner → plan saved; warm-library run → `plan_match` ≥ threshold → `plan_run` succeeds, includes ≥1 `traverse` step traversing typed links from RDR to implementing code.
+- Zero regressions on `plan_save` / `plan_search` / `/conexus:query` / `search()` / `query()` (SC-9).
 - Cross-embedding boundary not crossed anywhere (SC-10): `test_plan_runner_rejects_cross_embedding_step` green; greppable invariant on `plan_run`.
 
 ## Continuation State
@@ -259,7 +259,7 @@ The epic closes when:
 Persist progress to T2 memory after each phase merges:
 
 ```
-mcp__plugin_nx_nexus__memory_put(
+mcp__plugin_conexus_nexus__memory_put(
     project="nexus",
     title="rdr-078-impl-state.md",
     content="<phase status, blocker notes, calibration values for PQ-2/PQ-20>"

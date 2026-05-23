@@ -639,7 +639,7 @@ fails (each gets its own T2). With this RDR, it succeeds.
 
 ### Phase 1: Code Implementation
 
-To be expanded during `/nx:create-plan`.
+To be expanded during `/conexus:create-plan`.
 
 ### Phase 2: Operational Activation
 
@@ -788,7 +788,7 @@ Document covers a structural shift in how every persistent
 shared-state store is accessed; size is justified. Research
 findings, assumption ledger, impact inventory, and gate
 finalisation are all evidence-backed. The remaining "to be
-expanded during `/nx:create-plan`" markers in §Implementation
+expanded during `/conexus:create-plan`" markers in §Implementation
 Plan Phase 1 / Phase 2 are appropriate — phase decomposition is
 the planner's job, not this RDR's.
 

@@ -33,7 +33,7 @@ Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
 2. get_symbols_overview to map key classes in discovered files
 3. type_hierarchy to trace abstraction patterns
 4. find_referencing_symbols to understand cross-module usage
-5. Synthesize findings with `mcp__plugin_nx_sequential-thinking__sequentialthinking`
+5. Synthesize findings with `mcp__plugin_conexus_sequential-thinking__sequentialthinking`
 6. Design architecture with clear boundaries
 ```
 
@@ -55,11 +55,11 @@ strategic-planner -> nx_plan_audit -> architect-planner -> developer
 
 Before dispatching the architect-planner agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings:
 
-1. If the task references an RDR (pattern `RDR-\d+`) or a known document, resolve it: `mcp__plugin_nx_nexus-catalog__search(query="RDR-NNN or document title")`
+1. If the task references an RDR (pattern `RDR-\d+`) or a known document, resolve it: `mcp__plugin_conexus_nexus-catalog__search(query="RDR-NNN or document title")`
 2. Check T1 scratch for `rdr-planning-context`
 3. Write link context to scratch:
    ```
-   mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "relates"}], "source_agent": "architect-planner"}', tags="link-context")
+   mcp__plugin_conexus_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "relates"}], "source_agent": "architect-planner"}', tags="link-context")
    ```
 4. If no RDR/document reference found, skip seeding (the auto-linker handles empty context gracefully)
 
@@ -89,7 +89,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Architecture Methodology
 
-The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-50 results), then `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
+The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-50 results), then `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
 1. Understand system architecture and integration patterns
 2. Synthesize findings into architectural approach
 3. Define component boundaries and interfaces
@@ -104,7 +104,7 @@ The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-
 - [ ] Execution plan created with beads
 - [ ] Beads created for trackable work
 - [ ] Risks identified with mitigations
-- [ ] Ready for `mcp__plugin_nx_nexus__nx_plan_audit` validation (RDR-080)
+- [ ] Ready for `mcp__plugin_conexus_nexus__nx_plan_audit` validation (RDR-080)
 
 ## Agent-Specific PRODUCE
 

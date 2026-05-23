@@ -594,7 +594,7 @@ def check_version_compatibility() -> None:
     2. **Plugin ↔ CLI version drift** — installed Claude Code plugin's
        declared version (read from ``${CLAUDE_PLUGIN_ROOT}/.claude-plugin/
        plugin.json``) differs (minor or major) from the running CLI.
-       Suggests ``/plugin update nx@nexus-plugins`` or
+       Suggests ``/plugin update conexus@nexus-plugins`` or
        ``uv tool upgrade conexus`` depending on which side is older.
        The plugin and CLI ship from the same repo at the same version
        (CI enforces marketplace.json parity); drift means one update
@@ -672,7 +672,7 @@ def check_version_compatibility() -> None:
                 if cli_t[:2] != plugin_t[:2]:
                     # Choose the actionable update for the lagging side.
                     if cli_t > plugin_t:
-                        hint = "plugin is older — run '/plugin update nx@nexus-plugins' in Claude Code"
+                        hint = "plugin is older — run '/plugin update conexus@nexus-plugins' in Claude Code"
                     else:
                         hint = "CLI is older — run 'uv tool upgrade conexus'"
                     log.warning(

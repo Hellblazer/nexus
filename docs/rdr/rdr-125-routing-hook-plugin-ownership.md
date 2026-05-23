@@ -175,7 +175,7 @@ without sn it would dead-end the user.
   it solves the symptom not the cause.
 - The two other RDR-121 rules are correctly placed:
   `phase_review_close_requires_gate` depends on
-  `/nx:phase-review-gate` (an nx-shipped skill) → nx owns it.
+  `/conexus:phase-review-gate` (an nx-shipped skill) → nx owns it.
   `git_add_all_redirects_to_explicit_paths` enforces a generic git
   discipline; it has no plugin-specific redirect target → nx is a
   reasonable default home.
@@ -434,7 +434,7 @@ The RDR is validated when:
 
 ## Finalization Gate
 
-To be run before acceptance. See `/nx:rdr-gate`.
+To be run before acceptance. See `/conexus:rdr-gate`.
 
 ## References
 
@@ -454,7 +454,7 @@ To be run before acceptance. See `/nx:rdr-gate`.
   (id=1384) and `125-research-A2` (id=1385). Chosen mechanism:
   vendor `_lib.py` with byte-equality CI guard.
 - 2026-05-20: gate-driven fix-in-place. Two Significant findings
-  from `/nx:rdr-gate 125` substantive-critic pass folded in:
+  from `/conexus:rdr-gate 125` substantive-critic pass folded in:
   (1) A3 enforcement perimeter scoped to monorepo development
   model (symmetric guard within the current nexus monorepo; would
   become one-directional if nx + sn ever split into separate

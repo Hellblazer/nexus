@@ -24,7 +24,7 @@ related_issues:
 
 ## Problem Statement
 
-All 14 nx plugin agents fail to use MCP tools (`mcp__plugin_nx_nexus__*`, `mcp__plugin_nx_sequential-thinking__*`) when spawned as subagents. This renders the entire MCP server infrastructure built in RDR-034 non-functional for its intended purpose — reliable agent access to T1/T2/T3 storage tiers.
+All 14 nx plugin agents fail to use MCP tools (`mcp__plugin_conexus_nexus__*`, `mcp__plugin_conexus_sequential-thinking__*`) when spawned as subagents. This renders the entire MCP server infrastructure built in RDR-034 non-functional for its intended purpose — reliable agent access to T1/T2/T3 storage tiers.
 
 **Observed failure** (2026-03-12, Delos project): 15 agents (6 knowledge-tidier, 8 general-purpose, 1 codebase-analyzer) all failed to call `store_put`, `memory_put`, `scratch`, and `sequentialthinking`. Every MCP tool was denied from the very first attempt, while built-in tools (Read, Bash) worked initially.
 
@@ -76,8 +76,8 @@ Both MCP tools worked on the first attempt with zero permission denials.
 ### Finding 4: The PermissionRequest hook provides runtime safety
 
 The nx plugin's `permission-request-stdin.sh` hook auto-approves:
-- All `mcp__plugin_nx_nexus__*` tools (line 52-55)
-- All `mcp__plugin_nx_sequential-thinking__*` tools (line 46-49)
+- All `mcp__plugin_conexus_nexus__*` tools (line 52-55)
+- All `mcp__plugin_conexus_sequential-thinking__*` tools (line 46-49)
 - Read, Write, Edit, Grep, Glob, WebSearch, WebFetch, Agent (lines 22-43)
 - Safe Bash commands: `bd`, `git` read-only, `uv run pytest`, `nx` CLI (lines 89-131)
 - Denies destructive commands: `git push --force`, `bd delete`, `nx collection delete` (lines 60-86)
@@ -116,7 +116,7 @@ version: "2.0"
 description: ...
 model: haiku
 color: mint
-tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", ...]
+tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_conexus_sequential-thinking__sequentialthinking", "mcp__plugin_conexus_nexus__search", "mcp__plugin_conexus_nexus__store_put", ...]
 ---
 ```
 
@@ -234,7 +234,7 @@ Documented but confirmed non-functional for plugin-defined agents (GitHub #21560
 
 Documented but confirmed non-functional (GitHub #25200). "MCP tools are not injected into the subagent's tool inventory at all, regardless of frontmatter declarations."
 
-### E: Keep `tools:` but use wildcard patterns like `mcp__plugin_nx_nexus__*` (rejected)
+### E: Keep `tools:` but use wildcard patterns like `mcp__plugin_conexus_nexus__*` (rejected)
 
 Wildcard patterns in `tools:` are supported in allow lists but their behavior in agent frontmatter is undocumented and untested. Given that explicit MCP tool names in `tools:` already fail, wildcards are unlikely to work.
 

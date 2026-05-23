@@ -75,7 +75,7 @@ Reviewed orchestration skill (`orchestration/SKILL.md`):
 - **Verified** — Developer agent's escalation is output-only, fires at end of turn. By then, the damage (wasted context, wasted time) is done.
 - **Verified** — Debugger agent solves these problems efficiently when given clear context (failing test, error, hypothesis). The gap is invocation timing, not capability.
 - **Verified** — Subagents cannot spawn other subagents. The developer cannot launch a debugger; it can only signal the parent.
-- **Documented** — The `using-nx-skills` routing table already says "Test fails → /nx:debug IMMEDIATELY" but this is advisory to the human, not enforced in agent prompts.
+- **Documented** — The `using-nx-skills` routing table already says "Test fails → /conexus:debug IMMEDIATELY" but this is advisory to the human, not enforced in agent prompts.
 
 ### Critical Assumptions
 

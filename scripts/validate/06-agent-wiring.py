@@ -116,7 +116,7 @@ def run_suite() -> None:
     # ── Stub agent body contracts ────────────────────────────────────────────
     step("Stub agent bodies name their MCP tool replacement")
     for stub_name, mcp_tool in STUB_AGENTS.items():
-        with case(f"stub[{stub_name}] → mcp__plugin_nx_nexus__{mcp_tool}"):
+        with case(f"stub[{stub_name}] → mcp__plugin_conexus_nexus__{mcp_tool}"):
             path = NX / "agents" / f"{stub_name}.md"
             assert path.exists(), f"stub file missing: {path}"
             body = _read(path)
@@ -132,7 +132,7 @@ def run_suite() -> None:
             for deleted in DELETED_AGENTS:
                 assert deleted not in body, f"body references deleted agent {deleted!r}"
             # Body must name the MCP tool in at least one invocation example
-            tool_full = f"mcp__plugin_nx_nexus__{mcp_tool}"
+            tool_full = f"mcp__plugin_conexus_nexus__{mcp_tool}"
             assert tool_full in body or mcp_tool in body, \
                 f"body doesn't show the {mcp_tool} MCP tool call"
 

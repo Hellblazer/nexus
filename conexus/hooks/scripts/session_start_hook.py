@@ -109,14 +109,14 @@ def main() -> None:
     output_lines.append("")
     output_lines.append("Search: `search` MCP tool — `where=\"KEY>=VALUE\"` for metadata filtering, `cluster_by=\"semantic\"` for result grouping, `topic=\"Label\"` for topic-scoped search, `where=\"section_type!=references\"` to filter noise (results include `chunk_text_hash` metadata)")
     output_lines.append("Document search: `query` MCP tool — document-level results with catalog-aware routing (`author`, `content_type`, `subtree`, `follow_links`, `depth`), taxonomy-boosted ranking")
-    output_lines.append("Analytical queries: `/nx:query` skill — multi-step retrieval and analysis")
+    output_lines.append("Analytical queries: `/conexus:query` skill — multi-step retrieval and analysis")
     output_lines.append("Plan library: `plan_save`/`plan_search` MCP tools (T2, project-scoped)")
     output_lines.append("Scratch: `scratch` MCP tool — session-scoped, shared across agents")
     output_lines.append("Catalog: `search`/`links`/`link` MCP tools (nexus-catalog server) — metadata-first routing; link creation with `chash:` spans (content-addressed, preferred)")
     output_lines.append("Enrichment: `nx enrich bib COLLECTION` (Semantic Scholar) | `nx enrich aspects COLLECTION` (RDR-089 structured aspects)")
     output_lines.append("Pagination: search/store_list/memory_search return paged results. Footer shows `offset=N` for next page.")
     output_lines.append("")
-    output_lines.append("MCP tool prefix: `mcp__plugin_nx_nexus__` (e.g. `mcp__plugin_nx_nexus__search`, `mcp__plugin_nx_nexus__query`)")
+    output_lines.append("MCP tool prefix: `mcp__plugin_conexus_nexus__` (e.g. `mcp__plugin_conexus_nexus__search`, `mcp__plugin_conexus_nexus__query`)")
     output_lines.append("")
 
     # --- L1 Knowledge Map (RDR-072) — per-repo cached topic labels ---

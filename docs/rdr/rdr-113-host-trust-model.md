@@ -332,7 +332,7 @@ hang, not silently fall back, not return a stale read.
 
 ### Phase 1: Daemon-side enforcement
 
-To be expanded during `/nx:create-plan`.
+To be expanded during `/conexus:create-plan`.
 
 ### Day 2 Operations
 

@@ -64,7 +64,7 @@ implementation_notes: |
 
 ## Problem Statement
 
-Nexus has a working catalogue of "preferred tool" rules: Serena for symbol-level work, `/nx:phase-review-gate` before phase close, `/nx:brainstorming-gate` before any production edit, `/nx:debug` after two failed fix attempts, `/nx:plan-audit` when a plan exists, T3 `nx search` before codebase exploration, `/nx:receiving-review` before acting on review feedback. Each rule lives in some combination of:
+Nexus has a working catalogue of "preferred tool" rules: Serena for symbol-level work, `/conexus:phase-review-gate` before phase close, `/conexus:brainstorming-gate` before any production edit, `/conexus:debug` after two failed fix attempts, `/conexus:plan-audit` when a plan exists, T3 `nx search` before codebase exploration, `/conexus:receiving-review` before acting on review feedback. Each rule lives in some combination of:
 
 - The user's global `CLAUDE.md` (e.g. "Serena for symbols; Grep for text")
 - The project `CLAUDE.md`
@@ -73,7 +73,7 @@ Nexus has a working catalogue of "preferred tool" rules: Serena for symbol-level
 - Per-skill `description:` lines visible during skill discovery
 - Persistent memory entries with `When to use` guidance
 
-Despite all of this, agents reach for the default-available tool instead of the preferred one. Steve's Claude diagnosed it precisely: "Serena's tools are listed as 'deferred' (requiring a ToolSearch call to load schemas), while grep and Read are immediately available. The path of least resistance wins every time, and I rationalize it as 'just a quick check.'" The same pattern shows up in nexus: the agent grep-walks Python symbols instead of calling `jet_brains_find_symbol`; closes phase-review beads with `bd close` without running `/nx:phase-review-gate`; runs the third retry-fix instead of invoking `/nx:debug`; opens Edit on production code without `/nx:brainstorming-gate`.
+Despite all of this, agents reach for the default-available tool instead of the preferred one. Steve's Claude diagnosed it precisely: "Serena's tools are listed as 'deferred' (requiring a ToolSearch call to load schemas), while grep and Read are immediately available. The path of least resistance wins every time, and I rationalize it as 'just a quick check.'" The same pattern shows up in nexus: the agent grep-walks Python symbols instead of calling `jet_brains_find_symbol`; closes phase-review beads with `bd close` without running `/conexus:phase-review-gate`; runs the third retry-fix instead of invoking `/conexus:debug`; opens Edit on production code without `/conexus:brainstorming-gate`.
 
 The failure mode is universal and the diagnosis is consistent across instances. Documentation and session-start context are necessary but not sufficient. The agent reads them, agrees with them, and then rationalizes past them at the moment of action because the wrong tool is one tool call away while the right tool needs ToolSearch, a slash-command dispatch, or a multi-step preamble.
 
@@ -89,9 +89,9 @@ Steve's instance: "I see [MEMORY.md] is available but I treat it as optional con
 
 #### Gap 3: No enforcement layer at the action boundary
 
-The skills themselves (`/nx:phase-review-gate`, `/nx:brainstorming-gate`) ARE hard-enforcement preambles (Python scripts the agent cannot reason past), but invoking them is soft. The hard part of "must run the gate" is the *decision* to run it, not the gate itself. Once invoked, the gate works; the gap is that the agent doesn't invoke it.
+The skills themselves (`/conexus:phase-review-gate`, `/conexus:brainstorming-gate`) ARE hard-enforcement preambles (Python scripts the agent cannot reason past), but invoking them is soft. The hard part of "must run the gate" is the *decision* to run it, not the gate itself. Once invoked, the gate works; the gap is that the agent doesn't invoke it.
 
-This RDR is the meta-solution to the pattern that `/nx:phase-review-gate` is one instance of: skill-level hard enforcement only protects you after you've decided to invoke the skill. To force the invocation, the enforcement has to move earlier, to the moment the agent reaches for the wrong tool.
+This RDR is the meta-solution to the pattern that `/conexus:phase-review-gate` is one instance of: skill-level hard enforcement only protects you after you've decided to invoke the skill. To force the invocation, the enforcement has to move earlier, to the moment the agent reaches for the wrong tool.
 
 ## Context
 
@@ -101,7 +101,7 @@ Three precedents in nexus that already use the hook-at-action-time pattern:
 
 - **`PreToolUse` hook on `Bash` matcher** at `nx/hooks/scripts/pre_close_verification_hook.sh`. Already in production for verifying pre-close conditions. The hook intercepts Bash invocations and runs a verification check before the command executes.
 - **`PostToolUse` hook on `Write|Edit` matcher** at `nx/hooks/scripts/divergence-language-guard.sh`. Already in production for language-divergence checks after edits.
-- **`PermissionRequest` hook on `mcp__plugin_nx_.*` matcher** at `nx/hooks/scripts/auto-approve-nx-mcp.sh`. Already in production for auto-approving nx MCP tools.
+- **`PermissionRequest` hook on `mcp__plugin_conexus_.*` matcher** at `nx/hooks/scripts/auto-approve-nx-mcp.sh`. Already in production for auto-approving nx MCP tools.
 
 The hook infrastructure is mature. The pattern this RDR proposes generalizes the same shape (intercept-at-action-time, with redirect) to the tool-routing problem.
 
@@ -113,7 +113,7 @@ Three other RDRs frame the why:
 
 And one direct precedent:
 
-- **RDR-120 § Enforcement Backstops** (drafted 2026-05-19) catalogues four working enforcement mechanisms and three tooling gaps for the substrate moratorium. The "tooling gaps" list includes three PreToolUse-shaped hooks (cross-RDR moratorium awareness in `/nx:rdr-create`, scope-gain check in `/nx:phase-review-gate`, `bd create` grep against banned-topic lists). RDR-121 generalizes those into a single architectural pattern.
+- **RDR-120 § Enforcement Backstops** (drafted 2026-05-19) catalogues four working enforcement mechanisms and three tooling gaps for the substrate moratorium. The "tooling gaps" list includes three PreToolUse-shaped hooks (cross-RDR moratorium awareness in `/conexus:rdr-create`, scope-gain check in `/conexus:phase-review-gate`, `bd create` grep against banned-topic lists). RDR-121 generalizes those into a single architectural pattern.
 
 ### Technical Environment
 
@@ -127,7 +127,7 @@ Hook events available (per Claude Code SubagentStart hook contract verified in `
 
 For tool routing, `PreToolUse` is the load-bearing event. It runs before the agent's tool call executes, can inspect the tool name and arguments, and can block with a structured stderr message that the agent receives as feedback.
 
-Matchers in `hooks.json` are regex against the tool name. Current production matchers: `Bash`, `Write|Edit`, `mcp__plugin_nx_.*`. The matcher can target the default tool (e.g. `Bash` for grep / `bd close`, `Edit|Write` for production edits) and the hook script inspects the call arguments to decide whether to fire.
+Matchers in `hooks.json` are regex against the tool name. Current production matchers: `Bash`, `Write|Edit`, `mcp__plugin_conexus_.*`. The matcher can target the default tool (e.g. `Bash` for grep / `bd close`, `Edit|Write` for production edits) and the hook script inspects the call arguments to decide whether to fire.
 
 ## Scope Boundaries
 
@@ -152,11 +152,11 @@ This is the inventory the design must address. Each row is a place where the pre
 | Default tool reached for | Preferred tool | Documented in | Hook candidate? |
 |---|---|---|---|
 | `Bash: grep .*\.py` on symbol names | `jet_brains_find_symbol` (Serena) | CLAUDE.md, using-nx-skills | Yes: PreToolUse Bash matcher with `--include='*.py' --include='*.swift' --include='*.java'` pattern detection |
-| `Bash: bd close <bead>` on a phase-review bead | `/nx:phase-review-gate <rdr-id> --phase N` first | RDR-120, using-nx-skills (after this branch lands) | Yes: PreToolUse Bash matcher on `bd close.*` with bead-title inspection |
-| `Edit` / `Write` on production code | `/nx:brainstorming-gate` first | using-nx-skills | Maybe: high false-positive risk on tests and docs; needs tight matcher |
-| `Bash: pytest` retry after second failure | `/nx:debug` | using-nx-skills, memory feedback_robot_no_fatigue | Maybe: needs session-state (retry count) which PreToolUse can't see; better as PostToolUse warn |
-| `Edit` on code with an in-flight plan | `/nx:plan-audit` first | using-nx-skills | Yes: PreToolUse Edit/Write matcher checking for active plan in T2 |
-| `Edit` implementing review feedback | `/nx:receiving-review` first | CLAUDE.md feedback, using-nx-skills | Hard: requires understanding that the edit is "implementing feedback" vs ordinary work |
+| `Bash: bd close <bead>` on a phase-review bead | `/conexus:phase-review-gate <rdr-id> --phase N` first | RDR-120, using-nx-skills (after this branch lands) | Yes: PreToolUse Bash matcher on `bd close.*` with bead-title inspection |
+| `Edit` / `Write` on production code | `/conexus:brainstorming-gate` first | using-nx-skills | Maybe: high false-positive risk on tests and docs; needs tight matcher |
+| `Bash: pytest` retry after second failure | `/conexus:debug` | using-nx-skills, memory feedback_robot_no_fatigue | Maybe: needs session-state (retry count) which PreToolUse can't see; better as PostToolUse warn |
+| `Edit` on code with an in-flight plan | `/conexus:plan-audit` first | using-nx-skills | Yes: PreToolUse Edit/Write matcher checking for active plan in T2 |
+| `Edit` implementing review feedback | `/conexus:receiving-review` first | CLAUDE.md feedback, using-nx-skills | Hard: requires understanding that the edit is "implementing feedback" vs ordinary work |
 | `Bash: ls / find` for codebase exploration | T3 `nx search` first | using-nx-skills Red Flags | Yes: PreToolUse Bash matcher on `find . -name` / `ls -R` shapes |
 | `bd create` on substrate-adjacent work during RDR-120 moratorium | Stop and read RDR-120 § Scope Boundaries first | RDR-120 | Yes: PreToolUse Bash matcher on `bd create.*` with description regex against banned-topic list |
 | `git add -A` / `git add .` | `git add <explicit path>` | CLAUDE.md feedback, memory feedback_no_git_add_all | Yes: PreToolUse Bash matcher; simple regex |
@@ -201,7 +201,7 @@ Design lifted from in-tree precedent `nx/hooks/scripts/pre_close_verification_ho
 Three rules with the highest confidence and lowest false-positive risk. Each ships as its own hook script under `nx/hooks/scripts/routing/`.
 
 1. **`grep_for_symbols_redirects_to_serena`**: Bash matcher; detects `grep` / `rg` against `*.py`, `*.swift`, `*.java`, `*.ts`, `*.tsx`, `*.go`, `*.rs` with patterns that look like identifier searches (no spaces, no regex metacharacters). Emits a block message: "This looks like a symbol search. Use `mcp__plugin_sn_serena__jet_brains_find_symbol` for symbol definitions, `mcp__plugin_sn_serena__jet_brains_find_referencing_symbols` for callers. To override, add `# routing-allow: <reason ≥8 chars>` to the command."
-2. **`phase_review_close_requires_gate`**: Bash matcher; detects `bd close .*` where the bead title (looked up via `bd show`) contains "phase" or "review". Claude Code provides no native session-history API to PreToolUse hooks, so "recent invocation of `/nx:phase-review-gate`" is observed via a **sentinel file** at `${TMPDIR:-/tmp}/nx-phase-gate-sentinel/<claude_pid>-<rdr-id>-<phase>.json` written by the `/nx:phase-review-gate` skill on successful pass. The hook checks: (a) sentinel exists for the closing bead's `(rdr-id, phase)`, (b) sentinel `mtime` is newer than the current Claude session-start time (read from `~/.config/nexus/t1_addr.<claude_pid>` ctime), (c) sentinel content reports `outcome: "PASSED"`. Any of: sentinel absent, sentinel stale (pre-session-start), sentinel `outcome != "PASSED"`, or sentinel unreadable produces **fail-closed deny** with a redirect message naming the exact gate invocation. RDR-120 § Enforcement Backstops cites this as a load-bearing follow-on. The sentinel-write side ships in this RDR's P2 alongside the hook (single PR; sentinel + reader are coupled and tested together). Pattern precedent: `pre_close_verification_hook.sh` uses scratch markers the same way; this is the file-system analogue.
+2. **`phase_review_close_requires_gate`**: Bash matcher; detects `bd close .*` where the bead title (looked up via `bd show`) contains "phase" or "review". Claude Code provides no native session-history API to PreToolUse hooks, so "recent invocation of `/conexus:phase-review-gate`" is observed via a **sentinel file** at `${TMPDIR:-/tmp}/nx-phase-gate-sentinel/<claude_pid>-<rdr-id>-<phase>.json` written by the `/conexus:phase-review-gate` skill on successful pass. The hook checks: (a) sentinel exists for the closing bead's `(rdr-id, phase)`, (b) sentinel `mtime` is newer than the current Claude session-start time (read from `~/.config/nexus/t1_addr.<claude_pid>` ctime), (c) sentinel content reports `outcome: "PASSED"`. Any of: sentinel absent, sentinel stale (pre-session-start), sentinel `outcome != "PASSED"`, or sentinel unreadable produces **fail-closed deny** with a redirect message naming the exact gate invocation. RDR-120 § Enforcement Backstops cites this as a load-bearing follow-on. The sentinel-write side ships in this RDR's P2 alongside the hook (single PR; sentinel + reader are coupled and tested together). Pattern precedent: `pre_close_verification_hook.sh` uses scratch markers the same way; this is the file-system analogue.
 3. **`git_add_all_redirects_to_explicit_paths`**: Bash matcher; detects `git add -A`, `git add .`, `git add --all`. Emits a block message: "Stage by explicit path. Wildcard adds pull in unrelated untracked drafts (`feedback_no_git_add_all.md`). To override, add `# routing-allow: <reason ≥8 chars>` to the command."
 
 **Phase 3: Telemetry and refinement**
@@ -319,7 +319,7 @@ The telemetry loop closes the long-term question: which rules actually catch fai
 
 ### Prerequisites
 
-- [ ] `/nx:phase-review-gate` restored to main (RDR-120 P0 prerequisite; this RDR's Phase 2 hook 2 depends on it).
+- [ ] `/conexus:phase-review-gate` restored to main (RDR-120 P0 prerequisite; this RDR's Phase 2 hook 2 depends on it).
 - [ ] Existing hook tests green on main.
 - [ ] **P2 co-requirement**: `nx/skills/phase-review-gate/SKILL.md` updated to write the sentinel file on PASSED outcome (`${TMPDIR:-/tmp}/nx-phase-gate-sentinel/<claude_pid>-<rdr-id>-<phase>.json`). The hook reader and sentinel writer MUST ship in the same PR; shipping the hook without the writer denies every phase-review close indefinitely.
 
@@ -378,7 +378,7 @@ None. Stdlib bash + python; existing `~/.config/nexus/` convention.
 - **Scenario**: `grep -r MyFunction src/nexus/ --include='*.py'` triggers `grep_for_symbols_redirects_to_serena`. **Verify**: block emitted, redirect message names `jet_brains_find_symbol`.
 - **Scenario**: `grep -r "TODO" src/nexus/ --include='*.py'` (text search, multi-character non-identifier pattern). **Verify**: hook is no-op; legitimate text grep proceeds.
 - **Scenario**: `bd close nexus-abc1` where bead title contains "Phase 3 review"; sentinel file present, fresh, PASSED. **Verify**: hook reads sentinel, returns `allow()` with advisory context naming the verified gate run.
-- **Scenario**: same `bd close` shape; sentinel file **absent**. **Verify**: hook returns `deny()` with redirect message naming exact gate invocation (`/nx:phase-review-gate <rdr-id> --phase N`); fail-closed.
+- **Scenario**: same `bd close` shape; sentinel file **absent**. **Verify**: hook returns `deny()` with redirect message naming exact gate invocation (`/conexus:phase-review-gate <rdr-id> --phase N`); fail-closed.
 - **Scenario**: same `bd close`; sentinel file present but `mtime` older than session-start ctime. **Verify**: `deny()` with "stale sentinel: gate must run in this session" message.
 - **Scenario**: same `bd close`; sentinel exists with `outcome: "BLOCKED"`. **Verify**: `deny()` with "gate did not pass" message naming the BLOCKED outcome.
 - **Scenario**: same `bd close`; sentinel exists but is unreadable (permissions denied or malformed JSON). **Verify**: `deny()` with "cannot verify gate, fail-closed" message; treats cannot-verify as not-verified.
@@ -433,7 +433,7 @@ This RDR is scoped to the routing-enforcement pattern. Specifically OUT of scope
 - **IDE compatibility**: N/A (Claude Code only).
 - **Incremental adoption**: each rule ships independently; no global flag.
 - **Secret/credential lifecycle**: hooks do not read or emit secrets.
-- **Memory management**: telemetry log grows; needs rotation policy. P3 to spec. Sentinel files at `${TMPDIR}/nx-phase-gate-sentinel/` accumulate across sessions; the OS clears `$TMPDIR` on reboot on macOS/Linux but not predictably. Add a sweep-on-write step to `/nx:phase-review-gate`'s sentinel writer that deletes sentinels whose `<claude_pid>` is no longer alive (cheap: one `kill -0` per file). Out of scope for the hook itself.
+- **Memory management**: telemetry log grows; needs rotation policy. P3 to spec. Sentinel files at `${TMPDIR}/nx-phase-gate-sentinel/` accumulate across sessions; the OS clears `$TMPDIR` on reboot on macOS/Linux but not predictably. Add a sweep-on-write step to `/conexus:phase-review-gate`'s sentinel writer that deletes sentinels whose `<claude_pid>` is no longer alive (cheap: one `kill -0` per file). Out of scope for the hook itself.
 
 ### Proportionality
 
@@ -465,6 +465,6 @@ Document is sized to the architectural pattern, not to any single hook. The cata
 
 ## Revision History
 
-- 2026-05-19: Draft. Filed in response to Steve's Serena-adoption issue and as the meta-solution to the pattern that RDR-120's `/nx:phase-review-gate` restoration is one instance of.
+- 2026-05-19: Draft. Filed in response to Steve's Serena-adoption issue and as the meta-solution to the pattern that RDR-120's `/conexus:phase-review-gate` restoration is one instance of.
 - 2026-05-20 (re-gate): Second-pass revisions (re-gate outcome PARTIAL with 0 Critical, 2 Significant). (1) Fail-closed carve-out moved from test-plan-only to §Approach Phase 1 "Hook script discipline" as an explicit `registry.yaml: fail_closed` opt-in; `phase_review_close_requires_gate` is the first declared instance. Removes the §Approach/test-plan contradiction the first re-gate caught. (2) Cumulative latency budget arithmetic corrected: one-process-per-hook architecture means 4× Python-startup baseline is paid, not amortized. New "Cumulative budget accounting" subsection in §Approach + §Performance Expectations + Trade-offs latency bullet now state <300ms p95 cumulative with a hook-count cap of 4. Single-dispatcher fallback noted as Phase 3 follow-on. (3) Prerequisites list updated with SKILL.md sentinel-write co-requirement (hook + writer ship in the same PR). (4) Sentinel cleanup policy added to Cross-Cutting Concerns memory bullet (sweep dead-pid sentinels at write time).
-- 2026-05-20: Gate-driven revisions (gate outcome BLOCKED with 2 Critical, 2 Significant). (1) Hook 2 `phase_review_close_requires_gate` replaced the nonexistent "session log" lookup with a sentinel-file pattern written by `/nx:phase-review-gate`; sentinel write-side ships in P2 alongside the hook. Hook fails closed on sentinel absent/stale/non-PASSED/unreadable; five new test scenarios cover those cases. (2) MVV P1 row corrected from "exit code 2" to JSON `permissionDecision: "deny"` envelope + exit 0, matching A1 verification. (3) A2 language choice committed at P1 to Python-native (was deferred to P3); `_lib.sh` → `_lib.py`, helpers renamed; cumulative-budget bullet added (<200ms with 4 stacked hooks). A2 status promoted from `[~]` to `[x]`. Hook 2 fail-closed exception documented in test plan top-level-exception scenario.
+- 2026-05-20: Gate-driven revisions (gate outcome BLOCKED with 2 Critical, 2 Significant). (1) Hook 2 `phase_review_close_requires_gate` replaced the nonexistent "session log" lookup with a sentinel-file pattern written by `/conexus:phase-review-gate`; sentinel write-side ships in P2 alongside the hook. Hook fails closed on sentinel absent/stale/non-PASSED/unreadable; five new test scenarios cover those cases. (2) MVV P1 row corrected from "exit code 2" to JSON `permissionDecision: "deny"` envelope + exit 0, matching A1 verification. (3) A2 language choice committed at P1 to Python-native (was deferred to P3); `_lib.sh` → `_lib.py`, helpers renamed; cumulative-budget bullet added (<200ms with 4 stacked hooks). A2 status promoted from `[~]` to `[x]`. Hook 2 fail-closed exception documented in test plan top-level-exception scenario.

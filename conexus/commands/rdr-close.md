@@ -129,7 +129,7 @@ force_implemented_match = (re.search(r"--force-implemented\s+'([^']*)'", args)
 force_implemented_reason = force_implemented_match.group(1) if force_implemented_match else None
 if force_implemented_match is not None and not (force_implemented_reason or '').strip():
     print("> **ERROR**: `--force-implemented` requires a non-empty reason string.")
-    print("> Example: `/nx:rdr-close 069 --reason implemented --force-implemented 'critic false positive — gap addressed at src/foo.py:42'`")
+    print("> Example: `/conexus:rdr-close 069 --reason implemented --force-implemented 'critic false positive — gap addressed at src/foo.py:42'`")
     sys.exit(0)
 args_clean = re.sub(r'--reason\s+\S+', '', args)
 # Strip --force-implemented BEFORE --force so the negative-lookahead strip below
@@ -146,7 +146,7 @@ args_clean = re.sub(r'--pointers\s+\S+', '', args_clean).strip()
 id_match = re.search(r'\d+', args_clean)
 
 if not id_match:
-    print("> **Usage**: `/nx:rdr-close <id> [--reason implemented|reverted|abandoned|superseded]`")
+    print("> **Usage**: `/conexus:rdr-close <id> [--reason implemented|reverted|abandoned|superseded]`")
     print()
     rdrs = get_all_rdrs(rdr_path)
     print("### Open/Draft RDRs")
@@ -186,7 +186,7 @@ if current_status.lower() not in ('accepted', 'final'):
         print()
     else:
         print(f"> **BLOCKED**: RDR status is `{current_status}`. Close requires status `accepted` or `final`.")
-        print(f"> Run `/nx:rdr-gate` to validate, or use `--force` to override.")
+        print(f"> Run `/conexus:rdr-gate` to validate, or use `--force` to override.")
         print()
         sys.exit(0)
 
@@ -250,7 +250,7 @@ if (close_reason or '').lower() == 'implemented':
         print("**Re-invoke with per-gap closure pointers:**")
         print()
         example = ",".join(f"Gap{num}=path/to/file.py:LINE" for num, _q, _t in gap_matches)
-        print(f"```\n/nx:rdr-close {rdr_id_label} --reason implemented --pointers '{example}'\n```")
+        print(f"```\n/conexus:rdr-close {rdr_id_label} --reason implemented --pointers '{example}'\n```")
         print()
         sys.exit(0)
     else:

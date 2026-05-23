@@ -439,8 +439,8 @@ Measurement stays qualitative pre-RDR-090 (describe the deltas against the R2 pr
 
 ## Finalization Gate
 
-- [ ] All research findings recorded via `/nx:rdr-research add 092`.
-- [ ] Three-layer gate passes via `/nx:rdr-gate 092`.
+- [ ] All research findings recorded via `/conexus:rdr-research add 092`.
+- [ ] Three-layer gate passes via `/conexus:rdr-gate 092`.
 - [ ] Critic critique resolved.
 - [ ] Canary measurements documented.
 

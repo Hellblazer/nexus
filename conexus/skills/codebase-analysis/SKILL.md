@@ -18,7 +18,7 @@ Delegates to the **codebase-deep-analyzer** agent (model: sonnet).
 
 ## Pre-Dispatch: Seed Link Context (optional)
 
-If the analysis is for a specific RDR or architectural decision, seed link-context so findings stored to T3 auto-link. See `/nx:catalog` for details. Skip for general exploration.
+If the analysis is for a specific RDR or architectural decision, seed link-context so findings stored to T3 auto-link. See `/conexus:catalog` for details. Skip for general exploration.
 
 ## Agent Invocation
 
@@ -46,12 +46,12 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Analysis Methodology
 
-The codebase-deep-analyzer uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
+The codebase-deep-analyzer uses `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
 1. Form hypothesis about architecture (e.g., "This appears to be MVC pattern")
 2. Gather evidence from code structure, naming, dependencies
 3. Validate/refute hypothesis against actual code
 4. Map module/package structure and document patterns
-5. Persist findings to nx store: mcp__plugin_nx_nexus__store_put(content="...", collection="knowledge", title="architecture-{project}-{component}", tags="architecture"
+5. Persist findings to nx store: mcp__plugin_conexus_nexus__store_put(content="...", collection="knowledge", title="architecture-{project}-{component}", tags="architecture"
 
 ## Success Criteria
 

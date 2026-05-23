@@ -7,15 +7,15 @@ effort: medium
 **Tier-aware discipline** — apply at session start and before every major step:
 
 1. **Read** widest → narrowest before duplicating effort:
-   - T3 (cross-project): `mcp__plugin_nx_nexus__nx_answer(...)` for verb-shape questions; `mcp__plugin_nx_nexus__search(...)` for keyword lookup.
-   - T2 (project): `mcp__plugin_nx_nexus__memory_search(query="<topic>", project="<repo>")`.
-   - T1 (siblings, this session): `mcp__plugin_nx_nexus__scratch(action="search", query="<topic>")`.
-2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_nx_nexus__plan_search(query="<task>", limit=3)`.
+   - T3 (cross-project): `mcp__plugin_conexus_nexus__nx_answer(...)` for verb-shape questions; `mcp__plugin_conexus_nexus__search(...)` for keyword lookup.
+   - T2 (project): `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`.
+   - T1 (siblings, this session): `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`.
+2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_conexus_nexus__plan_search(query="<task>", limit=3)`.
 3. **Write back at end** — findings not stored are findings lost. Pick the tier that matches the audience:
-   - `mcp__plugin_nx_nexus__scratch(action="put", ..., tags="<topic>")` for sibling agents downstream THIS session (T1, narrowest scope, cheapest write).
-   - `mcp__plugin_nx_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2).
-   - `mcp__plugin_nx_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
-   - `mcp__plugin_nx_nexus__plan_save(...)` for multi-agent pipeline outcomes (so future callers hit plan-match).
+   - `mcp__plugin_conexus_nexus__scratch(action="put", ..., tags="<topic>")` for sibling agents downstream THIS session (T1, narrowest scope, cheapest write).
+   - `mcp__plugin_conexus_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2).
+   - `mcp__plugin_conexus_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
+   - `mcp__plugin_conexus_nexus__plan_save(...)` for multi-agent pipeline outcomes (so future callers hit plan-match).
 
 # Research Synthesis Skill
 
@@ -42,11 +42,11 @@ Default: **haiku**. Escalate via `model` parameter on the Agent tool:
 
 Before dispatching the deep-research-synthesizer agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings:
 
-1. If the task references an RDR (pattern `RDR-\d+`) or a known document, resolve it: `mcp__plugin_nx_nexus-catalog__search(query="RDR-NNN or document title")`
+1. If the task references an RDR (pattern `RDR-\d+`) or a known document, resolve it: `mcp__plugin_conexus_nexus-catalog__search(query="RDR-NNN or document title")`
 2. Check T1 scratch for `rdr-planning-context`
 3. Write link context to scratch:
    ```
-   mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "cites"}], "source_agent": "deep-research-synthesizer"}', tags="link-context")
+   mcp__plugin_conexus_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "cites"}], "source_agent": "deep-research-synthesizer"}', tags="link-context")
    ```
 4. If no RDR/document reference found, skip seeding (the auto-linker handles empty context gracefully)
 
@@ -76,7 +76,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Research Methodology
 
-The agent uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
+The agent uses `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
 1. Form hypothesis about what information is needed
 2. Search nx store for existing knowledge — for scoped evidence, prefer `query(question=..., author=..., content_type=...)` over `search()` + manual scoping
 3. Search web resources for current information
@@ -91,7 +91,7 @@ The agent uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
 - [ ] Key findings synthesized (not just listed)
 - [ ] Contradictions identified and resolved
 - [ ] Recommendations provided with supporting evidence
-- [ ] Findings persisted to nx T3 store via `mcp__plugin_nx_nexus__store_put` (RDR-080 — direct call, no agent spawn)
+- [ ] Findings persisted to nx T3 store via `mcp__plugin_conexus_nexus__store_put` (RDR-080 — direct call, no agent spawn)
 - [ ] Round artifacts persisted to T2 or T3
 
 ## Agent-Specific PRODUCE

@@ -1,6 +1,6 @@
 ---
 name: plan-first
-description: Use when starting any retrieval task — you MUST call `mcp__plugin_nx_nexus__plan_match` first; if a match clears the threshold you MUST execute it via `mcp__plugin_nx_nexus__plan_run`. Falling through to `/nx:query` is permitted only on a confirmed miss. Skipping this gate is a defect.
+description: Use when starting any retrieval task — you MUST call `mcp__plugin_conexus_nexus__plan_match` first; if a match clears the threshold you MUST execute it via `mcp__plugin_conexus_nexus__plan_run`. Falling through to `/conexus:query` is permitted only on a confirmed miss. Skipping this gate is a defect.
 effort: low
 ---
 
@@ -10,7 +10,7 @@ effort: low
 
 ## Rule
 
-Before decomposing any retrieval task, you MUST call `mcp__plugin_nx_nexus__plan_match` first. If a match clears `min_confidence`, you MUST execute the returned plan via `mcp__plugin_nx_nexus__plan_run`. Dispatching `/nx:query` without first checking is a defect.
+Before decomposing any retrieval task, you MUST call `mcp__plugin_conexus_nexus__plan_match` first. If a match clears `min_confidence`, you MUST execute the returned plan via `mcp__plugin_conexus_nexus__plan_run`. Dispatching `/conexus:query` without first checking is a defect.
 
 ## Flow
 
@@ -34,7 +34,7 @@ Before decomposing any retrieval task, you MUST call `mcp__plugin_nx_nexus__plan
 
 ## When to pin dimensions
 
-- **From a verb skill** (e.g. `/nx:research`): pin `dimensions={verb:
+- **From a verb skill** (e.g. `/conexus:research`): pin `dimensions={verb:
   "research"}`. Narrows the cosine pool to research plans; specificity
   tiebreaks pick the best strategy variant.
 - **From the top-level agent**: leave dimensions empty. Let the
@@ -62,7 +62,7 @@ the missing bindings to the user rather than guessing defaults.
 
 - **Plan returned** → present the final step's result, log the
   plan_id for the session trace.
-- **No plan matched** → fall through to `/nx:query` and save the
+- **No plan matched** → fall through to `/conexus:query` and save the
   resulting plan via `plan_save` for future reuse.
 - **`plan_run` raised** → surface the error verbatim; do not retry
   with heuristic bindings.

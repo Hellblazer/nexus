@@ -8,7 +8,7 @@
 
 ```bash
 /plugin marketplace add Hellblazer/nexus
-/plugin install nx@nexus-plugins
+/plugin install conexus@nexus-plugins
 ```
 
 **Local development** (from the nexus repo checkout):
@@ -26,11 +26,11 @@ The `nx` CLI and plugin work independently, but the plugin's full agent and skil
 | **`nx` CLI** | Hook scripts, indexing, and CLI-only operations (agents use MCP tools) | See [Getting Started](../docs/getting-started.md) |
 | **`bd` (Beads)** | Task tracking in all agents | [github.com/BeadsProject/beads](https://github.com/BeadsProject/beads) |
 
-Run `/nx:nx-preflight` after installing to verify all dependencies are present.
+Run `/conexus:nx-preflight` after installing to verify all dependencies are present.
 
 The plugin's SessionStart hook auto-spawns the T2 daemon (`nx daemon
 t2 ensure-running --quiet`) on every Claude Code session start, so a
-fresh `pip install conexus` + `/plugin install nx@nexus-plugins`
+fresh `pip install conexus` + `/plugin install conexus@nexus-plugins`
 yields a working substrate on first session without any manual
 `nx daemon t2 start` incantation. For a daemon that survives
 across reboots independent of Claude Code (recommended for any host
@@ -58,13 +58,13 @@ SDK-bridge transport.
 
 | Goal | Start here |
 |------|-----------|
-| Explore an unfamiliar codebase | `/nx:analyze-code` |
-| Plan a feature or component | `/nx:brainstorming-gate` → `/nx:create-plan` |
-| Debug a failure | `/nx:debug` (after 2–3 failed attempts) |
-| Review code before committing | `/nx:review-code` |
-| Research an unfamiliar topic | `/nx:research` |
-| Document a technical decision | `/nx:rdr-create` → `/nx:rdr-research` → `/nx:rdr-accept` |
-| Index PDFs into semantic search | `/nx:pdf-process` |
+| Explore an unfamiliar codebase | `/conexus:analyze-code` |
+| Plan a feature or component | `/conexus:brainstorming-gate` → `/conexus:create-plan` |
+| Debug a failure | `/conexus:debug` (after 2–3 failed attempts) |
+| Review code before committing | `/conexus:review-code` |
+| Research an unfamiliar topic | `/conexus:research` |
+| Document a technical decision | `/conexus:rdr-create` → `/conexus:rdr-research` → `/conexus:rdr-accept` |
+| Index PDFs into semantic search | `/conexus:pdf-process` |
 | Not sure which agent to use | Check the skill directory in `using-nx-skills` |
 
 ## Directory Structure
@@ -80,7 +80,7 @@ nx/
 │   │   └── RELAY_TEMPLATE.md    # Canonical relay message format
 │   └── *.md                 # 14 command-invoked + 2 query-dispatched = 16 agent definitions
 ├── commands/
-│   └── *.md                 # Slash commands (/nx:research, /nx:create-plan, /nx:review-code, etc.)
+│   └── *.md                 # Slash commands (/conexus:research, /conexus:create-plan, /conexus:review-code, etc.)
 ├── hooks/
 │   ├── hooks.json                     # Hook event → script wiring (source of truth)
 │   └── scripts/
@@ -120,10 +120,10 @@ nx/
     ├── plan-promote/        # meta-seed: rank promotion candidates
     │
     │   # RDR-080 pointer skills (dispatch a specific MCP tool — no agent spawn)
-    ├── query/               # → mcp__plugin_nx_nexus__nx_answer
-    ├── knowledge-tidying/   # → mcp__plugin_nx_nexus__nx_tidy
-    ├── enrich-plan/         # → mcp__plugin_nx_nexus__nx_enrich_beads
-    ├── plan-validation/     # → mcp__plugin_nx_nexus__nx_plan_audit
+    ├── query/               # → mcp__plugin_conexus_nexus__nx_answer
+    ├── knowledge-tidying/   # → mcp__plugin_conexus_nexus__nx_tidy
+    ├── enrich-plan/         # → mcp__plugin_conexus_nexus__nx_enrich_beads
+    ├── plan-validation/     # → mcp__plugin_conexus_nexus__nx_plan_audit
     │
     │   # Agent-dispatcher skills
     ├── code-review/         # → code-review-expert agent
@@ -162,7 +162,7 @@ This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure
 | analyze | Cross-corpus analysis and synthesis |
 | debug | Dev / debug from a failing code path |
 | document | Documentation authoring or coverage audit |
-| plan-first | Retrieval gate — try `plan_match` before falling through to `/nx:query` |
+| plan-first | Retrieval gate — try `plan_match` before falling through to `/conexus:query` |
 | plan-author | Author a new plan template |
 | plan-inspect | Inspect plan metrics or the dimension registry |
 | plan-promote | Rank promotion candidates by library metrics |
@@ -171,10 +171,10 @@ This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure
 
 | Skill | Delegates to |
 |-------|--------------|
-| query | `mcp__plugin_nx_nexus__nx_answer` — multi-step retrieval |
-| knowledge-tidying | `mcp__plugin_nx_nexus__nx_tidy` — knowledge consolidation |
-| enrich-plan | `mcp__plugin_nx_nexus__nx_enrich_beads` — bead context enrichment |
-| plan-validation | `mcp__plugin_nx_nexus__nx_plan_audit` — plan audit |
+| query | `mcp__plugin_conexus_nexus__nx_answer` — multi-step retrieval |
+| knowledge-tidying | `mcp__plugin_conexus_nexus__nx_tidy` — knowledge consolidation |
+| enrich-plan | `mcp__plugin_conexus_nexus__nx_enrich_beads` — bead context enrichment |
+| plan-validation | `mcp__plugin_conexus_nexus__nx_plan_audit` — plan audit |
 
 ### Infrastructure skills
 
@@ -201,16 +201,16 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 
 | Agent | Skill | Command | Model | Purpose |
 |-------|-------|---------|-------|---------|
-| architect-planner | architecture | `/nx:architecture` | opus | Software architecture design, execution plans |
-| code-review-expert | code-review | `/nx:review-code` | sonnet | Code quality, security, best practices |
-| codebase-deep-analyzer | codebase-analysis | `/nx:analyze-code` | sonnet | Architecture, patterns, dependency mapping |
-| debugger | debugging | `/nx:debug` | opus | Hypothesis-driven debugging |
-| deep-analyst | deep-analysis | `/nx:deep-analysis` | opus | Complex problem investigation, root cause |
-| deep-research-synthesizer | research-synthesis | `/nx:research` | sonnet | Multi-source research with synthesis |
-| developer | development | `/nx:implement` | sonnet | TDD implementation, test-first methodology |
-| strategic-planner | strategic-planning | `/nx:create-plan` | opus | Implementation planning, task decomposition |
-| substantive-critic | substantive-critique | `/nx:substantive-critique` | sonnet | Constructive critique of plans/designs/code |
-| test-validator | test-validation | `/nx:test-validate` | sonnet | Test coverage and quality validation |
+| architect-planner | architecture | `/conexus:architecture` | opus | Software architecture design, execution plans |
+| code-review-expert | code-review | `/conexus:review-code` | sonnet | Code quality, security, best practices |
+| codebase-deep-analyzer | codebase-analysis | `/conexus:analyze-code` | sonnet | Architecture, patterns, dependency mapping |
+| debugger | debugging | `/conexus:debug` | opus | Hypothesis-driven debugging |
+| deep-analyst | deep-analysis | `/conexus:deep-analysis` | opus | Complex problem investigation, root cause |
+| deep-research-synthesizer | research-synthesis | `/conexus:research` | sonnet | Multi-source research with synthesis |
+| developer | development | `/conexus:implement` | sonnet | TDD implementation, test-first methodology |
+| strategic-planner | strategic-planning | `/conexus:create-plan` | opus | Implementation planning, task decomposition |
+| substantive-critic | substantive-critique | `/conexus:substantive-critique` | sonnet | Constructive critique of plans/designs/code |
+| test-validator | test-validation | `/conexus:test-validate` | sonnet | Test coverage and quality validation |
 
 ### Stub agents — redirect to MCP tools (RDR-080)
 
@@ -220,9 +220,9 @@ MCP tool directly and skip the agent spawn entirely.
 
 | Stub agent | Replacement | Call shape |
 |------------|-------------|------------|
-| knowledge-tidier | nx_tidy | `mcp__plugin_nx_nexus__nx_tidy(topic=..., collection="knowledge")` |
-| plan-auditor | nx_plan_audit | `mcp__plugin_nx_nexus__nx_plan_audit(plan_json=..., context="")` |
-| plan-enricher | nx_enrich_beads | `mcp__plugin_nx_nexus__nx_enrich_beads(bead_description=..., context="")` |
+| knowledge-tidier | nx_tidy | `mcp__plugin_conexus_nexus__nx_tidy(topic=..., collection="knowledge")` |
+| plan-auditor | nx_plan_audit | `mcp__plugin_conexus_nexus__nx_plan_audit(plan_json=..., context="")` |
+| plan-enricher | nx_enrich_beads | `mcp__plugin_conexus_nexus__nx_enrich_beads(bead_description=..., context="")` |
 
 ### Removed in RDR-080
 
@@ -260,34 +260,34 @@ See `hooks/hooks.json` for exact wiring. Paths below use `$CLAUDE_PLUGIN_ROOT` a
 | `StopFailure` | `hooks/scripts/stop_failure_hook.py` | Advisory on abnormal session termination |
 | `PreToolUse` (`Bash`) | `hooks/scripts/pre_close_verification_hook.sh` | Opt-in bd-close gate: verifies before `bd close` / `bd done` |
 | `SubagentStart` | `hooks/scripts/subagent-start.sh` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
-| `PermissionRequest` (`mcp__plugin_nx_.*`) | `hooks/scripts/auto-approve-nx-mcp.sh` | Auto-approve nexus and nexus-catalog MCP tool calls |
+| `PermissionRequest` (`mcp__plugin_conexus_.*`) | `hooks/scripts/auto-approve-nx-mcp.sh` | Auto-approve nexus and nexus-catalog MCP tool calls |
 
 ## Slash Commands
 
 **Agent commands** (`/command → agent`):
-- `/nx:research` → deep-research-synthesizer
-- `/nx:create-plan` → strategic-planner
-- `/nx:analyze-code` → codebase-deep-analyzer
-- `/nx:review-code` → code-review-expert
-- `/nx:test-validate` → test-validator
-- `/nx:implement` → developer
-- `/nx:debug` → debugger
-- `/nx:architecture` → architect-planner
-- `/nx:deep-analysis` → deep-analyst
-- `/nx:substantive-critique` → substantive-critic
+- `/conexus:research` → deep-research-synthesizer
+- `/conexus:create-plan` → strategic-planner
+- `/conexus:analyze-code` → codebase-deep-analyzer
+- `/conexus:review-code` → code-review-expert
+- `/conexus:test-validate` → test-validator
+- `/conexus:implement` → developer
+- `/conexus:debug` → debugger
+- `/conexus:architecture` → architect-planner
+- `/conexus:deep-analysis` → deep-analyst
+- `/conexus:substantive-critique` → substantive-critic
 
 **MCP-tool pointer commands** (RDR-080 — dispatch the named MCP tool directly):
-- `/nx:query` → `nx_answer` (multi-step retrieval)
-- `/nx:knowledge-tidy` → `nx_tidy` *(was → knowledge-tidier agent)*
-- `/nx:plan-audit` → `nx_plan_audit` *(was → plan-auditor agent)*
-- `/nx:enrich-plan` → `nx_enrich_beads` *(was → plan-enricher agent)*
-- `/nx:pdf-process` → `nx index pdf` CLI *(was → pdf-chromadb-processor agent)*
+- `/conexus:query` → `nx_answer` (multi-step retrieval)
+- `/conexus:knowledge-tidy` → `nx_tidy` *(was → knowledge-tidier agent)*
+- `/conexus:plan-audit` → `nx_plan_audit` *(was → plan-auditor agent)*
+- `/conexus:enrich-plan` → `nx_enrich_beads` *(was → plan-enricher agent)*
+- `/conexus:pdf-process` → `nx index pdf` CLI *(was → pdf-chromadb-processor agent)*
 
 **Utility commands** (no agent dispatch, no MCP call — direct local action):
-- `/nx:continuation [topic]` — write a paste-ready handoff prompt to `~/.cache/nexus/continuations/` capturing branch, in-progress beads, open PRs, and active T2 memory. Use at session close. Compressed prompt is emitted in chat as a copy-clickable code block.
-- `/nx:nx-preflight` — verify nx plugin dependencies (CLI, doctor, beads).
+- `/conexus:continuation [topic]` — write a paste-ready handoff prompt to `~/.cache/nexus/continuations/` capturing branch, in-progress beads, open PRs, and active T2 memory. Use at session close. Compressed prompt is emitted in chat as a copy-clickable code block.
+- `/conexus:nx-preflight` — verify nx plugin dependencies (CLI, doctor, beads).
 
-**RDR commands**: `/nx:rdr-create`, `/nx:rdr-list`, `/nx:rdr-show`, `/nx:rdr-research`, `/nx:rdr-gate`, `/nx:rdr-accept`, `/nx:rdr-close`, `/nx:rdr-audit`
+**RDR commands**: `/conexus:rdr-create`, `/conexus:rdr-list`, `/conexus:rdr-show`, `/conexus:rdr-research`, `/conexus:rdr-gate`, `/conexus:rdr-accept`, `/conexus:rdr-close`, `/conexus:rdr-audit`
 
 
 ## MCP Servers
@@ -323,7 +323,7 @@ The nexus core server exposes 15 MCP tools and the nexus-catalog server exposes 
 
 **Pagination**: `search`, `store_list`, and `memory_search` return paged results. Pass `offset=N` for subsequent pages. Response footer: `--- showing X-Y of Z. next: offset=N` or `(end)`.
 
-**Tool names** follow Claude Code's naming convention: `mcp__plugin_nx_nexus__<tool_name>` for core tools, `mcp__plugin_nx_nexus-catalog__<tool_name>` for catalog tools.
+**Tool names** follow Claude Code's naming convention: `mcp__plugin_conexus_nexus__<tool_name>` for core tools, `mcp__plugin_conexus_nexus-catalog__<tool_name>` for catalog tools.
 
 **Resource management**:
 - T1 and T3 use thread-safe lazy singletons (expensive to initialize, reused across the session)
@@ -373,8 +373,8 @@ When skills delegate to agents, they use a standardized relay format defined in 
 
 The permission hook auto-approves safe operations:
 
-- **nexus MCP tools**: all `mcp__plugin_nx_nexus__*` core tools and `mcp__plugin_nx_nexus-catalog__*` catalog tools
-- **sequential thinking**: `mcp__plugin_nx_sequential-thinking__sequentialthinking`
+- **nexus MCP tools**: all `mcp__plugin_conexus_nexus__*` core tools and `mcp__plugin_conexus_nexus-catalog__*` catalog tools
+- **sequential thinking**: `mcp__plugin_conexus_sequential-thinking__sequentialthinking`
 - **beads**: `bd list`, `bd show`, `bd search`, `bd prime`, `bd ready`, `bd status`
 - **git**: `git log`, `git diff`, `git status`, `git show`, `git branch -a`
 - **nexus CLI**: `nx search`, `nx store list/get`, `nx memory list/get/search`, `nx scratch list`, `nx doctor`

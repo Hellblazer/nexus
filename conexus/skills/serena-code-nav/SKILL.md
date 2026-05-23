@@ -42,7 +42,7 @@ Tool names below show `LSP name` / `JetBrains name`. Use whichever resolved in S
 | Rename a symbol across codebase | `rename_symbol` / `jet_brains_rename` | Grep + Edit (corrupts comments/strings) |
 | Pattern search across files | `search_for_pattern` | Grep (prefer Grep — it's faster) |
 | Find files by name | Glob | `find_file` |
-| Semantic/conceptual search | `mcp__plugin_nx_nexus__search` | Serena (no semantic search) |
+| Semantic/conceptual search | `mcp__plugin_conexus_nexus__search` | Serena (no semantic search) |
 | Exact text, comments, config | Grep | Serena |
 
 ## Workflow Patterns

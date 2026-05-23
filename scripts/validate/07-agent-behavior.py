@@ -107,7 +107,7 @@ STUBS = [
             "Consolidate knowledge on topic 'chromadb quotas'. "
             "What tool should I call, and what's the call shape?"
         ),
-        "expect": ["nx_tidy", "mcp__plugin_nx_nexus__nx_tidy"],
+        "expect": ["nx_tidy", "mcp__plugin_conexus_nexus__nx_tidy"],
     },
     {
         "name": "plan-auditor",
@@ -116,7 +116,7 @@ STUBS = [
             "Audit this plan: {\"steps\":[{\"tool\":\"search\",\"args\":{\"query\":\"$topic\"}}]}. "
             "What tool should I call?"
         ),
-        "expect": ["nx_plan_audit", "mcp__plugin_nx_nexus__nx_plan_audit"],
+        "expect": ["nx_plan_audit", "mcp__plugin_conexus_nexus__nx_plan_audit"],
     },
     {
         "name": "plan-enricher",
@@ -125,7 +125,7 @@ STUBS = [
             "Enrich this bead: 'Add --foo flag to nx search'. "
             "What tool should I call?"
         ),
-        "expect": ["nx_enrich_beads", "mcp__plugin_nx_nexus__nx_enrich_beads"],
+        "expect": ["nx_enrich_beads", "mcp__plugin_conexus_nexus__nx_enrich_beads"],
     },
 ]
 

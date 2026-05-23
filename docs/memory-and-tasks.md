@@ -53,24 +53,24 @@ tool provides three hygiene operations:
 
 ```
 # Find overlapping pairs (Jaccard > 0.7)
-mcp__plugin_nx_nexus__memory_consolidate(action="find-overlaps", project="myrepo")
+mcp__plugin_conexus_nexus__memory_consolidate(action="find-overlaps", project="myrepo")
 
 # Flag entries not accessed in 30+ days
-mcp__plugin_nx_nexus__memory_consolidate(action="flag-stale", project="myrepo", idle_days=30)
+mcp__plugin_conexus_nexus__memory_consolidate(action="flag-stale", project="myrepo", idle_days=30)
 
 # Preview a merge (dry run)
-mcp__plugin_nx_nexus__memory_consolidate(
+mcp__plugin_conexus_nexus__memory_consolidate(
     action="merge", project="myrepo",
     keep_id=42, delete_ids="43", merged_content="...",
     dry_run=True)
 
 # Execute the merge (single delete — no confirm required)
-mcp__plugin_nx_nexus__memory_consolidate(
+mcp__plugin_conexus_nexus__memory_consolidate(
     action="merge", project="myrepo",
     keep_id=42, delete_ids="43", merged_content="...")
 
 # Multi-entry merge (confirm required)
-mcp__plugin_nx_nexus__memory_consolidate(
+mcp__plugin_conexus_nexus__memory_consolidate(
     action="merge", project="myrepo",
     keep_id=42, delete_ids="43,44,45", merged_content="...",
     confirm_destructive=True)
@@ -82,7 +82,7 @@ UPDATE and DELETE are atomic. If `keep_id` was deleted by a concurrent
 preventing silent data loss when the consolidation scan races with TTL
 expiry.
 
-The `/nx:query` skill (via `nx_answer`) and the `nx_tidy` MCP tool
+The `/conexus:query` skill (via `nx_answer`) and the `nx_tidy` MCP tool
 (formerly the knowledge-tidier agent; RDR-080) both use these
 operations during periodic memory hygiene.
 
@@ -109,7 +109,7 @@ The plugin wires beads into the session lifecycle:
 - **SessionStart** also shows ready beads (unblocked work) via `bd ready`
 - **SubagentStart** injects the active bead so spawned agents know what
   task they're continuing
-- **RDR close** (`/nx:rdr-close`) decomposes a decision into beads — one epic
+- **RDR close** (`/conexus:rdr-close`) decomposes a decision into beads — one epic
   for the overall effort, plus task beads for each implementation step
 - **Branch naming** ties git branches to beads: `feature/<bead-id>-<description>`
 
@@ -124,7 +124,7 @@ the other.
 
 When you use both, the connections are automated:
 
-- `/nx:rdr-close` creates beads (epic + task beads) for implementation tracking.
+- `/conexus:rdr-close` creates beads (epic + task beads) for implementation tracking.
   The `epic_bead` field in each RDR's T2 metadata provides a machine-readable
   link from decision to work items.
 - RDR decisions surface as prior art during planning via `nx search "topic"` against the knowledge corpus.

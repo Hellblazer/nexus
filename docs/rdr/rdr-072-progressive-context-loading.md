@@ -82,7 +82,7 @@ Already served by `search()` and `query()` MCP tools. No change needed. The topi
 
 ### Layer 3: Deep search (existing)
 
-Already served by `/nx:query` skill for multi-step analytical queries. No change needed.
+Already served by `/conexus:query` skill for multi-step analytical queries. No change needed.
 
 ### Refresh strategy
 

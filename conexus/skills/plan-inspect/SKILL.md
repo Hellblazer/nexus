@@ -48,7 +48,7 @@ plan_match(
 ## Anti-patterns
 
 - **Using plan-inspect as a promotion trigger.** Metrics inspection
-  is diagnostic; promotion decisions go through `/nx:plan-promote`.
+  is diagnostic; promotion decisions go through `/conexus:plan-promote`.
 - **Querying a plan you just wrote.** Metrics are empty for a new
   plan. Wait for runtime data before judging.
 

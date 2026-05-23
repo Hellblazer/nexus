@@ -7,11 +7,11 @@ effort: medium
 # Composition Probe Skill
 
 Validates that a coordinator bead's inter-bead composition is wired correctly before downstream beads begin.
-A coordinator bead is any bead tagged `metadata.coordinator=true` (set by `mcp__plugin_nx_nexus__nx_enrich_beads` when a bead's implementation composes outputs from ≥2 prior beads).
+A coordinator bead is any bead tagged `metadata.coordinator=true` (set by `mcp__plugin_conexus_nexus__nx_enrich_beads` when a bead's implementation composes outputs from ≥2 prior beads).
 
 ## When This Skill Activates
 
-- User invokes `/nx:composition-probe <coordinator-bead-id>`
+- User invokes `/conexus:composition-probe <coordinator-bead-id>`
 - Plan execution reaches a step tagged `probe: <bead-id>` in the enriched bead description
 - User says "run composition probe on bead X", "check probe bead X"
 

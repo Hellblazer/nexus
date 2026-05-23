@@ -440,8 +440,8 @@ def _record_tier_write(
 
 
 # Note: catalog server also registers a "search" tool. No collision — Claude Code
-# disambiguates by server prefix (mcp__plugin_nx_nexus__search vs
-# mcp__plugin_nx_nexus-catalog__search).
+# disambiguates by server prefix (mcp__plugin_conexus_nexus__search vs
+# mcp__plugin_conexus_nexus-catalog__search).
 @mcp.tool()
 def search(
     query: str,
@@ -2947,7 +2947,7 @@ Pattern B (operator auto-hydration shortcut):
   above).  A mismatch fails with PlanRunStepRefError.
 
 === Forbidden tools ===
-  Do NOT emit mcp__plugin_nx_nexus-catalog__* names — use traverse.
+  Do NOT emit mcp__plugin_conexus_nexus-catalog__* names — use traverse.
   Do NOT emit Read, Grep, Bash, Write, or web_* — they are not part of
   the plan dispatcher.
 """
@@ -3754,7 +3754,7 @@ async def nx_answer(
 
     # RDR-084: Save successful ad-hoc plans so the plan library compounds
     # with usage. scope=personal keeps growth isolated to the caller (the
-    # project/global scopes are reached only via /nx:plan-promote). TTL is
+    # project/global scopes are reached only via /conexus:plan-promote). TTL is
     # config-driven; 30-day default. Best-effort — a save failure never
     # affects the user's answer, and the T1 cache upsert is a separate
     # best-effort step inside the same guard.

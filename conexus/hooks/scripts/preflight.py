@@ -126,10 +126,10 @@ def main() -> None:
         "The nx CLI is not reachable in this session. The "
         "``using-nx-skills`` routing guidance below is INACTIVE: "
         "any tool path that starts with ``nx ...`` or "
-        "``mcp__plugin_nx_nexus__*`` will fail. Fall back to "
+        "``mcp__plugin_conexus_nexus__*`` will fail. Fall back to "
         "direct ``Read`` / ``Grep`` / ``Glob`` for code "
         "exploration; do NOT attempt to invoke nx skills "
-        "(``/nx:query``, ``/nx:debug``, ``/nx:create-plan``, "
+        "(``/conexus:query``, ``/conexus:debug``, ``/conexus:create-plan``, "
         "etc.); they will produce confusing partial errors."
     )
     out.append("")

@@ -25,7 +25,7 @@ The Nexus orchestrator agent exists but is never invoked in practice. The main c
 2. **No typed pipeline validation**: The orchestrator emits prose Pipeline Plans. There is no typed DAG, no schema consistency check between stages, no automatic parallelism identification. Broken relay chains are discovered at runtime, not at plan time.
 3. **No cross-validation against knowledge base**: Agent critics operate on artifacts in isolation. No "Inspector & Editor" role reconciles artifacts against indexed source documents.
 
-The fundamental constraint: **subagents cannot spawn other subagents**. The orchestrator agent can only recommend routing — it cannot actually dispatch a pipeline. This was already acknowledged when `/nx:orchestrate` was removed (CHANGELOG: "routing tree in using-nx-skills replaces it").
+The fundamental constraint: **subagents cannot spawn other subagents**. The orchestrator agent can only recommend routing — it cannot actually dispatch a pipeline. This was already acknowledged when `/conexus:orchestrate` was removed (CHANGELOG: "routing tree in using-nx-skills replaces it").
 
 ### The Orchestrator's Real Location
 
@@ -70,7 +70,7 @@ agents directly. The fundamental constraint is architectural: **subagents cannot
 subagents**, so the orchestrator can only recommend routing, not execute pipelines.
 
 The `using-nx-skills` routing skill already replaced the orchestrator's dispatch logic
-(documented in CHANGELOG when `/nx:orchestrate` was removed). The orchestrator agent's
+(documented in CHANGELOG when `/conexus:orchestrate` was removed). The orchestrator agent's
 remaining value is as **process documentation** — it describes standard pipeline patterns
 (RDR chain, plan-audit-implement, research-synthesize) that the main conversation and skills
 reference when deciding what to dispatch.

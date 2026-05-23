@@ -94,9 +94,9 @@ warns early rather than failing silently during agent work.
 
 | Old Name | New Name | Skill Command (old) | Skill Command (new) |
 |----------|----------|--------------------|--------------------|
-| java-developer | developer | `/java-implement` | `/nx:implement` |
-| java-debugger | debugger | `/java-debug` | `/nx:debug` |
-| java-architect-planner | architect-planner | `/java-architecture` | `/nx:architecture` |
+| java-developer | developer | `/java-implement` | `/conexus:implement` |
+| java-debugger | debugger | `/java-debug` | `/conexus:debug` |
+| java-architect-planner | architect-planner | `/java-architecture` | `/conexus:architecture` |
 
 ### Content Replacement Strategy
 
@@ -196,8 +196,8 @@ should return zero results (excluding changelogs and RDR docs).
 
 ## Migration Impact
 
-**Slash command changes**: `/java-implement` → `/nx:implement`, `/java-debug` → `/nx:debug`,
-`/java-architecture` → `/nx:architecture`. Old commands will stop working immediately.
+**Slash command changes**: `/java-implement` → `/conexus:implement`, `/java-debug` → `/conexus:debug`,
+`/java-architecture` → `/conexus:architecture`. Old commands will stop working immediately.
 No aliases — all references are plugin-internal and updated atomically in one PR.
 Users with muscle memory for the old commands will need to adjust.
 

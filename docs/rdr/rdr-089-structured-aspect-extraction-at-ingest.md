@@ -949,7 +949,7 @@ schema conformance.
 
 ## Finalization Gate
 
-_To be completed during /nx:rdr-gate._
+_To be completed during /conexus:rdr-gate._
 
 ## Implementation Deviations
 
@@ -988,7 +988,7 @@ The consistency model is now documented in the operator docstrings and the SQL f
 
 **Second-pass substantive-critique findings (post-Phase F)**:
 
-A second `/nx:substantive-critique` pass after Phases A–F shipped found four critical correctness defects that survived the first review because the reviewer was checking the implementation against itself; this round checked it against the LLM-path contracts and the documented invariants. All four are resolved in-place:
+A second `/conexus:substantive-critique` pass after Phases A–F shipped found four critical correctness defects that survived the first review because the reviewer was checking the implementation against itself; this round checked it against the LLM-path contracts and the documented invariants. All four are resolved in-place:
 
 1. `operator_groupby` SQL path on JSON-array columns (`experimental_datasets`, `experimental_baselines`) would unroll a multi-value item across multiple groups, violating the LLM path's one-group-per-item invariant (RDR-093 §C-1). Now: under `source="auto"` the SQL path detects json_array fields and returns `None` so the operator falls back to LLM (which respects the invariant); under `source="aspects"` the divergence is surfaced as a `_meta` group with rationale rather than silently emitting wrong-shape output. Callers who specifically want unrolled multi-membership must construct a different operator.
 2. `count distinct` returned `0 distinct item(s)` when input items lacked an explicit `id` field — a misleading-rather-than-obviously-wrong result that would hide silently in any pipeline driven by `operator_groupby`'s SQL path (which does not synthesize `id`). Now: falls back to dedup by `(collection, source_path)` tuple when `id` is absent on every item, with annotation `"id field absent; deduped by (collection, source_path)"`. Truly identity-less items report `len(items) item(s) (no id or identity field; cannot dedup)`.

@@ -47,7 +47,7 @@ This RDR defines what to build on top of the catalog (RDR-049) to turn it into a
 |---|---|---|
 | Query planner agent | Decomposes NL → step-by-step JSON plan | No catalog awareness; can only plan `search` steps |
 | Analytical operator agent | Executes extract/summarize/rank/compare/generate | Operates on retrieved chunks only; no graph navigation |
-| `/nx:query` skill | Orchestrates plan execution via T1 scratch | Sequential only; no catalog resolution |
+| `/conexus:query` skill | Orchestrates plan execution via T1 scratch | Sequential only; no catalog resolution |
 | Plan library (T2) | FTS5 search over saved plans | No link back to catalog entries |
 | Search MCP tools | Semantic chunk/document retrieval | Corpus resolution via prefix matching only |
 
@@ -120,7 +120,7 @@ Extend the query planner's vocabulary with three new operations. Each operation 
 | `catalog_links` | `catalog_links` | Tumbler + direction + type + depth | List of link dicts (`from`, `to`, `type`) | Navigate relationships via graph traversal |
 | `catalog_resolve` | `catalog_resolve` | Owner or corpus string | List of collection name strings | Map catalog namespace to T3 collection names |
 
-**Design principle**: Plan operation names match MCP tool names exactly — no translation layer in the skill dispatch. The `/nx:query` skill dispatches catalog operations by calling the MCP tools directly (same pattern as `search` steps).
+**Design principle**: Plan operation names match MCP tool names exactly — no translation layer in the skill dispatch. The `/conexus:query` skill dispatches catalog operations by calling the MCP tools directly (same pattern as `search` steps).
 
 #### 2b. Operation Schemas
 
@@ -211,7 +211,7 @@ The skill extracts `physical_collection` from the link targets (`to` tumblers re
 
 #### 2d. Skill Dispatch Rules
 
-The `/nx:query` skill handles catalog operations as follows:
+The `/conexus:query` skill handles catalog operations as follows:
 
 1. **`catalog_search`**: Call `catalog_search` MCP tool with params. Store result list in T1 scratch. Extract distinct `physical_collection` values into `$step_N.collections` for downstream `search` steps.
 2. **`catalog_links`**: If `inputs` references a prior step, extract first entry's `tumbler`. Call `catalog_links` MCP tool. Resolve link target tumblers to `physical_collection` via `catalog_show`. Store collections in `$step_N.collections`.
@@ -288,7 +288,7 @@ Embed link type descriptions and do semantic matching for "find related" queries
 ### Layer 2 (Query Planning)
 - [x] Query planner generates valid plans with `catalog_search`, `catalog_links`, `catalog_resolve` steps
 - [x] `nx/agents/query-planner.md` updated with the three new operation schemas
-- [x] `/nx:query` skill dispatches catalog operations correctly (dispatch rules §2d)
+- [x] `/conexus:query` skill dispatches catalog operations correctly (dispatch rules §2d)
 - [x] `$step_N.collections` extraction works: catalog results → collection names → search corpus — validated against 109-document catalog
 - [x] On 5 reference queries with known relevant documents, catalog-scoped search retrieves a relevant document in fewer MCP calls than unconstrained search — "Schema Mappings" narrows 83→9 collections
 - [x] Few-shot plan templates seeded in T2 plan library with `catalog` tag (IDs 18-21)
@@ -319,7 +319,7 @@ Embed link type descriptions and do semantic matching for "find related" queries
 
 ### Remaining (Layer 2 — Query Planner Integration)
 5. **Query planner agent update**: Add `catalog_search`, `catalog_links`, `catalog_resolve` to `nx/agents/query-planner.md` operation list with schemas (§2b)
-6. **Skill dispatch update**: `/nx:query` handles catalog operations per dispatch rules (§2d) — collection extraction, fanout, T1 scratch
+6. **Skill dispatch update**: `/conexus:query` handles catalog operations per dispatch rules (§2d) — collection extraction, fanout, T1 scratch
 7. **Few-shot templates**: Seed T2 plan library with narrow-then-search, citation traversal, cross-type provenance, corpus-scoped patterns (§2c) tagged `catalog`
 
 ### Future (Layer 3 — When Needed)
@@ -350,7 +350,7 @@ Link search designed to be "free" — sublinear scaling via enfilade algorithms.
 ### RF-5: Query Planner Capabilities Audit (2026-04-04)
 **Classification**: Verified — Codebase Analysis | **Confidence**: HIGH
 
-Query planner supports 6 operations (search, extract, summarize, rank, compare, generate). Plans are sequential JSON, dispatched by `/nx:query` skill via T1 scratch. Plan library is T2 FTS5. Adding 3 catalog operations (catalog_search, catalog_links, catalog_resolve) is additive — same relay format, same T1 scratch bus, same plan JSON structure.
+Query planner supports 6 operations (search, extract, summarize, rank, compare, generate). Plans are sequential JSON, dispatched by `/conexus:query` skill via T1 scratch. Plan library is T2 FTS5. Adding 3 catalog operations (catalog_search, catalog_links, catalog_resolve) is additive — same relay format, same T1 scratch bus, same plan JSON structure.
 
 ### RF-6: FEBE Search Protocol (2026-04-04)
 **Classification**: Verified — Literary Machines Ch. 4 + Java implementation | **Confidence**: HIGH
@@ -424,7 +424,7 @@ RDR-049 was fully implemented on 2026-04-05 (18 beads, 5 phases, ~180 tests, PR 
 - Q5 (agent discipline): `created_by` mandatory, no approval gate — filter junk later per Nelson
 
 **What remains for Layer 2:**
-The 8 MCP catalog tools (`catalog_search`, `catalog_show`, `catalog_list`, `catalog_register`, `catalog_update`, `catalog_link`, `catalog_links`, `catalog_resolve`) are the dispatch targets. The query planner needs 3 new plan step types that call these tools. The `/nx:query` skill's operator relay pattern already supports adding new operations — the catalog operations follow the same `T1 scratch → dispatch → harvest` pattern as existing `search`/`extract`/`summarize` steps.
+The 8 MCP catalog tools (`catalog_search`, `catalog_show`, `catalog_list`, `catalog_register`, `catalog_update`, `catalog_link`, `catalog_links`, `catalog_resolve`) are the dispatch targets. The query planner needs 3 new plan step types that call these tools. The `/conexus:query` skill's operator relay pattern already supports adding new operations — the catalog operations follow the same `T1 scratch → dispatch → harvest` pattern as existing `search`/`extract`/`summarize` steps.
 
 **Key architectural insight:** The catalog's `graph()` method with `depth`, `direction`, and `link_type` parameters maps directly to the `catalog_links` plan operation. No adapter needed — the MCP `catalog_links` tool already exposes this.
 
@@ -441,7 +441,7 @@ T3 `knowledge__*` collections store working knowledge (facts, insights, decision
 
 **What's needed for seamless integration:**
 - Use `meta.kind` to subdivide knowledge entries: `fact`, `insight`, `decision`, `observation` — avoids proliferating `content_type` values while maintaining queryability via `json_extract(metadata, '$.kind')`
-- New link type `derived_from` for provenance: when an agent produces an insight during `/nx:query`, it links the catalog entry to the source documents that produced it
+- New link type `derived_from` for provenance: when an agent produces an insight during `/conexus:query`, it links the catalog entry to the source documents that produced it
 - The query planner can then navigate: `fact → derived_from → paper → cites → foundational_paper` — a provenance chain from working knowledge back to primary sources
 
 **Why `meta.kind` not `content_type`:**

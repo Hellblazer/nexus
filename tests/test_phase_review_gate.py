@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the /nx:phase-review-gate preamble (nexus-j327).
+"""Tests for the /conexus:phase-review-gate preamble (nexus-j327).
 
 The gate has two enforcement paths:
 

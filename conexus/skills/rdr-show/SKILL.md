@@ -9,7 +9,7 @@ effort: low
 ## When This Skill Activates
 
 - User says "show RDR 003", "RDR details", "what's in RDR 5"
-- User invokes `/nx:rdr-show`
+- User invokes `/conexus:rdr-show`
 - User asks about a specific RDR's content or status
 
 ## Behavior
@@ -17,13 +17,13 @@ effort: low
 1. **Resolve RDR directory**: Read from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/rdr`. Use the Step 0 snippet from the rdr-create skill, stored as `RDR_DIR`.
 2. **Determine RDR ID**: From user's argument, or default to most recently modified RDR in `$RDR_DIR/`
 3. **Read the markdown file**: `$RDR_DIR/NNN-*.md`
-4. **Read T2 metadata** (if available): mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="NNN"
-5. **Read research findings** (if available): mcp__plugin_nx_nexus__memory_get(project="{repo}_rdr", title="" and filter titles matching `NNN-research-*`
+4. **Read T2 metadata** (if available): mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title="NNN"
+5. **Read research findings** (if available): mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title="" and filter titles matching `NNN-research-*`
 6. **Catalog links** (if catalog initialized): Search for this RDR in the catalog and display graph relationships:
    ```
-   mcp__plugin_nx_nexus-catalog__search(query="<rdr-title>", content_type="rdr")
+   mcp__plugin_conexus_nexus-catalog__search(query="<rdr-title>", content_type="rdr")
    ```
-   If found, call: `mcp__plugin_nx_nexus-catalog__links(tumbler="<tumbler>", depth=1)`
+   If found, call: `mcp__plugin_conexus_nexus-catalog__links(tumbler="<tumbler>", depth=1)`
    Display inbound and outbound links from the result. Skip silently if catalog not initialized.
 
 7. **Display unified view**:
@@ -59,7 +59,7 @@ effort: low
 (not closed yet)
 ```
 
-7. If the RDR ID is not found, list available RDRs (delegate to `/nx:rdr-list` behavior).
+7. If the RDR ID is not found, list available RDRs (delegate to `/conexus:rdr-list` behavior).
 
 ## Success Criteria
 
@@ -68,7 +68,7 @@ effort: low
 - [ ] Linked beads shown with status (if `epic_bead` is set in T2)
 - [ ] Supersedes/Superseded-by relationships displayed
 - [ ] Catalog links displayed (if catalog initialized and RDR indexed)
-- [ ] Fallback to `/nx:rdr-list` behavior if RDR ID not found
+- [ ] Fallback to `/conexus:rdr-list` behavior if RDR ID not found
 
 ## Agent-Specific PRODUCE
 

@@ -30,18 +30,18 @@ Delegates to the **developer** agent (sonnet). See [registry.yaml](../../registr
 
 ## When This Skill Activates
 
-- After `mcp__plugin_nx_nexus__nx_plan_audit` validates a plan (required prerequisite — RDR-080)
+- After `mcp__plugin_conexus_nexus__nx_plan_audit` validates a plan (required prerequisite — RDR-080)
 - When a bead for an implementation task is in_progress
 - Executing tasks from an approved implementation plan
 - Writing or modifying production code
 
 ## Pre-Dispatch: Seed Link Context
 
-Before dispatching the developer agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings. See `/nx:catalog` skill for full reference.
+Before dispatching the developer agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings. See `/conexus:catalog` skill for full reference.
 
-1. If the task references an RDR (pattern `RDR-\d+`), resolve it: `mcp__plugin_nx_nexus-catalog__search(query="RDR-NNN")`
+1. If the task references an RDR (pattern `RDR-\d+`), resolve it: `mcp__plugin_conexus_nexus-catalog__search(query="RDR-NNN")`
 2. Check T1 scratch for `rdr-planning-context` (set by strategic-planner for RDR-driven beads)
-3. Seed: `mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<tumbler>", "link_type": "implements"}], "source_agent": "developer"}', tags="link-context")`
+3. Seed: `mcp__plugin_conexus_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<tumbler>", "link_type": "implements"}], "source_agent": "developer"}', tags="link-context")`
 4. If no RDR/document reference found, skip seeding (auto-linker handles empty context gracefully)
 
 ## Agent Invocation
@@ -74,9 +74,9 @@ If the developer agent returns with `## ESCALATION: Debugger Required` in its ou
 
 1. **Do not re-dispatch the developer.** The circuit breaker fired for a reason.
 2. **Escalation guard — check before dispatching:**
-   mcp__plugin_nx_nexus__scratch(action="search", query="circuit-breaker-fired-for-[bead-id]", limit=1
+   mcp__plugin_conexus_nexus__scratch(action="search", query="circuit-breaker-fired-for-[bead-id]", limit=1
    - **If found**: do NOT dispatch the debugger. Report to the user: "Developer circuit breaker has fired twice for bead [ID]. The debugger's fix did not resolve the issue. Human investigation recommended." **Stop here.**
-   - **If not found**: write the guard entry NOW: mcp__plugin_nx_nexus__scratch(action="put", content="circuit-breaker-fired-for-[bead-id]", tags="escalation-guard". Then proceed to step 3.
+   - **If not found**: write the guard entry NOW: mcp__plugin_conexus_nexus__scratch(action="put", content="circuit-breaker-fired-for-[bead-id]", tags="escalation-guard". Then proceed to step 3.
 3. **Dispatch the debugger** using this relay:
 
 ```markdown
@@ -131,7 +131,7 @@ Do not retry approaches listed in scratch under tag "failed-approach".
 
 Code review steps are baked into plans by the strategic planner. When
 executing a plan, follow the review tasks at the designated points.
-For ad-hoc implementation outside a plan, use `/nx:review-code` when
+For ad-hoc implementation outside a plan, use `/conexus:review-code` when
 the scope warrants it.
 
 ## TDD Methodology
@@ -144,7 +144,7 @@ The developer agent follows test-driven development:
 5. Ensure all existing tests still pass
 
 **REQUIRED:** Run verification (tests pass, no regressions) before claiming any task is done.
-**REQUIRED SUB-SKILL:** Use `/nx:review-code` after implementation for quality review.
+**REQUIRED SUB-SKILL:** Use `/conexus:review-code` after implementation for quality review.
 
 ## Success Criteria
 

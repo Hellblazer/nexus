@@ -705,7 +705,7 @@ class TestRdr080StubAgents:
     def test_stub_references_mcp_tool(self, agent_name: str) -> None:
         stub = PLUGIN_DIR / "agents" / f"{agent_name}.md"
         content = stub.read_text()
-        assert "mcp__plugin_nx_nexus__" in content, (
+        assert "mcp__plugin_conexus_nexus__" in content, (
             f"nx/agents/{agent_name}.md must reference an MCP tool "
-            "(mcp__plugin_nx_nexus__*) as its redirect target (RDR-080)."
+            "(mcp__plugin_conexus_nexus__*) as its redirect target (RDR-080)."
         )

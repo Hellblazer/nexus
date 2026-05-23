@@ -18,55 +18,55 @@ effort: low
 
 ```
 # Analytical answer (RDR-080) — plan-match-first, falls through to inline planner on miss
-mcp__plugin_nx_nexus__nx_answer(question="how does plan matching work"                  # primary front door
-mcp__plugin_nx_nexus__nx_answer(question="...", dimensions={"verb":"research"}          # pin a verb for the matcher
-mcp__plugin_nx_nexus__nx_answer(question="...", scope="1.2"                             # catalog subtree filter
+mcp__plugin_conexus_nexus__nx_answer(question="how does plan matching work"                  # primary front door
+mcp__plugin_conexus_nexus__nx_answer(question="...", dimensions={"verb":"research"}          # pin a verb for the matcher
+mcp__plugin_conexus_nexus__nx_answer(question="...", scope="1.2"                             # catalog subtree filter
 
 # Search (chunk-level) / query (document-level)
-mcp__plugin_nx_nexus__search(query="query"                          # semantic search across T3
-mcp__plugin_nx_nexus__search(query="query", corpus="code"           # code only
-mcp__plugin_nx_nexus__search(query="query", structured=True         # returns {ids, tumblers, distances, collections}
-mcp__plugin_nx_nexus__query(question="...", corpus="knowledge", follow_links="cites"    # catalog-aware, document-level
+mcp__plugin_conexus_nexus__search(query="query"                          # semantic search across T3
+mcp__plugin_conexus_nexus__search(query="query", corpus="code"           # code only
+mcp__plugin_conexus_nexus__search(query="query", structured=True         # returns {ids, tumblers, distances, collections}
+mcp__plugin_conexus_nexus__query(question="...", corpus="knowledge", follow_links="cites"    # catalog-aware, document-level
 
 # Batch hydrate chunks past the ChromaDB 300-record quota
-mcp__plugin_nx_nexus__store_get_many(ids=["id1","id2","id3"], collections="knowledge__art-1-1__voyage-context-3__v1"
-mcp__plugin_nx_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus-1-1__voyage-context-3__v1", structured=True
+mcp__plugin_conexus_nexus__store_get_many(ids=["id1","id2","id3"], collections="knowledge__art-1-1__voyage-context-3__v1"
+mcp__plugin_conexus_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus-1-1__voyage-context-3__v1", structured=True
 
 # Walk the catalog link graph (depth capped at 3 — SC-4)
-mcp__plugin_nx_nexus__traverse(seeds=["1.1.635"], link_types=["implements","cites"], depth=2
-mcp__plugin_nx_nexus__traverse(seeds="1.1.635", purpose="find-implementations"          # link_types XOR purpose
+mcp__plugin_conexus_nexus__traverse(seeds=["1.1.635"], link_types=["implements","cites"], depth=2
+mcp__plugin_conexus_nexus__traverse(seeds="1.1.635", purpose="find-implementations"          # link_types XOR purpose
 
 # Analytical operators — each spawns `claude -p` (default timeout 120s)
-mcp__plugin_nx_nexus__operator_summarize(content="...", cited=True
-mcp__plugin_nx_nexus__operator_extract(inputs=["doc1","doc2"], fields="title,year,author"
-mcp__plugin_nx_nexus__operator_rank(items=["a","b","c"], criterion="relevance to X"
-mcp__plugin_nx_nexus__operator_compare(items=["x","y"], focus="scalability"
-mcp__plugin_nx_nexus__operator_generate(template="release note", context="..."
-mcp__plugin_nx_nexus__operator_filter(items='[{"id":"a", ...}, ...]', criterion="peer-reviewed only"
-mcp__plugin_nx_nexus__operator_check(items='[{"id":"p1"}, ...]', check_instruction="do the papers agree?"
-mcp__plugin_nx_nexus__operator_verify(claim="X uses attention", evidence="Section 2.1: ..."
+mcp__plugin_conexus_nexus__operator_summarize(content="...", cited=True
+mcp__plugin_conexus_nexus__operator_extract(inputs=["doc1","doc2"], fields="title,year,author"
+mcp__plugin_conexus_nexus__operator_rank(items=["a","b","c"], criterion="relevance to X"
+mcp__plugin_conexus_nexus__operator_compare(items=["x","y"], focus="scalability"
+mcp__plugin_conexus_nexus__operator_generate(template="release note", context="..."
+mcp__plugin_conexus_nexus__operator_filter(items='[{"id":"a", ...}, ...]', criterion="peer-reviewed only"
+mcp__plugin_conexus_nexus__operator_check(items='[{"id":"p1"}, ...]', check_instruction="do the papers agree?"
+mcp__plugin_conexus_nexus__operator_verify(claim="X uses attention", evidence="Section 2.1: ..."
 
 # Background hygiene — call and let run (long-lived claude -p subprocesses)
-mcp__plugin_nx_nexus__nx_tidy()                                     # T2 memory consolidation
-mcp__plugin_nx_nexus__nx_enrich_beads()                             # design-notes auto-fill
-mcp__plugin_nx_nexus__nx_plan_audit()                               # plan library quality sweep
+mcp__plugin_conexus_nexus__nx_tidy()                                     # T2 memory consolidation
+mcp__plugin_conexus_nexus__nx_enrich_beads()                             # design-notes auto-fill
+mcp__plugin_conexus_nexus__nx_plan_audit()                               # plan library quality sweep
 
 # Memory (T2)
-mcp__plugin_nx_nexus__memory_put(content="content", project="{repo}", title="file.md"
-mcp__plugin_nx_nexus__memory_get(project="{repo}", title="file.md"       # exact-then-unique-prefix match
-mcp__plugin_nx_nexus__memory_search(query="query", project="{repo}"
+mcp__plugin_conexus_nexus__memory_put(content="content", project="{repo}", title="file.md"
+mcp__plugin_conexus_nexus__memory_get(project="{repo}", title="file.md"       # exact-then-unique-prefix match
+mcp__plugin_conexus_nexus__memory_search(query="query", project="{repo}"
 
 # Knowledge (T3)
-mcp__plugin_nx_nexus__store_put(content="content", collection="knowledge", title="title", tags="tag"
-mcp__plugin_nx_nexus__store_list(collection="knowledge"
+mcp__plugin_conexus_nexus__store_put(content="content", collection="knowledge", title="title", tags="tag"
+mcp__plugin_conexus_nexus__store_list(collection="knowledge"
 
 # Scratch (T1)
-mcp__plugin_nx_nexus__scratch(action="put", content="working note"
-mcp__plugin_nx_nexus__scratch_manage(action="flag", entry_id="<id>"       # auto-promote to T2 at session end
+mcp__plugin_conexus_nexus__scratch(action="put", content="working note"
+mcp__plugin_conexus_nexus__scratch_manage(action="flag", entry_id="<id>"       # auto-promote to T2 at session end
 
 # Plan library (T2)
-mcp__plugin_nx_nexus__plan_search(query="retrieval"                       # find reusable plans
-mcp__plugin_nx_nexus__plan_save(query="...", plan_json="{...}"            # persist a successful plan
+mcp__plugin_conexus_nexus__plan_search(query="retrieval"                       # find reusable plans
+mcp__plugin_conexus_nexus__plan_save(query="...", plan_json="{...}"            # persist a successful plan
 ```
 
 ## When to reach for each
@@ -82,27 +82,27 @@ mcp__plugin_nx_nexus__plan_save(query="...", plan_json="{...}"            # pers
 
 ```
 # Search/browse
-mcp__plugin_nx_nexus-catalog__search(query="schema mappings", author="Fagin", corpus="schema-evolution"
-mcp__plugin_nx_nexus-catalog__show(tumbler="1.9.14"                    # full entry with links
-mcp__plugin_nx_nexus-catalog__resolve(owner="1.1", corpus="schema-evolution"  # → collection names
-mcp__plugin_nx_nexus-catalog__stats                                    # health summary
+mcp__plugin_conexus_nexus-catalog__search(query="schema mappings", author="Fagin", corpus="schema-evolution"
+mcp__plugin_conexus_nexus-catalog__show(tumbler="1.9.14"                    # full entry with links
+mcp__plugin_conexus_nexus-catalog__resolve(owner="1.1", corpus="schema-evolution"  # → collection names
+mcp__plugin_conexus_nexus-catalog__stats                                    # health summary
 
 # Link graph — live documents only (deleted nodes excluded)
-mcp__plugin_nx_nexus-catalog__links(tumbler="1.9.14", direction="in", link_type="cites", depth=2
+mcp__plugin_conexus_nexus-catalog__links(tumbler="1.9.14", direction="in", link_type="cites", depth=2
   Returns {"nodes": [...], "edges": [...]}
 
 # Link CRUD
-mcp__plugin_nx_nexus-catalog__link(from_tumbler="1.1.1", to_tumbler="1.2.5", link_type="cites", created_by="user"
+mcp__plugin_conexus_nexus-catalog__link(from_tumbler="1.1.1", to_tumbler="1.2.5", link_type="cites", created_by="user"
   Returns {"from": ..., "to": ..., "type": ..., "created": true/false}
 
 # Admin/audit — includes orphaned links (all links, not just live)
-mcp__plugin_nx_nexus-catalog__link_query(link_type="cites", created_by="bib_enricher", limit=50
+mcp__plugin_conexus_nexus-catalog__link_query(link_type="cites", created_by="bib_enricher", limit=50
 ```
 
 **Link types**: `cites` (citation), `implements-heuristic` (auto code→RDR), `supersedes`, `quotes`, `relates`, `comments`, `implements` (manual).
-**Two graph views**: `mcp__plugin_nx_nexus-catalog__links` returns live-document links only. `mcp__plugin_nx_nexus-catalog__link_query` returns all links including orphans.
+**Two graph views**: `mcp__plugin_conexus_nexus-catalog__links` returns live-document links only. `mcp__plugin_conexus_nexus-catalog__link_query` returns all links including orphans.
 Use catalog for: author queries, citation traversal, provenance chains, corpus-scoped search.
-The `/nx:query` skill handles full catalog-aware plan execution.
+The `/conexus:query` skill handles full catalog-aware plan execution.
 
 ## Indexing (CLI only — no MCP equivalent)
 

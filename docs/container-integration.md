@@ -204,7 +204,7 @@ What works:
    host; the VM agent's tool calls are bridged back through the
    Anthropic SDK channel, not through the network.
 4. Inside the VM, the Cowork agent has
-   `mcp__plugin_nx_nexus__memory_put`, `mcp__plugin_nx_nexus__search`,
+   `mcp__plugin_conexus_nexus__memory_put`, `mcp__plugin_conexus_nexus__search`,
    etc. available. Every call round-trips: VM agent → SDK bridge →
    host nx-mcp → host T2/T3 daemons → shared state.
 

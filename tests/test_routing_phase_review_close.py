@@ -228,7 +228,7 @@ def test_impl_bead_description_mentioning_phase_review_gate_allows(tmp_env):
     _write_bd_stub(
         tmp_env["bin_dir"],
         title="P3.A Migration ownership transfer",
-        description="When P3 is complete, run /nx:phase-review-gate RDR-120 --phase 3 to close the phase.",
+        description="When P3 is complete, run /conexus:phase-review-gate RDR-120 --phase 3 to close the phase.",
     )
     proc = _run_hook(
         {"tool_name": "Bash", "tool_input": {"command": "bd close nexus-e9x4l"}},
@@ -243,7 +243,7 @@ def test_gate_bead_sub_phase_letter_title_triggers(tmp_env):
     still trigger the sentinel check."""
     _write_bd_stub(
         tmp_env["bin_dir"],
-        title="Phase 3b review gate: /nx:phase-review-gate RDR-120 --phase 3b",
+        title="Phase 3b review gate: /conexus:phase-review-gate RDR-120 --phase 3b",
     )
     # No sentinel written — expect deny.
     proc = _run_hook(
@@ -322,7 +322,7 @@ def test_sentinel_absent_denies(tmp_env):
     )
     decision = _decision(proc)
     assert decision["permissionDecision"] == "deny"
-    assert "/nx:phase-review-gate" in decision["reason"]
+    assert "/conexus:phase-review-gate" in decision["reason"]
 
 
 def test_sentinel_stale_denies(tmp_env):

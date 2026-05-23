@@ -50,7 +50,7 @@ tail -F ~/.config/nexus/logs/watchdog.log
 ## Case 1: top-level MCP spawn
 
 Open Claude Code in any project. Trigger any MCP tool that touches
-T1 (a `nx scratch put`, an `mcp__plugin_nx_nexus__scratch` call, or
+T1 (a `nx scratch put`, an `mcp__plugin_conexus_nexus__scratch` call, or
 just let the session-scratch flow run normally).
 
 **Verify**
@@ -66,7 +66,7 @@ just let the session-scratch flow run normally).
 ## Case 2: Agent-tool sub-agents (in-process)
 
 Inside the running Claude session, dispatch a sub-agent through the
-Task tool. Any agent works; `/nx:research` or `/nx:analyze` are
+Task tool. Any agent works; `/conexus:research` or `/conexus:analyze` are
 typical.
 
 **Verify**
@@ -97,7 +97,7 @@ nx scratch list
 ## Case 6: ephemeral operator dispatch
 
 Inside Claude, invoke any operator that dispatches `claude -p`
-(`/nx:query "what is X"`, `/nx:analyze`, `nx_answer` via the MCP
+(`/conexus:query "what is X"`, `/conexus:analyze`, `nx_answer` via the MCP
 tool, etc.).
 
 **Verify**

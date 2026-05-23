@@ -37,7 +37,7 @@ Adjacent precedent: RDR-053 (Xanadu fidelity, closed) established `chash:` as th
 
 ### Technical Environment
 
-`nx_answer` today is implemented in `nexus/operators/answer.py` (entry via MCP tool `mcp__plugin_nx_nexus__nx_answer`). Internally it:
+`nx_answer` today is implemented in `nexus/operators/answer.py` (entry via MCP tool `mcp__plugin_conexus_nexus__nx_answer`). Internally it:
 
 1. Runs plan-match gate (RDR-080 plan library).
 2. Composes search + traverse + rank operators.
@@ -84,7 +84,7 @@ Surface
 
 ### Action handlers
 
-The `open-chash` action is host-side: the renderer resolves the chash via `nexus.catalog` (existing `mcp__plugin_nx_nexus-catalog__resolve` tool) and opens the resulting document/chunk. No nexus-side handler change.
+The `open-chash` action is host-side: the renderer resolves the chash via `nexus.catalog` (existing `mcp__plugin_conexus_nexus-catalog__resolve` tool) and opens the resulting document/chunk. No nexus-side handler change.
 
 ## Alternatives Considered
 
@@ -116,7 +116,7 @@ Defer until RDR-118/119 ship and there's a host actually rendering surfaces. Rej
 - First substantial A2UI producer in nexus — validates the wire format end-to-end on real content.
 - Citations become addressable and interactive in hosts that render A2UI.
 - Structured intermediates from `nx_answer` stop being thrown away.
-- Pattern generalizes: `/nx:query`, `/nx:research`, `/nx:analyze` are obvious next producers.
+- Pattern generalizes: `/conexus:query`, `/conexus:research`, `/conexus:analyze` are obvious next producers.
 
 ### Negative
 

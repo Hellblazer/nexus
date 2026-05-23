@@ -388,7 +388,7 @@ For coordination with sibling agents:
   → out(subspace="mailbox/<agent>", ...)  or
     out(subspace="tasks/<project>", ...)
 For permanent knowledge across all projects:
-  → defer to /nx:knowledge-tidy (T3 promotion)
+  → defer to /conexus:knowledge-tidy (T3 promotion)
 ```
 
 The proactive-search-agents-vs-relay-reliant-agents split survives
@@ -446,7 +446,7 @@ The rewrite proposal:
 
 The skill registry is the right rewrite target because skills are
 the lowest-friction recommendation surface — an agent invoking
-`/nx:tuplespace-tasks` gets the work-stealing pattern in its
+`/conexus:tuplespace-tasks` gets the work-stealing pattern in its
 context window with one tool call. No CONTEXT_PROTOCOL paragraph
 to read, no MCP tool list to scan.
 
@@ -521,8 +521,8 @@ subspaces, not just scratch.
 
 The migration must not break:
 
-- **Existing skill invocations**: agents calling `/nx:knowledge-tidy`
-  or `/nx:plan-first` continue to work unchanged across all phases.
+- **Existing skill invocations**: agents calling `/conexus:knowledge-tidy`
+  or `/conexus:plan-first` continue to work unchanged across all phases.
   Skills are the public contract; their internals can be rewritten
   freely.
 - **Existing MCP tool calls**: `scratch`, `memory_put`,
@@ -1786,11 +1786,11 @@ project tier and informs whether `block` becomes necessary in v2.
 
 ### Contradiction Check
 
-_To be completed during /nx:rdr-gate._
+_To be completed during /conexus:rdr-gate._
 
 ### Assumption Verification
 
-_To be completed during /nx:rdr-gate. CA #2, #4, #5 are
+_To be completed during /conexus:rdr-gate. CA #2, #4, #5 are
 spike-gated; CA #1, #3, #6 are Verified via source search +
 honker production reference._
 
@@ -1806,7 +1806,7 @@ honker production reference._
 
 ### Scope Verification
 
-_To be completed during /nx:rdr-gate. The MVV (10-parallel-worker
+_To be completed during /conexus:rdr-gate. The MVV (10-parallel-worker
 work-stealing harness) is in scope and bundled into Phase 1 Step 7._
 
 ### Cross-Cutting Concerns
@@ -1836,7 +1836,7 @@ work-stealing harness) is in scope and bundled into Phase 1 Step 7._
 
 ### Proportionality
 
-_To be completed during /nx:rdr-gate. The document is scoped at the
+_To be completed during /conexus:rdr-gate. The document is scoped at the
 "new architectural primitive with phased migration" level; sections
 match RDRs 094 / 105 / 108._
 
@@ -2054,7 +2054,7 @@ consistent. No stale outer-UPDATE `LIMIT 1` form survives
 anywhere in the document. End-to-end coherence across all four
 revision rounds verified. Total findings closed across four
 passes: 16 (3 critical → 0; 7 significant → 0; 6 observations →
-0). RDR-110 ready for `/nx:rdr-accept`.
+0). RDR-110 ready for `/conexus:rdr-accept`.
 
 ### Post-acceptance cross-reference 2026-05-12 — RDR-112 (Storage-as-Service)
 

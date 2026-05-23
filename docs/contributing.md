@@ -165,7 +165,7 @@ Do not bump these without testing the full chunking pipeline.
 - **Integration branch is `develop`.** Open PRs against `develop`, not `main`. `main` carries the plugin marketplace surface; the develop split protects it from in-flight churn. Releases promote `develop` to `main` via merge (or merge-then-tag).
 - Direct pushes to `main` are reserved for the version-bump commit during a release. See Release Process below.
 - Use `bd` (beads, **≥ 1.0.0**: `brew install beads` or `brew upgrade beads`) for task tracking. Earlier 0.x versions reject the comma-separated `--status` flag the close-skill preamble uses; the bead advisory will silently report no open beads on stale installs.
-- **Code review**: Plans include review tasks after implementation phases. Use `/nx:review-code` or dispatch `code-review-expert` at the designated plan steps.
+- **Code review**: Plans include review tasks after implementation phases. Use `/conexus:review-code` or dispatch `code-review-expert` at the designated plan steps.
 
 Both `main` and `develop` carry branch protection. Configure at
 https://github.com/Hellblazer/nexus/settings/branches:

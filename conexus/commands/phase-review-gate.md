@@ -168,7 +168,7 @@ args_clean = re.sub(r'--evidence\s+\S+', '', args_clean).strip()
 id_match = re.search(r'\d+', args_clean)
 
 if not id_match:
-    print("> **Usage**: `/nx:phase-review-gate <id> --phase <N> [--evidence 'Item1=bead-id,...']`")
+    print("> **Usage**: `/conexus:phase-review-gate <id> --phase <N> [--evidence 'Item1=bead-id,...']`")
     print()
     print("### What this gate does")
     print()
@@ -228,7 +228,7 @@ if not evidence_arg:
     print("**Re-invoke with evidence once all items are accounted for:**")
     print()
     print(f"```")
-    print(f"/nx:phase-review-gate {rdr_id_label} --phase {phase_arg or '1'} --evidence '{example_parts}'")
+    print(f"/conexus:phase-review-gate {rdr_id_label} --phase {phase_arg or '1'} --evidence '{example_parts}'")
     print(f"```")
     print()
     sys.exit(0)
@@ -263,7 +263,7 @@ if failures:
         for num, _, _ in items
     )
     print(f"```")
-    print(f"/nx:phase-review-gate {rdr_id_label} --phase {phase_arg or '1'} --evidence '{example_parts}'")
+    print(f"/conexus:phase-review-gate {rdr_id_label} --phase {phase_arg or '1'} --evidence '{example_parts}'")
     print(f"```")
     sys.exit(0)
 

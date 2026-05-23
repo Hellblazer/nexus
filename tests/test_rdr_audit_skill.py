@@ -44,7 +44,7 @@ class TestSkillFileExists:
     def test_command_file_present(self) -> None:
         assert COMMAND_PATH.exists(), (
             f"nx/commands/rdr-audit.md does not exist. "
-            f"Slash command file is required for /nx:rdr-audit invocation."
+            f"Slash command file is required for /conexus:rdr-audit invocation."
         )
 
 

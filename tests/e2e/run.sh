@@ -111,7 +111,7 @@ cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" << PLUGINS_EOF
 {
   "version": 2,
   "plugins": {
-    "nx@nexus-plugins": [
+    "conexus@nexus-plugins": [
       {
         "scope": "user",
         "installPath": "$REPO_ROOT/nx",
@@ -129,7 +129,7 @@ PLUGINS_EOF
 cat > "$TEST_HOME/.claude/settings.json" << SETTINGS_EOF
 {
   "enabledPlugins": {
-    "nx@nexus-plugins": true
+    "conexus@nexus-plugins": true
   },
   "skipDangerousModePermissionPrompt": true
 }

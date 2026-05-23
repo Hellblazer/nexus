@@ -1,10 +1,10 @@
 # rdr-audit launchd template (macOS)
 
-Schedule the `/nx:rdr-audit <project>` skill to run periodically via macOS launchd.
+Schedule the `/conexus:rdr-audit <project>` skill to run periodically via macOS launchd.
 
 Used together with the shell wrapper at `scripts/cron-rdr-audit.sh`. The plist
 template fires the wrapper on a recurring interval; the wrapper invokes
-`claude -p '/nx:rdr-audit <PROJECT>'` in a headless Claude Code session and
+`claude -p '/conexus:rdr-audit <PROJECT>'` in a headless Claude Code session and
 writes output to `~/.local/state/rdr-audit/<PROJECT>.log`.
 
 ## Install
@@ -55,8 +55,8 @@ You can also print the exact install/uninstall commands from inside Claude Code
 without leaving the session:
 
 ```
-/nx:rdr-audit schedule <project>
-/nx:rdr-audit unschedule <project>
+/conexus:rdr-audit schedule <project>
+/conexus:rdr-audit unschedule <project>
 ```
 
 These print the platform-specific commands to stdout for you to review and run
@@ -67,7 +67,7 @@ manual step.
 ## Safety Note
 
 **Do not run `launchctl load` automatically** — this is your explicit step. The
-nx skill's `/nx:rdr-audit schedule <project>` command prints the install
+nx skill's `/conexus:rdr-audit schedule <project>` command prints the install
 instructions but never executes them. System-level installs require your review
 and authorization each time.
 

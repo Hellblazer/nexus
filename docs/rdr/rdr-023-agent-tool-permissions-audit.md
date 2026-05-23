@@ -56,7 +56,7 @@ what subagents can use at runtime regardless of other configuration.
 
 ### Finding 3: Sequential thinking is pervasive
 
-12 of 14 agents reference `mcp__plugin_nx_sequential-thinking__sequentialthinking`
+12 of 14 agents reference `mcp__plugin_conexus_sequential-thinking__sequentialthinking`
 in their system prompts. This is a reasoning primitive with no side effects — it
 should not be restricted.
 
@@ -96,7 +96,7 @@ Two independent layers:
 ### Tool Assignments
 
 > **Note**: "sequential-thinking" in the table below abbreviates the full tool
-> identifier `mcp__plugin_nx_sequential-thinking__sequentialthinking`. The
+> identifier `mcp__plugin_conexus_sequential-thinking__sequentialthinking`. The
 > design doc and impl-plan contain the full identifiers as deployed to agent
 > frontmatter.
 

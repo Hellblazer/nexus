@@ -33,12 +33,12 @@ else
     if python3 -c "
 import json, sys
 d = json.load(open(sys.argv[1]))
-entries = d.get('plugins', {}).get('nx@nexus-plugins', [])
+entries = d.get('plugins', {}).get('conexus@nexus-plugins', [])
 sys.exit(1 if any('plugins/cache' in e.get('installPath','') for e in entries) else 0)
 " "$plugins_json" 2>/dev/null; then
         pass "nx plugin does not load from cache (not v1)"
     else
-        fail "nx@nexus-plugins installPath points to plugin cache — testing v1, not dev"
+        fail "conexus@nexus-plugins installPath points to plugin cache — testing v1, not dev"
     fi
 fi
 

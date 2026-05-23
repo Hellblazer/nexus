@@ -2,7 +2,7 @@
 
 Nexus organizes data across three tiers with increasing durability. Data flows upward (T1 → T2 → T3).
 
-**Two access paths**: Humans use the `nx` CLI. Agents use MCP tools (`mcp__plugin_nx_nexus__*`) which call the same Python APIs directly — no Bash dependency. MCP tools that return lists (`search`, `store_list`, `memory_search`) are paged — pass `offset=N` for subsequent pages. See [nx/README.md](../nx/README.md#mcp-servers) for MCP tool details.
+**Two access paths**: Humans use the `nx` CLI. Agents use MCP tools (`mcp__plugin_conexus_nexus__*`) which call the same Python APIs directly — no Bash dependency. MCP tools that return lists (`search`, `store_list`, `memory_search`) are paged — pass `offset=N` for subsequent pages. See [nx/README.md](../nx/README.md#mcp-servers) for MCP tool details.
 
 **One arbitrator per tier**: Since conexus 4.34.0 (RDR-120), both T2 and (local-mode) T3 are wrapped in dedicated daemon processes. Every consumer — host CLI, the MCP server, multiple Claude Code sessions, Claude Cowork agents (via SDK transport), dev containers (via TCP loopback or UDS mount) — routes through the same daemon, so the underlying SQLite / ChromaDB instance has exactly one writer. Start the daemons once via `nx daemon t2 install --autostart` (and `nx daemon t3 install --autostart` in local mode); the Claude Code plugin's SessionStart hook also auto-spawns them on each session start.
 

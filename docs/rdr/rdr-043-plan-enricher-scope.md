@@ -38,7 +38,7 @@ The current framing causes two problems:
 
 RDR-036 introduced the plan-enricher as the third step in the RDR accept chain: `strategic-planner → plan-auditor → plan-enricher`. In that chain, audit findings flow through T1 scratch and the enricher folds them into beads. This works well for the chain use case.
 
-But the enricher is also invoked standalone (`/nx:enrich-plan`) and should work equally well without a preceding audit. The "degraded mode" label discourages standalone use.
+But the enricher is also invoked standalone (`/conexus:enrich-plan`) and should work equally well without a preceding audit. The "degraded mode" label discourages standalone use.
 
 ### Scope of Change
 
@@ -127,6 +127,6 @@ This is purely a framing/documentation change:
 - [ ] "audit findings" is no longer the primary framing in any agent/skill description
 - [ ] Context-only enrichment has no warning or "degraded" label
 - [ ] Enrichment checklist includes file paths, symbols, test commands, constraints
-- [ ] Standalone `/nx:enrich-plan` works without preceding audit (no warning)
+- [ ] Standalone `/conexus:enrich-plan` works without preceding audit (no warning)
 - [ ] RDR accept chain still works (audit findings still incorporated when present)
 - [ ] All plugin structure tests pass

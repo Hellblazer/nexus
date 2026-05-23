@@ -549,7 +549,7 @@ own scope of work, likely a descendant of RDR-090.
 - [ ] Structural: all sections filled.
 - [ ] Assumption audit: A-3 weight-calibration assumption flagged
       for Phase 2c calibration run.
-- [ ] AI critique pass via `/nx:rdr-gate`.
+- [ ] AI critique pass via `/conexus:rdr-gate`.
 
 ## References
 

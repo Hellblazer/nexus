@@ -219,7 +219,7 @@ if command -v nx &>/dev/null; then
            printf '%s' "$SCRATCH_RESULTS" | grep -q "$BEAD_ID"; then
             REVIEW_MSG="Review completed for $BEAD_ID."
         else
-            REVIEW_MSG="ADVISORY: No review marker found for $BEAD_ID — consider running /nx:review-code before closing."
+            REVIEW_MSG="ADVISORY: No review marker found for $BEAD_ID — consider running /conexus:review-code before closing."
         fi
     fi
 fi

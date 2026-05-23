@@ -33,7 +33,7 @@ Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
 3. find_referencing_symbols to trace all callers
 4. type_hierarchy for polymorphic dispatch questions
 5. Form hypothesis based on Serena evidence
-6. Validate with `mcp__plugin_nx_sequential-thinking__sequentialthinking`
+6. Validate with `mcp__plugin_conexus_sequential-thinking__sequentialthinking`
 ```
 
 ## When This Skill Activates
@@ -48,11 +48,11 @@ Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
 
 Before dispatching the debugger agent, seed T1 scratch with link targets so the auto-linker can create catalog links when the agent stores findings:
 
-1. If the task references an RDR (pattern `RDR-\d+`), resolve it: `mcp__plugin_nx_nexus-catalog__search(query="RDR-NNN")`
+1. If the task references an RDR (pattern `RDR-\d+`), resolve it: `mcp__plugin_conexus_nexus-catalog__search(query="RDR-NNN")`
 2. Check T1 scratch for `rdr-planning-context`
 3. Write link context to scratch:
    ```
-   mcp__plugin_nx_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "relates"}], "source_agent": "debugger"}', tags="link-context")
+   mcp__plugin_conexus_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<resolved-tumbler>", "link_type": "relates"}], "source_agent": "debugger"}', tags="link-context")
    ```
 4. If no RDR/document reference found, skip seeding (the auto-linker handles empty context gracefully)
 
@@ -82,7 +82,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 
 ## Debugging Methodology
 
-The debugger uses `mcp__plugin_nx_sequential-thinking__sequentialthinking`:
+The debugger uses `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
 1. Form initial hypotheses about root cause
 2. Identify evidence needed to validate/refute each hypothesis
 3. Gather evidence from code, tests, logs

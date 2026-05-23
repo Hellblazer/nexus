@@ -3,13 +3,13 @@ rdr_process incident filing template (RDR-067 Phase 3)
 
 Use this template to file a cross-project silent-scope-reduction incident into
 the `rdr_process` T2 collection. Filings from different projects aggregate into
-the `/nx:rdr-audit` subagent's evidence base and let future audits see
+the `/conexus:rdr-audit` subagent's evidence base and let future audits see
 historical patterns beyond any single project's post-mortem corpus.
 
 ## How to file
 
 1. Copy this template into a new T2 entry:
-   `mcp__plugin_nx_nexus__memory_put(project="rdr_process", title="<project>-incident-<slug>", ttl=0, tags="rdr-audit,incident,<project>,<drift_class>", content=<filled-in template>)`
+   `mcp__plugin_conexus_nexus__memory_put(project="rdr_process", title="<project>-incident-<slug>", ttl=0, tags="rdr-audit,incident,<project>,<drift_class>", content=<filled-in template>)`
 
 2. Title convention: `<project>-incident-<short-slug>` where slug is a stable
    handle for the incident (e.g. `art-incident-073-dialog-grounding-dropped`).

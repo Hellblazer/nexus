@@ -491,14 +491,14 @@ The 065-069 silent-scope-reduction remediation delivered four interventions — 
 
 | Intervention | Trigger | Automated? |
 |---|---|---|
-| Close funnel preamble (065) | `/nx:rdr-close` | Manual only |
-| Composition probe (066) | `/nx:composition-probe` | Manual only |
-| Audit skill (067) | `/nx:rdr-audit` | Templates exist (`scripts/launchd/`, `scripts/cron/`) but NOT installed |
+| Close funnel preamble (065) | `/conexus:rdr-close` | Manual only |
+| Composition probe (066) | `/conexus:composition-probe` | Manual only |
+| Audit skill (067) | `/conexus:rdr-audit` | Templates exist (`scripts/launchd/`, `scripts/cron/`) but NOT installed |
 | Critic dispatch (069) | During manual close | Manual only |
 
 Meanwhile, telemetry data accumulates unseen: `relevance_log` (RDR-061 E2), search traces, 2+ parallel T1 sessions, 16K+ catalog links with zero viewer.
 
-The console is the missing activation layer. Without it, the operator doesn't remember to run `/nx:rdr-audit` periodically, the telemetry data is write-only, and parallel agent sessions are invisible.
+The console is the missing activation layer. Without it, the operator doesn't remember to run `/conexus:rdr-audit` periodically, the telemetry data is write-only, and parallel agent sessions are invisible.
 
 **Priority upgrade rationale (P2 → P1)**: the console makes the cross-RDR remediation operational, not just available. The 065-069 infrastructure has no value if the operator never invokes it — and the operator won't without an observability surface that reminds them to.
 

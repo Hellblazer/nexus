@@ -43,10 +43,10 @@ reduction on plans with multiple consecutive operators. See
 
 | Capability | Before RDR-080 | After RDR-080 |
 |------------|---------------|---------------|
-| Knowledge consolidation | `knowledge-tidier` agent | `mcp__plugin_nx_nexus__nx_tidy` |
-| Plan audit | `plan-auditor` agent | `mcp__plugin_nx_nexus__nx_plan_audit` |
-| Bead enrichment | `plan-enricher` agent | `mcp__plugin_nx_nexus__nx_enrich_beads` |
-| Multi-step retrieval | `query-planner` + `analytical-operator` agents | `mcp__plugin_nx_nexus__nx_answer` |
+| Knowledge consolidation | `knowledge-tidier` agent | `mcp__plugin_conexus_nexus__nx_tidy` |
+| Plan audit | `plan-auditor` agent | `mcp__plugin_conexus_nexus__nx_plan_audit` |
+| Bead enrichment | `plan-enricher` agent | `mcp__plugin_conexus_nexus__nx_enrich_beads` |
+| Multi-step retrieval | `query-planner` + `analytical-operator` agents | `mcp__plugin_conexus_nexus__nx_answer` |
 | PDF indexing | `pdf-chromadb-processor` agent | `nx index pdf` CLI / direct ingest |
 | Code review | `code-review-expert` agent | (kept) — multi-turn inspection with judgement |
 | Debugging | `debugger` agent | (kept) — hypothesis → evidence → revise loop |
@@ -70,8 +70,8 @@ so legacy dispatch references don't break:
 ```markdown
 ---
 name: knowledge-tidier
-description: "STUB — superseded by mcp__plugin_nx_nexus__nx_tidy MCP tool
-             (RDR-080 P3).  Call mcp__plugin_nx_nexus__nx_tidy instead of
+description: "STUB — superseded by mcp__plugin_conexus_nexus__nx_tidy MCP tool
+             (RDR-080 P3).  Call mcp__plugin_conexus_nexus__nx_tidy instead of
              dispatching this agent."
 ---
 
@@ -83,7 +83,7 @@ This agent is a redirector.  The real work lives in the `nx_tidy` MCP tool.
 
 Call the MCP tool directly:
 
-    mcp__plugin_nx_nexus__nx_tidy(topic="...", collection="knowledge")
+    mcp__plugin_conexus_nexus__nx_tidy(topic="...", collection="knowledge")
 ```
 
 When a caller dispatches the stub agent via the `Agent` tool, Claude reads

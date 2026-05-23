@@ -218,7 +218,7 @@ def _read_chroma_uri(uri: str, t3) -> ReadResult:
         return ReadFail(reason="unreachable", detail=f"{type(e).__name__}: {e}")
 ```
 
-**Alternative considered**: rather than per-collection dispatch, a Phase 0 backfill could normalize all `knowledge__*` chunks to populate `source_path` (copy from `title`). That eliminates dispatch logic permanently but requires a one-shot T3 migration touching every `knowledge__*` chunk. Decision deferred to /nx:rdr-accept's planning chain — both options ship a working reader; the dispatch table is the lower-blast-radius default.
+**Alternative considered**: rather than per-collection dispatch, a Phase 0 backfill could normalize all `knowledge__*` chunks to populate `source_path` (copy from `title`). That eliminates dispatch logic permanently but requires a one-shot T3 migration touching every `knowledge__*` chunk. Decision deferred to /conexus:rdr-accept's planning chain — both options ship a working reader; the dispatch table is the lower-blast-radius default.
 
 ### Existing Infrastructure Audit
 
@@ -315,7 +315,7 @@ The two-release deprecation window for `source_path` is conservative — the dua
 - [x] Spike P2.0: multi-chunk reassembly verification on paper-shaped collections — **Done — research-5, id 1014 (PASS)**. 3/3 signal across 273/408/209-chunk papers from `knowledge__delos`; mean operator_verify 1.00 across 11 claims; ordering verification PASS via independent-reassembly hash match. Resolves the Phase 2 prerequisite that A1 left open. Two collateral bugfixes shipped during the spike: `T3Database.get_collection` added (the wrapper had no public read-only accessor); URI path stripping changed from `lstrip('/')` to `removeprefix('/')` so absolute filesystem paths round-trip correctly.
 - [x] Spike A2: backfill round-trip across `rdr__*`, `docs__*`, `code__*` collections — **Done — research-2, id 1009 (PASS)**. 99.98% (5470/5471). Lone empty-string `source_path` in `code__int-crossmodel-ba3a85dc` triaged at backfill time.
 - [x] Spike A3: no-null-row contract preserves partial successes — **Done — research-3, id 1010 (PASS)**. 0% ambiguous. Three-category split surfaced; Phase 2 SQL tightened with `AND confidence IS NULL` clause.
-- [ ] T2 schema review: `source_uri TEXT` column on `document_aspects` and `catalog_documents`; backfill SQL; deprecation policy on `source_path`. **Pending — handled in /nx:rdr-accept's planning chain.**
+- [ ] T2 schema review: `source_uri TEXT` column on `document_aspects` and `catalog_documents`; backfill SQL; deprecation policy on `source_path`. **Pending — handled in /conexus:rdr-accept's planning chain.**
 
 ### Minimum Viable Validation
 
@@ -442,7 +442,7 @@ Unit tests for `read_source` per scheme (file, chroma, scratch — https/s3 defe
 
 ## Finalization Gate
 
-**Gate run**: 2026-04-27 — `/nx:rdr-gate 096`. Outcome: **PASSED** with 3 critical and 2 significant in-place edits applied to this RDR before accept (per the gate-accept-pause discipline). The architectural design is sound; all in-place edits sync the RDR body to the spike outcomes (research-1/2/3/4, ids 1008/1009/1010/1011).
+**Gate run**: 2026-04-27 — `/conexus:rdr-gate 096`. Outcome: **PASSED** with 3 critical and 2 significant in-place edits applied to this RDR before accept (per the gate-accept-pause discipline). The architectural design is sound; all in-place edits sync the RDR body to the spike outcomes (research-1/2/3/4, ids 1008/1009/1010/1011).
 
 Critical edits: (1) Phase 2 null-row DELETE SQL was missing the `AND confidence IS NULL` clause — without it, the migration would silently delete 51 `rdr-frontmatter-v1` structured-zero successes. SQL now uses the four-clause form from research-3. (2) Phase 1 `_read_chroma_uri` code sketch queried `where={"source_path": ...}` — wrong field for `knowledge__*` chunks (which identify documents via `title`). Reader now includes a `CHROMA_IDENTITY_FIELD` collection-prefix → identity-field dispatch table per research-4. (3) All three Critical Assumption checkboxes synced from `[ ]` to `[x]` with PASS verdicts citing research findings; all three Phase 1 Prerequisites synced similarly.
 

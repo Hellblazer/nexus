@@ -9,7 +9,7 @@ effort: medium
 ## When This Skill Activates
 
 - User says "create an RDR", "new RDR", "start an RDR"
-- User invokes `/nx:rdr-create`
+- User invokes `/conexus:rdr-create`
 - User wants to think through a technical decision — before, during, or after building
 
 ## Inputs
@@ -53,7 +53,7 @@ If `$RDR_DIR` does not exist:
 
 If `$CLAUDE_PLUGIN_ROOT` is not available, use the templates inline (they are embedded below in the Templates section).
 
-> **Gap convention** (enforced at `/nx:rdr-gate` Layer 1 and `/nx:rdr-close` for post-65 RDRs): the `## Problem Statement` (or `## Problem`) section must contain one or more `#### Gap N: <title>` headings (regex: `^#{3,5} Gap \d+:`). Fill these in during drafting — the template scaffolds `Gap 1` and `Gap 2` placeholders. Replacing the Problem Statement with free-form prose and removing the gap headings will fail the gate at accept time, not just at close time. Authors can override with `/nx:rdr-gate <id> --skip-gaps` when the gap structure truly does not fit (audit-trail escape only; prefer adding real gap headings).
+> **Gap convention** (enforced at `/conexus:rdr-gate` Layer 1 and `/conexus:rdr-close` for post-65 RDRs): the `## Problem Statement` (or `## Problem`) section must contain one or more `#### Gap N: <title>` headings (regex: `^#{3,5} Gap \d+:`). Fill these in during drafting — the template scaffolds `Gap 1` and `Gap 2` placeholders. Replacing the Problem Statement with free-form prose and removing the gap headings will fail the gate at accept time, not just at close time. Authors can override with `/conexus:rdr-gate <id> --skip-gaps` when the gap structure truly does not fit (audit-trail escape only; prefer adding real gap headings).
 
 ### Step 2: Assign ID
 
@@ -78,7 +78,7 @@ Replace `[NUMBER]` with the assigned ID and `[TITLE]` with the user's title.
 
 ### Step 4: Write T2 record
 
-mcp__plugin_nx_nexus__memory_put(content="id: NNN\nprefix: PREFIX\ntitle: User's Title\nstatus: Draft\ntype: Feature\npriority: Medium\ncreated: YYYY-MM-DD\ngated: \nclosed: \nclose_reason: \nsuperseded_by: \nsupersedes: \nepic_bead: \narchived: false\nfile_path: $RDR_DIR/NNN-kebab-title.md", project="{repo}_rdr", title="{NNN}", ttl="permanent", tags="rdr,{type}"
+mcp__plugin_conexus_nexus__memory_put(content="id: NNN\nprefix: PREFIX\ntitle: User's Title\nstatus: Draft\ntype: Feature\npriority: Medium\ncreated: YYYY-MM-DD\ngated: \nclosed: \nclose_reason: \nsuperseded_by: \nsupersedes: \nepic_bead: \narchived: false\nfile_path: $RDR_DIR/NNN-kebab-title.md", project="{repo}_rdr", title="{NNN}", ttl="permanent", tags="rdr,{type}"
 
 ### Step 5: Regenerate README index
 
@@ -100,7 +100,7 @@ Created RDR PREFIX-NNN: "Title"
 File: docs/rdr/NNN-kebab-title.md
 Status: Draft
 
-Next: Fill in Problem Statement and Context, then use /nx:rdr-research to add findings.
+Next: Fill in Problem Statement and Context, then use /conexus:rdr-research to add findings.
 ```
 
 ## Success Criteria
@@ -117,7 +117,7 @@ Next: Fill in Problem Statement and Context, then use /nx:rdr-research to add fi
 
 This skill produces outputs directly (no agent delegation):
 
-- **T3 knowledge**: Not produced at create time (archival happens at `/nx:rdr-close`)
+- **T3 knowledge**: Not produced at create time (archival happens at `/conexus:rdr-close`)
 - **T2 memory**: RDR metadata record via memory_put tool: project="{repo}_rdr", title="{NNN}", ttl="permanent", tags="rdr,{type}"
 - **T1 scratch**: Working notes during creation via scratch tool: action="put", content="RDR NNN: scaffolding", tags="rdr,create" (optional, for tracking multi-step creation)
 - **Filesystem**: `docs/rdr/NNN-kebab-title.md`, updated `docs/rdr/README.md`
@@ -126,7 +126,7 @@ This skill produces outputs directly (no agent delegation):
 
 ## Does NOT
 
-- Create beads (that happens at `/nx:rdr-close`)
-- Run validation (that happens at `/nx:rdr-gate`)
+- Create beads (that happens at `/conexus:rdr-close`)
+- Run validation (that happens at `/conexus:rdr-gate`)
 - Commit (user decides when to commit)
 - Run `nx index rdr` (user can do this manually or it happens at gate/close)

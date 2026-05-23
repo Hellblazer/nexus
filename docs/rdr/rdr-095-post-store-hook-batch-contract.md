@@ -963,7 +963,7 @@ time per batch is the sum of the existing two hardcoded calls
 
 ## Finalization Gate
 
-_To be completed during /nx:rdr-gate._
+_To be completed during /conexus:rdr-gate._
 
 ## References
 

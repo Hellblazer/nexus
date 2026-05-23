@@ -41,7 +41,7 @@ The MCP server imports nexus Python modules directly — `T1Database`, `T2Databa
 Claude Code Process
     │
     ├── Agent (foreground or background)
-    │     └── calls mcp__plugin_nx_nexus__search (MCP tool)
+    │     └── calls mcp__plugin_conexus_nexus__search (MCP tool)
     │           └── JSON-RPC → MCP server process
     │                 └── T3Database.search() (direct Python)
     │
@@ -53,7 +53,7 @@ Claude Code Process
 
 ### MCP Tool Set (8 tools, ~750 context tokens)
 
-Server name: `"nexus"` in `.mcp.json` → tools are `mcp__plugin_nx_nexus__<name>`
+Server name: `"nexus"` in `.mcp.json` → tools are `mcp__plugin_conexus_nexus__<name>`
 
 | Tool | Parameters | Replaces |
 |------|-----------|----------|
@@ -130,7 +130,7 @@ Multiple Claude Code sessions may run concurrently, each with its own `nx-mcp` p
 }
 ```
 
-The server key `"nexus"` determines the tool name prefix: `mcp__plugin_nx_nexus__<tool_name>`. This naming convention must be verified against Claude Code's actual tool-name construction logic before committing to it in 63 files. The verification should be part of Phase 1 (create server, register, call a tool, inspect the actual tool name).
+The server key `"nexus"` determines the tool name prefix: `mcp__plugin_conexus_nexus__<tool_name>`. This naming convention must be verified against Claude Code's actual tool-name construction logic before committing to it in 63 files. The verification should be part of Phase 1 (create server, register, call a tool, inspect the actual tool name).
 
 ### Permission Hook Integration
 
@@ -138,7 +138,7 @@ Add pre-approval for all nexus MCP tools to `nx/hooks/scripts/permission-request
 
 ```bash
 # Auto-approve all nexus MCP tools (storage tiers, search)
-if [[ "$TOOL" =~ ^mcp__plugin_nx_nexus__ ]]; then
+if [[ "$TOOL" =~ ^mcp__plugin_conexus_nexus__ ]]; then
   echo "allow"
   exit 0
 fi
@@ -306,7 +306,7 @@ Use scratch tool: action="put", content="hypothesis", tags="debug"
 All 14 agents that use nx commands add MCP tools to their `tools:` list:
 
 ```yaml
-tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", "mcp__plugin_nx_nexus__store_list", "mcp__plugin_nx_nexus__memory_put", "mcp__plugin_nx_nexus__memory_get", "mcp__plugin_nx_nexus__memory_search", "mcp__plugin_nx_nexus__scratch", "mcp__plugin_nx_sequential-thinking__sequentialthinking"]
+tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_conexus_nexus__search", "mcp__plugin_conexus_nexus__store_put", "mcp__plugin_conexus_nexus__store_list", "mcp__plugin_conexus_nexus__memory_put", "mcp__plugin_conexus_nexus__memory_get", "mcp__plugin_conexus_nexus__memory_search", "mcp__plugin_conexus_nexus__scratch", "mcp__plugin_conexus_sequential-thinking__sequentialthinking"]
 ```
 
 Bash remains in the tools list for non-nx operations (git, bd, pytest, etc.).
@@ -335,7 +335,7 @@ See `docs/rdr/rdr-035-plugin-agent-mcp-tool-access.md`.
 - [x] T1 PPID chain verification test passes
 - [x] Integration test confirms round-trip MCP tool calls
 - [x] All 63 agent-consumed files updated to MCP tool references
-- [x] Permission hook pre-approves `mcp__plugin_nx_nexus__*` tools
+- [x] Permission hook pre-approves `mcp__plugin_conexus_nexus__*` tools
 - [ ] ~~No agent references `nx scratch/memory/store/search` via Bash~~ — agents may use either path
 - [x] Background agent (knowledge-tidier) successfully persists to T3 via MCP — **Verified 2026-03-12 after RDR-035 fix**
 - [x] `uv run pytest` passes (no regressions)

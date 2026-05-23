@@ -1,21 +1,21 @@
 ---
 name: document
-description: Use when authoring or auditing documentation against existing coverage — tries the document plan library first (search prose follow_links=cites + search code → documentation-for traversal → compare), falls through to /nx:query if nothing matches
+description: Use when authoring or auditing documentation against existing coverage — tries the document plan library first (search prose follow_links=cites + search code → documentation-for traversal → compare), falls through to /conexus:query if nothing matches
 effort: medium
 ---
 
 **Tier-aware discipline** — apply at session start and before every major step:
 
 1. **Read** widest → narrowest before duplicating effort:
-   - T3 (cross-project): `mcp__plugin_nx_nexus__nx_answer(...)` for verb-shape questions; `mcp__plugin_nx_nexus__search(...)` for keyword lookup.
-   - T2 (project): `mcp__plugin_nx_nexus__memory_search(query="<topic>", project="<repo>")`.
-   - T1 (siblings, this session): `mcp__plugin_nx_nexus__scratch(action="search", query="<topic>")`.
-2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_nx_nexus__plan_search(query="<task>", limit=3)`.
+   - T3 (cross-project): `mcp__plugin_conexus_nexus__nx_answer(...)` for verb-shape questions; `mcp__plugin_conexus_nexus__search(...)` for keyword lookup.
+   - T2 (project): `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`.
+   - T1 (siblings, this session): `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`.
+2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_conexus_nexus__plan_search(query="<task>", limit=3)`.
 3. **Write back at end** — findings not stored are findings lost. Pick the tier that matches the audience:
-   - `mcp__plugin_nx_nexus__scratch(action="put", ..., tags="<topic>")` for sibling agents downstream THIS session (T1, narrowest scope, cheapest write).
-   - `mcp__plugin_nx_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2).
-   - `mcp__plugin_nx_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
-   - `mcp__plugin_nx_nexus__plan_save(...)` for multi-agent pipeline outcomes (so future callers hit plan-match).
+   - `mcp__plugin_conexus_nexus__scratch(action="put", ..., tags="<topic>")` for sibling agents downstream THIS session (T1, narrowest scope, cheapest write).
+   - `mcp__plugin_conexus_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2).
+   - `mcp__plugin_conexus_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
+   - `mcp__plugin_conexus_nexus__plan_save(...)` for multi-agent pipeline outcomes (so future callers hit plan-match).
 
 # document
 
@@ -27,7 +27,7 @@ exists to surface.**
 ## The call
 
 ```
-mcp__plugin_nx_nexus__nx_answer(
+mcp__plugin_conexus_nexus__nx_answer(
     question=<caller's phrasing>,
     dimensions={"verb": "document"},
     context=<area + limit — as JSON string if needed>,
@@ -57,7 +57,7 @@ Plan-miss falls through to an inline `claude -p` planner.
 ## When direct `search` is fine
 
 A simple "where is X documented" lookup — one corpus, one keyword
-query — is fine via `mcp__plugin_nx_nexus__search`. This skill earns
+query — is fine via `mcp__plugin_conexus_nexus__search`. This skill earns
 its cost when the question requires a cites-graph walk (finding
 undocumented areas) or multi-corpus alignment (code + docs coverage
 comparison).
@@ -79,4 +79,4 @@ comparison).
   an area to its documentation coverage (coverage-first). Different
   traversal purposes.
 
-See `/nx:plan-first` and `docs/plan-authoring-guide.md`.
+See `/conexus:plan-first` and `docs/plan-authoring-guide.md`.

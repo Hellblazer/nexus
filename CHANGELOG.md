@@ -29,7 +29,7 @@ turns the silent gap into a visible diagnostic.
 
 ## [4.34.5] - 2026-05-23
 
-### New: `/nx:continuation` slash command
+### New: `/conexus:continuation` slash command
 
 Generates a paste-ready handoff prompt at session close. Captures
 branch state, in-progress and ready beads, open PRs from this branch,
@@ -40,8 +40,8 @@ a 10-section continuation document at
 and emit the compressed paste-ready prompt in chat as a copy-clickable
 code block.
 
-Argument is optional: `/nx:continuation` slugs from the current branch,
-`/nx:continuation "RDR-120 P3b"` slugs from the topic. Same-day
+Argument is optional: `/conexus:continuation` slugs from the current branch,
+`/conexus:continuation "RDR-120 P3b"` slugs from the topic. Same-day
 re-invocations append `-HHMM` so prior captures aren't overwritten.
 
 Mined from 122 instances of the continuation-prompt pattern across
@@ -477,7 +477,7 @@ the post-RDR-103 collection-name shape.
   - `git_add_all_redirects_to_explicit_paths.py`: blocks `git add -A`
     / `git add .` / `git add --all` and asks for explicit paths.
   - `phase_review_close_requires_gate.py` (fail-closed): blocks
-    `bd close` on phase-review beads unless `/nx:phase-review-gate`
+    `bd close` on phase-review beads unless `/conexus:phase-review-gate`
     has written a fresh PASSED sentinel for the `(rdr-id, phase)`
     tuple. The sentinel writer lives in
     `nx/skills/phase-review-gate/SKILL.md` via
@@ -557,7 +557,7 @@ CI infrastructure, and repo-local skill discovery.
 
 ## [4.32.13] - 2026-05-19
 
-Plugin-only patch on 4.32.12. Restores the `/nx:phase-review-gate`
+Plugin-only patch on 4.32.12. Restores the `/conexus:phase-review-gate`
 slash command from the archived develop branch (built as bead
 `nexus-j327`, commit `122feaff`, 2026-05-17). The skill enforces a
 two-pass cross-walk of RDR §Approach items against closing beads at
@@ -3563,7 +3563,7 @@ Shakeout patch against 4.10.0, run live on the reference install immediately aft
 
 ## [4.10.0] - 2026-04-23
 
-Ships operator bundling and the plan-use telemetry wiring. Contiguous runs of ≥2 operator steps (extract / rank / compare / summarize / generate) now collapse into a single `claude -p` subprocess instead of one spawn per step. Measured wins on real corpora: **-55%** on a 2-op `extract → summarize` chain, **-28%** on the blog-post Arcaneum tradeoffs plan (with materially better ranking quality), **-72%** on a 4-op cross-repo compositional query (192s → 54s, matched synthesis quality). Default is on (`bundle_operators=True`); the one-line escape hatch `bundle_operators=False` recovers per-step isolation for debugging. Separately, `plans.use_count` / `success_count` / `failure_count` finally populate — the `PlanLibrary.increment_run_*` methods existed since RDR-078 but had zero callers until this release. Skill wording for the five verb skills (`/nx:research`, `/nx:review`, `/nx:analyze`, `/nx:debug`, `/nx:document`) and `/nx:query` shifts from descriptive ("Routes through nx_answer") to imperative ("You MUST call nx_answer") to close the 6,537:0 audit deficit between direct `search` calls and `nx_answer` invocations.
+Ships operator bundling and the plan-use telemetry wiring. Contiguous runs of ≥2 operator steps (extract / rank / compare / summarize / generate) now collapse into a single `claude -p` subprocess instead of one spawn per step. Measured wins on real corpora: **-55%** on a 2-op `extract → summarize` chain, **-28%** on the blog-post Arcaneum tradeoffs plan (with materially better ranking quality), **-72%** on a 4-op cross-repo compositional query (192s → 54s, matched synthesis quality). Default is on (`bundle_operators=True`); the one-line escape hatch `bundle_operators=False` recovers per-step isolation for debugging. Separately, `plans.use_count` / `success_count` / `failure_count` finally populate — the `PlanLibrary.increment_run_*` methods existed since RDR-078 but had zero callers until this release. Skill wording for the five verb skills (`/conexus:research`, `/conexus:review`, `/conexus:analyze`, `/conexus:debug`, `/conexus:document`) and `/conexus:query` shifts from descriptive ("Routes through nx_answer") to imperative ("You MUST call nx_answer") to close the 6,537:0 audit deficit between direct `search` calls and `nx_answer` invocations.
 
 ### Added
 
@@ -3578,7 +3578,7 @@ Ships operator bundling and the plan-use telemetry wiring. Contiguous runs of �
 
 ### Changed
 
-- **Verb skills (`research` / `review` / `analyze` / `debug` / `document`) and `/nx:query`** — wording flipped from descriptive to imperative. Each skill now has a "When direct `search` is fine" carve-out for single-corpus keyword lookups, and anti-patterns cite *composition* (not a blanket "analytical") as the deciding factor. The `using-nx-skills` common-mistakes table adds three mappings from bad `search(analytical-question)` shapes to correct `nx_answer` shapes (full `mcp__plugin_nx_nexus__` prefix throughout — no short-form syntax).
+- **Verb skills (`research` / `review` / `analyze` / `debug` / `document`) and `/conexus:query`** — wording flipped from descriptive to imperative. Each skill now has a "When direct `search` is fine" carve-out for single-corpus keyword lookups, and anti-patterns cite *composition* (not a blanket "analytical") as the deciding factor. The `using-nx-skills` common-mistakes table adds three mappings from bad `search(analytical-question)` shapes to correct `nx_answer` shapes (full `mcp__plugin_conexus_nexus__` prefix throughout — no short-form syntax).
 - **`_hydrate_operator_args` is now synchronous** (`src/nexus/plans/runner.py`). Previously declared `async def` with no `await` expressions. Removed the coroutine allocation per operator step and the misleading async contract.
 
 ### Fixed
@@ -3615,15 +3615,15 @@ Ships RDR-092 (Plan Match-Text from Dimensional Identity) in full, plus the whee
 
 ## [4.9.11] - 2026-04-23
 
-Plugin-side hardening. Shifts the `#### Gap N:` structural requirement in RDR Problem Statements from `/nx:rdr-close` (detected at close time) to `/nx:rdr-gate` (detected at gate time, before accept) so authors meet the rule before it bites. Closes the surprise-at-close pattern that bit RDR-091 on 2026-04-22: the RDR accepted cleanly without gap headings, then failed the close preamble, and the gap structure had to be retrofitted after the fact.
+Plugin-side hardening. Shifts the `#### Gap N:` structural requirement in RDR Problem Statements from `/conexus:rdr-close` (detected at close time) to `/conexus:rdr-gate` (detected at gate time, before accept) so authors meet the rule before it bites. Closes the surprise-at-close pattern that bit RDR-091 on 2026-04-22: the RDR accepted cleanly without gap headings, then failed the close preamble, and the gap structure had to be retrofitted after the fact.
 
 ### Added
 
-- **`/nx:rdr-gate` Layer 1 gap-structure check** (`nx/commands/rdr-gate.md`, `nx/skills/rdr-gate/SKILL.md`, `nexus-4qpb`). For RDRs with `id >= 65`, the preamble now validates the `## Problem Statement` section contains at least one `#### Gap N: <title>` heading. Missing headings emit a BLOCKED outcome with the same error and regex the close skill uses; the assistant stops at Layer 1 without running the assumption audit or AI critique. Legacy RDRs (`id < 65`) are grandfathered. `--skip-gaps` bypasses the check for rare RDRs where the structure does not fit; the override is recorded in the gate audit trail.
+- **`/conexus:rdr-gate` Layer 1 gap-structure check** (`nx/commands/rdr-gate.md`, `nx/skills/rdr-gate/SKILL.md`, `nexus-4qpb`). For RDRs with `id >= 65`, the preamble now validates the `## Problem Statement` section contains at least one `#### Gap N: <title>` heading. Missing headings emit a BLOCKED outcome with the same error and regex the close skill uses; the assistant stops at Layer 1 without running the assumption audit or AI critique. Legacy RDRs (`id < 65`) are grandfathered. `--skip-gaps` bypasses the check for rare RDRs where the structure does not fit; the override is recorded in the gate audit trail.
 
 ### Changed
 
-- **`/nx:rdr-create` template and SKILL both reinforce the gap convention** (`nx/resources/rdr/TEMPLATE.md`, `nx/skills/rdr-create/SKILL.md`). Template comment now explicitly names both gate enforcement points (`/nx:rdr-gate` and `/nx:rdr-close`) so authors see "missing gaps will block the gate" at drafting time, not just at close. The Gap 1 + Gap 2 placeholders remain in place.
+- **`/conexus:rdr-create` template and SKILL both reinforce the gap convention** (`nx/resources/rdr/TEMPLATE.md`, `nx/skills/rdr-create/SKILL.md`). Template comment now explicitly names both gate enforcement points (`/conexus:rdr-gate` and `/conexus:rdr-close`) so authors see "missing gaps will block the gate" at drafting time, not just at close. The Gap 1 + Gap 2 placeholders remain in place.
 
 ### Fixed
 
@@ -3739,7 +3739,7 @@ Rolls up the kxez (GitHub #243 + #241) and gwhy (#238 / #239 / #240 + review-res
 
 ### Added
 
-- **Plugin↔CLI version drift detection at MCP server startup** (`src/nexus/mcp_infra.py`, `nx/.mcp.json`). The plugin and CLI ship from one `pyproject.toml` (CI enforces marketplace.json parity) but the user runs two separate update commands — `uv tool upgrade conexus` and `/plugin update nx@nexus-plugins`. After drift, the plugin's hooks may invoke flags the CLI no longer recognises. Extended `check_version_compatibility()` (already called from each MCP server's `main()` for CLI ↔ T2 schema drift) with a second case: read `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json`'s `version` field, compare against `importlib.metadata.version("conexus")`, log `plugin_cli_version_mismatch` warning on minor or major divergence with the actionable update hint for the lagging side. Patch-level drift ignored (within-minor releases are wire-compatible). Never blocks startup. The MCP server is the natural single binding point — `nx-mcp` and `nx-mcp-catalog` are conexus entry points; plugin/CLI coupling runs entirely through that surface. Modelled on JupyterLab/VSCode's runtime-recheck-on-every-load pattern. `nx/.mcp.json` gains an explicit `env: {"CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"}` block so the spawned MCP server sees the variable as an env var (not just a path-substitution token).
+- **Plugin↔CLI version drift detection at MCP server startup** (`src/nexus/mcp_infra.py`, `nx/.mcp.json`). The plugin and CLI ship from one `pyproject.toml` (CI enforces marketplace.json parity) but the user runs two separate update commands — `uv tool upgrade conexus` and `/plugin update conexus@nexus-plugins`. After drift, the plugin's hooks may invoke flags the CLI no longer recognises. Extended `check_version_compatibility()` (already called from each MCP server's `main()` for CLI ↔ T2 schema drift) with a second case: read `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json`'s `version` field, compare against `importlib.metadata.version("conexus")`, log `plugin_cli_version_mismatch` warning on minor or major divergence with the actionable update hint for the lagging side. Patch-level drift ignored (within-minor releases are wire-compatible). Never blocks startup. The MCP server is the natural single binding point — `nx-mcp` and `nx-mcp-catalog` are conexus entry points; plugin/CLI coupling runs entirely through that surface. Modelled on JupyterLab/VSCode's runtime-recheck-on-every-load pattern. `nx/.mcp.json` gains an explicit `env: {"CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"}` block so the spawned MCP server sees the variable as an env var (not just a path-substitution token).
 
 ## [4.9.2] - 2026-04-20
 
@@ -3971,7 +3971,7 @@ Rolls up the kxez (GitHub #243 + #241) and gwhy (#238 / #239 / #240 + review-res
 - **`Catalog.graph_many()` no longer produces dangling edges** when the node cap fires — edges referencing truncated nodes are filtered out of `merged_edges`; new `graph_many_node_limit_mid_seed` debug log.
 - **`get_t1_plan_cache` init-failure short-circuit** via `_PLAN_CACHE_UNAVAILABLE` sentinel — prevents lock contention on the degraded-T1 hot path.
 - **`store_get_many`** returns N contents for N input ids without silent truncation at the ChromaDB 300-record quota boundary.
-- **Tool-name normalization in the inline planner** — LLM emits `mcp__plugin_nx_nexus__operator_extract`; dispatcher expected bare `extract`. `_TOOL_ALIASES` now maps both forms + the common catalog-tool names (`link_query` → `traverse`, etc.) so steps don't silently drop.
+- **Tool-name normalization in the inline planner** — LLM emits `mcp__plugin_conexus_nexus__operator_extract`; dispatcher expected bare `extract`. `_TOOL_ALIASES` now maps both forms + the common catalog-tool names (`link_query` → `traverse`, etc.) so steps don't silently drop.
 - **`T2Database.save_plan()` facade** accepts and forwards dimensional kwargs (`name`, `verb`, `scope`, `dimensions`, `default_bindings`, `parent_dims`). Previously stripped silently.
 - **`_seed_plan_templates()` restores `load_all_tiers()` call** — 9 YAML templates under `nx/plans/builtin/` now actually seed into T2 (the call had been dead code).
 - **`PlanLibrary.get_plan_by_dimensions()` restored** — `seed_loader.py` referenced it; method was missing. Seed-directory loads fail at the idempotency check without it.
@@ -4362,8 +4362,8 @@ to honor relay-specified storage targets (T1/T2/T3).
   dispatching skills' T2 target requests. Softened to "MUST persist …
   unless the dispatching relay specifies an alternative storage target
   in its Input Artifacts, Deliverable, or Operational Notes section".
-  The T3 default is preserved for generic `/nx:research`,
-  `/nx:deep-analysis`, `/nx:analyze-code`, etc. invocations (so the
+  The T3 default is preserved for generic `/conexus:research`,
+  `/conexus:deep-analysis`, `/conexus:analyze-code`, etc. invocations (so the
   auto-linker and catalog graph behavior is unchanged). Dispatching
   skills like `nx:rdr-audit` can now redirect findings to T2 without
   fighting the agent's trained pattern.
@@ -4389,14 +4389,14 @@ dimensional contracts.
   — the enricher now inspects `bd show <id> --json .dependencies` in
   its per-bead walk. When the blocking-dependency count is ≥ 2, the
   bead is tagged `metadata.coordinator=true` via `bd update --metadata`,
-  and a `/nx:composition-probe <id>` instruction is appended to the
+  and a `/conexus:composition-probe <id>` instruction is appended to the
   enriched bead description. Post-write verification asserts the tag
   actually persisted (CA-4 silent-omission mitigation) — on failure the
   enricher surfaces an explicit WARNING to the user rather than
   silently proceeding.
 - **`nx:composition-probe` skill** (`nx/skills/composition-probe/SKILL.md`)
   — new skill fired on coordinator beads (or manually via
-  `/nx:composition-probe <id>`). Reads the coordinator bead and its
+  `/conexus:composition-probe <id>`). Reads the coordinator bead and its
   dependencies, dispatches a general-purpose subagent with a verbatim
   prompt to generate a 30-50 line composition smoke test, runs it via
   the project-native test runner (py/java/ts auto-detected), and
@@ -4434,7 +4434,7 @@ dimensional contracts.
 
 ## [3.8.4] - 2026-04-11
 
-Patch release: surgical close-time reindex. The `/nx:rdr-close` skill
+Patch release: surgical close-time reindex. The `/conexus:rdr-close` skill
 was unconditionally walking the entire RDR corpus via `nx index rdr`
 on every close, even when the diff was wholly inside the frontmatter
 (status / closed_date / close_reason flip). This shipped two fixes
@@ -4474,7 +4474,7 @@ that should have landed together with RDR-069 in 3.8.3.
 ## [3.8.3] - 2026-04-11
 
 Patch release: ships RDR-069 automatic substantive-critic dispatch at
-`/nx:rdr-close`. New Step 1.75 (Automatic Critique) runs the
+`/conexus:rdr-close`. New Step 1.75 (Automatic Critique) runs the
 `substantive-critic` agent on every close and gates `close_reason` on
 the critic's verdict category. Addresses ART's documented
 silent-scope-reduction failure mode with the only intervention that has
@@ -4483,7 +4483,7 @@ empirical catch evidence (2/2 on ART RDR-073 + RDR-075).
 ### Added (nx plugin)
 
 - **Step 1.75 Automatic Critique** in `nx/skills/rdr-close/SKILL.md` —
-  dispatches `/nx:substantive-critique <rdr-id>` via a fixed-shape
+  dispatches `/conexus:substantive-critique <rdr-id>` via a fixed-shape
   minimal relay (rdr_id + standard input artifacts only — never
   session-generated summaries, which is the exact rationalization-bias
   failure mode RDR-069 addresses). Parses the canonical `## Verdict`
@@ -4846,7 +4846,7 @@ findings addressed, 3426 unit tests + 20 integration tests passing.
 ### Fixed
 - **Phantom Serena tool names eradicated** — `rename_symbol` (not a real JetBrains backend tool) replaced with `jet_brains_rename` in session-start.sh, mcp-inject.sh, and serena-code-nav skill.
 - **Wrong MCP prefix** — `mcp__plugin_serena_serena__` corrected to `mcp__plugin_sn_serena__` in serena-code-nav skill and registry.yaml.
-- **Sequential thinking prefix** — `mcp__sequential-thinking__` corrected to `mcp__plugin_nx_sequential-thinking__` in 7 skills and 1 command.
+- **Sequential thinking prefix** — `mcp__sequential-thinking__` corrected to `mcp__plugin_conexus_sequential-thinking__` in 7 skills and 1 command.
 - **Phantom tools removed** — `restart_language_server`, `get_current_config`, and `activate_project` references removed from serena-code-nav skill (not exposed in `--context claude-code` MCP mode).
 
 ### Changed
@@ -5034,7 +5034,7 @@ findings addressed, 3426 unit tests + 20 integration tests passing.
 
 ### Docs
 - **[Xanadu in Nexus](docs/xanadu-in-nexus.md)** — Xanadu lineage, cross-document linkage problem, and how the link graph enables plan-driven agentic search.
-- **[Querying Guide](docs/querying-guide.md)** — `nx search` vs `query()` MCP vs `/nx:query` skill with catalog-aware routing and analytical query examples.
+- **[Querying Guide](docs/querying-guide.md)** — `nx search` vs `query()` MCP vs `/conexus:query` skill with catalog-aware routing and analytical query examples.
 - Expanded catalog guide with tumbler addressing, link type guidance, span lifecycle, admin operations, and troubleshooting.
 
 ## [3.1.1] - 2026-04-06
@@ -5056,7 +5056,7 @@ findings addressed, 3426 unit tests + 20 integration tests passing.
 - **`Catalog.resolve_span()`** — resolves `chash:` spans to chunk content via ChromaDB metadata query.
 - **`link_audit()` chash verification** — optional `t3` parameter verifies each `chash:` span resolves to an actual chunk in ChromaDB. MCP `catalog_link_audit` tool now performs chash verification automatically.
 - **`nx collection backfill-hash`** — backfill `chunk_text_hash` metadata on existing chunks without re-embedding. Also integrated into `nx catalog setup` and `nx catalog backfill` for automatic backfill during onboarding.
-- **Querying guide** — new `docs/querying-guide.md` documenting `nx search` vs `query()` MCP vs `/nx:query` skill, catalog-aware routing, three-path dispatch, and analytical query examples.
+- **Querying guide** — new `docs/querying-guide.md` documenting `nx search` vs `query()` MCP vs `/conexus:query` skill, catalog-aware routing, three-path dispatch, and analytical query examples.
 
 ### Fixed
 - `resolve_span_text()` now handles `chash:` spans (was silently returning None for the preferred format).
@@ -5178,7 +5178,7 @@ After upgrading, run `nx catalog setup` to create and populate the catalog. This
 - **store_list title display** — falls back to `source_title` for PDF-indexed entries
 - **`search` param `n` → `limit`** — consistent pagination parameter naming across all tools
 - **FTS5 title search** — corrected documentation: memory_search searches title, content, and tags (was incorrectly documented as "title not searchable")
-- **Agent tool discoverability** — all tool references use full `mcp__plugin_nx_nexus__` prefix. Fixed `mcp__sequential-thinking__` → `mcp__plugin_nx_sequential-thinking__` in 13 agent files.
+- **Agent tool discoverability** — all tool references use full `mcp__plugin_conexus_nexus__` prefix. Fixed `mcp__sequential-thinking__` → `mcp__plugin_conexus_sequential-thinking__` in 13 agent files.
 - **`reinstall-tool.sh`** — symlinks `mineru-api` to `~/.local/bin` when `[mineru]` extra is present
 - **`plan_save` schema** — documented minimal JSON schema in tool docstring
 
@@ -5235,14 +5235,14 @@ After upgrading, run `nx catalog setup` to create and populate the catalog. This
 ### Removed
 - **PostToolUse prompt hook** — `type: "prompt"` is not valid for
   PostToolUse hooks, causing `PostToolUse:Bash hook error` on every
-  Bash tool call. Removed entirely; `/nx:debug` remains available
+  Bash tool call. Removed entirely; `/conexus:debug` remains available
   on demand.
 
 ## [2.10.3] - 2026-04-01
 
 ### Added
 - **PostToolUse prompt hook** for debugger enforcement — detects
-  repeated test failures and enforces `/nx:debug` invocation instead
+  repeated test failures and enforces `/conexus:debug` invocation instead
   of manual retry loops.
 
 ## [2.10.2] - 2026-04-01
@@ -5362,7 +5362,7 @@ After upgrading, run `nx catalog setup` to create and populate the catalog. This
 
 ### Added
 - **SessionStart capabilities summary** — main conversation now gets a
-  compact overview of `--where` operators, `/nx:query` pipeline, `nx enrich`,
+  compact overview of `--where` operators, `/conexus:query` pipeline, `nx enrich`,
   and plan library MCP tools on every session start.
 
 ## [2.8.1] - 2026-03-30
@@ -5375,7 +5375,7 @@ After upgrading, run `nx catalog setup` to create and populate the catalog. This
 ## [2.8.0] - 2026-03-30
 
 ### Added
-- **Analytical query pipeline** — `/nx:query` skill decomposes complex questions
+- **Analytical query pipeline** — `/conexus:query` skill decomposes complex questions
   into multi-step plans (search → extract → summarize → compare → generate),
   dispatched via new `query-planner` and `analytical-operator` agents. Step
   outputs persist in T1 scratch for cross-dispatch reference. (RDR-042)
@@ -5537,7 +5537,7 @@ After upgrading, run `nx catalog setup` to create and populate the catalog. This
   fixed local-mode auto-detection docs (either key absent, not both), added missing
   `--on-locked` flag and `NX_VOYAGEAI_READ_TIMEOUT_SECONDS` env var, corrected
   minified code detection description, and replaced all `pip install` with `uv` syntax.
-- **Unprefixed skill references** — corrected `/rdr-create` → `/nx:rdr-create` etc.
+- **Unprefixed skill references** — corrected `/rdr-create` → `/conexus:rdr-create` etc.
   across all documentation and RDR files.
 
 ### Fixed
@@ -5553,7 +5553,7 @@ After upgrading, run `nx catalog setup` to create and populate the catalog. This
   auto-select Python 3.13. All `import voyageai` sites guarded with clear error
   messages pointing to `conexus[cloud]`.
 - **Unprefixed skill references in docs** — all `/rdr-create`, `/rdr-close`, etc.
-  corrected to `/nx:rdr-create`, `/nx:rdr-close` across 11 documentation files.
+  corrected to `/conexus:rdr-create`, `/conexus:rdr-close` across 11 documentation files.
 
 ## [2.3.3] - 2026-03-23
 
@@ -5629,7 +5629,7 @@ After upgrading, run `nx catalog setup` to create and populate the catalog. This
 
 ### Fixed
 - **Plugin skill references** — all 19 nx plugin files now use fully-qualified
-  `/nx:skill-name` form instead of short `/skill-name` which Claude Code cannot
+  `/conexus:skill-name` form instead of short `/skill-name` which Claude Code cannot
   resolve for plugin-namespaced skills. Affected agents, commands, hooks, skills,
   and README.
 
@@ -5815,7 +5815,7 @@ After upgrading, run `nx catalog setup` to create and populate the catalog. This
   Entry point: `nx-mcp = "nexus.mcp_server:main"` in pyproject.toml.
 - **Plugin migration to MCP tools** — all 14 agents, shared protocols, and 9 skills
   updated from CLI syntax (`nx scratch put ...`) to MCP tool syntax
-  (`mcp__plugin_nx_nexus__scratch`). Human-facing docs (`docs/`) retain CLI syntax.
+  (`mcp__plugin_conexus_nexus__scratch`). Human-facing docs (`docs/`) retain CLI syntax.
 
 ### Changed
 - `id` parameter renamed to `entry_id` in `scratch()` and `scratch_manage()` MCP tools
@@ -6346,7 +6346,7 @@ from rc10 — this entry marks the API, CLI, and plugin contract as stable.
 - Plugin test suite: 752 unit + structural tests covering install simulation, `$CLAUDE_PLUGIN_ROOT` reference integrity, markdown link resolution, hook script presence, and marketplace version consistency
 - E2E debug-load scenario (scenario 00): validates plugin load diagnostics, hook script execution, and component discovery via Claude `-p` mode without a live interactive session
 - E2E test sandbox now includes locally-cached superpowers plugin alongside nx, enabling cross-plugin skill validation
-- E2E isolation guard: verifies `nx@nexus-plugins` loads from dev repo, not the installed v1 cache
+- E2E isolation guard: verifies `conexus@nexus-plugins` loads from dev repo, not the installed v1 cache
 
 ### Changed
 - RDR skills now read the RDR directory from `.nexus.yml` `indexing.rdr_paths[0]` (default: `docs/rdr`) instead of hardcoding the path — consistent with the nx repo indexer config

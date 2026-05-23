@@ -9,9 +9,9 @@ Nexus has three query interfaces, each suited to different needs.
 | `nx search` | Semantic chunk search from the CLI | Text chunks with topic grouping | < 1s |
 | `search()` MCP tool | Chunk search from agents, with topic scoping | Chunks grouped by topic + boosted | < 1s |
 | `query()` MCP tool | Document-level retrieval with catalog routing | Best snippet per document + metadata | < 2s |
-| `/nx:query` skill | Complex multi-step analytical queries | Synthesized answer | 5-15s |
+| `/conexus:query` skill | Complex multi-step analytical queries | Synthesized answer | 5-15s |
 
-**Rule of thumb**: Start with `nx search` for quick lookups. Use `search()` MCP with `topic=` to narrow results to a specific knowledge domain. Use `query()` when you need to scope by author, content type, or follow citation links. Use `/nx:query` for questions that require extracting, comparing, or generating across multiple sources.
+**Rule of thumb**: Start with `nx search` for quick lookups. Use `search()` MCP with `topic=` to narrow results to a specific knowledge domain. Use `query()` when you need to scope by author, content type, or follow citation links. Use `/conexus:query` for questions that require extracting, comparing, or generating across multiple sources.
 
 ---
 
@@ -135,9 +135,9 @@ The `search()` tool does **not** apply link boost but does apply topic boost. Us
 
 ---
 
-## /nx:query skill → `nx_answer` MCP tool (analytical queries)
+## /conexus:query skill → `nx_answer` MCP tool (analytical queries)
 
-For questions that require multiple retrieval steps — comparing sources, extracting structured data, or generating from evidence — invoke the `nx_answer` MCP tool.  The `/nx:query` skill is now a thin pointer to this tool (RDR-080 consolidation — replaces the earlier `query-planner` + `analytical-operator` agent pair).
+For questions that require multiple retrieval steps — comparing sources, extracting structured data, or generating from evidence — invoke the `nx_answer` MCP tool.  The `/conexus:query` skill is now a thin pointer to this tool (RDR-080 consolidation — replaces the earlier `query-planner` + `analytical-operator` agent pair).
 
 ### The trunk: plan-match → plan-run → record
 
@@ -200,32 +200,32 @@ Plans match by **dimensions** (`verb`, `scope`, `strategy`) + semantic similarit
 
 ### Verb skills (new in RDR-078)
 
-Instead of `/nx:query "research how X works"`, the verb skills route directly to `plan_match` scoped to the matching verb:
+Instead of `/conexus:query "research how X works"`, the verb skills route directly to `plan_match` scoped to the matching verb:
 
 | Skill | Intent shape |
 |-------|--------------|
-| `/nx:research` | "How does X work?", "Design context for Y" |
-| `/nx:review` | "Review this change set", "Did the refactor drift from the RDR?" |
-| `/nx:analyze` | "Compare approaches across corpora", "Rank candidates by criterion" |
-| `/nx:debug` | "Why is this handler failing?", "Trace the stack of the panic" |
-| `/nx:document` | "Audit doc coverage", "Find coverage gaps" |
+| `/conexus:research` | "How does X work?", "Design context for Y" |
+| `/conexus:review` | "Review this change set", "Did the refactor drift from the RDR?" |
+| `/conexus:analyze` | "Compare approaches across corpora", "Rank candidates by criterion" |
+| `/conexus:debug` | "Why is this handler failing?", "Trace the stack of the panic" |
+| `/conexus:document` | "Audit doc coverage", "Find coverage gaps" |
 
-Each skill scopes `plan_match` with `dimensions={verb: <skill>}` and executes the returned plan via `plan_run`.  Falls through to `/nx:query` on miss.
+Each skill scopes `plan_match` with `dimensions={verb: <skill>}` and executes the returned plan via `plan_run`.  Falls through to `/conexus:query` on miss.
 
 ### Example analytical queries
 
 ```
 # Cross-source consistency
-/nx:query Compare what the architecture docs say about caching with what the code actually does
+/conexus:query Compare what the architecture docs say about caching with what the code actually does
 
 # Citation chain analysis
-/nx:query What papers does the Delos survey cite, and which of those are in our knowledge base?
+/conexus:query What papers does the Delos survey cite, and which of those are in our knowledge base?
 
 # Evidence-grounded extraction
-/nx:query Extract all error handling patterns from the indexing pipeline code, with file locations
+/conexus:query Extract all error handling patterns from the indexing pipeline code, with file locations
 
 # Multi-corpus comparison
-/nx:query How does our RDR process compare to what the literature recommends?
+/conexus:query How does our RDR process compare to what the literature recommends?
 ```
 
 ---
@@ -243,7 +243,7 @@ User or Agent
      │                    │
      │                    └─ link graph traversal (follow_links)
      │
-     └─ /nx:query skill
+     └─ /conexus:query skill
               │
               ├─ Path 1: single query() call (with topic scoping)
               ├─ Path 2: template match (cached plan)

@@ -80,7 +80,7 @@ user to review and push.
 - **Scheduling assets**: shell wrapper (`scripts/cron-rdr-audit.sh`,
   chmod +x, strict bash mode, log rotation), macOS launchd plist
   template, Linux crontab template (true 90-day cadence via `0 3 1
-  */3 *`), and two platform READMEs. The `claude -p '/nx:rdr-audit
+  */3 *`), and two platform READMEs. The `claude -p '/conexus:rdr-audit
   <project>'` invocation path was verified end-to-end in Phase 1b
   spike (T2 id 743) before Phase 4 files were written.
 - **Test suite**: 91 new tests across three files
@@ -112,7 +112,7 @@ principle).
    actually landed in T3 as `rdr067-audit-run1-*`, not T2 as
    requested. All 6 agents had their primary directives + HARD-GATE
    blocks softened to honor relay-specified storage targets (T1/T2/T3)
-   while preserving the T3 default for generic `/nx:research`-style
+   while preserving the T3 default for generic `/conexus:research`-style
    dispatches. Phase 5a MVV confirmed the softening works — both the
    first (mis-scoped) and retry dispatches used `memory_put` to T2,
    neither called `store_put` to T3. Full investigation at T2
