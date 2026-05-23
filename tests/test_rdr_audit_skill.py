@@ -16,10 +16,10 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).parent.parent
-SKILL_PATH = REPO_ROOT / "nx" / "skills" / "rdr-audit" / "SKILL.md"
-COMMAND_PATH = REPO_ROOT / "nx" / "commands" / "rdr-audit.md"
-REGISTRY_PATH = REPO_ROOT / "nx" / "registry.yaml"
-USING_SKILLS_PATH = REPO_ROOT / "nx" / "skills" / "using-nx-skills" / "SKILL.md"
+SKILL_PATH = REPO_ROOT / "conexus" / "skills" / "rdr-audit" / "SKILL.md"
+COMMAND_PATH = REPO_ROOT / "conexus" / "commands" / "rdr-audit.md"
+REGISTRY_PATH = REPO_ROOT / "conexus" / "registry.yaml"
+USING_SKILLS_PATH = REPO_ROOT / "conexus" / "skills" / "using-nx-skills" / "SKILL.md"
 
 
 def _load_skill_text() -> str:

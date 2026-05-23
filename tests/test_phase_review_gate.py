@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
-COMMAND_FILE = REPO_ROOT / "nx" / "commands" / "phase-review-gate.md"
+COMMAND_FILE = REPO_ROOT / "conexus" / "commands" / "phase-review-gate.md"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -122,7 +122,7 @@ class TestCommandFileStructure:
         assert "NEXUS_RDR_ARGS" in text, "Preamble must read args via NEXUS_RDR_ARGS"
 
     def test_skill_file_exists(self) -> None:
-        skill_file = REPO_ROOT / "nx" / "skills" / "phase-review-gate" / "SKILL.md"
+        skill_file = REPO_ROOT / "conexus" / "skills" / "phase-review-gate" / "SKILL.md"
         assert skill_file.exists(), f"Missing: {skill_file}"
 
 

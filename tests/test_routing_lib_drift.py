@@ -40,13 +40,13 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent
 # path lives in nx; vendored copies must be byte-identical.
 _VENDORED_FILES: tuple[tuple[pathlib.Path, tuple[pathlib.Path, ...]], ...] = (
     (
-        REPO_ROOT / "nx" / "hooks" / "scripts" / "routing" / "_lib.py",
+        REPO_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "_lib.py",
         (
             REPO_ROOT / "sn" / "hooks" / "scripts" / "routing" / "_lib.py",
         ),
     ),
     (
-        REPO_ROOT / "nx" / "hooks" / "scripts" / "_run_python_hook.sh",
+        REPO_ROOT / "conexus" / "hooks" / "scripts" / "_run_python_hook.sh",
         (
             REPO_ROOT / "sn" / "hooks" / "scripts" / "_run_python_hook.sh",
         ),

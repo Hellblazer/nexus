@@ -29,7 +29,7 @@ yaml = pytest.importorskip("yaml")
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 
 _REGISTRY_PATHS: tuple[pathlib.Path, ...] = (
-    REPO_ROOT / "nx" / "hooks" / "scripts" / "routing" / "registry.yaml",
+    REPO_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml",
     REPO_ROOT / "sn" / "hooks" / "scripts" / "routing" / "registry.yaml",
 )
 

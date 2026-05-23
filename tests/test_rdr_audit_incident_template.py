@@ -12,8 +12,8 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
-TEMPLATE = REPO_ROOT / "nx" / "resources" / "rdr_process" / "INCIDENT-TEMPLATE.md"
-SKILL = REPO_ROOT / "nx" / "skills" / "rdr-audit" / "SKILL.md"
+TEMPLATE = REPO_ROOT / "conexus" / "resources" / "rdr_process" / "INCIDENT-TEMPLATE.md"
+SKILL = REPO_ROOT / "conexus" / "skills" / "rdr-audit" / "SKILL.md"
 
 
 def _template_text() -> str:

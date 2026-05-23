@@ -207,7 +207,7 @@ class TestFormatCoordination:
     must agree on the <PROJECT> substitution format so both ship compatible text."""
 
     def test_skill_plist_and_file_plist_have_same_placeholder(self) -> None:
-        skill = (REPO_ROOT / "nx" / "skills" / "rdr-audit" / "SKILL.md").read_text()
+        skill = (REPO_ROOT / "conexus" / "skills" / "rdr-audit" / "SKILL.md").read_text()
         plist = PLIST.read_text()
         # Both use <PROJECT> (angle-bracketed) as the substitution marker
         assert "<PROJECT>" in skill, (
@@ -216,7 +216,7 @@ class TestFormatCoordination:
         assert "PROJECT" in plist
 
     def test_skill_and_crontab_use_compatible_format(self) -> None:
-        skill = (REPO_ROOT / "nx" / "skills" / "rdr-audit" / "SKILL.md").read_text()
+        skill = (REPO_ROOT / "conexus" / "skills" / "rdr-audit" / "SKILL.md").read_text()
         cron = CRONTAB.read_text()
         # Both reference the `/conexus:rdr-audit <PROJECT>` invocation
         assert "/conexus:rdr-audit" in skill
