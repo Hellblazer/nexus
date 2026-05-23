@@ -93,16 +93,17 @@ The RDR-120 substrate split (conexus 4.34.0+, shipped 2026-05-22) is what makes 
 
 - **Verified** — RDR-120's daemon substrate is the load-bearing piece that makes this RDR's cross-surface story possible. Without one arbitrated writer, each MCP consumer would have its own SQLite file.
 - **Verified** — Cowork uses SDK transport, not network. The Cowork VM has a strict allowlist (`api.anthropic.com`, `pypi.org`, `registry.npmjs.org`); TCP loopback and UDS mount paths do not apply. State sharing happens through the SDK bridge.
-- **Documented** — MCPB v0.4 `"uv"` server type handles compiled dependencies in production (Azure MCP Server precedent, April 2026).
+- **Verified (spike 2026-05-23)** — MCPB v0.4 `"uv"` server type resolves Nexus's full compiled-extension dep stack (chromadb Rust, pydantic-core Rust, tree-sitter C, numpy C, torch native, onnxruntime native, lxml C, pymupdf C, grpcio C, mineru + 227 others). Cold-run 19s, warm-run 4.5s on M-series Mac. `nx-mcp` boots cleanly via stdio and all 31 tools register in Claude Desktop's Connectors panel. The Azure MCP Server precedent is real and extends to Nexus's harder dep graph. Full report: `mcpb/SPIKE.md`.
+- **Verified (spike 2026-05-23)** — Claude Desktop does NOT bundle `uv`; the manifest's `mcp_config.command` literally invokes `uv run`. Host must have `uv` on PATH or the spawn fails. README install instructions must list `uv` as a hard pre-requisite (e.g. `brew install uv` / `pipx install uv`).
+- **Verified (spike 2026-05-23)** — When a user already has the Claude Code plugin (`nx@nexus-plugins`) installed, the Claude Desktop chat surface (local-agent mode) already exposes Nexus tools via the `plugin:nx:nexus` namespace. The `.mcpb` installs as a SECOND copy under the bare `nexus` namespace. They coexist on disk and in the UI; tool-name strings are distinct (`mcp__plugin_nx_nexus__memory_get` vs `mcp__nexus__memory_get`) so there is no hard collision, but they ARE functionally duplicate. This reframes the `.mcpb`'s strategic audience: not "the install path for Claude Desktop chat" but "the install path for Claude Desktop users who don't have Claude Code".
 - **Documented** — Claude Desktop has three MCP integration models: local MCP (manual config), Desktop Extensions (`.mcpb`), Custom Connectors (remote MCP via OAuth). Only `.mcpb` matches Nexus's local-first architecture.
 - **Documented** — MCPB has no signing-trust signal in either Anthropic marketplace as of May 2026; distribution carries no signing guarantee.
-- **Assumed** — Claude Desktop's MCP-spawn context provides `uv` (host application manages runtime). Needs spike.
-- **Assumed** — `notifications/message` renders in Claude Desktop chat in a user-visible way. Needs spike.
+- **Assumed** — `notifications/message` renders in Claude Desktop chat in a user-visible way. Spike scope-narrowed; verification deferred to Phase 2 where the banner-emission code lives.
 
 ### Critical Assumptions
 
-- [ ] **A1**: Claude Desktop's MCP-spawn context provides a `uv` runtime such that a `"type": "uv"` MCPB resolves `conexus` and its compiled C-extension dependencies on first launch — **Status**: Unverified — **Method**: Spike
-- [ ] **A2**: `notifications/message` (severity `info`) emitted by the MCP server renders in Claude Desktop chat in a way the user notices — **Status**: Unverified — **Method**: Spike
+- [x] **A1**: Claude Desktop's MCP-spawn context provides a `uv` runtime such that a `"type": "uv"` MCPB resolves `conexus` and its compiled C-extension dependencies on first launch — **Status**: Verified 2026-05-23 — **Method**: Spike (`mcpb/SPIKE.md`). Refinement: uv is NOT bundled by Claude Desktop; uv must be on host PATH. Documented as a hard pre-requisite.
+- [ ] **A2**: `notifications/message` (severity `info`) emitted by the MCP server renders in Claude Desktop chat in a way the user notices — **Status**: Unverified — **Method**: Spike deferred to Phase 2 (the banner-emission code does not exist yet; spike honestly narrowed scope to packaging feasibility)
 - [ ] **A3**: LaunchAgent install from inside MCP startup succeeds without elevated privileges (writes to `~/Library/LaunchAgents/` which is user-owned) — **Status**: Verified — **Method**: Source Search (`src/nexus/commands/daemon.py` already does this)
 - [ ] **A4**: MCPB uninstall via Claude Desktop removes the bundle but does NOT cascade to LaunchAgent removal — **Status**: Verified — **Method**: Docs Only (no manifest hook in MCPB spec for uninstall-time actions)
 - [ ] **A5**: Cowork SDK transport end-to-end bidirectional state-sharing works as documented (sentinel test) — **Status**: Unverified — **Method**: Spike (live test executing in user's session at draft time)
@@ -120,7 +121,7 @@ The RDR-120 substrate split (conexus 4.34.0+, shipped 2026-05-22) is what makes 
 
 The work decomposes into nine specification items, numbered for phase-review-gate cross-walk:
 
-1. **Distribution architecture (three-surface).** Claude Code: marketplace path unchanged. Claude Cowork: SDK transport unchanged (no new install artifact; verification artifact added). Claude Desktop chat: new `.mcpb` Desktop Extension via `"type": "uv"`, deps declared in a bundled `pyproject.toml` pinning `conexus>=<version>`. The three surfaces are documented as one unified product surface in `docs/desktop-deployment.md` (new doc).
+1. **Distribution architecture (three-surface, with audience reframing from spike).** Claude Code: marketplace path unchanged — serves the existing Claude Code user base. Claude Cowork: SDK transport unchanged (no new install artifact; verification artifact added). Claude Desktop chat: new `.mcpb` Desktop Extension via `"type": "uv"`, deps declared in a bundled `pyproject.toml` pinning `conexus>=<version>`. **Spike-driven audience refinement (2026-05-23):** the `.mcpb` is NOT a duplicate path for Claude Code users (who already get Nexus in Claude Desktop chat via the plugin's `plugin:nx:nexus` namespace); it's the install path for Claude Desktop users WITHOUT Claude Code. The three surfaces are documented as one unified product surface in `docs/desktop-deployment.md` (new doc), with the audience refinement made explicit.
 
 2. **Daemon first-run on MCP startup.** All MCP entry points (`nx-mcp`, `nx-mcp-catalog`) call a shared `_first_run.ensure_installed()` function before serving tools. The function: (a) checks if the OS unit exists (LaunchAgent / systemd file) — if yes, skip install; (b) if no, invokes the existing install logic from `nexus.daemon.installer` (lifted from `src/nexus/commands/daemon.py`); (c) always calls `daemon t2 ensure-running` so the current session works. Idempotent across clean state, pre-installed state, and marker-only state. The OS unit is the source of truth.
 
@@ -281,9 +282,12 @@ The `daemon_uninstall` tool with default `confirm=false` matches MCP destructive
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified (A1, A2, A5 — currently unverified)
-- [ ] RDR-126 accepted via `/nx:rdr-gate` + `/nx:rdr-accept`
-- [ ] Strategic-synthesis rename decision (`nexus-mkj6u`) made and shipped, OR explicitly deferred to a later RDR (decoupled scope)
+- [x] **A1** verified via 2026-05-23 spike (`mcpb/SPIKE.md`).
+- [ ] **A2** verified during Phase 2 (banner-emission code lives there; spike honestly narrowed scope).
+- [ ] **A5** verified via live Cowork sentinel test (recipe in user's session; result pending).
+- [ ] **GUI-spawn credential bug** (`nexus-m7evs`) merged to develop (PR #935 squash-merged 2026-05-23 as `4f54f77e`). DONE.
+- [ ] RDR-126 accepted via `/nx:rdr-gate` + `/nx:rdr-accept`.
+- [ ] Strategic-synthesis rename decision (`nexus-mkj6u`) made and shipped, OR explicitly deferred to a later RDR (decoupled scope).
 
 ### Minimum Viable Validation
 
@@ -462,3 +466,14 @@ The RDR is sized for a cross-surface lifecycle change. Sections covering individ
 ## Revision History
 
 - 2026-05-23: Initial draft.
+- 2026-05-23 (later): Folded Phase 1 spike results. A1 verified. A2 method
+  refined to "Spike deferred to Phase 2" (banner-emission code does not
+  exist yet; spike honestly narrowed scope to packaging feasibility). New
+  Key Discovery: spike `.mcpb` install + 31 tools register; uv is NOT
+  bundled by Claude Desktop (hard pre-requisite). New Key Discovery on
+  coexistence with Claude Code plugin: tools live in distinct namespaces
+  (`plugin:nx:nexus` vs `nexus`); they are functionally duplicate but
+  technically separable. Strategic audience refinement of `.mcpb`: serves
+  Claude Desktop users WITHOUT Claude Code, not existing Claude Code users.
+  GUI-spawn credential bug (`nexus-m7evs`) discovered during spike
+  verification; fixed and shipped in PR #935 on the same day.
