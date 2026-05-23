@@ -159,12 +159,22 @@ Compose a paste-ready continuation prompt and write it to the **Target file** pa
 
 ### Output
 
-Write the document to **Target file** (the path printed at the top of the rendered context block). After writing, output exactly one line for easy copy:
+Write the full 10-section document to **Target file** (the path printed at the top of the rendered context block).
 
-```
-Continuation prompt written: <path-from-Target-file-line>
-```
+Then in chat, respond with **exactly three elements in this order, nothing else**:
 
-Then a one-paragraph human summary of what the next session is picking up. Nothing else.
+1. **One bold line** with the file path on its own (no prefix prose):
+   ```
+   **<path-from-Target-file-line>**
+   ```
+2. **A single fenced code block** containing the compressed continuation prompt (section 10 of the written document, verbatim). Use triple-backtick fence with no language tag so the user's terminal renders a clean copy button:
+   <pre>
+   ```
+   &lt;5 to 10 line paste-ready prompt for the next session&gt;
+   ```
+   </pre>
+3. **One short sentence** (under 20 words) naming the entry point for the next session, e.g. `Next session resumes at PR #928 CI merge.` No more.
+
+No headers, no bullet lists, no summary paragraph, no "I've written...", no closing pleasantry. The user is mid-clear-and-paste workflow; every extra line is friction.
 
 If the rendered "Topic:" line above reads `current branch no-branch` (no arguments AND not a git repo) AND the in-progress beads block is empty or absent, stop and ask the user what the handoff scope should cover rather than guessing.
