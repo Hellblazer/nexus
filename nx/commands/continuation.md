@@ -1,11 +1,11 @@
 ---
-description: Write a paste-ready continuation prompt under ~/.cache/nexus/continuations/ capturing session state, branch, beads, T2 entries, and next-step pointers
+description: Write a paste-ready continuation prompt under /tmp capturing session state, branch, beads, T2 entries, and next-step pointers. Primes the system clipboard with `cat <path>` so a fresh session bootstraps with one paste.
 argument-hint: [topic-or-arc-slug] (optional; defaults to current branch)
 ---
 
 # Continuation prompt builder
 
-Generates a paste-ready handoff document under `~/.cache/nexus/continuations/` that a future Claude Code session can read to pick up cold. Use this at the END of a productive session, or at a phase boundary, to capture state cheaply before context is lost.
+Generates a handoff document under `/tmp/` that a future Claude Code session can read to pick up cold. Stores under `/tmp` (purged on reboot by macOS) so we don't accumulate stale handoffs in `~/.cache`. Also pre-loads the user's system clipboard with `cat <path>` so the bootstrap is `/clear`, paste, return.
 
 !{
   set +e
@@ -17,8 +17,9 @@ Generates a paste-ready handoff document under `~/.cache/nexus/continuations/` t
   REPO_SAFE=$(printf '%s' "$(basename "$(pwd)")" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
   [ -z "$REPO_SAFE" ] && REPO_SAFE="repo"
   TODAY=$(date +%Y-%m-%d)
-  OUT_DIR="${HOME}/.cache/nexus/continuations"
-  mkdir -p "$OUT_DIR"
+  # /tmp is purged on reboot (macOS) or periodically (Linux). Don't accumulate
+  # handoffs under ~/.cache or ~/.claude; they're throwaway state.
+  OUT_DIR="/tmp"
 
   # Slug pipeline: printf strips the trailing newline that echo adds, so the
   # tr -c result has no trailing-dash artefact that the later s/-$//g would
@@ -35,13 +36,34 @@ Generates a paste-ready handoff document under `~/.cache/nexus/continuations/` t
 
   # If a same-day file already exists at the base path, suffix with HHMM so
   # successive invocations on the same day don't silently overwrite.
-  BASE="${OUT_DIR}/${REPO_SAFE}-continuation-${SLUG}-${TODAY}.md"
+  BASE="${OUT_DIR}/nexus-continuation-${REPO_SAFE}-${SLUG}-${TODAY}.md"
   if [ -e "$BASE" ]; then
-    OUT="${OUT_DIR}/${REPO_SAFE}-continuation-${SLUG}-${TODAY}-$(date +%H%M).md"
+    OUT="${OUT_DIR}/nexus-continuation-${REPO_SAFE}-${SLUG}-${TODAY}-$(date +%H%M).md"
   else
     OUT="$BASE"
   fi
+
+  # ---- Clipboard prime (silent) --------------------------------------------
+  # Push `cat <OUT>` onto the system clipboard so the user's next action is
+  # /clear + paste + return. Detect tool by platform; warn but proceed if none.
+  if command -v pbcopy >/dev/null 2>&1; then
+    CLIP_CMD="pbcopy"
+  elif command -v wl-copy >/dev/null 2>&1; then
+    CLIP_CMD="wl-copy"
+  elif command -v xclip >/dev/null 2>&1; then
+    CLIP_CMD="xclip -selection clipboard"
+  else
+    CLIP_CMD=""
+  fi
+  if [ -n "$CLIP_CMD" ]; then
+    printf 'cat %s' "$OUT" | eval "$CLIP_CMD"
+    CLIP_STATUS="primed (\`$CLIP_CMD\`)"
+  else
+    CLIP_STATUS="NOT primed (no pbcopy/wl-copy/xclip on PATH)"
+  fi
+
   echo "**Target file:** \`$OUT\`"
+  echo "**Clipboard:** $CLIP_STATUS"
   echo ""
   echo "**Topic:** $TITLE_TOPIC"
   echo ""
@@ -127,17 +149,19 @@ Generates a paste-ready handoff document under `~/.cache/nexus/continuations/` t
 
 ## Action
 
-Compose a paste-ready continuation prompt and write it to the **Target file** path above. Match the canonical 10-section structure exactly. Each section is load-bearing for a cold pickup; skipping one loses information the next session needs.
+The shell block above has already primed the user's clipboard with `cat <Target file>` (check the "Clipboard:" line). Your job: write the handoff file, then emit one short confirmation line. Nothing else.
 
-### Required sections (in order)
+### Step 1: write the full handoff to `<Target file>`
 
-1. **Title** — `# Continuation: <topic> (YYYY-MM-DD)` matching the working-state topic line.
+Compose a 9-section handoff document. Each section is load-bearing for a cold pickup; skipping one loses information the next session needs.
 
-2. **What just shipped / state at handoff** — concrete commits with SHAs from the recent-commits block, beads closed in the session, T2 entries written, releases tagged. Name everything explicitly.
+1. **Title** (`# Continuation: <topic> (YYYY-MM-DD)`) matching the working-state topic line.
 
-3. **Where state lives** — bullet list of branch, RDR file paths (if applicable), T2 memory keys (`project=X, title=Y`), bead IDs of the epic and root work, PR numbers.
+2. **What just shipped / state at handoff.** Concrete commits with SHAs from the recent-commits block, beads closed in the session, T2 entries written, releases tagged. Name everything explicitly.
 
-4. **Literal first actions** — numbered, copy-paste-runnable commands. Always include:
+3. **Where state lives.** Bullet list of branch, RDR file paths (if applicable), T2 memory keys (`project=X, title=Y`), bead IDs of the epic and root work, PR numbers.
+
+4. **Literal first actions.** Numbered, copy-paste-runnable commands. Always include:
    - `cd <abs path>` from working-state cwd
    - `git fetch && git checkout <branch> && git pull` (or equivalent)
    - `git status --short` clean-state check
@@ -145,43 +169,37 @@ Compose a paste-ready continuation prompt and write it to the **Target file** pa
    - Any specific T2 reads (`mcp__plugin_nx_nexus__memory_get(project=..., title=...)`)
    - Any specific file reads required to come up to speed
 
-5. **Open work / bead graph** — if multiple beads are in flight, draw the dependency graph as an ASCII tree. Mark the READY entry point.
+5. **Open work / bead graph.** If multiple beads are in flight, draw the dependency graph as an ASCII tree. Mark the READY entry point.
 
-6. **Active blockers** — any `in_progress` beads that gate the next step, or external blockers (CI red, dependent PR pending).
+6. **Active blockers.** Any `in_progress` beads that gate the next step, or external blockers (CI red, dependent PR pending).
 
-7. **Locked contracts / invariants** — anything settled in this session that the next session MUST honour. Pull from RDR §Out-of-scope, prior decisions, locked-in shapes, version-bump parity rules.
+7. **Locked contracts / invariants.** Anything settled in this session that the next session MUST honour. Pull from RDR §Out-of-scope, prior decisions, locked-in shapes, version-bump parity rules.
 
-8. **What you should NOT do** — explicit ban list. If feedback-memory filenames appeared in the working-state block, reference them by filename (don't paraphrase, point). The block lists filenames only, not contents; if you need to quote a specific rule, Read the file first rather than guessing at the body from the slug.
+8. **What you should NOT do.** Explicit ban list. If feedback-memory filenames appeared in the working-state block, reference them by filename (don't paraphrase, point). The block lists filenames only, not contents; if you need to quote a specific rule, Read the file first rather than guessing at the body from the slug.
 
-9. **Workflow lessons from this session** — anything that bit you this session that next-session-you should pre-empt.
+9. **Workflow lessons from this session.** Anything that bit you this session that next-session-you should pre-empt.
 
-10. **Compressed continuation prompt** — a single blockquote (5-10 lines) that a future Claude session can paste verbatim to bootstrap. References the full file path.
+### Step 2: chat response is one short line, plain text
 
-### Style rules
+The entire chat response is:
 
-- **No em dashes (`—`).** Use commas, colons, periods, or parentheses. Grep your output before writing.
+    Clipboard primed: cat <Target file>. /clear, paste, return.
+
+Where `<Target file>` is the absolute path from the working-state block. No fence, no bullet, no bold, no headers, no second line.
+
+Example complete chat response:
+
+    Clipboard primed: cat /tmp/nexus-continuation-luciferase-main-2026-05-23.md. /clear, paste, return.
+
+If the **Clipboard:** line in the working-state block read `NOT primed`, replace the response with the literal `cat <Target file>` command alone and tell the user to copy it manually (one line, no other prose).
+
+### Style rules for the handoff file (not the chat response)
+
+- **No em dashes (`—`).** Use commas, colons, periods, or parentheses. Grep before writing.
 - **Imperative voice.** "Read X first. Run Y. Pick up Z." not "you might want to consider...".
 - **Concrete over general.** file:line, commit SHA, bead ID, date. Never "the relevant file" or "the recent work".
 - **Tool names in full form.** `mcp__plugin_nx_nexus__memory_get`, not "the memory tool".
 
-### Output
-
-Write the full 10-section document to **Target file** (the path printed at the top of the rendered context block).
-
-Then in chat, respond with **exactly three elements in this order, nothing else**:
-
-1. **One bold line** with the file path on its own (no prefix prose):
-   ```
-   **<path-from-Target-file-line>**
-   ```
-2. **A single fenced code block** containing the compressed continuation prompt (section 10 of the written document, verbatim). Use triple-backtick fence with no language tag so the user's terminal renders a clean copy button:
-   <pre>
-   ```
-   &lt;5 to 10 line paste-ready prompt for the next session&gt;
-   ```
-   </pre>
-3. **One short sentence** (under 20 words) naming the entry point for the next session, e.g. `Next session resumes at PR #928 CI merge.` No more.
-
-No headers, no bullet lists, no summary paragraph, no "I've written...", no closing pleasantry. The user is mid-clear-and-paste workflow; every extra line is friction.
+### Bail-out
 
 If the rendered "Topic:" line above reads `current branch no-branch` (no arguments AND not a git repo) AND the in-progress beads block is empty or absent, stop and ask the user what the handoff scope should cover rather than guessing.
