@@ -30,6 +30,32 @@ This rename also retired the term "the nx plugin" in CHANGELOG history and prose
 
 Skill directory names `using-nx-skills` and `writing-nx-skills` were left as-is for now (their slash commands are `/conexus:using-nx-skills` and `/conexus:writing-nx-skills`). Skill renames are a separate follow-up if desired.
 
+### Architecture: marketplace.json plugin sources pinned to git tags (nexus-mkj6u)
+
+The Claude Code marketplace previously followed main HEAD: any commit to main that touched plugin files was immediately fetchable by users running `/plugin install` or `/plugin marketplace update`. Convention prevented surprises (main only takes release commits), but enforcement was social.
+
+`.claude-plugin/marketplace.json` now uses the `git-subdir` source form with explicit tag pinning per plugin:
+
+```json
+"source": {
+  "source": "git-subdir",
+  "url": "https://github.com/Hellblazer/nexus.git",
+  "path": "conexus",
+  "ref": "v4.34.5"
+}
+```
+
+Two surfaces of the decoupling:
+
+- **`version` field** still gates "update available" UX. Users only see the prompt when this string changes.
+- **`source.ref` field** gates WHERE the plugin code comes from. Users install at the exact tag, not from current main HEAD. Main can take any code change between releases without affecting installed users.
+
+Release process gains one more bump field (`marketplace.json` `plugins[].source.ref` to `vX.Y.Z`), tracked in lock-step with the existing four version fields. `tests/test_plugin_structure.py::TestMarketplaceVersion::test_marketplace_source_ref_matches_pyproject` enforces parity in CI.
+
+Tag-push timing matters: marketplace.json's `source.ref` points at the upcoming tag. The release commit must be pushed AND the tag pushed in tight succession (seconds), so no user finds marketplace.json referencing a nonexistent tag.
+
+Background: per the Claude Code marketplace spec, the `version` field pins the "update available" UI, but the install fetch follows whatever the marketplace.json `source` resolves to at fetch time. With relative-path sources (`./conexus`), that's main HEAD of the repo containing marketplace.json. With `git-subdir`+`ref`, that's the exact tag — immutable for the lifetime of the tag.
+
 ### Fix: post-commit hook spawns pile up under burst-commit workloads (nexus-mkj6u shakeout)
 
 The `post-commit` git hook installed by `nx hooks install` previously relied solely on the indexer's internal `--on-locked=skip` flag to prevent concurrent reindex runs. Under burst-commit workloads (e.g. a long-running rename PR pushing 9 commits in 30 minutes), the race between the lock file's `open()` + truncate and the subsequent `flock()` lets multiple indexers slip past the guard before any of them holds an exclusive lock. Result: up to 4 concurrent `nx index repo` processes accumulated, each consuming significant CPU and contending on T3.

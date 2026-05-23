@@ -99,16 +99,16 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 
 1. **Run unit + integration suite.** `uv run pytest` and `uv run pytest -m integration`. Both must pass — integration is excluded from CI and is your last line of defense.
 2. **Audit docs against changes since last tag.** `git log --oneline v<prev>..HEAD` then check `docs/cli-reference.md`, `docs/architecture.md`, `README.md` for user-visible drift.
-3. **Bump version in all four manifests** (CI enforces parity):
+3. **Bump version in all four manifests AND both `source.ref` fields** (CI enforces parity):
    - `pyproject.toml` — `version = "X.Y.Z"`
-   - `.claude-plugin/marketplace.json` — both `version` fields
+   - `.claude-plugin/marketplace.json` — both `version` fields AND both `plugins[].source.ref` fields (must be `"vX.Y.Z"` — the tag form). The `source.ref` is what decouples installed users from main HEAD: plugins are fetched from the pinned tag, not from whatever main currently is. CI test `TestMarketplaceVersion::test_marketplace_source_ref_matches_pyproject` enforces this.
    - `conexus/.claude-plugin/plugin.json` — `version`
    - `sn/.claude-plugin/plugin.json` — `version`
 4. **Update changelogs.** Add a new section to `CHANGELOG.md` and `conexus/CHANGELOG.md` with the date and the changes since last release.
 5. **Refresh `uv.lock`.** Run `uv sync` — the lock file MUST be committed.
 6. **Run sandbox smoke.** `./tests/e2e/release-sandbox.sh smoke` (~2 min). Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/db/migrations.py`, `src/nexus/mcp/**`, `conexus/**`, `.claude-plugin/**`, `src/nexus/commands/{doctor,upgrade}.py`.
 7. **Commit and push to main.** `chore(release): conexus X.Y.Z` is the only direct-to-main commit allowed.
-8. **Tag and push the tag.** `git tag -a vX.Y.Z -m "conexus X.Y.Z" && git push origin vX.Y.Z`. The tag-push triggers the Release workflow → PyPI auto-publish via OIDC.
+8. **Tag and push the tag IMMEDIATELY after the commit push.** `git tag -a vX.Y.Z -m "conexus X.Y.Z" && git push origin vX.Y.Z`. The tag-push triggers the Release workflow → PyPI auto-publish via OIDC. Order matters: marketplace.json's `source.ref` points at `vX.Y.Z`, which must exist on origin before any user runs `/plugin install`. Push commit, then push tag, in tight succession (seconds).
 9. **Reinstall locally.** `scripts/reinstall-tool.sh && nx --version` — `pyproject.toml` is bumped but the local `nx` shim still points at the old wheel until reinstall.
 
 Full checklist with rollback / one-time setup steps lives in [`docs/contributing.md` § Release Process](docs/contributing.md#release-process).

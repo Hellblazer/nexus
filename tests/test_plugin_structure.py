@@ -589,6 +589,33 @@ class TestMarketplaceVersion:
             assert plugin.get("version", "") == pv, \
                 f"marketplace.json '{plugin['name']}' version != pyproject.toml {pv!r}"
 
+    def test_marketplace_source_ref_matches_pyproject(self) -> None:
+        """nexus-mkj6u: marketplace.json plugins[].source.ref must match
+        pyproject.toml version. Pinning the plugin source to a tag (rather
+        than relative-path + main HEAD) decouples main commits from
+        marketplace publication — installed plugins stay at the pinned tag
+        until both ``version`` AND ``source.ref`` are bumped together at
+        release time. CI enforces parity so a partial bump (e.g. version
+        but not source.ref) can't ship.
+        """
+        pv = self._pyproject_version()
+        expected_ref = f"v{pv}"
+        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+            source = plugin.get("source")
+            assert isinstance(source, dict), (
+                f"marketplace.json '{plugin['name']}' source must be the "
+                f"object form (git-subdir with ref pinning), got {source!r}"
+            )
+            assert source.get("source") == "git-subdir", (
+                f"marketplace.json '{plugin['name']}' source.source must be "
+                f"'git-subdir' for tag-pinned releases, got {source.get('source')!r}"
+            )
+            assert source.get("ref") == expected_ref, (
+                f"marketplace.json '{plugin['name']}' source.ref {source.get('ref')!r} "
+                f"!= pyproject.toml v{pv} (expected {expected_ref!r}). Bump source.ref "
+                f"in the same release commit that bumps the version field."
+            )
+
     def test_uv_lock_version_matches_pyproject(self) -> None:
         pv = self._pyproject_version()
         uv_lock = REPO_ROOT / "uv.lock"

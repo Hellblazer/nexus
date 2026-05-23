@@ -42,11 +42,18 @@ def installed_plugin(tmp_path_factory) -> Path:
     )
     assert result.returncode == 0, f"git clone failed:\n{result.stderr}"
 
-    # Read source dir from marketplace.json (same as Claude Code does)
+    # Read source dir from marketplace.json (same as Claude Code does).
+    # nexus-mkj6u: source is now the git-subdir object form with tag
+    # pinning. The `path` field is what we used to read off the
+    # bare relative-path string (e.g. "./conexus" -> "conexus").
     marketplace = json.loads(
         (REPO_ROOT / ".claude-plugin" / "marketplace.json").read_text()
     )
-    source = marketplace["plugins"][0]["source"].lstrip("./")  # "./conexus" -> "conexus"
+    source_field = marketplace["plugins"][0]["source"]
+    if isinstance(source_field, dict):
+        source = source_field.get("path", "")
+    else:
+        source = source_field.lstrip("./")  # legacy relative-path form
 
     plugin_root = clone_root / source
     assert plugin_root.is_dir(), (

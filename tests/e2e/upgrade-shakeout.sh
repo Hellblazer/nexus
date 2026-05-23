@@ -176,16 +176,31 @@ if echo "$DOCTOR_OUT" | grep -qi 'stanza drift'; then
 fi
 _pass "drift resolved"
 
-# ── 9. Plugin rename surface (marketplace.json) ──────────────────────────────
-_step "9/11 plugin marketplace.json reflects rename"
+# ── 9. Plugin rename + tag-pin surface (marketplace.json) ────────────────────
+_step "9/11 plugin marketplace.json reflects rename + tag pinning"
 MJ="$REPO_ROOT/.claude-plugin/marketplace.json"
+# Plugin name = conexus
 grep -q '"name": "conexus"' "$MJ" \
     || _die "REPO_ROOT marketplace.json missing 'name: conexus'"
-grep -q '"source": "./conexus"' "$MJ" \
-    || _die "REPO_ROOT marketplace.json missing 'source: ./conexus'"
 ! grep -q '"name": "nx"' "$MJ" \
     || _die "REPO_ROOT marketplace.json still contains 'name: nx' (rename incomplete)"
-_pass "marketplace.json shows the rename (conexus, ./conexus)"
+# Source uses git-subdir object form with path + ref pinning
+python3 -c "
+import json, pathlib, sys
+mj = json.loads(pathlib.Path('$MJ').read_text())
+for p in mj['plugins']:
+    src = p.get('source')
+    if not isinstance(src, dict):
+        sys.exit(f'plugin {p[\"name\"]!r} source must be object form, got {src!r}')
+    if src.get('source') != 'git-subdir':
+        sys.exit(f'plugin {p[\"name\"]!r} source.source must be git-subdir, got {src.get(\"source\")!r}')
+    if not src.get('ref', '').startswith('v'):
+        sys.exit(f'plugin {p[\"name\"]!r} source.ref must be tag form (vX.Y.Z), got {src.get(\"ref\")!r}')
+    if src.get('ref') != f\"v{p['version']}\":
+        sys.exit(f'plugin {p[\"name\"]!r} source.ref {src.get(\"ref\")!r} != version v{p[\"version\"]}')
+print('  all plugins: git-subdir source + ref pinned to v{version}')
+" || _die "marketplace.json pinning check failed"
+_pass "marketplace.json: rename (conexus) + tag pinning (git-subdir + ref=v\$version)"
 
 # ── 10. Plugin-name drift detection (nexus-mkj6u) ────────────────────────────
 _step "10/11 plugin-name drift detected when OLD nx plugin still installed"
