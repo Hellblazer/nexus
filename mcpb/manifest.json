@@ -1,0 +1,34 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "nexus",
+  "display_name": "Nexus (Spike)",
+  "version": "0.0.1",
+  "description": "RDR-126 P1 spike: verify uv resolves conexus + compiled deps in Claude Desktop's MCP-spawn context.",
+  "long_description": "Three-tier semantic search and knowledge management. Spike bundle for RDR-126; not for general use.",
+  "author": {
+    "name": "Hal Hildebrand",
+    "url": "https://github.com/Hellblazer"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Hellblazer/nexus"
+  },
+  "homepage": "https://github.com/Hellblazer/nexus",
+  "license": "AGPL-3.0-or-later",
+  "keywords": ["semantic-search", "knowledge-management", "rag", "claude", "spike"],
+  "server": {
+    "type": "uv",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "src/server.py"]
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "linux"],
+    "runtimes": {
+      "python": ">=3.12"
+    }
+  }
+}

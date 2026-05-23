@@ -1,0 +1,11 @@
+[project]
+name = "nexus-mcpb-spike"
+version = "0.0.1"
+description = "RDR-126 P1 spike — Nexus packaged as Claude Desktop .mcpb"
+requires-python = ">=3.12"
+dependencies = [
+    "conexus>=4.34.6",
+]
+
+[tool.uv]
+package = false
