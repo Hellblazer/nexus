@@ -1,11 +1,11 @@
 ---
-description: Write a paste-ready continuation prompt under /tmp capturing session state, branch, beads, T2 entries, and next-step pointers. Primes the system clipboard with `cat <path>` so a fresh session bootstraps with one paste.
+description: Write a handoff document under /tmp capturing session state, branch, beads, T2 entries, and next-step pointers. Chat response is `cat <path>`; user copies it and pastes after /clear to bootstrap the next session.
 argument-hint: [topic-or-arc-slug] (optional; defaults to current branch)
 ---
 
 # Continuation prompt builder
 
-Generates a handoff document under `/tmp/` that a future Claude Code session can read to pick up cold. Stores under `/tmp` (purged on reboot by macOS) so we don't accumulate stale handoffs in `~/.cache`. Also pre-loads the user's system clipboard with `cat <path>` so the bootstrap is `/clear`, paste, return.
+Generates a handoff document under `/tmp/` that a future Claude Code session can read to pick up cold. Stores under `/tmp` (purged on reboot by macOS) so we don't accumulate stale handoffs in `~/.cache`. The chat response is one literal line: `cat <Target file>`. The user copies that line (mouse-select + cmd-C, or whatever their terminal supports), runs `/clear`, pastes, hits return. The new session reads the handoff and resumes.
 
 !{
   set +e
@@ -43,27 +43,14 @@ Generates a handoff document under `/tmp/` that a future Claude Code session can
     OUT="$BASE"
   fi
 
-  # ---- Clipboard prime (silent) --------------------------------------------
-  # Push `cat <OUT>` onto the system clipboard so the user's next action is
-  # /clear + paste + return. Detect tool by platform; warn but proceed if none.
-  if command -v pbcopy >/dev/null 2>&1; then
-    CLIP_CMD="pbcopy"
-  elif command -v wl-copy >/dev/null 2>&1; then
-    CLIP_CMD="wl-copy"
-  elif command -v xclip >/dev/null 2>&1; then
-    CLIP_CMD="xclip -selection clipboard"
-  else
-    CLIP_CMD=""
-  fi
-  if [ -n "$CLIP_CMD" ]; then
-    printf 'cat %s' "$OUT" | eval "$CLIP_CMD"
-    CLIP_STATUS="primed (\`$CLIP_CMD\`)"
-  else
-    CLIP_STATUS="NOT primed (no pbcopy/wl-copy/xclip on PATH)"
-  fi
+  # No clipboard auto-prime. Tried pbcopy (writes to remote pasteboard if
+  # over SSH/mosh), launchctl asuser pbcopy (same), OSC 52 (mosh and many
+  # tmux/terminal combos drop the escape). Bash-tool side cannot reliably
+  # reach the user's local NSPasteboard from a remote tmux-over-mosh
+  # session. Leave the copy to the user; they have terminal text selection
+  # which works everywhere.
 
   echo "**Target file:** \`$OUT\`"
-  echo "**Clipboard:** $CLIP_STATUS"
   echo ""
   echo "**Topic:** $TITLE_TOPIC"
   echo ""
@@ -149,7 +136,7 @@ Generates a handoff document under `/tmp/` that a future Claude Code session can
 
 ## Action
 
-The shell block above has already primed the user's clipboard with `cat <Target file>` (check the "Clipboard:" line). Your job: write the handoff file, then emit one short confirmation line. Nothing else.
+Two steps. Write the handoff file, then emit one line of chat. Nothing else.
 
 ### Step 1: write the full handoff to `<Target file>`
 
@@ -179,19 +166,21 @@ Compose a 9-section handoff document. Each section is load-bearing for a cold pi
 
 9. **Workflow lessons from this session.** Anything that bit you this session that next-session-you should pre-empt.
 
-### Step 2: chat response is one short line, plain text
+### Step 2: chat response is one line, plain text
 
-The entire chat response is:
+The entire chat response is the literal string:
 
-    Clipboard primed: cat <Target file>. /clear, paste, return.
+    cat <Target file>
 
-Where `<Target file>` is the absolute path from the working-state block. No fence, no bullet, no bold, no headers, no second line.
+Where `<Target file>` is the absolute path from the working-state block. No fence, no backticks, no bullet, no bold, no leading word, no trailing word. Just the command on its own line.
 
 Example complete chat response:
 
-    Clipboard primed: cat /tmp/nexus-continuation-luciferase-main-2026-05-23.md. /clear, paste, return.
+    cat /tmp/nexus-continuation-luciferase-main-2026-05-23.md
 
-If the **Clipboard:** line in the working-state block read `NOT primed`, replace the response with the literal `cat <Target file>` command alone and tell the user to copy it manually (one line, no other prose).
+The user selects the line (mouse drag, triple-click, or whatever their terminal supports), copies it (`cmd-C` or terminal-specific binding), `/clear`s, pastes, hits return. The next session sees `cat <path>` as its first user message, reads the handoff, resumes.
+
+Clipboard auto-prime was tried (pbcopy, launchctl asuser pbcopy, OSC 52 plain and DCS-wrapped) and abandoned: remote tmux over mosh, the canonical nexus-developer environment, doesn't reliably forward any of them to the user's local NSPasteboard. Plain text on its own line is the only universally-portable affordance.
 
 ### Style rules for the handoff file (not the chat response)
 
