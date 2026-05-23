@@ -6,6 +6,37 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Plugins — tool/skill invocation discipline restored
+
+Two compounding upstream changes have collapsed ambient tool and skill
+invocation for plugin-heavy users:
+
+- **Claude Code v2.1.69** extended MCP-style schema-deferral to
+  built-in tools. Out-of-sight tools don't get invoked. Reported in
+  [anthropics/claude-code#31002][cc-31002].
+- **Opus 4.7** (April 2026 model card, [whats-new-claude-4-7][opus47])
+  reduced default tool calls and subagent dispatch, and made
+  instruction-following more literal. Soft hints ("if a skill plausibly
+  applies, invoke it") no longer survive.
+
+Mitigations in this release:
+
+- `nx/.mcp.json` and `sn/.mcp.json` set `alwaysLoad: true` on all five
+  MCP servers (`sequential-thinking`, `nexus`, `nexus-catalog`,
+  `serena`, `context7`). Claude Code v2.1.121+ honours this per-server
+  flag to skip tool-search deferral. Tradeoff: added session-start
+  context in exchange for guaranteed tool visibility.
+- The two routing-gate skills (`nx/skills/using-nx-skills`,
+  `nx/skills/plan-first`) now use MUST-form imperatives in their
+  descriptions and bodies. The `"Use when"` prefix convention enforced
+  by `TestSkillDescriptionCSO` is preserved.
+
+If you observe specific MCP tools or skills still being skipped after
+upgrading Claude Code, file an issue and we'll widen the audit.
+
+[cc-31002]: https://github.com/anthropics/claude-code/issues/31002
+[opus47]: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7
+
 ## [4.34.3] - 2026-05-22
 
 Documentation-only release. Sweep of user-facing surfaces for the
@@ -186,7 +217,6 @@ nexus.db via the daemon.
   session-end launcher, ``nx health`` PRAGMA integrity_check)
   stay on direct ``T2Database`` with ``# epsilon-allow`` — those
   legitimately must work when the daemon is offline.
-
 ## [4.34.0] - 2026-05-22
 
 RDR-120 Storage Substrate Split — the full P0 → P6 substrate-only
