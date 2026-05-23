@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.4] - 2026-05-23
+
 ### Plugins — tool/skill invocation discipline restored
 
 Two compounding upstream changes have collapsed ambient tool and skill

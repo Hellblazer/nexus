@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.4] - 2026-05-23
+
 ### Restored tool/skill invocation discipline
 
 Tuning for Claude Code v2.1.69+ (built-in tool deferral) and Opus 4.7
