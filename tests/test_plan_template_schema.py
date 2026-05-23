@@ -280,7 +280,7 @@ def test_dimensions_registry_ships_required_keys() -> None:
 
     import yaml
 
-    path = Path(__file__).resolve().parents[1] / "nx" / "plans" / "dimensions.yml"
+    path = Path(__file__).resolve().parents[1] / "conexus" / "plans" / "dimensions.yml"
     assert path.exists(), f"missing {path}"
     data = yaml.safe_load(path.read_text())
     assert isinstance(data, dict), "dimensions.yml must be a mapping"

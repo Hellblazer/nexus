@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-_BUILTIN_DIR = Path(__file__).parent.parent / "nx" / "plans" / "builtin"
+_BUILTIN_DIR = Path(__file__).parent.parent / "conexus" / "plans" / "builtin"
 _YAML_FILES = sorted(_BUILTIN_DIR.glob("*.yml")) + sorted(_BUILTIN_DIR.glob("*.yaml"))
 
 

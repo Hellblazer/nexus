@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-NX_SCRIPT = Path(__file__).resolve().parents[2] / "nx" / "hooks" / "scripts" / "auto-approve-nx-mcp.sh"
+NX_SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "auto-approve-nx-mcp.sh"
 SN_SCRIPT = Path(__file__).resolve().parents[2] / "sn" / "hooks" / "scripts" / "auto-approve-sn-mcp.sh"
 
 

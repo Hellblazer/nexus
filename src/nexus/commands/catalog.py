@@ -53,8 +53,8 @@ def _resolve_plugin_root(repo_root: Path) -> Path:
         # resolvers.
         pass
     candidates.extend([
-        repo_root / "nx",
-        Path(__file__).resolve().parent.parent.parent.parent / "nx",
+        repo_root / "conexus",
+        Path(__file__).resolve().parent.parent.parent.parent / "conexus",
     ])
     for candidate in candidates:
         if (candidate / "plans" / "builtin").is_dir():

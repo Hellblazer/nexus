@@ -182,7 +182,7 @@ class TestGenerateContextL1:
 class TestSubagentHookInjection:
     """Verify the SubagentStart hook expands the L1 context cache."""
 
-    HOOK_PATH = Path(__file__).parent.parent / "nx" / "hooks" / "scripts" / "subagent-start.sh"
+    HOOK_PATH = Path(__file__).parent.parent / "conexus" / "hooks" / "scripts" / "subagent-start.sh"
 
     def test_hook_emits_knowledge_map(self, tmp_path: Path) -> None:
         """SubagentStart hook outputs the cached knowledge map content."""
@@ -259,7 +259,7 @@ class TestSubagentHookInjection:
 class TestSessionHookInjection:
     """Verify the SessionStart hook reads the L1 context cache."""
 
-    HOOK_PATH = Path(__file__).parent.parent / "nx" / "hooks" / "scripts" / "session_start_hook.py"
+    HOOK_PATH = Path(__file__).parent.parent / "conexus" / "hooks" / "scripts" / "session_start_hook.py"
 
     def test_hook_emits_knowledge_map(self, tmp_path: Path) -> None:
         """SessionStart hook outputs the cached knowledge map content."""

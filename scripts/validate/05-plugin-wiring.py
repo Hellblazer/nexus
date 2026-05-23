@@ -64,7 +64,7 @@ def case(name: str):
 
 
 REPO = Path(__file__).resolve().parent.parent.parent
-NX = REPO / "nx"
+NX = REPO / "conexus"
 
 
 def _registered_tool_names() -> set[str]:

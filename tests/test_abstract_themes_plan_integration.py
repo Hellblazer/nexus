@@ -373,7 +373,7 @@ def builtin_plans_library(tmp_path_factory: pytest.TempPathFactory):
     _add_plan_dimensional_identity(lib.conn)
     lib.conn.commit()
 
-    builtin_dir = Path(__file__).parent.parent / "nx" / "plans" / "builtin"
+    builtin_dir = Path(__file__).parent.parent / "conexus" / "plans" / "builtin"
     result = load_seed_directory(builtin_dir, library=lib)
     assert not result.errors, f"seed_loader errors: {result.errors}"
     assert result.inserted, "no builtin templates loaded"
@@ -454,7 +454,7 @@ class TestAbstractThemesPlanIntegration:
         # (which the unit-shape file already pins).
         template_path = (
             Path(__file__).parent.parent
-            / "nx" / "plans" / "builtin" / "abstract-themes.yml"
+            / "conexus" / "plans" / "builtin" / "abstract-themes.yml"
         )
         import yaml
         template = yaml.safe_load(template_path.read_text())

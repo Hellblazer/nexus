@@ -33,12 +33,12 @@ def _clear_upgrade_done() -> None:
 
 class TestHooksJson:
     def test_valid_json(self) -> None:
-        hooks_path = Path(__file__).parent.parent / "nx" / "hooks" / "hooks.json"
+        hooks_path = Path(__file__).parent.parent / "conexus" / "hooks" / "hooks.json"
         data = json.loads(hooks_path.read_text())
         assert "hooks" in data
 
     def test_upgrade_auto_is_first_session_start_hook(self) -> None:
-        hooks_path = Path(__file__).parent.parent / "nx" / "hooks" / "hooks.json"
+        hooks_path = Path(__file__).parent.parent / "conexus" / "hooks" / "hooks.json"
         data = json.loads(hooks_path.read_text())
         startup_hooks = next(
             h["hooks"]

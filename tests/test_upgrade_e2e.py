@@ -212,7 +212,7 @@ class TestSC7RegistryPattern:
 
 class TestSC8HooksJson:
     def test_upgrade_auto_first(self) -> None:
-        hooks_path = Path(__file__).parent.parent / "nx" / "hooks" / "hooks.json"
+        hooks_path = Path(__file__).parent.parent / "conexus" / "hooks" / "hooks.json"
         data = json.loads(hooks_path.read_text())
         startup_hooks = next(
             h["hooks"]
@@ -235,7 +235,7 @@ class TestSC8HooksJson:
         five-minute stall in the hook with no operator visibility. The
         bound here matches the SessionStart fast-path hooks (5 s).
         """
-        hooks_path = Path(__file__).parent.parent / "nx" / "hooks" / "hooks.json"
+        hooks_path = Path(__file__).parent.parent / "conexus" / "hooks" / "hooks.json"
         data = json.loads(hooks_path.read_text())
         bash_blocks = [
             h for h in data["hooks"].get("PreToolUse", [])

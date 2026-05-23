@@ -143,7 +143,7 @@ def test_empty_stdin_allows():
 
 def test_registry_has_rule():
     yaml = pytest.importorskip("yaml")
-    reg = PROJECT_ROOT / "nx" / "hooks" / "scripts" / "routing" / "registry.yaml"
+    reg = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml"
     rule = (yaml.safe_load(reg.read_text()) or {}).get("rules", {}).get(
         "git_add_all_redirects_to_explicit_paths"
     )
@@ -151,7 +151,7 @@ def test_registry_has_rule():
 
 
 def test_hooks_json_registers():
-    hooks_json = PROJECT_ROOT / "nx" / "hooks" / "hooks.json"
+    hooks_json = PROJECT_ROOT / "conexus" / "hooks" / "hooks.json"
     data = json.loads(hooks_json.read_text())
     found = any(
         "git_add_all_redirects_to_explicit_paths.py" in h.get("command", "")

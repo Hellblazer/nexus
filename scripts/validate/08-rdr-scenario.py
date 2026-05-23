@@ -376,7 +376,7 @@ def run_suite() -> None:
 
 def _exercise_ai_critique() -> None:
     """Spawn the substantive-critic agent and verify it produces a verdict."""
-    agents_dir = Path(__file__).resolve().parent.parent.parent / "nx" / "agents"
+    agents_dir = Path(__file__).resolve().parent.parent.parent / "conexus" / "agents"
     critic_md = (agents_dir / "substantive-critic.md").read_text()
     rdr_body = _rdr_file_path().read_text()
 
@@ -431,11 +431,11 @@ def _exercise_rdr_close_invocation() -> None:
 
     skill_md = (
         Path(__file__).resolve().parent.parent.parent
-        / "nx" / "commands" / "rdr-close.md"
+        / "conexus" / "commands" / "rdr-close.md"
     )
     if not skill_md.exists():
         # Command files live under conexus/commands — check both.
-        skill_md = Path(__file__).resolve().parent.parent.parent / "nx" / "commands" / "rdr-close.md"
+        skill_md = Path(__file__).resolve().parent.parent.parent / "conexus" / "commands" / "rdr-close.md"
     body = skill_md.read_text() if skill_md.exists() else ""
 
     env = os.environ.copy()

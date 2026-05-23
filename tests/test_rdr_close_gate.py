@@ -409,7 +409,7 @@ class TestPreambleConsistency:
         from pathlib import Path
 
         preamble = (
-            Path(__file__).parent.parent / "nx" / "commands" / "rdr-close.md"
+            Path(__file__).parent.parent / "conexus" / "commands" / "rdr-close.md"
         ).read_text()
         # The _extract_section call must include both variants
         assert "'## Problem Statement'" in preamble
@@ -420,7 +420,7 @@ class TestPreambleConsistency:
         from pathlib import Path
 
         preamble = (
-            Path(__file__).parent.parent / "nx" / "commands" / "rdr-close.md"
+            Path(__file__).parent.parent / "conexus" / "commands" / "rdr-close.md"
         ).read_text()
         assert "#{3,5}" in preamble
 
@@ -429,7 +429,7 @@ class TestPreambleConsistency:
         from pathlib import Path
 
         skill = (
-            Path(__file__).parent.parent / "nx" / "skills" / "rdr-gate" / "SKILL.md"
+            Path(__file__).parent.parent / "conexus" / "skills" / "rdr-gate" / "SKILL.md"
         ).read_text()
         assert "Problem / Problem Statement" in skill
 
@@ -439,7 +439,7 @@ class TestPreambleConsistency:
 
         skill = (
             Path(__file__).parent.parent
-            / "nx"
+            / "conexus"
             / "skills"
             / "rdr-create"
             / "SKILL.md"

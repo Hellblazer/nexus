@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking: plugin renamed `nx` → `conexus` (nexus-mkj6u)
+
+The Claude Code plugin name changed from `nx` to `conexus` to eliminate the namespace collision with Nx (nrwl)'s Q1 2026 plugin of the same name. This is a breaking change for existing installs.
+
+Effects:
+
+- Plugin install command: `/plugin install nx@nexus-plugins` is replaced by `/plugin install conexus@nexus-plugins`. The marketplace name `nexus-plugins` is unchanged.
+- Slash-command prefix: all `/nx:foo` skills become `/conexus:foo`.
+- MCP tool prefix: tool names that were `mcp__plugin_nx_nexus__*` are now `mcp__plugin_conexus_nexus__*` (the underlying `nexus` and `nexus-catalog` MCP server names are unchanged).
+- Repo layout: the plugin directory moved from `nx/` to `conexus/`; `pyproject.toml` `force-include` paths and editable-install symlinks were updated accordingly.
+
+User migration (one-time):
+
+```
+/plugin uninstall nx@nexus-plugins
+/plugin install conexus@nexus-plugins
+```
+
+The CLI binary `nx` is unchanged — only the plugin name was renamed. The PyPI package `conexus` is unchanged.
+
+This rename also retired the term "the nx plugin" in CHANGELOG history and prose. Historical CHANGELOG entries that say "the conexus plugin shipped X in version 4.x" are technically anachronistic (the plugin was named `nx` at that time) but serve the forward reader. The rename event is documented here as the anchor.
+
+Skill directory names `using-nx-skills` and `writing-nx-skills` were left as-is for now (their slash commands are `/conexus:using-nx-skills` and `/conexus:writing-nx-skills`). Skill renames are a separate follow-up if desired.
+
 ### Fix: GUI-spawned `nx-mcp` misdetected cloud mode as local (nexus-m7evs)
 
 Cloud users whose `CHROMA_API_KEY` and `VOYAGE_API_KEY` lived only as

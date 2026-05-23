@@ -33,7 +33,7 @@ import pytest
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 HOOK_SCRIPT = (
     PROJECT_ROOT
-    / "nx"
+    / "conexus"
     / "hooks"
     / "scripts"
     / "routing"
@@ -420,7 +420,7 @@ def test_malformed_stdin_fails_closed(tmp_env):
 
 def test_registry_lists_rule_with_fail_closed():
     yaml = pytest.importorskip("yaml")
-    reg = PROJECT_ROOT / "nx" / "hooks" / "scripts" / "routing" / "registry.yaml"
+    reg = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml"
     parsed = yaml.safe_load(reg.read_text()) or {}
     rules = parsed.get("rules") or {}
     rule = rules.get("phase_review_close_requires_gate")
@@ -434,7 +434,7 @@ def test_registry_lists_rule_with_fail_closed():
 
 
 def test_hooks_json_registers_routing_hook():
-    hooks_json = PROJECT_ROOT / "nx" / "hooks" / "hooks.json"
+    hooks_json = PROJECT_ROOT / "conexus" / "hooks" / "hooks.json"
     data = json.loads(hooks_json.read_text())
     bash_hooks = data["hooks"]["PreToolUse"]
     found = False

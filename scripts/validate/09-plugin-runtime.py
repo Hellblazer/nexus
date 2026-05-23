@@ -33,7 +33,7 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parent.parent.parent
-NX = REPO / "nx"
+NX = REPO / "conexus"
 
 #: Per-call timeout in seconds. Skills are short-form; 60s is generous.
 PER_CALL_TIMEOUT = 90.0

@@ -2424,7 +2424,7 @@ class TestBackfillBuiltinBindings:
     def test_backfills_matching_row_by_dimensions(self, tmp_path, monkeypatch):
         from nexus.plans.repair import repair_builtin_bindings
 
-        yaml_dir = tmp_path / "nx" / "plans" / "builtin"
+        yaml_dir = tmp_path / "conexus" / "plans" / "builtin"
         yaml_dir.mkdir(parents=True)
         self._write_yaml(
             yaml_dir / "analyze.yml",
@@ -2456,9 +2456,9 @@ class TestBackfillBuiltinBindings:
             # / plans / builtin. We ship the YAMLs at tmp_path/conexus/plans/
             # builtin, so route _resources/plans/builtin to tmp_path/conexus/
             # plans/builtin via the FakeResource chain.
-            root = tmp_path / "nx"
+            root = tmp_path / "conexus"
             # Eat the leading "_resources" segment by returning a resource
-            # rooted at tmp_path/nx so the subsequent / "plans" / "builtin"
+            # rooted at tmp_path/conexus so the subsequent / "plans" / "builtin"
             # lands correctly. Requires a small shim: intercept the first
             # / and redirect.
             class _RedirectingFakeResource(_FakeResource):

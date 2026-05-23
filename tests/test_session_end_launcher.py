@@ -165,7 +165,7 @@ def _read_plugin_hooks_json() -> dict:
     from pathlib import Path
 
     repo_root = Path(__file__).resolve().parent.parent
-    return json.loads((repo_root / "nx" / "hooks" / "hooks.json").read_text())
+    return json.loads((repo_root / "conexus" / "hooks" / "hooks.json").read_text())
 
 
 def test_hooks_json_session_end_uses_launcher_not_flush_directly() -> None:

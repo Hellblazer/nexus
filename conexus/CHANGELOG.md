@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking: plugin renamed `nx` → `conexus` (nexus-mkj6u)
+
+Plugin name changed from `nx` to `conexus`. Skill prefix `/nx:foo` → `/conexus:foo`. MCP tool prefix `mcp__plugin_nx_*` → `mcp__plugin_conexus_*`. Plugin install command: `/plugin install conexus@nexus-plugins`. See root `CHANGELOG.md` § Unreleased for full migration notes.
+
 ## [4.34.5] - 2026-05-23
 
 ### New utility command: `/conexus:continuation`

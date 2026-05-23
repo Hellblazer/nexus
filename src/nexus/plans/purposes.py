@@ -38,7 +38,7 @@ _log = logging.getLogger(__name__)
 #: Path to the shipped purposes registry. Resolved once at import time.
 PURPOSES_YML: Path = (
     Path(__file__).resolve().parent.parent.parent.parent
-    / "nx" / "plans" / "purposes.yml"
+    / "conexus" / "plans" / "purposes.yml"
 )
 
 #: Known catalog link types. Source: ``catalog/tumbler.py:166`` —

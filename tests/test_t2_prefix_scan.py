@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 # Make t2_prefix_scan importable without installing it as a package
-sys.path.insert(0, str(Path(__file__).parent.parent / "nx" / "hooks" / "scripts"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "conexus" / "hooks" / "scripts"))
 from t2_prefix_scan import _HARD_CAP, _SNIPPET_LIMIT, _TITLE_LIMIT, _snippet
 
 

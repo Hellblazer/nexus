@@ -157,7 +157,7 @@ def _run_claude_p(system_prompt: str, user_prompt: str, timeout: float = 90.0) -
 
 def _exercise_stubs() -> None:
     from pathlib import Path
-    agents_dir = Path(__file__).resolve().parent.parent.parent / "nx" / "agents"
+    agents_dir = Path(__file__).resolve().parent.parent.parent / "conexus" / "agents"
 
     step("Stub agents route callers to the MCP tool")
     for stub in STUBS:
