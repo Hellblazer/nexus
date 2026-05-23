@@ -2,16 +2,22 @@
 title: "nx_answer A2UI Surfaces: Render Composed-Retrieval Responses as Structured Surfaces"
 id: RDR-123
 type: Architecture
-status: draft
+status: superseded
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-19
 accepted_date:
+superseded_date: 2026-05-22
+superseded_by: RDR-127
 related_issues: []
-related_rdrs: [RDR-110, RDR-111, RDR-118, RDR-119]
+related_rdrs: [RDR-110, RDR-111, RDR-118, RDR-119, RDR-127]
 related_tests: []
 implementation_notes: ""
+---
+
+> **TOMBSTONE 2026-05-22.** Superseded by [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md). The intent (nx_answer emits structured surfaces) is preserved at the palinex layer: nexus tools provide the raw data (`nx_answer`, `store_get_many`, etc.); the palinex Claude Code plugin renders surfaces from that data via its `render_surface` MCP tool. No nexus-side surface-rendering code. Do not implement against this RDR.
+
 ---
 
 # RDR-123: nx_answer A2UI Surfaces — Render Composed-Retrieval Responses as Structured Surfaces
