@@ -221,6 +221,29 @@ The rule of thumb: **content** (chunks, documents, notes) is on `nexus`,
 on `nexus-catalog`. `query` is the one core-server tool that crosses the
 boundary — it uses catalog metadata to scope a content search.
 
+## Heads-up: `alwaysLoad` and Claude Code v2.1.69+ tool deferral
+
+Starting in Claude Code **v2.1.69**, schema-deferral was extended from
+MCP tools (deferred since the `ToolSearch` rollout) to most built-in
+tools as well. Only ~10 core tools load eagerly — everything else,
+including all MCP servers, becomes discoverable via `ToolSearch` only.
+The space saving is real (~14k tokens), but the behavioural side effect
+is that the model often skips the `ToolSearch` step and answers without
+ever loading the MCP schemas. Combined with **Opus 4.7**'s documented
+"fewer tool calls by default" and "more literal instruction following"
+disposition, plugin-heavy users see Serena, sequential-thinking, and
+nexus only fire when explicitly named.
+
+Both nx and sn plugin `.mcp.json` files ship with
+`"alwaysLoad": true` on every server. Claude Code v2.1.121+ honours
+this per-server flag and skips the deferral, so schemas load eagerly
+again. If you fork or customise these files, keep the flag — otherwise
+you'll see the same regression.
+
+References:
+- [anthropics/claude-code#31002](https://github.com/anthropics/claude-code/issues/31002) — built-in tool deferral
+- [Opus 4.7 model card](https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7) — disposition shifts
+
 ## References
 
 - [Architecture § Module Map (MCP Servers row)](architecture.md#module-map) — developer-oriented internals

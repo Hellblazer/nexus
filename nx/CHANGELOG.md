@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.4] - 2026-05-23
+
+### Restored tool/skill invocation discipline
+
+Tuning for Claude Code v2.1.69+ (built-in tool deferral) and Opus 4.7
+(literal instruction-following + reduced default tool calls). Without
+these changes, plugin-heavy users were seeing Serena, sequential-thinking,
+and nexus only fire when explicitly told.
+
+- `nx/.mcp.json`: added `"alwaysLoad": true` to `sequential-thinking`,
+  `nexus`, and `nexus-catalog`. Claude Code v2.1.121+ honours this per
+  server to skip tool-search deferral so schemas load eagerly.
+- `nx/skills/using-nx-skills/SKILL.md` and `nx/skills/plan-first/SKILL.md`:
+  rewrote descriptions and opening rules as MUST-form imperatives.
+  Opus 4.7 reads soft hints as suggestions; explicit "MUST" / "defect"
+  language survives the literalism shift. The `"Use when"` prefix
+  required by `tests/test_plugin_structure.py::TestSkillDescriptionCSO`
+  is preserved.
+
+References: [anthropics/claude-code#31002](https://github.com/anthropics/claude-code/issues/31002),
+[Opus 4.7 model card](https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7).
+
 ## [4.34.3] - 2026-05-22
 
 Plugin version aligned with conexus 4.34.3 — documentation-only
@@ -36,7 +58,6 @@ Plugin version aligned with conexus 4.34.1. No plugin-side changes;
 this is a substrate patch release fixing the CLI-vs-daemon gap
 that 4.34.0 left open. See the conexus 4.34.1 entry in the root
 CHANGELOG for the full RDR-120 P6 follow-up details.
-
 ## [4.34.0] - 2026-05-22
 
 Plugin version aligned with conexus 4.34.0. No plugin-side changes
