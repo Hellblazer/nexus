@@ -6,6 +6,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.6] - 2026-05-23
+
+### Fix: `/nx:continuation` chat output ergonomics
+
+Three changes to the slash command shipped in 4.34.5:
+
+- Handoff written to `/tmp` (was `~/.cache/nexus/continuations/`). `/tmp` is
+  purged on reboot; `~/.cache` accumulated stale handoffs forever. Filename
+  is now `nexus-continuation-<repo>-<slug>-<date>.md`.
+- Chat response is plain text on its own line, not the prior wall of prose.
+  A one-line hint, blank separator, then the bare `cat <path>` command on
+  its own line. Triple-click selects only the command, no two-piece grab.
+- Auto-priming the system clipboard was prototyped (pbcopy, `launchctl
+  asuser pbcopy`, OSC 52 plain and DCS-wrapped) and abandoned. The canonical
+  nexus-developer environment is remote tmux over mosh, and that chain
+  drops every clipboard escape somewhere between Bash and the local
+  NSPasteboard. Plain text on its own line is the only portable affordance.
+  The skill body documents the dead-end so a future reader does not re-walk it.
+
 ## [4.34.5] - 2026-05-23
 
 ### New: `/nx:continuation` slash command
