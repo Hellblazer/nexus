@@ -127,7 +127,13 @@ jobs:
         # No api-token needed — uses OIDC trusted publisher
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        # Pinned to v2.6.2 SHA after the floating @v2 tag was implicated
+        # in a "Bad credentials" failure during the 4.34.4 publish (run
+        # 26327424584, 2026-05-23). PyPI publish succeeded; only the GH
+        # release sub-step failed and was created manually. Pinning to a
+        # full-length SHA prevents silent action upgrades from re-introducing
+        # the issue. Bump deliberately when validating a newer v2.x.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
           body_path: /tmp/release_notes.md
           files: |
