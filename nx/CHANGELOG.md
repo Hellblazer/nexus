@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New utility command: `/nx:continuation`
+
+Session-close handoff prompt generator. Captures branch, beads,
+PRs, T2 memory, and Claude Code auto-memory (if present) into a
+10-section continuation document under
+`~/.cache/nexus/continuations/`. Emits a paste-ready compressed
+prompt in chat for the next session's bootstrap.
+
+Argument optional; defaults to a slug derived from the current
+branch. Same-day re-runs append HHMM so nothing is overwritten.
+
+Registry entry: `utility_commands.continuation` in
+`nx/registry.yaml`.
+
 ## [4.34.4] - 2026-05-23
 
 ### Restored tool/skill invocation discipline

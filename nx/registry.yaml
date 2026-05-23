@@ -652,6 +652,11 @@ utility_commands:
     description: "Index PDF files into nx store for semantic search via nx index pdf"
     disable_model_invocation: false
 
+  continuation:
+    slash_command: /continuation
+    description: "Write a paste-ready continuation prompt under ~/.cache/nexus/continuations/ capturing session state, branch, beads, T2 entries, and next-step pointers"
+    disable_model_invocation: false
+
 
 
 
