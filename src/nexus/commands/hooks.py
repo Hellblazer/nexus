@@ -193,6 +193,51 @@ def hooks_uninstall(path: Path) -> None:
     click.echo("Done.")
 
 
+@hooks.command("update")
+@click.argument("path", type=click.Path(file_okay=False, path_type=Path), default=".")
+def hooks_update(path: Path) -> None:
+    """Refresh nexus git hooks to the current stanza (nexus-mkj6u shakeout).
+
+    Equivalent to ``nx hooks uninstall && nx hooks install`` in one step.
+    Use this when ``nx doctor`` reports stanza drift — typically after a
+    conexus upgrade that changed the stanza (e.g. the 2026-05-23 pgrep
+    guard for the multi-indexer pile-up race).
+
+    Only rewrites hooks that are currently nexus-managed (have the
+    sentinel block); never touches unmanaged hook files.
+    """
+    repo = path.resolve()
+    hooks_dir = _effective_hooks_dir(repo)
+
+    if hooks_dir.exists() and not _is_writable(hooks_dir):
+        raise click.ClickException(
+            f"Hooks directory is not writable: {hooks_dir}\n"
+            "Check core.hooksPath or directory permissions."
+        )
+
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    click.echo(f"Updating nexus hooks in {repo}…")
+
+    for name in _HOOK_NAMES:
+        hook_file = hooks_dir / name
+        if not hook_file.exists():
+            click.echo(f"  · {name}  (not installed; skipped)")
+            continue
+        content = hook_file.read_text()
+        if SENTINEL_BEGIN not in content:
+            click.echo(f"  · {name}  (unmanaged; skipped)")
+            continue
+        # Rewrite: remove old stanza, install fresh one. The
+        # _install_hook path handles both "owned" (file has only the
+        # stanza + shebang) and "appended" (other content present)
+        # cases correctly.
+        _uninstall_hook(hooks_dir, name)
+        action = _install_hook(hooks_dir, name)
+        click.echo(f"  ✓ {name}  (refreshed: {action})")
+
+    click.echo("Done. New stanza in effect from the next commit.")
+
+
 @hooks.command("status")
 @click.argument("path", type=click.Path(file_okay=False, path_type=Path), default=".")
 def hooks_status(path: Path) -> None:

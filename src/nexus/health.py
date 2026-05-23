@@ -472,8 +472,9 @@ def _check_git_hooks() -> list[HealthResult]:
     # reaching up into commands/. Use module-attribute access so test
     # monkeypatches on ``nexus._git_hooks_meta.effective_hooks_dir``
     # reach the live binding at call time.
+    import re
     from nexus import _git_hooks_meta as _ghm
-    from nexus._git_hooks_meta import SENTINEL_BEGIN
+    from nexus._git_hooks_meta import SENTINEL_BEGIN, SENTINEL_END
     _effective_hooks_dir = _ghm.effective_hooks_dir
     from nexus.registry import RepoRegistry
 
@@ -482,6 +483,32 @@ def _check_git_hooks() -> list[HealthResult]:
     results: list[HealthResult] = []
     hook_names = ("post-commit", "post-merge", "post-rewrite")
     registry_path = nexus_config_dir() / "repos.json"
+
+    # nexus-mkj6u shakeout: extract the canonical stanza from the
+    # current template so we can detect drift in already-installed
+    # hooks (e.g. the pre-pgrep-guard stanza). Done once per call;
+    # the import is lazy because commands/hooks.py imports click
+    # which we don't want to pay for at health-check time when no
+    # repos are registered.
+    def _canonical_stanza_body() -> str | None:
+        try:
+            from nexus.commands.hooks import _STANZA
+        except Exception:
+            return None
+        m = re.search(
+            rf"{re.escape(SENTINEL_BEGIN)}\n(.*?)\n{re.escape(SENTINEL_END)}",
+            _STANZA, re.DOTALL,
+        )
+        return m.group(1) if m else None
+
+    def _installed_stanza_body(content: str) -> str | None:
+        m = re.search(
+            rf"{re.escape(SENTINEL_BEGIN)}\n(.*?)\n{re.escape(SENTINEL_END)}",
+            content, re.DOTALL,
+        )
+        return m.group(1) if m else None
+
+    canonical = _canonical_stanza_body()
 
     try:
         reg = RepoRegistry(registry_path)
@@ -505,10 +532,36 @@ def _check_git_hooks() -> list[HealthResult]:
                     if (hdir / n).exists() and SENTINEL_BEGIN in (hdir / n).read_text()
                 ]
                 if installed:
-                    results.append(HealthResult(
-                        label="git hooks", ok=True,
-                        detail=f"{repo_path} ({', '.join(installed)})",
-                    ))
+                    # nexus-mkj6u: drift check — compare installed stanza
+                    # body to the canonical template body. Different
+                    # body means the user is running an old stanza
+                    # (e.g. pre-pgrep-guard, vulnerable to the multi-
+                    # indexer pile-up race).
+                    drifted: list[str] = []
+                    if canonical is not None:
+                        for name in installed:
+                            installed_body = _installed_stanza_body(
+                                (hdir / name).read_text()
+                            )
+                            if installed_body is not None and installed_body != canonical:
+                                drifted.append(name)
+                    if drifted:
+                        results.append(HealthResult(
+                            label="git hooks (stanza drift)",
+                            ok=False,
+                            detail=(
+                                f"{repo_path} — installed stanza differs from "
+                                f"current template ({', '.join(drifted)}). "
+                                "May be missing pile-up guard or other fixes."
+                            ),
+                            fix_suggestions=[f"nx hooks update {repo_path}"],
+                            fatal=False,
+                        ))
+                    else:
+                        results.append(HealthResult(
+                            label="git hooks", ok=True,
+                            detail=f"{repo_path} ({', '.join(installed)})",
+                        ))
                 else:
                     results.append(HealthResult(
                         label="git hooks", ok=True,
