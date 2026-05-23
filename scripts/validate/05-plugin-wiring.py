@@ -6,7 +6,7 @@ command actually exists in the registered tool set. Catches drift where a
 skill points at a renamed/deleted tool.
 
 Also validates:
- * Every slash command (nx/commands/*.md) references a registered skill.
+ * Every slash command (conexus/commands/*.md) references a registered skill.
  * Every agent markdown parses.
  * Every skill markdown parses.
 """
@@ -64,7 +64,7 @@ def case(name: str):
 
 
 REPO = Path(__file__).resolve().parent.parent.parent
-NX = REPO / "nx"
+NX = REPO / "conexus"
 
 
 def _registered_tool_names() -> set[str]:
@@ -75,15 +75,15 @@ def _registered_tool_names() -> set[str]:
     cat  = {t.name for t in catalog_mcp._tool_manager.list_tools()}
     # Catalog tools are registered under short names (search, show, …) per
     # @mcp.tool(name="search"); the full form agents use is
-    # mcp__plugin_nx_nexus_catalog__<name>.
+    # mcp__plugin_conexus_nexus_catalog__<name>.
     return core | {f"catalog_{n}" for n in cat} | cat
 
 
 def _extract_tool_refs(text: str) -> set[str]:
     """Find MCP tool name references in a skill / agent / command body."""
     names: set[str] = set()
-    # Pattern 1: mcp__plugin_nx_nexus__<tool>
-    names.update(re.findall(r"mcp__plugin_nx_nexus(?:_catalog)?__(\w+)", text))
+    # Pattern 1: mcp__plugin_conexus_nexus__<tool>
+    names.update(re.findall(r"mcp__plugin_conexus_nexus(?:_catalog)?__(\w+)", text))
     # Pattern 2: bare tool names in code blocks (heuristic — match core tool names only)
     return names
 

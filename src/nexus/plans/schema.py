@@ -203,7 +203,7 @@ class PlanTemplateLoader:
     """Validate templates and detect canonical-identity collisions.
 
     A loader instance accumulates templates from one or more source
-    locations (``.nexus/plans/*.yml``, ``nx/plans/builtin/*.yml``,
+    locations (``.nexus/plans/*.yml``, ``conexus/plans/builtin/*.yml``,
     etc.). Any two templates whose canonical dimension JSON matches
     raise :class:`PlanTemplateDuplicateError` naming both sources.
 

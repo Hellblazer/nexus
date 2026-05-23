@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-RDR-078 ships in **six phases** (Phase 4 fans out into 4a-4e). Every phase is additive on top of shipped substrate (RDR-041 T1 HTTP server, RDR-042 plan library + `/nx:query`, RDR-070 HDBSCAN taxonomies, RDR-077 projection quality). The architectural glue: a dimensional plan template registry, semantic plan matching via T1 cosine, a `traverse` plan operator over the existing catalog typed-link graph, scenario seeds, and plan-first agent priming.
+RDR-078 ships in **six phases** (Phase 4 fans out into 4a-4e). Every phase is additive on top of shipped substrate (RDR-041 T1 HTTP server, RDR-042 plan library + `/conexus:query`, RDR-070 HDBSCAN taxonomies, RDR-077 projection quality). The architectural glue: a dimensional plan template registry, semantic plan matching via T1 cosine, a `traverse` plan operator over the existing catalog typed-link graph, scenario seeds, and plan-first agent priming.
 
 The quality lever is **Phase 3** (typed-graph traversal). The efficiency lever is **Phase 1** (semantic plan matching, ~40% compute reduction at ≥0.85 confidence). The shipping-velocity lever is **Phase 6** (git-tracked YAML scopes).
 
@@ -50,7 +50,7 @@ The five scenario seeds (4b) and four meta-seeds (4d) all reference `traverse` s
 
 ### Why Phase 5 depends on Phases 1, 3, 4b being mergeable
 
-The 9 skills' template body is `plan_match(intent, dimensions={verb:<v>}, n=1) → plan_run(match, bindings)`. Each skill needs at least one matching plan in the library — five verb skills need five scenario seeds (4b); three plan-mgmt skills need three meta-seeds (4d). Without these, the skills fall through to `/nx:query` 100% of the time, defeating the demo.
+The 9 skills' template body is `plan_match(intent, dimensions={verb:<v>}, n=1) → plan_run(match, bindings)`. Each skill needs at least one matching plan in the library — five verb skills need five scenario seeds (4b); three plan-mgmt skills need three meta-seeds (4d). Without these, the skills fall through to `/conexus:query` 100% of the time, defeating the demo.
 
 The hook edits could in principle land before the skills, but the SessionStart "## Plan Library" block lists the scenario names — wrong listing if seeds aren't shipped.
 
@@ -85,7 +85,7 @@ The scoped loader's idempotency mechanism is `INSERT … ON CONFLICT(project, di
 
 ## Per-Bead Detail
 
-Each bead below maps to one phase deliverable. Beads include: file touchpoints, test cases, dependencies, and a reminder to use `mcp__plugin_nx_sequential-thinking__sequentialthinking` for the design-of-DAG tasks (Phase 1 runner contract, Phase 3 traverse merge invariants, Phase 4a canonical-JSON dedup).
+Each bead below maps to one phase deliverable. Beads include: file touchpoints, test cases, dependencies, and a reminder to use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` for the design-of-DAG tasks (Phase 1 runner contract, Phase 3 traverse merge invariants, Phase 4a canonical-JSON dedup).
 
 ### Epic — RDR-078 Plan-Centric Retrieval
 
@@ -124,7 +124,7 @@ Tracks all phase beads. Closes when SC-1..SC-19 all pass and the ART end-to-end 
 5. `test_plan_runner_rejects_cross_embedding_step` — step with `scope.taxonomy_domain=prose` dispatched to a code corpus → `PlanRunEmbeddingDomainError` (SC-10).
 6. `test_plan_save_visible_within_session` — save, then `plan_match` from same process resolves it.
 
-**Reminder**: use `mcp__plugin_nx_sequential-thinking__sequentialthinking` to design the `$stepN.<field>` resolution contract — multi-hop reference resolution interacts with T1 scratch tagging (RDR-041 pattern, tag `plan_run,step-N`).
+**Reminder**: use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` to design the `$stepN.<field>` resolution contract — multi-hop reference resolution interacts with T1 scratch tagging (RDR-041 pattern, tag `plan_run,step-N`).
 
 ### P2 — Domain-scoped retrieval steps
 
@@ -143,8 +143,8 @@ Tracks all phase beads. Closes when SC-1..SC-19 all pass and the ART end-to-end 
 **Files**:
 - `src/nexus/catalog/catalog.py` — add `Catalog.graph_many(seeds, depth, link_types, direction) -> {nodes, edges}` per RDR §Phase 3.
 - `src/nexus/plans/runner.py` — register `traverse` step kind; dispatch to `graph_many()` (list seeds) or `graph()` (single seed).
-- `src/nexus/plans/purposes.py` — **new file** — `purposes_resolve(name, project, scope) -> list[str]`; loads `nx/plans/purposes.yml`; warn-and-drop unknown link types per RDR.
-- `nx/plans/purposes.yml` — **new file** — starter purpose set per RDR §Phase 3.
+- `src/nexus/plans/purposes.py` — **new file** — `purposes_resolve(name, project, scope) -> list[str]`; loads `conexus/plans/purposes.yml`; warn-and-drop unknown link types per RDR.
+- `conexus/plans/purposes.yml` — **new file** — starter purpose set per RDR §Phase 3.
 - `docs/catalog-link-types.md` — **new file** — directionality, source, typical traversal shape per link type.
 - `docs/catalog-purposes.md` — **new file** — purpose registry reference.
 
@@ -175,11 +175,11 @@ Tracks all phase beads. Closes when SC-1..SC-19 all pass and the ART end-to-end 
 ### P4b — Five scenario template seeds
 
 **Files**:
-- `nx/plans/builtin/research-default.yml` — `verb:research, scope:global, strategy:default`.
-- `nx/plans/builtin/review-default.yml` — `verb:review, ...`.
-- `nx/plans/builtin/analyze-default.yml` — `verb:analyze, ...`.
-- `nx/plans/builtin/debug-default.yml` — `verb:debug, ...` (intentionally flat — no `traverse`).
-- `nx/plans/builtin/document-default.yml` — `verb:document, ...`.
+- `conexus/plans/builtin/research-default.yml` — `verb:research, scope:global, strategy:default`.
+- `conexus/plans/builtin/review-default.yml` — `verb:review, ...`.
+- `conexus/plans/builtin/analyze-default.yml` — `verb:analyze, ...`.
+- `conexus/plans/builtin/debug-default.yml` — `verb:debug, ...` (intentionally flat — no `traverse`).
+- `conexus/plans/builtin/document-default.yml` — `verb:document, ...`.
 - `src/nexus/commands/catalog.py` — extend `nx catalog setup` to load builtin scenarios via P6 loader (or via direct seed call until P6 lands).
 
 **Tests** (`tests/test_scenario_seeds.py`):
@@ -192,10 +192,10 @@ Tracks all phase beads. Closes when SC-1..SC-19 all pass and the ART end-to-end 
 ### P4d — Four meta-seed plans
 
 **Files**:
-- `nx/plans/builtin/plan-author-default.yml` — `verb:plan-author, strategy:default`.
-- `nx/plans/builtin/plan-promote-propose.yml` — `verb:plan-promote, strategy:propose`.
-- `nx/plans/builtin/plan-inspect-default.yml` — `verb:plan-inspect, strategy:default`.
-- `nx/plans/builtin/plan-inspect-dimensions.yml` — `verb:plan-inspect, strategy:dimensions`.
+- `conexus/plans/builtin/plan-author-default.yml` — `verb:plan-author, strategy:default`.
+- `conexus/plans/builtin/plan-promote-propose.yml` — `verb:plan-promote, strategy:propose`.
+- `conexus/plans/builtin/plan-inspect-default.yml` — `verb:plan-inspect, strategy:default`.
+- `conexus/plans/builtin/plan-inspect-dimensions.yml` — `verb:plan-inspect, strategy:dimensions`.
 
 **Tests** (`tests/test_meta_seeds.py`):
 1. `test_all_four_meta_seeds_load_idempotent` — re-setup is no-op (SC-13).
@@ -215,24 +215,24 @@ Tracks all phase beads. Closes when SC-1..SC-19 all pass and the ART end-to-end 
 ### P5 — Skills + hook edits + per-agent prompts
 
 **Files**:
-- `nx/skills/nx-plan-first.md` — **new** — gate skill, dispatches `plan_match` first.
-- `nx/skills/nx-research.md`, `nx-review.md`, `nx-analyze.md`, `nx-debug.md`, `nx-document.md` — **new** — five verb skills, shared template body.
-- `nx/skills/nx-plan-author.md`, `nx-plan-inspect.md`, `nx-plan-promote.md` — **new** — three plan-mgmt skills.
-- `nx/hooks/scripts/session_start_hook.py` — **edit** — populate T1 `plans__session` (SQL per RDR §Phase 5); inject `## Plan Library` block.
-- `nx/hooks/scripts/subagent-start.sh` — **edit** — inject plan-match-first preamble for the 8 retrieval-shaped agents.
-- `nx/agents/strategic-planner.md`, `architect-planner.md`, `code-review-expert.md`, `substantive-critic.md`, `deep-analyst.md`, `deep-research-synthesizer.md`, `debugger.md`, `plan-auditor.md` — **edit** — opening instruction citing `plan_match`-first pattern.
+- `conexus/skills/nx-plan-first.md` — **new** — gate skill, dispatches `plan_match` first.
+- `conexus/skills/nx-research.md`, `nx-review.md`, `nx-analyze.md`, `nx-debug.md`, `nx-document.md` — **new** — five verb skills, shared template body.
+- `conexus/skills/nx-plan-author.md`, `nx-plan-inspect.md`, `nx-plan-promote.md` — **new** — three plan-mgmt skills.
+- `conexus/hooks/scripts/session_start_hook.py` — **edit** — populate T1 `plans__session` (SQL per RDR §Phase 5); inject `## Plan Library` block.
+- `conexus/hooks/scripts/subagent-start.sh` — **edit** — inject plan-match-first preamble for the 8 retrieval-shaped agents.
+- `conexus/agents/strategic-planner.md`, `architect-planner.md`, `code-review-expert.md`, `substantive-critic.md`, `deep-analyst.md`, `deep-research-synthesizer.md`, `debugger.md`, `plan-auditor.md` — **edit** — opening instruction citing `plan_match`-first pattern.
 
 **Tests** (`tests/test_plan_first_skills.py`, `tests/test_session_start_hook.py`, `tests/test_plugin_structure.py` extension):
 1. `test_all_nine_skills_present_and_well_formed` — plugin structure tests pass for the 9 new skill files.
 2. `test_session_start_populates_plans_session` — after hook runs, `COUNT(t1.plans__session) == COUNT(t2.plans WHERE outcome='success' AND ttl-honest)` (SC-2).
 3. `test_session_start_injects_plan_library_block` — output contains `## Plan Library` with all five scenario names (SC-7).
 4. `test_subagent_start_preamble_present_for_eight_agents` — grep on hook output for each of 8 agent names (SC-7).
-5. `test_each_agent_md_cites_plan_match_first` — grep on each `nx/agents/<name>.md` (SC-7 — survives hook trimming).
+5. `test_each_agent_md_cites_plan_match_first` — grep on each `conexus/agents/<name>.md` (SC-7 — survives hook trimming).
 
 ### P6 — Scoped plan loader (4 YAML tiers) + CI schema validation
 
 **Files**:
-- `src/nexus/plans/loader.py` — **new file** — scans `nx/plans/builtin/*.yml`, `docs/rdr/<slug>/plans.yml` (only `accepted`/`closed`), `.nexus/plans/*.yml`, optional `_repo.yml`. Validates per P4a, dedups via `(project, dimensions)` UNIQUE.
+- `src/nexus/plans/loader.py` — **new file** — scans `conexus/plans/builtin/*.yml`, `docs/rdr/<slug>/plans.yml` (only `accepted`/`closed`), `.nexus/plans/*.yml`, optional `_repo.yml`. Validates per P4a, dedups via `(project, dimensions)` UNIQUE.
 - `src/nexus/commands/catalog.py` — `nx catalog setup` invokes loader.
 - `.github/workflows/plan-schema-check.yml` — **new** — CI check on PR for plan schema validity (SC-15).
 
@@ -250,8 +250,8 @@ The epic closes when:
 
 - All phase beads are `closed`.
 - All SC-1..SC-19 verified — checklist run as part of close gate.
-- ART end-to-end demo (SC-8) recorded: cold-library run → `/nx:query` planner → plan saved; warm-library run → `plan_match` ≥ threshold → `plan_run` succeeds, includes ≥1 `traverse` step traversing typed links from RDR to implementing code.
-- Zero regressions on `plan_save` / `plan_search` / `/nx:query` / `search()` / `query()` (SC-9).
+- ART end-to-end demo (SC-8) recorded: cold-library run → `/conexus:query` planner → plan saved; warm-library run → `plan_match` ≥ threshold → `plan_run` succeeds, includes ≥1 `traverse` step traversing typed links from RDR to implementing code.
+- Zero regressions on `plan_save` / `plan_search` / `/conexus:query` / `search()` / `query()` (SC-9).
 - Cross-embedding boundary not crossed anywhere (SC-10): `test_plan_runner_rejects_cross_embedding_step` green; greppable invariant on `plan_run`.
 
 ## Continuation State
@@ -259,7 +259,7 @@ The epic closes when:
 Persist progress to T2 memory after each phase merges:
 
 ```
-mcp__plugin_nx_nexus__memory_put(
+mcp__plugin_conexus_nexus__memory_put(
     project="nexus",
     title="rdr-078-impl-state.md",
     content="<phase status, blocker notes, calibration values for PQ-2/PQ-20>"
@@ -276,5 +276,5 @@ PQ-2 (match threshold), PQ-20 (specificity bonus weight), and PQ-14 (scope prece
 - T1 server: `src/nexus/session.py:220-277`, RDR-041 PPID inheritance
 - Migration registry: `src/nexus/db/migrations.py`
 - MCP server: `src/nexus/mcp/core.py`
-- Hooks: `nx/hooks/scripts/session_start_hook.py`, `nx/hooks/scripts/subagent-start.sh`
-- Agents: `nx/agents/{strategic-planner,architect-planner,code-review-expert,substantive-critic,deep-analyst,deep-research-synthesizer,debugger,plan-auditor}.md`
+- Hooks: `conexus/hooks/scripts/session_start_hook.py`, `conexus/hooks/scripts/subagent-start.sh`
+- Agents: `conexus/agents/{strategic-planner,architect-planner,code-review-expert,substantive-critic,deep-analyst,deep-research-synthesizer,debugger,plan-auditor}.md`

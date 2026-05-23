@@ -33,12 +33,12 @@ def _clear_upgrade_done() -> None:
 
 class TestHooksJson:
     def test_valid_json(self) -> None:
-        hooks_path = Path(__file__).parent.parent / "nx" / "hooks" / "hooks.json"
+        hooks_path = Path(__file__).parent.parent / "conexus" / "hooks" / "hooks.json"
         data = json.loads(hooks_path.read_text())
         assert "hooks" in data
 
     def test_upgrade_auto_is_first_session_start_hook(self) -> None:
-        hooks_path = Path(__file__).parent.parent / "nx" / "hooks" / "hooks.json"
+        hooks_path = Path(__file__).parent.parent / "conexus" / "hooks" / "hooks.json"
         data = json.loads(hooks_path.read_text())
         startup_hooks = next(
             h["hooks"]
@@ -163,11 +163,18 @@ class TestPluginCliVersionCheck:
     installed CLI.
     """
 
-    def _write_plugin_manifest(self, root: Path, version: str) -> None:
+    def _write_plugin_manifest(self, root: Path, version: str, name: str = "conexus") -> None:
+        """Plant a plugin.json for the version-check tests.
+
+        nexus-mkj6u: the default plugin name is the new ``conexus`` so
+        the version-check tests don't pick up the plugin-name-mismatch
+        warning as collateral damage. Tests that specifically want to
+        exercise the rename path pass name='nx' explicitly.
+        """
         manifest_dir = root / ".claude-plugin"
         manifest_dir.mkdir(parents=True, exist_ok=True)
         (manifest_dir / "plugin.json").write_text(
-            json.dumps({"name": "nx", "version": version})
+            json.dumps({"name": name, "version": version})
         )
 
     def test_no_plugin_root_silent(self, tmp_path: Path, monkeypatch) -> None:

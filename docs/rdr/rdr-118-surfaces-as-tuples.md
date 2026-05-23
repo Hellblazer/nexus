@@ -513,10 +513,10 @@ medium-specific API. Reactivates `nexus-kgo4`.
 
 #### Step 1: Land subspace YAML schemas
 
-- `nx/tuplespace/builtin/surface_cell.yml`
-- `nx/tuplespace/builtin/cell_layout.yml`
-- `nx/tuplespace/builtin/cell_input.yml`
-- `nx/tuplespace/builtin/cell_focus.yml`
+- `conexus/tuplespace/builtin/surface_cell.yml`
+- `conexus/tuplespace/builtin/cell_layout.yml`
+- `conexus/tuplespace/builtin/cell_input.yml`
+- `conexus/tuplespace/builtin/cell_focus.yml`
 
 Register via RDR-112 admin RPC. Document the sibling-surface recursion
 convention in the `surface_cell.yml` header.

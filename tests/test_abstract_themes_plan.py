@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-_TEMPLATE_PATH = Path(__file__).parent.parent / "nx" / "plans" / "builtin" / "abstract-themes.yml"
+_TEMPLATE_PATH = Path(__file__).parent.parent / "conexus" / "plans" / "builtin" / "abstract-themes.yml"
 
 
 @pytest.fixture(scope="module")

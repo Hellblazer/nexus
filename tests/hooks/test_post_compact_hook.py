@@ -6,7 +6,7 @@ import os
 import subprocess
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[2] / "nx" / "hooks" / "scripts" / "post_compact_hook.sh"
+SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "post_compact_hook.sh"
 
 STDIN_PAYLOAD = json.dumps({
     "session_id": "test-session",

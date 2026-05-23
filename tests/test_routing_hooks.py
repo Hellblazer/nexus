@@ -22,9 +22,9 @@ import textwrap
 import pytest
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
-LIB_PATH = PROJECT_ROOT / "nx" / "hooks" / "scripts" / "routing" / "_lib.py"
-REGISTRY_PATH = PROJECT_ROOT / "nx" / "hooks" / "scripts" / "routing" / "registry.yaml"
-README_PATH = PROJECT_ROOT / "nx" / "hooks" / "scripts" / "routing" / "README.md"
+LIB_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "_lib.py"
+REGISTRY_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml"
+README_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "README.md"
 
 
 def _load_lib():

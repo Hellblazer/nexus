@@ -21,14 +21,14 @@ related_issues:
 ## Problem Statement
 
 T2 metadata records for RDRs go stale when status changes happen outside of
-`/nx:rdr-close`. In a pilot session with 3 RDRs, all three were accepted and
+`/conexus:rdr-close`. In a pilot session with 3 RDRs, all three were accepted and
 implemented but their T2 records still showed "DRAFT" — discovered only when
 querying T2 after the session.
 
 The root cause: the pilot RDRs were accepted and implemented but never
-`/nx:rdr-close`d — they remained open. Status transitions happened by editing
+`/conexus:rdr-close`d — they remained open. Status transitions happened by editing
 YAML frontmatter (draft → accepted, accepted → implemented) with no
-corresponding T2 update. Only `/nx:rdr-create` and `/nx:rdr-close` write T2;
+corresponding T2 update. Only `/conexus:rdr-create` and `/conexus:rdr-close` write T2;
 every intermediate status change is invisible.
 
 ## Context
@@ -43,7 +43,7 @@ T2 query revealed all records still showed their initial draft status.
 
 - **Agents querying T2 get stale data** — any agent using `nx memory get`
   to check RDR status will act on wrong information
-- **`/nx:rdr-list` shows wrong statuses** — it reads T2 for fast response
+- **`/conexus:rdr-list` shows wrong statuses** — it reads T2 for fast response
   without parsing markdown files, so it reports stale statuses
 - **Audit trail has holes** — no record of when acceptance happened
 - **Cross-RDR dependency checking** is unreliable if status is wrong
@@ -52,7 +52,7 @@ T2 query revealed all records still showed their initial draft status.
 
 **T2 is the process authority; files are the human-editable persistence
 layer.** Agent interactions with RDR process state (status, gate results,
-acceptance, reviewed-by) should flow through `nx` and the nx plugin. Files
+acceptance, reviewed-by) should flow through `nx` and the conexus plugin. Files
 are the git-versioned merge state — editable by humans, diffable, reviewable
 — but Claude's primary interface for process metadata is T2.
 
@@ -65,16 +65,16 @@ This means:
   content and for persistence across sessions (git-versioned). When they
   diverge, reconciliation always advances to the more advanced status
   (monotonic-advance rule). Deliberate status regression goes through
-  `/nx:rdr-close --force`, not direct frontmatter edits.
+  `/conexus:rdr-close --force`, not direct frontmatter edits.
 
 ### Technical Environment
 
-- RDR tooling: nexus plugin skill commands (`/nx:rdr-create`, `/nx:rdr-gate`,
-  `/nx:rdr-close`, `/nx:rdr-research`, `/nx:rdr-list`, `/nx:rdr-show`)
+- RDR tooling: nexus plugin skill commands (`/conexus:rdr-create`, `/conexus:rdr-gate`,
+  `/conexus:rdr-close`, `/conexus:rdr-research`, `/conexus:rdr-list`, `/conexus:rdr-show`)
 - T2 storage: `nx memory put/get` with project `{repo}_rdr`
-- Current T2 update points: `/nx:rdr-create` (initial write), `/nx:rdr-close`
+- Current T2 update points: `/conexus:rdr-create` (initial write), `/conexus:rdr-close`
   (final write)
-- SessionStart hook: `nx/hooks/scripts/rdr_hook.py` — runs at session
+- SessionStart hook: `conexus/hooks/scripts/rdr_hook.py` — runs at session
   start, currently reports RDR count and indexing status
 
 ## Research Findings
@@ -86,18 +86,18 @@ Reviewed all RDR skill commands to identify which ones read/write T2
 
 | Command | Reads T2? | Writes T2? | Status change? |
 |---------|-----------|------------|----------------|
-| `/nx:rdr-create` | No | Yes (initial record) | Sets Draft |
-| `/nx:rdr-research` | Yes (findings) | Yes (findings) | No status change |
-| `/nx:rdr-gate` | Yes (metadata + findings) | No | No (gate outcomes are BLOCKED/PASSED, not status) |
-| `/nx:rdr-close` | Yes (metadata) | Yes (close record) | Sets terminal status |
-| `/nx:rdr-list` | Yes (all records) | No | No |
-| `/nx:rdr-show` | Yes (single record) | No | No |
+| `/conexus:rdr-create` | No | Yes (initial record) | Sets Draft |
+| `/conexus:rdr-research` | Yes (findings) | Yes (findings) | No status change |
+| `/conexus:rdr-gate` | Yes (metadata + findings) | No | No (gate outcomes are BLOCKED/PASSED, not status) |
+| `/conexus:rdr-close` | Yes (metadata) | Yes (close record) | Sets terminal status |
+| `/conexus:rdr-list` | Yes (all records) | No | No |
+| `/conexus:rdr-show` | Yes (single record) | No | No |
 
 **Gap**: No command writes T2 for the draft → accepted transition. The gate
 reports BLOCKED/PASSED but does not store its outcome. Acceptance is a manual
 frontmatter edit with no T2 update.
 
-**Note on `/nx:rdr-list`**: The workflow doc says it "reads from T2 metadata for
+**Note on `/conexus:rdr-list`**: The workflow doc says it "reads from T2 metadata for
 fast response" but the actual implementation (`rdr-list.md`) parses markdown
 files via `parse_frontmatter()` and `get_all_rdrs()` for the status table,
 calling `nx memory list` only to display raw T2 records as a secondary
@@ -107,7 +107,7 @@ section. This divergence is addressed in the proposed solution.
 
 - **Documented**: `parse_frontmatter()` in every command reads current status
   from the file. T2 and file status can diverge silently.
-- **Documented**: `/nx:rdr-list` currently reads files, not T2, for its primary
+- **Documented**: `/conexus:rdr-list` currently reads files, not T2, for its primary
   status display (contradicts workflow doc claim).
 - **Assumed**: Most status transitions happen during interactive sessions
   where the user is present. Batch/CI status changes are not a current
@@ -129,11 +129,11 @@ section. This divergence is addressed in the proposed solution.
 
 **T2-primary with SessionStart reconciliation.** Three complementary pieces:
 
-1. **`/nx:rdr-accept` command**: Writes T2 first (status, accepted_date,
+1. **`/conexus:rdr-accept` command**: Writes T2 first (status, accepted_date,
    reviewed-by, gate verification), then propagates to file frontmatter.
 
-2. **Gate result storage**: `/nx:rdr-gate` writes outcome to T2 after each
-   run. Enables `/nx:rdr-accept` to verify gate passed.
+2. **Gate result storage**: `/conexus:rdr-gate` writes outcome to T2 after each
+   run. Enables `/conexus:rdr-accept` to verify gate passed.
 
 3. **SessionStart reconciliation**: Extend the existing `rdr_hook.py` to
    compare file frontmatter against T2 on session start. Catches human
@@ -143,8 +143,8 @@ section. This divergence is addressed in the proposed solution.
 
 #### Gate result storage
 
-Gate outcomes must be stored to enable `/nx:rdr-accept` verification. The
-gate command (`/nx:rdr-gate`) will write a T2 record after each gate run:
+Gate outcomes must be stored to enable `/conexus:rdr-accept` verification. The
+gate command (`/conexus:rdr-gate`) will write a T2 record after each gate run:
 
 ```bash
 nx memory put - --project {repo}_rdr --title {id}-gate-latest <<'EOF'
@@ -155,7 +155,7 @@ significant_count: 2
 EOF
 ```
 
-This is a new T2 write in `/nx:rdr-gate` (currently it writes nothing).
+This is a new T2 write in `/conexus:rdr-gate` (currently it writes nothing).
 The record is overwritten on each gate/re-gate run (last-write-wins,
 no history — the current gate state is what matters for acceptance).
 
@@ -163,10 +163,10 @@ The gate outcome is written by Claude as part of the gate action
 instructions (the `## Action` section of `rdr-gate.md`), not by the
 pre-loaded Python script. Implementation is a prompt/instruction update.
 
-#### `/nx:rdr-accept` command
+#### `/conexus:rdr-accept` command
 
 ```
-/nx:rdr-accept <id> [--reviewed-by <name>]
+/conexus:rdr-accept <id> [--reviewed-by <name>]
 ```
 
 - Reads T2 gate record (`{id}-gate-latest`). If no gate record exists
@@ -190,7 +190,7 @@ to frontmatter — report the error. T2 is the process authority.
 
 #### SessionStart reconciliation
 
-Extend `nx/hooks/scripts/rdr_hook.py` to reconcile file ↔ T2 on every
+Extend `conexus/hooks/scripts/rdr_hook.py` to reconcile file ↔ T2 on every
 session start:
 
 ```python
@@ -219,12 +219,12 @@ visible.
 **Output**: The hook prints a summary line only when reconciliation
 happens. Silent when everything is in sync.
 
-#### `/nx:rdr-close --force` and the gate invariant
+#### `/conexus:rdr-close --force` and the gate invariant
 
-RDR-001 P1 added `--force` to `/nx:rdr-close` to allow closing without
+RDR-001 P1 added `--force` to `/conexus:rdr-close` to allow closing without
 accepted/final status. This creates a path that bypasses both
-`/nx:rdr-accept` and the gate: a user can go directly to
-`/nx:rdr-close --force` on a draft RDR.
+`/conexus:rdr-accept` and the gate: a user can go directly to
+`/conexus:rdr-close --force` on a draft RDR.
 
 This is an intentional escape hatch, not a bug. The `--force` flag
 creates an explicit paper trail (the override is visible in the close
@@ -254,7 +254,7 @@ whichever source they can reach).
 between writes, agents can't trust T2 without cross-checking files
 
 **Reason for rejection**: This was the original RDR-002 design. The
-re-gate revealed it creates complexity: `/nx:rdr-list` already reads files
+re-gate revealed it creates complexity: `/conexus:rdr-list` already reads files
 (contradicting the workflow doc), sync-on-read in read commands violates
 expectations, and timestamp fabrication corrupts audit trails. T2-primary
 with reconciliation is cleaner.
@@ -299,9 +299,9 @@ daemons or per-clone setup.
 
 ### Risks and Mitigations
 
-- **Risk**: User forgets `/nx:rdr-accept` just like they forgot
-  `/nx:rdr-research`
-  **Mitigation**: When gate returns PASSED, print: "Run `/nx:rdr-accept <id>`
+- **Risk**: User forgets `/conexus:rdr-accept` just like they forgot
+  `/conexus:rdr-research`
+  **Mitigation**: When gate returns PASSED, print: "Run `/conexus:rdr-accept <id>`
   to accept this RDR."
 - **Risk**: SessionStart reconciliation has wrong "more advanced" logic
   **Mitigation**: Status ordering is explicit and simple. Edge cases
@@ -312,18 +312,18 @@ daemons or per-clone setup.
 - **T2 unavailable at session start**: Reconciliation skipped, hook
   prints warning. Commands fall back to file reads. T2 stays stale until
   next successful session start.
-- **`/nx:rdr-accept` T2 write fails**: Command reports error, does not
+- **`/conexus:rdr-accept` T2 write fails**: Command reports error, does not
   update file. User retries or proceeds manually.
-- **`/nx:rdr-accept` skipped**: SessionStart reconciliation catches the
+- **`/conexus:rdr-accept` skipped**: SessionStart reconciliation catches the
   divergence on next session. Status is corrected but accepted_date is
   set to reconciliation time, not actual acceptance time — acknowledged
   limitation.
-- **`/nx:rdr-accept` on already-accepted RDR**: No-op, prints current
+- **`/conexus:rdr-accept` on already-accepted RDR**: No-op, prints current
   acceptance info.
 - **Conflicting edits**: User edits file to "accepted" between sessions,
   but T2 still shows "draft" (no gate). Reconciliation advances T2 to
   match file. This bypasses gate enforcement — an accepted limitation
-  of the file-editable model. Unlike `/nx:rdr-close --force`, this leaves
+  of the file-editable model. Unlike `/conexus:rdr-close --force`, this leaves
   no explicit paper trail in command output.
 - **Human edits file mid-session**: T2 reflects pre-edit state until
   next SessionStart. Agent commands reading T2 will see stale status
@@ -333,55 +333,55 @@ daemons or per-clone setup.
 
 ### Phase 0: Verify Root Cause
 
-0. Confirm that `/nx:rdr-close` correctly updates T2 by running it on a
+0. Confirm that `/conexus:rdr-close` correctly updates T2 by running it on a
    test RDR. Rule out a bug in close itself.
 
 ### Phase 1: Gate Result Storage + Accept Command
 
-1. Update `/nx:rdr-gate` action instructions to write T2 gate result record
+1. Update `/conexus:rdr-gate` action instructions to write T2 gate result record
    (`{id}-gate-latest`) after each gate run — this is a prompt change in
    the `## Action` section, not a Python code change
-2. Update `/nx:rdr-gate` action instructions to print accept prompt when
-   gate returns PASSED: "Run `/nx:rdr-accept <id>` to accept this RDR."
-3. Create `/nx:rdr-accept` command file (`nx/commands/nx:rdr-accept.md`) and
-   corresponding skill definition (`nx/skills/nx:rdr-accept/SKILL.md`) —
+2. Update `/conexus:rdr-gate` action instructions to print accept prompt when
+   gate returns PASSED: "Run `/conexus:rdr-accept <id>` to accept this RDR."
+3. Create `/conexus:rdr-accept` command file (`conexus/commands/conexus:rdr-accept.md`) and
+   corresponding skill definition (`conexus/skills/conexus:rdr-accept/SKILL.md`) —
    reads gate result from T2, blocks if no PASSED gate, writes T2 first
    (`status`, `reviewed-by`, `accepted_date`), then updates file
    frontmatter, self-heals on re-run if file update failed previously
 
 ### Phase 2: SessionStart Reconciliation
 
-5. Extend `nx/hooks/scripts/rdr_hook.py` to reconcile file ↔ T2 on
+5. Extend `conexus/hooks/scripts/rdr_hook.py` to reconcile file ↔ T2 on
    session start — compare statuses, update the less-advanced side,
    print summary only when changes occur
-6. Update `/nx:rdr-list` to read process metadata from T2 (not files) for
+6. Update `/conexus:rdr-list` to read process metadata from T2 (not files) for
    its primary status display, matching the workflow doc's stated behavior
 
 ### Phase 3: Documentation
 
-7. Add `/nx:rdr-accept` to `docs/rdr/workflow.md` as an explicit lifecycle
+7. Add `/conexus:rdr-accept` to `docs/rdr/workflow.md` as an explicit lifecycle
    step between Gate and Close
 8. Document `accepted_date` frontmatter field in `docs/rdr/templates.md`
-9. Update workflow doc's `/nx:rdr-list` description to accurately reflect
+9. Update workflow doc's `/conexus:rdr-list` description to accurately reflect
    its T2-primary behavior after Phase 2
 
 ## Test Plan
 
 ### Phase 0
 
-- Run `/nx:rdr-close` on a test RDR — verify T2 updates correctly
+- Run `/conexus:rdr-close` on a test RDR — verify T2 updates correctly
 
 ### Phase 1
 
-- Run `/nx:rdr-gate`, verify T2 gate result record written (`{id}-gate-latest`)
-- Run `/nx:rdr-accept` on a draft RDR without gate — verify it blocks
-- Run `/nx:rdr-accept` on a gated RDR — verify T2 updated first, then
+- Run `/conexus:rdr-gate`, verify T2 gate result record written (`{id}-gate-latest`)
+- Run `/conexus:rdr-accept` on a draft RDR without gate — verify it blocks
+- Run `/conexus:rdr-accept` on a gated RDR — verify T2 updated first, then
   frontmatter updated, `accepted_date` set
-- Run `/nx:rdr-accept` on already-accepted RDR (T2=accepted, file=accepted)
+- Run `/conexus:rdr-accept` on already-accepted RDR (T2=accepted, file=accepted)
   — verify no-op
-- Run `/nx:rdr-accept` on already-accepted RDR (T2=accepted, file=draft)
+- Run `/conexus:rdr-accept` on already-accepted RDR (T2=accepted, file=draft)
   — verify file repaired
-- Run `/nx:rdr-accept` with `--reviewed-by alice` — verify field set in
+- Run `/conexus:rdr-accept` with `--reviewed-by alice` — verify field set in
   both T2 and frontmatter
 
 ### Phase 2
@@ -392,7 +392,7 @@ daemons or per-clone setup.
   session — verify reconciliation updates file to match T2
 - Set T2=abandoned and file=superseded, start session — verify file
   wins with warning
-- Run `/nx:rdr-list` — verify status column populated from T2
+- Run `/conexus:rdr-list` — verify status column populated from T2
 
 ## Validation
 
@@ -409,7 +409,7 @@ daemons or per-clone setup.
 3. **Scenario**: Accept without gate
    **Expected**: Command refuses — no override available
 
-4. **Scenario**: `/nx:rdr-list` after Phase 2
+4. **Scenario**: `/conexus:rdr-list` after Phase 2
    **Expected**: Status column populated from T2, not file parsing
 
 ## References
@@ -424,15 +424,15 @@ daemons or per-clone setup.
 ### Critical — Resolved
 
 **C1. `--force` undermines RDR-001 P1 gate enforcement — RESOLVED.** If
-`/nx:rdr-accept --force` bypasses gate verification, then accepted status no
+`/conexus:rdr-accept --force` bypasses gate verification, then accepted status no
 longer implies gated, and RDR-001 P1's hard-block on close is invalidated.
-Fixed: removed `--force` from `/nx:rdr-accept` entirely. Gate must pass before
+Fixed: removed `--force` from `/conexus:rdr-accept` entirely. Gate must pass before
 acceptance — no override.
 
 **C2. Gate verification mechanism unspecified — RESOLVED.** The design said
 "verifies gate has passed" but never defined where gate results are stored
-or how they are checked. Fixed: `/nx:rdr-gate` now writes a T2 record
-(`{id}-gate-latest`) with outcome, date, and finding counts. `/nx:rdr-accept`
+or how they are checked. Fixed: `/conexus:rdr-gate` now writes a T2 record
+(`{id}-gate-latest`) with outcome, date, and finding counts. `/conexus:rdr-accept`
 reads this record to verify.
 
 **C3. Sync-on-read fabricates audit timestamps — RESOLVED.** Sync-on-read
@@ -444,20 +444,20 @@ audit trail recovery from sync-on-read's claimed benefits.
 
 ### Significant — Resolved
 
-**S1. Partial write failure during `/nx:rdr-accept` unhandled — RESOLVED.**
+**S1. Partial write failure during `/conexus:rdr-accept` unhandled — RESOLVED.**
 Fixed: if T2 write fails, do not proceed to frontmatter — report error.
 T2 is the process authority.
 
-**S2. Idempotency undefined — RESOLVED.** Fixed: `/nx:rdr-accept` on an
+**S2. Idempotency undefined — RESOLVED.** Fixed: `/conexus:rdr-accept` on an
 already-accepted RDR is a no-op that prints current acceptance info.
 
-**S3. Silent T2 mutation in `/nx:rdr-list` — RESOLVED.** Fixed: replaced
-sync-on-read with SessionStart reconciliation. `/nx:rdr-list` will read T2
+**S3. Silent T2 mutation in `/conexus:rdr-list` — RESOLVED.** Fixed: replaced
+sync-on-read with SessionStart reconciliation. `/conexus:rdr-list` will read T2
 directly after Phase 2, no longer mutating T2 as a side effect.
 
 **S4. Root cause assumed, not verified — RESOLVED.** Fixed: clarified
-that the pilot RDRs were never `/nx:rdr-close`d (they remained open after
-acceptance). Added Phase 0 to verify `/nx:rdr-close` works correctly.
+that the pilot RDRs were never `/conexus:rdr-close`d (they remained open after
+acceptance). Added Phase 0 to verify `/conexus:rdr-close` works correctly.
 
 ### Observations — Applied
 
@@ -477,15 +477,15 @@ through T2; human edits reconciled on SessionStart. This resolved S-NEW-1
 
 ### Significant — Resolved
 
-**S-NEW-1. `/nx:rdr-list` sync-on-read requires behavioral change not
+**S-NEW-1. `/conexus:rdr-list` sync-on-read requires behavioral change not
 reflected in design — RESOLVED.** The original sync-on-read design required
-`/nx:rdr-list` to start reading T2 per-record, which contradicted its actual
+`/conexus:rdr-list` to start reading T2 per-record, which contradicted its actual
 implementation (it reads files). Fixed: replaced sync-on-read with
-SessionStart reconciliation. `/nx:rdr-list` will read T2 directly (Phase 2,
+SessionStart reconciliation. `/conexus:rdr-list` will read T2 directly (Phase 2,
 step 6), matching the workflow doc's stated behavior.
 
-**S-NEW-2. `/nx:rdr-close --force` bypasses gate invariant — RESOLVED.**
-`/nx:rdr-close --force` can close an ungated RDR, bypassing both `/nx:rdr-accept`
+**S-NEW-2. `/conexus:rdr-close --force` bypasses gate invariant — RESOLVED.**
+`/conexus:rdr-close --force` can close an ungated RDR, bypassing both `/conexus:rdr-accept`
 and the gate. Fixed: documented as an intentional escape hatch with explicit
 paper trail, not a bug. Removing it would prevent abandoning/superseding
 ungated RDRs, which are legitimate operations.
@@ -510,7 +510,7 @@ reviewed for internal consistency.
 Principle said "favor more recent write" but Technical Design said "update
 the less-advanced side." These are different policies that diverge on status
 regression. Fixed: committed to monotonic-advance rule throughout. Deliberate
-regression goes through `/nx:rdr-close --force`.
+regression goes through `/conexus:rdr-close --force`.
 
 **S-NEW-4. Terminal state conflict handling incomplete — RESOLVED.** Both
 sides carrying different terminal states (e.g., T2=abandoned, file=superseded)
@@ -518,7 +518,7 @@ was unhandled. Fixed: favor file and emit warning for terminal-vs-terminal
 conflicts.
 
 **S-NEW-5. Idempotency skips file repair — RESOLVED.** If T2=accepted but
-file=draft (prior partial write), re-running `/nx:rdr-accept` exited with no
+file=draft (prior partial write), re-running `/conexus:rdr-accept` exited with no
 repair. Fixed: idempotency now checks both sides — repairs file if T2 is
 ahead, true no-op only when both agree.
 

@@ -12,11 +12,11 @@ The core insight: complex features are bigger than what fits in working memory, 
 
 ## Quick start
 
-1. `/nx:rdr-create`: creates a new file with metadata prefilled, status set to Draft
-2. `/nx:rdr-research add <id>`: appends a finding with an evidence classification tag
-3. `/nx:rdr-gate <id>`: runs 3-layer validation: structure check, assumption audit, AI critique (optional, recommended for irreversible decisions)
-4. `/nx:rdr-accept <id>`: locks the decision, sets status to Accepted
-5. `/nx:rdr-close <id> --reason implemented`: archives the RDR, creates a post-mortem template, indexes to T3
+1. `/conexus:rdr-create`: creates a new file with metadata prefilled, status set to Draft
+2. `/conexus:rdr-research add <id>`: appends a finding with an evidence classification tag
+3. `/conexus:rdr-gate <id>`: runs 3-layer validation: structure check, assumption audit, AI critique (optional, recommended for irreversible decisions)
+4. `/conexus:rdr-accept <id>`: locks the decision, sets status to Accepted
+5. `/conexus:rdr-close <id> --reason implemented`: archives the RDR, creates a post-mortem template, indexes to T3
 
 Steps 3–5 add rigor for high-stakes decisions. For a straightforward bug fix, steps 1–2 plus writing the solution may be all you need.
 
@@ -95,8 +95,8 @@ RDR works in any repository; it doesn't require the Nexus CLI or plugin. The too
 
 **With Nexus CLI + plugin:**
 
-1. `/nx:rdr-create` bootstraps the directory, templates, and README automatically on first use
-2. `/nx:rdr-research`, `/nx:rdr-gate`, `/nx:rdr-accept`, `/nx:rdr-close` manage the full lifecycle
+1. `/conexus:rdr-create` bootstraps the directory, templates, and README automatically on first use
+2. `/conexus:rdr-research`, `/conexus:rdr-gate`, `/conexus:rdr-accept`, `/conexus:rdr-close` manage the full lifecycle
 3. RDRs are auto-indexed by `nx index repo` and searchable via `nx search --corpus rdr`
 
 See [Nexus Integration](rdr-nexus-integration.md) for how agents and storage tiers work with RDRs.

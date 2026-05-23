@@ -85,7 +85,7 @@ Nelson's Xanadu was a complete alternative to the file system. Nexus is a catalo
 ## Further reading
 
 - [Document Catalog guide](catalog.md) — full user guide for the catalog system
-- [Querying Guide](querying-guide.md) — `nx search` vs `query()` MCP vs `/nx:query` skill
+- [Querying Guide](querying-guide.md) — `nx search` vs `query()` MCP vs `/conexus:query` skill
 - [Architecture](architecture.md) — module map and design decisions
 - [RDR-049: Git-Backed Catalog](rdr/rdr-049-git-backed-catalog.md) — catalog architecture design
 - [RDR-051: Link Lifecycle](rdr/rdr-051-link-lifecycle.md) — full CRUD for typed links

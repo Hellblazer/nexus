@@ -11,12 +11,12 @@ RDR documents live in the repository as markdown, but Nexus makes them queryable
 The typical agent workflow touches the storage tiers at each stage:
 
 1. **Before new work**: search T3 for prior RDRs with `nx search "topic" --corpus rdr`. New designs often build on or refine earlier decisions; the search surfaces that chain automatically.
-2. **During research**: `/nx:rdr-research` can delegate to `deep-research-synthesizer` or `codebase-deep-analyzer` for investigation that goes beyond what a single agent session can cover.
+2. **During research**: `/conexus:rdr-research` can delegate to `deep-research-synthesizer` or `codebase-deep-analyzer` for investigation that goes beyond what a single agent session can cover.
 3. **At gate time**: `substantive-critic` provides independent review of the RDR's logic, evidence, and completeness.
-4. **At accept time**: `/nx:rdr-accept` updates T2 metadata, then optionally dispatches the planning chain: `strategic-planner` agent → `nx_plan_audit` MCP tool → `nx_enrich_beads` MCP tool. The last two were agents before RDR-080; they're now direct MCP-tool calls that the strategic-planner can invoke without a sub-agent spawn.
-5. **After close**: `/nx:rdr-close` archives the full RDR to T3 for permanent semantic retrieval.
+4. **At accept time**: `/conexus:rdr-accept` updates T2 metadata, then optionally dispatches the planning chain: `strategic-planner` agent → `nx_plan_audit` MCP tool → `nx_enrich_beads` MCP tool. The last two were agents before RDR-080; they're now direct MCP-tool calls that the strategic-planner can invoke without a sub-agent spawn.
+5. **After close**: `/conexus:rdr-close` archives the full RDR to T3 for permanent semantic retrieval.
 
-Agents access all storage tiers via structured MCP tools rather than CLI commands, which works reliably in background agents and restricted permission contexts. Team members use the `nx` CLI directly. See [nx/README.md](../nx/README.md#mcp-servers) for MCP tool details.
+Agents access all storage tiers via structured MCP tools rather than CLI commands, which works reliably in background agents and restricted permission contexts. Team members use the `nx` CLI directly. See [conexus/README.md](../conexus/README.md#mcp-servers) for MCP tool details.
 
 ## T2: structured metadata
 
@@ -35,8 +35,8 @@ Timestamps (`created`, `gated`, `accepted_date`, `closed`) let you reconstruct w
 
 RDRs are indexed into `rdr__<repo>` collections using `voyage-context-3` embeddings. This happens two ways:
 
-- **`nx index repo`** auto-discovers `docs/rdr/*.md` and indexes them during normal repo indexing. Draft RDRs are findable immediately; no need to wait for `/nx:rdr-close`.
-- **`/nx:rdr-close`** indexes the RDR explicitly at close time as part of permanent archival.
+- **`nx index repo`** auto-discovers `docs/rdr/*.md` and indexes them during normal repo indexing. Draft RDRs are findable immediately; no need to wait for `/conexus:rdr-close`.
+- **`/conexus:rdr-close`** indexes the RDR explicitly at close time as part of permanent archival.
 
 ```bash
 nx search "caching strategy" --corpus rdr
@@ -51,7 +51,7 @@ The highest-signal chunks are typically the **Problem Statement** (best for dete
 
 ## Beads integration
 
-`/nx:rdr-accept` optionally decomposes the Implementation Plan into beads (epic + tasks) via the planning chain. The `epic_bead` T2 field links each accepted decision to its implementation work items. Session hooks inject T2 context and the active bead into spawned agents, so they pick up where the previous session left off.
+`/conexus:rdr-accept` optionally decomposes the Implementation Plan into beads (epic + tasks) via the planning chain. The `epic_bead` T2 field links each accepted decision to its implementation work items. Session hooks inject T2 context and the active bead into spawned agents, so they pick up where the previous session left off.
 
 ## Catalog: document registry and link graph
 
@@ -60,12 +60,12 @@ When the [catalog](catalog.md) is initialized, RDR lifecycle skills create typed
 | Lifecycle stage | What happens in the catalog |
 |---|---|
 | `nx index rdr` / `nx index repo` | RDR document registered with tumbler, title from frontmatter, content_type=rdr |
-| `/nx:rdr-research add` | `cites` link from RDR to referenced paper (if indexed in catalog) |
-| `/nx:rdr-gate` | Prior-art search uses `catalog_search` + `catalog_links` before falling back to T3 |
-| `/nx:rdr-accept` | `relates` links to topically related RDRs found during planning |
-| `/nx:rdr-show` | Displays inbound/outbound catalog links (implements-heuristic, cites, supersedes) |
-| `/nx:rdr-close` (Superseded) | `supersedes` link between new and old RDR |
-| `/nx:rdr-close` (Implemented) | `cites` links from RDR to referenced research papers |
+| `/conexus:rdr-research add` | `cites` link from RDR to referenced paper (if indexed in catalog) |
+| `/conexus:rdr-gate` | Prior-art search uses `catalog_search` + `catalog_links` before falling back to T3 |
+| `/conexus:rdr-accept` | `relates` links to topically related RDRs found during planning |
+| `/conexus:rdr-show` | Displays inbound/outbound catalog links (implements-heuristic, cites, supersedes) |
+| `/conexus:rdr-close` (Superseded) | `supersedes` link between new and old RDR |
+| `/conexus:rdr-close` (Implemented) | `cites` links from RDR to referenced research papers |
 | Indexer hook | `implements-heuristic` links from code files to RDRs (title substring match) |
 
 This means `nx catalog links "RDR-051"` shows which code implements it, what research it cites, and what it supersedes, without parsing markdown.
@@ -74,7 +74,7 @@ All catalog steps are skipped silently if the catalog isn't initialized. T2 and 
 
 ## Learning from post-mortems
 
-`/nx:rdr-close` creates a post-mortem template for drift analysis. Findings from post-mortems feed directly into the next RDR:
+`/conexus:rdr-close` creates a post-mortem template for drift analysis. Findings from post-mortems feed directly into the next RDR:
 
 - **Unvalidated assumption** → add a Spike task to the next RDR's research phase.
 - **Missing failure mode** → add explicit failure mode entries to the risk section.

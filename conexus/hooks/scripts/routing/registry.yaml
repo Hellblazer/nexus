@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# RDR-121 routing-hook registry.
+#
+# One entry per active routing hook. Hooks may read their own rule
+# entry at runtime to determine fail_closed behavior. Initially empty;
+# nexus-mzvwa.3 / .4 / .5 will populate this file with their rule
+# entries.
+#
+# Schema (per rule):
+#   rule_name:        unique snake_case identifier; matches the hook
+#                     script basename minus the .py extension
+#   hook_script:      path under conexus/hooks/scripts/routing/ to the .py
+#                     entry point
+#   matcher:          Claude Code hook matcher pattern (Bash, Edit, etc.)
+#   mode:             redirect | block | warn  — semantic only; the hook
+#                     enforces with allow/deny envelopes
+#   rationale:        one-line user-facing rule statement
+#   escape_token:     normally `# routing-allow:`; included for
+#                     discoverability
+#   fail_closed:      bool; default false. true means hook crashes deny
+#                     the call rather than allow it. Reserve for safety-
+#                     critical invariants (phase-review close gate).
+#
+# Example shape (commented; not yet active):
+#
+# rules:
+#   grep_for_symbols_redirects_to_serena:
+#     hook_script: grep_for_symbols_redirects_to_serena.py
+#     matcher: Bash
+#     mode: redirect
+#     rationale: "grep on code files for identifier-shaped patterns should use Serena"
+#     escape_token: "# routing-allow:"
+#     fail_closed: false
+
+rules:
+  git_add_all_redirects_to_explicit_paths:
+    hook_script: git_add_all_redirects_to_explicit_paths.py
+    matcher: Bash
+    mode: redirect
+    rationale: >-
+      git add wildcard forms (-A, ., --all) pull in unrelated untracked
+      drafts; stage by explicit path (feedback_no_git_add_all).
+    escape_token: "# routing-allow:"
+    fail_closed: false
+  phase_review_close_requires_gate:
+    hook_script: phase_review_close_requires_gate.py
+    matcher: Bash
+    mode: block
+    rationale: >-
+      bd close on a phase-review bead requires a fresh PASSED
+      /conexus:phase-review-gate sentinel; the cross-walk catches silent
+      scope reduction that test-validator and code-review-expert miss
+      by construction (see feedback_phase_closeout_scope_audit).
+    escape_token: "# routing-allow:"
+    fail_closed: true

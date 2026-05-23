@@ -3,7 +3,7 @@
 #
 # rdr-audit cron/launchd wrapper
 #
-# Invokes `claude -p '/nx:rdr-audit <PROJECT>'` in a headless Claude Code
+# Invokes `claude -p '/conexus:rdr-audit <PROJECT>'` in a headless Claude Code
 # session, rotates the output log, and writes all output to
 # ~/.local/state/rdr-audit/<PROJECT>.log.
 #
@@ -46,5 +46,5 @@ fi
 
 {
   echo "=== rdr-audit run: $(date -u +%Y-%m-%dT%H:%M:%SZ) project=${PROJECT} ==="
-  exec "${CLAUDE_BIN}" -p "/nx:rdr-audit ${PROJECT}"
+  exec "${CLAUDE_BIN}" -p "/conexus:rdr-audit ${PROJECT}"
 } >> "${LOG_FILE}" 2>&1

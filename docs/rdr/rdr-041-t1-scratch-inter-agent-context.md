@@ -38,7 +38,7 @@ RDR-040 introduced the circuit breaker, which captures the developer's last 2 fa
 
 ### Technical Environment
 
-- CONTEXT_PROTOCOL: `nx/agents/_shared/CONTEXT_PROTOCOL.md`
+- CONTEXT_PROTOCOL: `conexus/agents/_shared/CONTEXT_PROTOCOL.md`
 - T1 scratch: session-scoped ChromaDB via MCP tools (`scratch`, `scratch_manage`)
 - Shared across all agents in a session via HTTP server (PPID chain)
 - Tags supported but no standardized vocabulary
@@ -296,9 +296,9 @@ Run a developer → code-review-expert pipeline. Verify:
 
 ## References
 
-- CONTEXT_PROTOCOL: `nx/agents/_shared/CONTEXT_PROTOCOL.md`
-- Developer agent: `nx/agents/developer.md`
-- Code-review-expert agent: `nx/agents/code-review-expert.md`
+- CONTEXT_PROTOCOL: `conexus/agents/_shared/CONTEXT_PROTOCOL.md`
+- Developer agent: `conexus/agents/developer.md`
+- Code-review-expert agent: `conexus/agents/code-review-expert.md`
 - RDR-040: Developer Agent Circuit Breaker (predecessor — structured escalation handoff)
 - T1 scratch implementation: `src/nexus/db/t1.py`, `src/nexus/session.py`
 

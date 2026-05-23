@@ -5,7 +5,7 @@ that the `traverse` operator should walk. Plan templates declare
 `purpose: <name>` instead of an explicit `link_types: [...]` list so
 the same template stays correct as new link types ship in the catalog.
 
-The registry lives at `nx/plans/purposes.yml` and is loaded once per
+The registry lives at `conexus/plans/purposes.yml` and is loaded once per
 process by `nexus.plans.purposes.resolve_purpose`. Project overrides
 may add purposes in `.nexus/plans/purposes.yml` (additive — name
 collisions surface at load time).
@@ -43,7 +43,7 @@ half-resolved walk.
 
 ## Adding a new purpose
 
-1. Add an entry to `nx/plans/purposes.yml`:
+1. Add an entry to `conexus/plans/purposes.yml`:
    ```yaml
    <new-purpose-name>:
      description: >-

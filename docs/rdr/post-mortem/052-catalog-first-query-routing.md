@@ -18,7 +18,7 @@ closed_date: 2026-04-05
 - Tumbler hierarchy infrastructure: `depth`, `ancestors()`, `lca()`, `descendants()`, `resolve_chunk()`
 - Plan library TTL: `ttl` column, expiry enforcement in `search_plans()`/`list_plans()`, `plan_save(ttl=)` through MCP
 - 5 builtin plan templates seeded idempotently at `nx catalog setup`
-- Three-path dispatch in `/nx:query` skill: single query → template match → planner
+- Three-path dispatch in `/conexus:query` skill: single query → template match → planner
 - Query-planner scoped to exception path (extract/compare/generate only)
 - Routing diagnostic header in query responses
 - Subtree depth guard (document-level addresses rejected with helpful error)

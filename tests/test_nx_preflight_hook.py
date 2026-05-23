@@ -24,7 +24,7 @@ import pytest
 
 PREFLIGHT = (
     Path(__file__).resolve().parent.parent
-    / "nx" / "hooks" / "scripts" / "preflight.py"
+    / "conexus" / "hooks" / "scripts" / "preflight.py"
 )
 
 
@@ -50,7 +50,7 @@ class TestPreflightExists:
         """
         assert PREFLIGHT.exists(), (
             f"preflight.py must live at {PREFLIGHT} so the "
-            f"SessionStart hook config in nx/hooks/hooks.json "
+            f"SessionStart hook config in conexus/hooks/hooks.json "
             f"can find it."
         )
         # Executable bit not strictly required (the hook runs it via
@@ -131,7 +131,7 @@ class TestHookConfigWiresPreflightEarly:
     def test_hook_config_references_preflight_second(self) -> None:
         cfg = (
             Path(__file__).resolve().parent.parent
-            / "nx" / "hooks" / "hooks.json"
+            / "conexus" / "hooks" / "hooks.json"
         )
         data = json.loads(cfg.read_text())
         sessionstart = data["hooks"]["SessionStart"][0]["hooks"]
@@ -155,7 +155,7 @@ class TestHookConfigWiresPreflightEarly:
         """
         cfg = (
             Path(__file__).resolve().parent.parent
-            / "nx" / "hooks" / "hooks.json"
+            / "conexus" / "hooks" / "hooks.json"
         )
         data = json.loads(cfg.read_text())
         sessionstart = data["hooks"]["SessionStart"][0]["hooks"]
@@ -183,7 +183,7 @@ class TestHookConfigWiresPreflightEarly:
         """
         cfg = (
             Path(__file__).resolve().parent.parent
-            / "nx" / "hooks" / "hooks.json"
+            / "conexus" / "hooks" / "hooks.json"
         )
         data = json.loads(cfg.read_text())
         sessionstart = data["hooks"]["SessionStart"][0]["hooks"]

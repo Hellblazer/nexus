@@ -34,7 +34,7 @@ import pytest
 pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-HOOK_PATH = REPO_ROOT / "nx" / "hooks" / "scripts" / "rdr_hook.py"
+HOOK_PATH = REPO_ROOT / "conexus" / "hooks" / "scripts" / "rdr_hook.py"
 
 
 @pytest.fixture()

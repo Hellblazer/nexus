@@ -107,7 +107,7 @@ STUBS = [
             "Consolidate knowledge on topic 'chromadb quotas'. "
             "What tool should I call, and what's the call shape?"
         ),
-        "expect": ["nx_tidy", "mcp__plugin_nx_nexus__nx_tidy"],
+        "expect": ["nx_tidy", "mcp__plugin_conexus_nexus__nx_tidy"],
     },
     {
         "name": "plan-auditor",
@@ -116,7 +116,7 @@ STUBS = [
             "Audit this plan: {\"steps\":[{\"tool\":\"search\",\"args\":{\"query\":\"$topic\"}}]}. "
             "What tool should I call?"
         ),
-        "expect": ["nx_plan_audit", "mcp__plugin_nx_nexus__nx_plan_audit"],
+        "expect": ["nx_plan_audit", "mcp__plugin_conexus_nexus__nx_plan_audit"],
     },
     {
         "name": "plan-enricher",
@@ -125,7 +125,7 @@ STUBS = [
             "Enrich this bead: 'Add --foo flag to nx search'. "
             "What tool should I call?"
         ),
-        "expect": ["nx_enrich_beads", "mcp__plugin_nx_nexus__nx_enrich_beads"],
+        "expect": ["nx_enrich_beads", "mcp__plugin_conexus_nexus__nx_enrich_beads"],
     },
 ]
 
@@ -157,7 +157,7 @@ def _run_claude_p(system_prompt: str, user_prompt: str, timeout: float = 90.0) -
 
 def _exercise_stubs() -> None:
     from pathlib import Path
-    agents_dir = Path(__file__).resolve().parent.parent.parent / "nx" / "agents"
+    agents_dir = Path(__file__).resolve().parent.parent.parent / "conexus" / "agents"
 
     step("Stub agents route callers to the MCP tool")
     for stub in STUBS:

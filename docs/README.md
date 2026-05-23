@@ -29,12 +29,12 @@ Structured decision tracking for human-AI collaboration. Read in order:
 
 ## Claude Code Plugins
 
-- [nx Plugin](../nx/README.md) — Agents, skills, session hooks, MCP servers, slash commands
+- [nx Plugin](../conexus/README.md) — Agents, skills, session hooks, MCP servers, slash commands
 - [sn Plugin](../sn/README.md) — Serena + Context7 MCP servers with subagent guidance injection
 
 ## Search and Analysis
 
-- [Querying Guide](querying-guide.md) — When to use `nx search` vs `query()` MCP vs `/nx:query` skill, catalog-aware routing, analytical query examples
+- [Querying Guide](querying-guide.md) — When to use `nx search` vs `query()` MCP vs `/conexus:query` skill, catalog-aware routing, analytical query examples
 - [Plan-Centric Retrieval](plan-centric-retrieval.md) — How `nx_answer` ties plan matching, typed-graph traversal, and scenario templates into one retrieval trunk (RDR-078)
 - [Plan Authoring Guide](plan-authoring-guide.md) — YAML schema for authoring plan templates, dimensions, default bindings, CI validation
 - [MCP Tools vs Agents](mcp-vs-agents.md) — When to ship a capability as an MCP tool vs a Claude Code agent (RDR-080 boundary rule + stub-agent pattern)

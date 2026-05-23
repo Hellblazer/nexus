@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "nx" / "hooks" / "scripts" / "stop_verification_hook.sh"
+SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "stop_verification_hook.sh"
 
 _MINIMAL_PATH = "/usr/bin:/bin"
 

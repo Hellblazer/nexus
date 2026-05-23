@@ -69,7 +69,7 @@ Subagents that opt in emit their structured result as an A2UI surface to the `su
 ```
 ## {subagent_type} — {short title}
 
-**Surface:** `surface_cell:{surface_id}` ({N} findings, view via `/nx:surface-show {surface_id}`)
+**Surface:** `surface_cell:{surface_id}` ({N} findings, view via `/conexus:surface-show {surface_id}`)
 
 {2-3 sentence summary highlighting top finding and any blocker}
 
@@ -149,12 +149,12 @@ Convention-based: every subagent emits H2 headers, bullet lists with specific pa
 - [ ] codebase-deep-analyzer emits a surface on dispatch; return value to orchestrator includes pointer + ≤ 200-word summary.
 - [ ] Surface payload validates against a2ui v0.9 schema in subagent-side check.
 - [ ] Measurable token-per-dispatch reduction on codebase-deep-analyzer (target: ≥40% reduction in orchestrator return-value size).
-- [ ] One downstream consumer reads the surface and renders it — terminal renderer per RDR-118, or `/nx:surface-show` skill (new).
+- [ ] One downstream consumer reads the surface and renders it — terminal renderer per RDR-118, or `/conexus:surface-show` skill (new).
 - [ ] If token reduction target not met or surfaces aren't being consumed, RDR is wrong — iterate before extending to other subagents.
 
 ## Open Questions
 
-1. **`/nx:surface-show` skill** — a new skill that fetches a surface by id and renders it (markdown fallback for non-A2UI hosts). Required for v1, or follow-up RDR? Required for v1 — without a consumer, the surface is write-only.
+1. **`/conexus:surface-show` skill** — a new skill that fetches a surface by id and renders it (markdown fallback for non-A2UI hosts). Required for v1, or follow-up RDR? Required for v1 — without a consumer, the surface is write-only.
 2. **Surface TTL policy** — session-scoped default, but some surfaces (a definitive architecture analysis) should be promoted to T2/T3. Use existing promote mechanism with surface-as-memory mapping? Defer to implementation.
 3. **Should the orchestrator be allowed to *edit* a surface?** — e.g., orchestrator marks issues as triaged. Out of v1 scope; surfaces are immutable on emit.
 4. **Failure mode: subagent emits invalid surface** — fall back to prose return? Or fail loudly? v1: fall back to prose, log validation error. Reconsider after rollout.

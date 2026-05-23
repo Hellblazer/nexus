@@ -216,7 +216,7 @@ class TestProseFilepathLinks:
     code file paths and creating ``implements`` links. Same shape
     as the RDR linker but with a wider source-side filter (content_type
     in {prose, markdown, docs}) and a relaxed regex (no source-root
-    anchor; ``docs/`` and ``nx/`` paths match).
+    anchor; ``docs/`` and ``conexus/`` paths match).
     """
 
     def _make_catalog(self, tmp_path: Path) -> Catalog:
@@ -265,16 +265,16 @@ class TestProseFilepathLinks:
         assert links[0].link_type == "implements"
 
     def test_prose_doc_in_non_source_root_dir_links(self, tmp_path: Path) -> None:
-        """nexus-sob9 widening contract: a docs/ -> nx/ reference (no
+        """nexus-sob9 widening contract: a docs/ -> conexus/ reference (no
         ``src/`` anchor) MUST link. Pre-fix the RDR regex required a
-        source-root prefix; ``nx/`` plugin paths never matched.
+        source-root prefix; ``conexus/`` plugin paths never matched.
         Reverting the relaxed prose regex makes this test fail.
         """
         repo = tmp_path / "myrepo"
         repo.mkdir()
         prose_file = repo / "docs" / "guide.md"
         prose_file.parent.mkdir(parents=True)
-        prose_file.write_text("See ``nx/skills/foo.md`` for usage.\n")
+        prose_file.write_text("See ``conexus/skills/foo.md`` for usage.\n")
 
         cat = self._make_catalog(tmp_path)
         owner = cat.register_owner(
@@ -286,7 +286,7 @@ class TestProseFilepathLinks:
         )
         code_tumbler = cat.register(
             owner, "foo.md", content_type="code",
-            file_path="nx/skills/foo.md",
+            file_path="conexus/skills/foo.md",
         )
 
         count = generate_prose_filepath_links(cat)

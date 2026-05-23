@@ -1,10 +1,10 @@
 # rdr-audit crontab template (Linux)
 
-Schedule the `/nx:rdr-audit <project>` skill to run periodically via Linux cron.
+Schedule the `/conexus:rdr-audit <project>` skill to run periodically via Linux cron.
 
 Used together with the shell wrapper at `scripts/cron-rdr-audit.sh`. The crontab
 line fires the wrapper on a recurring interval; the wrapper invokes
-`claude -p '/nx:rdr-audit <PROJECT>'` in a headless Claude Code session and
+`claude -p '/conexus:rdr-audit <PROJECT>'` in a headless Claude Code session and
 writes output to `~/.local/state/rdr-audit/<PROJECT>.log`.
 
 ## Install
@@ -58,7 +58,7 @@ Log rotation happens automatically when the file exceeds 10 MB (rotated to
 crontab -e
 ```
 
-Remove the line matching `/nx:rdr-audit <PROJECT>`, save, and exit. Verify:
+Remove the line matching `/conexus:rdr-audit <PROJECT>`, save, and exit. Verify:
 
 ```bash
 crontab -l | grep rdr-audit   # should show nothing
@@ -70,8 +70,8 @@ You can also print the exact install/uninstall commands from inside Claude Code
 without leaving the session:
 
 ```
-/nx:rdr-audit schedule <project>
-/nx:rdr-audit unschedule <project>
+/conexus:rdr-audit schedule <project>
+/conexus:rdr-audit unschedule <project>
 ```
 
 These print the platform-specific commands to stdout for you to review and run
@@ -82,7 +82,7 @@ step.
 ## Safety Note
 
 **Do not run `crontab -e` from a script automatically** — this is your explicit
-step. The nx skill's `/nx:rdr-audit schedule <project>` command prints the
+step. The nx skill's `/conexus:rdr-audit schedule <project>` command prints the
 install instructions but never executes them. System-level installs require
 your review and authorization each time.
 
@@ -98,12 +98,12 @@ intermittently-online hosts, consider one of:
 - **On-boot script** — add a boot-time check that runs the audit if the last
   run is older than N days
 
-The `/nx:rdr-audit status <project>` subcommand shows the last-run timestamp
+The `/conexus:rdr-audit status <project>` subcommand shows the last-run timestamp
 from T2, so you can manually verify whether the schedule is keeping up.
 
 ## See Also
 
 - `scripts/cron-rdr-audit.sh` — shell wrapper invoked by cron
 - `scripts/launchd/README.md` — macOS launchd equivalent
-- `nx/skills/rdr-audit/SKILL.md` — the skill body that `claude -p` invokes
+- `conexus/skills/rdr-audit/SKILL.md` — the skill body that `claude -p` invokes
 - `docs/rdr/rdr-067-cross-project-rdr-audit-loop.md` — design rationale

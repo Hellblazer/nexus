@@ -13,13 +13,13 @@ reviewed-by: self
 
 # RDR-078: Plan-Centric Retrieval
 
-Pickup of the two explicit deferrals in RDR-042, plus the reasoning mechanism that AgenticScholar attributes its quality delta to but RDR-042 did not ship: **multi-hop typed-link traversal as a first-class plan operator.** That RDR shipped the analytical-operator agent, plan library (`plans` table + FTS5), the `/nx:query` skill, and the self-correction loop. It deferred a semantic layer over the plan library ("Can add T3 semantic layer later if FTS5 matching proves inadequate") and skipped taxonomy-driven planning ("may revisit via lightweight clustering in a future RDR"). RDR-070 shipped HDBSCAN taxonomy discovery across both code and prose corpora; RDR-077 shipped similarity-aware projection quality signals. The blockers RDR-042 cited are now absent.
+Pickup of the two explicit deferrals in RDR-042, plus the reasoning mechanism that AgenticScholar attributes its quality delta to but RDR-042 did not ship: **multi-hop typed-link traversal as a first-class plan operator.** That RDR shipped the analytical-operator agent, plan library (`plans` table + FTS5), the `/conexus:query` skill, and the self-correction loop. It deferred a semantic layer over the plan library ("Can add T3 semantic layer later if FTS5 matching proves inadequate") and skipped taxonomy-driven planning ("may revisit via lightweight clustering in a future RDR"). RDR-070 shipped HDBSCAN taxonomy discovery across both code and prose corpora; RDR-077 shipped similarity-aware projection quality signals. The blockers RDR-042 cited are now absent.
 
 The center of gravity is the **plan** — a saved query+DAG pair — composed of steps that each operate in one embedding space or walk explicit typed edges between documents. No cross-embedding bridging is attempted; the architecture never requires it. The quality lever is the typed-link traversal step, not the domain-scoped retrieval step.
 
 ## Problem Statement
 
-Nexus agents routinely reinvent retrieval DAGs, cannot reuse past plans semantically, cannot compose typed-graph traversal into plans, and cannot scope retrieval steps by domain taxonomy. The machinery to fix each exists in shipped RDRs (RDR-041 T1 HTTP server, RDR-042 plan library + `/nx:query`, RDR-070 HDBSCAN taxonomies, RDR-077 projection quality). What's missing is the architectural glue that binds them into a plan-centric retrieval layer.
+Nexus agents routinely reinvent retrieval DAGs, cannot reuse past plans semantically, cannot compose typed-graph traversal into plans, and cannot scope retrieval steps by domain taxonomy. The machinery to fix each exists in shipped RDRs (RDR-041 T1 HTTP server, RDR-042 plan library + `/conexus:query`, RDR-070 HDBSCAN taxonomies, RDR-077 projection quality). What's missing is the architectural glue that binds them into a plan-centric retrieval layer.
 
 ### Enumerated gaps to close
 
@@ -47,7 +47,7 @@ This is a narrower problem than Problem 2. Taxonomies scope *individual* retriev
 
 #### Gap 4: Scenario-shaped reuse is unimplemented
 
-Five canonical scenarios recur across every nexus session: design/planning, critique/review, analysis/synthesis, dev/debug, documentation. Each has a stereotyped retrieval shape. Today each session reinvents the retrieval DAG ad-hoc, even when a prior session three days ago solved the same pattern. Infrastructure exists — `plan_save`, `plan_search`, `/nx:query` — but the library is empty of what scenario-matched queries would need. Agents don't reach for the library because the library does not yet answer to the scenarios.
+Five canonical scenarios recur across every nexus session: design/planning, critique/review, analysis/synthesis, dev/debug, documentation. Each has a stereotyped retrieval shape. Today each session reinvents the retrieval DAG ad-hoc, even when a prior session three days ago solved the same pattern. Infrastructure exists — `plan_save`, `plan_search`, `/conexus:query` — but the library is empty of what scenario-matched queries would need. Agents don't reach for the library because the library does not yet answer to the scenarios.
 
 ## Context
 
@@ -55,7 +55,7 @@ Five canonical scenarios recur across every nexus session: design/planning, crit
 
 AgenticScholar ("Agentic Data Management with Pipeline Orchestration for Scholarly Corpora", arXiv 2603.13774, indexed in `knowledge__agentic-scholar`) describes a four-layer architecture: taxonomy-anchored knowledge graph, LLM-driven query planner, composable operator library, structured ingestion. Its benchmarks — NDCG@3 = 0.606 vs RAG's 0.411 (+47%) — are qualitatively attributed to the multi-hop KG Traverse operator (Tier-3 analytical reasoning), not to plan reuse or taxonomy construction alone. Plan reuse is explicitly an efficiency story (~40% compute cost reduction at ≥90% match confidence).
 
-RDR-042 ("AgenticScholar-Inspired Enhancements", closed) adopted the composable operator library, the plan library (FTS5-indexed `plans` table), the `/nx:query` skill, and the self-correction loop. It **explicitly deferred two layers**: (a) a T3 semantic layer over the plan library ("Can add T3 semantic layer later if FTS5 matching proves inadequate") and (b) taxonomy-driven planning ("may revisit via lightweight clustering in a future RDR"). RDR-070 shipped HDBSCAN-based lightweight clustering across all corpora; RDR-077 shipped similarity-aware projection quality signals (similarity, assigned_at, source_collection, ICF). The two blockers RDR-042 cited are now absent.
+RDR-042 ("AgenticScholar-Inspired Enhancements", closed) adopted the composable operator library, the plan library (FTS5-indexed `plans` table), the `/conexus:query` skill, and the self-correction loop. It **explicitly deferred two layers**: (a) a T3 semantic layer over the plan library ("Can add T3 semantic layer later if FTS5 matching proves inadequate") and (b) taxonomy-driven planning ("may revisit via lightweight clustering in a future RDR"). RDR-070 shipped HDBSCAN-based lightweight clustering across all corpora; RDR-077 shipped similarity-aware projection quality signals (similarity, assigned_at, source_collection, ICF). The two blockers RDR-042 cited are now absent.
 
 The empirical corner-case of RDR-077 (recorded at 2026-04-14 during the ART backfill) rules out any cross-embedding-model cosine bridge: code uses `voyage-code-3`, prose uses `voyage-context-3`, and cosine between them is approximately noise. Plans must compose per-space steps; the typed-link catalog graph is the only bridge between code and prose and is already exposed via `query(follow_links=...)`.
 
@@ -67,8 +67,8 @@ The empirical corner-case of RDR-077 (recorded at 2026-04-14 during the ART back
 - **T3** = ChromaDB Cloud or local persistent, with `voyage-code-3` / `voyage-context-3` embedding per-prefix (RDR-059).
 - **Catalog** = Git-backed JSONL source of truth + SQLite cache; ~16,500 typed edges across `cites`, `implements`, `implements-heuristic`, `supersedes`, `relates` (RDR-050, RDR-053, RDR-063).
 - **Plan library** = `plans` table with FTS5 triggers + 5 builtin template seeds at `nx catalog setup` (RDR-042).
-- **Analytical operator agent** = `nx/agents/analytical-operator.md` handles extract / summarize / rank / compare / generate (RDR-042).
-- **Query planner agent** = `nx/agents/query-planner.md` dispatched by `/nx:query` skill for novel analytical pipelines (RDR-042).
+- **Analytical operator agent** = `conexus/agents/analytical-operator.md` handles extract / summarize / rank / compare / generate (RDR-042).
+- **Query planner agent** = `conexus/agents/query-planner.md` dispatched by `/conexus:query` skill for novel analytical pipelines (RDR-042).
 - **Taxonomy** = HDBSCAN topic discovery + c-TF-IDF labels + centroid ANN (RDR-070), similarity + ICF + hub detection (RDR-077).
 
 ## Proposed Design
@@ -99,7 +99,7 @@ The match is `cosine(embed(caller.intent), embed(plan.description))`, applied to
 | `object` | concept / file / module / rdr / change-set / symbol / commit / ... | no |
 | `domain` | security / performance / correctness / documentation / onboarding / ... | no |
 
-Dimensions live in a git-tracked registry: `nx/plans/dimensions.yml` (global, plugin-shipped) with project/repo overrides via the Phase 6 scoped-loader mechanism. Unregistered dimensions on a plan warn at load ("unrecognised dimension `<name>` — register or remove"). Discipline: a dimension earns inclusion only when filtering by it is a *recurring* need — prematurely pinned dimensions retire on disuse.
+Dimensions live in a git-tracked registry: `conexus/plans/dimensions.yml` (global, plugin-shipped) with project/repo overrides via the Phase 6 scoped-loader mechanism. Unregistered dimensions on a plan warn at load ("unrecognised dimension `<name>` — register or remove"). Discipline: a dimension earns inclusion only when filtering by it is a *recurring* need — prematurely pinned dimensions retire on disuse.
 
 **Plan template structure:**
 
@@ -191,7 +191,7 @@ Pickup of RDR-042 §Alternatives "T3 for plan storage (deferred)". The original 
 - **T2 remains authoritative.** `plans` table + FTS5 (existing, RDR-042) is the source of truth. All writes go to T2 via `plan_save`. No schema changes.
 - **T1 holds the session semantic cache.** New collection `plans__session` (via RDR-041's T1 HTTP server) populated at SessionStart: `SELECT id, query, plan_json, tags, dimensions FROM plans WHERE outcome='success' AND (ttl IS NULL OR julianday('now') - julianday(created_at) <= ttl)` (matches the existing `search_plans` TTL predicate in `plan_library.py:195-197`) → embed the query text → upsert one document per plan with `metadata={plan_id, verb_name, handler_kind, tags, project, ttl, last_used}`.
 - **`plan_match`** — signature in the Vocabulary section above. T1 cosine over plan descriptions, returns ranked `Match` objects with `{plan_id, name, description, confidence, dimensions, tags, plan_json, required_bindings, optional_bindings, default_bindings, parent_dims}`. Only `outcome='success'` plans are loaded (TTL-honest per Phase 5 SessionStart SQL), so no explicit failure filter needed at call time.
-- **`plan_run`** — new MCP tool (signature in Vocabulary section above). **Execution model: deterministic**. Pure substitution + tool dispatch, no subagent spawning. Steps run in declared order. For each step: (i) resolve `$var` placeholders from `{**match.default_bindings, **caller.bindings}`; (ii) resolve `$stepN.<field>` references from prior step outputs stashed in T1 scratch (RDR-041 pattern, tag `plan_run,step-N`, same mechanism RDR-042's `/nx:query` skill already uses); (iii) dispatch the MCP tool named in `step.tool` with the substituted args; (iv) persist the step result to T1 scratch for downstream `$stepN` resolution. Unresolved required bindings abort with `PlanRunBindingError(missing=[...])`; unresolved `$stepN` references abort with `PlanRunStepRefError`. `plan_run` does NOT dispatch the query-planner or analytical-operator agents — those agents are still available as `step.tool: "extract"` / `"summarize"` / etc., invoked as any other MCP tool. This distinguishes `plan_run` (deterministic DAG execution of a known plan) from `/nx:query` (the planner-dispatching skill for novel analytical pipelines without a matching plan).
+- **`plan_run`** — new MCP tool (signature in Vocabulary section above). **Execution model: deterministic**. Pure substitution + tool dispatch, no subagent spawning. Steps run in declared order. For each step: (i) resolve `$var` placeholders from `{**match.default_bindings, **caller.bindings}`; (ii) resolve `$stepN.<field>` references from prior step outputs stashed in T1 scratch (RDR-041 pattern, tag `plan_run,step-N`, same mechanism RDR-042's `/conexus:query` skill already uses); (iii) dispatch the MCP tool named in `step.tool` with the substituted args; (iv) persist the step result to T1 scratch for downstream `$stepN` resolution. Unresolved required bindings abort with `PlanRunBindingError(missing=[...])`; unresolved `$stepN` references abort with `PlanRunStepRefError`. `plan_run` does NOT dispatch the query-planner or analytical-operator agents — those agents are still available as `step.tool: "extract"` / `"summarize"` / etc., invoked as any other MCP tool. This distinguishes `plan_run` (deterministic DAG execution of a known plan) from `/conexus:query` (the planner-dispatching skill for novel analytical pipelines without a matching plan).
 - **Retrieval step output contract** (PQ-5 resolved as a design decision, not an open question): every retrieval step (`search`, `query`, `traverse`) emits a result object carrying at least `{tumblers: list[str], ids: list[str], distances: list[float] | None}`, stashed to T1 scratch under the `$stepN` key. Downstream `$stepN.tumblers` / `$stepN.ids` references resolve from this shape. Non-retrieval operators (`extract`, `summarize`, `rank`, `compare`, `generate`) emit `{text: str, citations: list[dict]}`; `$stepN.text` and `$stepN.citations` are the documented reference fields.
 - **Fallback path.** When T1 is unavailable (EphemeralClient in tests, or session server failed to start), `plan_match` degrades to `plan_search` FTS5 over T2. The fallback must return `Match` objects compatible with `plan_run`; implement via a constructor `Match.from_plan_row(row: dict) -> Match` that parses `dimensions` JSON into a dict, parses `default_bindings` JSON into a dict, and sets `confidence=None` (sentinel for "FTS5 match; cosine confidence unavailable"). `plan_run(match, bindings)` treats `confidence=None` as an implicit pass — skills that gate on `confidence >= 0.85` must check `confidence is not None` first. Tests assert the fallback round-trip: `plan_match(...)` → `plan_run(...)` succeeds with both T1 available and T1 disabled.
 - **Write visibility.** A new plan saved mid-session via `plan_save` is also upserted to T1 by the same commit hook — so the calling session sees it immediately without waiting for the next SessionStart. Subagents sharing the parent T1 (RDR-041 session inheritance) see it too.
@@ -271,7 +271,7 @@ Hand-picking `link_types: [implements, cites, ...]` in every plan is brittle. Pl
 - **`link_types: [...]`** — literal list, pinned at authoring time. Explicit and inspection-friendly.
 - **`purpose: <name>`** — resolved via a registry to a link-types set. Preferred; more readable; auto-adapts when the vocabulary extends.
 
-Starter purpose set (shipped in `nx/plans/purposes.yml`, git-tracked; overridable per Phase 6 scope tiers via `.nexus/purposes.yml`):
+Starter purpose set (shipped in `conexus/plans/purposes.yml`, git-tracked; overridable per Phase 6 scope tiers via `.nexus/purposes.yml`):
 
 | Purpose | Resolves to | When |
 |---|---|---|
@@ -400,7 +400,7 @@ Four seed plans whose purpose is to teach agents and humans how the library work
 - **`verb:plan-author, strategy:default`** — description: *"Author a new plan template from scratch."* DAG: fetches `docs/plan-authoring-guide.md` → fetches the dimension registry and schema → prompts the caller for dimensions / description / required_bindings → drafts a candidate `plan_json` with per-step scope and `traverse` purpose guidance → calls `plan_save` with the result. Self-referential bootstrap.
 - **`verb:plan-promote, strategy:propose`** — description: *"Survey T2 plan counters and rank promotion candidates."* DAG: reads `plans` metrics → applies candidate thresholds (default 4c values) → formats a ranked shortlist with paraphrase-range per plan → emits a markdown report. Primitive form of RDR-079's `nx plan audit` CLI; usable today via `plan_run`.
 - **`verb:plan-inspect, strategy:default`** — description: *"Inspect a plan by its dimension map. Render description, dimensions, bindings, lineage, and DAG with annotation."* DAG: loads plan by canonical dimension map → renders fields + step-by-step with arg binding notes + currying parent if any. Agent self-service introspection.
-- **`verb:plan-inspect, strategy:dimensions`** — description: *"List registered dimensions with their value sets and usage counts."* DAG: reads `nx/plans/dimensions.yml` (+ scoped overrides) → cross-references T2 plan usage per dimension → emits a markdown catalogue. Vocabulary discovery for agents and humans.
+- **`verb:plan-inspect, strategy:dimensions`** — description: *"List registered dimensions with their value sets and usage counts."* DAG: reads `conexus/plans/dimensions.yml` (+ scoped overrides) → cross-references T2 plan usage per dimension → emits a markdown catalogue. Vocabulary discovery for agents and humans.
 
 #### 4e — `docs/plan-authoring-guide.md`
 
@@ -420,10 +420,10 @@ Linked from RDR-078's References. Catalog-indexed like any other doc in `docs/`,
 
 The ergonomic change. Agents must reach for `plan_match` **before** decomposing any retrieval task.
 
-- **`nx:plan-first` skill** — the gate skill. Invoked at the top of every retrieval-shaped task. Triggers on verbs like "plan", "design", "review", "analyze", "debug", "document". Instructs: call `plan_match(intent, min_confidence=0.85)` first; if a match exists, present it and execute via `plan_run`; if not, dispatch `/nx:query` (the query-planner) and save the result.
-- **Five verb skills**: `nx:research`, `nx:review`, `nx:analyze`, `nx:debug`, `nx:document`. All share one template body — `plan_match(intent, dimensions={verb: <skill_verb>}, n=1)` → if confidence ≥ threshold, `plan_run(match, bindings)`; else defer to `/nx:query`. Skill names are pure verbs; the dimension filter does the namespacing that old compound names (`nx:research-plan`) tried to do by embedding a qualifier.
+- **`nx:plan-first` skill** — the gate skill. Invoked at the top of every retrieval-shaped task. Triggers on verbs like "plan", "design", "review", "analyze", "debug", "document". Instructs: call `plan_match(intent, min_confidence=0.85)` first; if a match exists, present it and execute via `plan_run`; if not, dispatch `/conexus:query` (the query-planner) and save the result.
+- **Five verb skills**: `nx:research`, `nx:review`, `nx:analyze`, `nx:debug`, `nx:document`. All share one template body — `plan_match(intent, dimensions={verb: <skill_verb>}, n=1)` → if confidence ≥ threshold, `plan_run(match, bindings)`; else defer to `/conexus:query`. Skill names are pure verbs; the dimension filter does the namespacing that old compound names (`nx:research-plan`) tried to do by embedding a qualifier.
 - **Three plan-management skills**: `nx:plan-author`, `nx:plan-inspect`, `nx:plan-promote`. Same template body pointed at the matching meta-seed verbs.
-- **SessionStart hook** (`nx/hooks/scripts/session_start_hook.py`) — two additions:
+- **SessionStart hook** (`conexus/hooks/scripts/session_start_hook.py`) — two additions:
     1. **Populate T1 `plans__session` semantic cache.** Read
        ```sql
        SELECT id, query, plan_json, tags, dimensions, created_at, ttl
@@ -433,8 +433,8 @@ The ergonomic change. Agents must reach for `plan_match` **before** decomposing 
        ```
        (matches the existing `search_plans` TTL predicate in `plan_library.py:195-197`) → embed the `query` text (the description per Vocabulary) → upsert to T1 collection `plans__session` with metadata `{plan_id, verb, scope, strategy, tags, project, ttl, created_at, last_used}`. Skipped gracefully if the T1 server is unavailable (fallback to FTS5 at match time). Log the populated count.
     2. **Inject a "## Plan Library" context block** listing `plan_match` / `plan_save` / `plan_search` and the five scenario/verb names. Extends the existing "## nx Capabilities" section.
-- **SubagentStart hook** (`nx/hooks/scripts/subagent-start.sh`) — for the eight retrieval-shaped agents (strategic-planner, architect-planner, code-review-expert, substantive-critic, deep-analyst, deep-research-synthesizer, debugger, plan-auditor), inject a "plan-match-first" preamble: *before decomposing any retrieval task, call `plan_match(query, min_confidence=0.85)`; execute the returned plan if match confidence clears the threshold.*
-- **Per-agent `nx/agents/<name>.md`** — each target agent's opening instruction cites the `plan_match`-first pattern independently of the hook, so behavior survives hook-context trimming.
+- **SubagentStart hook** (`conexus/hooks/scripts/subagent-start.sh`) — for the eight retrieval-shaped agents (strategic-planner, architect-planner, code-review-expert, substantive-critic, deep-analyst, deep-research-synthesizer, debugger, plan-auditor), inject a "plan-match-first" preamble: *before decomposing any retrieval task, call `plan_match(query, min_confidence=0.85)`; execute the returned plan if match confidence clears the threshold.*
+- **Per-agent `conexus/agents/<name>.md`** — each target agent's opening instruction cites the `plan_match`-first pattern independently of the hook, so behavior survives hook-context trimming.
 
 ### Phase 6: Scoped plan loader — git as the shipping transport
 
@@ -446,7 +446,7 @@ Extends `nx catalog setup` to load plan templates from scoped locations beyond t
 | `scope:rdr-<slug>` | `docs/rdr/<slug>/plans.yml` (peer to the RDR file) | `nx catalog setup` when RDR is `status: accepted` | Yes (with the RDR) |
 | `scope:project` | `.nexus/plans/*.yml` or `.nexus/plans.yml` (project root) | `nx catalog setup` | Yes |
 | `scope:repo` | umbrella path (e.g. `.nexus/plans/_repo.yml`) | `nx catalog setup` with umbrella detection | Yes |
-| `scope:global` | `nx/plans/builtin/*.yml` in the plugin | plugin load at catalog setup | Plugin release |
+| `scope:global` | `conexus/plans/builtin/*.yml` in the plugin | plugin load at catalog setup | Plugin release |
 
 **Loader contract:**
 
@@ -546,19 +546,19 @@ Promote plans automatically once `use_count`, `match_conf_avg`, and `success_rat
 - **SC-4** — Plan step schema accepts `{tool: "traverse", args: {seeds, link_types, depth, direction, return}}`. Depth is capped at 3. `seeds` accepts both literal tumbler lists and `$step_N` references. The runner resolves both cases and returns the agreed shape.
 - **SC-5** — `traverse` operator dispatches through `Catalog.graph_many()` (the thin multi-seed wrapper defined in Phase 3 with node-key = `str(tumbler)` and edge-key = `(from, to, link_type)` dedup invariants, honouring `_MAX_GRAPH_NODES` across the merged frontier) for seed lists, or through `Catalog.graph()` directly for single-seed cases — no new BFS algorithm. Contract tests pin the merge invariants against the catalog's existing link data. Returning `collections` from a traverse step usable as `subtree=` / explicit `corpus=` input to a downstream retrieval step is end-to-end tested.
 - **SC-6** — Five scenario plans seed via `nx catalog setup`. Four use at least one `traverse` step; `verb:debug` is the one intentionally-flat scenario (see Phase 4b). Reseeding is idempotent via the `(project, dimensions)` UNIQUE index.
-- **SC-7** — Session-start hook injects a "## Plan Library" block listing `plan_match`, `plan_save`, `plan_search`, and the five scenario names. SubagentStart hook injects the plan-match-first preamble for the eight retrieval-shaped agents. Each agent's `nx/agents/<name>.md` cites the pattern independently (verifiable by grep).
-- **SC-8** — End-to-end demo on ART repo: fresh session, user asks *"how does vision→language priming work in ART?"*, `nx:plan-first` skill fires, cold-library case runs `/nx:query` planner → plan saved; warm-library case resolves from `plan_match` with `confidence >= min_confidence` (the PQ-2 calibrated value) and executes the saved DAG via `plan_run`. At least one step in the resulting plan is a `traverse` that walks from the RDR to its implementing code via typed links.
-- **SC-9** — Zero regressions. `plan_save` / `plan_search` / `/nx:query` unchanged in behavior for existing callers. `search()` / `query()` existing arg sets unchanged in behavior.
+- **SC-7** — Session-start hook injects a "## Plan Library" block listing `plan_match`, `plan_save`, `plan_search`, and the five scenario names. SubagentStart hook injects the plan-match-first preamble for the eight retrieval-shaped agents. Each agent's `conexus/agents/<name>.md` cites the pattern independently (verifiable by grep).
+- **SC-8** — End-to-end demo on ART repo: fresh session, user asks *"how does vision→language priming work in ART?"*, `nx:plan-first` skill fires, cold-library case runs `/conexus:query` planner → plan saved; warm-library case resolves from `plan_match` with `confidence >= min_confidence` (the PQ-2 calibrated value) and executes the saved DAG via `plan_run`. At least one step in the resulting plan is a `traverse` that walks from the RDR to its implementing code via typed links.
+- **SC-9** — Zero regressions. `plan_save` / `plan_search` / `/conexus:query` unchanged in behavior for existing callers. `search()` / `query()` existing arg sets unchanged in behavior.
 - **SC-10** — Cross-embedding boundary is not crossed anywhere in the plan runner. Every retrieval step operates in exactly one embedding space. `traverse` operates on catalog tumblers (no embeddings involved). **Enforced at runtime, not by grep**: (a) `plan_run` asserts that any step carrying `scope.taxonomy_domain` dispatches only to corpora whose embedding model matches the declared domain — mismatch raises `PlanRunEmbeddingDomainError`; (b) unit test `test_plan_runner_rejects_cross_embedding_step` pins the invariant; (c) `traverse` step signature is typed to accept only tumblers/ids/link-types, never embedding vectors, so the type system prevents accidental cosine on traversal output.
 - **SC-11** — Plan template contract. `plan_match` accepts the four-axis signature (`intent`, `scope_preference`, `tag_filter`, `context`, plus `min_confidence` / `n`). `plan_run` accepts `(match, bindings)` and resolves `$var` placeholders + `$stepN.<field>` references; unresolved required bindings abort with a named error. Documented in `docs/plan-authoring-guide.md` and round-trip-tested with a small paraphrase set (≥20 intent variants → correct plan match + execution).
 - **SC-12** — Metrics columns (`use_count`, `last_used`, `match_count`, `match_conf_sum`, `success_count`, `failure_count`) are added to `plans` via a T2 migration and updated atomically at the right call sites (match on `plan_match`, start/complete on `plan_run`). Counters do not persist across scope promotions.
 - **SC-13** — Three meta-seeds ship at `scope:global`: `verb:plan-authoring`, `verb:plan-propose-promotion`, `verb:plan-inspect`. Each is callable via `plan_match`+`plan_run` and produces its documented output on a freshly-set-up catalog. `docs/plan-authoring-guide.md` exists and is catalog-indexed.
-- **SC-14** — Scoped plan loader covers all four non-personal tiers: `nx/plans/builtin/*.yml` (global), `docs/rdr/<slug>/plans.yml` (rdr-scoped, only for accepted/closed RDRs), `.nexus/plans/*.yml` (project), and an optional umbrella path for `scope:repo`. Schema validation rejects malformed YAML with a named error. Source-path / declared-scope mismatches log a warning and prefer the path. Re-running `nx catalog setup` is idempotent via the Phase 4c `UNIQUE INDEX idx_plans_project_dimensions ON plans(project, dimensions)` + `INSERT ON CONFLICT(project, dimensions) DO UPDATE` — dedup key is the canonical JSON dimension map, not `(name, scope)`.
+- **SC-14** — Scoped plan loader covers all four non-personal tiers: `conexus/plans/builtin/*.yml` (global), `docs/rdr/<slug>/plans.yml` (rdr-scoped, only for accepted/closed RDRs), `.nexus/plans/*.yml` (project), and an optional umbrella path for `scope:repo`. Schema validation rejects malformed YAML with a named error. Source-path / declared-scope mismatches log a warning and prefer the path. Re-running `nx catalog setup` is idempotent via the Phase 4c `UNIQUE INDEX idx_plans_project_dimensions ON plans(project, dimensions)` + `INSERT ON CONFLICT(project, dimensions) DO UPDATE` — dedup key is the canonical JSON dimension map, not `(name, scope)`.
 - **SC-15** — Git-as-transport integrity. All four YAML paths are commit-indexed, plan schema CI check runs on PR, rollback via `git revert` restores prior plan state after a subsequent `nx catalog setup`. No hidden state lives outside T2 + git.
 - **SC-16** — Purpose abstraction on `traverse`. Step schema accepts `purpose: <name>` resolving via registry, or `link_types: [...]` literal — specifying both is a validation error. `purposes_resolve(name, project, scope) → list[str]` is a pure function of registry state. Registry loads with the same scope cascade as Phase 6 plans.
 - **SC-17** — `docs/catalog-link-types.md` and `docs/catalog-purposes.md` ship in the plugin, are catalog-indexed, and a paraphrase-set test (e.g. *"when do I use supersedes"*, *"what does implements-heuristic mean"*, *"which link type for walking documentation"*) resolves to the correct reference via `plan_match` / `query` with confidence ≥ 0.80.
 - **SC-18** — Dimensional identity and currying. A plan's identity is the canonicalised dimension map (sorted, keys-lowercased); two plans with identical maps at load time reject with a named error citing both sources. `plan_run(match, bindings)` merges `match.default_bindings` under `caller.bindings` (caller wins). Currying lineage is inspectable via `verb:plan-inspect, strategy:default`.
-- **SC-19** — Dimension registry. `nx/plans/dimensions.yml` ships with at least `verb`, `scope`, `strategy`, `object`, `domain` registered. Unregistered dimensions on a loaded plan emit a warning naming the file and the offending key; load still succeeds (lenient by default, strict mode opt-in via `NX_PLAN_STRICT_DIMENSIONS=1`). `verb:plan-inspect, strategy:dimensions` enumerates registered dimensions with per-dimension usage counts drawn from live T2.
+- **SC-19** — Dimension registry. `conexus/plans/dimensions.yml` ships with at least `verb`, `scope`, `strategy`, `object`, `domain` registered. Unregistered dimensions on a loaded plan emit a warning naming the file and the offending key; load still succeeds (lenient by default, strict mode opt-in via `NX_PLAN_STRICT_DIMENSIONS=1`). `verb:plan-inspect, strategy:dimensions` enumerates registered dimensions with per-dimension usage counts drawn from live T2.
 
 ## Research Findings
 
@@ -603,7 +603,7 @@ Promote plans automatically once `use_count`, `match_conf_avg`, and `success_rat
 
 ## Finalization Gate
 
-Checklist run at RDR acceptance time. Layer 1 is structural (run by `/nx:rdr-gate`); Layers 2-4 are author + reviewer responsibility.
+Checklist run at RDR acceptance time. Layer 1 is structural (run by `/conexus:rdr-gate`); Layers 2-4 are author + reviewer responsibility.
 
 ### Contradiction Check
 
@@ -617,7 +617,7 @@ Checklist run at RDR acceptance time. Layer 1 is structural (run by `/nx:rdr-gat
 - [ ] RDR-042 plan library schema (`plans` table + FTS5) exists and is live at `nexus.db.t2.plan_library` — verified by SQL introspection.
 - [ ] T1 HTTP ChromaDB server (RDR-010) is reachable; spawned subagents inherit the parent's session via PPID walking (RDR-041) — verified by existing `tests/test_session*.py` and `tests/test_t1*.py` integration tests where present.
 - [ ] `Catalog.graph(tumbler, depth, link_type)` returns `{nodes, edges}` as assumed in Phase 3 — verified by `nx catalog links --help` source in `src/nexus/catalog/catalog.py`.
-- [ ] Five retrieval-shaped agents (Phase 5 list) exist in `nx/agents/` — verified by glob.
+- [ ] Five retrieval-shaped agents (Phase 5 list) exist in `conexus/agents/` — verified by glob.
 - [ ] HDBSCAN topic discovery (RDR-070) is live and populates `topics` + `topic_assignments` tables — verified by `nx taxonomy status`.
 - [ ] Voyage AI embedding models are accessible at plan-save time — fallback to FTS5 if T1 cannot embed.
 
@@ -630,7 +630,7 @@ Checklist run at RDR acceptance time. Layer 1 is structural (run by `/nx:rdr-gat
 ### Scope Verification
 
 - [ ] RDR does not implement `nx plan promote` CLI, `nx plan audit` CLI, RDR lifecycle hooks, or `search(purpose=)` / `query(follow_links=purpose)` propagation. All four are explicitly deferred to RDR-079 in the Out of Scope section.
-- [ ] RDR does not modify RDR-042's shipped `plan_save` / `plan_search` / `/nx:query` behaviour for existing callers (SC-9).
+- [ ] RDR does not modify RDR-042's shipped `plan_save` / `plan_search` / `/conexus:query` behaviour for existing callers (SC-9).
 - [ ] RDR does not introduce a cross-embedding bridge mechanism (SC-10, RF-2).
 - [ ] Phases 1-6 count as one shippable unit; no phase is described as optional within this RDR (but individual phases are delivery-orderable as PRs).
 
@@ -662,7 +662,7 @@ Checklist run at RDR acceptance time. Layer 1 is structural (run by `/nx:rdr-gat
 
 ### RDRs
 
-- **RDR-042** — *AgenticScholar-Inspired Enhancements* (closed). Shipped the analytical-operator agent, plan library (T2 `plans` table + FTS5), `/nx:query` skill, self-correction loop. RDR-078 picks up its two explicit deferrals.
+- **RDR-042** — *AgenticScholar-Inspired Enhancements* (closed). Shipped the analytical-operator agent, plan library (T2 `plans` table + FTS5), `/conexus:query` skill, self-correction loop. RDR-078 picks up its two explicit deferrals.
 - **RDR-010** — *T1 Scratch Persistent Bounded Store*. The T1 HTTP ChromaDB server startup + fallback-to-EphemeralClient warning (`src/nexus/session.py:220-277`).
 - **RDR-041** — *T1 Scratch Inter-Agent Context* (closed). Session ID routing + PPID-based inheritance so spawned subagents share the parent's T1 scratch. RDR-078 Phase 1 relies on this for cross-subagent visibility of the plan semantic cache.
 - **RDR-050** — *Catalog-First Query Routing*. Establishes `query(follow_links=...)` + `author=` + `content_type=` + `subtree=` routing primitives. RDR-078 Phase 3 wraps the same `Catalog.graph()` BFS into a plan step.
@@ -692,9 +692,9 @@ Checklist run at RDR acceptance time. Layer 1 is structural (run by `/nx:rdr-gat
 - `src/nexus/search_engine.py:152-163` — `search_cross_corpus()` kwargs.
 - `src/nexus/mcp/core.py:178` — `query()` MCP tool.
 - `src/nexus/mcp/core.py:53` — `search()` MCP tool.
-- `nx/agents/query-planner.md`, `nx/agents/analytical-operator.md` — existing RDR-042 agents.
-- `nx/hooks/scripts/session_start_hook.py`, `nx/hooks/scripts/subagent-start.sh` — priming integration points (Phase 5).
-- `nx/resources/rdr/TEMPLATE.md` — RDR template this document conforms to.
+- `conexus/agents/query-planner.md`, `conexus/agents/analytical-operator.md` — existing RDR-042 agents.
+- `conexus/hooks/scripts/session_start_hook.py`, `conexus/hooks/scripts/subagent-start.sh` — priming integration points (Phase 5).
+- `conexus/resources/rdr/TEMPLATE.md` — RDR template this document conforms to.
 
 ## Revision History
 
@@ -704,5 +704,5 @@ Checklist run at RDR acceptance time. Layer 1 is structural (run by `/nx:rdr-gat
 - **2026-04-15** — Revision 4: T1 session cache replaces T3 plans__semantic collection (research-3). Added four scope tiers (personal/rdr/project/repo/global) with git as transport.
 - **2026-04-15** — Revision 5: templating vocabulary + `plan_run` named tool (research-4). Phase 4 rewritten into 4a-4e (schema + scenarios + metrics + meta-seeds + authoring guide). Phase 6 added.
 - **2026-04-15** — Revision 6: dimensional identity (research-5). Scope/verb/name collapse into pinned dimension map. Currying via `default_bindings` + `parent`. Purpose abstraction over link types. Skills collapse to pure verbs.
-- **2026-04-15** — Revision 7: formal structure — Problem Statement with `#### Gap N:` enumeration, `## Context`, `## Alternatives Considered`, `## Trade-offs`, `## Finalization Gate`, `## References`, `## Revision History`. Content unchanged; structure conforms to `nx/resources/rdr/TEMPLATE.md`.
+- **2026-04-15** — Revision 7: formal structure — Problem Statement with `#### Gap N:` enumeration, `## Context`, `## Alternatives Considered`, `## Trade-offs`, `## Finalization Gate`, `## References`, `## Revision History`. Content unchanged; structure conforms to `conexus/resources/rdr/TEMPLATE.md`.
 - **2026-04-15** — Revision 8 (this): gate-fix pass against `nexus_rdr/078-critique-gate` findings. Fixes 4 critical (C-1..C-4) and 5 significant (S-1..S-5) issues, all code-vs-design mismatches: (C-1) multi-seed `traverse` wrapper `Catalog.graph_many()` explicitly spec'd with node/edge dedup invariants; (C-2) `description` concept persisted via existing `plans.query` column — no schema rename; (C-3) SessionStart SQL replaced with correct `julianday()`-based TTL filter matching `plan_library.py:195-197`; (C-4) identity-dedup key made concrete via new `dimensions TEXT` column + UNIQUE `(project, dimensions)` index, canonical-JSON serialisation, `ON CONFLICT DO UPDATE` reseeding; (S-1) `Match.from_plan_row()` constructor spec'd for FTS5 fallback with `confidence=None` sentinel; (S-2) `$stepN.<field>` output contract resolved as design — retrieval steps emit `{tumblers, ids, distances}`, operators emit `{text, citations}`; (S-3) SC-10 now enforced at runtime via `PlanRunEmbeddingDomainError` + typed `traverse` signature + unit test; (S-4) `plan_run` execution model declared deterministic (no agent dispatch); (S-5) SC-1/SC-8 thresholds reference PQ-2 calibration rather than hardcoded numbers. Observations (O-3..O-5) addressed: references split correctly across RDR-010 + RDR-041 for T1 server lineage; `purpose:all-implementations` semantics clarified with `purposes_resolve` warn-and-drop on unknown types; `verb:debug` flat-scenario framing made definitive.

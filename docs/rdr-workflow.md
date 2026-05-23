@@ -9,21 +9,21 @@ This document covers the operational details of each lifecycle step. For backgro
 ## Lifecycle
 
 ```
-/nx:rdr-create
+/conexus:rdr-create
      │
-  [Draft] ◄── /nx:rdr-research (repeat as needed)
+  [Draft] ◄── /conexus:rdr-research (repeat as needed)
      │
-     │ /nx:rdr-gate (optional but recommended)
+     │ /conexus:rdr-gate (optional but recommended)
      │ ├─ BLOCKED → fix and re-gate
      │ └─ PASSED
      ▼
-/nx:rdr-accept
+/conexus:rdr-accept
      │
   [Accepted]
      │
      │ optional: planning chain → implementation beads
      │
-     │ /nx:rdr-close --reason implemented
+     │ /conexus:rdr-close --reason implemented
      ▼
 [Implemented]
 
@@ -37,34 +37,34 @@ Only **Create** and **Research** are required. Gate, Accept, and Close add forma
 A bug fix RDR from create to close:
 
 ```
-/nx:rdr-create
+/conexus:rdr-create
   Title: "Fix: chunker emits full-file line range for every AST chunk"
   Type: Bug Fix   Priority: High
   → Creates docs/rdr/rdr-016-fix-chunker-line-range.md (status: draft)
 
-/nx:rdr-research add 016
+/conexus:rdr-research add 016
   Finding: CodeSplitter never populates line_start/line_end
   Classification: Verified (Source Search, chunker.py:210)
 
-/nx:rdr-gate 016
+/conexus:rdr-gate 016
   Structure ✓ · Assumptions ✓ · AI critique ✓ → PASSED
 
-/nx:rdr-accept 016
+/conexus:rdr-accept 016
   Verifies gate, updates status → accepted
 
-/nx:rdr-close 016 --reason implemented
+/conexus:rdr-close 016 --reason implemented
   Creates post-mortem template, indexes to T3
 ```
 
 The RDR is now searchable via `nx search --corpus rdr` and tracked in T2.
 
-## Create (`/nx:rdr-create`)
+## Create (`/conexus:rdr-create`)
 
 Prompts for title, type, and priority. Creates `docs/rdr/NNN-kebab-title.md` from the standard template with metadata prefilled, writes a T2 record, and regenerates the RDR index. Status: **Draft**.
 
-On first use in a repository, `/nx:rdr-create` bootstraps the `docs/rdr/` directory and copies the template automatically.
+On first use in a repository, `/conexus:rdr-create` bootstraps the `docs/rdr/` directory and copies the template automatically.
 
-## Research (`/nx:rdr-research`)
+## Research (`/conexus:rdr-research`)
 
 Adds structured findings to a Draft RDR. Each finding records a summary, evidence classification (Verified, Documented, or Assumed), verification method, and source reference.
 
@@ -74,9 +74,9 @@ Verification methods:
 - **Spike**: behavior verified by running code against a live service
 - **Docs Only**: documentation reading only; insufficient for load-bearing assumptions
 
-For complex investigations, `/nx:rdr-research` can delegate to specialized agents (`deep-research-synthesizer` for web/document research, `codebase-deep-analyzer` for codebase exploration). Findings are written to both the markdown file and T2. The RDR stays Draft throughout.
+For complex investigations, `/conexus:rdr-research` can delegate to specialized agents (`deep-research-synthesizer` for web/document research, `codebase-deep-analyzer` for codebase exploration). Findings are written to both the markdown file and T2. The RDR stays Draft throughout.
 
-## Gate (`/nx:rdr-gate`)
+## Gate (`/conexus:rdr-gate`)
 
 Three-layer validation. Optional but recommended before committing to irreversible decisions.
 
@@ -86,17 +86,17 @@ Three-layer validation. Optional but recommended before committing to irreversib
 
 **Layer 3, AI critique**: Delegates to the `substantive-critic` agent, which evaluates logical coherence, missing alternatives, unstated assumptions, and evidence gaps. Findings are appended to the RDR.
 
-The gate either **BLOCKS** (critical issues; fix and re-gate) or **PASSES** (no critical issues, may have observations). No conditional outcomes. The result is stored in T2 for `/nx:rdr-accept` to verify.
+The gate either **BLOCKS** (critical issues; fix and re-gate) or **PASSES** (no critical issues, may have observations). No conditional outcomes. The result is stored in T2 for `/conexus:rdr-accept` to verify.
 
-## Accept (`/nx:rdr-accept`)
+## Accept (`/conexus:rdr-accept`)
 
 The decision point. The gate validates; acceptance is a deliberate human choice.
 
-Verifies that the gate passed, updates T2 status to Accepted, updates the file frontmatter to match, and regenerates the index. For multi-phase implementation plans, `/nx:rdr-accept` optionally dispatches the planning chain: `strategic-planner` agent → `nx_plan_audit` MCP tool → `nx_enrich_beads` MCP tool, decomposing the work into trackable beads. (The latter two were agents before RDR-080; they are now direct MCP-tool calls.)
+Verifies that the gate passed, updates T2 status to Accepted, updates the file frontmatter to match, and regenerates the index. For multi-phase implementation plans, `/conexus:rdr-accept` optionally dispatches the planning chain: `strategic-planner` agent → `nx_plan_audit` MCP tool → `nx_enrich_beads` MCP tool, decomposing the work into trackable beads. (The latter two were agents before RDR-080; they are now direct MCP-tool calls.)
 
-If T2 and the file disagree on status, `/nx:rdr-accept` self-heals by repairing the file to match T2.
+If T2 and the file disagree on status, `/conexus:rdr-accept` self-heals by repairing the file to match T2.
 
-## Close (`/nx:rdr-close`)
+## Close (`/conexus:rdr-close`)
 
 Finalizes an Accepted RDR. Requires status Accepted (use `--force` to override).
 
@@ -107,11 +107,11 @@ Closing creates a post-mortem template for drift analysis, indexes the RDR into 
 ## Querying RDRs
 
 ```bash
-/nx:rdr-list                      # all RDRs
-/nx:rdr-list --status Draft       # active research only
-/nx:rdr-list --type "Bug Fix"     # bug fixes only
+/conexus:rdr-list                      # all RDRs
+/conexus:rdr-list --status Draft       # active research only
+/conexus:rdr-list --type "Bug Fix"     # bug fixes only
 
-/nx:rdr-show 007                  # full detail: metadata, findings, gate status, linked beads
+/conexus:rdr-show 007                  # full detail: metadata, findings, gate status, linked beads
 ```
 
 Both commands read from T2; no markdown parsing required.

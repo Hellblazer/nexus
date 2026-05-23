@@ -24,7 +24,7 @@ In-repo sites split into three groups:
 - **Backfill / recovery** (one-shot operator paths, not in steady-state RPS): `commands/catalog.py:_backfill_rdrs` / `_backfill_papers` / `_recover_files_for_collection`, `commands/enrich.py:enrich_aspects`.
 - **Display / scoring** (reads chunk metadata returned by a search, not via direct `col.get`): `mcp/core.py:_dedup_by_doc_key`, `formatters.py`, `scoring.py`. These read fields off `r.metadata` after a search call, not via raw `col.get`; they still depend on Phase-5 fields surviving the schema flip.
 
-Plugin / skill marketplace surface that documents these fields (in-repo `nx/` and external `~/.claude/plugins/marketplaces/nexus-plugins/`): 5 documentation references in `nx/CHANGELOG.md`, `nx/agents/_shared/CONTEXT_PROTOCOL.md`, `nx/hooks/scripts/session_start_hook.py`, plus the external `nexus-plugins/AGENTS.md` identity-field table. None of these are tools that bypass the catalog at runtime; they are doc strings that promise the fields exist.
+Plugin / skill marketplace surface that documents these fields (in-repo `conexus/` and external `~/.claude/plugins/marketplaces/nexus-plugins/`): 5 documentation references in `conexus/CHANGELOG.md`, `conexus/agents/_shared/CONTEXT_PROTOCOL.md`, `conexus/hooks/scripts/session_start_hook.py`, plus the external `nexus-plugins/AGENTS.md` identity-field table. None of these are tools that bypass the catalog at runtime; they are doc strings that promise the fields exist.
 
 Out-of-scope T1 reads (session scratch): `db/t1.py` and `plans/session_cache.py` carry their own per-session metadata schema. RDR-101 §"Out of Scope" excludes T1; these are listed for completeness only.
 
@@ -90,12 +90,12 @@ The marketplace surface is documentation that promises specific T3 metadata fiel
 
 | File:line | Field documented | Repo (in-repo / external) | Deprecation announcement scope |
 |---|---|---|---|
-| `nx/CHANGELOG.md:91, 270-271, 279, 935, 978, 1184, 1853, 1924, 1935-1936, 1951, 2035, 2039, 2109` | `source_path`, `chunk_text_hash`, `chunk_count`, `head_hash`, `git_project_name`/`git_branch`/`git_commit_hash`/`git_remote_url`, `section_type`, `section_title`, `expires_at`, `ttl_days`, `corpus`, `store_type` | in-repo (`nx/`) | Phase 4 PR updates the changelog forward; Phase 5 PR adds an entry naming each removed field. |
-| `nx/agents/_shared/CONTEXT_PROTOCOL.md:104` | `chunk_text_hash` | in-repo | No change; `chunk_text_hash` is intrinsic and stays. |
-| `nx/agents/_shared/CONTEXT_PROTOCOL.md:224` | `category`, `tags` (as `store_put` args) | in-repo | Phase 5 PR rewrites the example; `store_put` API stops accepting `category`/`tags` (RDR-101 §Phase 5). |
-| `nx/hooks/scripts/session_start_hook.py:110` | `section_type` (in `where=` example) | in-repo | Phase 5 PR rewrites the line after the Phase 0 audit decides whether `section_type` is intrinsic-on-chunk or moves to a projection. |
-| `nx/hooks/scripts/subagent-start.sh:122, 196` | `section_type`, `chunk_text_hash` | in-repo | Same. |
-| `nx/skills/nexus/reference.md:36` | `section_type` (search example) | in-repo | Same. |
+| `conexus/CHANGELOG.md:91, 270-271, 279, 935, 978, 1184, 1853, 1924, 1935-1936, 1951, 2035, 2039, 2109` | `source_path`, `chunk_text_hash`, `chunk_count`, `head_hash`, `git_project_name`/`git_branch`/`git_commit_hash`/`git_remote_url`, `section_type`, `section_title`, `expires_at`, `ttl_days`, `corpus`, `store_type` | in-repo (`conexus/`) | Phase 4 PR updates the changelog forward; Phase 5 PR adds an entry naming each removed field. |
+| `conexus/agents/_shared/CONTEXT_PROTOCOL.md:104` | `chunk_text_hash` | in-repo | No change; `chunk_text_hash` is intrinsic and stays. |
+| `conexus/agents/_shared/CONTEXT_PROTOCOL.md:224` | `category`, `tags` (as `store_put` args) | in-repo | Phase 5 PR rewrites the example; `store_put` API stops accepting `category`/`tags` (RDR-101 §Phase 5). |
+| `conexus/hooks/scripts/session_start_hook.py:110` | `section_type` (in `where=` example) | in-repo | Phase 5 PR rewrites the line after the Phase 0 audit decides whether `section_type` is intrinsic-on-chunk or moves to a projection. |
+| `conexus/hooks/scripts/subagent-start.sh:122, 196` | `section_type`, `chunk_text_hash` | in-repo | Same. |
+| `conexus/skills/nexus/reference.md:36` | `section_type` (search example) | in-repo | Same. |
 | `~/.claude/plugins/marketplaces/nexus-plugins/AGENTS.md:31-33` | `source_path`, `title` (identity-field table per collection prefix) | external (synced from this repo to the plugin marketplace) | **Highest blast radius.** This is the table plugin authors will copy verbatim into their own integrations. RF-101-5 calls out 6-month minimum wall-clock deprecation window for exactly this surface. The Phase 4 deprecation announcement re-publishes this table with `doc_id` as the only identity field. |
 | `~/.claude/plugins/marketplaces/nexus-plugins/CHANGELOG.md` (multiple lines, ~17 mentions) | `source_path`, `chunk_text_hash`, `chunk_count`, `head_hash`, `git_*`, `section_type`, `section_title`, `expires_at`, `ttl_days`, `corpus`, `store_type` | external (mirrored) | Phase 5 release notes published to the marketplace registry. |
 | `~/.claude/plugins/marketplaces/nexus-plugins/tests/test_*.py` (12+ files) | `source_path`, `chunk_text_hash`, `title`, `git_*` | external; these are tests in the marketplace plugin against the public T3 metadata schema. **Marketplace tests directly read fields the schema is about to drop.** | Phase 5 PR migrates the marketplace tests in lockstep. |

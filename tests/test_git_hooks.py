@@ -186,7 +186,13 @@ class TestHookContent:
     def test_required_elements(self, runner, fake_repo):
         _install(runner, fake_repo)
         content = (_hooks_dir(fake_repo) / "post-commit").read_text()
-        for token in ("index.log", "disown", "--on-locked=skip", "nx index repo"):
+        # pgrep guard added 2026-05-23 (nexus-mkj6u): belt-and-suspenders
+        # with --on-locked=skip; catches the multi-commit pile-up race
+        # that flock-based locking lost on the open()+truncate+flock window.
+        for token in (
+            "index.log", "disown", "--on-locked=skip", "nx index repo",
+            "pgrep -f", "exit 0",
+        ):
             assert token in content
 
     def test_stanza_identical_in_owned_and_appended(self, runner, fake_repo):
@@ -204,3 +210,142 @@ class TestHookContent:
             return m.group(0) if m else ""
 
         assert extract(owned) == extract(appended)
+
+
+# ── hook update (nexus-mkj6u shakeout) ────────────────────────────────────────
+
+
+class TestUpdate:
+    """``nx hooks update`` refreshes nexus-managed stanzas to the current
+    template — for users whose existing post-commit stanza pre-dates a
+    fix like the 2026-05-23 pgrep guard."""
+
+    def _write_legacy_stanza(self, hook_file):
+        """Simulate a pre-pgrep-guard stanza on disk."""
+        legacy = (
+            f"#!/bin/sh\n"
+            f"{SENTINEL_BEGIN}\n"
+            'nx index repo "$(git rev-parse --show-toplevel)" --on-locked=skip \\\n'
+            '  >> "$HOME/.config/nexus/index.log" 2>&1 &\n'
+            "disown\n"
+            f"{SENTINEL_END}\n"
+        )
+        hook_file.write_text(legacy)
+
+    def test_refreshes_legacy_stanza_to_current(self, runner, fake_repo):
+        from nexus.cli import main
+        hd = _hooks_dir(fake_repo)
+        hd.mkdir(parents=True, exist_ok=True)
+        legacy_file = hd / "post-commit"
+        self._write_legacy_stanza(legacy_file)
+        assert "pgrep" not in legacy_file.read_text()
+
+        with _mock_git(fake_repo):
+            result = runner.invoke(main, ["hooks", "update", str(fake_repo)])
+        assert result.exit_code == 0, result.output
+        new_content = legacy_file.read_text()
+        assert "pgrep -f" in new_content
+        assert "exit 0" in new_content
+        # Single sentinel block (no duplication).
+        assert new_content.count(SENTINEL_BEGIN) == 1
+
+    def test_skips_unmanaged_hook_files(self, runner, fake_repo):
+        from nexus.cli import main
+        hd = _hooks_dir(fake_repo)
+        hd.mkdir(parents=True, exist_ok=True)
+        unmanaged = hd / "post-commit"
+        unmanaged.write_text("#!/bin/sh\necho hi\n")  # no SENTINEL
+
+        with _mock_git(fake_repo):
+            result = runner.invoke(main, ["hooks", "update", str(fake_repo)])
+        assert result.exit_code == 0
+        assert unmanaged.read_text() == "#!/bin/sh\necho hi\n"
+        assert "unmanaged" in result.output
+
+    def test_skips_not_installed(self, runner, fake_repo):
+        from nexus.cli import main
+        # No hook files at all
+        with _mock_git(fake_repo):
+            result = runner.invoke(main, ["hooks", "update", str(fake_repo)])
+        assert result.exit_code == 0
+        assert "not installed" in result.output
+
+    def test_preserves_appended_content(self, runner, fake_repo):
+        from nexus.cli import main
+        hd = _hooks_dir(fake_repo)
+        hd.mkdir(parents=True, exist_ok=True)
+        legacy_file = hd / "post-commit"
+        legacy_stanza = (
+            f"{SENTINEL_BEGIN}\n"
+            'nx index repo "$(git rev-parse --show-toplevel)" --on-locked=skip \\\n'
+            '  >> "$HOME/.config/nexus/index.log" 2>&1 &\n'
+            "disown\n"
+            f"{SENTINEL_END}\n"
+        )
+        appended = "#!/bin/sh\necho 'pre-existing user logic'\n" + legacy_stanza
+        legacy_file.write_text(appended)
+
+        with _mock_git(fake_repo):
+            result = runner.invoke(main, ["hooks", "update", str(fake_repo)])
+        assert result.exit_code == 0
+        new_content = legacy_file.read_text()
+        # User logic preserved
+        assert "echo 'pre-existing user logic'" in new_content
+        # New stanza body present
+        assert "pgrep -f" in new_content
+        # Single sentinel block
+        assert new_content.count(SENTINEL_BEGIN) == 1
+
+
+# ── doctor stanza-drift check ──────────────────────────────────────────────────
+
+
+class TestDoctorStanzaDrift:
+    """nexus-mkj6u: nx doctor surfaces drift between installed stanza and
+    current template, with a fix suggestion pointing at ``nx hooks update``."""
+
+    def _seed_registry(self, monkeypatch, tmp_path, repo):
+        """RepoRegistry expects ``{repos: {<path>: {...}}}`` JSON shape."""
+        import json
+        cfg = tmp_path / "nx_config_drift"
+        cfg.mkdir(exist_ok=True)
+        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: cfg)
+        registry_path = cfg / "repos.json"
+        registry_path.write_text(json.dumps({"repos": {str(repo): {}}}))
+
+    def test_drift_detected_when_legacy_stanza_installed(self, fake_repo, monkeypatch, tmp_path):
+        self._seed_registry(monkeypatch, tmp_path, fake_repo)
+
+        # Write a legacy stanza (no pgrep) to fake_repo's post-commit
+        hd = _hooks_dir(fake_repo)
+        hd.mkdir(parents=True, exist_ok=True)
+        (hd / "post-commit").write_text(
+            f"#!/bin/sh\n{SENTINEL_BEGIN}\n"
+            'nx index repo "$(git rev-parse --show-toplevel)" --on-locked=skip \\\n'
+            '  >> "$HOME/.config/nexus/index.log" 2>&1 &\n'
+            "disown\n"
+            f"{SENTINEL_END}\n"
+        )
+
+        with _mock_git(fake_repo):
+            from nexus.health import _check_git_hooks
+            results = _check_git_hooks()
+        drift = [r for r in results if "stanza drift" in r.label.lower()]
+        assert drift, f"expected a stanza-drift warning, got: {[r.label for r in results]}"
+        r = drift[0]
+        assert r.ok is False
+        assert any("nx hooks update" in s for s in r.fix_suggestions)
+
+    def test_no_drift_when_stanza_matches_template(self, runner, fake_repo, monkeypatch, tmp_path):
+        # Install fresh hooks (matches current template by definition)
+        _install(runner, fake_repo)
+        self._seed_registry(monkeypatch, tmp_path, fake_repo)
+
+        with _mock_git(fake_repo):
+            from nexus.health import _check_git_hooks
+            results = _check_git_hooks()
+        drift = [r for r in results if "stanza drift" in r.label.lower()]
+        assert drift == [], (
+            f"expected no drift warning (fresh install matches template), "
+            f"got: {[(r.label, r.detail) for r in drift]}"
+        )

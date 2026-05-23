@@ -68,12 +68,12 @@ Two tracks, nine deliverables:
 - C5: MCP `_get_collection_names()` cache race condition (no lock)
 
 **Track D — Documentation & Plugin Updates:**
-- D1: `nx/skills/nexus/reference.md` — add new MCP tools (collection_list, collection_info, collection_verify, multi-corpus search)
+- D1: `conexus/skills/nexus/reference.md` — add new MCP tools (collection_list, collection_info, collection_verify, multi-corpus search)
 - D2: `docs/cli-reference.md` — add `nx collection reindex`, update `verify --deep` docs
 - D3: `docs/architecture.md` — update MCP server tool surface
-- D4: `nx/agents/pdf-chromadb-processor.md` — update for per-chunk progress
+- D4: `conexus/agents/pdf-chromadb-processor.md` — update for per-chunk progress
 - D5: `CLAUDE.md` — note single-chunk CCE caveat in collection conventions
-- D6: `nx/CHANGELOG.md` — release notes for all changes
+- D6: `conexus/CHANGELOG.md` — release notes for all changes
 
 ## Design
 
@@ -273,12 +273,12 @@ After all code changes, update:
 
 | ID | File | Change |
 |----|------|--------|
-| D1 | `nx/skills/nexus/reference.md` | Add collection_list, collection_info, collection_verify MCP tools; update search default |
+| D1 | `conexus/skills/nexus/reference.md` | Add collection_list, collection_info, collection_verify MCP tools; update search default |
 | D2 | `docs/cli-reference.md` | Add `nx collection reindex`; update `verify --deep`; document per-chunk progress |
 | D3 | `docs/architecture.md` | Update MCP tool surface (8 → 12 tools); note single-chunk CCE handling |
-| D4 | `nx/agents/pdf-chromadb-processor.md` | Update for per-chunk progress expectations |
+| D4 | `conexus/agents/pdf-chromadb-processor.md` | Update for per-chunk progress expectations |
 | D5 | `CLAUDE.md` | Add single-chunk CCE caveat to collection conventions |
-| D6 | `nx/CHANGELOG.md` | Release notes for all changes |
+| D6 | `conexus/CHANGELOG.md` | Release notes for all changes |
 
 ## Research Findings
 
@@ -346,7 +346,7 @@ Plus: mixed-model batch consistency (I2), MCP cache race (I1), pagination gaps i
 11. MCP collection cache is thread-safe
 
 **Track D — Documentation:**
-12. `nx/skills/nexus/reference.md` documents all new MCP tools
+12. `conexus/skills/nexus/reference.md` documents all new MCP tools
 13. `docs/cli-reference.md` documents `reindex`, enhanced `verify --deep`, per-chunk progress
 14. `CLAUDE.md` notes single-chunk CCE handling in collection conventions
 

@@ -281,7 +281,7 @@ def get_verification_config(repo_root: Path | None = None) -> dict[str, Any]:
     return {**defaults, **section}
 
 
-# Detection table shared with nx/hooks/scripts/read_verification_config.py.
+# Detection table shared with conexus/hooks/scripts/read_verification_config.py.
 # Keep both tables identical — a cross-validation test enforces this.
 _DETECT_TABLE: list[tuple[str, str]] = [
     ("pom.xml",          "mvn test"),

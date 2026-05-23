@@ -26,10 +26,10 @@ nexus-dqp.10) + one follow-up drift bead (nexus-cwm) filed and closed
 mid-session. Plugin version 3.9.0 built and reinstalled locally; `nx
 --version` reports 3.9.0. The canonical audit prompt is pinned in T2
 at `nexus_rdr/067-canonical-prompt-v1` (permanent). The skill
-(`nx/skills/rdr-audit/SKILL.md`) ships with both Phase 2a (core audit
+(`conexus/skills/rdr-audit/SKILL.md`) ships with both Phase 2a (core audit
 dispatch) and Phase 2b (5 management subcommands with read-only /
 print-only safety split). The incident template is at
-`nx/resources/rdr_process/INCIDENT-TEMPLATE.md`. Scheduling assets
+`conexus/resources/rdr_process/INCIDENT-TEMPLATE.md`. Scheduling assets
 ship under `scripts/cron-rdr-audit.sh`, `scripts/launchd/`, and
 `scripts/cron/` with READMEs carrying explicit "do not run launchctl
 load automatically" safety notes.
@@ -47,8 +47,8 @@ documented in the RDR §Revision History (two new entries dated
 RDR itself formalizes.
 
 Uncommitted at post-mortem time: the version-bump files
-(`pyproject.toml`, `nx/.claude-plugin/plugin.json`,
-`.claude-plugin/marketplace.json`, `CHANGELOG.md`, `nx/CHANGELOG.md`,
+(`pyproject.toml`, `conexus/.claude-plugin/plugin.json`,
+`.claude-plugin/marketplace.json`, `CHANGELOG.md`, `conexus/CHANGELOG.md`,
 `uv.lock`) are staged but not yet committed. Per
 `docs/contributing.md`, the release commit + tag is the user's
 explicit step, not autonomous — the close flow leaves those for the
@@ -60,7 +60,7 @@ user to review and push.
 
 ### What Was Implemented as Planned
 
-- **`nx:rdr-audit` skill** (`nx/skills/rdr-audit/SKILL.md`) — wraps
+- **`nx:rdr-audit` skill** (`conexus/skills/rdr-audit/SKILL.md`) — wraps
   the canonical audit prompt with main-session transcript pre-step,
   current-project derivation precedence chain, skill-body-owned
   `memory_put` persistence, and explicit CA-1 output-format contract.
@@ -72,7 +72,7 @@ user to review and push.
   explicitly; all 5 subcommands have dedicated SKILL.md subsections
   with exact shell-out patterns or template-print behavior.
 - **Cross-project incident template**
-  (`nx/resources/rdr_process/INCIDENT-TEMPLATE.md`) with 6 frontmatter
+  (`conexus/resources/rdr_process/INCIDENT-TEMPLATE.md`) with 6 frontmatter
   fields (`project`, `rdr`, `incident_date`, `drift_class`,
   `caught_by`, `outcome`) + 8 required narrative sections. The
   `drift_class` enum matches the canonical prompt taxonomy exactly so
@@ -80,7 +80,7 @@ user to review and push.
 - **Scheduling assets**: shell wrapper (`scripts/cron-rdr-audit.sh`,
   chmod +x, strict bash mode, log rotation), macOS launchd plist
   template, Linux crontab template (true 90-day cadence via `0 3 1
-  */3 *`), and two platform READMEs. The `claude -p '/nx:rdr-audit
+  */3 *`), and two platform READMEs. The `claude -p '/conexus:rdr-audit
   <project>'` invocation path was verified end-to-end in Phase 1b
   spike (T2 id 743) before Phase 4 files were written.
 - **Test suite**: 91 new tests across three files
@@ -90,7 +90,7 @@ user to review and push.
   shell/XML/crontab syntax, registry integration, skill cross-reference.
 - **Plugin 3.9.0** built, reinstalled, and live at session time;
   CHANGELOG entries written in both `CHANGELOG.md` and
-  `nx/CHANGELOG.md` under `[3.9.0] - 2026-04-11`.
+  `conexus/CHANGELOG.md` under `[3.9.0] - 2026-04-11`.
 
 ### What Diverged From Plan (Post-Gate Scope Additions)
 
@@ -112,7 +112,7 @@ principle).
    actually landed in T3 as `rdr067-audit-run1-*`, not T2 as
    requested. All 6 agents had their primary directives + HARD-GATE
    blocks softened to honor relay-specified storage targets (T1/T2/T3)
-   while preserving the T3 default for generic `/nx:research`-style
+   while preserving the T3 default for generic `/conexus:research`-style
    dispatches. Phase 5a MVV confirmed the softening works — both the
    first (mis-scoped) and retry dispatches used `memory_put` to T2,
    neither called `store_put` to T3. Full investigation at T2
@@ -300,7 +300,7 @@ The skill was used to audit itself in Phase 5b. It caught:
    scan of all agents for hardcoded "MUST store to X" directives
    would have caught this at enrichment time. Consider adding to
    `plan-enricher` or to a new pre-release check: grep all
-   `nx/agents/*.md` for hardcoded storage-tier mandates and flag
+   `conexus/agents/*.md` for hardcoded storage-tier mandates and flag
    them if the dispatching skill specifies an alternative target.
 
 ---
@@ -326,18 +326,18 @@ The skill was used to audit itself in Phase 5b. It caught:
   `rdr_process/failure-mode-silent-scope-reduction`
 - **2026-04-11 historical audit (baseline)**: T2
   `rdr_process/nexus-audit-2026-04-11`
-- **Shipped files**: `nx/skills/rdr-audit/SKILL.md`,
-  `nx/commands/rdr-audit.md`,
-  `nx/resources/rdr_process/INCIDENT-TEMPLATE.md`,
+- **Shipped files**: `conexus/skills/rdr-audit/SKILL.md`,
+  `conexus/commands/rdr-audit.md`,
+  `conexus/resources/rdr_process/INCIDENT-TEMPLATE.md`,
   `scripts/cron-rdr-audit.sh`, `scripts/launchd/*`, `scripts/cron/*`,
   `tests/test_rdr_audit_skill.py`,
   `tests/test_rdr_audit_scheduling.py`,
   `tests/test_rdr_audit_incident_template.py`
-- **Agent softening**: `nx/agents/deep-research-synthesizer.md`,
-  `nx/agents/deep-analyst.md`,
-  `nx/agents/codebase-deep-analyzer.md`,
-  `nx/agents/architect-planner.md`, `nx/agents/debugger.md`,
-  `nx/agents/strategic-planner.md`
+- **Agent softening**: `conexus/agents/deep-research-synthesizer.md`,
+  `conexus/agents/deep-analyst.md`,
+  `conexus/agents/codebase-deep-analyzer.md`,
+  `conexus/agents/architect-planner.md`, `conexus/agents/debugger.md`,
+  `conexus/agents/strategic-planner.md`
 - **4-RDR cycle context**: RDR-065 (close-time funnel hardening,
   closed), RDR-066 (composition smoke probe at coordinator beads,
   closed), RDR-068 (dimensional contracts at enrichment, draft),

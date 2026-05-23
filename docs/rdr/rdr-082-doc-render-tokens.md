@@ -52,7 +52,7 @@ Bead state lives in `.beads/` (SQLite, `bd show <id>` JSON output). RDR state li
 
 - Surveyed current ad-hoc drift patterns in `docs/rdr/*.md` and `docs/architecture*.md`: the two dominant system-of-record token types are bead status and RDR status. Projection-anchor and chunk-excerpt patterns are handled by RDR-083; other long-tail patterns (call-graph fragments, file-path lists) are out of scope — they belong to the chunk-citation work (RDR-083) or symbol-graph work (F9).
 - Verified `bd show <id> --json` exposes `status`, `title`, `assignee`, `closed_at`, `epic_id`, `progress` in stable fields.
-- Verified RDR T2 records (RDR-081 Step 4 precedent in `nx/skills/rdr-create/SKILL.md`) contain `status`, `gated`, `closed`, `close_reason`, `epic_bead`.
+- Verified RDR T2 records (RDR-081 Step 4 precedent in `conexus/skills/rdr-create/SKILL.md`) contain `status`, `gated`, `closed`, `close_reason`, `epic_bead`.
 
 ### Key Discoveries
 

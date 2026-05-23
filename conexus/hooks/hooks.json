@@ -1,0 +1,153 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "nx upgrade --auto 2>/dev/null || echo 'conexus plugin requires conexus >= 4.2.0 — run: uv tool upgrade conexus' >&2",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/preflight.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "nx daemon t2 ensure-running --quiet --timeout=5 2>/dev/null || true",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "nx hook session-start",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/session_start_hook.py",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/rdr_hook.py",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "cat $CLAUDE_PLUGIN_ROOT/skills/using-nx-skills/SKILL.md",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "nx-session-end-launcher",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreCompact": [],
+    "PostCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/post_compact_hook.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/stop_failure_hook.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-start.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/stop_verification_hook.sh",
+            "timeout": 180
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/pre_close_verification_hook.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/routing/phase_review_close_requires_gate.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/divergence-language-guard.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "mcp__plugin_conexus_.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/auto-approve-nx-mcp.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

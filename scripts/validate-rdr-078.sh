@@ -211,7 +211,7 @@ import yaml
 from pathlib import Path
 from nexus.plans.schema import validate_plan_template, canonical_dimensions_json
 
-builtin = Path(".").resolve() / "nx" / "plans" / "builtin"
+builtin = Path(".").resolve() / "conexus" / "plans" / "builtin"
 files = sorted(builtin.glob("*.yml"))
 assert len(files) == 9, f"expected 9 builtin files, got {len(files)}"
 

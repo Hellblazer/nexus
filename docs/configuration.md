@@ -251,7 +251,7 @@ If no marker file is found and no command is configured, the test check is skipp
 
 **Stop hook** (`on_stop: true`): Fires when the agent ends a session. Advisory only — warns about uncommitted git changes and open beads (`bd list --status=in_progress`) but never blocks. The agent sees the warnings and can choose to address them.
 
-**bd-close gate** (`on_close: true`): Fires before `bd close` or `bd done` commands. Advisory only — warns when no review marker found in T1 scratch (from `/nx:review-code`). Never blocks.
+**bd-close gate** (`on_close: true`): Fires before `bd close` or `bd done` commands. Advisory only — warns when no review marker found in T1 scratch (from `/conexus:review-code`). Never blocks.
 
 ## File Locations
 

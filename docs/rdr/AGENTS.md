@@ -36,9 +36,9 @@ If you need to find an RDR by topic, prefer the index in `docs/rdr/README.md` ov
 
 ## Authoring a new RDR
 
-Use the lifecycle skills: `/nx:rdr-create` → `/nx:rdr-research` → `/nx:rdr-gate` → `/nx:rdr-accept` → `/nx:rdr-close`. List existing with `/nx:rdr-list`; show one with `/nx:rdr-show NNN`.
+Use the lifecycle skills: `/conexus:rdr-create` → `/conexus:rdr-research` → `/conexus:rdr-gate` → `/conexus:rdr-accept` → `/conexus:rdr-close`. List existing with `/conexus:rdr-list`; show one with `/conexus:rdr-show NNN`.
 
-The numbering is monotonic; pick the next unused integer. The frontmatter shape is enforced by `/nx:rdr-audit`.
+The numbering is monotonic; pick the next unused integer. The frontmatter shape is enforced by `/conexus:rdr-audit`.
 
 ## Frontmatter quoting — `#` is comment-start in YAML
 

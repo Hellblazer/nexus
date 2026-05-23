@@ -24,7 +24,7 @@ their `grep` invocations.
 - `grep_for_symbols_redirects_to_serena.py` -- the routing rule. Uses
   the standard `sys.path.insert(0, dirname); import _lib` pattern.
 - `registry.yaml` -- the sn-side registry. Schema mirrors
-  `nx/hooks/scripts/routing/registry.yaml`.
+  `conexus/hooks/scripts/routing/registry.yaml`.
 
 The `_run_python_hook.sh` wrapper at `sn/hooks/scripts/_run_python_hook.sh`
 is also vendored from nx canonical.
@@ -33,7 +33,7 @@ is also vendored from nx canonical.
 
 The 4-hook cap on PreToolUse:Bash is an **aggregate across all
 installed plugins**, not per-plugin. See
-`nx/hooks/scripts/routing/README.md` for the breakdown. Adding a
+`conexus/hooks/scripts/routing/README.md` for the breakdown. Adding a
 fifth routing rule in any plugin requires consolidation or a budget
 revision in a successor RDR.
 

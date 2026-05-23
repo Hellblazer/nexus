@@ -26,8 +26,8 @@ _BULK_DELETE_CONFIRM_THRESHOLD = 10
 
 
 # Note: core server also registers a "search" tool. No collision — Claude Code
-# disambiguates by server prefix (mcp__plugin_nx_nexus-catalog__search vs
-# mcp__plugin_nx_nexus__search).
+# disambiguates by server prefix (mcp__plugin_conexus_nexus-catalog__search vs
+# mcp__plugin_conexus_nexus__search).
 @mcp.tool(name="search")
 def catalog_search(
     query: str = "",

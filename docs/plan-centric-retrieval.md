@@ -11,7 +11,7 @@ for authoring plan templates is in [plan-authoring-guide.md](plan-authoring-guid
 
 ## The retrieval trunk
 
-Every call to `mcp__plugin_nx_nexus__nx_answer(question, ...)` runs this
+Every call to `mcp__plugin_conexus_nexus__nx_answer(question, ...)` runs this
 sequence:
 
 ```
@@ -108,7 +108,7 @@ unchanged templates produces zero inserts.
 
 ## The 14 builtin scenario templates
 
-`nx catalog setup` seeds these from `nx/plans/builtin/*.yml` as
+`nx catalog setup` seeds these from `conexus/plans/builtin/*.yml` as
 `scope:global` plans:
 
 | Template | Verb + strategy | What it does |
@@ -130,7 +130,7 @@ unchanged templates produces zero inserts.
 | `abstract-themes` | query / abstract-themes | CheapRAG community-summary pipeline: broad over-fetch (`mode: broad`) → `groupby` by BERTopic centroid label → per-group `aggregate` → `summarize` coalesce. Routes "main themes / overview / give a summary" question shapes. RDR-098. |
 
 The first 5 are the "verb" scenarios: they correspond to the 5
-RDR-078 verb skills (`/nx:research`, `/nx:review`, …). The next 4 are
+RDR-078 verb skills (`/conexus:research`, `/conexus:review`, …). The next 4 are
 meta-seeds for the plan-library itself. Three (RDR-092 Phase 0a
 migrations) replace the legacy `_PLAN_TEMPLATES` array retired from
 `src/nexus/commands/catalog.py`; two further legacy shapes (provenance
@@ -205,7 +205,7 @@ from pre-RDR-092 databases are backfilled by the 4.9.13 migration
 Each verb skill dispatches `plan_match` scoped to its verb:
 
 ```
-/nx:research "how does projection quality work?"
+/conexus:research "how does projection quality work?"
     │
     ▼  (under the hood)
 plan_match(intent="...", dimensions={verb: "research"}, n=1, min_confidence=0.40)
@@ -219,7 +219,7 @@ plan_run(match, bindings={concept: "projection quality", limit: 10})
 For open-ended questions where you don't want to pre-commit to a verb:
 
 ```
-mcp__plugin_nx_nexus__nx_answer(
+mcp__plugin_conexus_nexus__nx_answer(
     question="Compare our retrieval approach to Delos and AgenticScholar.",
     scope="global",
     context="recently changed: src/nexus/plans/, RDR-078",
@@ -235,9 +235,9 @@ RDR-079 P5). Passing an explicit float overrides both the `plan_match`
 gate and the `_nx_answer_match_is_hit` check so a tighter precision
 floor is honoured consistently.
 
-### Via /nx:query
+### Via /conexus:query
 
-The `/nx:query` slash command is now a thin pointer to `nx_answer` —
+The `/conexus:query` slash command is now a thin pointer to `nx_answer` —
 convenience shortcut when you're in Claude Code.
 
 ## Plan operators (what plan_run can call)
@@ -328,7 +328,7 @@ Three signals that a class of questions needs its own plan template:
    won't intuit (e.g. "search code first, then walk `supersedes` edges
    back to the originating RDR, THEN hydrate").
 
-Author a template in `nx/plans/builtin/<verb>-<strategy>.yml` for global
+Author a template in `conexus/plans/builtin/<verb>-<strategy>.yml` for global
 scope, or `.nexus/plans/*.yml` / `docs/rdr/<slug>/plans.yml` for
 project / per-RDR scope.  The CI gate (`.github/workflows/plan-schema-check.yml`)
 validates every plan template on PR.

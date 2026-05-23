@@ -88,9 +88,9 @@ a usage pattern built on it. Agents that need project context can use
 - Update `tests/test_plugin.py` and `tests/test_hooks.py`
 
 ### Phase 2: Plugin cleanup
-- Delete `nx/commands/pm-status.md`, `pm-new.md`, `pm-list.md`, `project-setup.md`
-- Delete `nx/agents/project-management-setup.md`
-- Delete `nx/skills/project-setup/SKILL.md`
+- Delete `conexus/commands/pm-status.md`, `pm-new.md`, `pm-list.md`, `project-setup.md`
+- Delete `conexus/agents/project-management-setup.md`
+- Delete `conexus/skills/project-setup/SKILL.md`
 - Remove `nx pm` calls from `session_start_hook.py` and `subagent-start.sh`
 - Clean PM references from agent docs, skills, registry, and README
 

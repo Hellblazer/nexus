@@ -34,12 +34,12 @@ implementation_notes: |
     sn/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py:1
     is now the home of the rule (moved out of nx).
   - Gap 2 (no ownership rule for routing-hook placement) ->
-    nx/hooks/scripts/routing/README.md and
+    conexus/hooks/scripts/routing/README.md and
     sn/hooks/scripts/routing/README.md document the rule:
     "hook lives in the plugin that ships the redirect target".
   - Gap 3 (no story for cross-plugin framework consumption) ->
     tests/test_routing_lib_drift.py enforces byte-equality between
-    nx/hooks/scripts/routing/_lib.py and
+    conexus/hooks/scripts/routing/_lib.py and
     sn/hooks/scripts/routing/_lib.py; vendoring is now the
     documented mechanism.
 
@@ -65,9 +65,9 @@ implementation_notes: |
 ## Problem Statement
 
 RDR-121 (shipped in conexus 4.33.0) introduced a PreToolUse routing-hook
-framework under `nx/hooks/scripts/routing/` plus three rules:
+framework under `conexus/hooks/scripts/routing/` plus three rules:
 `grep_for_symbols_redirects_to_serena`, `git_add_all_redirects_to_explicit_paths`,
-`phase_review_close_requires_gate`. All three live in the nx plugin.
+`phase_review_close_requires_gate`. All three live in the conexus plugin.
 
 This is correct for two of the three rules but architecturally wrong for
 the third. `grep_for_symbols_redirects_to_serena` redirects users to
@@ -80,7 +80,7 @@ tools they do not have.
 The escape token (`# routing-allow: <reason>`) lets them bypass on a
 per-call basis, but the default behavior is user-hostile.
 
-The deeper problem: the nx plugin is making routing decisions on behalf
+The deeper problem: the conexus plugin is making routing decisions on behalf
 of tools it does not own. This violates the substrate-vs-consumer
 boundary that RDR-120 § A8 articulated for storage and tests: substrate
 provides shape; consumers own content. The same principle applies to
@@ -91,8 +91,8 @@ to it.
 
 #### Gap 1: nx ships routing rules whose targets it does not control
 
-`grep_for_symbols_redirects_to_serena.py` is in `nx/hooks/scripts/routing/`
-and registered in `nx/hooks/hooks.json`. It fires on every `grep` /
+`grep_for_symbols_redirects_to_serena.py` is in `conexus/hooks/scripts/routing/`
+and registered in `conexus/hooks/hooks.json`. It fires on every `grep` /
 `rg` against a code file regardless of whether the sn plugin is
 installed. The redirect message names Serena MCP tools that may not
 exist in the user's session.
@@ -125,7 +125,7 @@ re-implement the JSON-envelope contract from scratch.
   draft) articulates substrate-vs-consumer for storage. § A8
   generalized the principle to test infrastructure. This RDR
   generalizes it to routing rules.
-- The nx plugin (`nx/`) and sn plugin (`sn/`) ship from the same
+- The conexus plugin (`conexus/`) and sn plugin (`sn/`) ship from the same
   marketplace today. sn provides Serena + Context7 MCP tools; nx
   provides the nexus stack (T1/T2/T3, RDR lifecycle skills, beads
   integration, hook framework). Plugins are loaded independently;
@@ -134,12 +134,12 @@ re-implement the JSON-envelope contract from scratch.
 ### Technical Environment
 
 In scope:
-- `nx/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py`
+- `conexus/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py`
   (moves to sn)
-- `nx/hooks/scripts/routing/_lib.py` (stays in nx; becomes the
+- `conexus/hooks/scripts/routing/_lib.py` (stays in nx; becomes the
   framework other plugins import or vendor)
-- `nx/hooks/scripts/routing/registry.yaml` (loses the grep rule entry)
-- `nx/hooks/hooks.json` (loses the grep PreToolUse registration)
+- `conexus/hooks/scripts/routing/registry.yaml` (loses the grep rule entry)
+- `conexus/hooks/hooks.json` (loses the grep PreToolUse registration)
 - `sn/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py`
   (new home)
 - `sn/hooks/scripts/routing/registry.yaml` (new file)
@@ -175,7 +175,7 @@ without sn it would dead-end the user.
   it solves the symptom not the cause.
 - The two other RDR-121 rules are correctly placed:
   `phase_review_close_requires_gate` depends on
-  `/nx:phase-review-gate` (an nx-shipped skill) → nx owns it.
+  `/conexus:phase-review-gate` (an nx-shipped skill) → nx owns it.
   `git_add_all_redirects_to_explicit_paths` enforces a generic git
   discipline; it has no plugin-specific redirect target → nx is a
   reasonable default home.
@@ -198,7 +198,7 @@ without sn it would dead-end the user.
 - [~] **A2**: **A hook in plugin Y can import a Python module from
   plugin X at runtime.** **Status**: PARTIALLY REFUTED (High
   confidence on the constraint, Medium on the chosen mitigation).
-  **Method**: Source Search of `nx/hooks/scripts/_run_python_hook.sh`.
+  **Method**: Source Search of `conexus/hooks/scripts/_run_python_hook.sh`.
   **Evidence**: T2 entry `125-research-A2`. The wrapper selects
   system `python3.13` / `python3.12` directly (`for py in
   python3.13 python3.12; do command -v "$py" && exec "$py" "$@";
@@ -210,7 +210,7 @@ without sn it would dead-end the user.
   under a system python with no `conexus` venv on `sys.path`.
   **Cross-plugin import options surveyed:**
   1. Relative-path traversal from sn's `$CLAUDE_PLUGIN_ROOT` up to
-     `~/.claude/plugins/cache/nexus-plugins/nx/<version>/hooks/scripts/routing/_lib.py`.
+     `~/.claude/plugins/cache/nexus-plugins/conexus/<version>/hooks/scripts/routing/_lib.py`.
      Fragile: version selection is implicit; marketplaces upgrade
      independently.
   2. Vendor `_lib.py` in sn with a CI byte-equality check. Small
@@ -228,13 +228,13 @@ without sn it would dead-end the user.
   budget constraint, leaving vendoring as the best of the imperfect
   options. The drift risk is mitigated, not eliminated, by a
   `tests/test_routing_lib_drift.py` byte-equality test: any
-  divergence between `nx/hooks/scripts/routing/_lib.py` and
+  divergence between `conexus/hooks/scripts/routing/_lib.py` and
   `sn/hooks/scripts/routing/_lib.py` fails CI loudly. The framework
   contract is frozen per RDR-121 § Locked Contracts; the rate of
   legitimate changes is low.
   **Enforcement perimeter (gate critique fix-in-place):** the
   byte-equality test runs in the nexus monorepo CI pipeline.
-  Because `nx/` and `sn/` both live in `/Users/hal.hildebrand/git/nexus/`
+  Because `conexus/` and `sn/` both live in `/Users/hal.hildebrand/git/nexus/`
   and ship through the same release pipeline (4.32.x, 4.33.0, ...
   publish both plugins from the same tag), an sn-side modification
   to `_lib.py` is caught by the same test that catches an nx-side
@@ -275,7 +275,7 @@ needs no separate verification.
      entry that points at the new script path.
    - Delete the script + registry entry + hooks.json entry from nx.
    - Add `tests/test_routing_lib_drift.py`: asserts byte-equality
-     between `nx/hooks/scripts/routing/_lib.py` and
+     between `conexus/hooks/scripts/routing/_lib.py` and
      `sn/hooks/scripts/routing/_lib.py`. Any divergence fails CI.
    - Update `tests/test_routing_grep_for_symbols.py` to point at the
      new sn-side script path.
@@ -283,7 +283,7 @@ needs no separate verification.
      back-reference to RDR-125.
 
 2. **P2 Convention**: document the ownership rule in
-   `nx/hooks/scripts/routing/README.md` AND in
+   `conexus/hooks/scripts/routing/README.md` AND in
    `sn/hooks/scripts/routing/README.md` (new file). The rule: "If
    your redirect message names a `mcp__plugin_<owner>_*` tool, the
    hook lives in the `<owner>` plugin. The framework (`_lib.py`) is
@@ -391,9 +391,9 @@ landing:
 - `sn/hooks/scripts/routing/registry.yaml` (new)
 - `sn/hooks/scripts/routing/README.md` (new)
 - `sn/hooks/hooks.json` (extended with PreToolUse Bash matcher)
-- `nx/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py` (deleted)
-- `nx/hooks/scripts/routing/registry.yaml` (rule entry removed)
-- `nx/hooks/hooks.json` (matcher entry removed)
+- `conexus/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py` (deleted)
+- `conexus/hooks/scripts/routing/registry.yaml` (rule entry removed)
+- `conexus/hooks/hooks.json` (matcher entry removed)
 - `tests/test_routing_lib_drift.py` (new — byte-equality guard)
 - `tests/test_routing_registry_aggregate_cap.py` (new — refuses to
   commit when union of plugin registries exceeds 4 PreToolUse:Bash
@@ -405,7 +405,7 @@ landing:
 
 ### Phase 2: Convention (folded into P1's PR)
 
-`nx/hooks/scripts/routing/README.md` + new
+`conexus/hooks/scripts/routing/README.md` + new
 `sn/hooks/scripts/routing/README.md` document the ownership rule and
 the vendor-with-byte-equality pattern.
 
@@ -434,7 +434,7 @@ The RDR is validated when:
 
 ## Finalization Gate
 
-To be run before acceptance. See `/nx:rdr-gate`.
+To be run before acceptance. See `/conexus:rdr-gate`.
 
 ## References
 
@@ -454,7 +454,7 @@ To be run before acceptance. See `/nx:rdr-gate`.
   (id=1384) and `125-research-A2` (id=1385). Chosen mechanism:
   vendor `_lib.py` with byte-equality CI guard.
 - 2026-05-20: gate-driven fix-in-place. Two Significant findings
-  from `/nx:rdr-gate 125` substantive-critic pass folded in:
+  from `/conexus:rdr-gate 125` substantive-critic pass folded in:
   (1) A3 enforcement perimeter scoped to monorepo development
   model (symmetric guard within the current nexus monorepo; would
   become one-directional if nx + sn ever split into separate

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-125 byte-equality guard against ``_lib.py`` drift between plugins.
 
-The routing-hook framework (``nx/hooks/scripts/routing/_lib.py``) is
+The routing-hook framework (``conexus/hooks/scripts/routing/_lib.py``) is
 vendored into each plugin that ships a routing rule. The clean import
 path is structurally blocked (RDR-125 § A2): hook scripts run under a
 system ``python3.12`` / ``python3.13`` interpreter with no
@@ -40,13 +40,13 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent
 # path lives in nx; vendored copies must be byte-identical.
 _VENDORED_FILES: tuple[tuple[pathlib.Path, tuple[pathlib.Path, ...]], ...] = (
     (
-        REPO_ROOT / "nx" / "hooks" / "scripts" / "routing" / "_lib.py",
+        REPO_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "_lib.py",
         (
             REPO_ROOT / "sn" / "hooks" / "scripts" / "routing" / "_lib.py",
         ),
     ),
     (
-        REPO_ROOT / "nx" / "hooks" / "scripts" / "_run_python_hook.sh",
+        REPO_ROOT / "conexus" / "hooks" / "scripts" / "_run_python_hook.sh",
         (
             REPO_ROOT / "sn" / "hooks" / "scripts" / "_run_python_hook.sh",
         ),

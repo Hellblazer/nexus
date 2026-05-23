@@ -230,13 +230,13 @@ def test_canonical_dimensions_dedup_collision_names_both_sources() -> None:
     )
 
     loader = PlanTemplateLoader()
-    loader.add(_full_template(), source="nx/plans/builtin/research.yml")
+    loader.add(_full_template(), source="conexus/plans/builtin/research.yml")
 
     with pytest.raises(PlanTemplateDuplicateError) as excinfo:
         loader.add(_full_template(), source=".nexus/plans/research-override.yml")
 
     msg = str(excinfo.value)
-    assert "nx/plans/builtin/research.yml" in msg
+    assert "conexus/plans/builtin/research.yml" in msg
     assert ".nexus/plans/research-override.yml" in msg
 
 
@@ -273,14 +273,14 @@ def test_loader_distinct_dimensions_coexist() -> None:
 
 
 def test_dimensions_registry_ships_required_keys() -> None:
-    """``nx/plans/dimensions.yml`` registers at least the five canonical
+    """``conexus/plans/dimensions.yml`` registers at least the five canonical
     dimensions used by the meta-seeds (verb, scope, strategy + 2 more
     to cover specialisation axes)."""
     from pathlib import Path
 
     import yaml
 
-    path = Path(__file__).resolve().parents[1] / "nx" / "plans" / "dimensions.yml"
+    path = Path(__file__).resolve().parents[1] / "conexus" / "plans" / "dimensions.yml"
     assert path.exists(), f"missing {path}"
     data = yaml.safe_load(path.read_text())
     assert isinstance(data, dict), "dimensions.yml must be a mapping"

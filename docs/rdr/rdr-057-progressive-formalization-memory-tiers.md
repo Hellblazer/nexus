@@ -173,7 +173,7 @@ RDR-062 split the monolithic MCP server into `nexus` (14 core tools) and `nexus-
 
 - **Phase 1c** (promote feedback): `scratch_manage` in `mcp/core.py` calls `t1.promote()` at line 783. When `promote()` returns a `PromotionReport`, `scratch_manage` renders it in its response string. No catalog-server involvement.
 - **Phase 3a** (contradiction flag): `search` in `mcp/core.py` calls `search_cross_corpus()`. Results with `_contradiction_flag` metadata render inline. No catalog-server involvement.
-- **Phase 1a** (`formalizes` link type): `link` tool on the catalog server accepts free-form link types — `formalizes` works today with zero code changes. Agents call `mcp__plugin_nx_nexus-catalog__link(link_type="formalizes")`.
+- **Phase 1a** (`formalizes` link type): `link` tool on the catalog server accepts free-form link types — `formalizes` works today with zero code changes. Agents call `mcp__plugin_conexus_nexus-catalog__link(link_type="formalizes")`.
 
 Net: the server split is transparent to RDR-057. No design changes needed.
 

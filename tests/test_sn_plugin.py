@@ -97,8 +97,22 @@ class TestSnMarketplace:
         assert "sn" in names
 
     def test_sn_source_path(self, marketplace: dict) -> None:
+        """nexus-mkj6u: source is now the git-subdir object form with tag
+        pinning. The plugin tree lives at `sn/` inside the repo; the
+        marketplace.json source declares that via `path: "sn"` plus
+        `ref: "v<version>"` pinning."""
         sn_entry = next(p for p in marketplace["plugins"] if p["name"] == "sn")
-        assert sn_entry["source"] == "./sn"
+        source = sn_entry["source"]
+        assert isinstance(source, dict), (
+            f"sn source must be the object form (git-subdir), got {source!r}"
+        )
+        assert source["source"] == "git-subdir"
+        assert source["path"] == "sn"
+        assert source["url"] == "https://github.com/Hellblazer/nexus.git"
+        # ref is pinned in lock-step with the version field; the
+        # source-ref-matches-pyproject parity check enforces the exact
+        # value (see tests/test_plugin_structure.py::TestMarketplaceVersion).
+        assert source.get("ref", "").startswith("v")
 
     def test_sn_has_version(self, marketplace: dict) -> None:
         sn_entry = next(p for p in marketplace["plugins"] if p["name"] == "sn")
@@ -155,7 +169,7 @@ class TestSnHookOutput:
 
         Plain stdout was the prior shape; the JSON envelope is the
         documented schema and prevents silent drop on parser tightening.
-        Mirrors nx/hooks/scripts/subagent-start.sh (commit 68854ca).
+        Mirrors conexus/hooks/scripts/subagent-start.sh (commit 68854ca).
         """
         envelope = json.loads(hook_envelope)
         assert "hookSpecificOutput" in envelope

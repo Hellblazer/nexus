@@ -11,7 +11,7 @@ import yaml
 import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
-PLUGIN_DIR = REPO_ROOT / "nx"
+PLUGIN_DIR = REPO_ROOT / "conexus"
 AGENTS_DIR = PLUGIN_DIR / "agents"
 SHARED_DIR = AGENTS_DIR / "_shared"
 SKILLS_DIR = PLUGIN_DIR / "skills"
@@ -487,7 +487,7 @@ class TestHooks:
         )
 
     def test_plugin_json_declares_python_engine(self) -> None:
-        """nx/.claude-plugin/plugin.json must declare engines.python so the
+        """conexus/.claude-plugin/plugin.json must declare engines.python so the
         Python ≥3.12 requirement is discoverable from the plugin manifest,
         not just from the runtime guards in each hook script.
         """
@@ -588,6 +588,85 @@ class TestMarketplaceVersion:
         for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
             assert plugin.get("version", "") == pv, \
                 f"marketplace.json '{plugin['name']}' version != pyproject.toml {pv!r}"
+
+    def test_marketplace_source_ref_matches_pyproject(self) -> None:
+        """nexus-mkj6u: marketplace.json plugins[].source.ref must match
+        pyproject.toml version. Pinning the plugin source to a tag (rather
+        than relative-path + main HEAD) decouples main commits from
+        marketplace publication — installed plugins stay at the pinned tag
+        until both ``version`` AND ``source.ref`` are bumped together at
+        release time. CI enforces parity so a partial bump (e.g. version
+        but not source.ref) can't ship.
+        """
+        pv = self._pyproject_version()
+        expected_ref = f"v{pv}"
+        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+            source = plugin.get("source")
+            assert isinstance(source, dict), (
+                f"marketplace.json '{plugin['name']}' source must be the "
+                f"object form (git-subdir with ref pinning), got {source!r}"
+            )
+            assert source.get("source") == "git-subdir", (
+                f"marketplace.json '{plugin['name']}' source.source must be "
+                f"'git-subdir' for tag-pinned releases, got {source.get('source')!r}"
+            )
+            assert source.get("ref") == expected_ref, (
+                f"marketplace.json '{plugin['name']}' source.ref {source.get('ref')!r} "
+                f"!= pyproject.toml v{pv} (expected {expected_ref!r}). Bump source.ref "
+                f"in the same release commit that bumps the version field."
+            )
+
+    def test_plugin_source_path_exists_in_repo(self) -> None:
+        """nexus-mkj6u: marketplace.json plugins[].source.path must point
+        at an actual directory in the repo. Catches typos and orphaned
+        entries before they ship.
+
+        (Pattern from the global_directives marketplace-pinned-source-
+        playbook; adopted from the parallel palinex implementation.)
+        """
+        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+            source = plugin["source"]
+            assert isinstance(source, dict), "covered by ref test"
+            path = source.get("path", "")
+            plugin_dir = REPO_ROOT / path
+            assert plugin_dir.is_dir(), (
+                f"marketplace.json '{plugin['name']}' source.path "
+                f"{path!r} -> {plugin_dir} does not exist or is not a directory"
+            )
+
+    def test_plugin_source_path_has_plugin_json(self) -> None:
+        """Each plugin's source.path subdir must contain its own
+        .claude-plugin/plugin.json. CLAUDE_PLUGIN_ROOT resolves there
+        at runtime."""
+        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+            source = plugin["source"]
+            assert isinstance(source, dict)
+            manifest = REPO_ROOT / source.get("path", "") / ".claude-plugin" / "plugin.json"
+            assert manifest.exists(), (
+                f"marketplace.json '{plugin['name']}' source.path is missing "
+                f"its own .claude-plugin/plugin.json at {manifest}"
+            )
+
+    def test_plugin_source_sha_is_well_formed_when_present(self) -> None:
+        """Optional `source.sha` for tag-force-push protection. When
+        present, must be a 40-character lowercase hex string (full
+        git SHA-1). Empty or absent is allowed; partial / uppercase
+        / non-hex is rejected to keep the field useful as an integrity
+        check."""
+        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+            source = plugin["source"]
+            sha = source.get("sha")
+            if not sha:
+                continue
+            assert isinstance(sha, str), f"source.sha must be a string, got {type(sha).__name__}"
+            assert len(sha) == 40, (
+                f"marketplace.json '{plugin['name']}' source.sha must be 40 chars "
+                f"(full git SHA-1), got {len(sha)}: {sha!r}"
+            )
+            assert all(c in "0123456789abcdef" for c in sha), (
+                f"marketplace.json '{plugin['name']}' source.sha must be "
+                f"lowercase hex, got: {sha!r}"
+            )
 
     def test_uv_lock_version_matches_pyproject(self) -> None:
         pv = self._pyproject_version()
@@ -697,7 +776,7 @@ class TestRdr080StubAgents:
         content = stub.read_text()
         for deleted in _DELETED_AGENTS:
             assert deleted not in content, (
-                f"nx/agents/{agent_name}.md references deleted agent '{deleted}'. "
+                f"conexus/agents/{agent_name}.md references deleted agent '{deleted}'. "
                 "Stubs must redirect to MCP tools only (RDR-080 SC-4)."
             )
 
@@ -705,7 +784,7 @@ class TestRdr080StubAgents:
     def test_stub_references_mcp_tool(self, agent_name: str) -> None:
         stub = PLUGIN_DIR / "agents" / f"{agent_name}.md"
         content = stub.read_text()
-        assert "mcp__plugin_nx_nexus__" in content, (
-            f"nx/agents/{agent_name}.md must reference an MCP tool "
-            "(mcp__plugin_nx_nexus__*) as its redirect target (RDR-080)."
+        assert "mcp__plugin_conexus_nexus__" in content, (
+            f"conexus/agents/{agent_name}.md must reference an MCP tool "
+            "(mcp__plugin_conexus_nexus__*) as its redirect target (RDR-080)."
         )
