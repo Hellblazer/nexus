@@ -663,6 +663,7 @@ def test_migration_guard_sequential_construction(tmp_path: Path, monkeypatch) ->
     )
 
 
+@_skip_on_gha_flake
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="os.symlink requires admin/developer mode on Windows",

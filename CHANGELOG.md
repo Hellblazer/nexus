@@ -6,6 +6,219 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.4] - 2026-05-23
+
+### Plugins — tool/skill invocation discipline restored
+
+Two compounding upstream changes have collapsed ambient tool and skill
+invocation for plugin-heavy users:
+
+- **Claude Code v2.1.69** extended MCP-style schema-deferral to
+  built-in tools. Out-of-sight tools don't get invoked. Reported in
+  [anthropics/claude-code#31002][cc-31002].
+- **Opus 4.7** (April 2026 model card, [whats-new-claude-4-7][opus47])
+  reduced default tool calls and subagent dispatch, and made
+  instruction-following more literal. Soft hints ("if a skill plausibly
+  applies, invoke it") no longer survive.
+
+Mitigations in this release:
+
+- `nx/.mcp.json` and `sn/.mcp.json` set `alwaysLoad: true` on all five
+  MCP servers (`sequential-thinking`, `nexus`, `nexus-catalog`,
+  `serena`, `context7`). Claude Code v2.1.121+ honours this per-server
+  flag to skip tool-search deferral. Tradeoff: added session-start
+  context in exchange for guaranteed tool visibility.
+- The two routing-gate skills (`nx/skills/using-nx-skills`,
+  `nx/skills/plan-first`) now use MUST-form imperatives in their
+  descriptions and bodies. The `"Use when"` prefix convention enforced
+  by `TestSkillDescriptionCSO` is preserved.
+
+If you observe specific MCP tools or skills still being skipped after
+upgrading Claude Code, file an issue and we'll widen the audit.
+
+[cc-31002]: https://github.com/anthropics/claude-code/issues/31002
+[opus47]: https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7
+
+## [4.34.3] - 2026-05-22
+
+Documentation-only release. Sweep of user-facing surfaces for the
+RDR-120 storage substrate shift that shipped in 4.34.0/4.34.1/4.34.2.
+
+Pre-audit the docs were silent on the daemon model — README,
+getting-started, cli-reference, contributing, configuration, and
+mcp-servers had zero mentions. New users hitting
+``T2DaemonNotReachableError`` on first install had no documentation
+to fall back on.
+
+This release closes the gap:
+
+- **README.md**: Quick Start includes ``nx daemon t2 install
+  --autostart``; at-a-glance table notes daemon-mediated storage;
+  CLI commands table gets an ``nx daemon`` row; Documentation
+  table cross-links Container Integration and Upgrading to 4.34.x.
+- **docs/getting-started.md**: New "First-time setup: the T2
+  daemon" section between Install and Update. Three new
+  Troubleshooting entries (``T2DaemonNotReachableError``,
+  ``T2SchemaVersionMismatchError``, the launchctl-bootout-race
+  for "discovery file not found") with copy-paste recovery commands.
+- **docs/cli-reference.md**: Complete ``nx daemon`` section
+  documenting all 11 subcommands (t2 + t3 start/stop/status,
+  ensure-running, install/uninstall --autostart), with flags,
+  exit codes, log paths, and the LaunchAgent / systemd unit
+  filenames.
+- **docs/configuration.md**: New "Daemon environment variables"
+  section covering ``NX_T2_ADDR`` / ``NX_T2_SOCK`` / ``NX_T3_ADDR``
+  / ``NX_LOCAL`` with operator-facing semantics and discovery-file
+  fallback rules.
+- **docs/storage-tiers.md**: Rewrote the canonical tier table to
+  add a Daemon column and Transport column; added "one
+  arbitrator per tier" callout explaining the multi-process
+  arbitration model.
+- **docs/mcp-servers.md**: Substrate-dependency callout right
+  after the two-servers intro.
+- **docs/contributing.md**: Development Setup updated with the
+  daemon-install step + "hacking on the daemon itself" foreground
+  workflow.
+- **nx/README.md**: SessionStart-hook explainer + cross-link to
+  Container Integration.
+- **docs/migration/upgrading-to-4.34.md**: NEW comprehensive
+  upgrade guide. TL;DR is one command; full explainer covers
+  what changed, what happens if you skip the upgrade step,
+  container/Cowork integration, schema-version handshake,
+  empirical validation receipts, and rollback procedure.
+- **docs/migration/README.md**: split into "Active operator-facing
+  guides" and "Historical forensic records" sections.
+
+No code changes. Existing 4.34.2 installations continue working;
+this release exists to notify operators that the substrate-shift
+docs are now comprehensive.
+
+## [4.34.2] - 2026-05-22
+
+UX patch release. Closes the daemon-not-running cliff that 4.34.1
+introduced: a fresh `pip install conexus` + `/plugin install nx`
+now produces a working substrate on first session without any
+manual `nx daemon t2 start` incantation.
+
+### Added
+
+- `nx daemon t2 ensure-running` (nexus-qnrvn): idempotent
+  daemon-spawn helper. Silent no-op if a T2 daemon is already
+  running on the named config_dir; otherwise spawns one in the
+  background and polls the discovery file until reachable
+  (or `--timeout`, default 5s, expires with exit 1 + a log-
+  pointer message). The probe is `os.kill(pid, 0)` against the
+  discovery-file PID, so stale discovery files left behind by
+  crashed daemons trigger a fresh spawn rather than a false-
+  positive.
+
+- nx plugin `SessionStart` hook runs the new
+  `ensure-running --quiet` on every Claude Code session start
+  (`startup|resume|clear|compact`). This closes the
+  daemon-not-running cliff that 4.34.1 introduced: a fresh
+  `pip install conexus` + `/plugin install nx` now produces a
+  working substrate on first session without any manual
+  daemon-start incantation.
+
+For users who want a durable always-running daemon independent
+of Claude Code (recommended for any host with regular nx use):
+`nx daemon t2 install --autostart` writes a LaunchAgent (macOS)
+or systemd user-unit (Linux) with `KeepAlive=true` /
+`Restart=on-failure`. This install path was already shipped in
+4.34.0; 4.34.1 documents it explicitly in
+`docs/container-integration.md`.
+
+### Docs
+
+- `docs/container-integration.md` (nexus-ai5ic): operator-facing
+  guide covering the three container-to-host connection paths
+  (TCP loopback, UDS mount, operator-side forward) + the Claude
+  Cowork SDK-transport pattern + a diagnostic recipe table.
+  Linked from `docs/architecture.md` § Storage tiers.
+
+### Process
+
+- Moratorium-lift criterion superseded (nexus-57pwo): the
+  RDR-120 §Approach Phase 6 "30 days on main" calendar window is
+  replaced by an empirical stress-validation matrix. Five
+  scenario scripts at `tests/stress/substrate_validation/` cover
+  multi-container fan-in, mixed-workload concurrency, hard-kill
+  recovery under load, schema-handshake mismatch under load, and
+  catalog rebuild under T2 contention. All five passed
+  2026-05-22; the substrate is empirically validated and
+  consumer RDRs may file regardless of calendar date.
+- `test_migration_guard_path_normalization` marked
+  `@_skip_on_gha_flake` — same nexus-9eaz family GHA-runner
+  pressure flake its two siblings already wear. Passes locally;
+  opt back in with `NEXUS_RUN_FLAKY_TESTS=1`.
+
+## [4.34.1] - 2026-05-22
+
+Patch release. RDR-120 P6 follow-up (nexus-w6txl): the user-facing
+``nx memory put / get / search / list / delete / expire / promote``
+CLI commands now route through ``T2Client`` and the running T2
+daemon instead of opening the SQLite file directly.
+
+### Architecture (RDR-120 follow-up)
+
+4.34.0 shipped the substrate split (daemon-mediated storage) but
+left the user-facing CLI memory commands on direct ``T2Database``
+opens with ``# epsilon-allow`` annotations. The lint count went to
+zero but the daemon's runtime arbitration was only exercised by
+the MCP server path. The container smoke surfaced the gap:
+``nx memory put`` from a Docker container with ``NX_T2_ADDR`` set
+silently wrote to a container-local SQLite file (row id=1) and
+never touched the host daemon.
+
+This release closes the gap.
+
+- New ``nexus.commands._helpers.t2_handle()`` context manager
+  returns a ``T2Client`` connected to the running T2 daemon.
+  Raises ``T2DaemonNotReachableError`` with the
+  ``nx daemon t2 start`` operator hint if the daemon isn't
+  running — same UX as T3's daemon-required model.
+- ``src/nexus/commands/memory.py``: every command migrated from
+  ``T2Database(default_db_path())`` to ``t2_handle()``. Call sites
+  use ``.memory.<method>`` (works identically against ``T2Client``
+  and ``T2Database``).
+- Cross-domain cascades (memory + taxonomy on ``delete``,
+  memory + telemetry on ``expire``) now run client-side via two
+  store-level calls. Pre-migration, the ``T2Database.delete``
+  facade did the cascade in-process; ``T2Client.database`` doesn't
+  expose the facade, so the CLI drives both stores explicitly.
+
+### Validated end-to-end
+
+Container ↔ host shared state via the CLI:
+
+```
+# Host
+$ nx daemon t2 start
+$ # daemon listens on 127.0.0.1:<port>
+
+# Container (python:3.13-slim + pip install conexus==4.34.1)
+$ NX_T2_ADDR=host.docker.internal:<port> \
+    nx memory put -p nexus_rdr -t example "from container"
+Stored: nexus_rdr/example (id=1443)            ← host id-space
+
+# Host
+$ nx memory get -p nexus_rdr -t example
+from container
+```
+
+Row IDs land in the host's id-space (vs. id=1 in the pre-fix
+container-local DB), confirming the write reached the host's
+nexus.db via the daemon.
+
+### Out of scope (still open follow-ups)
+
+- ``nx plan repair *`` (uses raw ``execute()`` — needs separate
+  RPC method additions for the migration-helper-style backfills).
+- ``nx tier-status`` (read-only diagnostic; low priority).
+- Operator/debug paths (``nx upgrade``, ``nx doctor``, the
+  session-end launcher, ``nx health`` PRAGMA integrity_check)
+  stay on direct ``T2Database`` with ``# epsilon-allow`` — those
+  legitimately must work when the daemon is offline.
 ## [4.34.0] - 2026-05-22
 
 RDR-120 Storage Substrate Split — the full P0 → P6 substrate-only

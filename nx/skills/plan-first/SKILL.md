@@ -1,20 +1,16 @@
 ---
 name: plan-first
-description: Use when starting any retrieval task — the gate that tries plan_match first, executes via plan_run if a match clears the threshold, and falls through to /nx:query only on a miss
+description: Use when starting any retrieval task — you MUST call `mcp__plugin_nx_nexus__plan_match` first; if a match clears the threshold you MUST execute it via `mcp__plugin_nx_nexus__plan_run`. Falling through to `/nx:query` is permitted only on a confirmed miss. Skipping this gate is a defect.
 effort: low
 ---
 
 # plan-first
 
-**Gate skill.** Every retrieval-shaped task starts here. The plan
-library exists so agents don't re-derive pipelines that have already
-been authored; this skill is the discipline that enforces it.
+**Hard gate.** Every retrieval-shaped task starts here. **You MUST call `plan_match` before decomposing or dispatching anything else.** The plan library exists so agents don't re-derive pipelines that have already been authored; this skill is the enforcement, not a suggestion.
 
 ## Rule
 
-Before decomposing any retrieval task, call `plan_match` first. If a
-match clears `min_confidence`, execute the returned plan via
-`plan_run`. Only dispatch `/nx:query` when no plan matches.
+Before decomposing any retrieval task, you MUST call `mcp__plugin_nx_nexus__plan_match` first. If a match clears `min_confidence`, you MUST execute the returned plan via `mcp__plugin_nx_nexus__plan_run`. Dispatching `/nx:query` without first checking is a defect.
 
 ## Flow
 

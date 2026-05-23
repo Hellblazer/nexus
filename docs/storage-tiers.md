@@ -4,12 +4,14 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 
 **Two access paths**: Humans use the `nx` CLI. Agents use MCP tools (`mcp__plugin_nx_nexus__*`) which call the same Python APIs directly — no Bash dependency. MCP tools that return lists (`search`, `store_list`, `memory_search`) are paged — pass `offset=N` for subsequent pages. See [nx/README.md](../nx/README.md#mcp-servers) for MCP tool details.
 
-| Tier | Storage | Network | Durability | Use |
-|------|---------|---------|------------|-----|
-| T1 -- scratch | ChromaDB HTTP server (per-session) | Localhost only | Session only | Working notes, hypotheses |
-| T2 -- memory | SQLite + FTS5 (WAL) | None | Survives restarts | Per-project notes, session context |
-| T3 -- knowledge | Local ChromaDB (default) or ChromaDB Cloud + Voyage AI | Local: none / Cloud: required | Permanent | Semantic search, indexed code/docs |
-| Catalog | Git-backed JSONL + SQLite | None (optional git remote) | Permanent | Document registry, typed link graph, provenance |
+**One arbitrator per tier**: Since conexus 4.34.0 (RDR-120), both T2 and (local-mode) T3 are wrapped in dedicated daemon processes. Every consumer — host CLI, the MCP server, multiple Claude Code sessions, Claude Cowork agents (via SDK transport), dev containers (via TCP loopback or UDS mount) — routes through the same daemon, so the underlying SQLite / ChromaDB instance has exactly one writer. Start the daemons once via `nx daemon t2 install --autostart` (and `nx daemon t3 install --autostart` in local mode); the Claude Code plugin's SessionStart hook also auto-spawns them on each session start.
+
+| Tier | Storage | Daemon | Transport | Durability | Use |
+|------|---------|--------|-----------|------------|-----|
+| T1 -- scratch | ChromaDB EphemeralClient (per-MCP-process) | none | Process-local | Session only | Working notes, hypotheses |
+| T2 -- memory | SQLite + FTS5 (WAL) | T2 daemon (`nx daemon t2`) | UDS + 127.0.0.1 loopback | Survives restarts | Per-project notes, session context |
+| T3 -- knowledge | Local ChromaDB or ChromaDB Cloud + Voyage AI | local: T3 daemon; cloud: direct HTTPS | local: localhost / cloud: required | Permanent | Semantic search, indexed code/docs |
+| Catalog | T2-store-backed (eighth domain store; RDR-120 P5.A) + events.jsonl (canonical) | shared with T2 daemon | UDS + 127.0.0.1 loopback | Permanent | Document registry, typed link graph, provenance |
 
 The catalog sits alongside T3 as a metadata layer. While T3 stores document *content* as embeddings, the catalog stores document *metadata* and *relationships*. See [Document Catalog](catalog.md).
 

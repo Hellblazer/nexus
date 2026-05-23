@@ -6,8 +6,33 @@
 git clone https://github.com/Hellblazer/nexus.git
 cd nexus
 uv sync
-scripts/reinstall-tool.sh   # install nx CLI (preserves optional extras)
-nx hooks install             # auto-index this repo on every commit
+scripts/reinstall-tool.sh           # install nx CLI (preserves optional extras)
+nx daemon t2 install --autostart    # T2 daemon at login (RDR-120, 4.34.0+)
+nx hooks install                     # auto-index this repo on every commit
+```
+
+The `nx daemon t2 install --autostart` step writes a LaunchAgent (macOS)
+or systemd user-unit (Linux) so the T2 daemon starts at login and
+survives across dev-machine reboots. Without it the unit suite and
+many CLI commands fail loud with `T2DaemonNotReachableError`. For an
+explicit one-shot start, use `nx daemon t2 ensure-running` instead.
+
+If you're hacking on the daemon itself, you'll want to manually stop
+the LaunchAgent-managed instance and run `nx daemon t2 start` in the
+foreground:
+
+```bash
+launchctl bootout gui/$(id -u)/com.nexus.t2     # macOS
+# or
+systemctl --user stop nexus-t2.service          # Linux
+nx daemon t2 start                              # foreground, ^C to stop
+```
+
+After every conexus version bump (including local edits), restart the
+LaunchAgent-managed daemon so it picks up the new code:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.nexus.t2
 ```
 
 ## Running Tests

@@ -6,6 +6,58 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.4] - 2026-05-23
+
+### Restored tool/skill invocation discipline
+
+Tuning for Claude Code v2.1.69+ (built-in tool deferral) and Opus 4.7
+(literal instruction-following + reduced default tool calls). Without
+these changes, plugin-heavy users were seeing Serena, sequential-thinking,
+and nexus only fire when explicitly told.
+
+- `nx/.mcp.json`: added `"alwaysLoad": true` to `sequential-thinking`,
+  `nexus`, and `nexus-catalog`. Claude Code v2.1.121+ honours this per
+  server to skip tool-search deferral so schemas load eagerly.
+- `nx/skills/using-nx-skills/SKILL.md` and `nx/skills/plan-first/SKILL.md`:
+  rewrote descriptions and opening rules as MUST-form imperatives.
+  Opus 4.7 reads soft hints as suggestions; explicit "MUST" / "defect"
+  language survives the literalism shift. The `"Use when"` prefix
+  required by `tests/test_plugin_structure.py::TestSkillDescriptionCSO`
+  is preserved.
+
+References: [anthropics/claude-code#31002](https://github.com/anthropics/claude-code/issues/31002),
+[Opus 4.7 model card](https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7).
+
+## [4.34.3] - 2026-05-22
+
+Plugin version aligned with conexus 4.34.3 — documentation-only
+release. ``nx/README.md`` gains a SessionStart-hook explainer
+showing how the plugin auto-spawns the T2 daemon on every Claude
+Code session start, plus a cross-link to ``docs/container-integration.md``
+for the full multi-process / Claude Cowork integration story.
+
+No agent / skill / hook / MCP-server changes. See the conexus
+4.34.3 entry in the root CHANGELOG for the full doc-sweep details.
+
+## [4.34.2] - 2026-05-22
+
+Plugin SessionStart hook now runs
+`nx daemon t2 ensure-running --quiet --timeout=5` so the T2 daemon
+auto-spawns on every Claude Code session start. Closes the
+daemon-not-running cliff 4.34.1 introduced: fresh
+`pip install conexus` + `/plugin install nx` produces a working
+substrate on first session without any manual incantation.
+
+The hook is idempotent — when the daemon is already running (from
+`nx daemon t2 install --autostart` or a manual start) it's a
+silent no-op (~5ms).
+
+## [4.34.1] - 2026-05-22
+
+Plugin version aligned with conexus 4.34.1. No plugin-side changes;
+this is a substrate patch release fixing the CLI-vs-daemon gap
+that 4.34.0 left open. See the conexus 4.34.1 entry in the root
+CHANGELOG for the full RDR-120 P6 follow-up details.
 ## [4.34.0] - 2026-05-22
 
 Plugin version aligned with conexus 4.34.0. No plugin-side changes

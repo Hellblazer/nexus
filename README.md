@@ -17,7 +17,7 @@ The four-paragraph version is on the Tensegrity blog: [**How I actually use Nexu
 
 | | What you get |
 |---|---|
-| **Storage** | T1 ephemeral session scratch (in-memory ChromaDB) · T2 SQLite + FTS5 for memory / plans / taxonomy / telemetry · T3 ChromaDB persistent + Voyage AI in cloud mode, ONNX MiniLM in local mode |
+| **Storage** | T1 ephemeral session scratch (in-memory ChromaDB) · T2 SQLite + FTS5 for memory / plans / catalog / taxonomy / telemetry · T3 ChromaDB persistent + Voyage AI in cloud mode, ONNX MiniLM in local mode · daemon-mediated (RDR-120, 4.34.0+) so host CLI + Cowork agents + dev containers + the MCP server all share one arbitrated writer |
 | **Indexing** | Tree-sitter AST chunking (23 languages) · CCE prose chunking (`voyage-context-3`) · PDF auto-routing (Docling → MinerU → PyMuPDF) · git frecency scoring · automatic topic discovery via HDBSCAN |
 | **Search** | Semantic · keyword · hybrid · taxonomy-boosted · catalog-aware · plan-driven via `nx_answer`. Metadata filtering via `--where bib_year>=2024 --where chunk_type=table_page` and similar |
 | **Catalog** | Event-sourced (`events.jsonl` canonical, SQLite is a deterministic projection) · typed links (`cites`, `implements`, `supersedes`, …) · Tumbler addressing inspired by Ted Nelson's Xanadu |
@@ -53,14 +53,23 @@ nx taxonomy review                                  # accept, rename, merge, spl
 Requires Python 3.12–3.13 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv tool install conexus          # install the nx CLI
-nx doctor                        # verify installation
-nx index repo .                  # index your repo + discover topics (no API keys needed)
-nx search "what does X do"       # semantic search with topic grouping, fully local
-nx taxonomy status               # see discovered topics
+uv tool install conexus                  # install the nx CLI
+nx daemon t2 install --autostart         # register the T2 daemon (launchd / systemd)
+nx doctor                                # verify installation
+nx index repo .                          # index your repo + discover topics (no API keys needed)
+nx search "what does X do"               # semantic search with topic grouping, fully local
+nx taxonomy status                       # see discovered topics
 ```
 
 Update: `uv tool update conexus`
+
+Since 4.34.0 (RDR-120), persistent storage is daemon-mediated so the
+CLI, the Claude Code plugin's MCP server, and dev containers all
+share one arbitrated SQLite writer. `nx daemon t2 install --autostart`
+writes a LaunchAgent (macOS) or systemd user-unit (Linux) so the
+daemon starts at login and respawns on crash. The Claude Code plugin
+also auto-spawns the daemon on each session start, so it's a one-time
+setup. See [Container Integration](https://github.com/Hellblazer/nexus/blob/main/docs/container-integration.md) for the multi-process / container story.
 
 Works immediately with local ONNX embeddings: no accounts, no API keys. For higher-quality cloud embeddings (Voyage AI), see the [cloud setup instructions](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md#cloud-mode-optional).
 
@@ -144,6 +153,7 @@ The `nx` command provides direct access to all storage tiers, indexing, and sear
 | `nx taxonomy` | Topic taxonomy: discover, project across collections, review, merge, split |
 | `nx context` | Project context cache: topic map for agent cold-start acceleration |
 | `nx mineru` | MinerU server lifecycle (start/stop/status) for PDF extraction |
+| `nx daemon` | T2 / T3 daemon lifecycle: `start`, `stop`, `status`, `ensure-running`, and `install --autostart` (LaunchAgent on macOS, systemd user-unit on Linux). One-time setup; daemons persist across reboots. |
 
 Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md).
 
@@ -158,6 +168,8 @@ Full details: [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs
 | [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md) | File classification, chunking pipeline, frecency scoring |
 | [Configuration](https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md) | Config hierarchy, .nexus.yml, tuning parameters |
 | [Architecture](https://github.com/Hellblazer/nexus/blob/main/docs/architecture.md) | Module map, design decisions |
+| [Container Integration](https://github.com/Hellblazer/nexus/blob/main/docs/container-integration.md) | Daemon model, TCP / UDS / Claude Cowork SDK paths, diagnostic recipes |
+| [Upgrading to 4.34.x](https://github.com/Hellblazer/nexus/blob/main/docs/migration/upgrading-to-4.34.md) | RDR-120 substrate shift: one new command after upgrade, schema-handshake, container/Cowork integration |
 | [Contributing](https://github.com/Hellblazer/nexus/blob/main/docs/contributing.md) | Dev setup, testing, code style |
 | [How I actually use Nexus](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) | Blog overview: the substrate as a control surface for developers, teams, and agents |
 | [Installing Nexus](https://tensegrity.blog/2026/04/26/installing-nexus/) | Blog install walkthrough: prerequisites, CLI, plugin, short tour |

@@ -130,6 +130,28 @@ taxonomy:
 | `local_exclude_collections` | `["code__*"]` | Glob patterns for collections to skip in local mode. Cloud mode (Voyage embeddings) ignores this — set to `[]` to enable all collections locally. |
 | `collection_prefixes` | `["docs", "code", "knowledge", "rdr"]` | Prefix whitelist for `nx taxonomy validate-refs`. Extend this when your project adds a new user-facing collection prefix (e.g. `"custom"`). Internal-prefix collections (`taxonomy__*`, `plans__*`) are implementation-fixed and intentionally excluded. |
 
+## Daemon environment variables
+
+Since conexus 4.34.0 (RDR-120 storage substrate split), the CLI and
+MCP server route through the T2 and (local-mode) T3 daemons. The
+daemons publish their address via discovery files at
+`~/.config/nexus/t2_addr.<uid>` and `t3_addr.<uid>`; clients also
+honour these env-var overrides:
+
+| Variable | Effect | Default |
+|----------|--------|---------|
+| `NX_T2_ADDR` | TCP `host:port` for the T2 daemon (e.g. `host.docker.internal:55459`). Used by dev containers reaching the host's loopback. | discovery file |
+| `NX_T2_SOCK` | UDS path for the T2 daemon (Linux-only when bind-mounted from the host into a container). Mutually exclusive with `NX_T2_ADDR`. | discovery file |
+| `NX_T3_ADDR` | TCP `host:port` for the local-mode T3 daemon. Cloud-mode T3 ignores this. | discovery file |
+| `NX_LOCAL` | Force local-mode T3 (ONNX MiniLM) even when cloud credentials exist. Local mode requires the T3 daemon. | unset (cloud mode if credentials present) |
+
+When all env vars are unset, the client falls back to the discovery
+file. If no daemon is reachable, the CLI raises
+`T2DaemonNotReachableError` with a hint to run
+`nx daemon t2 ensure-running` or `install --autostart`. See
+[Container Integration](container-integration.md) for the full
+operator-facing matrix of transport choices per platform.
+
 ## Tuning Parameters
 
 The `[tuning]` section in `~/.config/nexus/config.yml` controls search scoring, chunking, and timeout behavior. All values have sensible defaults — only override what you need.
