@@ -808,6 +808,79 @@ def _check_catalog(cat: "Catalog | None", cat_path: "Path") -> list[HealthResult
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 
 
+def _check_credential_persistence() -> list[HealthResult]:
+    """nexus-m7evs: warn when cloud credentials live in shell env only.
+
+    GUI-spawned ``nx-mcp`` (Claude Desktop, Cowork SDK bridge) inherits
+    launchd's environment, NOT the user's interactive shell. If
+    ``CHROMA_API_KEY`` / ``VOYAGE_API_KEY`` are in ``.zshrc`` exports
+    but never persisted via ``nx config set``, the GUI-spawned
+    subprocess sees them as absent, ``is_local_mode()`` flips to True,
+    and T3 dispatch goes to the daemon path that fails opaquely.
+
+    This check runs on the CLI side (where shell env IS visible) and
+    surfaces the gap before the GUI-spawn path hits it. Non-fatal: a
+    warning, not a blocker, because the CLI itself works fine.
+
+    Returns an empty list when the configuration is consistent (both
+    persisted, neither set, or no env exports).
+    """
+    from nexus.config import _global_config_path
+
+    cloud_keys = ("chroma_api_key", "voyage_api_key", "chroma_tenant", "chroma_database")
+    env_names = {
+        "chroma_api_key": "CHROMA_API_KEY",
+        "voyage_api_key": "VOYAGE_API_KEY",
+        "chroma_tenant": "CHROMA_TENANT",
+        "chroma_database": "CHROMA_DATABASE",
+    }
+
+    # Read config.yml directly; we want to see file state independent of env.
+    file_creds: dict[str, str] = {}
+    cfg_path = _global_config_path()
+    if cfg_path.exists():
+        try:
+            import yaml
+            data = yaml.safe_load(cfg_path.read_text()) or {}
+            file_creds = data.get("credentials", {}) or {}
+        except Exception:
+            file_creds = {}
+
+    env_only: list[str] = []
+    for key in cloud_keys:
+        env_present = bool(os.environ.get(env_names[key], "").strip())
+        file_present = bool(str(file_creds.get(key, "")).strip())
+        if env_present and not file_present:
+            env_only.append(key)
+
+    if not env_only:
+        return []
+
+    # Surface the most-load-bearing pair first; chroma_tenant /
+    # chroma_database are derived/configuration rather than identity.
+    suggestions = [f"nx config set {key} \"${env_names[key]}\"" for key in env_only]
+    suggestions.append(
+        "Then quit and relaunch Claude Desktop so the next nx-mcp "
+        "spawn reads ~/.config/nexus/config.yml instead of empty env."
+    )
+
+    detail = (
+        f"{len(env_only)} credential(s) in shell env only: {', '.join(env_only)}. "
+        "GUI-spawned consumers (Claude Desktop, Cowork) cannot see "
+        "shell env vars and will misdetect cloud mode as local mode."
+    )
+
+    return [
+        HealthResult(
+            label="Credential persistence (GUI spawn)",
+            ok=False,
+            detail=detail,
+            fix_suggestions=suggestions,
+            fatal=False,
+        )
+    ]
+
+
 def run_health_checks() -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -819,6 +892,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
 
     results.extend(_check_python())
     results.extend(_check_cli_version())
+    results.extend(_check_credential_persistence())
 
     _local = is_local_mode()
     if _local:

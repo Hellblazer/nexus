@@ -14,6 +14,22 @@ SENTINEL_BEGIN = "# >>> nexus managed begin >>>"
 
 # ── Fixtures / helpers ──────────────────────────────────────────────────────
 
+
+@pytest.fixture(autouse=True)
+def _isolate_cloud_credentials_from_host_env(monkeypatch, tmp_path):
+    """nexus-m7evs: the credential-persistence health check reads
+    ``os.environ`` and ``~/.config/nexus/config.yml`` directly (not
+    through ``get_credential``) so it can detect env-vs-file divergence.
+    Tests that mock ``get_credential`` for other scenarios get the new
+    check piggy-backing on their fixtures. Strip the cloud credentials
+    from the test process env and point the config dir at a clean
+    tmp_path so the new check is silent unless a test explicitly opts in.
+    """
+    for env_var in ("CHROMA_API_KEY", "VOYAGE_API_KEY", "CHROMA_TENANT", "CHROMA_DATABASE"):
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+
+
 @pytest.fixture()
 def runner():
     return CliRunner()

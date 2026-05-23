@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fix: GUI-spawned `nx-mcp` misdetected cloud mode as local (nexus-m7evs)
+
+Cloud users whose `CHROMA_API_KEY` and `VOYAGE_API_KEY` lived only as
+shell exports in `.zshrc` saw `nx-mcp` fail with "T3 daemon not running"
+when launched by Claude Desktop or Cowork. Root cause: a GUI process
+launched by launchd does not inherit shell env, so `get_credential`
+returned empty strings and `is_local_mode()` flipped to True.
+
+Two surfaces of the fix:
+
+- `nx doctor` now reports a "Credential persistence (GUI spawn)" warning
+  when cloud credentials are present in shell env but absent from
+  `~/.config/nexus/config.yml`, with the four `nx config set` commands
+  needed to make them visible to GUI-spawned subprocesses.
+- `make_t3()`'s error path from `T3DaemonError` now self-explains the
+  credential persistence option in addition to the existing daemon
+  start hint, so the spawned-from-GUI failure mode is no longer opaque.
+
+The persisted-to-file path was always the recommended one; this fix
+turns the silent gap into a visible diagnostic.
+
 ## [4.34.5] - 2026-05-23
 
 ### New: `/nx:continuation` slash command
