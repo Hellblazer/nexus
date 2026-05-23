@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.5] - 2026-05-23
+
 ### New: `/nx:continuation` slash command
 
 Generates a paste-ready handoff prompt at session close. Captures
@@ -24,6 +26,27 @@ re-invocations append `-HHMM` so prior captures aren't overwritten.
 Mined from 122 instances of the continuation-prompt pattern across
 project sessions plus 9 canonical handoff files in `/tmp/`; the
 10-section structure is the empirical consensus shape.
+
+### Fix: `phase_review_close_requires_gate` no longer false-positives on implementation beads (GH #931)
+
+The `bd close` PreToolUse hook previously triggered on `\b(phase|review)\b`
+anywhere in the full `bd show` output. Combined with `fail_closed: true`,
+this denied closing any implementation bead in a phased plan whose text
+mentioned "phase" or "review", which is most implementation beads under a
+phased RDR. The trigger now matches against the bead's TITLE line only and
+only for narrow patterns: `Phase N review gate` (with optional sub-phase
+letter or decimal) or `PN phase-review-gate`. A bare mention of
+`phase-review-gate` without a phase prefix no longer false-positives. Four
+regression tests cover the false-positive cases from #931 and the
+sub-phase-letter true-positive.
+
+### CI: pin `softprops/action-gh-release` to v2.6.2 SHA
+
+After the 4.34.4 release surfaced a `Bad credentials` failure from the
+floating `@v2` tag (PyPI publish succeeded; only the downstream GH-release
+creation failed and was created manually), the action is now pinned to
+`3bb12739c298aeb8a4eeaf626c5b8d85266b0e65` (v2.6.2). Future drift requires
+a deliberate SHA bump.
 
 ## [4.34.4] - 2026-05-23
 
