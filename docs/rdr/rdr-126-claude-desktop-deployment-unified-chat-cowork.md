@@ -134,7 +134,7 @@ The work decomposes into nine specification items, numbered for phase-review-gat
 
 6. **Cross-surface consistency.** The same `_first_run.ensure_installed()` runs in all MCP startup paths. This means installing the Claude Code plugin and starting a session for the first time also runs the install (currently only `ensure-running`). Side effect: patches Gap 3 (plugin installed but daemon never persistently installed). The SessionStart hook continues to call `ensure-running` for the rare case where the MCP server has not been started yet in the session, but the install-on-first-MCP-spawn path dominates in practice.
 
-7. **`.mcpb` manifest schema v0.4 with `server.type: "uv"`.** Repository layout: new `mcpb/` directory at repo root containing `manifest.json` and a bundled `pyproject.toml` pinned to `conexus>=<version>`. Manifest fields: `manifest_version: "0.4"`, `name: "nexus"`, `version: <from pyproject.toml>`, `description`, `author`, `server.type: "uv"`, `server.entry_point: "src/server.py"` (or equivalent), `compatibility.claude_desktop: ">=1.0.0"`, `compatibility.platforms: ["darwin", "linux"]`. `user_config` optional for nexus data directory.
+7. **`.mcpb` manifest schema v0.4 with `server.type: "uv"`.** Repository layout: new `mcpb/` directory at repo root containing `manifest.json` and a bundled `pyproject.toml` pinned to `conexus>=<version>`. **Manifest fields match the spike manifest at `mcpb/manifest.json`** (committed via PR #936); use that file as the authoritative template. The load-bearing field is `server.mcp_config.command`/`args` invoking `uv run --directory ${__dirname} src/server.py` — `${__dirname}` is what makes uv resolve deps relative to the bundle install location, NOT the user's cwd. Omitting `mcp_config` or dropping `--directory ${__dirname}` produces a manifest that passes validation but fails at runtime. Required additional fields: `manifest_version: "0.4"`, `name`, `version` (synced from pyproject.toml at release time), `description`, `author`, `server.type: "uv"`, `server.entry_point: "src/server.py"`, `compatibility.platforms: ["darwin", "linux"]`, `compatibility.runtimes.python: ">=3.12"`. `user_config` optional for nexus data directory.
 
 8. **Out of scope.** Signing trust signals (no spec support in MCPB v2.1.2). Windows Claude Desktop (daemon installer has no Windows path; defer to a follow-up RDR). MCP Apps interactive UI for `nx_answer` (LB2 in the strategic synthesis; separate large bet). Marketplace submission of the Claude Code plugin and Smithery listing (QW2/QW3 in the strategic synthesis; not technical, do separately).
 
@@ -278,6 +278,7 @@ The `daemon_uninstall` tool with default `confirm=false` matches MCP destructive
 - **Banner content malformed**: Tool response is malformed; first tool call appears to fail. Mitigated by treating banner as best-effort: try/except around prepend; on exception, log to stderr and serve the tool response unchanged. Marker still gets written (one-shot semantics preserved).
 - **uv runtime absent on Claude Desktop chat host**: MCPB install fails with "uv not found"; no daemon installed; user sees a Claude Desktop install error. Mitigated by README documentation pointing at `brew install uv` (macOS) or `pip install uv` / `pipx install uv` (Linux).
 - **Cowork SDK bridge dropped a tool call**: Test sentinel write never appears on host side. Diagnostic recipe: check `nx daemon t2 status` then `nx memory list -p _cowork_test`.
+- **Cowork SDK bridge with `.mcpb`-only install (no Claude Code plugin)**: UNTESTED. A5's bidirectional sentinel verification used the `plugin:nx:nexus` Claude Code namespace; whether the SDK bridge also forwards `.mcpb`-registered MCP servers into the Cowork VM is unverified. If the bridge only forwards Claude Code plugin servers, a `.mcpb`-only user has Nexus tools in Claude Desktop chat but NOT in Cowork. Verify during Phase 5 (Cowork verification) by installing the `.mcpb` on a host that does NOT have the Claude Code plugin and re-running the sentinel test. If unsupported, document the limitation in `docs/desktop-deployment.md` § Cowork; the `.mcpb`'s audience may need to narrow further (Claude Desktop chat only, no Cowork).
 
 ## Implementation Plan
 
@@ -317,6 +318,15 @@ Manually toggle states: clean / OS unit pre-installed / marker pre-existing. Ver
 Write `mcpb/SPIKE.md` documenting A1, A2, gotchas, and concrete decisions for Phase 2.
 
 ### Phase 2: Library lift + daemon install/uninstall (RDR-126 §2, §4, §6)
+
+#### Step 0: A2 verification gate (before banner code lands)
+
+Before merging banner code: emit a test `notifications/message` (severity `info`) from a running MCP server instance in Claude Desktop chat. Observe whether the message renders user-visibly. Two outcomes:
+
+- **A2 verified**: Banner uses dual-channel delivery (tool-content-prepend + `notifications/message`) as planned in §Approach §3.
+- **A2 falsified**: Drop the `notifications/message` emission. Banner relies on tool-content-prepend as the sole channel. Update §Approach §3 (revision history entry) and Phase 2 Step 3 code path accordingly.
+
+Record the outcome in `mcpb/SPIKE.md` and a `126-research-a2-*` T2 entry before Step 3 lands.
 
 #### Step 1: Lift install logic from CLI
 
@@ -418,11 +428,17 @@ First-run install adds one LaunchAgent file write to MCP startup. Sub-second. Su
 
 ### Contradiction Check
 
-[To be filled at gate time.]
+Gate run 2026-05-23. No contradictions found between Research Findings and Proposed Solution. Cross-RDR consistency verified by substantive-critic: RDR-120 ("one daemon serves all surfaces") and RDR-105 (T1 per-process isolation) claims as reflected in RDR-126 match those source RDRs.
 
 ### Assumption Verification
 
-[To be filled at gate time. A1, A2, A5 require spike completion before gate-pass.]
+Gate run 2026-05-23. Five of six critical assumptions verified:
+- A1 (uv resolves deps in Claude Desktop): Verified via spike (`mcpb/SPIKE.md`, T2 `126-research-a1-uv-resolves-deps`)
+- A2 (notifications/message visibility): Unverified, honestly deferred to Phase 2 Step 0 gate (banner code does not exist yet); explicit phase-gate added per Layer 3 finding
+- A3 (LaunchAgent install needs no elevated privs): Verified via Source Search
+- A4 (.mcpb uninstall does not cascade): Verified via MCPB spec read (no manifest hook for uninstall actions; absence-of-feature)
+- A5 (Cowork SDK bidirectional): Verified via live sentinel trace 2026-05-23 17:00 UTC (T2 `126-research-a5-cowork-bidirectional`)
+- A6 (first-run marker granularity): Verified via Source Search
 
 #### API Verification
 
@@ -435,7 +451,7 @@ First-run install adds one LaunchAgent file write to MCP startup. Sub-second. Su
 
 ### Scope Verification
 
-[To be filled at gate time. Minimum Viable Validation is in-scope (Phase 1 spike result drives whether it remains feasible).]
+Gate run 2026-05-23. Minimum Viable Validation is in-scope and partially complete: Phase 1 spike (steps 1-2 of MVV) verified live install + tool registration. Phase 2 (steps 3-5) commits remaining MVV items (banner display + uninstall via MCP tool + LaunchAgent absence after restart). No deferrals from MVV; all five items remain in-scope for the RDR.
 
 ### Cross-Cutting Concerns
 
@@ -485,3 +501,14 @@ The RDR is sized for a cross-surface lifecycle change. Sections covering individ
   through the host T2 daemon. RDR-126 §5 claim is now backed by a
   documented live trace. Only A2 remains outstanding (deferred to
   Phase 2 by design).
+- 2026-05-23 gate: Layer 1 (structural) and Layer 2 (assumption audit)
+  passed. Layer 3 substantive-critic returned PASSED with 2 significant
+  findings, all in-place addressable. Applied: (a) §Approach §7 now
+  references the spike `mcpb/manifest.json` as authoritative template
+  and explicitly calls out the load-bearing `mcp_config.command` with
+  `${__dirname}`; (b) added Phase 2 Step 0 — explicit A2 verification
+  gate before banner code lands, with falsified-path documented; (c)
+  added Failure Mode bullet for the Cowork-with-.mcpb-only-install
+  unverified path (Phase 5 verification scoped). Finalization Gate's
+  Contradiction Check, Assumption Verification, and Scope Verification
+  sections filled. Gate verdict: PASSED.
