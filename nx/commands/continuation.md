@@ -1,11 +1,11 @@
 ---
-description: Write a paste-ready continuation prompt under ~/.cache/nexus/continuations/ capturing session state, branch, beads, T2 entries, and next-step pointers
+description: Write a handoff document under /tmp capturing session state, branch, beads, T2 entries, and next-step pointers. Chat response is `cat <path>`; user copies it and pastes after /clear to bootstrap the next session.
 argument-hint: [topic-or-arc-slug] (optional; defaults to current branch)
 ---
 
 # Continuation prompt builder
 
-Generates a paste-ready handoff document under `~/.cache/nexus/continuations/` that a future Claude Code session can read to pick up cold. Use this at the END of a productive session, or at a phase boundary, to capture state cheaply before context is lost.
+Generates a handoff document under `/tmp/` that a future Claude Code session can read to pick up cold. Stores under `/tmp` (purged on reboot by macOS) so we don't accumulate stale handoffs in `~/.cache`. The chat response is one literal line: `cat <Target file>`. The user copies that line (mouse-select + cmd-C, or whatever their terminal supports), runs `/clear`, pastes, hits return. The new session reads the handoff and resumes.
 
 !{
   set +e
@@ -17,8 +17,9 @@ Generates a paste-ready handoff document under `~/.cache/nexus/continuations/` t
   REPO_SAFE=$(printf '%s' "$(basename "$(pwd)")" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
   [ -z "$REPO_SAFE" ] && REPO_SAFE="repo"
   TODAY=$(date +%Y-%m-%d)
-  OUT_DIR="${HOME}/.cache/nexus/continuations"
-  mkdir -p "$OUT_DIR"
+  # /tmp is purged on reboot (macOS) or periodically (Linux). Don't accumulate
+  # handoffs under ~/.cache or ~/.claude; they're throwaway state.
+  OUT_DIR="/tmp"
 
   # Slug pipeline: printf strips the trailing newline that echo adds, so the
   # tr -c result has no trailing-dash artefact that the later s/-$//g would
@@ -35,12 +36,20 @@ Generates a paste-ready handoff document under `~/.cache/nexus/continuations/` t
 
   # If a same-day file already exists at the base path, suffix with HHMM so
   # successive invocations on the same day don't silently overwrite.
-  BASE="${OUT_DIR}/${REPO_SAFE}-continuation-${SLUG}-${TODAY}.md"
+  BASE="${OUT_DIR}/nexus-continuation-${REPO_SAFE}-${SLUG}-${TODAY}.md"
   if [ -e "$BASE" ]; then
-    OUT="${OUT_DIR}/${REPO_SAFE}-continuation-${SLUG}-${TODAY}-$(date +%H%M).md"
+    OUT="${OUT_DIR}/nexus-continuation-${REPO_SAFE}-${SLUG}-${TODAY}-$(date +%H%M).md"
   else
     OUT="$BASE"
   fi
+
+  # No clipboard auto-prime. Tried pbcopy (writes to remote pasteboard if
+  # over SSH/mosh), launchctl asuser pbcopy (same), OSC 52 (mosh and many
+  # tmux/terminal combos drop the escape). Bash-tool side cannot reliably
+  # reach the user's local NSPasteboard from a remote tmux-over-mosh
+  # session. Leave the copy to the user; they have terminal text selection
+  # which works everywhere.
+
   echo "**Target file:** \`$OUT\`"
   echo ""
   echo "**Topic:** $TITLE_TOPIC"
@@ -127,17 +136,19 @@ Generates a paste-ready handoff document under `~/.cache/nexus/continuations/` t
 
 ## Action
 
-Compose a paste-ready continuation prompt and write it to the **Target file** path above. Match the canonical 10-section structure exactly. Each section is load-bearing for a cold pickup; skipping one loses information the next session needs.
+Two steps. Write the handoff file, then emit one line of chat. Nothing else.
 
-### Required sections (in order)
+### Step 1: write the full handoff to `<Target file>`
 
-1. **Title** — `# Continuation: <topic> (YYYY-MM-DD)` matching the working-state topic line.
+Compose a 9-section handoff document. Each section is load-bearing for a cold pickup; skipping one loses information the next session needs.
 
-2. **What just shipped / state at handoff** — concrete commits with SHAs from the recent-commits block, beads closed in the session, T2 entries written, releases tagged. Name everything explicitly.
+1. **Title** (`# Continuation: <topic> (YYYY-MM-DD)`) matching the working-state topic line.
 
-3. **Where state lives** — bullet list of branch, RDR file paths (if applicable), T2 memory keys (`project=X, title=Y`), bead IDs of the epic and root work, PR numbers.
+2. **What just shipped / state at handoff.** Concrete commits with SHAs from the recent-commits block, beads closed in the session, T2 entries written, releases tagged. Name everything explicitly.
 
-4. **Literal first actions** — numbered, copy-paste-runnable commands. Always include:
+3. **Where state lives.** Bullet list of branch, RDR file paths (if applicable), T2 memory keys (`project=X, title=Y`), bead IDs of the epic and root work, PR numbers.
+
+4. **Literal first actions.** Numbered, copy-paste-runnable commands. Always include:
    - `cd <abs path>` from working-state cwd
    - `git fetch && git checkout <branch> && git pull` (or equivalent)
    - `git status --short` clean-state check
@@ -145,43 +156,45 @@ Compose a paste-ready continuation prompt and write it to the **Target file** pa
    - Any specific T2 reads (`mcp__plugin_nx_nexus__memory_get(project=..., title=...)`)
    - Any specific file reads required to come up to speed
 
-5. **Open work / bead graph** — if multiple beads are in flight, draw the dependency graph as an ASCII tree. Mark the READY entry point.
+5. **Open work / bead graph.** If multiple beads are in flight, draw the dependency graph as an ASCII tree. Mark the READY entry point.
 
-6. **Active blockers** — any `in_progress` beads that gate the next step, or external blockers (CI red, dependent PR pending).
+6. **Active blockers.** Any `in_progress` beads that gate the next step, or external blockers (CI red, dependent PR pending).
 
-7. **Locked contracts / invariants** — anything settled in this session that the next session MUST honour. Pull from RDR §Out-of-scope, prior decisions, locked-in shapes, version-bump parity rules.
+7. **Locked contracts / invariants.** Anything settled in this session that the next session MUST honour. Pull from RDR §Out-of-scope, prior decisions, locked-in shapes, version-bump parity rules.
 
-8. **What you should NOT do** — explicit ban list. If feedback-memory filenames appeared in the working-state block, reference them by filename (don't paraphrase, point). The block lists filenames only, not contents; if you need to quote a specific rule, Read the file first rather than guessing at the body from the slug.
+8. **What you should NOT do.** Explicit ban list. If feedback-memory filenames appeared in the working-state block, reference them by filename (don't paraphrase, point). The block lists filenames only, not contents; if you need to quote a specific rule, Read the file first rather than guessing at the body from the slug.
 
-9. **Workflow lessons from this session** — anything that bit you this session that next-session-you should pre-empt.
+9. **Workflow lessons from this session.** Anything that bit you this session that next-session-you should pre-empt.
 
-10. **Compressed continuation prompt** — a single blockquote (5-10 lines) that a future Claude session can paste verbatim to bootstrap. References the full file path.
+### Step 2: chat response is three lines, plain text
 
-### Style rules
+The entire chat response is:
 
-- **No em dashes (`—`).** Use commas, colons, periods, or parentheses. Grep your output before writing.
+    Paste this in the next session after /clear:
+
+    cat <Target file>
+
+Three lines: a one-line hint reminding the user what the command is for, a blank separator, and the bare `cat` command on its own line. The blank line matters: it isolates the command so triple-click selects only the command, not the hint.
+
+Where `<Target file>` is the absolute path from the working-state block. No fence, no backticks, no bullet, no bold around the command. Nothing after the third line.
+
+Example complete chat response:
+
+    Paste this in the next session after /clear:
+
+    cat /tmp/nexus-continuation-luciferase-main-2026-05-23.md
+
+The user selects the third line (mouse drag or triple-click), copies (`cmd-C` or terminal-specific binding), `/clear`s, pastes, hits return. The next session sees `cat <path>` as its first user message, reads the handoff, resumes.
+
+Clipboard auto-prime was tried (pbcopy, launchctl asuser pbcopy, OSC 52 plain and DCS-wrapped) and abandoned: remote tmux over mosh, the canonical nexus-developer environment, doesn't reliably forward any of them to the user's local NSPasteboard. Plain text on its own line is the only universally portable affordance.
+
+### Style rules for the handoff file (not the chat response)
+
+- **No em dashes (`—`).** Use commas, colons, periods, or parentheses. Grep before writing.
 - **Imperative voice.** "Read X first. Run Y. Pick up Z." not "you might want to consider...".
 - **Concrete over general.** file:line, commit SHA, bead ID, date. Never "the relevant file" or "the recent work".
 - **Tool names in full form.** `mcp__plugin_nx_nexus__memory_get`, not "the memory tool".
 
-### Output
-
-Write the full 10-section document to **Target file** (the path printed at the top of the rendered context block).
-
-Then in chat, respond with **exactly three elements in this order, nothing else**:
-
-1. **One bold line** with the file path on its own (no prefix prose):
-   ```
-   **<path-from-Target-file-line>**
-   ```
-2. **A single fenced code block** containing the compressed continuation prompt (section 10 of the written document, verbatim). Use triple-backtick fence with no language tag so the user's terminal renders a clean copy button:
-   <pre>
-   ```
-   &lt;5 to 10 line paste-ready prompt for the next session&gt;
-   ```
-   </pre>
-3. **One short sentence** (under 20 words) naming the entry point for the next session, e.g. `Next session resumes at PR #928 CI merge.` No more.
-
-No headers, no bullet lists, no summary paragraph, no "I've written...", no closing pleasantry. The user is mid-clear-and-paste workflow; every extra line is friction.
+### Bail-out
 
 If the rendered "Topic:" line above reads `current branch no-branch` (no arguments AND not a git repo) AND the in-progress beads block is empty or absent, stop and ask the user what the handoff scope should cover rather than guessing.
