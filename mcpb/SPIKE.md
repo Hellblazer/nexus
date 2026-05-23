@@ -43,7 +43,31 @@ The bundle does NOT carry deps. uv pulls them on first launch in the
 Claude Desktop process. Trade-off: small bundle (1.3 KB vs ~5-10 MB
 for `type: "python"`) at the cost of a ~20s first-launch delay.
 
-## What needs Hal's eyes in the Claude Desktop UI
+## Live install observations (2026-05-23, Hal's machine)
+
+`open mcpb/nexus-spike-0.0.1.mcpb` triggered Claude Desktop's install
+dialog without error. After confirming the install:
+
+- The bundle landed at
+  `~/Library/Application Support/Claude/Claude Extensions/local.mcpb.hal-hildebrand.nexus/`
+  (the `local.mcpb.` prefix is Claude Desktop's convention for
+  user-installed `.mcpb` files, distinct from `ant.dir.*` which are
+  Anthropic-distributed extensions).
+- The Connectors panel (Settings → Connectors → Desktop group) lists
+  it as "Nexus (Spike)" — the `display_name` field from the manifest
+  rendered exactly as authored.
+- The connector is Enabled by default with an Uninstall button surfaced.
+- All 31 tools from `nx-mcp` were enumerated and listed in the
+  Connectors panel, gated by per-tool "Needs approval" permission
+  controls. Tools observed: `search`, `query`, `store_put`,
+  `store_get`, `store_get_many`, `store_list`, `memory_put`,
+  `memory_get`, plus 23 more under "View details".
+
+A1 is verified at all four levels:
+1. uv resolves the dep graph
+2. `nx-mcp` starts cleanly via stdio
+3. Claude Desktop accepts the connector
+4. Tool dispatch surface registers (31 tools listed)
 
 ### A2 — `notifications/message` user-visibility (DEFERRED)
 
@@ -56,12 +80,23 @@ packaging path" rather than "verifies the entire RDR §Approach". The
 banner verification will happen during Phase 2 implementation when
 there is something to emit.
 
-### Tool listing (deferred)
+### Coexistence with the Claude Code plugin's `nx-mcp`
 
-Whether Claude Desktop renders 36 MCP tools (the full Nexus surface)
-in a usable way is also a UI question. Not blocking the spike's
-verdict on the packaging path; observable during the install test
-recommended below.
+When the user already has Claude Code installed plus the
+`nx@nexus-plugins` marketplace plugin, Claude Desktop's local-agent
+mode in chat already exposes Nexus tools via the `plugin:nx:nexus`
+namespace (tool name: `mcp__plugin_nx_nexus__memory_get` etc.). The
+`.mcpb` adds a SECOND copy under the bare `nexus` namespace
+(`mcp__nexus__memory_get`). They coexist on disk and in the UI; the
+model can target either by name. Tool-name strings are distinct, so
+there is no hard collision, but they ARE functionally duplicate.
+
+This reframes the `.mcpb`'s strategic value:
+
+- For Claude Code users: redundant; no new value
+- For Claude-Desktop-only users (no Claude Code installed): the
+  `.mcpb` is the only install path. This is the audience the work
+  unlocks.
 
 ## Decisions for Phase 2 (driven by spike findings)
 
