@@ -43,7 +43,34 @@ _BD_CLOSE_RE = re.compile(
 _RDR_RE = re.compile(r"\brdr[-_ ]?(?P<id>\d+)\b", re.IGNORECASE)
 _PHASE_RE = re.compile(r"\bphase[\s-]?(?P<phase>\d+)\b", re.IGNORECASE)
 _P_LEAF_RE = re.compile(r"\bP(?P<phase>\d+)(?:\.\d+)*\b")
-_TRIGGER_RE = re.compile(r"\b(phase|review)\b", re.IGNORECASE)
+# Trigger must match the bead TITLE line only (not the full description).
+# Implementation beads in phased plans routinely mention "phase" or "review"
+# in their description, parent epic, or rationale text. To distinguish a
+# phase-review-gate bead from an implementation bead in the same phase, the
+# trigger requires either:
+#   1. The phrase "Phase N review gate" (case-insensitive, with optional
+#      sub-phase letter or decimal, e.g. "Phase 3b" / "Phase 1.5"), OR
+#   2. The literal slash-command name "phase-review-gate" preceded by a
+#      phase prefix like "P3b" or "Phase 0".
+# A bare mention of "phase-review-gate" anywhere (e.g. in a meta-task title
+# "phase-review-gate skill: recognize ...") is intentionally NOT matched —
+# the bead must be an actual phase-N gate execution to trigger the sentinel
+# check. See GH issue #931 / bead nexus-1pr9n for the regression that
+# motivated the tighter trigger.
+_GATE_TITLE_RE = re.compile(
+    r"\b(?:phase|p)[\s-]?\d+[\w.]*\s+(?:phase[\s-]?)?review[\s-]?gate\b",
+    re.IGNORECASE,
+)
+
+
+def _bd_header_line(bd_output: str) -> str:
+    """Return the first non-empty line from ``bd show`` output (the header
+    line carrying the bead title), or empty string if none."""
+    for line in bd_output.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
 
 
 def _claude_pid() -> int:
@@ -164,8 +191,13 @@ def body(payload: dict[str, Any]) -> None:
         # than fail-closed; we have no signal to deny on.
         _lib.allow()
 
-    # Trigger heuristic: title or description contains "phase" or "review".
-    if not _TRIGGER_RE.search(bd_output):
+    # Trigger: match against the bead's TITLE line only (the first non-empty
+    # line of bd show output), and only for the narrow "Phase N ... review
+    # gate" or "Phase N ... phase-review-gate" patterns. Implementation beads
+    # in phased plans whose description / parent / rationale mentions "phase"
+    # or "review" no longer false-positive (GH #931 / nexus-1pr9n).
+    title_line = _bd_header_line(bd_output)
+    if not _GATE_TITLE_RE.search(title_line):
         _lib.allow()
 
     rdr_id, phase = _extract_rdr_phase(bd_output)
