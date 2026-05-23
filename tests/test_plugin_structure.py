@@ -616,6 +616,37 @@ class TestMarketplaceVersion:
                 f"in the same release commit that bumps the version field."
             )
 
+    def test_plugin_source_path_exists_in_repo(self) -> None:
+        """nexus-mkj6u: marketplace.json plugins[].source.path must point
+        at an actual directory in the repo. Catches typos and orphaned
+        entries before they ship.
+
+        (Pattern from the global_directives marketplace-pinned-source-
+        playbook; adopted from the parallel palinex implementation.)
+        """
+        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+            source = plugin["source"]
+            assert isinstance(source, dict), "covered by ref test"
+            path = source.get("path", "")
+            plugin_dir = REPO_ROOT / path
+            assert plugin_dir.is_dir(), (
+                f"marketplace.json '{plugin['name']}' source.path "
+                f"{path!r} -> {plugin_dir} does not exist or is not a directory"
+            )
+
+    def test_plugin_source_path_has_plugin_json(self) -> None:
+        """Each plugin's source.path subdir must contain its own
+        .claude-plugin/plugin.json. CLAUDE_PLUGIN_ROOT resolves there
+        at runtime."""
+        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+            source = plugin["source"]
+            assert isinstance(source, dict)
+            manifest = REPO_ROOT / source.get("path", "") / ".claude-plugin" / "plugin.json"
+            assert manifest.exists(), (
+                f"marketplace.json '{plugin['name']}' source.path is missing "
+                f"its own .claude-plugin/plugin.json at {manifest}"
+            )
+
     def test_uv_lock_version_matches_pyproject(self) -> None:
         pv = self._pyproject_version()
         uv_lock = REPO_ROOT / "uv.lock"
