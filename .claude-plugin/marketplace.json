@@ -6,8 +6,8 @@
   },
   "plugins": [
     {
-      "name": "nx",
-      "source": "./nx",
+      "name": "conexus",
+      "source": "./conexus",
       "description": "Self-hosted three-tier knowledge management with 13 specialized agents, plan-centric retrieval via nx_answer, semantic search, and RDR decision tracking for Claude Code.",
       "version": "4.34.5"
     },
