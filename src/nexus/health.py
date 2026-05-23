@@ -861,6 +861,61 @@ def _check_catalog(cat: "Catalog | None", cat_path: "Path") -> list[HealthResult
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 
 
+def _check_plugin_name() -> list[HealthResult]:
+    """nexus-mkj6u: warn when the installed Claude Code plugin's name
+    differs from what the CLI expects.
+
+    The 2026-05-23 rename moved the plugin name from ``nx`` to
+    ``conexus``. Claude Code does NOT auto-uninstall renamed plugins;
+    a user's local cache at
+    ``~/.claude/plugins/cache/nexus-plugins/nx/...`` survives the
+    marketplace.json rename. Until they explicitly uninstall +
+    reinstall, they run the NEW conexus CLI under the OLD ``nx``
+    plugin. The MCP-server-startup check fires once per session;
+    this doctor check is the explicit-invocation surface for users
+    who run ``nx doctor`` to diagnose what's stale.
+
+    Non-fatal. Returns an empty list when no ``CLAUDE_PLUGIN_ROOT``
+    is set (CLI-only use; nothing to check) or when the plugin name
+    matches.
+    """
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    if not plugin_root:
+        return []
+    manifest_path = Path(plugin_root) / ".claude-plugin" / "plugin.json"
+    if not manifest_path.exists():
+        return []
+    try:
+        manifest = json.loads(manifest_path.read_text())
+        plugin_name = manifest.get("name")
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not plugin_name:
+        return []
+
+    from nexus.mcp_infra import EXPECTED_PLUGIN_NAME
+    if plugin_name == EXPECTED_PLUGIN_NAME:
+        return []
+
+    return [
+        HealthResult(
+            label="Claude Code plugin name (renamed)",
+            ok=False,
+            detail=(
+                f"installed plugin is '{plugin_name}@nexus-plugins'; CLI "
+                f"expects '{EXPECTED_PLUGIN_NAME}@nexus-plugins' "
+                "(renamed 2026-05-23, nexus-mkj6u)"
+            ),
+            fix_suggestions=[
+                f"/plugin uninstall {plugin_name}@nexus-plugins",
+                f"/plugin install {EXPECTED_PLUGIN_NAME}@nexus-plugins",
+                "(both commands run in Claude Code, not from the shell)",
+            ],
+            fatal=False,
+        )
+    ]
+
+
 def _check_credential_persistence() -> list[HealthResult]:
     """nexus-m7evs: warn when cloud credentials live in shell env only.
 
@@ -945,6 +1000,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
 
     results.extend(_check_python())
     results.extend(_check_cli_version())
+    results.extend(_check_plugin_name())
     results.extend(_check_credential_persistence())
 
     _local = is_local_mode()

@@ -664,15 +664,45 @@ def check_version_compatibility() -> None:
             try:
                 manifest = json.loads(manifest_path.read_text())
                 plugin_ver = manifest.get("version")
+                plugin_name = manifest.get("name")
             except (OSError, json.JSONDecodeError):
                 plugin_ver = None
+                plugin_name = None
+
+            # ── (3) Plugin NAME drift (nexus-mkj6u) ─────────────────────
+            # The 2026-05-23 rename moved the plugin name from ``nx`` to
+            # ``conexus``. Claude Code does NOT auto-uninstall renamed
+            # plugins; the user's local cache at
+            # ``~/.claude/plugins/cache/nexus-plugins/nx/...`` survives
+            # the marketplace.json rename until the user explicitly
+            # uninstalls + reinstalls. Until then, they're running the
+            # NEW conexus CLI but the OLD nx plugin — silently sliding
+            # toward whatever drift the rename introduced.
+            #
+            # Fire this warning EVERY MCP startup until resolved. It is
+            # the most reliable surface to catch the gap because every
+            # Claude Code session spawns nx-mcp.
+            if plugin_name and plugin_name != EXPECTED_PLUGIN_NAME:
+                log.warning(
+                    "plugin_name_mismatch",
+                    installed_plugin_name=plugin_name,
+                    expected_plugin_name=EXPECTED_PLUGIN_NAME,
+                    hint=(
+                        f"Plugin was renamed '{plugin_name}' -> "
+                        f"'{EXPECTED_PLUGIN_NAME}' (nexus-mkj6u). In "
+                        f"Claude Code, run: /plugin uninstall "
+                        f"{plugin_name}@nexus-plugins && /plugin install "
+                        f"{EXPECTED_PLUGIN_NAME}@nexus-plugins"
+                    ),
+                )
+
             if plugin_ver:
                 cli_t = _parse_version(cli_ver)
                 plugin_t = _parse_version(plugin_ver)
                 if cli_t[:2] != plugin_t[:2]:
                     # Choose the actionable update for the lagging side.
                     if cli_t > plugin_t:
-                        hint = "plugin is older — run '/plugin update conexus@nexus-plugins' in Claude Code"
+                        hint = f"plugin is older — run '/plugin update {EXPECTED_PLUGIN_NAME}@nexus-plugins' in Claude Code"
                     else:
                         hint = "CLI is older — run 'uv tool upgrade conexus'"
                     log.warning(
@@ -683,6 +713,14 @@ def check_version_compatibility() -> None:
                     )
     except Exception:
         pass  # never block MCP startup
+
+
+# Plugin identity (nexus-mkj6u 2026-05-23). The 2026-05-23 rename
+# moved the Claude Code plugin name from ``nx`` to ``conexus``. The
+# CLI knows its own identity; this constant is what
+# ``check_version_compatibility`` and ``nexus.health`` compare
+# against to detect drift in the installed plugin's manifest.
+EXPECTED_PLUGIN_NAME: str = "conexus"
 
 
 # ── Test injection ────────────────────────────────────────────────────────────

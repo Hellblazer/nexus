@@ -177,7 +177,7 @@ fi
 _pass "drift resolved"
 
 # ── 9. Plugin rename surface (marketplace.json) ──────────────────────────────
-_step "9/10 plugin marketplace.json reflects rename"
+_step "9/11 plugin marketplace.json reflects rename"
 MJ="$REPO_ROOT/.claude-plugin/marketplace.json"
 grep -q '"name": "conexus"' "$MJ" \
     || _die "REPO_ROOT marketplace.json missing 'name: conexus'"
@@ -187,8 +187,35 @@ grep -q '"source": "./conexus"' "$MJ" \
     || _die "REPO_ROOT marketplace.json still contains 'name: nx' (rename incomplete)"
 _pass "marketplace.json shows the rename (conexus, ./conexus)"
 
-# ── 10. Summary ──────────────────────────────────────────────────────────────
-_step "10/10 PASS"
+# ── 10. Plugin-name drift detection (nexus-mkj6u) ────────────────────────────
+_step "10/11 plugin-name drift detected when OLD nx plugin still installed"
+# Simulate the user's "ran uv tool upgrade but didn't reinstall plugin"
+# state by planting a fake CLAUDE_PLUGIN_ROOT with name=nx.
+FAKE_PLUGIN_ROOT="$SANDBOX/fake_plugin_root"
+mkdir -p "$FAKE_PLUGIN_ROOT/.claude-plugin"
+cat > "$FAKE_PLUGIN_ROOT/.claude-plugin/plugin.json" << 'PJEOF'
+{
+  "name": "nx",
+  "version": "4.34.5",
+  "description": "stale OLD plugin still installed in Claude Code"
+}
+PJEOF
+
+# nx doctor with CLAUDE_PLUGIN_ROOT set to OLD plugin should surface the drift.
+DOCTOR_OUT="$(CLAUDE_PLUGIN_ROOT="$FAKE_PLUGIN_ROOT" HOME="$SANDBOX" nx doctor 2>&1 || true)"
+echo "$DOCTOR_OUT" | grep -qi 'plugin name' \
+    || _die "nx doctor did not surface plugin-name drift. Output:\n$DOCTOR_OUT"
+echo "$DOCTOR_OUT" | grep -q '/plugin uninstall nx@nexus-plugins' \
+    || _die "doctor warning missing uninstall command"
+echo "$DOCTOR_OUT" | grep -q '/plugin install conexus@nexus-plugins' \
+    || _die "doctor warning missing install command"
+_pass "nx doctor names the uninstall + install commands"
+# (The structlog warning at every MCP startup is covered by unit test
+# tests/test_plugin_name_drift.py::test_check_version_compatibility_logs_plugin_name_mismatch
+# — easier to assert there than to spawn nx-mcp + watch stderr here.)
+
+# ── 11. Summary ──────────────────────────────────────────────────────────────
+_step "11/11 PASS"
 echo "  Upgrade-shakeout green: $FROM_VERSION → $NEW_VER"
 echo "  - hook stanza migrated (pgrep guard added, no pile-up risk)"
 echo "  - nx doctor drift detection works"
