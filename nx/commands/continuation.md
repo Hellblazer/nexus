@@ -11,26 +11,33 @@ Generates a paste-ready handoff document under `~/.cache/nexus/continuations/` t
   set +e
 
   # ---- Resolve repo + slug -------------------------------------------------
-  REPO=$(basename "$(pwd)")
+  # Sanitize REPO (basename can contain spaces) the same way as the SLUG so
+  # the final filename has no whitespace and no character that would need
+  # shell quoting downstream.
+  REPO_SAFE=$(printf '%s' "$(basename "$(pwd)")" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+  [ -z "$REPO_SAFE" ] && REPO_SAFE="repo"
   TODAY=$(date +%Y-%m-%d)
   OUT_DIR="${HOME}/.cache/nexus/continuations"
   mkdir -p "$OUT_DIR"
 
+  # Slug pipeline: printf strips the trailing newline that echo adds, so the
+  # tr -c result has no trailing-dash artefact that the later s/-$//g would
+  # have to clean up. Explicit > implicit.
   if [ -n "$ARGUMENTS" ]; then
-    SLUG=$(echo "$ARGUMENTS" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+    SLUG=$(printf '%s' "$ARGUMENTS" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
     TITLE_TOPIC="$ARGUMENTS"
   else
     BR=$(git branch --show-current 2>/dev/null || echo "no-branch")
-    SLUG=$(echo "$BR" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+    SLUG=$(printf '%s' "$BR" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
     TITLE_TOPIC="current branch $BR"
   fi
   [ -z "$SLUG" ] && SLUG="session"
 
   # If a same-day file already exists at the base path, suffix with HHMM so
   # successive invocations on the same day don't silently overwrite.
-  BASE="${OUT_DIR}/${REPO}-continuation-${SLUG}-${TODAY}.md"
+  BASE="${OUT_DIR}/${REPO_SAFE}-continuation-${SLUG}-${TODAY}.md"
   if [ -e "$BASE" ]; then
-    OUT="${OUT_DIR}/${REPO}-continuation-${SLUG}-${TODAY}-$(date +%H%M).md"
+    OUT="${OUT_DIR}/${REPO_SAFE}-continuation-${SLUG}-${TODAY}-$(date +%H%M).md"
   else
     OUT="$BASE"
   fi
@@ -144,7 +151,7 @@ Compose a paste-ready continuation prompt and write it to the **Target file** pa
 
 7. **Locked contracts / invariants** — anything settled in this session that the next session MUST honour. Pull from RDR §Out-of-scope, prior decisions, locked-in shapes, version-bump parity rules.
 
-8. **What you should NOT do** — explicit ban list. If feedback-memory filenames appeared in the working-state block, reference them by filename (don't paraphrase, point).
+8. **What you should NOT do** — explicit ban list. If feedback-memory filenames appeared in the working-state block, reference them by filename (don't paraphrase, point). The block lists filenames only, not contents; if you need to quote a specific rule, Read the file first rather than guessing at the body from the slug.
 
 9. **Workflow lessons from this session** — anything that bit you this session that next-session-you should pre-empt.
 
