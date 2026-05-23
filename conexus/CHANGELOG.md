@@ -75,7 +75,7 @@ Plugin SessionStart hook now runs
 `nx daemon t2 ensure-running --quiet --timeout=5` so the T2 daemon
 auto-spawns on every Claude Code session start. Closes the
 daemon-not-running cliff 4.34.1 introduced: fresh
-`pip install conexus` + `/plugin install nx` produces a working
+`pip install conexus` + `/plugin install conexus-plugins` produces a working
 substrate on first session without any manual incantation.
 
 The hook is idempotent — when the daemon is already running (from

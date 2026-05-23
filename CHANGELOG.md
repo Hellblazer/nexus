@@ -232,7 +232,7 @@ docs are now comprehensive.
 ## [4.34.2] - 2026-05-22
 
 UX patch release. Closes the daemon-not-running cliff that 4.34.1
-introduced: a fresh `pip install conexus` + `/plugin install nx`
+introduced: a fresh `pip install conexus` + `/plugin install conexus-plugins`
 now produces a working substrate on first session without any
 manual `nx daemon t2 start` incantation.
 
@@ -252,7 +252,7 @@ manual `nx daemon t2 start` incantation.
   `ensure-running --quiet` on every Claude Code session start
   (`startup|resume|clear|compact`). This closes the
   daemon-not-running cliff that 4.34.1 introduced: a fresh
-  `pip install conexus` + `/plugin install nx` now produces a
+  `pip install conexus` + `/plugin install conexus-plugins` now produces a
   working substrate on first session without any manual
   daemon-start incantation.
 
@@ -488,10 +488,10 @@ after this release ships on ``main``.
 
 Patch release. Architectural follow-up to RDR-121 (4.33.0): the
 routing-hook framework now applies ownership boundaries cleanly.
-The `grep_for_symbols_redirects_to_serena` rule moved from the nx
+The `grep_for_symbols_redirects_to_serena` rule moved from the conexus
 plugin to the sn plugin because its deny message redirects to
-Serena MCP tools that sn ships. Users who install nx without sn no
-longer get a hook that denies grep and points at tools they do not
+Serena MCP tools that sn ships. Users who install conexus without sn
+no longer get a hook that denies grep and points at tools they do not
 have; the hook simply does not exist for them.
 
 ### Architecture (RDR-125)

@@ -194,8 +194,8 @@ the network.**
 What works:
 
 1. Install the conexus plugin in your Claude Code installation:
-   `/plugin install nx`. The plugin registers `nx-mcp` as an MCP
-   server in your Claude Desktop config.
+   `/plugin install conexus@nexus-plugins`. The plugin registers
+   `nx-mcp` as an MCP server in your Claude Desktop config.
 2. Start the daemons on the host: `nx daemon t2 start` (and
    `nx daemon t3 start` if local-mode).
 3. Open a Cowork session. Claude Desktop **passes the configured
