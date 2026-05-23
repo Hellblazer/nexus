@@ -283,6 +283,10 @@ See `hooks/hooks.json` for exact wiring. Paths below use `$CLAUDE_PLUGIN_ROOT` a
 - `/nx:enrich-plan` → `nx_enrich_beads` *(was → plan-enricher agent)*
 - `/nx:pdf-process` → `nx index pdf` CLI *(was → pdf-chromadb-processor agent)*
 
+**Utility commands** (no agent dispatch, no MCP call — direct local action):
+- `/nx:continuation [topic]` — write a paste-ready handoff prompt to `~/.cache/nexus/continuations/` capturing branch, in-progress beads, open PRs, and active T2 memory. Use at session close. Compressed prompt is emitted in chat as a copy-clickable code block.
+- `/nx:nx-preflight` — verify nx plugin dependencies (CLI, doctor, beads).
+
 **RDR commands**: `/nx:rdr-create`, `/nx:rdr-list`, `/nx:rdr-show`, `/nx:rdr-research`, `/nx:rdr-gate`, `/nx:rdr-accept`, `/nx:rdr-close`, `/nx:rdr-audit`
 
 
