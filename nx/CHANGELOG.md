@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [4.34.5] - 2026-05-23
+
 ### New utility command: `/nx:continuation`
 
 Session-close handoff prompt generator. Captures branch, beads,
@@ -19,6 +21,16 @@ branch. Same-day re-runs append HHMM so nothing is overwritten.
 
 Registry entry: `utility_commands.continuation` in
 `nx/registry.yaml`.
+
+### Fix: `phase_review_close_requires_gate` hook trigger tightened (GH #931)
+
+The PreToolUse hook (`nx/hooks/scripts/routing/phase_review_close_requires_gate.py`)
+previously matched `\b(phase|review)\b` anywhere in the full `bd show`
+output and false-positived on implementation beads in phased plans
+whose description, parent epic, or rationale mentioned "phase" or
+"review". The trigger now matches against the title line only with a
+narrow regex requiring `Phase N review gate` or `PN phase-review-gate`.
+Four regression tests added.
 
 ## [4.34.4] - 2026-05-23
 
