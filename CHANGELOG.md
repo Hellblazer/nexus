@@ -6,6 +6,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### New: `/nx:continuation` slash command
+
+Generates a paste-ready handoff prompt at session close. Captures
+branch state, in-progress and ready beads, open PRs from this branch,
+active T2 memory titles, and (if Claude Code auto-memory is in use)
+the project's `feedback_*.md` filenames. Instructs Claude to compose
+a 10-section continuation document at
+`~/.cache/nexus/continuations/<repo>-continuation-<slug>-<date>.md`
+and emit the compressed paste-ready prompt in chat as a copy-clickable
+code block.
+
+Argument is optional: `/nx:continuation` slugs from the current branch,
+`/nx:continuation "RDR-120 P3b"` slugs from the topic. Same-day
+re-invocations append `-HHMM` so prior captures aren't overwritten.
+
+Mined from 122 instances of the continuation-prompt pattern across
+project sessions plus 9 canonical handoff files in `/tmp/`; the
+10-section structure is the empirical consensus shape.
+
 ## [4.34.4] - 2026-05-23
 
 ### Plugins — tool/skill invocation discipline restored
