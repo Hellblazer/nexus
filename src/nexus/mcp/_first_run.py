@@ -1,0 +1,154 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""RDR-126 P2 (nexus-bsjro): first-run daemon install for MCP startup.
+
+When ``nx-mcp`` / ``nx-mcp-catalog`` boots, ensure the host T2 daemon
+unit (LaunchAgent on macOS, systemd user-unit on Linux) is installed.
+Without this, a Claude-Desktop-only user who installs the .mcpb bundle
+has nx-mcp running but no daemon for it to talk to — every MCP tool
+that touches T2 fails opaquely.
+
+Idempotency model (per RDR-126 §Approach §2):
+
+- The OS unit (LaunchAgent / systemd file) is the source of truth.
+  If it exists, skip install. We do NOT compare contents or
+  overwrite — that's the realm of ``nx daemon t2 install --autostart
+  --force`` which the user can invoke deliberately.
+- We always call ``daemon t2 ensure-running`` so the current MCP
+  session has a daemon to talk to even if install just happened or
+  the previously-installed unit was stopped.
+
+Side effects are silent on success; failures log a structured warning
+and continue (the MCP server still starts; tool calls that need the
+daemon will fail with their own error path).
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import structlog
+
+_log = structlog.get_logger(__name__)
+
+
+def _macos_launchagent_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / "com.nexus.t2.plist"
+
+
+def _linux_systemd_unit_path() -> Path:
+    xdg_config = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+    return xdg_config / "systemd" / "user" / "nexus-t2.service"
+
+
+def _os_unit_exists() -> bool:
+    """Return True if the T2 daemon's OS-level autostart unit is
+    already installed on this host. macOS = LaunchAgent .plist,
+    Linux = systemd user .service. Other platforms (Windows): always
+    return True so the install step skips (no install support yet)."""
+    platform = sys.platform
+    if platform == "darwin":
+        return _macos_launchagent_path().exists()
+    if platform.startswith("linux"):
+        return _linux_systemd_unit_path().exists()
+    return True
+
+
+def _find_nx_binary() -> str | None:
+    """Locate the ``nx`` CLI binary the MCP server can shell out to.
+
+    Strategy:
+    1. ``shutil.which`` on the current PATH (typical CLI-spawned case).
+    2. Sibling of ``sys.argv[0]`` (the ``nx-mcp`` entry point lives in
+       the same bin dir as ``nx`` when conexus is installed via uv tool
+       or pip).
+    3. Standard uv-tool location (~/.local/bin/nx) as last-resort
+       fallback for GUI-spawned subprocesses that may have a sparse PATH.
+    """
+    found = shutil.which("nx")
+    if found:
+        return found
+
+    if sys.argv and sys.argv[0]:
+        sibling = Path(sys.argv[0]).resolve().parent / "nx"
+        if sibling.exists():
+            return str(sibling)
+
+    fallback = Path.home() / ".local" / "bin" / "nx"
+    if fallback.exists():
+        return str(fallback)
+
+    return None
+
+
+def ensure_installed_and_running() -> None:
+    """Best-effort: install the T2 daemon autostart unit if missing,
+    then ensure-running for this session. Never raises; logs warnings.
+
+    Called from each MCP server's ``main()`` once at startup, after
+    logging setup but before serving tools.
+    """
+    nx_bin = _find_nx_binary()
+    if not nx_bin:
+        _log.warning(
+            "first_run_no_nx_binary",
+            hint=(
+                "nx CLI binary not found on PATH; cannot auto-install "
+                "the T2 daemon. Install via 'uv tool install conexus' "
+                "and ensure ~/.local/bin (or your uv tool bin dir) is "
+                "on PATH for GUI-spawned subprocesses."
+            ),
+        )
+        return
+
+    if not _os_unit_exists():
+        # OS unit missing — install it. Idempotent within ``nx daemon
+        # t2 install --autostart`` itself; it checks the destination
+        # and bails with "already up to date" if the file matches.
+        try:
+            result = subprocess.run(
+                [nx_bin, "daemon", "t2", "install", "--autostart"],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+            if result.returncode != 0:
+                _log.warning(
+                    "first_run_install_failed",
+                    returncode=result.returncode,
+                    stderr=(result.stderr or "").strip()[:500],
+                    hint=(
+                        "T2 daemon autostart install failed; current MCP "
+                        "session will work via ensure-running but the "
+                        "daemon will not survive reboots. Re-run "
+                        "'nx daemon t2 install --autostart' manually."
+                    ),
+                )
+            else:
+                _log.info(
+                    "first_run_install_ok",
+                    stdout=(result.stdout or "").strip()[:500],
+                )
+        except subprocess.TimeoutExpired:
+            _log.warning(
+                "first_run_install_timeout",
+                hint="`nx daemon t2 install --autostart` timed out after 30s",
+            )
+        except Exception as exc:
+            _log.warning(
+                "first_run_install_exception",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+    # Always ensure-running so the current session has a daemon.
+    try:
+        subprocess.run(
+            [nx_bin, "daemon", "t2", "ensure-running", "--quiet"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except Exception as exc:
+        _log.warning(
+            "first_run_ensure_running_exception",
+            error=f"{type(exc).__name__}: {exc}",
+        )

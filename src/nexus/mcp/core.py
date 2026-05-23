@@ -4035,6 +4035,7 @@ def main():
     import structlog
 
     from nexus.logging_setup import configure_logging
+    from nexus.mcp._first_run import ensure_installed_and_running
     from nexus.mcp_infra import check_version_compatibility
 
     configure_logging("mcp")
@@ -4046,6 +4047,13 @@ def main():
         pid=os.getpid(),
         ppid=os.getppid(),
     )
+    # RDR-126 P2 (nexus-bsjro): ensure the host T2 daemon's OS-level
+    # autostart unit is installed and the daemon is running before
+    # serving any tools. Without this, a Claude-Desktop-only user who
+    # installed the .mcpb has nx-mcp running but no daemon to talk to;
+    # every memory_put / search call fails opaquely. Best-effort:
+    # logs warnings on failure, never blocks startup.
+    ensure_installed_and_running()
     # The FastMCP lifespan finally is the design's primary cleanup
     # path; the signal handlers below are belt-and-braces for the
     # cases where the lifespan does not fire. Empirically, FastMCP's

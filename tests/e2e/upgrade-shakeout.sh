@@ -229,8 +229,26 @@ _pass "nx doctor names the uninstall + install commands"
 # tests/test_plugin_name_drift.py::test_check_version_compatibility_logs_plugin_name_mismatch
 # — easier to assert there than to spawn nx-mcp + watch stderr here.)
 
-# ── 11. Summary ──────────────────────────────────────────────────────────────
-_step "11/11 PASS"
+# ── 11. .mcpb production bundle packs from REPO_ROOT ─────────────────────────
+_step "11/12 .mcpb bundle packs cleanly from REPO_ROOT/mcpb"
+if [ -f "$REPO_ROOT/mcpb/manifest.json" ]; then
+    cd "$REPO_ROOT/mcpb"
+    rm -f conexus.mcpb
+    npx -y @anthropic-ai/mcpb@latest pack . conexus.mcpb >/dev/null 2>&1 \
+        || _die "mcpb pack failed in $REPO_ROOT/mcpb"
+    BUNDLE_SIZE=$(stat -f%z conexus.mcpb 2>/dev/null || stat -c%s conexus.mcpb 2>/dev/null)
+    rm -f conexus.mcpb
+    cd - >/dev/null
+    if [ -z "$BUNDLE_SIZE" ] || [ "$BUNDLE_SIZE" -gt 100000 ]; then
+        _die "conexus.mcpb is $BUNDLE_SIZE bytes (expected <100 KB); check .mcpbignore"
+    fi
+    _pass "mcpb pack produces a $BUNDLE_SIZE-byte bundle (well under 100 KB)"
+else
+    _pass "skipped (mcpb/ not present on this branch)"
+fi
+
+# ── 12. Summary ──────────────────────────────────────────────────────────────
+_step "12/12 PASS"
 echo "  Upgrade-shakeout green: $FROM_VERSION → $NEW_VER"
 echo "  - hook stanza migrated (pgrep guard added, no pile-up risk)"
 echo "  - nx doctor drift detection works"

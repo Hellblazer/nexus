@@ -647,6 +647,28 @@ class TestMarketplaceVersion:
                 f"its own .claude-plugin/plugin.json at {manifest}"
             )
 
+    def test_mcpb_manifest_version_matches_pyproject(self) -> None:
+        """nexus-bsjro: the Claude Desktop .mcpb bundle's manifest.json
+        and pyproject.toml versions both track the canonical conexus
+        version. CI catches forgot-to-bump-mcpb releases."""
+        mcpb_manifest = REPO_ROOT / "mcpb" / "manifest.json"
+        mcpb_pyproject = REPO_ROOT / "mcpb" / "pyproject.toml"
+        if not mcpb_manifest.exists():
+            return  # mcpb bundle not yet shipped on this branch
+        pv = self._pyproject_version()
+        manifest_version = json.loads(mcpb_manifest.read_text()).get("version")
+        assert manifest_version == pv, (
+            f"mcpb/manifest.json version {manifest_version!r} "
+            f"!= pyproject.toml {pv!r}"
+        )
+        if mcpb_pyproject.exists():
+            with mcpb_pyproject.open("rb") as f:
+                mcpb_pv = tomllib.load(f)["project"]["version"]
+            assert mcpb_pv == pv, (
+                f"mcpb/pyproject.toml version {mcpb_pv!r} "
+                f"!= pyproject.toml {pv!r}"
+            )
+
     def test_plugin_source_sha_is_well_formed_when_present(self) -> None:
         """Optional `source.sha` for tag-force-push protection. When
         present, must be a 40-character lowercase hex string (full
