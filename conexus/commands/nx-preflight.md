@@ -1,5 +1,5 @@
 ---
-description: Check that all nx plugin dependencies are correctly installed and configured
+description: Check that all conexus plugin dependencies are correctly installed and configured
 disable-model-invocation: false
 ---
 
@@ -141,5 +141,5 @@ Based on the preflight output above, produce a summary table:
 
 Fill in each row from the check results above. Use "PASS", "FAIL", or "WARN" for Status. Leave Action needed blank for passing checks; for failures/warnings, provide the install command or link.
 
-If all checks pass: print "nx plugin is ready"
+If all checks pass: print "conexus plugin is ready"
 If any check fails: print "Fix the above before using nx agents"

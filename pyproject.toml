@@ -124,7 +124,7 @@ exclude = [
     "src/nexus/_resources",
 ]
 
-# RDR-092 nexus-b9f3: ship the nx plugin's plan YAMLs as package data
+# RDR-092 nexus-b9f3: ship the conexus plugin's plan YAMLs as package data
 # so installed CLIs can resolve them via ``importlib.resources.files
 # ("nexus") / "_resources"``. Without this, ``_seed_plan_templates``
 # cannot find ``nx/plans/builtin/*.yml`` from a uv-tool install and

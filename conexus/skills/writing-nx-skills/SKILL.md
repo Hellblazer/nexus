@@ -1,6 +1,6 @@
 ---
 name: writing-nx-skills
-description: Use when creating new nx plugin skills, editing existing skills, or verifying skill quality before committing
+description: Use when creating new conexus plugin skills, editing existing skills, or verifying skill quality before committing
 effort: low
 ---
 

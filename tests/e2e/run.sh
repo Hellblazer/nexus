@@ -124,7 +124,7 @@ cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" << PLUGINS_EOF
 }
 PLUGINS_EOF
 
-# Write settings.json: enable nx plugin and skip the "dangerous mode" confirmation
+# Write settings.json: enable conexus plugin and skip the "dangerous mode" confirmation
 # dialog so claude_start doesn't need to navigate it.
 cat > "$TEST_HOME/.claude/settings.json" << SETTINGS_EOF
 {

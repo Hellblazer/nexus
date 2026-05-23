@@ -531,7 +531,7 @@ process discipline actually failed.
   case). **Method**: Counterfactual Analysis (4 of 4 documented
   scope-drift events from the scrapped RDR-110-119 arc would have been
   blocked by §Scope Boundaries + author self-check before filing) +
-  Tooling Inspection (rdr-gate skill at nx plugin 4.32.12 +
+  Tooling Inspection (rdr-gate skill at conexus plugin 4.32.12 +
   `/conexus:phase-review-gate` skill at `archive/develop-2026-05-19`
   commit `122feaff`). **Evidence**: T2 entry `120-research-A7`.
   **Tooling that exists**: `/conexus:phase-review-gate` (bead `nexus-j327`,
@@ -1273,12 +1273,12 @@ counterfactual.
   same path the old direct client did," verified in P1 and P3.
 - **What signals lifting the moratorium**: P6 + 30 days under real
   usage is the floor. Any other criteria? Open for the gate to settle.
-- **Cross-RDR moratorium tooling**: should the nx plugin gain a
+- **Cross-RDR moratorium tooling**: should the conexus plugin gain a
   `moratorium_blocks: <topic-list>` frontmatter field on active RDRs
   plus a pre-scaffold check in `/conexus:rdr-create` and a cross-check in
   `/conexus:rdr-gate` Layer 3? Required before multi-author substrate work
   in any future RDR; dormant for RDR-120's solo-author implementation
-  window. File as a follow-on bead against the nx plugin if pursued.
+  window. File as a follow-on bead against the conexus plugin if pursued.
 
 ## References
 

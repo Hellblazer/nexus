@@ -146,7 +146,7 @@ Source: `nexus_rdr/067-research-2-ca3-phase1b-spike-result` (id 743). Live test 
 
 **Headless Claude Code mode supports plugin slash command invocation with subagent dispatch end-to-end.** Test verified:
 
-1. Fresh `claude -p` session loads nx plugin from installed location
+1. Fresh `claude -p` session loads conexus plugin from installed location
 2. `/conexus:substantive-critique` slash command resolves to the substantive-critic skill
 3. Skill body executes — reads the target RDR file from disk, constructs the relay
 4. `Agent` tool dispatches the substantive-critic subagent from within the headless main-thread session
@@ -173,7 +173,7 @@ Source: `nexus_rdr/067-research-2-ca3-phase1b-spike-result` (id 743). Live test 
 
 - [x] **CA-3**: A usable scheduling mechanism exists for periodic audits. **VERIFIED 2026-04-11** via Research Findings 1 + 2 (T2 `nexus_rdr/067-research-1-ca3-scheduling-mechanism-survey` id 742, `nexus_rdr/067-research-2-ca3-phase1b-spike-result` id 743). Primary mechanism selected: **external cron/launchd + `claude -p '/conexus:rdr-audit <project>'`**.
   — **Status**: VERIFIED. `claude -p` headless invocation confirmed end-to-end via live test: plugin loads, slash command resolves, skill body executes, subagent dispatch works (`Agent` tool active on headless main-thread sessions). Test cost ~$0.10-0.30, wall-clock ~2min.
-  — **Why external cron is primary**: only mechanism with (a) local file access — the audit reads `~/git/ART/.beads/dolt/ART/` which is outside any git repo and unreachable from any cloud-hosted agent context, (b) full nx MCP tool access — T2 memory_put for findings without requiring external connector registration, (c) full nx plugin loading via the local Claude Code installation.
+  — **Why external cron is primary**: only mechanism with (a) local file access — the audit reads `~/git/ART/.beads/dolt/ART/` which is outside any git repo and unreachable from any cloud-hosted agent context, (b) full nx MCP tool access — T2 memory_put for findings without requiring external connector registration, (c) full conexus plugin loading via the local Claude Code installation.
   — **Trade-off**: per-machine cron entries; users running Claude Code from multiple machines need separate cron per machine. No cross-machine sync. Output to log file, manual failure inspection.
   — **Secondary candidates (documented for future scope)**:
     - `schedule` skill (Claude Code harness CCR) — viable for reduced-scope remote audits against git-cloneable sources only. Not a drop-in for the full audit (no ART Dolt archive access, no nx MCP without connector registration). Reserved for cross-machine scheduling if local cron friction becomes painful.

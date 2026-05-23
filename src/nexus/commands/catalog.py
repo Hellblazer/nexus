@@ -127,7 +127,7 @@ def _seed_plan_templates() -> int:
                 f"YAML builtins found at {plugin_root / 'plans' / 'builtin'}). "
                 "This typically means the plugin root is misconfigured "
                 "or the shipped builtin YAMLs were removed. Re-install "
-                "the nx plugin or run 'nx doctor --check-plan-library' "
+                "the conexus plugin or run 'nx doctor --check-plan-library' "
                 "for diagnostics."
             )
 

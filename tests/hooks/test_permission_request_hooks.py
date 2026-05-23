@@ -40,11 +40,11 @@ def _parse_decision(output: str) -> str | None:
     return data["hookSpecificOutput"]["decision"]["behavior"]
 
 
-# ── nx plugin hook ───────────────────────────────────────────────────────────
+# ── conexus plugin hook ───────────────────────────────────────────────────────────
 
 
 class TestNxPermissionHook:
-    """nx plugin auto-approves mcp__plugin_conexus_* tools."""
+    """conexus plugin auto-approves mcp__plugin_conexus_* tools."""
 
     def test_approves_nexus_catalog_tool(self) -> None:
         output = _run_hook(NX_SCRIPT, "mcp__plugin_conexus_nexus-catalog__search")

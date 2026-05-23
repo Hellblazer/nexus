@@ -18,7 +18,7 @@ related_issues:
 
 ## Summary
 
-The nx plugin infrastructure for Claude is architecturally sound but leads
+The conexus plugin infrastructure for Claude is architecturally sound but leads
 Claude into its worst-performing pathways in practice. Four specific adoption
 gaps were identified through empirical testing: (1) the session hook surfaces
 T2 memory under the bare repo name but the RDR workflow populates
@@ -43,7 +43,7 @@ findings are directly observable and reproducible.
 
 ## Motivation
 
-The nx plugin exists to give Claude persistent, cross-session knowledge about
+The conexus plugin exists to give Claude persistent, cross-session knowledge about
 a project. Its value proposition depends entirely on Claude actually using it
 and getting correct results. Neither is currently reliable.
 

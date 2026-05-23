@@ -20,7 +20,7 @@ related_issues: []
 
 ## Problem Statement
 
-Claude Code v2.1.72–v2.1.81 (March 10–20, 2026) introduced new plugin/agent/skill capabilities, fixed bugs that directly impacted nexus workflows, and added hook events the nx plugin does not yet exploit. The nexus plugin is leaving value on the table and carrying workarounds for issues that are now fixed upstream.
+Claude Code v2.1.72–v2.1.81 (March 10–20, 2026) introduced new plugin/agent/skill capabilities, fixed bugs that directly impacted nexus workflows, and added hook events the conexus plugin does not yet exploit. The nexus plugin is leaving value on the table and carrying workarounds for issues that are now fixed upstream.
 
 This RDR captures the full alignment gap, organizes the work into independent phases, and prioritizes by impact.
 

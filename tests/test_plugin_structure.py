@@ -11,7 +11,7 @@ import yaml
 import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
-PLUGIN_DIR = REPO_ROOT / "nx"
+PLUGIN_DIR = REPO_ROOT / "conexus"
 AGENTS_DIR = PLUGIN_DIR / "agents"
 SHARED_DIR = AGENTS_DIR / "_shared"
 SKILLS_DIR = PLUGIN_DIR / "skills"

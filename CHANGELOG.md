@@ -175,7 +175,7 @@ manual `nx daemon t2 start` incantation.
   crashed daemons trigger a fresh spawn rather than a false-
   positive.
 
-- nx plugin `SessionStart` hook runs the new
+- conexus plugin `SessionStart` hook runs the new
   `ensure-running --quiet` on every Claude Code session start
   (`startup|resume|clear|compact`). This closes the
   daemon-not-running cliff that 4.34.1 introduced: a fresh
@@ -4068,7 +4068,7 @@ Rolls up the kxez (GitHub #243 + #241) and gwhy (#238 / #239 / #240 + review-res
 - **`rebuild_taxonomy` cleanup**: paginated GET + batched DELETE so collections with >300 centroids don't fail rebuild.
 - **`nx taxonomy links` invisible cross-collection links**: command queried `compute_topic_links` (catalog-derived only) and ignored the `topic_links` table. Cross-collection projection links written by `_discover_cross_links` and `generate_cooccurrence_links` were invisible. Now displays all rows in `topic_links` with `[collection]` prefix on each topic. New `--refresh` flag re-runs catalog-derived computation explicitly.
 - **`backfill_projection` misleading count**: reported "X assignments" using the per-call attempt count, but `INSERT OR IGNORE` deduplicates. Now reports "X stored (Y attempted)" using `COUNT(*) FROM topic_assignments WHERE assigned_by = 'projection'`.
-- **Plugin/CLI version mismatch UX**: when the nx plugin is upgraded but the conexus CLI is not, the `nx upgrade --auto` SessionStart hook would print a cryptic Click error. Now prints a helpful message: `nx plugin requires conexus >= 4.2.0 — run: uv tool upgrade conexus`.
+- **Plugin/CLI version mismatch UX**: when the conexus plugin is upgraded but the conexus CLI is not, the `nx upgrade --auto` SessionStart hook would print a cryptic Click error. Now prints a helpful message: `conexus plugin requires conexus >= 4.2.0 — run: uv tool upgrade conexus`.
 
 ## [4.2.0] - 2026-04-14
 
@@ -4313,7 +4313,7 @@ safety split, cross-project incident template, scheduling asset
 templates for local cron/launchd, and softens six research-class agents
 to honor relay-specified storage targets (T1/T2/T3).
 
-### Added (nx plugin)
+### Added (conexus plugin)
 
 - **`nx:rdr-audit` skill** (`conexus/skills/rdr-audit/SKILL.md`) — wraps the
   canonical audit prompt from RDR-067 Phase 1a (pinned in T2 at
@@ -4352,7 +4352,7 @@ to honor relay-specified storage targets (T1/T2/T3).
   `0 3 1 */3 *` true 90-day cadence), and platform READMEs with
   explicit "do not run launchctl load automatically" safety notes.
 
-### Changed (nx plugin)
+### Changed (conexus plugin)
 
 - **Research-class agents honor relay-specified storage targets**. Six
   agents (`deep-research-synthesizer`, `deep-analyst`,
@@ -4383,7 +4383,7 @@ boundary (inter-bead composition failures); the 4th (RDR-036 intra-class
 HashMap short-circuit) is out of scope and re-attributed to RDR-068
 dimensional contracts.
 
-### Added (nx plugin)
+### Added (conexus plugin)
 
 - **Plan-enricher coordinator detection** (`conexus/agents/plan-enricher.md`)
   — the enricher now inspects `bd show <id> --json .dependencies` in
@@ -4405,7 +4405,7 @@ dimensional contracts.
   locked on Phase 1a spike that verified `search_cross_corpus` as a
   hard-case target without Serena symbol resolution needed.
 
-### Fixed (nx plugin)
+### Fixed (conexus plugin)
 
 - **Coordinator convention documentation** in plan-enricher agent
   prompt header — clarifies what a coordinator is, how detection works
@@ -4454,7 +4454,7 @@ that should have landed together with RDR-069 in 3.8.3.
   with a clean error; rejects unresolvable files with guidance to pass
   a directory instead.
 
-### Fixed (nx plugin)
+### Fixed (conexus plugin)
 
 - **`rdr-close` skill unconditional corpus reindex** — Step 4.4 of
   the Implemented flow, Step 5 of the Reverted/Abandoned flow, and
@@ -4480,7 +4480,7 @@ the critic's verdict category. Addresses ART's documented
 silent-scope-reduction failure mode with the only intervention that has
 empirical catch evidence (2/2 on ART RDR-073 + RDR-075).
 
-### Added (nx plugin)
+### Added (conexus plugin)
 
 - **Step 1.75 Automatic Critique** in `conexus/skills/rdr-close/SKILL.md` —
   dispatches `/conexus:substantive-critique <rdr-id>` via a fixed-shape
@@ -4514,7 +4514,7 @@ empirical catch evidence (2/2 on ART RDR-073 + RDR-075).
   close is not blocked). Measurement surface: the T2 override audit
   entries above.
 
-### Fixed (nx plugin)
+### Fixed (conexus plugin)
 
 - **`--force` regex collision** in `rdr-close` preamble (plan-auditor
   SIG-1/SIG-2). Both occurrences — the `force = bool(...)` detection
@@ -4541,12 +4541,12 @@ empirical catch evidence (2/2 on ART RDR-073 + RDR-075).
 
 ## [3.8.2] - 2026-04-11
 
-Patch release: ships RDR-065 close-time funnel hardening for the nx plugin.
+Patch release: ships RDR-065 close-time funnel hardening for the conexus plugin.
 No core CLI changes — all surface area lives in the `nx` Claude Code plugin
 (commands, hooks, skill text, RDR template scaffold). The new gates defend
 the RDR close ritual against silent scope reduction.
 
-### Added (nx plugin)
+### Added (conexus plugin)
 
 - **RDR template scaffold (Gap 4)** — `### Enumerated gaps to close`
   subsection with `#### Gap N: <title>` placeholders. Authors of new RDRs
@@ -4702,7 +4702,7 @@ acceptance gates all green.
 ### Fixed
 
 - README agent/skill/tool counts: 32 → 33 skills, 24 → 25 MCP tools (main
-  README), 32 → 33 skills (nx plugin README), 17 → 16 agents and 32 → 33
+  README), 32 → 33 skills (conexus plugin README), 17 → 16 agents and 32 → 33
   skills (getting-started.md), 17 → 16 agents (historical.md).
 - `docs/architecture.md` Telemetry row mislabeled "access tracking" — moved
   to Memory row where it belongs; Telemetry reworded as "Relevance log …
@@ -4838,7 +4838,7 @@ findings addressed, 3426 unit tests + 20 integration tests passing.
 ## [3.6.4] - 2026-04-09
 
 ### Fixed
-- **nx plugin.json version not bumped** — `conexus/.claude-plugin/plugin.json` was stuck at 3.2.3 since the nx plugin was created, preventing Claude Code from refreshing the nx plugin cache on new releases. All plugin changes since 3.2.3 were invisible to users until manual cache clearing.
+- **conexus plugin.json version not bumped** — `conexus/.claude-plugin/plugin.json` was stuck at 3.2.3 since the conexus plugin was created, preventing Claude Code from refreshing the conexus plugin cache on new releases. All plugin changes since 3.2.3 were invisible to users until manual cache clearing.
 - **Release docs updated** — contributing.md now lists `conexus/.claude-plugin/plugin.json` as a required release artifact alongside `sn/.claude-plugin/plugin.json`.
 
 ## [3.6.3] - 2026-04-09
@@ -5508,7 +5508,7 @@ After upgrading, run `nx catalog setup` to create and populate the catalog. This
 - **`collection verify --deep`** — enhanced with known-document probe, distance reporting, and `VerifyResult` dataclass (A2)
 
 ### Docs
-- Updated CLI reference, architecture docs, MCP tool reference, CLAUDE.md, and nx plugin CHANGELOG for all RDR-040 changes (D1–D6)
+- Updated CLI reference, architecture docs, MCP tool reference, CLAUDE.md, and conexus plugin CHANGELOG for all RDR-040 changes (D1–D6)
 
 ### References
 - RDR-040: CCE Post-Mortem Gap Closure & MCP Server Enhancement
@@ -5628,7 +5628,7 @@ After upgrading, run `nx catalog setup` to create and populate the catalog. This
 ## [2.1.1] - 2026-03-15
 
 ### Fixed
-- **Plugin skill references** — all 19 nx plugin files now use fully-qualified
+- **Plugin skill references** — all 19 conexus plugin files now use fully-qualified
   `/conexus:skill-name` form instead of short `/skill-name` which Claude Code cannot
   resolve for plugin-namespaced skills. Affected agents, commands, hooks, skills,
   and README.
@@ -6428,7 +6428,7 @@ from rc10 — this entry marks the API, CLI, and plugin contract as stable.
 ## [0.4.0] - 2026-02-24
 
 ### Added
-- nx plugin v0.4.0: brainstorming-gate, verification-before-completion, receiving-code-review, using-nx-skills, dispatching-parallel-agents, writing-nx-skills skills
+- conexus plugin v0.4.0: brainstorming-gate, verification-before-completion, receiving-code-review, using-nx-skills, dispatching-parallel-agents, writing-nx-skills skills
 - Graphviz flowcharts in decision-heavy skills
 - REQUIRED SUB-SKILL cross-reference markers
 - Companion reference.md for nexus skill

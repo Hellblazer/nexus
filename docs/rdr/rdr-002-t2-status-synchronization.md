@@ -52,7 +52,7 @@ T2 query revealed all records still showed their initial draft status.
 
 **T2 is the process authority; files are the human-editable persistence
 layer.** Agent interactions with RDR process state (status, gate results,
-acceptance, reviewed-by) should flow through `nx` and the nx plugin. Files
+acceptance, reviewed-by) should flow through `nx` and the conexus plugin. Files
 are the git-versioned merge state — editable by humans, diffable, reviewable
 — but Claude's primary interface for process metadata is T2.
 

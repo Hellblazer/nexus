@@ -67,7 +67,7 @@ implementation_notes: |
 RDR-121 (shipped in conexus 4.33.0) introduced a PreToolUse routing-hook
 framework under `conexus/hooks/scripts/routing/` plus three rules:
 `grep_for_symbols_redirects_to_serena`, `git_add_all_redirects_to_explicit_paths`,
-`phase_review_close_requires_gate`. All three live in the nx plugin.
+`phase_review_close_requires_gate`. All three live in the conexus plugin.
 
 This is correct for two of the three rules but architecturally wrong for
 the third. `grep_for_symbols_redirects_to_serena` redirects users to
@@ -80,7 +80,7 @@ tools they do not have.
 The escape token (`# routing-allow: <reason>`) lets them bypass on a
 per-call basis, but the default behavior is user-hostile.
 
-The deeper problem: the nx plugin is making routing decisions on behalf
+The deeper problem: the conexus plugin is making routing decisions on behalf
 of tools it does not own. This violates the substrate-vs-consumer
 boundary that RDR-120 § A8 articulated for storage and tests: substrate
 provides shape; consumers own content. The same principle applies to
@@ -125,7 +125,7 @@ re-implement the JSON-envelope contract from scratch.
   draft) articulates substrate-vs-consumer for storage. § A8
   generalized the principle to test infrastructure. This RDR
   generalizes it to routing rules.
-- The nx plugin (`conexus/`) and sn plugin (`sn/`) ship from the same
+- The conexus plugin (`conexus/`) and sn plugin (`sn/`) ship from the same
   marketplace today. sn provides Serena + Context7 MCP tools; nx
   provides the nexus stack (T1/T2/T3, RDR lifecycle skills, beads
   integration, hook framework). Plugins are loaded independently;

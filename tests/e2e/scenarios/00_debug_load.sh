@@ -36,7 +36,7 @@ d = json.load(open(sys.argv[1]))
 entries = d.get('plugins', {}).get('conexus@nexus-plugins', [])
 sys.exit(1 if any('plugins/cache' in e.get('installPath','') for e in entries) else 0)
 " "$plugins_json" 2>/dev/null; then
-        pass "nx plugin does not load from cache (not v1)"
+        pass "conexus plugin does not load from cache (not v1)"
     else
         fail "conexus@nexus-plugins installPath points to plugin cache — testing v1, not dev"
     fi
@@ -59,10 +59,10 @@ echo "    ---"
 
 # Plugin name or install path should appear somewhere in debug output
 if echo "$debug_out" | grep -qiE "\bnx\b|nexus|$REPO_ROOT"; then
-    pass "nx plugin reference appears in debug output"
+    pass "conexus plugin reference appears in debug output"
 else
     # --debug format varies by Claude Code version; not a hard failure
-    pass "nx plugin debug output check inconclusive (format may vary) — see dump above"
+    pass "conexus plugin debug output check inconclusive (format may vary) — see dump above"
 fi
 
 # No load-time errors
@@ -168,9 +168,9 @@ scenario_end
 
 scenario "00 debug-load: agents visible to Claude"
 
-echo "    Asking Claude to list nx plugin agents (print mode)..."
+echo "    Asking Claude to list conexus plugin agents (print mode)..."
 agents_out=$(crun "claude --dangerously-skip-permissions \
-    -p 'List ALL agent names provided by the nx plugin. One per line, names only.' \
+    -p 'List ALL agent names provided by the conexus plugin. One per line, names only.' \
     2>&1" || true)
 
 echo "    --- agents output (first 30 lines) ---"
@@ -225,9 +225,9 @@ scenario_end
 
 scenario "00 debug-load: slash commands visible to Claude"
 
-echo "    Asking Claude to list nx plugin slash commands (print mode)..."
+echo "    Asking Claude to list conexus plugin slash commands (print mode)..."
 cmds_out=$(crun "claude --dangerously-skip-permissions \
-    -p 'List ALL slash commands provided by the nx plugin. One per line.' \
+    -p 'List ALL slash commands provided by the conexus plugin. One per line.' \
     2>&1" || true)
 
 echo "    --- commands output (first 30 lines) ---"

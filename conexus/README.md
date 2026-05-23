@@ -191,7 +191,7 @@ This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure
 | receiving-review | Technical evaluation of code review feedback |
 | serena-code-nav | Navigate code by symbol — definitions, callers, type hierarchies |
 | using-nx-skills | Skill invocation discipline — check skills before every response |
-| writing-nx-skills | Guide for authoring nx plugin skills |
+| writing-nx-skills | Guide for authoring conexus plugin skills |
 
 ## Agents (13)
 
@@ -285,7 +285,7 @@ See `hooks/hooks.json` for exact wiring. Paths below use `$CLAUDE_PLUGIN_ROOT` a
 
 **Utility commands** (no agent dispatch, no MCP call — direct local action):
 - `/conexus:continuation [topic]` — write a paste-ready handoff prompt to `~/.cache/nexus/continuations/` capturing branch, in-progress beads, open PRs, and active T2 memory. Use at session close. Compressed prompt is emitted in chat as a copy-clickable code block.
-- `/conexus:nx-preflight` — verify nx plugin dependencies (CLI, doctor, beads).
+- `/conexus:nx-preflight` — verify conexus plugin dependencies (CLI, doctor, beads).
 
 **RDR commands**: `/conexus:rdr-create`, `/conexus:rdr-list`, `/conexus:rdr-show`, `/conexus:rdr-research`, `/conexus:rdr-gate`, `/conexus:rdr-accept`, `/conexus:rdr-close`, `/conexus:rdr-audit`
 

@@ -46,7 +46,7 @@ def installed_plugin(tmp_path_factory) -> Path:
     marketplace = json.loads(
         (REPO_ROOT / ".claude-plugin" / "marketplace.json").read_text()
     )
-    source = marketplace["plugins"][0]["source"].lstrip("./")  # "./nx" -> "nx"
+    source = marketplace["plugins"][0]["source"].lstrip("./")  # "./conexus" -> "conexus"
 
     plugin_root = clone_root / source
     assert plugin_root.is_dir(), (
@@ -171,7 +171,7 @@ def test_all_shared_relative_links_resolve_after_install(installed_plugin: Path)
 
 def test_all_agent_files_present_after_install(installed_plugin: Path) -> None:
     """Every agent .md file from the source tree must be present after install."""
-    source_agents = {p.name for p in (REPO_ROOT / "nx" / "agents").glob("*.md")}
+    source_agents = {p.name for p in (REPO_ROOT / "conexus" / "agents").glob("*.md")}
     installed_agents = {
         p.name for p in (installed_plugin / "agents").glob("*.md")
     }
@@ -187,7 +187,7 @@ def test_all_agent_files_present_after_install(installed_plugin: Path) -> None:
 
 def test_all_skill_files_present_after_install(installed_plugin: Path) -> None:
     """Every skills/<name>/SKILL.md from the source tree must survive the install."""
-    source_skills = {p.parent.name for p in (REPO_ROOT / "nx" / "skills").glob("*/SKILL.md")}
+    source_skills = {p.parent.name for p in (REPO_ROOT / "conexus" / "skills").glob("*/SKILL.md")}
     installed_skills = {
         p.parent.name for p in (installed_plugin / "skills").glob("*/SKILL.md")
     }
@@ -203,7 +203,7 @@ def test_all_skill_files_present_after_install(installed_plugin: Path) -> None:
 
 def test_all_command_files_present_after_install(installed_plugin: Path) -> None:
     """Every commands/*.md from the source tree must survive the install."""
-    source_cmds = {p.name for p in (REPO_ROOT / "nx" / "commands").glob("*.md")}
+    source_cmds = {p.name for p in (REPO_ROOT / "conexus" / "commands").glob("*.md")}
     installed_cmds = {p.name for p in (installed_plugin / "commands").glob("*.md")}
     missing = source_cmds - installed_cmds
     assert not missing, (
@@ -218,7 +218,7 @@ def test_all_command_files_present_after_install(installed_plugin: Path) -> None
 def test_all_hook_scripts_present_after_install(installed_plugin: Path) -> None:
     """Every hook script from the source tree must survive the install."""
     source_scripts = {
-        p.name for p in (REPO_ROOT / "nx" / "hooks" / "scripts").iterdir()
+        p.name for p in (REPO_ROOT / "conexus" / "hooks" / "scripts").iterdir()
         if p.is_file()
     }
     installed_scripts = {

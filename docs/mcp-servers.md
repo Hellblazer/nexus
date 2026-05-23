@@ -250,4 +250,4 @@ References:
 - [Document Catalog](catalog.md) — conceptual introduction to what the catalog is
 - [Querying Guide](querying-guide.md) — when to use `nx search` vs `query()` MCP vs `/conexus:query` skill
 - [CLI Reference — nx catalog](cli-reference.md#nx-catalog) — CLI equivalents for the 10 catalog tools
-- [nx plugin README](../conexus/README.md) — plugin installation, hooks, auto-approval
+- [conexus plugin README](../conexus/README.md) — plugin installation, hooks, auto-approval

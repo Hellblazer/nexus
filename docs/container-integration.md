@@ -54,7 +54,7 @@ This installs `~/Library/LaunchAgents/com.nexus.t2.plist` on macOS or
 / `Restart=on-failure` so the daemon survives crashes and reboots.
 Uninstall with `nx daemon t2 uninstall --autostart`.
 
-When Claude Code is the primary consumer, the nx plugin's
+When Claude Code is the primary consumer, the conexus plugin's
 **SessionStart hook** also runs `nx daemon t2 ensure-running --quiet`
 on every Claude session start, so the daemon is auto-spawned on the
 first session after `pip install conexus` even if you haven't yet
@@ -193,7 +193,7 @@ the network.**
 
 What works:
 
-1. Install the nx plugin in your Claude Code installation:
+1. Install the conexus plugin in your Claude Code installation:
    `/plugin install nx`. The plugin registers `nx-mcp` as an MCP
    server in your Claude Desktop config.
 2. Start the daemons on the host: `nx daemon t2 start` (and
@@ -275,7 +275,7 @@ the daemon's address matches.
 | `[Errno 13] Permission denied` on UDS | UID mismatch | `--user $(id -u):$(id -g)` |
 | `[Errno 111] Connection refused` on TCP | Daemon not running, or wrong port | `nx daemon t2 status` on the host; verify port matches `NX_T2_ADDR` |
 | Container writes succeed but host can't see them | Container falling back to local SQLite | (4.34.0 only) Upgrade to 4.34.1+; verify CLI is using `t2_handle()` |
-| Cowork agent's `mcp_*` tool returns error | Host daemon down or nx plugin not enabled | Start daemons; `/plugin list` to confirm nx plugin is active |
+| Cowork agent's `mcp_*` tool returns error | Host daemon down or conexus plugin not enabled | Start daemons; `/plugin list` to confirm conexus plugin is active |
 
 ### `T2SchemaVersionMismatchError`
 

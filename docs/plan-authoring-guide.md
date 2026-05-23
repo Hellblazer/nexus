@@ -242,7 +242,7 @@ Every scope above `personal` is a git-tracked YAML path:
 | `rdr-<slug>` | `docs/rdr/<slug>/plans.yml` (peer to the RDR) | `nx catalog setup` when RDR is `status: accepted` |
 | `project` | `.nexus/plans/*.yml` or `.nexus/plans.yml` | `nx catalog setup` |
 | `repo` | umbrella `.nexus/plans/_repo.yml` | `nx catalog setup` (umbrella detection) |
-| `global` | `conexus/plans/builtin/*.yml` (nx plugin) | plugin release |
+| `global` | `conexus/plans/builtin/*.yml` (conexus plugin) | plugin release |
 
 A plan authored at one scope can be *promoted* — copied to a higher
 scope with a new dimension map. Promotion flow (tool surface in

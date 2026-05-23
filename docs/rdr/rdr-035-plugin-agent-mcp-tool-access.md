@@ -24,7 +24,7 @@ related_issues:
 
 ## Problem Statement
 
-All 14 nx plugin agents fail to use MCP tools (`mcp__plugin_conexus_nexus__*`, `mcp__plugin_conexus_sequential-thinking__*`) when spawned as subagents. This renders the entire MCP server infrastructure built in RDR-034 non-functional for its intended purpose — reliable agent access to T1/T2/T3 storage tiers.
+All 14 conexus plugin agents fail to use MCP tools (`mcp__plugin_conexus_nexus__*`, `mcp__plugin_conexus_sequential-thinking__*`) when spawned as subagents. This renders the entire MCP server infrastructure built in RDR-034 non-functional for its intended purpose — reliable agent access to T1/T2/T3 storage tiers.
 
 **Observed failure** (2026-03-12, Delos project): 15 agents (6 knowledge-tidier, 8 general-purpose, 1 codebase-analyzer) all failed to call `store_put`, `memory_put`, `scratch`, and `sequentialthinking`. Every MCP tool was denied from the very first attempt, while built-in tools (Read, Bash) worked initially.
 
@@ -75,7 +75,7 @@ Both MCP tools worked on the first attempt with zero permission denials.
 
 ### Finding 4: The PermissionRequest hook provides runtime safety
 
-The nx plugin's `permission-request-stdin.sh` hook auto-approves:
+The conexus plugin's `permission-request-stdin.sh` hook auto-approves:
 - All `mcp__plugin_conexus_nexus__*` tools (line 52-55)
 - All `mcp__plugin_conexus_sequential-thinking__*` tools (line 46-49)
 - Read, Write, Edit, Grep, Glob, WebSearch, WebFetch, Agent (lines 22-43)
@@ -102,7 +102,7 @@ After enough MCP tool denials accumulate, the framework enters a degraded state 
 
 ## Proposed Solution
 
-Remove the `tools:` frontmatter field from all 14 nx plugin agents. Agents will inherit all tools from the parent session, including MCP tools. The PermissionRequest hook remains as the runtime enforcement layer for tool access control.
+Remove the `tools:` frontmatter field from all 14 conexus plugin agents. Agents will inherit all tools from the parent session, including MCP tools. The PermissionRequest hook remains as the runtime enforcement layer for tool access control.
 
 ### What Changes
 

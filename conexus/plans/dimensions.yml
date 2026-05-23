@@ -5,7 +5,7 @@
 # SC-19 schema validator. The validator warns (or, with --strict,
 # rejects) plan templates whose dimension keys are not in this set.
 #
-# Sharing model: this file is shipped by the nx plugin (scope:global).
+# Sharing model: this file is shipped by the conexus plugin (scope:global).
 # Project overrides may add new dimensions in `.nexus/plans/dimensions.yml`
 # (additive — name collisions surface at load time).
 #

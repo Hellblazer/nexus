@@ -1411,7 +1411,7 @@ Exit codes:
 - `0`: reachable (already running OR successfully spawned)
 - `1`: spawned but did not become reachable within `--timeout`
 
-Used by the nx plugin's SessionStart hook; safe to invoke from any
+Used by the conexus plugin's SessionStart hook; safe to invoke from any
 post-install script that needs the daemon up before running other
 commands.
 

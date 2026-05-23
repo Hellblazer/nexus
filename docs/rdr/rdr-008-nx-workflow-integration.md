@@ -19,7 +19,7 @@ related_issues:
 
 ## Summary
 
-All nx plugin agents were written before nx reached its current form. The result is
+All conexus plugin agents were written before nx reached its current form. The result is
 uneven integration: a few agents use nx deeply and correctly; others treat it as a
 fallback; the nx wrapper skill for brainstorming (`nx:brainstorming-gate`) mentions
 nx prior-art search but leaves it too vague to be reliably executed. The `--hybrid`

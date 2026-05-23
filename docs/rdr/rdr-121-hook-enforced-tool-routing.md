@@ -429,7 +429,7 @@ This RDR is scoped to the routing-enforcement pattern. Specifically OUT of scope
 - **Versioning**: hook contracts pinned to Claude Code 2.x hook schema; document the assumed schema version.
 - **Build tool compatibility**: bash 3.2 (macOS) and bash 5.x (Linux) must both work; heredoc deadlocks per `subagent-start.sh` precedent apply.
 - **Licensing**: no new third-party deps.
-- **Deployment model**: hooks ship with the nx plugin; no separate install.
+- **Deployment model**: hooks ship with the conexus plugin; no separate install.
 - **IDE compatibility**: N/A (Claude Code only).
 - **Incremental adoption**: each rule ships independently; no global flag.
 - **Secret/credential lifecycle**: hooks do not read or emit secrets.

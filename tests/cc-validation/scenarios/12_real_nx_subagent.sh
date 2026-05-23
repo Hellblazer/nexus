@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scenario 12 — REAL-WORLD: install nx plugin into TEST_HOME, dispatch a
+# Scenario 12 — REAL-WORLD: install conexus plugin into TEST_HOME, dispatch a
 # subagent, and probe for content that ONLY subagent-start.sh injects (not
 # tool inventory, which is inherited regardless). The hook outputs literal
 # strings like "T1 scratch — session-scoped, shared across all sibling agents"
@@ -8,7 +8,7 @@
 
 scenario "12 real_nx_subagent: does the actual subagent-start.sh inject specific markdown content?"
 
-# Install nx plugin into TEST_HOME (mirrors tests/e2e/run.sh setup)
+# Install conexus plugin into TEST_HOME (mirrors tests/e2e/run.sh setup)
 NOW="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
 cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" <<EOF
 {

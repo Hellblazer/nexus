@@ -16,7 +16,7 @@ related_issues: ["RDR-023"]
 
 ## Problem Statement
 
-The nx plugin has three Java-specific agents: `java-developer`, `java-debugger`,
+The conexus plugin has three Java-specific agents: `java-developer`, `java-debugger`,
 and `java-architect-planner`. These agents are unusable for projects in Python,
 Go, Rust, TypeScript, or any other language — even though 75-80% of their content
 (debugging methodology, TDD workflow, architecture patterns, relay reception,

@@ -431,7 +431,7 @@ standalone_skills:
     tools: []
 
   writing-nx-skills:
-    description: "Guide for authoring nx plugin skills"
+    description: "Guide for authoring conexus plugin skills"
     triggers:
       - "creating new skill"
       - "editing skill"
@@ -644,7 +644,7 @@ model_summary:
 utility_commands:
   nx-preflight:
     slash_command: /nx-preflight
-    description: "Verify nx plugin dependencies: nx CLI, nx doctor, bd (beads)"
+    description: "Verify conexus plugin dependencies: nx CLI, nx doctor, bd (beads)"
     disable_model_invocation: false
 
   pdf-process:
