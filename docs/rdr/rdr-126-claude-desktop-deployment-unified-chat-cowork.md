@@ -96,6 +96,7 @@ The RDR-120 substrate split (conexus 4.34.0+, shipped 2026-05-22) is what makes 
 - **Verified (spike 2026-05-23)** — MCPB v0.4 `"uv"` server type resolves Nexus's full compiled-extension dep stack (chromadb Rust, pydantic-core Rust, tree-sitter C, numpy C, torch native, onnxruntime native, lxml C, pymupdf C, grpcio C, mineru + 227 others). Cold-run 19s, warm-run 4.5s on M-series Mac. `nx-mcp` boots cleanly via stdio and all 31 tools register in Claude Desktop's Connectors panel. The Azure MCP Server precedent is real and extends to Nexus's harder dep graph. Full report: `mcpb/SPIKE.md`.
 - **Verified (spike 2026-05-23)** — Claude Desktop does NOT bundle `uv`; the manifest's `mcp_config.command` literally invokes `uv run`. Host must have `uv` on PATH or the spawn fails. README install instructions must list `uv` as a hard pre-requisite (e.g. `brew install uv` / `pipx install uv`).
 - **Verified (spike 2026-05-23)** — When a user already has the Claude Code plugin (`nx@nexus-plugins`) installed, the Claude Desktop chat surface (local-agent mode) already exposes Nexus tools via the `plugin:nx:nexus` namespace. The `.mcpb` installs as a SECOND copy under the bare `nexus` namespace. They coexist on disk and in the UI; tool-name strings are distinct (`mcp__plugin_nx_nexus__memory_get` vs `mcp__nexus__memory_get`) so there is no hard collision, but they ARE functionally duplicate. This reframes the `.mcpb`'s strategic audience: not "the install path for Claude Desktop chat" but "the install path for Claude Desktop users who don't have Claude Code".
+- **Verified (spike 2026-05-23 17:00 UTC)** — Cowork SDK bridge round-trips bidirectionally via the host T2 daemon. Host wrote `sentinel-host-to-cowork`; Cowork VM read it, then wrote `sentinel-cowork-to-host`; host re-read Cowork's write. The Cowork→host write was visible from the host within ~4 seconds. Confirms the docs/container-integration.md § Cowork claim with a documented live trace.
 - **Documented** — Claude Desktop has three MCP integration models: local MCP (manual config), Desktop Extensions (`.mcpb`), Custom Connectors (remote MCP via OAuth). Only `.mcpb` matches Nexus's local-first architecture.
 - **Documented** — MCPB has no signing-trust signal in either Anthropic marketplace as of May 2026; distribution carries no signing guarantee.
 - **Assumed** — `notifications/message` renders in Claude Desktop chat in a user-visible way. Spike scope-narrowed; verification deferred to Phase 2 where the banner-emission code lives.
@@ -106,7 +107,7 @@ The RDR-120 substrate split (conexus 4.34.0+, shipped 2026-05-22) is what makes 
 - [ ] **A2**: `notifications/message` (severity `info`) emitted by the MCP server renders in Claude Desktop chat in a way the user notices — **Status**: Unverified — **Method**: Spike deferred to Phase 2 (the banner-emission code does not exist yet; spike honestly narrowed scope to packaging feasibility)
 - [ ] **A3**: LaunchAgent install from inside MCP startup succeeds without elevated privileges (writes to `~/Library/LaunchAgents/` which is user-owned) — **Status**: Verified — **Method**: Source Search (`src/nexus/commands/daemon.py` already does this)
 - [ ] **A4**: MCPB uninstall via Claude Desktop removes the bundle but does NOT cascade to LaunchAgent removal — **Status**: Verified — **Method**: Docs Only (no manifest hook in MCPB spec for uninstall-time actions)
-- [ ] **A5**: Cowork SDK transport end-to-end bidirectional state-sharing works as documented (sentinel test) — **Status**: Unverified — **Method**: Spike (live test executing in user's session at draft time)
+- [x] **A5**: Cowork SDK transport end-to-end bidirectional state-sharing works as documented (sentinel test) — **Status**: Verified 2026-05-23 17:00 UTC — **Method**: Spike (bidirectional sentinel exercised via T2 memory_put / memory_get). Host wrote `sentinel-host-to-cowork` at 15:00:46Z. Cowork VM read it successfully, then wrote `sentinel-cowork-to-host` at 17:00:44Z. Host re-read the Cowork write at 17:00:48Z (id 1465). Round-trip latency through the SDK bridge: ~4 seconds for the write side. State is genuinely shared via host T2 daemon; the docs/container-integration.md § Cowork claim is now backed by a documented live trace.
 - [ ] **A6**: First-run marker (`~/.config/nexus/.mcp_first_run_complete`) is the right granularity to distinguish "banner shown" from "OS unit installed"; OS unit is the source of truth for install state — **Status**: Verified — **Method**: Source Search (no current code conflates these)
 
 **Method definitions**:
@@ -284,8 +285,8 @@ The `daemon_uninstall` tool with default `confirm=false` matches MCP destructive
 
 - [x] **A1** verified via 2026-05-23 spike (`mcpb/SPIKE.md`).
 - [ ] **A2** verified during Phase 2 (banner-emission code lives there; spike honestly narrowed scope).
-- [ ] **A5** verified via live Cowork sentinel test (recipe in user's session; result pending).
-- [ ] **GUI-spawn credential bug** (`nexus-m7evs`) merged to develop (PR #935 squash-merged 2026-05-23 as `4f54f77e`). DONE.
+- [x] **A5** verified 2026-05-23 17:00 UTC (bidirectional Cowork sentinel test — host wrote, Cowork read+wrote, host re-read).
+- [x] **GUI-spawn credential bug** (`nexus-m7evs`) merged to develop (PR #935 squash-merged 2026-05-23 as `4f54f77e`).
 - [ ] RDR-126 accepted via `/nx:rdr-gate` + `/nx:rdr-accept`.
 - [ ] Strategic-synthesis rename decision (`nexus-mkj6u`) made and shipped, OR explicitly deferred to a later RDR (decoupled scope).
 
@@ -477,3 +478,10 @@ The RDR is sized for a cross-surface lifecycle change. Sections covering individ
   Claude Desktop users WITHOUT Claude Code, not existing Claude Code users.
   GUI-spawn credential bug (`nexus-m7evs`) discovered during spike
   verification; fixed and shipped in PR #935 on the same day.
+- 2026-05-23 17:00 UTC: A5 verified. Bidirectional Cowork sentinel test
+  passed: host wrote `sentinel-host-to-cowork` at 15:00:46Z, Cowork VM
+  read it then wrote `sentinel-cowork-to-host` at 17:00:44Z, host re-read
+  Cowork's write at 17:00:48Z. SDK bridge round-trips both directions
+  through the host T2 daemon. RDR-126 §5 claim is now backed by a
+  documented live trace. Only A2 remains outstanding (deferred to
+  Phase 2 by design).
