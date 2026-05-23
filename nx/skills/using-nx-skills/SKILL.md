@@ -1,12 +1,12 @@
 ---
 name: using-nx-skills
-description: Use when starting any conversation or task — establishes that nx skills must be checked before every response, including clarifying questions. If a skill plausibly applies, invoke it.
+description: Use when starting any turn — you MUST scan the available nx skill list and invoke `Skill` for any matching skill BEFORE producing any other response (clarifying questions, code, or prose included). Direct answers without first invoking a matching skill are a defect. False positives are cheap; misses cost real time.
 effort: low
 ---
 
 # Using nx Skills
 
-If a skill plausibly applies, invoke it. False positives are cheap; misses cost time. Skills evolve — read the current version, don't rely on memory.
+**You MUST invoke `Skill` for any plausibly-matching nx skill before producing any other response.** This is not a hint or a preference — it is a hard rule. Skipping a matching skill is a defect, not an optimization. False positives are cheap; misses cost real time. Skills evolve — read the current version, don't rely on memory.
 
 ## Plan Reuse
 

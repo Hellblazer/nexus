@@ -14,7 +14,8 @@ Nexus provides persistent memory and semantic search for AI coding agents. Begin
 - [Memory and Tasks](memory-and-tasks.md) — T2 memory, beads integration, session context
 - [MCP Servers](mcp-servers.md) — The two bundled MCP servers (`nexus` + `nexus-catalog`), tool reference, and the 6 CLI-only operations
 - [Repo Indexing](repo-indexing.md) — File classification, tree-sitter chunking, frecency scoring
-- [Configuration](configuration.md) — Config hierarchy, `.nexus.yml`, settings
+- [Configuration](configuration.md) — Config hierarchy, `.nexus.yml`, daemon env-vars, settings
+- [Container Integration](container-integration.md) — Daemon model (RDR-120, 4.34.0+) for dev containers, Claude Cowork, and multi-process / multi-host setups
 
 ## RDR (Research-Design-Review)
 

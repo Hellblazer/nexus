@@ -1,10 +1,12 @@
 {
   "serena": {
     "command": "uvx",
-    "args": ["--from", "git+https://github.com/oraios/serena", "serena", "start-mcp-server", "--context", "claude-code", "--project-from-cwd"]
+    "args": ["--from", "git+https://github.com/oraios/serena", "serena", "start-mcp-server", "--context", "claude-code", "--project-from-cwd"],
+    "alwaysLoad": true
   },
   "context7": {
     "command": "npx",
-    "args": ["-y", "@upstash/context7-mcp"]
+    "args": ["-y", "@upstash/context7-mcp"],
+    "alwaysLoad": true
   }
 }

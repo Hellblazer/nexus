@@ -112,6 +112,10 @@ MVV) but NOT through Docker Desktop's macOS/Windows VM file-
 sharing layer (returns ``ENOTSUP``); use the TCP path when the
 host is macOS or Windows.
 
+For the full container-integration story (operator-facing setup,
+Claude Cowork SDK transport, diagnostic recipes, failure-mode
+table) see [`docs/container-integration.md`](container-integration.md).
+
 Data flows upward (T1 → T2 → T3).
 
 ## Catalog & Link Graph

@@ -49,7 +49,28 @@ def runner() -> CliRunner:
 
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
+    """Isolate T2 path + bypass the daemon for CLI memory commands.
+
+    RDR-120 P6 follow-up (nexus-w6txl): ``nx memory`` commands route
+    through ``t2_handle()`` -> T2 daemon. Integration tests don't
+    spawn a daemon; patch ``t2_handle`` to inject an in-process
+    ``T2Database`` backed by ``tmp_path``. Tests that don't invoke
+    nx memory commands are unaffected.
+    """
+    from contextlib import contextmanager
+    from nexus.db.t2 import T2Database
+
     monkeypatch.setenv("HOME", str(tmp_path))
+
+    @contextmanager
+    def _stub_t2_handle():
+        db = T2Database(tmp_path / "memory.db")
+        try:
+            yield db
+        finally:
+            db.close()
+
+    monkeypatch.setattr("nexus.commands.memory.t2_handle", _stub_t2_handle)
     return tmp_path
 
 

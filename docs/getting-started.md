@@ -43,11 +43,63 @@ If you don't intend to index math PDFs and want to skip the download, run with `
 nx index pdf --extractor docling some.pdf
 ```
 
+## First-time setup: the T2 daemon
+
+Since conexus 4.34.0 (RDR-120 storage substrate split), all
+user-facing CLI commands that touch persistent state — `nx memory`,
+`nx index`, `nx store`, `nx catalog`, the MCP server, and everything
+the Claude Code plugin does — route through the **T2 daemon**, a
+single arbitrating SQLite-writer process. This is the substrate
+fix that lets host CLI usage, multiple Claude Code sessions, Claude
+Cowork agents, and dev containers all share state without racing on
+the database file.
+
+Register the daemon to start at login (one-time setup):
+
+```bash
+nx daemon t2 install --autostart
+nx daemon t2 status                # confirm running
+```
+
+This writes a LaunchAgent (macOS, `~/Library/LaunchAgents/com.nexus.t2.plist`)
+or systemd user-unit (Linux, `~/.config/systemd/user/nexus-t2.service`)
+with `KeepAlive=true` / `Restart=on-failure`, so the daemon survives
+crashes and reboots. Uninstall with `nx daemon t2 uninstall --autostart`.
+
+If you skip this step, the nx Claude Code plugin's SessionStart hook
+will auto-spawn the daemon on every session start anyway, so plugin
+users still get a working substrate. The autostart path is recommended
+if you also use `nx` directly from the shell.
+
+**Local-mode T3 only**: the T3 daemon wraps a local ChromaDB process.
+Register it the same way:
+
+```bash
+nx daemon t3 install --autostart   # only when NX_LOCAL=1 / no cloud creds
+```
+
+Cloud-mode T3 talks directly to ChromaDB Cloud over HTTP and has no
+daemon — `nx daemon t3` is a no-op in that configuration.
+
+See [docs/container-integration.md](https://github.com/Hellblazer/nexus/blob/main/docs/container-integration.md) for the full daemon-model story
+including TCP / UDS / Cowork transport details.
+
 ## Update
 
 ```bash
 uv tool update conexus
 ```
+
+After upgrading conexus, restart the daemon so it picks up the new
+binary:
+
+```bash
+nx daemon t2 stop && nx daemon t2 start    # or: launchctl kickstart -k gui/<uid>/com.nexus.t2
+```
+
+The schema-version handshake (RDR-120 P3b) fails loud on
+client/daemon version mismatch, so stale daemons fail closed rather
+than silently corrupting state.
 
 ## Use it (no API keys needed)
 
@@ -221,6 +273,29 @@ Note: `uv tool update` reuses the existing environment's Python — it won't swi
 **First index is slow or hits a rate limit** — Large repos may take a few minutes. Add `--monitor` for per-file progress. Re-running is safe — unchanged files are skipped.
 
 **`nx search` returns no results** — Run `nx doctor` to verify connectivity. If indexing was interrupted, re-run `nx index repo .` to resume.
+
+**`T2DaemonNotReachableError: No T2 daemon discovery resolved`** — Since 4.34.0 the CLI routes through the T2 daemon. Start it (one of):
+
+```bash
+nx daemon t2 ensure-running              # one-shot spawn (idempotent)
+nx daemon t2 install --autostart         # durable LaunchAgent / systemd unit
+```
+
+If `ensure-running` succeeds but the next command still errors, check
+the daemon's log:
+
+- macOS: `~/Library/Logs/nexus-t2.err`
+- Linux: `journalctl --user -u nexus-t2.service`
+
+**`T2SchemaVersionMismatchError`** — The client's conexus version differs from the running daemon's. Restart the daemon so it picks up the new binary:
+
+```bash
+nx daemon t2 stop && nx daemon t2 start
+# or under launchd:
+launchctl kickstart -k gui/$(id -u)/com.nexus.t2
+```
+
+**Daemon is up but the CLI says "discovery file not found"** — Race between `launchctl bootout` / `systemctl stop` and the next CLI call. The daemon's spawn-lock release lags briefly behind process termination. Wait 2–3 seconds and retry, or use `nx daemon t2 ensure-running --timeout=10`.
 
 **Upgrading from an earlier version — topics missing from search** — Topic discovery runs automatically on new indexes. To populate topics for collections indexed before this feature was added, run:
 

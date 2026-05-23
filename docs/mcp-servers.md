@@ -38,6 +38,16 @@ Both servers are bundled in the `nx` plugin's `.mcp.json`. Installing the
 plugin (`/plugin install nx@nexus-plugins`) registers both with Claude Code
 automatically. No separate install step.
 
+**Substrate dependency**: Since conexus 4.34.0 (RDR-120), the MCP servers'
+storage tools route through the T2 daemon (and the T3 daemon in local mode).
+The plugin's SessionStart hook auto-spawns `nx daemon t2 ensure-running` on
+every Claude Code session start, so first-call-after-install works without
+any manual setup. For a daemon that survives reboots independent of Claude
+Code, run `nx daemon t2 install --autostart` once. See
+[Container Integration](container-integration.md) for the multi-process /
+multi-host story (host CLI + multiple Claude Code sessions + Cowork agents +
+dev containers all sharing one arbitrated SQLite writer).
+
 ## `nexus` — retrieval + storage (26 tools)
 
 Full tool names follow Claude Code's convention: `mcp__plugin_nx_nexus__<tool>`.
@@ -210,6 +220,29 @@ The rule of thumb: **content** (chunks, documents, notes) is on `nexus`,
 **metadata and relationships** (catalog entries, typed links, tumblers) are
 on `nexus-catalog`. `query` is the one core-server tool that crosses the
 boundary — it uses catalog metadata to scope a content search.
+
+## Heads-up: `alwaysLoad` and Claude Code v2.1.69+ tool deferral
+
+Starting in Claude Code **v2.1.69**, schema-deferral was extended from
+MCP tools (deferred since the `ToolSearch` rollout) to most built-in
+tools as well. Only ~10 core tools load eagerly — everything else,
+including all MCP servers, becomes discoverable via `ToolSearch` only.
+The space saving is real (~14k tokens), but the behavioural side effect
+is that the model often skips the `ToolSearch` step and answers without
+ever loading the MCP schemas. Combined with **Opus 4.7**'s documented
+"fewer tool calls by default" and "more literal instruction following"
+disposition, plugin-heavy users see Serena, sequential-thinking, and
+nexus only fire when explicitly named.
+
+Both nx and sn plugin `.mcp.json` files ship with
+`"alwaysLoad": true` on every server. Claude Code v2.1.121+ honours
+this per-server flag and skips the deferral, so schemas load eagerly
+again. If you fork or customise these files, keep the flag — otherwise
+you'll see the same regression.
+
+References:
+- [anthropics/claude-code#31002](https://github.com/anthropics/claude-code/issues/31002) — built-in tool deferral
+- [Opus 4.7 model card](https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7) — disposition shifts
 
 ## References
 

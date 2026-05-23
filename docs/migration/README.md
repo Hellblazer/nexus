@@ -1,6 +1,14 @@
-# Migration directory: HISTORICAL forensic records
+# Migration directory
 
-Everything in this directory is a frozen engineering artifact from the RDR-101 event-sourced catalog migration (Phases 0-6, shipped April-May 2026). The migration is complete; the verbs these docs reference (`synthesize-log`, `t3-backfill-doc-id`, `repair-orphan-chunks`, `prune-deprecated-keys`, `migrate`) were retired in nexus-iftc (PR #496+#497).
+## Active operator-facing guides
+
+- **[Upgrading to 4.34.x](upgrading-to-4.34.md)** — RDR-120 storage
+  substrate split: the daemon model, the one new command after upgrade,
+  schema-version handshake, container/Cowork integration, rollback.
+
+## Historical forensic records
+
+Everything below is a frozen engineering artifact from the RDR-101 event-sourced catalog migration (Phases 0-6, shipped April-May 2026). The migration is complete; the verbs these docs reference (`synthesize-log`, `t3-backfill-doc-id`, `repair-orphan-chunks`, `prune-deprecated-keys`, `migrate`) were retired in nexus-iftc (PR #496+#497).
 
 ## What's here
 
