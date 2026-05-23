@@ -186,7 +186,13 @@ class TestHookContent:
     def test_required_elements(self, runner, fake_repo):
         _install(runner, fake_repo)
         content = (_hooks_dir(fake_repo) / "post-commit").read_text()
-        for token in ("index.log", "disown", "--on-locked=skip", "nx index repo"):
+        # pgrep guard added 2026-05-23 (nexus-mkj6u): belt-and-suspenders
+        # with --on-locked=skip; catches the multi-commit pile-up race
+        # that flock-based locking lost on the open()+truncate+flock window.
+        for token in (
+            "index.log", "disown", "--on-locked=skip", "nx index repo",
+            "pgrep -f", "exit 0",
+        ):
             assert token in content
 
     def test_stanza_identical_in_owned_and_appended(self, runner, fake_repo):

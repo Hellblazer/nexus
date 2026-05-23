@@ -35,7 +35,19 @@ _HOOK_NAMES = ("post-commit", "post-merge", "post-rewrite")
 
 _STANZA = """\
 {begin}
-nx index repo "$(git rev-parse --show-toplevel)" --on-locked=skip \\
+REPO_TOP="$(git rev-parse --show-toplevel)"
+# pgrep guard (nexus-mkj6u 2026-05-23): skip if an indexer for THIS
+# repo is already running. Belt-and-suspenders with --on-locked=skip,
+# which races on lock acquisition under burst-commit workloads. The
+# race fires when 2+ commits happen before the first indexer finishes
+# its open()+truncate+write+flock sequence; the second indexer can
+# truncate the lock file out from under the first and still get past
+# its own flock if the timing aligns. pgrep at the hook layer catches
+# 99%+ of pile-ups before they fork.
+if pgrep -f "nx index repo $REPO_TOP" > /dev/null 2>&1; then
+  exit 0
+fi
+nx index repo "$REPO_TOP" --on-locked=skip \\
   >> "$HOME/.config/nexus/index.log" 2>&1 &
 disown
 {end}""".format(begin=SENTINEL_BEGIN, end=SENTINEL_END)

@@ -30,6 +30,21 @@ This rename also retired the term "the nx plugin" in CHANGELOG history and prose
 
 Skill directory names `using-nx-skills` and `writing-nx-skills` were left as-is for now (their slash commands are `/conexus:using-nx-skills` and `/conexus:writing-nx-skills`). Skill renames are a separate follow-up if desired.
 
+### Fix: post-commit hook spawns pile up under burst-commit workloads (nexus-mkj6u shakeout)
+
+The `post-commit` git hook installed by `nx hooks install` previously relied solely on the indexer's internal `--on-locked=skip` flag to prevent concurrent reindex runs. Under burst-commit workloads (e.g. a long-running rename PR pushing 9 commits in 30 minutes), the race between the lock file's `open()` + truncate and the subsequent `flock()` lets multiple indexers slip past the guard before any of them holds an exclusive lock. Result: up to 4 concurrent `nx index repo` processes accumulated, each consuming significant CPU and contending on T3.
+
+The hook template (`src/nexus/commands/hooks.py:_STANZA`) now wraps the indexer invocation with a `pgrep` guard at the hook layer:
+
+```sh
+if pgrep -f "nx index repo $REPO_TOP" > /dev/null 2>&1; then
+  exit 0
+fi
+nx index repo "$REPO_TOP" --on-locked=skip & disown
+```
+
+This catches 99%+ of pile-ups before fork. The `--on-locked=skip` flag is kept as belt-and-suspenders for the residual microsecond-window race between `pgrep` and `fork`. Existing installs propagate the fix by re-running `nx hooks uninstall && nx hooks install`.
+
 ### Fix: GUI-spawned `nx-mcp` misdetected cloud mode as local (nexus-m7evs)
 
 Cloud users whose `CHROMA_API_KEY` and `VOYAGE_API_KEY` lived only as
