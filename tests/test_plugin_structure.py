@@ -647,6 +647,27 @@ class TestMarketplaceVersion:
                 f"its own .claude-plugin/plugin.json at {manifest}"
             )
 
+    def test_plugin_source_sha_is_well_formed_when_present(self) -> None:
+        """Optional `source.sha` for tag-force-push protection. When
+        present, must be a 40-character lowercase hex string (full
+        git SHA-1). Empty or absent is allowed; partial / uppercase
+        / non-hex is rejected to keep the field useful as an integrity
+        check."""
+        for plugin in json.loads(MARKETPLACE_PATH.read_text()).get("plugins", []):
+            source = plugin["source"]
+            sha = source.get("sha")
+            if not sha:
+                continue
+            assert isinstance(sha, str), f"source.sha must be a string, got {type(sha).__name__}"
+            assert len(sha) == 40, (
+                f"marketplace.json '{plugin['name']}' source.sha must be 40 chars "
+                f"(full git SHA-1), got {len(sha)}: {sha!r}"
+            )
+            assert all(c in "0123456789abcdef" for c in sha), (
+                f"marketplace.json '{plugin['name']}' source.sha must be "
+                f"lowercase hex, got: {sha!r}"
+            )
+
     def test_uv_lock_version_matches_pyproject(self) -> None:
         pv = self._pyproject_version()
         uv_lock = REPO_ROOT / "uv.lock"

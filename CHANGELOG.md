@@ -30,6 +30,14 @@ This rename also retired the term "the nx plugin" in CHANGELOG history and prose
 
 Skill directory names `using-nx-skills` and `writing-nx-skills` were left as-is for now (their slash commands are `/conexus:using-nx-skills` and `/conexus:writing-nx-skills`). Skill renames are a separate follow-up if desired.
 
+### Process: release-branch-PR workflow + §Releases policy (nexus-mkj6u)
+
+Two governance changes adopted from the global `marketplace-pinned-source-playbook` (cross-referenced from the parallel `Hellblazer/palinex` work):
+
+- **Release commits go through a PR.** `release/vX.Y.Z` branch → PR against main → merge after CI green → tag the merge commit. Replaces the direct-to-main convention. The release skill (`.claude/skills/release/SKILL.md`) reflects the new flow.
+- **§Releases policy section** added to `AGENTS.md` with six explicit cadence rules: releases are hand-cut; `source.ref` only ever points at immutable release tags; one channel; bump cadence matches user-visible impact; releaser is human; parity tests stay strict.
+- **Optional `source.sha`** added to `.claude-plugin/marketplace.json` for tag-force-push protection. Validated by a new parity test that rejects malformed SHAs (must be 40-char lowercase hex when present).
+
 ### Architecture: marketplace.json plugin sources pinned to git tags (nexus-mkj6u)
 
 The Claude Code marketplace previously followed main HEAD: any commit to main that touched plugin files was immediately fetchable by users running `/plugin install` or `/plugin marketplace update`. Convention prevented surprises (main only takes release commits), but enforcement was social.

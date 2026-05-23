@@ -11,7 +11,8 @@
         "source": "git-subdir",
         "url": "https://github.com/Hellblazer/nexus.git",
         "path": "conexus",
-        "ref": "v4.34.5"
+        "ref": "v4.34.5",
+        "sha": "715b6224adc5ed45f69b5070a72629b24b76d27e"
       },
       "description": "Self-hosted three-tier knowledge management with 13 specialized agents, plan-centric retrieval via nx_answer, semantic search, and RDR decision tracking for Claude Code.",
       "version": "4.34.5"
@@ -22,7 +23,8 @@
         "source": "git-subdir",
         "url": "https://github.com/Hellblazer/nexus.git",
         "path": "sn",
-        "ref": "v4.34.5"
+        "ref": "v4.34.5",
+        "sha": "715b6224adc5ed45f69b5070a72629b24b76d27e"
       },
       "description": "Injects Serena and Context7 MCP tool usage guidance into subagents via SubagentStart hook.",
       "version": "4.34.5"

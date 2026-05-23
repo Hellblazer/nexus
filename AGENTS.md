@@ -95,6 +95,17 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 3. Add tests in `tests/test_your_cmd.py`.
 4. Document the new flags/subcommands in `docs/cli-reference.md`.
 
+### Release cadence policy (nexus-mkj6u)
+
+Six rules borrowed from the global `marketplace-pinned-source-playbook`:
+
+1. **Releases are hand-cut.** CI does not publish on merge. Tag-push triggers publish. Merges to main between releases do not affect installed users (marketplace.json's `source.ref` stays pinned to the previous tag).
+2. **`source.ref` only ever points at immutable release tags.** Never at a branch, never at main HEAD. Optional `source.sha` for force-push protection.
+3. **One channel until proven otherwise.** No `-dev` / `-rc` / `-canary` suffix variants. If a beta channel becomes necessary, file an RDR.
+4. **Bump cadence matches user-visible impact, not commit volume.** Many internal PRs can land on develop and then on main without bumping the version. The version bumps when users would see something change.
+5. **Releaser is human. AI prepares; human cuts.** AI can draft the release PR, bump manifests, write the CHANGELOG entry. The human runs `gh pr merge` + `git tag` + `git push origin vX.Y.Z`.
+6. **Parity tests stay strict.** Any drift between `pyproject.toml` version and the four other manifests (plus `source.ref` in marketplace.json) fails CI. No `# noqa` escape hatches.
+
 ### Cutting a release (version bump + tag-push to PyPI)
 
 1. **Run unit + integration suite.** `uv run pytest` and `uv run pytest -m integration`. Both must pass — integration is excluded from CI and is your last line of defense.
@@ -107,8 +118,22 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 4. **Update changelogs.** Add a new section to `CHANGELOG.md` and `conexus/CHANGELOG.md` with the date and the changes since last release.
 5. **Refresh `uv.lock`.** Run `uv sync` — the lock file MUST be committed.
 6. **Run sandbox smoke.** `./tests/e2e/release-sandbox.sh smoke` (~2 min). Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/db/migrations.py`, `src/nexus/mcp/**`, `conexus/**`, `.claude-plugin/**`, `src/nexus/commands/{doctor,upgrade}.py`.
-7. **Commit and push to main.** `chore(release): conexus X.Y.Z` is the only direct-to-main commit allowed.
-8. **Tag and push the tag IMMEDIATELY after the commit push.** `git tag -a vX.Y.Z -m "conexus X.Y.Z" && git push origin vX.Y.Z`. The tag-push triggers the Release workflow → PyPI auto-publish via OIDC. Order matters: marketplace.json's `source.ref` points at `vX.Y.Z`, which must exist on origin before any user runs `/plugin install`. Push commit, then push tag, in tight succession (seconds).
+7. **Commit on a release branch + PR to main** (nexus-mkj6u: replaces direct-to-main convention).
+   ```
+   git checkout main && git pull && git checkout -b release/vX.Y.Z
+   <bump all manifests, refresh uv.lock, update CHANGELOGs>
+   git commit -m "chore(release): conexus X.Y.Z"
+   git push -u origin release/vX.Y.Z
+   gh pr create --base main --title "release: conexus X.Y.Z"
+   ```
+   Wait for CI green. Then `gh pr merge <N> --merge` (NOT `--squash` — preserves the release commit SHA for the optional `source.sha` pin in Step 8a).
+8. **Tag the merge commit IMMEDIATELY after PR lands.**
+   ```
+   git checkout main && git pull
+   git tag -a vX.Y.Z -m "conexus X.Y.Z" $(git rev-parse HEAD)
+   git push origin vX.Y.Z
+   ```
+   Tag-push triggers the Release workflow → PyPI auto-publish via OIDC. Order matters: marketplace.json's `source.ref` points at `vX.Y.Z`, which must exist on origin before any user runs `/plugin install`. Push commit (via PR merge), then push tag, in tight succession.
 9. **Reinstall locally.** `scripts/reinstall-tool.sh && nx --version` — `pyproject.toml` is bumped but the local `nx` shim still points at the old wheel until reinstall.
 
 Full checklist with rollback / one-time setup steps lives in [`docs/contributing.md` § Release Process](docs/contributing.md#release-process).
