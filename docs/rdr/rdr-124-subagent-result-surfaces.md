@@ -16,7 +16,7 @@ related_tests: []
 implementation_notes: ""
 ---
 
-> **TOMBSTONE 2026-05-22.** Superseded by [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md). The intent (subagents emit surfaces; orchestrator receives pointer + summary instead of full prose) is preserved as Item 9 of RDR-127, reframed onto the `SurfaceBroker` Protocol (in-process v1, tuple-space vN) instead of the scrapped `surface_cell` subspace. Do not implement against this RDR.
+> **TOMBSTONE 2026-05-22.** Superseded by [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md). The intent (subagents emit surfaces instead of bulk prose) is preserved at the palinex layer: subagent output gets built into a `palinex.Surface`, then handed to the palinex Claude Code plugin's `render_surface` MCP tool for emission as an inline UI resource. No nexus-side surface code. Do not implement against this RDR.
 
 ---
 

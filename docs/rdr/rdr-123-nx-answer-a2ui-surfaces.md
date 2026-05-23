@@ -16,7 +16,7 @@ related_tests: []
 implementation_notes: ""
 ---
 
-> **TOMBSTONE 2026-05-22.** Superseded by [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md). The intent (nx_answer emits structured surfaces) is preserved; the implementation no longer depends on the scrapped RDR-118/119 surface_cell subspace. Producers now build via `palinex` (PyPI) emitting a2ui v0.9 envelopes; delivery is MCP UI resource / embedded artifact / external URL; substrate work (RDR-118 successor) becomes a bolt-on later, not a precondition. Do not implement against this RDR.
+> **TOMBSTONE 2026-05-22.** Superseded by [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md). The intent (nx_answer emits structured surfaces) is preserved at the palinex layer: nexus tools provide the raw data (`nx_answer`, `store_get_many`, etc.); the palinex Claude Code plugin renders surfaces from that data via its `render_surface` MCP tool. No nexus-side surface-rendering code. Do not implement against this RDR.
 
 ---
 
