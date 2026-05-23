@@ -178,6 +178,89 @@ def test_bd_close_on_non_phase_review_bead_allows(tmp_env):
     assert _decision(proc)["permissionDecision"] == "allow"
 
 
+# ---------------------------------------------------------------------------
+# Regression: GH #931 / nexus-1pr9n
+#
+# Implementation beads inside a phased RDR plan must not trigger the gate
+# just because the word "phase" or "review" appears in their title or
+# description. Only beads whose title matches "Phase N review gate" or
+# "Phase N phase-review-gate" should count.
+# ---------------------------------------------------------------------------
+
+
+def test_impl_bead_phase_step_title_allows(tmp_env):
+    """Implementation bead title 'Phase N Step N: ...' must NOT trigger
+    the gate (GH #931). The implementation step is not the gate bead;
+    the gate is a sibling with a distinct title."""
+    _write_bd_stub(
+        tmp_env["bin_dir"],
+        title="Phase 0 Step 0: Resolve spatial-level question (Manager + BubbleBounds co-update)",
+        description="RDR-003 §Implementation Plan Phase 0 Step 0. Closing gate is the sibling phase-review-gate bead.",
+    )
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "bd close Luciferase-hic"}},
+        env_extra={},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    assert _decision(proc)["permissionDecision"] == "allow"
+
+
+def test_meta_bead_about_phase_review_gate_skill_allows(tmp_env):
+    """A bead title ABOUT the phase-review-gate skill (e.g. a follow-on
+    task) is not a gate execution and must not trigger the sentinel
+    check. Distinguishing signal: no phase number prefix in the title."""
+    _write_bd_stub(
+        tmp_env["bin_dir"],
+        title="phase-review-gate skill: recognize phase-block sub-bullets as items (RDR-120 follow-on)",
+    )
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "bd close nexus-4u6mt"}},
+        env_extra={},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    assert _decision(proc)["permissionDecision"] == "allow"
+
+
+def test_impl_bead_description_mentioning_phase_review_gate_allows(tmp_env):
+    """An implementation bead whose DESCRIPTION mentions the phase-review-
+    gate command (because future-self will eventually run it) must not
+    trigger the gate when the title itself is an implementation step."""
+    _write_bd_stub(
+        tmp_env["bin_dir"],
+        title="P3.A Migration ownership transfer",
+        description="When P3 is complete, run /nx:phase-review-gate RDR-120 --phase 3 to close the phase.",
+    )
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "bd close nexus-e9x4l"}},
+        env_extra={},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    assert _decision(proc)["permissionDecision"] == "allow"
+
+
+def test_gate_bead_sub_phase_letter_title_triggers(tmp_env):
+    """Gate beads with sub-phase identifiers (P3b, Phase 1.5, etc.) must
+    still trigger the sentinel check."""
+    _write_bd_stub(
+        tmp_env["bin_dir"],
+        title="Phase 3b review gate: /nx:phase-review-gate RDR-120 --phase 3b",
+    )
+    # No sentinel written — expect deny.
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "bd close nexus-b9lox"}},
+        env_extra={"NX_FAKE_CLAUDE_PID": str(os.getpid())},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    _make_session_addr(tmp_env["config_dir"], os.getpid())
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "bd close nexus-b9lox"}},
+        env_extra={"NX_FAKE_CLAUDE_PID": str(os.getpid())},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    decision = _decision(proc)
+    assert decision["permissionDecision"] == "deny"
+
+
 def test_escape_token_allows_even_on_phase_review_bead(tmp_env):
     _write_bd_stub(tmp_env["bin_dir"], title="P1 phase review gate for RDR-112")
     proc = _run_hook(
