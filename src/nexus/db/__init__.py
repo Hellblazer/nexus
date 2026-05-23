@@ -64,8 +64,30 @@ def make_t3(*, _client=None, _ef_override=None) -> "T3Database":
         # ``PersistentClient`` + ``LocalEmbeddingFunction`` direct-open
         # path is deleted. Tests that need a non-daemon local backend
         # inject ``_client`` (typically ``EphemeralClient``).
-        from nexus.daemon.t3_client import make_t3_client
-        return make_t3_client()
+        from nexus.daemon.t3_client import make_t3_client, T3DaemonError
+        try:
+            return make_t3_client()
+        except T3DaemonError as exc:
+            # nexus-m7evs: when a GUI-spawned subprocess (Claude Desktop,
+            # Cowork SDK bridge) hits this path, the cause is almost
+            # always that the user's cloud credentials live in shell env
+            # exports but were never persisted via ``nx config set``,
+            # so the subprocess (launched without shell env inheritance)
+            # sees them as absent and falls through to local mode. The
+            # subprocess cannot inspect the parent shell, so the error
+            # must self-explain both alternatives.
+            raise T3DaemonError(
+                f"{exc}\n\n"
+                "If you intend cloud mode (Voyage AI + ChromaDB Cloud), "
+                "persist credentials so GUI-spawned subprocesses (Claude "
+                "Desktop, Cowork) can see them — shell env vars are not "
+                "inherited by launchd children:\n"
+                "    nx config set chroma_api_key \"$CHROMA_API_KEY\"\n"
+                "    nx config set voyage_api_key \"$VOYAGE_API_KEY\"\n"
+                "    nx config set chroma_tenant \"$CHROMA_TENANT\"\n"
+                "    nx config set chroma_database \"$CHROMA_DATABASE\"\n"
+                "Then quit and relaunch the host process."
+            ) from exc
 
     cfg = load_config()
     read_timeout_seconds: float = cfg.get("voyageai", {}).get("read_timeout_seconds", 120.0)
