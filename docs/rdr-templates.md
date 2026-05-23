@@ -57,7 +57,7 @@ conversion using `start_char_idx`/`end_char_idx`. No dependency changes needed.
 
 ## RDR Template
 
-Location: `docs/rdr/TEMPLATE.md` (copied from `nx/resources/rdr/TEMPLATE.md` on first use)
+Location: `docs/rdr/TEMPLATE.md` (copied from `conexus/resources/rdr/TEMPLATE.md` on first use)
 
 ### Metadata
 
@@ -123,7 +123,7 @@ Each load-bearing assumption is a checkbox with verification status:
 ## Post-Mortem Template
 
 Location: `docs/rdr/post-mortem/TEMPLATE.md` (copied from
-`nx/resources/rdr/post-mortem/TEMPLATE.md`)
+`conexus/resources/rdr/post-mortem/TEMPLATE.md`)
 
 Created automatically by `/conexus:rdr-close`. Fill it after implementation to analyze
 drift between what was decided and what was built.

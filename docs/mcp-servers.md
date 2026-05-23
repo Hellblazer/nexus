@@ -200,7 +200,7 @@ by this hook and remain subject to the normal confirmation flow.
 
 If you are writing a custom agent that should operate with stricter
 permission boundaries, remove or narrow the matcher in
-`nx/hooks/hooks.json`'s `PermissionRequest` section.
+`conexus/hooks/hooks.json`'s `PermissionRequest` section.
 
 ## Which server should an agent call?
 
@@ -250,4 +250,4 @@ References:
 - [Document Catalog](catalog.md) — conceptual introduction to what the catalog is
 - [Querying Guide](querying-guide.md) — when to use `nx search` vs `query()` MCP vs `/conexus:query` skill
 - [CLI Reference — nx catalog](cli-reference.md#nx-catalog) — CLI equivalents for the 10 catalog tools
-- [nx plugin README](../nx/README.md) — plugin installation, hooks, auto-approval
+- [nx plugin README](../conexus/README.md) — plugin installation, hooks, auto-approval

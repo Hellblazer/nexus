@@ -42,7 +42,7 @@ hit the same issue.
 
 ### Finding 1: No agents have `tools` frontmatter
 
-Confirmed via `grep -c '^tools:' nx/agents/*.md` — zero matches across all 14
+Confirmed via `grep -c '^tools:' conexus/agents/*.md` — zero matches across all 14
 agent files. All agents share the same frontmatter structure: name, version,
 description, model, color.
 
@@ -164,7 +164,7 @@ See `docs/rdr/rdr-035-plugin-agent-mcp-tool-access.md`.
 
 Pre-conditions (verified before gate):
 
-- [x] All 14 agents have explicit `tools` in frontmatter (verified: `grep '^tools:' nx/agents/*.md` — 14 matches)
+- [x] All 14 agents have explicit `tools` in frontmatter (verified: `grep '^tools:' conexus/agents/*.md` — 14 matches)
 - [x] PermissionRequest hook auto-approves safe tools (verified: JSON payload tests — all allow/deny/ask-user scenarios pass)
 - [x] Existing deny rules preserved (verified: destructive commands still denied in hook tests)
 - [x] ~~Tools frontmatter~~ **Reversed by RDR-035** — `tools:` removed from all agents due to MCP filtering bug

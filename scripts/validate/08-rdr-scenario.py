@@ -434,7 +434,7 @@ def _exercise_rdr_close_invocation() -> None:
         / "nx" / "commands" / "rdr-close.md"
     )
     if not skill_md.exists():
-        # Command files live under nx/commands — check both.
+        # Command files live under conexus/commands — check both.
         skill_md = Path(__file__).resolve().parent.parent.parent / "nx" / "commands" / "rdr-close.md"
     body = skill_md.read_text() if skill_md.exists() else ""
 

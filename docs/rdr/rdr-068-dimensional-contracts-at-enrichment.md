@@ -61,7 +61,7 @@ Dimensional contracts provide a cheap additional layer that surfaces errors earl
 
 #### Gap 1: No `## Contracts` section in the enrichment template
 
-`nx/skills/enrich-plan/SKILL.md` does not prompt plan-enricher to populate per-method dimensional contracts. Enriched beads have file paths and method names but no shape declarations. The gap is in the template — the agent will produce whatever the template asks for.
+`conexus/skills/enrich-plan/SKILL.md` does not prompt plan-enricher to populate per-method dimensional contracts. Enriched beads have file paths and method names but no shape declarations. The gap is in the template — the agent will produce whatever the template asks for.
 
 #### Gap 2: Plan-enricher agent doesn't populate contracts
 
@@ -106,8 +106,8 @@ The research target (a regex bank for detecting composition failures in test out
 
 ### Technical Environment
 
-- **`nx:enrich-plan`** (`nx/skills/enrich-plan/SKILL.md`) — the skill that drives enrichment
-- **`plan-enricher` agent** (`nx/agents/plan-enricher.md`) — the agent to extend
+- **`nx:enrich-plan`** (`conexus/skills/enrich-plan/SKILL.md`) — the skill that drives enrichment
+- **`plan-enricher` agent** (`conexus/agents/plan-enricher.md`) — the agent to extend
 - **CA-2 spike findings** (from the prior iteration, still valid) — easy-case verification that a Sonnet subagent can produce grounded contracts from Read alone
 - **Template refinements** surfaced by the CA-2 spike:
   1. Split "Error modes" into `caught` / `propagates` sub-bullets
@@ -225,7 +225,7 @@ Source: `nexus_rdr/068-research-5-ca2-ca4-ca5-cross-bead-analysis` (T2 id 765).
 
 ### Approach
 
-Extend `nx/skills/enrich-plan/SKILL.md` to require a `## Contracts` section per enriched bead that names methods the bead touches. Update `nx/agents/plan-enricher.md` prompt to populate the section using the 11-field template (refined per Finding 1).
+Extend `conexus/skills/enrich-plan/SKILL.md` to require a `## Contracts` section per enriched bead that names methods the bead touches. Update `conexus/agents/plan-enricher.md` prompt to populate the section using the 11-field template (refined per Finding 1).
 
 ### Technical Design
 
@@ -300,10 +300,10 @@ Only populate contracts on beads tagged `metadata.coordinator=true`.
 
 | Proposed Component | Existing Module | Decision |
 |---|---|---|
-| Enrichment template | `nx/skills/enrich-plan/SKILL.md` | **Extend** — add contracts section |
-| Plan-enricher agent | `nx/agents/plan-enricher.md` | **Extend** — add contracts walk + mismatch detection |
+| Enrichment template | `conexus/skills/enrich-plan/SKILL.md` | **Extend** — add contracts section |
+| Plan-enricher agent | `conexus/agents/plan-enricher.md` | **Extend** — add contracts walk + mismatch detection |
 | Mismatch detection | N/A | **New** — inline in plan-enricher prompt |
-| Contracts template | N/A | **New** — document at `nx/resources/rdr/CONTRACTS-TEMPLATE.md` |
+| Contracts template | N/A | **New** — document at `conexus/resources/rdr/CONTRACTS-TEMPLATE.md` |
 
 ### Decision Rationale
 
@@ -363,9 +363,9 @@ Retrospective test against RDR-073: populate contracts for IMPL-04 (GroundedLang
 
 ### Phase 2: Template + skill update
 
-- Create `nx/resources/rdr/CONTRACTS-TEMPLATE.md` with the 11-field block from Finding 1
-- Update `nx/skills/enrich-plan/SKILL.md` to require contracts per enriched bead
-- Update `nx/agents/plan-enricher.md` prompt: walk each bead's methods, produce contracts, emit mismatch warnings on cross-bead conflicts
+- Create `conexus/resources/rdr/CONTRACTS-TEMPLATE.md` with the 11-field block from Finding 1
+- Update `conexus/skills/enrich-plan/SKILL.md` to require contracts per enriched bead
+- Update `conexus/agents/plan-enricher.md` prompt: walk each bead's methods, produce contracts, emit mismatch warnings on cross-bead conflicts
 
 ### Phase 3: Mismatch detection
 
@@ -384,7 +384,7 @@ Retrospective test against RDR-073: populate contracts for IMPL-04 (GroundedLang
 
 | Resource | List | Info | Delete | Verify | Backup |
 |---|---|---|---|---|---|
-| `nx/resources/rdr/CONTRACTS-TEMPLATE.md` | `ls` | `cat` | `rm` | N/A | git |
+| `conexus/resources/rdr/CONTRACTS-TEMPLATE.md` | `ls` | `cat` | `rm` | N/A | git |
 | Enrichment output with contracts | `bd show <bead>` | `bd show --json` | N/A | retrospective audit | beads dolt backup |
 
 ## Test Plan
@@ -440,7 +440,7 @@ Right-sized for a P3 belt-and-suspenders layer.
 - `rdr_process/nexus-audit-2026-04-11` — audit evidence showing 1/4 clean catches
 - `nexus_rdr/066-research-2-ca2-spike-verified` — CA-2 easy-case spike (retained from prior iteration)
 - `~/git/ART/docs/rdr/post-mortem/073-cogem-training-deployment-and-dialog-runtime-integration.md` — RDR-073 retrospective target for MVV
-- `nx/skills/enrich-plan/SKILL.md`, `nx/agents/plan-enricher.md` — pieces to extend
+- `conexus/skills/enrich-plan/SKILL.md`, `conexus/agents/plan-enricher.md` — pieces to extend
 - RDR-066 (Phase 1 — composition probe) — the primary layer this supplements
 - RDR-069 (Phase 0 — critic at close) — the backstop
 

@@ -14,7 +14,7 @@ four. Adding a fifth routing hook in ANY plugin (nx, sn, or a future
 plugin) requires either consolidation or a budget revision in a
 successor RDR.
 
-Currently in scope: ``nx/hooks/scripts/routing/registry.yaml`` and
+Currently in scope: ``conexus/hooks/scripts/routing/registry.yaml`` and
 ``sn/hooks/scripts/routing/registry.yaml``. Extend ``_REGISTRY_PATHS``
 when a third plugin ships a routing registry.
 """

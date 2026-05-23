@@ -64,7 +64,7 @@ All three papers add a pre-execution step: DeepEye validates type compatibility 
 
 **Source**: Operational experience, user feedback (2026-04-07)
 
-The orchestrator agent (`nx/agents/orchestrator.md`) is never invoked in practice. The main
+The orchestrator agent (`conexus/agents/orchestrator.md`) is never invoked in practice. The main
 conversation acts as the orchestrator — the user tells Claude what to do, Claude dispatches
 agents directly. The fundamental constraint is architectural: **subagents cannot spawn other
 subagents**, so the orchestrator can only recommend routing, not execute pipelines.
@@ -92,7 +92,7 @@ and what order to use them. That's a documentation problem, not an infrastructur
 
 **1a. Convert orchestrator agent to reference document**
 
-Move `nx/agents/orchestrator.md` content to `nx/skills/orchestration/reference.md` (or similar).
+Move `conexus/agents/orchestrator.md` content to `conexus/skills/orchestration/reference.md` (or similar).
 Remove the agent frontmatter (name, model, color). Keep the routing tables, pipeline templates,
 and standard workflow patterns as skill reference material that the main conversation and
 using-nx-skills consult.

@@ -2434,7 +2434,7 @@ class TestBackfillBuiltinBindings:
         )
 
         # Point the migration's repo-root fallback at our tmp layout.
-        # Migration walks __file__.parents[3]/nx/plans/builtin; a monkeypatch
+        # Migration walks __file__.parents[3]/conexus/plans/builtin; a monkeypatch
         # of the module-level ``Path`` lookup in the migration is brittle,
         # so instead pivot on ``importlib.resources`` by setting up a
         # resource stub. Simpler: mock ``importlib.resources.files`` to
@@ -2453,8 +2453,8 @@ class TestBackfillBuiltinBindings:
 
         def fake_files(_pkg):
             # Mirror the migration's expected layout: <pkg> / _resources
-            # / plans / builtin. We ship the YAMLs at tmp_path/nx/plans/
-            # builtin, so route _resources/plans/builtin to tmp_path/nx/
+            # / plans / builtin. We ship the YAMLs at tmp_path/conexus/plans/
+            # builtin, so route _resources/plans/builtin to tmp_path/conexus/
             # plans/builtin via the FakeResource chain.
             root = tmp_path / "nx"
             # Eat the leading "_resources" segment by returning a resource

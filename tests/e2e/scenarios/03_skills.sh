@@ -42,7 +42,7 @@ scenario "03 skills: using-nexus skill guidance is correct"
 # This is fast, deterministic, and exercises the same property the old
 # print-mode query was reaching for: "does the nx:nexus skill describe
 # when to reach for nx search and semantic retrieval?"
-skill_file="$REPO_ROOT/nx/skills/nexus/SKILL.md"
+skill_file="$REPO_ROOT/conexus/skills/nexus/SKILL.md"
 if [[ ! -f "$skill_file" ]]; then
     fail "nx:nexus skill file missing: $skill_file"
 elif grep -qiE "nx search|index|codebase|semantic" "$skill_file"; then

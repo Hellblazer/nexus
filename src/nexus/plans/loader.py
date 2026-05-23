@@ -233,7 +233,7 @@ class _CIError:
 
 
 def _load_registered_dimensions(plugin_root: Path) -> set[str] | None:
-    """Read the canonical dimensions registry from ``nx/plans/dimensions.yml``.
+    """Read the canonical dimensions registry from ``conexus/plans/dimensions.yml``.
 
     Returns the set of registered top-level dimension keys, or ``None`` if
     the file is missing/unreadable (in which case the caller should fall
@@ -263,7 +263,7 @@ def ci_validate_plan_tree(
     GitHub Actions workflow ``plan-schema-check.yml`` (SC-15).
 
     Runs the validator in strict mode with the dimensions registry
-    loaded from ``nx/plans/dimensions.yml`` so SC-19 (unknown dimension
+    loaded from ``conexus/plans/dimensions.yml`` so SC-19 (unknown dimension
     rejected at CI) is actually enforced.
     """
     import sys

@@ -143,13 +143,13 @@ Other interventions are deferred to sibling RDRs.
 
 ### Technical Environment
 
-- **`nx:rdr-create`** (`nx/skills/rdr-create.md`): scaffolds new RDRs
+- **`nx:rdr-create`** (`conexus/skills/rdr-create.md`): scaffolds new RDRs
   from `resources/rdr/TEMPLATE.md`
-- **`nx:rdr-close`** (`nx/skills/rdr-close.md`): closes RDRs, writes
+- **`nx:rdr-close`** (`conexus/skills/rdr-close.md`): closes RDRs, writes
   post-mortems, sets `close_reason`, optionally archives to T3
-- **`nx:rdr-accept`** (`nx/skills/rdr-accept.md`): runs the finalization
+- **`nx:rdr-accept`** (`conexus/skills/rdr-accept.md`): runs the finalization
   gate and transitions `status: draft` → `status: accepted`
-- **`nx:rdr-gate`** (`nx/skills/rdr-gate.md`): structural, assumption,
+- **`nx:rdr-gate`** (`conexus/skills/rdr-gate.md`): structural, assumption,
   and AI critique checks
 - **Beads** (`bd`): external task tracker. We cannot modify its schema;
   enforcement of follow-up commitment fields happens in our wrapper
@@ -182,8 +182,8 @@ exhibits it.
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| `nx:rdr-close` skill | **Yes** (2026-04-10) | Located at `nx/skills/rdr-close/SKILL.md` plus command preamble at `nx/commands/rdr-close.md`. The skill has 6 steps (Divergence Notes, Create Post-Mortem, Bead Status Gate, Update State, Catalog Links, T3 Archive). **Critical finding 1**: `close_reason` is set by direct user input via `--reason` flag or the Step 1 interactive prompt — there is NO automated analysis and NO re-read of the RDR's Problem Statement body. The skill already has a **hard-gate pattern** on open beads (lines 75-78 of SKILL.md) that refuses to proceed without explicit user confirmation — this pattern is the model for the new problem-statement replay gate. **Critical finding 2 (HA-5)**: the `close_reason` is parsed by the Python command preamble at `nx/commands/rdr-close.md` line 113 (`reason_match = re.search(r'--reason\s+(\S+)', args)`), BEFORE the SKILL.md flow runs. This means the enforcement surface for gap replay must live in the command preamble (or as a hard block the skill body refuses to proceed past), not purely in the SKILL.md instructions. The skill also has a fixed **10-category drift classification taxonomy** in Step 2 (Unvalidated assumption, Framework API detail, Missing failure mode, Missing Day 2 operation, Deferred critical constraint, Over-specified code, Under-specified architecture, Scope underestimation, Internal contradiction, Missing cross-cutting concern). This taxonomy classifies *acknowledged* divergences after the fact; it does **NOT** provide vocabulary for detecting *unacknowledged* divergence language in post-mortem prose. The divergence-language regex bank must be authored independently (see CA-5). **Insertion points**: problem-statement replay inserts between Step 1 (Divergence Notes) and Step 2 (Create Post-Mortem) in SKILL.md AND as a pre-check in the command preamble for `--reason implemented`; divergence-language honesty check inserts between Step 2 and Step 3 (Bead Status Gate); follow-up bead enforcement piggybacks on Step 3. |
-| `nx:rdr-create` skill | No | Template is at `nx/resources/rdr/TEMPLATE.md` (plus a README-TEMPLATE.md). The scaffold Python preamble lives in `nx/commands/rdr-create.md`. Not yet confirmed whether scaffold modification requires plugin republish or whether the template is read from repo working tree at scaffold time. |
+| `nx:rdr-close` skill | **Yes** (2026-04-10) | Located at `conexus/skills/rdr-close/SKILL.md` plus command preamble at `conexus/commands/rdr-close.md`. The skill has 6 steps (Divergence Notes, Create Post-Mortem, Bead Status Gate, Update State, Catalog Links, T3 Archive). **Critical finding 1**: `close_reason` is set by direct user input via `--reason` flag or the Step 1 interactive prompt — there is NO automated analysis and NO re-read of the RDR's Problem Statement body. The skill already has a **hard-gate pattern** on open beads (lines 75-78 of SKILL.md) that refuses to proceed without explicit user confirmation — this pattern is the model for the new problem-statement replay gate. **Critical finding 2 (HA-5)**: the `close_reason` is parsed by the Python command preamble at `conexus/commands/rdr-close.md` line 113 (`reason_match = re.search(r'--reason\s+(\S+)', args)`), BEFORE the SKILL.md flow runs. This means the enforcement surface for gap replay must live in the command preamble (or as a hard block the skill body refuses to proceed past), not purely in the SKILL.md instructions. The skill also has a fixed **10-category drift classification taxonomy** in Step 2 (Unvalidated assumption, Framework API detail, Missing failure mode, Missing Day 2 operation, Deferred critical constraint, Over-specified code, Under-specified architecture, Scope underestimation, Internal contradiction, Missing cross-cutting concern). This taxonomy classifies *acknowledged* divergences after the fact; it does **NOT** provide vocabulary for detecting *unacknowledged* divergence language in post-mortem prose. The divergence-language regex bank must be authored independently (see CA-5). **Insertion points**: problem-statement replay inserts between Step 1 (Divergence Notes) and Step 2 (Create Post-Mortem) in SKILL.md AND as a pre-check in the command preamble for `--reason implemented`; divergence-language honesty check inserts between Step 2 and Step 3 (Bead Status Gate); follow-up bead enforcement piggybacks on Step 3. |
+| `nx:rdr-create` skill | No | Template is at `conexus/resources/rdr/TEMPLATE.md` (plus a README-TEMPLATE.md). The scaffold Python preamble lives in `conexus/commands/rdr-create.md`. Not yet confirmed whether scaffold modification requires plugin republish or whether the template is read from repo working tree at scaffold time. |
 | beads (`bd`) PreToolUse hook surface | No | Still need to confirm that PreToolUse hooks fire on `bd create` invocations dispatched by skills, and whether arguments are inspectable. |
 | Existing nexus RDR corpus | No | Need to grep `docs/rdr/*.md` for divergence language and unstructured Problem Statements to size the grandfathering problem. |
 
@@ -235,7 +235,7 @@ from scratch; CA-5 is entirely unverified with no prior art to draw on.
   sequence and surface divergence-language hits to the user before the
   close completes.
   — **Status**: Verified (2026-04-10) via source search of
-  `nx/hooks/hooks.json` and `nx/hooks/scripts/pre_close_verification_hook.sh`.
+  `conexus/hooks/hooks.json` and `conexus/hooks/scripts/pre_close_verification_hook.sh`.
   Findings: (a) PreToolUse Bash hook already exists
   (`pre_close_verification_hook.sh`, matches commands containing
   `bd close|done`, currently advisory-only); (b) the hook JSON schema
@@ -376,8 +376,8 @@ the original CA list. They are now named and scoped for verification.
 - [x] **HA-1**: Hook firing order is deterministic relative to the
   close skill's Write to the RDR/post-mortem file.
   — **Status**: Verified with design correction (2026-04-10) via
-  source search of `nx/skills/rdr-close/SKILL.md` and
-  `nx/hooks/hooks.json`. **Finding**: the original design placed
+  source search of `conexus/skills/rdr-close/SKILL.md` and
+  `conexus/hooks/hooks.json`. **Finding**: the original design placed
   the divergence-language guard as a PreToolUse hook on Write. This
   is wrong — PreToolUse fires BEFORE the tool executes, so the hook
   would see the pre-Write state of the file (empty, or the old
@@ -456,11 +456,11 @@ the original CA list. They are now named and scoped for verification.
   the scaffold reads at `nx:rdr-create` time, not a bundled copy in the
   installed plugin.
   — **Status**: Verified with concerning finding (2026-04-10) via
-  source search of `nx/skills/rdr-create/SKILL.md` lines 46–54.
+  source search of `conexus/skills/rdr-create/SKILL.md` lines 46–54.
   **Finding**: the scaffold reads the template from
   `$CLAUDE_PLUGIN_ROOT/resources/rdr/TEMPLATE.md` — the **installed
   plugin cache location**, not the working tree. Modifying
-  `nx/resources/rdr/TEMPLATE.md` in the working tree has no effect on
+  `conexus/resources/rdr/TEMPLATE.md` in the working tree has no effect on
   running sessions until the plugin is republished (version bump +
   `scripts/reinstall-tool.sh`). Additionally: the scaffold bootstrap
   is per-repo and ONE-SHOT — on first use, `TEMPLATE.md` is copied
@@ -470,7 +470,7 @@ the original CA list. They are now named and scoped for verification.
   must be reading from the plugin cache directly, which means the
   bootstrap was either never run or was run without the template
   copy. Either way, the deployment story for Gap 4 has three steps:
-  (1) edit `nx/resources/rdr/TEMPLATE.md` in the working tree, (2)
+  (1) edit `conexus/resources/rdr/TEMPLATE.md` in the working tree, (2)
   release a new plugin version, (3) users install the new version.
   This is a plugin release, not a file edit. **Scope implication**:
   Phase 1 Step 2 (Update RDR template scaffold) must be bundled with
@@ -483,8 +483,8 @@ the original CA list. They are now named and scoped for verification.
   structured gaps.
 
 - [ ] **HA-5**: The `--reason implemented` refusal must happen in
-  `nx/commands/rdr-close.md` (the Python command preamble) at argument
-  parse time, not purely in `nx/skills/rdr-close/SKILL.md` instruction
+  `conexus/commands/rdr-close.md` (the Python command preamble) at argument
+  parse time, not purely in `conexus/skills/rdr-close/SKILL.md` instruction
   text. The command preamble already parses `--reason` via
   `reason_match = re.search(r'--reason\s+(\S+)', args)` at line 113.
   If the Python preamble accepts `--reason implemented` without
@@ -493,7 +493,7 @@ the original CA list. They are now named and scoped for verification.
   agent can reason past them. The enforcement surface is the command
   preamble. — **Status**: Partially Verified (2026-04-10) —
   **Enforcement surface confirmed**: source search of
-  `nx/commands/rdr-close.md` lines 112–197 confirms `--reason` is
+  `conexus/commands/rdr-close.md` lines 112–197 confirms `--reason` is
   parsed at line 113 and the preamble has hard-exit points
   (`sys.exit(0)` at lines 133, 138, 161) that block the skill body
   from running. The preamble CAN enforce by refusing to proceed.
@@ -553,16 +553,16 @@ Interventions deferred to sibling RDRs:
 
 **Surface area** (files this RDR will touch):
 
-- `nx/skills/rdr-create.md` — template scaffold
-- `nx/skills/rdr-close.md` — problem-statement replay logic, follow-up
+- `conexus/skills/rdr-create.md` — template scaffold
+- `conexus/skills/rdr-close.md` — problem-statement replay logic, follow-up
   bead enforcement
 - `resources/rdr/TEMPLATE.md` — `### Enumerated gaps to close`
   subsection with example `#### Gap 1:` heading
-- `nx/hooks/scripts/divergence-language-guard.sh` (new) — Stop or
+- `conexus/hooks/scripts/divergence-language-guard.sh` (new) — Stop or
   PreToolUse hook for the honesty check
-- `nx/hooks/scripts/bd-create-followup-guard.sh` (new) — PreToolUse
+- `conexus/hooks/scripts/bd-create-followup-guard.sh` (new) — PreToolUse
   hook on `bd create` invocations from active close contexts
-- `nx/hooks.json` — register the two new hooks
+- `conexus/hooks.json` — register the two new hooks
 
 **Code guidance**:
 
@@ -592,8 +592,8 @@ Interventions deferred to sibling RDRs:
   (HA-5), not in the SKILL.md body.** The skill body's instructions
   are advisory to the agent; only the command preamble's argument
   validation is a hard block that cannot be reasoned past. Step 3 of
-  the Implementation Plan must update `nx/commands/rdr-close.md`
-  directly, not just `nx/skills/rdr-close/SKILL.md`.
+  the Implementation Plan must update `conexus/commands/rdr-close.md`
+  directly, not just `conexus/skills/rdr-close/SKILL.md`.
 - The divergence regex bank is:
   `divergence|workaround|limitation|deferred|follow-up\s+RDR|Phase\s+\d+\s+(deferred|required)|out\s+of\s+scope|not\s+in\s+scope`
   (8 patterns). This was derived from two rounds of precision
@@ -616,8 +616,8 @@ Interventions deferred to sibling RDRs:
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| Problem-statement replay logic | `nx/skills/rdr-close.md` | Extend — add a new step before `close_reason` is computed |
-| Divergence-language hook | `nx/hooks/scripts/readonly-agent-guard.sh` (pattern reference) | Reuse pattern: bash script invoked from hooks.json, exit non-zero to block |
+| Problem-statement replay logic | `conexus/skills/rdr-close.md` | Extend — add a new step before `close_reason` is computed |
+| Divergence-language hook | `conexus/hooks/scripts/readonly-agent-guard.sh` (pattern reference) | Reuse pattern: bash script invoked from hooks.json, exit non-zero to block |
 | Follow-up bead PreToolUse hook | Same pattern | Reuse pattern |
 | RDR template scaffold | `resources/rdr/TEMPLATE.md` | Extend — add `### Enumerated gaps to close` subsection only |
 | Recursive self-validation | None | New — this RDR is the first to validate against its own close skill |
@@ -852,16 +852,16 @@ new version. This step must be bundled with a plugin version bump per
 
 Concrete actions:
 
-1. Edit `nx/resources/rdr/TEMPLATE.md` (working tree) to add a
+1. Edit `conexus/resources/rdr/TEMPLATE.md` (working tree) to add a
    `### Enumerated gaps to close` subsection under `## Problem
    Statement` with example `#### Gap 1:` headings. Document the
    anchor convention explicitly: "The close skill greps for
    `^#### Gap \d+:` headings. Use exactly this format."
-2. Update `nx/skills/rdr-create/SKILL.md` to mention the convention
+2. Update `conexus/skills/rdr-create/SKILL.md` to mention the convention
    in the scaffold guidance and the behavior section.
 3. Bump the plugin version per the release checklist in
    `docs/contributing.md`: `pyproject.toml`, `uv.lock`,
-   `CHANGELOG.md`, `nx/CHANGELOG.md`, `.claude-plugin/marketplace.json`.
+   `CHANGELOG.md`, `conexus/CHANGELOG.md`, `.claude-plugin/marketplace.json`.
 4. Run `scripts/reinstall-tool.sh` to install the new plugin locally.
 5. Verify by creating a test RDR via `/conexus:rdr-create` and confirming
    the new scaffold includes the `### Enumerated gaps to close`
@@ -874,9 +874,9 @@ CA-6's Step 6c cannot exercise the full close path.
 
 #### Step 3: Rewrite `nx:rdr-close` problem-statement replay logic (two-pass invocation model)
 
-This step modifies BOTH `nx/commands/rdr-close.md` (the Python command
+This step modifies BOTH `conexus/commands/rdr-close.md` (the Python command
 preamble — per HA-5 this is the hard-enforcement surface) AND
-`nx/skills/rdr-close/SKILL.md` (the instruction text the agent follows).
+`conexus/skills/rdr-close/SKILL.md` (the instruction text the agent follows).
 
 **Architectural constraint** (from NI-2 in Gate Round 1 review): the
 Python preamble is one-shot. It runs ONCE at `/conexus:rdr-close`
@@ -906,7 +906,7 @@ specific gap(s) that failed validation. If all pointers validate, the
 preamble emits a "validation passed" message into context and the
 SKILL.md body proceeds with the rest of the close flow.
 
-**Preamble changes** (`nx/commands/rdr-close.md`):
+**Preamble changes** (`conexus/commands/rdr-close.md`):
 
 1. Parse a new optional flag: `--pointers 'Gap1=file1.py:line1,...'`
 2. After `close_reason` is parsed, if it is `implemented`, parse the
@@ -931,7 +931,7 @@ SKILL.md body proceeds with the rest of the close flow.
    listing the failed gaps. If all pass, emit "validation passed" and
    allow the skill body to proceed.
 
-**SKILL.md changes** (`nx/skills/rdr-close/SKILL.md`):
+**SKILL.md changes** (`conexus/skills/rdr-close/SKILL.md`):
 
 1. Insert a new "Step 1.5: Problem Statement Replay" between the
    existing Step 1 (Divergence Notes) and Step 2 (Create Post-Mortem).
@@ -958,7 +958,7 @@ bug — it makes the commitment auditable (the full invocation with
 pointers appears in the shell history / command log).
 
 **Implementation cross-check**: this two-pass design is validated
-against the existing preamble architecture at `nx/commands/rdr-close.md`
+against the existing preamble architecture at `conexus/commands/rdr-close.md`
 lines 112–197, which already uses `sys.exit(0)` for hard blocks
 (lines 133, 138, 161). The pattern is established; we are adding a
 third exit case (Pass 1 gap enumeration) and a conditional branch
@@ -972,9 +972,9 @@ file path**, not the RDR file. PreToolUse fires before the tool
 executes and would see the pre-write state. PostToolUse fires after
 the write completes and can read the final file content.
 
-**Hook script**: create `nx/hooks/scripts/divergence-language-guard.sh`.
+**Hook script**: create `conexus/hooks/scripts/divergence-language-guard.sh`.
 
-**Matcher** (registered in `nx/hooks/hooks.json` under `PostToolUse`):
+**Matcher** (registered in `conexus/hooks/hooks.json` under `PostToolUse`):
 ```json
 {
   "matcher": "Write|Edit",
@@ -1028,7 +1028,7 @@ that moment — no coordination needed between preamble and skill.
 
 **Design refinement** (from CA-2 verification): rather than creating
 a new hook script, **extend the existing**
-`nx/hooks/scripts/pre_close_verification_hook.sh`. That script
+`conexus/hooks/scripts/pre_close_verification_hook.sh`. That script
 already:
 - Matches PreToolUse Bash calls
 - Parses `bd close|done` commands via regex
@@ -1289,7 +1289,7 @@ in T2 for the structured research log.
 - HA-4 Verified with concerning finding (plugin release coordination
   required for Gap 4; RDR stays `accepted` until release)
 - HA-5 Partially Verified (enforcement surface confirmed at
-  `nx/commands/rdr-close.md` line 113; implementation pending)
+  `conexus/commands/rdr-close.md` line 113; implementation pending)
 
 #### API Verification
 
@@ -1337,11 +1337,11 @@ weaken CA-6.
   Pre-Flight, RDR-067 Cross-Project RDR Observability, RDR-068
   Composition Failure Detection (research), RDR-069 Evidence-Chain
   Gate Beads (INT-6)
-- Nexus skills: `nx/skills/rdr-create.md`, `nx/skills/rdr-close.md`,
-  `nx/skills/rdr-accept.md`, `nx/skills/rdr-gate.md`,
-  `nx/skills/enrich-plan.md`
+- Nexus skills: `conexus/skills/rdr-create.md`, `conexus/skills/rdr-close.md`,
+  `conexus/skills/rdr-accept.md`, `conexus/skills/rdr-gate.md`,
+  `conexus/skills/enrich-plan.md`
 - Nexus templates: `resources/rdr/TEMPLATE.md`
-- Nexus hooks: `nx/hooks/scripts/readonly-agent-guard.sh` (pattern
+- Nexus hooks: `conexus/hooks/scripts/readonly-agent-guard.sh` (pattern
   reference)
 
 ## Revision History
@@ -1349,7 +1349,7 @@ weaken CA-6.
 - 2026-04-10 — Draft created. Not yet gated.
 
 - 2026-04-10 — CA-1 partially verified via source search of
-  `nx/skills/rdr-close/SKILL.md` and `nx/commands/rdr-close.md`.
+  `conexus/skills/rdr-close/SKILL.md` and `conexus/commands/rdr-close.md`.
   Implementation surface confirmed as feasible. Sibling RDRs RDR-066
   (enrichment-time), RDR-067 (cross-project observability), RDR-068
   (composition failure detection research) created as stubs. **This
@@ -1437,7 +1437,7 @@ weaken CA-6.
   new issues identified:
 
   **NI-1 (addressed)**: HA-5 was marked "Verified" but the Python
-  preamble at `nx/commands/rdr-close.md` lines 112–197 contains no
+  preamble at `conexus/commands/rdr-close.md` lines 112–197 contains no
   gap-replay logic, no Problem Statement grep, and no refusal of
   `--reason implemented`. The verification confirmed the right
   enforcement surface but NOT that enforcement exists. HA-5 status
@@ -1466,7 +1466,7 @@ weaken CA-6.
   transitioned from Unverified to Verified or Partially Verified.
   Several design corrections required as a result.
 
-  **CA-2 verified**: `nx/hooks/hooks.json` audited;
+  **CA-2 verified**: `conexus/hooks/hooks.json` audited;
   `pre_close_verification_hook.sh` exists as a PreToolUse Bash hook
   with a proven pattern for matching `bd close|done` commands. JSON
   schema supports `permissionDecision: deny` for hard blocks. Stop

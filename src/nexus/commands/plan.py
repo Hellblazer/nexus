@@ -32,7 +32,7 @@ def _classify_origin(row: dict) -> str:
     reliability complaint drives the change.
 
     - ``builtin``  — tags carry the ``builtin-template`` token (seeded
-      from ``nx/plans/builtin/*.yml`` by ``nx catalog setup``).
+      from ``conexus/plans/builtin/*.yml`` by ``nx catalog setup``).
     - ``grown``    — ``project=='personal'`` with no recognisable user
       tag, the shape ``_nx_answer_plan_grow`` produces.
     - ``user``     — anything else (called via ``plan_save`` MCP tool

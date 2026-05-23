@@ -226,8 +226,8 @@ Tag convention: all catalog-aware plans saved with `tags="catalog,<operation_typ
 
 #### 2f. Files to Update
 
-- `nx/agents/query-planner.md` — add `catalog_search`, `catalog_links`, `catalog_resolve` to operation list + schemas
-- `nx/skills/query/SKILL.md` — add dispatch rules for catalog operations
+- `conexus/agents/query-planner.md` — add `catalog_search`, `catalog_links`, `catalog_resolve` to operation list + schemas
+- `conexus/skills/query/SKILL.md` — add dispatch rules for catalog operations
 - `src/nexus/mcp_server.py` — `catalog_search` already accepts structured filters (added in this iteration)
 
 ### Layer 3: Concept Nodes (Build When Needed, Not Before)
@@ -287,7 +287,7 @@ Embed link type descriptions and do semantic matching for "find related" queries
 
 ### Layer 2 (Query Planning)
 - [x] Query planner generates valid plans with `catalog_search`, `catalog_links`, `catalog_resolve` steps
-- [x] `nx/agents/query-planner.md` updated with the three new operation schemas
+- [x] `conexus/agents/query-planner.md` updated with the three new operation schemas
 - [x] `/conexus:query` skill dispatches catalog operations correctly (dispatch rules §2d)
 - [x] `$step_N.collections` extraction works: catalog results → collection names → search corpus — validated against 109-document catalog
 - [x] On 5 reference queries with known relevant documents, catalog-scoped search retrieves a relevant document in fewer MCP calls than unconstrained search — "Schema Mappings" narrows 83→9 collections
@@ -318,7 +318,7 @@ Embed link type descriptions and do semantic matching for "find related" queries
 4. ~~**Manual link creation**~~: `nx catalog link` CLI + `catalog_link` MCP tool
 
 ### Remaining (Layer 2 — Query Planner Integration)
-5. **Query planner agent update**: Add `catalog_search`, `catalog_links`, `catalog_resolve` to `nx/agents/query-planner.md` operation list with schemas (§2b)
+5. **Query planner agent update**: Add `catalog_search`, `catalog_links`, `catalog_resolve` to `conexus/agents/query-planner.md` operation list with schemas (§2b)
 6. **Skill dispatch update**: `/conexus:query` handles catalog operations per dispatch rules (§2d) — collection extraction, fanout, T1 scratch
 7. **Few-shot templates**: Seed T2 plan library with narrow-then-search, citation traversal, cross-type provenance, corpus-scoped patterns (§2c) tagged `catalog`
 

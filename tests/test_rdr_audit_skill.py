@@ -37,13 +37,13 @@ class TestSkillFileExists:
 
     def test_skill_file_present(self) -> None:
         assert SKILL_PATH.exists(), (
-            f"nx/skills/rdr-audit/SKILL.md does not exist. "
+            f"conexus/skills/rdr-audit/SKILL.md does not exist. "
             f"Phase 2a (nexus-dqp.3) creates this file."
         )
 
     def test_command_file_present(self) -> None:
         assert COMMAND_PATH.exists(), (
-            f"nx/commands/rdr-audit.md does not exist. "
+            f"conexus/commands/rdr-audit.md does not exist. "
             f"Slash command file is required for /conexus:rdr-audit invocation."
         )
 
@@ -356,7 +356,7 @@ class TestCommandFileSubcommandRouting:
     def test_command_file_does_not_stub_subcommands(self) -> None:
         text = COMMAND_PATH.read_text()
         assert "not yet implemented" not in text.lower(), (
-            "nx/commands/rdr-audit.md still has 'not yet implemented' stub for subcommands — "
+            "conexus/commands/rdr-audit.md still has 'not yet implemented' stub for subcommands — "
             "Phase 2b should remove that and route subcommands to the skill body"
         )
 
@@ -372,7 +372,7 @@ class TestRegistryIntegration:
         registry = yaml.safe_load(REGISTRY_PATH.read_text())
         rdr_skills = registry.get("rdr_skills", {})
         assert "rdr-audit" in rdr_skills, (
-            "rdr-audit must be registered under rdr_skills: in nx/registry.yaml"
+            "rdr-audit must be registered under rdr_skills: in conexus/registry.yaml"
         )
 
     def test_registry_entry_has_required_fields(self) -> None:
@@ -388,5 +388,5 @@ class TestRegistryIntegration:
         text = USING_SKILLS_PATH.read_text()
         assert "rdr-audit" in text, (
             "rdr-audit must be added to the routing table in "
-            "nx/skills/using-nx-skills/SKILL.md so it is discoverable each session"
+            "conexus/skills/using-nx-skills/SKILL.md so it is discoverable each session"
         )

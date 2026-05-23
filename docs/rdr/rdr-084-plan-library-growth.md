@@ -55,7 +55,7 @@ whether the library is compounding or plateauing.
 
 #### Gap 3: Hand-authoring is the only growth path, and it's expensive
 
-Writing a `nx/plans/*.yml` template is a high-friction act: authors
+Writing a `conexus/plans/*.yml` template is a high-friction act: authors
 must pick dimensions, required/optional bindings, tags. Operators who
 hit plan-miss paths never see the diff between "this worked; do more
 of it" and "this failed; do something else" — they have to reverse-engineer

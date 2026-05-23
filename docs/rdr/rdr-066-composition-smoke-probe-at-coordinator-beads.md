@@ -97,8 +97,8 @@ The probe is the primary intervention. Contracts are an additive layer. They bel
 
 ### Technical Environment
 
-- **`nx:enrich-plan`** (`nx/skills/enrich-plan/SKILL.md`) — the skill plan-enricher dispatches. Today it produces structural enrichment only.
-- **`plan-enricher` agent** (`nx/agents/plan-enricher.md`) — the agent that walks beads and populates descriptions with file paths, symbols, test commands.
+- **`nx:enrich-plan`** (`conexus/skills/enrich-plan/SKILL.md`) — the skill plan-enricher dispatches. Today it produces structural enrichment only.
+- **`plan-enricher` agent** (`conexus/agents/plan-enricher.md`) — the agent that walks beads and populates descriptions with file paths, symbols, test commands.
 - **`bd metadata` JSON field** — verified available as of bd 1.0.0 (CA-3 from prior iteration, retained). `bd create --metadata '{"coordinator":true}'` roundtrips via `bd show --json`.
 - **`bd --waits-for --waits-for-gate all-children`** — also verified. Native bd coordinator semantic for "wait until all children complete before unblocking." The composition probe would consume this gate to know when a coordinator bead is ready to test.
 - **Subagent dispatch from skills** — the probe skill can dispatch a short-lived subagent (general-purpose or developer) to generate the smoke test. The subagent reads the coordinator bead, reads the dependencies' declared outputs, writes a minimal test, runs it, reports.
@@ -150,7 +150,7 @@ Critically, **neither the fallback heuristic NOR the full CA-5 method-ownership 
 
 ### Finding 4 (2026-04-11): plan-enricher CA-4/CA-5 feasibility — Phase 2 is near-zero-cost
 
-Source: `nexus_rdr/066-research-3-ca4-ca5-enricher-feasibility` (id 730). Dispatched `nx:codebase-deep-analyzer` against `nx/agents/plan-enricher.md` and `nx/skills/enrich-plan/SKILL.md` with a fixed-shape minimal relay. Purely code-analytic — no runtime spike required.
+Source: `nexus_rdr/066-research-3-ca4-ca5-enricher-feasibility` (id 730). Dispatched `nx:codebase-deep-analyzer` against `conexus/agents/plan-enricher.md` and `conexus/skills/enrich-plan/SKILL.md` with a fixed-shape minimal relay. Purely code-analytic — no runtime spike required.
 
 **The enricher walks beads one at a time with zero cross-bead state.** The per-child loop at `plan-enricher.md:98-100` processes beads serially with no accumulator, no map, no session memory of prior walks. Tool budget: Write, `/beads:show`, `/beads:update --body-file`, scratch, memory_get/put, sequential-thinking. No Serena, no catalog, no symbol-resolution tools.
 
@@ -226,7 +226,7 @@ Three components, built in order:
 
 1. **Coordinator convention**: plan-enricher agent prompt gains a rule — "any bead whose implementation composes outputs from ≥2 prior beads (e.g., calls methods defined in bead M and bead N where M,N < this bead) must be tagged `metadata.coordinator=true` when the bead is updated." This is prompt-level, no new infrastructure. Enforced by the prompt, verified by the audit loop (RDR-067).
 
-2. **`nx:composition-probe` skill**: new skill at `nx/skills/composition-probe/SKILL.md`. Takes a coordinator bead ID. Reads the bead description + the declared outputs of its dependencies. Dispatches a subagent (general-purpose, sonnet-class) with a fixed prompt: "generate a 30-50 line minimal end-to-end test against `<entry_point>` that exercises the composition with realistic input. Include assertions on the output shape and the dimensionality of intermediate values. Fail fast on any exception." The subagent generates the test, writes it to a temp file, runs it via the existing test runner (project-dependent — `mvn test`, `uv run pytest`, etc.), reports pass/fail + the test output.
+2. **`nx:composition-probe` skill**: new skill at `conexus/skills/composition-probe/SKILL.md`. Takes a coordinator bead ID. Reads the bead description + the declared outputs of its dependencies. Dispatches a subagent (general-purpose, sonnet-class) with a fixed prompt: "generate a 30-50 line minimal end-to-end test against `<entry_point>` that exercises the composition with realistic input. Include assertions on the output shape and the dimensionality of intermediate values. Fail fast on any exception." The subagent generates the test, writes it to a temp file, runs it via the existing test runner (project-dependent — `mvn test`, `uv run pytest`, etc.), reports pass/fail + the test output.
 
 3. **Workflow integration**: plan-enricher agent, when it closes enrichment on a coordinator bead, emits a required probe-run step in the plan description. The step is: "Before beginning the next bead, run `/conexus:composition-probe <this-bead-id>` and verify PASS." Agents executing the plan see the step and run the probe. If the probe fails, the agent cannot proceed until the failing dependency bead is reopened (detected by the probe's output identifying which dependency's contract broke).
 
@@ -234,7 +234,7 @@ Three components, built in order:
 
 > **Design locked on Read-only branch (post-Phase-1a)**. The Phase 1a hard-case spike (Finding 5, `nexus_rdr/066-research-5-ca1-ca2-ca3-hard-case-spike`) verified that a Read-only subagent is sufficient for nexus coordinator targets. `Any` at injection boundaries is the dominant nexus pattern — contracts are expressed as runtime dict-key presence, not typed generics requiring inference. Tool budget for the Phase 3 composition-probe skill: `Read + Grep + Glob + conftest-fixture heuristic`. Serena escalation is reserved for `typing.Protocol` / `TypeVar` cases that may appear in future targets but do not appear in the nexus + ART coordinator corpus verified so far.
 
-**Probe skill shape** (`nx/skills/composition-probe/SKILL.md`):
+**Probe skill shape** (`conexus/skills/composition-probe/SKILL.md`):
 
 ```markdown
 ---
@@ -261,7 +261,7 @@ description: Use to run a composition smoke test against a coordinator bead befo
 - On FAIL: structured report citing the failing dependency bead with suggested reopen
 ```
 
-**Subagent prompt** (used by the skill — pinned verbatim in `nx/skills/composition-probe/SKILL.md`):
+**Subagent prompt** (used by the skill — pinned verbatim in `conexus/skills/composition-probe/SKILL.md`):
 
 > Generate a minimal (30-50 line) end-to-end smoke test against `<entry_point>` that exercises the composition of dependencies {list of dep bead IDs + their declared outputs}. The test should:
 > - Use realistic input data (not mocks, not stubs, not defaults)
@@ -303,10 +303,10 @@ Run the existing test suite against main after each coordinator bead lands.
 |---|---|---|
 | Coordinator bead tag | `bd metadata` (bd 1.0.0) | **Reuse** — no new fields needed |
 | Wait-gate semantic | `bd --waits-for-gate all-children` | **Reuse** — native |
-| Probe skill | `nx/skills/composition-probe/SKILL.md` | **New** (create) |
+| Probe skill | `conexus/skills/composition-probe/SKILL.md` | **New** (create) |
 | Test generator subagent | general-purpose / developer agent | **Reuse** — standard agent |
 | Test runner | project-specific (`mvn test`, `uv run pytest`, etc.) | **Reuse** — shell out |
-| Plan-enricher prompt | `nx/agents/plan-enricher.md` | **Extend** — add coordinator tagging rule |
+| Plan-enricher prompt | `conexus/agents/plan-enricher.md` | **Extend** — add coordinator tagging rule |
 
 ### Decision Rationale
 
@@ -392,7 +392,7 @@ Phase 1 has two parallel sub-tasks. Both feed Phase 2/3 implementation decisions
 
 **Scope shift (per Finding 4)**: Phase 2 is a near-zero-cost prompt diff, not a moderate rewrite. The enricher already reads `.dependencies` from `bd show --json` in its existing per-bead walk; the detection heuristic is a single prompt sentence consuming data already in the read path.
 
-- Add the detection rule to `nx/agents/plan-enricher.md` near line 100: "After reading the bead via `/beads:show <id> --json`, inspect `.dependencies`. If the count is ≥2, treat this bead as a coordinator candidate." (The `--waits-for` edge-count fallback heuristic — ships the 80% value at zero marginal cost.)
+- Add the detection rule to `conexus/agents/plan-enricher.md` near line 100: "After reading the bead via `/beads:show <id> --json`, inspect `.dependencies`. If the count is ≥2, treat this bead as a coordinator candidate." (The `--waits-for` edge-count fallback heuristic — ships the 80% value at zero marginal cost.)
 - Extend the `/beads:update` call near line 134 to append `--metadata '{"coordinator": true}'` when the coordinator candidate heuristic fires.
 - Add a post-write verification step: after `/beads:update`, call `/beads:show <id> --json` and assert `.metadata.coordinator == true` was persisted. On failure, surface to the user. (CA-4 silent-omission mitigation — the enricher can successfully write the body update and silently omit the metadata flag with no error.)
 - Emit the probe-run step in the enriched bead description: "Before beginning the next bead, run `/conexus:composition-probe <this-bead-id>` and verify PASS."
@@ -406,7 +406,7 @@ Phase 1 has two parallel sub-tasks. Both feed Phase 2/3 implementation decisions
 
 ### Phase 3: `nx:composition-probe` skill
 
-- Create `nx/skills/composition-probe/SKILL.md` with the shape in §Technical Design
+- Create `conexus/skills/composition-probe/SKILL.md` with the shape in §Technical Design
 - Subagent prompt authored and pinned
 - Test runner integration: support py/java/ts targets (the common nexus + ART cases)
 - Test: run probe against the RDR-073 MVV target, confirm it catches
@@ -426,7 +426,7 @@ Phase 1 has two parallel sub-tasks. Both feed Phase 2/3 implementation decisions
 
 | Resource | List | Info | Delete | Verify | Backup |
 |---|---|---|---|---|---|
-| `nx/skills/composition-probe/` | `ls` | `cat SKILL.md` | `rm` | smoke test | git |
+| `conexus/skills/composition-probe/` | `ls` | `cat SKILL.md` | `rm` | smoke test | git |
 | `/tmp/probe-*.{py|java|...}` | N/A — ephemeral | N/A | auto-cleanup | N/A | N/A |
 
 ## Test Plan
@@ -492,7 +492,7 @@ Right-sized. One new skill, one prompt update, one workflow integration. No new 
 - `~/git/ART/docs/rdr/post-mortem/036-grossberg-language-understanding.md` — RDR-036 unwiring evidence
 - `~/git/ART/docs/rdr/post-mortem/075-semantic-learning-and-generalization.md` — RDR-075 unwiring evidence
 - `~/git/ART/docs/rdr/post-mortem/031-equation-first-grossberg.md` — RDR-031 unwiring evidence
-- `nx/skills/enrich-plan/SKILL.md`, `nx/agents/plan-enricher.md` — the pieces to extend
+- `conexus/skills/enrich-plan/SKILL.md`, `conexus/agents/plan-enricher.md` — the pieces to extend
 - RDR-069 (Phase 0 — critic dispatch) — the backstop
 
 ## Revision History

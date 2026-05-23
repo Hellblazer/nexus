@@ -155,7 +155,7 @@ class TestSnHookOutput:
 
         Plain stdout was the prior shape; the JSON envelope is the
         documented schema and prevents silent drop on parser tightening.
-        Mirrors nx/hooks/scripts/subagent-start.sh (commit 68854ca).
+        Mirrors conexus/hooks/scripts/subagent-start.sh (commit 68854ca).
         """
         envelope = json.loads(hook_envelope)
         assert "hookSpecificOutput" in envelope

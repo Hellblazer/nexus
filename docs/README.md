@@ -29,7 +29,7 @@ Structured decision tracking for human-AI collaboration. Read in order:
 
 ## Claude Code Plugins
 
-- [nx Plugin](../nx/README.md) — Agents, skills, session hooks, MCP servers, slash commands
+- [nx Plugin](../conexus/README.md) — Agents, skills, session hooks, MCP servers, slash commands
 - [sn Plugin](../sn/README.md) — Serena + Context7 MCP servers with subagent guidance injection
 
 ## Search and Analysis

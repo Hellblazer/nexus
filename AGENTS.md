@@ -102,11 +102,11 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 3. **Bump version in all four manifests** (CI enforces parity):
    - `pyproject.toml` — `version = "X.Y.Z"`
    - `.claude-plugin/marketplace.json` — both `version` fields
-   - `nx/.claude-plugin/plugin.json` — `version`
+   - `conexus/.claude-plugin/plugin.json` — `version`
    - `sn/.claude-plugin/plugin.json` — `version`
-4. **Update changelogs.** Add a new section to `CHANGELOG.md` and `nx/CHANGELOG.md` with the date and the changes since last release.
+4. **Update changelogs.** Add a new section to `CHANGELOG.md` and `conexus/CHANGELOG.md` with the date and the changes since last release.
 5. **Refresh `uv.lock`.** Run `uv sync` — the lock file MUST be committed.
-6. **Run sandbox smoke.** `./tests/e2e/release-sandbox.sh smoke` (~2 min). Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/db/migrations.py`, `src/nexus/mcp/**`, `nx/**`, `.claude-plugin/**`, `src/nexus/commands/{doctor,upgrade}.py`.
+6. **Run sandbox smoke.** `./tests/e2e/release-sandbox.sh smoke` (~2 min). Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/db/migrations.py`, `src/nexus/mcp/**`, `conexus/**`, `.claude-plugin/**`, `src/nexus/commands/{doctor,upgrade}.py`.
 7. **Commit and push to main.** `chore(release): conexus X.Y.Z` is the only direct-to-main commit allowed.
 8. **Tag and push the tag.** `git tag -a vX.Y.Z -m "conexus X.Y.Z" && git push origin vX.Y.Z`. The tag-push triggers the Release workflow → PyPI auto-publish via OIDC.
 9. **Reinstall locally.** `scripts/reinstall-tool.sh && nx --version` — `pyproject.toml` is bumped but the local `nx` shim still points at the old wheel until reinstall.

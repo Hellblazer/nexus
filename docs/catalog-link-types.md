@@ -76,7 +76,7 @@ RDR-077 hub detection works the same way.
 3. Decide on `created_by` provenance: extend the link-generator
    passes (`src/nexus/catalog/link_generator.py`) or document a
    manual workflow.
-4. Update `nx/plans/purposes.yml` if any existing purpose should
+4. Update `conexus/plans/purposes.yml` if any existing purpose should
    include the new type (additive; consider whether to ship a new
    purpose name instead to avoid changing the meaning of an existing
    one).

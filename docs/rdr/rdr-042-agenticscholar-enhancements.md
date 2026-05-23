@@ -69,7 +69,7 @@ Seven enhancements adapted from AgenticScholar, scoped to what fits Nexus's mixe
 
 ### Component 1: Analytical Operator Agent
 
-Single agent (`nx/agents/analytical-operator.md`) handling 5 operation types:
+Single agent (`conexus/agents/analytical-operator.md`) handling 5 operation types:
 
 | Operation | Purpose | Input | Output |
 |-----------|---------|-------|--------|
@@ -239,7 +239,7 @@ httpx v0.28.1 is present in `uv.lock` as a transitive dependency of chromadb, mc
 **Method**: Glob pattern verification of existing skills
 **Confidence**: HIGH
 
-All existing skills follow the `nx/skills/<name>/SKILL.md` directory pattern. Flat `.md` files at `nx/skills/` are NOT recognized by the plugin system. The query skill must be created at `nx/skills/query/SKILL.md`.
+All existing skills follow the `conexus/skills/<name>/SKILL.md` directory pattern. Flat `.md` files at `conexus/skills/` are NOT recognized by the plugin system. The query skill must be created at `conexus/skills/query/SKILL.md`.
 
 ### RF-7: Semantic Scholar API Characteristics (2026-03-29)
 
@@ -268,5 +268,5 @@ All existing skills follow the `nx/skills/<name>/SKILL.md` directory pattern. Fl
 ## Audit Corrections (Applied)
 
 1. Add `httpx>=0.27` to `pyproject.toml` (currently transitive only)
-2. Skill path: `nx/skills/query/SKILL.md` (directory), not `nx/skills/query.md`
+2. Skill path: `conexus/skills/query/SKILL.md` (directory), not `conexus/skills/query.md`
 3. Use `strftime("%Y-%m-%dT%H:%M:%SZ")` in `save_plan()` to match T2 convention

@@ -70,7 +70,7 @@ SDK-bridge transport.
 ## Directory Structure
 
 ```
-nx/
+conexus/
 ├── agents/
 │   ├── _shared/             # Shared resources referenced by all agents
 │   │   ├── CONTEXT_PROTOCOL.md  # Standard relay/context exchange protocol

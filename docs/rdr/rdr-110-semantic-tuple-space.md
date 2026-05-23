@@ -162,7 +162,7 @@ is the natural foundation; surfaces are a Phase 4 application of it.
 - **T3**: ChromaDB Cloud, four-database split per RDR-004
   (`{base}_code`, `{base}_docs`, `{base}_rdr`, `{base}_knowledge`).
   No per-row CAS — `take` is structurally disabled at this tier.
-- **Existing dimension registry**: `nx/plans/builtin/*.yml` declares
+- **Existing dimension registry**: `conexus/plans/builtin/*.yml` declares
   plan templates with `(verb, scope, strategy, object, domain)`
   schemas. Validated at seed time. Pattern this RDR generalises.
 - **Existing claim-table prior art**: beads' issue claim flow
@@ -314,7 +314,7 @@ friction profile.
 
 | Consumer | Discovery surface today | Friction shape |
 |---|---|---|
-| **Agent** (Claude Code session running tools) | MCP tool list + skill registry + `nx/agents/_shared/CONTEXT_PROTOCOL.md` + per-agent prompt + `CLAUDE.md` | Three parallel surfaces (`scratch` / `memory_put` / `store_put`) with overlapping intent — agent must guess which tier suits the finding's lifetime. RDR-041 documented this; tag-vocabulary drift confirms it persists. |
+| **Agent** (Claude Code session running tools) | MCP tool list + skill registry + `conexus/agents/_shared/CONTEXT_PROTOCOL.md` + per-agent prompt + `CLAUDE.md` | Three parallel surfaces (`scratch` / `memory_put` / `store_put`) with overlapping intent — agent must guess which tier suits the finding's lifetime. RDR-041 documented this; tag-vocabulary drift confirms it persists. |
 | **Session** (the coordination context itself) | Session-start hook output + agent-loaded T1/T2/T3 banner | Lifetime semantics are implicit. T1 dies on session-end; agent has no warning before it does. T2 survives but agent doesn't know which T2 entries are session-scoped vs project-scoped vs permanent. |
 | **User** (human at terminal running `nx`) | `nx --help`, `docs/`, shell completion | Six different subcommands for tuple-shaped operations (`nx scratch put/search/list`, `nx memory put/search/list`, `nx store put/get/list`, `nx plan ...`). User must internalise three taxonomies. |
 | **Script** (hooks, CI, automation) | Env vars (`NX_T1_HOST`, `NX_SESSION_ID`, `NEXUS_SKIP_T1`) + CLI invocation | Discovery is fragile — RDR-105's six-bug class came from script-vs-hook coordination on T1 specifically. Scripts have no introspection: a script can't ask "what subspaces exist and what do they accept?" |
@@ -369,7 +369,7 @@ mental model and the migration must explicitly teach it.
 
 ### RF-3: CONTEXT_PROTOCOL is the single highest-leverage prompt surface
 
-`nx/agents/_shared/CONTEXT_PROTOCOL.md` is loaded by every
+`conexus/agents/_shared/CONTEXT_PROTOCOL.md` is loaded by every
 proactive-search and relay-reliant agent and dictates the search
 order across T1/T2/T3 (RDR-041's surface). It is the canonical
 guidance for "when to use which tier" today. If RDR-110's API
@@ -713,7 +713,7 @@ operations (`out` / `read` / `take`), two claim-lifecycle operations
 `subspace_schema` / `subspace_stats`). Total surface: 8 functions.
 Tuples live in tier-appropriate backends (T1 / T2 / T3); the claim
 ledger lives in T2 SQLite. Subspaces are registered via static YAML
-in `nx/tuplespace/builtin/*.yml`, validated at MCP startup, and
+in `conexus/tuplespace/builtin/*.yml`, validated at MCP startup, and
 discovered at runtime via `list_subspaces`. Existing surfaces (plans,
 scratch, memory) are NOT migrated in v1; v2 wraps them as subspaces
 behavior-preservingly.
@@ -775,7 +775,7 @@ immediately with `None` if no candidate clears floor + margin.
 
 **Subspace schema (YAML, registered statically):**
 
-Each `nx/tuplespace/builtin/*.yml` declares a template:
+Each `conexus/tuplespace/builtin/*.yml` declares a template:
 
 ```yaml
 name: tasks/<project>              # single-segment param
@@ -1091,7 +1091,7 @@ sweep_claim_log():        # bound the audit log size
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| Subspace registry (YAML loader, schema validation) | `nx/plans/builtin/*.yml` + plan dimension registry | **Reuse pattern, new registry module.** Plans' registry is plan-specific; tuple-space registry generalises it but does not subsume it in v1. |
+| Subspace registry (YAML loader, schema validation) | `conexus/plans/builtin/*.yml` + plan dimension registry | **Reuse pattern, new registry module.** Plans' registry is plan-specific; tuple-space registry generalises it but does not subsume it in v1. |
 | Body store (T2 SQLite tables) | `~/.config/nexus/memory.db` | **New database `tuples.db`.** Operational separation per RDR-004 logic; tuples are a different access pattern from memory. |
 | Vector index (per-template chroma collection) | RDR-004 four-database split for T3 | **Reuse pattern.** Per-template chroma collection at T2 (local persistent) and T3 (cloud, `take`-disabled). |
 | Claim ledger CAS | beads SQLite claim flow + RDR-105's claims approach + honker `UPDATE … RETURNING` pattern | **Claim state columns on `tuples` + append-only `tuple_claim_log` for audit.** Beads' claim flow is human-curated, no lease, no semantic match — wrong fit. SQLite WAL + honker's single-statement claim is the load-bearing pattern; see RF-9. |
@@ -1348,7 +1348,7 @@ caller can break because no existing surface changes.
 #### Step 1: Schema registry module
 
 Create `src/nexus/tuplespace/registry.py` that loads
-`nx/tuplespace/builtin/*.yml` at MCP startup, validates each schema
+`conexus/tuplespace/builtin/*.yml` at MCP startup, validates each schema
 against a JSON Schema for the registry format itself, exposes
 `get_schema_for(subspace)` with parameterised-name matching.
 
@@ -1414,7 +1414,7 @@ appends `transition='expire'` to `tuple_claim_log`).
 
 Ship `tasks/<project>`, `mailbox/<agent>`, `locks/<resource>`,
 `events/<topic>`, `barriers/<barrier_id>` YAML files in
-`nx/tuplespace/builtin/`.
+`conexus/tuplespace/builtin/`.
 
 #### Step 7: Critical Assumption spikes (gates Steps 8-12)
 
@@ -1445,7 +1445,7 @@ clear.
 
 #### Step 8: Agent-consumer landing — five new coordination skills
 
-Per RF-4, ship five new skill files in `nx/skills/` (or wherever the
+Per RF-4, ship five new skill files in `conexus/skills/` (or wherever the
 plugin's skill registry lives):
 
 - `nx:tuplespace-tasks` — work-stealing pattern; points at
@@ -1465,7 +1465,7 @@ The deprecation/rewrite of existing skills is Phase 3.
 
 **O1 mitigation — CONTEXT_PROTOCOL forward reference**: alongside
 the new skills, prepend a one-paragraph note to
-`nx/agents/_shared/CONTEXT_PROTOCOL.md` naming the five
+`conexus/agents/_shared/CONTEXT_PROTOCOL.md` naming the five
 coordination skills and stating: *"Use these for cross-agent
 coordination patterns (work-stealing, mailboxes, mutexes,
 barriers, events). The canonical tier-vs-subspace guidance below
@@ -1566,7 +1566,7 @@ target one path per process per surface.
 
 #### Step 1: Schema rollout for wrapped subspaces
 
-Ship `nx/tuplespace/builtin/plans.yml`, `scratch.yml`, `memory.yml`
+Ship `conexus/tuplespace/builtin/plans.yml`, `scratch.yml`, `memory.yml`
 schemas in the registry. These are inert until their respective
 flags flip — registered but no callers yet.
 
@@ -1612,8 +1612,8 @@ through the tuple-space primitive internally.
 #### Step 8: CONTEXT_PROTOCOL rewrite
 
 Per RF-3, after all three wrappers default-on, rewrite
-`nx/agents/_shared/CONTEXT_PROTOCOL.md` from per-tier guidance to
-per-subspace guidance. Update agent files in `nx/agents/*.md` that
+`conexus/agents/_shared/CONTEXT_PROTOCOL.md` from per-tier guidance to
+per-subspace guidance. Update agent files in `conexus/agents/*.md` that
 quote tier-specific guidance. The proactive-search-vs-relay-reliant
 agent split survives unchanged; only the tier-vocabulary changes.
 

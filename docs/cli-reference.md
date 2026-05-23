@@ -1085,7 +1085,7 @@ nx hook routing-stats [--log-path PATH] [--json]
 ```
 
 Aggregates the per-rule JSONL log written by the RDR-121 routing-hook
-framework (`nx/hooks/scripts/routing/_lib.log_routing_event`). Reports
+framework (`conexus/hooks/scripts/routing/_lib.log_routing_event`). Reports
 fire counts, deny / allow / escape outcomes, block-rate, and
 escape-rate per rule.
 

@@ -5,7 +5,7 @@ The bug: ``session_start_cmd`` calls ``sys.stdin.read()`` unconditionally
 to parse the Claude-Code JSON payload. When stdin is a TTY with no data
 (any non-Claude-Code invocation: shell pipeline, ad-hoc CLI run with no
 piped input, test harness), the call blocks indefinitely. Claude Code
-itself remains usable because the 10s timeout in ``nx/hooks/hooks.json``
+itself remains usable because the 10s timeout in ``conexus/hooks/hooks.json``
 bounds the SessionStart entry, but the CLI surface is broken for any
 out-of-band invocation.
 

@@ -235,7 +235,7 @@ def test_registry_has_rule():
     nx_reg = PROJECT_ROOT / "nx" / "hooks" / "scripts" / "routing" / "registry.yaml"
     nx_parsed = yaml.safe_load(nx_reg.read_text()) or {}
     assert "grep_for_symbols_redirects_to_serena" not in (nx_parsed.get("rules") or {}), (
-        "Rule still present in nx/hooks/scripts/routing/registry.yaml; "
+        "Rule still present in conexus/hooks/scripts/routing/registry.yaml; "
         "RDR-125 migrated it to sn — nx entry must be removed."
     )
 
@@ -261,6 +261,6 @@ def test_hooks_json_registers():
         for h in entry.get("hooks", [])
     )
     assert not nx_found, (
-        "Hook still registered in nx/hooks/hooks.json after RDR-125 migration; "
+        "Hook still registered in conexus/hooks/hooks.json after RDR-125 migration; "
         "nx PreToolUse:Bash entry must be removed."
     )

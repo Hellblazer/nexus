@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for nx/hooks/scripts/t2_prefix_scan.py — _snippet() and cap algorithm."""
+"""Tests for conexus/hooks/scripts/t2_prefix_scan.py — _snippet() and cap algorithm."""
 import sys
 from pathlib import Path
 

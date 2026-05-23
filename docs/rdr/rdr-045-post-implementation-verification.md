@@ -218,8 +218,8 @@ Detection order is first-match. If nothing is detected, the test check is skippe
 
 ## Deliverables
 
-1. **Stop hook script** (`nx/hooks/scripts/stop_verification_hook.sh`) — reads `.nexus.yml`, runs checks, handles `stop_hook_active` retry logic, differentiates mechanical vs test failures on retry, handles command-not-found (exit 126/127) as skip-with-advisory
-2. **PreToolUse hook script** (`nx/hooks/scripts/pre_close_verification_hook.sh`) — pattern-matches `bd close` and `bd done`, runs test suite (Layer 2a, blocking) + review scratch marker search (Layer 2b, advisory), sets `bd set-state <id> verification=passed` on success
+1. **Stop hook script** (`conexus/hooks/scripts/stop_verification_hook.sh`) — reads `.nexus.yml`, runs checks, handles `stop_hook_active` retry logic, differentiates mechanical vs test failures on retry, handles command-not-found (exit 126/127) as skip-with-advisory
+2. **PreToolUse hook script** (`conexus/hooks/scripts/pre_close_verification_hook.sh`) — pattern-matches `bd close` and `bd done`, runs test suite (Layer 2a, blocking) + review scratch marker search (Layer 2b, advisory), sets `bd set-state <id> verification=passed` on success
 3. **hooks.json update** — register Stop and PreToolUse hooks
 4. **review-code skill modification** — write T1 scratch marker via `nx scratch put "review-completed bead={id} ..." --tags "review,{id}"` on completion; handle no-bead-context case (write `bead=none`)
 5. **`.nexus.yml` schema update** — document `verification` section with `on_stop`, `on_close`, `test_command`, `lint_command`, `test_timeout`

@@ -108,7 +108,7 @@ unchanged templates produces zero inserts.
 
 ## The 14 builtin scenario templates
 
-`nx catalog setup` seeds these from `nx/plans/builtin/*.yml` as
+`nx catalog setup` seeds these from `conexus/plans/builtin/*.yml` as
 `scope:global` plans:
 
 | Template | Verb + strategy | What it does |
@@ -328,7 +328,7 @@ Three signals that a class of questions needs its own plan template:
    won't intuit (e.g. "search code first, then walk `supersedes` edges
    back to the originating RDR, THEN hydrate").
 
-Author a template in `nx/plans/builtin/<verb>-<strategy>.yml` for global
+Author a template in `conexus/plans/builtin/<verb>-<strategy>.yml` for global
 scope, or `.nexus/plans/*.yml` / `docs/rdr/<slug>/plans.yml` for
 project / per-RDR scope.  The CI gate (`.github/workflows/plan-schema-check.yml`)
 validates every plan template on PR.

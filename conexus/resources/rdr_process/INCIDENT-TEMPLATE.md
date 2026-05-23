@@ -34,7 +34,7 @@ scope delivered but the artifact shipped with a material subset missing.
 - Generic bugs caught in review/testing with no scope gap.
 - Process friction that did not result in a delivery gap.
 
-See `nx/skills/rdr-audit/SKILL.md` for the failure-mode definition and
+See `conexus/skills/rdr-audit/SKILL.md` for the failure-mode definition and
 sub-pattern taxonomy (unwiring / dim-mismatch / deferred-integration / other).
 -->
 

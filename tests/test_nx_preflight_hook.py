@@ -50,7 +50,7 @@ class TestPreflightExists:
         """
         assert PREFLIGHT.exists(), (
             f"preflight.py must live at {PREFLIGHT} so the "
-            f"SessionStart hook config in nx/hooks/hooks.json "
+            f"SessionStart hook config in conexus/hooks/hooks.json "
             f"can find it."
         )
         # Executable bit not strictly required (the hook runs it via

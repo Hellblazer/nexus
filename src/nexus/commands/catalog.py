@@ -29,7 +29,7 @@ def _resolve_plugin_root(repo_root: Path) -> Path:
        the ``[tool.hatch.build.targets.wheel.force-include]``
        mapping in pyproject.toml) and inside
        ``src/nexus/_resources`` for editable installs (via the
-       symlink back into ``nx/plans``).
+       symlink back into ``conexus/plans``).
     2. **Repo-root relative** — ``<repo_root>/nx``. Works when the
        caller runs ``nx catalog setup`` from a nexus checkout.
     3. **Legacy ``__file__``-relative walk** — four levels up from
@@ -65,7 +65,7 @@ def _resolve_plugin_root(repo_root: Path) -> Path:
 def _seed_plan_templates() -> int:
     """Seed pre-built plan templates into T2. Idempotent — skips existing.
 
-    All templates are shipped as YAML files under ``nx/plans/builtin/``
+    All templates are shipped as YAML files under ``conexus/plans/builtin/``
     and loaded via the four-tier loader, which deduplicates on the
     ``UNIQUE (project, dimensions)`` partial index (nexus-05i.6).
 
@@ -89,13 +89,13 @@ def _seed_plan_templates() -> int:
         from nexus.plans.loader import load_all_tiers
 
         repo_root = find_repo_root(Path.cwd()) or Path.cwd()
-        # Plugin root resolution (RDR-092 nexus-b9f3). The nx/ plan
+        # Plugin root resolution (RDR-092 nexus-b9f3). The conexus/ plan
         # YAMLs ship as wheel package data via hatch force-include
         # (see pyproject.toml), landing at
         # ``<site-packages>/nexus/_resources/plans/builtin/*.yml`` on
         # installed builds. Editable installs get the same path via
         # a ``src/nexus/_resources/plans`` symlink back into
-        # ``nx/plans``. Either way ``importlib.resources.files`` is
+        # ``conexus/plans``. Either way ``importlib.resources.files`` is
         # the correct resolver; it handles both cases and MultiplexedPath
         # from namespace packages transparently.
         #
@@ -111,7 +111,7 @@ def _seed_plan_templates() -> int:
         )
 
         # RDR-092 Phase 0c.1: fail loud on an empty global tier. A
-        # missing or empty ``nx/plans/builtin`` is a deployment gap
+        # missing or empty ``conexus/plans/builtin`` is a deployment gap
         # (plugin root misrouted, YAMLs deleted) that silently leaves
         # the library without dimensional seeds. The loader normally
         # logs this via ``_log.info("seed_directory_missing")``; the

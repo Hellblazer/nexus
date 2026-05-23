@@ -82,5 +82,5 @@ intervals natively; for a true 90-day cadence, use the Linux cron template under
 
 - `scripts/cron-rdr-audit.sh` — shell wrapper invoked by the plist
 - `scripts/cron/README.md` — Linux cron equivalent
-- `nx/skills/rdr-audit/SKILL.md` — the skill body that `claude -p` invokes
+- `conexus/skills/rdr-audit/SKILL.md` — the skill body that `claude -p` invokes
 - `docs/rdr/rdr-067-cross-project-rdr-audit-loop.md` — design rationale

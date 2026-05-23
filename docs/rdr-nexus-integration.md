@@ -16,7 +16,7 @@ The typical agent workflow touches the storage tiers at each stage:
 4. **At accept time**: `/conexus:rdr-accept` updates T2 metadata, then optionally dispatches the planning chain: `strategic-planner` agent → `nx_plan_audit` MCP tool → `nx_enrich_beads` MCP tool. The last two were agents before RDR-080; they're now direct MCP-tool calls that the strategic-planner can invoke without a sub-agent spawn.
 5. **After close**: `/conexus:rdr-close` archives the full RDR to T3 for permanent semantic retrieval.
 
-Agents access all storage tiers via structured MCP tools rather than CLI commands, which works reliably in background agents and restricted permission contexts. Team members use the `nx` CLI directly. See [nx/README.md](../nx/README.md#mcp-servers) for MCP tool details.
+Agents access all storage tiers via structured MCP tools rather than CLI commands, which works reliably in background agents and restricted permission contexts. Team members use the `nx` CLI directly. See [conexus/README.md](../conexus/README.md#mcp-servers) for MCP tool details.
 
 ## T2: structured metadata
 

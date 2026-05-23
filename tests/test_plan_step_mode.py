@@ -121,7 +121,7 @@ class TestAbstractThemesUsesMode:
         import yaml
         from pathlib import Path
 
-        path = Path("nx/plans/builtin/abstract-themes.yml")
+        path = Path("conexus/plans/builtin/abstract-themes.yml")
         with path.open() as f:
             doc = yaml.safe_load(f)
         steps = doc.get("plan_json", {}).get("steps", [])
@@ -147,7 +147,7 @@ class TestAbstractThemesUsesMode:
         import yaml
         from pathlib import Path
 
-        path = Path("nx/plans/builtin/abstract-themes.yml")
+        path = Path("conexus/plans/builtin/abstract-themes.yml")
         with path.open() as f:
             doc = yaml.safe_load(f)
         steps = doc.get("plan_json", {}).get("steps", [])

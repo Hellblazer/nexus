@@ -64,7 +64,7 @@ an agent.
 ## The stub-agent pattern
 
 For the three agents that were demoted to MCP tools, the plugin keeps a
-40-line stub agent file (`nx/agents/{knowledge-tidier,plan-auditor,plan-enricher}.md`)
+40-line stub agent file (`conexus/agents/{knowledge-tidier,plan-auditor,plan-enricher}.md`)
 so legacy dispatch references don't break:
 
 ```markdown

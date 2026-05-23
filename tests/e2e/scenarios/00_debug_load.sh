@@ -100,7 +100,7 @@ scenario "00 debug-load: SessionStart hook produces expected output"
 session_hook_out=$(HOME="$TEST_HOME" \
     PATH="$TEST_HOME/.local/bin:$PATH" \
     CLAUDE_PROJECT_DIR="$REPO_ROOT" \
-    python3 "$REPO_ROOT/nx/hooks/scripts/session_start_hook.py" 2>&1 || true)
+    python3 "$REPO_ROOT/conexus/hooks/scripts/session_start_hook.py" 2>&1 || true)
 
 echo "    --- session_start_hook.py output ---"
 echo "$session_hook_out" | head -20 | sed 's/^/    | /'
@@ -121,7 +121,7 @@ subagent_hook_out=$(CLAUDE_PLUGIN_ROOT="$REPO_ROOT/nx" \
     HOME="$TEST_HOME" \
     PATH="$TEST_HOME/.local/bin:$PATH" \
     CLAUDE_PROJECT_DIR="$REPO_ROOT" \
-    bash "$REPO_ROOT/nx/hooks/scripts/subagent-start.sh" 2>&1 || true)
+    bash "$REPO_ROOT/conexus/hooks/scripts/subagent-start.sh" 2>&1 || true)
 
 echo "    --- subagent-start.sh output ---"
 echo "$subagent_hook_out" | head -30 | sed 's/^/    | /'
@@ -153,7 +153,7 @@ scenario_end
 scenario "00 debug-load: hook shell scripts are executable"
 
 for script in \
-    "$REPO_ROOT/nx/hooks/scripts/subagent-start.sh"; do
+    "$REPO_ROOT/conexus/hooks/scripts/subagent-start.sh"; do
     name=$(basename "$script")
     if [[ -x "$script" ]]; then
         pass "$name is executable"
@@ -180,7 +180,7 @@ echo "    ---"
 # Check a representative spread of agents across model tiers.
 # RDR-025 renamed language-specific agents to neutral names
 # (java-developer → developer). Keep the current agent names here so
-# the scenario stays in lockstep with ``nx/agents/``.
+# the scenario stays in lockstep with ``conexus/agents/``.
 for agent in \
     "strategic-planner" \
     "developer" \
@@ -207,7 +207,7 @@ scenario "00 debug-load: skills visible to Claude"
 # accurate signal that our plugin packaging is correct; skill *triggering*
 # under real Claude usage is exercised by scenario 03's interactive tmux
 # session.
-skills_dir="$REPO_ROOT/nx/skills"
+skills_dir="$REPO_ROOT/conexus/skills"
 for skill in \
     "nexus" \
     "brainstorming-gate" \
@@ -215,9 +215,9 @@ for skill in \
     "cli-controller" \
     "using-nx-skills"; do
     if [[ -f "$skills_dir/$skill/SKILL.md" ]]; then
-        pass "skill packaged: $skill (nx/skills/$skill/SKILL.md)"
+        pass "skill packaged: $skill (conexus/skills/$skill/SKILL.md)"
     else
-        fail "skill NOT packaged: $skill — expected nx/skills/$skill/SKILL.md"
+        fail "skill NOT packaged: $skill — expected conexus/skills/$skill/SKILL.md"
     fi
 done
 

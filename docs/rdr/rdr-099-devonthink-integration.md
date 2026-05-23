@@ -107,7 +107,7 @@ Then `subprocess.run(["open", uri])` shells out. macOS resolves the URL to DT.
 
 The CLI surface lives in `src/nexus/commands/dt.py`. The osascript wrappers live in `src/nexus/devonthink.py` (a new module distinct from `aspect_readers` because the surface is different — bulk selection resolution, not single-URI read). `_devonthink_resolver_default` is reused for the existing URI-read path; `dt.py` adds `_dt_selection`, `_dt_group_records`, `_dt_tag_records`, `_dt_smart_group_records` helpers each returning `[(uuid, path), ...]`.
 
-A small Claude Code plugin layer (`dt/` next to `nx/` and `sn/`) ships in a follow-up bead, providing `/dt:index-selection` and `/dt:open-result` slash commands. The plugin is *agent-facing surface* — it wraps the CLI verbs and exposes them as one-shot skill invocations. It is not on the v1 critical path.
+A small Claude Code plugin layer (`dt/` next to `conexus/` and `sn/`) ships in a follow-up bead, providing `/dt:index-selection` and `/dt:open-result` slash commands. The plugin is *agent-facing surface* — it wraps the CLI verbs and exposes them as one-shot skill invocations. It is not on the v1 critical path.
 
 ## Alternatives Considered
 

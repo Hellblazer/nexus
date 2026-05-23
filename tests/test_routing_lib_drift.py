@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-125 byte-equality guard against ``_lib.py`` drift between plugins.
 
-The routing-hook framework (``nx/hooks/scripts/routing/_lib.py``) is
+The routing-hook framework (``conexus/hooks/scripts/routing/_lib.py``) is
 vendored into each plugin that ships a routing rule. The clean import
 path is structurally blocked (RDR-125 § A2): hook scripts run under a
 system ``python3.12`` / ``python3.13`` interpreter with no

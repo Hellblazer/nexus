@@ -9,7 +9,7 @@
 # Schema (per rule):
 #   rule_name:        unique snake_case identifier; matches the hook
 #                     script basename minus the .py extension
-#   hook_script:      path under nx/hooks/scripts/routing/ to the .py
+#   hook_script:      path under conexus/hooks/scripts/routing/ to the .py
 #                     entry point
 #   matcher:          Claude Code hook matcher pattern (Bash, Edit, etc.)
 #   mode:             redirect | block | warn  — semantic only; the hook

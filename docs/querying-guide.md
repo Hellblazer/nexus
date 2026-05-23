@@ -182,7 +182,7 @@ change.  Caveats:
 
 ### Builtin scenario plans (RDR-078 Phase 6)
 
-`nx catalog setup` seeds 9 YAML plan templates under `nx/plans/builtin/`:
+`nx catalog setup` seeds 9 YAML plan templates under `conexus/plans/builtin/`:
 
 | Template | Verb | Covers |
 |----------|------|--------|

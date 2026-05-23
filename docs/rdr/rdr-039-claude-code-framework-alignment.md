@@ -40,9 +40,9 @@ The nexus plugin currently ships:
 ### Technical Environment
 
 - Claude Code v2.1.81 (current)
-- Nexus plugin: `nx/` directory — agents, skills, hooks, commands
+- Nexus plugin: `conexus/` directory — agents, skills, hooks, commands
 - Python 3.12+ CLI: `src/nexus/`
-- Plugin hook system: `nx/hooks/hooks.json`
+- Plugin hook system: `conexus/hooks/hooks.json`
 
 ### Changelog Source
 
@@ -82,7 +82,7 @@ All items below were identified by cross-referencing the Claude Code changelog a
 | 15 | Background agent task output hanging indefinitely | v2.1.81 | Agents appearing stuck between polling intervals | **Documented** |
 | 16 | `--resume` dropping parallel tool results | v2.1.80 | Lost results in multi-agent workflows | **Documented** |
 | 17 | Deferred tools losing input schemas after compaction | v2.1.76 | MCP tools (serena, context7, etc.) uncallable post-compact | **Verified** — nexus relies heavily on deferred MCP tools |
-| 18 | Deadlock with many skill file changes | v2.1.73 | `git pull` on nx/ with ~25 skills could freeze Claude Code | **Documented** |
+| 18 | Deadlock with many skill file changes | v2.1.73 | `git pull` on conexus/ with ~25 skills could freeze Claude Code | **Documented** |
 | 19 | `cc log` / `--resume` truncating large sessions with subagents | v2.1.78 | RDR workflows with many subagents lost history at >5MB | **Documented** |
 | 20 | Invisible hook attachments inflating message count | v2.1.81 | 6 SessionStart hooks producing hidden context bloat | **Verified** — nexus has 6 SessionStart hooks |
 | 21 | JSON hooks injecting no-op messages into model context | v2.1.73 | Wasted context tokens every turn | **Documented** |
@@ -103,7 +103,7 @@ From official Claude Code docs:
 
 > "For security reasons, plugin subagents do not support the `hooks`, `mcpServers`, or `permissionMode` frontmatter fields. These fields are ignored when loading agents from a plugin."
 
-All 15 nexus agents are plugin-shipped (`nx/agents/`). This means:
+All 15 nexus agents are plugin-shipped (`conexus/agents/`). This means:
 - `hooks` in agent frontmatter: **silently ignored** — cannot add per-agent validation hooks
 - `mcpServers` in agent frontmatter: **silently ignored** — agents inherit parent MCP connections
 - `permissionMode` in agent frontmatter: **silently ignored** — cannot enforce read-only via mode
@@ -178,7 +178,7 @@ Add `effort`, `maxTurns`, and `disallowedTools` to agent and skill frontmatter w
 
 #### Phase 2: New Hook Events
 
-Add `PostCompact` and `StopFailure` hooks to `nx/hooks/hooks.json`.
+Add `PostCompact` and `StopFailure` hooks to `conexus/hooks/hooks.json`.
 
 **PostCompact hook:** Re-inject critical session context after compaction. Uses the same pattern as the existing `bd prime` in PreCompact — calls external commands to query live state, not relying on the `compact_summary` to know what was lost.
 ```
@@ -218,9 +218,9 @@ Three upstream fixes (v2.1.73, v2.1.77, v2.1.78) collectively address the known 
 
 | Proposed Component | Existing Module | Decision |
 |---|---|---|
-| PostCompact hook | `nx/hooks/hooks.json` (has PreCompact) | Extend — add PostCompact entry |
-| Agent frontmatter | `nx/agents/*.md` (15 files) | Extend — add new fields |
-| Skill frontmatter | `nx/skills/*/SKILL.md` (28 files) | Extend — add effort field |
+| PostCompact hook | `conexus/hooks/hooks.json` (has PreCompact) | Extend — add PostCompact entry |
+| Agent frontmatter | `conexus/agents/*.md` (15 files) | Extend — add new fields |
+| Skill frontmatter | `conexus/skills/*/SKILL.md` (28 files) | Extend — add effort field |
 | Plugin data dir | None | New — adopt `${CLAUDE_PLUGIN_DATA}` if spike confirms persistence |
 
 ### Decision Rationale
@@ -317,15 +317,15 @@ Dispatch plan-auditor with a task requiring file analysis, confirm it uses Read/
 
 #### Step 1: Create PostCompact hook script
 
-Write `nx/hooks/scripts/post_compact_hook.sh` that outputs active bead IDs, T1 session pointer, and MCP health.
+Write `conexus/hooks/scripts/post_compact_hook.sh` that outputs active bead IDs, T1 session pointer, and MCP health.
 
 #### Step 2: Create StopFailure hook script
 
-Write `nx/hooks/scripts/stop_failure_hook.py` that logs failure context to beads memory.
+Write `conexus/hooks/scripts/stop_failure_hook.py` that logs failure context to beads memory.
 
 #### Step 3: Register hooks in hooks.json
 
-Add `PostCompact` and `StopFailure` entries to `nx/hooks/hooks.json`.
+Add `PostCompact` and `StopFailure` entries to `conexus/hooks/hooks.json`.
 
 ### Phase 3: Worktree Re-evaluation
 
@@ -351,8 +351,8 @@ Assess whether nx MCP server should adopt elicitation for interactive disambigua
 
 | Resource | List | Info | Delete | Verify | Backup |
 |---|---|---|---|---|---|
-| Agent frontmatter fields | N/A | `head -10 nx/agents/*.md` | N/A | Dispatch agent, check behavior | Git |
-| Hook scripts | `cat nx/hooks/hooks.json` | Read script | Remove entry | Trigger event, check output | Git |
+| Agent frontmatter fields | N/A | `head -10 conexus/agents/*.md` | N/A | Dispatch agent, check behavior | Git |
+| Hook scripts | `cat conexus/hooks/hooks.json` | Read script | Remove entry | Trigger event, check output | Git |
 | Beads memory entries | `bd memories worktree` | `bd memories` | `bd forget <key>` | Check accuracy | Dolt |
 
 ### New Dependencies
@@ -423,7 +423,7 @@ This RDR is intentionally broad — it catalogs a framework alignment gap across
 - Claude Code official docs — Skills: https://code.claude.com/docs/en/skills (skill frontmatter fields, effort levels)
 - Claude Code official docs — Hooks: https://code.claude.com/docs/en/hooks (PostCompact, StopFailure, all event types)
 - Claude Code official docs — Plugins Reference: https://code.claude.com/docs/en/plugins-reference (`${CLAUDE_PLUGIN_DATA}`, plugin variables)
-- Nexus plugin: `nx/` directory (agents, skills, hooks, commands)
+- Nexus plugin: `conexus/` directory (agents, skills, hooks, commands)
 - RDR-023: Agent Tool Permissions Audit — introduced `tools:` frontmatter and PermissionRequest hook
 - RDR-035: Fix Plugin Agent MCP Tool Access — removed `tools:` due to MCP filtering bug (GitHub #13605, #21560, #25200)
 - GitHub #12863: `--disallowedTools` flag does not affect MCP server tools (built-in tools correctly blocked)

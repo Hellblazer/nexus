@@ -162,7 +162,7 @@ independently of all five.
   `--claude-pid` + `--chroma-pid`, kills chroma when claude dies.
 - `src/nexus/db/t1.py`, T1 ChromaDB client. Resolves session by
   `NX_SESSION_ID` env / `current_session` flat file / PPID walk.
-- `nx/hooks/hooks.json`, SessionStart + SessionEnd wired to the
+- `conexus/hooks/hooks.json`, SessionStart + SessionEnd wired to the
   corresponding `nx hook ...` commands.
 
 ## Research Findings
@@ -701,7 +701,7 @@ Watchdog continues to be spawned detached (`start_new_session=True`)
 so it survives the MCP server's clean shutdown and is not killed by
 the MCP server's pgroup teardown. The 5s poll interval is unchanged.
 
-**Hook retirement** (`nx/hooks/hooks.json`):
+**Hook retirement** (`conexus/hooks/hooks.json`):
 
 - `SessionStart` hook: retain the non-chroma work (RDR skill
   loader, plugin upgrade banner, rdr-audit cadence hint). Remove
@@ -741,7 +741,7 @@ Two complementary paths:
 | Chroma teardown at MCP exit | `nexus.hooks.session_end` (chroma block) | **Move to atexit**: reuse `stop_t1_server` + tmpdir rmtree + record removal as an atexit handler. Keep `session_end_flush` for scratch-flush + memory-expire. |
 | Watchdog target PIDs | `nexus.t1_watchdog` | **Add second flag**: keep `--claude-pid`, add `--mcp-pid`, OR-trigger logic. Both PIDs already in the session record; only the watchdog argument interface and polling loop change. Required to cover Claude Code issue #1935 (orphaned MCP on Claude crash). |
 | Sweep | `sweep_stale_sessions` | **Keep + extend**: all four current triggers stay; optional tmpdir-scan pass added for Gap 3. |
-| SessionEnd hook / launcher | `nx/hooks/hooks.json` + `_session_end_launcher.py` | **Retire from chroma path**: launcher stays as code but is unwired. Hook shrinks to scratch/memory cleanup via `nx hook session-end-flush`. |
+| SessionEnd hook / launcher | `conexus/hooks/hooks.json` + `_session_end_launcher.py` | **Retire from chroma path**: launcher stays as code but is unwired. Hook shrinks to scratch/memory cleanup via `nx hook session-end-flush`. |
 
 ### Decision Rationale
 
@@ -817,7 +817,7 @@ problem we don't.
 - `nexus.hooks.session_end` loses its chroma-stop block; atexit
   + SIGTERM handler in the MCP server owns it. The remaining
   `session_end_flush` does scratch-flush + memory-expire only.
-- `nx/hooks/hooks.json` SessionStart command tightens (no more
+- `conexus/hooks/hooks.json` SessionStart command tightens (no more
   chroma spawn in the hook); SessionEnd command swaps the
   launcher for a direct `nx hook session-end-flush` call. The
   5s timeout stays; work inside the hook is now milliseconds, not
@@ -1034,7 +1034,7 @@ cleanup exclusively under the flag. The hook still flushes scratch
 and runs memory-expire, which are hook-native tasks unaffected by
 chroma ownership.
 
-#### Step 3: Update `nx/hooks/hooks.json`
+#### Step 3: Update `conexus/hooks/hooks.json`
 
 **Status: deferred to a pre-Phase-4 follow-up bead.** SessionEnd
 command swaps `nx-session-end-launcher` for `nx hook session-end-

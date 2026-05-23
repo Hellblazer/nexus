@@ -85,7 +85,7 @@ detection mechanism needed.
 
 ### Guardrail 1: Brainstorming-gate skill amendment
 
-Add a section to the brainstorming-gate skill (`nx/skills/brainstorming-gate/SKILL.md`)
+Add a section to the brainstorming-gate skill (`conexus/skills/brainstorming-gate/SKILL.md`)
 between "Present design" and "Save design doc" steps. Uses passive detection
 (regex scan) rather than requiring prior knowledge of an RDR:
 
@@ -102,7 +102,7 @@ between "Present design" and "Save design doc" steps. Uses passive detection
 
 ### Guardrail 2: Strategic-planner agent pre-check
 
-Add to the strategic-planner agent system prompt (`nx/agents/strategic-planner.md`)
+Add to the strategic-planner agent system prompt (`conexus/agents/strategic-planner.md`)
 relay validation step 6, after existing field checks:
 
 ```
@@ -117,7 +117,7 @@ relay validation step 6, after existing field checks:
 
 ### Guardrail 3: Bead context hook enhancement
 
-Extend `bead_context_hook.py` (`nx/hooks/scripts/bead_context_hook.py`) to
+Extend `bead_context_hook.py` (`conexus/hooks/scripts/bead_context_hook.py`) to
 detect RDR references. **Regex-only, no T2 lookup** (zero latency):
 
 ```python

@@ -6,7 +6,7 @@ command actually exists in the registered tool set. Catches drift where a
 skill points at a renamed/deleted tool.
 
 Also validates:
- * Every slash command (nx/commands/*.md) references a registered skill.
+ * Every slash command (conexus/commands/*.md) references a registered skill.
  * Every agent markdown parses.
  * Every skill markdown parses.
 """

@@ -31,7 +31,7 @@ implementation_notes: |
 
   RDR-125 follow-up (2026-05-21): the
   grep_for_symbols_redirects_to_serena rule migrated from
-  nx/hooks/scripts/routing/ to sn/hooks/scripts/routing/ because it
+  conexus/hooks/scripts/routing/ to sn/hooks/scripts/routing/ because it
   redirects to Serena MCP tools that ship in the sn plugin. The
   routing-hook framework (_lib.py + _run_python_hook.sh) is now
   vendored into each plugin that ships a routing rule, guarded by
@@ -42,19 +42,19 @@ implementation_notes: |
 
   Problem Statement closure pointers (Pass 2):
   - Gap 1 (session-start guidance bypassable): enforcement at
-    nx/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py:1
+    conexus/hooks/scripts/routing/grep_for_symbols_redirects_to_serena.py:1
     (and the other two cohort hooks). PreToolUse fires regardless of
     whether the session-start preamble was read.
   - Gap 2 (memory-loaded guidance is optional context):
-    nx/hooks/scripts/routing/phase_review_close_requires_gate.py:1.
+    conexus/hooks/scripts/routing/phase_review_close_requires_gate.py:1.
     The phase-review-close rule was a recurring memory feedback entry
     (feedback_phase_closeout_scope_audit); the hook makes the
     cross-walk a deterministic precondition for `bd close`.
   - Gap 3 (no enforcement layer at the action boundary):
-    nx/hooks/scripts/routing/_lib.py:1 + nx/hooks/hooks.json.
+    conexus/hooks/scripts/routing/_lib.py:1 + conexus/hooks/hooks.json.
     The framework gives every rule a PreToolUse action-boundary
     enforcement surface with the contract documented in
-    nx/hooks/scripts/routing/README.md.
+    conexus/hooks/scripts/routing/README.md.
 ---
 
 # RDR-121: Hook-Enforced Tool Routing: PreToolUse as Backstop for Soft Guidance
@@ -68,8 +68,8 @@ Nexus has a working catalogue of "preferred tool" rules: Serena for symbol-level
 
 - The user's global `CLAUDE.md` (e.g. "Serena for symbols; Grep for text")
 - The project `CLAUDE.md`
-- `nx/skills/using-nx-skills/SKILL.md` (catted at SessionStart)
-- `nx/hooks/scripts/subagent-start.sh` (injected at SubagentStart)
+- `conexus/skills/using-nx-skills/SKILL.md` (catted at SessionStart)
+- `conexus/hooks/scripts/subagent-start.sh` (injected at SubagentStart)
 - Per-skill `description:` lines visible during skill discovery
 - Persistent memory entries with `When to use` guidance
 
@@ -99,9 +99,9 @@ This RDR is the meta-solution to the pattern that `/conexus:phase-review-gate` i
 
 Three precedents in nexus that already use the hook-at-action-time pattern:
 
-- **`PreToolUse` hook on `Bash` matcher** at `nx/hooks/scripts/pre_close_verification_hook.sh`. Already in production for verifying pre-close conditions. The hook intercepts Bash invocations and runs a verification check before the command executes.
-- **`PostToolUse` hook on `Write|Edit` matcher** at `nx/hooks/scripts/divergence-language-guard.sh`. Already in production for language-divergence checks after edits.
-- **`PermissionRequest` hook on `mcp__plugin_conexus_.*` matcher** at `nx/hooks/scripts/auto-approve-nx-mcp.sh`. Already in production for auto-approving nx MCP tools.
+- **`PreToolUse` hook on `Bash` matcher** at `conexus/hooks/scripts/pre_close_verification_hook.sh`. Already in production for verifying pre-close conditions. The hook intercepts Bash invocations and runs a verification check before the command executes.
+- **`PostToolUse` hook on `Write|Edit` matcher** at `conexus/hooks/scripts/divergence-language-guard.sh`. Already in production for language-divergence checks after edits.
+- **`PermissionRequest` hook on `mcp__plugin_conexus_.*` matcher** at `conexus/hooks/scripts/auto-approve-nx-mcp.sh`. Already in production for auto-approving nx MCP tools.
 
 The hook infrastructure is mature. The pattern this RDR proposes generalizes the same shape (intercept-at-action-time, with redirect) to the tool-routing problem.
 
@@ -171,7 +171,7 @@ Three phases. Each ships independently and is reversible.
 
 **Phase 1: Hook framework**
 
-Design lifted from in-tree precedent `nx/hooks/scripts/pre_close_verification_hook.sh` (245 LOC production hook; same JSON-envelope contract; see A1 evidence in T2 `121-research-A1`).
+Design lifted from in-tree precedent `conexus/hooks/scripts/pre_close_verification_hook.sh` (245 LOC production hook; same JSON-envelope contract; see A1 evidence in T2 `121-research-A1`).
 
 **Language commitment (A2-driven, locked at P1)**: Routing hooks are **Python-native**: `#!/usr/bin/env python3` shebang, single-process per hook, no nested bash + python3 calls. The A2 spike measured bash + python3-per-call at 74-89ms p95 (40ms of which is python3 interpreter startup amortized once per shell invocation but paid again on every helper call). Python-native eliminates the *per-helper* python3 startup cost within a single hook by collapsing all logic into one process; the ~40ms interpreter-startup baseline is paid once per hook instead of three to four times. Single-hook budget: **<50ms p95 per hook** (40ms startup + ~10ms logic), within the original target.
 
@@ -180,8 +180,8 @@ Design lifted from in-tree precedent `nx/hooks/scripts/pre_close_verification_ho
 - **Worst case** (all 3 P2 hooks plus the existing `pre_close_verification_hook.sh` fire on one call): ~200ms p95 startup + ~40ms logic ≈ **240ms p95**. This exceeds the originally stated 200ms ceiling, so the per-Bash-call ceiling is **revised to <300ms p95** with an enforced **hook-count cap of 4 active routing hooks**. Adding a fifth requires either consolidating two existing hooks into one script or accepting a budget revision.
 - **Mitigation if 4× startup proves uncomfortable**: Phase 3 telemetry will measure real-world cumulative p95. If it trends high, the framework can adopt a **single-dispatcher script** that internally runs N rules in one Python process (trading per-rule failure isolation for amortized startup); this is filed as a follow-on under §Open Questions rather than ship-blocking, since the matcher-set will rarely overlap on the same call.
 
-- New directory `nx/hooks/scripts/routing/` for routing hooks.
-- Shared Python helper `nx/hooks/scripts/routing/_lib.py` providing:
+- New directory `conexus/hooks/scripts/routing/` for routing hooks.
+- Shared Python helper `conexus/hooks/scripts/routing/_lib.py` providing:
   - `allow([context])`: emits `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "additionalContext": "<text>"}}` to stdout; exits 0. Pass-through case, with optional advisory message injected into agent context.
   - `deny(<reason>)`: emits `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "reason": "<multi-line markdown>"}}` to stdout; exits 0. Blocks the tool call; agent sees the reason.
   - `warn(<message>)`: alias of `allow(<message>)`; named for the "advisory but not blocking" case. § Decision Rationale's "Block, not warn" rule maps to deny-vs-warn at the per-rule level.
@@ -193,12 +193,12 @@ Design lifted from in-tree precedent `nx/hooks/scripts/pre_close_verification_ho
   - **Fail-closed carve-out**: hooks marked `fail_closed: true` in `registry.yaml` MUST override the default with `except BaseException as e: print(deny_envelope("cannot verify, fail-closed: " + str(e))); sys.exit(0)`. The carve-out exists because some rules' enforcement property only holds if "cannot verify" is treated as "not verified". `phase_review_close_requires_gate` (Phase 2 hook 2) is the load-bearing instance: its sentinel-read failure modes (absent, stale, malformed, permission denied) are exactly the conditions that motivate the hook. Fail-open in those cases defeats the rule. The carve-out is opt-in per hook so it stays auditable in one place (`registry.yaml`) rather than scattered across scripts.
   - Tool-name short-circuit at the top: parse `tool_name` from stdin first; if not the matcher target, `allow()` immediately. Fast no-op for unrelated calls.
   - Tool-input parsing: extract `tool_input.command` (Bash) or `tool_input.file_path` (Edit/Write) from stdin. Pattern-match against the actual call, not just the tool name.
-- A `nx/hooks/scripts/routing/registry.yaml` enumerating active rules with metadata: rule name, hook script path, matcher, mode (`deny` / `warn`), rationale, escape token.
+- A `conexus/hooks/scripts/routing/registry.yaml` enumerating active rules with metadata: rule name, hook script path, matcher, mode (`deny` / `warn`), rationale, escape token.
 - Test fixtures at `tests/test_routing_hooks.py` for each rule: positive case (preferred tool path then `allow`), negative case (default tool path then `deny` with redirect message), escape case (allowlisted with reason then `allow`), error case (malformed input then `allow`, fail-open is the only safe degradation).
 
 **Phase 2: Initial cohort**
 
-Three rules with the highest confidence and lowest false-positive risk. Each ships as its own hook script under `nx/hooks/scripts/routing/`.
+Three rules with the highest confidence and lowest false-positive risk. Each ships as its own hook script under `conexus/hooks/scripts/routing/`.
 
 1. **`grep_for_symbols_redirects_to_serena`**: Bash matcher; detects `grep` / `rg` against `*.py`, `*.swift`, `*.java`, `*.ts`, `*.tsx`, `*.go`, `*.rs` with patterns that look like identifier searches (no spaces, no regex metacharacters). Emits a block message: "This looks like a symbol search. Use `mcp__plugin_sn_serena__jet_brains_find_symbol` for symbol definitions, `mcp__plugin_sn_serena__jet_brains_find_referencing_symbols` for callers. To override, add `# routing-allow: <reason ≥8 chars>` to the command."
 2. **`phase_review_close_requires_gate`**: Bash matcher; detects `bd close .*` where the bead title (looked up via `bd show`) contains "phase" or "review". Claude Code provides no native session-history API to PreToolUse hooks, so "recent invocation of `/conexus:phase-review-gate`" is observed via a **sentinel file** at `${TMPDIR:-/tmp}/nx-phase-gate-sentinel/<claude_pid>-<rdr-id>-<phase>.json` written by the `/conexus:phase-review-gate` skill on successful pass. The hook checks: (a) sentinel exists for the closing bead's `(rdr-id, phase)`, (b) sentinel `mtime` is newer than the current Claude session-start time (read from `~/.config/nexus/t1_addr.<claude_pid>` ctime), (c) sentinel content reports `outcome: "PASSED"`. Any of: sentinel absent, sentinel stale (pre-session-start), sentinel `outcome != "PASSED"`, or sentinel unreadable produces **fail-closed deny** with a redirect message naming the exact gate invocation. RDR-120 § Enforcement Backstops cites this as a load-bearing follow-on. The sentinel-write side ships in this RDR's P2 alongside the hook (single PR; sentinel + reader are coupled and tested together). Pattern precedent: `pre_close_verification_hook.sh` uses scratch markers the same way; this is the file-system analogue.
@@ -218,11 +218,11 @@ The telemetry loop closes the long-term question: which rules actually catch fai
 
 | Proposed component | Existing precedent | Decision |
 |---|---|---|
-| PreToolUse hook on Bash | `nx/hooks/scripts/pre_close_verification_hook.sh` | Extend pattern; same hooks.json entry shape. |
+| PreToolUse hook on Bash | `conexus/hooks/scripts/pre_close_verification_hook.sh` | Extend pattern; same hooks.json entry shape. |
 | PreToolUse hook on Edit/Write | (none on PreToolUse; PostToolUse precedent in `divergence-language-guard.sh`) | New; the divergence guard is the structural template, just moved to PreToolUse. |
 | Allowlist token convention | `# epsilon-allow: <reason ≥8 chars>` at `tests/test_no_direct_catalog_writes_outside_projector.py` | Direct port; rename token to `# routing-allow:` to distinguish concern. |
 | Telemetry log | `~/.config/nexus/` config dir convention (RDR-105) | Extend; add `routing_log.jsonl`. |
-| Hook script shared lib | `nx/hooks/scripts/_run_python_hook.sh` | Extend pattern; new `_lib.py` for routing-specific helpers. |
+| Hook script shared lib | `conexus/hooks/scripts/_run_python_hook.sh` | Extend pattern; new `_lib.py` for routing-specific helpers. |
 | Test harness | `tests/cc-validation/` scenarios | Extend pattern; new `tests/test_routing_hooks.py` for unit-level coverage and `tests/cc-validation/scenarios/14_routing_*.sh` for E2E. |
 
 ### Decision Rationale
@@ -321,7 +321,7 @@ The telemetry loop closes the long-term question: which rules actually catch fai
 
 - [ ] `/conexus:phase-review-gate` restored to main (RDR-120 P0 prerequisite; this RDR's Phase 2 hook 2 depends on it).
 - [ ] Existing hook tests green on main.
-- [ ] **P2 co-requirement**: `nx/skills/phase-review-gate/SKILL.md` updated to write the sentinel file on PASSED outcome (`${TMPDIR:-/tmp}/nx-phase-gate-sentinel/<claude_pid>-<rdr-id>-<phase>.json`). The hook reader and sentinel writer MUST ship in the same PR; shipping the hook without the writer denies every phase-review close indefinitely.
+- [ ] **P2 co-requirement**: `conexus/skills/phase-review-gate/SKILL.md` updated to write the sentinel file on PASSED outcome (`${TMPDIR:-/tmp}/nx-phase-gate-sentinel/<claude_pid>-<rdr-id>-<phase>.json`). The hook reader and sentinel writer MUST ship in the same PR; shipping the hook without the writer denies every phase-review close indefinitely.
 
 ### Minimum Viable Validation
 
@@ -336,14 +336,14 @@ One end-to-end demo per phase:
 ### Phasing
 
 **P1: Framework + scaffolding** (week 1)
-- `nx/hooks/scripts/routing/_lib.py` with `allow()`, `deny()`, `warn()`, `should_skip_for_reason()`, `log_routing_event()`
-- `nx/hooks/scripts/routing/registry.yaml` (empty initially)
+- `conexus/hooks/scripts/routing/_lib.py` with `allow()`, `deny()`, `warn()`, `should_skip_for_reason()`, `log_routing_event()`
+- `conexus/hooks/scripts/routing/registry.yaml` (empty initially)
 - `tests/test_routing_hooks.py` with framework tests (assert JSON envelope shape + exit 0 on every path)
-- Documentation: `nx/hooks/scripts/routing/README.md` describing the Python-native hook authoring convention
+- Documentation: `conexus/hooks/scripts/routing/README.md` describing the Python-native hook authoring convention
 
 **P2: Initial cohort** (week 2-3)
 - `grep_for_symbols_redirects_to_serena.py` + tests
-- `phase_review_close_requires_gate.py` + sentinel-write integration into `nx/skills/phase-review-gate/SKILL.md` (skill writes `${TMPDIR:-/tmp}/nx-phase-gate-sentinel/<claude_pid>-<rdr-id>-<phase>.json` on PASSED) + tests covering: sentinel present-and-fresh-and-PASSED → allow, sentinel absent → deny, sentinel stale (mtime < session start) → deny, sentinel `outcome != "PASSED"` → deny, sentinel unreadable (permissions / corrupt JSON) → deny.
+- `phase_review_close_requires_gate.py` + sentinel-write integration into `conexus/skills/phase-review-gate/SKILL.md` (skill writes `${TMPDIR:-/tmp}/nx-phase-gate-sentinel/<claude_pid>-<rdr-id>-<phase>.json` on PASSED) + tests covering: sentinel present-and-fresh-and-PASSED → allow, sentinel absent → deny, sentinel stale (mtime < session start) → deny, sentinel `outcome != "PASSED"` → deny, sentinel unreadable (permissions / corrupt JSON) → deny.
 - `git_add_all_redirects_to_explicit_paths.py` + tests
 - `hooks.json` entries for each; `registry.yaml` populated
 - E2E scenarios at `tests/cc-validation/scenarios/14_routing_*.sh`
@@ -361,7 +361,7 @@ One end-to-end demo per phase:
 
 | Operation | Command |
 |---|---|
-| List active routing rules | `cat nx/hooks/scripts/routing/registry.yaml` |
+| List active routing rules | `cat conexus/hooks/scripts/routing/registry.yaml` |
 | Check telemetry | `nx hook routing-stats` |
 | Add a rule | New script in `routing/`; new entry in `registry.yaml`; new entry in `hooks.json`; new tests |
 | Disable a rule | Remove from `hooks.json`; keep script + tests for future re-enable |
@@ -412,7 +412,7 @@ To be completed.
 
 Critical assumptions to verify:
 
-- [x] **A1** (REVISED): PreToolUse hooks can block tool execution via JSON `permissionDecision: "deny"` envelope with `exit 0`, NOT via stderr exit code 2. **Status**: Verified (High confidence). **Method**: Source Search of `nx/hooks/scripts/pre_close_verification_hook.sh` and three sibling production hooks (all use the JSON envelope pattern); empirical: the pre-close hook is registered as PreToolUse on `Bash` matcher and has been denying `bd close` calls missing required metadata since at least 2026-04. **Evidence**: T2 entry `121-research-A1`. **Design implications folded into § Approach Phase 1 above**: helpers renamed (`emit_block` to `deny`, `emit_warn` to `warn`); helpers emit JSON with `permissionDecision` field + `reason` (deny) or `additionalContext` (allow) and exit 0; `set -e`/`set -u` PROHIBITED (every code path produces valid JSON); defensive python3 JSON escaping with shell-quoting fallback; tool-name + tool-input short-circuit at the top of every hook. The stderr-exit-2 mechanism is dropped from the design.
+- [x] **A1** (REVISED): PreToolUse hooks can block tool execution via JSON `permissionDecision: "deny"` envelope with `exit 0`, NOT via stderr exit code 2. **Status**: Verified (High confidence). **Method**: Source Search of `conexus/hooks/scripts/pre_close_verification_hook.sh` and three sibling production hooks (all use the JSON envelope pattern); empirical: the pre-close hook is registered as PreToolUse on `Bash` matcher and has been denying `bd close` calls missing required metadata since at least 2026-04. **Evidence**: T2 entry `121-research-A1`. **Design implications folded into § Approach Phase 1 above**: helpers renamed (`emit_block` to `deny`, `emit_warn` to `warn`); helpers emit JSON with `permissionDecision` field + `reason` (deny) or `additionalContext` (allow) and exit 0; `set -e`/`set -u` PROHIBITED (every code path produces valid JSON); defensive python3 JSON escaping with shell-quoting fallback; tool-name + tool-input short-circuit at the top of every hook. The stderr-exit-2 mechanism is dropped from the design.
 - [x] **A2** (REVISED, COMMITTED): Hook chain latency is bounded at <50ms p95/hook via **Python-native hook implementation** (committed at P1; see § Approach Phase 1 "Language commitment"). Original bash + python3-per-call pattern measured 74-89ms p95 (40ms python3-startup baseline), violating the original budget. **Status**: Verified (Spike + design commitment). **Method**: Stub hook at `/tmp/rdr121_stub_routing_hook.sh` modeled byte-for-byte on `pre_close_verification_hook.sh`, 50 iters per path on macOS darwin Py3.13.13. **Measured**: non-Bash short-circuit p95 52ms (bash); allow path p95 74ms (bash + 1 python3 call); deny path p95 89ms (bash + 2 python3 calls). Python-native eliminates the per-helper python3-startup cost by collapsing the entire hook into one process; measured cost is dominated by interpreter import (~40ms) which pays once. **Evidence**: T2 entry `121-research-A2`. **Cumulative budget** (corrected at re-gate; see §Approach "Cumulative budget accounting"): <300ms p95 per Bash call with a hook-count cap of 4 active routing hooks (~240ms 4× Python startup + ~40ms logic).
 - [~] **A3** (REVISED): Matchers achieve high precision AND adequate recall on representative corpus. Original spec ("identifier search, no spaces, no regex metacharacters") REFUTED: 80% precision, 33% recall on n=20 corpus replay. Refined three-shape spec (single id + dotted-id chain + pipe-alternation, with disqualifier list including all-uppercase-short-token) predicted to reach 92%+ recall, ~100% precision. **Status**: Partially Verified at refined spec (corpus replay only; live matcher not yet built). **Method**: Corpus Replay (n=20: 12 actual session grep/rg invocations + 8 plausible negative-case variants). **Evidence**: T2 entry `121-research-A3` + `/tmp/rdr121_a3_corpus.txt`. **Design implication**: § Approach Phase 2 hook 1 (`grep_for_symbols_redirects_to_serena`) must adopt the refined three-shape matcher; original "no regex metacharacters" spec misses the dominant real-world shapes (dotted attrs, alternation of identifiers).
 - [?] **A4** (ASSUMED): Escape mechanism is sufficient to handle edge cases without rules being silenced wholesale. **Status**: Assumed (acknowledged unverifiable pre-implementation). **Method**: Original method "30-day telemetry post-P2" is the only verification path; pre-implementation design audit cannot substitute. P3 telemetry loop is the closure path. **Acknowledged risk**: if escape-rate per rule exceeds an actionable threshold (TBD during P3), the rule is producing too many false positives and must be refined or removed. The matcher refinement from A3 (recall improvement) should reduce escape pressure on the symbol-grep rule specifically.
@@ -443,7 +443,7 @@ Document is sized to the architectural pattern, not to any single hook. The cata
 
 - **Telemetry retention**: how long does `routing_log.jsonl` keep entries? Default 90 days, rotate weekly? Open for P3 to settle.
 - **Cross-IDE generalization**: if other IDEs gain hook contracts compatible enough, can this framework be ported? Out of scope; flag for revisit if it ever matters.
-- **Hook-author training**: a new contributor needs to understand the routing-hook discipline. Where does that guidance live? Probably in `nx/hooks/scripts/routing/README.md` produced during P1.
+- **Hook-author training**: a new contributor needs to understand the routing-hook discipline. Where does that guidance live? Probably in `conexus/hooks/scripts/routing/README.md` produced during P1.
 - **Interaction with `using-nx-skills/SKILL.md`**: should every routing-hook also be documented in the session-start guidance? Probably yes. Session-start tells the agent "we have rules"; the hooks enforce them. They reinforce each other.
 - **Should `bd create` against an active moratorium's banned-topic list be a hook?** RDR-120 § Enforcement Backstops names this as a gap. It belongs in this RDR's catalogue (Phase 2 follow-on). Currently listed as a candidate but not in the initial cohort.
 
@@ -456,9 +456,9 @@ Document is sized to the architectural pattern, not to any single hook. The cata
 - RDR-024: RDR-process guardrails (gate-before-implement); analogous enforcement at the RDR-lifecycle level.
 - RDR-045: post-implementation verification gate; same shape applied to implementation-completion enforcement.
 - RDR-105: T1 chroma architecture with env-passdown discovery; substrate-level enforcement precedent.
-- `nx/hooks/scripts/pre_close_verification_hook.sh`: existing PreToolUse hook on Bash matcher (production).
-- `nx/hooks/scripts/divergence-language-guard.sh`: existing PostToolUse hook on Write|Edit (production).
-- `nx/hooks/scripts/auto-approve-nx-mcp.sh`: existing PermissionRequest hook (production).
+- `conexus/hooks/scripts/pre_close_verification_hook.sh`: existing PreToolUse hook on Bash matcher (production).
+- `conexus/hooks/scripts/divergence-language-guard.sh`: existing PostToolUse hook on Write|Edit (production).
+- `conexus/hooks/scripts/auto-approve-nx-mcp.sh`: existing PermissionRequest hook (production).
 - `tests/test_no_direct_catalog_writes_outside_projector.py`: ε-lint allowlist-token precedent (RDR-101 Phase 3).
 - `feedback_no_git_add_all.md`: user memory entry documenting one of the rules.
 - `feedback_robot_no_fatigue.md`: user memory entry pointing at debug-after-N-fails as a discipline gap.

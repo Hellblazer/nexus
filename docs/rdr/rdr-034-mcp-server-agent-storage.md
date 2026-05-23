@@ -134,7 +134,7 @@ The server key `"nexus"` determines the tool name prefix: `mcp__plugin_conexus_n
 
 ### Permission Hook Integration
 
-Add pre-approval for all nexus MCP tools to `nx/hooks/scripts/permission-request-stdin.sh`:
+Add pre-approval for all nexus MCP tools to `conexus/hooks/scripts/permission-request-stdin.sh`:
 
 ```bash
 # Auto-approve all nexus MCP tools (storage tiers, search)
@@ -161,13 +161,13 @@ Keep existing Bash `nx` auto-approval for human interactive use and hook scripts
 | File | Change |
 |------|--------|
 | `pyproject.toml` | Add `mcp>=1.0` dependency, `nx-mcp` entry point |
-| `nx/.mcp.json` | Register `"nexus"` MCP server |
-| `nx/hooks/scripts/permission-request-stdin.sh` | Add MCP tool auto-approval block |
+| `conexus/.mcp.json` | Register `"nexus"` MCP server |
+| `conexus/hooks/scripts/permission-request-stdin.sh` | Add MCP tool auto-approval block |
 | `docs/architecture.md` | Add `mcp_server.py` to module map |
 
 ### Modified Files — Agent-Consumed Documentation (63)
 
-All CLI `nx` command references in agent-consumed files are replaced with MCP tool calls. Human-facing docs (`docs/`, `nx/README.md`, `CHANGELOG.md`) and hook scripts retain CLI syntax.
+All CLI `nx` command references in agent-consumed files are replaced with MCP tool calls. Human-facing docs (`docs/`, `conexus/README.md`, `CHANGELOG.md`) and hook scripts retain CLI syntax.
 
 | Category | Files | References | Description |
 |----------|-------|------------|-------------|
@@ -182,7 +182,7 @@ All CLI `nx` command references in agent-consumed files are replaced with MCP to
 |----------|-------|--------|
 | Hook scripts | 2 | Shell processes, not Claude Code agents |
 | Human docs | ~5 | `docs/` directory stays CLI for human reference |
-| `nx/README.md` | 1 | Human-facing project overview |
+| `conexus/README.md` | 1 | Human-facing project overview |
 | `CHANGELOG.md` | 1 | Release notes |
 
 ## Testing Strategy

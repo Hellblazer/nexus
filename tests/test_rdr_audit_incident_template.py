@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Structural tests for the RDR-067 Phase 3 incident template.
 
-Verifies that nx/resources/rdr_process/INCIDENT-TEMPLATE.md has the exact
+Verifies that conexus/resources/rdr_process/INCIDENT-TEMPLATE.md has the exact
 frontmatter fields and sections required by the canonical audit prompt
 (T2 nexus_rdr/067-canonical-prompt-v1) and that the skill body references
 the template correctly.
@@ -27,7 +27,7 @@ class TestIncidentTemplateExists:
         assert TEMPLATE.exists()
 
     def test_resources_directory_structure(self) -> None:
-        """The template lives under nx/resources/rdr_process/ so it ships with the plugin."""
+        """The template lives under conexus/resources/rdr_process/ so it ships with the plugin."""
         assert TEMPLATE.parent.name == "rdr_process"
         assert TEMPLATE.parent.parent.name == "resources"
 

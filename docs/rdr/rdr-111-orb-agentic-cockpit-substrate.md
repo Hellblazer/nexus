@@ -263,7 +263,7 @@ findings below are verified against those sources.
 
 ### Research Finding RF-1: Hook payload shapes — verified inventory
 
-Sourced from `nx/hooks/scripts/`, `tests/hooks/`, and the LangSmith Claude Agent SDK
+Sourced from `conexus/hooks/scripts/`, `tests/hooks/`, and the LangSmith Claude Agent SDK
 integration (`_hooks.py`). All fields below are verified against production code or
 test fixtures. Fields marked `[inferred]` are from community documentation and GitHub
 issues; no production hook in this repo reads them yet.
@@ -344,7 +344,7 @@ correct output contract, all sharing the `out` call.
 
 ### Research Finding RF-3: Hook chaining is already in use — bridge is additive
 
-`nx/hooks/hooks.json` shows multiple hooks registered per event type (e.g.,
+`conexus/hooks/hooks.json` shows multiple hooks registered per event type (e.g.,
 `SessionStart` chains 6 commands). The bridge adds one more entry per type.
 Hook chaining has no ordering guarantee across entries at the same level, but
 output from all entries is collected. **The bridge must never be the last
@@ -388,7 +388,7 @@ in test harnesses, linting, and local dev without polluting the tuple space.
 
 ### The seven semantic event subspaces
 
-Seven new subspace YAML files in `nx/tuplespace/builtin/hooks/`:
+Seven new subspace YAML files in `conexus/tuplespace/builtin/hooks/`:
 
 ```
 hook_events/tool_call_intent      ← PreToolUse
@@ -419,7 +419,7 @@ Each subspace schema carries:
 ### The hook → tuple bridge
 
 **Revised per RF-2**: not a single handler but a family of thin per-hook-type
-scripts in `nx/hooks/scripts/orb_bridge_*.py`, all sharing a common
+scripts in `conexus/hooks/scripts/orb_bridge_*.py`, all sharing a common
 `src/nexus/cockpit/hook_bridge.py` library for the `out` call and
 mapping table.
 
@@ -433,7 +433,7 @@ Each script:
    - `Stop` / `StopFailure` / `SessionEnd`: emit nothing
 5. Exits 0 unconditionally — bridge errors are logged to stderr, never propagated
 
-Registered in `nx/hooks/hooks.json` as the **first** entry for each hook type
+Registered in `conexus/hooks/hooks.json` as the **first** entry for each hook type
 (before existing decision hooks) — **provisional pending CA-8 spike**. If the
 CA-8 spike (now gated before Step 2 — see Step 7a below) confirms first-wins
 semantics (i.e., the first hook's `allow` prevents subsequent hooks from
@@ -725,9 +725,9 @@ advanced users in a later phase but is not the starting point.
 
 #### Step 1: Seven hook-event subspace schemas
 
-Add `nx/tuplespace/builtin/hooks/*.yml` with the seven hook-event subspace
-definitions, plus `nx/tuplespace/builtin/connection_manifest.yml` and
-`nx/tuplespace/builtin/layout_state.yml` (schema defined in Proposed
+Add `conexus/tuplespace/builtin/hooks/*.yml` with the seven hook-event subspace
+definitions, plus `conexus/tuplespace/builtin/connection_manifest.yml` and
+`conexus/tuplespace/builtin/layout_state.yml` (schema defined in Proposed
 Solution). Register layout disposition fields on each hook-event subspace
 (surface level, decay profile, priority class, `preempts` list).
 No code changes — schema-only. `layout_state` ships now so the layout
@@ -750,7 +750,7 @@ order accordingly before any bridge code is written. (≤ 1h)
 `src/nexus/cockpit/hook_bridge.py`: reads hook payload from stdin,
 maps to subspace + dimensions + match_text, calls `out` via the
 MCP tool (or directly against the store if in-process), exits 0.
-Register in `nx/hooks/hooks.json` (the canonical hook registration
+Register in `conexus/hooks/hooks.json` (the canonical hook registration
 location per RF-3) for the **seven projected hook types**: `PreToolUse`,
 `PostToolUse`, `Stop`/`StopFailure` (→ `assistant_turn_ended`),
 `SubagentStop`, `UserPromptSubmit`, `SessionStart`/`SessionEnd`
@@ -786,7 +786,7 @@ Phase 2 Step 6.
 
 #### Step 4: Bindings subspace schema
 
-Add `nx/tuplespace/builtin/bindings.yml`. Include all fields from
+Add `conexus/tuplespace/builtin/bindings.yml`. Include all fields from
 the proposed solution above. Add `profile` as a first-class
 dimension so `read(subspace="bindings/<profile>")` is the query
 for the active profile's bindings.
@@ -1186,7 +1186,7 @@ Other gates:
 | 2026-05-11 | Hal Hildebrand | Initial draft |
 | 2026-05-11 | Hal Hildebrand | Post-gate revision: expanded RF-1 to complete verified payload inventory for all 13 hook types; revised liveness from tuple-space to T2 table (cross-process visibility requirement); added _BindingWatcher restart semantics, cursor persistence, at-least-once delivery + idempotency_key requirement; added CA-6 (inferred payload empirical spike), CA-7 (Bakke LoC estimate), CA-8 (PreToolUse ordering empirical spike); restructured CA phase gates to P1/P2/P3; added debounce to auto-layout engine; added binding_create async requirement; added RDR-110 subspace registry extension coordination note |
 | 2026-05-11 | Hal Hildebrand | Post-gate-2 revision (all gate-2 BLOCKED issues addressed): (C-NEW-1) _BindingWatcher retrieval mechanism changed from `rd()` with offset cursor to direct T2 SQL on `tuples` table by `rowid` — intentional internal bypass, RDR-110 `read()` has no ordered-retrieval parameter; (C-NEW-2) Active-claims panel changed from `rd(claim_state=claimed)` to direct T2 SQL — `claim_state` is an internal column not a registered dimension; (S1) T2 migration added to `src/nexus/db/migrations.py`, `watcher_state` table added to same migration as `liveness`; (S2) corrected false liveness rationale — project-tier T2 subspaces ARE cross-process, liveness uses raw T2 for semantic/schema/tombstone reasons; (S3) registry extension CA-9 added as definitive prerequisite, registry section changed from conditional "if" to CA-9; (S4) CA-8 fallback design documented (no-permissionDecision or last-in-chain if first-wins confirmed); (S5) `binding_create` changed to return `task_id` immediately with async task pattern |
-| 2026-05-11 | Hal Hildebrand | Post-gate-4 revision (all gate-4 BLOCKED issues addressed): (C-G4-1) corrected cursor-advance pseudocode — dispatch is now outside SQLite transaction (async dispatch cannot be wrapped in synchronous sqlite3 BEGIN/COMMIT); removed "genuinely atomic" claim; clarified same-database placement enables one connection, not transactional atomicity between dispatch and commit; (S-G4-1) switched recent-events semantic fallback sort from `tuple.created_at` (internal column not in read() DTO) to `timestamp` dimension (registered, accessible in read() response); (S-G4-2) removed CA-8 from Step 7 spike list — now only in Step 1b where it belongs; added cross-reference note; (S-G4-3) added CA-10 for `watcher_state` table coordination with RDR-110 implementor; added to Finalization Gate; (O-G4-2) fixed Step 2 registration path from `.claude/hooks/` to `nx/hooks/hooks.json` |
+| 2026-05-11 | Hal Hildebrand | Post-gate-4 revision (all gate-4 BLOCKED issues addressed): (C-G4-1) corrected cursor-advance pseudocode — dispatch is now outside SQLite transaction (async dispatch cannot be wrapped in synchronous sqlite3 BEGIN/COMMIT); removed "genuinely atomic" claim; clarified same-database placement enables one connection, not transactional atomicity between dispatch and commit; (S-G4-1) switched recent-events semantic fallback sort from `tuple.created_at` (internal column not in read() DTO) to `timestamp` dimension (registered, accessible in read() response); (S-G4-2) removed CA-8 from Step 7 spike list — now only in Step 1b where it belongs; added cross-reference note; (S-G4-3) added CA-10 for `watcher_state` table coordination with RDR-110 implementor; added to Finalization Gate; (O-G4-2) fixed Step 2 registration path from `.claude/hooks/` to `conexus/hooks/hooks.json` |
 | 2026-05-11 | Hal Hildebrand | Post-gate-5 revision (no criticals; 3 significant fixed pre-accept): (SIG-1) removed residual "enabling a genuine single-transaction cursor advance" claim from watcher_state rationale — replaced with accurate "one connection" language; (SIG-2) corrected Step 9 semantic fallback sort from `created_at` (internal column, not in read() DTO) to `timestamp` dimension; (SIG-3) added `action_idempotency` table schema, migration reference (memory.db), and sweep hook to Phase 2 Step 6 |
 | 2026-05-11 | Hal Hildebrand | Post-gate-6 revision (no criticals; all significant and observation issues addressed pre-accept): (SIG-A) replaced `rd`/`in` Linda aliases with `read`/`take` throughout all implementation-facing sections — Bindings CRUD, active-bindings panel, Step 10, Relationship to RDR-110 surfaces sentence, Key Discoveries (bindings, surfaces, cross-process), CA-3 across all references (assumption table, Step 7b spike, Finalization Gate), and the Linda bullet's "ORB uses" clause; added Linda→RDR-110 API name mapping table and usage rule to Relationship to RDR-110 section; (SIG-B) added `layout_state/<profile>` subspace schema block (dimensions: profile, event_type; content: surface_level, demotion_level, ttl_seconds, pinned) to Proposed Solution; added `layout_state.yml` and `connection_manifest.yml` to Step 1 file list; (OBS-1) added `tuple_claim_log` join note for `claimed_at` display field — `tuples` has no `claimed_at` column; (OBS-2) `connection_manifest.yml` now explicit in Step 1; (OBS-3) integration test 3 corrected to distinguish SQL-based panels (active-claims, recent-events) from `read()`-based panel (active-bindings); (OBS-4) Step 2 explicitly documents which hook types are projected (7) and which are excluded (SubagentStart, PermissionRequest) with rationale |
 | 2026-05-11 | Hal Hildebrand | Post-gate-3 revision (all gate-3 BLOCKED issues addressed): (C-G3-1) Added `task_id` (string) and `status` (enum: pending/active/failed) dimensions to bindings subspace schema YAML; documented enabled/status/task_id lifecycle; (S-G3-1) moved `watcher_state` table to `tuples.db` (not `memory.db`) for genuine single-transaction cursor atomicity; corrected "atomic" language; (S-G3-2) added `claim_expires_at > unixepoch()` filter to active-claims panel query in Proposed Solution and Step 8 to exclude expired leases; (S-G3-3) flagged Step 2 bridge registration order as provisional pending CA-8; moved CA-8 spike to new Step 1b (before Step 2); added feature-flag requirement for registration order; (S-G3-4) changed recent-events panel from `rd()` (no time ordering) to direct SQL on `tuples.db` ordered by `created_at DESC`; semantic filter noted as opt-in mode; (S-G3-5) replaced "direct T2 SQL via src/nexus/db/" with explicit `tuples.db` database references throughout; (O1) corrected "six" to "seven" subspaces; (O2) documented PostCompact/PreCompact exclusion with rationale; (O3) updated CA-9 gate condition to outcome-based (confirmed open-registry shipping) not action-based (notification sent) |

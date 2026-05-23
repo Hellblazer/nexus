@@ -336,7 +336,7 @@ is a reason to add a CLI call to a workflow that the API path already handles.
 
 ### Fix 3: FTS5 Caveat, Tool Selection Guide, and Naming Convention Correction
 
-Fix 3 makes three changes to `nx/skills/nexus/reference.md`:
+Fix 3 makes three changes to `conexus/skills/nexus/reference.md`:
 
 **Change A — Correct the namespace naming convention.** The current
 `reference.md` states: "**Project naming**: use bare `{repo}` for all project
@@ -357,7 +357,7 @@ stored under any `{repo}_*` namespace will surface at session start.
 
 **Change B — Add "T2 Search Constraints" section** (new section, add two):
 
-Add to `nx/skills/nexus/reference.md`:
+Add to `conexus/skills/nexus/reference.md`:
 
 **Change B — "T2 Search Constraints" section**
 
@@ -536,7 +536,7 @@ ensuring all populated namespaces are surfaced.
 
 ### Phase 2: Skill Documentation Updates
 
-4. Add "T2 Search Constraints" section to `nx/skills/nexus/reference.md`
+4. Add "T2 Search Constraints" section to `conexus/skills/nexus/reference.md`
 5. Add "Code Search: When to Use nx vs Grep" section to same file
 6. Update the `nx search --corpus code` example in the quick-reference
    table to note the precision caveat

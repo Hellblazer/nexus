@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Runtime exercise of every skill and agent via `claude -p`.
 
-For each markdown file in nx/skills/ and nx/agents/, spawn `claude -p`
+For each markdown file in conexus/skills/ and conexus/agents/, spawn `claude -p`
 with the file body as --append-system-prompt plus a canned user task
 drawn from the skill/agent's `triggers:` field. Assert that the output
 satisfies the skill's contract — semantically, not just syntactically.

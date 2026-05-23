@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for RDR close gate heading normalization and gap extraction.
 
-Validates that the close gate preamble (nx/commands/rdr-close.md) correctly
+Validates that the close gate preamble (conexus/commands/rdr-close.md) correctly
 handles heading variants and gap format variations. Tests the Python functions
 extracted from the preamble script.
 

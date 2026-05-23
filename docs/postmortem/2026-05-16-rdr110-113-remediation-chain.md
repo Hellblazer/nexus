@@ -39,7 +39,7 @@ The fix took five minutes once located. The diagnosis took longer because the fa
 
 ### Pre-existing develop failures masquerading as PR-introduced
 
-After #795, develop CI still failed on seven tests. None were caused by the signal-event fix. They were latent failures from a prior y0nb merge that prepended `orb_bridge_*` entries to every event in `nx/hooks/hooks.json` without updating the tests asserting on the original hook positions. Five hook-related tests + migration ordering + session-end timeout, all in the same PR (#795). Time cost was modest because once the pattern was clear, the fixes were rote, but the lesson is the same: develop CI green is a prerequisite for any new PR to be diagnosable.
+After #795, develop CI still failed on seven tests. None were caused by the signal-event fix. They were latent failures from a prior y0nb merge that prepended `orb_bridge_*` entries to every event in `conexus/hooks/hooks.json` without updating the tests asserting on the original hook positions. Five hook-related tests + migration ordering + session-end timeout, all in the same PR (#795). Time cost was modest because once the pattern was clear, the fixes were rote, but the lesson is the same: develop CI green is a prerequisite for any new PR to be diagnosable.
 
 ### The CLAUDECODE gate that only failed on Linux CI
 

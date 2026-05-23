@@ -105,5 +105,5 @@ from T2, so you can manually verify whether the schedule is keeping up.
 
 - `scripts/cron-rdr-audit.sh` — shell wrapper invoked by cron
 - `scripts/launchd/README.md` — macOS launchd equivalent
-- `nx/skills/rdr-audit/SKILL.md` — the skill body that `claude -p` invokes
+- `conexus/skills/rdr-audit/SKILL.md` — the skill body that `claude -p` invokes
 - `docs/rdr/rdr-067-cross-project-rdr-audit-loop.md` — design rationale

@@ -256,8 +256,8 @@ The effort is proportional to the problem. The 234-line agent prompt is provably
 ## References
 
 - `nx index pdf` implementation: `src/nexus/doc_indexer.py` (CLI: `src/nexus/commands/index.py`)
-- Current agent: `nx/agents/pdf-chromadb-processor.md`
-- Current skill: `nx/skills/pdf-processing/SKILL.md`
+- Current agent: `conexus/agents/pdf-chromadb-processor.md`
+- Current skill: `conexus/skills/pdf-processing/SKILL.md`
 - RDR-011: PDF Ingest Test Coverage
 - RDR-012: pdfplumber Extraction Tier (superseded by RDR-021)
 - RDR-015: Indexing Pipeline Rethink

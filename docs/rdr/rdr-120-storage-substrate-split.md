@@ -308,11 +308,11 @@ RDR-120, the tooling gaps must be closed first.
 
 **P0 prerequisite: restore `/conexus:phase-review-gate` from archive.**
 The skill exists at `archive/develop-2026-05-19` commit `122feaff`.
-Files to restore: `nx/commands/phase-review-gate.md` (307 LOC),
-`nx/skills/phase-review-gate/SKILL.md` (128 LOC),
+Files to restore: `conexus/commands/phase-review-gate.md` (307 LOC),
+`conexus/skills/phase-review-gate/SKILL.md` (128 LOC),
 `tests/test_phase_review_gate.py` (312 LOC), entries in
-`nx/registry.yaml` (11 LOC), `tests/test_plugin_structure.py` (4 LOC),
-`docs/rdr/AGENTS.md` (2 LOC), `nx/CHANGELOG.md` (16 LOC). Restoration
+`conexus/registry.yaml` (11 LOC), `tests/test_plugin_structure.py` (4 LOC),
+`docs/rdr/AGENTS.md` (2 LOC), `conexus/CHANGELOG.md` (16 LOC). Restoration
 is a docs-and-tooling PR independent of any substrate work.
 
 **Residual confidence gap.** A7 carries a 30% residual gap that no

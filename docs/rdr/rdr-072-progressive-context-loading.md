@@ -51,7 +51,7 @@ Total potential: ~300-650 tokens on top of CLAUDE.md.
 
 ### RF-072-3: Injection mechanism
 
-The SessionStart hook (`nx/hooks/scripts/session_start_hook.py`) already runs at every session start and injects content into the system reminder. It currently injects:
+The SessionStart hook (`conexus/hooks/scripts/session_start_hook.py`) already runs at every session start and injects content into the system reminder. It currently injects:
 - Ready beads
 - nx capabilities summary
 - T1 scratch initialization

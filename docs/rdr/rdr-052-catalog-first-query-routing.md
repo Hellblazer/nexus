@@ -234,17 +234,17 @@ Multi-step analytical pipelines need inter-step state (extract results feed into
 3. **Seed pre-built plan templates** (`commands/catalog.py` setup command): insert 5 templates into T2 plan library at `nx catalog setup` time. Idempotent: `plan_search` before `plan_save`, skip if exists.
 4. **Tests**: unit tests for enhanced `query` routing (catalog-scoped vs broad, subtree scoping), tumbler hierarchy helpers, template seeding idempotency.
 
-### Phase 2: Plugin Layer (nx/)
+### Phase 2: Plugin Layer (conexus/)
 
-5. **Simplify `/conexus:query` skill** (`nx/skills/query/SKILL.md`): three-path dispatch (single-tool / template / planner). Remove manual collection extraction instructions. Remove "save plan?" prompt. Add auto-cache: Path 3 calls `plan_save()` on successful planner execution (TTL 30 days).
-6. **Update query-planner agent** (`nx/agents/query-planner.md`): reduce scope to exception-path. Add note that simple scoped queries go through enhanced `query` MCP directly. Update few-shot examples to emphasize catalog-first patterns.
-7. **Update analytical-operator agent** (`nx/agents/analytical-operator.md`): no functional changes, but update references to the query pipeline flow.
-8. **Update orchestrator agent** (`nx/agents/orchestrator.md`): when the task is a simple search question (no extract/compare/generate signals), call enhanced `query` MCP with appropriate params instead of dispatching `/conexus:query` skill. Decision: if the question can be answered by a single `query()` call with catalog params, use it directly. If it needs multi-step analysis, dispatch the skill.
-9. **Update SubagentStart hook** (`nx/hooks/scripts/subagent-start.sh`): update `query` tool signature in the nx Storage Tools block to show new params (`author`, `content_type`, `follow_links`, `depth`, `subtree`).
+5. **Simplify `/conexus:query` skill** (`conexus/skills/query/SKILL.md`): three-path dispatch (single-tool / template / planner). Remove manual collection extraction instructions. Remove "save plan?" prompt. Add auto-cache: Path 3 calls `plan_save()` on successful planner execution (TTL 30 days).
+6. **Update query-planner agent** (`conexus/agents/query-planner.md`): reduce scope to exception-path. Add note that simple scoped queries go through enhanced `query` MCP directly. Update few-shot examples to emphasize catalog-first patterns.
+7. **Update analytical-operator agent** (`conexus/agents/analytical-operator.md`): no functional changes, but update references to the query pipeline flow.
+8. **Update orchestrator agent** (`conexus/agents/orchestrator.md`): when the task is a simple search question (no extract/compare/generate signals), call enhanced `query` MCP with appropriate params instead of dispatching `/conexus:query` skill. Decision: if the question can be answered by a single `query()` call with catalog params, use it directly. If it needs multi-step analysis, dispatch the skill.
+9. **Update SubagentStart hook** (`conexus/hooks/scripts/subagent-start.sh`): update `query` tool signature in the nx Storage Tools block to show new params (`author`, `content_type`, `follow_links`, `depth`, `subtree`).
 10. **Update related skills** that reference the query pipeline:
-    - `nx/skills/research-synthesis/SKILL.md` — reference enhanced `query` for scoped search
-    - `nx/skills/knowledge-tidying/SKILL.md` — reference enhanced `query` for dedup checks
-    - `nx/skills/deep-analysis/SKILL.md` — reference enhanced `query` for evidence gathering
+    - `conexus/skills/research-synthesis/SKILL.md` — reference enhanced `query` for scoped search
+    - `conexus/skills/knowledge-tidying/SKILL.md` — reference enhanced `query` for dedup checks
+    - `conexus/skills/deep-analysis/SKILL.md` — reference enhanced `query` for evidence gathering
 
 ### Phase 3: User-Facing Documentation (docs/)
 

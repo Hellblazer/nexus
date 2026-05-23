@@ -337,7 +337,7 @@ Full audit output conforming to the canonical prompt's output-format contract:
 
 ## Cross-Project Incident Filings
 
-When the audit subagent reads T2 `rdr_process`, it ingests both prior audit outputs and individual incident filings from sibling projects. Sibling projects file cross-project incidents using the template at `nx/resources/rdr_process/INCIDENT-TEMPLATE.md` (Phase 3). The template has 6 frontmatter fields (`project`, `rdr`, `incident_date`, `drift_class`, `caught_by`, `outcome`) and 8 required narrative sections covering what was meant, what shipped, the gap, decision point, mechanism, what caught it, cost, and lessons.
+When the audit subagent reads T2 `rdr_process`, it ingests both prior audit outputs and individual incident filings from sibling projects. Sibling projects file cross-project incidents using the template at `conexus/resources/rdr_process/INCIDENT-TEMPLATE.md` (Phase 3). The template has 6 frontmatter fields (`project`, `rdr`, `incident_date`, `drift_class`, `caught_by`, `outcome`) and 8 required narrative sections covering what was meant, what shipped, the gap, decision point, mechanism, what caught it, cost, and lessons.
 
 Filings land in T2 as `rdr_process/<project>-incident-<slug>` with `ttl=0` (permanent). The audit subagent picks them up via `memory_list(project="rdr_process")` + `memory_search(project="rdr_process", query="<project>")`. The template's `drift_class` enum values exactly match the sub-pattern taxonomy in the canonical prompt, so the subagent can classify filed incidents directly without translation.
 

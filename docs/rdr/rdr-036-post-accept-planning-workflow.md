@@ -62,12 +62,12 @@ Not every RDR warrants full planning ceremony. RDR-035 (delete one frontmatter l
 
 ### F-04: Strategic planner already mandates plan-auditor as successor
 - **Classification**: Verified — Source Search
-- **Method**: Read `nx/agents/strategic-planner.md` lines 165-170
+- **Method**: Read `conexus/agents/strategic-planner.md` lines 165-170
 - **Detail**: The strategic-planner agent has a "Successor Enforcement (MANDATORY)" section that always relays to plan-auditor after creating a plan. This means the accept skill only needs to dispatch strategic-planner — the auditor handoff is already built into the agent chain. No separate dispatch logic needed.
 
 ### F-05: Accept skill currently has no agent delegation
 - **Classification**: Verified — Source Search
-- **Method**: Read `nx/skills/rdr-accept/SKILL.md` line 31
+- **Method**: Read `conexus/skills/rdr-accept/SKILL.md` line 31
 - **Detail**: The accept skill states "This skill executes directly — no agent delegation." Adding the planning handoff would be the first agent dispatch from the accept skill. The skill needs to be updated to support optional agent delegation.
 
 ### F-06: RDR content provides complete input for strategic planner relay
@@ -82,7 +82,7 @@ Not every RDR warrants full planning ceremony. RDR-035 (delete one frontmatter l
 
 ### F-08: Strategic planner lacks an explicit enrichment phase after audit
 - **Classification**: Verified — Source Search
-- **Method**: Read `nx/agents/strategic-planner.md` Phase 3 (lines 107-114) and Bead Content Requirements (lines 118-150)
+- **Method**: Read `conexus/agents/strategic-planner.md` Phase 3 (lines 107-114) and Bead Content Requirements (lines 118-150)
 - **Detail**: Phase 3 says "Iterate based on audit feedback until the plan passes review" but this is aspirational — the planner dispatches the auditor as a successor and is done. There is no mechanism for the audit findings to flow back into the beads. The Bead Content Requirements template describes what beads should contain (context, prerequisites, execution instructions, parallelization guidance, continuation state, validation) but the audit-identified gaps, refined dependency ordering, missing test strategies, and codebase alignment issues are never folded back in.
 
 ### F-09: Feedback loop to strategic planner is architecturally impossible
@@ -119,7 +119,7 @@ Not every RDR warrants full planning ceremony. RDR-035 (delete one frontmatter l
 
 ### New agent: plan-enricher
 
-A new agent (`nx/agents/plan-enricher.md`) that sits at the end of the planning chain. It receives audit findings from plan-auditor and enriches every bead to be fully self-contained and ready for autonomous execution.
+A new agent (`conexus/agents/plan-enricher.md`) that sits at the end of the planning chain. It receives audit findings from plan-auditor and enriches every bead to be fully self-contained and ready for autonomous execution.
 
 **Agent chain (forward-only, no feedback loops):**
 ```
@@ -234,18 +234,18 @@ Update the close skill's frontmatter description to remove "bead decomposition" 
 ## Implementation Plan
 
 ### Phase 1: Create plan-enricher agent
-- Create `nx/agents/plan-enricher.md` with:
+- Create `conexus/agents/plan-enricher.md` with:
   - Relay reception: lightweight relay with RDR reference; discovers context via T1 scratch search
   - T1 read pattern: search for audit findings, plan structure, bead IDs from predecessors
   - Bead enrichment logic: read each bead, update with audit findings, ensure self-contained
   - T1 write: epic bead ID and enrichment summary (for accept skill to persist to T2)
   - No mandatory successor — reports to user
   - Model: sonnet (structured enrichment, not deep reasoning)
-- Create `/conexus:enrich-plan` skill (`nx/skills/enrich-plan/SKILL.md`)
-- Register agent and skill in `nx/registry.yaml`
+- Create `/conexus:enrich-plan` skill (`conexus/skills/enrich-plan/SKILL.md`)
+- Register agent and skill in `conexus/registry.yaml`
 
 ### Phase 2: Wire plan-auditor successor
-- Update `nx/agents/plan-auditor.md` Successor Enforcement:
+- Update `conexus/agents/plan-auditor.md` Successor Enforcement:
   - Search T1 for `rdr-planning-context` tag (written by accept skill) and verify RDR ID matches current relay — if both match, relay to `plan-enricher`
   - If tag absent or RDR ID mismatch (standalone audit) → relay to `developer`/`architect-planner` (existing behavior)
 - Remove aspirational "iterate based on audit feedback" from strategic planner Phase 3
@@ -264,7 +264,7 @@ Update the close skill's frontmatter description to remove "bead decomposition" 
 - Update frontmatter description to remove "bead decomposition"
 - Update Success Criteria to remove bead-creation checkbox, add bead-status advisory checkbox
 - Skip advisory if no `epic_bead` in T2 (user skipped planning)
-- Update `nx/registry.yaml` rdr-close entry to remove "bead decomposition" from description
+- Update `conexus/registry.yaml` rdr-close entry to remove "bead decomposition" from description
 
 ### Phase 5: Update workflow documentation
 - Update `docs/rdr-workflow.md` state machine and Accept/Close sections

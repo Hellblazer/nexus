@@ -23,7 +23,7 @@ Survey of every call site that reads or writes the four duplicated catalog field
 
 Caveat on counts: "reads" includes display, comparison, predicate, dict-roundtrip, and projector-side rebuild reads. Some sites read multiple fields on the same line (`cat.update(...)` in `commands/catalog.py:543/558` accepts any subset of the four via `**fields`). The mutating site that matters operationally is **`Catalog.register()` line 778-786 (head_hash + title idempotency guard)**, which is read-only at the API level (a SELECT) but is the load-bearing dedup gate that Phase 5 plans to drop.
 
-Plugin/skill markdown surface: zero call sites read these fields. Only `nx/CHANGELOG.md` mentions `source_uri` in release-note prose. No plugin or agent prompt reads the fields directly.
+Plugin/skill markdown surface: zero call sites read these fields. Only `conexus/CHANGELOG.md` mentions `source_uri` in release-note prose. No plugin or agent prompt reads the fields directly.
 
 Test surface: 30 test assertions touch `entry.{source_uri,head_hash,chunk_count,title}` across 6 files; all are read-only assertions and migrate by adopting the projection-only contract.
 
@@ -104,11 +104,11 @@ Phase 0 leaves `consolidation.py:86/114`, `commands/catalog.py:3064/3067`, `comm
 
 ## Plugin / skill surface
 
-Survey paths: `nx/agents/**/*.md`, `nx/commands/**/*.md`, `nx/skills/**/*.md`, `sn/hooks/**`, `~/.claude/plugins/marketplaces/nexus-plugins/**` (live cache).
+Survey paths: `conexus/agents/**/*.md`, `conexus/commands/**/*.md`, `conexus/skills/**/*.md`, `sn/hooks/**`, `~/.claude/plugins/marketplaces/nexus-plugins/**` (live cache).
 
 | File:line | Field | Kind | Notes |
 |---|---|---|---|
-| `nx/CHANGELOG.md:31,35,56` | `source_uri` | release-note prose | References to the nexus-3e4s incident and the dt-stamp source_uri restoration. No code path |
+| `conexus/CHANGELOG.md:31,35,56` | `source_uri` | release-note prose | References to the nexus-3e4s incident and the dt-stamp source_uri restoration. No code path |
 
 **Zero plugin / skill / agent prompt files read any of the four fields directly.** The MCP `catalog.update` tool (`src/nexus/mcp/catalog.py:286-302`) is the only MCP surface that mutates them, and is captured in §Mutating call sites.
 

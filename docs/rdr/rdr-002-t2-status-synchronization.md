@@ -74,7 +74,7 @@ This means:
 - T2 storage: `nx memory put/get` with project `{repo}_rdr`
 - Current T2 update points: `/conexus:rdr-create` (initial write), `/conexus:rdr-close`
   (final write)
-- SessionStart hook: `nx/hooks/scripts/rdr_hook.py` — runs at session
+- SessionStart hook: `conexus/hooks/scripts/rdr_hook.py` — runs at session
   start, currently reports RDR count and indexing status
 
 ## Research Findings
@@ -190,7 +190,7 @@ to frontmatter — report the error. T2 is the process authority.
 
 #### SessionStart reconciliation
 
-Extend `nx/hooks/scripts/rdr_hook.py` to reconcile file ↔ T2 on every
+Extend `conexus/hooks/scripts/rdr_hook.py` to reconcile file ↔ T2 on every
 session start:
 
 ```python
@@ -343,15 +343,15 @@ daemons or per-clone setup.
    the `## Action` section, not a Python code change
 2. Update `/conexus:rdr-gate` action instructions to print accept prompt when
    gate returns PASSED: "Run `/conexus:rdr-accept <id>` to accept this RDR."
-3. Create `/conexus:rdr-accept` command file (`nx/commands/conexus:rdr-accept.md`) and
-   corresponding skill definition (`nx/skills/conexus:rdr-accept/SKILL.md`) —
+3. Create `/conexus:rdr-accept` command file (`conexus/commands/conexus:rdr-accept.md`) and
+   corresponding skill definition (`conexus/skills/conexus:rdr-accept/SKILL.md`) —
    reads gate result from T2, blocks if no PASSED gate, writes T2 first
    (`status`, `reviewed-by`, `accepted_date`), then updates file
    frontmatter, self-heals on re-run if file update failed previously
 
 ### Phase 2: SessionStart Reconciliation
 
-5. Extend `nx/hooks/scripts/rdr_hook.py` to reconcile file ↔ T2 on
+5. Extend `conexus/hooks/scripts/rdr_hook.py` to reconcile file ↔ T2 on
    session start — compare statuses, update the less-advanced side,
    print summary only when changes occur
 6. Update `/conexus:rdr-list` to read process metadata from T2 (not files) for

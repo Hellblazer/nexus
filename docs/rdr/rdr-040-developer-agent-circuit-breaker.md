@@ -47,10 +47,10 @@ Full incident memo: T2 `nexus_active/investigation-developer-agent-thrashing-deb
 
 ### Technical Environment
 
-- Developer agent: `nx/agents/developer.md` (sonnet model)
-- Debugger agent: `nx/agents/debugger.md` (opus model)
-- Development skill: `nx/skills/development/SKILL.md`
-- Orchestration skill: `nx/skills/orchestration/SKILL.md`
+- Developer agent: `conexus/agents/developer.md` (sonnet model)
+- Debugger agent: `conexus/agents/debugger.md` (opus model)
+- Development skill: `conexus/skills/development/SKILL.md`
+- Orchestration skill: `conexus/skills/orchestration/SKILL.md`
 - Known constraint: subagents cannot spawn other subagents
 
 ## Research Findings
@@ -266,9 +266,9 @@ Dispatch developer agent on a task with a known test failure (e.g., the ART Mask
 ## References
 
 - T2 incident memo: `nexus_active/investigation-developer-agent-thrashing-debugger-underuse`
-- Developer agent: `nx/agents/developer.md`
-- Development skill: `nx/skills/development/SKILL.md`
-- Orchestration skill: `nx/skills/orchestration/SKILL.md`
+- Developer agent: `conexus/agents/developer.md`
+- Development skill: `conexus/skills/development/SKILL.md`
+- Orchestration skill: `conexus/skills/orchestration/SKILL.md`
 - Known limitation: subagents cannot spawn other subagents (CLAUDE.md)
 
 ## Revision History

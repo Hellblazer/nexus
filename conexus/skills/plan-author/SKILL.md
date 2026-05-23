@@ -35,7 +35,7 @@ plan_match(
 
 1. The plan-authoring guide (`docs/plan-authoring-guide.md`) —
    vocabulary, schema, dimension conventions.
-2. The dimension registry (`nx/plans/dimensions.yml`) — valid
+2. The dimension registry (`conexus/plans/dimensions.yml`) — valid
    dimension keys.
 3. Prior art via `plan_search` — existing plans at the target verb
    so the draft doesn't duplicate or diverge needlessly.
@@ -52,6 +52,6 @@ when satisfied.
   descriptions take a few iterations to settle.
 - **Ignoring the dimension registry.** New plans whose dimensions
   are unregistered produce warnings (lenient mode) or raise (strict
-  mode). Check `nx/plans/dimensions.yml` before pinning exotic axes.
+  mode). Check `conexus/plans/dimensions.yml` before pinning exotic axes.
 
 See `docs/plan-authoring-guide.md` for full authoring reference.

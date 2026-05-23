@@ -29,7 +29,7 @@ Contracts gated here:
 
     **Contingent fix path** (do NOT pre-emptively apply): if RF-2 is
     falsified empirically, flip ``key: topic`` -> ``key: _topic_label``
-    at ``nx/plans/builtin/abstract-themes.yml:71`` in the SAME commit
+    at ``conexus/plans/builtin/abstract-themes.yml:71`` in the SAME commit
     as the failing-then-passing assertion. ``_topic_label`` is a
     natural-language hint that nudges the LLM partitioner toward the
     materialized field; the SQL fast path is NOT triggered (RDR-093
@@ -516,7 +516,7 @@ class TestAbstractThemesPlanIntegration:
                 f"{len(invented)}/{len(keys)} key(s) NOT grounded in the "
                 f"BERTopic label set for {corpus}: {invented!r}. "
                 "Contingent fix: flip 'key: topic' -> 'key: _topic_label' "
-                "at nx/plans/builtin/abstract-themes.yml; ship the flip in "
+                "at conexus/plans/builtin/abstract-themes.yml; ship the flip in "
                 "the same commit as this assertion's first green run."
             )
 

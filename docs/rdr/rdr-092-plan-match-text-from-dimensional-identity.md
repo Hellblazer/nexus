@@ -104,7 +104,7 @@ Scope pivoted to upstream-first (RDR-092B). The Proposed Solution and Implementa
 Note: `purposes.yml` defines link-traversal purposes, not verbs. Verbs live in `dimensions.yml`. Verb routing for grown plans must come from caller-supplied dims or plan_json shape.
 
 **R7: Legacy templates vs YAML builtins (T2: `092-research-7`).** Enumerated the 5 legacy `_PLAN_TEMPLATES` rows. Disposition:
-- Migrate 3 to YAML (distinct shapes not covered by existing builtins): "find documents by author" (author-scoped search), "trace citation chain" (citation-traversal), "search within content type" (type-scoped). Each becomes a dimensional template in `nx/plans/builtin/*.yml`.
+- Migrate 3 to YAML (distinct shapes not covered by existing builtins): "find documents by author" (author-scoped search), "trace citation chain" (citation-traversal), "search within content type" (type-scoped). Each becomes a dimensional template in `conexus/plans/builtin/*.yml`.
 - Retire 2 as redundant: "trace provenance chain" (overlaps research-default), "compare documents across corpora" (overlaps analyze-default). Drop them entirely.
 
 Net result: `_PLAN_TEMPLATES` array shrinks from 5 to 0; YAML builtin count grows from 9 to 12. The comment at `catalog.py:91` about dimensions=NULL being load-bearing gets removed along with the `_PLAN_TEMPLATES` block.
@@ -141,7 +141,7 @@ def _synthesize_match_text(row):
     return f"{query}. {' '.join(suffix_parts)}".strip('. ')
 ```
 
-Also: the "analyze: tradeoffs" probe mismatches `document-default` in all three forms. That is a description-quality issue in `nx/plans/builtin/document-default.yml`, fixable independently.
+Also: the "analyze: tradeoffs" probe mismatches `document-default` in all three forms. That is a description-quality issue in `conexus/plans/builtin/document-default.yml`, fixable independently.
 
 **R11: Engineering cost (T2: `092-research-11`).** Source delta ~420 LOC across 9 Python files; 120 LOC of 3 new YAML builtins; 425 LOC of 17 new tests across 7 existing test files; 3 docs files. Wall-clock per phase 19-30 hours focused; 29-45 hours with a 1.5x migration risk multiplier. Revised downward after the Phase 2 gate finding: Phase 2 is no longer new `min_confidence` wiring (the parameter already exists at 0.40 per RDR-079) but a smaller constant revision or a per-call override, 1-2 hours not the originally-estimated 2-3. Adjusted total: ~28-44 hours. Each phase can ship as its own PR. Natural ship order: Phase 0 first now (Phase 2's leverage depends on the Option A/B/C choice and on the size of the Phase 5 probe set), then 1 → 2 → 3 → 4 → 5. If Option B is chosen for Phase 2, ship it after Phase 0 so the measured effect is attributable.
 
@@ -165,7 +165,7 @@ The root cause of the empty columns is three save paths that do not carry dimens
 `src/nexus/commands/catalog.py:107` iterates `_PLAN_TEMPLATES` and calls `db.save_plan(query, plan_json, tags)` only. The 5 legacy builtins land with NULL `verb`/`name`/`dimensions`.
 
 Two options:
-- **Option 1 (preferred):** retire `_PLAN_TEMPLATES` and migrate the 5 legacy templates into `nx/plans/builtin/*.yml` files with full dimensional frontmatter. The `seed_loader.load_all_tiers` path already knows how to load them. One legacy-catalog-by-author template; one trace-citation; one trace-provenance; one compare-across-corpora; one find-by-type. Each becomes a YAML with `verb`, `scope`, `strategy`, `dimensions`, `plan_json`.
+- **Option 1 (preferred):** retire `_PLAN_TEMPLATES` and migrate the 5 legacy templates into `conexus/plans/builtin/*.yml` files with full dimensional frontmatter. The `seed_loader.load_all_tiers` path already knows how to load them. One legacy-catalog-by-author template; one trace-citation; one trace-provenance; one compare-across-corpora; one find-by-type. Each becomes a YAML with `verb`, `scope`, `strategy`, `dimensions`, `plan_json`.
 - **Option 2 (minimal):** keep `_PLAN_TEMPLATES` but add `verb`, `name`, `dimensions` dict entries to each template, and pass them through on `save_plan`. Simpler diff; keeps two template surfaces alive.
 
 Pick Option 1. Fewer surfaces, one loader, dimensional from the source.
@@ -186,7 +186,7 @@ Clarification: `purposes.yml` resolves link-type sets for the `traverse` operato
 
 #### 0.3 Verify `seed_loader` actually runs
 
-R3 showed that `load_all_tiers` works in isolation (would insert 9 dimensional rows from `nx/plans/builtin/*.yml`) but the live DB has 0 such rows. The `nx catalog setup` path at `catalog.py:120` does call `load_all_tiers`, and errors are logged via `_log.warning("rdr078_seed_load_error", ...)` (line 133). Two hypotheses:
+R3 showed that `load_all_tiers` works in isolation (would insert 9 dimensional rows from `conexus/plans/builtin/*.yml`) but the live DB has 0 such rows. The `nx catalog setup` path at `catalog.py:120` does call `load_all_tiers`, and errors are logged via `_log.warning("rdr078_seed_load_error", ...)` (line 133). Two hypotheses:
 - Errors WERE raised per-tier and logged, but `seeded += len(result.inserted)` masked the zero-count case. Likely, since `catalog.py:131-137` does not differentiate "no files found" from "errors swallowed all of them".
 - `nx catalog setup` never ran on this machine after the loader landed.
 
@@ -318,7 +318,7 @@ Train or use a cross-encoder post-ranker over the cosine top-K. More complex, co
 
 ### Phase 0a: migrate legacy `_PLAN_TEMPLATES` into YAML
 
-- Retire `_PLAN_TEMPLATES` from `src/nexus/commands/catalog.py`. Add 5 new YAML files under `nx/plans/builtin/` (one per legacy template) with full `verb`, `scope`, `strategy`, `dimensions`, `plan_json` frontmatter.
+- Retire `_PLAN_TEMPLATES` from `src/nexus/commands/catalog.py`. Add 5 new YAML files under `conexus/plans/builtin/` (one per legacy template) with full `verb`, `scope`, `strategy`, `dimensions`, `plan_json` frontmatter.
 - Remove the `for tmpl in _PLAN_TEMPLATES:` loop in `catalog.py:107-115`. The `load_all_tiers` call below it already handles loading.
 - Regression gate: `nx catalog setup` on a fresh DB produces at least 9 dimensional rows (4 existing + 5 migrated, minus any overlap). Test: `test_catalog_cli.py::test_setup_produces_dimensional_rows`.
 

@@ -66,7 +66,7 @@ The investigation tested every available permission mechanism. All failed for MC
 ### Finding 3: Removing `tools:` field fixes MCP access — verified
 
 Test performed 2026-03-12:
-1. Removed `tools:` field from `nx/agents/knowledge-tidier.md`
+1. Removed `tools:` field from `conexus/agents/knowledge-tidier.md`
 2. Spawned agent with `mode: bypassPermissions`
 3. Agent called `store_put` → **SUCCESS** (entry ID: `7b82106b6143ef2b`)
 4. Agent called `search` → **SUCCESS** (retrieved entry with score 0.4895)
@@ -140,7 +140,7 @@ color: mint
 ### What Does NOT Change
 
 - MCP server (`src/nexus/mcp_server.py`) — no changes needed
-- MCP server registration (`nx/.mcp.json`) — stays at plugin level
+- MCP server registration (`conexus/.mcp.json`) — stays at plugin level
 - Agent system prompts — all MCP tool references in agent bodies remain correct
 - Skill and command files — MCP tool references remain correct
 - PermissionRequest hook — already handles all tools
@@ -165,20 +165,20 @@ color: mint
 
 | File | Change |
 |------|--------|
-| `nx/agents/architect-planner.md` | Remove `tools:` frontmatter line |
-| `nx/agents/code-review-expert.md` | Remove `tools:` frontmatter line |
-| `nx/agents/codebase-deep-analyzer.md` | Remove `tools:` frontmatter line |
-| `nx/agents/debugger.md` | Remove `tools:` frontmatter line |
-| `nx/agents/deep-analyst.md` | Remove `tools:` frontmatter line |
-| `nx/agents/deep-research-synthesizer.md` | Remove `tools:` frontmatter line |
-| `nx/agents/developer.md` | Remove `tools:` frontmatter line |
-| `nx/agents/knowledge-tidier.md` | Remove `tools:` frontmatter line (already done) |
-| `nx/agents/orchestrator.md` | Remove `tools:` frontmatter line |
-| `nx/agents/pdf-chromadb-processor.md` | Remove `tools:` frontmatter line |
-| `nx/agents/plan-auditor.md` | Remove `tools:` frontmatter line |
-| `nx/agents/strategic-planner.md` | Remove `tools:` frontmatter line |
-| `nx/agents/substantive-critic.md` | Remove `tools:` frontmatter line |
-| `nx/agents/test-validator.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/architect-planner.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/code-review-expert.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/codebase-deep-analyzer.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/debugger.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/deep-analyst.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/deep-research-synthesizer.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/developer.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/knowledge-tidier.md` | Remove `tools:` frontmatter line (already done) |
+| `conexus/agents/orchestrator.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/pdf-chromadb-processor.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/plan-auditor.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/strategic-planner.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/substantive-critic.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/test-validator.md` | Remove `tools:` frontmatter line |
 | `docs/rdr/rdr-023-agent-tool-permissions-audit.md` | Add supersession note for tools field |
 | `docs/rdr/rdr-034-mcp-server-agent-storage.md` | Add post-implementation note |
 
@@ -187,8 +187,8 @@ color: mint
 | Category | Reason |
 |----------|--------|
 | `src/nexus/mcp_server.py` | MCP server works correctly |
-| `nx/.mcp.json` | Server registration is correct |
-| `nx/hooks/scripts/permission-request-stdin.sh` | Already handles all tools |
+| `conexus/.mcp.json` | Server registration is correct |
+| `conexus/hooks/scripts/permission-request-stdin.sh` | Already handles all tools |
 | Skills, commands, shared docs | MCP tool references are correct |
 | Tests | No code changes to test |
 

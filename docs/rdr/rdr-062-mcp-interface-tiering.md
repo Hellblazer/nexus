@@ -97,7 +97,7 @@ src/nexus/
 
 ### Plugin Configuration
 
-`nx/.mcp.json` registers both servers:
+`conexus/.mcp.json` registers both servers:
 ```json
 {
   "nexus": { "command": "nx-mcp" },
@@ -125,13 +125,13 @@ This required two mechanical renames across ~24 agent/skill/hook files:
 4. Drop 6 demoted tools from MCP entirely (CLI commands unchanged)
 5. Update `mcp_server.py` as backward-compat shim for test imports
 6. Update `pyproject.toml` entry points
-7. Update `nx/.mcp.json`, auto-approve hook, subagent-start hook
+7. Update `conexus/.mcp.json`, auto-approve hook, subagent-start hook
 8. Mechanical sed across agent/skill `.md` files for new tool prefix
 
 ### Phase 1 Additional Items (from gate critique)
 
 9. Update `test_mcp_server_round_trip` integration test: remove demoted tools from expected set, add catalog server round-trip test
-10. Remove demoted tool references from `_shared/CONTEXT_PROTOCOL.md`, `subagent-start.sh`, `nx/skills/nexus/SKILL.md` — these require content deletion, not prefix rename
+10. Remove demoted tool references from `_shared/CONTEXT_PROTOCOL.md`, `subagent-start.sh`, `conexus/skills/nexus/SKILL.md` — these require content deletion, not prefix rename
 11. Update `mcp_server.py` shim to re-export all 23 tool functions (13 core + 10 catalog) plus injection helpers — demoted functions remain importable as Python callables
 12. `result_used` tool (RDR-061) is a forward dependency — include in core server only after RDR-061 branch merges. Core server is 13 tools without it, 14 with it.
 
@@ -141,7 +141,7 @@ This required two mechanical renames across ~24 agent/skill/hook files:
 - `uv run pytest -m integration` — round-trip tests pass for both servers
 - Both `nx-mcp` and `nx-mcp-catalog` start and register correct tool counts
 - Auto-approve hook accepts both prefixes
-- `grep -r 'mcp__plugin_conexus_nexus__catalog' nx/` returns 0 matches
+- `grep -r 'mcp__plugin_conexus_nexus__catalog' conexus/` returns 0 matches
 - No demoted tool names appear in injected agent guidance (`subagent-start.sh`, `CONTEXT_PROTOCOL.md`)
 
 ## Key Files
@@ -154,21 +154,21 @@ This required two mechanical renames across ~24 agent/skill/hook files:
 | `src/nexus/mcp/core.py` | NEW — 14 core tools + FastMCP |
 | `src/nexus/mcp/catalog.py` | NEW — 10 catalog tools + FastMCP |
 | `pyproject.toml` | Add `nx-mcp-catalog` entry point |
-| `nx/.mcp.json` | Add `nexus-catalog` server |
-| `nx/hooks/scripts/auto-approve-nx-mcp.sh` | Update allow list |
-| `nx/agents/*.md` (~24 files) | Update catalog tool prefixes |
+| `conexus/.mcp.json` | Add `nexus-catalog` server |
+| `conexus/hooks/scripts/auto-approve-nx-mcp.sh` | Update allow list |
+| `conexus/agents/*.md` (~24 files) | Update catalog tool prefixes |
 
 ## Research Findings
 
 ### RF-062-1: Agent usage data shows clear tool tier separation
 
-**Source**: Empirical analysis of 16 agent `.md` files in `nx/agents/`.
+**Source**: Empirical analysis of 16 agent `.md` files in `conexus/agents/`.
 
 9 of 16 agents (56%) reference zero catalog tools. Only 7 agents use catalog tools: `debugger`, `codebase-deep-analyzer`, `deep-analyst`, `developer`, `deep-research-synthesizer`, `architect-planner`, `knowledge-tidier`. All 16 agents reference core tools (search, store, memory, scratch). This validates the two-tier split — most agents would benefit from a smaller tool surface.
 
 ### RF-062-2: Catalog tool references are concentrated in linker/research agents
 
-**Source**: `grep -rc` across `nx/` directory.
+**Source**: `grep -rc` across `conexus/` directory.
 
 104 catalog tool occurrences across 24 files. The heaviest users: `auto-approve-nx-mcp.sh` (13 — the allow list), `nexus/SKILL.md` (10 — the cheat sheet), `deep-research-synthesizer.md` (10 — citation graph traversal), `subagent-start.sh` (9 — injected guidance). Agent files average 5-6 catalog refs each. This concentration means the migration impact is bounded and mechanical.
 

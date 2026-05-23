@@ -170,7 +170,7 @@ The `nx` plugin gives Claude Code agents access to all three storage tiers, 13 s
 
 After installing, run `/conexus:nx-preflight` to verify all plugin dependencies are present.
 
-See [plugin documentation](https://github.com/Hellblazer/nexus/blob/main/nx/README.md) for the full agent/skill reference. For local development from a repo checkout:
+See [plugin documentation](https://github.com/Hellblazer/nexus/blob/main/conexus/README.md) for the full agent/skill reference. For local development from a repo checkout:
 
 ```bash
 claude --plugin-dir ./nx

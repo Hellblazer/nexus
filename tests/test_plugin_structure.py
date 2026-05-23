@@ -487,7 +487,7 @@ class TestHooks:
         )
 
     def test_plugin_json_declares_python_engine(self) -> None:
-        """nx/.claude-plugin/plugin.json must declare engines.python so the
+        """conexus/.claude-plugin/plugin.json must declare engines.python so the
         Python ≥3.12 requirement is discoverable from the plugin manifest,
         not just from the runtime guards in each hook script.
         """
@@ -697,7 +697,7 @@ class TestRdr080StubAgents:
         content = stub.read_text()
         for deleted in _DELETED_AGENTS:
             assert deleted not in content, (
-                f"nx/agents/{agent_name}.md references deleted agent '{deleted}'. "
+                f"conexus/agents/{agent_name}.md references deleted agent '{deleted}'. "
                 "Stubs must redirect to MCP tools only (RDR-080 SC-4)."
             )
 
@@ -706,6 +706,6 @@ class TestRdr080StubAgents:
         stub = PLUGIN_DIR / "agents" / f"{agent_name}.md"
         content = stub.read_text()
         assert "mcp__plugin_conexus_nexus__" in content, (
-            f"nx/agents/{agent_name}.md must reference an MCP tool "
+            f"conexus/agents/{agent_name}.md must reference an MCP tool "
             "(mcp__plugin_conexus_nexus__*) as its redirect target (RDR-080)."
         )

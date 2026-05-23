@@ -11,10 +11,10 @@ accepted_date: 2026-04-29
 closed_date: 2026-04-29
 close_reason: implemented
 gap_closures:
-  Gap1: nx/plans/builtin/abstract-themes.yml:24
-  Gap2: nx/plans/builtin/abstract-themes.yml:35
-  Gap3: nx/plans/builtin/abstract-themes.yml:21
-  Gap4: nx/plans/builtin/abstract-themes.yml:45
+  Gap1: conexus/plans/builtin/abstract-themes.yml:24
+  Gap2: conexus/plans/builtin/abstract-themes.yml:35
+  Gap3: conexus/plans/builtin/abstract-themes.yml:21
+  Gap4: conexus/plans/builtin/abstract-themes.yml:45
   Gap5: tests/test_abstract_themes_plan_integration.py:95
 related_issues: [nexus-ldnp, nexus-5gby, nexus-17yg, nexus-zvbc, nexus-j5ka, nexus-h3e2]
 related_tests: [test_abstract_themes_plan.py, test_abstract_themes_plan_integration.py]
@@ -59,7 +59,7 @@ A collection with 46 topics (e.g. `docs__art-grossberg-papers`) would naïvely p
 
 ### Technical Environment
 
-- **Plan library**: `src/nexus/db/t2/plan_library.py`, the `plans` SQLite table seeded from YAML files at `nx/plans/builtin/*.yml` via the four-tier loader.
+- **Plan library**: `src/nexus/db/t2/plan_library.py`, the `plans` SQLite table seeded from YAML files at `conexus/plans/builtin/*.yml` via the four-tier loader.
 - **Plan matching**: `src/nexus/plans/matcher.py` — T1 cosine over match-text + FTS5 fallback, scope-aware after RDR-091, hybrid match-text after RDR-092. Verb dimension filters before similarity ranking.
 - **Plan execution**: `src/nexus/plans/runner.py` — dispatches each step's `tool` to the corresponding MCP tool via `_OPERATOR_TOOL_MAP`.
 - **Search step**: `src/nexus/search_engine.py:search` — supports per-corpus over-fetch, scope filters, topic pre-filter and grouping. Critically, it tags each result with `_topic_label` (`search_engine.py:674-697`) when the source collection has an active BERTopic taxonomy, so the downstream `operator_groupby` step can group by `_topic_label` without an extra lookup.
@@ -88,7 +88,7 @@ Deep-research synthesis at T3 IDs `01d3943271e1e716` + `45040ed1bffe64d6` — th
 
 **RF-5** (Documented, Zhou et al. VLDB 2025 §6.4): the paper's CheapRAG configuration uses K = top-5 communities by aggregate vector score against the question. The shipped plan preserves the *selection rule* (rank groups by sum of per-item search score) but bounds the candidate set upstream via the `limit` binding rather than slicing post-groupby. `groupby` returns groups in aggregate-score order; `aggregate` consumes that ordering inside one bundled `claude_dispatch`. The K=5 cap is implicit in the search over-fetch + groupby partitioning rather than explicit in the plan YAML.
 
-**RF-6** (Verified, source `nx/plans/builtin/research-default.yml`): the YAML format supports binding-driven step parameterization (`$concept`, `$limit`, `$step1.ids`). The new plan can expose `K`, `over_fetch_limit`, and `score_threshold` as optional bindings with defaults.
+**RF-6** (Verified, source `conexus/plans/builtin/research-default.yml`): the YAML format supports binding-driven step parameterization (`$concept`, `$limit`, `$step1.ids`). The new plan can expose `K`, `over_fetch_limit`, and `score_threshold` as optional bindings with defaults.
 
 **RF-7** (Verified, current `nx taxonomy status`): `knowledge__delos` has 25+ topics and 1k+ chunk assignments; `docs__art-grossberg-papers` has 46 topics and several thousand chunk assignments. `knowledge__hybridrag` has zero topics (HDBSCAN found no clusters; corpus too small/uniform). Validation must use one of the populated collections.
 
@@ -139,7 +139,7 @@ One phase, one branch, one PR. Single-phase by design (see "Why one phase" above
 
 ### Prerequisites (mapped to beads)
 
-- **P1.1 — `abstract-themes` plan YAML.** ✅ Shipped (nexus-ldnp). `nx/plans/builtin/abstract-themes.yml` lands the four-step shape: `search` (broad over-fetch with mode:broad and section_type!=references filter) → `groupby` (key=topic) → `aggregate` (cross-group synthesis) → `summarize` (coalescing pass). Dimensions: `verb=query`, `scope=global`, `strategy=abstract-themes`. Required bindings: `intent`. Optional bindings: `corpus`, `limit`. Defaults: `corpus=all`, `limit=30`. Two follow-up commits applied smoke-test feedback: nexus-h3e2 introduced the `mode: broad` runner affordance (replacing a hard-coded `threshold=2.0` workaround) and nexus-j5ka added the `section_type!=references` filter. Both shipped on PR #362.
+- **P1.1 — `abstract-themes` plan YAML.** ✅ Shipped (nexus-ldnp). `conexus/plans/builtin/abstract-themes.yml` lands the four-step shape: `search` (broad over-fetch with mode:broad and section_type!=references filter) → `groupby` (key=topic) → `aggregate` (cross-group synthesis) → `summarize` (coalescing pass). Dimensions: `verb=query`, `scope=global`, `strategy=abstract-themes`. Required bindings: `intent`. Optional bindings: `corpus`, `limit`. Defaults: `corpus=all`, `limit=30`. Two follow-up commits applied smoke-test feedback: nexus-h3e2 introduced the `mode: broad` runner affordance (replacing a hard-coded `threshold=2.0` workaround) and nexus-j5ka added the `section_type!=references` filter. Both shipped on PR #362.
 
 - **P1.2 — Top-K group selection.** ✅ Resolved by the shipped shape. The original framing proposed a new `operator_select_top_k` primitive between groupby and summarize. The shipped `groupby → aggregate → summarize` path does not need a separate top-K operator: `groupby` returns groups ordered by aggregate item score, and the `limit` binding bounds the surface area. No new operator needed.
 
@@ -204,7 +204,7 @@ Deep-research synthesis at T3 IDs `01d3943271e1e716` + `45040ed1bffe64d6` — th
 
 ### Nexus Modules
 
-- `nx/plans/builtin/abstract-themes.yml` — the shipped plan template (renamed from working name `abstract-question.yml` during nexus-ldnp implementation).
+- `conexus/plans/builtin/abstract-themes.yml` — the shipped plan template (renamed from working name `abstract-question.yml` during nexus-ldnp implementation).
 - `src/nexus/db/t2/plan_library.py` — plan storage, the `plans` table, four-tier loader.
 - `src/nexus/plans/matcher.py` — verb-dimension filter + match-text cosine ranking.
 - `src/nexus/plans/runner.py` — step dispatch, `_OPERATOR_TOOL_MAP`. Includes the `mode: broad` authoring affordance (nexus-h3e2) that translates to `threshold=2.0` for abstract retrieval.

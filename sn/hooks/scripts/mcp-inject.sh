@@ -12,7 +12,7 @@
 # Plain stdout was the prior shape and once worked, but the JSON envelope is
 # the documented schema — it makes the emit intent unambiguous, so a Claude
 # Code change that tightens parsing won't silently drop the content. This
-# mirrors nx/hooks/scripts/subagent-start.sh, which migrated 2026-05-05
+# mirrors conexus/hooks/scripts/subagent-start.sh, which migrated 2026-05-05
 # (commit 68854ca). The sn plugin missed that migration; restoring it here
 # is what gets Serena + Context7 setup back into spawned subagents.
 #

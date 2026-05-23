@@ -77,7 +77,7 @@ The RDR-120 substrate split (conexus 4.34.0+, shipped 2026-05-22) is what makes 
 - **build-mcpb skill** (`mcp-server-dev:build-mcpb`) confirms: "Handles compiled dependencies (pydantic, numpy, chromadb, etc.). Eliminates manual pre-compilation burden." Reference example: `examples/hello-world-uv` in the mcpb repo.
 - **Container integration document** (`docs/container-integration.md` lines 182-220) describes the Cowork SDK transport: Claude Desktop passes configured MCP servers into the VM via `--mcp-config` with `"type": "sdk"`; the MCP server stays on the host; the VM's tool calls are bridged through the Anthropic SDK channel. State is shared with host CLI Claude through the same T2 / T3 daemons.
 - **MCP spec** for user-visible communication: `notifications/message` for log-level messages and tool-response `content` for in-thread text. Client behavior varies; safest pattern is to use both.
-- **Current SessionStart hook** at `nx/hooks/scripts/session_start.py` runs `nx daemon t2 ensure-running --quiet` only; never calls `install --autostart`.
+- **Current SessionStart hook** at `conexus/hooks/scripts/session_start.py` runs `nx daemon t2 ensure-running --quiet` only; never calls `install --autostart`.
 - **Strategic synthesis 2026-05-23 (T2)**: cited 16 sources; identified competitive landscape (Context7 49k stars, cognee 14k, mem0 634); confirmed `nx` plugin name collides with nrwl Nx Q1 2026 Claude Code plugin (separate concern, bead `nexus-mkj6u`).
 
 #### Dependency Source Verification

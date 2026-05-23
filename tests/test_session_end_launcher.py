@@ -157,7 +157,7 @@ def test_daemonize_falls_through_to_sync_on_oserror() -> None:
     assert calls == ["sync"]
 
 
-# ── nx/hooks/hooks.json contract (RDR-094 Phase C / nexus-l828) ─────────────
+# ── conexus/hooks/hooks.json contract (RDR-094 Phase C / nexus-l828) ─────────────
 
 
 def _read_plugin_hooks_json() -> dict:

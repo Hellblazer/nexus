@@ -84,7 +84,7 @@ Skills that produce outputs must document which tiers they use:
 
 ### Registry Integration
 
-After creating a skill, update `nx/registry.yaml`:
+After creating a skill, update `conexus/registry.yaml`:
 - Agent-delegating: under `agents:` — add model, skill, slash_command, triggers, and entry in `model_summary`
 - Standalone: under `standalone_skills:` with tools and triggers
 - RDR: under `rdr_skills:` with slash_command and triggers
@@ -92,7 +92,7 @@ After creating a skill, update `nx/registry.yaml`:
 
 ### Updating using-nx-skills
 
-When adding a new skill, also add it to `nx/skills/using-nx-skills/SKILL.md` routing tree. This file is injected every session — if your skill isn't listed there, it won't be discovered.
+When adding a new skill, also add it to `conexus/skills/using-nx-skills/SKILL.md` routing tree. This file is injected every session — if your skill isn't listed there, it won't be discovered.
 
 ## Known Pitfalls
 
@@ -126,7 +126,7 @@ This applies to `--description`, `--notes`, `--design`, and any flag that accept
 
 **Convention (not CI-enforced but expected):**
 - [ ] `effort` matches skill type (low=reference, medium=workflow, high=analysis)
-- [ ] Added to `nx/registry.yaml` (including `model_summary` for agent skills)
+- [ ] Added to `conexus/registry.yaml` (including `model_summary` for agent skills)
 - [ ] Added to `using-nx-skills` routing tree
 
 **Verify before committing:**

@@ -69,7 +69,7 @@ Use search tool: query="how does feature X work in our codebase", corpus="code",
 
 ## Consistency Checks
 
-Run from the **plugin root** (the `nx/` directory):
+Run from the **plugin root** (the `conexus/` directory):
 
 ```bash
 # All agents reference shared protocol

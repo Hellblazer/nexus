@@ -3,7 +3,7 @@
 
 Simulates what happens when Claude Code installs the plugin from GitHub:
   1. Clone the repo (simulated via `git clone --local`)
-  2. Set CLAUDE_PLUGIN_ROOT to the `nx/` subdirectory of the clone
+  2. Set CLAUDE_PLUGIN_ROOT to the `conexus/` subdirectory of the clone
   3. Validate that all referenced files are present in that installed location
 
 This is fundamentally different from test_plugin_structure.py, which validates

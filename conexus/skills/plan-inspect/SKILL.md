@@ -11,7 +11,7 @@ Two variants share this skill. The `strategy` dimension picks which:
 - **`strategy:default`** — inspect a single plan's runtime metrics
   and match history.
 - **`strategy:dimensions`** — enumerate registered dimensions from
-  `nx/plans/dimensions.yml` and count plans pinning each.
+  `conexus/plans/dimensions.yml` and count plans pinning each.
 
 ## Flow — single-plan inspection
 

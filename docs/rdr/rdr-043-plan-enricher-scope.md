@@ -66,14 +66,14 @@ This is a framing/documentation change across ~15 files, not a behavioral change
 
 | File | What changes |
 |------|-------------|
-| `nx/agents/plan-enricher.md` | Description, prompts, remove "degraded mode" |
-| `nx/skills/enrich-plan/SKILL.md` | Description, relay template, quality criteria |
-| `nx/commands/enrich-plan.md` | Relay prompt text |
-| `nx/commands/rdr-accept.md` | Enricher dispatch prompt |
-| `nx/skills/rdr-accept/SKILL.md` | Enricher dispatch description |
-| `nx/registry.yaml` | Agent description and triggers |
-| `nx/README.md` | Agent table description |
-| `nx/CHANGELOG.md` | Release note |
+| `conexus/agents/plan-enricher.md` | Description, prompts, remove "degraded mode" |
+| `conexus/skills/enrich-plan/SKILL.md` | Description, relay template, quality criteria |
+| `conexus/commands/enrich-plan.md` | Relay prompt text |
+| `conexus/commands/rdr-accept.md` | Enricher dispatch prompt |
+| `conexus/skills/rdr-accept/SKILL.md` | Enricher dispatch description |
+| `conexus/registry.yaml` | Agent description and triggers |
+| `conexus/README.md` | Agent table description |
+| `conexus/CHANGELOG.md` | Release note |
 
 ## Alternatives Considered
 
@@ -88,20 +88,20 @@ One for audit-findings integration, one for general enrichment. Rejected: same l
 ### RF-1: Audit-centric language inventory (2026-03-30)
 
 **Classification**: Verified — Codebase Search
-**Method**: `grep -rn "audit.finding\|degraded.mode"` across `nx/`
+**Method**: `grep -rn "audit.finding\|degraded.mode"` across `conexus/`
 **Confidence**: HIGH
 
 27 references to "audit findings" across 8 files:
 
 | File | References | Key phrases |
 |------|-----------|-------------|
-| `nx/agents/plan-enricher.md` | 11 | "degraded mode", "context-only enrichment", "audit-identified gaps" |
-| `nx/skills/enrich-plan/SKILL.md` | 6 | "audit findings folded in", "context-only if T1 miss" |
-| `nx/commands/enrich-plan.md` | 4 | "audit findings using plan-enricher" |
-| `nx/commands/rdr-accept.md` | 1 | "enrich beads with audit findings from T1 scratch" |
-| `nx/skills/rdr-accept/SKILL.md` | 2 | "enriches beads with audit findings" |
-| `nx/registry.yaml` | 2 | description + triggers |
-| `nx/README.md` | 1 | agent table description |
+| `conexus/agents/plan-enricher.md` | 11 | "degraded mode", "context-only enrichment", "audit-identified gaps" |
+| `conexus/skills/enrich-plan/SKILL.md` | 6 | "audit findings folded in", "context-only if T1 miss" |
+| `conexus/commands/enrich-plan.md` | 4 | "audit findings using plan-enricher" |
+| `conexus/commands/rdr-accept.md` | 1 | "enrich beads with audit findings from T1 scratch" |
+| `conexus/skills/rdr-accept/SKILL.md` | 2 | "enriches beads with audit findings" |
+| `conexus/registry.yaml` | 2 | description + triggers |
+| `conexus/README.md` | 1 | agent table description |
 
 ### RF-2: Enricher already handles no-audit case (2026-03-30)
 

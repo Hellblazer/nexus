@@ -11,7 +11,7 @@ Required before merging any PR that touches:
 - `pyproject.toml`, `uv.lock` (dependency or version surface)
 - `src/nexus/db/migrations.py` (T2 schema migrations — version-gated, only fire on real installs)
 - `src/nexus/mcp/**` (MCP servers — registration only resolves in installed venv)
-- `nx/**` (plugin manifest, hooks, agents, skills — `$CLAUDE_PLUGIN_ROOT` resolution depends on install layout)
+- `conexus/**` (plugin manifest, hooks, agents, skills — `$CLAUDE_PLUGIN_ROOT` resolution depends on install layout)
 - `.claude-plugin/**` (marketplace + plugin descriptors)
 - `src/nexus/commands/doctor.py`, `src/nexus/commands/upgrade.py`
 - Any code path that reads T2 / T3 state and ships to users
