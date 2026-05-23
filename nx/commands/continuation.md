@@ -166,21 +166,27 @@ Compose a 9-section handoff document. Each section is load-bearing for a cold pi
 
 9. **Workflow lessons from this session.** Anything that bit you this session that next-session-you should pre-empt.
 
-### Step 2: chat response is one line, plain text
+### Step 2: chat response is three lines, plain text
 
-The entire chat response is the literal string:
+The entire chat response is:
+
+    Paste this in the next session after /clear:
 
     cat <Target file>
 
-Where `<Target file>` is the absolute path from the working-state block. No fence, no backticks, no bullet, no bold, no leading word, no trailing word. Just the command on its own line.
+Three lines: a one-line hint reminding the user what the command is for, a blank separator, and the bare `cat` command on its own line. The blank line matters: it isolates the command so triple-click selects only the command, not the hint.
+
+Where `<Target file>` is the absolute path from the working-state block. No fence, no backticks, no bullet, no bold around the command. Nothing after the third line.
 
 Example complete chat response:
 
+    Paste this in the next session after /clear:
+
     cat /tmp/nexus-continuation-luciferase-main-2026-05-23.md
 
-The user selects the line (mouse drag, triple-click, or whatever their terminal supports), copies it (`cmd-C` or terminal-specific binding), `/clear`s, pastes, hits return. The next session sees `cat <path>` as its first user message, reads the handoff, resumes.
+The user selects the third line (mouse drag or triple-click), copies (`cmd-C` or terminal-specific binding), `/clear`s, pastes, hits return. The next session sees `cat <path>` as its first user message, reads the handoff, resumes.
 
-Clipboard auto-prime was tried (pbcopy, launchctl asuser pbcopy, OSC 52 plain and DCS-wrapped) and abandoned: remote tmux over mosh, the canonical nexus-developer environment, doesn't reliably forward any of them to the user's local NSPasteboard. Plain text on its own line is the only universally-portable affordance.
+Clipboard auto-prime was tried (pbcopy, launchctl asuser pbcopy, OSC 52 plain and DCS-wrapped) and abandoned: remote tmux over mosh, the canonical nexus-developer environment, doesn't reliably forward any of them to the user's local NSPasteboard. Plain text on its own line is the only universally portable affordance.
 
 ### Style rules for the handoff file (not the chat response)
 
