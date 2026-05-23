@@ -1,11 +1,11 @@
 ---
-description: Write a paste-ready continuation prompt to /tmp capturing session state, branch, beads, T2 entries, and next-step pointers
+description: Write a paste-ready continuation prompt under ~/.cache/nexus/continuations/ capturing session state, branch, beads, T2 entries, and next-step pointers
 argument-hint: [topic-or-arc-slug] (optional; defaults to current branch)
 ---
 
 # Continuation prompt builder
 
-Generates a paste-ready handoff document in `/tmp/` that a future Claude Code session can read to pick up cold. Use this at the END of a productive session, or at a phase boundary, to capture state cheaply before context is lost.
+Generates a paste-ready handoff document under `~/.cache/nexus/continuations/` that a future Claude Code session can read to pick up cold. Use this at the END of a productive session, or at a phase boundary, to capture state cheaply before context is lost.
 
 !{
   set +e
@@ -13,6 +13,8 @@ Generates a paste-ready handoff document in `/tmp/` that a future Claude Code se
   # ---- Resolve repo + slug -------------------------------------------------
   REPO=$(basename "$(pwd)")
   TODAY=$(date +%Y-%m-%d)
+  OUT_DIR="${HOME}/.cache/nexus/continuations"
+  mkdir -p "$OUT_DIR"
 
   if [ -n "$ARGUMENTS" ]; then
     SLUG=$(echo "$ARGUMENTS" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
@@ -24,7 +26,14 @@ Generates a paste-ready handoff document in `/tmp/` that a future Claude Code se
   fi
   [ -z "$SLUG" ] && SLUG="session"
 
-  OUT="/tmp/${REPO}-continuation-${SLUG}-${TODAY}.md"
+  # If a same-day file already exists at the base path, suffix with HHMM so
+  # successive invocations on the same day don't silently overwrite.
+  BASE="${OUT_DIR}/${REPO}-continuation-${SLUG}-${TODAY}.md"
+  if [ -e "$BASE" ]; then
+    OUT="${OUT_DIR}/${REPO}-continuation-${SLUG}-${TODAY}-$(date +%H%M).md"
+  else
+    OUT="$BASE"
+  fi
   echo "**Target file:** \`$OUT\`"
   echo ""
   echo "**Topic:** $TITLE_TOPIC"
@@ -93,10 +102,15 @@ Generates a paste-ready handoff document in `/tmp/` that a future Claude Code se
     echo ""
   fi
 
-  # ---- Optional: Claude Code auto-memory (Hal's pattern; silent if absent) -
+  # ---- Optional: Claude Code auto-memory (silent if absent) ----------------
+  # Claude Code names session dirs by replacing every non-alphanumeric char in
+  # the absolute cwd with a dash. Use printf to strip pwd's trailing newline
+  # (otherwise tr -c converts it to a trailing dash and the glob over-matches
+  # adjacent repos with prefix-equal paths, e.g. nexus vs nexus-rdr-125).
   echo "### Feedback memories (auto-memory dir, if present)"
-  PROJ_DIR=$(ls -td ~/.claude/projects/*"$(pwd | tr '/' '-' | sed 's/^-//')"* 2>/dev/null | head -1)
-  if [ -n "$PROJ_DIR" ] && [ -d "$PROJ_DIR/memory" ]; then
+  PWD_KEY=$(printf '%s' "$(pwd)" | tr -c 'A-Za-z0-9' '-')
+  PROJ_DIR="${HOME}/.claude/projects/${PWD_KEY}"
+  if [ -d "$PROJ_DIR/memory" ]; then
     ls "$PROJ_DIR/memory/" 2>/dev/null | grep -E '^feedback_' | head -10 | sed 's|^|- |'
   else
     echo "(none; auto-memory not configured for this repo)"
@@ -145,12 +159,12 @@ Compose a paste-ready continuation prompt and write it to the **Target file** pa
 
 ### Output
 
-Write the document to **Target file**. After writing, output exactly one line for easy copy:
+Write the document to **Target file** (the path printed at the top of the rendered context block). After writing, output exactly one line for easy copy:
 
 ```
-Continuation prompt written: /tmp/<repo>-continuation-<slug>-<date>.md
+Continuation prompt written: <path-from-Target-file-line>
 ```
 
 Then a one-paragraph human summary of what the next session is picking up. Nothing else.
 
-If `$ARGUMENTS` is empty AND no obvious in-progress arc exists, stop and ask the user what the handoff scope should cover, rather than guessing.
+If the rendered "Topic:" line above reads `current branch no-branch` (no arguments AND not a git repo) AND the in-progress beads block is empty or absent, stop and ask the user what the handoff scope should cover rather than guessing.

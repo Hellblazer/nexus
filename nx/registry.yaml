@@ -654,7 +654,7 @@ utility_commands:
 
   continuation:
     slash_command: /continuation
-    description: "Write a paste-ready continuation prompt to /tmp capturing session state, branch, beads, T2 entries, and next-step pointers"
+    description: "Write a paste-ready continuation prompt under ~/.cache/nexus/continuations/ capturing session state, branch, beads, T2 entries, and next-step pointers"
     disable_model_invocation: false
 
 
