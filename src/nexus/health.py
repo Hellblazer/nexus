@@ -866,14 +866,14 @@ def _check_plugin_name() -> list[HealthResult]:
     differs from what the CLI expects.
 
     The 2026-05-23 rename moved the plugin name from ``nx`` to
-    ``conexus``. Claude Code does NOT auto-uninstall renamed plugins;
-    a user's local cache at
-    ``~/.claude/plugins/cache/nexus-plugins/nx/...`` survives the
-    marketplace.json rename. Until they explicitly uninstall +
-    reinstall, they run the NEW conexus CLI under the OLD ``nx``
-    plugin. The MCP-server-startup check fires once per session;
-    this doctor check is the explicit-invocation surface for users
-    who run ``nx doctor`` to diagnose what's stale.
+    ``conexus``. Until the user runs ``/reload-plugins`` in Claude
+    Code (which re-reads marketplace.json and reconciles the rename
+    in place), they may continue running the NEW conexus CLI under
+    the OLD ``nx`` plugin install at
+    ``~/.claude/plugins/cache/nexus-plugins/nx/...``. The MCP-server-
+    startup check fires once per session; this doctor check is the
+    explicit-invocation surface for users who run ``nx doctor`` to
+    diagnose what's stale.
 
     Non-fatal. Returns an empty list when no ``CLAUDE_PLUGIN_ROOT``
     is set (CLI-only use; nothing to check) or when the plugin name
@@ -907,9 +907,8 @@ def _check_plugin_name() -> list[HealthResult]:
                 "(renamed 2026-05-23, nexus-mkj6u)"
             ),
             fix_suggestions=[
-                f"/plugin uninstall {plugin_name}@nexus-plugins",
-                f"/plugin install {EXPECTED_PLUGIN_NAME}@nexus-plugins",
-                "(both commands run in Claude Code, not from the shell)",
+                "/reload-plugins",
+                "(run in Claude Code; the marketplace reconciles the rename in place — no uninstall + install needed)",
             ],
             fatal=False,
         )

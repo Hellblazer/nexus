@@ -60,9 +60,10 @@ After upgrading conexus (`uv tool upgrade conexus`) or after the plugin rename (
 - **Plugin name drift**: the installed Claude Code plugin still has `name: "nx"` but the CLI expects `conexus`. Fix:
 
   ```
-  /plugin uninstall nx@nexus-plugins      # in Claude Code
-  /plugin install conexus@nexus-plugins   # in Claude Code
+  /reload-plugins      # in Claude Code
   ```
+
+  Claude Code re-reads the marketplace and swaps the installed plugin in place. No explicit uninstall + install needed.
 
 - **Post-commit hook stanza drift**: the installed `.git/hooks/post-commit` predates the pgrep guard fix (nexus-mkj6u 2026-05-23). Fix:
 
