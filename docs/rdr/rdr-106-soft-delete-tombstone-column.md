@@ -112,7 +112,7 @@ fix.
 
 ### Investigation
 
-(to be filled during /nx:rdr-research)
+(to be filled during /conexus:rdr-research)
 
 ### Critical Assumptions
 
@@ -171,7 +171,7 @@ reversible after purge.
 
 ### Technical Design
 
-(to be filled during /nx:rdr-research and /nx:create-plan)
+(to be filled during /conexus:rdr-research and /conexus:create-plan)
 
 #### Phase 1: Schema migration
 
@@ -226,7 +226,7 @@ reversible after purge.
 
 ### Decision Rationale
 
-(to be filled during /nx:rdr-research)
+(to be filled during /conexus:rdr-research)
 
 ## Alternatives Considered
 
@@ -335,13 +335,13 @@ P5: Doctor checks + backwards-compat smoke tests.
 
 ## Test Plan
 
-(to be filled during /nx:rdr-research)
+(to be filled during /conexus:rdr-research)
 
 ## Validation
 
 ### Testing Strategy
 
-(to be filled during /nx:rdr-research)
+(to be filled during /conexus:rdr-research)
 
 ## Finalization Gate
 

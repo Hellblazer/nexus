@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "nx" / "hooks" / "scripts" / "read_verification_config.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "read_verification_config.py"
 
 DEFAULTS = {
     "on_stop": False,

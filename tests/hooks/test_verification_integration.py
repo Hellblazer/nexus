@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-HOOKS_DIR = Path(__file__).resolve().parents[2] / "nx" / "hooks" / "scripts"
-HOOKS_JSON = Path(__file__).resolve().parents[2] / "nx" / "hooks" / "hooks.json"
+HOOKS_DIR = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts"
+HOOKS_JSON = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "hooks.json"
 STOP_HOOK = HOOKS_DIR / "stop_verification_hook.sh"
 CLOSE_HOOK = HOOKS_DIR / "pre_close_verification_hook.sh"
 CONFIG_READER = HOOKS_DIR / "read_verification_config.py"

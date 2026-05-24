@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-NX_SCRIPT = Path(__file__).resolve().parents[2] / "nx" / "hooks" / "scripts" / "auto-approve-nx-mcp.sh"
+NX_SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "auto-approve-nx-mcp.sh"
 SN_SCRIPT = Path(__file__).resolve().parents[2] / "sn" / "hooks" / "scripts" / "auto-approve-sn-mcp.sh"
 
 
@@ -40,22 +40,22 @@ def _parse_decision(output: str) -> str | None:
     return data["hookSpecificOutput"]["decision"]["behavior"]
 
 
-# ── nx plugin hook ───────────────────────────────────────────────────────────
+# ── conexus plugin hook ───────────────────────────────────────────────────────────
 
 
 class TestNxPermissionHook:
-    """nx plugin auto-approves mcp__plugin_nx_* tools."""
+    """conexus plugin auto-approves mcp__plugin_conexus_* tools."""
 
     def test_approves_nexus_catalog_tool(self) -> None:
-        output = _run_hook(NX_SCRIPT, "mcp__plugin_nx_nexus-catalog__search")
+        output = _run_hook(NX_SCRIPT, "mcp__plugin_conexus_nexus-catalog__search")
         assert _parse_decision(output) == "allow"
 
     def test_approves_nexus_search_tool(self) -> None:
-        output = _run_hook(NX_SCRIPT, "mcp__plugin_nx_nexus__search")
+        output = _run_hook(NX_SCRIPT, "mcp__plugin_conexus_nexus__search")
         assert _parse_decision(output) == "allow"
 
     def test_approves_sequential_thinking(self) -> None:
-        output = _run_hook(NX_SCRIPT, "mcp__plugin_nx_sequential-thinking__sequentialthinking")
+        output = _run_hook(NX_SCRIPT, "mcp__plugin_conexus_sequential-thinking__sequentialthinking")
         assert _parse_decision(output) == "allow"
 
     def test_ignores_sn_tools(self) -> None:
@@ -67,7 +67,7 @@ class TestNxPermissionHook:
         assert output == ""
 
     def test_output_is_valid_json(self) -> None:
-        output = _run_hook(NX_SCRIPT, "mcp__plugin_nx_nexus__scratch")
+        output = _run_hook(NX_SCRIPT, "mcp__plugin_conexus_nexus__scratch")
         data = json.loads(output)
         assert "hookSpecificOutput" in data
         assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
@@ -88,7 +88,7 @@ class TestSnPermissionHook:
         assert _parse_decision(output) == "allow"
 
     def test_ignores_nx_tools(self) -> None:
-        output = _run_hook(SN_SCRIPT, "mcp__plugin_nx_nexus__search")
+        output = _run_hook(SN_SCRIPT, "mcp__plugin_conexus_nexus__search")
         assert output == ""
 
     def test_ignores_unrelated_tools(self) -> None:
@@ -110,7 +110,7 @@ class TestHookAgreement:
 
     def test_same_decision_structure(self) -> None:
         """nx and sn hooks use the same JSON envelope for allow decisions."""
-        nx_out = json.loads(_run_hook(NX_SCRIPT, "mcp__plugin_nx_nexus__search"))
+        nx_out = json.loads(_run_hook(NX_SCRIPT, "mcp__plugin_conexus_nexus__search"))
         sn_out = json.loads(_run_hook(SN_SCRIPT, "mcp__plugin_sn_serena__find_file"))
 
         # Same top-level keys
@@ -123,7 +123,7 @@ class TestHookAgreement:
     def test_no_cross_approval(self) -> None:
         """nx hook doesn't approve sn tools, sn hook doesn't approve nx tools."""
         assert _run_hook(NX_SCRIPT, "mcp__plugin_sn_serena__find_file") == ""
-        assert _run_hook(SN_SCRIPT, "mcp__plugin_nx_nexus__search") == ""
+        assert _run_hook(SN_SCRIPT, "mcp__plugin_conexus_nexus__search") == ""
 
     def test_neither_approves_unknown(self) -> None:
         """Neither hook approves tools from unknown plugins."""

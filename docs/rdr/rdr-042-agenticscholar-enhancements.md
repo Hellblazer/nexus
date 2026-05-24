@@ -63,13 +63,13 @@ Seven enhancements adapted from AgenticScholar, scoped to what fits Nexus's mixe
 
 1. **Agent-mediated operators** — analytical operations run as agent prompts, not MCP tools. The MCP server stays LLM-free and deterministic.
 2. **T2-first for plan storage** — plans are structured records (query, JSON plan, outcome, tags), not prose. SQLite + FTS5 is the natural fit. Semantic T3 layer deferred until FTS5 proves insufficient.
-3. **Skill-driven execution** — the `/nx:query` skill is the loop driver for multi-step analytical queries, working around the subagent-cannot-spawn-subagent constraint.
+3. **Skill-driven execution** — the `/conexus:query` skill is the loop driver for multi-step analytical queries, working around the subagent-cannot-spawn-subagent constraint.
 4. **Explicit plan save** — no auto-pollution of the plan library; user prompted after successful execution.
 5. **Skip full taxonomy** — AgenticScholar's 4-stage LLM taxonomy is over-engineered for mixed corpora. Deferred to a future RDR if needed.
 
 ### Component 1: Analytical Operator Agent
 
-Single agent (`nx/agents/analytical-operator.md`) handling 5 operation types:
+Single agent (`conexus/agents/analytical-operator.md`) handling 5 operation types:
 
 | Operation | Purpose | Input | Output |
 |-----------|---------|-------|--------|
@@ -95,11 +95,11 @@ New `src/nexus/bib_enricher.py` querying Semantic Scholar API. Returns `{year, v
 
 ### Component 4: Plan Library (T2)
 
-New `plans` table + FTS5 in T2Database with `save_plan()`, `search_plans()`, `list_plans()`. Explicit save triggered by `/nx:query` skill after successful execution.
+New `plans` table + FTS5 in T2Database with `save_plan()`, `search_plans()`, `list_plans()`. Explicit save triggered by `/conexus:query` skill after successful execution.
 
 ### Component 5: Query Decomposition
 
-New `query-planner` agent decomposes NL questions into ordered operator step lists. New `/nx:query` skill drives execution: search plan library → dispatch planner → iterate operator calls → collect results → prompt to save.
+New `query-planner` agent decomposes NL questions into ordered operator step lists. New `/conexus:query` skill drives execution: search plan library → dispatch planner → iterate operator calls → collect results → prompt to save.
 
 **Step output persistence**: After each operator step, the skill writes the step output to T1 scratch with tag `query-step,step-N`. Subsequent steps that reference `$step_N` read from scratch by tag. This leverages the T1 scratch cross-agent context bus established by RDR-041.
 
@@ -142,8 +142,8 @@ Auto-saving every successful pipeline pollutes the library. Explicit save ensure
 - [ ] `nx enrich <collection>` backfills metadata with configurable `--delay` (default 0.5s)
 - [ ] `nx enrich` skips chunks with existing `bib_semantic_scholar_id` (idempotent backfill)
 - [ ] Plan library stores and retrieves plans via FTS5 search (note: `plan_json` is not FTS-indexed)
-- [ ] `/nx:query` skill executes multi-step analytical queries end-to-end
-- [ ] `/nx:query` step outputs persisted to T1 scratch and correctly resolved by subsequent steps
+- [ ] `/conexus:query` skill executes multi-step analytical queries end-to-end
+- [ ] `/conexus:query` step outputs persisted to T1 scratch and correctly resolved by subsequent steps
 - [ ] Orchestrator distinguishes ESCALATION sentinels (route to debugger) from incomplete output (retry up to 2×)
 - [ ] NDCG@5 benchmark passes at calibrated threshold (set after first run, not hardcoded), no API keys required
 - [ ] MCP server remains LLM-free
@@ -239,7 +239,7 @@ httpx v0.28.1 is present in `uv.lock` as a transitive dependency of chromadb, mc
 **Method**: Glob pattern verification of existing skills
 **Confidence**: HIGH
 
-All existing skills follow the `nx/skills/<name>/SKILL.md` directory pattern. Flat `.md` files at `nx/skills/` are NOT recognized by the plugin system. The query skill must be created at `nx/skills/query/SKILL.md`.
+All existing skills follow the `conexus/skills/<name>/SKILL.md` directory pattern. Flat `.md` files at `conexus/skills/` are NOT recognized by the plugin system. The query skill must be created at `conexus/skills/query/SKILL.md`.
 
 ### RF-7: Semantic Scholar API Characteristics (2026-03-29)
 
@@ -268,5 +268,5 @@ All existing skills follow the `nx/skills/<name>/SKILL.md` directory pattern. Fl
 ## Audit Corrections (Applied)
 
 1. Add `httpx>=0.27` to `pyproject.toml` (currently transitive only)
-2. Skill path: `nx/skills/query/SKILL.md` (directory), not `nx/skills/query.md`
+2. Skill path: `conexus/skills/query/SKILL.md` (directory), not `conexus/skills/query.md`
 3. Use `strftime("%Y-%m-%dT%H:%M:%SZ")` in `save_plan()` to match T2 convention

@@ -40,7 +40,7 @@ The relevant precedent in nexus is RDR-119 (cockpit UI fabric) which already ado
 Existing nexus parsers and their malformed-output behavior:
 
 - **`plan_save` / `plan_match`** — JSON schema validation in `nexus/db/plan_library.py`. Validation failures bounce to caller with no repair attempt.
-- **RDR frontmatter generators** — `/nx:rdr-create` skill builds YAML+JSON; the writing scripts in `nx/hooks/scripts/` are tolerant but produce silent malformed entries when LLM output is close-but-wrong.
+- **RDR frontmatter generators** — `/conexus:rdr-create` skill builds YAML+JSON; the writing scripts in `conexus/hooks/scripts/` are tolerant but produce silent malformed entries when LLM output is close-but-wrong.
 - **Operators `extract` / `summarize` / `generate`** — return JSON; downstream callers `json.loads` and propagate parse errors.
 - **Catalog payload assembly** — `tools/build_catalog` paths.
 

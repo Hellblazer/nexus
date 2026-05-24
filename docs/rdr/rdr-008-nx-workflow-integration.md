@@ -19,7 +19,7 @@ related_issues:
 
 ## Summary
 
-All nx plugin agents were written before nx reached its current form. The result is
+All conexus plugin agents were written before nx reached its current form. The result is
 uneven integration: a few agents use nx deeply and correctly; others treat it as a
 fallback; the nx wrapper skill for brainstorming (`nx:brainstorming-gate`) mentions
 nx prior-art search but leaves it too vague to be reliably executed. The `--hybrid`
@@ -34,7 +34,7 @@ ensuring findings written to T3 by one agent compound into future work rather th
 sitting inert.
 
 **Scope constraint**: Changes are limited to files in the local nexus repo
-(`nx/agents/`, `nx/agents/_shared/`, `nx/skills/`). The superpowers plugin
+(`conexus/agents/`, `conexus/agents/_shared/`, `conexus/skills/`). The superpowers plugin
 (`claude-plugins-official`) source files are not modified. Superpowers skills
 (`brainstorming`, `systematic-debugging`) are invoked exactly as they are.
 nx integration for these workflows is delivered via the nx wrapper skills
@@ -119,7 +119,7 @@ features.
 
 ### Audit Methodology
 
-All 15 agent files in `nx/agents/` and `nx/agents/_shared/CONTEXT_PROTOCOL.md` were
+All 15 agent files in `conexus/agents/` and `conexus/agents/_shared/CONTEXT_PROTOCOL.md` were
 read and classified against two criteria:
 
 - Does the agent proactively search nx before starting work?
@@ -621,7 +621,7 @@ Each file change is independent. Implement in any order.
 7. `java-developer.md` — add conditional proactive search and T3 storage (C1 + C2)
 8. `java-debugger.md` — add prior traces search and mandatory root cause storage (C3)
 
-9. `nx/skills/brainstorming-gate/SKILL.md` — concretize Step 1 prior-art search (B6)
+9. `conexus/skills/brainstorming-gate/SKILL.md` — concretize Step 1 prior-art search (B6)
 
 **Validation**: For each agent, read the full RECEIVE section and PRODUCE section
 after change. Verify:

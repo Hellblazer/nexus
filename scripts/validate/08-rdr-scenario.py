@@ -3,7 +3,7 @@
 
 This suite exercises the full RDR lifecycle in the sandbox without
 depending on Claude Code's interactive skill system. It reproduces the
-T2 state transitions and file-artifact invariants that the /nx:rdr-*
+T2 state transitions and file-artifact invariants that the /conexus:rdr-*
 slash commands encode, so a plugin regression that breaks (for example)
 rdr-close's gap-pointer gate shows up here rather than at user-report
 time.
@@ -19,8 +19,8 @@ Sandbox contract:
 
 Phases (6 structural + 3 LLM-gated):
   1. create  — scaffold file + register in T2 as status=draft
-  2. list    — /nx:rdr-list equivalent: T2 iteration finds the entry
-  3. show    — /nx:rdr-show equivalent: T2 read returns content
+  2. list    — /conexus:rdr-list equivalent: T2 iteration finds the entry
+  3. show    — /conexus:rdr-show equivalent: T2 read returns content
   4. gate (structural) — frontmatter, Problem Statement gaps, closing
      sections present; preamble-equivalent invariants from rdr-close
      (e.g. regex `^#{3,5} Gap \\d+:`) satisfied
@@ -165,7 +165,7 @@ but its invariants aren't tested in sequence.
 
 ## Research Findings
 
-See docs/rdr/rdr-workflow.md for the canonical state machine.
+See docs/rdr.md#workflow for the canonical state machine.
 
 ## Design
 
@@ -185,7 +185,7 @@ Using the real RDR workflow against the live repo — would pollute prod T2.
 
 
 def _t2_record(status: str, close_reason: str = "") -> str:
-    """T2 record shape that /nx:rdr-* skills read."""
+    """T2 record shape that /conexus:rdr-* skills read."""
     lines = [
         f"title: RDR-{RDR_ID}: {RDR_TITLE}",
         f"status: {status}",
@@ -376,7 +376,7 @@ def run_suite() -> None:
 
 def _exercise_ai_critique() -> None:
     """Spawn the substantive-critic agent and verify it produces a verdict."""
-    agents_dir = Path(__file__).resolve().parent.parent.parent / "nx" / "agents"
+    agents_dir = Path(__file__).resolve().parent.parent.parent / "conexus" / "agents"
     critic_md = (agents_dir / "substantive-critic.md").read_text()
     rdr_body = _rdr_file_path().read_text()
 
@@ -431,11 +431,11 @@ def _exercise_rdr_close_invocation() -> None:
 
     skill_md = (
         Path(__file__).resolve().parent.parent.parent
-        / "nx" / "commands" / "rdr-close.md"
+        / "conexus" / "commands" / "rdr-close.md"
     )
     if not skill_md.exists():
-        # Command files live under nx/commands — check both.
-        skill_md = Path(__file__).resolve().parent.parent.parent / "nx" / "commands" / "rdr-close.md"
+        # Command files live under conexus/commands — check both.
+        skill_md = Path(__file__).resolve().parent.parent.parent / "conexus" / "commands" / "rdr-close.md"
     body = skill_md.read_text() if skill_md.exists() else ""
 
     env = os.environ.copy()

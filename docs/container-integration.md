@@ -54,7 +54,7 @@ This installs `~/Library/LaunchAgents/com.nexus.t2.plist` on macOS or
 / `Restart=on-failure` so the daemon survives crashes and reboots.
 Uninstall with `nx daemon t2 uninstall --autostart`.
 
-When Claude Code is the primary consumer, the nx plugin's
+When Claude Code is the primary consumer, the conexus plugin's
 **SessionStart hook** also runs `nx daemon t2 ensure-running --quiet`
 on every Claude session start, so the daemon is auto-spawned on the
 first session after `pip install conexus` even if you haven't yet
@@ -193,9 +193,9 @@ the network.**
 
 What works:
 
-1. Install the nx plugin in your Claude Code installation:
-   `/plugin install nx`. The plugin registers `nx-mcp` as an MCP
-   server in your Claude Desktop config.
+1. Install the conexus plugin in your Claude Code installation:
+   `/plugin install conexus@nexus-plugins`. The plugin registers
+   `nx-mcp` as an MCP server in your Claude Desktop config.
 2. Start the daemons on the host: `nx daemon t2 start` (and
    `nx daemon t3 start` if local-mode).
 3. Open a Cowork session. Claude Desktop **passes the configured
@@ -204,7 +204,7 @@ What works:
    host; the VM agent's tool calls are bridged back through the
    Anthropic SDK channel, not through the network.
 4. Inside the VM, the Cowork agent has
-   `mcp__plugin_nx_nexus__memory_put`, `mcp__plugin_nx_nexus__search`,
+   `mcp__plugin_conexus_nexus__memory_put`, `mcp__plugin_conexus_nexus__search`,
    etc. available. Every call round-trips: VM agent → SDK bridge →
    host nx-mcp → host T2/T3 daemons → shared state.
 
@@ -275,7 +275,7 @@ the daemon's address matches.
 | `[Errno 13] Permission denied` on UDS | UID mismatch | `--user $(id -u):$(id -g)` |
 | `[Errno 111] Connection refused` on TCP | Daemon not running, or wrong port | `nx daemon t2 status` on the host; verify port matches `NX_T2_ADDR` |
 | Container writes succeed but host can't see them | Container falling back to local SQLite | (4.34.0 only) Upgrade to 4.34.1+; verify CLI is using `t2_handle()` |
-| Cowork agent's `mcp_*` tool returns error | Host daemon down or nx plugin not enabled | Start daemons; `/plugin list` to confirm nx plugin is active |
+| Cowork agent's `mcp_*` tool returns error | Host daemon down or conexus plugin not enabled | Start daemons; `/plugin list` to confirm conexus plugin is active |
 
 ### `T2SchemaVersionMismatchError`
 

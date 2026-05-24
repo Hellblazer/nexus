@@ -1,0 +1,173 @@
+# Orchestration Reference
+
+Routing tables, pipeline templates, and decision framework for multi-agent workflows. This is a reference document — no agent is dispatched.
+
+## Routing Graph
+
+```dot
+digraph routing {
+    rankdir=TB;
+    "Request type?" [shape=diamond];
+
+    "Plan a feature" [shape=box];
+    "Implement code" [shape=box];
+    "Debug issue" [shape=box];
+    "Review code" [shape=box];
+    "Research topic" [shape=box];
+    "Analyze system" [shape=box];
+
+    "strategic-planner" [shape=ellipse];
+    "nx_plan_audit (MCP)" [shape=ellipse, style=dashed];
+    "architect-planner" [shape=ellipse];
+    "developer" [shape=ellipse];
+    "code-review-expert" [shape=ellipse];
+    "test-validator" [shape=ellipse];
+    "debugger" [shape=ellipse];
+    "deep-analyst" [shape=ellipse];
+    "substantive-critic" [shape=ellipse];
+    "deep-research-synthesizer" [shape=ellipse];
+    "store_put (MCP)" [shape=ellipse, style=dashed];
+    "codebase-deep-analyzer" [shape=ellipse];
+
+    "Request type?" -> "Plan a feature" [label="plan/design"];
+    "Request type?" -> "Implement code" [label="build/implement"];
+    "Request type?" -> "Debug issue" [label="test failure/bug"];
+    "Request type?" -> "Review code" [label="review/quality"];
+    "Request type?" -> "Research topic" [label="research/investigate"];
+    "Request type?" -> "Analyze system" [label="explore/understand"];
+
+    "Plan a feature" -> "strategic-planner";
+    "strategic-planner" -> "nx_plan_audit (MCP)" [label="then"];
+    "nx_plan_audit (MCP)" -> "architect-planner" [label="then"];
+
+    "Implement code" -> "developer";
+    "developer" -> "code-review-expert" [label="then"];
+    "developer" -> "debugger" [label="on escalation"];
+    "debugger" -> "developer" [label="fix applied, resume"];
+    "code-review-expert" -> "test-validator" [label="then"];
+
+    "Debug issue" -> "debugger";
+    "debugger" -> "deep-analyst" [label="if cross-cutting"];
+
+    "Review code" -> "code-review-expert";
+    "code-review-expert" -> "substantive-critic" [label="if critical"];
+
+    "Research topic" -> "deep-research-synthesizer";
+    "deep-research-synthesizer" -> "store_put (MCP)" [label="then"];
+
+    "Analyze system" -> "codebase-deep-analyzer";
+    "codebase-deep-analyzer" -> "deep-analyst" [label="if deep"];
+}
+```
+
+## Routing Quick Reference
+
+| Request Type | Primary Agent | Pipeline |
+|-------------|---------------|----------|
+| Plan a feature | strategic-planner | -> nx_plan_audit (MCP) -> architect-planner |
+| Implement code | developer | -> code-review-expert -> test-validator |
+| Implement code (circuit breaker fired) | debugger | [after developer stops] -> debugger -> developer resumes |
+| Debug issue | debugger | -> (if cross-cutting) deep-analyst |
+| Review code | code-review-expert | -> (if critical) substantive-critic |
+| Research topic | deep-research-synthesizer | -> store_put (MCP direct) |
+| Analyze system | codebase-deep-analyzer | -> (if deep) deep-analyst |
+
+## Decision Framework
+
+### Step 1: Classify the Request
+- **Implementation**: Code needs to be written -> developer
+- **Architecture/Design**: System design needed -> architect-planner or strategic-planner
+- **Bug/Issue**: Something is broken -> debugger
+- **Review**: Work needs validation -> code-review-expert, `mcp__plugin_conexus_nexus__nx_plan_audit` (for plans), or substantive-critic
+- **Catalog Query**: Question about specific authors, papers, citations, provenance, references, corpus -> `/conexus:query` skill (catalog-aware retrieval)
+- **Research**: General information gathering -> deep-research-synthesizer
+- **Analysis**: Understanding needed -> deep-analyst or codebase-deep-analyzer
+
+### Step 2: Check for Pipeline Needs
+If the task requires multiple stages:
+1. Identify all required agents
+2. Determine the correct sequence
+3. Define relay points and context requirements
+4. Consider parallelization opportunities
+
+### Step 3: Route or Dispatch
+- **Single Agent**: Dispatch directly with context via relay
+- **Pipeline**: Dispatch sequentially — the caller orchestrates each stage
+
+## Standard Pipelines
+
+### Feature Development Pipeline
+1. strategic-planner: Create plan with beads
+2. `mcp__plugin_conexus_nexus__nx_plan_audit`: Validate plan (RDR-080 — no agent spawn)
+3. architect-planner: Design architecture
+4. developer: Implement with TDD
+5. code-review-expert: Review implementation
+6. test-validator: Verify test coverage
+
+### Bug Fix Pipeline
+1. debugger: Investigate and identify root cause
+2. developer: Implement fix
+3. code-review-expert: Review fix
+4. test-validator: Verify fix and regression tests
+
+### Catalog Query Pipeline
+Use `/conexus:query` skill directly — it calls `mcp__plugin_conexus_nexus__nx_answer` internally (RDR-080).
+Route here when the question involves: specific authors, paper citations, "what cites X",
+"what research informed Y", corpus-scoped retrieval, or document provenance chains.
+
+### Research Pipeline
+1. deep-research-synthesizer: Gather information
+2. `mcp__plugin_conexus_nexus__nx_tidy`: Consolidate findings (RDR-080 — no agent spawn needed)
+3. (optional) architect-planner: Apply findings to design
+
+### Plan Validation Pipeline
+1. strategic-planner or architect-planner: Create plan
+2. `mcp__plugin_conexus_nexus__nx_plan_audit`: Validate technical accuracy (RDR-080 — no agent spawn needed)
+3. substantive-critic: Critique for gaps and assumptions
+
+## Pipeline Pattern Catalog
+
+These patterns are stored in the T2 plan library and are returned by `plan_search` when matching queries are detected. The `using-nx-skills` skill checks for matching templates before dispatching multi-agent pipelines.
+
+| Pattern | Agents | When to Use | Prerequisites |
+|---------|--------|-------------|---------------|
+| RDR Chain | deep-research-synthesizer → `/conexus:rdr-gate` → `/conexus:rdr-accept` → strategic-planner → `nx_plan_audit` → developer → code-review-expert → test-validator | Non-trivial features needing design documentation before coding | RDR created and populated with research findings |
+| Plan-Audit-Implement | strategic-planner → `nx_plan_audit` → developer → code-review-expert → test-validator | Standard feature development with clear requirements | Requirements defined, no RDR needed |
+| Research-Synthesize | deep-research-synthesizer → `nx_tidy` | Gathering information on unfamiliar topics or comparing approaches | Topic identified |
+| Code Review | code-review-expert → test-validator | Post-implementation quality gate before merge or PR | Code changes committed |
+| Debug | debugger → developer → test-validator | Test failures or non-deterministic behavior, especially after 2+ failed manual fix attempts | Reproducible failure or clear symptom |
+
+## Agent Ecosystem
+
+### Development Agents
+| Agent | When to Use |
+|-------|-------------|
+| developer | Execute implementation plans, write code with TDD |
+| architect-planner | Design architecture, create execution plans |
+| debugger | Complex bugs, non-deterministic failures, performance issues |
+| (none — use `/conexus:query`) | Analytical operations are handled by `nx_answer` internally (RDR-080) |
+
+### Review Agents
+| Agent | When to Use |
+|-------|-------------|
+| code-review-expert | Review implemented code for quality and best practices |
+| `mcp__plugin_conexus_nexus__nx_plan_audit` | Validate plans before implementation (RDR-080 — MCP tool, not agent) |
+| substantive-critic | Deep critique of any content (code, docs, designs) |
+
+### Analysis Agents
+| Agent | When to Use |
+|-------|-------------|
+| deep-analyst | Investigate complex problems, system behavior analysis |
+| codebase-deep-analyzer | Understand codebase structure, onboarding, pre-refactoring |
+
+### Research Agents
+| Agent | When to Use |
+|-------|-------------|
+| deep-research-synthesizer | Multi-source research across all knowledge bases |
+| query (skill: `/conexus:query`) | Author, citation, corpus, or provenance questions — catalog-aware multi-step retrieval |
+
+### Infrastructure Agents
+| Agent | When to Use |
+|-------|-------------|
+| strategic-planner | Project planning, bead management, infrastructure setup |
+| test-validator | Verify test coverage, run test suites |

@@ -442,7 +442,7 @@ def _check_tools() -> list[HealthResult]:
         ))
 
     # npx (Node.js, plugin-only)
-    # Required by the nx Claude Code plugin, which spawns the
+    # Required by the conexus Claude Code plugin, which spawns the
     # ``sequential-thinking`` and ``context7`` MCP servers via ``npx -y …``.
     # The CLI alone does not need it, so this is non-fatal — but a missing
     # ``npx`` causes silent MCP-server failures the moment a plugin tool is
@@ -472,8 +472,9 @@ def _check_git_hooks() -> list[HealthResult]:
     # reaching up into commands/. Use module-attribute access so test
     # monkeypatches on ``nexus._git_hooks_meta.effective_hooks_dir``
     # reach the live binding at call time.
+    import re
     from nexus import _git_hooks_meta as _ghm
-    from nexus._git_hooks_meta import SENTINEL_BEGIN
+    from nexus._git_hooks_meta import SENTINEL_BEGIN, SENTINEL_END
     _effective_hooks_dir = _ghm.effective_hooks_dir
     from nexus.registry import RepoRegistry
 
@@ -482,6 +483,32 @@ def _check_git_hooks() -> list[HealthResult]:
     results: list[HealthResult] = []
     hook_names = ("post-commit", "post-merge", "post-rewrite")
     registry_path = nexus_config_dir() / "repos.json"
+
+    # nexus-mkj6u shakeout: extract the canonical stanza from the
+    # current template so we can detect drift in already-installed
+    # hooks (e.g. the pre-pgrep-guard stanza). Done once per call;
+    # the import is lazy because commands/hooks.py imports click
+    # which we don't want to pay for at health-check time when no
+    # repos are registered.
+    def _canonical_stanza_body() -> str | None:
+        try:
+            from nexus.commands.hooks import _STANZA
+        except Exception:
+            return None
+        m = re.search(
+            rf"{re.escape(SENTINEL_BEGIN)}\n(.*?)\n{re.escape(SENTINEL_END)}",
+            _STANZA, re.DOTALL,
+        )
+        return m.group(1) if m else None
+
+    def _installed_stanza_body(content: str) -> str | None:
+        m = re.search(
+            rf"{re.escape(SENTINEL_BEGIN)}\n(.*?)\n{re.escape(SENTINEL_END)}",
+            content, re.DOTALL,
+        )
+        return m.group(1) if m else None
+
+    canonical = _canonical_stanza_body()
 
     try:
         reg = RepoRegistry(registry_path)
@@ -505,10 +532,36 @@ def _check_git_hooks() -> list[HealthResult]:
                     if (hdir / n).exists() and SENTINEL_BEGIN in (hdir / n).read_text()
                 ]
                 if installed:
-                    results.append(HealthResult(
-                        label="git hooks", ok=True,
-                        detail=f"{repo_path} ({', '.join(installed)})",
-                    ))
+                    # nexus-mkj6u: drift check — compare installed stanza
+                    # body to the canonical template body. Different
+                    # body means the user is running an old stanza
+                    # (e.g. pre-pgrep-guard, vulnerable to the multi-
+                    # indexer pile-up race).
+                    drifted: list[str] = []
+                    if canonical is not None:
+                        for name in installed:
+                            installed_body = _installed_stanza_body(
+                                (hdir / name).read_text()
+                            )
+                            if installed_body is not None and installed_body != canonical:
+                                drifted.append(name)
+                    if drifted:
+                        results.append(HealthResult(
+                            label="git hooks (stanza drift)",
+                            ok=False,
+                            detail=(
+                                f"{repo_path} — installed stanza differs from "
+                                f"current template ({', '.join(drifted)}). "
+                                "May be missing pile-up guard or other fixes."
+                            ),
+                            fix_suggestions=[f"nx hooks update {repo_path}"],
+                            fatal=False,
+                        ))
+                    else:
+                        results.append(HealthResult(
+                            label="git hooks", ok=True,
+                            detail=f"{repo_path} ({', '.join(installed)})",
+                        ))
                 else:
                     results.append(HealthResult(
                         label="git hooks", ok=True,
@@ -808,6 +861,134 @@ def _check_catalog(cat: "Catalog | None", cat_path: "Path") -> list[HealthResult
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 
 
+def _check_plugin_name() -> list[HealthResult]:
+    """nexus-mkj6u: warn when the installed Claude Code plugin's name
+    differs from what the CLI expects.
+
+    The 2026-05-23 rename moved the plugin name from ``nx`` to
+    ``conexus``. Claude Code does NOT auto-uninstall renamed plugins;
+    a user's local cache at
+    ``~/.claude/plugins/cache/nexus-plugins/nx/...`` survives the
+    marketplace.json rename. Until they explicitly uninstall +
+    reinstall, they run the NEW conexus CLI under the OLD ``nx``
+    plugin. The MCP-server-startup check fires once per session;
+    this doctor check is the explicit-invocation surface for users
+    who run ``nx doctor`` to diagnose what's stale.
+
+    Non-fatal. Returns an empty list when no ``CLAUDE_PLUGIN_ROOT``
+    is set (CLI-only use; nothing to check) or when the plugin name
+    matches.
+    """
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    if not plugin_root:
+        return []
+    manifest_path = Path(plugin_root) / ".claude-plugin" / "plugin.json"
+    if not manifest_path.exists():
+        return []
+    try:
+        manifest = json.loads(manifest_path.read_text())
+        plugin_name = manifest.get("name")
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not plugin_name:
+        return []
+
+    from nexus.mcp_infra import EXPECTED_PLUGIN_NAME
+    if plugin_name == EXPECTED_PLUGIN_NAME:
+        return []
+
+    return [
+        HealthResult(
+            label="Claude Code plugin name (renamed)",
+            ok=False,
+            detail=(
+                f"installed plugin is '{plugin_name}@nexus-plugins'; CLI "
+                f"expects '{EXPECTED_PLUGIN_NAME}@nexus-plugins' "
+                "(renamed 2026-05-23, nexus-mkj6u)"
+            ),
+            fix_suggestions=[
+                f"/plugin uninstall {plugin_name}@nexus-plugins",
+                f"/plugin install {EXPECTED_PLUGIN_NAME}@nexus-plugins",
+                "(both commands run in Claude Code, not from the shell)",
+            ],
+            fatal=False,
+        )
+    ]
+
+
+def _check_credential_persistence() -> list[HealthResult]:
+    """nexus-m7evs: warn when cloud credentials live in shell env only.
+
+    GUI-spawned ``nx-mcp`` (Claude Desktop, Cowork SDK bridge) inherits
+    launchd's environment, NOT the user's interactive shell. If
+    ``CHROMA_API_KEY`` / ``VOYAGE_API_KEY`` are in ``.zshrc`` exports
+    but never persisted via ``nx config set``, the GUI-spawned
+    subprocess sees them as absent, ``is_local_mode()`` flips to True,
+    and T3 dispatch goes to the daemon path that fails opaquely.
+
+    This check runs on the CLI side (where shell env IS visible) and
+    surfaces the gap before the GUI-spawn path hits it. Non-fatal: a
+    warning, not a blocker, because the CLI itself works fine.
+
+    Returns an empty list when the configuration is consistent (both
+    persisted, neither set, or no env exports).
+    """
+    from nexus.config import _global_config_path
+
+    cloud_keys = ("chroma_api_key", "voyage_api_key", "chroma_tenant", "chroma_database")
+    env_names = {
+        "chroma_api_key": "CHROMA_API_KEY",
+        "voyage_api_key": "VOYAGE_API_KEY",
+        "chroma_tenant": "CHROMA_TENANT",
+        "chroma_database": "CHROMA_DATABASE",
+    }
+
+    # Read config.yml directly; we want to see file state independent of env.
+    file_creds: dict[str, str] = {}
+    cfg_path = _global_config_path()
+    if cfg_path.exists():
+        try:
+            import yaml
+            data = yaml.safe_load(cfg_path.read_text()) or {}
+            file_creds = data.get("credentials", {}) or {}
+        except Exception:
+            file_creds = {}
+
+    env_only: list[str] = []
+    for key in cloud_keys:
+        env_present = bool(os.environ.get(env_names[key], "").strip())
+        file_present = bool(str(file_creds.get(key, "")).strip())
+        if env_present and not file_present:
+            env_only.append(key)
+
+    if not env_only:
+        return []
+
+    # Surface the most-load-bearing pair first; chroma_tenant /
+    # chroma_database are derived/configuration rather than identity.
+    suggestions = [f"nx config set {key} \"${env_names[key]}\"" for key in env_only]
+    suggestions.append(
+        "Then quit and relaunch Claude Desktop so the next nx-mcp "
+        "spawn reads ~/.config/nexus/config.yml instead of empty env."
+    )
+
+    detail = (
+        f"{len(env_only)} credential(s) in shell env only: {', '.join(env_only)}. "
+        "GUI-spawned consumers (Claude Desktop, Cowork) cannot see "
+        "shell env vars and will misdetect cloud mode as local mode."
+    )
+
+    return [
+        HealthResult(
+            label="Credential persistence (GUI spawn)",
+            ok=False,
+            detail=detail,
+            fix_suggestions=suggestions,
+            fatal=False,
+        )
+    ]
+
+
 def run_health_checks() -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -819,6 +1000,8 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
 
     results.extend(_check_python())
     results.extend(_check_cli_version())
+    results.extend(_check_plugin_name())
+    results.extend(_check_credential_persistence())
 
     _local = is_local_mode()
     if _local:

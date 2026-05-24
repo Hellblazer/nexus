@@ -2424,7 +2424,7 @@ class TestBackfillBuiltinBindings:
     def test_backfills_matching_row_by_dimensions(self, tmp_path, monkeypatch):
         from nexus.plans.repair import repair_builtin_bindings
 
-        yaml_dir = tmp_path / "nx" / "plans" / "builtin"
+        yaml_dir = tmp_path / "conexus" / "plans" / "builtin"
         yaml_dir.mkdir(parents=True)
         self._write_yaml(
             yaml_dir / "analyze.yml",
@@ -2434,7 +2434,7 @@ class TestBackfillBuiltinBindings:
         )
 
         # Point the migration's repo-root fallback at our tmp layout.
-        # Migration walks __file__.parents[3]/nx/plans/builtin; a monkeypatch
+        # Migration walks __file__.parents[3]/conexus/plans/builtin; a monkeypatch
         # of the module-level ``Path`` lookup in the migration is brittle,
         # so instead pivot on ``importlib.resources`` by setting up a
         # resource stub. Simpler: mock ``importlib.resources.files`` to
@@ -2453,12 +2453,12 @@ class TestBackfillBuiltinBindings:
 
         def fake_files(_pkg):
             # Mirror the migration's expected layout: <pkg> / _resources
-            # / plans / builtin. We ship the YAMLs at tmp_path/nx/plans/
-            # builtin, so route _resources/plans/builtin to tmp_path/nx/
+            # / plans / builtin. We ship the YAMLs at tmp_path/conexus/plans/
+            # builtin, so route _resources/plans/builtin to tmp_path/conexus/
             # plans/builtin via the FakeResource chain.
-            root = tmp_path / "nx"
+            root = tmp_path / "conexus"
             # Eat the leading "_resources" segment by returning a resource
-            # rooted at tmp_path/nx so the subsequent / "plans" / "builtin"
+            # rooted at tmp_path/conexus so the subsequent / "plans" / "builtin"
             # lands correctly. Requires a small shim: intercept the first
             # / and redirect.
             class _RedirectingFakeResource(_FakeResource):

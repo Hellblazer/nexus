@@ -1228,7 +1228,7 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
     help=(
         "Cosine similarity threshold. When omitted, per-corpus-type "
         "defaults apply: code__* → 0.70, knowledge__* → 0.50, "
-        "docs__*/rdr__* → 0.55. See docs/taxonomy-projection-tuning.md."
+        "docs__*/rdr__* → 0.55. See docs/exploration/taxonomy-projection-tuning.md."
     ),
 )
 @click.option("--top-k", default=3, type=int, show_default=True, help="Top-k centroids per chunk")
@@ -1515,7 +1515,7 @@ def hubs_cmd(
       nx taxonomy hubs --min-collections 5 --max-icf 1.2
       nx taxonomy hubs --warn-stale --explain
 
-    See docs/taxonomy-projection-tuning.md for guidance on interpreting
+    See docs/exploration/taxonomy-projection-tuning.md for guidance on interpreting
     the output and acting on flagged topics.
     """
     db = _T2Database(_default_db_path())
@@ -1587,7 +1587,7 @@ def hubs_cmd(
         "Count projections whose raw cosine similarity falls below this "
         "value. Defaults to the per-corpus-type value "
         "(code__* 0.70, knowledge__* 0.50, docs__*/rdr__* 0.55). See "
-        "docs/taxonomy-projection-tuning.md."
+        "docs/exploration/taxonomy-projection-tuning.md."
     ),
 )
 @click.option(
@@ -1605,7 +1605,7 @@ def audit_cmd(collection: str, threshold: float | None, top_n: int) -> None:
       * pattern-pollution: receiving topics whose labels contain generic
         stopword tokens (`assert`, `class`, `exception`, ...).
 
-    See docs/taxonomy-projection-tuning.md for interpretation guidance.
+    See docs/exploration/taxonomy-projection-tuning.md for interpretation guidance.
     """
     db = _T2Database(_default_db_path())
     try:

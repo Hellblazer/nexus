@@ -157,7 +157,7 @@ def test_daemonize_falls_through_to_sync_on_oserror() -> None:
     assert calls == ["sync"]
 
 
-# ── nx/hooks/hooks.json contract (RDR-094 Phase C / nexus-l828) ─────────────
+# ── conexus/hooks/hooks.json contract (RDR-094 Phase C / nexus-l828) ─────────────
 
 
 def _read_plugin_hooks_json() -> dict:
@@ -165,7 +165,7 @@ def _read_plugin_hooks_json() -> dict:
     from pathlib import Path
 
     repo_root = Path(__file__).resolve().parent.parent
-    return json.loads((repo_root / "nx" / "hooks" / "hooks.json").read_text())
+    return json.loads((repo_root / "conexus" / "hooks" / "hooks.json").read_text())
 
 
 def test_hooks_json_session_end_uses_launcher_not_flush_directly() -> None:

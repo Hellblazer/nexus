@@ -1,0 +1,11 @@
+[project]
+name = "conexus-mcpb"
+version = "5.0.0"
+description = "Conexus packaged as Claude Desktop .mcpb (Desktop Extension)"
+requires-python = ">=3.12"
+dependencies = [
+    "conexus>=5.0.0",
+]
+
+[tool.uv]
+package = false

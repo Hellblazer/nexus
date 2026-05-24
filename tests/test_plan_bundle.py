@@ -112,10 +112,10 @@ class TestSegmentation:
         assert all(isinstance(s, IsolatedStep) for s in segs)
 
     def test_mcp_prefixed_tool_names_normalize(self):
-        """``mcp__plugin_nx_nexus__operator_extract`` should match ``extract``."""
+        """``mcp__plugin_conexus_nexus__operator_extract`` should match ``extract``."""
         steps = [
-            {"tool": "mcp__plugin_nx_nexus__operator_extract", "args": {}},
-            {"tool": "mcp__plugin_nx_nexus__operator_summarize", "args": {}},
+            {"tool": "mcp__plugin_conexus_nexus__operator_extract", "args": {}},
+            {"tool": "mcp__plugin_conexus_nexus__operator_summarize", "args": {}},
         ]
         segs = segment_steps(steps)
         assert len(segs) == 1

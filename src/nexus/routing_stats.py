@@ -2,7 +2,7 @@
 """RDR-121 Phase 3: routing-hook telemetry aggregation.
 
 Reads the JSONL log written by routing hooks via
-``nx/hooks/scripts/routing/_lib.log_routing_event`` and computes
+``conexus/hooks/scripts/routing/_lib.log_routing_event`` and computes
 per-rule fire / allow / deny / escape counts. Surfaced to the user
 by the ``nx hook routing-stats`` CLI subcommand. Used at the 30-day
 soak review (mzvwa.7) to decide whether matchers need refinement,

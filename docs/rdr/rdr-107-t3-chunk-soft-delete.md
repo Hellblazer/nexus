@@ -156,7 +156,7 @@ choice — soft-delete over hard-prune — flowed from that read.
 
 ## Research Findings
 
-(to be filled during /nx:rdr-research)
+(to be filled during /conexus:rdr-research)
 
 Open questions to research:
 
@@ -384,7 +384,7 @@ link integrity. The vacuum window is the user-facing knob.
 
 ## Test Plan
 
-(to be filled during /nx:rdr-research)
+(to be filled during /conexus:rdr-research)
 
 Sketch:
 
@@ -410,7 +410,7 @@ Sketch:
 
 ### Testing Strategy
 
-(to be filled during /nx:rdr-research)
+(to be filled during /conexus:rdr-research)
 
 ## Finalization Gate
 

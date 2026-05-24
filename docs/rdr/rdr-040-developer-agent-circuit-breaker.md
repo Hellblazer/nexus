@@ -47,10 +47,10 @@ Full incident memo: T2 `nexus_active/investigation-developer-agent-thrashing-deb
 
 ### Technical Environment
 
-- Developer agent: `nx/agents/developer.md` (sonnet model)
-- Debugger agent: `nx/agents/debugger.md` (opus model)
-- Development skill: `nx/skills/development/SKILL.md`
-- Orchestration skill: `nx/skills/orchestration/SKILL.md`
+- Developer agent: `conexus/agents/developer.md` (sonnet model)
+- Debugger agent: `conexus/agents/debugger.md` (opus model)
+- Development skill: `conexus/skills/development/SKILL.md`
+- Orchestration skill: `conexus/skills/orchestration/SKILL.md`
 - Known constraint: subagents cannot spawn other subagents
 
 ## Research Findings
@@ -75,7 +75,7 @@ Reviewed orchestration skill (`orchestration/SKILL.md`):
 - **Verified** — Developer agent's escalation is output-only, fires at end of turn. By then, the damage (wasted context, wasted time) is done.
 - **Verified** — Debugger agent solves these problems efficiently when given clear context (failing test, error, hypothesis). The gap is invocation timing, not capability.
 - **Verified** — Subagents cannot spawn other subagents. The developer cannot launch a debugger; it can only signal the parent.
-- **Documented** — The `using-nx-skills` routing table already says "Test fails → /nx:debug IMMEDIATELY" but this is advisory to the human, not enforced in agent prompts.
+- **Documented** — The `using-nx-skills` routing table already says "Test fails → /conexus:debug IMMEDIATELY" but this is advisory to the human, not enforced in agent prompts.
 
 ### Critical Assumptions
 
@@ -266,9 +266,9 @@ Dispatch developer agent on a task with a known test failure (e.g., the ART Mask
 ## References
 
 - T2 incident memo: `nexus_active/investigation-developer-agent-thrashing-debugger-underuse`
-- Developer agent: `nx/agents/developer.md`
-- Development skill: `nx/skills/development/SKILL.md`
-- Orchestration skill: `nx/skills/orchestration/SKILL.md`
+- Developer agent: `conexus/agents/developer.md`
+- Development skill: `conexus/skills/development/SKILL.md`
+- Orchestration skill: `conexus/skills/orchestration/SKILL.md`
 - Known limitation: subagents cannot spawn other subagents (CLAUDE.md)
 
 ## Revision History

@@ -15,7 +15,7 @@ related_rdrs: [RDR-053, RDR-101, RDR-103, RDR-106, RDR-107]
 supersedes: [RDR-107]
 implementation_notes: |
   Implemented in five phases across 2026-05-08 to 2026-05-15 via the
-  related_issues epic. Problem Statement gap closures (per /nx:rdr-close
+  related_issues epic. Problem Statement gap closures (per /conexus:rdr-close
   pass-2 validation 2026-05-20):
   - Gap 1 (chunk_chroma_id position-derived) -> src/nexus/db/migrations.py:2449
     (_drop_chash_index_chunk_chroma_id, Phase 4a, nexus-mmf5)
@@ -1307,7 +1307,7 @@ RDR-101 Phase 5b.
 
 ### Testing Strategy
 
-(to be filled during /nx:rdr-research)
+(to be filled during /conexus:rdr-research)
 
 ## Finalization Gate
 

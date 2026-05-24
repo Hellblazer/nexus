@@ -100,7 +100,7 @@
       "scope": "global",
       "description": "",
       "dimensions": "{\"scope\":\"global\",\"strategy\":\"dimensions\",\"verb\":\"plan-inspect\"}",
-      "match_text": "Enumerate the registered dimensions from nx/plans/dimensions.yml and count how many plans pin each one. Surfaces the dimension registry so an authoring agent can see which axes are canonical (verb, scope, strategy) versus which are specialisation axe"
+      "match_text": "Enumerate the registered dimensions from conexus/plans/dimensions.yml and count how many plans pin each one. Surfaces the dimension registry so an authoring agent can see which axes are canonical (verb, scope, strategy) versus which are specialisation axe"
     },
     {
       "id": 61,

@@ -7,7 +7,7 @@ Phase 4a schema, dedups by canonical dimensions, and upserts into a
 :class:`~nexus.db.t2.plan_library.PlanLibrary`.
 
 This is the glue that ships the five builtin scenario templates
-(``nx/plans/builtin/*.yml``) as ``scope:global`` seeds. The same
+(``conexus/plans/builtin/*.yml``) as ``scope:global`` seeds. The same
 loader powers the Phase 6 multi-tier loader (``.nexus/plans/*.yml``,
 ``docs/rdr/<slug>/plans.yml``, umbrella repo plans).
 

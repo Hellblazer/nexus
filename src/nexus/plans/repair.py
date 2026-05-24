@@ -366,7 +366,7 @@ def repair_builtin_bindings(conn: sqlite3.Connection) -> dict[str, Any]:
         pass
     if yaml_dir is None:
         from pathlib import Path as _Path
-        repo_candidate = _Path(__file__).resolve().parents[3] / "nx" / "plans" / "builtin"
+        repo_candidate = _Path(__file__).resolve().parents[3] / "conexus" / "plans" / "builtin"
         if repo_candidate.is_dir():
             yaml_dir = repo_candidate
     if yaml_dir is None:

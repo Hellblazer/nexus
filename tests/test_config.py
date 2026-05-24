@@ -209,7 +209,7 @@ def test_detect_test_command_priority(tmp_path: Path) -> None:
 def test_detect_table_matches_reader_script() -> None:
     import importlib.util
     from nexus.config import _DETECT_TABLE
-    script = Path(__file__).parents[1] / "nx" / "hooks" / "scripts" / "read_verification_config.py"
+    script = Path(__file__).parents[1] / "conexus" / "hooks" / "scripts" / "read_verification_config.py"
     spec = importlib.util.spec_from_file_location("reader", script)
     reader = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reader)

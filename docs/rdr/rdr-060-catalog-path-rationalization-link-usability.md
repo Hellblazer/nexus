@@ -233,7 +233,7 @@ Nexus installs three git hooks (`post-commit`, `post-merge`, `post-rewrite`) via
 
 ### RF-9: Claude Code Plugin Hooks Do Not Touch Catalog
 
-**Source**: `nx/hooks/hooks.json`
+**Source**: `conexus/hooks/hooks.json`
 
 The Claude Code plugin hooks (`SessionStart`, `PostCompact`, `StopFailure`, `SubagentStart`) manage T1 scratch, T2 memory, and session lifecycle. None invoke catalog operations. This is appropriate — catalog maintenance belongs in git hooks, not agent session hooks.
 

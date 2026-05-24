@@ -16,7 +16,7 @@ related_issues: ["RDR-023"]
 
 ## Problem Statement
 
-The nx plugin has three Java-specific agents: `java-developer`, `java-debugger`,
+The conexus plugin has three Java-specific agents: `java-developer`, `java-debugger`,
 and `java-architect-planner`. These agents are unusable for projects in Python,
 Go, Rust, TypeScript, or any other language — even though 75-80% of their content
 (debugging methodology, TDD workflow, architecture patterns, relay reception,
@@ -94,9 +94,9 @@ warns early rather than failing silently during agent work.
 
 | Old Name | New Name | Skill Command (old) | Skill Command (new) |
 |----------|----------|--------------------|--------------------|
-| java-developer | developer | `/java-implement` | `/nx:implement` |
-| java-debugger | debugger | `/java-debug` | `/nx:debug` |
-| java-architect-planner | architect-planner | `/java-architecture` | `/nx:architecture` |
+| java-developer | developer | `/java-implement` | `/conexus:implement` |
+| java-debugger | debugger | `/java-debug` | `/conexus:debug` |
+| java-architect-planner | architect-planner | `/java-architecture` | `/conexus:architecture` |
 
 ### Content Replacement Strategy
 
@@ -150,54 +150,54 @@ with reduced quality.
 
 | File | Changes |
 |------|---------|
-| `nx/agents/java-developer.md` | Rename to `developer.md`, rewrite identity/Maven/standards/escalation sections |
-| `nx/agents/java-debugger.md` | Rename to `debugger.md`, rewrite identity/expertise/tool sections |
-| `nx/agents/java-architect-planner.md` | Rename to `architect-planner.md`, rewrite identity/expertise/examples |
+| `conexus/agents/java-developer.md` | Rename to `developer.md`, rewrite identity/Maven/standards/escalation sections |
+| `conexus/agents/java-debugger.md` | Rename to `debugger.md`, rewrite identity/expertise/tool sections |
+| `conexus/agents/java-architect-planner.md` | Rename to `architect-planner.md`, rewrite identity/expertise/examples |
 
 ### Agent cross-references (name substitution)
 
 | File | References to update |
 |------|---------------------|
-| `nx/agents/orchestrator.md` | Routing table, Standard Pipelines |
-| `nx/agents/strategic-planner.md` | Relationship section |
-| `nx/agents/test-validator.md` | Relationship section |
-| `nx/agents/plan-auditor.md` | Successor Enforcement conditions, routing logic |
-| `nx/agents/deep-analyst.md` | Relationship section |
-| `nx/agents/deep-research-synthesizer.md` | Relationship section |
-| `nx/agents/codebase-deep-analyzer.md` | Verify for Java/Maven references |
-| `nx/agents/_shared/CONTEXT_PROTOCOL.md` | Proactive search agents list, relay-reliant agents list |
-| `nx/agents/_shared/MAINTENANCE.md` | Example references |
+| `conexus/agents/orchestrator.md` | Routing table, Standard Pipelines |
+| `conexus/agents/strategic-planner.md` | Relationship section |
+| `conexus/agents/test-validator.md` | Relationship section |
+| `conexus/agents/plan-auditor.md` | Successor Enforcement conditions, routing logic |
+| `conexus/agents/deep-analyst.md` | Relationship section |
+| `conexus/agents/deep-research-synthesizer.md` | Relationship section |
+| `conexus/agents/codebase-deep-analyzer.md` | Verify for Java/Maven references |
+| `conexus/agents/_shared/CONTEXT_PROTOCOL.md` | Proactive search agents list, relay-reliant agents list |
+| `conexus/agents/_shared/MAINTENANCE.md` | Example references |
 
 ### Skills and commands (rename + content update)
 
 | File | Changes |
 |------|---------|
-| `nx/skills/java-development/SKILL.md` | Rename dir to `development/`, update relay target |
-| `nx/skills/java-debugging/SKILL.md` | Rename dir to `debugging/`, update relay target |
-| `nx/skills/java-architecture/SKILL.md` | Rename dir to `architecture/`, update relay target |
-| `nx/skills/orchestration/SKILL.md` | Routing diagram nodes + routing table |
-| `nx/skills/using-nx-skills/SKILL.md` | Skill directory table entries |
-| `nx/commands/java-implement.md` | Rename to `implement.md`, update relay target |
-| `nx/commands/java-debug.md` | Rename to `debug.md`, update relay target |
-| `nx/commands/java-architecture.md` | Rename to `architecture.md`, update relay target |
+| `conexus/skills/java-development/SKILL.md` | Rename dir to `development/`, update relay target |
+| `conexus/skills/java-debugging/SKILL.md` | Rename dir to `debugging/`, update relay target |
+| `conexus/skills/java-architecture/SKILL.md` | Rename dir to `architecture/`, update relay target |
+| `conexus/skills/orchestration/SKILL.md` | Routing diagram nodes + routing table |
+| `conexus/skills/using-nx-skills/SKILL.md` | Skill directory table entries |
+| `conexus/commands/java-implement.md` | Rename to `implement.md`, update relay target |
+| `conexus/commands/java-debug.md` | Rename to `debug.md`, update relay target |
+| `conexus/commands/java-architecture.md` | Rename to `architecture.md`, update relay target |
 
 ### Plugin infrastructure
 
 | File | Changes |
 |------|---------|
-| `nx/registry.yaml` | Agent entries, predecessor/successor chains, all 5 pipeline definitions, model_summary, naming_aliases |
-| `nx/README.md` | Agent table, pipeline descriptions, entry points section |
-| `nx/hooks/hooks.json` | Verify no Java-specific references |
+| `conexus/registry.yaml` | Agent entries, predecessor/successor chains, all 5 pipeline definitions, model_summary, naming_aliases |
+| `conexus/README.md` | Agent table, pipeline descriptions, entry points section |
+| `conexus/hooks/hooks.json` | Verify no Java-specific references |
 
 ### Verification command
 
-After all changes: `grep -rl "java-developer\|java-debugger\|java-architect" nx/`
+After all changes: `grep -rl "java-developer\|java-debugger\|java-architect" conexus/`
 should return zero results (excluding changelogs and RDR docs).
 
 ## Migration Impact
 
-**Slash command changes**: `/java-implement` → `/nx:implement`, `/java-debug` → `/nx:debug`,
-`/java-architecture` → `/nx:architecture`. Old commands will stop working immediately.
+**Slash command changes**: `/java-implement` → `/conexus:implement`, `/java-debug` → `/conexus:debug`,
+`/java-architecture` → `/conexus:architecture`. Old commands will stop working immediately.
 No aliases — all references are plugin-internal and updated atomically in one PR.
 Users with muscle memory for the old commands will need to adjust.
 
@@ -229,7 +229,7 @@ returns.
 ## Success Criteria
 
 - [ ] All three agents renamed and generalized (no Java-specific content in prompts)
-- [ ] `grep -rl "java-developer\|java-debugger\|java-architect" nx/` returns zero results (excluding changelogs)
+- [ ] `grep -rl "java-developer\|java-debugger\|java-architect" conexus/` returns zero results (excluding changelogs)
 - [ ] Agents function correctly for at least 3 non-Java languages (Python, Go, TypeScript)
 - [ ] Preflight check warns when CLAUDE.md lacks language/build/test sections
 - [ ] Nexus project's own CLAUDE.md passes the preflight check without warnings

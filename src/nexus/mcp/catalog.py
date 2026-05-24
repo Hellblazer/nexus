@@ -26,8 +26,8 @@ _BULK_DELETE_CONFIRM_THRESHOLD = 10
 
 
 # Note: core server also registers a "search" tool. No collision — Claude Code
-# disambiguates by server prefix (mcp__plugin_nx_nexus-catalog__search vs
-# mcp__plugin_nx_nexus__search).
+# disambiguates by server prefix (mcp__plugin_conexus_nexus-catalog__search vs
+# mcp__plugin_conexus_nexus__search).
 @mcp.tool(name="search")
 def catalog_search(
     query: str = "",
@@ -630,6 +630,7 @@ def main():
     import structlog
 
     from nexus.logging_setup import configure_logging
+    from nexus.mcp._first_run import ensure_installed_and_running
     from nexus.mcp_infra import check_version_compatibility
 
     configure_logging("mcp")
@@ -641,6 +642,8 @@ def main():
         pid=os.getpid(),
         ppid=os.getppid(),
     )
+    # RDR-126 P2 (nexus-bsjro): see nexus/mcp/core.py for rationale.
+    ensure_installed_and_running()
     try:
         check_version_compatibility()
         mcp.run(transport="stdio")

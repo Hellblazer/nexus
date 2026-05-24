@@ -15,7 +15,7 @@ related_rdrs: [RDR-038, RDR-059, RDR-089, RDR-097, RDR-101, RDR-103]
 github_issues: [667]
 implementation_notes: |
   Implemented across multiple phases between 2026-05-10 and
-  2026-05-20. Problem Statement gap closures (per /nx:rdr-close
+  2026-05-20. Problem Statement gap closures (per /conexus:rdr-close
   pass-2 validation 2026-05-20):
   - Gap 1 (nexus-59vl GH #667: local-ONNX collections falsely
     labeled voyage-*) -> src/nexus/catalog/collection_name.py:100

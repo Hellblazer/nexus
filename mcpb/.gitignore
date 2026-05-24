@@ -1,0 +1,5 @@
+# Spike + release-asset artifacts that should NOT live in the repo.
+*.mcpb
+uv.lock
+.venv/
+__pycache__/

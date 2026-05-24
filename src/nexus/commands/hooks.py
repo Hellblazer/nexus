@@ -35,7 +35,19 @@ _HOOK_NAMES = ("post-commit", "post-merge", "post-rewrite")
 
 _STANZA = """\
 {begin}
-nx index repo "$(git rev-parse --show-toplevel)" --on-locked=skip \\
+REPO_TOP="$(git rev-parse --show-toplevel)"
+# pgrep guard (nexus-mkj6u 2026-05-23): skip if an indexer for THIS
+# repo is already running. Belt-and-suspenders with --on-locked=skip,
+# which races on lock acquisition under burst-commit workloads. The
+# race fires when 2+ commits happen before the first indexer finishes
+# its open()+truncate+write+flock sequence; the second indexer can
+# truncate the lock file out from under the first and still get past
+# its own flock if the timing aligns. pgrep at the hook layer catches
+# 99%+ of pile-ups before they fork.
+if pgrep -f "nx index repo $REPO_TOP" > /dev/null 2>&1; then
+  exit 0
+fi
+nx index repo "$REPO_TOP" --on-locked=skip \\
   >> "$HOME/.config/nexus/index.log" 2>&1 &
 disown
 {end}""".format(begin=SENTINEL_BEGIN, end=SENTINEL_END)
@@ -179,6 +191,51 @@ def hooks_uninstall(path: Path) -> None:
         click.echo(f"  {symbol} {name}  ({action})")
 
     click.echo("Done.")
+
+
+@hooks.command("update")
+@click.argument("path", type=click.Path(file_okay=False, path_type=Path), default=".")
+def hooks_update(path: Path) -> None:
+    """Refresh nexus git hooks to the current stanza (nexus-mkj6u shakeout).
+
+    Equivalent to ``nx hooks uninstall && nx hooks install`` in one step.
+    Use this when ``nx doctor`` reports stanza drift — typically after a
+    conexus upgrade that changed the stanza (e.g. the 2026-05-23 pgrep
+    guard for the multi-indexer pile-up race).
+
+    Only rewrites hooks that are currently nexus-managed (have the
+    sentinel block); never touches unmanaged hook files.
+    """
+    repo = path.resolve()
+    hooks_dir = _effective_hooks_dir(repo)
+
+    if hooks_dir.exists() and not _is_writable(hooks_dir):
+        raise click.ClickException(
+            f"Hooks directory is not writable: {hooks_dir}\n"
+            "Check core.hooksPath or directory permissions."
+        )
+
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    click.echo(f"Updating nexus hooks in {repo}…")
+
+    for name in _HOOK_NAMES:
+        hook_file = hooks_dir / name
+        if not hook_file.exists():
+            click.echo(f"  · {name}  (not installed; skipped)")
+            continue
+        content = hook_file.read_text()
+        if SENTINEL_BEGIN not in content:
+            click.echo(f"  · {name}  (unmanaged; skipped)")
+            continue
+        # Rewrite: remove old stanza, install fresh one. The
+        # _install_hook path handles both "owned" (file has only the
+        # stanza + shebang) and "appended" (other content present)
+        # cases correctly.
+        _uninstall_hook(hooks_dir, name)
+        action = _install_hook(hooks_dir, name)
+        click.echo(f"  ✓ {name}  (refreshed: {action})")
+
+    click.echo("Done. New stanza in effect from the next commit.")
 
 
 @hooks.command("status")

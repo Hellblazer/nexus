@@ -224,7 +224,7 @@ All four domain stores open independent connections to the **same single SQLite 
 
 1. **Python path**: `importlib.metadata.version("conexus")` works from any Python code where the `conexus` package is installed. MCP servers run as subprocesses via entry points (`nx-mcp`, `nx-mcp-catalog` in `pyproject.toml:72–75`), so the package is always importable.
 
-2. **Plugin hook path**: The `SessionStart` hook (`nx/hooks/scripts/session_start_hook.py`) already calls `nx` CLI commands (e.g., `nx memory list`). It could call `nx --version` and compare against `plugin.json` version.
+2. **Plugin hook path**: The `SessionStart` hook (`conexus/hooks/scripts/session_start_hook.py`) already calls `nx` CLI commands (e.g., `nx memory list`). It could call `nx --version` and compare against `plugin.json` version.
 
 3. **MCP server startup**: `core.py:1151` and `catalog.py:575` both have `main()` functions called before `mcp.run()` — ideal injection point for version check.
 

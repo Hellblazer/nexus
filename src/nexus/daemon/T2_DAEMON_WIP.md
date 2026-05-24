@@ -43,7 +43,7 @@ Archive port deleted; clean substrate-only modules in place.
     mode); supervisors (launchd / systemd) treat it as their
     supervised foreground process.
 
-- `nx/daemon/com.nexus.t2.plist` + `nx/daemon/nexus-t2.service`
+- `conexus/daemon/com.nexus.t2.plist` + `conexus/daemon/nexus-t2.service`
   - Templates updated to remove the `--foreground` arg (no such
     flag exists on `nx daemon t2 start` because the start command
     always foregrounds).

@@ -83,28 +83,28 @@ echo ""
 # Probe 1 — catalog search via MCP (exercises _DocumentOps.find +
 # the registry-keyed routing).
 echo "[1/6] Catalog search via MCP (search by author)..."
-claude_prompt "Use the mcp__plugin_nx_nexus-catalog__search tool with text='nexus' and limit=5. Just call the tool and tell me the count of results."
+claude_prompt "Use the mcp__plugin_conexus_nexus-catalog__search tool with text='nexus' and limit=5. Just call the tool and tell me the count of results."
 claude_wait 90
 _assert "catalog search returns" _no_crash_markers
 
 # Probe 2 — catalog show on a known tumbler (exercises
 # _DocumentOps.resolve via the MCP show tool).
 echo "[2/6] Catalog show on a tumbler..."
-claude_prompt "Use mcp__plugin_nx_nexus-catalog__list with limit=3 to find a tumbler, then call mcp__plugin_nx_nexus-catalog__show on the first result. Report whether show returned a document or an error."
+claude_prompt "Use mcp__plugin_conexus_nexus-catalog__list with limit=3 to find a tumbler, then call mcp__plugin_conexus_nexus-catalog__show on the first result. Report whether show returned a document or an error."
 claude_wait 90
 _assert "catalog show resolves" _no_crash_markers
 
 # Probe 3 — catalog links readback (exercises _LinkOps.links_to /
 # links_from / link_query through the MCP links tool).
 echo "[3/6] Catalog links readback..."
-claude_prompt "Use mcp__plugin_nx_nexus-catalog__links with the tumbler from the previous step, direction='out', depth=1. Report the number of edges returned."
+claude_prompt "Use mcp__plugin_conexus_nexus-catalog__links with the tumbler from the previous step, direction='out', depth=1. Report the number of edges returned."
 claude_wait 90
 _assert "catalog links readback" _no_crash_markers
 
 # Probe 4 — nx_answer routing (exercises catalog → T3 query path,
 # touches _DocumentOps + _SyncOps for the rebuild bootstrap).
 echo "[4/6] nx_answer composed retrieval..."
-claude_prompt "Use mcp__plugin_nx_nexus__nx_answer to ask: 'How does the catalog handle event-sourced writes?' Limit to 1 source. Just report whether the call succeeded."
+claude_prompt "Use mcp__plugin_conexus_nexus__nx_answer to ask: 'How does the catalog handle event-sourced writes?' Limit to 1 source. Just report whether the call succeeded."
 claude_wait 180
 _assert "nx_answer composed retrieval" _no_crash_markers
 

@@ -11,9 +11,9 @@ Companion references:
 
 - **RDR-078** — the design decision. Read the Vocabulary + Phase 1-4
   sections for the why.
-- `docs/catalog-link-types.md` — the seven link-type values
+- `docs/catalog.md#link-types` — the seven link-type values
   (`implements`, `cites`, `supersedes`, …) that `traverse` walks.
-- `docs/catalog-purposes.md` — named aliases that map to link-type
+- `docs/catalog.md#purposes-link-type-aliases` — named aliases that map to link-type
   lists; use `purpose:` in plans instead of bare `link_types:` when a
   named alias exists.
 
@@ -44,7 +44,7 @@ dimensions:                       # identity — the pinned set
   strategy: default | security | performance | ...   # optional, defaults to "default"
   object: ...                     # optional (e.g. change-set, rdr, module)
   domain: ...                     # optional (e.g. security, ml-systems)
-  # any registered dimension from nx/plans/dimensions.yml
+  # any registered dimension from conexus/plans/dimensions.yml
 
 # OPTIONAL
 name: <human-disambiguator>       # distinguishes otherwise-identical dimension sets
@@ -121,7 +121,7 @@ A `traverse` step must pick one of the two — never both:
   list. Freezes the set; any new link type introduced in the catalog
   after the plan was authored will **not** be walked.
 - `purpose: find-implementations` — named alias resolved at run time
-  via `nx/plans/purposes.yml`. Forward-compatible: if a new link type
+  via `conexus/plans/purposes.yml`. Forward-compatible: if a new link type
   (`semantic-implements`, …) ships under the purpose, older plans pick
   it up automatically.
 
@@ -242,7 +242,7 @@ Every scope above `personal` is a git-tracked YAML path:
 | `rdr-<slug>` | `docs/rdr/<slug>/plans.yml` (peer to the RDR) | `nx catalog setup` when RDR is `status: accepted` |
 | `project` | `.nexus/plans/*.yml` or `.nexus/plans.yml` | `nx catalog setup` |
 | `repo` | umbrella `.nexus/plans/_repo.yml` | `nx catalog setup` (umbrella detection) |
-| `global` | `nx/plans/builtin/*.yml` (nx plugin) | plugin release |
+| `global` | `conexus/plans/builtin/*.yml` (conexus plugin) | plugin release |
 
 A plan authored at one scope can be *promoted* — copied to a higher
 scope with a new dimension map. Promotion flow (tool surface in
@@ -438,8 +438,8 @@ the `"all"` wildcard end up agnostic (`scope_tags=""`) in that case.
 
 ## See also
 
-- `nx/plans/dimensions.yml` — registered dimension keys.
-- `nx/plans/purposes.yml` — registered purpose names and link-type mappings.
+- `conexus/plans/dimensions.yml` — registered dimension keys.
+- `conexus/plans/purposes.yml` — registered purpose names and link-type mappings.
 - `src/nexus/plans/schema.py` — the validator enforcing this schema.
 - `src/nexus/plans/runner.py` — `plan_run` implementation.
 - `src/nexus/plans/matcher.py` — `plan_match` (T1 cosine + FTS5 fallback).

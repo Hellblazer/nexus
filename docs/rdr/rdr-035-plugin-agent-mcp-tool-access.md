@@ -24,7 +24,7 @@ related_issues:
 
 ## Problem Statement
 
-All 14 nx plugin agents fail to use MCP tools (`mcp__plugin_nx_nexus__*`, `mcp__plugin_nx_sequential-thinking__*`) when spawned as subagents. This renders the entire MCP server infrastructure built in RDR-034 non-functional for its intended purpose — reliable agent access to T1/T2/T3 storage tiers.
+All 14 conexus plugin agents fail to use MCP tools (`mcp__plugin_conexus_nexus__*`, `mcp__plugin_conexus_sequential-thinking__*`) when spawned as subagents. This renders the entire MCP server infrastructure built in RDR-034 non-functional for its intended purpose — reliable agent access to T1/T2/T3 storage tiers.
 
 **Observed failure** (2026-03-12, Delos project): 15 agents (6 knowledge-tidier, 8 general-purpose, 1 codebase-analyzer) all failed to call `store_put`, `memory_put`, `scratch`, and `sequentialthinking`. Every MCP tool was denied from the very first attempt, while built-in tools (Read, Bash) worked initially.
 
@@ -66,7 +66,7 @@ The investigation tested every available permission mechanism. All failed for MC
 ### Finding 3: Removing `tools:` field fixes MCP access — verified
 
 Test performed 2026-03-12:
-1. Removed `tools:` field from `nx/agents/knowledge-tidier.md`
+1. Removed `tools:` field from `conexus/agents/knowledge-tidier.md`
 2. Spawned agent with `mode: bypassPermissions`
 3. Agent called `store_put` → **SUCCESS** (entry ID: `7b82106b6143ef2b`)
 4. Agent called `search` → **SUCCESS** (retrieved entry with score 0.4895)
@@ -75,9 +75,9 @@ Both MCP tools worked on the first attempt with zero permission denials.
 
 ### Finding 4: The PermissionRequest hook provides runtime safety
 
-The nx plugin's `permission-request-stdin.sh` hook auto-approves:
-- All `mcp__plugin_nx_nexus__*` tools (line 52-55)
-- All `mcp__plugin_nx_sequential-thinking__*` tools (line 46-49)
+The conexus plugin's `permission-request-stdin.sh` hook auto-approves:
+- All `mcp__plugin_conexus_nexus__*` tools (line 52-55)
+- All `mcp__plugin_conexus_sequential-thinking__*` tools (line 46-49)
 - Read, Write, Edit, Grep, Glob, WebSearch, WebFetch, Agent (lines 22-43)
 - Safe Bash commands: `bd`, `git` read-only, `uv run pytest`, `nx` CLI (lines 89-131)
 - Denies destructive commands: `git push --force`, `bd delete`, `nx collection delete` (lines 60-86)
@@ -102,7 +102,7 @@ After enough MCP tool denials accumulate, the framework enters a degraded state 
 
 ## Proposed Solution
 
-Remove the `tools:` frontmatter field from all 14 nx plugin agents. Agents will inherit all tools from the parent session, including MCP tools. The PermissionRequest hook remains as the runtime enforcement layer for tool access control.
+Remove the `tools:` frontmatter field from all 14 conexus plugin agents. Agents will inherit all tools from the parent session, including MCP tools. The PermissionRequest hook remains as the runtime enforcement layer for tool access control.
 
 ### What Changes
 
@@ -116,7 +116,7 @@ version: "2.0"
 description: ...
 model: haiku
 color: mint
-tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_nx_sequential-thinking__sequentialthinking", "mcp__plugin_nx_nexus__search", "mcp__plugin_nx_nexus__store_put", ...]
+tools: ["Read", "Grep", "Glob", "Bash", "mcp__plugin_conexus_sequential-thinking__sequentialthinking", "mcp__plugin_conexus_nexus__search", "mcp__plugin_conexus_nexus__store_put", ...]
 ---
 ```
 
@@ -140,7 +140,7 @@ color: mint
 ### What Does NOT Change
 
 - MCP server (`src/nexus/mcp_server.py`) — no changes needed
-- MCP server registration (`nx/.mcp.json`) — stays at plugin level
+- MCP server registration (`conexus/.mcp.json`) — stays at plugin level
 - Agent system prompts — all MCP tool references in agent bodies remain correct
 - Skill and command files — MCP tool references remain correct
 - PermissionRequest hook — already handles all tools
@@ -165,20 +165,20 @@ color: mint
 
 | File | Change |
 |------|--------|
-| `nx/agents/architect-planner.md` | Remove `tools:` frontmatter line |
-| `nx/agents/code-review-expert.md` | Remove `tools:` frontmatter line |
-| `nx/agents/codebase-deep-analyzer.md` | Remove `tools:` frontmatter line |
-| `nx/agents/debugger.md` | Remove `tools:` frontmatter line |
-| `nx/agents/deep-analyst.md` | Remove `tools:` frontmatter line |
-| `nx/agents/deep-research-synthesizer.md` | Remove `tools:` frontmatter line |
-| `nx/agents/developer.md` | Remove `tools:` frontmatter line |
-| `nx/agents/knowledge-tidier.md` | Remove `tools:` frontmatter line (already done) |
-| `nx/agents/orchestrator.md` | Remove `tools:` frontmatter line |
-| `nx/agents/pdf-chromadb-processor.md` | Remove `tools:` frontmatter line |
-| `nx/agents/plan-auditor.md` | Remove `tools:` frontmatter line |
-| `nx/agents/strategic-planner.md` | Remove `tools:` frontmatter line |
-| `nx/agents/substantive-critic.md` | Remove `tools:` frontmatter line |
-| `nx/agents/test-validator.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/architect-planner.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/code-review-expert.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/codebase-deep-analyzer.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/debugger.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/deep-analyst.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/deep-research-synthesizer.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/developer.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/knowledge-tidier.md` | Remove `tools:` frontmatter line (already done) |
+| `conexus/agents/orchestrator.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/pdf-chromadb-processor.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/plan-auditor.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/strategic-planner.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/substantive-critic.md` | Remove `tools:` frontmatter line |
+| `conexus/agents/test-validator.md` | Remove `tools:` frontmatter line |
 | `docs/rdr/rdr-023-agent-tool-permissions-audit.md` | Add supersession note for tools field |
 | `docs/rdr/rdr-034-mcp-server-agent-storage.md` | Add post-implementation note |
 
@@ -187,8 +187,8 @@ color: mint
 | Category | Reason |
 |----------|--------|
 | `src/nexus/mcp_server.py` | MCP server works correctly |
-| `nx/.mcp.json` | Server registration is correct |
-| `nx/hooks/scripts/permission-request-stdin.sh` | Already handles all tools |
+| `conexus/.mcp.json` | Server registration is correct |
+| `conexus/hooks/scripts/permission-request-stdin.sh` | Already handles all tools |
 | Skills, commands, shared docs | MCP tool references are correct |
 | Tests | No code changes to test |
 
@@ -234,7 +234,7 @@ Documented but confirmed non-functional for plugin-defined agents (GitHub #21560
 
 Documented but confirmed non-functional (GitHub #25200). "MCP tools are not injected into the subagent's tool inventory at all, regardless of frontmatter declarations."
 
-### E: Keep `tools:` but use wildcard patterns like `mcp__plugin_nx_nexus__*` (rejected)
+### E: Keep `tools:` but use wildcard patterns like `mcp__plugin_conexus_nexus__*` (rejected)
 
 Wildcard patterns in `tools:` are supported in allow lists but their behavior in agent frontmatter is undocumented and untested. Given that explicit MCP tool names in `tools:` already fail, wildcards are unlikely to work.
 

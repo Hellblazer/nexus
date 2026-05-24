@@ -710,13 +710,13 @@ class TestPlanMissPlanner:
 
     @pytest.mark.asyncio
     async def test_plan_miss_normalizes_mcp_prefix(self):
-        """mcp__plugin_nx_nexus__search → search."""
+        """mcp__plugin_conexus_nexus__search → search."""
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
         async def fake_dispatch(prompt, schema, timeout=60.0):
             return {"steps": [
-                {"tool": "mcp__plugin_nx_nexus__search", "args": {"query": "$intent"}},
+                {"tool": "mcp__plugin_conexus_nexus__search", "args": {"query": "$intent"}},
                 {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
             ]}
 

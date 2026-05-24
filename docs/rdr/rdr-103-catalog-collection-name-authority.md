@@ -110,26 +110,26 @@ The `rename_collection` verb is the right primitive: legacy-to-conformant is a 1
 Surveys (verified):
 
 - `grep -rn 'physical_collection\b' src/nexus/ | wc -l`: 246 occurrences. Most are projector reads or test assertions; the field is widely consumed.
-- `grep -rn '_collection_name\|_docs_collection_name\|_rdr_collection_name' src/ nx/ sn/`: 78 callers across the repo, plugins, and skills. All must switch to the new path or stop importing.
+- `grep -rn '_collection_name\|_docs_collection_name\|_rdr_collection_name' src/ conexus/ sn/`: 78 callers across the repo, plugins, and skills. All must switch to the new path or stop importing.
 - MCP surface (`src/nexus/mcp/core.py`): `collection_info`, `store_get`, `store_put`, `search`, and several other tools accept a literal `name` argument.
 - Search routing in `src/nexus/search/` and CLI commands accept collection names directly.
 
 ### Plugin layer surfaces
 
-The `nx/` plugin tree carries its own references. Two kinds:
+The `conexus/` plugin tree carries its own references. Two kinds:
 
 **Active name-constructing code** (treat like the indexer family):
 
-- `nx/hooks/scripts/rdr_hook.py:58, 269`: writes `target = f"rdr__{repo_name}"`. Constructs a legacy 2-segment name; needs to go through `Catalog.collection_for(...)` like the indexer family does.
-- `nx/skills/rdr-close/SKILL.md`: writes post-mortems to `knowledge__rdr_postmortem__{repo}` (lines 220, 231, 244, 278, 296, 309). **Decision (pinned)**: this collapses into the conformant `knowledge__<owner_id>__<model>__v1` shape, where `owner_id` is the repo's tumbler segment (same as every other knowledge collection for that repo). The `rdr_postmortem` semantic is encoded at the document level via the `category` field (or `tags`), NOT in the collection name. Rationale: the conformant schema's `owner_id` segment is a single tumbler-derived identifier; mixing in a literal `rdr_postmortem-` prefix would require a new escape rule and would diverge from how every other curated knowledge collection is named. Document-level routing via `where={"category": "rdr_postmortem"}` is already a supported retrieval pattern. This pulls `rdr_hook.py` and `rdr-close/SKILL.md` into Phase 3 (indexer rewrite) scope, not Phase 6.
+- `conexus/hooks/scripts/rdr_hook.py:58, 269`: writes `target = f"rdr__{repo_name}"`. Constructs a legacy 2-segment name; needs to go through `Catalog.collection_for(...)` like the indexer family does.
+- `conexus/skills/rdr-close/SKILL.md`: writes post-mortems to `knowledge__rdr_postmortem__{repo}` (lines 220, 231, 244, 278, 296, 309). **Decision (pinned)**: this collapses into the conformant `knowledge__<owner_id>__<model>__v1` shape, where `owner_id` is the repo's tumbler segment (same as every other knowledge collection for that repo). The `rdr_postmortem` semantic is encoded at the document level via the `category` field (or `tags`), NOT in the collection name. Rationale: the conformant schema's `owner_id` segment is a single tumbler-derived identifier; mixing in a literal `rdr_postmortem-` prefix would require a new escape rule and would diverge from how every other curated knowledge collection is named. Document-level routing via `where={"category": "rdr_postmortem"}` is already a supported retrieval pattern. This pulls `rdr_hook.py` and `rdr-close/SKILL.md` into Phase 3 (indexer rewrite) scope, not Phase 6.
 
 **Documentation and examples** (search-and-replace pass):
 
-- `nx/agents/codebase-deep-analyzer.md:96`: example `code__<repo>`.
-- `nx/agents/deep-research-synthesizer.md:112, 116`: examples `knowledge__art`, `code__<repo>`.
-- `nx/agents/_shared/ERROR_HANDLING.md:97`, `_shared/CONTEXT_PROTOCOL.md:131`: example shapes in agent docstrings.
-- `nx/skills/nexus/SKILL.md`, `nexus/reference.md`, `review/SKILL.md`, `debug/SKILL.md`, `rdr-gate/SKILL.md`: example collection names in skill instructions.
-- `nx/commands/pdf-process.md:39`: example `--collection knowledge__<corpus>`.
+- `conexus/agents/codebase-deep-analyzer.md:96`: example `code__<repo>`.
+- `conexus/agents/deep-research-synthesizer.md:112, 116`: examples `knowledge__art`, `code__<repo>`.
+- `conexus/agents/_shared/ERROR_HANDLING.md:97`, `_shared/CONTEXT_PROTOCOL.md:131`: example shapes in agent docstrings.
+- `conexus/skills/nexus/SKILL.md`, `nexus/reference.md`, `review/SKILL.md`, `debug/SKILL.md`, `rdr-gate/SKILL.md`: example collection names in skill instructions.
+- `conexus/commands/pdf-process.md:39`: example `--collection knowledge__<corpus>`.
 
 Compatibility implication accepted as breakage: with a user base of two operators, scripted MCP calls and saved CLI invocations referencing legacy names are expected to fail loudly post-rename. The operator updates the call once. No transparent-redirect shim; no deprecation chain follow. The surface audit above stands as a guide for *what to update*, not as a list of compat surfaces to preserve.
 
@@ -309,8 +309,8 @@ Rationale: building and maintaining a `superseded_by` chain-follow at every read
 7. Replace `registry._collection_name` family with calls to `cat.collection_for(...).render()`. Drop the legacy helpers as soon as call sites switch (no deprecation window; user base is two operators).
 8. Update `doc_indexer.py:599/1102/1463` inline name construction.
 9. Update `pipeline_stages.py`, `indexer.py`, `commands/index.py`.
-10. Update `nx/hooks/scripts/rdr_hook.py:58, 269` to use the same naming authority.
-11. Update `nx/skills/rdr-close/SKILL.md` so post-mortems land in the conformant `knowledge__<owner_id>__<model>__v1` shape with `category="rdr_postmortem"` set at the document level. Migrate any existing `knowledge__rdr_postmortem__*` collections via `nx catalog rename-collection` as a one-time operator step; document the rename in the skill's migration note.
+10. Update `conexus/hooks/scripts/rdr_hook.py:58, 269` to use the same naming authority.
+11. Update `conexus/skills/rdr-close/SKILL.md` so post-mortems land in the conformant `knowledge__<owner_id>__<model>__v1` shape with `category="rdr_postmortem"` set at the document level. Migrate any existing `knowledge__rdr_postmortem__*` collections via `nx catalog rename-collection` as a one-time operator step; document the rename in the skill's migration note.
 
 ### Phase 4: migration on first index
 
@@ -326,8 +326,8 @@ Rationale: building and maintaining a `superseded_by` chain-follow at every read
 
 ### Phase 6: plugin-layer documentation pass
 
-18. Sweep `nx/agents/*.md`, `nx/agents/_shared/*.md`, `nx/skills/*/SKILL.md`, `nx/skills/*/reference.md`, `nx/commands/*.md` for legacy-shape illustrative examples (`code__<repo>`, `knowledge__art`, `rdr__nexus`, etc.). Replace with conformant examples that reflect the post-RDR-103 reality.
-19. Update `nx/skills/nexus/SKILL.md` and `reference.md` collection-naming sections to describe the canonical 4-segment shape as the public contract.
+18. Sweep `conexus/agents/*.md`, `conexus/agents/_shared/*.md`, `conexus/skills/*/SKILL.md`, `conexus/skills/*/reference.md`, `conexus/commands/*.md` for legacy-shape illustrative examples (`code__<repo>`, `knowledge__art`, `rdr__nexus`, etc.). Replace with conformant examples that reflect the post-RDR-103 reality.
+19. Update `conexus/skills/nexus/SKILL.md` and `reference.md` collection-naming sections to describe the canonical 4-segment shape as the public contract.
 
 ### Day 2 operations
 

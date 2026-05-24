@@ -30,7 +30,7 @@ process pays no nexus-import cost before forking off the daemon.
 Imports happen only inside ``_run_session_end_synchronously`` which
 runs in the grandchild.
 
-Shell invocation (wired into ``nx/hooks/hooks.json``)::
+Shell invocation (wired into ``conexus/hooks/hooks.json``)::
 
     nx-session-end-launcher
 

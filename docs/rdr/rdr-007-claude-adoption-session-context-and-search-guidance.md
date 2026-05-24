@@ -18,7 +18,7 @@ related_issues:
 
 ## Summary
 
-The nx plugin infrastructure for Claude is architecturally sound but leads
+The conexus plugin infrastructure for Claude is architecturally sound but leads
 Claude into its worst-performing pathways in practice. Four specific adoption
 gaps were identified through empirical testing: (1) the session hook surfaces
 T2 memory under the bare repo name but the RDR workflow populates
@@ -43,7 +43,7 @@ findings are directly observable and reproducible.
 
 ## Motivation
 
-The nx plugin exists to give Claude persistent, cross-session knowledge about
+The conexus plugin exists to give Claude persistent, cross-session knowledge about
 a project. Its value proposition depends entirely on Claude actually using it
 and getting correct results. Neither is currently reliable.
 
@@ -94,7 +94,7 @@ The following was tested in a single session against the arcaneum project:
 --show-toplevel` → `Path(toplevel).name`. For repo `arcaneum`, this produces
 `arcaneum`. The hook then calls `nx memory list --project arcaneum`.
 
-The RDR workflow (via `/nx:rdr-create` and the `rdr_hook.py`) populates T2 under
+The RDR workflow (via `/conexus:rdr-create` and the `rdr_hook.py`) populates T2 under
 `{repo_name}_rdr` (e.g., `arcaneum_rdr`). These are different keys in the T2
 store.
 
@@ -336,7 +336,7 @@ is a reason to add a CLI call to a workflow that the API path already handles.
 
 ### Fix 3: FTS5 Caveat, Tool Selection Guide, and Naming Convention Correction
 
-Fix 3 makes three changes to `nx/skills/nexus/reference.md`:
+Fix 3 makes three changes to `conexus/skills/nexus/reference.md`:
 
 **Change A — Correct the namespace naming convention.** The current
 `reference.md` states: "**Project naming**: use bare `{repo}` for all project
@@ -348,7 +348,7 @@ contradicts the actual namespace conventions in use (`{repo}_rdr`,
 **Project naming**: Use purpose-specific suffixes for different memory domains:
 
 - bare `{repo}` — general project memory and notes
-- `{repo}_rdr` — RDR documents and gate results (populated by `/nx:rdr-create`)
+- `{repo}_rdr` — RDR documents and gate results (populated by `/conexus:rdr-create`)
 - `{repo}_pm` — project management context (populated by `nx pm`)
 
 The session hook discovers all populated namespaces by prefix scan; content
@@ -357,7 +357,7 @@ stored under any `{repo}_*` namespace will surface at session start.
 
 **Change B — Add "T2 Search Constraints" section** (new section, add two):
 
-Add to `nx/skills/nexus/reference.md`:
+Add to `conexus/skills/nexus/reference.md`:
 
 **Change B — "T2 Search Constraints" section**
 
@@ -536,7 +536,7 @@ ensuring all populated namespaces are surfaced.
 
 ### Phase 2: Skill Documentation Updates
 
-4. Add "T2 Search Constraints" section to `nx/skills/nexus/reference.md`
+4. Add "T2 Search Constraints" section to `conexus/skills/nexus/reference.md`
 5. Add "Code Search: When to Use nx vs Grep" section to same file
 6. Update the `nx search --corpus code` example in the quick-reference
    table to note the precision caveat

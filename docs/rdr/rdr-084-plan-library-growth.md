@@ -55,7 +55,7 @@ whether the library is compounding or plateauing.
 
 #### Gap 3: Hand-authoring is the only growth path, and it's expensive
 
-Writing a `nx/plans/*.yml` template is a high-friction act: authors
+Writing a `conexus/plans/*.yml` template is a high-friction act: authors
 must pick dimensions, required/optional bindings, tags. Operators who
 hit plan-miss paths never see the diff between "this worked; do more
 of it" and "this failed; do something else" — they have to reverse-engineer
@@ -194,7 +194,7 @@ if best.plan_id == 0:
 
 - **Personal scope only** — grown plans are caller-specific by default.
   Promotion to `project` or `global` is a separate decision (the
-  existing `/nx:plan-promote` skill + `plan-promote-propose` YAML
+  existing `/conexus:plan-promote` skill + `plan-promote-propose` YAML
   handle this; RDR-083 / RDR-084 can layer on top).
 - **TTL 30 days default** — ad-hoc plans are experimental; a stale
   plan is worse than no plan. 30 days is long enough to cover "used

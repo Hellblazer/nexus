@@ -2,7 +2,7 @@
 """RDR-121 Phase 3: ``nx hook routing-stats`` CLI + aggregation.
 
 Reads the per-rule JSONL log written by routing hooks (via
-``nx/hooks/scripts/routing/_lib.log_routing_event``) and produces a
+``conexus/hooks/scripts/routing/_lib.log_routing_event``) and produces a
 small report: total fires, allow / deny / escape counts, block-rate
 and escape-rate per rule.
 """

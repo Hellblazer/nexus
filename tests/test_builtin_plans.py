@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Validate every builtin plan template in nx/plans/builtin/.
+"""Validate every builtin plan template in conexus/plans/builtin/.
 
 Each *.yml file must:
   * Parse as valid YAML.
@@ -20,13 +20,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-_BUILTIN_DIR = Path(__file__).parent.parent / "nx" / "plans" / "builtin"
+_BUILTIN_DIR = Path(__file__).parent.parent / "conexus" / "plans" / "builtin"
 _YAML_FILES = sorted(_BUILTIN_DIR.glob("*.yml")) + sorted(_BUILTIN_DIR.glob("*.yaml"))
 
 
 @pytest.mark.skipif(
     not _BUILTIN_DIR.exists() or not _YAML_FILES,
-    reason="nx/plans/builtin/ dir is empty - defensive skip; expected to be populated",
+    reason="conexus/plans/builtin/ dir is empty - defensive skip; expected to be populated",
 )
 @pytest.mark.parametrize("path", _YAML_FILES, ids=[p.name for p in _YAML_FILES])
 def test_builtin_template_validates(path: Path) -> None:
@@ -42,7 +42,7 @@ def test_builtin_template_validates(path: Path) -> None:
 
 @pytest.mark.skipif(
     not _BUILTIN_DIR.exists() or not _YAML_FILES,
-    reason="nx/plans/builtin/ dir is empty - defensive skip; expected to be populated",
+    reason="conexus/plans/builtin/ dir is empty - defensive skip; expected to be populated",
 )
 @pytest.mark.parametrize("path", _YAML_FILES, ids=[p.name for p in _YAML_FILES])
 def test_builtin_template_required_dimensions(path: Path) -> None:
@@ -55,7 +55,7 @@ def test_builtin_template_required_dimensions(path: Path) -> None:
 
 @pytest.mark.skipif(
     not _BUILTIN_DIR.exists() or not _YAML_FILES,
-    reason="nx/plans/builtin/ dir is empty - defensive skip; expected to be populated",
+    reason="conexus/plans/builtin/ dir is empty - defensive skip; expected to be populated",
 )
 def test_builtin_templates_no_dimension_collisions() -> None:
     """No two builtin templates may have the same canonical dimensions.
@@ -81,7 +81,7 @@ def test_builtin_templates_no_dimension_collisions() -> None:
 
 @pytest.mark.skipif(
     not _BUILTIN_DIR.exists() or not _YAML_FILES,
-    reason="nx/plans/builtin/ dir is empty - defensive skip; expected to be populated",
+    reason="conexus/plans/builtin/ dir is empty - defensive skip; expected to be populated",
 )
 def test_builtin_templates_load_into_library(tmp_path: Path) -> None:
     """All builtin templates must load into a fresh PlanLibrary with no errors.

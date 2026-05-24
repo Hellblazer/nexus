@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "4.34.6"
+version = "5.0.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -118,24 +118,24 @@ packages = ["src/nexus"]
 # header filenames that PyPI rejects with a 400 "Duplicate filename
 # in local headers." The symlink exists for editable installs to
 # resolve ``importlib.resources.files('nexus') / '_resources'`` into
-# the repo's ``nx/plans`` tree; force-include is the wheel-install
+# the repo's ``conexus/plans`` tree; force-include is the wheel-install
 # path. Exactly one of the two should land files into the wheel.
 exclude = [
     "src/nexus/_resources",
 ]
 
-# RDR-092 nexus-b9f3: ship the nx plugin's plan YAMLs as package data
+# RDR-092 nexus-b9f3: ship the conexus plugin's plan YAMLs as package data
 # so installed CLIs can resolve them via ``importlib.resources.files
 # ("nexus") / "_resources"``. Without this, ``_seed_plan_templates``
-# cannot find ``nx/plans/builtin/*.yml`` from a uv-tool install and
+# cannot find ``conexus/plans/builtin/*.yml`` from a uv-tool install and
 # the Phase 0c fail-loud guard correctly surfaces the deployment gap.
 #
-# Only ``nx/plans/`` travels. The rest of ``nx/`` (agents, skills,
+# Only ``conexus/plans/`` travels. The rest of ``conexus/`` (agents, skills,
 # commands, hooks, .claude-plugin/plugin.json) is consumed by Claude
 # Code from the repo at plugin-install time, not from the Python
 # wheel.
 [tool.hatch.build.targets.wheel.force-include]
-"nx/plans" = "nexus/_resources/plans"
+"conexus/plans" = "nexus/_resources/plans"
 # nexus-tv5u: ship DT-side AppleScripts as package data so
 # ``nx dt install-scripts`` can resolve them via
 # ``importlib.resources.files("nexus") / "_resources" / "dt-scripts"``
@@ -146,14 +146,14 @@ exclude = [
 # ``nx daemon t3 install --autostart`` can resolve them via
 # ``importlib.resources.files("nexus") / "_resources" / "daemon"``.
 # Editable installs use a ``src/nexus/_resources/daemon`` symlink back
-# into ``nx/daemon``.
-"nx/daemon" = "nexus/_resources/daemon"
+# into ``conexus/daemon``.
+"conexus/daemon" = "nexus/_resources/daemon"
 
 [tool.hatch.build.targets.sdist]
 include = [
     "src",
-    "nx/plans",
-    "nx/daemon",
+    "conexus/plans",
+    "conexus/daemon",
     "dt/scripts",
     "README.md",
     "LICENSE",

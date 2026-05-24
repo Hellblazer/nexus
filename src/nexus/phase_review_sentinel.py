@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-121 phase-review-gate sentinel.
 
-The /nx:phase-review-gate command writes a sentinel file on a PASSED
+The /conexus:phase-review-gate command writes a sentinel file on a PASSED
 outcome. The phase_review_close_requires_gate routing hook reads the
 sentinel before allowing a phase-review bead close. Sentinel + reader
 must ship together (RDR-121 P2 hard coupling).

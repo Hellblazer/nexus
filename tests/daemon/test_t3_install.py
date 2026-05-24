@@ -2,7 +2,7 @@
 """RDR-120 P1.A (nexus-41unl): ``nx daemon t3 install/uninstall --autostart`` tests.
 
 Templates ship under ``src/nexus/_resources/daemon/`` (symlinked to
-``nx/daemon/``). The CLI substitutes ``__NX_BIN__`` / ``__LOG_DIR__`` /
+``conexus/daemon/``). The CLI substitutes ``__NX_BIN__`` / ``__LOG_DIR__`` /
 ``__PATH_ENV__`` at install time and drops the rendered file into the
 per-OS autostart location.
 
@@ -69,7 +69,7 @@ class TestInstallMacOS:
         monkeypatch.setattr(
             daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "Logs",
         )
-        monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/nx/bin/nx"])
+        monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/conexus/bin/nx"])
 
         with patch.object(daemon_cmd.subprocess, "run") as mock_run:
             mock_run.return_value.returncode = 0
@@ -85,7 +85,7 @@ class TestInstallMacOS:
         dest = tmp_path / "LaunchAgents" / "com.nexus.t3.plist"
         assert dest.exists()
         body = dest.read_text()
-        assert "<string>/opt/nx/bin/nx</string>" in body
+        assert "<string>/opt/conexus/bin/nx</string>" in body
         assert "<string>t3</string>" in body
         assert "<string>__NX_BIN__</string>" not in body
         cmd = mock_run.call_args[0][0]
@@ -103,7 +103,7 @@ class TestInstallMacOS:
         monkeypatch.setattr(
             daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "Logs",
         )
-        monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/nx/bin/nx"])
+        monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/conexus/bin/nx"])
 
         with patch.object(daemon_cmd.subprocess, "run") as mock_run:
             mock_run.return_value.returncode = 0
@@ -158,7 +158,7 @@ class TestInstallLinux:
             daemon_cmd, "_autostart_log_dir",
             lambda: tmp_path / "state",
         )
-        monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/nx/bin/nx"])
+        monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/conexus/bin/nx"])
 
         with patch.object(daemon_cmd.subprocess, "run") as mock_run:
             mock_run.return_value.returncode = 0
@@ -173,7 +173,7 @@ class TestInstallLinux:
         dest = tmp_path / "systemd-user" / "nexus-t3.service"
         assert dest.exists()
         body = dest.read_text()
-        assert "/opt/nx/bin/nx daemon t3 start" in body
+        assert "/opt/conexus/bin/nx daemon t3 start" in body
         assert "ExecStart=__NX_BIN__" not in body
         cmd = mock_run.call_args[0][0]
         assert cmd == [
@@ -216,7 +216,7 @@ class TestOverwriteGuard:
         monkeypatch.setattr(
             daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "Logs",
         )
-        monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/nx/bin/nx"])
+        monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/conexus/bin/nx"])
         (tmp_path / "LaunchAgents").mkdir()
         dest = tmp_path / "LaunchAgents" / "com.nexus.t3.plist"
         dest.write_text("<!-- old customisation -->\n")
@@ -232,7 +232,7 @@ class TestOverwriteGuard:
             )
 
         assert result.exit_code == 0, result.output
-        assert "<string>/opt/nx/bin/nx</string>" in dest.read_text()
+        assert "<string>/opt/conexus/bin/nx</string>" in dest.read_text()
         assert "<!-- old customisation -->" not in dest.read_text()
 
 

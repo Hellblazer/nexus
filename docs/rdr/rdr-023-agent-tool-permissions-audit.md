@@ -42,7 +42,7 @@ hit the same issue.
 
 ### Finding 1: No agents have `tools` frontmatter
 
-Confirmed via `grep -c '^tools:' nx/agents/*.md` — zero matches across all 14
+Confirmed via `grep -c '^tools:' conexus/agents/*.md` — zero matches across all 14
 agent files. All agents share the same frontmatter structure: name, version,
 description, model, color.
 
@@ -56,7 +56,7 @@ what subagents can use at runtime regardless of other configuration.
 
 ### Finding 3: Sequential thinking is pervasive
 
-12 of 14 agents reference `mcp__plugin_nx_sequential-thinking__sequentialthinking`
+12 of 14 agents reference `mcp__plugin_conexus_sequential-thinking__sequentialthinking`
 in their system prompts. This is a reasoning primitive with no side effects — it
 should not be restricted.
 
@@ -96,7 +96,7 @@ Two independent layers:
 ### Tool Assignments
 
 > **Note**: "sequential-thinking" in the table below abbreviates the full tool
-> identifier `mcp__plugin_nx_sequential-thinking__sequentialthinking`. The
+> identifier `mcp__plugin_conexus_sequential-thinking__sequentialthinking`. The
 > design doc and impl-plan contain the full identifiers as deployed to agent
 > frontmatter.
 
@@ -164,7 +164,7 @@ See `docs/rdr/rdr-035-plugin-agent-mcp-tool-access.md`.
 
 Pre-conditions (verified before gate):
 
-- [x] All 14 agents have explicit `tools` in frontmatter (verified: `grep '^tools:' nx/agents/*.md` — 14 matches)
+- [x] All 14 agents have explicit `tools` in frontmatter (verified: `grep '^tools:' conexus/agents/*.md` — 14 matches)
 - [x] PermissionRequest hook auto-approves safe tools (verified: JSON payload tests — all allow/deny/ask-user scenarios pass)
 - [x] Existing deny rules preserved (verified: destructive commands still denied in hook tests)
 - [x] ~~Tools frontmatter~~ **Reversed by RDR-035** — `tools:` removed from all agents due to MCP filtering bug

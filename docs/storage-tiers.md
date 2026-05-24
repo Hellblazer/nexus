@@ -2,7 +2,7 @@
 
 Nexus organizes data across three tiers with increasing durability. Data flows upward (T1 → T2 → T3).
 
-**Two access paths**: Humans use the `nx` CLI. Agents use MCP tools (`mcp__plugin_nx_nexus__*`) which call the same Python APIs directly — no Bash dependency. MCP tools that return lists (`search`, `store_list`, `memory_search`) are paged — pass `offset=N` for subsequent pages. See [nx/README.md](../nx/README.md#mcp-servers) for MCP tool details.
+**Two access paths**: Humans use the `nx` CLI. Agents use MCP tools (`mcp__plugin_conexus_nexus__*`) which call the same Python APIs directly — no Bash dependency. MCP tools that return lists (`search`, `store_list`, `memory_search`) are paged — pass `offset=N` for subsequent pages. See [conexus/README.md](../conexus/README.md#mcp-servers) for MCP tool details.
 
 **One arbitrator per tier**: Since conexus 4.34.0 (RDR-120), both T2 and (local-mode) T3 are wrapped in dedicated daemon processes. Every consumer — host CLI, the MCP server, multiple Claude Code sessions, Claude Cowork agents (via SDK transport), dev containers (via TCP loopback or UDS mount) — routes through the same daemon, so the underlying SQLite / ChromaDB instance has exactly one writer. Start the daemons once via `nx daemon t2 install --autostart` (and `nx daemon t3 install --autostart` in local mode); the Claude Code plugin's SessionStart hook also auto-spawns them on each session start.
 
@@ -75,8 +75,8 @@ A local SQLite database. Every entry has a project, a title, and content — lik
 T2 is the persistent local layer that bridges sessions. Notes, project state, and agent relay context survive restarts here. Different usage patterns share the same simple model:
 
 - **Developer notes** — hypotheses, findings, decisions-in-progress via `nx memory put`
-- **Project memory** — design notes, working state, active decisions. Store with `nx memory put`, retrieve with `nx memory get`. See [Memory and Tasks](memory-and-tasks.md).
-- **RDR metadata** — status, type, priority, dates for each RDR document. See [RDR: Nexus Integration](rdr-nexus-integration.md).
+- **Project memory** — design notes, working state, active decisions. Store with `nx memory put`, retrieve with `nx memory get`. 
+- **RDR metadata** — status, type, priority, dates for each RDR document. See [RDR: Nexus Integration](rdr.md#nexus-integration).
 - **Plan library** — saved query execution plans with project scoping, FTS5 search, dimensional identity (`verb`, `scope`, `strategy` + optional axes), and optional TTL. Fourteen builtin templates are seeded at `nx catalog setup` (5 legacy + 9 RDR-078 scenario plans for `verb: research` / `review` / `analyze` / `debug` / `document` + 4 meta-seeds). Access via `plan_save` / `plan_search` MCP tools, or indirectly via `nx_answer` (the retrieval trunk — see [Plan-Centric Retrieval](plan-centric-retrieval.md)). Note: auto-growth of the library from successful ad-hoc plans is filed as RDR-084 (draft, not yet implemented) — today the library stays at the 14 seed templates plus any manually-authored YAMLs.
 - **Agent relay** — context passed between agent invocations
 - **Promoted scratch** — T1 entries flagged during a session are auto-flushed to T2 at session end
@@ -87,7 +87,32 @@ Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, 
 
 > **Note (RDR-063 interaction)**: Under sustained concurrent cross-domain write load (e.g. a large `nx index repo` run generating dense telemetry writes while an agent is actively using memory), the access-count increment inside `memory.search` and `memory.get` is a best-effort side-effect. If the write leg cannot acquire the SQLite write lock immediately, the counter update is skipped and logged at warning as `memory.access_tracking.skipped`. In practice this drops roughly 5–10% of increments during heavy indexing. Heat-weighted TTL is therefore approximate: heavily-accessed entries may accumulate slightly lower `access_count` values than their true read frequency would suggest, which modestly compresses their effective TTL. The trade-off is an intentional Phase 2 choice — keeping search/get latency stable under load is worth the loss of a fraction of statistical signal.
 
-**Consolidation (RDR-061 E6)**: `memory_consolidate` MCP tool provides `find-overlaps`, `merge` (with `dry_run` and `confirm_destructive` safety gates), and `flag-stale` operations. See [Memory and Tasks — Consolidation](memory-and-tasks.md#consolidation-rdr-061-e6).
+**Consolidation (RDR-061 E6)**: `memory_consolidate` MCP tool provides three hygiene operations to manage T2 growth over time:
+
+```python
+# Find overlapping pairs (Jaccard > 0.7)
+memory_consolidate(action="find-overlaps", project="myrepo")
+
+# Flag entries not accessed in 30+ days
+memory_consolidate(action="flag-stale", project="myrepo", idle_days=30)
+
+# Preview a merge (dry run)
+memory_consolidate(action="merge", project="myrepo",
+    keep_id=42, delete_ids="43", merged_content="...", dry_run=True)
+
+# Execute single-entry merge (no confirm required)
+memory_consolidate(action="merge", project="myrepo",
+    keep_id=42, delete_ids="43", merged_content="...")
+
+# Multi-entry merge (confirm required)
+memory_consolidate(action="merge", project="myrepo",
+    keep_id=42, delete_ids="43,44,45", merged_content="...",
+    confirm_destructive=True)
+```
+
+Merges use SQLite's write lock via `with self.conn:` to ensure UPDATE and DELETE are atomic. If `keep_id` was deleted by a concurrent `expire()` call, the merge raises `KeyError` and `delete_ids` survive, preventing silent data loss when the consolidation scan races with TTL expiry. `nx_tidy` and `nx_answer` both invoke these operations during periodic hygiene.
+
+**Taxonomy cascade on delete**: When a memory entry is deleted, the T2 facade also calls `CatalogTaxonomy.purge_assignments_for_doc(project, title)`, removing any topic assignments that reference the deleted entry and dropping any topics left empty by the deletion.
 
 **Relevance log (RDR-061 E2)**: T2 also holds a `relevance_log` table that records `(query, chunk_id, action)` triples when an agent acts on search results (`store_put`, `catalog_link`). This is internal telemetry — not exposed as an MCP tool. Purged by `T2Database.expire(relevance_log_days=90)` alongside memory TTL expiry.
 
@@ -102,7 +127,7 @@ The taxonomy spans two storage tiers:
 | Table | Purpose |
 |-------|---------|
 | `topics` | One row per discovered or manually-created topic, including label, parent, collection, curation state, and top keywords |
-| `topic_assignments` | Maps documents to topics. Columns: `doc_id`, `topic_id`, `assigned_by` (`hdbscan` / `manual` / `centroid` / `projection` / `auto-matched` / `split`). Projection rows (RDR-077) additionally carry `similarity` (raw cosine — ICF is applied at query time, never stored), `assigned_at` (ISO-8601), and `source_collection` (origin of the projected chunk; required for ICF aggregation). Projection rows use a prefer-higher UPSERT; other provenance keeps `INSERT OR IGNORE` idempotency. See [taxonomy-projection-tuning.md](taxonomy-projection-tuning.md). |
+| `topic_assignments` | Maps documents to topics. Columns: `doc_id`, `topic_id`, `assigned_by` (`hdbscan` / `manual` / `centroid` / `projection` / `auto-matched` / `split`). Projection rows (RDR-077) additionally carry `similarity` (raw cosine — ICF is applied at query time, never stored), `assigned_at` (ISO-8601), and `source_collection` (origin of the projected chunk; required for ICF aggregation). Projection rows use a prefer-higher UPSERT; other provenance keeps `INSERT OR IGNORE` idempotency. See [taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md). |
 | `taxonomy_meta` | Per-collection watermark used to decide whether re-discovery is needed |
 | `topic_links` | Aggregated link counts between topics, derived from the catalog link graph |
 

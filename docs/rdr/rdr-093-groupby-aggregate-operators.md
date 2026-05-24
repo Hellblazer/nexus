@@ -540,7 +540,7 @@ against `knowledge__delos` with shape-based assertions.
 
 ## Finalization Gate
 
-Gated 2026-04-24 via `/nx:rdr-gate 093`. First pass surfaced one
+Gated 2026-04-24 via `/conexus:rdr-gate 093`. First pass surfaced one
 critical issue plus two significant issues — all resolvable in
 design, no code changes required pre-accept. Fixed in-place
 before the re-gate:

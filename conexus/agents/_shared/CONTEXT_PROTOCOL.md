@@ -1,0 +1,278 @@
+# Shared Context Protocol for Agents
+
+This file documents the standard context exchange protocol used by all agents for consistent relays, context recovery, and knowledge management.
+
+## Degraded Mode
+
+If nexus MCP tools (`mcp__plugin_conexus_nexus__*`) are unavailable (e.g., MCP server not started, plugin not loaded), fall back to the `nx` CLI via Bash tool. MCP tools are the primary interface; CLI is the fallback.
+
+## RECEIVE (Before Starting Work)
+
+### Proactive Search Agents (Planning & Research)
+
+These agents **MUST proactively search** for context before starting:
+- **strategic-planner**: Search T3 store for prior decisions, T2 memory for active work
+- **architect-planner**: Search T3 store for architectural patterns, design decisions
+- **deep-research-synthesizer**: Search T3 store for prior research, web resources for related docs
+- **codebase-deep-analyzer**: Search T3 store for codebase knowledge, architecture notes
+
+**Search Sources in Order**:
+1. **Bead**: `/beads:show <id>` for task context, design field, dependencies
+2. **Project Infrastructure**: T2 memory and beads context is auto-injected by SessionStart and SubagentStart hooks
+3. **T3 store**: mcp__plugin_conexus_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
+4. **Catalog link graph**: `mcp__plugin_conexus_nexus__query( question="[topic]", follow_links="implements" )` — the `query` tool automatically boosts results from documents with precise `implements` links
+5. **T2 memory**: mcp__plugin_conexus_nexus__memory_get( `project="{project}", title="ACTIVE_INDEX.md"`
+6. **T1 scratch** (current session): mcp__plugin_conexus_nexus__scratch( `action="search", query="[topic]"`
+
+### Relay-Reliant Agents (Execution & Validation)
+
+These agents **rely on relays** for context (do not proactively search):
+- **developer**: Expects architecture/plan in relay
+- **code-review-expert**: Expects files to review in relay
+- **nx_plan_audit** (`mcp__plugin_conexus_nexus__nx_plan_audit`): call with `plan_json` + `context` (RDR-080 — no relay needed)
+- **test-validator**: Expects code/test paths in relay
+- **debugger**: Expects failure description in relay
+
+**Sibling context (SHOULD, not MUST):** Before starting work, relay-reliant agents SHOULD search scratch for predecessor findings:
+
+mcp__plugin_conexus_nexus__scratch( action="search", query="[task topic]", limit=5
+
+If results exist, incorporate them as supplementary context. If scratch is empty, proceed normally. This adds one MCP call (~100ms) and provides context that relays may omit.
+
+**Precedence rule:** Relay context takes precedence over scratch context. Scratch entries are hints, not authoritative. If a scratch `decision` entry conflicts with the relay, proceed per the relay and note the discrepancy.
+
+**If relay is incomplete**, use RECOVER protocol (search as fallback).
+
+### Relay Validation (All Agents)
+
+If relay received, verify it contains:
+- [ ] Bead ID(s) with current status (or 'none')
+- [ ] Input Artifacts section (nx store/memory/Files)
+- [ ] Deliverable description
+- [ ] Quality criteria checkboxes
+
+## T1 — Session Scratch (Ephemeral)
+
+T1 is session-scoped: all entries are wiped at SessionEnd unless flagged.
+
+**When to use T1:**
+- Ephemeral working notes and hypotheses during a single session
+- Intermediate analysis results before validation
+- Step-by-step debug traces that may not be worth persisting
+- Routing or coordination notes within a pipeline run
+
+### Standard Scratch Tags
+
+All agents SHOULD use these tags when writing to scratch:
+
+| Tag | Meaning | Written by | Useful for |
+|-----|---------|-----------|------------|
+| `impl` | General implementation work (combine with others) | developer | any successor |
+| `checkpoint` | Implementation step completed | developer | reviewer, test-validator |
+| `failed-approach` | Attempted fix/approach that didn't work | developer, debugger | reviewer, debugger |
+| `hypothesis` | Working theory about a problem | debugger, analyst | developer |
+| `discovery` | Unexpected finding during work | any agent | any successor |
+| `decision` | Design/approach choice made during work | planner, architect | developer |
+
+Tags are comma-separated. Combine with domain tags: `failed-approach,auth,retry`.
+
+**T1 MCP Tools:**
+```
+mcp__plugin_conexus_nexus__scratch(action="put", content="<content>", tags="TAG1,TAG2")
+mcp__plugin_conexus_nexus__scratch(action="get", entry_id="<id>")
+mcp__plugin_conexus_nexus__scratch(action="search", query="<query>", limit=10)
+mcp__plugin_conexus_nexus__scratch(action="list")
+mcp__plugin_conexus_nexus__scratch_manage(action="flag", entry_id="<id>", project="PROJECT", title="TITLE")
+mcp__plugin_conexus_nexus__scratch_manage(action="promote", entry_id="<id>", project="PROJECT", title="TITLE")
+```
+
+The SessionEnd hook runs automatically at session close and auto-promotes flagged T1 items to T2. Flagging items with scratch_manage `action="flag"` is how you opt in.
+
+**Promote to T2 when:**
+- Hypothesis validated (worth preserving across sessions)
+- Interim findings that a future session may need
+- Working notes that inform future work
+
+## Storage Tier Quick Reference
+
+Conexus MCP tools use the full prefix `mcp__plugin_conexus_nexus__` (e.g. `mcp__plugin_conexus_nexus__search`).
+
+| Tier | Name | Scope | MCP Tools | Use Cases | TTL |
+|------|------|-------|-----------|-----------|-----|
+| T1 | scratch | Session (ephemeral) | `scratch`, `scratch_manage` | Working notes, hypotheses, debug traces | Wiped on SessionEnd (flag to survive) |
+| T2 | memory | Per-project, persistent | `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate` | Session state, project context, agent relay, active work. Consolidation: find overlaps, merge duplicates, flag stale entries | 30d default; `permanent` available. Heat-weighted: highly-accessed entries survive longer |
+| T3 | store / search | Permanent, cross-session | `search`, `query`, `store_put`, `store_get`, `store_list` | Research findings, architectural decisions, validated patterns. Results include `chunk_text_hash` metadata | `permanent` or explicit TTL |
+| Catalog | document registry | Permanent, cross-session | `search`, `show`, `links`, `link`, `resolve` | Author/corpus/provenance queries; typed links between documents; content-addressed span references | Permanent |
+
+## Pagination
+
+`search`, `store_list`, and `memory_search` return paged results. Response footer format: `--- showing X-Y of Z. next: offset=N`. Re-call with `offset=N` for the next page. Stop when you see `(end)` or `No results at offset N`.
+
+## Choosing Search Options
+
+Use the right search form for the task:
+
+| Goal | Tool Call |
+|---|---|
+| Find related prior knowledge | mcp__plugin_conexus_nexus__search( `query="topic", corpus="knowledge", limit=5` |
+| Research question (which documents match?) | mcp__plugin_conexus_nexus__query( `question="topic", corpus="knowledge"` |
+| Filter by year, tag, or metadata | mcp__plugin_conexus_nexus__query( `question="topic", where="bib_year>=2023"` |
+| Filter by multiple criteria | mcp__plugin_conexus_nexus__query( `question="topic", where="bib_year>=2020,tags=arch"` |
+| Research with uncertain vocabulary | Run 2 queries: primary term, then alternate framing |
+| Conceptual code search (unfamiliar codebase) | mcp__plugin_conexus_nexus__search( `query="concept", corpus="code", limit=15` |
+| Documentation search | mcp__plugin_conexus_nexus__search( `query="topic", corpus="docs", limit=10` |
+| Exact code navigation | Use Grep tool instead — faster and more precise |
+| Search by author | mcp__plugin_conexus_nexus__query( `question="topic", author="Fagin"` |
+| Search by content type | mcp__plugin_conexus_nexus__query( `question="topic", content_type="rdr"` |
+| Follow citation links | mcp__plugin_conexus_nexus__query( `question="topic", follow_links="cites", depth=1` |
+| Search document subtree | mcp__plugin_conexus_nexus__query( `question="topic", subtree="1.1"` |
+| Search within a topic cluster | mcp__plugin_conexus_nexus__search( `query="question", topic="PDF Extraction"` |
+| Cross-corpus research | Use query tool with `corpus="all"` or multiple query calls |
+| List documents in a collection | mcp__plugin_conexus_nexus__store_list( `collection="knowledge__art-1-1__voyage-context-3__v1", docs=true` (RDR-103 4-segment shape) |
+
+**When NOT to use search:**
+- When the relay already contains the information needed
+- For simple, bounded tasks where prior knowledge is unlikely to change the approach
+- When Grep or file reads are faster and more precise (class/function lookups)
+
+## PRODUCE
+
+Agents produce artifacts based on their specialization:
+- **Code Changes**: Committed with bead reference in message
+- **Test Results**: Logged; failures create bug beads
+- **Analysis/Research**: Store in T3 store with appropriate title pattern
+- **Session State**: Store in T2 memory for multi-session work
+- **Interim Working Notes**: Use T1 scratch for session-scoped state; promote to T2 when validated:
+  ```
+  # Store ephemeral working note
+  mcp__plugin_conexus_nexus__scratch( action="put", content="<hypothesis or interim finding>", tags="hypothesis"
+  # Flag for auto-flush to T2 at session end
+  mcp__plugin_conexus_nexus__scratch_manage( action="flag", entry_id="<id>", project="{project}", title="interim-notes.md"
+  # Or promote immediately
+  mcp__plugin_conexus_nexus__scratch_manage( action="promote", entry_id="<id>", project="{project}", title="interim-findings.md"
+  ```
+
+### Naming Conventions
+
+- **nx store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
+- **nx memory**: `project="{project}", title="{topic}.md"` (e.g., `project="ART", title="auth-implementation.md"`)
+
+
+## RELAY (Standard Format)
+
+Relays are constructed by the **caller** (main conversation or skill) when dispatching agents. Agents do not construct relays to other agents — subagents cannot spawn subagents. Instead, agents output a "Recommended Next Step" block that the caller uses to build the next relay.
+
+Standard relay structure:
+
+```
+## Relay: [Target Agent]
+
+**Task**: [1-2 sentence summary]
+**Bead**: [ID] (status: [status])
+
+### Input Artifacts
+- nx store: [document titles or "none"]
+- nx memory: [project/title path or "none"]
+- nx scratch: [scratch IDs or "none"]
+- Files: [key files touched]
+
+### Deliverable
+[What the receiving agent should produce]
+
+### Quality Criteria
+- [ ] [Criterion 1]
+- [ ] [Criterion 2]
+
+### Context Notes
+[Special context, blockers, or warnings]
+```
+
+See [RELAY_TEMPLATE.md](./RELAY_TEMPLATE.md) for the full template, extended template, and optional fields reference.
+
+## RECOVER (If Context Missing)
+
+If expected context not received:
+1. Search T3 store for related prior work: mcp__plugin_conexus_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
+2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search( `query="[topic]", project="{project}"`
+3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch( `action="search", query="[topic]"`
+4. Query active work via `/beads:list` with status=in_progress
+5. Document assumption in bead notes
+6. Flag incomplete context in downstream relay
+
+## Beads Integration
+
+All agents should:
+- Check `/beads:ready` for available work before starting
+- Update bead status when starting: `/beads:update <id>` with status=in_progress
+- Close beads when complete: `/beads:close <id>`
+- Create new beads for discovered work: `/beads:create`
+- Always commit `.beads/issues.jsonl` with code changes
+
+## nx Store Patterns
+
+### Document Title Prefixes by Domain
+- `research-` - Research findings and literature reviews
+- `decision-` - Architectural and design decisions
+- `pattern-` - Reusable code patterns and solutions
+- `debug-` - Debugging insights and root causes
+- `analysis-` - Deep analysis findings
+- `insight-` - Developer/agent discoveries
+
+### Storage Tools
+```
+# Store a document
+mcp__plugin_conexus_nexus__store_put( content="content", collection="knowledge", title="research-topic-date", tags="category"
+
+# Search stored knowledge
+mcp__plugin_conexus_nexus__search( query="query", corpus="knowledge", limit=5
+
+# List stored documents
+mcp__plugin_conexus_nexus__store_list( collection="knowledge"
+```
+
+### Metadata
+store_put uses `tags` parameter for categorization (comma-separated strings).
+
+## nx Memory Organization
+
+Three project namespaces are in use:
+- `{repo}` — agent working notes and relay state (e.g., `project="nexus"`)
+- `{repo}_rdr` — RDR records and gate results (e.g., `project="nexus_rdr"`)
+
+Common titles under `{repo}`:
+- `title="hypotheses.md"` - Current working hypotheses
+- `title="findings.md"` - Validated discoveries
+- `title="blockers.md"` - Active blockers and impediments
+- `title="relay.md"` - Pending relay context
+
+### Memory Tools
+```
+# Write to memory
+mcp__plugin_conexus_nexus__memory_put( content="content", project="{project}", title="findings.md", ttl=30
+
+# Read from memory
+mcp__plugin_conexus_nexus__memory_get( project="{project}", title="findings.md"
+
+# Search memory
+mcp__plugin_conexus_nexus__memory_search( query="query", project="{project}"
+
+# List memory files
+mcp__plugin_conexus_nexus__memory_get( project="{project}", title=""
+```
+
+## Usage in Agent Files
+
+Agents should reference this protocol instead of duplicating:
+
+```markdown
+## Context Protocol
+
+This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
+
+### Agent-Specific PRODUCE
+- [Additional artifacts this agent produces]
+- [Custom nx store title patterns]
+
+### Agent-Specific RELAY
+[Any modifications to standard relay format]
+```

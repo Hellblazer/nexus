@@ -69,7 +69,7 @@ uv run pytest -m integration
 src/nexus/           # Core Python package
   commands/          # Click CLI commands (one file per group)
   db/                # Storage tier implementations (t1, t2, t3)
-nx/                  # Claude Code plugin (skills, agents, hooks)
+conexus/                  # Claude Code plugin (skills, agents, hooks)
 tests/               # pytest test suite
 docs/                # Documentation
 ```
@@ -146,9 +146,9 @@ for the map.
 
 ## Adding an Agent or Skill
 
-See `nx/README.md` for the plugin structure. Skills live in `nx/skills/<name>/SKILL.md`, agents in `nx/agents/<name>.md`, and both are registered in `nx/registry.yaml`.
+See `conexus/README.md` for the plugin structure. Skills live in `conexus/skills/<name>/SKILL.md`, agents in `conexus/agents/<name>.md`, and both are registered in `conexus/registry.yaml`.
 
-**MCP tools in agents**: Agents do NOT declare a `tools:` or `disallowedTools:` field in frontmatter — Claude Code has confirmed bugs where these fields in plugin-defined agents filter out MCP tools or are silently ignored (see RDR-035, RDR-039). Agents inherit all tools from the parent session; the `settings.json` permissions list provides runtime enforcement. Agent body text references MCP tool syntax (not CLI commands) for storage tier operations. See `nx/README.md` § MCP Servers for tool names and parameters.
+**MCP tools in agents**: Agents do NOT declare a `tools:` or `disallowedTools:` field in frontmatter — Claude Code has confirmed bugs where these fields in plugin-defined agents filter out MCP tools or are silently ignored (see RDR-035, RDR-039). Agents inherit all tools from the parent session; the `settings.json` permissions list provides runtime enforcement. Agent body text references MCP tool syntax (not CLI commands) for storage tier operations. See `conexus/README.md` § MCP Servers for tool names and parameters.
 
 ## Version Pinning
 
@@ -165,7 +165,7 @@ Do not bump these without testing the full chunking pipeline.
 - **Integration branch is `develop`.** Open PRs against `develop`, not `main`. `main` carries the plugin marketplace surface; the develop split protects it from in-flight churn. Releases promote `develop` to `main` via merge (or merge-then-tag).
 - Direct pushes to `main` are reserved for the version-bump commit during a release. See Release Process below.
 - Use `bd` (beads, **≥ 1.0.0**: `brew install beads` or `brew upgrade beads`) for task tracking. Earlier 0.x versions reject the comma-separated `--status` flag the close-skill preamble uses; the bead advisory will silently report no open beads on stale installs.
-- **Code review**: Plans include review tasks after implementation phases. Use `/nx:review-code` or dispatch `code-review-expert` at the designated plan steps.
+- **Code review**: Plans include review tasks after implementation phases. Use `/conexus:review-code` or dispatch `code-review-expert` at the designated plan steps.
 
 Both `main` and `develop` carry branch protection. Configure at
 https://github.com/Hellblazer/nexus/settings/branches:
@@ -231,18 +231,18 @@ Every step below is **required**. Missing any one of them has caused problems in
    - Leave a fresh empty `## [Unreleased]` at the top
    - Group entries under `### Added`, `### Fixed`, `### Changed`, `### Removed`, `### Docs`
 
-6. **Update `nx/CHANGELOG.md`** (plugin changelog — always, even if no plugin changes)
+6. **Update `conexus/CHANGELOG.md`** (plugin changelog — always, even if no plugin changes)
    Add a release entry. If there are no plugin-level changes, write:
    > Plugin version aligned with Nexus CLI X.Y.Z. No plugin-level functional changes.
 
 7. **Update `.claude-plugin/marketplace.json`**
    Bump the `"version"` field in **both** the `nx` and `sn` plugin entries to match the new version.
-   Also update `nx/.claude-plugin/plugin.json` and `sn/.claude-plugin/plugin.json` to match.
+   Also update `conexus/.claude-plugin/plugin.json` and `sn/.claude-plugin/plugin.json` to match.
    Claude Code uses each plugin's `plugin.json` version to decide whether to refresh the cache — forgetting either one leaves stale skills/agents running.
 
 8. **Commit all release artifacts directly to `main`**
    ```bash
-   git add pyproject.toml uv.lock CHANGELOG.md nx/CHANGELOG.md nx/.claude-plugin/plugin.json sn/.claude-plugin/plugin.json .claude-plugin/marketplace.json docs/
+   git add pyproject.toml uv.lock CHANGELOG.md conexus/CHANGELOG.md conexus/.claude-plugin/plugin.json sn/.claude-plugin/plugin.json .claude-plugin/marketplace.json docs/
    git commit -m "chore: bump version to X.Y.Z"
    git push
    ```
@@ -278,9 +278,9 @@ Every step below is **required**. Missing any one of them has caused problems in
 | `pyproject.toml` | `version` field |
 | `uv.lock` | auto-updated by `uv sync` — **must be committed** |
 | `CHANGELOG.md` | move Unreleased → `[X.Y.Z]`, add empty Unreleased |
-| `nx/CHANGELOG.md` | add `[X.Y.Z]` entry |
+| `conexus/CHANGELOG.md` | add `[X.Y.Z]` entry |
 | `.claude-plugin/marketplace.json` | bump `"version"` in both `nx` and `sn` plugin entries |
-| `nx/.claude-plugin/plugin.json` | bump `"version"` to match — **controls nx cache refresh** |
+| `conexus/.claude-plugin/plugin.json` | bump `"version"` to match — **controls nx cache refresh** |
 | `sn/.claude-plugin/plugin.json` | bump `"version"` to match — **controls sn cache refresh** |
 | `docs/cli-reference.md` | new/changed CLI flags and subcommands |
 | `docs/architecture.md` | new/changed modules |

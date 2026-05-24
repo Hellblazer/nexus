@@ -29,7 +29,7 @@ Contracts gated here:
 
     **Contingent fix path** (do NOT pre-emptively apply): if RF-2 is
     falsified empirically, flip ``key: topic`` -> ``key: _topic_label``
-    at ``nx/plans/builtin/abstract-themes.yml:71`` in the SAME commit
+    at ``conexus/plans/builtin/abstract-themes.yml:71`` in the SAME commit
     as the failing-then-passing assertion. ``_topic_label`` is a
     natural-language hint that nudges the LLM partitioner toward the
     materialized field; the SQL fast path is NOT triggered (RDR-093
@@ -373,7 +373,7 @@ def builtin_plans_library(tmp_path_factory: pytest.TempPathFactory):
     _add_plan_dimensional_identity(lib.conn)
     lib.conn.commit()
 
-    builtin_dir = Path(__file__).parent.parent / "nx" / "plans" / "builtin"
+    builtin_dir = Path(__file__).parent.parent / "conexus" / "plans" / "builtin"
     result = load_seed_directory(builtin_dir, library=lib)
     assert not result.errors, f"seed_loader errors: {result.errors}"
     assert result.inserted, "no builtin templates loaded"
@@ -454,7 +454,7 @@ class TestAbstractThemesPlanIntegration:
         # (which the unit-shape file already pins).
         template_path = (
             Path(__file__).parent.parent
-            / "nx" / "plans" / "builtin" / "abstract-themes.yml"
+            / "conexus" / "plans" / "builtin" / "abstract-themes.yml"
         )
         import yaml
         template = yaml.safe_load(template_path.read_text())
@@ -516,7 +516,7 @@ class TestAbstractThemesPlanIntegration:
                 f"{len(invented)}/{len(keys)} key(s) NOT grounded in the "
                 f"BERTopic label set for {corpus}: {invented!r}. "
                 "Contingent fix: flip 'key: topic' -> 'key: _topic_label' "
-                "at nx/plans/builtin/abstract-themes.yml; ship the flip in "
+                "at conexus/plans/builtin/abstract-themes.yml; ship the flip in "
                 "the same commit as this assertion's first green run."
             )
 

@@ -85,7 +85,7 @@ detection mechanism needed.
 
 ### Guardrail 1: Brainstorming-gate skill amendment
 
-Add a section to the brainstorming-gate skill (`nx/skills/brainstorming-gate/SKILL.md`)
+Add a section to the brainstorming-gate skill (`conexus/skills/brainstorming-gate/SKILL.md`)
 between "Present design" and "Save design doc" steps. Uses passive detection
 (regex scan) rather than requiring prior knowledge of an RDR:
 
@@ -94,7 +94,7 @@ between "Present design" and "Save design doc" steps. Uses passive detection
     request for the pattern `RDR-\d+`. For each match:
     - Run: `nx memory get --project {repo}_rdr --title NNN`
     - If status is not "accepted" or "closed": warn the user:
-      "RDR-NNN is still {status}. Run /nx:rdr-gate NNN and /nx:rdr-accept NNN
+      "RDR-NNN is still {status}. Run /conexus:rdr-gate NNN and /conexus:rdr-accept NNN
        before planning implementation."
     - If the lookup fails or returns no result, warn and proceed (fail-open).
     - If no RDR pattern is found, proceed normally.
@@ -102,7 +102,7 @@ between "Present design" and "Save design doc" steps. Uses passive detection
 
 ### Guardrail 2: Strategic-planner agent pre-check
 
-Add to the strategic-planner agent system prompt (`nx/agents/strategic-planner.md`)
+Add to the strategic-planner agent system prompt (`conexus/agents/strategic-planner.md`)
 relay validation step 6, after existing field checks:
 
 ```
@@ -110,14 +110,14 @@ relay validation step 6, after existing field checks:
    the pattern `RDR-\d+`. For each match:
    - Run: `nx memory get --project {repo}_rdr --title NNN`
    - If status is not "accepted" or "closed", warn: "RDR-NNN is {status}.
-     Consider running /nx:rdr-gate NNN and /nx:rdr-accept NNN first."
+     Consider running /conexus:rdr-gate NNN and /conexus:rdr-accept NNN first."
    - If the lookup fails, warn and proceed (fail-open).
    - If no RDR pattern found, proceed normally.
 ```
 
 ### Guardrail 3: Bead context hook enhancement
 
-Extend `bead_context_hook.py` (`nx/hooks/scripts/bead_context_hook.py`) to
+Extend `bead_context_hook.py` (`conexus/hooks/scripts/bead_context_hook.py`) to
 detect RDR references. **Regex-only, no T2 lookup** (zero latency):
 
 ```python
@@ -130,7 +130,7 @@ if rdr_refs:
     result = {
         "message": f"Bead references {rdr_list}. "
                    f"Verify RDR status before implementation: "
-                   f"/nx:rdr-show {rdr_refs[0]}"
+                   f"/conexus:rdr-show {rdr_refs[0]}"
     }
     print(json.dumps(result))
 ```
@@ -159,7 +159,7 @@ workflows.
 
 **T2 storage convention**: Guardrails 1 and 2 assume RDR status is stored in T2
 under `nx memory get --project {repo}_rdr --title NNN`. This is the convention
-used by `/nx:rdr-gate` and `/nx:rdr-accept`. If the T2 record doesn't exist, the
+used by `/conexus:rdr-gate` and `/conexus:rdr-accept`. If the T2 record doesn't exist, the
 guardrail falls back to "warn and proceed."
 
 ## Success Criteria

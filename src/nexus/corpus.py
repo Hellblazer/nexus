@@ -224,7 +224,7 @@ def default_projection_threshold(collection_name: str) -> float:
     =================  ======  ==============================================
 
     Unknown prefixes fall back to 0.70 (safer under-match bias).
-    See ``docs/taxonomy-projection-tuning.md`` for calibration methodology.
+    See ``docs/exploration/taxonomy-projection-tuning.md`` for calibration methodology.
     """
     if collection_name.startswith("code__"):
         return 0.70

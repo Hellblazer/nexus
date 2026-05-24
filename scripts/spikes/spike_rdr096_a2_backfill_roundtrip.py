@@ -2,7 +2,7 @@
 """RDR-096 spike A2: source_path → file:// URI backfill round-trip cleanliness.
 
 Verifies the second of three RDR-096 critical assumptions before
-/nx:rdr-gate. Pre-registered acceptance:
+/conexus:rdr-gate. Pre-registered acceptance:
 
 - A2 PASS if >=99% of rows round-trip cleanly across all collections
   AND every non-round-tripping case has a documented mitigation.

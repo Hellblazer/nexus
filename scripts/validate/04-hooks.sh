@@ -8,7 +8,7 @@
 source "$(dirname "$0")/lib.sh"
 
 REPO=$(git rev-parse --show-toplevel)
-HOOKS="$REPO/nx/hooks/scripts"
+HOOKS="$REPO/conexus/hooks/scripts"
 
 # Fake Claude Code hook env
 export CLAUDE_PLUGIN_ROOT="$REPO/nx"
@@ -57,7 +57,7 @@ run "stop_verification_hook.sh"     bash -c "echo '$(_stop_event)' | bash '$HOOK
 run "subagent-start.sh"             bash -c "echo '{\"subagent_type\":\"developer\"}' | bash '$HOOKS/subagent-start.sh' || true"
 
 step "hooks.json manifest"
-run "hooks.json parses as JSON"     python3 -c "import json; json.load(open('$REPO/nx/hooks/hooks.json'))"
+run "hooks.json parses as JSON"     python3 -c "import json; json.load(open('$REPO/conexus/hooks/hooks.json'))"
 
 summary "hooks"
 [[ $FAIL -eq 0 ]] || exit 1

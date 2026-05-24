@@ -34,14 +34,17 @@ Cross-walk against:
 
 Update any drift before bumping version. Doc audit is what catches "we changed the wire format but forgot to document it."
 
-### 3. Bump version in ALL FOUR manifests
+### 3. Bump version in ALL FIVE bump targets
 
-CI enforces parity. Missing any one of these fails the marketplace-version-matches-pyproject test.
+CI enforces parity. Missing any one of these fails the marketplace-version-matches-pyproject test or the marketplace-source-ref-matches-pyproject test.
 
-- `pyproject.toml`: `version = "X.Y.Z"`
-- `.claude-plugin/marketplace.json`: **both `version` fields** (one for nx, one for sn)
-- `nx/.claude-plugin/plugin.json`: `version`
+- `pyproject.toml`: `version = "X.Y.Z"` (canonical source of truth)
+- `.claude-plugin/marketplace.json`: **both `version` fields** (one for conexus, one for sn)
+- `.claude-plugin/marketplace.json`: **both `plugins[].source.ref` fields** — must be `"vX.Y.Z"` (the tag form). Easy to forget. This is what decouples installed users from main HEAD: plugin installs follow the pinned tag, not whatever main currently is. **CRITICAL: nexus-mkj6u 2026-05-23**
+- `conexus/.claude-plugin/plugin.json`: `version`
 - `sn/.claude-plugin/plugin.json`: `version`
+
+Optional but recommended: also bump `plugins[].source.sha` to the 40-char SHA of the release commit, for protection against tag force-push. Add post-commit (Step 8a, see below).
 
 Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 
@@ -68,44 +71,77 @@ Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/db/migr
 
 Must end with `[done]` and confirm the new schema version. Halt on any failure.
 
-### 7. Commit
+### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
 
-Two acceptable paths:
-
-**Path A: direct to main** (the one allowed exception per CLAUDE.md "no direct pushes to main"):
+Per the marketplace-pinned-source playbook (also used by `Hellblazer/palinex`), release commits go through a PR. CI gates the bump before it lands on main. No more direct-to-main exception.
 
 ```bash
-git add pyproject.toml uv.lock CHANGELOG.md nx/CHANGELOG.md \
+git checkout main && git pull
+git checkout -b release/vX.Y.Z
+
+git add pyproject.toml uv.lock CHANGELOG.md conexus/CHANGELOG.md \
         .claude-plugin/marketplace.json \
-        nx/.claude-plugin/plugin.json \
+        conexus/.claude-plugin/plugin.json \
         sn/.claude-plugin/plugin.json
 git commit -m "chore(release): conexus X.Y.Z"
-git push
+
+git push -u origin release/vX.Y.Z
+gh pr create --base main --title "release: conexus X.Y.Z" --body "<release notes>"
 ```
 
-**Path B: bundle into a feature PR** (when the release rides on substantive changes that are also in the PR):
+Wait for CI green, then merge:
 
-The same files as Path A, committed on a feature branch as `chore(release): conexus X.Y.Z`. Open PR with "release" in the title; merge once CI clears. Tag-push happens immediately after merge per Step 9.
+```bash
+gh pr merge <N> --merge   # NOT --squash — preserves the chore(release) commit verbatim
+git checkout main && git pull
+```
+
+Why merge-not-squash: tag-push (Step 9) must reference the release commit by SHA. Squash rewrites the SHA; merge preserves it. The optional `source.sha` field in marketplace.json (if you added it pre-tag) would point at the original branch SHA, not the squashed one.
+
+If you forgot something — say you missed the `source.ref` bump — push another commit to the release branch and re-CI. No rebase needed; CI re-runs.
 
 ### 8. Pre-push verification (do NOT skip)
 
+Run from the release branch BEFORE pushing:
+
 ```bash
-git diff --name-only HEAD                # all 5+ release files must appear
+git diff --name-only main..HEAD          # all release files must appear
 nx --version                             # must NOT yet print X.Y.Z (reinstall happens post-tag)
 grep '^version' pyproject.toml           # must equal X.Y.Z
-grep '"version"' .claude-plugin/marketplace.json   # both must equal X.Y.Z
-grep '"version"' nx/.claude-plugin/plugin.json     # must equal X.Y.Z
-grep '"version"' sn/.claude-plugin/plugin.json     # must equal X.Y.Z
+grep '"version"' .claude-plugin/marketplace.json    # both must equal X.Y.Z
+grep '"version"' conexus/.claude-plugin/plugin.json # must equal X.Y.Z
+grep '"version"' sn/.claude-plugin/plugin.json      # must equal X.Y.Z
+grep '"ref"' .claude-plugin/marketplace.json        # both must equal "vX.Y.Z"
 ```
 
-Five version strings must all read X.Y.Z. CI's parity check fails the build if any mismatch.
+The version+ref strings must all line up. CI's `TestMarketplaceVersion` parity checks (version field AND `source.ref` field) fail the build if any mismatch.
 
-### 9. Tag and push (triggers Release workflow + PyPI publish via OIDC)
+### 8a. Optional: bump source.sha post-merge (defends against tag force-push)
+
+After Step 7's merge lands on main, the release commit has a known SHA. Optionally add it to marketplace.json's `plugins[].source.sha`:
 
 ```bash
-git tag -a vX.Y.Z -m "conexus X.Y.Z"
+git checkout main && git pull
+RELEASE_SHA=$(git rev-parse HEAD)        # the merge commit (or the chore(release) commit if merged via merge-commit)
+# Edit .claude-plugin/marketplace.json: add "sha": "$RELEASE_SHA" alongside "ref": "vX.Y.Z" for both plugins
+git add .claude-plugin/marketplace.json
+git commit -m "chore(release): pin sha for vX.Y.Z"
+git push
+```
+
+Tradeoff: extra commit on main, but guards against the case where someone could force-push the `vX.Y.Z` tag. For solo / small-team projects the `ref` alone is usually fine; skip if so.
+
+### 9. Tag and push IMMEDIATELY after merge (triggers Release workflow + PyPI publish via OIDC)
+
+After Step 7's PR merges, switch to main, fetch, and tag the merge commit:
+
+```bash
+git checkout main && git pull
+git tag -a vX.Y.Z -m "conexus X.Y.Z" $(git rev-parse HEAD)
 git push origin vX.Y.Z
 ```
+
+Tag-push must follow the commit on origin in tight succession (seconds). marketplace.json's `source.ref` points at `vX.Y.Z`; if any user runs `/plugin install` between commit-push and tag-push, the install would fail.
 
 Do NOT use `gh release create`: the Release workflow at `.github/workflows/release.yml` creates the GitHub release automatically from the tag and extracts notes from CHANGELOG.md. Running `gh release create` produces a duplicate.
 

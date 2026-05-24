@@ -14,7 +14,7 @@ four. Adding a fifth routing hook in ANY plugin (nx, sn, or a future
 plugin) requires either consolidation or a budget revision in a
 successor RDR.
 
-Currently in scope: ``nx/hooks/scripts/routing/registry.yaml`` and
+Currently in scope: ``conexus/hooks/scripts/routing/registry.yaml`` and
 ``sn/hooks/scripts/routing/registry.yaml``. Extend ``_REGISTRY_PATHS``
 when a third plugin ships a routing registry.
 """
@@ -29,7 +29,7 @@ yaml = pytest.importorskip("yaml")
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 
 _REGISTRY_PATHS: tuple[pathlib.Path, ...] = (
-    REPO_ROOT / "nx" / "hooks" / "scripts" / "routing" / "registry.yaml",
+    REPO_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml",
     REPO_ROOT / "sn" / "hooks" / "scripts" / "routing" / "registry.yaml",
 )
 

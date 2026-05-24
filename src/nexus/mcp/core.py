@@ -440,8 +440,8 @@ def _record_tier_write(
 
 
 # Note: catalog server also registers a "search" tool. No collision — Claude Code
-# disambiguates by server prefix (mcp__plugin_nx_nexus__search vs
-# mcp__plugin_nx_nexus-catalog__search).
+# disambiguates by server prefix (mcp__plugin_conexus_nexus__search vs
+# mcp__plugin_conexus_nexus-catalog__search).
 @mcp.tool()
 def search(
     query: str,
@@ -2947,7 +2947,7 @@ Pattern B (operator auto-hydration shortcut):
   above).  A mismatch fails with PlanRunStepRefError.
 
 === Forbidden tools ===
-  Do NOT emit mcp__plugin_nx_nexus-catalog__* names — use traverse.
+  Do NOT emit mcp__plugin_conexus_nexus-catalog__* names — use traverse.
   Do NOT emit Read, Grep, Bash, Write, or web_* — they are not part of
   the plan dispatcher.
 """
@@ -3754,7 +3754,7 @@ async def nx_answer(
 
     # RDR-084: Save successful ad-hoc plans so the plan library compounds
     # with usage. scope=personal keeps growth isolated to the caller (the
-    # project/global scopes are reached only via /nx:plan-promote). TTL is
+    # project/global scopes are reached only via /conexus:plan-promote). TTL is
     # config-driven; 30-day default. Best-effort — a save failure never
     # affects the user's answer, and the T1 cache upsert is a separate
     # best-effort step inside the same guard.
@@ -4035,6 +4035,7 @@ def main():
     import structlog
 
     from nexus.logging_setup import configure_logging
+    from nexus.mcp._first_run import ensure_installed_and_running
     from nexus.mcp_infra import check_version_compatibility
 
     configure_logging("mcp")
@@ -4046,6 +4047,13 @@ def main():
         pid=os.getpid(),
         ppid=os.getppid(),
     )
+    # RDR-126 P2 (nexus-bsjro): ensure the host T2 daemon's OS-level
+    # autostart unit is installed and the daemon is running before
+    # serving any tools. Without this, a Claude-Desktop-only user who
+    # installed the .mcpb has nx-mcp running but no daemon to talk to;
+    # every memory_put / search call fails opaquely. Best-effort:
+    # logs warnings on failure, never blocks startup.
+    ensure_installed_and_running()
     # The FastMCP lifespan finally is the design's primary cleanup
     # path; the signal handlers below are belt-and-braces for the
     # cases where the lifespan does not fire. Empirically, FastMCP's

@@ -3,7 +3,7 @@
 
 Verifies that the launchd plist, cron crontab line, shell wrapper, and READMEs
 exist at the specified paths, are syntactically valid, and enforce the safety
-invariant that the wrapper only ever invokes `claude -p '/nx:rdr-audit ...'`
+invariant that the wrapper only ever invokes `claude -p '/conexus:rdr-audit ...'`
 without touching privileged OS state itself.
 """
 from __future__ import annotations
@@ -71,9 +71,9 @@ class TestWrapperSyntax:
 
     def test_wrapper_invokes_claude_p_rdr_audit(self) -> None:
         text = WRAPPER.read_text()
-        # The wrapper's purpose is to invoke `claude -p '/nx:rdr-audit <project>'`
+        # The wrapper's purpose is to invoke `claude -p '/conexus:rdr-audit <project>'`
         assert "claude" in text
-        assert "/nx:rdr-audit" in text
+        assert "/conexus:rdr-audit" in text
         assert "-p" in text, "Wrapper must invoke claude in headless (-p) mode"
 
     def test_wrapper_uses_set_euo_pipefail(self) -> None:
@@ -184,10 +184,10 @@ class TestReadmeSafetyNotes:
     def test_readme_points_to_skill_schedule_command(self, readme: Path) -> None:
         """The READMEs should cross-reference the skill's print-only schedule command."""
         text = readme.read_text()
-        assert "/nx:rdr-audit schedule" in text, (
+        assert "/conexus:rdr-audit schedule" in text, (
             f"{readme.name} should point to the skill's print-only schedule command"
         )
-        assert "/nx:rdr-audit unschedule" in text, (
+        assert "/conexus:rdr-audit unschedule" in text, (
             f"{readme.name} should point to the skill's print-only unschedule command"
         )
 
@@ -207,7 +207,7 @@ class TestFormatCoordination:
     must agree on the <PROJECT> substitution format so both ship compatible text."""
 
     def test_skill_plist_and_file_plist_have_same_placeholder(self) -> None:
-        skill = (REPO_ROOT / "nx" / "skills" / "rdr-audit" / "SKILL.md").read_text()
+        skill = (REPO_ROOT / "conexus" / "skills" / "rdr-audit" / "SKILL.md").read_text()
         plist = PLIST.read_text()
         # Both use <PROJECT> (angle-bracketed) as the substitution marker
         assert "<PROJECT>" in skill, (
@@ -216,8 +216,8 @@ class TestFormatCoordination:
         assert "PROJECT" in plist
 
     def test_skill_and_crontab_use_compatible_format(self) -> None:
-        skill = (REPO_ROOT / "nx" / "skills" / "rdr-audit" / "SKILL.md").read_text()
+        skill = (REPO_ROOT / "conexus" / "skills" / "rdr-audit" / "SKILL.md").read_text()
         cron = CRONTAB.read_text()
-        # Both reference the `/nx:rdr-audit <PROJECT>` invocation
-        assert "/nx:rdr-audit" in skill
+        # Both reference the `/conexus:rdr-audit <PROJECT>` invocation
+        assert "/conexus:rdr-audit" in skill
         assert "cron-rdr-audit.sh" in cron

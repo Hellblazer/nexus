@@ -1,12 +1,14 @@
 # Nexus CLI Reference
 
-All commands use the `nx` binary. Global flags: `--help`, `--version`, `-v`/`--verbose` (enable debug logging).
+Every `nx` command and flag. This is the **command reference** — exhaustive but skim-friendly. For **which retrieval interface to reach for** (`nx search` vs the MCP `search()` / `query()` / `nx_answer` tools), see [Querying Guide](querying-guide.md). For the MCP tool catalog, see [MCP Servers](mcp-servers.md).
+
+Global flags: `--help`, `--version`, `-v`/`--verbose` (enable debug logging).
 
 ---
 
 ## nx search
 
-Semantic search across T3 knowledge collections.
+Semantic search across T3 knowledge collections. For how `nx search` relates to the MCP search interfaces and the search-quality mechanics (topic boost, distance thresholds, contradiction flags), see [Querying Guide § Search quality features](querying-guide.md#search-quality-features).
 
 ```
 nx search "authentication middleware" --corpus code --hybrid --n 20
@@ -298,14 +300,14 @@ picked up on the next menu open. Each script logs to
 with a trailing `&` so DT's UI stays responsive.
 
 For automatic indexing on import (no manual click), see the smart-rule
-recipe in [`docs/devonthink-smart-rules.md`](devonthink-smart-rules.md).
+recipe in [`docs/integrations/devonthink-smart-rules.md`](integrations/devonthink-smart-rules.md).
 
 ### Cross-references
 
 - In-DT scripts (toolbar / menu):
-  [`docs/devonthink-scripts.md`](devonthink-scripts.md).
+  [`docs/integrations/devonthink-scripts.md`](integrations/devonthink-scripts.md).
 - Smart rule + folder action recipes:
-  [`docs/devonthink-smart-rules.md`](devonthink-smart-rules.md).
+  [`docs/integrations/devonthink-smart-rules.md`](integrations/devonthink-smart-rules.md).
 - Manual smoke runbook + fixture creation:
   [`tests/e2e/devonthink-manual.md`](../tests/e2e/devonthink-manual.md).
 - Design rationale + acceptance criteria:
@@ -798,7 +800,7 @@ taxonomy:
 | `split LABEL --k N` | Split into N sub-topics via KMeans. `-c NAME` scopes label lookup |
 | `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection |
 | `rebuild` | Full re-cluster (alias for `discover --force`). `-c NAME` required |
-| `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](taxonomy-projection-tuning.md)). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077). `--persist` to write assignments. `--backfill` to project all collections against each other |
+| `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md)). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077). `--persist` to write assignments. `--backfill` to project all collections against each other |
 | `hubs` | List generic-pattern hub topics (RDR-077 Phase 5). `--min-collections N` (default 2), `--max-icf F` filter, `--warn-stale` flags hubs whose latest assignment post-dates the newest `last_discover_at` across contributing source collections, `--explain` shows DF / ICF / matched stopword tokens per row. |
 | `audit --collection NAME` | Per-collection projection-quality report (RDR-077 Phase 6): total assignments, p10/p50/p90 of raw cosine, count below threshold (re-projection candidates), top receiving topics with ICF, pattern-pollution flags. `--threshold F` overrides the per-corpus default; `--top-n N` caps the receiving-topic list. |
 
@@ -1085,7 +1087,7 @@ nx hook routing-stats [--log-path PATH] [--json]
 ```
 
 Aggregates the per-rule JSONL log written by the RDR-121 routing-hook
-framework (`nx/hooks/scripts/routing/_lib.log_routing_event`). Reports
+framework (`conexus/hooks/scripts/routing/_lib.log_routing_event`). Reports
 fire counts, deny / allow / escape outcomes, block-rate, and
 escape-rate per rule.
 
@@ -1345,7 +1347,7 @@ nx daemon t3 install --autostart
 Cloud-mode T3 uses HTTP transport directly to ChromaDB Cloud and
 has no daemon; only `t2` is needed in that configuration.
 
-When the nx Claude Code plugin is installed, the plugin's
+When the conexus plugin is installed, the plugin's
 SessionStart hook auto-spawns the T2 daemon via
 `nx daemon t2 ensure-running` on every Claude Code session start,
 so first-session-after-install works without any manual incantation.
@@ -1411,7 +1413,7 @@ Exit codes:
 - `0`: reachable (already running OR successfully spawned)
 - `1`: spawned but did not become reachable within `--timeout`
 
-Used by the nx plugin's SessionStart hook; safe to invoke from any
+Used by the conexus plugin's SessionStart hook; safe to invoke from any
 post-install script that needs the daemon up before running other
 commands.
 

@@ -80,7 +80,7 @@ _FILE_PATH_RE = re.compile(
 # source-root prefix (``src/`` etc) because RDR text is dense with
 # fully-qualified paths; the anchor disambiguates against common
 # prose like "the algorithm runs in O(n log n)". Prose docs use a
-# wider path vocabulary (``docs/`` runbooks, ``nx/`` plugin trees,
+# wider path vocabulary (``docs/`` runbooks, ``conexus/`` plugin trees,
 # ``.claude/`` profiles) that the RDR anchor list misses entirely.
 # The prose regex requires AT LEAST ONE ``/`` (so a bare
 # ``foo.py`` mention doesn't match) plus a recognised source
@@ -174,7 +174,7 @@ def generate_prose_filepath_links(
     - Path regex: ``_PROSE_PATH_RE`` requires at least one ``/``
       and a recognised source extension, but does NOT require a
       ``src/`` / ``tests/`` source-root anchor. ``docs/`` runbooks,
-      ``nx/`` plugin trees, and ``.claude/`` profiles all match.
+      ``conexus/`` plugin trees, and ``.claude/`` profiles all match.
       Disambiguates against bare-filename mentions in prose by
       requiring the directory segment.
 

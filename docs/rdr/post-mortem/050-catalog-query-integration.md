@@ -25,7 +25,7 @@ Integrated the catalog (RDR-049) into nexus's query planning system across three
 **Layer 2 (Query Planning) — implemented:**
 - 3 new plan operations: `catalog_search`, `catalog_links`, `catalog_resolve`
 - Query planner agent updated with operation schemas
-- `/nx:query` skill dispatches catalog operations correctly
+- `/conexus:query` skill dispatches catalog operations correctly
 - `$step_N.collections` extraction: catalog results narrow search corpus
 - Few-shot plan templates seeded in T2 plan library (IDs 18-21, tagged `catalog`)
 - Validated: "Schema Mappings" query narrows 83 to 9 collections
