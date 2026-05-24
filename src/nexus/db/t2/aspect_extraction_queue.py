@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -150,7 +151,15 @@ class AspectExtractionQueue:
     def __init__(self, path: Path) -> None:
         self._lock = threading.Lock()
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        self.conn.execute("PRAGMA busy_timeout=5000")
+        # nexus-v4m7y: bumped from 5s to 30s. Nine T2 stores hold their own
+        # sqlite3.Connection against memory.db. Under WAL mode, only one
+        # writer is allowed across all connections; busy_timeout governs
+        # how long this connection waits before raising ERROR_BUSY. 5s was
+        # tight enough that a long memory_put (or any other store's write)
+        # could push reclaim_stale past the limit and surface "database is
+        # locked" warnings. 30s costs nothing on quiet systems and absorbs
+        # the realistic intra-daemon contention window.
+        self.conn.execute("PRAGMA busy_timeout=30000")
         self._init_schema()
 
     def close(self) -> None:
@@ -433,6 +442,17 @@ class AspectExtractionQueue:
             )
             self.conn.commit()
 
+    # nexus-v4m7y: retry-with-backoff for reclaim_stale. Three attempts
+    # with two inter-attempt sleeps (0.1s, 0.5s) on top of the 30s
+    # per-attempt SQLite busy_timeout. Absorbs transient writer-slot
+    # contention that would otherwise leak as ERROR_BUSY.
+    # Total worst-case wait if every attempt hits a locked writer:
+    # 30 + 0.1 + 30 + 0.5 + 30 = ~90.6 s. Acceptable for a background
+    # reclaim that runs every N polls. The final attempt still raises
+    # if it cannot acquire, so the existing aspect_worker_claim_failed
+    # warning surfaces in the truly-stuck case.
+    _RECLAIM_RETRY_SLEEPS_BETWEEN: tuple[float, ...] = (0.1, 0.5)
+
     def reclaim_stale(self, timeout_seconds: int = 300) -> int:
         """Reset ``in_progress`` rows whose ``last_attempt_at`` is older
         than the timeout back to ``pending``.
@@ -444,6 +464,10 @@ class AspectExtractionQueue:
 
         Returns the number of rows reclaimed.
 
+        Retries up to 3 attempts on ``database is locked`` to absorb
+        transient WAL writer-slot contention with other T2 stores in
+        the same daemon process. See ``_RECLAIM_RETRY_BACKOFF_SECONDS``.
+
         ``last_attempt_at`` is wrapped in ``datetime()`` to normalize
         the comparison: production writes ISO 8601 with ``T`` separator
         and ``+00:00`` suffix (``datetime.now(UTC).isoformat()``), while
@@ -453,15 +477,44 @@ class AspectExtractionQueue:
         regardless of staleness.
         """
         cutoff_clause = f"datetime('now', '-{int(timeout_seconds)} seconds')"
-        with self._lock:
-            cur = self.conn.execute(
-                "UPDATE aspect_extraction_queue "
-                "SET status = 'pending', last_attempt_at = NULL "
-                "WHERE status = 'in_progress' "
-                f"  AND datetime(last_attempt_at) < {cutoff_clause}",
-            )
-            self.conn.commit()
-            return cur.rowcount
+        sleeps_between = self._RECLAIM_RETRY_SLEEPS_BETWEEN
+        max_attempts = len(sleeps_between) + 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with self._lock:
+                    cur = self.conn.execute(
+                        "UPDATE aspect_extraction_queue "
+                        "SET status = 'pending', last_attempt_at = NULL "
+                        "WHERE status = 'in_progress' "
+                        f"  AND datetime(last_attempt_at) < {cutoff_clause}",
+                    )
+                    self.conn.commit()
+                    if attempt > 1:
+                        _log.debug(
+                            "aspect_queue_reclaim_stale_recovered",
+                            attempt=attempt,
+                            rowcount=cur.rowcount,
+                        )
+                    return cur.rowcount
+            except sqlite3.OperationalError as exc:
+                # Only retry on writer-slot contention. Anything else
+                # (schema corruption, FK violation, etc.) propagates
+                # immediately.
+                if "locked" not in str(exc).lower():
+                    raise
+                if attempt == max_attempts:
+                    raise
+                sleep_seconds = sleeps_between[attempt - 1]
+                _log.debug(
+                    "aspect_queue_reclaim_stale_retry",
+                    attempt=attempt,
+                    next_sleep_seconds=sleep_seconds,
+                    exc=str(exc),
+                )
+                time.sleep(sleep_seconds)
+        raise RuntimeError(  # pragma: no cover
+            "reclaim_stale exhausted retries unexpectedly"
+        )
 
     def pending_count(self) -> int:
         """Return the number of rows currently in ``pending`` status."""
