@@ -10,6 +10,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Plugin name changed from `nx` to `conexus`. Skill prefix `/nx:foo` → `/conexus:foo`. MCP tool prefix `mcp__plugin_nx_*` → `mcp__plugin_conexus_*`. Plugin install command: `/plugin install conexus@nexus-plugins`. See root `CHANGELOG.md` § Unreleased for full migration notes.
 
+## [4.34.6] - 2026-05-23
+
+### Fix: `/nx:continuation` chat output ergonomics
+
+Three changes to the slash command shipped in 4.34.5:
+
+- Handoff now written to `/tmp/nexus-continuation-<repo>-<slug>-<date>.md`
+  (was `~/.cache/nexus/continuations/`). `/tmp` is purged on reboot;
+  `~/.cache` accumulated stale handoffs forever.
+- Chat response is plain text on its own line, not a wall of prose. A
+  one-line hint, blank separator, then the bare `cat <path>` command on
+  its own line. Triple-click selects only the command.
+- Auto-priming the system clipboard was prototyped (pbcopy, `launchctl
+  asuser pbcopy`, OSC 52 plain and DCS-wrapped) and abandoned. Remote tmux
+  over mosh drops every clipboard escape between Bash and the local
+  NSPasteboard. Plain text on its own line is the only portable affordance;
+  the skill body documents the dead-end.
+
 ## [4.34.5] - 2026-05-23
 
 ### New utility command: `/conexus:continuation`
