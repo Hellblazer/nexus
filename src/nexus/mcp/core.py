@@ -442,7 +442,10 @@ def _record_tier_write(
 # Note: catalog server also registers a "search" tool. No collision — Claude Code
 # disambiguates by server prefix (mcp__plugin_conexus_nexus__search vs
 # mcp__plugin_conexus_nexus-catalog__search).
-@mcp.tool()
+@mcp.tool(
+    title="Semantic Search",
+    annotations={"readOnlyHint": True},
+)
 def search(
     query: str,
     corpus: str = "knowledge,code,docs",
@@ -639,7 +642,10 @@ def search(
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Catalog-Aware Document Query",
+    annotations={"readOnlyHint": True},
+)
 def query(
     question: str,
     corpus: str = "knowledge",
@@ -970,7 +976,10 @@ def query(
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Store Knowledge Document",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
 def store_put(
     content: str,
     collection: str = "knowledge",
@@ -1112,7 +1121,10 @@ def store_put(
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Knowledge Document",
+    annotations={"readOnlyHint": True},
+)
 def store_get(doc_id: str, collection: str = "knowledge") -> str:
     """Retrieve the full content and metadata of a T3 knowledge entry by document ID or title.
 
@@ -1165,7 +1177,10 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Batch-Retrieve Documents",
+    annotations={"readOnlyHint": True},
+)
 def store_get_many(
     ids: str | list,
     collections: str | list = "knowledge",
@@ -1344,7 +1359,10 @@ def store_get_many(
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List Collection Documents",
+    annotations={"readOnlyHint": True},
+)
 def store_list(
     collection: str = "knowledge",
     limit: int = 20,
@@ -1452,7 +1470,10 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Store Memory Entry",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
 def memory_put(
     content: str,
     project: str,
@@ -1514,7 +1535,10 @@ def memory_put(
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Retrieve Memory Entry",
+    annotations={"readOnlyHint": True},
+)
 def memory_get(project: str, title: str = "") -> str:
     """Retrieve a memory entry by project and title.
 
@@ -1571,7 +1595,10 @@ def memory_get(project: str, title: str = "") -> str:
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Delete Memory Entry",
+    annotations={"readOnlyHint": False, "destructiveHint": True},
+)
 def memory_delete(project: str, title: str) -> str:
     """Delete a T2 memory entry by project and title.
 
@@ -1591,7 +1618,10 @@ def memory_delete(project: str, title: str) -> str:
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Search Memory Entries",
+    annotations={"readOnlyHint": True},
+)
 def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 0) -> str:
     """Full-text search across T2 memory entries.
 
@@ -1627,7 +1657,10 @@ def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Consolidate Memory Entries",
+    annotations={"readOnlyHint": False, "destructiveHint": True},
+)
 def memory_consolidate(
     action: str,
     project: str,
@@ -1729,7 +1762,10 @@ def memory_consolidate(
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Session Scratch Pad",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
 def scratch(
     action: str,
     content: str = "",
@@ -1844,7 +1880,10 @@ def scratch(
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Manage Scratch Entry",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
 def scratch_manage(
     action: str,
     entry_id: str,
@@ -1880,7 +1919,10 @@ def scratch_manage(
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="List T3 Collections",
+    annotations={"readOnlyHint": True},
+)
 def collection_list() -> str:
     """List all T3 collections with document counts and embedding models."""
     try:
@@ -1896,7 +1938,10 @@ def collection_list() -> str:
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Save Query Plan",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
 def plan_save(
     query: str,
     plan_json: str,
@@ -1945,7 +1990,10 @@ def plan_save(
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Search Plan Library",
+    annotations={"readOnlyHint": True},
+)
 def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) -> str:
     """Search the T2 plan library for similar query plans.
 
@@ -2079,7 +2127,10 @@ def collection_verify(name: str) -> str:
 # ── Operator tools ───────────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Extract Structured Fields",
+    annotations={"readOnlyHint": True},
+)
 async def operator_extract(inputs: str, fields: str, timeout: float = 300.0) -> dict:
     """Extract structured fields from each input item using claude -p.
 
@@ -2107,7 +2158,10 @@ async def operator_extract(inputs: str, fields: str, timeout: float = 300.0) -> 
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Rank Items by Criterion",
+    annotations={"readOnlyHint": True},
+)
 async def operator_rank(items: str, criterion: str, timeout: float = 300.0) -> dict:
     """Rank items by a criterion using claude -p.
 
@@ -2133,7 +2187,10 @@ async def operator_rank(items: str, criterion: str, timeout: float = 300.0) -> d
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Compare Items",
+    annotations={"readOnlyHint": True},
+)
 async def operator_compare(
     items: str = "",
     focus: str = "",
@@ -2219,7 +2276,10 @@ async def operator_compare(
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Summarize Content",
+    annotations={"readOnlyHint": True},
+)
 async def operator_summarize(
     content: str,
     cited: bool = False,
@@ -2247,7 +2307,10 @@ async def operator_summarize(
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Generate from Template",
+    annotations={"readOnlyHint": True},
+)
 async def operator_generate(
     template: str,
     context: str,
@@ -2298,7 +2361,10 @@ _CHECK_EVIDENCE_ITEM_SCHEMA: dict = {
 }
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Filter Items by Criterion",
+    annotations={"readOnlyHint": True},
+)
 async def operator_filter(
     items: str,
     criterion: str,
@@ -2393,7 +2459,10 @@ async def operator_filter(
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Check Cross-Item Consistency",
+    annotations={"readOnlyHint": True},
+)
 async def operator_check(
     items: str,
     check_instruction: str,
@@ -2447,7 +2516,10 @@ async def operator_check(
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Verify Claim Against Evidence",
+    annotations={"readOnlyHint": True},
+)
 async def operator_verify(
     claim: str,
     evidence: str,
@@ -2499,7 +2571,10 @@ async def operator_verify(
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Group Items by Key",
+    annotations={"readOnlyHint": True},
+)
 async def operator_groupby(
     items: str,
     key: str,
@@ -2608,7 +2683,10 @@ async def operator_groupby(
     return await claude_dispatch(prompt, schema, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Aggregate Grouped Items",
+    annotations={"readOnlyHint": True},
+)
 async def operator_aggregate(
     groups: str,
     reducer: str,
@@ -2706,7 +2784,10 @@ async def operator_aggregate(
 _TRAVERSE_MAX_DEPTH: int = 3
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Walk Catalog Link Graph",
+    annotations={"readOnlyHint": True},
+)
 def traverse(
     seeds: list[str] | str,
     link_types: list[str] | None = None,
@@ -3338,7 +3419,10 @@ def _load_ad_hoc_ttl() -> int:
 # ── RDR-080 orchestration tools ───────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Multi-Step Knowledge Answer",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
 async def nx_answer(
     question: str,
     scope: str = "",
@@ -3840,7 +3924,10 @@ async def nx_answer(
     )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Consolidate Knowledge Topic",
+    annotations={"readOnlyHint": False, "destructiveHint": True},
+)
 async def nx_tidy(
     topic: str,
     collection: str = "knowledge",
@@ -3893,7 +3980,10 @@ async def nx_tidy(
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Enrich Bead Context",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
 async def nx_enrich_beads(
     bead_description: str,
     context: str = "",
@@ -3952,7 +4042,10 @@ async def nx_enrich_beads(
     )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Audit Plan Correctness",
+    annotations={"readOnlyHint": True},
+)
 async def nx_plan_audit(
     plan_json: str,
     context: str = "",

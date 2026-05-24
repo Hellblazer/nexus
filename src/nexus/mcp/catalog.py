@@ -28,7 +28,11 @@ _BULK_DELETE_CONFIRM_THRESHOLD = 10
 # Note: core server also registers a "search" tool. No collision — Claude Code
 # disambiguates by server prefix (mcp__plugin_conexus_nexus-catalog__search vs
 # mcp__plugin_conexus_nexus__search).
-@mcp.tool(name="search")
+@mcp.tool(
+    name="search",
+    title="Catalog Metadata Search",
+    annotations={"readOnlyHint": True},
+)
 def catalog_search(
     query: str = "",
     content_type: str = "",
@@ -128,7 +132,11 @@ def catalog_search(
         return [{"error": str(e)}]
 
 
-@mcp.tool(name="show")
+@mcp.tool(
+    name="show",
+    title="Show Catalog Entry",
+    annotations={"readOnlyHint": True},
+)
 def catalog_show(
     tumbler: str = "",
     title: str = "",
@@ -162,7 +170,11 @@ def catalog_show(
         return {"error": str(e)}
 
 
-@mcp.tool(name="list")
+@mcp.tool(
+    name="list",
+    title="List Catalog Entries",
+    annotations={"readOnlyHint": True},
+)
 def catalog_list(
     owner: str = "",
     content_type: str = "",
@@ -224,7 +236,11 @@ def catalog_list(
         return [{"error": str(e)}]
 
 
-@mcp.tool(name="register")
+@mcp.tool(
+    name="register",
+    title="Register Document in Catalog",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
 def catalog_register(
     title: str,
     owner: str,
@@ -281,7 +297,11 @@ def catalog_register(
         return {"error": str(e)}
 
 
-@mcp.tool(name="update")
+@mcp.tool(
+    name="update",
+    title="Update Catalog Entry",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
 def catalog_update(
     tumbler: str,
     title: str = "",
@@ -321,7 +341,11 @@ def catalog_update(
         return {"error": str(e)}
 
 
-@mcp.tool(name="link")
+@mcp.tool(
+    name="link",
+    title="Create Catalog Link",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
 def catalog_link(
     from_tumbler: str,
     to_tumbler: str,
@@ -376,7 +400,11 @@ def catalog_link(
         return {"error": str(e)}
 
 
-@mcp.tool(name="links")
+@mcp.tool(
+    name="links",
+    title="Get Document Links",
+    annotations={"readOnlyHint": True},
+)
 def catalog_links(
     tumbler: str,
     direction: str = "both",
@@ -405,7 +433,11 @@ def catalog_links(
         return {"error": str(e)}
 
 
-@mcp.tool(name="link_query")
+@mcp.tool(
+    name="link_query",
+    title="Query Link Table",
+    annotations={"readOnlyHint": True},
+)
 def catalog_link_query(
     from_tumbler: str = "",
     to_tumbler: str = "",
@@ -448,7 +480,11 @@ def catalog_link_query(
         return [{"error": str(e)}]
 
 
-@mcp.tool(name="resolve")
+@mcp.tool(
+    name="resolve",
+    title="Resolve Identifier to Entry",
+    annotations={"readOnlyHint": True},
+)
 def catalog_resolve(
     tumbler: str = "",
     owner: str = "",
@@ -502,7 +538,11 @@ def catalog_resolve(
         return [f"Error: {e}"]
 
 
-@mcp.tool(name="stats")
+@mcp.tool(
+    name="stats",
+    title="Catalog Statistics",
+    annotations={"readOnlyHint": True},
+)
 def catalog_stats() -> dict:
     """Catalog health summary: owner/document/link counts by type."""
     cat, err = _require_catalog()
