@@ -39,7 +39,11 @@ tests/fixtures/*.pdf
 .claude/scratch/
 .claude/scheduled_tasks.lock
 .serena/
-blog/
+# blog/ is local-only by default (drafts, images, .pulled.md sidecars);
+# tooling lives at blog/publish.py + blog/upload-images.sh and is tracked.
+blog/*
+!blog/publish.py
+!blog/upload-images.sh
 output/
 
 # Local exploration / scratch, never committed
