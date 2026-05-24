@@ -98,7 +98,7 @@ benefit from plan-reuse awareness during exploratory work.
 
 - `docs/plan-authoring-guide.md` — how to write a new plan when
   nothing matches.
-- `docs/catalog-link-types.md` — the link-type set the `traverse`
+- `docs/catalog.md#link-types` — the link-type set the `traverse`
   operator walks.
-- `docs/catalog-purposes.md` — purpose aliases for common traversal
+- `docs/catalog.md#purposes-link-type-aliases` — purpose aliases for common traversal
   shapes.

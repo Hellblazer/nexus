@@ -97,8 +97,8 @@ The deep-analyst uses `mcp__plugin_conexus_sequential-thinking__sequentialthinki
 
 ## Agent-Specific PRODUCE
 
-- **Analysis Findings**: Store in nx T3 via store_put tool: content="# Analysis: {topic}\n{findings}", collection="knowledge", title="analysis-{topic}-{date}", tags="analysis"
-- **Hypothesis Results**: Document with confidence levels in nx T3
+- **Analysis Findings**: Store in T3 via store_put tool: content="# Analysis: {topic}\n{findings}", collection="knowledge", title="analysis-{topic}-{date}", tags="analysis"
+- **Hypothesis Results**: Document with confidence levels in T3
 - **Recommendations**: Include in output as "Recommended Next Step" for caller to dispatch strategic-planner
 - **Analysis Chain**: Use T1 scratch to track hypothesis progression during investigation:
   - scratch tool: action="put", content="Analysis step {N}: {hypothesis}\nEvidence: {evidence}\nConfidence: {level}", tags="analysis,step-{N}"

@@ -264,3 +264,34 @@ If no marker file is found and no command is configured, the test check is skipp
 | `~/.config/nexus/sessions/` | JSON session records (T1 server address, session ID, `created_at`, `tmpdir`) + `session.lock` |
 | `~/.config/nexus/index.log` | Background indexing log (written by git hooks) |
 | `.nexus.yml` | Per-repo config overrides |
+
+## Logging
+
+Central configuration: `src/nexus/logging_setup.py` — `configure_logging(mode, verbose)`.
+
+### Entry Points
+
+| Entry point | Mode | File handler | Notes |
+|---|---|---|---|
+| `nx` CLI | `cli` | None (stderr only) | WARNING default, DEBUG with `-v` |
+| `nx-mcp` (core MCP) | `mcp` | `~/.config/nexus/logs/mcp.log` | RotatingFileHandler 10 MB × 5 |
+| `nx-mcp-catalog` | `mcp` | `~/.config/nexus/logs/mcp.log` | Shares log with core MCP |
+| `nx console` | `console` | `~/.config/nexus/logs/console.log` | RotatingFileHandler 10 MB × 5 |
+
+### Log Files
+
+| File | Writer | Format |
+|---|---|---|
+| `~/.config/nexus/index.log` | Git post-commit hook (`nx index repo`) | Unstructured, ~60 MB observed |
+| `~/.config/nexus/dolt-server.log` | Dolt server process | Dolt native format |
+| `~/.config/nexus/logs/mcp.log` | MCP servers (via `logging_setup`) | `%(asctime)s %(name)s %(levelname)s %(message)s` |
+| `~/.config/nexus/logs/console.log` | Console server (via `logging_setup`) | Same as above |
+
+### Suppressed Loggers
+
+`httpx`, `httpcore`, `chromadb.telemetry`, `opentelemetry` — forced to WARNING in all modes.
+
+### Special Cases
+
+- `search_cmd.py` overrides structlog to ERROR level when producing machine-parseable output (`--json`, `--vimgrep`, `--files`, `--compact`).
+- The indexer hook script redirects stdout/stderr to `index.log` directly in the shell — not managed by `logging_setup`.

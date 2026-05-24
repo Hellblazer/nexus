@@ -23,8 +23,8 @@ mcp__plugin_conexus_nexus__nx_enrich_beads(bead_description="<title + descriptio
 This agent is a stub. If dispatched, redirect to the MCP tool above.
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store: mcp__plugin_conexus_nexus__search(query="[topic]", corpus="knowledge", limit=5)
-2. Check nx T2 memory: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}")
+1. Search T3 store: mcp__plugin_conexus_nexus__search(query="[topic]", corpus="knowledge", limit=5)
+2. Check T2 memory: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}")
 3. Check T1 scratch: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]")
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user

@@ -253,7 +253,7 @@ Execute these steps sequentially when the planning handoff triggers (mandatory m
 Write T1 scratch entry: Use scratch tool: action="put", content="RDR-<ID>: planning context for <title>. RDR file: <RDR-file-path>", tags="rdr-planning-context,rdr-<ID>"
 
 **Step 8b — Dispatch strategic-planner (MANDATORY — do NOT do this yourself):**
-Dispatch `nx:strategic-planner` agent (via Agent tool, subagent_type="nx:strategic-planner") with prompt:
+Dispatch `strategic-planner` agent (via Agent tool, subagent_type="conexus:strategic-planner") with prompt:
 > Create phased execution plan for RDR-<ID>: <title>. RDR file: <RDR-file-path>. Read the RDR content for implementation phases. Create epic and task beads with dependencies.
 
 **Wait for the planner to complete before proceeding.**

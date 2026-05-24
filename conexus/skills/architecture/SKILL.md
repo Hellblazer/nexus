@@ -19,7 +19,7 @@ Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
 
 ## Code Navigation
 
-**REQUIRED SUB-SKILL:** Use **nx:serena-code-nav** for symbol-level architecture discovery. Combine with `nx search --hybrid` for semantic discovery — Serena for precision, nx search for conceptual queries.
+**REQUIRED SUB-SKILL:** Use **/conexus:serena-code-nav** for symbol-level architecture discovery. Combine with `nx search --hybrid` for semantic discovery — Serena for precision, nx search for conceptual queries.
 
 - **Map system structure**: `get_symbols_overview` for class/interface inventories without reading files
 - **Find architectural patterns**: `find_referencing_symbols` to trace abstraction usage across the codebase
@@ -108,9 +108,9 @@ The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-
 
 ## Agent-Specific PRODUCE
 
-- **Architecture Designs**: Store in nx T3 via store_put tool: content="# Architecture: {component}\n{design}", collection="knowledge", title="architecture-{project}-{component}", tags="architecture,design"
-- **Execution Plans**: Store in nx T2 memory via memory_put tool: content="plan", project="{project}", title="plan-{component}.md", ttl="30d"
-- **Design Decisions**: Store in nx T3 via store_put tool: content="# Decision: {topic}\n{rationale}", collection="knowledge", title="decision-architect-{topic}", tags="decision,architecture"
+- **Architecture Designs**: Store in T3 via store_put tool: content="# Architecture: {component}\n{design}", collection="knowledge", title="architecture-{project}-{component}", tags="architecture,design"
+- **Execution Plans**: Store in T2 memory via memory_put tool: content="plan", project="{project}", title="plan-{component}.md", ttl="30d"
+- **Design Decisions**: Store in T3 via store_put tool: content="# Decision: {topic}\n{rationale}", collection="knowledge", title="decision-architect-{topic}", tags="decision,architecture"
 - **Beads**: Epic → Phase → Task hierarchy with `/beads:dep add` for dependencies
 - **Design Notes**: Use T1 scratch for working notes during architecture analysis:
   - scratch tool: action="put", content="Design consideration: {note}", tags="architecture,design"

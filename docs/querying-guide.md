@@ -1,158 +1,135 @@
 # Querying Guide
 
-Nexus has three query interfaces, each suited to different needs.
+Nexus has three retrieval interfaces. This page is the **decision guide** — when to reach for which, and how the search-quality mechanics work underneath.
 
-## Which interface to use
+For the **tool catalog** (every tool, parameters, which server it lives on), see [MCP Servers](mcp-servers.md).
+
+## Which interface
 
 | Interface | Use for | Returns | Latency |
-|-----------|---------|---------|---------|
-| `nx search` | Semantic chunk search from the CLI | Text chunks with topic grouping | < 1s |
-| `search()` MCP tool | Chunk search from agents, with topic scoping | Chunks grouped by topic + boosted | < 1s |
-| `query()` MCP tool | Document-level retrieval with catalog routing | Best snippet per document + metadata | < 2s |
-| `/conexus:query` skill | Complex multi-step analytical queries | Synthesized answer | 5-15s |
+|---|---|---|---|
+| `nx search` (CLI) | Quick chunk lookup from the terminal | Text chunks with topic grouping | < 1s |
+| `search()` MCP | Chunk search from agents, with topic scoping | Chunks grouped by topic, with boost | < 1s |
+| `query()` MCP | Document-level retrieval with catalog routing | Best snippet per document + metadata | < 2s |
+| `nx_answer` MCP / `/conexus:query` skill | Multi-step analytical queries | Synthesized answer | 5–15s |
 
-**Rule of thumb**: Start with `nx search` for quick lookups. Use `search()` MCP with `topic=` to narrow results to a specific knowledge domain. Use `query()` when you need to scope by author, content type, or follow citation links. Use `/conexus:query` for questions that require extracting, comparing, or generating across multiple sources.
+**Rule of thumb**: start with `nx search` for quick lookups. Use `search()` MCP with `topic=` to narrow to a specific knowledge domain. Use `query()` when you need to scope by author, content type, or follow citation links. Use `nx_answer` for questions that require extracting, comparing, or generating across multiple sources.
 
----
+```
+User or Agent
+     │
+     ├─ nx search ──────────────────► T3 semantic search (chunks)
+     │
+     ├─ search() MCP ──► topic filter ──► T3 + topic boost + grouping
+     │
+     ├─ query() MCP ──► catalog ──────► T3 scoped + link boost
+     │                    │
+     │                    └─ link graph traversal (follow_links)
+     │
+     └─ nx_answer MCP / /conexus:query
+              │
+              ├─ Path 1: plan_match → plan_run
+              ├─ Path 2: bundled operator chain
+              └─ Path 3: inline planner (plan-miss)
+```
+
+All paths query T3 and benefit from topic-aware ranking. `search()` and `query()` use the T2 topic store for grouping, distance boosting, and optional pre-filtering.
 
 ## nx search (CLI)
 
-Semantic search across T3 knowledge collections. Returns individual chunks ranked by relevance.
-
 ```bash
 nx search "authentication middleware"                    # basic semantic search
-nx search "caching strategy" --corpus code               # search only code collections
+nx search "caching strategy" --corpus code               # search only code
 nx search "schema design" --hybrid                       # semantic + frecency + ripgrep
 nx search "database" --where bib_year>=2024              # metadata filter
 nx search "error handling" -c --bat                      # show content with syntax highlighting
 ```
 
-See [CLI Reference](cli-reference.md#nx-search) for all flags.
-
----
+See [CLI Reference — nx search](cli-reference.md#nx-search) for all flags.
 
 ## search() MCP tool
 
-The `search()` MCP tool provides chunk-level semantic search from agents — equivalent to `nx search` but accessible via MCP.
+Chunk-level semantic search from agents — equivalent to `nx search` but accessible via MCP.
 
 ```python
-# Basic search
 search(query="authentication middleware")
-
-# Search specific corpora
 search(query="caching", corpus="knowledge,docs")
-
-# With metadata filter
 search(query="schema design", where="bib_year>=2024")
-
-# With semantic clustering (groups by topic when available)
 search(query="error handling patterns", cluster_by="semantic")
-
-# Topic-scoped search (pre-filter to a topic cluster)
 search(query="extraction pipeline", topic="Math-aware PDF Extraction")
 ```
 
 | Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
+|---|---|---|---|
 | `query` | string | (required) | Search query text |
-| `corpus` | string | `knowledge,code,docs` | Comma-separated corpus prefixes or full names. `all` searches everything |
+| `corpus` | string | `knowledge,code,docs` | Comma-separated prefixes or full names. `all` searches everything |
 | `limit` | int | `10` | Page size |
 | `offset` | int | `0` | Skip this many results (pagination) |
-| `where` | string | `""` | Metadata filter (`KEY=VALUE` format, comma-separated) |
-| `cluster_by` | string | `""` | Set to `semantic` to group results by topic (with Ward fallback) |
-| `topic` | string | `""` | Restrict results to a named topic (run `nx taxonomy list` to see available topics) |
-
-**Topic-aware search**: When topics have been discovered (`nx taxonomy discover --all`), Nexus boosts results that share a topic cluster with others in the same query. Same-topic results get a distance reduction of 0.1; results in adjacent linked topics get 0.05. Pass `cluster_by="semantic"` to have results grouped by topic label when more than 50% of results carry topic assignments.
-
----
+| `where` | string | `""` | Metadata filter (`KEY=VALUE`, comma-separated; supports `=`, `>=`, `<=`, `>`, `<`, `!=`) |
+| `cluster_by` | string | `""` | Set to `semantic` to group results by topic (Ward fallback below 50% coverage) |
+| `topic` | string | `""` | Pre-filter to a named topic. Run `nx taxonomy list` for available topics |
 
 ## query() MCP tool
 
-The `query()` MCP tool is the primary interface for agents. It combines semantic search with catalog-aware routing — scoping results by author, content type, document subtree, or citation links before searching.
-
-### Basic usage
+The primary retrieval interface for agents. Combines semantic search with catalog-aware routing — scoping by author, content type, document subtree, or citation links before searching.
 
 ```python
-# Simple semantic search (same as nx search, but from an agent)
-query(question="caching strategies")
-
-# Scope to a specific corpus
-query(question="indexing pipeline", corpus="code")
+# Catalog-aware routing
+query(question="schema mappings", author="Fagin")           # papers by an author
+query(question="architecture decisions", content_type="rdr") # RDR documents only
+query(question="indexing pipeline", subtree="1.1")           # under tumbler prefix 1.1
+query(question="database design", follow_links="cites", depth=1)  # + citation graph
 ```
-
-### Catalog-aware routing
-
-When you add catalog parameters, the tool first resolves matching documents via the catalog, then searches only those collections:
-
-```python
-# Search only papers by a specific author
-query(question="schema mappings", author="Fagin")
-
-# Search only RDR documents
-query(question="architecture decisions", content_type="rdr")
-
-# Search within a document subtree (all docs under owner 1.1)
-query(question="indexing pipeline", subtree="1.1")
-
-# Include documents cited by matching papers
-query(question="database design", follow_links="cites", depth=1)
-```
-
-### Parameters
 
 | Parameter | Type | Description |
-|-----------|------|-------------|
+|---|---|---|
 | `question` | string | Search query text (required) |
-| `corpus` | string | Collection prefix or comma-separated list (default: `knowledge,code,docs,rdr`) |
+| `corpus` | string | Collection prefix or comma-separated list (default `knowledge,code,docs,rdr`) |
 | `author` | string | Filter by document author (catalog lookup) |
-| `content_type` | string | Filter by type: `code`, `prose`, `rdr`, `paper`, `knowledge` |
-| `subtree` | string | Tumbler prefix — search only documents under this address (e.g., `1.1`) |
-| `follow_links` | string | Link type to follow (e.g., `cites`) — enriches results with linked documents |
-| `depth` | integer | How many hops to follow in the link graph (default: 1) |
-| `n` | integer | Maximum results (default: 10) |
-| `where` | string | ChromaDB metadata filter (e.g., `bib_year>=2024`) |
+| `content_type` | string | `code`, `prose`, `rdr`, `paper`, `knowledge` |
+| `subtree` | string | Tumbler prefix — search only documents under this address |
+| `follow_links` | string | Link type to follow (e.g., `cites`) — enriches with linked documents |
+| `depth` | integer | Hops to follow in the link graph (default 1) |
+| `n` | integer | Maximum results (default 10) |
+| `where` | string | ChromaDB metadata filter |
 
-### How routing works
+### How catalog routing works
 
 1. If `author`, `content_type`, or `subtree` is set: query the catalog for matching documents, extract their `physical_collection` values, and search only those collections.
-2. If `follow_links` is set: find matching documents, then BFS-traverse their link graph to the given `depth`, collecting all linked documents' collections.
+2. If `follow_links` is set: find matching documents, BFS-traverse their link graph to `depth`, collect all linked collections.
 3. If no catalog parameters: fall through to corpus-based search (same as `nx search`).
 
-This means `query(question="X", author="Fagin")` is faster and more precise than `query(question="X")` because it searches fewer collections.
+`query(question="X", author="Fagin")` is faster and more precise than `query(question="X")` — fewer collections to search, hits constrained by the catalog before embedding.
 
 ### Link-aware scoring
 
-The `query()` tool automatically boosts results from documents that have outgoing `implements` links in the catalog. This means code files linked to RDRs rank higher than unlinked code at similar semantic distance. The boost is additive (+0.15 × link signal) and uses per-type weights:
+`query()` automatically boosts results from documents with outgoing `implements` links. Code linked to an RDR ranks higher than unlinked code at similar semantic distance. The boost is additive (+0.15 × link signal) with per-type weights:
 
 | Link type | Weight | Rationale |
-|-----------|--------|-----------|
-| `implements` | 1.0 | Precise — manually created or filepath-extracted |
+|---|---|---|
+| `implements` | 1.0 | Precise — manually authored or filepath-extracted |
 | `relates` / `cites` | 0.5 | Moderate signal |
 | `implements-heuristic` | 0.0 | Too noisy (87% of links, substring-matched) |
-| `supersedes` | 0.0 | Historical, not relevance signal |
+| `supersedes` | 0.0 | Historical, not relevance |
 
-The `search()` tool does **not** apply link boost but does apply topic boost. Use `query()` when you want both the link graph and topic-aware ranking to influence results.
+`search()` does **not** apply link boost; it does apply topic boost. Use `query()` when you want both the link graph and topic ranking to shape results.
 
----
+## /conexus:query skill → nx_answer MCP tool (analytical queries)
 
-## /conexus:query skill → `nx_answer` MCP tool (analytical queries)
-
-For questions that require multiple retrieval steps — comparing sources, extracting structured data, or generating from evidence — invoke the `nx_answer` MCP tool.  The `/conexus:query` skill is now a thin pointer to this tool (RDR-080 consolidation — replaces the earlier `query-planner` + `analytical-operator` agent pair).
+For questions that require multiple retrieval steps — comparing sources, extracting structured data, generating from evidence — invoke the `nx_answer` MCP tool. The `/conexus:query` skill is a thin pointer to it (RDR-080 consolidation; replaces the earlier `query-planner` + `analytical-operator` agent pair).
 
 ### The trunk: plan-match → plan-run → record
 
 `nx_answer` runs this sequence on every call:
 
-1. **`plan_match`** — semantic search against the T2 plan library (`plans` table) for an intent-similar plan.  T1 cosine cache is tried first; falls through to FTS5 when the cache is empty or unavailable.  A match with confidence ≥ 0.40 is a hit.
-2. **Classify + `plan_run`** — execute the matched plan's steps via the operator dispatcher.  Retrieval steps (`search`, `query`, `traverse`, `store_get_many`) dispatch individually as MCP tool calls.  Contiguous runs of ≥2 operator steps (`extract`, `rank`, `compare`, `summarize`, `generate`) collapse into a single `claude -p` subprocess (v4.10.0 — [operator bundling](#operator-bundling)), cutting per-operator spawn overhead by 55-72% on real analytical queries.  Step outputs thread through as `$stepN.<field>` references for downstream steps — bundled-intermediate slots raise a specific error when referenced from outside the bundle (reference the bundle's final step instead).
-3. **Plan-miss path** — if no match clears the threshold, an inline planner (claude_dispatch to `claude -p`) decomposes the question into a DAG of ≤ `max_steps` steps and `plan_run` executes it.
-4. **Record** — every run is logged in `nx_answer_runs` (T2) with duration, step count, cost, matched plan id, and the final answer.  Library-matched plans also bump `plans.use_count` / `success_count` / `failure_count` for long-term plan health telemetry.
+1. **`plan_match`** — semantic search against the T2 plan library for an intent-similar plan. T1 cosine cache first, FTS5 fallback. A match with confidence ≥ 0.40 is a hit.
+2. **`plan_run`** — execute the matched plan's steps via the operator dispatcher. Retrieval steps (`search`, `query`, `traverse`, `store_get_many`) dispatch individually as MCP tool calls. Contiguous runs of ≥2 operator steps (`extract`, `rank`, `compare`, `summarize`, `generate`) collapse into a single `claude -p` subprocess via operator bundling (see below). Step outputs thread through as `$stepN.<field>` references.
+3. **Plan-miss path** — if no match clears the threshold, an inline planner (`claude -p`) decomposes the question into a DAG of ≤ `max_steps` steps and `plan_run` executes it.
+4. **Record** — every run logged in `nx_answer_runs` (T2) with duration, step count, cost, matched plan id, and final answer. Library-matched plans bump `use_count` / `success_count` / `failure_count` for plan-health telemetry.
 
 ### Operator bundling
 
-When a plan has two or more operator steps in a row, they dispatch as a
-single `claude -p` call rather than N isolated subprocesses.  Measured
-latency reductions on real queries:
+When a plan has two or more LLM-operator steps in a row, they dispatch as a single `claude -p` call instead of N isolated subprocesses. Measured latency on real queries:
 
 | Plan shape | Bundled | Isolated | Saved |
 |---|---:|---:|---:|
@@ -160,32 +137,20 @@ latency reductions on real queries:
 | 2-op `extract → rank` (Arcaneum RDRs) | 57s | 80s | **-28%** |
 | 4-op `extract → extract → compare → summarize` (cross-repo) | 54s | 192s | **-72%** |
 
-Bundling is transparent to plan authors — your existing YAML doesn't
-change.  Caveats:
+Bundling is transparent to plan authors — existing YAML doesn't change. Caveats:
 
-- **Retrieval steps stay isolated.**  Only LLM operators (extract /
-  rank / compare / summarize / generate) bundle; retrieval needs real
-  host-side outputs to feed the next step's input.
-- **Parallel-branch bundles get source attribution.**  Two extracts
-  that hydrate from different retrieval steps carry their source
-  collection into the composed prompt so cross-corpus compare can
-  attribute claims to the right side.
-- **`$stepN.<field>` works across the bundle's output.**  Referencing
-  a bundled *intermediate* (not the bundle's final step) raises a
-  clear error — the intermediate isn't exposed host-side.
-- **Escape hatch:** `plan_run(match, bundle_operators=False)` recovers
-  per-step dispatch for debugging or when you need per-operator
-  telemetry.
-- **Size guard:** composite prompts over 200k chars fall back
-  transparently to per-step dispatch (logged as
-  `bundle_oversized_fallback_to_per_step`).
+- **Retrieval steps stay isolated.** Only LLM operators bundle; retrieval needs real host-side outputs to feed the next step.
+- **Parallel-branch bundles get source attribution.** Two extracts hydrating from different retrieval steps carry their source collection into the composed prompt so cross-corpus compare can attribute claims correctly.
+- **`$stepN.<field>` works across the bundle's output.** Referencing a bundled intermediate (not the bundle's final step) raises a clear error — the intermediate isn't exposed host-side.
+- **Escape hatch**: `plan_run(match, bundle_operators=False)` recovers per-step dispatch for debugging.
+- **Size guard**: composite prompts over 200k chars fall back to per-step dispatch (logged as `bundle_oversized_fallback_to_per_step`).
 
-### Builtin scenario plans (RDR-078 Phase 6)
+### Builtin scenario plans (RDR-078)
 
-`nx catalog setup` seeds 9 YAML plan templates under `conexus/plans/builtin/`:
+`nx catalog setup` seeds nine YAML plan templates under `conexus/plans/builtin/`:
 
 | Template | Verb | Covers |
-|----------|------|--------|
+|---|---|---|
 | research-default | research | Design / architecture walks from prose to implementing code |
 | review-default | review | Critique a change set against decision-evolution history |
 | analyze-default | analyze | Cross-corpus synthesis with reference chains |
@@ -196,21 +161,21 @@ change.  Caveats:
 | plan-inspect-dimensions | plan-inspect (variant) | Enumerate dimension registry usage |
 | plan-promote-propose | plan-promote | Rank plans worth promoting to higher scope |
 
-Plans match by **dimensions** (`verb`, `scope`, `strategy`) + semantic similarity to the plan's description.  See [plan-authoring-guide.md](plan-authoring-guide.md) for the template schema.
+Plans match by **dimensions** (`verb`, `scope`, `strategy`) plus semantic similarity to the description. See [Plan Authoring Guide](plan-authoring-guide.md) for the template schema.
 
-### Verb skills (new in RDR-078)
+### Verb skills
 
 Instead of `/conexus:query "research how X works"`, the verb skills route directly to `plan_match` scoped to the matching verb:
 
 | Skill | Intent shape |
-|-------|--------------|
+|---|---|
 | `/conexus:research` | "How does X work?", "Design context for Y" |
 | `/conexus:review` | "Review this change set", "Did the refactor drift from the RDR?" |
 | `/conexus:analyze` | "Compare approaches across corpora", "Rank candidates by criterion" |
 | `/conexus:debug` | "Why is this handler failing?", "Trace the stack of the panic" |
 | `/conexus:document` | "Audit doc coverage", "Find coverage gaps" |
 
-Each skill scopes `plan_match` with `dimensions={verb: <skill>}` and executes the returned plan via `plan_run`.  Falls through to `/conexus:query` on miss.
+Each scopes `plan_match` with `dimensions={verb: <skill>}` and executes via `plan_run`. Falls through to `/conexus:query` on miss.
 
 ### Example analytical queries
 
@@ -228,44 +193,32 @@ Each skill scopes `plan_match` with `dimensions={verb: <skill>}` and executes th
 /conexus:query How does our RDR process compare to what the literature recommends?
 ```
 
----
-
-## Relationship between search interfaces
-
-```
-User or Agent
-     │
-     ├─ nx search ──────────────────► T3 semantic search (chunks)
-     │                                    │
-     ├─ search() MCP ──► topic filter ──► T3 semantic search + topic boost + grouping
-     │                                    │
-     ├─ query() MCP ──► catalog ──────► T3 scoped search (documents) + topic boost
-     │                    │
-     │                    └─ link graph traversal (follow_links)
-     │
-     └─ /conexus:query skill
-              │
-              ├─ Path 1: single query() call (with topic scoping)
-              ├─ Path 2: template match (cached plan)
-              └─ Path 3: planner agent (novel decomposition)
-```
-
-All paths query T3 and benefit from topic-aware ranking when topics are available. The `search()` and `query()` MCP tools use the T2 topic store for result grouping, distance boosting, and optional pre-filtering via the `topic` parameter.
-
----
-
 ## Search quality features
 
-Several features work automatically to improve result quality across all search interfaces.
+Several mechanisms run automatically across all interfaces.
+
+### Topic-aware ranking
+
+After `nx index repo` (or `nx taxonomy discover --all`), topics are clustered via HDBSCAN with Claude-Haiku auto-labels. Topic-aware ranking then works three ways:
+
+- **Topic boost** — results sharing a topic cluster get a distance reduction of 0.1; results in adjacent linked topics get 0.05. Automatic on `search` and `query`.
+- **Topic grouping** — pass `cluster_by="semantic"` on `search()` to group results by topic label when more than 50% of results carry topic assignments. Falls back to Ward clustering below that threshold.
+- **Topic-scoped search** — the `topic` parameter on `search()` pre-filters results to documents in a single named topic. Run `nx taxonomy list` to see available topics.
+
+```python
+search(query="consensus protocol", topic="Byzantine Fault Tolerant Consensus")
+```
+
+`store_put` auto-assigns new documents to the nearest topic via centroid lookup. Operator-curated labels survive `nx taxonomy rebuild` via centroid-matching (cosine similarity > 0.8). See [Document Catalog § Topic taxonomy](catalog.md#topic-taxonomy) and [CLI Reference — nx taxonomy](cli-reference.md#nx-taxonomy).
 
 ### Distance thresholds (automatic noise filtering)
 
-Results exceeding per-corpus distance thresholds are filtered before reaching the caller. This removes the "noise tail" — irrelevant chunks that pad the bottom of result lists. Thresholds are calibrated for Voyage AI embeddings (cloud mode only) and configurable via `.nexus.yml`.
+Results exceeding per-corpus distance thresholds are filtered before reaching the caller. Calibrated for Voyage AI embeddings (cloud mode only); configurable in `.nexus.yml`.
 
 | Corpus | Threshold | Effect |
-|--------|-----------|--------|
-| `code__*` | 0.45 | Functionally inert post-RDR-059 (all relevant code <0.43) — guards future model changes |
-| `knowledge__*`, `docs__*`, `rdr__*` | 0.65 | Relevant results end ~0.59, noise starts ~0.67 |
+|---|---|---|
+| `code__*` | 0.45 | Functionally inert post-RDR-059 (all relevant code < 0.43) |
+| `knowledge__*`, `docs__*`, `rdr__*` | 0.65 | Relevant ends ~0.59, noise starts ~0.67 |
 | Cross-corpus default | 0.55 | 93% of relevant results below this threshold |
 
 ### Section-type metadata filtering
@@ -278,42 +231,19 @@ nx search "caching strategy" --where section_type!=references
 
 ### Corpus-specific over-fetch
 
-Knowledge, docs, and RDR collections fetch 4x the requested result count before filtering (vs 2x for code). This compensates for the higher noise ratio in prose collections, ensuring enough quality results survive threshold filtering.
-
-### Topic-aware search
-
-When topics have been discovered (`nx taxonomy discover --all`, or automatically after `nx index repo`), search quality improves in three ways.
-
-**1. Topic boost**: Results that share a topic cluster with other results in the same query get a distance reduction of 0.1. Results in adjacent linked topics (via the catalog link graph) get 0.05. Queries that land on a coherent topic cluster surface more of that cluster at the top of results.
-
-**2. Topic grouping**: Pass `cluster_by="semantic"` to the `search()` MCP tool to group results by topic label when more than 50% of results have topic assignments. Each group is headed by its label (e.g., `── ChromaDB Transient Retry Logic ──`). Below 50% coverage, results fall back to Ward hierarchical clustering.
-
-**3. Topic-scoped search**: The `topic` parameter on `search()` restricts results to documents in a single named topic. Run `nx taxonomy list` to see available topics, then pass one:
-
-```python
-search(query="consensus protocol", topic="Byzantine Fault Tolerant Consensus")
-```
-
-**How topics are created**: `nx index repo` clusters the collection's own embeddings with HDBSCAN (Voyage on cloud, MiniLM on local) and auto-labels clusters with Claude Haiku when the `claude` CLI is available. New documents added via `store_put` are assigned to the nearest topic via centroid lookup.
-
-**Curating topics**: Run `nx taxonomy review` for interactive accept/rename/merge/delete. Run `nx taxonomy status` to see coverage and pending reviews. Curated labels survive `nx taxonomy rebuild` via centroid-matching (cosine similarity >0.8).
-
-See [CLI Reference — nx taxonomy](cli-reference.md#nx-taxonomy) for the full command set.
+Knowledge, docs, and RDR collections fetch 4x the requested result count before filtering (vs 2x for code), compensating for higher noise in prose collections.
 
 ### Catalog pre-filtering
 
-When metadata filters have high selectivity (<5% of documents match), Nexus pre-fetches matching file paths from the catalog SQLite database and passes them as a `source_path` filter to ChromaDB. This avoids HNSW/SPANN stalling in predicate-sparse graph regions. Happens automatically when a catalog is available — no configuration needed.
+When metadata filters have high selectivity (<5% of documents match), Nexus pre-fetches matching file paths from the catalog SQLite database and passes them as a `source_path` filter to ChromaDB. Avoids HNSW/SPANN stalling in predicate-sparse graph regions. Automatic when a catalog is available.
 
 ### Multi-probe collection health
 
-`nx collection verify --deep` probes up to 5 documents per collection and reports a hit rate. A hit rate below 100% indicates degraded retrieval quality — run `nx doctor --fix` (local mode) or re-index the collection.
+`nx collection verify --deep` probes up to 5 documents per collection and reports a hit rate. Below 100% indicates degraded retrieval — run `nx doctor --fix` (local mode) or re-index.
 
 ### Contradiction detection (RDR-057 Phase 3a)
 
-When two results from the same collection have near-identical embeddings
-(cosine distance < 0.3) but different `source_agent` provenance, both are
-flagged with `_contradiction_flag` in their metadata. The MCP `search` tool
-renders this as a `[CONTRADICTS ANOTHER RESULT]` suffix in the result line:
+When two results from the same collection have near-identical embeddings (cosine distance < 0.3) but different `source_agent` provenance, both are flagged with `_contradiction_flag` in metadata. The MCP `search` tool renders this as a `[CONTRADICTS ANOTHER RESULT]` suffix:
 
 ```
 [0.1234] Caching strategy notes [CONTRADICTS ANOTHER RESULT]
@@ -322,23 +252,15 @@ renders this as a `[CONTRADICTS ANOTHER RESULT]` suffix in the result line:
   We use Memcached for session cache with 1h expiry...
 ```
 
-When you see this flag, two agents recorded conflicting claims about the
-same topic. Investigate and consolidate — the flag is purely informational;
-neither result is dropped.
+Two agents recorded conflicting claims; investigate and consolidate. The flag is informational; neither result is dropped.
 
-**Enabled by default.** Opt out via `search.contradiction_check: false` in
-`.nexus.yml`. The check adds one extra embedding fetch per collection
-(shared with clustering when both are enabled — the helper fetches
-embeddings once and passes them to both features). See
-[Configuration](configuration.md) for the config key.
-
----
+Enabled by default. Opt out via `search.contradiction_check: false` in `.nexus.yml`. The check adds one extra embedding fetch per collection (shared with clustering when both are enabled). See [Configuration](configuration.md).
 
 ## See also
 
-- [Plan-Centric Retrieval](plan-centric-retrieval.md) — the full `nx_answer`
-  trunk, plan library, dimensions, and builtin scenario templates.
-- [Plan Authoring Guide](plan-authoring-guide.md) — template schema for
-  authoring new plans.
-- [MCP Tools vs Agents](mcp-vs-agents.md) — why `nx_answer` replaced the
-  `query-planner` + `analytical-operator` agent pair.
+- [MCP Servers](mcp-servers.md) — every tool, every server, every parameter
+- [CLI Reference](cli-reference.md) — every `nx` subcommand and flag
+- [Plan-Centric Retrieval](plan-centric-retrieval.md) — the full `nx_answer` trunk, plan library, dimensions
+- [Plan Authoring Guide](plan-authoring-guide.md) — schema for authoring new plans
+- [Document Catalog](catalog.md) — catalog concepts, link types, purposes, topic taxonomy
+- [MCP Tools vs Agents](exploration/mcp-vs-agents.md) — why `nx_answer` replaced the agent pair

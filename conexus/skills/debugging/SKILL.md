@@ -19,7 +19,7 @@ Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
 
 ## Code Navigation
 
-**REQUIRED SUB-SKILL:** Use **nx:serena-code-nav** for all symbol-level navigation during debugging. Serena gives accurate call traces; Grep finds text matches that may be comments or strings.
+**REQUIRED SUB-SKILL:** Use **/conexus:serena-code-nav** for all symbol-level navigation during debugging. Serena gives accurate call traces; Grep finds text matches that may be comments or strings.
 
 - **Trace call chains**: `find_referencing_symbols` on failing methods to find all callers
 - **Find exception sources**: `find_symbol` on exception types to locate definitions

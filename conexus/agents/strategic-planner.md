@@ -17,9 +17,9 @@ effort: high
 ---
 
 
-## nx Tool Reference
+## Conexus Tool Reference
 
-nx MCP tools use the full prefix `mcp__plugin_conexus_nexus__`. Examples:
+Conexus MCP tools use the full prefix `mcp__plugin_conexus_nexus__`. Examples:
 
 ```
 mcp__plugin_conexus_nexus__search(query="...", corpus="knowledge", limit=5)
@@ -94,8 +94,8 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
    If no RDR pattern is found, proceed normally.
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
-2. Check nx T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
+1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
+2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
@@ -135,8 +135,8 @@ Thought 8: Identify critical risks and mitigations
 
 Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought: N` to refine earlier analysis.
 2. Search relevant knowledge bases for prior art and context:
-   - nx T3 store: mcp__plugin_conexus_nexus__search(query="relevant topic", corpus="knowledge", limit=5
-   - nx T2 memory: mcp__plugin_conexus_nexus__memory_get(project="{project}", title="plan.md"
+   - T3 store: mcp__plugin_conexus_nexus__search(query="relevant topic", corpus="knowledge", limit=5
+   - T2 memory: mcp__plugin_conexus_nexus__memory_get(project="{project}", title="plan.md"
 3. Identify constraints, dependencies, and success criteria
 5. **Discover Relevant Project History and Patterns with nx search**:
    Project structure and organization:
@@ -277,7 +277,7 @@ Your final output MUST include a clearly labeled next-step recommendation.
 This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
-- **Project Plans**: Store in nx T2 memory as `--project {project} --title plan-{name}.md`
+- **Project Plans**: Store in T2 memory as `--project {project} --title plan-{name}.md`
 - **Bead Hierarchy**: Epic -> Phase -> Task structure
 - **Dependency Maps**: Use `/beads:dep add` for all relationships
 - **Planning Notes**: Use T1 scratch for intermediate analysis during planning; flag for T2 at session end:

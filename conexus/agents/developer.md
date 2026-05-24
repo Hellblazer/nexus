@@ -16,9 +16,9 @@ effort: high
 ---
 
 
-## nx Tool Reference
+## Conexus Tool Reference
 
-nx MCP tools use the full prefix `mcp__plugin_conexus_nexus__`. Examples:
+Conexus MCP tools use the full prefix `mcp__plugin_conexus_nexus__`. Examples:
 
 ```
 mcp__plugin_conexus_nexus__search(query="...", corpus="knowledge", limit=5)
@@ -104,7 +104,7 @@ mcp__plugin_conexus_nexus__memory_get(project="{project}", title="" to list proj
 
 Check `/beads:ready` for unblocked tasks.
 
-### Prior Implementation Search (if relay has no nx artifacts)
+### Prior Implementation Search (if relay has no conexus artifacts)
 
 If the relay's Input Artifacts section contains no nx store titles and no nx memory paths —
 i.e., no prior knowledge has been assembled — search before starting:

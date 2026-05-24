@@ -11,9 +11,9 @@ Companion references:
 
 - **RDR-078** — the design decision. Read the Vocabulary + Phase 1-4
   sections for the why.
-- `docs/catalog-link-types.md` — the seven link-type values
+- `docs/catalog.md#link-types` — the seven link-type values
   (`implements`, `cites`, `supersedes`, …) that `traverse` walks.
-- `docs/catalog-purposes.md` — named aliases that map to link-type
+- `docs/catalog.md#purposes-link-type-aliases` — named aliases that map to link-type
   lists; use `purpose:` in plans instead of bare `link_types:` when a
   named alias exists.
 

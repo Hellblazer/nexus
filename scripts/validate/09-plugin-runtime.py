@@ -193,7 +193,7 @@ _RDR_SKILLS = [
 # Category 5: Infrastructure skills — domain-topical assertions.
 # NOTE: these describe themselves rather than dispatch; narrow tasks.
 _INFRA_SKILLS = [
-    Case("using-nx-skills",     _META_PREFIX + "What's the rule for invoking nx skills?",
+    Case("using-nx-skills",     _META_PREFIX + "What's the rule for invoking conexus skills?",
          ["skill", "invoke", "before"]),
     Case("writing-nx-skills",   _META_PREFIX + "I want to create a new skill — what's the structure?",
          ["skill", "frontmatter", "SKILL.md"]),

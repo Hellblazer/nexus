@@ -16,9 +16,9 @@ effort: medium
 ---
 
 
-## nx Tool Reference
+## Conexus Tool Reference
 
-nx MCP tools use the full prefix `mcp__plugin_conexus_nexus__`. Examples:
+Conexus MCP tools use the full prefix `mcp__plugin_conexus_nexus__`. Examples:
 
 ```
 mcp__plugin_conexus_nexus__search(query="...", corpus="knowledge", limit=5)
@@ -88,8 +88,8 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
-2. Check nx T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
+1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
+2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
@@ -173,7 +173,7 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 
    Locate integration points:
    mcp__plugin_conexus_nexus__search(query="external service integrations and APIs", corpus="code", limit=20
-   Combine semantic findings with Glob (file structure) and Serena (symbol navigation — see nx:serena-code-nav) for complete understanding.
+   Combine semantic findings with Glob (file structure) and Serena (symbol navigation — see /conexus:serena-code-nav) for complete understanding.
 
 6. **Context Conservation Strategy**:
    - Use subtasks to handle detailed analysis of specific modules/components

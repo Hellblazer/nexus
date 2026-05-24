@@ -145,8 +145,8 @@ Tracks all phase beads. Closes when SC-1..SC-19 all pass and the ART end-to-end 
 - `src/nexus/plans/runner.py` — register `traverse` step kind; dispatch to `graph_many()` (list seeds) or `graph()` (single seed).
 - `src/nexus/plans/purposes.py` — **new file** — `purposes_resolve(name, project, scope) -> list[str]`; loads `conexus/plans/purposes.yml`; warn-and-drop unknown link types per RDR.
 - `conexus/plans/purposes.yml` — **new file** — starter purpose set per RDR §Phase 3.
-- `docs/catalog-link-types.md` — **new file** — directionality, source, typical traversal shape per link type.
-- `docs/catalog-purposes.md` — **new file** — purpose registry reference.
+- `docs/catalog.md#link-types` — **new file** — directionality, source, typical traversal shape per link type.
+- `docs/catalog.md#purposes-link-type-aliases` — **new file** — purpose registry reference.
 
 **Tests** (`tests/test_catalog_graph_many.py`, `tests/test_traverse_step.py`, `tests/test_purposes_resolve.py`):
 1. `test_graph_many_node_dedup` — two seeds reaching same node merge with `seed_origin: list[str]` populated, first-seen wins.

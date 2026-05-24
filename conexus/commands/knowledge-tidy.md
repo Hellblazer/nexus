@@ -1,5 +1,5 @@
 ---
-description: Persist and organize knowledge into nx store using mcp__plugin_conexus_nexus__nx_tidy (RDR-080)
+description: Persist and organize knowledge into the T3 store using mcp__plugin_conexus_nexus__nx_tidy (RDR-080)
 ---
 
 # Knowledge Tidying Request

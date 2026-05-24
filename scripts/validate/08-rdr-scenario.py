@@ -165,7 +165,7 @@ but its invariants aren't tested in sequence.
 
 ## Research Findings
 
-See docs/rdr/rdr-workflow.md for the canonical state machine.
+See docs/rdr.md#workflow for the canonical state machine.
 
 ## Design
 

@@ -458,7 +458,7 @@ change upstream and deprecate our convention.
 
 ### Nexus context
 
-- `docs/agentic-cockpit.md` (especially §Surfaces lines 593–738, §Open
+- `docs/exploration/agentic-cockpit.md` (especially §Surfaces lines 593–738, §Open
   Questions lines 813–815 — explicitly anticipates A2UI)
 - RDR-053: Xanadu Fidelity (`chash://` content-addressed spans)
 - RDR-108: T3 Chunk Soft-Delete (chunk_text_hash as natural ID)

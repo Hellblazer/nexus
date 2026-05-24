@@ -337,7 +337,7 @@ validates every plan template on PR.
 
 - [RDR-078](rdr/rdr-078-unified-context-graph-and-retrieval.md) — architectural decision
 - [Plan Authoring Guide](plan-authoring-guide.md) — template schema, dimensions, bindings
-- [Catalog Link Types](catalog-link-types.md) — what edges `traverse` can walk
-- [Catalog Purposes](catalog-purposes.md) — named link-type bundles
+- [Catalog Link Types](catalog.md#link-types) — what edges `traverse` can walk
+- [Catalog Purposes](catalog.md#purposes-link-type-aliases) — named link-type bundles
 - [Querying Guide](querying-guide.md) — when to use each retrieval interface
 - [MCP Servers](mcp-servers.md) — full tool catalog

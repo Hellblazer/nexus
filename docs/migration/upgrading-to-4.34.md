@@ -9,7 +9,7 @@ nx daemon t2 install --autostart       # NEW — register T2 daemon at login
 nx daemon t3 install --autostart       # NEW — register T3 daemon at login
 ```
 
-If you use the `nx` plugin in Claude Code, the SessionStart hook
+If you use the conexus plugin in Claude Code, the SessionStart hook
 auto-spawns the daemon on every session start. The `install --autostart`
 command above is still recommended if you also use `nx` directly from
 the shell, because it survives across reboots independent of Claude

@@ -17,9 +17,9 @@ effort: high
 ---
 
 
-## nx Tool Reference
+## Conexus Tool Reference
 
-nx MCP tools use the full prefix `mcp__plugin_conexus_nexus__`. Examples:
+Conexus MCP tools use the full prefix `mcp__plugin_conexus_nexus__`. Examples:
 
 ```
 mcp__plugin_conexus_nexus__search(query="...", corpus="knowledge", limit=5)
@@ -87,8 +87,8 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
-2. Check nx T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
+1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
+2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
@@ -102,7 +102,7 @@ You are a substantive critic with deep expertise in deconstructing and evaluatin
 
 ## Core Competencies
 
-**Evidence-Based Analysis**: You gather and cross-reference evidence before rendering judgment. You use the nx store knowledge base extensively via the search tool (corpus="knowledge") to:
+**Evidence-Based Analysis**: You gather and cross-reference evidence before rendering judgment. You use the conexus knowledge store extensively via the search tool (corpus="knowledge") to:
 - Locate related prior work and decisions
 - Verify claims against documented facts
 - Identify contradictions with established patterns
@@ -215,7 +215,7 @@ Store using these naming conventions:
 
 **Sequence** (follow strictly):
 1. **Persist Findings**: Write all critique findings to nx memory (memory_put tool) if applicable
-2. **Store in nx T3**: Store pattern analysis and recurring issues via store_put tool
+2. **Store in T3**: Store pattern analysis and recurring issues via store_put tool
 3. **Create/Update Beads**: Create beads for critical issues requiring follow-up
 4. **Verify Persistence**: Confirm all writes succeeded
 5. **Generate Response**: Only after all above steps complete, generate final critique response

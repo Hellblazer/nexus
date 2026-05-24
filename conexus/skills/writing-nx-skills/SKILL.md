@@ -4,15 +4,15 @@ description: Use when creating new conexus plugin skills, editing existing skill
 effort: low
 ---
 
-# Writing nx Skills
+# Writing Conexus Skills
 
 ## Overview
 
-Guide for authoring skills in the nx Claude Code plugin. Skills are reference guides for proven techniques, patterns, or tools that help future Claude instances find and apply effective approaches.
+Guide for authoring skills in the conexus Claude Code plugin. Skills are reference guides for proven techniques, patterns, or tools that help future Claude instances find and apply effective approaches.
 
 **Methodology:** TDD-for-documentation — write pressure scenarios (test cases), verify baseline behavior without the skill, then write the skill and verify compliance.
 
-## nx Skill Conventions
+## Skill Conventions
 
 ### Frontmatter
 
@@ -30,7 +30,7 @@ effort: low|medium|high
 - `description`: MUST start with "Use when". Describe triggering conditions, NEVER summarize workflow.
 - `effort`: Reasoning depth hint — `low` (reference/lookup), `medium` (guided workflow), `high` (deep analysis/critique)
 
-### Skill Types in nx
+### Skill Types
 
 **Agent-delegating skills** (majority): Invoke a specific agent via Agent tool relay.
 CI-enforced required sections (`test_plugin_structure.py` will fail without these):
@@ -58,8 +58,8 @@ Required sections:
 ### Cross-References
 
 Use explicit markers, not file paths:
-- `**REQUIRED SUB-SKILL:** Use nx:skill-name for [purpose]`
-- `**REQUIRED BACKGROUND:** Understand nx:skill-name before using this skill`
+- `**REQUIRED SUB-SKILL:** Use /conexus:skill-name for [purpose]`
+- `**REQUIRED BACKGROUND:** Understand /conexus:skill-name before using this skill`
 
 Never use `@` syntax (force-loads files, burns context).
 

@@ -91,7 +91,7 @@ conexus/
 │       ├── stop_verification_hook.sh  # Stop: opt-in session-end verification (tests, git)
 │       ├── pre_close_verification_hook.sh  # PreToolUse (Bash): bd-close gate
 │       ├── subagent-start.sh          # SubagentStart: inject context for spawned subagents
-│       ├── auto-approve-nx-mcp.sh     # PermissionRequest: auto-approve nx MCP tools
+│       ├── auto-approve-nx-mcp.sh     # PermissionRequest: auto-approve conexus MCP tools
 │       ├── t2_prefix_scan.py          # Shared helper: T2 multi-namespace prefix scan
 │       └── read_verification_config.py # Shared helper: read .nexus.yml verification block
 ├── .mcp.json                # Bundled MCP servers (nexus storage + sequential-thinking)
@@ -101,7 +101,7 @@ conexus/
     ├── brainstorming-gate/  # Standalone: design gate before implementation
     ├── catalog/             # Standalone: catalog operations + link graph patterns
     ├── cli-controller/      # Standalone: tmux-based interactive CLI control
-    ├── nexus/               # Standalone: nx CLI reference (all tiers)
+    ├── nexus/               # Standalone: CLI reference (all tiers)
     ├── serena-code-nav/     # Standalone: navigate code by symbol (definitions, callers, renames)
     ├── using-nx-skills/     # Standalone: skill invocation discipline
     ├── writing-nx-skills/   # Standalone: plugin authorship guide

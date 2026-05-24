@@ -834,7 +834,7 @@ class TestProjectCmdFlag:
         # Reference to tuning doc for operators. Click wraps at hyphens,
         # inserting "- " breaks, so normalise before the containment check.
         collapsed = " ".join(result.output.split()).replace("- ", "-")
-        assert "taxonomy-projection-tuning.md" in collapsed
+        assert "exploration/taxonomy-projection-tuning.md" in collapsed
 
 
 # ── Phase 5 (nexus-84v) — nx taxonomy hubs ──────────────────────────────────
@@ -1016,7 +1016,7 @@ class TestHubs:
             assert flag in result.output
         # Points the operator at the tuning doc.
         collapsed = " ".join(result.output.split()).replace("- ", "-")
-        assert "taxonomy-projection-tuning.md" in collapsed
+        assert "exploration/taxonomy-projection-tuning.md" in collapsed
 
 
 # ── Phase 6 (nexus-w4k) — nx taxonomy audit ─────────────────────────────────
@@ -1126,4 +1126,4 @@ class TestAudit:
         assert "--threshold" in result.output
         assert "--top-n" in result.output
         collapsed = " ".join(result.output.split()).replace("- ", "-")
-        assert "taxonomy-projection-tuning.md" in collapsed
+        assert "exploration/taxonomy-projection-tuning.md" in collapsed

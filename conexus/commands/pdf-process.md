@@ -1,5 +1,5 @@
 ---
-description: Index PDF files into nx store for semantic search
+description: Index PDF files into the T3 knowledge store for semantic search
 ---
 
 # PDF Processing Request

@@ -10,7 +10,7 @@ Delegates to the **developer** agent (sonnet). See [registry.yaml](../../registr
 
 ## Code Navigation
 
-**REQUIRED SUB-SKILL:** Use **nx:serena-code-nav** for all symbol-level navigation — finding definitions, callers, type hierarchies, and surgical edits. Serena replaces text-pattern Grep for any symbol task.
+**REQUIRED SUB-SKILL:** Use **/conexus:serena-code-nav** for all symbol-level navigation — finding definitions, callers, type hierarchies, and surgical edits. Serena replaces text-pattern Grep for any symbol task.
 
 - **Before modifying interfaces**: `find_referencing_symbols` to find all implementers and callers
 - **Before refactoring methods**: `find_referencing_symbols` to find all callers
