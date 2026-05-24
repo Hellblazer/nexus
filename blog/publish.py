@@ -525,7 +525,10 @@ def main() -> None:
             "Publish a markdown post to WordPress.com as Gutenberg blocks."
         )
     )
-    ap.add_argument("md_path", type=Path, help="Path to .md file")
+    ap.add_argument(
+        "md_path", type=Path, nargs="?", default=None,
+        help="Path to .md file. Required unless --batch is given.",
+    )
     ap.add_argument(
         "--post-id", type=int, default=None,
         help="Update existing post by ID (default: create new draft)",
@@ -565,6 +568,12 @@ def main() -> None:
         help="Inter-post pause in --batch mode, in seconds (default: 1.0).",
     )
     args = ap.parse_args()
+
+    # md_path is optional iff --batch is given; required otherwise.
+    if not args.batch and args.md_path is None:
+        ap.error("md_path is required unless --batch is given")
+    if args.batch and args.md_path is not None:
+        ap.error("md_path is incompatible with --batch (the batch arg carries paths)")
 
     if args.batch:
         if args.print_html or args.pull:
