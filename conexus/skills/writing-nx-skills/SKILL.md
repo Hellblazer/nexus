@@ -58,8 +58,8 @@ Required sections:
 ### Cross-References
 
 Use explicit markers, not file paths:
-- `**REQUIRED SUB-SKILL:** Use nx:skill-name for [purpose]`
-- `**REQUIRED BACKGROUND:** Understand nx:skill-name before using this skill`
+- `**REQUIRED SUB-SKILL:** Use /conexus:skill-name for [purpose]`
+- `**REQUIRED BACKGROUND:** Understand /conexus:skill-name before using this skill`
 
 Never use `@` syntax (force-loads files, burns context).
 

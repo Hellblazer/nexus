@@ -173,7 +173,7 @@ Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to
 
    Locate integration points:
    mcp__plugin_conexus_nexus__search(query="external service integrations and APIs", corpus="code", limit=20
-   Combine semantic findings with Glob (file structure) and Serena (symbol navigation — see nx:serena-code-nav) for complete understanding.
+   Combine semantic findings with Glob (file structure) and Serena (symbol navigation — see /conexus:serena-code-nav) for complete understanding.
 
 6. **Context Conservation Strategy**:
    - Use subtasks to handle detailed analysis of specific modules/components

@@ -1,6 +1,6 @@
 ---
 name: query
-description: Use when answering any analytical question over nx knowledge collections. This is the canonical entry point; direct search/query calls for analytical questions are an anti-pattern.
+description: Use when answering any analytical question over the conexus knowledge collections. This is the canonical entry point; direct search/query calls for analytical questions are an anti-pattern.
 effort: medium
 ---
 

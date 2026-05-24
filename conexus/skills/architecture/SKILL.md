@@ -19,7 +19,7 @@ Default: **sonnet**. Escalate via `model` parameter on the Agent tool:
 
 ## Code Navigation
 
-**REQUIRED SUB-SKILL:** Use **nx:serena-code-nav** for symbol-level architecture discovery. Combine with `nx search --hybrid` for semantic discovery — Serena for precision, nx search for conceptual queries.
+**REQUIRED SUB-SKILL:** Use **/conexus:serena-code-nav** for symbol-level architecture discovery. Combine with `nx search --hybrid` for semantic discovery — Serena for precision, nx search for conceptual queries.
 
 - **Map system structure**: `get_symbols_overview` for class/interface inventories without reading files
 - **Find architectural patterns**: `find_referencing_symbols` to trace abstraction usage across the codebase

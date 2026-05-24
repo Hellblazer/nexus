@@ -1,6 +1,6 @@
 ---
 name: knowledge-tidying
-description: Use when validated findings need to be consolidated in nx T3 knowledge store.
+description: Use when validated findings need to be consolidated in the T3 knowledge store.
 effort: low
 ---
 

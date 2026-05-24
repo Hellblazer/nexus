@@ -108,4 +108,4 @@ Phased implementation plan with beads for task tracking
 - [ ] Dependencies between tasks are explicit
 ```
 
-**REQUIRED SUB-SKILL:** Use nx:strategic-planning after design approval to create the implementation plan.
+**REQUIRED SUB-SKILL:** Use /conexus:strategic-planning after design approval to create the implementation plan.
