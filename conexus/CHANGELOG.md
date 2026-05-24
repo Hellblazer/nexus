@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.0.1] - 2026-05-24
+
+### Feature: tool annotations on all 41 MCP tools
+
+Every MCP tool now carries `title` and `readOnlyHint` annotations via the
+MCP `tools/list` response. Tools that mutate state additionally carry
+`destructiveHint`. This was the headline Connector Directory submission
+prerequisite. See root `CHANGELOG.md` § 5.0.1 for the read-only /
+write-non-destructive / destructive classification table.
+
+### Docs: support URL added to plugin manifest
+
+`bugs` URL added to `conexus/.claude-plugin/plugin.json` pointing to
+`https://github.com/Hellblazer/nexus/issues`. Surfaced for users seeking
+the support channel.
+
 ## [5.0.0] - 2026-05-24
 
 ### Breaking: plugin renamed `nx` → `conexus` (nexus-mkj6u)

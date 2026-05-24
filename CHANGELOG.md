@@ -6,6 +6,44 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.0.1] - 2026-05-24
+
+### Fix: release workflow PyPI publish failure
+
+The v5.0.0 release workflow built the wheel + sdist + `.mcpb` artifact
+successfully, then failed at the PyPI publish step because the `mcpb pack`
+step had moved `conexus.mcpb` into `dist/` alongside the wheel and sdist.
+Twine's pre-publish check rejects unknown distribution formats, so the
+PyPI upload never ran and no GitHub Release was created.
+
+Fix: pack `.mcpb` into a separate `mcpb-dist/` directory so `dist/` stays
+PyPI-pure. The "Create GitHub Release" step now references
+`mcpb-dist/conexus.mcpb`. v5.0.0 stays as a phantom git tag with no PyPI
+artifact; v5.0.1 is the first published 5.x release.
+
+### Feature: MCP tool annotations on all 41 tools (Connector Directory prereq)
+
+Anthropic's Connector Directory submission checklist requires every MCP
+tool to expose `title`, `readOnlyHint`, and (where applicable)
+`destructiveHint` annotations. The 31 core + 10 catalog tools all carry
+these annotations now, surfaced at runtime via the MCP `tools/list`
+response.
+
+Classification: 21 tools marked read-only (search, query, all retrieval,
+all operators), 7 write/non-destructive (store_put, memory_put,
+plan_save, scratch family, nx_enrich_beads, nx_answer), 3 destructive
+(memory_delete, memory_consolidate, nx_tidy).
+
+### Docs: privacy policy + support channels
+
+- `docs/privacy-policy.md` — local-mode data stays on the host machine;
+  cloud-mode third-party connections (Voyage AI, ChromaDB Cloud,
+  Semantic Scholar, Anthropic Claude) are user-opt-in; no telemetry sent
+  to the conexus author. Required for the Connector Directory submission.
+- `bugs` URL added to `conexus/.claude-plugin/plugin.json` and
+  `sn/.claude-plugin/plugin.json`. `support` URL added to
+  `mcpb/manifest.json`. All point to `https://github.com/Hellblazer/nexus/issues`.
+
 ## [5.0.0] - 2026-05-24
 
 ### New: Claude Desktop Extension (`.mcpb`) for chat-only users (nexus-bsjro, RDR-126)

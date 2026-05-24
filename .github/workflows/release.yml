@@ -133,7 +133,7 @@ jobs:
           cd mcpb
           mcpb pack . conexus.mcpb
           ls -la conexus.mcpb
-          mv conexus.mcpb ../dist/
+          mkdir -p ../mcpb-dist && mv conexus.mcpb ../mcpb-dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -152,5 +152,5 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
-            dist/conexus.mcpb
+            mcpb-dist/conexus.mcpb
           prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
