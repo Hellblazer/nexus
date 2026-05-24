@@ -404,6 +404,108 @@ def sweep_orphan_resource_trackers(
     return signalled
 
 
+def _parse_orphan_t1_chromadb_candidates(
+    ps_output: str,
+    *,
+    min_age_seconds: float = 60.0,
+    protected_pids: set[int] | None = None,
+) -> list[int]:
+    """Parse ``ps -eo pid,ppid,etime,command`` and return PIDs of
+    orphan T1 chromadb servers safe to reap (nexus-aigkb).
+
+    A row is included iff every condition holds:
+
+    * ``ppid == 1`` (re-parented to init; originating Claude Code
+      session is dead).
+    * ``command`` contains BOTH ``chroma run`` AND ``nx_t1_``
+      (chromadb spawned by :func:`start_t1_server`; the
+      ``nx_t1_`` prefix carries the entropy that prevents
+      false positives against unrelated chromadb instances).
+    * Process age >= *min_age_seconds* (avoids racing
+      in-flight T1 spawns whose parent has not yet attached).
+    * ``pid not in protected_pids`` (escape hatch for tests).
+
+    Pure function. Returns the list in the order ``ps`` emitted.
+    """
+    protected = protected_pids or set()
+    out: list[int] = []
+    for line in ps_output.splitlines():
+        s = line.strip()
+        if not s or not s[0].isdigit():
+            continue
+        parts = s.split(None, 3)
+        if len(parts) < 4:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        if ppid != 1:
+            continue
+        if pid in protected:
+            continue
+        # Require BOTH markers — defence in depth against matching
+        # an unrelated user-managed chromadb.
+        cmd = parts[3]
+        if "chroma run" not in cmd or "nx_t1_" not in cmd:
+            continue
+        age = _parse_etime_seconds(parts[2])
+        if age is None or age < min_age_seconds:
+            continue
+        out.append(pid)
+    return out
+
+
+def sweep_orphan_t1_chromadbs(
+    *,
+    min_age_seconds: float = 60.0,
+    protected_pids: set[int] | None = None,
+) -> int:
+    """Reap orphan T1 chromadb servers re-parented to init (nexus-aigkb).
+
+    Each ungraceful Claude Code session exit (SIGKILL, OOM, lost
+    SessionEnd hook) leaves the per-session chromadb running with
+    its PPID re-parented to launchd / init (pid 1). The chromadb
+    keeps holding its TCP port, file descriptors, and tmpdir
+    indefinitely. :func:`sweep_orphan_tmpdirs` reaps the dirs only
+    after 24h and only by mtime; this sweep reaps the actual
+    processes immediately so the next SessionStart starts clean.
+
+    Sends SIGTERM (graceful), escalates to SIGKILL after 3 s. The
+    helper :func:`_kill_orphan_tracker_pids` is reused.
+
+    Returns the count signalled. Best-effort; failures are logged
+    at debug and never block startup. Companion to
+    :func:`sweep_orphan_resource_trackers`.
+    """
+    try:
+        ps_output = subprocess.check_output(
+            ["ps", "-eo", "pid,ppid,etime,command"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+        _log.debug("sweep_orphan_t1_chromadbs_ps_failed", error=str(exc))
+        return 0
+
+    candidates = _parse_orphan_t1_chromadb_candidates(
+        ps_output,
+        min_age_seconds=min_age_seconds,
+        protected_pids=protected_pids,
+    )
+    if not candidates:
+        return 0
+
+    signalled = _kill_orphan_tracker_pids(candidates)
+    _log.info(
+        "sweep_orphan_t1_chromadbs_reaped",
+        count=signalled,
+        candidates=len(candidates),
+    )
+    return signalled
+
+
 def _kill_orphan_tracker_pids(
     pids: list[int],
     *,
