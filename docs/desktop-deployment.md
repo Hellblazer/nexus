@@ -57,13 +57,14 @@ Daemon lifecycle: `nx daemon t2 status` / `nx daemon t2 start` / `nx daemon t2 i
 
 After upgrading conexus (`uv tool upgrade conexus`) or after the plugin rename (`nx` → `conexus` at v5.0.0), `nx doctor` surfaces two kinds of drift:
 
-- **Plugin name drift**: the installed Claude Code plugin still has `name: "nx"` but the CLI expects `conexus`. Fix:
+- **Plugin name drift**: the installed Claude Code plugin still has `name: "nx"` but the CLI expects `conexus`. Fix is two commands:
 
   ```
-  /reload-plugins      # in Claude Code
+  /plugin install conexus@nexus-plugins   # in Claude Code — registers the new plugin
+  /reload-plugins                          # in Claude Code — activates it
   ```
 
-  Claude Code re-reads the marketplace and swaps the installed plugin in place. No explicit uninstall + install needed.
+  Install alone leaves the new plugin staged but inactive; reload alone won't pick up the renamed plugin from marketplace.json. Both are required. Optionally `/plugin uninstall nx@nexus-plugins` after to drop the stale entry.
 
 - **Post-commit hook stanza drift**: the installed `.git/hooks/post-commit` predates the pgrep guard fix (nexus-mkj6u 2026-05-23). Fix:
 
