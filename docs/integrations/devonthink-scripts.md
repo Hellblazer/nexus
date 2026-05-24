@@ -167,8 +167,8 @@ To restore the shipped version, run `nx dt install-scripts --force`.
 
 - CLI reference for `nx dt install-scripts` and the underlying
   `nx dt index` / `nx dt open` verbs:
-  [`docs/cli-reference.md § nx dt`](cli-reference.md#nx-dt).
+  [`docs/cli-reference.md § nx dt`](../cli-reference.md#nx-dt).
 - Hands-off auto-indexing on import / tag / move: smart-rule recipe
-  in [`docs/devonthink-smart-rules.md`](devonthink-smart-rules.md).
+  in [`devonthink-smart-rules.md`](devonthink-smart-rules.md).
 - Design rationale and acceptance criteria for the `nx dt` CLI:
-  [RDR-099](rdr/rdr-099-devonthink-integration.md).
+  [RDR-099](../rdr/rdr-099-devonthink-integration.md).

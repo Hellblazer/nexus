@@ -22,9 +22,9 @@ This is the role Xanadu fills in Nexus. Not a hypertext system, but a linking su
 
 ## How the suite leverages it
 
-The catalog is the connective tissue between Nexus's [storage tiers](storage-tiers.md) and the AI agents that use them.
+The catalog is the connective tissue between Nexus's [storage tiers](../storage-tiers.md) and the AI agents that use them.
 
-**The [RDR process](rdr-overview.md) ties it together.** A design decision starts as an RDR, picks up research findings along the way, gets accepted and implemented in code, and closes with a post-mortem. Each stage produces artifacts in different collections, and the RDR lifecycle skills link them as they go. An agent can then start from any piece and walk the graph: RDR → research that informed it → code that implements it → post-mortem that evaluated it.
+**The [RDR process](../rdr.md) ties it together.** A design decision starts as an RDR, picks up research findings along the way, gets accepted and implemented in code, and closes with a post-mortem. Each stage produces artifacts in different collections, and the RDR lifecycle skills link them as they go. An agent can then start from any piece and walk the graph: RDR → research that informed it → code that implements it → post-mortem that evaluated it.
 
 **Other agents do the same thing.** A research synthesizer `cites` source papers. Debugger and analyst agents `relates` findings to each other. The knowledge tidier `supersedes` duplicates when consolidating. Agents can link at the chunk level when search results provide specific passages, but most links today are document-to-document.
 

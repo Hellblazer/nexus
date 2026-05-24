@@ -298,14 +298,14 @@ picked up on the next menu open. Each script logs to
 with a trailing `&` so DT's UI stays responsive.
 
 For automatic indexing on import (no manual click), see the smart-rule
-recipe in [`docs/devonthink-smart-rules.md`](devonthink-smart-rules.md).
+recipe in [`docs/integrations/devonthink-smart-rules.md`](integrations/devonthink-smart-rules.md).
 
 ### Cross-references
 
 - In-DT scripts (toolbar / menu):
-  [`docs/devonthink-scripts.md`](devonthink-scripts.md).
+  [`docs/integrations/devonthink-scripts.md`](integrations/devonthink-scripts.md).
 - Smart rule + folder action recipes:
-  [`docs/devonthink-smart-rules.md`](devonthink-smart-rules.md).
+  [`docs/integrations/devonthink-smart-rules.md`](integrations/devonthink-smart-rules.md).
 - Manual smoke runbook + fixture creation:
   [`tests/e2e/devonthink-manual.md`](../tests/e2e/devonthink-manual.md).
 - Design rationale + acceptance criteria:
@@ -798,7 +798,7 @@ taxonomy:
 | `split LABEL --k N` | Split into N sub-topics via KMeans. `-c NAME` scopes label lookup |
 | `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection |
 | `rebuild` | Full re-cluster (alias for `discover --force`). `-c NAME` required |
-| `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](taxonomy-projection-tuning.md)). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077). `--persist` to write assignments. `--backfill` to project all collections against each other |
+| `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md)). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077). `--persist` to write assignments. `--backfill` to project all collections against each other |
 | `hubs` | List generic-pattern hub topics (RDR-077 Phase 5). `--min-collections N` (default 2), `--max-icf F` filter, `--warn-stale` flags hubs whose latest assignment post-dates the newest `last_discover_at` across contributing source collections, `--explain` shows DF / ICF / matched stopword tokens per row. |
 | `audit --collection NAME` | Per-collection projection-quality report (RDR-077 Phase 6): total assignments, p10/p50/p90 of raw cosine, count below threshold (re-projection candidates), top receiving topics with ICF, pattern-pollution flags. `--threshold F` overrides the per-corpus default; `--top-n N` caps the receiving-topic list. |
 

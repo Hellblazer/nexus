@@ -309,5 +309,5 @@ nx taxonomy discover --all
 - [Storage Tiers](https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md) — T1, T2, T3 architecture
 - [Repo Indexing](https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md) — file classification, chunking, frecency
 - [Configuration](https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md) — config keys, environment variables, tuning
-- [Taxonomy](https://github.com/Hellblazer/nexus/blob/main/docs/taxonomy.md) — topic discovery, auto-labeling, and search clustering
-- [RDR Overview](https://github.com/Hellblazer/nexus/blob/main/docs/rdr-overview.md) — decision tracking with Research-Design-Review
+- [Taxonomy](https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md#topic-taxonomy) — topic discovery, auto-labeling, and search clustering
+- [RDR Overview](https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md) — decision tracking with Research-Design-Review

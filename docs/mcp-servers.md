@@ -71,7 +71,7 @@ Full tool names follow Claude Code's convention: `mcp__plugin_conexus_nexus__<to
 | `memory_get` | Retrieve a note by `(project, title)` or by id. Title resolution is exact-then-prefix (nexus-e59o): if `title` does not match any entry exactly, a unique prefix match is returned. Ambiguous prefixes return a candidate list rather than silently picking one. |
 | `memory_search` | FTS5 keyword search over T2 memory |
 | `memory_delete` | Delete a single note |
-| `memory_consolidate` | Find overlaps, merge, or flag stale entries (see [Memory and Tasks § Consolidation](memory-and-tasks.md#consolidation-rdr-061-e6)) |
+| `memory_consolidate` | Find overlaps, merge, or flag stale entries (see [Memory consolidation](storage-tiers.md#t2----memory-bank)) |
 
 ### Scratch (T1)
 

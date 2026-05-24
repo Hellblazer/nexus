@@ -340,5 +340,5 @@ embeddings once and passes them to both features). See
   trunk, plan library, dimensions, and builtin scenario templates.
 - [Plan Authoring Guide](plan-authoring-guide.md) — template schema for
   authoring new plans.
-- [MCP Tools vs Agents](mcp-vs-agents.md) — why `nx_answer` replaced the
+- [MCP Tools vs Agents](exploration/mcp-vs-agents.md) — why `nx_answer` replaced the
   `query-planner` + `analytical-operator` agent pair.

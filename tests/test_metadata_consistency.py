@@ -2,7 +2,7 @@
 """Pin the cross-indexer metadata consistency contract.
 
 Drift guard for the chunk-metadata factory (RDR-089 follow-up,
-see docs/metadata-consistency-matrix.md). Every indexer that writes
+see docs/exploration/metadata-consistency-matrix.md). Every indexer that writes
 T3 chunk metadata must route through ``make_chunk_metadata`` so that:
 
   * Every ``ALLOWED_TOP_LEVEL`` key is present (with documented

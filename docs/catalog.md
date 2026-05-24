@@ -137,6 +137,119 @@ nx catalog links --created-by bib_enricher    # all auto-generated citation link
 nx catalog links --created-by user            # all manually created links
 ```
 
+Conventional `created_by` values:
+
+- `bib_enricher` — Semantic Scholar lookup created a `cites` from a citation match
+- `rdr_implements_pass` — generator pass walked accepted RDRs and emitted strict `implements`
+- `code_rdr_heuristic` — looser pass; emitted `implements-heuristic` on path/symbol substring match
+- `manual` — user authored via `nx catalog link`
+- `auto_linker` — created at storage time from T1 link-context (RDR-053 storage-boundary auto-linker)
+- `llm_linker` — Claude-suggested edge; advisory, manual review recommended before traversing in an audit
+
+When auditing graph traversal, prefer `created_by IN ('bib_enricher', 'rdr_implements_pass', 'manual')` over heuristic creators.
+
+The link-type set is **closed at a given release**. Plans that reference an unknown link type degrade gracefully (warn + drop) so future releases don't break old plans. To add a new type: update the catalog enum, add to `_KNOWN_LINK_TYPES` in `src/nexus/plans/purposes.py`, decide on `created_by` provenance, and update `conexus/plans/purposes.yml` if any existing purpose should include it.
+
+## Purposes (link-type aliases)
+
+A **purpose** is a human-named alias for a list of catalog link types. Plan templates declare `purpose: <name>` instead of an explicit `link_types: [...]` list so the same template stays correct as new link types ship. The registry lives at `conexus/plans/purposes.yml`; project overrides may add purposes in `.nexus/plans/purposes.yml`.
+
+| Name | Resolves to | When to use |
+|------|-------------|-------------|
+| `find-implementations` | `implements`, `implements-heuristic` | Walk from a design/RDR to the code modules that implement it |
+| `decision-evolution` | `supersedes`, `cites` | Walk back through the decision history (RDRs that supersede or cite each other) |
+| `reference-chain` | `cites`, `quotes` | Walk citation chains across docs and papers |
+| `documentation-for` | `implements`, `implements-heuristic`, `cites` | Inverse of `find-implementations`: code back to docs that describe it |
+| `soft-relations` | `relates`, `comments` | Loose semantic associations; lower-confidence than `find-implementations` |
+| `all-implementations` | `implements` | Strict-only — excludes `implements-heuristic`. For audits that need verified mappings |
+
+`resolve_purpose("find-implementations")` returns the link-type list filtered against the catalog's known set. Unknown purpose name returns an empty list (traverse short-circuits). Unknown link type within a known purpose is dropped with a structured warning; the valid subset is returned.
+
+The `traverse` MCP tool enforces mutual exclusion: passing both `link_types` and `purpose` returns an error instead of running a half-resolved walk.
+
+## Topic taxonomy
+
+Nexus automatically discovers topic clusters across your indexed documents, labels them with human-readable names, and uses them to improve search quality. Topics live in T2 (SQLite) and centroids in a dedicated ChromaDB collection (`taxonomy__centroids`).
+
+```bash
+nx taxonomy discover --all        # discover topics for all T3 collections
+nx taxonomy status                # see what was discovered
+nx taxonomy review                # interactive: accept, rename, merge, delete, skip
+nx taxonomy label                 # batch re-label pending topics with Claude haiku
+nx taxonomy project <src>         # cross-collection projection (RDR-075/077)
+```
+
+| Command | Description |
+|---------|-------------|
+| `nx taxonomy status` | Overview: collections, topic count, coverage, review state |
+| `nx taxonomy discover -c NAME` | Discover for a single collection (`--force` to re-cluster) |
+| `nx taxonomy list` | Topic tree with doc counts |
+| `nx taxonomy show ID` | Documents assigned to a topic |
+| `nx taxonomy review` | Interactive: accept, rename, merge, delete, skip |
+| `nx taxonomy assign DOC LABEL` | Manually assign a document to a topic |
+| `nx taxonomy rename OLD NEW` | Rename a topic |
+| `nx taxonomy merge SOURCE TARGET` | Merge source topic into target |
+| `nx taxonomy split LABEL --k N` | Split a topic into N sub-topics via KMeans |
+| `nx taxonomy links` | Show inter-topic relationships from catalog link graph |
+| `nx taxonomy rebuild -c NAME` | Full rebuild (preserves operator labels via centroid matching) |
+| `nx taxonomy hubs` | Detect generic-pattern hub topics via DF + ICF |
+| `nx taxonomy audit -c NAME` | Projection-quality report |
+
+### Search integration
+
+Topic taxonomy improves search through three mechanisms:
+
+- **Topic boost** — results that share a topic cluster receive a distance reduction (same topic: -0.1; linked topics via catalog graph: -0.05). Automatic, no parameter needed.
+- **Topic grouping** — when `search()` is called with `cluster_by="semantic"` (the default for agents), Nexus groups results by topic label. Falls back to Ward hierarchical clustering when topic coverage is below 50%.
+- **Topic-scoped search** — pre-filter results to a specific topic: `search(query="extraction pipeline", topic="Math-aware PDF Extraction")`.
+
+### Cross-collection projection
+
+`nx taxonomy project` maps chunks from one collection against topic centroids in other collections, creating `assigned_by='projection'` rows that surface cross-domain connections (e.g., RDR docs matching the code that implements them). Each projection row stores the raw cosine similarity plus `source_collection` and `assigned_at`.
+
+Default thresholds when `--threshold` is omitted:
+
+| Source prefix | Default |
+|---|---|
+| `code__*` | 0.70 |
+| `knowledge__*` | 0.50 |
+| `docs__*`, `rdr__*` | 0.55 |
+
+`--use-icf` computes Inverse Collection Frequency per target topic and suppresses hubs (topics appearing in nearly every source) before threshold filtering. For the operator guide, calibration loop, and troubleshooting, see [taxonomy-projection-tuning](exploration/taxonomy-projection-tuning.md).
+
+### Configuration
+
+In `.nexus.yml`:
+
+```yaml
+taxonomy:
+  auto_label: true                       # Label with Claude haiku (default)
+  local_exclude_collections: ["code__*"] # Skip code in local mode (MiniLM clusters code poorly)
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `auto_label` | `true` | Auto-label topics with Claude haiku after discover. Requires the `claude` CLI. |
+| `local_exclude_collections` | `["code__*"]` | Glob patterns to skip in local mode. Cloud mode ignores this setting. |
+
+### Local vs cloud quality
+
+| Mode | Embedding model | Code quality | Document quality |
+|------|----------------|-------------|-----------------|
+| Local | MiniLM 384d (ONNX) | Poor (excluded by default) | Good (8 topics from 120 docs) |
+| Cloud | Voyage 1024d | Excellent (124 topics from 5K chunks) | Excellent (88 topics, 78% assigned) |
+
+### How it works
+
+After `nx index repo` (or `nx taxonomy discover --all`):
+
+1. **Fetch embeddings** from each T3 collection
+2. **Cluster** via HDBSCAN density-based clustering (`min_cluster_size=5`)
+3. **Label** each cluster with c-TF-IDF keywords, refined via Claude haiku
+4. **Store** topics in T2 and centroids in ChromaDB
+
+From then on, every `store_put` auto-assigns the new document to its nearest topic via centroid lookup, every search call boosts results sharing a topic cluster, and operator-curated labels survive rebuilds via centroid-matching merge (similarity > 0.8 transfers the old label).
+
 ## Span lifecycle and staleness
 
 Spans identify specific passages within documents. The three formats have different durability characteristics:

@@ -318,7 +318,7 @@ Manual labels survive rebuild via `_merge_labels`.
 
 `topic_assignments` also carries `similarity` (raw cosine), `assigned_at`,
 and `source_collection` for projection rows. Operator guide:
-[docs/taxonomy-projection-tuning.md](taxonomy-projection-tuning.md) —
+[docs/exploration/taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md) —
 threshold calibration, ICF rationale, upsert semantics, troubleshooting.
 
 ### Config (`taxonomy` section in `.nexus.yml`)
@@ -534,7 +534,7 @@ Grouped by verb:
 
    When authoring agent/skill instructions, always use the full MCP tool name (`mcp__plugin_conexus_nexus__<tool>`) — short names fail at runtime.
 
-   See [MCP Tools vs Agents](mcp-vs-agents.md) for the full boundary rule, the stub-agent pattern, and guidance on where to place new capabilities. See [Plan-Centric Retrieval](plan-centric-retrieval.md) for how `nx_answer` + the plan library replaced the earlier retrieval-agent chain.
+   See [MCP Tools vs Agents](exploration/mcp-vs-agents.md) for the full boundary rule, the stub-agent pattern, and guidance on where to place new capabilities. See [Plan-Centric Retrieval](plan-centric-retrieval.md) for how `nx_answer` + the plan library replaced the earlier retrieval-agent chain.
 
 ## Heritage
 
@@ -546,4 +546,3 @@ Grouped by verb:
 
 Storage (ChromaDB + Voyage AI) and embedding layers are Nexus's own.
 
-For project origins and inspirations, see [historical.md](historical.md).
