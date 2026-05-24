@@ -36,7 +36,7 @@ Default: **haiku**. Escalate via `model` parameter on the Agent tool:
 - Investigating best practices for an unfamiliar domain
 - Comparing different approaches or frameworks
 - Questions requiring synthesis from multiple sources
-- When nx T3 search returns insufficient context for a decision
+- When T3 search returns insufficient context for a decision
 
 ## Pre-Dispatch: Seed Link Context
 
@@ -91,15 +91,15 @@ The agent uses `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
 - [ ] Key findings synthesized (not just listed)
 - [ ] Contradictions identified and resolved
 - [ ] Recommendations provided with supporting evidence
-- [ ] Findings persisted to nx T3 store via `mcp__plugin_conexus_nexus__store_put` (RDR-080 — direct call, no agent spawn)
+- [ ] Findings persisted to T3 store via `mcp__plugin_conexus_nexus__store_put` (RDR-080 — direct call, no agent spawn)
 - [ ] Round artifacts persisted to T2 or T3
 
 ## Agent-Specific PRODUCE
 
-- **Research Synthesis**: Store in nx T3 via store_put tool: content="# Research: {topic}\n{content}", collection="knowledge", title="research-{topic}-{date}", tags="research,{domain}"
+- **Research Synthesis**: Store in T3 via store_put tool: content="# Research: {topic}\n{content}", collection="knowledge", title="research-{topic}-{date}", tags="research,{domain}"
 - **Source Citations**: Include in document content (not separate)
 - **Knowledge Gaps**: Create research beads for follow-up
-- **Cross-Reference Maps**: Document relationships in nx T3 document content
+- **Cross-Reference Maps**: Document relationships in T3 document content
 - **Round Artifacts**: Use T1 scratch to track findings per research round:
   - scratch tool: action="put", content="# Round {N} findings\n{content}", tags="research,round-{N}"
   - scratch_manage tool: action="flag", entry_id="<id>", project="{project}", title="research-round-{N}.md"

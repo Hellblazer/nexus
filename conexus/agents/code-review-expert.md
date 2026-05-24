@@ -16,9 +16,9 @@ effort: high
 ---
 
 
-## nx Tool Reference
+## Conexus Tool Reference
 
-nx MCP tools use the full prefix `mcp__plugin_conexus_nexus__`. Examples:
+Conexus MCP tools use the full prefix `mcp__plugin_conexus_nexus__`. Examples:
 
 ```
 mcp__plugin_conexus_nexus__search(query="...", corpus="knowledge", limit=5)

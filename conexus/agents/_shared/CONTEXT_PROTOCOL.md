@@ -11,17 +11,17 @@ If nexus MCP tools (`mcp__plugin_conexus_nexus__*`) are unavailable (e.g., MCP s
 ### Proactive Search Agents (Planning & Research)
 
 These agents **MUST proactively search** for context before starting:
-- **strategic-planner**: Search nx T3 store for prior decisions, nx T2 memory for active work
-- **architect-planner**: Search nx T3 store for architectural patterns, design decisions
-- **deep-research-synthesizer**: Search nx T3 store for prior research, web resources for related docs
-- **codebase-deep-analyzer**: Search nx T3 store for codebase knowledge, architecture notes
+- **strategic-planner**: Search T3 store for prior decisions, T2 memory for active work
+- **architect-planner**: Search T3 store for architectural patterns, design decisions
+- **deep-research-synthesizer**: Search T3 store for prior research, web resources for related docs
+- **codebase-deep-analyzer**: Search T3 store for codebase knowledge, architecture notes
 
 **Search Sources in Order**:
 1. **Bead**: `/beads:show <id>` for task context, design field, dependencies
 2. **Project Infrastructure**: T2 memory and beads context is auto-injected by SessionStart and SubagentStart hooks
-3. **nx T3 store**: mcp__plugin_conexus_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
+3. **T3 store**: mcp__plugin_conexus_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
 4. **Catalog link graph**: `mcp__plugin_conexus_nexus__query( question="[topic]", follow_links="implements" )` — the `query` tool automatically boosts results from documents with precise `implements` links
-5. **nx T2 memory**: mcp__plugin_conexus_nexus__memory_get( `project="{project}", title="ACTIVE_INDEX.md"`
+5. **T2 memory**: mcp__plugin_conexus_nexus__memory_get( `project="{project}", title="ACTIVE_INDEX.md"`
 6. **T1 scratch** (current session): mcp__plugin_conexus_nexus__scratch( `action="search", query="[topic]"`
 
 ### Relay-Reliant Agents (Execution & Validation)
@@ -95,7 +95,7 @@ The SessionEnd hook runs automatically at session close and auto-promotes flagge
 
 ## Storage Tier Quick Reference
 
-nx MCP tools use the full prefix `mcp__plugin_conexus_nexus__` (e.g. `mcp__plugin_conexus_nexus__search`).
+Conexus MCP tools use the full prefix `mcp__plugin_conexus_nexus__` (e.g. `mcp__plugin_conexus_nexus__search`).
 
 | Tier | Name | Scope | MCP Tools | Use Cases | TTL |
 |------|------|-------|-----------|-----------|-----|
@@ -140,8 +140,8 @@ Use the right search form for the task:
 Agents produce artifacts based on their specialization:
 - **Code Changes**: Committed with bead reference in message
 - **Test Results**: Logged; failures create bug beads
-- **Analysis/Research**: Store in nx T3 store with appropriate title pattern
-- **Session State**: Store in nx T2 memory for multi-session work
+- **Analysis/Research**: Store in T3 store with appropriate title pattern
+- **Session State**: Store in T2 memory for multi-session work
 - **Interim Working Notes**: Use T1 scratch for session-scoped state; promote to T2 when validated:
   ```
   # Store ephemeral working note
@@ -192,8 +192,8 @@ See [RELAY_TEMPLATE.md](./RELAY_TEMPLATE.md) for the full template, extended tem
 ## RECOVER (If Context Missing)
 
 If expected context not received:
-1. Search nx T3 store for related prior work: mcp__plugin_conexus_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
-2. Check nx T2 memory for session state: mcp__plugin_conexus_nexus__memory_search( `query="[topic]", project="{project}"`
+1. Search T3 store for related prior work: mcp__plugin_conexus_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
+2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search( `query="[topic]", project="{project}"`
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch( `action="search", query="[topic]"`
 4. Query active work via `/beads:list` with status=in_progress
 5. Document assumption in bead notes

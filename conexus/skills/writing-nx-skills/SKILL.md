@@ -4,7 +4,7 @@ description: Use when creating new conexus plugin skills, editing existing skill
 effort: low
 ---
 
-# Writing nx Skills
+# Writing Conexus Skills
 
 ## Overview
 
@@ -12,7 +12,7 @@ Guide for authoring skills in the conexus Claude Code plugin. Skills are referen
 
 **Methodology:** TDD-for-documentation — write pressure scenarios (test cases), verify baseline behavior without the skill, then write the skill and verify compliance.
 
-## nx Skill Conventions
+## Skill Conventions
 
 ### Frontmatter
 
@@ -30,7 +30,7 @@ effort: low|medium|high
 - `description`: MUST start with "Use when". Describe triggering conditions, NEVER summarize workflow.
 - `effort`: Reasoning depth hint — `low` (reference/lookup), `medium` (guided workflow), `high` (deep analysis/critique)
 
-### Skill Types in nx
+### Skill Types
 
 **Agent-delegating skills** (majority): Invoke a specific agent via Agent tool relay.
 CI-enforced required sections (`test_plugin_structure.py` will fail without these):

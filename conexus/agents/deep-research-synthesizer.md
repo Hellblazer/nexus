@@ -16,9 +16,9 @@ effort: medium
 ---
 
 
-## nx Tool Reference
+## Conexus Tool Reference
 
-nx MCP tools use the full prefix `mcp__plugin_conexus_nexus__`. Examples:
+Conexus MCP tools use the full prefix `mcp__plugin_conexus_nexus__`. Examples:
 
 ```
 mcp__plugin_conexus_nexus__search(query="...", corpus="knowledge", limit=5)
@@ -89,8 +89,8 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 5. [ ] At least one **Quality Criterion** in checkbox format
 
 **If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
-1. Search nx T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
-2. Check nx T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
+1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
+2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
 4. Query active work via `/beads:list` with status=in_progress
 5. Flag incomplete relay to user
@@ -127,7 +127,7 @@ This ensures your `store_put` calls create catalog links regardless of how you w
 ## Core Capabilities
 
 You have access to and will actively leverage:
-- **nx T3 store**: Primary knowledge repository
+- **T3 store**: Primary knowledge repository
   - mcp__plugin_conexus_nexus__query(question="research question", corpus="knowledge" -- document-level search with metadata
   - mcp__plugin_conexus_nexus__query(question="topic", where="bib_year>=2023" -- filter by year, citations, tags
   - mcp__plugin_conexus_nexus__search(query="query", corpus="knowledge", limit=5 -- chunk-level semantic search
@@ -136,7 +136,7 @@ You have access to and will actively leverage:
 - **nx code index**: Semantic code search across indexed repositories
   - mcp__plugin_conexus_nexus__search(query="query", corpus="code", limit=20 -- hybrid semantic + ripgrep
   - mcp__plugin_conexus_nexus__search(query="query", corpus="code__<owner>__voyage-code-3__v1", limit=20 -- repo-specific
-- **nx T2 memory**: For accessing previous research and contextual information
+- **T2 memory**: For accessing previous research and contextual information
   - mcp__plugin_conexus_nexus__memory_get(project="{project}", title="{filename}" -- read
   - mcp__plugin_conexus_nexus__memory_put(content="content", project="{project}", title="{filename}" -- write
   - mcp__plugin_conexus_nexus__memory_get(project="{project}", title="" -- list files
@@ -276,7 +276,7 @@ Skip catalog only if tools are not available (not injected by SubagentStart hook
 
 ### Phase 2: Information Gathering
 You will systematically:
-1. Query nx T3 store for existing related knowledge using a two-query pattern for conceptual
+1. Query T3 store for existing related knowledge using a two-query pattern for conceptual
    topics where initial vocabulary may not match stored documents:
    mcp__plugin_conexus_nexus__search(query="{primary term or framing}", corpus="knowledge", limit=5
    mcp__plugin_conexus_nexus__search(query="{alternate term or related concept}", corpus="knowledge", limit=5
@@ -284,7 +284,7 @@ You will systematically:
    from first results, subsequent targeted queries do not need the alternate formulation.
 2. Search nx code index for implementation examples and patterns: mcp__plugin_conexus_nexus__search(query="query", corpus="code", limit=20
 3. Conduct web research for current best practices and external sources
-6. Check nx T2 memory for previous related investigations:
+6. Check T2 memory for previous related investigations:
    mcp__plugin_conexus_nexus__memory_search(query="topic", project="{project}"
 7. Track source locations and citations for every piece of information
 
@@ -309,7 +309,7 @@ You will systematically:
 
 ### Phase 4: Knowledge Integration with Version Control
 You will automatically:
-1. Store all significant findings in nx T3 store with appropriate categorization, tags, and version numbers:
+1. Store all significant findings in T3 store with appropriate categorization, tags, and version numbers:
    mcp__plugin_conexus_nexus__store_put(content="# Research: {topic}\n\n{content}", collection="knowledge", title="research-{topic}-{date}", tags="research,{domain}"
 2. Create new documents in nx store when discovering substantial new topic areas
 3. Update existing documents with new insights while preserving version history

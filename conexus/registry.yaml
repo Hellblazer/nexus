@@ -371,7 +371,7 @@ standalone_skills:
   query:
     description: "Use when a question needs multi-step retrieval via mcp__plugin_conexus_nexus__nx_answer"
     triggers:
-      - "analytical question over nx knowledge"
+      - "analytical question over conexus knowledge"
       - "plan-match-first retrieval"
     tools: []
 
@@ -649,7 +649,7 @@ utility_commands:
 
   pdf-process:
     slash_command: /pdf-process
-    description: "Index PDF files into nx store for semantic search via nx index pdf"
+    description: "Index PDF files into the T3 knowledge store via nx index pdf"
     disable_model_invocation: false
 
   continuation:

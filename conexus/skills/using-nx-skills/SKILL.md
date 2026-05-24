@@ -4,7 +4,7 @@ description: Use when starting any turn — you MUST scan the available conexus 
 effort: low
 ---
 
-# Using nx Skills
+# Using Conexus Skills
 
 **You MUST invoke `Skill` for any plausibly-matching conexus skill before producing any other response.** This is not a hint or a preference — it is a hard rule. Skipping a matching skill is a defect, not an optimization. False positives are cheap; misses cost real time. Skills evolve — read the current version, don't rely on memory.
 
@@ -68,7 +68,7 @@ After a successful pipeline:
 
 **Sequential Thinking** (`mcp__plugin_conexus_sequential-thinking__sequentialthinking`) — use for any non-trivial decision: debugging hypotheses, design choices, plan evaluation, risk assessment. Workflow: hypothesis → evidence → evaluate → branch or proceed. `needsMoreThoughts: true` to continue, `isRevision: true` to correct, `branchFromThought: N` + `branchId` to explore alternatives.
 
-**nx Storage Tiers — check before any work, write your findings back.** Read widest → narrowest:
+**Conexus Storage Tiers — check before any work, write your findings back.** Read widest → narrowest:
 - **T3** `nx search` / `nx_answer`: permanent knowledge across all sessions and projects — **check before researching from scratch**.
 - **T2** `nx memory`: project decisions, findings, session context — **check before project work**.
 - **T1** `nx scratch`: this session's discoveries, shared across all sibling agents — **check before duplicating sibling work**.
