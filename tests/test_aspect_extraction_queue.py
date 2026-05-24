@@ -424,6 +424,157 @@ class TestReclaimStale:
         assert row[0] == "pending"
         assert row[1] is None
 
+    def test_reclaim_stale_busy_timeout_is_30s(self, tmp_path: Path) -> None:
+        """nexus-v4m7y: busy_timeout was bumped from 5s to 30s so the
+        connection waits longer for the WAL writer slot before raising
+        ERROR_BUSY. Nine T2 stores hold their own sqlite3.Connection
+        against memory.db; 5s was tight under intra-daemon contention.
+        """
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+
+        store = AspectExtractionQueue(tmp_path / "t2.db")
+        try:
+            row = store.conn.execute("PRAGMA busy_timeout").fetchone()
+        finally:
+            store.close()
+        assert row[0] == 30000, (
+            f"busy_timeout should be 30000 ms (was 5000); got {row[0]}"
+        )
+
+    def test_reclaim_stale_retries_on_locked_then_succeeds(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """nexus-v4m7y: on top of the 30s SQLite busy_timeout, reclaim_stale
+        retries up to 3 attempts on ``database is locked``. Simulates two
+        transient locks via a connection proxy, then verifies the third
+        attempt succeeds and returns the expected rowcount."""
+        import sqlite3
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+
+        # Shorten the retry sleeps so the test doesn't take ~0.6s real time.
+        monkeypatch.setattr(
+            AspectExtractionQueue,
+            "_RECLAIM_RETRY_SLEEPS_BETWEEN",
+            (0.0, 0.0),
+        )
+
+        store = AspectExtractionQueue(tmp_path / "t2.db")
+        try:
+            store.enqueue("knowledge__delos", "/p1.pdf")
+            store.claim_next()
+            store.conn.execute(
+                "UPDATE aspect_extraction_queue "
+                "SET last_attempt_at = datetime('now', '-10 minutes')"
+            )
+            store.conn.commit()
+
+            real_conn = store.conn
+            calls = {"n": 0}
+
+            class FlakyConn:
+                def execute(self, sql, *args, **kwargs):  # noqa: ANN001
+                    if sql.lstrip().upper().startswith("UPDATE ASPECT_EXTRACTION_QUEUE"):
+                        calls["n"] += 1
+                        if calls["n"] <= 2:
+                            raise sqlite3.OperationalError("database is locked")
+                    return real_conn.execute(sql, *args, **kwargs)
+
+                def commit(self):
+                    return real_conn.commit()
+
+                def __getattr__(self, name):
+                    return getattr(real_conn, name)
+
+            store.conn = FlakyConn()  # type: ignore[assignment]
+            reclaimed = store.reclaim_stale(timeout_seconds=60)
+            store.conn = real_conn  # type: ignore[assignment]
+        finally:
+            store.close()
+        assert calls["n"] == 3, (
+            f"expected 3 UPDATE attempts (2 simulated locks + 1 success); "
+            f"got {calls['n']}"
+        )
+        assert reclaimed == 1, (
+            f"third attempt should reclaim the stale row; got {reclaimed}"
+        )
+
+    def test_reclaim_stale_raises_after_exhausted_retries(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """nexus-v4m7y: when every retry still hits ``database is locked``,
+        the final attempt re-raises so the existing aspect_worker
+        warning surfaces in the truly-stuck case."""
+        import sqlite3
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+
+        monkeypatch.setattr(
+            AspectExtractionQueue,
+            "_RECLAIM_RETRY_SLEEPS_BETWEEN",
+            (0.0, 0.0),
+        )
+
+        store = AspectExtractionQueue(tmp_path / "t2.db")
+        try:
+            real_conn = store.conn
+
+            class AlwaysLockedConn:
+                def execute(self, sql, *args, **kwargs):  # noqa: ANN001
+                    if sql.lstrip().upper().startswith("UPDATE ASPECT_EXTRACTION_QUEUE"):
+                        raise sqlite3.OperationalError("database is locked")
+                    return real_conn.execute(sql, *args, **kwargs)
+
+                def commit(self):
+                    return real_conn.commit()
+
+                def __getattr__(self, name):
+                    return getattr(real_conn, name)
+
+            store.conn = AlwaysLockedConn()  # type: ignore[assignment]
+            import pytest as _pytest
+            with _pytest.raises(sqlite3.OperationalError, match="locked"):
+                store.reclaim_stale(timeout_seconds=60)
+            store.conn = real_conn  # type: ignore[assignment]
+        finally:
+            store.close()
+
+    def test_reclaim_stale_propagates_non_lock_operational_errors(
+        self, tmp_path: Path,
+    ) -> None:
+        """nexus-v4m7y: only "database is locked" is retried. Other
+        OperationalErrors (schema corruption, syntax, etc.) propagate
+        immediately on the first attempt — we never retry around them."""
+        import sqlite3
+        from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+
+        store = AspectExtractionQueue(tmp_path / "t2.db")
+        try:
+            real_conn = store.conn
+            calls = {"n": 0}
+
+            class SyntaxErrConn:
+                def execute(self, sql, *args, **kwargs):  # noqa: ANN001
+                    if sql.lstrip().upper().startswith("UPDATE ASPECT_EXTRACTION_QUEUE"):
+                        calls["n"] += 1
+                        raise sqlite3.OperationalError("syntax error near 'oops'")
+                    return real_conn.execute(sql, *args, **kwargs)
+
+                def commit(self):
+                    return real_conn.commit()
+
+                def __getattr__(self, name):
+                    return getattr(real_conn, name)
+
+            store.conn = SyntaxErrConn()  # type: ignore[assignment]
+            import pytest as _pytest
+            with _pytest.raises(sqlite3.OperationalError, match="syntax"):
+                store.reclaim_stale(timeout_seconds=60)
+            store.conn = real_conn  # type: ignore[assignment]
+        finally:
+            store.close()
+        assert calls["n"] == 1, (
+            f"non-lock errors should not retry; expected 1 attempt, got {calls['n']}"
+        )
+
 
 # ── Pending count + listing ──────────────────────────────────────────────────
 
