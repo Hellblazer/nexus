@@ -11,6 +11,8 @@
 
 **Persistent memory and semantic search for Claude.** Three storage tiers that survive across sessions, an event-sourced document catalog with typed links, and a specification-before-code workflow for tracking decisions. Local-first; no API keys required. Knowledge compounds across conversations instead of evaporating when the window closes.
 
+**Start here**: [**How I actually use Nexus**](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) — the conceptual overview and the shape of the substrate. Then [**Installing Nexus**](https://tensegrity.blog/2026/04/26/installing-nexus/) — a ten-minute hands-on walkthrough from `uv tool install` through your first search.
+
 ## Install for Claude
 
 Three surfaces share one host substrate. Pick the one that matches how you use Claude.
@@ -64,7 +66,9 @@ The `nx` CLI provides direct access to all storage tiers, indexing, search, the 
 | Configure or tune | [Configuration](https://github.com/Hellblazer/nexus/blob/main/docs/configuration.md) |
 | Run in containers or Cowork | [Container Integration](https://github.com/Hellblazer/nexus/blob/main/docs/container-integration.md) |
 | Browse the docs tree | [docs/README.md](https://github.com/Hellblazer/nexus/blob/main/docs/README.md) |
-| Read the long-form story | [Tensegrity blog](https://tensegrity.blog/) |
+| Read the conceptual story | [How I actually use Nexus](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) |
+| Walk through a fresh install | [Installing Nexus](https://tensegrity.blog/2026/04/26/installing-nexus/) |
+| Browse the full series | [Tensegrity blog](https://tensegrity.blog/) |
 
 ## Prerequisites
 

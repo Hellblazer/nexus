@@ -57,12 +57,14 @@ Daemon lifecycle: `nx daemon t2 status` / `nx daemon t2 start` / `nx daemon t2 i
 
 After upgrading conexus (`uv tool upgrade conexus`) or after the plugin rename (`nx` → `conexus` at v5.0.0), `nx doctor` surfaces two kinds of drift:
 
-- **Plugin name drift**: the installed Claude Code plugin still has `name: "nx"` but the CLI expects `conexus`. Fix:
+- **Plugin name drift**: the installed Claude Code plugin still has `name: "nx"` but the CLI expects `conexus`. Fix is two commands:
 
   ```
-  /plugin uninstall nx@nexus-plugins      # in Claude Code
-  /plugin install conexus@nexus-plugins   # in Claude Code
+  /plugin install conexus@nexus-plugins   # in Claude Code — registers the new plugin
+  /reload-plugins                          # in Claude Code — activates it
   ```
+
+  Install alone leaves the new plugin staged but inactive; reload alone won't pick up the renamed plugin from marketplace.json. Both are required. Optionally `/plugin uninstall nx@nexus-plugins` after to drop the stale entry.
 
 - **Post-commit hook stanza drift**: the installed `.git/hooks/post-commit` predates the pgrep guard fix (nexus-mkj6u 2026-05-23). Fix:
 
@@ -71,6 +73,17 @@ After upgrading conexus (`uv tool upgrade conexus`) or after the plugin rename (
   ```
 
 Both warnings include the resolution commands; `nx doctor` is the single explicit-invocation surface that consolidates them.
+
+For Claude Desktop `.mcpb` users specifically, the bundle also performs a best-effort stale-install check at MCP server startup (MCPB v0.4 has no auto-update). When the installed `conexus` is older than the latest on PyPI, it emits a one-line warning to stderr naming the GitHub release URL to re-download:
+
+```
+[conexus-mcpb] installed conexus=X.Y.Z, latest on PyPI=A.B.C. Re-download
+the .mcpb from https://github.com/Hellblazer/nexus/releases/latest and
+re-install in Claude Desktop to upgrade. (Set NX_MCPB_SKIP_UPDATE_CHECK=1
+to silence.)
+```
+
+The check is non-fatal: a network failure, timeout, or unreachable PyPI never blocks startup. Set `NX_MCPB_SKIP_UPDATE_CHECK=1` in the environment to opt out entirely.
 
 ## Uninstall
 

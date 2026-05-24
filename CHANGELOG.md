@@ -6,6 +6,56 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.0.2] - 2026-05-24
+
+Post-shakeout follow-ups to the 5.0.x line. No schema changes; safe in-place upgrade from 5.0.1.
+
+### Fix: orphan T1 chromadb sweep at MCP startup (nexus-aigkb)
+
+Session-scoped T1 chromadb servers could be orphaned when an MCP process
+exited without cleaning up its child chroma (crash, SIGKILL, or a parent
+that never ran shutdown). Over many sessions these accumulated as leaked
+processes holding ports and memory. The MCP server now sweeps orphan T1
+chromadb servers at startup: any T1 chroma whose owning process is gone
+is terminated before the new session starts.
+
+### Fix: aspect_queue tolerance under WAL contention (nexus-v4m7y)
+
+`reclaim_stale` on the T2 aspect-extraction queue could raise
+`database is locked` when the indexer and the daemon contended on the
+SQLite WAL writer lock. `busy_timeout` is raised (5s to 30s) and the
+reclaim path now retries up to three times on `database is locked`
+before surfacing the error. Reduces spurious failures during concurrent
+indexing.
+
+### Feature: MCPB stale-install warning at startup
+
+The Claude Desktop `.mcpb` bundle now performs a best-effort version
+check at MCP server startup (MCPB v0.4 has no auto-update mechanism).
+When the installed `conexus` is older than the latest on PyPI, it emits
+a one-line warning to stderr naming the GitHub release URL to
+re-download. The check is non-fatal (offline or PyPI hiccup is silent)
+and opt-out via `NX_MCPB_SKIP_UPDATE_CHECK=1`.
+
+### Fix: plugin-rename drift hint requires BOTH install AND reload
+
+The `nx doctor` plugin-name-drift hint previously suggested
+`/reload-plugins` alone to migrate the renamed `nx` plugin to `conexus`.
+That is insufficient on a fresh shell: install alone leaves the new
+plugin staged but inactive, reload alone won't pick up the renamed
+plugin from marketplace.json. The hint now correctly instructs both
+`/plugin install conexus@nexus-plugins` and `/reload-plugins`.
+
+### Docs
+
+- README "Start here" callout and blog-post pointers restored (a
+  regression from the chat-first README restructure).
+- `docs/desktop-deployment.md` documents the new MCPB stale-install
+  warning and its opt-out env var under Drift detection.
+- Blog publishing helpers (`blog/publish.py`, `blog/upload-images.sh`)
+  are now tracked in git; `publish.py --batch` no longer requires a
+  placeholder `md_path`.
+
 ## [5.0.1] - 2026-05-24
 
 ### Fix: release workflow PyPI publish failure

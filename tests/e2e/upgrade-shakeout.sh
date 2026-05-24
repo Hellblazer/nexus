@@ -220,11 +220,11 @@ PJEOF
 DOCTOR_OUT="$(CLAUDE_PLUGIN_ROOT="$FAKE_PLUGIN_ROOT" HOME="$SANDBOX" nx doctor 2>&1 || true)"
 echo "$DOCTOR_OUT" | grep -qi 'plugin name' \
     || _die "nx doctor did not surface plugin-name drift. Output:\n$DOCTOR_OUT"
-echo "$DOCTOR_OUT" | grep -q '/plugin uninstall nx@nexus-plugins' \
-    || _die "doctor warning missing uninstall command"
 echo "$DOCTOR_OUT" | grep -q '/plugin install conexus@nexus-plugins' \
-    || _die "doctor warning missing install command"
-_pass "nx doctor names the uninstall + install commands"
+    || _die "doctor warning missing /plugin install hint"
+echo "$DOCTOR_OUT" | grep -q '/reload-plugins' \
+    || _die "doctor warning missing /reload-plugins hint"
+_pass "nx doctor names both /plugin install and /reload-plugins migration commands"
 # (The structlog warning at every MCP startup is covered by unit test
 # tests/test_plugin_name_drift.py::test_check_version_compatibility_logs_plugin_name_mismatch
 # — easier to assert there than to spawn nx-mcp + watch stderr here.)

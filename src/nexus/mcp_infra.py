@@ -671,13 +671,17 @@ def check_version_compatibility() -> None:
 
             # ── (3) Plugin NAME drift (nexus-mkj6u) ─────────────────────
             # The 2026-05-23 rename moved the plugin name from ``nx`` to
-            # ``conexus``. Claude Code does NOT auto-uninstall renamed
-            # plugins; the user's local cache at
-            # ``~/.claude/plugins/cache/nexus-plugins/nx/...`` survives
-            # the marketplace.json rename until the user explicitly
-            # uninstalls + reinstalls. Until then, they're running the
-            # NEW conexus CLI but the OLD nx plugin — silently sliding
-            # toward whatever drift the rename introduced.
+            # ``conexus``. Migration requires TWO Claude Code commands:
+            # ``/plugin install conexus@nexus-plugins`` to register the
+            # new plugin, then ``/reload-plugins`` to activate it.
+            # Until both run, the local cache at
+            # ``~/.claude/plugins/cache/nexus-plugins/nx/...`` continues
+            # to back the OLD nx plugin name; the user is running the
+            # NEW conexus CLI under that stale install. The earlier
+            # nexus-v4m7y-adjacent guidance that ``/reload-plugins``
+            # alone suffices was wrong — empirically confirmed when a
+            # user on a fresh shell ran reload and saw no effect until
+            # the explicit install ran.
             #
             # Fire this warning EVERY MCP startup until resolved. It is
             # the most reliable surface to catch the gap because every
@@ -690,9 +694,9 @@ def check_version_compatibility() -> None:
                     hint=(
                         f"Plugin was renamed '{plugin_name}' -> "
                         f"'{EXPECTED_PLUGIN_NAME}' (nexus-mkj6u). In "
-                        f"Claude Code, run: /plugin uninstall "
-                        f"{plugin_name}@nexus-plugins && /plugin install "
-                        f"{EXPECTED_PLUGIN_NAME}@nexus-plugins"
+                        f"Claude Code, run: /plugin install "
+                        f"{EXPECTED_PLUGIN_NAME}@nexus-plugins "
+                        "&& /reload-plugins"
                     ),
                 )
 
