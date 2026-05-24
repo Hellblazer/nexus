@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """
-nexus-hwbj (GH #619): nx-plugin preflight.
+nexus-hwbj (GH #619): conexus-plugin preflight.
 
-Runs at SessionStart. Checks whether the tools the nx skills route
+Runs at SessionStart. Checks whether the tools the conexus skills route
 to are actually reachable. When everything works, emits NOTHING
 (silent on healthy hosts). When something is missing or broken,
 emits a "## nx Preflight: FAILED" marker that names the gap and
@@ -128,7 +128,7 @@ def main() -> None:
         "any tool path that starts with ``nx ...`` or "
         "``mcp__plugin_conexus_nexus__*`` will fail. Fall back to "
         "direct ``Read`` / ``Grep`` / ``Glob`` for code "
-        "exploration; do NOT attempt to invoke nx skills "
+        "exploration; do NOT attempt to invoke conexus skills "
         "(``/conexus:query``, ``/conexus:debug``, ``/conexus:create-plan``, "
         "etc.); they will produce confusing partial errors."
     )

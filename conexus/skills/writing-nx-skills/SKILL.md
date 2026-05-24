@@ -8,7 +8,7 @@ effort: low
 
 ## Overview
 
-Guide for authoring skills in the nx Claude Code plugin. Skills are reference guides for proven techniques, patterns, or tools that help future Claude instances find and apply effective approaches.
+Guide for authoring skills in the conexus Claude Code plugin. Skills are reference guides for proven techniques, patterns, or tools that help future Claude instances find and apply effective approaches.
 
 **Methodology:** TDD-for-documentation — write pressure scenarios (test cases), verify baseline behavior without the skill, then write the skill and verify compliance.
 

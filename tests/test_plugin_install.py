@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Installation simulation tests for the nx Claude Code plugin.
+"""Installation simulation tests for the conexus plugin.
 
 Simulates what happens when Claude Code installs the plugin from GitHub:
   1. Clone the repo (simulated via `git clone --local`)

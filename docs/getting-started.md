@@ -66,7 +66,7 @@ or systemd user-unit (Linux, `~/.config/systemd/user/nexus-t2.service`)
 with `KeepAlive=true` / `Restart=on-failure`, so the daemon survives
 crashes and reboots. Uninstall with `nx daemon t2 uninstall --autostart`.
 
-If you skip this step, the nx Claude Code plugin's SessionStart hook
+If you skip this step, the conexus plugin's SessionStart hook
 will auto-spawn the daemon on every session start anyway, so plugin
 users still get a working substrate. The autostart path is recommended
 if you also use `nx` directly from the shell.
@@ -159,7 +159,7 @@ See [Document Catalog](catalog.md) for details.
 
 ## Claude Code plugin (optional)
 
-The `nx` plugin gives Claude Code agents access to all three storage tiers, 13 specialized agents, and 43 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
+The conexus plugin gives Claude Code agents access to all three storage tiers, 13 specialized agents, and 43 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
 
 **Plugin-only prerequisite: [Node.js](https://nodejs.org/).** The plugin's `sequential-thinking` and `context7` MCP servers are spawned via `npx -y …` and silently fail to start without `node`/`npm` on PATH. Install with `brew install node` (macOS) or your platform's installer before running the plugin commands below.
 

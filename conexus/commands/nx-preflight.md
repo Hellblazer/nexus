@@ -4,7 +4,7 @@ disable-model-invocation: false
 ---
 
 !{
-  echo "## nx Plugin Preflight Check"
+  echo "## conexus Plugin Preflight Check"
   echo ""
 
   # ── 1. nx CLI ────────────────────────────────────────────────────────────────

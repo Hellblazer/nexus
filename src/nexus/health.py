@@ -442,7 +442,7 @@ def _check_tools() -> list[HealthResult]:
         ))
 
     # npx (Node.js, plugin-only)
-    # Required by the nx Claude Code plugin, which spawns the
+    # Required by the conexus Claude Code plugin, which spawns the
     # ``sequential-thinking`` and ``context7`` MCP servers via ``npx -y …``.
     # The CLI alone does not need it, so this is non-fatal — but a missing
     # ``npx`` causes silent MCP-server failures the moment a plugin tool is

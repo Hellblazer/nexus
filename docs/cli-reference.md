@@ -1347,7 +1347,7 @@ nx daemon t3 install --autostart
 Cloud-mode T3 uses HTTP transport directly to ChromaDB Cloud and
 has no daemon; only `t2` is needed in that configuration.
 
-When the nx Claude Code plugin is installed, the plugin's
+When the conexus plugin is installed, the plugin's
 SessionStart hook auto-spawns the T2 daemon via
 `nx daemon t2 ensure-running` on every Claude Code session start,
 so first-session-after-install works without any manual incantation.

@@ -67,7 +67,7 @@ manual step.
 ## Safety Note
 
 **Do not run `launchctl load` automatically** — this is your explicit step. The
-nx skill's `/conexus:rdr-audit schedule <project>` command prints the install
+conexus skill's `/conexus:rdr-audit schedule <project>` command prints the install
 instructions but never executes them. System-level installs require your review
 and authorization each time.
 

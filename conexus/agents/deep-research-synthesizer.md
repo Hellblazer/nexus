@@ -1,7 +1,7 @@
 ---
 name: deep-research-synthesizer
 version: "2.0"
-description: Conducts comprehensive research across nx knowledge store, memory, web resources, and code repositories. Use when needing multi-source research synthesis or building comprehensive understanding of new technologies.
+description: Conducts comprehensive research across the conexus knowledge store, memory, web resources, and code repositories. Use when needing multi-source research synthesis or building comprehensive understanding of new technologies.
 model: sonnet
 color: teal
 effort: medium
@@ -180,11 +180,11 @@ If your project uses beads for task tracking, consider linking research findings
 
 ## Persistence (before returning)
 
-You MUST persist your research findings to the nx knowledge store BEFORE returning — **unless the dispatching relay specifies an alternative storage target** (e.g. a T2 `memory_put` destination or a T1 `scratch` target) in its Input Artifacts, Deliverable, or Operational Notes section. In that case, honor the relay's target and skip the T3 default.
+You MUST persist your research findings to the conexus knowledge store BEFORE returning — **unless the dispatching relay specifies an alternative storage target** (e.g. a T2 `memory_put` destination or a T1 `scratch` target) in its Input Artifacts, Deliverable, or Operational Notes section. In that case, honor the relay's target and skip the T3 default.
 
 **Why the default is T3**: for generic `/conexus:research` dispatches, the auto-linker creates catalog links at `store_put` time, and those links are lost if you skip this step. Do not defer persistence — call `mcp__plugin_conexus_nexus__store_put` directly.
 
-**When to override to T2 or T1**: when the dispatching skill is using this agent as a classifier or analyzer rather than as a research persister — for example, `nx:rdr-audit` dispatches this agent to run an audit whose output is a project-local audit record that belongs in T2 `rdr_process`, not in the permanent T3 knowledge graph. If the relay says "write findings to `<project>/<title>` via `memory_put`", do that instead and do not also redundantly store to T3.
+**When to override to T2 or T1**: when the dispatching skill is using this agent as a classifier or analyzer rather than as a research persister — for example, `/conexus:rdr-audit` dispatches this agent to run an audit whose output is a project-local audit record that belongs in T2 `rdr_process`, not in the permanent T3 knowledge graph. If the relay says "write findings to `<project>/<title>` via `memory_put`", do that instead and do not also redundantly store to T3.
 
 **Default T3 store call** (use only if the relay does NOT specify an alternative):
 

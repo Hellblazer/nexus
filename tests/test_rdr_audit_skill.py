@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Structural tests for the nx:rdr-audit skill (RDR-067 Phase 2a).
+"""Structural tests for the conexus:rdr-audit skill (RDR-067 Phase 2a).
 
 These tests pin the invariants that Phase 1b's spike surfaced:
 - Transcript mining must be explicit and marked non-delegatable
