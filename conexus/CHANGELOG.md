@@ -6,9 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-05-24
+
 ### Breaking: plugin renamed `nx` → `conexus` (nexus-mkj6u)
 
-Plugin name changed from `nx` to `conexus`. Skill prefix `/nx:foo` → `/conexus:foo`. MCP tool prefix `mcp__plugin_nx_*` → `mcp__plugin_conexus_*`. Plugin install command: `/plugin install conexus@nexus-plugins`. See root `CHANGELOG.md` § Unreleased for full migration notes.
+Plugin name changed from `nx` to `conexus`. Skill prefix `/nx:foo` → `/conexus:foo`. MCP tool prefix `mcp__plugin_nx_*` → `mcp__plugin_conexus_*`. Plugin install command: `/plugin install conexus@nexus-plugins`. See root `CHANGELOG.md` § 5.0.0 for full migration notes.
+
+### Docs: four-round `nx → conexus` scrub across plugin internals
+
+Storage-tier prose (`nx T3 store` → `T3 store`), skill cross-references (`nx:serena-code-nav` → `/conexus:serena-code-nav`), agent dispatch values (`subagent_type="nx:strategic-planner"` → `subagent_type="conexus:strategic-planner"`), section headers, and frontmatter descriptions all updated. Directory and file names with `nx` in them (`using-nx-skills/`, `writing-nx-skills/`, `nx-preflight.md`) intentionally kept for slash-command stability.
 
 ## [4.34.6] - 2026-05-23
 

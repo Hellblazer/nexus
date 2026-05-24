@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-05-24
+
 ### New: Claude Desktop Extension (`.mcpb`) for chat-only users (nexus-bsjro, RDR-126)
 
 Nexus is now installable as a one-click `.mcpb` Desktop Extension for Claude Desktop chat users who don't have Claude Code installed. The bundle is a 1.5 KB artifact (manifest + pyproject + entry point); uv resolves Nexus's full compiled-dep stack on first launch (~20s cold, ~5s warm).
@@ -93,6 +95,17 @@ nx index repo "$REPO_TOP" --on-locked=skip & disown
 ```
 
 This catches 99%+ of pile-ups before fork. The `--on-locked=skip` flag is kept as belt-and-suspenders for the residual microsecond-window race between `pgrep` and `fork`. Existing installs propagate the fix by re-running `nx hooks uninstall && nx hooks install`.
+
+### Docs: pre-v5.0.0 cleanup — chat-first README, 37 → 16 top-level docs
+
+Documentation reorganized for the audience shift baked into v5: Chat (Claude Desktop chat) is the primary surface, then Cowork, then Code. README leads with the `.mcpb` install for chat, then the Claude Code plugin, then Cowork. `docs/` consolidated from 37 top-level files to 16, with internal design surveys moved under `docs/exploration/` and external integrations under `docs/integrations/`. Four-file RDR doc set merged into `docs/rdr.md`; three catalog/taxonomy docs merged into `docs/catalog.md`. Forty-three inbound references swept across plugin skills, source code, tests, and scripts.
+
+Four rounds of `nx → conexus` reference scrubbing across plugin internals (skills, agents, commands, hooks) caught storage-tier-prefixed forms (`nx T3 store` → `T3 store`), skill cross-references (`nx:serena-code-nav` → `/conexus:serena-code-nav`), and stale prose descriptions. Directory and file names with `nx` in them (`using-nx-skills`, `writing-nx-skills`, `nx-preflight.md`) were intentionally kept so existing user-invoked slash commands keep working.
+
+Doc-pair labor splits sharpened so each pair has a clean separation with explicit bidirectional pointers:
+
+- `architecture.md` (structural / rationale) ↔ `mcp-servers.md` (tool catalog)
+- `cli-reference.md` (exhaustive command reference) ↔ `querying-guide.md` (decision guide + retrieval mechanics)
 
 ### Fix: GUI-spawned `nx-mcp` misdetected cloud mode as local (nexus-m7evs)
 
