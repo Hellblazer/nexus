@@ -1,12 +1,14 @@
 # Nexus CLI Reference
 
-All commands use the `nx` binary. Global flags: `--help`, `--version`, `-v`/`--verbose` (enable debug logging).
+Every `nx` command and flag. This is the **command reference** — exhaustive but skim-friendly. For **which retrieval interface to reach for** (`nx search` vs the MCP `search()` / `query()` / `nx_answer` tools), see [Querying Guide](querying-guide.md). For the MCP tool catalog, see [MCP Servers](mcp-servers.md).
+
+Global flags: `--help`, `--version`, `-v`/`--verbose` (enable debug logging).
 
 ---
 
 ## nx search
 
-Semantic search across T3 knowledge collections.
+Semantic search across T3 knowledge collections. For how `nx search` relates to the MCP search interfaces and the search-quality mechanics (topic boost, distance thresholds, contradiction flags), see [Querying Guide § Search quality features](querying-guide.md#search-quality-features).
 
 ```
 nx search "authentication middleware" --corpus code --hybrid --n 20
