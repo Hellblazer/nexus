@@ -40,7 +40,7 @@ def _plant_plugin_manifest(tmp_path: Path, name: str, version: str = "4.34.5") -
 
 def test_check_plugin_name_warns_on_old_nx(monkeypatch, tmp_path):
     """An installed ``nx`` plugin against the conexus-expecting CLI fires
-    a non-fatal warning telling the user to run /reload-plugins."""
+    a non-fatal warning naming both /plugin install and /reload-plugins."""
     plugin_root = _plant_plugin_manifest(tmp_path, name="nx")
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
 
@@ -53,6 +53,7 @@ def test_check_plugin_name_warns_on_old_nx(monkeypatch, tmp_path):
     assert r.fatal is False
     assert "nx@nexus-plugins" in r.detail or "renamed" in r.detail
     suggestions = " ".join(r.fix_suggestions)
+    assert "/plugin install conexus@nexus-plugins" in suggestions
     assert "/reload-plugins" in suggestions
 
 
@@ -107,7 +108,8 @@ def test_check_version_compatibility_logs_plugin_name_mismatch(monkeypatch, tmp_
     assert "plugin_name_mismatch" in captured, (
         f"expected plugin_name_mismatch warning in stdout/stderr; got: {captured!r}"
     )
-    # Actionable hint surfaces
+    # Actionable hint names BOTH commands: install registers, reload activates.
+    assert "/plugin install conexus@nexus-plugins" in captured
     assert "/reload-plugins" in captured
 
 
