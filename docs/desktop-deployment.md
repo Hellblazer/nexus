@@ -74,6 +74,17 @@ After upgrading conexus (`uv tool upgrade conexus`) or after the plugin rename (
 
 Both warnings include the resolution commands; `nx doctor` is the single explicit-invocation surface that consolidates them.
 
+For Claude Desktop `.mcpb` users specifically, the bundle also performs a best-effort stale-install check at MCP server startup (MCPB v0.4 has no auto-update). When the installed `conexus` is older than the latest on PyPI, it emits a one-line warning to stderr naming the GitHub release URL to re-download:
+
+```
+[conexus-mcpb] installed conexus=X.Y.Z, latest on PyPI=A.B.C. Re-download
+the .mcpb from https://github.com/Hellblazer/nexus/releases/latest and
+re-install in Claude Desktop to upgrade. (Set NX_MCPB_SKIP_UPDATE_CHECK=1
+to silence.)
+```
+
+The check is non-fatal: a network failure, timeout, or unreachable PyPI never blocks startup. Set `NX_MCPB_SKIP_UPDATE_CHECK=1` in the environment to opt out entirely.
+
 ## Uninstall
 
 ### Claude Code plugin

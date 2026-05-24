@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.0.2] - 2026-05-24
+
+Plugin version aligned with conexus 5.0.2. Runtime fixes in the bundled
+MCP server (orphan T1 chromadb sweep at startup, aspect-queue WAL
+contention tolerance) plus a corrected plugin-rename drift hint. See
+root `CHANGELOG.md` § 5.0.2 for details.
+
+### Fix: plugin-rename drift hint requires BOTH install AND reload
+
+`nx doctor`'s plugin-name-drift hint now instructs both
+`/plugin install conexus@nexus-plugins` and `/reload-plugins` to
+migrate the renamed `nx` plugin. The earlier "reload alone" guidance
+was insufficient on a fresh shell.
+
 ## [5.0.1] - 2026-05-24
 
 ### Feature: tool annotations on all 41 MCP tools
