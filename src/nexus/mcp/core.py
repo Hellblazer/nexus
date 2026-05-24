@@ -158,6 +158,7 @@ async def _t1_chroma_lifespan(_app: Any):
         start_t1_server,
         sweep_orphan_resource_trackers,
         sweep_orphan_t1_addr_files,
+        sweep_orphan_t1_chromadbs,
         sweep_orphan_tmpdirs,
     )
 
@@ -189,6 +190,19 @@ async def _t1_chroma_lifespan(_app: Any):
     except Exception as exc:
         _sweep_log.debug(
             "sweep_orphan_resource_trackers_failed", error=str(exc)
+        )
+    # (d) orphan T1 chromadb servers (nexus-aigkb). When a Claude
+    # Code session exits ungracefully (SIGKILL, crash, lost
+    # SessionEnd hook), its per-session chromadb is re-parented to
+    # launchd and runs indefinitely, holding a TCP port and tmpdir.
+    # sweep_orphan_tmpdirs reaps the dirs only after 24h; this
+    # sweeps the processes immediately so the next start_t1_server
+    # has a clean slate.
+    try:
+        sweep_orphan_t1_chromadbs()
+    except Exception as exc:
+        _sweep_log.debug(
+            "sweep_orphan_t1_chromadbs_failed", error=str(exc)
         )
 
     # Reset the ``_SHUTDOWN_IN_FLIGHT`` sentinel BEFORE
