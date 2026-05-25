@@ -146,6 +146,52 @@ def t2_ctx():
     return T2Database(default_db_path())
 
 
+def t2_index_write(write_fn) -> None:
+    """Run one indexer T2 write through the daemon (``T2Client``) if it is
+    reachable, else a direct ``T2Database`` (RDR-128 P1, nexus-kg8sj).
+
+    Routing keeps the ``nx index repo`` process from opening ``memory.db``
+    directly and holding its single WAL writer slot — the daemon becomes
+    the writer, so a dead/slow indexer can no longer strand the lock for
+    other processes. The direct-``T2Database`` fallback preserves
+    functionality when the daemon is down (at the cost of the old
+    direct-lock behavior), and is logged so the degraded path is visible.
+
+    ``write_fn(db)`` receives the writer (``T2Client`` or ``T2Database``;
+    both expose the same ``db.<store>.<method>(...)`` surface). Reachability
+    is decided by an explicit up-front probe (``database.hello()``) rather
+    than by catching an error *out of* ``write_fn`` — because some writers
+    (e.g. the best-effort ``dual_write_chash_index``) swallow their own
+    exceptions internally, which would otherwise hide the unreachable
+    signal and silently drop the write. ``write_fn`` is therefore invoked
+    against exactly one writer, never re-run, so there is no double-write
+    risk regardless of how it handles errors.
+    """
+    from nexus.daemon.t2_client import T2DaemonNotReachableError, make_t2_client
+
+    client = None
+    try:
+        client = make_t2_client()
+        client.database.hello()  # force the lazy connect; raises if down
+    except T2DaemonNotReachableError:
+        if client is not None:
+            client.close()
+        client = None
+
+    if client is not None:
+        try:
+            write_fn(client)
+        finally:
+            client.close()
+        return
+
+    import structlog
+    structlog.get_logger().debug("t2_index_write_daemon_unreachable_fallback")
+    from nexus.db.t2 import T2Database
+    with T2Database(default_db_path()) as db:
+        write_fn(db)
+
+
 # ── T1 plan session cache (RDR-078) ──────────────────────────────────────────
 # Plan-cache wrappers. The cache state itself lives in
 # nexus.mcp.plan_cache_registry.PlanCacheRegistry as a single module-
@@ -450,8 +496,13 @@ def chash_dual_write_batch_hook(
     try:
         from nexus.db.t2.chash_index import dual_write_chash_index
 
-        with t2_ctx() as db:
-            dual_write_chash_index(db.chash_index, collection, doc_ids, metadatas)
+        # RDR-128 P1 (kg8sj): route through the daemon so the indexer does
+        # not hold memory.db's writer lock; dual_write batches to one RPC.
+        t2_index_write(
+            lambda db: dual_write_chash_index(
+                db.chash_index, collection, doc_ids, metadatas
+            )
+        )
     except Exception:
         import structlog
         structlog.get_logger().debug("chash_dual_write_batch_failed", exc_info=True)

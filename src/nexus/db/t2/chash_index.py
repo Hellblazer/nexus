@@ -164,6 +164,41 @@ class ChashIndex:
             )
             self.conn.commit()
 
+    def upsert_many(self, *, chashes: list[str], collection: str) -> None:
+        """Register many ``chashes`` in one ``collection`` in a single
+        statement + commit.
+
+        RDR-128 P1 (kg8sj): the indexer's per-chunk dual-write previously
+        looped :meth:`upsert` (one statement+commit per chunk). Batching
+        collapses a chunk-batch to one ``executemany`` — and, crucially,
+        to one daemon RPC when routed through ``T2Client``, instead of one
+        round-trip per chunk.
+
+        ``INSERT OR REPLACE`` semantics per :meth:`upsert`. Blank/whitespace
+        ``chashes`` entries are skipped (the dual-write helper already
+        filters, but the batch API is defensive). Raises ``ValueError`` on
+        an empty ``collection`` (a caller-side bug); an empty ``chashes``
+        list is a silent no-op.
+        """
+        if not collection:
+            raise ValueError("collection must not be empty")
+        now = datetime.now(UTC).isoformat()
+        rows = [
+            (c, collection, now)
+            for c in chashes
+            if isinstance(c, str) and c.strip()
+        ]
+        if not rows:
+            return
+        with self._lock:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO chash_index "
+                "(chash, physical_collection, created_at) "
+                "VALUES (?, ?, ?)",
+                rows,
+            )
+            self.conn.commit()
+
     def lookup(self, chash: str) -> list[dict[str, Any]]:
         """Return all (collection, created_at) rows for ``chash``.
 
@@ -370,16 +405,23 @@ def dual_write_chash_index(
     """
     if chash_index is None or not ids or not metadatas:
         return
-    for meta in metadatas:
-        chash = meta.get("chunk_text_hash", "") if isinstance(meta, dict) else ""
-        if not chash:
-            continue
-        try:
-            chash_index.upsert(chash=chash, collection=collection)
-        except Exception as exc:
-            _log.warning(
-                "chash_index_dual_write_failed",
-                collection=collection,
-                chash_prefix=chash[:16],
-                error=str(exc),
-            )
+    chashes = [
+        meta.get("chunk_text_hash", "")
+        for meta in metadatas
+        if isinstance(meta, dict)
+    ]
+    chashes = [c for c in chashes if c]
+    if not chashes:
+        return
+    # RDR-128 P1 (kg8sj): one batch call (one daemon RPC when routed via
+    # T2Client) instead of a per-chunk upsert loop. Still best-effort — a
+    # T2 failure logs but never aborts the successful T3 write.
+    try:
+        chash_index.upsert_many(chashes=chashes, collection=collection)
+    except Exception as exc:
+        _log.warning(
+            "chash_index_dual_write_failed",
+            collection=collection,
+            count=len(chashes),
+            error=str(exc),
+        )
