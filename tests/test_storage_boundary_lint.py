@@ -317,6 +317,14 @@ def test_dual_population_baseline_locked():
     assert result.epsilon_allow_connects == 16, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
-    assert result.t2database_constructions == 35, (
+    # 36 = 35 (P0c baseline) + 1: RDR-128 P1 (kg8sj-A) added the
+    # ``t2_index_write`` daemon-unreachable FALLBACK in mcp_infra.py, which
+    # must construct a direct T2Database by design (the degraded path when
+    # the daemon is down). Net direction is still correct — kg8sj-A routes
+    # the *hot-path* writes through the daemon; the single fallback site is
+    # the documented-irreducible cost of graceful degradation. The taxonomy
+    # residual (nexus-fkq5q) will drive the remaining indexer-path
+    # constructions down further.
+    assert result.t2database_constructions == 36, (
         f"T2Database construction baseline moved: {result.t2database_constructions}"
     )
