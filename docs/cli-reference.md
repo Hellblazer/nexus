@@ -1407,6 +1407,15 @@ Stale discovery files left behind by crashed daemons trigger a
 fresh spawn rather than a false-positive — the probe is
 `os.kill(pid, 0)` against the discovery-file PID.
 
+Version-aware (nexus-5ldk1): a live daemon whose `daemon_version`
+differs from the installed `conexus` is treated as stale. The command
+gracefully cycles it (SIGTERM drains in-flight RPC, then respawns) so
+the running daemon matches the installed code. This is why `nx upgrade`,
+`scripts/reinstall-tool.sh`, and the plugin / `.mcpb` session-start
+hooks all call `ensure-running` after an install: the daemon comes up on
+the new version without a manual restart. A daemon already matching the
+installed version is left untouched.
+
 | Flag | Description |
 |------|-------------|
 | `--config-dir PATH` | Config directory override |

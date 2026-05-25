@@ -52,6 +52,36 @@ def upgrade(dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool) -> None:
             _log.warning("upgrade_auto_error", exc_info=True)
             return
         raise
+    # nexus-5ldk1: a running T2 daemon froze its code at start and now
+    # predates this upgrade. Bring it to the just-installed version so the
+    # upgrade is live rather than pending a manual daemon restart.
+    # ensure-running is version-aware: no-op on a current daemon, graceful
+    # cycle on a stale one. Best-effort, non-dry-run only.
+    if not dry_run:
+        _cycle_daemon_to_current()
+
+
+def _cycle_daemon_to_current() -> None:
+    """Bring a stale T2 daemon to the just-installed version (best-effort).
+
+    Shells out to ``nx daemon t2 ensure-running --quiet``, the same
+    version-aware primitive the plugin/mcpb session-start hooks use. Never
+    raises: a daemon nudge must not fail the upgrade.
+    """
+    import subprocess
+
+    try:
+        from nexus.commands.daemon import _resolve_nx_bin
+
+        subprocess.run(
+            [*_resolve_nx_bin(), "daemon", "t2", "ensure-running", "--quiet"],
+            timeout=30,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("upgrade_daemon_cycle_failed", error=str(exc))
 
 
 def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool = False) -> None:

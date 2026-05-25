@@ -60,3 +60,13 @@ if [[ -d "$TOOL_BIN" ]]; then
         fi
     done
 fi
+
+# nexus-5ldk1: a running T2 daemon froze its code at start and now predates
+# this reinstall. Bring it to the freshly-installed version so the reinstall
+# is live, not pending a manual `nx daemon t2 stop && ensure-running`.
+# ensure-running is version-aware: no-op on a current daemon, graceful cycle
+# on a stale one. Best-effort; never fails the reinstall.
+if command -v nx >/dev/null 2>&1; then
+    nx daemon t2 ensure-running --quiet --timeout=10 2>/dev/null || \
+        echo "(note: daemon cycle skipped/failed; run 'nx daemon t2 ensure-running' manually)"
+fi

@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.0.4] - 2026-05-25
+
+### Docs: Claude Desktop `.mcpb` update procedure + lifecycle
+
+`docs/desktop-deployment.md` gains an "Updating the Desktop Extension"
+section: why the bundle does not auto-update (MCPB v0.4 has no update
+mechanism; the extension venv is pinned at install and `uv run` reuses
+it), the manual re-install steps, what the update leaves untouched, and
+the expected connector-vs-daemon version skew.
+
+### Fix: install/upgrade paths now bring a stale T2 daemon to current (nexus-5ldk1)
+
+The long-lived T2 daemon froze its code version at process start, so an
+upgrade (`uv tool upgrade conexus`, `nx upgrade`, a reinstall) left a
+stale daemon running old code until a manual `nx daemon t2 stop && start`.
+`nx daemon t2 ensure-running` is now version-aware: it leaves a current
+daemon alone and gracefully cycles one whose version differs from the
+installed tool (SIGTERM drains in-flight RPC, then respawns). This is
+wired into every install path: `nx upgrade` and `scripts/reinstall-tool.sh`
+call it after installing, and the plugin / `.mcpb` session-start hooks
+already invoke it. An upgrade is now live without a manual daemon restart.
+
 ## [5.0.3] - 2026-05-25
 
 ### Fix: T2 daemon observability + stale-state detection (nexus-n8sbw)

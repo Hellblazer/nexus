@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.0.4] - 2026-05-25
+
+Plugin version aligned with conexus 5.0.4. The release wires the
+version-aware `nx daemon t2 ensure-running` into install/upgrade paths
+(nexus-5ldk1) so a stale T2 daemon is brought to the installed version
+without a manual restart; the plugin's session-start hook already calls
+`ensure-running`, so it self-heals on install. See root `CHANGELOG.md`
+§ 5.0.4.
+
 ## [5.0.3] - 2026-05-25
 
 Plugin version aligned with conexus 5.0.3. No plugin-side changes; the
