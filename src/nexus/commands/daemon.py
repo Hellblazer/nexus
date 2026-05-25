@@ -704,27 +704,70 @@ def t2_ensure_running_cmd(
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     disc = t2_discovery_path(config_dir)
 
-    def _daemon_is_alive() -> bool:
+    def _running_daemon() -> tuple[int, str] | None:
+        """Return (pid, daemon_version) of the live daemon, or None.
+
+        Probes the recorded PID via ``os.kill(pid, 0)``; stale discovery
+        files outlive crashed daemons, so a readable file is not proof of
+        life.
+        """
         if not disc.exists():
-            return False
+            return None
         try:
             data = json.loads(disc.read_text())
         except (OSError, json.JSONDecodeError):
-            return False
+            return None
         pid = data.get("pid")
         if not isinstance(pid, int):
-            return False
-        # Probe the PID — stale discovery files outlive crashed daemons.
+            return None
         try:
             os.kill(pid, 0)
         except (ProcessLookupError, PermissionError):
-            return False
-        return True
+            return None
+        return pid, str(data.get("daemon_version") or "")
 
-    if _daemon_is_alive():
+    def _daemon_is_alive() -> bool:
+        return _running_daemon() is not None
+
+    def _installed_version() -> str:
+        from importlib.metadata import PackageNotFoundError
+        from importlib.metadata import version as _pkg_version
+
+        try:
+            return _pkg_version("conexus")
+        except PackageNotFoundError:
+            return ""
+
+    running = _running_daemon()
+    if running is not None:
+        running_pid, running_ver = running
+        installed = _installed_version()
+        # A live daemon whose version matches the installed tool (or whose
+        # installed version can't be determined) is left alone (idempotent).
+        if not installed or running_ver == installed:
+            if not quiet:
+                click.echo("T2 daemon already running.")
+            return
+        # Version skew: the daemon froze its code at start and predates the
+        # last upgrade (nexus-5ldk1). "Ensure running" means ensure a
+        # CURRENT daemon; gracefully cycle the stale one and respawn below.
+        # SIGTERM lets the daemon drain in-flight RPC (stop() awaits
+        # wait_closed) and remove its discovery file before we respawn.
         if not quiet:
-            click.echo("T2 daemon already running.")
-        return
+            click.echo(
+                f"T2 daemon is stale (running {running_ver}, installed "
+                f"{installed}); cycling to current."
+            )
+        try:
+            os.kill(running_pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        cycle_deadline = _time.monotonic() + 10.0
+        while _time.monotonic() < cycle_deadline:
+            if not _daemon_is_alive():
+                break
+            _time.sleep(0.1)
+        # fall through to cold spawn
 
     # Cold spawn. Use the same nx binary the operator invoked (preserves
     # PATH/virtualenv assumptions). start_new_session detaches the child

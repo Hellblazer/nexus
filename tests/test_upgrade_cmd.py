@@ -29,6 +29,15 @@ def _tmp_db(tmp_path: Path) -> Path:
     return tmp_path / "memory.db"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_daemon_nudge():
+    """Patch the post-upgrade daemon cycle (nexus-5ldk1) for all upgrade
+    tests so they never shell out to the real host T2 daemon. Yields the
+    mock so tests can assert whether the nudge fired."""
+    with patch("nexus.commands.upgrade._cycle_daemon_to_current") as m:
+        yield m
+
+
 class TestUpgradeCommand:
     """Tests for the ``nx upgrade`` CLI command."""
 
@@ -52,6 +61,33 @@ class TestUpgradeCommand:
             result = runner.invoke(main, ["upgrade", "--dry-run"])
         assert result.exit_code == 0
         assert "dry-run" in result.output.lower() or "pending" in result.output.lower()
+
+    def test_upgrade_cycles_daemon_on_success(
+        self, runner: CliRunner, tmp_path: Path, _no_real_daemon_nudge,
+    ) -> None:
+        """nexus-5ldk1: a successful (non-dry-run) upgrade brings a stale
+        daemon to the just-installed version."""
+        db_path = tmp_path / "memory.db"
+        with (
+            patch("nexus.commands.upgrade._db_path", return_value=db_path),
+            patch("nexus.commands.upgrade.T3_UPGRADES", []),
+        ):
+            result = runner.invoke(main, ["upgrade"])
+        assert result.exit_code == 0
+        assert _no_real_daemon_nudge.called, "upgrade did not cycle the daemon"
+
+    def test_upgrade_dry_run_does_not_cycle_daemon(
+        self, runner: CliRunner, tmp_path: Path, _no_real_daemon_nudge,
+    ) -> None:
+        """--dry-run installs nothing, so it must not touch the daemon."""
+        db_path = tmp_path / "memory.db"
+        with (
+            patch("nexus.commands.upgrade._db_path", return_value=db_path),
+            patch("nexus.commands.upgrade.T3_UPGRADES", []),
+        ):
+            result = runner.invoke(main, ["upgrade", "--dry-run"])
+        assert result.exit_code == 0
+        assert not _no_real_daemon_nudge.called, "dry-run must not cycle the daemon"
 
     def test_upgrade_force(self, runner: CliRunner, tmp_path: Path) -> None:
         """--force resets version gate to 0.0.0 and re-runs."""
