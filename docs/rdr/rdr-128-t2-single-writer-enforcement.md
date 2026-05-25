@@ -78,7 +78,12 @@ every `nx-mcp` process (per the `daemon-restart-not-worker-fix` finding, the
 worker opens its own short-lived SQLite connection); (e) `nx doctor` (multiple
 `epsilon-allow` read-only diagnostic connections). The `epsilon-allow` comments
 are themselves an audit trail of where the single-writer invariant was knowingly
-broken.
+broken. **Verified 2026-05-25 (codebase grep, develop @ 5.0.4): 20 `epsilon-allow`
+sites and 53 direct `T2Database(...)` constructions outside the daemon and the
+store implementations** — far more than five. The worst writers beyond the
+indexer: `nx upgrade`, `nx repair plans`, `nx aspects` repair verbs, and ~10
+operator/CLI paths in `enrich.py`, `operators/aspect_sql.py`, `mcp_infra.py`,
+`merge_candidates.py`, and the `collection_*` modules.
 
 **RF-2 — every daemon incident is a contention symptom.** v4m7y = writer-vs-writer
 collision; kg8sj = the indexer-writer starves others; the 2026-05-25 crash-loop =
@@ -96,6 +101,18 @@ one path and not the structurally-identical one next to it.
 version-aware cycle SIGTERMs a running daemon without first confirming the
 replacement can acquire the DB. Trading a working-but-stale daemon for no daemon
 is strictly worse; the cycle needs a precondition.
+
+**RF-5 — the boundary is already recognized and linted; this is a tightening
+exercise.** `src/nexus/storage_boundary_lint.py` already flags direct
+`sqlite3.connect` / T2 opens and requires a per-line `# epsilon-allow: <reason>`
+(reason >= 8 chars); `nx doctor` surfaces violations. So RDR-128 introduces no new
+concept — the single-writer boundary exists and is enforced-by-lint, but the
+exemption list has proliferated (RF-1: 20 sites). This gives the cure a built-in
+**metric** (the `epsilon-allow` count) and a built-in **gate** (the lint): route
+the writers so their exemptions can be deleted, and reserve exemptions for the
+genuinely-irreducible bootstrap cases (the `nx upgrade` chicken-and-egg) under an
+explicit lock discipline. Acceptance = the exemption count reduced to that
+documented-irreducible set.
 
 ## Proposed Solution
 
