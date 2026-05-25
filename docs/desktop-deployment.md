@@ -85,6 +85,21 @@ to silence.)
 
 The check is non-fatal: a network failure, timeout, or unreachable PyPI never blocks startup. Set `NX_MCPB_SKIP_UPDATE_CHECK=1` in the environment to opt out entirely.
 
+## Updating the Desktop Extension
+
+The `.mcpb` does **not** auto-update. MCPB v0.4 has no update mechanism, and the extension's Python environment is pinned at install time: Claude Desktop builds a `uv` venv under `~/Library/Application Support/Claude/Claude Extensions/local.mcpb.<id>.conexus/.venv` from the bundle's `pyproject.toml` (`conexus>=X.Y.Z`), and every launch runs `uv run` against **that existing venv**. `uv run` reuses the resolved venv rather than re-resolving against PyPI, so a newer published conexus is not picked up until the bundle is re-installed and the venv is rebuilt.
+
+So the update is a manual, idempotent re-install:
+
+1. **Download** the new `conexus.mcpb` from the [latest release](https://github.com/Hellblazer/nexus/releases/latest) (the same asset attached to every GitHub release alongside the wheel and sdist).
+2. **Double-click it** (or Claude Desktop → Settings → Connectors → Desktop → install). Claude Desktop replaces the existing "Conexus" extension in place; you do not need to uninstall first.
+3. **First launch resolves the new version.** `uv` rebuilds the venv from the new manifest's `conexus>=X.Y.Z` pin (~20s cold, ~5s warm), pulling the new conexus from PyPI. The stale-install warning stops firing once installed == latest.
+4. **Verify** (optional): the installed version is the `version` field in the extension's `manifest.json`, and the resolved package is `<ext>/.venv/bin/python -c "from importlib.metadata import version; print(version('conexus'))"`.
+
+What the update does **not** touch: the host T2 daemon, the T3 store, the catalog, and all stored data are owned by the OS / user account and shared across the CLI, the Claude Code plugin, and the Desktop extension. Re-installing the bundle swaps only the bundle files and its venv. The daemon is not restarted by an extension update.
+
+**Version skew is expected and tolerated.** The Desktop connector (its venv) and the host T2 daemon are independent installs that can briefly differ, since they update on different triggers (a `.mcpb` re-install vs `uv tool upgrade conexus` / a CLI reinstall). The connector talks to the daemon over RPC within a major version; align them by updating whichever is behind. After a release, update both: the CLI/daemon via `uv tool upgrade conexus` (then restart the daemon), and the Desktop extension via the re-install above.
+
 ## Uninstall
 
 ### Claude Code plugin
