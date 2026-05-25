@@ -167,13 +167,20 @@ def t2_index_write(write_fn) -> None:
     against exactly one writer, never re-run, so there is no double-write
     risk regardless of how it handles errors.
     """
-    from nexus.daemon.t2_client import T2DaemonNotReachableError, make_t2_client
+    from nexus.daemon.t2_client import (
+        T2DaemonNotReachableError,
+        T2SchemaVersionMismatchError,
+        make_t2_client,
+    )
 
     client = None
     try:
         client = make_t2_client()
         client.database.hello()  # force the lazy connect; raises if down
-    except T2DaemonNotReachableError:
+    except (T2DaemonNotReachableError, T2SchemaVersionMismatchError):
+        # Daemon down OR version-skewed (e.g. just after a daemon upgrade,
+        # before the indexer is restarted). Either way it cannot serve this
+        # write; close the half-open client and degrade to a direct write.
         if client is not None:
             client.close()
         client = None
@@ -185,8 +192,14 @@ def t2_index_write(write_fn) -> None:
             client.close()
         return
 
+    # Degraded path: this is the direct-lock behavior RDR-128 exists to
+    # eliminate, so log it at warning (not debug) — a persistently
+    # unreachable daemon during indexing is operator-actionable.
     import structlog
-    structlog.get_logger().debug("t2_index_write_daemon_unreachable_fallback")
+    structlog.get_logger().warning(
+        "t2_index_write_daemon_unreachable_fallback",
+        hint="start the T2 daemon (`nx daemon t2 start`) to route indexer writes",
+    )
     from nexus.db.t2 import T2Database
     with T2Database(default_db_path()) as db:
         write_fn(db)

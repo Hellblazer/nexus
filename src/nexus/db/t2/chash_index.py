@@ -179,6 +179,13 @@ class ChashIndex:
         filters, but the batch API is defensive). Raises ``ValueError`` on
         an empty ``collection`` (a caller-side bug); an empty ``chashes``
         list is a silent no-op.
+
+        All-or-nothing: the batch is one ``executemany`` + ``commit``, so a
+        failure rolls back the whole batch (unlike the prior per-row loop,
+        where one bad row was logged and the rest continued). Callers that
+        need best-effort partial progress should pre-validate the batch;
+        ``dual_write_chash_index`` accepts this since it is best-effort and
+        wrapped at the hook level.
         """
         if not collection:
             raise ValueError("collection must not be empty")

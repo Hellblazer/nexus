@@ -135,3 +135,53 @@ def test_non_unreachable_error_propagates_no_fallback(
 
     with pytest.raises(RuntimeError, match="daemon-side RPC error"):
         t2_index_write(_write)
+
+
+def test_dual_write_calls_upsert_many_exactly_once() -> None:
+    """The batch dual-write must be ONE store call (one daemon RPC when
+    routed), not one per chunk — pins the batching, not just end-state."""
+    from nexus.db.t2.chash_index import dual_write_chash_index
+
+    class _SpyChash:
+        def __init__(self) -> None:
+            self.many = 0
+            self.single = 0
+            self.seen: tuple | None = None
+
+        def upsert_many(self, *, chashes, collection) -> None:  # noqa: ANN001
+            self.many += 1
+            self.seen = (list(chashes), collection)
+
+        def upsert(self, *, chash, collection) -> None:  # noqa: ANN001
+            self.single += 1
+
+    spy = _SpyChash()
+    metas = [{"chunk_text_hash": f"h{i}"} for i in range(5)]
+    dual_write_chash_index(spy, "code__c", [f"d{i}" for i in range(5)], metas)
+
+    assert spy.many == 1, "must batch into a single upsert_many call"
+    assert spy.single == 0, "must NOT loop per-row upsert"
+    assert spy.seen == (["h0", "h1", "h2", "h3", "h4"], "code__c")
+
+
+def test_chash_hook_delegates_to_t2_index_write(monkeypatch) -> None:
+    """chash_dual_write_batch_hook routes through t2_index_write (the daemon
+    path), not a raw t2_ctx/T2Database open."""
+    import nexus.mcp_infra as mi
+
+    calls: list[object] = []
+    monkeypatch.setattr(mi, "t2_index_write", lambda write_fn: calls.append(write_fn))
+    monkeypatch.setattr(
+        mi, "t2_ctx",
+        lambda: pytest.fail("hook must route via t2_index_write, not t2_ctx"),
+    )
+
+    mi.chash_dual_write_batch_hook(
+        doc_ids=["d1"],
+        collection="code__c",
+        contents=["x"],
+        embeddings=None,
+        metadatas=[{"chunk_text_hash": "h1"}],
+    )
+
+    assert len(calls) == 1, "chash hook must delegate exactly one write to t2_index_write"
