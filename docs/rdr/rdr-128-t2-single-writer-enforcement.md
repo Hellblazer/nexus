@@ -1,0 +1,194 @@
+---
+title: "T2 Single-Writer Enforcement: One Owner for memory.db, or an Enforced Lock Discipline"
+id: RDR-128
+type: Architecture
+status: draft
+priority: high
+author: Hal Hildebrand
+reviewed-by: self
+created: 2026-05-25
+accepted_date:
+related_issues: [nexus-kg8sj, nexus-v4m7y, nexus-aigkb, nexus-n8sbw, nexus-5ldk1]
+related_rdrs: [RDR-105, RDR-120]
+supersedes: []
+related_tests: []
+implementation_notes: ""
+---
+
+# RDR-128: T2 Single-Writer Enforcement: One Owner for memory.db, or an Enforced Lock Discipline
+
+> Revise during planning; lock at implementation.
+> If wrong, abandon code and iterate RDR.
+
+## Problem Statement
+
+RDR-120 introduced the T2 daemon on the premise that it is the **single writer**
+of `memory.db` — one long-lived process owns the SQLite handles, and all other
+consumers reach T2 through it via RPC. That invariant is asserted but **not
+enforced**. In practice `memory.db` is a plain SQLite file that at least five
+independent code paths open directly with their own connections. SQLite in WAL
+mode permits many concurrent readers but exactly **one** writer; with multiple
+direct writers, lock contention is structural rather than incidental, and it has
+surfaced as a string of daemon incidents patched one symptom at a time across
+three consecutive patch releases.
+
+The releases 5.0.2, 5.0.3, and 5.0.4 each shipped a daemon "fix." None addressed
+the contention itself. Within minutes of shipping 5.0.4, the daemon entered a
+crash-loop on `sqlite3.OperationalError: database is locked` during its startup
+migration, because a post-commit-hook indexer held the WAL lock. This RDR exists
+to stop the patch-per-incident cycle by fixing the root cause: enforce a single
+writer, or replace the WAL free-for-all with a real cross-process lock discipline.
+
+## Context
+
+The piecemeal history, all tracing to the same invariant:
+
+- **5.0.2 / nexus-v4m7y**: `aspect_queue.reclaim_stale` raised "database is locked"
+  under WAL contention. Fix: `busy_timeout` 5s→30s + 3-attempt retry on that one
+  code path.
+- **5.0.2 / nexus-aigkb**: orphan T1 chromadb servers leaked across sessions. Fix:
+  sweep them at MCP startup. (The T1 sibling of the same disease — substrate
+  process lifecycle is not owned by one authority.)
+- **5.0.3 / nexus-n8sbw**: the daemon ran with stdout/stderr → DEVNULL and no log
+  sink, so its deaths were undiagnosable. Fix: file logging + status pid-liveness.
+  This was not the disease; it was that we were *blind* to the disease.
+- **5.0.4 / nexus-5ldk1**: the daemon froze its code version at start, so an
+  upgrade left a stale daemon. Fix: version-aware `ensure-running` that cycles a
+  stale daemon.
+- **OPEN / nexus-kg8sj** (deferred to 5.1.x): `nx index repo` bypasses the daemon
+  and opens `memory.db` directly, holding the WAL lock. This is the keystone
+  offender: frequent (fires from the post-commit hook on every commit) and
+  long-running.
+
+**The live incident that motivated this RDR (2026-05-25):** immediately after
+the 5.0.4 publish, `nx daemon t2 ensure-running` (the new 5.0.4 primitive)
+SIGTERM'd a healthy daemon to cycle it onto the new version; the respawn's startup
+migration hit the indexer's WAL lock and crashed; ensure-running is one-shot, so
+the daemon was left **down**. The 5.0.4 lifecycle fix, composed with kg8sj and an
+un-retried startup-migration path, converted "stale-but-running daemon" into "no
+daemon at all." We amplified the failure with the patch meant to fix lifecycle.
+
+## Research Findings
+
+**RF-1 — `memory.db` has 5+ direct accessors, not one.** Confirmed direct openers:
+(a) the T2 daemon (serving + startup migration); (b) `nx index repo` (kg8sj); (c)
+`nx upgrade` (explicit `epsilon-allow: nx upgrade chicken-and-egg substrate
+bootstrap (cannot route through daemon)`); (d) the `aspect_worker` thread inside
+every `nx-mcp` process (per the `daemon-restart-not-worker-fix` finding, the
+worker opens its own short-lived SQLite connection); (e) `nx doctor` (multiple
+`epsilon-allow` read-only diagnostic connections). The `epsilon-allow` comments
+are themselves an audit trail of where the single-writer invariant was knowingly
+broken.
+
+**RF-2 — every daemon incident is a contention symptom.** v4m7y = writer-vs-writer
+collision; kg8sj = the indexer-writer starves others; the 2026-05-25 crash-loop =
+the indexer-writer starves the daemon's *startup-migration* writer; aigkb = the
+unowned-lifecycle sibling. The pattern is not coincidence; it is the predictable
+consequence of N writers on one WAL lock.
+
+**RF-3 — contention hardening is inconsistent across paths.** v4m7y added
+`busy_timeout`+retry to `reclaim_stale`, but the daemon's **startup migration**
+(`apply_pending` via `T2Database.bootstrap_schema`, t2_daemon.py:493) has no such
+tolerance — it crashes hard on a locked DB. So even the band-aid was applied to
+one path and not the structurally-identical one next to it.
+
+**RF-4 — the 5.0.4 lifecycle cycle has no safety interlock.** `ensure-running`'s
+version-aware cycle SIGTERMs a running daemon without first confirming the
+replacement can acquire the DB. Trading a working-but-stale daemon for no daemon
+is strictly worse; the cycle needs a precondition.
+
+## Proposed Solution
+
+Enforce the single-writer invariant. Direction (to be refined in research/gate):
+
+1. **Route the worst offenders' writes through the daemon.** Keystone: the
+   indexer (kg8sj) writes T2 (catalog manifest, chash index, telemetry) via the
+   daemon RPC instead of a direct connection. Then audit `nx upgrade` and the
+   `aspect_worker` similarly.
+2. **For paths that genuinely cannot route** (the `nx upgrade` chicken-and-egg:
+   it migrates the schema the daemon needs before the daemon can own it), define
+   and enforce a **cross-process lock discipline** — e.g. the daemon must be
+   stopped for the migration window, or a documented advisory file-lock both the
+   daemon and `nx upgrade` honor — replacing the implicit WAL free-for-all.
+3. **Make every remaining direct DB path lock-tolerant**, starting with the
+   daemon startup migration (the same `busy_timeout`+retry v4m7y gave
+   `reclaim_stale`), so a transient lock causes a wait, not a crash.
+4. **Add the lifecycle interlock**: `ensure-running` must not SIGTERM a healthy
+   daemon to cycle it unless the replacement can acquire the DB lock first.
+
+The first principle is "one writer." Where that is impossible, the second
+principle is "explicit, enforced, documented lock discipline" — never the
+current implicit contention.
+
+## Alternatives Considered
+
+- **A. Keep patching per-incident.** Rejected — this is the status quo that
+  produced three releases of band-aids and a crash-loop. Each new code path that
+  touches `memory.db` is a new contention source and a new patch.
+- **B. Cross-process advisory lock only, no routing.** A shared advisory lock all
+  writers honor, without funnelling writes through the daemon. Lighter than full
+  routing; preserves the "many writers" topology but serializes them explicitly.
+  Viable for paths that can't route (upgrade), insufficient alone for the hot path
+  (indexer) where routing also buys batching + back-pressure.
+- **C. Full single-writer routing (all writes via daemon RPC).** The cleanest
+  realization of RDR-120's premise, highest implementation cost (every direct
+  writer must gain an RPC path, including the bootstrap chicken-and-egg). Likely
+  the end state; phase toward it.
+
+## Trade-offs
+
+Routing through the daemon adds RPC latency and a hard dependency on the daemon
+being up for writes that today degrade to direct access. The mitigation is that
+the daemon is *supposed* to be the authority anyway, and the 5.0.4 work already
+makes it self-heal on install. The cost of NOT doing this is the demonstrated
+patch-per-incident cycle plus user-facing daemon outages.
+
+## Implementation Plan
+
+Phased; P0 stops the bleeding, P1 removes the keystone, P2 closes the rest.
+
+- **P0 (crash-loop stop, patch-shippable):** (a) startup migration gets
+  `busy_timeout`+retry (RF-3); (b) `ensure-running` lifecycle interlock (RF-4).
+  These are small, self-contained, and end the self-inflicted amplification. They
+  remain mitigations, not the cure.
+- **P1 (keystone, nexus-kg8sj):** route `nx index repo` T2 writes through the
+  daemon. The single highest-value change; removes the most frequent, longest-held
+  lock.
+- **P2 (close the invariant):** audit `nx upgrade`, `aspect_worker`, `nx doctor`;
+  route or place each under the enforced lock discipline; remove the
+  `epsilon-allow` exemptions or convert them to documented, locked exceptions.
+
+## Test Plan
+
+- Reproduce the contention deterministically: hold a write lock on `memory.db`
+  (simulated indexer) and assert the daemon startup *waits and succeeds* rather
+  than crashing.
+- Assert `ensure-running` does not tear down a healthy daemon when the DB lock
+  is unavailable.
+- Concurrency test: N simulated writers (indexer + upgrade + worker) against one
+  daemon, assert no `database is locked` surfaces to a caller.
+- Regression guard that no new code path opens `memory.db` directly without going
+  through the routing/lock helper (lint or test over `epsilon-allow` sites).
+
+## Validation
+
+The disease is cured when a full release cycle (the kind that produced this RDR)
+can run — many commits firing the post-commit indexer, an upgrade, a daemon
+restart — without a single `database is locked` daemon incident, and with no new
+daemon band-aid bead filed.
+
+## Finalization Gate
+
+Pending — to be run via `/conexus:rdr-gate` after research findings are verified.
+
+## References
+
+- RDR-120 (Storage Substrate Split — asserted single-writer; this RDR enforces it)
+- RDR-105 (T1 sub-agent contract — sibling substrate-lifecycle discipline)
+- Beads: nexus-kg8sj (keystone), nexus-v4m7y, nexus-aigkb, nexus-n8sbw, nexus-5ldk1
+- Memory: `daemon-restart-not-worker-fix` (aspect_worker opens its own SQLite conn)
+
+## Revision History
+
+- 2026-05-25: Created (draft). Root-cause RDR motivated by the 5.0.4 post-publish
+  daemon crash-loop and the three-patch band-aid pattern Hal flagged.
