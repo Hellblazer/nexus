@@ -39,6 +39,36 @@ migration, because a post-commit-hook indexer held the WAL lock. This RDR exists
 to stop the patch-per-incident cycle by fixing the root cause: enforce a single
 writer, or replace the WAL free-for-all with a real cross-process lock discipline.
 
+The problem decomposes into four gaps (each maps to a verified research finding):
+
+#### Gap 1: The single-writer invariant is unenforced
+
+RDR-120 declared the daemon the single writer, but `memory.db` has many direct
+writers — verified 20 `epsilon-allow` `sqlite3.connect` sites and 53 direct
+`T2Database(...)` constructions outside the daemon (RF-1). They contend on
+SQLite's one WAL writer lock, so contention is structural. The keystone offender
+is the indexer (`nx index repo`, nexus-kg8sj): frequent (every commit's
+post-commit hook) and long-running.
+
+#### Gap 2: Contention hardening is inconsistent across DB paths
+
+v4m7y gave `reclaim_stale` a 30s `busy_timeout` + bounded retry, but the daemon's
+startup migration (`bootstrap_schema` → `apply_pending`) still uses a 5s
+`busy_timeout` and no lock-retry (RF-3). Under a sustained foreign lock the 5s
+expires and the daemon crashes — the proximate cause of the 2026-05-25 crash-loop.
+
+#### Gap 3: The lifecycle cycle has no DB-acquire interlock
+
+The 5.0.4 version-aware `ensure-running` SIGTERMs a healthy daemon unconditionally
+to cycle it (RF-4). Composed with Gap 2, it tears down a working daemon and the
+respawn crashes on a held lock — converting "stale-but-running" into "no daemon."
+
+#### Gap 4: The boundary lint is partial
+
+`storage_boundary_lint` (already wired into `nx doctor --check-storage-boundary`)
+flags raw `sqlite3.connect` but not direct `T2Database(...)` construction (RF-5).
+Closing only the raw-connect surface pushes the bypass into the construction form.
+
 ## Context
 
 The piecemeal history, all tracing to the same invariant:
