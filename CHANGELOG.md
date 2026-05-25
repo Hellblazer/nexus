@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.0.3] - 2026-05-25
+
 ### Fix: T2 daemon observability + stale-state detection (nexus-n8sbw)
 
 The T2 daemon was spawned with stdout/stderr routed to `DEVNULL` and had
@@ -24,6 +26,17 @@ no structlog file sink, so a crash or signal-kill left no record (a
   This is the fallback argv `_resolve_nx_bin` emits when the `nx` console
   script is not on PATH; without the guard that fallback ran nothing and
   exited 0, so daemon autostart could silently never start.
+
+### Tests: integration suite skips on absent corpus (nexus-gudwb)
+
+The RDR-097 hybrid-retrieval and RDR-093 groupby/aggregate integration
+tests require local-dev corpora (`knowledge__hybridrag`, `knowledge__delos`)
+that are absent on most machines and on CI. They previously hard-failed
+with a misleading "zero hits" / "<2 hits corpus health" assertion when the
+corpus was missing. They now probe T3 for the corpus (existence + >=2 docs)
+and `pytest.skip` when it is absent, matching their existing API-key /
+claude-auth skip-guards. When the corpus IS provisioned the real
+assertions still run; a missing dev corpus is no longer a spurious failure.
 
 ## [5.0.2] - 2026-05-24
 
