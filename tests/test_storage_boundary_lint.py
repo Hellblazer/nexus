@@ -27,14 +27,16 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "nexus"
 
 
-def _check(extra_files=None, allowlist_prefixes=None):
-    """Run the lint and return its result tuple."""
+def _check(extra_files=None, allowlist_prefixes=None,
+           construction_allowlist_prefixes=None):
+    """Run the lint and return its result."""
     from nexus.storage_boundary_lint import scan_repo
 
     return scan_repo(
         repo_root=REPO_ROOT,
         allowlist_prefixes=allowlist_prefixes,
         extra_files=extra_files,
+        construction_allowlist_prefixes=construction_allowlist_prefixes,
     )
 
 
@@ -166,7 +168,7 @@ def test_aliased_sqlite_import_caught(tmp_path):
     matched = [v for v in result.violations if v.file == str(target)]
     assert len(matched) == 1
     # The alias is resolved back to the canonical module name.
-    assert "sqlite3.connect" in matched[0].symbol or "_sqlite3.connect" in matched[0].symbol
+    assert matched[0].symbol in ("sqlite3.connect", "_sqlite3.connect")
 
 
 # ---------------------------------------------------------------------------
@@ -211,3 +213,110 @@ def test_result_has_file_line_symbol(tmp_path):
     assert isinstance(v.line, int)
     assert isinstance(v.symbol, str)
     assert v.line == 2
+
+
+# ---------------------------------------------------------------------------
+# RDR-128 P0c (RF-5): T2Database construction detection + dual baseline
+# ---------------------------------------------------------------------------
+#
+# The lint counts two baseline populations so the single-writer cure
+# (P1/P3) is measurable from day one:
+#   * population 1 — ``sqlite3.connect`` sites carrying a deliberate
+#     ``# epsilon-allow:`` override (the raw-connect exceptions);
+#   * population 2 — direct ``T2Database(...)`` syntactic constructions
+#     outside the db/ + daemon/ construction-allowlist.
+#
+# RDR-128 RF-1 cited 20 / 53 from a *codebase grep* (RDR §RF-1, line
+# "Verified ... codebase grep"). That grep over-counts: ``grep
+# 'T2Database('`` substring-matches the 16 ``_T2Database(...)`` wrapper
+# call sites in commands/taxonomy_cmd.py plus several doc-comments. The
+# AST lint counts true syntactic constructions (the taxonomy_cmd wrapper
+# body is one site, reused 16×), giving the authoritative baseline below.
+
+
+def test_t2database_construction_flagged(tmp_path):
+    """A direct ``T2Database(...)`` construction is counted (population 2)."""
+    base = _check().t2database_constructions
+    target = tmp_path / "ctor_offender.py"
+    target.write_text(
+        "from nexus.db.t2 import T2Database\n"
+        "def bad():\n"
+        "    return T2Database('/tmp/x.db')\n"
+    )
+    assert _check(extra_files=[target]).t2database_constructions == base + 1
+
+
+def test_t2database_construction_aliased_import_flagged(tmp_path):
+    """``from ... import T2Database as DB; DB(...)`` is resolved + counted."""
+    base = _check().t2database_constructions
+    target = tmp_path / "ctor_aliased.py"
+    target.write_text(
+        "from nexus.db.t2 import T2Database as DB\n"
+        "def bad():\n"
+        "    return DB('/tmp/x.db')\n"
+    )
+    assert _check(extra_files=[target]).t2database_constructions == base + 1
+
+
+def test_t2database_attribute_form_flagged(tmp_path):
+    """``module.T2Database(...)`` (attribute access) is also counted."""
+    base = _check().t2database_constructions
+    target = tmp_path / "ctor_attr.py"
+    target.write_text(
+        "import nexus.db.t2 as t2mod\n"
+        "def bad():\n"
+        "    return t2mod.T2Database('/tmp/x.db')\n"
+    )
+    assert _check(extra_files=[target]).t2database_constructions == base + 1
+
+
+def test_epsilon_allow_connect_counted_as_population(tmp_path):
+    """An epsilon-allow'd ``sqlite3.connect`` is counted (population 1),
+    not silently dropped, and is NOT a hard violation."""
+    base = _check()
+    target = tmp_path / "eps_connect.py"
+    target.write_text(
+        "import sqlite3\n"
+        "def ok():\n"
+        "    return sqlite3.connect('/tmp/x.db')  # epsilon-allow: documented exception\n"
+    )
+    result = _check(extra_files=[target])
+    assert result.epsilon_allow_connects == base.epsilon_allow_connects + 1
+    # Still not a hard violation (the override suppresses that).
+    assert [v for v in result.violations if v.file == str(target)] == []
+
+
+def test_daemon_construction_is_allowlisted(tmp_path):
+    """db/ AND daemon/ are construction-allowlisted (the daemon is the
+    legitimate single writer). Removing daemon/ from the allowlist must
+    reveal strictly more constructions."""
+    default = _check().t2database_constructions
+    db_only = _check(
+        construction_allowlist_prefixes=("src/nexus/db/",)
+    ).t2database_constructions
+    assert db_only > default, (
+        "daemon/ T2Database construction(s) should be excluded by default"
+    )
+
+
+def test_dual_population_baseline_locked():
+    """Exact baseline lock (silent-corruption guard, RDR-128 P0c).
+
+    These are the AST-authoritative counts on develop @ 5.0.4 + this P0
+    change. Locked as ``== N`` (never ``>=``): a regression that adds a
+    raw connect or a T2Database construction outside the daemon trips the
+    assertion, forcing either a daemon route (P1/P3) or a deliberate
+    baseline bump with justification.
+
+    Divergence from RDR RF-1's grep figures (20 / 53) is expected and
+    documented in this module's header — the AST count is authoritative.
+    """
+    result = _check()
+    # 16 = 15 pre-existing raw-connect exceptions + the RDR-128 P0b
+    # lock-acquirability probe (daemon.py), itself a deliberate raw connect.
+    assert result.epsilon_allow_connects == 16, (
+        f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
+    )
+    assert result.t2database_constructions == 35, (
+        f"T2Database construction baseline moved: {result.t2database_constructions}"
+    )

@@ -90,6 +90,79 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger()
 
+
+# RDR-128 P0a (RF-3): the daemon's startup migration must tolerate another
+# process holding memory.db's single WAL writer lock (typically ``nx index
+# repo``). ``busy_timeout`` governs how long each statement waits for the
+# lock before raising ``database is locked``; the old 5s was tight enough
+# that a concurrent indexer could trip a migration step and crash the
+# freshly-spawned daemon. 30s matches the intra-host contention window
+# already used by aspect_extraction_queue (nexus-v4m7y) and costs nothing
+# on a quiet database.
+_BOOTSTRAP_BUSY_TIMEOUT_MS: int = 30000
+
+# Bounded Python-level retry around ``apply_pending``, layered on top of the
+# busy_timeout. Mirrors aspect_extraction_queue.reclaim_stale: three attempts
+# with two inter-attempt sleeps. ``apply_pending`` is idempotent (per-migration
+# existence guards) and only records the path as done on success, so a retry
+# after a mid-run ``database is locked`` safely re-runs from bootstrap_version.
+# Worst case if every attempt blocks the full busy_timeout: 30 + 0.5 + 30 +
+# 1.0 + 30 = ~91.5s, after which the final attempt re-raises so a genuinely
+# stuck lock still surfaces rather than hanging the daemon forever.
+_BOOTSTRAP_RETRY_SLEEPS_BETWEEN: tuple[float, ...] = (0.5, 1.0)
+
+
+def _apply_pending_with_lock_retry(
+    conn: sqlite3.Connection, current_version: str
+) -> None:
+    """Run the startup migration (``PRAGMA journal_mode=WAL`` + ``apply_pending``)
+    with a bounded retry on ``database is locked`` / ``database is busy``.
+
+    ``journal_mode=WAL`` is inside the retry because it is itself a write
+    that takes the writer lock when the file is not already in WAL mode —
+    leaving it outside would let a held lock crash the daemon before
+    ``apply_pending`` ever runs (code-review finding, RDR-128 P0a). Only
+    writer-slot contention is retried; any other ``OperationalError``
+    (schema corruption, FK violation, ...) propagates on the first attempt.
+    The final attempt re-raises so the failure is never silently swallowed.
+    """
+    import time
+
+    from nexus.db.migrations import apply_pending
+
+    sleeps_between = _BOOTSTRAP_RETRY_SLEEPS_BETWEEN
+    max_attempts = len(sleeps_between) + 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            apply_pending(conn, current_version)
+            if attempt > 1:
+                _log.info(
+                    "t2_bootstrap_migration_recovered",
+                    attempt=attempt,
+                )
+            return
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            # Clear any partial transaction left by the failed step so the
+            # retry re-runs from a clean connection state.
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            if attempt == max_attempts:
+                raise
+            sleep_seconds = sleeps_between[attempt - 1]
+            _log.warning(
+                "t2_bootstrap_migration_lock_retry",
+                attempt=attempt,
+                next_sleep_seconds=sleep_seconds,
+                exc=str(exc),
+            )
+            time.sleep(sleep_seconds)
+
 # Re-export surface for backward compatibility. Resolution happens
 # lazily through the module-level ``__getattr__`` below; the eager
 # imports were pulling sklearn/scipy/numpy through CatalogTaxonomy on
@@ -328,7 +401,7 @@ class T2Database:
         short-circuit via the ``_upgrade_done`` set in
         :mod:`nexus.db.migrations`.
         """
-        from nexus.db.migrations import _upgrade_done, _upgrade_lock, apply_pending
+        from nexus.db.migrations import _upgrade_done, _upgrade_lock
 
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -356,9 +429,15 @@ class T2Database:
 
             conn = sqlite3.connect(str(path), check_same_thread=False)
             try:
-                conn.execute("PRAGMA busy_timeout=5000")
-                conn.execute("PRAGMA journal_mode=WAL")
-                apply_pending(conn, current_version)
+                # RDR-128 P0a (RF-3): tolerate a concurrent writer (e.g.
+                # `nx index repo`) holding the WAL writer lock — wait it out
+                # via a 30s busy_timeout plus a bounded retry, rather than
+                # crashing the daemon on `database is locked`.
+                # busy_timeout is a connection-local pragma that never blocks;
+                # journal_mode=WAL + apply_pending run inside the retry helper
+                # since both can take the writer lock (RDR-128 P0a).
+                conn.execute(f"PRAGMA busy_timeout={_BOOTSTRAP_BUSY_TIMEOUT_MS}")
+                _apply_pending_with_lock_retry(conn, current_version)
             finally:
                 conn.close()
             # Mirror the T2Database-form path_key into _upgrade_done so
