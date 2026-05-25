@@ -106,7 +106,7 @@ fi
 #   ~/.claude/settings.json                  — enabledPlugins + permissions
 NOW="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
 
-# Build installed_plugins.json — nx only.
+# Build installed_plugins.json (conexus only).
 cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" << PLUGINS_EOF
 {
   "version": 2,
@@ -114,7 +114,7 @@ cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" << PLUGINS_EOF
     "conexus@nexus-plugins": [
       {
         "scope": "user",
-        "installPath": "$REPO_ROOT/nx",
+        "installPath": "$REPO_ROOT/conexus",
         "version": "dev",
         "installedAt": "$NOW",
         "lastUpdated": "$NOW"
