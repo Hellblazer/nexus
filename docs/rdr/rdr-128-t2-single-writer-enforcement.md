@@ -91,16 +91,29 @@ the indexer-writer starves the daemon's *startup-migration* writer; aigkb = the
 unowned-lifecycle sibling. The pattern is not coincidence; it is the predictable
 consequence of N writers on one WAL lock.
 
-**RF-3 — contention hardening is inconsistent across paths.** v4m7y added
-`busy_timeout`+retry to `reclaim_stale`, but the daemon's **startup migration**
-(`apply_pending` via `T2Database.bootstrap_schema`, t2_daemon.py:493) has no such
-tolerance — it crashes hard on a locked DB. So even the band-aid was applied to
-one path and not the structurally-identical one next to it.
+**RF-3 — contention hardening is inconsistent across paths. VERIFIED 2026-05-25.**
+v4m7y added `busy_timeout`+retry to `reclaim_stale`, but the daemon's **startup
+migration** (`apply_pending` via `T2Database.bootstrap_schema`) has no such
+tolerance. Confirmed by reading the source: `bootstrap_schema`
+(`db/t2/__init__.py`) opens its connection with `PRAGMA busy_timeout=5000` (5s)
+and no lock-retry (`apply_pending`'s `MigrationRetry` handles migration-internal
+signals, not SQLite `database is locked`), whereas `reclaim_stale`
+(`aspect_extraction_queue.py:162`) uses `busy_timeout=30000` (30s) + bounded
+retry. Under the observed 10+ minute indexer lock the 5s timeout expires and the
+daemon crashes — matching the live traceback. **P0 spec:** give `bootstrap_schema`
+`busy_timeout>=30000` and wrap `apply_pending` in a lock-retry, mirroring
+`reclaim_stale`.
 
-**RF-4 — the 5.0.4 lifecycle cycle has no safety interlock.** `ensure-running`'s
-version-aware cycle SIGTERMs a running daemon without first confirming the
-replacement can acquire the DB. Trading a working-but-stale daemon for no daemon
-is strictly worse; the cycle needs a precondition.
+**RF-4 — the 5.0.4 lifecycle cycle has no safety interlock. VERIFIED 2026-05-25.**
+Confirmed in `commands/daemon.py`: on version skew `ensure-running` calls
+`os.kill(running_pid, SIGTERM)` **unconditionally**, waits ≤10s for the old daemon
+to die, then falls through to cold spawn — with no precondition that a replacement
+can acquire the DB lock. **RF-3 × RF-4 is the exact amplification mechanism of the
+live incident:** the cycle tears down the healthy daemon (RF-4); the respawn's
+5s-no-retry startup migration crashes on the indexer's lock (RF-3); `ensure-running`
+is one-shot, so the daemon is left down. **P0 spec:** do not SIGTERM a healthy
+daemon for a version-cycle unless the DB is confirmed acquirable (or make the cycle
+atomic — only tear down once the replacement is confirmed startable).
 
 **RF-5 — the boundary is already recognized and linted; this is a tightening
 exercise.** `src/nexus/storage_boundary_lint.py` already flags direct
@@ -226,3 +239,9 @@ Pending — to be run via `/conexus:rdr-gate` after research findings are verifi
   storage_boundary_lint wired into `nx doctor --check-storage-boundary`). Added
   the construction-site lint-coverage gap and a second live contention incident.
   T2 findings: nexus_rdr/128-research-1, /128-research-1-verified.
+- 2026-05-25: RF-3 and RF-4 verified from source (bootstrap_schema 5s/no-retry vs
+  reclaim_stale 30s+retry; ensure-running unconditional SIGTERM). RF-3 × RF-4
+  pinned as the exact amplification mechanism; P0 specs recorded on each. A third
+  live `database is locked` contention hit while recording these findings. T2:
+  nexus_rdr/128-research-2, /128-research-3. All outstanding RFs (1,3,4,5) now
+  verified; RF-2 corroborated by the three live incidents + the RF-3 traceback.
