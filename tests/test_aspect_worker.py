@@ -51,11 +51,24 @@ def _reset_worker():
 
 @pytest.fixture(autouse=True)
 def _isolate_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Point t2_ctx at a tmp_path-scoped DB so worker and test
-    share the same SQLite file."""
+    """Point the indexer's T2 write paths at a tmp_path-scoped DB so worker
+    and test share the same SQLite file.
+
+    RDR-128 P1 (kg8sj): the enqueue hook now routes through
+    ``t2_index_write`` (daemon-or-direct), so isolate that too — here it
+    writes directly to the tmp DB (daemon routing is covered by
+    ``tests/test_rdr128_p1_index_write_routing.py``). ``t2_ctx`` stays
+    patched for the tests that open the queue directly.
+    """
     import nexus.mcp_infra as infra
     db_path = tmp_path / "worker_t2.db"
     monkeypatch.setattr(infra, "t2_ctx", lambda: T2Database(db_path))
+
+    def _direct_index_write(write_fn):  # noqa: ANN001
+        with T2Database(db_path) as db:
+            write_fn(db)
+
+    monkeypatch.setattr(infra, "t2_index_write", _direct_index_write)
     return db_path
 
 

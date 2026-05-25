@@ -837,13 +837,16 @@ def aspect_extraction_enqueue_hook(
     from nexus.aspect_extractor import select_config
     if select_config(collection) is None:
         return  # No extractor for this collection — nothing to enqueue.
-    from nexus.mcp_infra import t2_ctx
+    from nexus.mcp_infra import t2_index_write
     try:
-        with t2_ctx() as t2:
-            t2.aspect_queue.enqueue(
+        # RDR-128 P1 (kg8sj): route the enqueue through the daemon so the
+        # indexer process does not open memory.db directly to write it.
+        t2_index_write(
+            lambda t2: t2.aspect_queue.enqueue(
                 collection, source_path, content=content,
                 doc_id=doc_id,
             )
+        )
     except Exception:
         _log.warning(
             "aspect_extraction_enqueue_failed",
