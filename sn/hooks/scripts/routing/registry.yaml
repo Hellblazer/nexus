@@ -3,18 +3,18 @@
 #
 # Per RDR-125, rules whose deny message redirects to a plugin-specific
 # tool live in the plugin that ships that tool. This file is sn's
-# registry; nx ships its own at conexus/hooks/scripts/routing/registry.yaml.
+# registry; conexus ships its own at conexus/hooks/scripts/routing/registry.yaml.
 #
 # Aggregate cap (RDR-121 + RDR-125): the union of routing rules
 # across all plugins must stay <= 4 PreToolUse:Bash entries to honor
 # the <300ms p95 cumulative budget. Current aggregate count:
-#   nx: 2 routing rules (git_add_all, phase_review_close)
+#   conexus: 2 routing rules (git_add_all, phase_review_close)
 #       + pre_close_verification_hook = 3 PreToolUse:Bash entries
 #   sn: 1 (grep_for_symbols_redirects_to_serena)
 #   total: 4, AT CAP. Adding a fifth rule in ANY plugin requires
 #   either consolidation or a budget revision in a successor RDR.
 #
-# The schema mirrors nx's registry.yaml exactly. See
+# The schema mirrors conexus's registry.yaml exactly. See
 # conexus/hooks/scripts/routing/registry.yaml for field documentation.
 
 rules:
