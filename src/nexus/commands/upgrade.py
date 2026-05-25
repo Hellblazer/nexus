@@ -18,6 +18,7 @@ from nexus.db.migrations import (
     _upgrade_done,
     apply_pending,
     bootstrap_version,
+    t2_migration_flock,
 )
 
 _log = structlog.get_logger()
@@ -45,20 +46,78 @@ def _current_version() -> str:
 @click.option("--skip-t3", is_flag=True, help="Skip T3 upgrade steps (e.g., cross-collection projection backfill). Useful for fast T2-only migrations.")
 def upgrade(dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool) -> None:
     """Run pending database migrations and upgrade steps."""
+    # RDR-128 P2: quiesce the daemon BEFORE migrating so its live T2
+    # connections are released — the migration flock serializes the two
+    # MIGRATOR processes, but only quiescing frees the daemon's serving
+    # connections so the migration DDL has clear access. try/finally brings
+    # the daemon back even if the upgrade fails (a failed upgrade must not
+    # leave the daemon down; its startup migration is idempotent + flocked).
     try:
+        if not dry_run:
+            _quiesce_daemon()
         _run_upgrade(dry_run=dry_run, force=force, auto_mode=auto_mode, skip_t3=skip_t3)
     except Exception:
         if auto_mode:
             _log.warning("upgrade_auto_error", exc_info=True)
             return
         raise
-    # nexus-5ldk1: a running T2 daemon froze its code at start and now
-    # predates this upgrade. Bring it to the just-installed version so the
-    # upgrade is live rather than pending a manual daemon restart.
-    # ensure-running is version-aware: no-op on a current daemon, graceful
-    # cycle on a stale one. Best-effort, non-dry-run only.
-    if not dry_run:
-        _cycle_daemon_to_current()
+    finally:
+        # nexus-5ldk1: a running T2 daemon froze its code at start and now
+        # predates this upgrade. Bring it to the just-installed version so
+        # the upgrade is live rather than pending a manual daemon restart.
+        # ensure-running is version-aware: no-op on a current daemon,
+        # graceful cycle on a stale one. Best-effort, non-dry-run only.
+        if not dry_run:
+            _cycle_daemon_to_current()
+
+
+def _quiesce_daemon() -> None:
+    """RDR-128 P2: stop the running T2 daemon and WAIT for it to exit, so it
+    has released its eight T2 connections before ``nx upgrade`` migrates.
+
+    ``nx daemon t2 stop`` only *sends* SIGTERM; the daemon then drains and
+    closes connections asynchronously, so we poll the recorded pid until it
+    is gone (bounded) to close the signal-to-shutdown race. Best-effort:
+    never raises — the migration flock + busy_timeout still protect
+    correctness if a straggler connection lingers.
+    """
+    import json
+    import os
+    import subprocess
+    import time as _time
+
+    try:
+        from nexus.commands.daemon import _resolve_nx_bin
+        from nexus.config import nexus_config_dir
+        from nexus.daemon.t2_daemon import t2_discovery_path
+
+        disc = t2_discovery_path(nexus_config_dir())
+        pid: int | None = None
+        if disc.exists():
+            try:
+                pid = json.loads(disc.read_text()).get("pid")
+            except (OSError, json.JSONDecodeError):
+                pid = None
+
+        subprocess.run(
+            [*_resolve_nx_bin(), "daemon", "t2", "stop"],
+            timeout=30,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # Wait for the daemon process to actually exit (release its conns).
+        if isinstance(pid, int) and pid > 0:
+            deadline = _time.monotonic() + 10.0
+            while _time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except (ProcessLookupError, PermissionError):
+                    break  # gone
+                _time.sleep(0.1)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("upgrade_daemon_quiesce_failed", error=str(exc))
 
 
 def _cycle_daemon_to_current() -> None:
@@ -176,7 +235,12 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
         path_key = str(Path(db_path).resolve())
         _upgrade_done.discard(path_key)
 
-        apply_pending(conn, current)
+        # RDR-128 P2: serialize against the daemon's startup migration via
+        # the cross-process flock (the daemon was quiesced above, but a
+        # session-start hook could respawn it mid-upgrade; the flock makes
+        # that respawn's migration WAIT rather than race the WAL).
+        with t2_migration_flock(db_path.parent):
+            apply_pending(conn, current)
 
         if not auto_mode:
             if pending_t2:

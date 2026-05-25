@@ -401,7 +401,11 @@ class T2Database:
         short-circuit via the ``_upgrade_done`` set in
         :mod:`nexus.db.migrations`.
         """
-        from nexus.db.migrations import _upgrade_done, _upgrade_lock
+        from nexus.db.migrations import (
+            _upgrade_done,
+            _upgrade_lock,
+            t2_migration_flock,
+        )
 
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -437,7 +441,11 @@ class T2Database:
                 # journal_mode=WAL + apply_pending run inside the retry helper
                 # since both can take the writer lock (RDR-128 P0a).
                 conn.execute(f"PRAGMA busy_timeout={_BOOTSTRAP_BUSY_TIMEOUT_MS}")
-                _apply_pending_with_lock_retry(conn, current_version)
+                # RDR-128 P2: take the cross-process migration flock so the
+                # daemon's startup migration serializes against `nx upgrade`
+                # (and vice-versa) instead of racing on the WAL writer lock.
+                with t2_migration_flock(path.parent):
+                    _apply_pending_with_lock_retry(conn, current_version)
             finally:
                 conn.close()
             # Mirror the T2Database-form path_key into _upgrade_done so

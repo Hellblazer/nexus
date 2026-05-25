@@ -11,11 +11,14 @@ RDR-076 (nexus-6cn).
 """
 from __future__ import annotations
 
+import fcntl
+import os
 import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 import structlog
 
@@ -2248,6 +2251,45 @@ _upgrade_done: set[str] = set()
 Checked by ``T2Database.__init__()`` before opening any connection.
 Distinct from per-domain ``_migrated_paths`` sets in each store.
 """
+
+#: RDR-128 P2: filename of the cross-process migration lock, in the same
+#: directory as ``memory.db`` (the config dir).
+T2_MIGRATION_LOCK_FILE: str = "t2_migration.lock"
+
+
+@contextmanager
+def t2_migration_flock(lock_dir: Path) -> Iterator[None]:
+    """Exclusive, cross-process advisory lock for T2 schema migration (RDR-128 P2).
+
+    Both ``nx upgrade`` and the daemon's own startup migration
+    (``T2Database.bootstrap_schema``) take this lock before running
+    ``apply_pending``, so the two migration paths SERIALIZE instead of
+    racing on SQLite's single WAL writer lock — the structural contention
+    that produced the 5.0.2-5.0.4 daemon incidents and the post-5.0.4
+    crash-loop.
+
+    Blocking ``LOCK_EX``: a second migrator WAITS for the first rather than
+    failing. The lock is bound to the open file descriptor, so the OS
+    releases it automatically when the fd is closed — including on process
+    death. A migrator that crashes mid-run therefore never strands the
+    lock; the next migrator acquires it and re-runs (``apply_pending`` is
+    idempotent and only records completion on success).
+
+    The lock file lives at ``<lock_dir>/t2_migration.lock``; both callers
+    pass the directory containing ``memory.db`` so they share one lock.
+    """
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / T2_MIGRATION_LOCK_FILE
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # blocking — serialize against the other migrator
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
 
 _upgrade_lock = threading.RLock()
 """Serialises the check-then-add on ``_upgrade_done``.
