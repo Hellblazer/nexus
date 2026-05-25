@@ -2,12 +2,12 @@
 title: "T2 Single-Writer Enforcement: One Owner for memory.db, or an Enforced Lock Discipline"
 id: RDR-128
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-25
-accepted_date:
+accepted_date: 2026-05-25
 related_issues: [nexus-kg8sj, nexus-v4m7y, nexus-aigkb, nexus-n8sbw, nexus-5ldk1]
 related_rdrs: [RDR-105, RDR-120]
 supersedes: []
