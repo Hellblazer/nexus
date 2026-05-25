@@ -236,3 +236,108 @@ def test_quiesce_daemon_shells_t2_stop(monkeypatch, tmp_path: Path) -> None:
 
     assert len(calls) == 1
     assert calls[0][-3:] == ["daemon", "t2", "stop"]
+
+
+def test_quiesce_daemon_waits_for_recorded_pid_to_exit(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """_quiesce_daemon polls the recorded pid via os.kill(pid,0) until the
+    process is gone — closing the SIGTERM-to-shutdown race (the poll loop
+    that test_quiesce_daemon_shells_t2_stop does not exercise)."""
+    import json
+    import os
+    import subprocess
+
+    import nexus.commands.upgrade as up
+    from nexus.daemon.t2_daemon import t2_discovery_path
+
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    disc = t2_discovery_path(tmp_path)
+    disc.parent.mkdir(parents=True, exist_ok=True)
+    disc.write_text(json.dumps({"pid": 999999, "daemon_version": "x"}))
+
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda argv, **kw: subprocess.CompletedProcess(argv, 0),
+    )
+
+    # The daemon is "alive" for the first two polls, then exits.
+    state = {"polls": 0}
+    real_kill = os.kill
+
+    def _fake_kill(pid, sig):  # noqa: ANN001
+        if pid == 999999 and sig == 0:
+            state["polls"] += 1
+            if state["polls"] >= 3:
+                raise ProcessLookupError
+            return
+        return real_kill(pid, sig)
+
+    monkeypatch.setattr(os, "kill", _fake_kill)
+
+    up._quiesce_daemon()
+
+    assert state["polls"] >= 3, "must poll the pid until the process exits"
+
+
+# ── Acceptance criterion: two real migrators don't collide ───────────────────
+
+
+def test_two_real_migration_paths_serialize_no_database_locked(
+    tmp_path: Path,
+) -> None:
+    """The literal acceptance criterion: the daemon-startup migration
+    (``bootstrap_schema``) and an ``nx upgrade``-style ``apply_pending``
+    (flock-wrapped) racing on the SAME memory.db both complete without a
+    ``database is locked`` error.
+
+    (Cross-process flock serialization itself is proven by
+    ``test_flock_serializes_two_holders``; this exercises the two real
+    migration paths integrated on one DB.)
+    """
+    from nexus.db.migrations import apply_pending, t2_migration_flock
+    from nexus.db.t2 import T2Database
+
+    db = tmp_path / "memory.db"
+    errors: list[tuple[str, Exception]] = []
+    start = threading.Barrier(2)
+
+    def _daemon_startup_path() -> None:
+        try:
+            start.wait(timeout=5)
+            T2Database.bootstrap_schema(db)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(("daemon", exc))
+
+    def _upgrade_path() -> None:
+        try:
+            start.wait(timeout=5)
+            conn = sqlite3.connect(str(db))
+            conn.execute("PRAGMA busy_timeout=30000")
+            try:
+                with t2_migration_flock(tmp_path):
+                    apply_pending(conn, "9.9.9")
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(("upgrade", exc))
+
+    t1 = threading.Thread(target=_daemon_startup_path)
+    t2 = threading.Thread(target=_upgrade_path)
+    t1.start()
+    t2.start()
+    t1.join(timeout=20)
+    t2.join(timeout=20)
+
+    assert not errors, f"migration paths collided: {errors}"
+    # Schema is present and consistent.
+    check = sqlite3.connect(str(db))
+    try:
+        tables = {
+            r[0] for r in check.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    finally:
+        check.close()
+    assert "_nexus_version" in tables

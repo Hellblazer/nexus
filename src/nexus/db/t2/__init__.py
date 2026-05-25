@@ -413,46 +413,58 @@ class T2Database:
         except OSError:
             path_key = str(path)
 
+        # Fast path: already migrated in this process. Cheap check under the
+        # in-process lock only — no cross-process flock needed.
         with _upgrade_lock:
             if path_key in _upgrade_done:
                 return
-            try:
-                from importlib.metadata import version as _pkg_version
 
-                current_version = _pkg_version("conexus")
-            except Exception:
-                current_version = "0.0.0"
+        # RDR-128 P2: acquire the cross-process migration flock BEFORE the
+        # in-process ``_upgrade_lock`` so the lock order matches ``nx upgrade``
+        # (flock -> _upgrade_lock, via apply_pending). Consistent ordering
+        # means the daemon-startup and upgrade migration paths cannot deadlock
+        # even if ever run concurrently in one process (code-review finding).
+        # The flock also serializes the two paths cross-process, replacing the
+        # old WAL free-for-all.
+        with t2_migration_flock(path.parent):
+            with _upgrade_lock:
+                # Double-check: another thread may have completed the migration
+                # while we blocked on the flock.
+                if path_key in _upgrade_done:
+                    return
+                try:
+                    from importlib.metadata import version as _pkg_version
 
-            import sys as _sys
-            if hasattr(_sys.stderr, "isatty") and _sys.stderr.isatty():
-                print(
-                    f"Migrating database {path.name!r} to schema "
-                    f"version {current_version} ...",
-                    file=_sys.stderr,
-                )
+                    current_version = _pkg_version("conexus")
+                except Exception:
+                    current_version = "0.0.0"
 
-            conn = sqlite3.connect(str(path), check_same_thread=False)
-            try:
-                # RDR-128 P0a (RF-3): tolerate a concurrent writer (e.g.
-                # `nx index repo`) holding the WAL writer lock — wait it out
-                # via a 30s busy_timeout plus a bounded retry, rather than
-                # crashing the daemon on `database is locked`.
-                # busy_timeout is a connection-local pragma that never blocks;
-                # journal_mode=WAL + apply_pending run inside the retry helper
-                # since both can take the writer lock (RDR-128 P0a).
-                conn.execute(f"PRAGMA busy_timeout={_BOOTSTRAP_BUSY_TIMEOUT_MS}")
-                # RDR-128 P2: take the cross-process migration flock so the
-                # daemon's startup migration serializes against `nx upgrade`
-                # (and vice-versa) instead of racing on the WAL writer lock.
-                with t2_migration_flock(path.parent):
+                import sys as _sys
+                if hasattr(_sys.stderr, "isatty") and _sys.stderr.isatty():
+                    print(
+                        f"Migrating database {path.name!r} to schema "
+                        f"version {current_version} ...",
+                        file=_sys.stderr,
+                    )
+
+                conn = sqlite3.connect(str(path), check_same_thread=False)
+                try:
+                    # RDR-128 P0a (RF-3): tolerate a concurrent writer (e.g.
+                    # `nx index repo`) holding the WAL writer lock — wait it
+                    # out via a 30s busy_timeout plus a bounded retry, rather
+                    # than crashing on `database is locked`. busy_timeout is a
+                    # connection-local pragma that never blocks; journal_mode
+                    # =WAL + apply_pending run inside the retry helper since
+                    # both can take the writer lock.
+                    conn.execute(f"PRAGMA busy_timeout={_BOOTSTRAP_BUSY_TIMEOUT_MS}")
                     _apply_pending_with_lock_retry(conn, current_version)
-            finally:
-                conn.close()
-            # Mirror the T2Database-form path_key into _upgrade_done so
-            # a second construction with the same Path argument
-            # short-circuits without re-opening the connection
-            # (nexus-avwe — CI path-resolution edge cases).
-            _upgrade_done.add(path_key)
+                finally:
+                    conn.close()
+                # Mirror the T2Database-form path_key into _upgrade_done so
+                # a second construction with the same Path argument
+                # short-circuits without re-opening the connection
+                # (nexus-avwe — CI path-resolution edge cases).
+                _upgrade_done.add(path_key)
 
     def __enter__(self) -> "T2Database":
         return self

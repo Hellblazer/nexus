@@ -2280,15 +2280,19 @@ def t2_migration_flock(lock_dir: Path) -> Iterator[None]:
     """
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / T2_MIGRATION_LOCK_FILE
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    fd = -1
     try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
         fcntl.flock(fd, fcntl.LOCK_EX)  # blocking — serialize against the other migrator
         try:
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
-        os.close(fd)
+        # Guard: if os.open itself raised, fd is still -1 (nothing to close,
+        # and we must not raise NameError from the finally and mask it).
+        if fd >= 0:
+            os.close(fd)
 
 
 _upgrade_lock = threading.RLock()
