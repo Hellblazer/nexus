@@ -182,10 +182,15 @@ def test_assign_batch_still_composes_compute_and_persist(
         "split__coll", ["batch-doc"], new_embs, chroma_client,
     )
     assert assigned == len(expected)
+    # Verify the persisted row matches what compute_assignments produced —
+    # not just that "a row exists" (guards against a drift where assign_batch
+    # silently computed something different).
     row = db.taxonomy.conn.execute(
-        "SELECT doc_id FROM topic_assignments WHERE doc_id='batch-doc'"
+        "SELECT topic_id, assigned_by FROM topic_assignments WHERE doc_id='batch-doc'"
     ).fetchone()
     assert row is not None
+    assert row[0] == expected[0]["topic_id"]
+    assert row[1] == expected[0]["assigned_by"]
 
 
 def test_compute_assignments_empty_when_no_centroids(
@@ -198,6 +203,65 @@ def test_compute_assignments_empty_when_no_centroids(
         "never__discovered", ["x"], [[0.1] * 384], chroma_client,
     )
     assert out == []
+
+
+def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> None:
+    """The rerouted taxonomy_assign_batch_hook must compute client-side and
+    persist via t2_index_write (the daemon path), NOT a direct t2_ctx open.
+
+    Without this the hook's new routing is untested — the pre-existing
+    t2_ctx-patching hook tests pass vacuously after the reroute (they don't
+    invoke this hook), so a lambda-scoping / wiring regression would slip
+    through (test-validator finding, fkq5q gate).
+    """
+    import nexus.mcp_infra as mi
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    computed = [{
+        "doc_id": "d1", "topic_id": 7, "assigned_by": "centroid",
+        "similarity": None, "source_collection": None,
+    }]
+
+    # Bypass chroma: same-collection returns the known list, cross returns [].
+    monkeypatch.setattr(
+        CatalogTaxonomy, "compute_assignments",
+        staticmethod(lambda *a, **k: [] if k.get("cross_collection") else computed),
+    )
+    # The hook does `from nexus.config import is_local_mode` at call time,
+    # so patch the source module (not mcp_infra).
+    import nexus.config as _cfg
+    monkeypatch.setattr(_cfg, "is_local_mode", lambda: False)  # skip exclude gate
+    monkeypatch.setattr(
+        mi, "get_t3", lambda: type("T", (), {"_client": object()})(),
+    )
+
+    captured: dict = {}
+
+    class _FakeTaxonomy:
+        def persist_assignments(self, assignments):  # noqa: ANN001
+            captured["assignments"] = assignments
+            return len(assignments)
+
+    class _FakeDb:
+        taxonomy = _FakeTaxonomy()
+
+    def _spy_index_write(write_fn):  # noqa: ANN001
+        captured["routed"] = True
+        write_fn(_FakeDb())
+
+    monkeypatch.setattr(mi, "t2_index_write", _spy_index_write)
+    monkeypatch.setattr(
+        mi, "t2_ctx",
+        lambda: pytest.fail("hook must route via t2_index_write, not t2_ctx"),
+    )
+
+    mi.taxonomy_assign_batch_hook(
+        doc_ids=["d1"], collection="code__c", contents=["x"],
+        embeddings=[[0.1] * 384], metadatas=None,
+    )
+
+    assert captured.get("routed") is True, "hook must call t2_index_write"
+    assert captured.get("assignments") == computed, "must persist the computed assignments"
 
 
 def test_assign_topic(db: T2Database) -> None:
