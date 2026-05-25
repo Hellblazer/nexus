@@ -301,7 +301,13 @@ Two acceptance criteria, one qualitative and one quantitative (the latter covers
 
 ## Finalization Gate
 
-Pending — to be run via `/conexus:rdr-gate` after research findings are verified.
+- **Run 1 (2026-05-25): BLOCKED** — 1 CRITICAL (P0(b) interlock under-specified) +
+  3 SIGNIFICANT (construction-site lint gap, unspecified `nx upgrade` lock
+  discipline, single-population acceptance criterion).
+- **Run 2 (2026-05-25): PASSED** — all four remediated and re-confirmed resolved
+  by the substantive-critic (0 critical, 0 significant). Layers 1 (structure: 4
+  gaps, all sections) and 2 (assumptions: all RFs verified from source) passed.
+  T2: `nexus_rdr/128-gate-latest`.
 
 ## References
 
