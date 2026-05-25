@@ -780,8 +780,26 @@ def run_t2_daemon(
     Called by ``nx daemon t2 start --foreground``. Synchronous wrapper
     that owns the asyncio event loop; the caller is the supervisor
     (launchd / systemd / shell) and treats this process as the daemon.
+
+    Routes the daemon's structlog events to a rotating file at
+    ``<config_dir>/logs/t2_daemon.log`` (nexus-n8sbw). Without this the
+    daemon was spawned with stdout/stderr -> DEVNULL and produced no
+    log, so a crash or signal-kill left no record and the cause was
+    undiagnosable.
     """
+    from nexus.logging_setup import configure_logging
+
+    configure_logging("t2_daemon", config_dir=config_dir)
+
     async def _main() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(
+            lambda _loop, ctx: _log.error(
+                "t2_daemon_loop_exception",
+                message=ctx.get("message"),
+                exception=repr(ctx.get("exception")),
+            )
+        )
         daemon = T2Daemon(config_dir=config_dir, db_path=db_path)
         await daemon.start()
         try:
@@ -789,4 +807,11 @@ def run_t2_daemon(
         finally:
             await daemon.stop()
 
-    asyncio.run(_main())
+    try:
+        asyncio.run(_main())
+    except Exception:
+        # Last-resort: an exception escaping the loop (e.g. start()
+        # raising before the handler is installed) must hit the log
+        # file, not a DEVNULL'd stderr.
+        _log.exception("t2_daemon_crashed")
+        raise

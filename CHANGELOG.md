@@ -6,6 +6,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fix: T2 daemon observability + stale-state detection (nexus-n8sbw)
+
+The T2 daemon was spawned with stdout/stderr routed to `DEVNULL` and had
+no structlog file sink, so a crash or signal-kill left no record (a
+0-byte `daemon.log`) and the cause was undiagnosable. Three fixes:
+
+- `run_t2_daemon` now routes the daemon's structlog events to a rotating
+  file at `<config_dir>/logs/t2_daemon.log` via `configure_logging`, with
+  an asyncio loop exception handler and a last-resort crash logger. A
+  graceful stop leaves a `t2_daemon_stop_requested` breadcrumb; a death
+  without the matching `t2_daemon_stopped` is now diagnosable.
+- `nx daemon t2 status` probes the recorded pid for liveness and reports
+  a stale discovery file (dead pid) as `STALE` with a non-zero exit,
+  instead of printing it as if the daemon were running.
+- `python -m nexus.cli` now invokes the CLI (added the `__main__` guard).
+  This is the fallback argv `_resolve_nx_bin` emits when the `nx` console
+  script is not on PATH; without the guard that fallback ran nothing and
+  exited 0, so daemon autostart could silently never start.
+
 ## [5.0.2] - 2026-05-24
 
 Post-shakeout follow-ups to the 5.0.x line. No schema changes; safe in-place upgrade from 5.0.1.
