@@ -168,7 +168,7 @@ def test_aliased_sqlite_import_caught(tmp_path):
     matched = [v for v in result.violations if v.file == str(target)]
     assert len(matched) == 1
     # The alias is resolved back to the canonical module name.
-    assert "sqlite3.connect" in matched[0].symbol or "_sqlite3.connect" in matched[0].symbol
+    assert matched[0].symbol in ("sqlite3.connect", "_sqlite3.connect")
 
 
 # ---------------------------------------------------------------------------

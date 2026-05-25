@@ -115,12 +115,16 @@ _BOOTSTRAP_RETRY_SLEEPS_BETWEEN: tuple[float, ...] = (0.5, 1.0)
 def _apply_pending_with_lock_retry(
     conn: sqlite3.Connection, current_version: str
 ) -> None:
-    """Run ``apply_pending`` with a bounded retry on ``database is locked``.
+    """Run the startup migration (``PRAGMA journal_mode=WAL`` + ``apply_pending``)
+    with a bounded retry on ``database is locked`` / ``database is busy``.
 
-    Only WAL writer-slot contention is retried; any other
-    ``OperationalError`` (schema corruption, FK violation, ...) propagates
-    on the first attempt. The final attempt re-raises so the failure is
-    never silently swallowed.
+    ``journal_mode=WAL`` is inside the retry because it is itself a write
+    that takes the writer lock when the file is not already in WAL mode —
+    leaving it outside would let a held lock crash the daemon before
+    ``apply_pending`` ever runs (code-review finding, RDR-128 P0a). Only
+    writer-slot contention is retried; any other ``OperationalError``
+    (schema corruption, FK violation, ...) propagates on the first attempt.
+    The final attempt re-raises so the failure is never silently swallowed.
     """
     import time
 
@@ -130,6 +134,7 @@ def _apply_pending_with_lock_retry(
     max_attempts = len(sleeps_between) + 1
     for attempt in range(1, max_attempts + 1):
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
             apply_pending(conn, current_version)
             if attempt > 1:
                 _log.info(
@@ -138,7 +143,8 @@ def _apply_pending_with_lock_retry(
                 )
             return
         except sqlite3.OperationalError as exc:
-            if "locked" not in str(exc).lower():
+            msg = str(exc).lower()
+            if "locked" not in msg and "busy" not in msg:
                 raise
             # Clear any partial transaction left by the failed step so the
             # retry re-runs from a clean connection state.
@@ -427,8 +433,10 @@ class T2Database:
                 # `nx index repo`) holding the WAL writer lock — wait it out
                 # via a 30s busy_timeout plus a bounded retry, rather than
                 # crashing the daemon on `database is locked`.
+                # busy_timeout is a connection-local pragma that never blocks;
+                # journal_mode=WAL + apply_pending run inside the retry helper
+                # since both can take the writer lock (RDR-128 P0a).
                 conn.execute(f"PRAGMA busy_timeout={_BOOTSTRAP_BUSY_TIMEOUT_MS}")
-                conn.execute("PRAGMA journal_mode=WAL")
                 _apply_pending_with_lock_retry(conn, current_version)
             finally:
                 conn.close()

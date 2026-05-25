@@ -111,7 +111,10 @@ class LintResult:
     catalog_allowlist_count: int = 0
     #: RDR-128 P0c population 2: direct ``T2Database(...)`` constructions
     #: outside the construction-allowlist (db/ + daemon/). Baseline metric;
-    #: P1/P3 drive it toward the documented-irreducible set.
+    #: P1/P3 drive it toward the documented-irreducible set. Counts SYNTACTIC
+    #: construction sites: a local wrapper like commands/taxonomy_cmd.py's
+    #: ``_T2Database`` is counted once (at its ``return T2Database(...)`` body),
+    #: not at each of its call sites — the wrapper body is the boundary.
     t2database_constructions: int = 0
     #: RDR-128 P0c population 1: ``sqlite3.connect`` sites outside the
     #: connect-allowlist that carry a valid ``# epsilon-allow:`` override.
