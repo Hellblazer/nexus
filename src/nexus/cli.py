@@ -111,3 +111,12 @@ main.add_command(taxonomy)
 main.add_command(tier_status_cmd, name="tier-status")
 main.add_command(aspects_group, name="aspects")
 main.add_command(upgrade)
+
+
+if __name__ == "__main__":
+    # Enables ``python -m nexus.cli``, the fallback argv that
+    # ``nexus.commands.daemon._resolve_nx_bin`` emits when the ``nx``
+    # console script is not on PATH (e.g. launchd/systemd autostart
+    # environments). Without this guard that fallback ran nothing and
+    # exited 0, so daemon autostart silently never started (nexus-n8sbw).
+    main()

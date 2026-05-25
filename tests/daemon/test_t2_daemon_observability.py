@@ -1,0 +1,157 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""nexus-n8sbw: T2 daemon observability + stale-state detection.
+
+The T2 daemon historically ran with stdout/stderr -> DEVNULL and no
+structlog file sink, so a crash or signal-kill left no record (the
+``daemon.log`` was a 0-byte file and the death cause was
+undiagnosable). These tests pin two fixes:
+
+1. ``run_t2_daemon`` routes the daemon's structlog events to a rotating
+   file at ``<config_dir>/logs/t2_daemon.log`` (via ``configure_logging``),
+   so the daemon's lifecycle is recorded regardless of how it was
+   launched. A SIGTERM that begins a graceful stop now leaves a
+   ``t2_daemon_stop_requested`` breadcrumb; a death without
+   ``t2_daemon_stopped`` is therefore diagnosable.
+
+2. ``nx daemon t2 status`` probes the recorded pid for liveness and
+   reports a stale discovery file (dead pid) as such, instead of
+   printing it as if the daemon were alive.
+"""
+from __future__ import annotations
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from click.testing import CliRunner
+
+from nexus.cli import main
+from nexus.daemon.t2_daemon import t2_discovery_path
+
+
+def _write_discovery(config_dir: Path, pid: int) -> Path:
+    payload = {
+        "format_version": 1,
+        "uds_path": str(config_dir / "sockets" / "t2.sock"),
+        "tcp_host": "127.0.0.1",
+        "tcp_port": 12345,
+        "pid": pid,
+        "daemon_version": "5.0.2",
+        "start_time": "2026-05-25T00:00:00+00:00",
+    }
+    dest = t2_discovery_path(config_dir)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(payload))
+    return dest
+
+
+def _dead_pid() -> int:
+    """Return a pid that is reliably not running: fork a trivial child
+    and reap it. Reuse within the test window is vanishingly unlikely."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: daemon logging (the death is no longer invisible)
+# ---------------------------------------------------------------------------
+
+
+class TestDaemonLogging:
+    def test_run_t2_daemon_writes_lifecycle_log_to_config_dir(
+        self, tmp_path: Path,
+    ) -> None:
+        """A real daemon subprocess records start + stop-request
+        breadcrumbs to ``<config_dir>/logs/t2_daemon.log``."""
+        import shutil
+        import tempfile
+
+        # Short config_dir: macOS caps AF_UNIX socket paths at 104 chars.
+        config_dir = Path(tempfile.mkdtemp(prefix="nxt2obs-", dir="/tmp"))
+        db_path = config_dir / "memory.db"
+        log_path = config_dir / "logs" / "t2_daemon.log"
+        proc: subprocess.Popen | None = None
+        try:
+            proc = subprocess.Popen(
+                [
+                    sys.executable, "-m", "nexus.cli",
+                    "daemon", "t2", "start",
+                    "--config-dir", str(config_dir),
+                    "--db-path", str(db_path),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            disc = t2_discovery_path(config_dir)
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                if disc.exists():
+                    break
+                if proc.poll() is not None:
+                    raise AssertionError(
+                        f"daemon exited early (code {proc.returncode})"
+                    )
+                time.sleep(0.1)
+            assert disc.exists(), "daemon did not write discovery file in 15s"
+
+            # The log file must exist and record the start event; the
+            # whole point: the daemon is no longer silent.
+            assert log_path.exists(), (
+                "daemon produced no log file; it is still silent"
+            )
+            assert "t2_daemon_started" in log_path.read_text()
+
+            # Graceful stop leaves a breadcrumb. Its presence (and the
+            # later absence of t2_daemon_stopped on a hard kill) is the
+            # diagnostic signal nexus-n8sbw was about.
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=15.0)
+            stop_deadline = time.monotonic() + 5.0
+            text = ""
+            while time.monotonic() < stop_deadline:
+                text = log_path.read_text()
+                if "t2_daemon_stop_requested" in text:
+                    break
+                time.sleep(0.1)
+            assert "t2_daemon_stop_requested" in text
+        finally:
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10.0)
+            shutil.rmtree(config_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: status reports stale discovery (dead pid) instead of "running"
+# ---------------------------------------------------------------------------
+
+
+class TestStatusLiveness:
+    def test_status_reports_stale_when_pid_dead(self, tmp_path: Path) -> None:
+        _write_discovery(tmp_path, _dead_pid())
+        result = CliRunner().invoke(
+            main, ["daemon", "t2", "status", "--config-dir", str(tmp_path)],
+        )
+        assert result.exit_code != 0, result.output
+        assert "stale" in result.output.lower()
+
+    def test_status_reports_running_when_pid_alive(self, tmp_path: Path) -> None:
+        _write_discovery(tmp_path, os.getpid())
+        result = CliRunner().invoke(
+            main, ["daemon", "t2", "status", "--config-dir", str(tmp_path)],
+        )
+        assert result.exit_code == 0, result.output
+        assert str(os.getpid()) in result.output
+
+    def test_status_absent_discovery_unchanged(self, tmp_path: Path) -> None:
+        """No discovery file still exits non-zero with the existing message."""
+        result = CliRunner().invoke(
+            main, ["daemon", "t2", "status", "--config-dir", str(tmp_path)],
+        )
+        assert result.exit_code != 0
+        assert "no t2 daemon discovery file" in result.output.lower()
