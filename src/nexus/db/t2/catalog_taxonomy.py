@@ -2103,24 +2103,29 @@ class CatalogTaxonomy:
         distance = float(results["distances"][0][0])
         return AssignResult(topic_id=topic_id, similarity=1.0 - distance)
 
-    def assign_batch(
-        self,
+    @staticmethod
+    def compute_assignments(
         collection_name: str,
         doc_ids: list[str],
         embeddings: list[list[float]],
         chroma_client: Any,
         *,
         cross_collection: bool = False,
-    ) -> int:
-        """Assign multiple docs to their nearest topics via centroid ANN.
+    ) -> list[dict[str, Any]]:
+        """Compute nearest-topic assignments via centroid ANN — the
+        chroma-coupled COMPUTE half of :meth:`assign_batch`.
 
-        When *cross_collection* is False (default), queries only centroids
-        for *collection_name*.  When True, queries only FOREIGN centroids
-        (``$ne collection_name``) — used for cross-collection projection
-        (RDR-075 SC-6).
+        RDR-128 P1 (nexus-fkq5q): split out so the indexer can compute
+        assignments *client-side* (where the ChromaDB client lives) and
+        route only the serializable RESULT to the daemon for persistence —
+        the chroma client cannot cross the JSON-RPC boundary, which is why
+        ``assign_batch`` itself was never daemon-routable.
 
-        Returns the number of docs successfully assigned.  No-op (returns 0)
-        when centroids don't exist or dimensions mismatch.
+        Returns a list of serializable assignment dicts (the kwargs for
+        :meth:`persist_assignments` / :meth:`assign_topic`). Empty list on
+        any no-op condition (no centroids, dimension mismatch, query
+        failure) — identical short-circuit conditions to the old
+        ``assign_batch`` returning 0.
         """
         try:
             centroid_coll = chroma_client.get_collection(
@@ -2128,17 +2133,17 @@ class CatalogTaxonomy:
                 embedding_function=None,
             )
         except Exception:
-            return 0
+            return []
 
         if centroid_coll.count() == 0:
-            return 0
+            return []
 
         # Dimension check once for the batch (all embeddings share dimension)
         if embeddings:
             first_emb = embeddings[0]
             sample = np.array(first_emb) if not isinstance(first_emb, np.ndarray) else first_emb
             if not _check_centroid_dimension(sample, centroid_coll):
-                return 0
+                return []
 
         base_kwargs: dict[str, Any] = {"n_results": 1}
         if cross_collection:
@@ -2157,30 +2162,87 @@ class CatalogTaxonomy:
                 **base_kwargs,
             )
         except Exception:
-            return 0
+            return []
 
         by = "projection" if cross_collection else "centroid"
         # RDR-077 C-1: capture per-row distance → similarity; source_collection
         # is the caller's *collection_name* (that's where the doc lives).
-        assigned = 0
+        out: list[dict[str, Any]] = []
         for i, doc_id in enumerate(doc_ids):
             if not results["ids"][i]:
                 continue
             topic_id = int(results["metadatas"][i][0]["topic_id"])
             if by == "projection":
                 distance = float(results["distances"][i][0])
-                self.assign_topic(
-                    doc_id,
-                    topic_id,
-                    assigned_by=by,
-                    similarity=1.0 - distance,
-                    source_collection=collection_name,
-                )
+                out.append({
+                    "doc_id": doc_id,
+                    "topic_id": topic_id,
+                    "assigned_by": by,
+                    "similarity": 1.0 - distance,
+                    "source_collection": collection_name,
+                })
             else:
-                self.assign_topic(doc_id, topic_id, assigned_by=by)
-            assigned += 1
+                out.append({
+                    "doc_id": doc_id,
+                    "topic_id": topic_id,
+                    "assigned_by": by,
+                    "similarity": None,
+                    "source_collection": None,
+                })
+        return out
 
-        return assigned
+    def persist_assignments(self, assignments: list[dict[str, Any]]) -> int:
+        """Persist pre-computed topic assignments — the serializable PERSIST
+        half of :meth:`assign_batch`, daemon-routable (RDR-128 P1, fkq5q).
+
+        ``assignments`` is a list of dicts as produced by
+        :meth:`compute_assignments`. Returns the number persisted. Each is
+        written via :meth:`assign_topic`, preserving its projection-UPSERT /
+        centroid-INSERT-OR-IGNORE semantics and doc_count resync.
+        """
+        for a in assignments:
+            self.assign_topic(
+                a["doc_id"],
+                int(a["topic_id"]),
+                assigned_by=a.get("assigned_by", "centroid"),
+                similarity=a.get("similarity"),
+                source_collection=a.get("source_collection"),
+            )
+        return len(assignments)
+
+    def assign_batch(
+        self,
+        collection_name: str,
+        doc_ids: list[str],
+        embeddings: list[list[float]],
+        chroma_client: Any,
+        *,
+        cross_collection: bool = False,
+    ) -> int:
+        """Assign multiple docs to their nearest topics via centroid ANN.
+
+        When *cross_collection* is False (default), queries only centroids
+        for *collection_name*.  When True, queries only FOREIGN centroids
+        (``$ne collection_name``) — used for cross-collection projection
+        (RDR-075 SC-6).
+
+        Returns the number of docs successfully assigned.  No-op (returns 0)
+        when centroids don't exist or dimensions mismatch.
+
+        Composes :meth:`compute_assignments` (chroma) + :meth:`persist_assignments`
+        (T2). Direct callers keep the one-shot behaviour; the indexer hook
+        splits the two halves to route persistence through the daemon
+        (RDR-128 P1, nexus-fkq5q).
+        """
+        return self.persist_assignments(
+            self.compute_assignments(
+                collection_name,
+                doc_ids,
+                embeddings,
+                chroma_client,
+                cross_collection=cross_collection,
+            )
+        )
 
     # ── Cross-collection projection (RDR-075 Phase 2) ──────────────
 

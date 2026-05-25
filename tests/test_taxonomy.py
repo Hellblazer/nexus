@@ -94,6 +94,112 @@ def test_discover_topics_creates_topics_and_centroids(
     assert meta["collection"] == "test__coll"
 
 
+# ── RDR-128 P1 (fkq5q): assign_batch compute/persist split ───────────────────
+
+
+def _seed_centroids(db: T2Database, chroma_client) -> list[str]:
+    """discover topics so taxonomy__centroids exists; return the doc_ids."""
+    rng = np.random.default_rng(7)
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"sd-{i}" for i in range(60)]
+    texts = (
+        [f"machine learning neural network gradient {i}" for i in range(30)]
+        + [f"database query indexing sql schema {i}" for i in range(30)]
+    )
+    db.taxonomy.discover_topics("split__coll", doc_ids, embeddings, texts, chroma_client)
+    return doc_ids
+
+
+def test_compute_assignments_returns_json_serializable_dicts(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """The COMPUTE half returns plain dicts (no chroma objects) that survive
+    JSON — i.e. they can cross the daemon RPC boundary, which is the whole
+    point of the split."""
+    import json
+
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    _seed_centroids(db, chroma_client)
+    new_embs = [
+        (np.random.default_rng(1).standard_normal(384).astype(np.float32) * 0.1
+         + np.array([3.0] + [0.0] * 383, dtype=np.float32)).tolist()
+        for _ in range(3)
+    ]
+    out = CatalogTaxonomy.compute_assignments(
+        "split__coll", ["a", "b", "c"], new_embs, chroma_client,
+        cross_collection=False,
+    )
+    assert out, "expected at least one assignment against seeded centroids"
+    # Plain, JSON-round-trippable dicts with the persist contract's keys.
+    json.dumps(out)  # must not raise
+    for a in out:
+        assert set(a) == {"doc_id", "topic_id", "assigned_by", "similarity", "source_collection"}
+        assert isinstance(a["topic_id"], int)
+        assert a["assigned_by"] == "centroid"
+
+
+def test_persist_assignments_writes_rows(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """The PERSIST half writes the computed dicts to topic_assignments."""
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    _seed_centroids(db, chroma_client)
+    new_embs = [
+        (np.random.default_rng(2).standard_normal(384).astype(np.float32) * 0.1
+         + np.array([3.0] + [0.0] * 383, dtype=np.float32)).tolist()
+    ]
+    out = CatalogTaxonomy.compute_assignments(
+        "split__coll", ["persist-doc"], new_embs, chroma_client,
+    )
+    n = db.taxonomy.persist_assignments(out)
+    assert n == len(out)
+    row = db.taxonomy.conn.execute(
+        "SELECT doc_id FROM topic_assignments WHERE doc_id='persist-doc'"
+    ).fetchone()
+    assert row is not None
+
+
+def test_assign_batch_still_composes_compute_and_persist(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """Back-compat: assign_batch == compute_assignments + persist_assignments,
+    same return + same persisted rows (direct callers unchanged)."""
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    _seed_centroids(db, chroma_client)
+    new_embs = [
+        (np.random.default_rng(3).standard_normal(384).astype(np.float32) * 0.1
+         + np.array([3.0] + [0.0] * 383, dtype=np.float32)).tolist()
+    ]
+    expected = CatalogTaxonomy.compute_assignments(
+        "split__coll", ["batch-doc"], new_embs, chroma_client,
+    )
+    assigned = db.taxonomy.assign_batch(
+        "split__coll", ["batch-doc"], new_embs, chroma_client,
+    )
+    assert assigned == len(expected)
+    row = db.taxonomy.conn.execute(
+        "SELECT doc_id FROM topic_assignments WHERE doc_id='batch-doc'"
+    ).fetchone()
+    assert row is not None
+
+
+def test_compute_assignments_empty_when_no_centroids(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """No centroids for the collection → empty (the old no-op-returns-0 case)."""
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    out = CatalogTaxonomy.compute_assignments(
+        "never__discovered", ["x"], [[0.1] * 384], chroma_client,
+    )
+    assert out == []
+
+
 def test_assign_topic(db: T2Database) -> None:
     """Assign a doc_id to a topic."""
     # Create a topic first
