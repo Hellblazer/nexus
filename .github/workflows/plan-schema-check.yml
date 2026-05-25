@@ -6,8 +6,8 @@ name: plan-schema
 on:
   pull_request:
     paths:
-      - "nx/plans/**/*.yml"
-      - "nx/plans/**/*.yaml"
+      - "conexus/plans/**/*.yml"
+      - "conexus/plans/**/*.yaml"
       - ".nexus/plans/**/*.yml"
       - ".nexus/plans/**/*.yaml"
       - "docs/rdr/**/plans.yml"
@@ -40,7 +40,7 @@ jobs:
           from nexus.plans.loader import ci_validate_plan_tree
 
           repo_root = Path('.').resolve()
-          plugin_root = repo_root / 'nx'
+          plugin_root = repo_root / 'conexus'
           sys.exit(ci_validate_plan_tree(
               plugin_root=plugin_root, repo_root=repo_root,
           ))
