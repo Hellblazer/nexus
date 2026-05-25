@@ -172,26 +172,55 @@ retry — RDR-128's thesis demonstrated twice in one session.
 
 ## Proposed Solution
 
-Enforce the single-writer invariant. Direction (to be refined in research/gate):
+Enforce the single-writer invariant. Specifications (tightened at gate, 2026-05-25,
+in response to the Layer-3 critique):
 
 1. **Route the worst offenders' writes through the daemon.** Keystone: the
    indexer (kg8sj) writes T2 (catalog manifest, chash index, telemetry) via the
-   daemon RPC instead of a direct connection. Then audit `nx upgrade` and the
-   `aspect_worker` similarly.
-2. **For paths that genuinely cannot route** (the `nx upgrade` chicken-and-egg:
-   it migrates the schema the daemon needs before the daemon can own it), define
-   and enforce a **cross-process lock discipline** — e.g. the daemon must be
-   stopped for the migration window, or a documented advisory file-lock both the
-   daemon and `nx upgrade` honor — replacing the implicit WAL free-for-all.
-3. **Make every remaining direct DB path lock-tolerant**, starting with the
-   daemon startup migration (the same `busy_timeout`+retry v4m7y gave
-   `reclaim_stale`), so a transient lock causes a wait, not a crash.
-4. **Add the lifecycle interlock**: `ensure-running` must not SIGTERM a healthy
-   daemon to cycle it unless the replacement can acquire the DB lock first.
+   daemon RPC instead of a direct connection. Then `aspect_worker` and the
+   operator/CLI construction sites (see item 5).
 
-The first principle is "one writer." Where that is impossible, the second
-principle is "explicit, enforced, documented lock discipline" — never the
-current implicit contention.
+2. **A concrete cross-process lock discipline for the bootstrap chicken-and-egg.**
+   `nx upgrade` and the daemon's own startup both migrate the schema, so they
+   cannot both hold open connections during a migration. The discipline (both
+   sides honor it): a dedicated advisory lock file
+   `~/.config/nexus/t2_migration.lock`, taken with an **exclusive `fcntl.flock`**
+   before any schema write. Protocol: (a) `nx upgrade` acquires the migration
+   lock; (b) it signals the running daemon to **quiesce** (stop accepting RPC
+   writes and close its T2 connections — a new daemon RPC `pause_for_migration`,
+   or, simplest, `nx daemon t2 stop`); (c) runs `apply_pending` under the lock;
+   (d) releases the lock; (e) `ensure-running` brings the daemon back. The
+   daemon's *own* startup migration takes the **same** lock, so daemon-start and
+   `nx upgrade` serialize against each other instead of racing on the WAL. This
+   replaces the implicit WAL free-for-all with one explicit, documented lock.
+
+3. **Make the daemon startup migration lock-tolerant (P0).** `bootstrap_schema`
+   gets `busy_timeout >= 30000` and wraps `apply_pending` in a bounded
+   lock-retry, mirroring `reclaim_stale` (RF-3). A transient foreign lock causes
+   a bounded wait, not a crash.
+
+4. **Lifecycle interlock with a specified timeout and fallback (P0, CRITICAL).**
+   Before `ensure-running` SIGTERMs a healthy daemon to version-cycle it, it
+   probes DB-acquirability with a **bounded timeout (30s, matching the migration
+   busy_timeout)**. On success it proceeds with the cycle. **On timeout it ABORTS
+   the cycle**: the stale-but-running daemon is left running, and a one-line
+   deferral warning is logged ("daemon vX stale but DB locked; cycle deferred").
+   This never trades a working daemon for none (the failure the un-interlocked
+   5.0.4 cycle caused) and never hangs indefinitely (the failure a naive
+   try-acquire would cause). The version-cycle is best-effort and re-attempted on
+   the next `ensure-running` invocation.
+
+5. **Extend the boundary lint to construction sites, and baseline (P0).**
+   `storage_boundary_lint` today flags raw `sqlite3.connect` but not direct
+   `T2Database(...)` construction outside daemon-internal code — the 53-site
+   surface that dominates the 20 raw-connect sites (RF-5). Extend the
+   banned-call/-construction set to flag direct `T2Database(...)` outside an
+   allowlisted daemon module, and baseline both counts at P0 so progress is
+   measurable from the start.
+
+The first principle is "one writer." Where that is impossible (the bootstrap
+chicken-and-egg), the second principle is the explicit advisory-lock discipline
+in item 2 — never the current implicit contention.
 
 ## Alternatives Considered
 
@@ -218,18 +247,28 @@ patch-per-incident cycle plus user-facing daemon outages.
 
 ## Implementation Plan
 
-Phased; P0 stops the bleeding, P1 removes the keystone, P2 closes the rest.
+Phased; P0 stops the bleeding and establishes the metric, P1 removes the keystone,
+P2 specifies+builds the bootstrap lock, P3 closes the remaining surface.
 
-- **P0 (crash-loop stop, patch-shippable):** (a) startup migration gets
-  `busy_timeout`+retry (RF-3); (b) `ensure-running` lifecycle interlock (RF-4).
-  These are small, self-contained, and end the self-inflicted amplification. They
-  remain mitigations, not the cure.
+- **P0 (crash-loop stop + baseline, patch-shippable):** (a) startup migration
+  gets `busy_timeout >= 30000` + bounded lock-retry (Proposed Solution §3 / RF-3);
+  (b) `ensure-running` interlock with the 30s-timeout / abort-cycle fallback
+  (§4 / RF-4); (c) extend `storage_boundary_lint` to flag direct `T2Database(...)`
+  construction and **baseline both populations** (20 raw-connect + 53 construction)
+  via `nx doctor --check-storage-boundary` (§5). (a)+(b) end the self-inflicted
+  amplification; (c) makes the cure measurable from day one.
 - **P1 (keystone, nexus-kg8sj):** route `nx index repo` T2 writes through the
-  daemon. The single highest-value change; removes the most frequent, longest-held
-  lock.
-- **P2 (close the invariant):** audit `nx upgrade`, `aspect_worker`, `nx doctor`;
-  route or place each under the enforced lock discipline; remove the
-  `epsilon-allow` exemptions or convert them to documented, locked exceptions.
+  daemon. The single highest-value change; removes the most frequent,
+  longest-held lock. Drives the construction-site count down.
+- **P2 (bootstrap lock discipline):** implement the advisory-`flock` migration
+  lock + daemon quiesce protocol (Proposed Solution §2) so `nx upgrade` and
+  daemon startup serialize. This is the hard residual — built as its own phase,
+  not hand-waved.
+- **P3 (close the invariant):** route or lock-discipline the remaining direct
+  writers (`aspect_worker`, operator/CLI `T2Database(...)` sites) and reduce
+  `nx doctor`'s reader connections; drive **both** lint populations to the
+  documented-irreducible set, removing each `epsilon-allow` / construction
+  exemption or converting it to a documented, locked exception.
 
 ## Test Plan
 
@@ -245,10 +284,20 @@ Phased; P0 stops the bleeding, P1 removes the keystone, P2 closes the rest.
 
 ## Validation
 
-The disease is cured when a full release cycle (the kind that produced this RDR)
-can run — many commits firing the post-commit indexer, an upgrade, a daemon
-restart — without a single `database is locked` daemon incident, and with no new
-daemon band-aid bead filed.
+Two acceptance criteria, one qualitative and one quantitative (the latter covers
+**both** bypass populations, per the gate critique):
+
+- **Qualitative:** a full release cycle (the kind that produced this RDR) — many
+  commits firing the post-commit indexer, an upgrade, a daemon restart — runs
+  without a single `database is locked` daemon incident, and no new daemon
+  band-aid bead is filed.
+- **Quantitative (from `nx doctor --check-storage-boundary`):** both lint
+  populations reach their documented-irreducible set — the raw `sqlite3.connect`
+  `epsilon-allow` count (baseline 20) and the direct `T2Database(...)`
+  construction count (baseline 53) each reduced to the small set of genuinely
+  daemon-internal or bootstrap-locked sites, with every remaining exemption
+  carrying a documented lock-discipline justification. The metric is emitted
+  today, so progress is trackable from P0's baseline.
 
 ## Finalization Gate
 
@@ -275,3 +324,10 @@ Pending — to be run via `/conexus:rdr-gate` after research findings are verifi
   live `database is locked` contention hit while recording these findings. T2:
   nexus_rdr/128-research-2, /128-research-3. All outstanding RFs (1,3,4,5) now
   verified; RF-2 corroborated by the three live incidents + the RF-3 traceback.
+- 2026-05-25: Gate run 1 BLOCKED (1 CRITICAL + 3 SIGNIFICANT, substantive-critic).
+  Remediated all four: P0(b) interlock now specifies a 30s probe + abort-cycle
+  fallback (never hang, never trade a working daemon for none); `nx upgrade` lock
+  discipline fully specified (advisory `flock` migration lock + daemon quiesce,
+  P2); construction-site linting + dual-population baseline added to P0; Validation
+  acceptance now covers both the raw-connect and T2Database-construction
+  populations. T2 gate: nexus_rdr/128-gate-latest. Re-gating.
