@@ -15,7 +15,7 @@ cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" <<EOF
   "version": 2,
   "plugins": {
     "conexus@nexus-plugins": [
-      { "scope": "user", "installPath": "$REPO_ROOT/nx", "version": "dev",
+      { "scope": "user", "installPath": "$REPO_ROOT/conexus", "version": "dev",
         "installedAt": "$NOW", "lastUpdated": "$NOW" }
     ]
   }

@@ -1,7 +1,7 @@
 # Routing Hooks (sn) — RDR-125
 
 PreToolUse hooks shipped in the sn plugin. The framework
-(`_lib.py`, `_run_python_hook.sh`) is canonical in nx and **vendored**
+(`_lib.py`, `_run_python_hook.sh`) is canonical in conexus and **vendored**
 here byte-for-byte; `tests/test_routing_lib_drift.py` in the nexus
 monorepo refuses any divergence.
 
@@ -13,13 +13,13 @@ redirects to a tool the plugin ships. sn ships Serena MCP tools
 `grep_for_symbols_redirects_to_serena` rule lives here because its
 deny message names those tools.
 
-Installing nx without sn means this hook does not exist -- which is
+Installing conexus without sn means this hook does not exist -- which is
 the correct default. Users without Serena get no surprise denial of
 their `grep` invocations.
 
 ## Files
 
-- `_lib.py` -- vendored from nx canonical. **Do not edit in isolation.**
+- `_lib.py` -- vendored from conexus canonical. **Do not edit in isolation.**
   Updating the framework means updating both copies atomically.
 - `grep_for_symbols_redirects_to_serena.py` -- the routing rule. Uses
   the standard `sys.path.insert(0, dirname); import _lib` pattern.
@@ -27,7 +27,7 @@ their `grep` invocations.
   `conexus/hooks/scripts/routing/registry.yaml`.
 
 The `_run_python_hook.sh` wrapper at `sn/hooks/scripts/_run_python_hook.sh`
-is also vendored from nx canonical.
+is also vendored from conexus canonical.
 
 ## Cumulative-cap accounting (RDR-121 + RDR-125)
 

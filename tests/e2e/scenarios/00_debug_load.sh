@@ -23,8 +23,8 @@ plugins_json="$TEST_HOME/.claude/plugins/installed_plugins.json"
 if [[ ! -f "$plugins_json" ]]; then
     fail "Isolated installed_plugins.json not found at $plugins_json"
 else
-    if grep -q "$REPO_ROOT/nx" "$plugins_json"; then
-        pass "isolated installed_plugins.json points to dev repo ($REPO_ROOT/nx)"
+    if grep -q "$REPO_ROOT/conexus" "$plugins_json"; then
+        pass "isolated installed_plugins.json points to dev repo ($REPO_ROOT/conexus)"
     else
         fail "installed_plugins.json does NOT point to dev repo — may be testing v1"
         echo "    content: $(cat "$plugins_json")"
@@ -117,7 +117,7 @@ scenario_end
 scenario "00 debug-load: SubagentStart hook injects RELAY_TEMPLATE"
 
 # Run subagent-start.sh directly with CLAUDE_PLUGIN_ROOT set
-subagent_hook_out=$(CLAUDE_PLUGIN_ROOT="$REPO_ROOT/nx" \
+subagent_hook_out=$(CLAUDE_PLUGIN_ROOT="$REPO_ROOT/conexus" \
     HOME="$TEST_HOME" \
     PATH="$TEST_HOME/.local/bin:$PATH" \
     CLAUDE_PROJECT_DIR="$REPO_ROOT" \
