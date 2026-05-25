@@ -628,13 +628,36 @@ def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     except (OSError, _json.JSONDecodeError) as exc:
         click.echo(f"Failed to read discovery file: {exc}", err=True)
         sys.exit(1)
+    # Probe the recorded pid for liveness. A discovery file can outlive
+    # its daemon (e.g. an interrupted graceful stop left the file while
+    # the process died, or a crash). Reporting such a file as "running"
+    # masks a dead daemon (nexus-n8sbw).
+    pid = data.get("pid")
+    alive = False
+    if isinstance(pid, int) and pid > 0:
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except (ProcessLookupError, PermissionError):
+            alive = False
+
     if as_json:
-        click.echo(_json.dumps(data, indent=2))
+        click.echo(_json.dumps({**data, "alive": alive}, indent=2))
+        if not alive:
+            sys.exit(1)
         return
+
     click.echo("T2 Daemon Status")
     click.echo("-" * 40)
     for key, value in data.items():
         click.echo(f"  {key}: {value}")
+    if not alive:
+        click.echo(
+            f"  status: STALE (recorded pid {pid} is not running). "
+            f"Run 'nx daemon t2 start' to respawn."
+        )
+        sys.exit(1)
+    click.echo("  status: running")
 
 
 @t2_group.command("ensure-running")

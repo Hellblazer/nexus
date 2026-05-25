@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.0.3] - 2026-05-25
+
+Plugin version aligned with conexus 5.0.3. No plugin-side changes; the
+release carries a T2 daemon observability fix (nexus-n8sbw) and an
+integration-test corpus skip-guard (nexus-gudwb) in the core package.
+See root `CHANGELOG.md` § 5.0.3.
+
 ## [5.0.2] - 2026-05-24
 
 Plugin version aligned with conexus 5.0.2. Runtime fixes in the bundled

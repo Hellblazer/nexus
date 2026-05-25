@@ -96,6 +96,32 @@ requires_t3_only = pytest.mark.skipif(
 TARGET_COLLECTION = "knowledge__hybridrag"
 
 
+def _corpus_indexed(prefix: str, min_docs: int = 2) -> bool:
+    """True iff a T3 collection under *prefix* exists with >= *min_docs*.
+
+    ``knowledge__hybridrag`` is a local-dev prerequisite (bead
+    nexus-qlfa) that is absent on most machines and on CI. When it is
+    not indexed these tests must ``pytest.skip`` rather than hard-fail
+    with a misleading "zero hits" assertion (nexus-gudwb); a missing
+    dev corpus is not a code regression. When the corpus IS present the
+    real assertions still run. Called only after the API-key gate, so
+    ``make_t3`` is reachable.
+    """
+    try:
+        from nexus.db import make_t3
+
+        t3 = make_t3()
+        for c in t3.list_collections():
+            name = c.get("name", "")
+            if (name == prefix or name.startswith(prefix + "__")) and c.get(
+                "count", 0
+            ) >= min_docs:
+                return True
+        return False
+    except Exception:
+        return False
+
+
 #: 5 question fixtures from the bead. The placeholder values below are
 #: structurally complete (the harness runs against them) but the
 #: ``expected_tumblers`` lists need to be populated with real corpus
@@ -316,6 +342,11 @@ def test_vector_only_baseline_runs(fixture: dict[str, Any]) -> None:
     the hybrid path has something to compare against. Asserts the
     baseline retrieves at least one chunk.
     """
+    if not _corpus_indexed(TARGET_COLLECTION):
+        pytest.skip(
+            f"{TARGET_COLLECTION} not indexed in T3 (>=2 docs); "
+            "corpus prerequisite missing (nexus-gudwb)"
+        )
     out = _vector_only_baseline(fixture["question"])
     assert out["ids"], (
         f"Baseline returned zero hits for {fixture['id']!r}; corpus "
@@ -355,6 +386,11 @@ async def test_hybrid_not_worse_than_baseline(
     cross-run diff can answer "did the change regress recall on
     fixture X at budget Y" without re-running the whole suite.
     """
+    if not _corpus_indexed(TARGET_COLLECTION):
+        pytest.skip(
+            f"{TARGET_COLLECTION} not indexed in T3 (>=2 docs); "
+            "corpus prerequisite missing (nexus-gudwb)"
+        )
     vector_budget, graph_budget = budget
 
     t0 = time.perf_counter()

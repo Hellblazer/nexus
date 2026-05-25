@@ -1390,7 +1390,11 @@ daemon version, start time.
 | `--config-dir PATH` | Config directory override |
 | `--json` | Output raw JSON (default: pretty-print) |
 
-Exit code 1 if no daemon is running.
+The recorded PID is probed for liveness (`os.kill(pid, 0)`). A discovery
+file whose PID is no longer running is reported as `STALE` (with `--json`,
+an `"alive": false` field) and exits 1, so a daemon that died leaving a
+stale discovery file is not reported as running. Exit code 1 also when no
+discovery file exists.
 
 ### nx daemon t2 ensure-running
 

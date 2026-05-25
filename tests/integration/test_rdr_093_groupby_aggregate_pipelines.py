@@ -80,6 +80,34 @@ def _t3_reachable() -> bool:
         return False
 
 
+#: Corpus these pipelines retrieve against (local-dev prerequisite).
+DELOS_COLLECTION = "knowledge__delos"
+
+
+def _corpus_indexed(prefix: str, min_docs: int = 2) -> bool:
+    """True iff a T3 collection under *prefix* exists with >= *min_docs*.
+
+    ``knowledge__delos`` is a local-dev prerequisite absent on most
+    machines and on CI. When it is not indexed these pipelines must
+    ``pytest.skip`` rather than hard-fail on the "<2 hits" corpus-health
+    assertion (nexus-gudwb); a missing dev corpus is not a regression.
+    Called only after the T3-reachable gate, so ``make_t3`` is live.
+    """
+    try:
+        from nexus.db import make_t3
+
+        t3 = make_t3()
+        for c in t3.list_collections():
+            name = c.get("name", "")
+            if (name == prefix or name.startswith(prefix + "__")) and c.get(
+                "count", 0
+            ) >= min_docs:
+                return True
+        return False
+    except Exception:
+        return False
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _reset_singletons_between_tests():
     yield
@@ -147,6 +175,11 @@ class TestPhase3MVVPipeline:
             pytest.skip("claude auth not available")
         if not _t3_reachable():
             pytest.skip("T3 not reachable")
+        if not _corpus_indexed(DELOS_COLLECTION):
+            pytest.skip(
+                f"{DELOS_COLLECTION} not indexed in T3 (>=2 docs); "
+                "corpus prerequisite missing (nexus-gudwb)"
+            )
 
     @pytest.mark.asyncio
     async def test_search_filter_groupby_aggregate_end_to_end(self) -> None:
@@ -293,6 +326,11 @@ class TestC1InlineItemsRegressionGuard:
             pytest.skip("claude auth not available")
         if not _t3_reachable():
             pytest.skip("T3 not reachable")
+        if not _corpus_indexed(DELOS_COLLECTION):
+            pytest.skip(
+                f"{DELOS_COLLECTION} not indexed in T3 (>=2 docs); "
+                "corpus prerequisite missing (nexus-gudwb)"
+            )
 
     @pytest.mark.asyncio
     async def test_aggregate_summaries_reference_inline_body_content(

@@ -43,8 +43,9 @@ def _resolve_level(mode: str, verbose: bool) -> int:
 
 
 def configure_logging(
-    mode: Literal["cli", "console", "mcp", "hook", "watchdog"],
+    mode: Literal["cli", "console", "mcp", "hook", "watchdog", "t2_daemon"],
     verbose: bool = False,
+    config_dir: Path | None = None,
 ) -> None:
     """Configure logging for the given nexus entry point.
 
@@ -58,10 +59,16 @@ def configure_logging(
     Modes:
       * ``cli``: stderr only, WARNING default. Kept legacy-compatible so
         the human-facing CLI does not gain noise from this change.
-      * ``console`` / ``mcp`` / ``hook`` / ``watchdog``: stderr +
-        RotatingFileHandler at ``<config_dir>/logs/<mode>.log``, INFO
-        default. Lifecycle events, tool dispatches, and structured
+      * ``console`` / ``mcp`` / ``hook`` / ``watchdog`` / ``t2_daemon``:
+        stderr + RotatingFileHandler at ``<config_dir>/logs/<mode>.log``,
+        INFO default. Lifecycle events, tool dispatches, and structured
         warnings now land in the log file.
+
+    *config_dir* overrides the log directory root (default:
+    ``NEXUS_CONFIG_DIR`` env or ``~/.config/nexus``). The T2 daemon
+    passes its own ``config_dir`` so a ``--config-dir`` override (or a
+    tmp dir under test) logs to the right place rather than the global
+    default.
 
     The level is overridable via the ``NEXUS_LOG_LEVEL`` env var; useful
     for one-off DEBUG runs without code changes.
@@ -118,7 +125,7 @@ def configure_logging(
         return  # stderr only — zero behaviour change for the CLI entry point
 
     # Non-CLI modes get a rotating file handler at <config>/logs/<mode>.log.
-    logs_dir = _config_dir() / "logs"
+    logs_dir = (config_dir or _config_dir()) / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_path = logs_dir / f"{mode}.log"
 
