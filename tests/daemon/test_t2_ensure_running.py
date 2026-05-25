@@ -34,15 +34,30 @@ def _discovery_path(config_dir: Path) -> Path:
     return t2_discovery_path(config_dir)
 
 
-def _write_discovery(config_dir: Path, pid: int) -> None:
-    """Pre-seed a discovery file shaped like the real daemon writes."""
+def _installed_conexus_version() -> str:
+    from importlib.metadata import version as _v
+
+    try:
+        return _v("conexus")
+    except Exception:
+        return "0.0.0"
+
+
+def _write_discovery(config_dir: Path, pid: int, version: str | None = None) -> None:
+    """Pre-seed a discovery file shaped like the real daemon writes.
+
+    ``version`` defaults to the installed conexus version so the
+    "already running, current" path is exercised; pass an older string
+    to simulate a stale daemon that ensure-running should cycle
+    (nexus-5ldk1).
+    """
     payload = {
         "format_version": 1,
         "uds_path": str(config_dir / "sockets" / "t2.sock"),
         "tcp_host": "127.0.0.1",
         "tcp_port": 12345,
         "pid": pid,
-        "daemon_version": "4.34.1",
+        "daemon_version": version if version is not None else _installed_conexus_version(),
         "start_time": "2026-05-22T19:00:00+00:00",
     }
     dest = _discovery_path(config_dir)
@@ -74,6 +89,74 @@ class TestEnsureRunning:
         assert result.exit_code == 0, result.output
         assert "already running" in result.output
         assert spawn_calls == []
+
+    def test_stale_version_daemon_is_cycled_then_respawned(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-5ldk1: a LIVE daemon whose version != installed tool is
+        stale (froze old code at start). ensure-running must SIGTERM it
+        and respawn a current one, rather than leaving the stale daemon."""
+        import signal as _signal
+
+        # Live daemon at an older version than the installed tool.
+        _write_discovery(tmp_path, pid=424242, version="0.0.1-stale")
+        monkeypatch.setattr(
+            "importlib.metadata.version", lambda _name: "9.9.9-installed"
+        )
+
+        # Stateful os.kill: pid is alive until it receives SIGTERM, then
+        # dead. Guards the test process: we never signal a real pid.
+        state = {"terminated": False}
+
+        def _fake_kill(pid, sig):  # noqa: ANN001
+            if pid != 424242:
+                raise ProcessLookupError
+            if sig == 0:
+                if state["terminated"]:
+                    raise ProcessLookupError
+                return
+            if sig == _signal.SIGTERM:
+                state["terminated"] = True
+                return
+
+        monkeypatch.setattr(os, "kill", _fake_kill)
+
+        spawn_calls: list[list[str]] = []
+
+        class _FakePopen:
+            def __init__(self, argv, **_kw):  # noqa: ANN001
+                spawn_calls.append(argv)
+
+        monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+        result = CliRunner().invoke(
+            main,
+            ["daemon", "t2", "ensure-running",
+             "--config-dir", str(tmp_path), "--timeout", "0.2"],
+        )
+        # Stale daemon was SIGTERM'd and a respawn was attempted.
+        assert state["terminated"] is True, "stale daemon was not cycled"
+        assert len(spawn_calls) == 1, "no respawn after cycling stale daemon"
+        assert "stale" in result.output.lower()
+
+    def test_current_version_daemon_not_cycled(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """A live daemon whose version == installed tool is left alone."""
+        _write_discovery(tmp_path, pid=424242, version="9.9.9-installed")
+        monkeypatch.setattr(
+            "importlib.metadata.version", lambda _name: "9.9.9-installed"
+        )
+        monkeypatch.setattr(os, "kill", lambda pid, sig: None)  # pid "alive"
+        monkeypatch.setattr(
+            subprocess, "Popen",
+            lambda *a, **kw: pytest.fail("must not cycle a current daemon"),
+        )
+        result = CliRunner().invoke(
+            main,
+            ["daemon", "t2", "ensure-running", "--config-dir", str(tmp_path)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "already running" in result.output
 
     def test_already_running_quiet_suppresses_output(
         self, tmp_path, monkeypatch,
