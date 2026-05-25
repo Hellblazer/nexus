@@ -114,6 +114,19 @@ genuinely-irreducible bootstrap cases (the `nx upgrade` chicken-and-egg) under a
 explicit lock discipline. Acceptance = the exemption count reduced to that
 documented-irreducible set.
 
+**RF-1 and RF-5 VERIFIED 2026-05-25** (independent recount + reading the lint
+source): counts reproduce exactly (20 / 53); `storage_boundary_lint.py` is wired
+into `nx doctor --check-storage-boundary` (RDR-120 P0.A / nexus-7xxxg), which
+emits a `storage_boundary_lint` structlog metric — so the acceptance gate and
+metric already exist and can be baselined. **Refinement:** the lint keys on raw
+`sqlite3.connect` only; it does NOT flag direct `T2Database(...)` construction
+(the 53 sites). The implementation must therefore extend the banned-call set to
+construction sites, or routing the raw connects merely pushes the bypass into the
+`T2Database()` form. Second live contention incident recorded the same day: an
+`nx memory put` (recording this very finding) failed with `database is locked`
+because a post-commit `nx index repo` held the WAL lock, succeeding only on
+retry — RDR-128's thesis demonstrated twice in one session.
+
 ## Proposed Solution
 
 Enforce the single-writer invariant. Direction (to be refined in research/gate):
@@ -209,3 +222,7 @@ Pending — to be run via `/conexus:rdr-gate` after research findings are verifi
 
 - 2026-05-25: Created (draft). Root-cause RDR motivated by the 5.0.4 post-publish
   daemon crash-loop and the three-patch band-aid pattern Hal flagged.
+- 2026-05-25: RF-1 and RF-5 verified (20 epsilon-allow + 53 direct T2Database;
+  storage_boundary_lint wired into `nx doctor --check-storage-boundary`). Added
+  the construction-site lint-coverage gap and a second live contention incident.
+  T2 findings: nexus_rdr/128-research-1, /128-research-1-verified.
