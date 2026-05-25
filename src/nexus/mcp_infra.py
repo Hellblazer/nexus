@@ -394,24 +394,33 @@ def taxonomy_assign_batch_hook(
             return
 
     try:
-        with t2_ctx() as db:
-            chroma_client = get_t3()._client
-            # Same-collection assignment
-            db.taxonomy.assign_batch(
-                collection, doc_ids, embeddings, chroma_client,
+        # RDR-128 P1 (nexus-fkq5q): compute assignments client-side (the
+        # ChromaDB client can't cross the RPC boundary), then persist the
+        # serializable result through the daemon so the indexer does not
+        # open memory.db directly.
+        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+        chroma_client = get_t3()._client
+        same = CatalogTaxonomy.compute_assignments(
+            collection, doc_ids, embeddings, chroma_client,
+            cross_collection=False,
+        )
+        cross = CatalogTaxonomy.compute_assignments(
+            collection, doc_ids, embeddings, chroma_client,
+            cross_collection=True,
+        )
+        assignments = same + cross
+        if assignments:
+            t2_index_write(
+                lambda db: db.taxonomy.persist_assignments(assignments)
             )
-            # Cross-collection projection (RDR-075 SC-6)
-            cross_assigned = db.taxonomy.assign_batch(
-                collection, doc_ids, embeddings, chroma_client,
-                cross_collection=True,
+        if cross:
+            import structlog
+            structlog.get_logger().debug(
+                "taxonomy_cross_collection_batch",
+                collection=collection,
+                cross_assigned=len(cross),
             )
-            if cross_assigned:
-                import structlog
-                structlog.get_logger().debug(
-                    "taxonomy_cross_collection_batch",
-                    collection=collection,
-                    cross_assigned=cross_assigned,
-                )
     except Exception:
         import structlog
         structlog.get_logger().debug("taxonomy_assign_batch_failed", exc_info=True)
