@@ -277,6 +277,7 @@ Central configuration: `src/nexus/logging_setup.py` — `configure_logging(mode,
 | `nx-mcp` (core MCP) | `mcp` | `~/.config/nexus/logs/mcp.log` | RotatingFileHandler 10 MB × 5 |
 | `nx-mcp-catalog` | `mcp` | `~/.config/nexus/logs/mcp.log` | Shares log with core MCP |
 | `nx console` | `console` | `~/.config/nexus/logs/console.log` | RotatingFileHandler 10 MB × 5 |
+| T2 daemon (`nx daemon t2 start`) | `t2_daemon` | `<config_dir>/logs/t2_daemon.log` | RotatingFileHandler 10 MB × 5; honours `--config-dir` |
 
 ### Log Files
 
@@ -286,6 +287,7 @@ Central configuration: `src/nexus/logging_setup.py` — `configure_logging(mode,
 | `~/.config/nexus/dolt-server.log` | Dolt server process | Dolt native format |
 | `~/.config/nexus/logs/mcp.log` | MCP servers (via `logging_setup`) | `%(asctime)s %(name)s %(levelname)s %(message)s` |
 | `~/.config/nexus/logs/console.log` | Console server (via `logging_setup`) | Same as above |
+| `~/.config/nexus/logs/t2_daemon.log` | T2 daemon (via `logging_setup`) | Same as above; records `t2_daemon_started` / `t2_daemon_stop_requested` / `t2_daemon_stopped` lifecycle + crashes |
 
 ### Suppressed Loggers
 
