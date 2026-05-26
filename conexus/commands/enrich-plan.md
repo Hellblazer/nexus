@@ -13,13 +13,11 @@ description: Enrich beads with execution context using mcp__plugin_conexus_nexus
 
   # Bead context
   echo "### Related Beads"
-  echo '```'
   if command -v bd &> /dev/null; then
     bd list --type=epic --status=open --limit=5 2>/dev/null || echo "No open epics"
   else
     echo "Beads not available"
   fi
-  echo '```'
 ```
 
 ## Plan to Enrich

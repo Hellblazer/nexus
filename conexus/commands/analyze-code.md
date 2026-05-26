@@ -39,21 +39,17 @@ description: Analyze codebase using codebase-deep-analyzer agent
   _pt "build.zig" "Zig"
   _pt "dune-project" "OCaml"
   _pt "shard.yml" "Crystal"
-  [ "$_pt_found" -eq 0 ] && echo "- Unknown (no recognized build/marker file)"
+  if [ "$_pt_found" -eq 0 ]; then echo "- Unknown (no recognized build/marker file)"; fi
   echo ""
 
   # Module structure
   echo "### Top-level Structure"
-  echo '```'
   ls -d */ 2>/dev/null | head -15 || echo "No subdirectories"
-  echo '```'
   echo ""
 
   # Source locations
   echo "### Source Locations"
-  echo '```'
   find . -type d -name "src" 2>/dev/null | grep -v node_modules | grep -v target | head -10 || echo "No src directories found"
-  echo '```'
 
 ```
 

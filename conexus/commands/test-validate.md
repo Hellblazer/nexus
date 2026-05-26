@@ -13,44 +13,36 @@ description: Validate tests using test-validator agent
 
   # Find test directories
   echo "### Test Locations"
-  echo '```'
   if [ -d "src/test" ]; then
     find src/test -type f -name "*.java" 2>/dev/null | wc -l | xargs -I{} echo "{} test files in src/test"
   fi
   find . -type d \( -name "test" -o -name "tests" -o -name "__tests__" \) 2>/dev/null | grep -v node_modules | grep -v target | head -5 || echo "No test directories found"
-  echo '```'
   echo ""
 
   # Recent changes
   if git rev-parse --git-dir > /dev/null 2>&1; then
     echo "### Recently Modified Files"
-    echo '```'
     git diff --name-only HEAD~5 2>/dev/null | grep -E "\.(java|py|ts|js)$" | head -10 || echo "No recent source changes"
-    echo '```'
     echo ""
   fi
 
   # Test results
   if [ -d "target/surefire-reports" ]; then
     echo "### Last Test Run"
-    echo '```'
     TOTAL=$(find target/surefire-reports -name "TEST-*.xml" 2>/dev/null | wc -l | tr -d ' ')
     FAILED=$(find target/surefire-reports -name "TEST-*.xml" -exec grep -l 'failures="[1-9]' {} \; 2>/dev/null | wc -l | tr -d ' ')
     echo "Total test files: $TOTAL"
     echo "Files with failures: $FAILED"
-    echo '```'
   fi
 
   # Bead context
   echo ""
   echo "### Active Beads"
-  echo '```'
   if command -v bd &> /dev/null; then
     bd list --status=in_progress --limit=3 2>/dev/null || echo "No in-progress beads"
   else
     echo "Beads not available"
   fi
-  echo '```'
 
 ```
 

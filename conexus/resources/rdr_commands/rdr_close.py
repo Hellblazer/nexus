@@ -10,6 +10,7 @@ matches the working echo/-c form. ARGUMENTS arrive via NEXUS_RDR_ARGS.
 """
 import os, sys, re, subprocess
 from pathlib import Path
+_F = chr(96) * 3  # nexus-61fzg: a literal triple-backtick truncates the fenced-bang command block
 
 args = os.environ.get('NEXUS_RDR_ARGS', '').strip()
 
@@ -252,7 +253,7 @@ if (close_reason or '').lower() == 'implemented':
         print("**Re-invoke with per-gap closure pointers:**")
         print()
         example = ",".join(f"Gap{num}=path/to/file.py:LINE" for num, _q, _t in gap_matches)
-        print(f"```\n/conexus:rdr-close {rdr_id_label} --reason implemented --pointers '{example}'\n```")
+        print(f"{_F}\n/conexus:rdr-close {rdr_id_label} --reason implemented --pointers '{example}'\n{_F}")
         print()
         sys.exit(0)
     else:

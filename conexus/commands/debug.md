@@ -21,7 +21,6 @@ description: Debug test failures using debugger agent
 
   # Check for recent test failures
   echo "### Recent Test Failures"
-  echo '```'
   if [ -d "target/surefire-reports" ]; then
     FAILURES=$(find target/surefire-reports -name "*.txt" -exec grep -l "FAILURE\|ERROR" {} \; 2>/dev/null | head -5)
     if [ -n "$FAILURES" ]; then
@@ -36,18 +35,15 @@ description: Debug test failures using debugger agent
   else
     echo "No test output found — run the project's test command (check CLAUDE.md)"
   fi
-  echo '```'
 
   # Bead context
   echo ""
   echo "### Active Beads"
-  echo '```'
   if command -v bd &> /dev/null; then
     bd list --status=in_progress --limit=3 2>/dev/null || echo "No in-progress beads"
   else
     echo "Beads not available"
   fi
-  echo '```'
 
 ```
 

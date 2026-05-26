@@ -10,6 +10,7 @@ matches the working echo/-c form. ARGUMENTS arrive via NEXUS_RDR_ARGS.
 """
 import os, sys, re, subprocess
 from pathlib import Path
+_F = chr(96) * 3  # nexus-61fzg: a literal triple-backtick truncates the fenced-bang command block
 
 args = os.environ.get('NEXUS_RDR_ARGS', '').strip()
 
@@ -229,9 +230,9 @@ if not evidence_arg:
     example_parts = ','.join(f"Item{num}=nexus-xxxx" for num, _, _ in items)
     print("**Re-invoke with evidence once all items are accounted for:**")
     print()
-    print(f"```")
+    print(_F)
     print(f"/conexus:phase-review-gate {rdr_id_label} --phase {phase_arg or '1'} --evidence '{example_parts}'")
-    print(f"```")
+    print(_F)
     print()
     sys.exit(0)
 
@@ -264,9 +265,9 @@ if failures:
         f"Item{num}={evidence.get(num, 'nexus-xxxx') or 'nexus-xxxx'}"
         for num, _, _ in items
     )
-    print(f"```")
+    print(_F)
     print(f"/conexus:phase-review-gate {rdr_id_label} --phase {phase_arg or '1'} --evidence '{example_parts}'")
-    print(f"```")
+    print(_F)
     sys.exit(0)
 
 # All items covered — validation passed
@@ -299,4 +300,3 @@ try:
     write_sentinel(rdr_id_label, str(phase_arg or "1"))
 except Exception:
     pass
-
