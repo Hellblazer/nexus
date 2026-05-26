@@ -51,6 +51,26 @@ def _epoch(dt: _dt.datetime) -> float:
     return dt.timestamp()
 
 
+def _loads_json_out(out: str) -> dict:
+    """Parse the ``--json`` payload from captured stdout, tolerating a leading
+    one-shot log line.
+
+    ``_run_check_mcp_logs`` emits clean JSON via ``click.echo``, but a
+    process-global structlog WARNING (console-rendered, starts with a
+    ``2026`` timestamp) can leak into captured stdout ahead of the payload
+    when this is the first test to trigger it in collection order. Without
+    this, ``json.loads`` reads ``2026`` as a number and raises
+    ``JSONDecodeError: Extra data`` — an order-dependent flake seen only on
+    the Python 3.12 full-suite collection (nexus-uu0vg; same class as
+    nexus-xdt7o). Find the first ``{`` and decode the object from there.
+    """
+    idx = out.find("{")
+    if idx == -1:
+        return json.loads(out)  # no object — let json raise the standard error
+    obj, _end = json.JSONDecoder().raw_decode(out[idx:])
+    return obj
+
+
 # ── _resolve_claude_cache_dir ───────────────────────────────────────────────
 
 
@@ -194,7 +214,7 @@ class TestRunCheckMcpLogs:
             return_value=nonexistent,
         ):
             _run_check_mcp_logs(json_out=True)
-        payload = json.loads(capsys.readouterr().out)
+        payload = _loads_json_out(capsys.readouterr().out)
         assert payload["platform_supported"] is False
         assert payload["silent_deaths"] == []
 
@@ -264,7 +284,7 @@ class TestRunCheckMcpLogs:
         ):
             _run_check_mcp_logs(json_out=True, hours=24)
 
-        payload = json.loads(capsys.readouterr().out)
+        payload = _loads_json_out(capsys.readouterr().out)
         assert payload["log_files_scanned"] == 0
         assert payload["silent_deaths"] == []
 
@@ -295,3 +315,29 @@ def test_check_mcp_logs_respects_custom_window():
             ["doctor", "--check-mcp-logs", "--mcp-log-hours", "1"],
         )
     assert result.exit_code == 0, result.output
+
+
+# ── _loads_json_out robustness (nexus-uu0vg) ─────────────────────────────────
+
+
+class TestLoadsJsonOut:
+    """The --json payload parser must tolerate a leaked leading log line."""
+
+    def test_plain_payload(self):
+        assert _loads_json_out('{"a": 1}') == {"a": 1}
+
+    def test_tolerates_leading_console_log_line(self):
+        # A console-rendered structlog WARNING (starts with a timestamp) that
+        # leaked to stdout ahead of the JSON — the exact shape that produced
+        # `JSONDecodeError: Extra data: line 1 column 5 (char 4)` on 3.12.
+        polluted = (
+            "2026-05-26T13:15:00Z [warning] some_one_shot_event foo=bar\n"
+            '{"silent_deaths": [], "log_files_scanned": 0}'
+        )
+        assert _loads_json_out(polluted) == {
+            "silent_deaths": [],
+            "log_files_scanned": 0,
+        }
+
+    def test_tolerates_trailing_data(self):
+        assert _loads_json_out('{"a": 1}\ntrailing log line') == {"a": 1}
