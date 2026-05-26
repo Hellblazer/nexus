@@ -346,3 +346,20 @@ class TestGatherTitledChunks:
         })
         groups = ob.gather_titled_chunks(t3, "x")
         assert groups[0].chunks[0].chash == ("abcdefghij" * 4)[:32]
+
+
+def test_content_type_inferred_from_collection_prefix() -> None:
+    """nexus-s5le: synthesized orphan-backfill rows take their content_type
+    from the collection's RDR-103 leading segment, not a hardcoded 'pdf'
+    (which never matched a content_type= catalog filter for the real corpus)."""
+    from nexus.catalog.orphan_backfill import _content_type_for_collection
+
+    assert _content_type_for_collection("code__nexus__voyage-code-3__v1") == "code"
+    assert _content_type_for_collection(
+        "knowledge__delos__voyage-context-3__v1"
+    ) == "knowledge"
+    assert _content_type_for_collection("rdr__nexus__voyage-context-3__v1") == "rdr"
+    assert _content_type_for_collection("docs__corpus__voyage-context-3__v1") == "docs"
+    # Non-conformant name with an empty prefix falls back; never the old 'pdf'.
+    assert _content_type_for_collection("__weird") == "knowledge"
+    assert _content_type_for_collection("code__x") != "pdf"
