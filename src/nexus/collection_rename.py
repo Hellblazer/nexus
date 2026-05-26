@@ -82,20 +82,25 @@ def rename_collection_data_plane(
     # ── T2 cascade FIRST (reversible) ────────────────────────────────────────
     # Failure here raises ClickException -- T3 rename has not yet run so the
     # system remains fully consistent. Operator can diagnose and retry.
-    from nexus.config import default_db_path  # noqa: PLC0415
-    from nexus.db.t2 import T2Database  # noqa: PLC0415
+    # RDR-128 P3 (nexus-sbxbe.3): route the multi-store cascade through the
+    # daemon so this command does not open memory.db directly. The op is on
+    # the daemon's database-pseudo-store allowlist and its dict return
+    # round-trips framed JSON; T2Client's facade passthrough makes the
+    # write_fn body work whether routed or degraded to a direct T2Database.
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415
 
     try:
-        with T2Database(default_db_path()) as t2db:
-            cascade = t2db.rename_collection_cascade(old=old, new=new)
-            counts["tax_topics"] = cascade.get("tax_topics", 0)
-            counts["tax_assignments"] = cascade.get("tax_assignments", 0)
-            counts["tax_meta"] = cascade.get("tax_meta", 0)
-            counts["chash"] = cascade.get("chash", 0)
-            counts["aspects"] = cascade.get("aspects", 0)
-            counts["aspect_queue"] = cascade.get("aspect_queue", 0)
-            counts["search_telemetry"] = cascade.get("search_telemetry", 0)
-            counts["hook_failures"] = cascade.get("hook_failures", 0)
+        cascade = t2_index_write(
+            lambda t2db: t2db.rename_collection_cascade(old=old, new=new)
+        )
+        counts["tax_topics"] = cascade.get("tax_topics", 0)
+        counts["tax_assignments"] = cascade.get("tax_assignments", 0)
+        counts["tax_meta"] = cascade.get("tax_meta", 0)
+        counts["chash"] = cascade.get("chash", 0)
+        counts["aspects"] = cascade.get("aspects", 0)
+        counts["aspect_queue"] = cascade.get("aspect_queue", 0)
+        counts["search_telemetry"] = cascade.get("search_telemetry", 0)
+        counts["hook_failures"] = cascade.get("hook_failures", 0)
     except Exception as exc:
         raise click.ClickException(
             f"T2 cascade failed before T3 rename -- collection {old!r} is "

@@ -11,7 +11,6 @@ from pathlib import Path
 
 import structlog
 
-from nexus.db.t2 import T2Database
 from nexus.session import (
     generate_session_id,
     write_claude_session_id,
@@ -23,13 +22,13 @@ _log = structlog.get_logger()
 # -- Helpers ------------------------------------------------------------------
 
 def _default_db_path() -> Path:
+    # RDR-128 P3: no longer opens T2 directly (session_end_flush routes its
+    # writes through the daemon via mcp_infra.t2_index_write). Retained as
+    # the config-dir-isolation canary asserted by
+    # test_config_dir_isolation.TestT2IsolatedUnderOverride.
     from nexus.config import nexus_config_dir
 
     return nexus_config_dir() / "memory.db"
-
-
-def _open_t2() -> T2Database:
-    return T2Database(_default_db_path())
 
 
 def _open_t1():
@@ -112,29 +111,44 @@ def session_end_flush() -> str:
     expired = 0
 
     try:
-        with _open_t2() as db:
-            try:
-                t1 = _open_t1()
-            except Exception as exc:
-                _log.warning(
-                    "session_end_flush_t1_unavailable",
-                    error=str(exc),
-                    message="flagged scratch entries were not flushed",
-                )
-                t1 = None
-            if t1 is not None:
-                for entry in t1.flagged_entries():
-                    db.put(
-                        project=entry["flush_project"],
-                        title=entry["flush_title"],
-                        content=entry["content"],
-                        tags=entry.get("tags", ""),
-                        ttl=None,
-                    )
-                    flushed += 1
-                t1.clear()
+        try:
+            t1 = _open_t1()
+        except Exception as exc:
+            _log.warning(
+                "session_end_flush_t1_unavailable",
+                error=str(exc),
+                message="flagged scratch entries were not flushed",
+            )
+            t1 = None
+        # T1 access is process-local; snapshot the flagged entries here so
+        # only the T2 writes cross the daemon boundary below.
+        entries = list(t1.flagged_entries()) if t1 is not None else []
 
-            expired = db.expire()
+        def _flush_and_expire(db):
+            n = 0
+            for entry in entries:
+                db.memory.put(
+                    project=entry["flush_project"],
+                    title=entry["flush_title"],
+                    content=entry["content"],
+                    tags=entry.get("tags", ""),
+                    ttl=None,
+                )
+                n += 1
+            # Flushed entries are permanent (ttl=None); the expire sweep
+            # below only reaps already-expired rows, so flush-then-expire
+            # ordering is safe.
+            return n, db.expire()
+
+        # RDR-128 P3 (nexus-sbxbe.3): route the flush + TTL sweep through the
+        # T2 daemon so the detached SessionEnd grandchild does not open
+        # memory.db directly and contend on its single WAL writer lock.
+        # t2_index_write falls back to a direct T2Database when the daemon
+        # is unreachable (the grandchild can outlive the MCP lifespan).
+        from nexus.mcp_infra import t2_index_write
+        flushed, expired = t2_index_write(_flush_and_expire)
+        if t1 is not None:
+            t1.clear()
     except (sqlite3.Error, OSError) as exc:
         _log.warning("session_end: storage error during flush/expire", error=str(exc))
 

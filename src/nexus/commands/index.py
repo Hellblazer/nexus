@@ -542,7 +542,7 @@ def run_collection_postprocessing(
     try:
         t3 = make_t3()
         total_topics = 0
-        with T2Database(default_db_path()) as db:
+        with T2Database(default_db_path()) as db:  # epsilon-allow: auto-discover runs discover_topics/project_against, which interleave ChromaDB centroid writes keyed on T2-generated topic_ids and need a live chroma client; cannot cross the daemon RPC (RDR-128 P3 documented-irreducible)
             for col_name in collections:
                 try:
                     n = _discover_taxonomy(col_name, db.taxonomy, t3._client)

@@ -286,7 +286,15 @@ _T2_STORE_ATTRS: tuple[str, ...] = (
 #: Top-level T2Database methods exposed under the "database" pseudo-store.
 #: ``hello`` is the RDR-120 P3b connection handshake — T2Client invokes
 #: it on first connect to validate schema-version compatibility.
-_T2_DATABASE_METHODS: tuple[str, ...] = ("rename_collection_cascade", "hello")
+#: ``expire`` (RDR-128 P3) is the multi-store TTL sweep (memory rows +
+#: relevance_log); routing it lets the SessionEnd flush hook reach the
+#: daemon instead of opening memory.db directly. Its ``int`` arg and
+#: ``int`` return round-trip framed JSON cleanly.
+_T2_DATABASE_METHODS: tuple[str, ...] = (
+    "rename_collection_cascade",
+    "expire",
+    "hello",
+)
 
 #: Methods filtered from every store. ``close`` is denied to prevent a
 #: client from tearing down the daemon's SQLite handles via RPC;

@@ -53,11 +53,15 @@ DEFAULT_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 CATALOG_PHASE_ALLOWLIST_PREFIX: str = "src/nexus/catalog/"
 
 
-#: RDR-128 P0c (RF-5): class names whose *direct construction* outside
+#: RDR-128 (RF-5): class names whose *direct construction* outside
 #: daemon-internal code is a single-writer-invariant offender. Each
 #: ``T2Database(...)`` outside the daemon opens eight SQLite connections
-#: that contend on memory.db's one WAL writer lock. Counted (not failed)
-#: as a baseline population so P1/P3 can drive it down measurably.
+#: that contend on memory.db's one WAL writer lock. P0c counted these as
+#: a baseline population; P3 (nexus-sbxbe.3) flipped the lint to ENFORCE —
+#: an un-annotated construction outside the construction-allowlist is now
+#: a hard violation, while one carrying ``# epsilon-allow: <reason>`` is a
+#: documented exception (counted in ``t2database_constructions``). Mirrors
+#: the ``sqlite3.connect`` treatment exactly.
 BANNED_CONSTRUCTORS: tuple[str, ...] = ("T2Database",)
 
 
@@ -109,12 +113,18 @@ class LintResult:
 
     violations: list[Violation] = field(default_factory=list)
     catalog_allowlist_count: int = 0
-    #: RDR-128 P0c population 2: direct ``T2Database(...)`` constructions
-    #: outside the construction-allowlist (db/ + daemon/). Baseline metric;
-    #: P1/P3 drive it toward the documented-irreducible set. Counts SYNTACTIC
-    #: construction sites: a local wrapper like commands/taxonomy_cmd.py's
-    #: ``_T2Database`` is counted once (at its ``return T2Database(...)`` body),
-    #: not at each of its call sites — the wrapper body is the boundary.
+    #: RDR-128 P3 population 2 (DOCUMENTED): direct ``T2Database(...)``
+    #: constructions outside the construction-allowlist (db/ + daemon/)
+    #: that carry a valid ``# epsilon-allow: <reason>`` override. At P0c
+    #: this counted ALL constructions (baseline metric); P3 flipped the
+    #: lint to enforce, so it now counts only the ANNOTATED survivors —
+    #: the documented-irreducible set, each carrying a lock-discipline
+    #: justification. Un-annotated constructions are hard violations
+    #: (see ``violations``), mirroring the ``sqlite3.connect`` treatment.
+    #: Counts SYNTACTIC construction sites: a local wrapper like
+    #: commands/taxonomy_cmd.py's ``_T2Database`` is counted once (at its
+    #: ``return T2Database(...)`` body), not at each call site — the
+    #: wrapper body is the boundary.
     t2database_constructions: int = 0
     #: RDR-128 P0c population 1: ``sqlite3.connect`` sites outside the
     #: connect-allowlist that carry a valid ``# epsilon-allow:`` override.
@@ -140,8 +150,13 @@ class FileScan:
     """Per-file scan result feeding :func:`scan_repo`'s aggregation."""
 
     violations: list[Violation] = field(default_factory=list)
-    #: ``T2Database(...)`` construction sites (symbol == "T2Database").
-    t2database_constructions: list[Violation] = field(default_factory=list)
+    #: RDR-128 P3: ``T2Database(...)`` construction sites carrying a valid
+    #: ``# epsilon-allow: <reason>`` (the documented-irreducible survivors).
+    t2database_constructions_documented: list[Violation] = field(default_factory=list)
+    #: RDR-128 P3: ``T2Database(...)`` construction sites WITHOUT a valid
+    #: override. Promoted to hard violations in :func:`scan_repo` when the
+    #: file is outside the construction-allowlist (db/ + daemon/).
+    t2database_constructions_undocumented: list[Violation] = field(default_factory=list)
     #: Count of epsilon-allow'd ``sqlite3.connect`` sites in this file.
     epsilon_allow_connects: int = 0
 
@@ -266,9 +281,15 @@ def _scan_file_full(
         elif isinstance(func, ast.Attribute) and func.attr in BANNED_CONSTRUCTORS:
             ctor = func.attr
         if ctor is not None:
-            scan.t2database_constructions.append(
-                Violation(file=_rel(), line=line, symbol=ctor)
-            )
+            v = Violation(file=_rel(), line=line, symbol=ctor)
+            # RDR-128 P3: an annotated construction is a documented
+            # exception (counted, not failed); an un-annotated one is a
+            # hard violation once scoped by the construction-allowlist in
+            # scan_repo. Mirrors the sqlite3.connect epsilon-allow split.
+            if _line_has_allowlist_token(source_lines, line):
+                scan.t2database_constructions_documented.append(v)
+            else:
+                scan.t2database_constructions_undocumented.append(v)
 
     return scan
 
@@ -354,9 +375,13 @@ def scan_repo(
             result.epsilon_allow_connects += scan.epsilon_allow_connects
 
         # Population 2 (T2Database constructions): scoped by the separate
-        # construction-allowlist (db/ + daemon/).
+        # construction-allowlist (db/ + daemon/). RDR-128 P3 enforces:
+        # annotated -> documented population; un-annotated -> hard violation.
         if not _is_allowlisted(rel, construction_allowlist_prefixes):
-            result.t2database_constructions += len(scan.t2database_constructions)
+            result.t2database_constructions += len(
+                scan.t2database_constructions_documented
+            )
+            result.violations.extend(scan.t2database_constructions_undocumented)
 
     # Extra files: always scanned, never allowlisted by path prefix.
     if extra_files:
@@ -364,6 +389,9 @@ def scan_repo(
             scan = _scan_file_full(pathlib.Path(extra), repo_root)
             result.violations.extend(scan.violations)
             result.epsilon_allow_connects += scan.epsilon_allow_connects
-            result.t2database_constructions += len(scan.t2database_constructions)
+            result.t2database_constructions += len(
+                scan.t2database_constructions_documented
+            )
+            result.violations.extend(scan.t2database_constructions_undocumented)
 
     return result
