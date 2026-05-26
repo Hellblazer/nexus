@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.1.1] - 2026-05-26
+
+### Fixed
+
+- **RDR-lifecycle commands render their discovery headers again (nexus-t1b1k).** The 9 RDR-lifecycle slash commands (`rdr-create`, `rdr-list`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-audit`, `rdr-close`, `rdr-research`, `phase-review-gate`) wrapped their discovery script in a Python heredoc inside the `!{ }` block, which Claude Code's command runner emits as raw source instead of executing. Each is now an extracted `resources/rdr_commands/*.py` script invoked by path; a plugin-structure test guards against reintroducing the heredoc form.
+
 ## [5.1.0] - 2026-05-25
 
 Plugin version aligned with conexus 5.1.0. No plugin-side changes. The

@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.1.1] - 2026-05-26
+
+Bug-fix rollup of post-5.1.0 shakeout and grooming. No new features, no breaking changes.
+
+### Fixed
+
+- **RDR-lifecycle slash commands render their headers again (nexus-t1b1k).** `/conexus:rdr-create`, `rdr-list`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-audit`, `rdr-close`, `rdr-research`, and `phase-review-gate` wrapped their discovery script in a Python heredoc inside the `!{ }` command block, which Claude Code's runner emits as raw source instead of executing, so the computed context header never appeared. Each is now an extracted `resources/rdr_commands/*.py` script invoked by path. A plugin-structure test guards against reintroducing the heredoc form.
+- **`nx index repo` cross-collection topic projection was a silent no-op (nexus-g25dk).** The auto-discover projection raised on a missing argument and the error was swallowed; projections now persist.
+- **Indexer housekeeping no longer aborts on macOS symlinked repo paths (nexus-f3tyz).** A `ValueError` from `Path.relative_to` across a symlink boundary skipped orphan eviction; paths now fall back to a resolved comparison per entry.
+- **Catalog orphan-backfill infers `content_type` from the collection prefix (nexus-s5le).** Synthesized rows hardcoded `content_type="pdf"`, which never matched a `content_type=` catalog filter for the real corpus; the RDR-103 leading segment is used instead.
+- **`memory_consolidate` find-overlaps recall (nexus-uul2r).** Collections up to 1000 entries now use a full all-pairs Jaccard comparison instead of the FTS prefilter, which dropped near-duplicates.
+- **`nx search` / `query` zero-hit output names the worst-offending distance threshold (nexus-uro6c)**, so an empty result explains itself.
+
+### Internal / test hardening
+
+- `upgrade-shakeout.sh` is runnable from any baseline: it detects hook-stanza drift at runtime and cross-checks `nx doctor`'s claim against the actual byte-diff (nexus-a3nqp).
+- Order-dependent test flakes fixed (nexus-1endg, nexus-uu0vg, nexus-xdt7o).
+
 ## [5.1.0] - 2026-05-25
 
 ### Fixed: T2 single-writer enforcement, root-cause fix for the daemon crash-loop (RDR-128)
