@@ -10,6 +10,7 @@ matches the working echo/-c form. ARGUMENTS arrive via NEXUS_RDR_ARGS.
 """
 import os, sys, re, subprocess
 from pathlib import Path
+_F = chr(96) * 3  # nexus-61fzg: a literal triple-backtick truncates the fenced-bang command block
 
 args = os.environ.get('NEXUS_RDR_ARGS', '').strip()
 
@@ -143,7 +144,7 @@ print()
 
 # Strip fenced code blocks before extracting headings (avoids # comment false positives)
 def strip_code_blocks(src):
-    return re.sub(r'```.*?```', '', src, flags=re.DOTALL)
+    return re.sub(rf'{_F}.*?{_F}', '', src, flags=re.DOTALL)
 
 
 # Gap-structure pre-check (nexus-4qpb): the close skill enforces

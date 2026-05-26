@@ -18,21 +18,17 @@ description: Constructive critique of code, plans, designs, or documentation usi
     echo ""
 
     echo "### Modified Files"
-    echo '```'
     git diff --name-only HEAD 2>/dev/null | head -20 || echo "No uncommitted changes"
-    echo '```'
     echo ""
   fi
 
   # Active beads context
   echo "### Active Beads"
-  echo '```'
   if command -v bd &> /dev/null; then
     bd list --status=in_progress --limit=3 2>/dev/null || echo "No in-progress beads"
   else
     echo "Beads not available"
   fi
-  echo '```'
   echo ""
 
   echo "### Tip"

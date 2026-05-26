@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.1.3] - 2026-05-26
+
+Hotfix for a 5.1.2 regression in slash-command preambles.
+
+### Fixed
+
+- **Slash commands no longer truncate on a literal triple-backtick (nexus-61fzg).** 5.1.2 moved command preambles to fenced bash blocks, but Claude Code closes such a block at the first literal triple-backtick in the source (any position, including inside `echo` of a code fence or a Python `print`/regex), which truncated 17 of 25 commands mid-content and produced a shell error on invocation. The block sources now contain no literal triple-backtick (shell drops the cosmetic fence-echoes; the RDR Python preambles build the fence at runtime), and a latent detector exit-code bug the truncation had masked is fixed. Verified against a real Claude Code via a new cc-validation scenario; a guard rejects any in-content triple-backtick inside a command bash block. The durable fix (moving preamble logic into the `nx` CLI) is tracked in RDR-130.
+
 ## [5.1.2] - 2026-05-26
 
 Bug-fix release. Completes the nexus-t1b1k fix from 5.1.1, which did not actually take effect, and fixes project-type detection exposed by it.

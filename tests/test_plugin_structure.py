@@ -407,6 +407,32 @@ class TestCommandStructure:
                 "(nexus-ln9y5); inline the logic instead of invoking by path."
             )
 
+    @pytest.mark.parametrize("cmd_path", _command_params())
+    def test_no_inner_triple_backtick_in_bang_block(self, cmd_path: Path) -> None:
+        """Regression for nexus-61fzg (5.1.2 broke 17/25 commands).
+
+        Claude Code closes a ```! fenced block at the FIRST line containing a
+        triple-backtick after the opener, at any position (e.g. inside
+        ``echo '<fence>'`` or a Python ``print``/regex), not only at a bare
+        closing-fence line. A 4-backtick opening fence does not change this.
+        So the first ```-bearing line after the opener MUST be the bare closing
+        fence; any earlier in-content triple-backtick truncates the block and
+        the shell errors. The nexus-ln9y5 guard checked only for *bare* fence
+        lines and missed this; this matches CC's actual parser.
+        """
+        text = cmd_path.read_text()
+        opener = re.search(r"(?m)^```!\s*$", text)
+        if opener is None:
+            pytest.skip(f"{cmd_path.name}: no ```! block")
+        for ln in text[opener.end():].splitlines():
+            if "```" in ln:
+                assert re.match(r"^[ ]{0,3}```[ \t]*$", ln), (
+                    f"{cmd_path.name}: literal triple-backtick inside the ```! "
+                    f"block truncates it (nexus-61fzg): {ln.strip()!r}. The block "
+                    "source must contain no triple-backtick before its closing fence."
+                )
+                break  # first ```-line is the bare closer — good
+
 
 
 class TestCrossReferenceIntegrity:

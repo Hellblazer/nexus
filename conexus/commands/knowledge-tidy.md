@@ -18,13 +18,11 @@ description: Persist and organize knowledge into the T3 store using mcp__plugin_
 
   # Active beads context
   echo "### Recently Completed Beads"
-  echo '```'
   if command -v bd &> /dev/null; then
     bd list --status=done --limit=5 2>/dev/null || echo "No recently completed beads"
   else
     echo "Beads not available"
   fi
-  echo '```'
   echo ""
 
   echo "### Storage Standards"
