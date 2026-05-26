@@ -247,6 +247,15 @@ class MemoryStore:
         }
     )
 
+    # nexus-uul2r: at or below this entry count, find_overlapping_memories
+    # compares ALL pairs directly (full recall). Above it, the FTS5 candidate
+    # prefilter (a scaling optimization with bounded recall) kicks in. A single
+    # consolidation project carries well under this many entries, so the common
+    # case always gets full-recall all-pairs; the O(n^2) cost on cached word
+    # sets is milliseconds-to-seconds at this scale and the tool is invoked
+    # deliberately, not in a hot path.
+    _ALL_PAIRS_MAX_ENTRIES = 1000
+
     def __init__(self, path: Path) -> None:
         self._lock = threading.Lock()
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
@@ -757,12 +766,39 @@ class MemoryStore:
                 if len(w) > 2 and w.lower() not in self._STOPWORDS
             }
 
-        seen: set[tuple[int, int]] = set()
+        # Cache each entry's content word-set once (used by both paths).
+        word_sets: list[tuple[dict[str, Any], set[str]]] = [
+            (e, _words(e.get("content", ""))) for e in entries
+        ]
+        word_sets = [(e, w) for e, w in word_sets if w]
+
         pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
 
-        for e1 in entries:
-            # Use first few content words for FTS5 candidate retrieval — AND-of-terms
-            # means too many words kills recall. Jaccard on full content handles precision.
+        # nexus-uul2r: full-recall all-pairs path for normal-sized projects.
+        # The FTS5 prefilter below built an AND-query from each entry's first
+        # 3 non-stopword words, so an overlap whose shared tokens were not
+        # among those leading words was never retrieved as a candidate and
+        # its Jaccard was never computed (5.1.0 shakeout: distinctive shared
+        # token sat at the end of the content). Comparing all pairs directly
+        # restores recall; precision is still the min_similarity Jaccard gate.
+        if len(word_sets) <= self._ALL_PAIRS_MAX_ENTRIES:
+            for i in range(len(word_sets)):
+                e1, w1 = word_sets[i]
+                for j in range(i + 1, len(word_sets)):
+                    e2, w2 = word_sets[j]
+                    jaccard = len(w1 & w2) / len(w1 | w2)
+                    if jaccard >= min_similarity:
+                        pairs.append((e1, e2))
+                        if len(pairs) >= limit:
+                            return pairs
+            return pairs
+
+        # Large-project scaling path: FTS5 candidate prefilter. Recall is
+        # bounded by the candidate snippet (the nexus-uul2r limitation above),
+        # accepted here only because all-pairs would be O(n^2) at this scale.
+        by_id: dict[Any, set[str]] = {e["id"]: w for e, w in word_sets}
+        seen: set[tuple[int, int]] = set()
+        for e1, w1 in word_sets:
             words = [
                 w
                 for w in e1.get("content", "").split()[:5]
@@ -777,9 +813,6 @@ class MemoryStore:
                 candidates = self.search(snippet, project=project, access="silent")
             except ValueError:
                 continue
-            w1 = _words(e1.get("content", ""))
-            if not w1:
-                continue
             for e2 in candidates:
                 if e2["id"] == e1["id"]:
                     continue
@@ -787,7 +820,7 @@ class MemoryStore:
                 if pair_key in seen:
                     continue
                 seen.add(pair_key)
-                w2 = _words(e2.get("content", ""))
+                w2 = by_id.get(e2["id"])
                 if not w2:
                     continue
                 jaccard = len(w1 & w2) / len(w1 | w2)
