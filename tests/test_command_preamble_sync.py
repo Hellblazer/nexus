@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -85,3 +86,35 @@ def test_inlined_body_executes(cmd: str, script: str) -> None:
     )
     assert r.returncode == 0, f"{cmd} inlined body crashed:\n{r.stderr}"
     assert r.stdout.strip(), f"{cmd} inlined body produced no output"
+
+
+def _all_fenced_commands() -> list[Path]:
+    return sorted(p for p in CMD.glob("*.md") if _FENCED.search(p.read_text()))
+
+
+@pytest.mark.parametrize(
+    "cmd_path", _all_fenced_commands(), ids=lambda p: p.stem
+)
+def test_fenced_block_executes_with_output(cmd_path: Path) -> None:
+    """Every command's ```! block actually runs and emits output (nexus-ln9y5).
+
+    This is the effect check, not a format check: it runs the WHOLE fenced bash
+    block as the harness would (env prefix + `python3 <<'PYEOF'` heredoc for the
+    RDR commands, plain shell for the rest) and asserts a clean exit with real
+    output. The legacy !{ } commands never executed at all; the t1b1k by-path
+    form exited non-zero (empty $CLAUDE_PLUGIN_ROOT). Both would fail here.
+    The blocks are written defensively against absent tools (nx/bd), so a clean
+    exit holds even on a minimal CI runner.
+    """
+    if shutil.which("bash") is None:
+        pytest.skip("bash not available")
+    body = _FENCED.search(cmd_path.read_text()).group("body")
+    env = {**os.environ, "ARGUMENTS": "", "NEXUS_RDR_ARGS": "", "NEXUS_PROJECT_ROOTS": ""}
+    r = subprocess.run(
+        ["bash", "-c", body], capture_output=True, text=True, timeout=120, env=env
+    )
+    assert r.returncode == 0, (
+        f"{cmd_path.name}: ```! block exited {r.returncode} (nexus-ln9y5):\n"
+        f"{r.stderr[:800]}"
+    )
+    assert r.stdout.strip(), f"{cmd_path.name}: ```! block produced no output"
