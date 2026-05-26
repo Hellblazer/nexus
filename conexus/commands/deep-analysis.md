@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Thorough analysis of complex problems using deep-analyst agent
 ---
 
 # Deep Analysis Request
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -32,7 +33,7 @@ description: Thorough analysis of complex problems using deep-analyst agent
   echo "The deep-analyst uses mcp__plugin_conexus_sequential-thinking__sequentialthinking: hypothesis → evidence → evaluation → conclusion."
   echo "For cross-cutting issues, this agent explores multiple components before converging on root cause."
 
-}
+```
 
 ### Project Context
 

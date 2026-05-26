@@ -1,4 +1,5 @@
 ---
+allowed-tools: Bash
 description: Write a handoff document under /tmp capturing session state, branch, beads, T2 entries, and next-step pointers. Chat response is `cat <path>`; user copies it and pastes after /clear to bootstrap the next session.
 argument-hint: [topic-or-arc-slug] (optional; defaults to current branch)
 ---
@@ -7,7 +8,7 @@ argument-hint: [topic-or-arc-slug] (optional; defaults to current branch)
 
 Generates a handoff document under `/tmp/` that a future Claude Code session can read to pick up cold. Stores under `/tmp` (purged on reboot by macOS) so we don't accumulate stale handoffs in `~/.cache`. The chat response is one literal line: `cat <Target file>`. The user copies that line (mouse-select + cmd-C, or whatever their terminal supports), runs `/clear`, pastes, hits return. The new session reads the handoff and resumes.
 
-!{
+```!
   set +e
 
   # ---- Resolve repo + slug -------------------------------------------------
@@ -132,7 +133,7 @@ Generates a handoff document under `/tmp/` that a future Claude Code session can
     echo "(none; auto-memory not configured for this repo)"
   fi
   echo ""
-}
+```
 
 ## Action
 

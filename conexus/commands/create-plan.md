@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Create implementation plan using strategic-planner agent
 ---
 
 # Planning Request
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -40,7 +41,7 @@ description: Create implementation plan using strategic-planner agent
   fi
   echo '```'
 
-}
+```
 
 ### Project Context
 

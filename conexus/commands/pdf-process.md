@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Index PDF files into the T3 knowledge store for semantic search
 ---
 
 # PDF Processing Request
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -25,7 +26,7 @@ description: Index PDF files into the T3 knowledge store for semantic search
   echo ""
   echo "Specify PDF paths or a directory. nx index pdf extracts text, chunks content,"
   echo "and indexes into T3 for semantic search via the search tool."
-}
+```
 
 ## PDFs to Process
 

@@ -1,9 +1,10 @@
 ---
+allowed-tools: Bash
 description: Check that all conexus plugin dependencies are correctly installed and configured
 disable-model-invocation: false
 ---
 
-!{
+```!
   echo "## conexus Plugin Preflight Check"
   echo ""
 
@@ -124,7 +125,7 @@ disable-model-invocation: false
     echo "See: https://docs.anthropic.com/en/docs/claude-code/memory#claudemd"
   fi
   echo ""
-}
+```
 
 ## Summary
 

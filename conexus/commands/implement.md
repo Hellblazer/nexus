@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Implement feature using developer agent
 ---
 
 # Implementation Request
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -48,7 +49,7 @@ description: Implement feature using developer agent
   fi
   echo '```'
 
-}
+```
 
 ### Project Context
 

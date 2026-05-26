@@ -111,15 +111,19 @@ class TestCommandFileStructure:
         assert COMMAND_FILE.exists(), f"Missing: {COMMAND_FILE}"
 
     def test_command_has_preamble_block(self) -> None:
-        # nexus-t1b1k: the Python preamble moved out of a !{ } heredoc into an
-        # extracted script invoked by path (a heredoc inside !{ } is emitted as
-        # raw source instead of executing). The block must invoke the script
-        # and contain no heredoc.
+        # nexus-ln9y5: the preamble runs inside a documented ```! fenced block
+        # via an inline `python3 <<'PYEOF'` heredoc. The earlier !{ } brace form
+        # (nexus-t1b1k) never executed, and the by-path `$CLAUDE_PLUGIN_ROOT`
+        # form failed because that var is empty in command bash context. The
+        # script file remains the source of truth (kept in sync by
+        # tests/test_command_preamble_sync.py); the .md inlines its code.
         text = COMMAND_FILE.read_text()
-        assert "python3 << 'PYEOF'" not in text, "heredoc form must be gone (nexus-t1b1k)"
-        assert "resources/rdr_commands/phase_review_gate.py" in text, \
-            "command must invoke the extracted preamble script by path"
-        assert SCRIPT_FILE.exists(), f"Missing extracted preamble script: {SCRIPT_FILE}"
+        assert "!{" not in text, "invalid !{ } brace form must be gone (nexus-ln9y5)"
+        assert "$CLAUDE_PLUGIN_ROOT" not in text, \
+            "$CLAUDE_PLUGIN_ROOT is empty in command bash; must not be referenced (nexus-ln9y5)"
+        assert "```!" in text, "preamble must use the documented ```! fenced form"
+        assert "python3 <<'PYEOF'" in text, "preamble must inline the script via a heredoc"
+        assert SCRIPT_FILE.exists(), f"Missing source-of-truth preamble script: {SCRIPT_FILE}"
 
     def test_command_has_nexus_rdr_args_env(self) -> None:
         text = COMMAND_FILE.read_text()

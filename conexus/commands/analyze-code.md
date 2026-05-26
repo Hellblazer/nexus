@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Analyze codebase using codebase-deep-analyzer agent
 ---
 
 # Codebase Analysis Request
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -44,7 +45,7 @@ description: Analyze codebase using codebase-deep-analyzer agent
   find . -type d -name "src" 2>/dev/null | grep -v node_modules | grep -v target | head -10 || echo "No src directories found"
   echo '```'
 
-}
+```
 
 ### Project Context
 

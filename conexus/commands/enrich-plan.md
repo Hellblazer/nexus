@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Enrich beads with execution context using mcp__plugin_conexus_nexus__nx_enrich_beads (RDR-080)
 ---
 
 # Enrich Plan
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -19,7 +20,7 @@ description: Enrich beads with execution context using mcp__plugin_conexus_nexus
     echo "Beads not available"
   fi
   echo '```'
-}
+```
 
 ## Plan to Enrich
 

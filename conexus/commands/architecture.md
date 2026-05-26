@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Design architecture and create phased execution plans using architect-planner agent
 ---
 
 # Architecture Request
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -60,7 +61,7 @@ description: Design architecture and create phased execution plans using archite
   echo ""
   echo "The agent uses the search tool with corpus='code' and hybrid=true (30-50 results) for discovery,"
   echo "then LSP for precision navigation (documentSymbol, goToImplementation, findReferences)."
-}
+```
 
 ### Project Context
 
