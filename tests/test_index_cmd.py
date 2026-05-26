@@ -565,3 +565,44 @@ def test_debug_timing_absent_emits_no_breakdown(runner, repo_dir, mock_reg):
     assert result.exit_code == 0
     assert "debug-timing" not in result.output
     assert "per-stage totals" not in result.output
+
+
+def test_project_cross_collections_passes_source_collection() -> None:
+    """nexus-g25dk: the auto-discover cross-collection projection persist must
+    pass source_collection. The old inline call omitted it, so
+    _persist_assignments raised TypeError (swallowed by the caller's except)
+    and the projection silently persisted nothing."""
+    from nexus.commands.index import _project_cross_collections
+
+    recorded: list[tuple] = []
+
+    class _FakeTaxonomy:
+        def project_against(self, col, others, chroma_client, threshold=0.85):
+            # One assignment per projection call.
+            return {"chunk_assignments": [("doc-1", 7, 0.9)]}
+
+        def assign_topic(self, doc_id, topic_id, *, assigned_by,
+                         similarity, source_collection):
+            recorded.append((doc_id, topic_id, source_collection))
+
+        def refresh_projection_links(self):
+            pass
+
+    total = _project_cross_collections(
+        _FakeTaxonomy(), ["code__a", "code__b"], chroma_client=None,
+    )
+    # a-vs-b and b-vs-a each persist one assignment.
+    assert total == 2
+    # Each persisted assignment is stamped with its own source collection.
+    assert {r[2] for r in recorded} == {"code__a", "code__b"}
+
+
+def test_project_cross_collections_single_collection_noop() -> None:
+    """A lone collection has no 'others' to project against → 0, no persist."""
+    from nexus.commands.index import _project_cross_collections
+
+    class _FakeTaxonomy:
+        def project_against(self, *a, **k):  # pragma: no cover - must not be called
+            raise AssertionError("project_against should not run with no others")
+
+    assert _project_cross_collections(_FakeTaxonomy(), ["only__one"], None) == 0

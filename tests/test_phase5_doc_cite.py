@@ -35,13 +35,30 @@ def _parse_json_payload(stdout: str) -> dict:
     one-shot through pre-consumption.
 
     Strategy: find the first ``{`` (the JSON payload always starts with
-    an object) and parse from there.
+    an object) and ``raw_decode`` from there. ``raw_decode`` parses the
+    first JSON value and ignores any trailing text, so a structlog/warning
+    line landing AFTER the payload (stderr merged into stdout under
+    CliRunner) no longer raises 'Extra data' (nexus-xdt7o); leading lines
+    are skipped by the ``find('{')`` offset.
     """
     idx = stdout.find("{")
     if idx == -1:
         # No JSON object — let json.loads raise the standard error.
         return json.loads(stdout)
-    return json.loads(stdout[idx:])
+    obj, _end = json.JSONDecoder().raw_decode(stdout[idx:])
+    return obj
+
+
+def test_parse_json_payload_tolerates_surrounding_log_lines() -> None:
+    """nexus-xdt7o: a log line BEFORE and AFTER the JSON payload must both be
+    tolerated. The pre-fix helper json.loads'd from the first '{' to EOF, so a
+    trailing structlog/warning line raised 'Extra data'."""
+    payload = (
+        "2026-01-01 warning event='leading_one_shot' level='warning'\n"
+        '{"results": [1, 2, 3], "ok": true}\n'
+        "2026-01-01 warning event='trailing_one_shot' level='warning'\n"
+    )
+    assert _parse_json_payload(payload) == {"results": [1, 2, 3], "ok": True}
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────

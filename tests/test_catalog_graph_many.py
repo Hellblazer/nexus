@@ -29,6 +29,23 @@ def _git_identity(monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
 
+@pytest.fixture(autouse=True)
+def _pin_node_cap(monkeypatch):
+    """nexus-1endg: pin the graph node cap so these boundary tests are
+    order-independent.
+
+    ``_MAX_GRAPH_NODES`` is a ``Catalog`` CLASS attribute that
+    ``graph_many`` reads via ``getattr(cat, "_MAX_GRAPH_NODES", ...)``
+    (catalog_links.py). ``test_catalog_links`` patches it to ``1`` for its
+    own assertion; under full-suite ordering that value bled into these
+    tests (which assume 500), failing the boundary count only in the
+    combined run, never in isolation. Pinning here makes every test in this
+    file see exactly 500 regardless of ambient state; ``monkeypatch.setattr``
+    restores the prior value afterwards.
+    """
+    monkeypatch.setattr(Catalog, "_MAX_GRAPH_NODES", 500)
+
+
 def _make_node(tumbler_str: str) -> MagicMock:
     """Return a fake catalog node with a .tumbler attribute."""
     node = MagicMock()
@@ -76,9 +93,11 @@ class TestGraphManyNodeCap:
         with patch.object(cat, "graph", side_effect=fake_graph):
             result = cat.graph_many(seeds, depth=1)
 
-        assert len(result["nodes"]) <= Catalog._MAX_GRAPH_NODES, (
-            f"graph_many returned {len(result['nodes'])} nodes, "
-            f"expected ≤ {Catalog._MAX_GRAPH_NODES}"
+        # Exact (not <=): 300 + 300 distinct fake nodes, deduped, capped at the
+        # pinned 500 → exactly 500. An inequality would silently pass under the
+        # leaked-cap contamination this test guards against (nexus-1endg).
+        assert len(result["nodes"]) == 500, (
+            f"graph_many returned {len(result['nodes'])} nodes, expected exactly 500"
         )
         assert call_count[0] == 2, "Both seeds must be dispatched (cap fires mid-merge)"
 

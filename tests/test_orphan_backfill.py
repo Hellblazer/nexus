@@ -346,3 +346,25 @@ class TestGatherTitledChunks:
         })
         groups = ob.gather_titled_chunks(t3, "x")
         assert groups[0].chunks[0].chash == ("abcdefghij" * 4)[:32]
+
+
+def test_content_type_inferred_from_collection_prefix() -> None:
+    """nexus-s5le: synthesized orphan-backfill rows take their content_type
+    from the collection's RDR-103 leading segment, not a hardcoded 'pdf'
+    (which never matched a content_type= catalog filter for the real corpus)."""
+    from nexus.catalog.orphan_backfill import _content_type_for_collection
+
+    # The embedder segment is a neutral placeholder ("embed3"), not the real
+    # voyage-*-3 model name: the function only inspects the leading "__"
+    # segment, so the embedder is incidental here, and a literal voyage token
+    # would trip the RDR-109 cloud-mode lint (test_mode_declarations_are_explicit)
+    # for a test that never touches cloud-mode state.
+    assert _content_type_for_collection("code__nexus__embed3__v1") == "code"
+    assert _content_type_for_collection(
+        "knowledge__delos__embed3__v1"
+    ) == "knowledge"
+    assert _content_type_for_collection("rdr__nexus__embed3__v1") == "rdr"
+    assert _content_type_for_collection("docs__corpus__embed3__v1") == "docs"
+    # Non-conformant name with an empty prefix falls back; never the old 'pdf'.
+    assert _content_type_for_collection("__weird") == "knowledge"
+    assert _content_type_for_collection("code__x") != "pdf"

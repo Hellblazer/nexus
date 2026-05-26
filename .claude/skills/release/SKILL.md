@@ -73,6 +73,17 @@ Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/db/migr
 
 Must end with `[done]` and confirm the new schema version. Halt on any failure.
 
+### 6b. Run upgrade-shakeout (~3-5 min, conditional)
+
+Required when the release touches the **upgrade path** an installed user traverses: hook stanzas (`src/nexus/commands/hooks.py`), the `nx doctor` drift checks, plugin name / marketplace.json `source.ref` pinning, or any migration touchpoint. `release-sandbox.sh smoke` tests one version in isolation; this tests `FROM_VERSION` to this branch.
+
+```bash
+./tests/e2e/upgrade-shakeout.sh run                       # latest stable -> this branch (clean-upgrade path)
+./tests/e2e/upgrade-shakeout.sh run --from-version 4.34.6 # pre-pgrep-guard baseline -> exercises drift -> reconcile
+```
+
+Runnable from any baseline (nexus-a3nqp): it detects stanza drift at runtime and cross-checks `nx doctor`'s drift claim against the actual stanza byte-diff, so a doctor false-positive/negative fails the run. Must end with `12/12 PASS`. `./tests/e2e/upgrade-shakeout.sh reset` cleans the sandbox.
+
 ### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
 
 Per the marketplace-pinned-source playbook (also used by `Hellblazer/palinex`), release commits go through a PR. CI gates the bump before it lands on main. No more direct-to-main exception.

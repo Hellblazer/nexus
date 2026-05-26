@@ -766,12 +766,40 @@ def _catalog_hook(
 
         # Housekeeping: detect and evict orphaned catalog entries
         _progress(f"  Catalog: housekeeping…\r")
-        indexed_set = {str(abs_path.relative_to(repo)) for abs_path, _, _ in indexed_files}
+        indexed_set = _indexed_relpaths(indexed_files, repo)
         _run_housekeeping(cat, owner, indexed_set)
         _progress(f"  Catalog: done ({len(new_tumblers)} new, {links_created} links)\n")
     except Exception:
         _log.debug("catalog_hook_failed", exc_info=True)
     return file_to_doc_id
+
+
+def _indexed_relpaths(indexed_files: list, repo: "Path") -> set[str]:
+    """Repo-relative paths of the indexed files, tolerant of symlink mismatch.
+
+    nexus-f3tyz: a single ``abs_path.relative_to(repo)`` ValueError (macOS
+    symlinks ``/tmp`` -> ``/private/tmp`` and ``/var`` -> ``/private/var`` make
+    one path not literally under ``repo``) previously aborted the whole
+    housekeeping set-comprehension, so ``_run_housekeeping`` was silently
+    skipped and orphaned catalog rows never got evicted. Fall back to comparing
+    resolved paths (the relative suffix is identical, so the key stays
+    consistent with registration); skip a genuinely-outside-repo path rather
+    than abort the whole pass.
+    """
+    repo_resolved = repo.resolve()
+    out: set[str] = set()
+    for abs_path, _c1, _c2 in indexed_files:
+        try:
+            out.add(str(abs_path.relative_to(repo)))
+        except ValueError:
+            try:
+                out.add(str(abs_path.resolve().relative_to(repo_resolved)))
+            except ValueError:
+                _log.debug(
+                    "housekeeping_rel_path_skip",
+                    path=str(abs_path), repo=str(repo),
+                )
+    return out
 
 
 def _run_housekeeping(
