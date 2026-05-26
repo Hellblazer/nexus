@@ -2,11 +2,12 @@
 title: "Command Preambles via the nx CLI: Thin Commands, Tested Logic, No Inlined Bash"
 id: RDR-130
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-26
+accepted_date: 2026-05-26
 related_issues: [nexus-61fzg, nexus-ln9y5, nexus-t1b1k]
 related_rdrs: [RDR-120, RDR-128]
 supersedes: []
