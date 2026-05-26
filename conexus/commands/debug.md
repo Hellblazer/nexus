@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Debug test failures using debugger agent
 ---
 
 # Debug Request
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -48,7 +49,7 @@ description: Debug test failures using debugger agent
   fi
   echo '```'
 
-}
+```
 
 ### Project Context
 

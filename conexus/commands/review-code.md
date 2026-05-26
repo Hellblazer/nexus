@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Review code changes using code-review-expert agent
 ---
 
 # Code Review Request
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -46,7 +47,7 @@ description: Review code changes using code-review-expert agent
   fi
   echo '```'
 
-}
+```
 
 ### Project Context
 

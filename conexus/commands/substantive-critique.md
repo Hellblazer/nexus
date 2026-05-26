@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Constructive critique of code, plans, designs, or documentation using substantive-critic agent
 ---
 
 # Deep Critique Request
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -39,7 +40,7 @@ description: Constructive critique of code, plans, designs, or documentation usi
   echo "The substantive-critic analyzes structure, logical consistency, completeness, and spec conformance."
   echo "Findings are prioritized: Critical > Significant > Minor."
 
-}
+```
 
 ### Project Context
 

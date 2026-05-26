@@ -52,7 +52,7 @@ trap cleanup EXIT
 
 echo "Setting up isolated test home at $TEST_HOME..."
 rm -rf "$TEST_HOME"
-mkdir -p "$TEST_HOME/.claude/plugins" "$TEST_HOME/.claude/agents" "$TEST_HOME/.claude/skills"
+mkdir -p "$TEST_HOME/.claude/plugins" "$TEST_HOME/.claude/agents" "$TEST_HOME/.claude/skills" "$TEST_HOME/.claude/commands"
 
 cp "$AUTH_DIR/.credentials.json" "$TEST_HOME/.claude/.credentials.json"
 if [[ -f "$AUTH_DIR/claude.json" ]]; then
@@ -92,8 +92,8 @@ reset_scenario_state() {
     rm -f "$TEST_HOME/.claude/settings.json" \
           "$TEST_HOME/.claude/.mcp.json" \
           "$STUB_LOG" "$HOOK_LOG"
-    rm -rf "$TEST_HOME/.claude/agents" "$TEST_HOME/.claude/skills"
-    mkdir -p "$TEST_HOME/.claude/agents" "$TEST_HOME/.claude/skills"
+    rm -rf "$TEST_HOME/.claude/agents" "$TEST_HOME/.claude/skills" "$TEST_HOME/.claude/commands"
+    mkdir -p "$TEST_HOME/.claude/agents" "$TEST_HOME/.claude/skills" "$TEST_HOME/.claude/commands"
     # Restore the dangerous-mode bypass — every scenario needs it.
     echo '{"skipDangerousModePermissionPrompt": true}' > "$TEST_HOME/.claude/settings.json"
 }
@@ -122,6 +122,15 @@ write_skill() {
     cp "$src" "$TEST_HOME/.claude/skills/$name/SKILL.md"
 }
 export -f write_skill
+
+# write_command <name> <src>: install a slash command (.claude/commands/<name>.md)
+# for the next claude_start. Used by scenario 19 (nexus-ln9y5) to validate that a
+# command's ```! bash-injection block actually renders.
+write_command() {
+    local name="$1" src="$2"
+    cp "$src" "$TEST_HOME/.claude/commands/$name.md"
+}
+export -f write_command
 
 # ─── Start tmux ───────────────────────────────────────────────────────────────
 

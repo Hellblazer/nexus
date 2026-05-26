@@ -333,17 +333,27 @@ class TestSkillDescriptionCSO:
 
 
 
+def _command_bash_block(text: str) -> str | None:
+    """Return the body of the documented ```! fenced bash block, or None.
+
+    nexus-ln9y5: command preambles inject bash via a ```! fenced block (Claude
+    Code's documented multi-line form). The legacy !{ } brace form never
+    executed; it is forbidden by test_command_bash_uses_documented_syntax.
+    """
+    m = re.search(r"(?ms)^```!\n(.*?)\n```[ \t]*$", text)
+    return m.group(1) if m else None
+
+
 class TestCommandStructure:
 
     @pytest.mark.parametrize("cmd_path", _command_params())
     def test_bash_block_syntax(self, cmd_path: Path) -> None:
         if shutil.which("bash") is None:
             pytest.skip("bash not available")
-        text = cmd_path.read_text()
-        match = re.search(r"^!\{$(.*?)^}", text, re.MULTILINE | re.DOTALL)
-        if not match:
-            pytest.skip(f"{cmd_path.name}: no !{{}} bash block found")
-        result = subprocess.run(["bash", "-n"], input=match.group(1), capture_output=True, text=True)
+        body = _command_bash_block(cmd_path.read_text())
+        if body is None:
+            pytest.skip(f"{cmd_path.name}: no ```! bash block found")
+        result = subprocess.run(["bash", "-n"], input=body, capture_output=True, text=True)
         assert result.returncode == 0, f"{cmd_path.name}: bash syntax error:\n{result.stderr}"
 
     @pytest.mark.parametrize("cmd_path", _command_params())
@@ -353,47 +363,49 @@ class TestCommandStructure:
 
     @pytest.mark.parametrize("cmd_path", _command_params())
     def test_nx_commands_guarded(self, cmd_path: Path) -> None:
-        text = cmd_path.read_text()
-        match = re.search(r"^!\{$(.*?)^}", text, re.MULTILINE | re.DOTALL)
-        if not match:
-            pytest.skip(f"{cmd_path.name}: no !{{}} bash block found")
+        body = _command_bash_block(cmd_path.read_text())
+        if body is None:
+            pytest.skip(f"{cmd_path.name}: no ```! bash block found")
         nx_calls = [
-            line.strip() for line in match.group(1).splitlines()
+            line.strip() for line in body.splitlines()
             if re.match(r"\s+nx\s+", line) and "2>/dev/null" not in line
             and "command -v nx" not in line
         ]
         assert len(nx_calls) < 5, \
-            f"{cmd_path.name}: {len(nx_calls)} unguarded 'nx' calls in !{{}} block"
+            f"{cmd_path.name}: {len(nx_calls)} unguarded 'nx' calls in ```! block"
 
     @pytest.mark.parametrize("cmd_path", _command_params())
-    def test_no_heredoc_in_bang_block(self, cmd_path: Path) -> None:
-        """Regression for nexus-t1b1k.
+    def test_command_bash_uses_documented_syntax(self, cmd_path: Path) -> None:
+        """Regression for nexus-ln9y5 (supersedes the nexus-t1b1k heredoc guard).
 
-        Claude Code's slash-command runner emits a ``!{ }`` block that wraps a
-        heredoc (``python3 << 'PYEOF' ... PYEOF``) as raw source instead of
-        executing it, so the block's intended output never renders. Long
-        scripts must live under ``conexus/resources/`` and be invoked by path
-        (``python3 "$CLAUDE_PLUGIN_ROOT/resources/.../<name>.py"``). Guard
-        against any reintroduction of the heredoc form.
+        Claude Code only executes command bash injection in the documented
+        forms: inline ``!`cmd``` or a multi-line fenced ````` ```! ````` block.
+        The legacy ``!{ ... }`` brace form (used by every conexus command
+        through 5.1.1) is NOT a recognized syntax and emits as raw source — the
+        preamble never runs. Additionally, ``$CLAUDE_PLUGIN_ROOT`` is empty in
+        the command-bash context (it is scoped to hooks/MCP/LSP), so by-path
+        script invocation fails. This guard would have caught both bugs; it is
+        what the t1b1k guard should have been.
+
+        Static check only. The render path itself is covered by the
+        cc-validation harness (the layer no unit test can reach).
         """
         text = cmd_path.read_text()
-        match = re.search(r"^!\{$(.*?)^}", text, re.MULTILINE | re.DOTALL)
-        if not match:
-            pytest.skip(f"{cmd_path.name}: no !{{}} bash block found")
-        # A heredoc intro: exactly two `<` (lookarounds exclude here-strings
-        # `<<<word`), optional `-`/`~`, optional quote, a delimiter word, at
-        # end of line. The leading-letter/underscore requirement excludes
-        # arithmetic shifts (`<< 2`).
-        heredocs = re.findall(
-            r"^.*?(?<!<)<<(?!<)[-~]?\s*['\"]?[A-Za-z_]\w*['\"]?\s*$",
-            match.group(1),
-            re.MULTILINE,
+        assert "!{" not in text, (
+            f"{cmd_path.name}: forbidden !{{ }} brace bash form (nexus-ln9y5). "
+            "It does not execute. Use a documented ```! fenced block."
         )
-        assert not heredocs, (
-            f"{cmd_path.name}: heredoc inside !{{}} block (nexus-t1b1k): {heredocs}. "
-            "Extract the script to conexus/resources/ and invoke it by path: "
-            'python3 "$CLAUDE_PLUGIN_ROOT/resources/.../<name>.py".'
-        )
+        body = _command_bash_block(text)
+        # An inline !`...` form is also acceptable; only enforce de-rooting and
+        # the fence rule for files that actually carry a bash block.
+        inline = re.search(r"(?<!\\)!`[^`]+`", text)
+        if body is None and inline is None:
+            pytest.skip(f"{cmd_path.name}: no bash injection block")
+        if body is not None:
+            assert "$CLAUDE_PLUGIN_ROOT" not in body, (
+                f"{cmd_path.name}: $CLAUDE_PLUGIN_ROOT is empty in command bash "
+                "(nexus-ln9y5); inline the logic instead of invoking by path."
+            )
 
 
 

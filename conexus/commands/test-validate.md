@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Validate tests using test-validator agent
 ---
 
 # Test Validation Request
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -51,7 +52,7 @@ description: Validate tests using test-validator agent
   fi
   echo '```'
 
-}
+```
 
 ### Project Context
 

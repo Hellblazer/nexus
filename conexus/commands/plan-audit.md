@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Audit a plan using mcp__plugin_conexus_nexus__nx_plan_audit (RDR-080)
 ---
 
 # Plan Audit Request
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -23,7 +24,7 @@ description: Audit a plan using mcp__plugin_conexus_nexus__nx_plan_audit (RDR-08
     echo "Beads not available"
   fi
   echo '```'
-}
+```
 
 ## Plan to Audit
 
