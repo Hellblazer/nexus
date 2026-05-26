@@ -292,7 +292,7 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
                     # writes on the single WAL writer lock.
                     with t2_migration_flock(db_path.parent):
                         t3_db = make_t3()
-                        t2_db = T2Database(default_db_path())  # epsilon-allow: nx upgrade bootstrap chicken-and-egg — T3 steps need a live chroma client + taxonomy store; serialized under the migration flock, daemon quiesced (RDR-128 P3 documented-irreducible)
+                        t2_db = T2Database(default_db_path())  # epsilon-allow: nx upgrade is the bootstrap chicken-and-egg (it migrates the schema the daemon serves, so it cannot route through the daemon); daemon quiesced during upgrade, the migration flock serializes a respawned daemon's startup migration cross-process. NOTE: shares the process with the apply_pending migration conn (pre-existing, single-threaded sequential writes, tracked by nexus-izpcb) (RDR-128 P3 documented-irreducible)
                         for step in unapplied:
                             click.echo(f"  T3: [{step.introduced}] {step.name}")
                             try:
