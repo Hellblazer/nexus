@@ -138,6 +138,85 @@ class TestChashIndexStoreBasics:
             store.close()
 
 
+# ── Batch upsert (RDR-128 P1 kg8sj) ──────────────────────────────────────────
+
+
+class TestChashIndexUpsertMany:
+    """``upsert_many`` writes a whole batch in one statement+commit so the
+    indexer's dual-write is a single daemon RPC, not one per chunk."""
+
+    def test_batch_inserts_all_rows(self, tmp_path: Path) -> None:
+        from nexus.db.t2.chash_index import ChashIndex
+
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            store.upsert_many(
+                chashes=["a1", "b2", "c3"], collection="code__foo"
+            )
+            rows = sorted(store.conn.execute(
+                "SELECT chash, physical_collection FROM chash_index"
+            ).fetchall())
+            assert rows == [
+                ("a1", "code__foo"), ("b2", "code__foo"), ("c3", "code__foo"),
+            ]
+        finally:
+            store.close()
+
+    def test_empty_list_is_noop(self, tmp_path: Path) -> None:
+        from nexus.db.t2.chash_index import ChashIndex
+
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            store.upsert_many(chashes=[], collection="code__foo")
+            assert store.conn.execute(
+                "SELECT COUNT(*) FROM chash_index"
+            ).fetchone()[0] == 0
+        finally:
+            store.close()
+
+    def test_blank_chashes_are_skipped(self, tmp_path: Path) -> None:
+        from nexus.db.t2.chash_index import ChashIndex
+
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            store.upsert_many(chashes=["a1", "", "  ", "b2"], collection="c")
+            rows = sorted(
+                r[0] for r in store.conn.execute(
+                    "SELECT chash FROM chash_index"
+                ).fetchall()
+            )
+            assert rows == ["a1", "b2"]
+        finally:
+            store.close()
+
+    def test_empty_collection_raises(self, tmp_path: Path) -> None:
+        from nexus.db.t2.chash_index import ChashIndex
+
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            with pytest.raises(ValueError, match="collection"):
+                store.upsert_many(chashes=["a1"], collection="")
+        finally:
+            store.close()
+
+    def test_batch_is_insert_or_replace(self, tmp_path: Path) -> None:
+        """Re-upserting an existing chash refreshes rather than erroring."""
+        from nexus.db.t2.chash_index import ChashIndex
+
+        store = ChashIndex(tmp_path / "t2.db")
+        try:
+            store.upsert_many(chashes=["a1", "b2"], collection="c")
+            store.upsert_many(chashes=["a1", "c3"], collection="c")  # a1 repeats
+            rows = sorted(
+                r[0] for r in store.conn.execute(
+                    "SELECT chash FROM chash_index"
+                ).fetchall()
+            )
+            assert rows == ["a1", "b2", "c3"]
+        finally:
+            store.close()
+
+
 # ── Concurrency ──────────────────────────────────────────────────────────────
 
 

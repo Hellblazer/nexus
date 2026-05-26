@@ -660,6 +660,51 @@ def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     click.echo("  status: running")
 
 
+# RDR-128 P0b (RF-4): bounded timeout for the pre-cycle DB-acquirability
+# probe. Matches the startup-migration busy_timeout (db/t2/__init__.py
+# _BOOTSTRAP_BUSY_TIMEOUT_MS) — there is no point cycling to a daemon whose
+# first act (the startup migration) would block longer than this. Module
+# constant so tests can shrink it without waiting the full 30s.
+_T2_CYCLE_DB_PROBE_TIMEOUT_MS: int = 30000
+
+
+def _t2_db_write_lock_acquirable(db_path: Path, timeout_ms: int) -> bool:
+    """Probe whether memory.db's single WAL writer lock is acquirable
+    within ``timeout_ms``, without holding it destructively (RDR-128 P0b).
+
+    Opens a throwaway connection and attempts ``BEGIN IMMEDIATE`` — the same
+    write lock the daemon's startup migration needs — then immediately rolls
+    back. Returns:
+
+    * ``True``  — the lock was acquired within the bounded busy_timeout (or
+      the file does not exist yet, so there is nothing to contend with);
+    * ``False`` — it stayed locked/busy for the whole timeout (another
+      process, typically ``nx index repo``, is holding it).
+
+    Bounded by construction: ``busy_timeout`` caps the ``BEGIN IMMEDIATE``
+    wait, so this never hangs. Non-lock ``OperationalError``\\s propagate.
+    """
+    import sqlite3
+
+    if not db_path.exists():
+        return True
+    # A raw connection is the point of this probe: routing through
+    # T2Database would open eight connections and defeat a single-lock test.
+    conn = sqlite3.connect(str(db_path), timeout=timeout_ms / 1000.0)  # epsilon-allow: RDR-128 P0b raw lock probe
+    try:
+        conn.execute(f"PRAGMA busy_timeout={int(timeout_ms)}")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.rollback()
+        return True
+    except sqlite3.OperationalError as exc:
+        msg = str(exc).lower()
+        if "locked" in msg or "busy" in msg:
+            return False
+        raise
+    finally:
+        conn.close()
+
+
 @t2_group.command("ensure-running")
 @click.option(
     "--config-dir",
@@ -753,6 +798,25 @@ def t2_ensure_running_cmd(
         # CURRENT daemon; gracefully cycle the stale one and respawn below.
         # SIGTERM lets the daemon drain in-flight RPC (stop() awaits
         # wait_closed) and remove its discovery file before we respawn.
+        #
+        # RDR-128 P0b (RF-4): but do NOT SIGTERM a healthy (if stale) daemon
+        # while memory.db's WAL writer lock is held — the respawn's startup
+        # migration would race the holder (typically `nx index repo`) and
+        # could crash-loop, and because ensure-running is one-shot we'd be
+        # left with NO daemon. Probe the lock with a bounded timeout; on
+        # timeout, ABORT the cycle: leave the stale-but-working daemon up and
+        # defer to the next ensure-running. Never hang; never trade a working
+        # daemon for none.
+        db_path = config_dir / "memory.db"
+        if not _t2_db_write_lock_acquirable(
+            db_path, timeout_ms=_T2_CYCLE_DB_PROBE_TIMEOUT_MS
+        ):
+            click.echo(
+                f"T2 daemon v{running_ver} stale but memory.db write lock "
+                f"held; cycle deferred (will retry on next ensure-running).",
+                err=True,
+            )
+            return  # leave the stale daemon up — best-effort, retried later
         if not quiet:
             click.echo(
                 f"T2 daemon is stale (running {running_ver}, installed "

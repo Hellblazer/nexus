@@ -856,9 +856,11 @@ def _run_check_storage_boundary(
     result = scan_repo(repo_root=repo_root)
 
     click.echo(
-        f"Storage-boundary lint (RDR-120 P0.A):\n"
+        f"Storage-boundary lint (RDR-120 P0.A / RDR-128 P0c):\n"
         f"  violations:                {result.total_violations}\n"
-        f"  catalog-allowlist count:   {result.catalog_allowlist_count}"
+        f"  catalog-allowlist count:   {result.catalog_allowlist_count}\n"
+        f"  epsilon-allow connects:    {result.epsilon_allow_connects}\n"
+        f"  T2Database constructions:  {result.t2database_constructions}"
     )
 
     if result.violations:
@@ -870,22 +872,27 @@ def _run_check_storage_boundary(
         "storage_boundary_lint",
         violations=result.total_violations,
         catalog_allowlist_count=result.catalog_allowlist_count,
+        epsilon_allow_connects=result.epsilon_allow_connects,
+        t2database_constructions=result.t2database_constructions,
         phase=phase or "unset",
     )
 
     if phase:
         try:
-            from nexus.commands._helpers import default_db_path
-            from nexus.db.t2 import T2Database
+            # RDR-128 P3 (nexus-sbxbe.3): route the phase-metric write
+            # through the daemon so `nx doctor` does not open memory.db
+            # directly. memory.put is a routable store op.
+            from nexus.mcp_infra import t2_index_write
 
-            with T2Database(default_db_path()) as db:
-                db.memory.put(
+            t2_index_write(
+                lambda db: db.memory.put(
                     project="nexus_rdr",
                     title=f"120-phase-{phase}-catalog-allowlist-count",
                     content=str(result.catalog_allowlist_count),
                     tags="rdr-120,phase-metric,catalog-allowlist",
                     ttl=None,  # permanent
                 )
+            )
         except Exception as exc:
             log.warning(
                 "storage_boundary_lint_metric_write_failed",

@@ -27,14 +27,16 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "nexus"
 
 
-def _check(extra_files=None, allowlist_prefixes=None):
-    """Run the lint and return its result tuple."""
+def _check(extra_files=None, allowlist_prefixes=None,
+           construction_allowlist_prefixes=None):
+    """Run the lint and return its result."""
     from nexus.storage_boundary_lint import scan_repo
 
     return scan_repo(
         repo_root=REPO_ROOT,
         allowlist_prefixes=allowlist_prefixes,
         extra_files=extra_files,
+        construction_allowlist_prefixes=construction_allowlist_prefixes,
     )
 
 
@@ -166,7 +168,7 @@ def test_aliased_sqlite_import_caught(tmp_path):
     matched = [v for v in result.violations if v.file == str(target)]
     assert len(matched) == 1
     # The alias is resolved back to the canonical module name.
-    assert "sqlite3.connect" in matched[0].symbol or "_sqlite3.connect" in matched[0].symbol
+    assert matched[0].symbol in ("sqlite3.connect", "_sqlite3.connect")
 
 
 # ---------------------------------------------------------------------------
@@ -211,3 +213,197 @@ def test_result_has_file_line_symbol(tmp_path):
     assert isinstance(v.line, int)
     assert isinstance(v.symbol, str)
     assert v.line == 2
+
+
+# ---------------------------------------------------------------------------
+# RDR-128 P0c (RF-5): T2Database construction detection + dual baseline
+# ---------------------------------------------------------------------------
+#
+# The lint counts two baseline populations so the single-writer cure
+# (P1/P3) is measurable from day one:
+#   * population 1 — ``sqlite3.connect`` sites carrying a deliberate
+#     ``# epsilon-allow:`` override (the raw-connect exceptions);
+#   * population 2 — direct ``T2Database(...)`` syntactic constructions
+#     outside the db/ + daemon/ construction-allowlist.
+#
+# RDR-128 RF-1 cited 20 / 53 from a *codebase grep* (RDR §RF-1, line
+# "Verified ... codebase grep"). That grep over-counts: ``grep
+# 'T2Database('`` substring-matches the 16 ``_T2Database(...)`` wrapper
+# call sites in commands/taxonomy_cmd.py plus several doc-comments. The
+# AST lint counts true syntactic constructions (the taxonomy_cmd wrapper
+# body is one site, reused 16×), giving the authoritative baseline below.
+
+
+def test_t2database_construction_unannotated_is_violation(tmp_path):
+    """RDR-128 P3: a direct un-annotated ``T2Database(...)`` outside the
+    construction-allowlist is now a HARD VIOLATION.
+
+    At P0c it was counted-only (baseline metric). P3 flips the lint to
+    enforce: an un-annotated construction is a violation exactly like an
+    un-annotated ``sqlite3.connect``. It must NOT inflate the documented
+    ``t2database_constructions`` population (that population is the
+    annotated survivors only)."""
+    base = _check().t2database_constructions
+    target = tmp_path / "ctor_offender.py"
+    target.write_text(
+        "from nexus.db.t2 import T2Database\n"
+        "def bad():\n"
+        "    return T2Database('/tmp/x.db')\n"
+    )
+    result = _check(extra_files=[target])
+    matched = [
+        v for v in result.violations
+        if v.file == str(target) and v.symbol == "T2Database"
+    ]
+    assert len(matched) == 1
+    assert matched[0].line == 3
+    assert result.t2database_constructions == base
+
+
+def test_t2database_construction_aliased_import_is_violation(tmp_path):
+    """``from ... import T2Database as DB; DB(...)`` resolves to a violation."""
+    target = tmp_path / "ctor_aliased.py"
+    target.write_text(
+        "from nexus.db.t2 import T2Database as DB\n"
+        "def bad():\n"
+        "    return DB('/tmp/x.db')\n"
+    )
+    result = _check(extra_files=[target])
+    matched = [
+        v for v in result.violations
+        if v.file == str(target) and v.symbol == "T2Database"
+    ]
+    assert len(matched) == 1
+
+
+def test_t2database_attribute_form_is_violation(tmp_path):
+    """``module.T2Database(...)`` (attribute access) resolves to a violation."""
+    target = tmp_path / "ctor_attr.py"
+    target.write_text(
+        "import nexus.db.t2 as t2mod\n"
+        "def bad():\n"
+        "    return t2mod.T2Database('/tmp/x.db')\n"
+    )
+    result = _check(extra_files=[target])
+    matched = [
+        v for v in result.violations
+        if v.file == str(target) and v.symbol == "T2Database"
+    ]
+    assert len(matched) == 1
+
+
+def test_t2database_construction_annotated_is_documented(tmp_path):
+    """RDR-128 P3: a ``T2Database(...)`` carrying a valid ``# epsilon-allow:``
+    is counted into the documented population (``t2database_constructions``)
+    and is NOT a hard violation — the exact mirror of the ``sqlite3.connect``
+    epsilon-allow treatment. This is how an irreducible direct construction
+    (read-only diagnostic, bootstrap chicken-and-egg, by-design daemon
+    fallback) declares its lock-discipline justification."""
+    base = _check().t2database_constructions
+    target = tmp_path / "ctor_documented.py"
+    target.write_text(
+        "from nexus.db.t2 import T2Database\n"
+        "def ok():\n"
+        "    return T2Database('/tmp/x.db')  "
+        "# epsilon-allow: read-only diagnostic, no WAL writer contention\n"
+    )
+    result = _check(extra_files=[target])
+    assert result.t2database_constructions == base + 1
+    assert [v for v in result.violations if v.file == str(target)] == []
+
+
+def test_t2database_construction_short_reason_is_violation(tmp_path):
+    """An epsilon-allow with a too-short (<8 char) reason does NOT suppress
+    the violation — same reason-length floor as the connect override."""
+    target = tmp_path / "ctor_shortreason.py"
+    target.write_text(
+        "from nexus.db.t2 import T2Database\n"
+        "def bad():\n"
+        "    return T2Database('/tmp/x.db')  # epsilon-allow: x\n"
+    )
+    result = _check(extra_files=[target])
+    assert [
+        v for v in result.violations
+        if v.file == str(target) and v.symbol == "T2Database"
+    ]
+
+
+def test_epsilon_allow_connect_counted_as_population(tmp_path):
+    """An epsilon-allow'd ``sqlite3.connect`` is counted (population 1),
+    not silently dropped, and is NOT a hard violation."""
+    base = _check()
+    target = tmp_path / "eps_connect.py"
+    target.write_text(
+        "import sqlite3\n"
+        "def ok():\n"
+        "    return sqlite3.connect('/tmp/x.db')  # epsilon-allow: documented exception\n"
+    )
+    result = _check(extra_files=[target])
+    assert result.epsilon_allow_connects == base.epsilon_allow_connects + 1
+    # Still not a hard violation (the override suppresses that).
+    assert [v for v in result.violations if v.file == str(target)] == []
+
+
+def test_daemon_construction_is_allowlisted(tmp_path):
+    """db/ AND daemon/ are construction-allowlisted (the daemon is the
+    legitimate single writer). Under the RDR-128 P3 enforcement flip,
+    removing daemon/ from the allowlist must reveal strictly more
+    VIOLATIONS — the daemon's own (un-annotated) ``T2Database(...)``
+    constructions become hard violations once unallowlisted."""
+    default = _check().total_violations
+    db_only = _check(
+        construction_allowlist_prefixes=("src/nexus/db/",)
+    ).total_violations
+    assert db_only > default, (
+        "daemon/ T2Database construction(s) should be exempt by default"
+    )
+
+
+def test_dual_population_baseline_locked():
+    """Exact baseline lock (silent-corruption guard, RDR-128 P0c → P3 close).
+
+    AST-authoritative counts. Locked as ``== N`` (never ``>=``): a
+    regression that adds a raw connect or an un-annotated ``T2Database(...)``
+    construction outside the daemon trips the assertion (the un-annotated
+    case via ``total_violations``), forcing either a daemon route or a
+    deliberate ``# epsilon-allow:`` exemption with justification.
+
+    RDR-128 P3 (nexus-sbxbe.3) flipped the lint from counted-only to
+    ENFORCING: ``t2database_constructions`` now counts the DOCUMENTED
+    survivors (annotated direct constructions), and any un-annotated
+    construction is a hard violation. The close drove un-annotated
+    constructions to ZERO — every surviving direct construction carries a
+    lock-discipline justification (the acceptance criterion's
+    "documented-irreducible set").
+    """
+    result = _check()
+    # 16 = 15 pre-existing raw-connect exceptions + the RDR-128 P0b
+    # lock-acquirability probe (daemon.py). Unchanged by P3: the P3 routing
+    # added no raw sqlite3.connect sites (the migration-flock extension in
+    # upgrade.py uses fcntl.flock, not a connect), and the T2Database
+    # constructions it removed were not raw connects.
+    assert result.epsilon_allow_connects == 16, (
+        f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
+    )
+    # P3 endpoint: ZERO un-annotated direct T2Database constructions outside
+    # db/ + daemon/. A new direct writer that lands without routing or an
+    # epsilon-allow justification fails CI here — the enforcement teeth that
+    # "close" the single-writer invariant.
+    assert result.total_violations == 0, (
+        "un-annotated T2Database construction(s) or raw connect(s) outside "
+        f"the allowlist: {[(v.file, v.line, v.symbol) for v in result.violations]}"
+    )
+    # 30 = the documented-irreducible survivor set after the P3 close. P0c
+    # baselined 36 (all constructions, counted-only). P3 routed the hot-path
+    # and routable writers away (indexer/worker-poll/session-end/rename/
+    # scratch-promote/doctor-metric/aspect-delete/collection-delete) and
+    # annotated the genuinely-irreducible remainder with documented
+    # justifications: the daemon-unreachable fallback + t2_ctx worker-persist
+    # (mcp_infra), the bootstrap upgrade path, document_aspects.upsert /
+    # raw-DDL / raw-cursor writers, the read-only diagnostic/CLI reads, and
+    # the taxonomy CLI factory (raw-cursor reads + chroma-interleaved writes
+    # that cannot cross the daemon RPC). Each survivor's ``# epsilon-allow:``
+    # reason states why it cannot route.
+    assert result.t2database_constructions == 30, (
+        f"T2Database documented-construction baseline moved: {result.t2database_constructions}"
+    )

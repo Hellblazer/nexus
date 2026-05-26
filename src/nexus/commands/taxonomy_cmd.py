@@ -12,9 +12,21 @@ from nexus.commands._helpers import default_db_path as _default_db_path
 
 
 def _T2Database(path):
-    """Lazy T2Database constructor (avoids module-level import poisoning by test mocks)."""
+    """Lazy T2Database constructor (avoids module-level import poisoning by test mocks).
+
+    RDR-128 P3 (nexus-sbxbe.3): this factory backs ~17 ``nx taxonomy``
+    subcommands and is the single construction site the lint sees for all
+    of them. It is irreducible: the read-only subcommands (``status`` /
+    ``list`` / ``show`` / ``hubs`` / ``audit`` / ``links``) issue raw
+    ``db.taxonomy.conn.execute(...)`` SELECTs, and a raw SQLite cursor
+    cannot cross the daemon RPC boundary; while ``discover`` / ``rebuild``
+    / ``split`` / ``project`` interleave a ChromaDB centroid write with the
+    T2-generated ``topic_id`` inside one lock, which likewise cannot route.
+    The reads do not contend on the WAL writer lock; the writes are
+    infrequent operator commands, not the automated hot path.
+    """
     from nexus.db.t2 import T2Database
-    return T2Database(path)
+    return T2Database(path)  # epsilon-allow: taxonomy CLI factory — read-only subcommands need raw-cursor SELECTs (no WAL writer contention) and discover/rebuild/split interleave chroma-centroid writes keyed on T2-generated topic_ids; neither can cross the daemon RPC (RDR-128 P3 documented-irreducible)
 
 if TYPE_CHECKING:
     from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
@@ -1834,7 +1846,7 @@ def backfill_source_collection_cmd(apply_: bool) -> None:
     if not db_path.exists():
         raise click.ClickException(f"T2 database not found: {db_path}")
 
-    t2 = T2Database(db_path)
+    t2 = T2Database(db_path)  # epsilon-allow: backfill passes the taxonomy store across a fn boundary for a read-then-UPDATE under its _lock; not a routable single-store RPC op (RDR-128 P3 documented-irreducible)
     try:
         # Pass the store (not the raw conn) so _lock is held for the
         # read + UPDATE sequence (review gate C-1).

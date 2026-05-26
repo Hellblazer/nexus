@@ -141,9 +141,82 @@ def get_collection_names() -> list[str]:
 
 
 def t2_ctx():
-    """Return a T2Database context manager — fresh per call."""
+    """Return a T2Database context manager — fresh per call.
+
+    Reserved for the paths that genuinely cannot route through the daemon
+    (RDR-128 P3): the ``aspect_worker`` persist block, whose
+    ``document_aspects.upsert(record)`` takes an ``AspectRecord`` argument
+    that the daemon wire protocol decodes to a plain dict server-side
+    (``t2_daemon._t2_decode``), so the method would receive a dict and
+    break on attribute access. The hot every-poll path routes via
+    ``t2_index_write``; only the work-bounded persist falls back here.
+    """
     from nexus.db.t2 import T2Database
-    return T2Database(default_db_path())
+    return T2Database(default_db_path())  # epsilon-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
+
+
+def t2_index_write(write_fn):
+    """Run one T2 write through the daemon (``T2Client``) if it is
+    reachable, else a direct ``T2Database`` (RDR-128 P1, nexus-kg8sj;
+    generalized to all routable writers in P3, nexus-sbxbe.3).
+
+    Returns ``write_fn``'s result so callers that need the write's return
+    value (e.g. the aspect_worker's ``claim_batch`` rows, or
+    ``rename_collection_cascade``'s per-store row counts) can route too;
+    fire-and-forget callers simply ignore the return.
+
+    Routing keeps the ``nx index repo`` process from opening ``memory.db``
+    directly and holding its single WAL writer slot — the daemon becomes
+    the writer, so a dead/slow indexer can no longer strand the lock for
+    other processes. The direct-``T2Database`` fallback preserves
+    functionality when the daemon is down (at the cost of the old
+    direct-lock behavior), and is logged so the degraded path is visible.
+
+    ``write_fn(db)`` receives the writer (``T2Client`` or ``T2Database``;
+    both expose the same ``db.<store>.<method>(...)`` surface). Reachability
+    is decided by an explicit up-front probe (``database.hello()``) rather
+    than by catching an error *out of* ``write_fn`` — because some writers
+    (e.g. the best-effort ``dual_write_chash_index``) swallow their own
+    exceptions internally, which would otherwise hide the unreachable
+    signal and silently drop the write. ``write_fn`` is therefore invoked
+    against exactly one writer, never re-run, so there is no double-write
+    risk regardless of how it handles errors.
+    """
+    from nexus.daemon.t2_client import (
+        T2DaemonNotReachableError,
+        T2SchemaVersionMismatchError,
+        make_t2_client,
+    )
+
+    client = None
+    try:
+        client = make_t2_client()
+        client.database.hello()  # force the lazy connect; raises if down
+    except (T2DaemonNotReachableError, T2SchemaVersionMismatchError):
+        # Daemon down OR version-skewed (e.g. just after a daemon upgrade,
+        # before the indexer is restarted). Either way it cannot serve this
+        # write; close the half-open client and degrade to a direct write.
+        if client is not None:
+            client.close()
+        client = None
+
+    if client is not None:
+        try:
+            return write_fn(client)
+        finally:
+            client.close()
+
+    # Degraded path: this is the direct-lock behavior RDR-128 exists to
+    # eliminate, so log it at warning (not debug) — a persistently
+    # unreachable daemon during indexing is operator-actionable.
+    import structlog
+    structlog.get_logger().warning(
+        "t2_index_write_daemon_unreachable_fallback",
+        hint="start the T2 daemon (`nx daemon t2 start`) to route indexer writes",
+    )
+    from nexus.db.t2 import T2Database
+    with T2Database(default_db_path()) as db:  # epsilon-allow: by-design daemon-unreachable fallback so writes degrade to direct rather than failing (RDR-128 P3 documented-irreducible)
+        return write_fn(db)
 
 
 # ── T1 plan session cache (RDR-078) ──────────────────────────────────────────
@@ -335,24 +408,33 @@ def taxonomy_assign_batch_hook(
             return
 
     try:
-        with t2_ctx() as db:
-            chroma_client = get_t3()._client
-            # Same-collection assignment
-            db.taxonomy.assign_batch(
-                collection, doc_ids, embeddings, chroma_client,
+        # RDR-128 P1 (nexus-fkq5q): compute assignments client-side (the
+        # ChromaDB client can't cross the RPC boundary), then persist the
+        # serializable result through the daemon so the indexer does not
+        # open memory.db directly.
+        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+        chroma_client = get_t3()._client
+        same = CatalogTaxonomy.compute_assignments(
+            collection, doc_ids, embeddings, chroma_client,
+            cross_collection=False,
+        )
+        cross = CatalogTaxonomy.compute_assignments(
+            collection, doc_ids, embeddings, chroma_client,
+            cross_collection=True,
+        )
+        assignments = same + cross
+        if assignments:
+            t2_index_write(
+                lambda db: db.taxonomy.persist_assignments(assignments)
             )
-            # Cross-collection projection (RDR-075 SC-6)
-            cross_assigned = db.taxonomy.assign_batch(
-                collection, doc_ids, embeddings, chroma_client,
-                cross_collection=True,
+        if cross:
+            import structlog
+            structlog.get_logger().debug(
+                "taxonomy_cross_collection_batch",
+                collection=collection,
+                cross_assigned=len(cross),
             )
-            if cross_assigned:
-                import structlog
-                structlog.get_logger().debug(
-                    "taxonomy_cross_collection_batch",
-                    collection=collection,
-                    cross_assigned=cross_assigned,
-                )
     except Exception:
         import structlog
         structlog.get_logger().debug("taxonomy_assign_batch_failed", exc_info=True)
@@ -450,8 +532,13 @@ def chash_dual_write_batch_hook(
     try:
         from nexus.db.t2.chash_index import dual_write_chash_index
 
-        with t2_ctx() as db:
-            dual_write_chash_index(db.chash_index, collection, doc_ids, metadatas)
+        # RDR-128 P1 (kg8sj): route through the daemon so the indexer does
+        # not hold memory.db's writer lock; dual_write batches to one RPC.
+        t2_index_write(
+            lambda db: dual_write_chash_index(
+                db.chash_index, collection, doc_ids, metadatas
+            )
+        )
     except Exception:
         import structlog
         structlog.get_logger().debug("chash_dual_write_batch_failed", exc_info=True)

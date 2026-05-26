@@ -295,8 +295,16 @@ class TestWorkerDrainIntegration:
         from nexus.aspect_worker import drain_worker, ensure_worker_started
 
         original_t2_ctx = infra_mod.t2_ctx
+        original_t2_index_write = infra_mod.t2_index_write
         original_extract = extractor_mod.extract_aspects
         infra_mod.t2_ctx = lambda: T2Database(queue_path)
+        # RDR-128 P3: the worker's hot poll (reclaim + claim) now routes
+        # through t2_index_write; point it at the test queue DB so the
+        # restarted worker claims the row enqueued below (no daemon in tests).
+        def _direct_poll(write_fn):  # noqa: ANN001
+            with T2Database(queue_path) as db:
+                return write_fn(db)
+        infra_mod.t2_index_write = _direct_poll
         # Stub extraction: return None (unsupported-collection short-circuit)
         # so the worker calls mark_done without real Claude calls.
         extractor_mod.extract_aspects = lambda **_kw: None
@@ -334,6 +342,7 @@ class TestWorkerDrainIntegration:
             )
         finally:
             infra_mod.t2_ctx = original_t2_ctx
+            infra_mod.t2_index_write = original_t2_index_write
             extractor_mod.extract_aspects = original_extract
 
     def test_worker_not_running_drain_is_just_is_drained(

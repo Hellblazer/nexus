@@ -11,7 +11,7 @@ REPO=$(git rev-parse --show-toplevel)
 HOOKS="$REPO/conexus/hooks/scripts"
 
 # Fake Claude Code hook env
-export CLAUDE_PLUGIN_ROOT="$REPO/nx"
+export CLAUDE_PLUGIN_ROOT="$REPO/conexus"
 export CLAUDE_PROJECT_DIR="$SANDBOX"
 
 # Fake SessionStart event payload

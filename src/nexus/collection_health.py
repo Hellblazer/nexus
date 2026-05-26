@@ -163,7 +163,7 @@ def _open_t2():
     db_path = default_db_path()
     if not db_path.exists():
         return None
-    return T2Database(db_path)
+    return T2Database(db_path)  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
 
 
 def _default_telemetry_stats_fn(col: str) -> dict[str, Any]:

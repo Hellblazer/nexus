@@ -51,11 +51,26 @@ def _reset_worker():
 
 @pytest.fixture(autouse=True)
 def _isolate_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Point t2_ctx at a tmp_path-scoped DB so worker and test
-    share the same SQLite file."""
+    """Point the indexer's T2 write paths at a tmp_path-scoped DB so worker
+    and test share the same SQLite file.
+
+    RDR-128 P1 (kg8sj): the enqueue hook now routes through
+    ``t2_index_write`` (daemon-or-direct), so isolate that too — here it
+    writes directly to the tmp DB (daemon routing is covered by
+    ``tests/test_rdr128_p1_index_write_routing.py``). ``t2_ctx`` stays
+    patched for the tests that open the queue directly.
+    """
     import nexus.mcp_infra as infra
     db_path = tmp_path / "worker_t2.db"
     monkeypatch.setattr(infra, "t2_ctx", lambda: T2Database(db_path))
+
+    def _direct_index_write(write_fn):  # noqa: ANN001
+        # RDR-128 P3: t2_index_write returns write_fn's result so the
+        # worker's routed poll can consume claim_batch's rows. Mirror that.
+        with T2Database(db_path) as db:
+            return write_fn(db)
+
+    monkeypatch.setattr(infra, "t2_index_write", _direct_index_write)
     return db_path
 
 
@@ -104,6 +119,35 @@ class TestWorkerDrain:
         assert rec is not None
         assert rec.problem_formulation == "P"
         assert rec.proposed_method == "M"
+
+    def test_queuerow_roundtrips_through_daemon_wire_shape(self) -> None:
+        """RDR-128 P3: routed through the daemon, ``claim_batch`` rows arrive
+        as plain dicts (``t2_daemon._t2_decode`` returns a dataclass's fields
+        as a dict, not a reconstructed object). The worker's poll relies on
+        ``QueueRow(**wire_dict)`` to restore object attribute access. Pin that
+        round-trip so a QueueRow field change can't silently break the routed
+        worker (the direct-fallback path returns objects and would mask it)."""
+        import dataclasses
+
+        from nexus.db.t2.aspect_extraction_queue import QueueRow
+
+        original = QueueRow(
+            collection="knowledge__delos",
+            source_path="/p1.pdf",
+            content_hash="abc123",
+            content="",
+            retry_count=2,
+            doc_id="1.2.3",
+        )
+        # The daemon wire protocol hands the client the dataclass's fields
+        # as a plain dict; reconstruct exactly as the worker poll does.
+        wire_dict = dataclasses.asdict(original)
+        assert not isinstance(wire_dict, QueueRow)
+        restored = QueueRow(**wire_dict)
+        assert restored == original
+        assert restored.collection == "knowledge__delos"
+        assert restored.retry_count == 2
+        assert restored.doc_id == "1.2.3"
 
     def test_worker_unsupported_collection_drops_silently(
         self, _isolate_t2: Path,

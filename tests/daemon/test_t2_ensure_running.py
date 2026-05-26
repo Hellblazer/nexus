@@ -275,3 +275,196 @@ class TestEnsureRunning:
         # know which platform the operator is on, so it names both).
         assert "nexus-t2.err" in result.output
         assert "journalctl --user -u nexus-t2.service" in result.output
+
+
+# ---------------------------------------------------------------------------
+# RDR-128 P0b (RF-4): pre-cycle DB-acquirability interlock
+# ---------------------------------------------------------------------------
+
+
+def _seed_wal_db(path) -> None:
+    """Create a WAL-mode memory.db so a competing writer lock is meaningful."""
+    import sqlite3
+
+    c = sqlite3.connect(str(path))
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("CREATE TABLE _t (x INTEGER)")
+    c.commit()
+    c.close()
+
+
+class TestDbProbe:
+    """The bounded ``_t2_db_write_lock_acquirable`` probe."""
+
+    def test_missing_file_is_acquirable(self, tmp_path) -> None:
+        from nexus.commands.daemon import _t2_db_write_lock_acquirable
+
+        assert _t2_db_write_lock_acquirable(
+            tmp_path / "absent.db", timeout_ms=200
+        ) is True
+
+    def test_free_lock_is_acquirable(self, tmp_path) -> None:
+        from nexus.commands.daemon import _t2_db_write_lock_acquirable
+
+        db = tmp_path / "memory.db"
+        _seed_wal_db(db)
+        assert _t2_db_write_lock_acquirable(db, timeout_ms=200) is True
+
+    def test_held_writer_lock_is_not_acquirable_and_is_bounded(
+        self, tmp_path,
+    ) -> None:
+        """A competing ``BEGIN IMMEDIATE`` makes the probe return False
+        within ~timeout_ms — it waits the bounded window, never forever."""
+        import sqlite3
+        import threading
+        import time
+
+        from nexus.commands.daemon import _t2_db_write_lock_acquirable
+
+        db = tmp_path / "memory.db"
+        _seed_wal_db(db)
+
+        locked = threading.Event()
+        release = threading.Event()
+
+        def _holder() -> None:
+            h = sqlite3.connect(str(db))
+            h.execute("PRAGMA busy_timeout=10000")
+            h.execute("BEGIN IMMEDIATE")
+            h.execute("INSERT INTO _t VALUES (1)")
+            locked.set()
+            release.wait(timeout=15)
+            h.rollback()
+            h.close()
+
+        holder = threading.Thread(target=_holder)
+        holder.start()
+        assert locked.wait(timeout=5), "holder failed to take the writer lock"
+
+        start = time.monotonic()
+        acquirable = _t2_db_write_lock_acquirable(db, timeout_ms=200)
+        elapsed = time.monotonic() - start
+
+        release.set()
+        holder.join()
+
+        assert acquirable is False
+        assert elapsed < 5.0, "probe must be bounded by busy_timeout, not hang"
+
+
+class TestCycleInterlock:
+    """ensure-running must defer the version-cycle when memory.db is locked,
+    and proceed when it is free."""
+
+    def test_stale_daemon_not_cycled_when_db_lock_held(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        import signal as _signal
+        import sqlite3
+        import threading
+
+        import nexus.commands.daemon as _daemon
+
+        _write_discovery(tmp_path, pid=424242, version="0.0.1-stale")
+        monkeypatch.setattr(
+            "importlib.metadata.version", lambda _name: "9.9.9-installed"
+        )
+
+        # Real, locked memory.db at the config dir.
+        db = tmp_path / "memory.db"
+        _seed_wal_db(db)
+        locked = threading.Event()
+        release = threading.Event()
+
+        def _holder() -> None:
+            h = sqlite3.connect(str(db))
+            h.execute("PRAGMA busy_timeout=15000")
+            h.execute("BEGIN IMMEDIATE")
+            h.execute("INSERT INTO _t VALUES (1)")
+            locked.set()
+            release.wait(timeout=20)
+            h.rollback()
+            h.close()
+
+        holder = threading.Thread(target=_holder)
+        holder.start()
+        assert locked.wait(timeout=5)
+
+        # Fast probe so the deferral path returns quickly.
+        monkeypatch.setattr(_daemon, "_T2_CYCLE_DB_PROBE_TIMEOUT_MS", 200)
+
+        signals: list[tuple[int, int]] = []
+
+        def _fake_kill(pid, sig):  # noqa: ANN001
+            if sig == 0:
+                if pid == 424242:
+                    return  # alive
+                raise ProcessLookupError
+            signals.append((pid, sig))
+
+        monkeypatch.setattr(os, "kill", _fake_kill)
+        monkeypatch.setattr(
+            subprocess, "Popen",
+            lambda *a, **kw: pytest.fail("must not respawn when cycle deferred"),
+        )
+
+        result = CliRunner().invoke(
+            main,
+            ["daemon", "t2", "ensure-running",
+             "--config-dir", str(tmp_path), "--timeout", "0.2"],
+        )
+
+        release.set()
+        holder.join()
+
+        # The healthy-but-stale daemon was LEFT UP (never SIGTERM'd).
+        assert not any(sig == _signal.SIGTERM for _, sig in signals), (
+            "stale daemon must NOT be cycled while memory.db is locked"
+        )
+        assert "cycle deferred" in result.output.lower()
+        assert result.exit_code == 0
+
+    def test_stale_daemon_cycled_when_db_lock_free(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Mirror of the deferral test: an existing but UNLOCKED memory.db
+        lets the probe pass, so the stale daemon is cycled as before."""
+        import signal as _signal
+
+        _write_discovery(tmp_path, pid=424242, version="0.0.1-stale")
+        monkeypatch.setattr(
+            "importlib.metadata.version", lambda _name: "9.9.9-installed"
+        )
+        _seed_wal_db(tmp_path / "memory.db")  # exists, not locked
+
+        state = {"terminated": False}
+
+        def _fake_kill(pid, sig):  # noqa: ANN001
+            if pid != 424242:
+                raise ProcessLookupError
+            if sig == 0:
+                if state["terminated"]:
+                    raise ProcessLookupError
+                return
+            if sig == _signal.SIGTERM:
+                state["terminated"] = True
+
+        monkeypatch.setattr(os, "kill", _fake_kill)
+
+        spawned: list[list[str]] = []
+
+        class _FakePopen:
+            def __init__(self, argv, **_kw):  # noqa: ANN001
+                spawned.append(argv)
+
+        monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+        result = CliRunner().invoke(
+            main,
+            ["daemon", "t2", "ensure-running",
+             "--config-dir", str(tmp_path), "--timeout", "0.2"],
+        )
+
+        assert state["terminated"] is True, "free lock should allow the cycle"
+        assert len(spawned) == 1
+        assert "cycling to current" in result.output.lower()

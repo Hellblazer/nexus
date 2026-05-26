@@ -155,7 +155,7 @@ def aspects_gc(apply: bool) -> None:
         )
         raise SystemExit(1)
 
-    with T2Database(mem_path) as db:
+    with T2Database(mem_path) as db:  # epsilon-allow: aspects gc delete_orphans cross-DB ATTACHes the catalog database; not a routable single-store op (RDR-128 P3 documented-irreducible)
         orphans, total = db.document_aspects.delete_orphans(
             cat_db, dry_run=not apply,
         )
@@ -220,7 +220,7 @@ def aspects_gc_fixtures(yes: bool) -> None:
 
     verb = "deleted" if yes else "would delete"
     any_rows = False
-    with T2Database(mem_path) as db:
+    with T2Database(mem_path) as db:  # epsilon-allow: gc-fixtures issues raw multi-store DELETE via live cursors, no store method to route (RDR-128 P3 documented-irreducible)
         # Both target stores expose ``conn`` directly (matching the
         # existing module convention; their writers go through the
         # store's lock, but the verb's serial DELETEs do not need the

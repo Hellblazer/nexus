@@ -1,6 +1,6 @@
 {
   "name": "sn",
-  "version": "5.0.4",
+  "version": "5.1.0",
   "description": "Injects Serena and Context7 MCP tool usage guidance into subagents via SubagentStart hook.",
   "author": {
     "name": "Hal Hildebrand",

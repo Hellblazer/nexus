@@ -1,6 +1,6 @@
 ---
 name: release
-description: Use when cutting a release, bumping version, tagging, or publishing to PyPI. Enforces the full release checklist from CLAUDE.md § Release Process. Also surfaces as /nx:release.
+description: Use when cutting a release, bumping version, tagging, or publishing to PyPI. Enforces the full release checklist from CLAUDE.md § Release Process. Also surfaces as /conexus:release.
 ---
 
 # Release Checklist
@@ -34,11 +34,13 @@ Cross-walk against:
 
 Update any drift before bumping version. Doc audit is what catches "we changed the wire format but forgot to document it."
 
-### 3. Bump version in ALL FIVE bump targets
+### 3. Bump version in ALL SEVEN bump targets
 
-CI enforces parity. Missing any one of these fails the marketplace-version-matches-pyproject test or the marketplace-source-ref-matches-pyproject test.
+CI enforces parity. Missing any one of these fails the marketplace-version-matches-pyproject test, the marketplace-source-ref-matches-pyproject test, or the mcpb-manifest-version-matches-pyproject test.
 
 - `pyproject.toml`: `version = "X.Y.Z"` (canonical source of truth)
+- `mcpb/pyproject.toml`: `version` **and** the `conexus>=X.Y.Z` dependency pin
+- `mcpb/manifest.json`: `version`
 - `.claude-plugin/marketplace.json`: **both `version` fields** (one for conexus, one for sn)
 - `.claude-plugin/marketplace.json`: **both `plugins[].source.ref` fields** — must be `"vX.Y.Z"` (the tag form). Easy to forget. This is what decouples installed users from main HEAD: plugin installs follow the pinned tag, not whatever main currently is. **CRITICAL: nexus-mkj6u 2026-05-23**
 - `conexus/.claude-plugin/plugin.json`: `version`
@@ -51,7 +53,7 @@ Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 ### 4. Update both changelogs
 
 - `CHANGELOG.md` (root): move `## [Unreleased]` content into a new `## [X.Y.Z] - YYYY-MM-DD` section. Leave a fresh empty `## [Unreleased]` at the top.
-- `nx/CHANGELOG.md` (plugin changelog): always update, even if no plugin changes (note: "Plugin version aligned with conexus X.Y.Z. No plugin-side changes." is acceptable).
+- `conexus/CHANGELOG.md` (plugin changelog): always update, even if no plugin changes (note: "Plugin version aligned with conexus X.Y.Z. No plugin-side changes." is acceptable).
 
 ### 5. Refresh `uv.lock`
 
@@ -63,7 +65,7 @@ The lock file MUST be committed. CI also checks this.
 
 ### 6. Run sandbox smoke (~2 min)
 
-Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/db/migrations.py`, `src/nexus/mcp/**`, `nx/**`, `.claude-plugin/**`, `src/nexus/commands/{doctor,upgrade}.py`.
+Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/db/migrations.py`, `src/nexus/mcp/**`, `conexus/**`, `.claude-plugin/**`, `src/nexus/commands/{doctor,upgrade}.py`.
 
 ```bash
 ./tests/e2e/release-sandbox.sh smoke
@@ -186,7 +188,7 @@ nx --version                 # must print X.Y.Z
 
 - **Bumping only `pyproject.toml` and missing the four plugin manifests.** CI parity check catches this late. Run the Step 8 pre-push check.
 - **Skipping the integration suite.** Unit-only is what CI runs; integration is your last gate against keyed-API regressions before tag-push.
-- **Skipping sandbox smoke when `nx/**` or `pyproject.toml` changed.** The smoke catches plugin-load + db-migration regressions that unit tests miss.
+- **Skipping sandbox smoke when `conexus/**` or `pyproject.toml` changed.** The smoke catches plugin-load + db-migration regressions that unit tests miss.
 - **Using `gh release create` after `git push origin vX.Y.Z`.** Duplicate release. The Release workflow already creates one.
 - **Forgetting `uv sync`.** `uv.lock` not updated; CI fails or local install resolves differently.
 - **Forgetting `scripts/reinstall-tool.sh` after tag-push.** Local `nx` stays on old version; the post-merge "verify locally" step lies.

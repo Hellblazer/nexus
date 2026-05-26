@@ -4,9 +4,7 @@ from typing import Any
 
 import click
 
-from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.db.t1 import T1Database
-from nexus.db.t2 import T2Database
 
 
 def _t1() -> T1Database:
@@ -130,12 +128,19 @@ def unflag_cmd(entry_id: str) -> None:
 @click.option("--title", "-t", required=True, help="Target T2 title")
 def promote_cmd(entry_id: str, project: str, title: str) -> None:
     """Copy a scratch entry to T2 immediately."""
+    from nexus.mcp_infra import t2_index_write
+
     t1 = _t1()
-    with T2Database(_default_db_path()) as t2:
-        try:
-            report = t1.promote(entry_id, project=project, title=title, t2=t2)
-        except KeyError as exc:
-            raise click.ClickException(str(exc)) from exc
+    try:
+        # RDR-128 P3 (nexus-sbxbe.3): route the T2 write through the daemon.
+        # T1Database.promote calls ``t2.put(...)``; T2Client's facade
+        # passthrough makes that work on the routed client (memory.put RPC)
+        # or the direct-fallback T2Database.
+        report = t2_index_write(
+            lambda t2: t1.promote(entry_id, project=project, title=title, t2=t2)
+        )
+    except KeyError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Promoted {entry_id} -> {project}/{title} (action={report.action})")
 
 

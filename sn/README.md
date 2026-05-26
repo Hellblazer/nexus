@@ -75,11 +75,11 @@ sn/
 └── README.md
 ```
 
-## Relationship to nx
+## Relationship to conexus
 
-`sn` is project-agnostic — it works in any repository where Serena is configured. It lives in the same marketplace as `nx` but has no dependency on it. Install either or both.
+`sn` is project-agnostic — it works in any repository where Serena is configured. It lives in the same marketplace as `conexus` but has no dependency on it. Install either or both.
 
 | Plugin | Scope | What it provides |
 |--------|-------|-----------------|
-| `nx` | Project-specific | Knowledge management, semantic search, agents, beads, RDR tracking |
+| `conexus` | Project-specific | Knowledge management, semantic search, agents, beads, RDR tracking |
 | `sn` | Universal | MCP tool guidance for subagents (Serena + Context7) |

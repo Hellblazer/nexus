@@ -576,3 +576,107 @@ class TestRepeatedTerminate:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5.0)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 12: RDR-128 P3 single-writer routing — no `database is locked`
+# ---------------------------------------------------------------------------
+
+
+class TestRdr128P3SingleWriterRouting:
+    """RDR-128 P3 (nexus-sbxbe.3) quantitative acceptance gate.
+
+    The whole RDR exists because N independent writers contending on
+    ``memory.db``'s single SQLite WAL writer lock produced a string of
+    ``database is locked`` daemon incidents. P3 routes the writers through
+    the daemon (``mcp_infra.t2_index_write``) so the daemon is the single
+    writer and contention cannot surface.
+
+    This scenario drives the three real writer shapes — indexer
+    (``chash_index.upsert_many``), aspect-worker (``aspect_queue.enqueue``),
+    and SessionEnd flush (``memory.put``) — concurrently, EACH through
+    ``t2_index_write``, against ONE daemon, and asserts that NO caller ever
+    sees ``database is locked`` (nor any other error) and that every write
+    lands. This is the deterministic analogue of the qualitative
+    release-cycle shakeout in the RDR's Validation section.
+    """
+
+    def test_mixed_routed_writers_never_surface_database_is_locked(
+        self, config_dir: Path, monkeypatch,
+    ) -> None:
+        # Daemon DB == default_db_path() under this config dir, so the
+        # routed path and the (unused-here) direct fallback agree.
+        db_path = config_dir / "memory.db"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+
+        proc = _spawn_daemon_subprocess(config_dir, db_path)
+        try:
+            _wait_for_discovery(config_dir)
+
+            from nexus.mcp_infra import t2_index_write
+
+            errors: list[tuple[str, int, str]] = []
+            n = 20
+
+            def _indexer(i: int) -> None:
+                try:
+                    t2_index_write(
+                        lambda db: db.chash_index.upsert_many(
+                            chashes=[f"h{i}_{j}" for j in range(5)],
+                            collection="code__stress",
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(("indexer", i, repr(exc)))
+
+            def _worker(i: int) -> None:
+                try:
+                    t2_index_write(
+                        lambda db: db.aspect_queue.enqueue(
+                            "knowledge__stress", f"/p{i}.pdf",
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(("worker", i, repr(exc)))
+
+            def _session(i: int) -> None:
+                try:
+                    t2_index_write(
+                        lambda db: db.memory.put(
+                            project="nexus_stress",
+                            title=f"s{i}",
+                            content="session flush entry",
+                            ttl=None,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(("session", i, repr(exc)))
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=30) as pool:
+                futures = []
+                for i in range(n):
+                    futures.append(pool.submit(_indexer, i))
+                    futures.append(pool.submit(_worker, i))
+                    futures.append(pool.submit(_session, i))
+                for f in futures:
+                    f.result(timeout=90.0)
+
+            locked = [e for e in errors if "database is locked" in e[2].lower()]
+            assert not locked, (
+                f"routing did NOT prevent WAL contention: {locked[:5]}"
+            )
+            # No caller saw ANY error at all (routing serializes cleanly).
+            assert errors == [], f"routed writers surfaced errors: {errors[:5]}"
+
+            # Every write landed via the daemon's single writer.
+            from nexus.db.t2 import T2Database
+
+            with T2Database(db_path) as db:
+                sessions = db.memory.search(
+                    "session flush entry", project="nexus_stress",
+                )
+            assert len(sessions) == n, (
+                f"expected all {n} session writes to land; got {len(sessions)}"
+            )
+        finally:
+            _terminate_daemon(proc)
