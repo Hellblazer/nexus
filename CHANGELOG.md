@@ -6,6 +6,44 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-05-25
+
+### Fixed: T2 single-writer enforcement, root-cause fix for the daemon crash-loop (RDR-128)
+
+RDR-120 made the T2 daemon `memory.db`'s single writer, but the invariant
+was asserted and never enforced: 20+ code paths opened the WAL database
+directly and contended on its one writer lock. That contention surfaced as
+a string of `database is locked` daemon incidents band-aided across 5.0.2,
+5.0.3, and 5.0.4, culminating in a startup crash-loop minutes after 5.0.4
+shipped (the version-cycle lifecycle fix amplified it). RDR-128 fixes the
+root cause rather than the symptom:
+
+- **Routing.** The hot and automated writers now go through the daemon via
+  `mcp_infra.t2_index_write`: the indexer (`nx index repo`), the
+  aspect-extraction worker's poll loop, the SessionEnd flush, and the
+  routable CLI writers (`nx scratch promote`, `nx collection delete`/`rename`,
+  `nx enrich aspects delete`, the `nx doctor` phase metric). A dead or slow
+  writer can no longer strand the WAL lock for the daemon.
+- **Lock-tolerant startup.** The daemon's startup migration now uses
+  `busy_timeout=30000` plus bounded retry, so a transient foreign lock makes
+  it wait rather than crash.
+- **Lifecycle interlock.** `nx daemon t2 ensure-running` probes
+  DB-acquirability (30s bound) before cycling a stale daemon and aborts the
+  cycle on timeout, so it never trades a working daemon for none.
+- **Bootstrap lock discipline.** `nx upgrade` and the daemon's own startup
+  serialize their schema migrations through an exclusive `fcntl.flock` on
+  `~/.config/nexus/t2_migration.lock`.
+- **Enforced boundary.** `nx doctor --check-storage-boundary` now hard-fails
+  any new direct `memory.db` open (raw `sqlite3.connect` or a direct
+  `T2Database(...)` construction) outside the daemon substrate that lacks a
+  documented `# epsilon-allow:` justification. The surviving irreducible
+  opens (bootstrap `nx upgrade`, the daemon-unreachable fallback, read-only
+  diagnostics, the taxonomy CLI factory) each carry one.
+
+No CLI flags changed; the fix is internal to the storage substrate and the
+daemon lifecycle. Installed users get a daemon that self-heals on the
+contention that previously crash-looped it.
+
 ## [5.0.4] - 2026-05-25
 
 ### Docs: Claude Desktop `.mcpb` update procedure + lifecycle
