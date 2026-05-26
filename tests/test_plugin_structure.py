@@ -365,6 +365,36 @@ class TestCommandStructure:
         assert len(nx_calls) < 5, \
             f"{cmd_path.name}: {len(nx_calls)} unguarded 'nx' calls in !{{}} block"
 
+    @pytest.mark.parametrize("cmd_path", _command_params())
+    def test_no_heredoc_in_bang_block(self, cmd_path: Path) -> None:
+        """Regression for nexus-t1b1k.
+
+        Claude Code's slash-command runner emits a ``!{ }`` block that wraps a
+        heredoc (``python3 << 'PYEOF' ... PYEOF``) as raw source instead of
+        executing it, so the block's intended output never renders. Long
+        scripts must live under ``conexus/resources/`` and be invoked by path
+        (``python3 "$CLAUDE_PLUGIN_ROOT/resources/.../<name>.py"``). Guard
+        against any reintroduction of the heredoc form.
+        """
+        text = cmd_path.read_text()
+        match = re.search(r"^!\{$(.*?)^}", text, re.MULTILINE | re.DOTALL)
+        if not match:
+            pytest.skip(f"{cmd_path.name}: no !{{}} bash block found")
+        # A heredoc intro: exactly two `<` (lookarounds exclude here-strings
+        # `<<<word`), optional `-`/`~`, optional quote, a delimiter word, at
+        # end of line. The leading-letter/underscore requirement excludes
+        # arithmetic shifts (`<< 2`).
+        heredocs = re.findall(
+            r"^.*?(?<!<)<<(?!<)[-~]?\s*['\"]?[A-Za-z_]\w*['\"]?\s*$",
+            match.group(1),
+            re.MULTILINE,
+        )
+        assert not heredocs, (
+            f"{cmd_path.name}: heredoc inside !{{}} block (nexus-t1b1k): {heredocs}. "
+            "Extract the script to conexus/resources/ and invoke it by path: "
+            'python3 "$CLAUDE_PLUGIN_ROOT/resources/.../<name>.py".'
+        )
+
 
 
 class TestCrossReferenceIntegrity:
