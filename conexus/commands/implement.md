@@ -22,18 +22,15 @@ description: Implement feature using developer agent
 
   # Bead context
   echo "### Active Work"
-  echo '```'
   if command -v bd &> /dev/null; then
     bd list --status=in_progress --limit=5 2>/dev/null || echo "No in-progress beads"
   else
     echo "Beads not available"
   fi
-  echo '```'
   echo ""
 
   # Project type
   echo "### Project Info"
-  echo '```'
   echo "**Project type:**"
   _pt_found=0
   _pt() { if compgen -G "$1" >/dev/null 2>&1; then echo "- $2"; _pt_found=1; fi; }
@@ -61,8 +58,7 @@ description: Implement feature using developer agent
   _pt "build.zig" "Zig"
   _pt "dune-project" "OCaml"
   _pt "shard.yml" "Crystal"
-  [ "$_pt_found" -eq 0 ] && echo "- Unknown (no recognized build/marker file)"
-  echo '```'
+  if [ "$_pt_found" -eq 0 ]; then echo "- Unknown (no recognized build/marker file)"; fi
 
 ```
 

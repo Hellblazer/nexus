@@ -18,34 +18,26 @@ description: Review code changes using code-review-expert agent
     echo ""
 
     echo "### Modified Files"
-    echo '```'
     git diff --name-only HEAD 2>/dev/null | head -20 || echo "No uncommitted changes"
-    echo '```'
     echo ""
 
     echo "### Diff Summary"
-    echo '```'
     git diff --stat HEAD 2>/dev/null | tail -10 || echo "No diff available"
-    echo '```'
   else
     echo "**Note:** Not a git repository"
     echo ""
     echo "### Recently Modified Files"
-    echo '```'
     find . -type f -name "*.java" -mmin -60 2>/dev/null | head -10 || echo "No recent files found"
-    echo '```'
   fi
 
   # Bead context
   echo ""
   echo "### Active Beads"
-  echo '```'
   if command -v bd &> /dev/null; then
     bd list --status=in_progress --limit=3 2>/dev/null || echo "No in-progress beads"
   else
     echo "Beads not available"
   fi
-  echo '```'
 
 ```
 

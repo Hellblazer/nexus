@@ -19,13 +19,11 @@ description: Thorough analysis of complex problems using deep-analyst agent
 
   # Active beads context
   echo "### Active Beads"
-  echo '```'
   if command -v bd &> /dev/null; then
     bd list --status=in_progress --limit=5 2>/dev/null || echo "No in-progress beads"
   else
     echo "Beads not available"
   fi
-  echo '```'
   echo ""
 
   echo "### Tip"

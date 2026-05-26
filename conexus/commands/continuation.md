@@ -74,19 +74,14 @@ Generates a handoff document under `/tmp/` that a future Claude Code session can
   echo ""
 
   echo "### Uncommitted"
-  echo '```'
   git status --short 2>/dev/null | head -20 || echo "(no git status)"
-  echo '```'
   echo ""
 
   echo "### Recent commits (last 10 on this branch)"
-  echo '```'
   git log --oneline -10 2>/dev/null || echo "(no log)"
-  echo '```'
   echo ""
 
   echo "### Open PRs from this branch"
-  echo '```'
   if command -v gh >/dev/null 2>&1; then
     gh pr list --head "$(git branch --show-current 2>/dev/null)" --state open \
       --json number,title,baseRefName \
@@ -94,28 +89,21 @@ Generates a handoff document under `/tmp/` that a future Claude Code session can
   else
     echo "(gh not installed)"
   fi
-  echo '```'
   echo ""
 
   if command -v bd >/dev/null 2>&1; then
     echo "### In-progress beads"
-    echo '```'
     bd list --status=in_progress --limit=10 2>/dev/null || echo "(none)"
-    echo '```'
     echo ""
     echo "### Ready beads (top 10)"
-    echo '```'
     bd ready --limit=10 2>/dev/null | head -25 || echo "(none)"
-    echo '```'
     echo ""
   fi
 
   if command -v nx >/dev/null 2>&1; then
     PROJ_ACTIVE="${REPO}_active"
     echo "### nx memory ($PROJ_ACTIVE) titles"
-    echo '```'
     nx memory get --project "$PROJ_ACTIVE" --title "" 2>/dev/null | head -15 || echo "(no active-project memory)"
-    echo '```'
     echo ""
   fi
 

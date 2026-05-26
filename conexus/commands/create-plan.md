@@ -19,7 +19,6 @@ description: Create implementation plan using strategic-planner agent
 
   # Existing beads context
   echo "### Existing Epics/Features"
-  echo '```'
   if command -v bd &> /dev/null; then
     bd list --type=epic --limit=5 2>/dev/null || echo "No epics found"
     echo ""
@@ -27,12 +26,10 @@ description: Create implementation plan using strategic-planner agent
   else
     echo "Beads not available"
   fi
-  echo '```'
   echo ""
 
   # Architecture hints
   echo "### Project Structure"
-  echo '```'
   echo "**Project type:**"
   _pt_found=0
   _pt() { if compgen -G "$1" >/dev/null 2>&1; then echo "- $2"; _pt_found=1; fi; }
@@ -60,8 +57,7 @@ description: Create implementation plan using strategic-planner agent
   _pt "build.zig" "Zig"
   _pt "dune-project" "OCaml"
   _pt "shard.yml" "Crystal"
-  [ "$_pt_found" -eq 0 ] && echo "- Unknown (no recognized build/marker file)"
-  echo '```'
+  if [ "$_pt_found" -eq 0 ]; then echo "- Unknown (no recognized build/marker file)"; fi
 
 ```
 

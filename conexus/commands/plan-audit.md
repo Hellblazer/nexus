@@ -17,13 +17,11 @@ description: Audit a plan using mcp__plugin_conexus_nexus__nx_plan_audit (RDR-08
   # Bead context
   echo ""
   echo "### Related Beads"
-  echo '```'
   if command -v bd &> /dev/null; then
     bd list --type=epic --status=open --limit=3 2>/dev/null || echo "No open epics"
   else
     echo "Beads not available"
   fi
-  echo '```'
 ```
 
 ## Plan to Audit

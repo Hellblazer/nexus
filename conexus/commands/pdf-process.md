@@ -12,9 +12,7 @@ description: Index PDF files into the T3 knowledge store for semantic search
   echo ""
 
   echo "### PDF Files in Current Directory"
-  echo '```'
   find . -name "*.pdf" -not -path "./.git/*" 2>/dev/null | head -20 || echo "No PDF files found"
-  echo '```'
   echo ""
 
   echo "### Existing Indexed Collections"
