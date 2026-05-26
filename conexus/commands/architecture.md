@@ -20,23 +20,34 @@ description: Design architecture and create phased execution plans using archite
   # Project structure
   echo "### Project Structure"
   echo '```'
-  if [ -f "pom.xml" ]; then
-    echo "Maven project with modules:"
-    find . -name "pom.xml" -not -path "./target/*" 2>/dev/null | head -10
-  elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
-    echo "Gradle project"
-    find . -name "build.gradle*" -not -path "./.gradle/*" -not -path "./build/*" 2>/dev/null | head -10
-  elif [ -f "pyproject.toml" ]; then
-    echo "Python project"
-  elif [ -f "go.mod" ]; then
-    echo "Go project"
-  elif [ -f "Cargo.toml" ]; then
-    echo "Rust project"
-  elif [ -f "package.json" ]; then
-    echo "Node.js/TypeScript project"
-  else
-    echo "Check CLAUDE.md for project type"
-  fi
+  echo "**Project type:**"
+  _pt_found=0
+  _pt() { if compgen -G "$1" >/dev/null 2>&1; then echo "- $2"; _pt_found=1; fi; }
+  _pt "pyproject.toml" "Python"
+  _pt "setup.py" "Python (setup.py)"
+  _pt "Cargo.toml" "Rust"
+  _pt "go.mod" "Go"
+  _pt "package.json" "Node.js / TypeScript"
+  _pt "pom.xml" "Java/Kotlin (Maven)"
+  _pt "build.gradle*" "Java/Kotlin (Gradle)"
+  _pt "Gemfile" "Ruby"
+  _pt "composer.json" "PHP"
+  _pt "*.csproj" "C#/.NET"
+  _pt "CMakeLists.txt" "C/C++ (CMake)"
+  _pt "Package.swift" "Swift"
+  _pt "mix.exs" "Elixir"
+  _pt "build.sbt" "Scala (sbt)"
+  _pt "pubspec.yaml" "Dart/Flutter"
+  _pt "deps.edn" "Clojure"
+  _pt "project.clj" "Clojure (Leiningen)"
+  _pt "*.cabal" "Haskell"
+  _pt "stack.yaml" "Haskell (Stack)"
+  _pt "Project.toml" "Julia"
+  _pt "DESCRIPTION" "R"
+  _pt "build.zig" "Zig"
+  _pt "dune-project" "OCaml"
+  _pt "shard.yml" "Crystal"
+  [ "$_pt_found" -eq 0 ] && echo "- Unknown (no recognized build/marker file)"
   echo '```'
   echo ""
 

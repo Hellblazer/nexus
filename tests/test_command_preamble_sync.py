@@ -88,6 +88,31 @@ def test_inlined_body_executes(cmd: str, script: str) -> None:
     assert r.stdout.strip(), f"{cmd} inlined body produced no output"
 
 
+DETECTOR_COMMANDS = ["analyze-code", "architecture", "create-plan", "implement"]
+
+
+@pytest.mark.parametrize("cmd", DETECTOR_COMMANDS)
+def test_project_detector_identifies_python(cmd: str) -> None:
+    """The agent-relay project-type detector must identify nexus as Python.
+
+    Correctness check (nexus-ln9y5): the original four detectors knew only
+    Maven/Gradle/Node, so they labeled this Python repo 'Unknown' (analyze-code)
+    or emitted nothing (create-plan). The unified marker-file detector covers
+    ~21 ecosystems and lists all matches. This guards against regressing to the
+    JVM/Node-only logic. Runs from the repo root, where pyproject.toml lives.
+    """
+    if shutil.which("bash") is None:
+        pytest.skip("bash not available")
+    body = _FENCED.search((CMD / f"{cmd}.md").read_text()).group("body")
+    env = {**os.environ, "ARGUMENTS": "", "NEXUS_RDR_ARGS": "", "NEXUS_PROJECT_ROOTS": ""}
+    r = subprocess.run(
+        ["bash", "-c", body], capture_output=True, text=True, timeout=120, env=env
+    )
+    assert r.returncode == 0, f"{cmd}: detector block exited {r.returncode}"
+    assert "- Python" in r.stdout, f"{cmd}: did not detect nexus as Python:\n{r.stdout[:600]}"
+    assert "Unknown" not in r.stdout, f"{cmd}: reported Unknown for a Python repo"
+
+
 def _all_fenced_commands() -> list[Path]:
     return sorted(p for p in CMD.glob("*.md") if _FENCED.search(p.read_text()))
 

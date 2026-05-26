@@ -12,24 +12,34 @@ description: Analyze codebase using codebase-deep-analyzer agent
   echo ""
 
   # Project type detection
-  if [ -f "pom.xml" ]; then
-    echo "**Project type:** Maven"
-    echo '```'
-    grep -E "<artifactId>|<groupId>" pom.xml 2>/dev/null | head -4 || echo "Could not parse pom.xml"
-    echo '```'
-  elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
-    echo "**Project type:** Gradle"
-    echo '```'
-    head -10 build.gradle* 2>/dev/null || echo "Could not read build.gradle"
-    echo '```'
-  elif [ -f "package.json" ]; then
-    echo "**Project type:** Node.js"
-    echo '```'
-    grep -E '"name"|"version"' package.json 2>/dev/null | head -2 || echo "Could not parse package.json"
-    echo '```'
-  else
-    echo "**Project type:** Unknown"
-  fi
+  echo "**Project type:**"
+  _pt_found=0
+  _pt() { if compgen -G "$1" >/dev/null 2>&1; then echo "- $2"; _pt_found=1; fi; }
+  _pt "pyproject.toml" "Python"
+  _pt "setup.py" "Python (setup.py)"
+  _pt "Cargo.toml" "Rust"
+  _pt "go.mod" "Go"
+  _pt "package.json" "Node.js / TypeScript"
+  _pt "pom.xml" "Java/Kotlin (Maven)"
+  _pt "build.gradle*" "Java/Kotlin (Gradle)"
+  _pt "Gemfile" "Ruby"
+  _pt "composer.json" "PHP"
+  _pt "*.csproj" "C#/.NET"
+  _pt "CMakeLists.txt" "C/C++ (CMake)"
+  _pt "Package.swift" "Swift"
+  _pt "mix.exs" "Elixir"
+  _pt "build.sbt" "Scala (sbt)"
+  _pt "pubspec.yaml" "Dart/Flutter"
+  _pt "deps.edn" "Clojure"
+  _pt "project.clj" "Clojure (Leiningen)"
+  _pt "*.cabal" "Haskell"
+  _pt "stack.yaml" "Haskell (Stack)"
+  _pt "Project.toml" "Julia"
+  _pt "DESCRIPTION" "R"
+  _pt "build.zig" "Zig"
+  _pt "dune-project" "OCaml"
+  _pt "shard.yml" "Crystal"
+  [ "$_pt_found" -eq 0 ] && echo "- Unknown (no recognized build/marker file)"
   echo ""
 
   # Module structure
