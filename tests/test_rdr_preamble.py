@@ -1,0 +1,653 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""TDD tests for ``nx rdr preamble <name>`` subcommands.
+
+Bead nexus-8nz1y (RDR-130 P1.1): these tests MUST FAIL (TDD red) because
+``nx rdr preamble`` does not yet exist.  The subgroup will be implemented
+in nexus-vb9r3 (P1.2).
+
+Covers all 9 subcommands:
+  rdr-create, rdr-list, rdr-show, rdr-gate, rdr-accept,
+  rdr-close, rdr-research, rdr-audit, phase-review-gate
+
+For each applicable subcommand, both data paths are covered:
+  - T2-read path   : T2Database seeded with known RDR fixtures
+  - file-fallback  : empty T2, fixture .md files in tmp docs/rdr/
+
+The ``$ARGUMENTS`` passthrough via ``--`` terminator is covered explicitly.
+
+Invocation convention mirrors test_rdr_lint.py:
+  CliRunner().invoke(rdr, ["preamble", "<name>", ...])
+"""
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+from click.testing import CliRunner
+
+from nexus.commands.rdr import rdr
+from nexus.db.t2 import T2Database
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+def _runner() -> CliRunner:
+    """CliRunner — matches the convention in test_rdr_lint.py."""
+    return CliRunner()
+
+
+@pytest.fixture()
+def rdr_env(tmp_path: Path, monkeypatch):
+    """Hermetic environment: tmp git repo, default T2 path, cwd set to repo root.
+
+    Returns a namespace-like dict:
+      rdr_dir     -- Path to tmp_path/docs/rdr (created)
+      db_path     -- Path to tmp_path/t2.db
+      db          -- live T2Database (open for seeding, auto-closed via yield)
+      repo_root   -- tmp_path (the fake git root)
+    """
+    # Fake git repo so git rev-parse --show-toplevel falls back cleanly.
+    subprocess.run(
+        ["git", "init", str(tmp_path)],
+        check=True, capture_output=True,
+    )
+    monkeypatch.chdir(tmp_path)
+
+    # Ensure docs/rdr exists (subcommands default to this path).
+    rdr_dir = tmp_path / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True, exist_ok=True)
+
+    # Redirect T2 to tmp SQLite so we don't touch the real database.
+    db_path = tmp_path / "t2.db"
+    monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+
+    db = T2Database(db_path)
+    yield {
+        "rdr_dir": rdr_dir,
+        "db_path": db_path,
+        "db": db,
+        "repo_root": tmp_path,
+    }
+    db.close()
+
+
+def _write_rdr(rdr_dir: Path, filename: str, frontmatter: dict, body: str = "") -> Path:
+    """Write a minimal RDR markdown file with YAML frontmatter."""
+    fm_lines = ["---"]
+    for k, v in frontmatter.items():
+        fm_lines.append(f"{k}: {v}")
+    fm_lines.append("---")
+    fm_lines.append("")
+    if body:
+        fm_lines.append(body)
+    path = rdr_dir / filename
+    path.write_text("\n".join(fm_lines), encoding="utf-8")
+    return path
+
+
+def _seed_rdr_t2(db: T2Database, repo_name: str, rdr_id: str, **fields) -> None:
+    """Seed a single RDR entry in T2 under project ``<repo_name>_rdr``.
+
+    ``rdr_id`` must be a numeric string (e.g. "1", "130") — the ported
+    rdr-list code filters on ``re.match(r'^\\d+$', title)``.
+    """
+    content_lines = [f"{k}: {v}" for k, v in fields.items()]
+    db.put(
+        project=f"{repo_name}_rdr",
+        title=rdr_id,
+        content="\n".join(content_lines),
+    )
+
+
+# ---------------------------------------------------------------------------
+# rdr-list  (T2 path + file-fallback path)
+# ---------------------------------------------------------------------------
+
+
+class TestRdrList:
+    """Tests for ``nx rdr preamble rdr-list``."""
+
+    def test_rdr_list_t2_path(self, rdr_env):
+        """T2-seeded path: output reports 'source: T2' and the table header."""
+        repo_name = rdr_env["repo_root"].name
+        _seed_rdr_t2(
+            rdr_env["db"],
+            repo_name,
+            "130",
+            title="Command Preambles via the nx CLI",
+            status="accepted",
+            type="decision",
+            priority="P0",
+            file_path="docs/rdr/rdr-130-command-preambles-via-nx-cli.md",
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-list"])
+        assert result.exit_code == 0, result.output
+        assert "source: T2" in result.output
+        assert "| ID | Title | Status | Type | Priority |" in result.output
+        assert "Command Preambles via the nx CLI" in result.output
+        assert "130" in result.output
+
+    def test_rdr_list_file_fallback(self, rdr_env):
+        """File-fallback path: empty T2 falls through to .md files."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-list"])
+        assert result.exit_code == 0, result.output
+        assert "source: files" in result.output
+        assert "| ID | Title | Status | Type | Priority |" in result.output
+        assert "Hello World" in result.output
+
+    def test_rdr_list_no_rdr_dir(self, tmp_path, monkeypatch):
+        """No docs/rdr directory: exits without error, reports directory missing."""
+        monkeypatch.chdir(tmp_path)
+        subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        result = _runner().invoke(rdr, ["preamble", "rdr-list"])
+        # Graceful: exit 0 or output about missing directory (not a crash)
+        assert result.exit_code == 0
+        assert "docs/rdr" in result.output
+
+
+# ---------------------------------------------------------------------------
+# rdr-create  (file-fallback only; no T2 path for create)
+# ---------------------------------------------------------------------------
+
+
+class TestRdrCreate:
+    """Tests for ``nx rdr preamble rdr-create``."""
+
+    def test_rdr_create_with_existing_rdrs(self, rdr_env):
+        """File-fallback: prints Next ID, ID style, and existing RDRs table."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-create"])
+        assert result.exit_code == 0, result.output
+        assert "**Next ID:**" in result.output
+        assert "RDR-002" in result.output
+        assert "**ID style detected:**" in result.output
+        assert "Existing RDRs" in result.output
+        assert "Hello World" in result.output
+
+    def test_rdr_create_no_rdr_dir(self, tmp_path, monkeypatch):
+        """No docs/rdr directory: bootstrap message and first ID."""
+        monkeypatch.chdir(tmp_path)
+        subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+        db_path = tmp_path / "t2.db"
+        monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db_path)
+        result = _runner().invoke(rdr, ["preamble", "rdr-create"])
+        assert result.exit_code == 0, result.output
+        assert "bootstrap required" in result.output
+        assert "RDR-001" in result.output
+        assert "this will be the first RDR" in result.output
+
+
+# ---------------------------------------------------------------------------
+# rdr-show  (file-fallback; no-arg and with-id paths)
+# ---------------------------------------------------------------------------
+
+
+class TestRdrShow:
+    """Tests for ``nx rdr preamble rdr-show``."""
+
+    def test_rdr_show_no_arg_lists_all(self, rdr_env):
+        """No ID arg: prints file listing table (most recently modified first)."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-show"])
+        assert result.exit_code == 0, result.output
+        assert "RDR Files" in result.output
+        assert "| File | Title | Status | Type | Priority |" in result.output
+        assert "Hello World" in result.output
+
+    def test_rdr_show_with_id_via_double_dash(self, rdr_env):
+        """ID via ``--`` terminator: prints specific RDR metadata table."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {
+                "title": "Hello World",
+                "status": "draft",
+                "type": "decision",
+                "priority": "P1",
+                "author": "hal",
+            },
+            body="## Problem Statement\n\nSomething is wrong.",
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-show", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "### RDR:" in result.output
+        assert "rdr-001-hello-world.md" in result.output
+        assert "#### Metadata" in result.output
+        assert "Hello World" in result.output
+
+    def test_rdr_show_unknown_id(self, rdr_env):
+        """Unknown ID: prints 'RDR not found' and available list."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-show", "--", "999"])
+        assert result.exit_code == 0, result.output
+        assert "RDR not found for" in result.output
+
+    def test_rdr_show_double_dash_passthrough(self, rdr_env):
+        """Explicit regression: ``--`` must pass a numeric arg, not swallow it."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-042-another.md",
+            {"title": "Another RDR", "status": "accepted", "type": "decision", "priority": "P0"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-show", "--", "42"])
+        assert result.exit_code == 0, result.output
+        assert "rdr-042-another.md" in result.output
+
+
+# ---------------------------------------------------------------------------
+# rdr-gate  (no-arg + with-id)
+# ---------------------------------------------------------------------------
+
+
+class TestRdrGate:
+    """Tests for ``nx rdr preamble rdr-gate``."""
+
+    def test_rdr_gate_no_arg_prints_usage(self, rdr_env):
+        """No ID: prints usage line and Available RDRs table."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate"])
+        assert result.exit_code == 0, result.output
+        assert "Usage" in result.output
+        assert "Available RDRs" in result.output
+        assert "| File | Title | Status | Type |" in result.output
+
+    def test_rdr_gate_with_pre65_rdr_prints_section_structure(self, rdr_env):
+        """ID for pre-65 RDR (no gap requirement): prints Section Structure."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+            body=(
+                "## Problem Statement\n\nProblem here.\n\n"
+                "## Proposed Solution\n\nSolution here.\n\n"
+                "## Tradeoffs\n\nTradeoffs here."
+            ),
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "Section Structure" in result.output
+        assert "## Problem Statement" in result.output
+
+    def test_rdr_gate_blocked_post65_missing_gaps(self, rdr_env):
+        """Post-65 RDR with no Gap headings: prints BLOCKED message."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-070-taxonomy.md",
+            {"title": "Taxonomy", "status": "draft", "type": "decision", "priority": "P0"},
+            body="## Problem Statement\n\nNo gaps structured here.\n\n## Approach\n\nDo things.",
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "70"])
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" in result.output
+        assert "gap structure" in result.output.lower()
+
+    def test_rdr_gate_post65_with_gaps_prints_gap_list(self, rdr_env):
+        """Post-65 RDR with gap headings: lists gaps before Section Structure."""
+        body = (
+            "## Problem Statement\n\n"
+            "#### Gap 1: Missing preamble commands\nThe nx CLI lacks preamble commands.\n\n"
+            "#### Gap 2: Brittle bash injection\nBash heredocs break.\n\n"
+            "## Proposed Solution\n\nPort to nx CLI."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-130-command-preambles.md",
+            {"title": "Command Preambles", "status": "draft", "type": "decision", "priority": "P0"},
+            body=body,
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "130"])
+        assert result.exit_code == 0, result.output
+        assert "Gap 1" in result.output
+        assert "Gap 2" in result.output
+        assert "gap heading(s) present" in result.output
+
+
+# ---------------------------------------------------------------------------
+# rdr-accept  (no-arg + with-id paths)
+# ---------------------------------------------------------------------------
+
+
+class TestRdrAccept:
+    """Tests for ``nx rdr preamble rdr-accept``."""
+
+    def test_rdr_accept_no_arg_prints_usage_and_drafts(self, rdr_env):
+        """No ID: prints usage + Draft RDRs table."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept"])
+        assert result.exit_code == 0, result.output
+        assert "Usage" in result.output
+        assert "Draft RDRs (eligible for acceptance)" in result.output
+        assert "Hello World" in result.output
+
+    def test_rdr_accept_with_draft_rdr_prints_planning_handoff(self, rdr_env):
+        """Draft RDR with plan section: prints Planning Handoff block."""
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "## Approach\n\n"
+            "### Phase 1: Implement\nDo the work.\n\n"
+            "### Phase 2: Validate\nCheck it works.\n\n"
+            "## Tradeoffs\n\nSome tradeoffs."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+            body=body,
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "### RDR:" in result.output
+        assert "Planning Handoff" in result.output
+        assert "Step count detected:" in result.output
+
+    def test_rdr_accept_blocked_non_draft_status(self, rdr_env):
+        """Non-draft/accepted status: prints BLOCKED message."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "closed", "type": "decision", "priority": "P1"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" in result.output
+        assert "closed" in result.output
+
+
+# ---------------------------------------------------------------------------
+# rdr-close  (no-arg + with-id paths, draft-blocked + accepted-proceeds)
+# ---------------------------------------------------------------------------
+
+
+class TestRdrClose:
+    """Tests for ``nx rdr preamble rdr-close``."""
+
+    def test_rdr_close_no_arg_prints_usage_and_rdr_list(self, rdr_env):
+        """No ID: prints usage + Open/Draft RDRs table."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-close"])
+        assert result.exit_code == 0, result.output
+        assert "Usage" in result.output
+        assert "Open/Draft RDRs" in result.output
+        assert "Hello World" in result.output
+
+    def test_rdr_close_blocked_draft_status(self, rdr_env):
+        """Draft RDR: prints BLOCKED (requires accepted/final status)."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" in result.output
+        assert "draft" in result.output.lower()
+        assert "accepted" in result.output.lower()
+
+    def test_rdr_close_accepted_pre65_no_gaps_proceeds_to_t2(self, rdr_env):
+        """Accepted pre-65 RDR with --reason implemented: passes gap check, prints T2 Metadata."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "accepted", "type": "decision", "priority": "P1"},
+            body="## Problem Statement\n\nProblem without structured gaps.\n\n## Approach\n\nStuff.",
+        )
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "rdr-close", "--", "1", "--reason", "implemented"],
+        )
+        assert result.exit_code == 0, result.output
+        # Pre-65, no gaps — warns and proceeds to T2 Metadata section
+        assert "T2 Metadata" in result.output
+
+    def test_rdr_close_force_flag_overrides_draft_block(self, rdr_env):
+        """--force overrides the draft-status block."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1", "--force"])
+        assert result.exit_code == 0, result.output
+        assert "Override" in result.output
+        assert "BLOCKED" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# rdr-research  (no-arg + with-id)
+# ---------------------------------------------------------------------------
+
+
+class TestRdrResearch:
+    """Tests for ``nx rdr preamble rdr-research``."""
+
+    def test_rdr_research_no_arg_prints_usage_and_list(self, rdr_env):
+        """No ID: prints Available RDRs table + usage hint."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-research"])
+        assert result.exit_code == 0, result.output
+        assert "Available RDRs" in result.output
+        assert "| File | Title | Status | Type |" in result.output
+        assert "Usage" in result.output
+
+    def test_rdr_research_with_id_prints_rdr_header(self, rdr_env):
+        """ID arg: prints RDR heading and Research Findings section."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+            body="## Research Findings\n\n- Finding A\n- Finding B",
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-research", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "### RDR 1:" in result.output
+        assert "Hello World" in result.output
+        assert "Research Findings" in result.output
+
+    def test_rdr_research_double_dash_passthrough_with_subcommand_word(self, rdr_env):
+        """Subcommand word 'add' plus numeric ID: numeric ID is extracted correctly."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        # "add 1" — the script searches for digits and finds 1
+        result = _runner().invoke(rdr, ["preamble", "rdr-research", "--", "add", "1"])
+        assert result.exit_code == 0, result.output
+        assert "RDR 1" in result.output
+
+
+# ---------------------------------------------------------------------------
+# rdr-audit  (default mode + management subcommand)
+# ---------------------------------------------------------------------------
+
+
+class TestRdrAudit:
+    """Tests for ``nx rdr preamble rdr-audit``."""
+
+    def test_rdr_audit_default_mode(self, rdr_env):
+        """No args or project arg: prints audit dispatch mode line."""
+        result = _runner().invoke(rdr, ["preamble", "rdr-audit"])
+        assert result.exit_code == 0, result.output
+        assert "**Mode:** audit dispatch" in result.output
+        assert "Target project:" in result.output
+
+    def test_rdr_audit_list_subcommand(self, rdr_env):
+        """'list' subcommand: prints management mode with read-only label."""
+        result = _runner().invoke(rdr, ["preamble", "rdr-audit", "--", "list"])
+        assert result.exit_code == 0, result.output
+        assert "management subcommand" in result.output
+        assert "list" in result.output
+        assert "read-only" in result.output
+
+    def test_rdr_audit_explicit_project(self, rdr_env):
+        """Explicit project name: target project appears in output."""
+        result = _runner().invoke(rdr, ["preamble", "rdr-audit", "--", "myproject"])
+        assert result.exit_code == 0, result.output
+        assert "myproject" in result.output
+
+
+# ---------------------------------------------------------------------------
+# phase-review-gate  (no-arg, no-approach error, pass-1 item table)
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseReviewGate:
+    """Tests for ``nx rdr preamble phase-review-gate``."""
+
+    def test_phase_review_gate_no_arg_prints_usage(self, rdr_env):
+        """No ID: prints usage + 'What this gate does' section."""
+        result = _runner().invoke(rdr, ["preamble", "phase-review-gate"])
+        assert result.exit_code == 0, result.output
+        assert "Usage" in result.output
+        assert "What this gate does" in result.output
+        assert "Pass 1" in result.output
+        assert "Pass 2" in result.output
+
+    def test_phase_review_gate_no_approach_section_errors(self, rdr_env):
+        """RDR without §Approach: prints ERROR about missing section."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "accepted", "type": "decision", "priority": "P1"},
+            body="## Problem Statement\n\nProblem.\n\n## Proposed Solution\n\nSolution.",
+        )
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "phase-review-gate", "--", "1", "--phase", "1"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "ERROR" in result.output
+        assert "Approach" in result.output
+
+    def test_phase_review_gate_pass1_enumerates_items(self, rdr_env):
+        """RDR with §Approach and numbered items: Pass 1 table printed."""
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "### Approach\n\n"
+            "1. **T2 read**: Read from T2 database.\n"
+            "2. **File fallback**: Fall back to .md files.\n"
+            "3. **CLI output**: Print markdown table.\n\n"
+            "## Tradeoffs\n\nSome tradeoffs."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-130-command-preambles.md",
+            {"title": "Command Preambles", "status": "accepted", "type": "decision", "priority": "P0"},
+            body=body,
+        )
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "phase-review-gate", "--", "130", "--phase", "1"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "§Approach Cross-Walk" in result.output
+        assert "| # | Label | Evidence needed |" in result.output
+        assert "Item1" in result.output
+        assert "T2 read" in result.output
+        assert "Item2" in result.output
+        assert "File fallback" in result.output
+        assert "Item3" in result.output
+
+    def test_phase_review_gate_pass2_all_covered_passes(self, rdr_env):
+        """Pass 2 with all items covered: APPROACH CROSS-WALK PASSED printed."""
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "### Approach\n\n"
+            "1. **T2 read**: Read from T2 database.\n"
+            "2. **File fallback**: Fall back to .md files.\n\n"
+            "## Tradeoffs\n\nSome tradeoffs."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-130-command-preambles.md",
+            {"title": "Command Preambles", "status": "accepted", "type": "decision", "priority": "P0"},
+            body=body,
+        )
+        result = _runner().invoke(
+            rdr,
+            [
+                "preamble",
+                "phase-review-gate",
+                "--",
+                "130",
+                "--phase",
+                "1",
+                "--evidence",
+                "Item1=nexus-abc1,Item2=nexus-xyz2",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "APPROACH CROSS-WALK PASSED" in result.output
+        assert "nexus-abc1" in result.output
+        assert "nexus-xyz2" in result.output
+
+    def test_phase_review_gate_pass2_missing_evidence_blocked(self, rdr_env):
+        """Pass 2 with missing evidence: BLOCKED printed."""
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "### Approach\n\n"
+            "1. **T2 read**: Read from T2 database.\n"
+            "2. **File fallback**: Fall back to .md files.\n\n"
+            "## Tradeoffs\n\nSome tradeoffs."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-130-command-preambles.md",
+            {"title": "Command Preambles", "status": "accepted", "type": "decision", "priority": "P0"},
+            body=body,
+        )
+        # Only provide evidence for Item1, not Item2
+        result = _runner().invoke(
+            rdr,
+            [
+                "preamble",
+                "phase-review-gate",
+                "--",
+                "130",
+                "--phase",
+                "1",
+                "--evidence",
+                "Item1=nexus-abc1",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" in result.output
+        assert "Item2" in result.output
