@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.1.2] - 2026-05-26
+
+### Fixed
+
+- **All slash commands execute their context preamble again (nexus-ln9y5).** The 5.1.1 fix (nexus-t1b1k) did not take effect: every command still wrapped its preamble in a `!{ ... }` brace block, which is not a recognized Claude Code bash-injection syntax (only inline backtick `` !`cmd` `` and the fenced ` ```! ` block execute), so the brace form was emitted as raw source and the preamble never ran. Moving heredocs to scripts in 5.1.1 also introduced a by-path failure because `$CLAUDE_PLUGIN_ROOT` is empty in the command-bash context. All 25 commands now use the documented fenced form; the 9 RDR-lifecycle preambles inline their script (byte-synced to `resources/rdr_commands/*.py`). Verified against a real Claude Code by cc-validation scenario 19.
+- **Project-type detection in `analyze-code`, `architecture`, `create-plan`, and `implement` now spans ~21 ecosystems (nexus-ln9y5).** The four ad-hoc detectors recognized only Maven, Gradle, and Node, mislabeling Python projects "Unknown". One shared marker-file detector now lists every detected stack.
+
 ## [5.1.1] - 2026-05-26
 
 ### Fixed
