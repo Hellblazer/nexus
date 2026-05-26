@@ -89,10 +89,18 @@ Runnable from any baseline (nexus-a3nqp): it detects stanza drift at runtime and
 Per the marketplace-pinned-source playbook (also used by `Hellblazer/palinex`), release commits go through a PR. CI gates the bump before it lands on main. No more direct-to-main exception.
 
 ```bash
-git checkout main && git pull
+# Base the release branch on DEVELOP, not main: a release PROMOTES develop's
+# accumulated state to main (CLAUDE.md: "releases promote develop to main via
+# merge"). Branching off main would omit develop's unmerged fixes, so the
+# release PR must carry develop's commits + the version-bump commit.
+git checkout develop && git pull
 git checkout -b release/vX.Y.Z
 
+# Stage ALL SEVEN bump targets from Step 3, plus uv.lock and both changelogs.
+# mcpb/pyproject.toml + mcpb/manifest.json are the easy-to-miss pair here and
+# their omission fails CI's mcpb-manifest-version parity check.
 git add pyproject.toml uv.lock CHANGELOG.md conexus/CHANGELOG.md \
+        mcpb/pyproject.toml mcpb/manifest.json \
         .claude-plugin/marketplace.json \
         conexus/.claude-plugin/plugin.json \
         sn/.claude-plugin/plugin.json
