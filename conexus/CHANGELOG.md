@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.1.3] - 2026-05-26
+
+### Fixed
+
+- **Slash-command preambles no longer truncate on a literal triple-backtick (nexus-61fzg).** The 5.1.2 fenced-block conversion broke 17/25 commands because Claude Code closes a fenced-bang block at the first literal triple-backtick in the source. Block sources are now free of literal triple-backticks (shell drops cosmetic fence-echoes; RDR Python builds the fence at runtime), verified through real Claude Code. Durable fix tracked in RDR-130 (move preamble logic into the nx CLI).
+
 ## [5.1.2] - 2026-05-26
 
 ### Fixed
