@@ -453,6 +453,33 @@ def _record_tier_write(
 # ── Registered tools ─────────────────────────────────────────────────────────
 
 
+def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
+    """Surface a threshold-drop instead of a silent zero-hit (nexus-uro6c).
+
+    When the distance threshold dropped EVERY candidate of some collection
+    (``SearchDiagnostics.worst_offender``), report the closest dropped
+    distance + the threshold that blocked it, so the caller can relax the
+    ``threshold`` knob rather than conclude "nothing matched". Falls back to
+    *base* when nothing was dropped — a genuine miss (raw candidate count 0).
+
+    Pure function of the diagnostics list populated by
+    ``search_cross_corpus(diagnostics_out=...)``; the engine itself never
+    emits this (MCP does not write stderr).
+    """
+    if not diagnostics:
+        return base
+    worst = diagnostics[0].worst_offender()
+    if worst is None:
+        return base
+    name, threshold, top_distance = worst
+    thr = f"{threshold:.4f}" if threshold is not None else "the per-corpus default"
+    return (
+        f"{base} Closest candidate was dropped at distance {top_distance:.4f} "
+        f"(threshold {thr}, collection {name}). Re-run with "
+        f"threshold={top_distance + 0.05:.2f} (or higher) to include it."
+    )
+
+
 # Note: catalog server also registers a "search" tool. No collision — Claude Code
 # disambiguates by server prefix (mcp__plugin_conexus_nexus__search vs
 # mcp__plugin_conexus_nexus-catalog__search).
@@ -543,9 +570,11 @@ def search(
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
         # Wrapped in context manager to avoid connection leak.
+        # nexus-uro6c: capture threshold-filter diagnostics so a silent
+        # zero-hit can surface the closest dropped candidate (the MCP tool
+        # turns it into an actionable message; the engine still emits no stderr).
+        diag: list = []
         with _t2_ctx() as _t2_db:
-            # Note: no ``diagnostics_out`` — MCP does not emit stderr
-            # (RDR-087 Phase 1 scope is CLI-only).
             # ``telemetry`` wired for RDR-087 Phase 2.2 hot-path logging;
             # opt-out via ``telemetry.search_enabled=false`` in .nexus.yml.
             results = search_cross_corpus(
@@ -557,6 +586,7 @@ def search(
                 topic=topic or None,
                 threshold_override=threshold,
                 telemetry=_t2_db.telemetry,
+                diagnostics_out=diag,
             )
         # Only sort by distance for flat (non-clustered) results.
         # Clustered results arrive in cluster-grouped order from search_engine.
@@ -569,7 +599,7 @@ def search(
                     "collections": [], "chunk_collections": [],
                     "chunk_text_hash": [],
                 }
-            return "No results."
+            return _no_results_message(diag)
 
         # Apply pagination
         total = len(results)
@@ -818,6 +848,9 @@ def query(
 
         # Over-fetch chunks to ensure good document coverage
         fetch_n = limit * 10
+        # nexus-uro6c: capture threshold-filter diagnostics to surface a
+        # threshold drop on a zero-hit (same rationale as the search tool).
+        qdiag: list = []
         with _t2_ctx() as _t2_db:
             results = search_cross_corpus(
                 question, target, n_results=fetch_n, t3=t3, where=where_dict,
@@ -825,6 +858,7 @@ def query(
                 link_boost=True,
                 taxonomy=_t2_db.taxonomy,
                 telemetry=_t2_db.telemetry,
+                diagnostics_out=qdiag,
             )
         results.sort(key=lambda r: r.distance)
         if not results:
@@ -834,7 +868,7 @@ def query(
                     "collections": [], "chunk_collections": [],
                     "chunk_text_hash": [],
                 }
-            return "No documents found."
+            return _no_results_message(qdiag, base="No documents found.")
 
         if structured:
             page = results[:limit]

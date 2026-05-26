@@ -303,6 +303,22 @@ def classify_groups(
     return matched, low_conf, unmatched
 
 
+def _content_type_for_collection(collection: str) -> str:
+    """Infer the catalog content_type from a collection's RDR-103 prefix.
+
+    Conformant collection names are ``<content_type>__<owner>__<embed>__v<n>``
+    (RDR-103), so the leading segment IS the content_type (``code`` /
+    ``knowledge`` / ``rdr`` / ``docs`` / ...). nexus-s5le: orphan-backfill
+    previously hardcoded ``"pdf"`` on every synthesized row regardless of
+    corpus, so those rows never matched a ``content_type=`` catalog filter for
+    their real corpus (the canonical query types are code/paper/rdr/knowledge/
+    docs, not pdf). Falls back to ``"knowledge"`` for a non-conformant name
+    with no prefix.
+    """
+    prefix = collection.split("__", 1)[0].strip()
+    return prefix or "knowledge"
+
+
 def register_dt_linked(
     catalog: "Catalog",
     owner: "Tumbler",
@@ -317,7 +333,7 @@ def register_dt_linked(
         tumbler = catalog.register(
             owner,
             title=m.title,
-            content_type="pdf",
+            content_type=_content_type_for_collection(collection),
             file_path="",
             physical_collection=collection,
             chunk_count=len(m.chunks),
@@ -389,7 +405,7 @@ def register_synthetic(
             tumbler = catalog.register(
                 owner,
                 title=title,
-                content_type="pdf",
+                content_type=_content_type_for_collection(collection),
                 file_path="",
                 physical_collection=collection,
                 chunk_count=len(g.chunks),
@@ -410,7 +426,7 @@ def register_synthetic(
                 tumbler = catalog.register(
                     owner,
                     title=title,
-                    content_type="pdf",
+                    content_type=_content_type_for_collection(collection),
                     file_path="",
                     physical_collection=collection,
                     chunk_count=1,
@@ -530,7 +546,7 @@ def apply_csv(
             tumbler = catalog.register(
                 owner,
                 title=title,
-                content_type="pdf",
+                content_type=_content_type_for_collection(collection),
                 file_path="",
                 physical_collection=collection,
                 chunk_count=len(chunks),

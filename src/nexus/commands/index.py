@@ -503,6 +503,41 @@ def _collections_from_registry_info(info: dict) -> list[str]:
     return collections
 
 
+def _project_cross_collections(
+    taxonomy: Any,
+    collections: list[str],
+    chroma_client: Any,
+    *,
+    threshold: float = 0.85,
+) -> int:
+    """Project each collection against the others and persist the assignments.
+
+    Returns the total number of cross-collection assignments persisted.
+
+    nexus-g25dk: ``_persist_assignments`` requires ``source_collection`` as a
+    3rd positional. The previous inline call omitted it, raising a TypeError
+    that the caller's ``except`` swallowed, so the auto-discover projection
+    pass silently persisted nothing. Extracted here so the call is unit-tested
+    (the bug shipped because it was untested inline). Each collection's
+    assignments are stamped with that collection as the source.
+    """
+    from nexus.commands.taxonomy_cmd import _persist_assignments
+
+    total = 0
+    for col_name in collections:
+        others = [c for c in collections if c != col_name]
+        if not others:
+            continue
+        result = taxonomy.project_against(
+            col_name, others, chroma_client, threshold=threshold,
+        )
+        assignments = result.get("chunk_assignments", [])
+        if assignments:
+            _persist_assignments(taxonomy, assignments, col_name, quiet=True)
+            total += len(assignments)
+    return total
+
+
 def run_collection_postprocessing(
     collections: list[str],
     *,
@@ -576,18 +611,9 @@ def run_collection_postprocessing(
                     )
                 # Cross-collection projection pass (RDR-075 SC-7)
                 try:
-                    proj_total = 0
-                    for col_name in collections:
-                        others = [c for c in collections if c != col_name]
-                        if others:
-                            result = db.taxonomy.project_against(
-                                col_name, others, t3._client, threshold=0.85,
-                            )
-                            assignments = result.get("chunk_assignments", [])
-                            if assignments:
-                                from nexus.commands.taxonomy_cmd import _persist_assignments
-                                _persist_assignments(db.taxonomy, assignments, quiet=True)
-                                proj_total += len(assignments)
+                    proj_total = _project_cross_collections(
+                        db.taxonomy, collections, t3._client,
+                    )
                     if proj_total:
                         _say(f"  Project:  {proj_total} cross-collection assignments.")
                 except Exception:

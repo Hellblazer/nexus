@@ -17,7 +17,6 @@ silently dropped from the closing-bead set.
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 import textwrap
@@ -27,30 +26,29 @@ import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
 COMMAND_FILE = REPO_ROOT / "conexus" / "commands" / "phase-review-gate.md"
+SCRIPT_FILE = (
+    REPO_ROOT / "conexus" / "resources" / "rdr_commands" / "phase_review_gate.py"
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _run_preamble(args: str, *, rdr_dir: Path | None = None) -> str:
-    """Execute the preamble embedded in phase-review-gate.md.
+    """Execute the preamble script for phase-review-gate.
 
-    Extracts the Python block between ``!{`` / ``PYEOF`` and runs it
-    in a subprocess so the same isolation level as the real slash command
-    applies.  Returns combined stdout+stderr.
+    Runs the extracted ``resources/rdr_commands/phase_review_gate.py`` script
+    (nexus-t1b1k moved it out of a ``!{ }`` heredoc) in a subprocess so the
+    same isolation level as the real slash command applies. Returns combined
+    stdout+stderr.
     """
-    text = COMMAND_FILE.read_text()
-    m = re.search(r"python3\s+<<\s+'PYEOF'\n(.*?)PYEOF", text, re.DOTALL)
-    assert m, "No PYEOF block found in phase-review-gate.md"
-    script = m.group(1)
-
     env = os.environ.copy()
     env["NEXUS_RDR_ARGS"] = args
     if rdr_dir is not None:
         env["NEXUS_RDR_DIR_OVERRIDE"] = str(rdr_dir)
 
     result = subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, str(SCRIPT_FILE)],
         capture_output=True, text=True, env=env,
         timeout=15,
     )
@@ -113,9 +111,15 @@ class TestCommandFileStructure:
         assert COMMAND_FILE.exists(), f"Missing: {COMMAND_FILE}"
 
     def test_command_has_preamble_block(self) -> None:
+        # nexus-t1b1k: the Python preamble moved out of a !{ } heredoc into an
+        # extracted script invoked by path (a heredoc inside !{ } is emitted as
+        # raw source instead of executing). The block must invoke the script
+        # and contain no heredoc.
         text = COMMAND_FILE.read_text()
-        assert "python3 << 'PYEOF'" in text, "No Python preamble block found"
-        assert "PYEOF" in text, "Preamble block not closed"
+        assert "python3 << 'PYEOF'" not in text, "heredoc form must be gone (nexus-t1b1k)"
+        assert "resources/rdr_commands/phase_review_gate.py" in text, \
+            "command must invoke the extracted preamble script by path"
+        assert SCRIPT_FILE.exists(), f"Missing extracted preamble script: {SCRIPT_FILE}"
 
     def test_command_has_nexus_rdr_args_env(self) -> None:
         text = COMMAND_FILE.read_text()
@@ -206,16 +210,12 @@ class TestSentinelSideEffect:
     """The PASSED path writes the sentinel the routing hook reads."""
 
     def _run_with_tmpdir(self, args: str, *, rdr_dir, tmpdir) -> str:
-        text = COMMAND_FILE.read_text()
-        m = re.search(r"python3\s+<<\s+'PYEOF'\n(.*?)PYEOF", text, re.DOTALL)
-        assert m
-        script = m.group(1)
         env = os.environ.copy()
         env["NEXUS_RDR_ARGS"] = args
         env["NEXUS_RDR_DIR_OVERRIDE"] = str(rdr_dir)
         env["TMPDIR"] = str(tmpdir)
         result = subprocess.run(
-            [sys.executable, "-c", script],
+            [sys.executable, str(SCRIPT_FILE)],
             capture_output=True, text=True, env=env, timeout=15,
         )
         return (result.stdout + result.stderr).strip()

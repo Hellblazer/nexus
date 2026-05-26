@@ -133,3 +133,40 @@ class TestSearchCrossCorpusThresholdFiltering:
         )
         ids = {r.id for r in results}
         assert ids == {"c1", "k1"}
+
+
+class TestNoResultsMessage:
+    """nexus-uro6c (5.1.0 shakeout): a zero-hit search must surface a
+    threshold drop instead of an undifferentiated 'No results.'."""
+
+    def test_footer_when_all_candidates_dropped(self) -> None:
+        from nexus.mcp.core import _no_results_message
+        from nexus.search_engine import SearchDiagnostics
+
+        # knowledge__papers: raw=3, all 3 dropped, threshold 0.65, closest
+        # dropped candidate at distance 0.5515 (the shakeout's recovered match).
+        diag = SearchDiagnostics(
+            per_collection={"knowledge__papers": (3, 3, 0.65, 0.5515)},
+            total_dropped=3,
+            total_raw=3,
+        )
+        msg = _no_results_message([diag])
+        assert "0.5515" in msg                 # closest dropped distance
+        assert "0.6500" in msg                 # the blocking threshold
+        assert "knowledge__papers" in msg      # which collection
+        assert "threshold=0.60" in msg         # 0.5515 + 0.05 relax hint
+
+    def test_plain_when_no_diagnostics(self) -> None:
+        from nexus.mcp.core import _no_results_message
+
+        assert _no_results_message([]) == "No results."
+
+    def test_plain_when_nothing_dropped(self) -> None:
+        from nexus.mcp.core import _no_results_message
+        from nexus.search_engine import SearchDiagnostics
+
+        # raw=0 => genuine miss, no candidate to surface => base message.
+        diag = SearchDiagnostics(
+            per_collection={"code__x": (0, 0, 0.45, None)},
+        )
+        assert _no_results_message([diag]) == "No results."

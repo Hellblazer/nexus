@@ -44,6 +44,36 @@ def test_find_overlapping_respects_threshold(db: T2Database) -> None:
     assert len(pairs) == 0
 
 
+def test_find_overlapping_when_shared_tokens_not_in_leading_words(
+    db: T2Database,
+) -> None:
+    """nexus-uul2r (5.1.0 shakeout): overlap must be detected even when the
+    distinctive shared tokens are NOT among an entry's leading words.
+
+    The pre-fix candidate retrieval built an FTS5 AND-query from each
+    entry's first 3 non-stopword words, so an overlapping entry that did
+    not contain those specific leading words was never retrieved as a
+    candidate and its Jaccard was never computed. Here the entries share a
+    high-overlap TAIL ('shared distinctive tokens trail zephyranth orchard
+    meadow') but have disjoint leading words, so the old code returned
+    empty.
+    """
+    db.put(
+        project="proj", title="alpha",
+        content="Leading words here padding clause. "
+                "Shared distinctive tokens trail: zephyranth orchard meadow.",
+    )
+    db.put(
+        project="proj", title="beta",
+        content="Different opening segment altogether. "
+                "Shared distinctive tokens trail: zephyranth orchard meadow.",
+    )
+    # The shared tail gives Jaccard well above 0.3 on the content word sets.
+    pairs = db.find_overlapping_memories("proj", min_similarity=0.3)
+    assert len(pairs) == 1
+    assert {pairs[0][0]["title"], pairs[0][1]["title"]} == {"alpha", "beta"}
+
+
 # ── merge ───────────────────────────────────────────────────────────────────
 
 

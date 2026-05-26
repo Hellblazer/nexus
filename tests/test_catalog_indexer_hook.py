@@ -356,3 +356,39 @@ class TestCatalogHookForeignCwd:
         # the foreign CWD.
         assert str(repo) in entry.source_uri
         assert str(foreign_cwd) not in entry.source_uri
+
+
+def test_indexed_relpaths_tolerates_symlinked_repo(tmp_path: Path) -> None:
+    """nexus-f3tyz: a symlink mismatch (file under the real dir, repo passed as
+    a symlink to it) must not abort the indexed-path set. The pre-fix
+    comprehension raised ValueError on the first such path, which the caller's
+    except swallowed, silently skipping _run_housekeeping (orphan eviction)."""
+    import os
+
+    from nexus.indexer import _indexed_relpaths
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "a.py").write_text("x")
+    link = tmp_path / "link"
+    os.symlink(real, link)
+
+    abs_path = real / "a.py"
+    # abs_path.relative_to(link) raises ValueError; the resolve-fallback recovers.
+    assert _indexed_relpaths([(abs_path, None, None)], link) == {"a.py"}
+
+
+def test_indexed_relpaths_skips_outside_repo_without_aborting(tmp_path: Path) -> None:
+    """A genuinely-outside-repo path is skipped, not raised — the rest of the
+    set (and thus housekeeping) still runs."""
+    from nexus.indexer import _indexed_relpaths
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "in.py").write_text("x")
+    outside = tmp_path / "elsewhere" / "out.py"
+
+    result = _indexed_relpaths(
+        [(repo / "in.py", None, None), (outside, None, None)], repo,
+    )
+    assert result == {"in.py"}
