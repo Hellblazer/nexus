@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for RDR close gate heading normalization and gap extraction.
 
-Validates that the close gate preamble (conexus/commands/rdr-close.md) correctly
-handles heading variants and gap format variations. Tests the Python functions
-extracted from the preamble script.
+Validates that the close gate preamble (conexus/resources/rdr_commands/rdr_close.py,
+extracted from conexus/commands/rdr-close.md per nexus-t1b1k) correctly handles
+heading variants and gap format variations. Tests the Python functions extracted
+from the preamble script.
 
-nexus-bbt, nexus-oyu, nexus-40b, nexus-j4o.
+nexus-bbt, nexus-oyu, nexus-40b, nexus-j4o, nexus-t1b1k.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import re
 import pytest
 
 
-# ── Replicate the preamble functions exactly as they appear in rdr-close.md ──
+# ── Replicate the preamble functions exactly as they appear in rdr_close.py ──
 
 
 def _extract_section(doc: str, *headings: str) -> str:
@@ -402,14 +403,15 @@ Content.
 
 
 class TestPreambleConsistency:
-    """Verify the actual preamble in rdr-close.md matches our test functions."""
+    """Verify the actual preamble in rdr_close.py matches our test functions."""
 
     def test_preamble_has_heading_variants(self) -> None:
         """The preamble must search for both '## Problem Statement' and '## Problem'."""
         from pathlib import Path
 
         preamble = (
-            Path(__file__).parent.parent / "conexus" / "commands" / "rdr-close.md"
+            Path(__file__).parent.parent
+            / "conexus" / "resources" / "rdr_commands" / "rdr_close.py"
         ).read_text()
         # The _extract_section call must include both variants
         assert "'## Problem Statement'" in preamble
@@ -420,7 +422,8 @@ class TestPreambleConsistency:
         from pathlib import Path
 
         preamble = (
-            Path(__file__).parent.parent / "conexus" / "commands" / "rdr-close.md"
+            Path(__file__).parent.parent
+            / "conexus" / "resources" / "rdr_commands" / "rdr_close.py"
         ).read_text()
         assert "#{3,5}" in preamble
 
