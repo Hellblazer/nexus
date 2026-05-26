@@ -192,7 +192,7 @@ def refresh_context_l1(
     from nexus.db.t2 import T2Database
 
     path = db_path or default_db_path()
-    with T2Database(path) as db:
+    with T2Database(path) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         return generate_context_l1(
             db.taxonomy, output_path=output_path, repo_path=repo_path,
         )

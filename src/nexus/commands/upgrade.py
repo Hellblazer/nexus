@@ -283,33 +283,41 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
                 applied = 0
                 any_failed = False
                 try:
-                    t3_db = make_t3()
-                    t2_db = T2Database(default_db_path())
-                    for step in unapplied:
-                        click.echo(f"  T3: [{step.introduced}] {step.name}")
-                        try:
-                            step.fn(t3_db, t2_db.taxonomy)
-                        except Exception as step_exc:
-                            any_failed = True
-                            _log.warning(
-                                "t3_upgrade_step_failed",
-                                introduced=step.introduced,
-                                name=step.name,
-                                error=str(step_exc),
-                                exc_info=True,
+                    # RDR-128 P3 (nexus-sbxbe.3): the T3 steps mutate T2
+                    # (taxonomy) data and write _nexus_t3_steps. Hold the
+                    # same cross-process migration flock that guards
+                    # apply_pending above (it was released by the time we
+                    # get here) so a session-start-respawned daemon's
+                    # startup migration WAITS rather than racing these
+                    # writes on the single WAL writer lock.
+                    with t2_migration_flock(db_path.parent):
+                        t3_db = make_t3()
+                        t2_db = T2Database(default_db_path())  # epsilon-allow: nx upgrade is the bootstrap chicken-and-egg (it migrates the schema the daemon serves, so it cannot route through the daemon); daemon quiesced during upgrade, the migration flock serializes a respawned daemon's startup migration cross-process. NOTE: shares the process with the apply_pending migration conn (pre-existing, single-threaded sequential writes, tracked by nexus-izpcb) (RDR-128 P3 documented-irreducible)
+                        for step in unapplied:
+                            click.echo(f"  T3: [{step.introduced}] {step.name}")
+                            try:
+                                step.fn(t3_db, t2_db.taxonomy)
+                            except Exception as step_exc:
+                                any_failed = True
+                                _log.warning(
+                                    "t3_upgrade_step_failed",
+                                    introduced=step.introduced,
+                                    name=step.name,
+                                    error=str(step_exc),
+                                    exc_info=True,
+                                )
+                                click.echo(
+                                    f"    FAILED: {step_exc} — will retry on next `nx upgrade`",
+                                    err=True,
+                                )
+                                continue
+                            conn.execute(
+                                "INSERT OR REPLACE INTO _nexus_t3_steps "
+                                "(introduced, name, applied_at) VALUES (?, ?, datetime('now'))",
+                                (step.introduced, step.name),
                             )
-                            click.echo(
-                                f"    FAILED: {step_exc} — will retry on next `nx upgrade`",
-                                err=True,
-                            )
-                            continue
-                        conn.execute(
-                            "INSERT OR REPLACE INTO _nexus_t3_steps "
-                            "(introduced, name, applied_at) VALUES (?, ?, datetime('now'))",
-                            (step.introduced, step.name),
-                        )
-                        conn.commit()
-                        applied += 1
+                            conn.commit()
+                            applied += 1
                 finally:
                     if t2_db is not None:
                         t2_db.close()

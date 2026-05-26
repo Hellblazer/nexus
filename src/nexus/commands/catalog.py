@@ -84,7 +84,7 @@ def _seed_plan_templates() -> int:
     from nexus.db.t2 import T2Database
 
     seeded = 0
-    with T2Database(default_db_path()) as db:
+    with T2Database(default_db_path()) as db:  # epsilon-allow: one-shot `nx catalog setup` plan-seed loader passes Plan dataclasses not in the daemon RPC wire allowlist; not a contention hot path (RDR-128 P3 documented-irreducible)
         from nexus.indexer_utils import find_repo_root
         from nexus.plans.loader import load_all_tiers
 
@@ -1602,7 +1602,7 @@ def _taxonomy_stats() -> dict | None:
         return None
 
     try:
-        with T2Database(db_path) as db:
+        with T2Database(db_path) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             conn = db.taxonomy.conn
             with db.taxonomy._lock:
                 topic_total = conn.execute(

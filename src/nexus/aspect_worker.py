@@ -255,20 +255,43 @@ class AspectExtractionWorker:
         All exceptions inside the loop are caught and recorded; the
         worker thread itself never dies from a row's failure.
         """
-        from nexus.mcp_infra import t2_ctx
+        from nexus.db.t2.aspect_extraction_queue import QueueRow
+        from nexus.mcp_infra import t2_index_write
         while not self._stop_event.is_set():
             # Increment unconditionally so a sustained T2 unavailability
             # does not pin _poll_count at a multiple of
             # _RECLAIM_EVERY_N_POLLS and amplify the reclaim UPDATE
             # against an already-stressed database.
             self._poll_count += 1
+            do_reclaim = self._poll_count % self._RECLAIM_EVERY_N_POLLS == 0
             try:
-                with t2_ctx() as t2:
-                    if self._poll_count % self._RECLAIM_EVERY_N_POLLS == 0:
+                # RDR-128 P3 (nexus-sbxbe.3): route the hot poll block
+                # (reclaim + claim, every ~poll_interval seconds) through
+                # the T2 daemon so this worker — which runs inside every
+                # nx-mcp process — stops opening memory.db directly and
+                # contending on its single WAL writer lock. This is the
+                # every-2s contention behind the recurring
+                # `aspect_worker_claim_failed` / `database is locked`
+                # incidents (memory: daemon-restart-not-worker-fix). The
+                # work-bounded persist below stays direct (t2_ctx) because
+                # document_aspects.upsert takes an AspectRecord the daemon
+                # wire protocol cannot round-trip.
+                def _poll(t2):
+                    if do_reclaim:
                         t2.aspect_queue.reclaim_stale(
                             timeout_seconds=self._stale_timeout_seconds,
                         )
-                    rows = t2.aspect_queue.claim_batch(self._batch_size)
+                    return t2.aspect_queue.claim_batch(self._batch_size)
+
+                rows = t2_index_write(_poll)
+                # The daemon RPC decodes QueueRow to a plain dict; the
+                # direct-fallback path returns QueueRow objects. Normalise
+                # so downstream attribute access (row.collection, ...) is
+                # uniform regardless of which path served the claim.
+                rows = [
+                    r if isinstance(r, QueueRow) else QueueRow(**r)
+                    for r in rows
+                ]
             except Exception:
                 _log.warning("aspect_worker_claim_failed", exc_info=True)
                 self._stop_event.wait(self._poll_interval)

@@ -698,6 +698,7 @@ class TestAspectCascadeIntegration:
         fake.rename_collection = MagicMock()
 
         with patch("nexus.commands.collection._t3", return_value=fake), \
+             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
              patch("nexus.config.default_db_path", return_value=db_path), \
              patch("nexus.config.catalog_path", return_value=cat_dir):
             counts = rename_collection_data_plane("code__old", "code__new")
@@ -1120,6 +1121,7 @@ class TestK9CascadeIncludesTelemetry:
         fake.rename_collection = MagicMock()
 
         with patch("nexus.commands.collection._t3", return_value=fake), \
+             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
              patch("nexus.config.default_db_path", return_value=db_path), \
              patch("nexus.config.catalog_path", return_value=cat_dir):
             counts = rename_collection_data_plane("code__old", "code__new")
@@ -1176,6 +1178,7 @@ class TestRenameOrdering:
         fake.rename_collection = _t3_rename_bomb
 
         with patch("nexus.commands.collection._t3", return_value=fake), \
+             patch("nexus.mcp_infra.default_db_path", return_value=db_path), \
              patch("nexus.config.default_db_path", return_value=db_path), \
              patch("nexus.config.catalog_path", return_value=cat_dir):
             with pytest.raises((RuntimeError, click.ClickException)):

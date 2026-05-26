@@ -107,13 +107,19 @@ def test_session_start_outputs_session_id(
 
 
 def test_session_end_runs_expire(runner: CliRunner, fake_home: Path) -> None:
-    """SessionEnd runs T2 expire."""
+    """SessionEnd routes its T2 flush + expire through the daemon
+    (mcp_infra.t2_index_write) and still runs the TTL expire sweep
+    (RDR-128 P3 — the flush no longer opens memory.db directly)."""
     mock_t2 = MagicMock()
     mock_t2.expire.return_value = 3
+    mock_t2.memory.put.return_value = 1
 
-    _t2_cm = MagicMock(__enter__=MagicMock(return_value=mock_t2))
+    def _run(write_fn):
+        # Stand in for the daemon route: run the write_fn against the mock.
+        return write_fn(mock_t2)
+
     with patch("nexus.hooks._open_t1", return_value=MagicMock(flagged_entries=lambda: [])):
-        with patch("nexus.hooks.T2Database", return_value=_t2_cm):
+        with patch("nexus.mcp_infra.t2_index_write", _run):
             result = runner.invoke(main, ["hook", "session-end"])
 
     mock_t2.expire.assert_called_once()

@@ -141,14 +141,29 @@ def get_collection_names() -> list[str]:
 
 
 def t2_ctx():
-    """Return a T2Database context manager — fresh per call."""
+    """Return a T2Database context manager — fresh per call.
+
+    Reserved for the paths that genuinely cannot route through the daemon
+    (RDR-128 P3): the ``aspect_worker`` persist block, whose
+    ``document_aspects.upsert(record)`` takes an ``AspectRecord`` argument
+    that the daemon wire protocol decodes to a plain dict server-side
+    (``t2_daemon._t2_decode``), so the method would receive a dict and
+    break on attribute access. The hot every-poll path routes via
+    ``t2_index_write``; only the work-bounded persist falls back here.
+    """
     from nexus.db.t2 import T2Database
-    return T2Database(default_db_path())
+    return T2Database(default_db_path())  # epsilon-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
 
 
-def t2_index_write(write_fn) -> None:
-    """Run one indexer T2 write through the daemon (``T2Client``) if it is
-    reachable, else a direct ``T2Database`` (RDR-128 P1, nexus-kg8sj).
+def t2_index_write(write_fn):
+    """Run one T2 write through the daemon (``T2Client``) if it is
+    reachable, else a direct ``T2Database`` (RDR-128 P1, nexus-kg8sj;
+    generalized to all routable writers in P3, nexus-sbxbe.3).
+
+    Returns ``write_fn``'s result so callers that need the write's return
+    value (e.g. the aspect_worker's ``claim_batch`` rows, or
+    ``rename_collection_cascade``'s per-store row counts) can route too;
+    fire-and-forget callers simply ignore the return.
 
     Routing keeps the ``nx index repo`` process from opening ``memory.db``
     directly and holding its single WAL writer slot — the daemon becomes
@@ -187,10 +202,9 @@ def t2_index_write(write_fn) -> None:
 
     if client is not None:
         try:
-            write_fn(client)
+            return write_fn(client)
         finally:
             client.close()
-        return
 
     # Degraded path: this is the direct-lock behavior RDR-128 exists to
     # eliminate, so log it at warning (not debug) — a persistently
@@ -201,8 +215,8 @@ def t2_index_write(write_fn) -> None:
         hint="start the T2 daemon (`nx daemon t2 start`) to route indexer writes",
     )
     from nexus.db.t2 import T2Database
-    with T2Database(default_db_path()) as db:
-        write_fn(db)
+    with T2Database(default_db_path()) as db:  # epsilon-allow: by-design daemon-unreachable fallback so writes degrade to direct rather than failing (RDR-128 P3 documented-irreducible)
+        return write_fn(db)
 
 
 # ── T1 plan session cache (RDR-078) ──────────────────────────────────────────

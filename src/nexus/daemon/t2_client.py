@@ -270,6 +270,27 @@ class T2Client:
                 self._sock = None
             self._handshake_done = False
 
+    # ── Facade-parity passthroughs (RDR-128 P3) ─────────────────────────
+    # T2Database exposes ``expire`` / ``rename_collection_cascade`` at the
+    # top level (they span multiple stores), whereas the daemon dispatches
+    # them under the ``database`` pseudo-store. These thin forwards give
+    # T2Client the same top-level surface as T2Database, so a
+    # ``t2_index_write(write_fn)`` body can call ``db.expire()`` /
+    # ``db.rename_collection_cascade(old, new)`` uniformly regardless of
+    # whether the daemon is reachable (routed client) or not (direct DB).
+
+    def expire(self, *args: Any, **kwargs: Any) -> Any:
+        return self.database.expire(*args, **kwargs)
+
+    def rename_collection_cascade(self, *args: Any, **kwargs: Any) -> Any:
+        return self.database.rename_collection_cascade(*args, **kwargs)
+
+    def put(self, *args: Any, **kwargs: Any) -> Any:
+        # T2Database.put is a thin facade over memory.put; mirror it so a
+        # write_fn (or a helper handed the writer, e.g. T1Database.promote)
+        # can call db.put(...) on either a routed client or a direct DB.
+        return self.memory.put(*args, **kwargs)
+
     # ── RPC ─────────────────────────────────────────────────────────────
 
     def _ensure_sock(self) -> socket.socket:

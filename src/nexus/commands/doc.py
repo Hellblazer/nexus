@@ -105,7 +105,7 @@ def render_cmd(
     # install, no db), fall back to bead + RDR resolvers only.
     db: T2Database | None = None
     try:
-        db = T2Database(default_db_path())
+        db = T2Database(default_db_path())  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
     except Exception:
         db = None
 
@@ -230,7 +230,7 @@ def validate_cmd(paths: tuple[Path, ...], project_root: Path | None) -> None:
 
     db: T2Database | None = None
     try:
-        db = T2Database(default_db_path())
+        db = T2Database(default_db_path())  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
     except Exception:
         db = None
 
@@ -573,7 +573,7 @@ def _phase4_t2_taxonomy():
 
     @contextmanager
     def _taxonomy_ctx():
-        db = T2Database(default_db_path())
+        db = T2Database(default_db_path())  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         try:
             yield db.taxonomy
         finally:

@@ -10,6 +10,16 @@ import pytest
 from nexus.hooks import session_end, session_end_flush, session_start
 
 
+def _no_daemon(**_kwargs):
+    """Force ``t2_index_write``'s direct-fallback path (RDR-128 P3).
+
+    SessionEnd flush routes its T2 writes through the daemon; tests have
+    no daemon, so make the reachability probe fail and let the write land
+    on the autouse-isolated tmp ``memory.db``."""
+    from nexus.daemon.t2_client import T2DaemonNotReachableError
+    raise T2DaemonNotReachableError("no daemon in tests")
+
+
 # ── session_start ────────────────────────────────────────────────────────────
 #
 # RDR-094 Phase F (4.13.0 / nexus-2lm0) deleted the hook-side chroma
@@ -120,13 +130,20 @@ def test_session_start_falls_back_to_generated_uuid(tmp_path, monkeypatch) -> No
 
 
 def test_session_end_db_error_doesnt_crash(tmp_path: Path) -> None:
-    """Storage errors during flush are caught gracefully."""
+    """Storage errors during flush are caught gracefully.
+
+    RDR-128 P3: session_end_flush now routes its writes through
+    ``mcp_infra.t2_index_write``; force a storage error out of that path
+    and assert the hook still returns its summary rather than crashing."""
+    import sqlite3
+
     sessions = tmp_path / "sessions"
     sessions.mkdir()
 
-    with (
-        patch("nexus.hooks._default_db_path", return_value=tmp_path / "nonexistent_dir" / "memory.db"),
-    ):
+    def _boom(_write_fn):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    with patch("nexus.mcp_infra.t2_index_write", _boom):
         output = session_end()
 
     assert "Session ended" in output
@@ -146,9 +163,7 @@ class TestSessionEndFlush:
         sessions.mkdir()
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
-        with (
-            patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
-        ):
+        with patch("nexus.daemon.t2_client.make_t2_client", _no_daemon):
             output = session_end_flush()
 
         assert "Flushed 0" in output
@@ -175,9 +190,7 @@ def test_session_end_flush_cli_subcommand(tmp_path, monkeypatch):
     sessions.mkdir()
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
-    with (
-        patch("nexus.hooks._default_db_path", return_value=tmp_path / "memory.db"),
-    ):
+    with patch("nexus.daemon.t2_client.make_t2_client", _no_daemon):
         runner = CliRunner()
         result = runner.invoke(hook_group, ["session-end-flush"])
 

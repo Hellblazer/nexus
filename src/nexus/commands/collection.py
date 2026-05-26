@@ -128,12 +128,18 @@ def delete_cmd(name: str, yes: bool) -> None:
     taxonomy_counts: dict[str, int] | None = None
     chash_deleted = 0
     try:
-        from nexus.commands._helpers import default_db_path
-        from nexus.db.t2 import T2Database
+        # RDR-128 P3 (nexus-sbxbe.3): route the cascade through the daemon.
+        # Both purge_collection and delete_collection are routable store
+        # ops (str arg, dict/int return).
+        from nexus.mcp_infra import t2_index_write
 
-        with T2Database(default_db_path()) as db:
-            taxonomy_counts = db.taxonomy.purge_collection(name)
-            chash_deleted = db.chash_index.delete_collection(name)
+        def _cascade(db):
+            return (
+                db.taxonomy.purge_collection(name),
+                db.chash_index.delete_collection(name),
+            )
+
+        taxonomy_counts, chash_deleted = t2_index_write(_cascade)
     except Exception as exc:
         prefix = "absent" if t3_absent else "succeeded"
         click.echo(

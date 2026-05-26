@@ -879,17 +879,20 @@ def _run_check_storage_boundary(
 
     if phase:
         try:
-            from nexus.commands._helpers import default_db_path
-            from nexus.db.t2 import T2Database
+            # RDR-128 P3 (nexus-sbxbe.3): route the phase-metric write
+            # through the daemon so `nx doctor` does not open memory.db
+            # directly. memory.put is a routable store op.
+            from nexus.mcp_infra import t2_index_write
 
-            with T2Database(default_db_path()) as db:
-                db.memory.put(
+            t2_index_write(
+                lambda db: db.memory.put(
                     project="nexus_rdr",
                     title=f"120-phase-{phase}-catalog-allowlist-count",
                     content=str(result.catalog_allowlist_count),
                     tags="rdr-120,phase-metric,catalog-allowlist",
                     ttl=None,  # permanent
                 )
+            )
         except Exception as exc:
             log.warning(
                 "storage_boundary_lint_metric_write_failed",

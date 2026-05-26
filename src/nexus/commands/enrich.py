@@ -744,7 +744,7 @@ def _select_entries(
         # Filter to entries whose existing aspect row has model_version
         # below the threshold. Rows without an existing aspect entry
         # are also included (they need first-time extraction).
-        with T2Database(default_db_path()) as db:
+        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             outdated_paths = {
                 r.source_path
                 for r in db.document_aspects.list_by_extractor_version(
@@ -967,7 +967,7 @@ def _run_extraction(
     manifest_lookup = _build_catalog_manifest_lookup()
 
     db_path = default_db_path()
-    with T2Database(db_path) as db:
+    with T2Database(db_path) as db:  # epsilon-allow: document_aspects.upsert takes an AspectRecord arg the daemon RPC wire protocol decodes to a dict server-side; not routable (RDR-128 P3 documented-irreducible)
         for i, entry in enumerate(entries, 1):
             source_path = entry.file_path or entry.title
             if not source_path:
@@ -1195,7 +1195,7 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
 
-    with T2Database(default_db_path()) as db:
+    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         records = db.document_aspects.list_by_collection(
             collection, limit=limit if limit > 0 else None,
         )
@@ -1242,7 +1242,7 @@ def enrich_aspects_info(collection: str, source_path: str) -> None:
     from nexus.commands._helpers import default_db_path
     from nexus.db.t2 import T2Database
 
-    with T2Database(default_db_path()) as db:
+    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         record = db.document_aspects.get(collection, source_path)
 
     if record is None:
@@ -1305,8 +1305,13 @@ def enrich_aspects_delete(
             abort=True,
         )
 
-    with T2Database(default_db_path()) as db:
-        deleted = db.document_aspects.delete(collection, source_path)
+    # RDR-128 P3 (nexus-sbxbe.3): route the delete through the daemon.
+    # document_aspects.delete (str/str args, int return) is routable —
+    # distinct from document_aspects.upsert, which is RPC-denied.
+    from nexus.mcp_infra import t2_index_write
+    deleted = t2_index_write(
+        lambda db: db.document_aspects.delete(collection, source_path)
+    )
 
     if deleted:
         click.echo(
@@ -1376,7 +1381,7 @@ def enrich_aspects_promote_field(
     from nexus.db.t2 import T2Database
 
     if history:
-        with T2Database(default_db_path()) as db:
+        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             entries = list_promotions(db)
         if not entries:
             click.echo("No promotion history.")
@@ -1390,7 +1395,7 @@ def enrich_aspects_promote_field(
             )
         return
 
-    with T2Database(default_db_path()) as db:
+    with T2Database(default_db_path()) as db:  # epsilon-allow: promote_extras_field runs raw DDL plus aspect_promotion_log writes on the live connection; not a routable store op (RDR-128 P3 documented-irreducible)
         try:
             result = promote_extras_field(
                 db, field_name,
@@ -1547,7 +1552,7 @@ def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
         )
         return
 
-    with T2Database(default_db_path()) as db:
+    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         # nexus-6xp2: post-drop, source_path-keyed lookup is unreliable
         # when the writer used a non-uri_for source_uri. Tumbler-keyed
         # get_by_doc_id is exact; fall back to legacy (coll, path) get
@@ -1616,7 +1621,7 @@ def aspects_list_cmd(
             )
         cat = Catalog(cat_path, cat_path / ".catalog.db")
         entries = cat.list_by_collection(collection)
-        with T2Database(default_db_path()) as db:
+        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             existing = {
                 r.source_path for r in db.document_aspects.list_by_collection(
                     collection,
@@ -1649,7 +1654,7 @@ def aspects_list_cmd(
             click.echo(f"  ... and {len(gaps) - limit} more.")
         return
 
-    with T2Database(default_db_path()) as db:
+    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         records = db.document_aspects.list_by_collection(
             collection, limit=(limit if limit else None),
         )
