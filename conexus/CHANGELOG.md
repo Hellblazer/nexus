@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-05-25
+
+Plugin version aligned with conexus 5.1.0. No plugin-side changes. The
+release is RDR-128 (T2 single-writer enforcement), a root-cause fix for
+the `database is locked` daemon crash-loop band-aided across 5.0.2 to
+5.0.4: the hot and automated writers now route through the T2 daemon, the
+daemon's startup migration is lock-tolerant, `ensure-running` aborts a
+version-cycle when the DB lock is held, and `nx doctor
+--check-storage-boundary` hard-fails any new direct `memory.db` open
+without a documented justification. See root `CHANGELOG.md`.
+
 ## [5.0.4] - 2026-05-25
 
 Plugin version aligned with conexus 5.0.4. The release wires the

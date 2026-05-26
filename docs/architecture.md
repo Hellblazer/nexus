@@ -428,6 +428,42 @@ Phase 2 consequences:
   own `threading.Lock` plus the SQLite file-level write lock -- callers
   never see `OperationalError: database is locked`.
 
+### Cross-process single writer (RDR-120 / RDR-128)
+
+The per-store `busy_timeout` above absorbs *within-process* cross-domain
+contention. *Across* processes, `memory.db` has a single owner: the **T2
+daemon** (RDR-120). Other processes reach T2 through it over a local RPC
+(`nexus.daemon.t2_client.T2Client`) rather than opening the WAL writer
+lock directly.
+
+RDR-128 enforces that invariant after it had drifted (20+ direct openers
+contended on the one WAL writer lock and produced a string of `database
+is locked` daemon incidents):
+
+- **Routing.** `mcp_infra.t2_index_write(write_fn)` runs a write through
+  the daemon when reachable (decided by an up-front `database.hello()`
+  probe), else a direct `T2Database` fallback. The hot/automated writers
+  route through it: the indexer (chash + taxonomy persist + aspect
+  enqueue), the `aspect_worker` poll (`reclaim_stale` + `claim_batch`),
+  the SessionEnd flush, and the routable CLI writers. The daemon RPC wire
+  protocol decodes dataclasses to plain dicts, so methods taking/returning
+  a dataclass the caller introspects (`document_aspects.upsert`,
+  `aspect_queue.claim_batch`) either stay direct or reconstruct on the
+  client side.
+- **Enforcement.** `nexus.storage_boundary_lint` (wired into `nx doctor
+  --check-storage-boundary`) hard-fails any raw `sqlite3.connect` or
+  direct `T2Database(...)` construction outside `src/nexus/db/` +
+  `src/nexus/daemon/` that lacks a documented `# epsilon-allow:
+  <reason>` override. The genuinely-irreducible direct opens (bootstrap
+  `nx upgrade`, the daemon-unreachable fallback, read-only diagnostics,
+  the taxonomy CLI factory whose read-only subcommands need raw cursors)
+  each carry that justification.
+- **Bootstrap serialization.** `nx upgrade` and the daemon's own startup
+  migration take an exclusive `fcntl.flock` on
+  `~/.config/nexus/t2_migration.lock` before any schema write, and the
+  startup migration is lock-tolerant (`busy_timeout=30000` + bounded
+  retry) so a transient foreign lock waits rather than crashes.
+
 **Migration Registry** (RDR-076): All T2 schema migrations are centralised in
 `src/nexus/db/migrations.py`. The `MIGRATIONS` list contains version-tagged
 `Migration(introduced, name, fn)` entries. `apply_pending(conn, current_version)`
