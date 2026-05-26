@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Research topic using deep-research-synthesizer agent
 ---
 
 # Research Request
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -24,7 +25,7 @@ description: Research topic using deep-research-synthesizer agent
   echo "The agent will first search the T3 store for existing research on this topic."
   echo "Prior findings will be incorporated into the synthesis."
 
-}
+```
 
 ### Project Context
 

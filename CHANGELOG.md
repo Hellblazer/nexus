@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.1.2] - 2026-05-26
+
+Bug-fix release. Completes the nexus-t1b1k fix from 5.1.1, which did not actually take effect, and fixes project-type detection exposed by it.
+
+### Fixed
+
+- **conexus slash commands execute their context preamble again (nexus-ln9y5).** Every command injected its preamble via a `!{ ... }` brace block. That is not a Claude Code bash-injection syntax: only inline backtick `` !`cmd` `` and the multi-line fenced ` ```! ` block execute, and the brace form is emitted as raw source. The 5.1.1 fix (nexus-t1b1k) kept the `!{ }` wrapper and only moved heredocs to scripts, so the preambles still never ran; the by-path form additionally failed because `$CLAUDE_PLUGIN_ROOT` is empty in the command-bash context. All 25 commands now use the documented fenced form. The 9 RDR-lifecycle preambles inline their script, kept byte-synced to `resources/rdr_commands/*.py`. Validated end to end against a real Claude Code (cc-validation scenario 19).
+- **Agent-relay project-type detection covers ~21 ecosystems (nexus-ln9y5).** `analyze-code`, `architecture`, `create-plan`, and `implement` carried four inconsistent detectors that recognized only Maven, Gradle, and Node, so they labeled Python repos "Unknown" or emitted nothing. They now share one marker-file detector (Python, Rust, Go, Node/TypeScript, Java/Kotlin Maven and Gradle, Ruby, PHP, C#/.NET, C/C++, Swift, Elixir, Scala, Dart/Flutter, Clojure, Haskell, Julia, R, Zig, OCaml, Crystal) that lists every match.
+
+### Internal / test hardening
+
+- Render-path coverage the prior fix lacked: cc-validation scenario 19 drives a real Claude Code and asserts the fenced block renders while a `!{ }` probe does not. `test_command_preamble_sync` enforces md-to-script sync and executes every block; `test_command_bash_uses_documented_syntax` replaces the vacuous heredoc guard; `test_project_detector_identifies_python` locks in the detector fix.
+
 ## [5.1.1] - 2026-05-26
 
 Bug-fix rollup of post-5.1.0 shakeout and grooming. No new features, no breaking changes.

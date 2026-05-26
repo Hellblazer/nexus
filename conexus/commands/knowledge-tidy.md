@@ -1,10 +1,11 @@
 ---
+allowed-tools: Bash
 description: Persist and organize knowledge into the T3 store using mcp__plugin_conexus_nexus__nx_tidy (RDR-080)
 ---
 
 # Knowledge Tidying Request
 
-!{
+```!
   echo "## Context"
   echo ""
   echo "**Working directory:** $(pwd)"
@@ -30,7 +31,7 @@ description: Persist and organize knowledge into the T3 store using mcp__plugin_
   echo ""
   echo "Title conventions: research-{topic}, decision-{component}-{name}, pattern-{name}, debug-{component}-{issue}"
   echo "All entries stored via store_put tool: collection='knowledge'"
-}
+```
 
 ### Project Context
 
