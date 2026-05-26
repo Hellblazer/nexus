@@ -2,17 +2,18 @@
 title: "T2 Single-Writer Enforcement: One Owner for memory.db, or an Enforced Lock Discipline"
 id: RDR-128
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-25
 accepted_date: 2026-05-25
+closed_date: 2026-05-25
 related_issues: [nexus-kg8sj, nexus-v4m7y, nexus-aigkb, nexus-n8sbw, nexus-5ldk1]
 related_rdrs: [RDR-105, RDR-120]
 supersedes: []
-related_tests: []
-implementation_notes: ""
+related_tests: [tests/test_storage_boundary_lint.py, tests/test_rdr128_p3_enablers.py, tests/stress/test_t2_daemon_stress.py]
+implementation_notes: "Closed implemented 2026-05-25. P0-P3 merged to develop. Post-mortem: docs/rdr/post-mortem/128-t2-single-writer-enforcement.md"
 ---
 
 # RDR-128: T2 Single-Writer Enforcement: One Owner for memory.db, or an Enforced Lock Discipline
