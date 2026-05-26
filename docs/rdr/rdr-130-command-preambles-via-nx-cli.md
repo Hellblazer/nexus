@@ -59,17 +59,32 @@ commands to the documented ```` ```! ```` fenced form and inlined the logic — 
 then hit Gap 1. The pattern across t1b1k -> ln9y5 -> 61fzg is the same: **inlining
 command logic fights the harness**, and each fix discovers a new parser edge.
 
-## Research Findings (empirically established this cycle)
+## Research Findings
+
+Empirically established this cycle and verified against real Claude Code via the
+`tests/cc-validation` harness (scenarios 19, 20, 21; fresh creds 2026-05-26).
 
 - Valid CC bash-injection forms: inline `` !`cmd` `` and fenced ```` ```! ````.
-  `!{ }` braces are NOT a recognized form (emit raw).
+  `!{ }` braces are NOT a recognized form (emit raw) — confirmed by scenario 19
+  Part B (negative control).
 - A fenced-bang block closes at the first literal triple-backtick in the source;
-  4-backtick fences do not change this.
-- Injected **output** is inserted as plain text and is NOT re-scanned, so a tool's
-  output may freely contain triple-backticks. The constraint is purely on the
-  `.md` source.
-- `$ARGUMENTS` is substituted by CC in the block; `$CLAUDE_PLUGIN_ROOT` is not.
+  4-backtick fences do not change this (probe-confirmed). The block source must
+  therefore contain zero triple-backticks before its closing fence — this is the
+  nexus-61fzg root cause.
+- **Critical assumption, VERIFIED (scenario 21):** injected **output** containing
+  triple-backticks is inserted as plain text and is NOT re-parsed. A `` ```! ``
+  block whose source has no literal triple-backtick (built via `printf` octal
+  `\140`) but whose output emits ` ``` ` fences rendered intact. RDR-130 rests on
+  this — the `nx` preamble subcommands emit markdown tables / fences in their
+  output, and that is now confirmed safe rather than merely doc-claimed.
+- `$ARGUMENTS` is substituted by CC in the block; `$CLAUDE_PLUGIN_ROOT` is empty
+  in command-bash context (scoped to hooks/MCP/LSP) — so commands must call an
+  on-PATH binary (`nx`), not a plugin-relative script.
 - The `nx` CLI is always on PATH (it is the package entry point).
+
+Conclusion: the RDR-130 design (one-line `nx` invocation per command; logic in
+the `nx` CLI emitting markdown) is mechanically sound and de-risked. Full T2
+record: `nexus_rdr/130-research-1`.
 
 ## Proposed Solution
 
