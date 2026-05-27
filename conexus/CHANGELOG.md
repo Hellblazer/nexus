@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-05-27
+
+Plugin version aligned with conexus 5.2.0 (RDR-129 T2 daemon write-path
+hardening). The user-visible plugin surface gains two `nx doctor` checks and
+a softened integrity check; no plugin-component (agent/skill/command/hook)
+files changed.
+
+### Added
+
+- **`nx doctor` gains `T2 daemon singleton` (hard error on >1 daemon per db) and `T2 best-effort writes` (soft warning + dropped-write count)** (RDR-129 A3/B4).
+
+### Fixed
+
+- **`nx doctor` reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure** (RDR-129 B4).
+
 ## [5.1.5] - 2026-05-27
 
 ### Changed

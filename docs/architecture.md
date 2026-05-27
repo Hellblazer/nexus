@@ -364,8 +364,12 @@ stores. Each store owns its own tables in a shared SQLite file and runs
 against its own `sqlite3.Connection` in WAL mode. Reads in one domain
 are never blocked by writes in another (the Phase 1 global Python
 mutex is gone); concurrent writes across domains still serialize at
-SQLite's single-writer WAL lock, but `busy_timeout=5000` absorbs the
-brief contention without raising `OperationalError`.
+SQLite's single-writer WAL lock. Each serving connection sets
+`busy_timeout=30000` (the shared `nexus.db.t2._tuning.SERVING_BUSY_TIMEOUT_MS`,
+raised from 5000 in RDR-129 B1 after two shakeouts showed 5s was too short to
+absorb sustained cross-store contention) and the daemon dispatch retries on a
+transient `database is locked` (RDR-129 B2), so a contention window becomes a
+wait rather than a dropped write.
 
 | Store             | Class                     | Attribute              | Responsibility                                                             |
 |-------------------|---------------------------|------------------------|----------------------------------------------------------------------------|
@@ -414,8 +418,11 @@ Phase 2 consequences:
   `memory_search` on one thread and a `plan_save` on another run in
   parallel because the Phase 1 shared Python mutex is gone. Concurrent
   *writes* across domains still serialize at SQLite's single-writer
-  WAL lock, but `busy_timeout=5000` absorbs the brief queue so callers
-  do not see `OperationalError: database is locked`.
+  WAL lock. The serving `busy_timeout` is 30000 (RDR-129 B1; the
+  earlier 5000 was falsified under sustained multi-writer load) and the
+  daemon dispatch retries on a transient `database is locked` (RDR-129
+  B2), so a contention window past the timeout becomes a wait, not a
+  dropped best-effort write.
 - **Telemetry no longer interferes with search**: MCP relevance-log
   writes run on the telemetry connection, so `memory_search` is not
   blocked by access-tracking hooks.
@@ -463,6 +470,19 @@ is locked` daemon incidents):
   `~/.config/nexus/t2_migration.lock` before any schema write, and the
   startup migration is lock-tolerant (`busy_timeout=30000` + bounded
   retry) so a transient foreign lock waits rather than crashes.
+- **Exactly-one-daemon enforcement (RDR-129).** RDR-128 routed writers
+  through the daemon; RDR-129 hardens the guarantee that there is only
+  *one* daemon per `memory.db`. On startup the daemon sweeps every live
+  t2 daemon holding the data file open (open-fd probe: `/proc/<pid>/fd`
+  on Linux, `lsof` on macOS) and reaps each non-self one, not just the
+  addr-file pid (A1). `stop()` no longer releases the spawn lock early;
+  the OS drops it on process exit, and `ensure-running` waits on the
+  predecessor's PID liveness (not the discovery file) before respawning,
+  so a version cycle converges to exactly one daemon, never zero (A2).
+  `nx doctor` reports a daemon-multiplicity census as a hard error (A3)
+  and surfaces a dropped-best-effort-write meter as a soft warning (B4);
+  the drop log path is `~/.config/nexus/dropped_writes.jsonl`
+  (`NX_DROPPED_WRITES_LOG_PATH` override).
 
 **Migration Registry** (RDR-076): All T2 schema migrations are centralised in
 `src/nexus/db/migrations.py`. The `MIGRATIONS` list contains version-tagged
