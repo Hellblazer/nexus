@@ -5,27 +5,7 @@ description: Research topic using deep-research-synthesizer agent
 
 # Research Request
 
-```!
-  echo "## Context"
-  echo ""
-  echo "**Working directory:** $(pwd)"
-  echo ""
-
-  echo "### Available Knowledge Sources"
-  echo ""
-  echo "- **nx store**: Semantic search across stored knowledge"
-  echo "- **Web**: Current information from web search"
-  echo "- **Codebase**: Relevant code examples and patterns"
-  echo "- **nx memory**: Session context and prior work"
-  echo ""
-
-  # Check for existing research
-  echo "### Tip"
-  echo ""
-  echo "The agent will first search the T3 store for existing research on this topic."
-  echo "Prior findings will be incorporated into the synthesis."
-
-```
+!`nx command-context research -- "$ARGUMENTS"`
 
 ### Project Context
 

@@ -5,20 +5,7 @@ description: Enrich beads with execution context using mcp__plugin_conexus_nexus
 
 # Enrich Plan
 
-```!
-  echo "## Context"
-  echo ""
-  echo "**Working directory:** $(pwd)"
-  echo ""
-
-  # Bead context
-  echo "### Related Beads"
-  if command -v bd &> /dev/null; then
-    bd list --type=epic --status=open --limit=5 2>/dev/null || echo "No open epics"
-  else
-    echo "Beads not available"
-  fi
-```
+!`nx command-context enrich-plan -- "$ARGUMENTS"`
 
 ## Plan to Enrich
 
