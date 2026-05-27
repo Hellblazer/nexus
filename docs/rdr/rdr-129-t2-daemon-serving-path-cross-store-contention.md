@@ -52,7 +52,7 @@ single-writer (Layer B).
 
 ### Layer A: single-daemon enforcement is layered-best-effort, not a hard invariant
 
-#### Gap A1: the spawn lock can be bypassed across a version transition
+#### Gap 1: (Layer A) the spawn lock can be bypassed across a version transition
 
 `T2Daemon._acquire_spawn_lock` takes two `fcntl` `LOCK_EX | LOCK_NB` locks
 (config-dir-scoped and db-path-scoped) and refuses to start a second
@@ -60,13 +60,17 @@ instance. That is the single-daemon guarantee. In the 5.1.5 prod shakeout
 (2026-05-27) two `nx daemon t2 start` processes coexisted on the same
 `memory.db` (canonical pid in the addr file plus a ~30-minute-old orphan),
 producing transient `FTS5: database is locked` contention. The flock was
-bypassed: a predecessor survived the 5.1.1 -> 5.1.4 transition without
-holding the lock (released-but-alive, or an older lock-path scheme), so the
-new daemon acquired the lock and ran alongside it. The flock is the right
-mechanism for the steady state but does not survive version transitions or a
-released-but-alive window. Bead: `nexus-kwqhd` (root).
+bypassed by a **release-before-exit** window (verified, RF-A1): the db-path
+lock is version-stable (`<db_path>.spawn_lock`), so this is not a lock-path
+mismatch; rather, `T2Daemon.stop()` calls `_release_spawn_lock()` while the
+process is still draining, freeing the lock before the process exits. A
+respawn during that window (notably `ensure-running` on version skew, which
+SIGTERMs the old daemon then spawns a new one) acquires the freed lock and
+runs alongside the still-draining predecessor. The flock is the right
+mechanism for the steady state but the early release punches a hole in it.
+Bead: `nexus-kwqhd` (root).
 
-#### Gap A2: predecessor reap only covers the addr-file pid, not side-orphans
+#### Gap 2: (Layer A) predecessor reap only covers the addr-file pid, not side-orphans
 
 The 5.1.5 mitigation (`nexus-070e2`) added `T2Daemon._reap_predecessor_daemon`:
 on takeover, the new daemon reaps the live pid named in the addr file
@@ -100,7 +104,7 @@ then.
 so callers do not see `OperationalError: database is locked`." Two shakeouts
 falsify that under sustained concurrency.
 
-#### Gap B1: the serving dispatch has no busy_timeout/retry tolerance
+#### Gap 3: (Layer B) the serving dispatch has no busy_timeout/retry tolerance
 
 The per-store connections use `busy_timeout=5000` and the daemon's
 `_dispatch` path does not retry on `database is locked`. RDR-128 RF-3 added
@@ -108,7 +112,7 @@ The per-store connections use `busy_timeout=5000` and the daemon's
 migration) only, not to the regular serving dispatch. A cross-store
 contention window over 5s makes the serving op fail rather than wait.
 
-#### Gap B2: best-effort writes drop silently on contention
+#### Gap 4: (Layer B) best-effort writes drop silently on contention
 
 `chash_dual_write_batch_hook` swallows the daemon's
 `T2ClientError('database is locked')` at debug level, so dropped chash rows
@@ -117,7 +121,7 @@ dropped best-effort writes, so the completeness gap is unobservable in normal
 operation, and `nx doctor` reports the transient lock as a hard failure
 rather than a soft warning (bead `nexus-uq8a4`).
 
-#### Gap B3: the daemon's per-store connections contend unmanaged
+#### Gap 5: (Layer B) the daemon's per-store connections contend unmanaged
 
 RDR-063 gave each store its own connection plus its own `threading.Lock`, but
 cross-store writes coordinate only via SQLite's file lock plus `busy_timeout`.
@@ -200,10 +204,12 @@ Layer B:
   `t2_daemon_dispatch_failed`).
 - **RF-B2 — VERIFIED.** `chash_dual_write_batch_hook` (`mcp_infra.py:506`)
   swallows the failure at `debug` level (`mcp_infra.py:544`,
-  `chash_dual_write_batch_failed`) with no metric; the inline comment
-  (`mcp_infra.py:558`) confirms the row is "current without manual backfill",
-  i.e. recoverable via a chash backfill/reconcile path (`ln-reconcile` /
-  `chash_index` rebuild).
+  `chash_dual_write_batch_failed`) with no metric; the dropped row is a
+  rebuildable `chash_index` cache entry, recoverable via a chash
+  backfill/reconcile path (`ln-reconcile` / `chash_index` rebuild). (The
+  "current without manual backfill" phrasing in the draft was attributed to
+  the wrong line; the load-bearing fact is the silent debug-level swallow at
+  `mcp_infra.py:544`, confirmed.)
 - **RF-B3 — VERIFIED.** Per RDR-063 each store has its own connection + its
   own `threading.Lock`; cross-store writes coordinate only via SQLite's file
   lock + `busy_timeout` (`db/t2/__init__.py:42-44` documents exactly this).
@@ -226,15 +232,29 @@ open-fd probe on `memory.db` / an advertised `db_path` in the process
 metadata (RF-A2 decides the mechanism). This generalises `nexus-070e2` from
 "reap the addr-file predecessor" to "guarantee single occupancy."
 
-A2. **Hold the spawn lock until the predecessor has fully exited.** The
-db-path spawn lock is already version-stable (RF-A1: `<db_path>.spawn_lock`),
-so the fix is not "make it stable" but "stop releasing it early." Defer the
-release to process exit: remove the early `_release_spawn_lock()` call in
-`stop()` (let the OS drop the flock on exit) or hold an exit-scoped lock, so a
-respawn cannot acquire the lock while the predecessor is alive. Close the
-`ensure-running` RF-4 window in tandem: when it spawns a new daemon on version
-skew, it must wait for the old one's full exit (not just its SIGTERM) before
-spawning.
+A2. **Hold the spawn lock until the predecessor has fully exited, and make the
+respawn wait on PID liveness, not the discovery file.** The db-path spawn lock
+is already version-stable (RF-A1: `<db_path>.spawn_lock`), so the fix is not
+"make it stable" but "stop releasing it early." Defer the release to process
+exit: remove the early `_release_spawn_lock()` call in `stop()` (let the OS
+drop the flock on exit) or hold an exit-scoped lock, so a respawn cannot
+acquire the lock while the predecessor is alive.
+
+This fix is **co-dependent with the `ensure-running` wait** and must not ship
+without it. `stop()` unlinks the discovery file (`t2_daemon.py:601`) *before*
+releasing the lock (`:611`), and `ensure-running`'s wait polls
+`_daemon_is_alive()` (a discovery-file probe). So with defer-release alone:
+the old daemon's discovery file disappears, `ensure-running` sees "no daemon"
+and cold-spawns a new one, the new daemon's `_acquire_spawn_lock` hits EAGAIN
+because the still-draining predecessor holds the flock, and the new process
+exits — leaving **zero** daemons, the exact failure RDR-128 prevents. The
+interlock therefore replaces the discovery-file poll with a **bounded PID-
+liveness poll** (`os.kill(pid, 0)`, reusing the `_is_t2_daemon_process`
+cmdline guard) on the prior pid: wait up to a bounded timeout for the
+predecessor to fully exit before cold-spawning; if it is still alive at
+timeout, abort the spawn and leave the stale-but-working daemon up (the
+RDR-128 RF-4 "never trade a working daemon for none" principle). The Test Plan
+covers the version-cycle-leaves-exactly-one case explicitly.
 
 A3. **Fail loud on multiplicity.** If, despite A1/A2, more than one daemon is
 ever observed for a db, `nx doctor` reports it as a hard error with the
@@ -244,7 +264,17 @@ silent.
 ### Layer B: the one daemon is internally single-writer
 
 B1. **Raise the serving connections' `busy_timeout`** (5000 -> 30000),
-matching the bootstrap path. Cheapest; absorbs longer contention windows.
+matching the bootstrap path. Cheapest; absorbs longer contention windows. Two
+prerequisites: (a) audit the `T2Client` per-call RPC timeout and raise it
+commensurately (or confirm it already exceeds 30s) so a daemon-side 30s wait
+does not surface to callers as an RPC-timeout error of a different type than
+`database is locked`; (b) `_dispatch` runs each store call on
+`asyncio.to_thread`, so a 30s blocking wait holds a pool thread for 30s —
+acceptable for one daemon, but under multi-daemon coexistence (Layer A still
+unfixed pre-P2) N daemons each saturating their thread pool can stall RPC
+dispatch. B1 therefore ships **paired with P2**, not as a standalone pre-P2
+change (see Implementation Plan), so the longer wait never runs while two
+daemons can coexist.
 
 B2. **Add bounded lock-retry to the serving dispatch** on `database is
 locked`, mirroring `reclaim_stale` / RDR-128 RF-3. Transient contention
@@ -257,7 +287,17 @@ eliminates internal contention at the cost of cross-store write parallelism.
 
 B4. **Meter and surface dropped best-effort writes.** Count them; `nx doctor`
 treats a transient FTS5 lock during an active write as a soft WARN (not a hard
-fail) and reports the drop counter (`nexus-uq8a4`).
+fail) and reports the drop counter (`nexus-uq8a4`). The soft classification is
+correct pre-P2 (the lock is expected under heavy concurrent indexing). It is
+kept soft post-P2 as **intentional defense-in-depth**: after single-daemon
+enforcement ships, an FTS5 lock on the serving path should be impossible in
+steady state, so a B4 fire then *indicates a single-daemon invariant
+violation* (two daemons, or a direct writer bypassing the daemon) and should
+be investigated. A3 detects the violation on the daemon census (hard error);
+B4 detects it on live-write lock contention (soft signal + counter) — the two
+are complementary, and B4 stays soft so the drop metric is never lost to a
+hard fail. A future maintainer must not flip B4 to hard without understanding
+this relationship.
 
 Likely end state: A1 + A2 + A3 (hard enforcement) + B1 + B2 + B4 (tolerance +
 observability), with B3 adopted only if B1+B2 prove insufficient under the
@@ -269,16 +309,22 @@ RDR-063 Phase 2 introduced.
 Phased under epic `nexus-70qc9`; ordered cheap-and-safe first, structural
 last:
 
-- **P1: observability + tolerance (low risk, immediate relief).** B1 (raise
-  serving busy_timeout), B2 (serving-dispatch retry), B4 (meter drops + doctor
-  soft-WARN, `nexus-uq8a4`). Makes contention a wait and a metric, not a
-  silent drop.
-- **P2: hard single-daemon enforcement.** A1 (full same-db sweep, generalising
-  `nexus-exa2p`), A2 (version-stable lock + release-on-exit +
-  ensure-running interlock, `nexus-kwqhd`), A3 (doctor multiplicity check).
+- **P1: observability + tolerance (low risk, immediate relief).** B2
+  (serving-dispatch bounded retry) and B4 (meter drops + doctor soft-WARN,
+  `nexus-uq8a4`). Makes transient contention a retried wait and a metric, not
+  a silent drop. B1 (the 30s busy_timeout raise) is deliberately NOT here: a
+  30s blocking wait under multi-daemon coexistence (Layer A still unfixed)
+  risks thread-pool starvation, so B1 ships with P2 once exactly-one-daemon is
+  guaranteed.
+- **P2: hard single-daemon enforcement (+ B1).** A1 (full same-db sweep,
+  generalising `nexus-exa2p`), A2 (defer lock release to exit + bounded
+  PID-liveness ensure-running interlock; the lock is already version-stable,
+  `nexus-kwqhd`), A3 (doctor multiplicity check), and B1 (raise serving
+  busy_timeout, now safe because only one daemon can hold the WAL). Audit the
+  `T2Client` RPC timeout as a B1 prerequisite.
 - **P3: internal serialization (conditional).** B3 (internal write lock +
-  upgrade-path writer consolidation, `nexus-izpcb`) only if the P1 load test
-  still shows drops.
+  upgrade-path writer consolidation, `nexus-izpcb`) only if the P2 load test
+  still shows drops after B1+B2.
 - **Phase gate** at each boundary: cross-walk §Validation against the closing
   beads.
 
@@ -292,6 +338,13 @@ last:
 - A full same-db daemon sweep (A1) must be conservatively scoped (PID-reuse
   guard, correct db-path scoping) or it could kill an unrelated process or a
   legitimate daemon for a different db; the design care is in RF-A2.
+- Deferring lock release to process exit (A2) means the spawn lock is held for
+  the whole of `stop()`. If `T2Database.close()` stalls (for example on a
+  pending WAL checkpoint), the predecessor holds the lock open-ended and the
+  PID-liveness interlock waits out its bounded timeout, then aborts the spawn
+  (leaving the stale daemon up). The existing `_GRACEFUL_STOP_TIMEOUT` guards
+  socket teardown, not DB close; A2 should add a bounded guard around the
+  shutdown so a hung close cannot wedge restarts.
 - Doing nothing: best-effort chash writes drop under heavy concurrent
   indexing (recoverable by backfill), and a future version transition can
   again leave two daemons contending until manual cleanup.
@@ -314,27 +367,61 @@ last:
 
 ## Test Plan
 
-- **Layer A enforcement:** a test that manufactures the takeover and
-  side-orphan conditions (a real lockless live "predecessor" plus a side
-  daemon, both same-db) and asserts a starting daemon reduces the system to
-  exactly one; a version-transition simulation (old lock scheme + new daemon)
-  asserting no coexistence; `nx doctor` multiplicity check fires when two are
-  forced.
+- **Layer A enforcement:** (1) the side-orphan sweep: manufacture a real
+  lockless live "predecessor" plus a side daemon (both same-db) and assert a
+  starting daemon reduces the system to exactly one. (2) The version-cycle
+  no-daemon regression: drive the `stop()` (defer-release) -> `ensure-running`
+  respawn sequence and assert it converges to exactly *one* daemon, never
+  *zero* (the A2 PID-liveness-interlock case the critic flagged) and never
+  two. (3) `nx doctor` multiplicity check fires when two daemons are forced.
+  The sweep's enumeration mechanism (open-fd probe / db-path lock) is
+  platform-sensitive: if `lsof`-based, cover the macOS case explicitly (its
+  output format is not POSIX-standardized); on Linux `/proc/<pid>/fd` is the
+  cheaper path.
 - **Layer B contention:** reproduce the cross-store contention
   deterministically (N concurrent routed writers across >=2 stores vs one
   daemon); confirm `database is locked` on the serving dispatch pre-fix; after
-  the fix, the same load produces zero dropped best-effort writes (or a
-  bounded, metered, retried count).
+  the fix, the same load produces zero *unrecovered* drops (writes that B2
+  retries and succeeds are not drops; only un-retried, unmetered failures
+  count). Audit that the `T2Client` RPC timeout exceeds the 30s serving
+  busy_timeout so B1 does not convert a wait into an RPC-timeout error.
 - Existing single-writer invariant tests
-  (`tests/daemon/test_t2_daemon_startup_invariant.py`) extended for the sweep.
+  (`tests/daemon/test_t2_daemon_startup_invariant.py`) extended for the sweep
+  and the version-cycle case.
 
 ## Validation
 
 Comprehensive closure: (1) under a version transition or a forced
 double-spawn, the system always converges to exactly one daemon for the db
-(no manual cleanup needed); (2) `nx doctor` reports daemon multiplicity as a
-hard error and the best-effort-drop counter; (3) the deterministic
-multi-writer load test produces zero silent drops; (4) full unit suite green.
+(never zero, never two; no manual cleanup needed); (2) `nx doctor` reports
+daemon multiplicity as a hard error and the best-effort-drop counter; (3) the
+deterministic multi-writer load test produces zero *unrecovered* drops
+(B2-retried-and-succeeded writes do not count); (4) full unit suite green.
+
+## Finalization Gate
+
+**PASSED — 2026-05-27.** Layer 1 (structural): 5 digit-numbered gaps, all
+sections present and non-empty. Layer 2 (assumption audit): all five RFs
+VERIFIED against the daemon code with file:line evidence, no unevidenced
+"Assumed" findings. Layer 3 (substantive-critic): 0 Critical, 3 Significant, 4
+Observations — all resolved in-place before accept:
+
+1. A2 ensure-running interlock under-specified (could leave *zero* daemons
+   after a version cycle, since `stop()` unlinks the discovery file at
+   `:601` before releasing the lock at `:611`). Resolved: A2 now specifies a
+   bounded PID-liveness poll (not the discovery-file probe) and abort-if-alive
+   per RDR-128 RF-4.
+2. B1's 30s busy_timeout not audited vs `T2Client` timeout + pre-P2
+   thread-pool starvation. Resolved: B1 audits the RPC timeout and ships
+   paired with P2 (not standalone pre-P2); moved in the Implementation Plan.
+3. B4 soft-WARN would mask single-daemon invariant violations post-P2.
+   Resolved: B4 documents the intentional post-P2 defense-in-depth meaning and
+   its complementarity with A3.
+
+Observations resolved: RF-B2 line-citation corrected; Validation/Test-Plan
+"silent drops" -> "unrecovered drops"; macOS `lsof` sweep-portability noted;
+stop()-close-timeout trade-off added. Gate result in T2:
+`nexus_rdr/129-gate-latest`.
 
 ## References
 
@@ -367,3 +454,8 @@ multi-writer load test produces zero silent drops; (4) full unit suite green.
   path-mismatch but release-before-exit (`stop()` unlocks at
   `t2_daemon.py:611` while the process is still draining); A2 sharpened to
   defer-release-to-exit + ensure-running full-exit interlock. Gate-ready.
+- 2026-05-27: Gate PASSED (0 Critical, 3 Significant + 4 Observations resolved
+  in-place). Significant: A2 PID-liveness interlock (avoid zero-daemon after a
+  version cycle), B1 paired with P2 + T2Client-timeout audit (avoid pre-P2
+  thread-pool starvation), B4 post-P2 invariant-violation semantics. See
+  Finalization Gate. Awaiting accept.
