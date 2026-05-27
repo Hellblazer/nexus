@@ -308,24 +308,28 @@ RDR-063 Phase 2 introduced.
 Phased under epic `nexus-70qc9`; ordered cheap-and-safe first, structural
 last:
 
-- **P1: observability + tolerance (low risk, immediate relief).** B2
-  (serving-dispatch bounded retry) and B4 (meter drops + doctor soft-WARN,
-  `nexus-uq8a4`). Makes transient contention a retried wait and a metric, not
-  a silent drop. B1 (the 30s busy_timeout raise) is deliberately NOT here: a
-  30s blocking wait under multi-daemon coexistence (Layer A still unfixed)
-  risks thread-pool starvation, so B1 ships with P2 once exactly-one-daemon is
-  guaranteed.
-- **P2: hard single-daemon enforcement (+ B1).** A1 (full same-db sweep,
+- **P1: observability + tolerance (low risk, immediate relief).** B4 (meter
+  drops + doctor soft-WARN, `nexus-uq8a4`). Makes transient contention an
+  observable metric and a soft warning, not a silent drop. The serving-dispatch
+  bounded retry (B2) and the 30s busy_timeout raise (B1) are the same
+  `_dispatch` change and ship together in P2, not split across phases: a 30s
+  blocking wait under multi-daemon coexistence (Layer A still unfixed) risks
+  thread-pool starvation, so neither lands until exactly-one-daemon is
+  guaranteed. P1's immediate relief is the doctor soft-WARN, not B2.
+- **P2: hard single-daemon enforcement (+ B1/B2).** A1 (full same-db sweep,
   generalising `nexus-exa2p`), A2 (defer lock release to exit + bounded
   PID-liveness ensure-running interlock; the lock is already version-stable,
-  `nexus-kwqhd`), A3 (doctor multiplicity check), and B1 (raise serving
-  busy_timeout, now safe because only one daemon can hold the WAL). Audit the
-  `T2Client` RPC timeout as a B1 prerequisite.
+  `nexus-kwqhd`), A3 (doctor multiplicity check, carried inside `nexus-kwqhd`
+  + `nexus-exa2p`), and B1+B2 (raise serving busy_timeout + bounded dispatch
+  retry, `nexus-qi1zb`, now safe because only one daemon can hold the WAL).
+  Audit the `T2Client` RPC timeout as a B1 prerequisite.
 - **P3: internal serialization (conditional).** B3 (internal write lock +
   upgrade-path writer consolidation, `nexus-izpcb`) only if the P2 load test
   still shows drops after B1+B2.
-- **Phase gate** at each boundary: cross-walk §Validation against the closing
-  beads.
+- **Phase gate** at each boundary: cross-walk §Validation AND §Implementation
+  Plan phase placement against the closing beads (a solution item silently
+  changing phase between this prose and the bead graph is the displacement
+  class the gate must catch).
 
 ## Trade-offs
 
@@ -458,3 +462,12 @@ stop()-close-timeout trade-off added. Gate result in T2:
   version cycle), B1 paired with P2 + T2Client-timeout audit (avoid pre-P2
   thread-pool starvation), B4 post-P2 invariant-violation semantics. See
   Finalization Gate. Awaiting accept.
+- 2026-05-27: Accepted. Planning chain run (strategic-planner -> nx_plan_audit
+  -> nx_enrich_beads); 5 facet beads sequenced under epic nexus-70qc9 + a P2
+  phase-review gate (nexus-70qc9.1), 8 cycle-free dependency edges. Plan audit
+  PASS_WITH_RECOMMENDATIONS surfaced one phase-placement inconsistency: B2
+  (serving-dispatch retry) and B1 share one `_dispatch` change and cannot split
+  across phases, so this §Implementation Plan was reconciled to ship B1+B2
+  together in P2 (P1 relief is the doctor soft-WARN, not B2); the phase gate
+  now also cross-walks §Implementation Plan phase placement. A3 confirmed
+  carried inside kwqhd + exa2p (no standalone bead, not deferred).
