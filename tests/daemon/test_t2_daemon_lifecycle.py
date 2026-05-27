@@ -342,3 +342,88 @@ class TestPublicSurface:
         from nexus.daemon.t2_daemon import ProtocolError
 
         assert issubclass(ProtocolError, Exception)
+
+
+# ---------------------------------------------------------------------------
+# RDR-129 B2 (nexus-qi1zb): serving-dispatch lock retry
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchLockRetry:
+    """The serving ``_dispatch`` retries on transient WAL writer-lock
+    contention so a window past the per-store busy_timeout becomes a wait, not
+    a dropped best-effort write. Non-lock errors are not retried; the final
+    attempt re-raises so a genuinely stuck lock still surfaces.
+    """
+
+    @staticmethod
+    def _daemon(config_dir: Path, db_path: Path):
+        from nexus.daemon.t2_daemon import T2Daemon
+
+        return T2Daemon(config_dir=config_dir, db_path=db_path)
+
+    @staticmethod
+    def _frame(op: str = "probe") -> dict:
+        return {"op": op, "args": [], "kwargs": {}}
+
+    def test_retries_then_succeeds(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        import sqlite3
+
+        from nexus.daemon import t2_daemon as td
+
+        monkeypatch.setattr(td, "_DISPATCH_RETRY_SLEEPS", (0.0, 0.0))
+        calls = {"n": 0}
+
+        def flaky(*_a, **_k):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise sqlite3.OperationalError("database is locked")
+            return "ok"
+
+        d = self._daemon(config_dir, db_path)
+        d._dispatch_table = {"probe": flaky}
+        result = asyncio.run(d._dispatch(self._frame(), is_uds=True))
+        assert result == "ok"
+        assert calls["n"] == 3  # two retries then success
+
+    def test_exhausts_retries_then_raises(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        import sqlite3
+
+        from nexus.daemon import t2_daemon as td
+
+        monkeypatch.setattr(td, "_DISPATCH_RETRY_SLEEPS", (0.0, 0.0))
+        calls = {"n": 0}
+
+        def always_locked(*_a, **_k):
+            calls["n"] += 1
+            raise sqlite3.OperationalError("database is locked")
+
+        d = self._daemon(config_dir, db_path)
+        d._dispatch_table = {"probe": always_locked}
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            asyncio.run(d._dispatch(self._frame(), is_uds=True))
+        assert calls["n"] == 3  # len(_DISPATCH_RETRY_SLEEPS) + 1
+
+    def test_non_lock_error_not_retried(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        import sqlite3
+
+        from nexus.daemon import t2_daemon as td
+
+        monkeypatch.setattr(td, "_DISPATCH_RETRY_SLEEPS", (0.0, 0.0))
+        calls = {"n": 0}
+
+        def bad_schema(*_a, **_k):
+            calls["n"] += 1
+            raise sqlite3.OperationalError("no such table: foo")
+
+        d = self._daemon(config_dir, db_path)
+        d._dispatch_table = {"probe": bad_schema}
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            asyncio.run(d._dispatch(self._frame(), is_uds=True))
+        assert calls["n"] == 1  # structural error surfaces on the first attempt

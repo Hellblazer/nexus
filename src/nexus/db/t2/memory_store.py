@@ -38,6 +38,7 @@ from typing import Any, Literal
 
 import structlog
 
+from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
 from nexus.session import read_claude_session_id as _read_session_id
 
 _log = structlog.get_logger()
@@ -176,10 +177,12 @@ _COLUMNS = (
 )
 
 
-# Default busy_timeout for the memory store's connection. 5 seconds is
-# well beyond any schema-creation or migration window and absorbs normal
-# cross-domain write-lock contention.
-_DEFAULT_BUSY_MS = 5000
+# Default busy_timeout for the memory store's connection. RDR-129 B1
+# (nexus-qi1zb) raised this 5000 -> 30000 (the shared
+# ``SERVING_BUSY_TIMEOUT_MS``, matching the bootstrap window): two shakeouts
+# showed 5s was too short to absorb cross-store WAL contention under heavy
+# concurrent indexing.
+_DEFAULT_BUSY_MS = SERVING_BUSY_TIMEOUT_MS
 
 # Disabled busy_timeout used only around the best-effort access-count
 # UPDATE in ``search(access="track")`` and ``get()``. The access counter

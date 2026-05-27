@@ -38,6 +38,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import numpy as np
 import structlog
 
+from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
+
 if TYPE_CHECKING:
     from nexus.db.t2.memory_store import MemoryStore
 
@@ -239,7 +241,7 @@ class CatalogTaxonomy:
         self._memory = memory
         self._lock = threading.Lock()
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        self.conn.execute("PRAGMA busy_timeout=5000")
+        self.conn.execute(f"PRAGMA busy_timeout={SERVING_BUSY_TIMEOUT_MS}")
         # RDR-077 Phase 3 (nexus-qab): register `log2` as a SQLite scalar
         # function so the ICF aggregation query can use LOG2() inline.
         # Null-safe: returns NULL when x is NULL, 0, or negative.
