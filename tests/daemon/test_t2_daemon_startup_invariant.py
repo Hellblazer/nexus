@@ -206,3 +206,133 @@ class TestDaemonRefusesSecondStartAgainstSamePath:
         finally:
             stop.set()
             thread.join(timeout=10.0)
+
+
+class TestDaemonReapsPredecessor:
+    """RDR-128 single-writer backstop (nexus-070e2).
+
+    The fcntl spawn lock normally prevents a second daemon, but a
+    predecessor can survive a version transition (or a released-but-alive
+    window) WITHOUT holding the lock. When a new daemon then acquires the
+    lock it is the legitimate single writer, and must reap that lingering
+    predecessor named in the addr file rather than coexist with it (the
+    two-daemons / WAL-contention class seen in the 5.1.1->5.1.4 upgrade).
+
+    These pin ``_reap_predecessor_daemon`` directly: the real two-process
+    race is the same one the nexus-9eaz framing could not reproduce on
+    GHA, so the primitives are monkeypatched for determinism.
+    """
+
+    @staticmethod
+    def _write_discovery(config_dir: Path, pid: int) -> Path:
+        import json
+
+        from nexus.daemon.t2_daemon import t2_discovery_path
+
+        p = t2_discovery_path(config_dir)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"pid": pid, "tcp_port": 1234}))
+        return p
+
+    def test_reaps_live_predecessor_with_sigterm(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        import signal
+
+        from nexus.daemon import t2_daemon as td
+
+        self._write_discovery(config_dir, 999999)
+        monkeypatch.setattr(td, "_is_t2_daemon_process", lambda pid: True)
+        state = {"alive": True}
+        monkeypatch.setattr(td, "_pid_is_alive", lambda pid: state["alive"])
+        kills: list[tuple[int, int]] = []
+
+        def fake_kill(pid: int, sig: int) -> None:
+            kills.append((pid, sig))
+            if sig == signal.SIGTERM:
+                state["alive"] = False  # graceful predecessor exits
+
+        monkeypatch.setattr(td.os, "kill", fake_kill)
+
+        d = td.T2Daemon(config_dir=config_dir, db_path=db_path)
+        d._reap_predecessor_daemon()
+
+        assert (999999, signal.SIGTERM) in kills
+        assert (999999, signal.SIGKILL) not in kills
+
+    def test_escalates_to_sigkill_when_sigterm_ignored(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        import signal
+
+        from nexus.daemon import t2_daemon as td
+
+        self._write_discovery(config_dir, 999998)
+        monkeypatch.setattr(td, "_is_t2_daemon_process", lambda pid: True)
+        monkeypatch.setattr(td, "_pid_is_alive", lambda pid: True)  # never dies
+        monkeypatch.setattr(td, "_PREDECESSOR_REAP_TIMEOUT", 0.2)
+        kills: list[tuple[int, int]] = []
+        monkeypatch.setattr(td.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+        d = td.T2Daemon(config_dir=config_dir, db_path=db_path)
+        d._reap_predecessor_daemon()
+
+        assert (999998, signal.SIGTERM) in kills
+        assert (999998, signal.SIGKILL) in kills
+
+    def test_no_reap_when_predecessor_dead(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        from nexus.daemon import t2_daemon as td
+
+        self._write_discovery(config_dir, 999997)
+        monkeypatch.setattr(td, "_pid_is_alive", lambda pid: False)
+        monkeypatch.setattr(td, "_is_t2_daemon_process", lambda pid: True)
+        kills: list = []
+        monkeypatch.setattr(td.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert kills == []
+
+    def test_no_reap_when_pid_is_self(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        import os
+
+        from nexus.daemon import t2_daemon as td
+
+        self._write_discovery(config_dir, os.getpid())
+        monkeypatch.setattr(td, "_pid_is_alive", lambda pid: True)
+        monkeypatch.setattr(td, "_is_t2_daemon_process", lambda pid: True)
+        kills: list = []
+        monkeypatch.setattr(td.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert kills == []
+
+    def test_no_reap_when_pid_not_a_t2_daemon(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        """PID-reuse guard: a live pid whose cmdline is NOT a t2 daemon must
+        not be killed (the addr-file pid may have been recycled)."""
+        from nexus.daemon import t2_daemon as td
+
+        self._write_discovery(config_dir, 999996)
+        monkeypatch.setattr(td, "_pid_is_alive", lambda pid: True)
+        monkeypatch.setattr(td, "_is_t2_daemon_process", lambda pid: False)
+        kills: list = []
+        monkeypatch.setattr(td.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert kills == []
+
+    def test_no_discovery_file_is_noop(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        from nexus.daemon import t2_daemon as td
+
+        kills: list = []
+        monkeypatch.setattr(td.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+        # no discovery file written
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert kills == []
