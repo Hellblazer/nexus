@@ -7,6 +7,7 @@ Exposes:
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -687,7 +688,7 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
         for _num, _qual, _title in _gap_headings:
             _qual_str = _qual.strip()
             _qual_disp = f" {_qual_str}" if _qual_str else ""
-            print(f"- Gap {_num}{_qual_disp}: {_title.strip()}")
+            print(f"- Gap{_num}{_qual_disp}: {_title.strip()}")
         print()
     elif _rdr_id_int < 65 and len(_gap_headings) == 0:
         print(
@@ -897,6 +898,20 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
     force_implemented_reason = (
         force_implemented_match.group(1) if force_implemented_match else None
     )
+    # S1: guard — --force-implemented requires a non-empty reason string (original rdr_close.py:133-137).
+    # Detect the flag either via regex match OR by presence in the raw args tuple (CLI path where
+    # an empty-string arg won't produce a \S+ regex match but the flag token is still present).
+    _force_impl_flag_present = (
+        force_implemented_match is not None
+        or "--force-implemented" in args
+    )
+    if _force_impl_flag_present and not (force_implemented_reason or "").strip():
+        print("> **ERROR**: `--force-implemented` requires a non-empty reason string.")
+        print(
+            "> Example: `nx rdr preamble rdr-close 069 --reason implemented"
+            " --force-implemented 'critic false positive — gap addressed at src/foo.py:42'`"
+        )
+        return
 
     args_clean = re.sub(r"--reason\s+\S+", "", args_str)
     args_clean = re.sub(r"--force-implemented\s+'[^']*'", "", args_clean)
@@ -1056,6 +1071,16 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
             for gap_key, ptr in sorted(pointers.items()):
                 print(f"- {gap_key} → {ptr}")
             print()
+            # S2: best-effort T1 scratch marker — downstream hook/skill consumes rdr-close-active tag
+            # (original rdr_close.py:299-303)
+            try:
+                subprocess.run(
+                    ["nx", "scratch", "put", t2_key,
+                     "--tags", f"rdr-close-active,rdr-{t2_key}"],
+                    capture_output=True, timeout=5,
+                )
+            except Exception:
+                pass
 
     # T2 metadata
     print("### T2 Metadata (current status)")
@@ -1073,7 +1098,8 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
     )
     print()
 
-    # Active beads
+    # Active beads — S3: track has_open_beads for conditional WARNING
+    has_open_beads = False
     print("### Active Beads")
     try:
         bd_result = subprocess.run(
@@ -1082,11 +1108,19 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
         )
         bd_out = (bd_result.stdout or "").strip()
         if bd_out and bd_out != "No issues found.":
+            has_open_beads = True
             print(bd_out)
         else:
             print("No open or in-progress beads.")
     except Exception as exc:
         print(f"Beads not available: {exc}")
+
+    # S3: WARNING block — required by feedback_rdr_close_protocol (original rdr_close.py:335-341)
+    if has_open_beads:
+        print()
+        print("> **⚠ WARNING: Open beads exist.** You MUST ask the user for explicit")
+        print("> confirmation before closing this RDR. Do NOT proceed without their approval.")
+        print("> Show them the open beads above and ask: \"Close RDR with these beads still open?\"")
 
 
 # ---------------------------------------------------------------------------
@@ -1269,7 +1303,6 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
         print()
 
         home = Path.home()
-        import os
         roots_env = os.environ.get("NEXUS_PROJECT_ROOTS", "").strip()
         if roots_env:
             roots = [Path(os.path.expanduser(r)) for r in roots_env.split(":") if r]

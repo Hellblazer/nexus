@@ -323,8 +323,9 @@ class TestRdrGate:
         )
         result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "130"])
         assert result.exit_code == 0, result.output
-        assert "Gap 1" in result.output
-        assert "Gap 2" in result.output
+        # O1: rdr-gate output uses no-space form "Gap1" to match original rdr_gate.py
+        assert "Gap1" in result.output
+        assert "Gap2" in result.output
         assert "gap heading(s) present" in result.output
 
 
@@ -444,6 +445,146 @@ class TestRdrClose:
         assert result.exit_code == 0, result.output
         assert "Override" in result.output
         assert "BLOCKED" not in result.output
+
+    # S1 regression: --force-implemented with empty reason must error
+    def test_rdr_close_force_implemented_empty_reason_errors(self, rdr_env):
+        """S1: --force-implemented with empty reason string prints ERROR and exits clean.
+
+        Original rdr_close.py:133-137 rejected empty/whitespace reasons.
+        The port dropped this guard; this test prevents regression.
+        """
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "accepted", "type": "decision", "priority": "P1"},
+        )
+        # Pass an empty-string reason (two single-quotes with nothing inside)
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "rdr-close", "--", "1", "--reason", "implemented",
+             "--force-implemented", ""],
+        )
+        assert result.exit_code == 0, result.output
+        assert "ERROR" in result.output
+        assert "non-empty reason" in result.output
+        # Must not proceed to T2 Metadata
+        assert "T2 Metadata" not in result.output
+
+    # S3 regression: WARNING block must appear when open beads exist
+    def test_rdr_close_warning_present_when_open_beads(self, rdr_env, monkeypatch):
+        """S3: prints WARNING when bd list returns open beads.
+
+        Original rdr_close.py:335-341 printed an explicit warning requiring
+        explicit user confirmation.  The port dropped the conditional block.
+        """
+        import subprocess as _real_sp
+
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "accepted", "type": "decision", "priority": "P1"},
+        )
+
+        # Mock bd list to return a non-empty bead list; route git calls to real subprocess
+        def _fake_run(cmd, **kwargs):
+            if cmd and cmd[0] == "git":
+                return _real_sp.run(cmd, **kwargs)
+            r = _real_sp.CompletedProcess(cmd, 0)
+            r.stdout = "nexus-abc: some open bead (open)"
+            r.stderr = ""
+            return r
+
+        monkeypatch.setattr("nexus.commands.rdr.subprocess.run", _fake_run)
+        result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "WARNING" in result.output
+        assert "Open beads exist" in result.output
+        assert "explicit" in result.output
+
+    def test_rdr_close_no_warning_when_no_open_beads(self, rdr_env, monkeypatch):
+        """S3: WARNING is absent when no open beads exist.
+
+        Counterpart to the above — ensures the WARNING is conditional,
+        not unconditional.
+        """
+        import subprocess as _real_sp
+
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "accepted", "type": "decision", "priority": "P1"},
+        )
+
+        def _fake_run(cmd, **kwargs):
+            if cmd and cmd[0] == "git":
+                return _real_sp.run(cmd, **kwargs)
+            r = _real_sp.CompletedProcess(cmd, 0)
+            r.stdout = "No issues found."
+            r.stderr = ""
+            return r
+
+        monkeypatch.setattr("nexus.commands.rdr.subprocess.run", _fake_run)
+        result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "WARNING" not in result.output
+        assert "Open beads exist" not in result.output
+
+    # S2 regression: PASS-2 success must attempt nx scratch put with rdr-close-active tag
+    def test_rdr_close_pass2_success_attempts_scratch_put(self, rdr_env, monkeypatch):
+        """S2: after gap-pointer validation passes, subprocess.run is called with nx scratch put.
+
+        Original rdr_close.py:299-303 emitted a best-effort scratch marker
+        (rdr-close-active tag) after PASS-2 pointer validation succeeded.
+        The port omitted this call.  We verify the call is attempted.
+        """
+        # Create a real implementation file so the pointer validation passes
+        impl_file = rdr_env["repo_root"] / "src" / "impl.py"
+        impl_file.parent.mkdir(parents=True, exist_ok=True)
+        impl_file.write_text("# implementation\n")
+
+        body = (
+            "## Problem Statement\n\n"
+            "#### Gap 1: Missing feature\nThe feature is missing.\n\n"
+            "## Approach\n\nImplement it."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-130-cmd.md",
+            {"title": "Command Preambles", "status": "accepted",
+             "type": "decision", "priority": "P0"},
+            body=body,
+        )
+
+        import subprocess as _real_sp
+
+        scratch_calls = []
+
+        def _capture_run(cmd, **kwargs):
+            if cmd and cmd[0] == "git":
+                return _real_sp.run(cmd, **kwargs)
+            scratch_calls.append(list(cmd))
+            r = _real_sp.CompletedProcess(cmd, 0)
+            r.stdout = "No issues found."
+            r.stderr = ""
+            return r
+
+        monkeypatch.setattr("nexus.commands.rdr.subprocess.run", _capture_run)
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "rdr-close", "--", "130", "--reason", "implemented",
+             "--pointers", "Gap1=src/impl.py:1"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "validation passed" in result.output
+        # Verify the scratch put call was attempted with the right tags
+        scratch_cmds = [c for c in scratch_calls if "scratch" in c and "put" in c]
+        assert scratch_cmds, (
+            f"Expected an 'nx scratch put' call with rdr-close-active tag; "
+            f"got calls: {scratch_calls}"
+        )
+        assert any("rdr-close-active" in str(c) for c in scratch_cmds), (
+            f"Expected rdr-close-active tag in scratch put call; got: {scratch_cmds}"
+        )
 
 
 # ---------------------------------------------------------------------------
