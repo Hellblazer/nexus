@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.1.5] - 2026-05-27
+
+### Changed
+
+- **RDR-130 P2: the 16 agent-relay commands now inject their preamble via `` !`nx command-context <name> -- "$ARGUMENTS"` ``** instead of inlined bash (analyze-code, architecture, create-plan, implement, debug, deep-analysis, enrich-plan, knowledge-tidy, pdf-process, plan-audit, research, review-code, substantive-critique, test-validate, nx-preflight, continuation). With P1 (5.1.4) this completes RDR-130: no command inlines bash, and a static guard locks the single-line form across all 25 commands.
+
+### Fixed
+
+- **MCP operator tools no longer prompt for permission (nexus-k1vr5):** added operator_filter / operator_check / operator_verify / operator_groupby / operator_aggregate to the `PermissionRequest` auto-approve allow-list, plus a drift guard parametrized over the live MCP registry against future omissions.
+
 ## [5.1.4] - 2026-05-27
 
 ### Changed

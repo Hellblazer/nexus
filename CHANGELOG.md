@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.1.5] - 2026-05-27
+
+Completes RDR-130 (all 25 slash commands now gather their preamble via the
+`nx` CLI) and fixes two issues found in the 5.1.4 prod shakeout.
+
+### Changed
+
+- **RDR-130 P2: the 16 agent-relay slash commands gather their preamble via `nx command-context <name>`** instead of inlined bash. analyze-code, architecture, create-plan, implement, debug, deep-analysis, enrich-plan, knowledge-tidy, pdf-process, plan-audit, research, review-code, substantive-critique, test-validate, nx-preflight, and continuation are now single-line `` !`nx command-context <name> -- "$ARGUMENTS"` `` invocations; the preamble logic lives in the tested `nx` CLI (`nexus.commands.command_context`). With P1 (5.1.4) this completes RDR-130: no command inlines bash, and a static guard enforces the single-line form across all 25 commands.
+
+### Fixed
+
+- **conexus MCP operator tools no longer prompt for permission (nexus-k1vr5).** The `PermissionRequest` auto-approve hook's explicit allow-list had drifted: `operator_filter`, `operator_check`, `operator_verify`, `operator_groupby`, and `operator_aggregate` (shipped in RDR-088/093) were missing, so Claude Code prompted on each. They are added, plus a drift guard that parametrizes over the live MCP tool registry so a future tool shipped without a hook entry fails CI.
+- **T2 daemon reaps a lingering predecessor on takeover (nexus-070e2, RDR-128 single-writer).** After a version upgrade two daemons could coexist (the new one took the addr file while the old one lingered without holding the spawn lock), causing transient "FTS5: database is locked" WAL contention. A new daemon that acquires the spawn lock now reaps any live predecessor named in the addr file (SIGTERM, escalating to SIGKILL, guarded by a `ps` cmdline check against PID reuse) before opening the database.
+
 ## [5.1.4] - 2026-05-27
 
 Completes the durable fix for the slash-command preamble regression class
