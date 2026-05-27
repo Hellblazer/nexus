@@ -57,8 +57,10 @@ import json
 import os
 import signal
 import socket
+import sqlite3
 import struct
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +73,25 @@ _log = structlog.get_logger(__name__)
 # Grace period after SIGTERM before escalating to SIGKILL when reaping a
 # lingering predecessor daemon on takeover (RDR-128 single-writer backstop).
 _PREDECESSOR_REAP_TIMEOUT: float = 5.0
+
+# RDR-129 B2 (nexus-qi1zb): bounded lock-retry for the serving dispatch.
+# Mirrors the bootstrap-migration retry
+# (``nexus.db.t2._apply_pending_with_lock_retry``): three attempts with two
+# inter-attempt async sleeps. The per-store ``busy_timeout``
+# (``SERVING_BUSY_TIMEOUT_MS`` = 30s) already absorbs most cross-store WAL
+# contention, so this only fires when a window exceeds the timeout; it turns a
+# >30s contention spike into a wait rather than a dropped best-effort write.
+# Module constant so tests can shrink the sleeps.
+_DISPATCH_RETRY_SLEEPS: tuple[float, ...] = (0.1, 0.25)
+
+
+def _is_locked_error(exc: BaseException) -> bool:
+    """True when *exc* is transient WAL writer-lock contention
+    (``database is locked`` / ``database is busy``), not a structural error.
+    Mirrors the discriminator in
+    ``nexus.db.t2._apply_pending_with_lock_retry``."""
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -105,6 +126,85 @@ def _is_t2_daemon_process(pid: int) -> bool:
         return False
     cmd = out.stdout.strip()
     return "daemon t2" in cmd or "t2_daemon" in cmd
+
+
+def _lsof_holder_pids(target: str) -> list[int]:
+    """Pids with *target* open, via ``lsof -t`` (macOS + any host with lsof).
+
+    ``lsof`` is not POSIX-standard but ships on macOS by default; on Linux it
+    is the fallback when ``/proc`` is unavailable. Best-effort: any failure
+    (lsof missing, non-zero exit because nothing holds the file) yields ``[]``.
+    """
+    try:
+        out = subprocess.run(
+            ["lsof", "-t", "--", target],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return []
+    pids: list[int] = []
+    for tok in out.stdout.split():
+        try:
+            pids.append(int(tok))
+        except ValueError:
+            continue
+    return pids
+
+
+def _proc_holder_pids(target: str) -> list[int]:
+    """Pids with *target* open, via a ``/proc/<pid>/fd`` symlink scan (Linux)."""
+    pids: list[int] = []
+    proc = Path("/proc")
+    try:
+        entries = list(proc.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        fd_dir = entry / "fd"
+        try:
+            fds = list(fd_dir.iterdir())
+        except OSError:
+            continue  # process gone, or not ours to inspect
+        for fd in fds:
+            try:
+                if os.readlink(str(fd)) == target:
+                    pids.append(int(entry.name))
+                    break
+            except OSError:
+                continue
+    return pids
+
+
+def _open_fd_holder_pids(target: str) -> list[int]:
+    """Best-effort: every pid holding *target* open. Linux uses ``/proc``;
+    other platforms (notably darwin) use ``lsof``."""
+    if sys.platform != "darwin" and Path("/proc").is_dir():
+        return _proc_holder_pids(target)
+    return _lsof_holder_pids(target)
+
+
+def _enumerate_t2_daemon_pids_for_db(db_path: Path) -> list[int]:
+    """Live t2-daemon pids holding *db_path* open (RDR-129 A1, nexus-exa2p).
+
+    The single-daemon invariant is "exactly one t2 daemon per db path." The
+    addr file names only the canonical pid, so a side-orphan that started
+    after it is invisible to the addr-file reap. An open-fd probe on the data
+    file finds every holder regardless of how it was started (the cmdline
+    ``nx daemon t2 start`` does not name the db). Results are filtered to
+    processes whose command line looks like a t2 daemon, guarding against an
+    unrelated process that happens to hold the file.
+
+    Best-effort: returns ``[]`` when the db file does not exist (no holders
+    possible) or any probe step fails. Used by the startup sweep
+    (:meth:`T2Daemon._reap_predecessor_daemon`) and by ``nx doctor``'s
+    multiplicity check.
+    """
+    if not db_path.exists():
+        return []
+    target = str(db_path.resolve())
+    return [pid for pid in _open_fd_holder_pids(target) if _is_t2_daemon_process(pid)]
 
 
 # ---------------------------------------------------------------------------
@@ -587,8 +687,22 @@ class T2Daemon:
         _log.info("t2_daemon_stop_requested", signal_received=True)
 
     async def stop(self) -> None:
-        """Close servers, drop discovery file, release spawn lock,
-        close T2Database."""
+        """Close servers, drop discovery file, close T2Database.
+
+        RDR-129 A2 (nexus-kwqhd): ``stop()`` deliberately does NOT release the
+        spawn lock. The lock is held for the whole process lifetime and dropped
+        by the OS when the process exits. Releasing it here (the prior
+        behaviour) opened a *released-but-alive* window: ``stop()`` runs while
+        the process is still draining/exiting, so a respawn (notably
+        ``ensure-running`` on version skew) could acquire the freed lock and
+        run alongside the still-living predecessor, violating single-writer.
+        Deferring the release to OS-on-exit closes that window: the lock stops
+        being held at exactly the moment the pid stops being alive. The
+        co-dependent ``ensure-running`` interlock (``commands/daemon.py``) now
+        waits on the predecessor's PID liveness before cold-spawning, so it
+        never spawns into the lock-still-held window. ``_release_spawn_lock``
+        remains callable for explicit teardown (tests simulate process exit).
+        """
         if self._uds_server is not None:
             self._uds_server.close()
             await self._uds_server.wait_closed()
@@ -608,7 +722,7 @@ class T2Daemon:
             except Exception as exc:  # noqa: BLE001
                 _log.warning("t2_daemon_t2db_close_failed", error=str(exc))
             self._t2db = None
-        self._release_spawn_lock()
+        # NB: spawn lock intentionally NOT released here — see docstring.
         _log.info("t2_daemon_stopped")
 
     # ── socket binding ──────────────────────────────────────────────────
@@ -720,7 +834,29 @@ class T2Daemon:
         callable_ = self._dispatch_table[op]
         # All current dispatch methods are sync; offload to a thread so
         # the event loop doesn't block on SQLite writes.
-        return await asyncio.to_thread(callable_, *args, **kwargs)
+        #
+        # RDR-129 B2 (nexus-qi1zb): retry on transient WAL writer-lock
+        # contention so a cross-store contention window past the per-store
+        # busy_timeout becomes a wait, not a dropped best-effort write (the
+        # shakeout drop class). Non-lock errors propagate on the first attempt;
+        # the final attempt re-raises so a genuinely stuck lock still surfaces
+        # (logged upstream as t2_daemon_dispatch_failed). Re-running the whole
+        # op is safe: SQLITE_BUSY fires at lock acquisition before the
+        # statement executes, and the store writes are upserts / single
+        # transactions that roll back cleanly on failure.
+        sleeps = _DISPATCH_RETRY_SLEEPS
+        max_attempts = len(sleeps) + 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await asyncio.to_thread(callable_, *args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                if not _is_locked_error(exc) or attempt == max_attempts:
+                    raise
+                _log.warning(
+                    "t2_daemon_dispatch_lock_retry",
+                    op=op, attempt=attempt, exc=str(exc),
+                )
+                await asyncio.sleep(sleeps[attempt - 1])
 
     @staticmethod
     def _send_error(
@@ -748,36 +884,65 @@ class T2Daemon:
             pass
 
     def _reap_predecessor_daemon(self) -> None:
-        """Reap a lingering predecessor daemon named in the addr file.
+        """Sweep and reap every lingering t2 daemon for this db path.
 
         Precondition: the spawn lock is held (called from :meth:`start`
         immediately after :meth:`_acquire_spawn_lock`). Holding the lock
-        means we are the legitimate single writer, so any OTHER live pid in
-        the pre-existing discovery file is a zombie that escaped the flock
-        (e.g. across a version transition, or a released-but-alive window) and
-        must be reaped to honour RDR-128 single-writer — otherwise two daemons
-        contend on the same WAL ("FTS5: database is locked"; the 5.0.2-5.0.4
-        daemon-churn class). Run BEFORE opening T2Database so the predecessor's
-        WAL writer is gone before we migrate.
+        means we are the legitimate single writer, so any OTHER live t2 daemon
+        against this ``memory.db`` is a zombie that escaped the flock (a
+        version transition, a released-but-alive window) and must be reaped to
+        honour RDR-128 single-writer — otherwise two daemons contend on the
+        same WAL ("FTS5: database is locked"; the 5.0.2-5.0.4 daemon-churn
+        class). Run BEFORE opening ``T2Database`` so each predecessor's WAL
+        writer is gone before we migrate (and so self does not yet hold the db
+        open, keeping it out of the open-fd probe).
 
-        Best-effort and non-fatal: any failure to read the file or signal the
-        pid leaves startup to proceed (the flock already guarantees we are the
-        sole new writer).
+        Two reap targets are unioned (RDR-129 A1, nexus-exa2p):
+
+        1. The addr-file pid — the cheap, reliable signal for the common
+           takeover case (and the only one the 5.1.5 ``nexus-070e2`` reap
+           covered).
+        2. Same-db open-fd holders — a side-orphan that started AFTER the
+           canonical daemon was never the addr-file pid and is invisible to
+           (1). Enumerating holders of the data file (RF-A2 open-fd probe)
+           generalises "reap the addr-file predecessor" to "guarantee single
+           occupancy."
+
+        Best-effort and non-fatal: any failure to read the file, probe fds, or
+        signal a pid leaves startup to proceed (the flock already guarantees
+        we are the sole new writer).
         """
+        targets: list[int] = []
+
+        # 1. addr-file pid.
         disc_path = t2_discovery_path(self._config_dir)
         try:
             raw = disc_path.read_text()
-        except OSError:
-            return
-        try:
             payload = json.loads(raw) if raw.strip() else None
-        except ValueError:
-            return
-        if not isinstance(payload, dict):
-            return
-        pid = payload.get("pid")
-        if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
-            return
+        except (OSError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            pid = payload.get("pid")
+            if isinstance(pid, int):
+                targets.append(pid)
+
+        # 2. same-db open-fd sweep (catches side-orphans absent from the addr
+        #    file).
+        targets.extend(_enumerate_t2_daemon_pids_for_db(self._db_path))
+
+        # Reap each distinct non-self target once.
+        seen: set[int] = set()
+        for pid in targets:
+            if pid <= 0 or pid == os.getpid() or pid in seen:
+                continue
+            seen.add(pid)
+            self._reap_one_daemon(pid)
+
+    def _reap_one_daemon(self, pid: int) -> None:
+        """SIGTERM (escalating to SIGKILL after ``_PREDECESSOR_REAP_TIMEOUT``)
+        a single live t2-daemon *pid*. Guarded by a liveness check and a
+        cmdline check (PID-reuse guard: refuse to kill a recycled pid whose
+        command line is not a t2 daemon). Best-effort; never raises."""
         if not _pid_is_alive(pid):
             return
         if not _is_t2_daemon_process(pid):

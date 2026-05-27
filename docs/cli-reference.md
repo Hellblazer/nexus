@@ -1222,7 +1222,7 @@ Health check for all dependencies.
 nx doctor
 ```
 
-Checks: ChromaDB API key, ChromaDB tenant, T3 database (`CHROMA_DATABASE`), Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity.
+Checks: ChromaDB API key, ChromaDB tenant, T3 database (`CHROMA_DATABASE`), Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 daemon singleton (RDR-129: hard error if more than one T2 daemon serves the same `memory.db`), T2 best-effort writes (RDR-129: soft warning with the count of chash dual-writes dropped under WAL contention). The T2 integrity check now reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4).
 
 ```
 nx doctor --clean-checkpoints   # Delete orphaned PDF checkpoint files

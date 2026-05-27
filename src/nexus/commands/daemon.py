@@ -667,6 +667,31 @@ def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
 # constant so tests can shrink it without waiting the full 30s.
 _T2_CYCLE_DB_PROBE_TIMEOUT_MS: int = 30000
 
+# RDR-129 A2 (nexus-kwqhd): how long ``ensure-running`` waits for a SIGTERM'd
+# stale daemon to FULLY EXIT before cold-spawning its replacement. The wait
+# polls the predecessor's PID liveness, not the discovery file: stop() now
+# holds the spawn lock until process exit (defer-release-to-exit) but unlinks
+# the discovery file early, so a discovery-file poll would see "gone" while the
+# lock is still held and cold-spawn into an EAGAIN -> zero daemons. If the
+# predecessor outlives this window the cycle aborts and leaves it up (RDR-128
+# RF-4: never trade a working daemon for none). Module constant so tests can
+# shrink it.
+_T2_CYCLE_EXIT_TIMEOUT: float = 10.0
+
+
+def _predecessor_alive(pid: int) -> bool:
+    """True iff *pid* is alive AND still looks like a t2 daemon.
+
+    The cmdline guard (``_is_t2_daemon_process``) defends the version-cycle
+    wait against PID reuse: if the predecessor's pid is recycled to an
+    unrelated process during the wait, treat the predecessor as gone rather
+    than waiting on (or aborting for) a stranger. Used by ``ensure-running``
+    to poll the predecessor's exit (RDR-129 A2).
+    """
+    from nexus.daemon.t2_daemon import _is_t2_daemon_process, _pid_is_alive
+
+    return _pid_is_alive(pid) and _is_t2_daemon_process(pid)
+
 
 def _t2_db_write_lock_acquirable(db_path: Path, timeout_ms: int) -> bool:
     """Probe whether memory.db's single WAL writer lock is acquirable
@@ -826,12 +851,29 @@ def t2_ensure_running_cmd(
             os.kill(running_pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
-        cycle_deadline = _time.monotonic() + 10.0
+        # RDR-129 A2 (nexus-kwqhd): poll the predecessor's PID liveness, NOT
+        # the discovery file. stop() now holds the spawn lock until the
+        # process exits (defer-release-to-exit) while unlinking the discovery
+        # file early; a discovery-file poll would see "gone" while the pid is
+        # still alive and holding the lock, so the cold spawn below would hit
+        # EAGAIN on the spawn lock and leave ZERO daemons. Wait for the pid to
+        # actually exit (lock dropped by the OS); if it outlives the window,
+        # abort and keep the stale-but-working daemon (RF-4: never trade a
+        # working daemon for none).
+        cycle_deadline = _time.monotonic() + _T2_CYCLE_EXIT_TIMEOUT
         while _time.monotonic() < cycle_deadline:
-            if not _daemon_is_alive():
+            if not _predecessor_alive(running_pid):
                 break
             _time.sleep(0.1)
-        # fall through to cold spawn
+        else:
+            click.echo(
+                f"T2 daemon v{running_ver} (pid {running_pid}) did not exit "
+                f"within {_T2_CYCLE_EXIT_TIMEOUT}s of SIGTERM; cycle aborted, "
+                "leaving it up (will retry on next ensure-running).",
+                err=True,
+            )
+            return  # never trade a working daemon for none
+        # predecessor fully exited; its spawn lock is released — cold spawn.
 
     # Cold spawn. Use the same nx binary the operator invoked (preserves
     # PATH/virtualenv assumptions). start_new_session detaches the child

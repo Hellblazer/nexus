@@ -539,8 +539,30 @@ def chash_dual_write_batch_hook(
                 db.chash_index, collection, doc_ids, metadatas
             )
         )
-    except Exception:
+    except Exception as exc:
         import structlog
+
+        # RDR-129 B4 (nexus-uq8a4): a ``database is locked`` / ``busy`` failure
+        # here is an *unrecovered* best-effort write — the daemon could not
+        # commit the chash dual-write because memory.db's single WAL writer
+        # slot was held. Meter it so the completeness gap is a number
+        # ``nx doctor`` surfaces, not an invisible debug line (RDR-129 Gap 4).
+        # A write that an inner retry recovers never reaches this except, so
+        # the counter only ever counts true drops. Non-lock failures are a
+        # different bug class and stay unmetered debug.
+        msg = str(exc).lower()
+        if "locked" in msg or "busy" in msg:
+            try:
+                from nexus.dropped_writes import record_drop
+
+                record_drop(
+                    hook="chash_dual_write_batch_hook",
+                    collection=collection,
+                    rows=len(doc_ids),
+                    error=str(exc),
+                )
+            except Exception:
+                pass  # metering must never break the best-effort hook
         structlog.get_logger().debug("chash_dual_write_batch_failed", exc_info=True)
 
 

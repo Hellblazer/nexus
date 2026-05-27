@@ -9,6 +9,7 @@ def test_health_result_fields():
     assert r.detail == "fine"
     assert r.fix_suggestions == []
     assert r.fatal is False
+    assert r.warn is False
 
 
 def test_health_result_with_fix_suggestions():
@@ -35,6 +36,24 @@ def test_format_check_fail():
     output, failed = format_health_for_cli(results, local_mode=False)
     assert "✗ Python ≥ 3.12: 3.11.0 — 3.12+ required" in output
     # Non-fatal by default
+    assert failed is False
+
+
+def test_format_soft_warn_renders_warning_glyph():
+    """RDR-129 B4 (nexus-uq8a4): a soft WARN (ok=False, warn=True) renders the
+    ⚠ glyph — distinct from both ✓ (pass) and ✗ (hard fail) — and never marks
+    the run as failed."""
+    results = [
+        HealthResult(
+            label="T2 integrity",
+            ok=False,
+            warn=True,
+            detail="FTS5: busy (write in progress, retry)",
+        )
+    ]
+    output, failed = format_health_for_cli(results, local_mode=False)
+    assert "⚠ T2 integrity: FTS5: busy (write in progress, retry)" in output
+    assert "✗ T2 integrity" not in output
     assert failed is False
 
 

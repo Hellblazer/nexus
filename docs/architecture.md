@@ -364,8 +364,12 @@ stores. Each store owns its own tables in a shared SQLite file and runs
 against its own `sqlite3.Connection` in WAL mode. Reads in one domain
 are never blocked by writes in another (the Phase 1 global Python
 mutex is gone); concurrent writes across domains still serialize at
-SQLite's single-writer WAL lock, but `busy_timeout=5000` absorbs the
-brief contention without raising `OperationalError`.
+SQLite's single-writer WAL lock. Each serving connection sets
+`busy_timeout=30000` (the shared `nexus.db.t2._tuning.SERVING_BUSY_TIMEOUT_MS`,
+raised from 5000 in RDR-129 B1 after two shakeouts showed 5s was too short to
+absorb sustained cross-store contention) and the daemon dispatch retries on a
+transient `database is locked` (RDR-129 B2), so a contention window becomes a
+wait rather than a dropped write.
 
 | Store             | Class                     | Attribute              | Responsibility                                                             |
 |-------------------|---------------------------|------------------------|----------------------------------------------------------------------------|
@@ -414,8 +418,11 @@ Phase 2 consequences:
   `memory_search` on one thread and a `plan_save` on another run in
   parallel because the Phase 1 shared Python mutex is gone. Concurrent
   *writes* across domains still serialize at SQLite's single-writer
-  WAL lock, but `busy_timeout=5000` absorbs the brief queue so callers
-  do not see `OperationalError: database is locked`.
+  WAL lock. The serving `busy_timeout` is 30000 (RDR-129 B1; the
+  earlier 5000 was falsified under sustained multi-writer load) and the
+  daemon dispatch retries on a transient `database is locked` (RDR-129
+  B2), so a contention window past the timeout becomes a wait, not a
+  dropped best-effort write.
 - **Telemetry no longer interferes with search**: MCP relevance-log
   writes run on the telemetry connection, so `memory_search` is not
   blocked by access-tracking hooks.
@@ -463,6 +470,19 @@ is locked` daemon incidents):
   `~/.config/nexus/t2_migration.lock` before any schema write, and the
   startup migration is lock-tolerant (`busy_timeout=30000` + bounded
   retry) so a transient foreign lock waits rather than crashes.
+- **Exactly-one-daemon enforcement (RDR-129).** RDR-128 routed writers
+  through the daemon; RDR-129 hardens the guarantee that there is only
+  *one* daemon per `memory.db`. On startup the daemon sweeps every live
+  t2 daemon holding the data file open (open-fd probe: `/proc/<pid>/fd`
+  on Linux, `lsof` on macOS) and reaps each non-self one, not just the
+  addr-file pid (A1). `stop()` no longer releases the spawn lock early;
+  the OS drops it on process exit, and `ensure-running` waits on the
+  predecessor's PID liveness (not the discovery file) before respawning,
+  so a version cycle converges to exactly one daemon, never zero (A2).
+  `nx doctor` reports a daemon-multiplicity census as a hard error (A3)
+  and surfaces a dropped-best-effort-write meter as a soft warning (B4);
+  the drop log path is `~/.config/nexus/dropped_writes.jsonl`
+  (`NX_DROPPED_WRITES_LOG_PATH` override).
 
 **Migration Registry** (RDR-076): All T2 schema migrations are centralised in
 `src/nexus/db/migrations.py`. The `MIGRATIONS` list contains version-tagged
@@ -498,6 +518,7 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 | Area | Files | What they do |
 |------|-------|-------------|
 | **Entry** | `cli.py`, `commands/` | Click CLI, one file per command group |
+| **Command preambles** | `commands/rdr.py` (`preamble` subgroup), `commands/command_context.py`, `conexus/commands/*.md` | RDR-130: slash-command context preambles. Each of the 25 conexus slash commands injects its preamble via a single-line `` !`nx <subcommand> -- "$ARGUMENTS"` `` call — the 9 RDR-lifecycle commands use `nx rdr preamble <name>`, the 16 agent-relay commands use `nx command-context <name>`. Preamble logic lives in the tested `nx` CLI (normal Python, unit-covered) and prints markdown; Claude Code injects that stdout as plain text and does NOT re-parse it, so emitted tables/fences are safe. No command inlines bash, no command depends on `$CLAUDE_PLUGIN_ROOT` (empty in command-bash context); a static guard (`test_migrated_command_uses_single_line_nx`) enforces the single-line form across all 25. Replaced the inlined-bash approach whose fenced-block truncation caused the 5.1.2 regression class |
 | **Catalog** | `catalog/catalog.py`, `catalog/catalog_db.py`, `catalog/tumbler.py`, `catalog/link_generator.py`, `catalog/auto_linker.py`, `catalog/consolidation.py` | Git-backed document registry + typed link graph (JSONL + SQLite). Tumbler addressing, `descendants()`/`ancestors()`/`lca()` hierarchy helpers, `resolve_chunk()` ghost element resolution, idempotent link upsert, composable query, bulk ops, audit. Auto-linker creates links from T1 link-context on every `store_put`. `consolidation.py` merges per-paper collections into corpus-level collections |
 | **Storage** | `db/t1.py`, `db/t2/`, `db/t3.py`, `db/chroma_quotas.py`, `db/local_ef.py` | Tier implementations. T2 is a package split into seven domain stores (see § T2 Domain Stores). Plans table has `ttl` column for auto-expiry. `chroma_quotas.py` is the single source of truth for ChromaDB Cloud quota constants and validators. `local_ef.py` provides the local ONNX embedding function |
 | **Indexing** | `indexer.py`, `code_indexer.py`, `prose_indexer.py`, `index_context.py`, `indexer_utils.py`, `classifier.py`, `chunker.py`, `md_chunker.py`, `doc_indexer.py`, `pdf_extractor.py`, `pdf_chunker.py`, `bib_enricher.py`, `languages.py`, `pipeline_buffer.py`, `pipeline_stages.py`, `checkpoint.py` | Repo indexing pipeline (decomposed per RDR-032). `bib_enricher.py` queries Semantic Scholar for bibliographic metadata; `pdf_extractor.py` auto-detects math-heavy PDFs via FormulaItem counting and routes to MinerU (default-installed since nexus-2fyb) for LaTeX extraction; non-math PDFs use Docling. MinerU absence at runtime raises a `RuntimeError` rather than silently falling back to formula-stripped Docling — the prior silent fallback wiped formulas from every PDF indexed for weeks. MinerU processes large PDFs in 5-page subprocess batches for memory isolation (prevents OOM on formula-dense documents). Chunk metadata includes `has_formulas` boolean. `pipeline_buffer.py` provides a WAL-mode SQLite buffer for the three-stage streaming pipeline (RDR-048); `pipeline_stages.py` implements the concurrent extractor/chunker/uploader stages and orchestrator; `checkpoint.py` handles batch-path crash recovery for smaller documents (RDR-047) |

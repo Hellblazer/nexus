@@ -55,6 +55,8 @@ from typing import Any
 
 import structlog
 
+from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
+
 _log = structlog.get_logger()
 
 
@@ -126,7 +128,7 @@ class Telemetry:
     def __init__(self, path: Path) -> None:
         self._lock = threading.Lock()
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        self.conn.execute("PRAGMA busy_timeout=5000")
+        self.conn.execute(f"PRAGMA busy_timeout={SERVING_BUSY_TIMEOUT_MS}")
         self._init_schema()
 
     def close(self) -> None:

@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-05-27
+
+Completes RDR-129 (T2 daemon write-path hardening): a comprehensive two-layer
+treatment that guarantees exactly one T2 daemon per database and makes the
+daemon internally tolerant of cross-store WAL contention. Builds on the
+5.1.5 reap backstop (nexus-070e2), generalising it from a patch into the
+closed invariant. Also closes RDR-130 (the slash-command CLI-preamble model,
+shipped behaviourally in 5.1.4/5.1.5).
+
+### Added
+
+- **`nx doctor` daemon-singleton census (RDR-129 A3).** A new `T2 daemon singleton` check hard-fails, naming the offending pids, if more than one T2 daemon is serving the same `memory.db`. The single-writer invariant becomes observable rather than silent.
+- **`nx doctor` dropped-best-effort-write meter (RDR-129 B4).** A new `T2 best-effort writes` check surfaces, as a soft warning, the count of chash dual-writes dropped under WAL contention. The previously-invisible completeness gap is now a number. Drops are logged to `~/.config/nexus/dropped_writes.jsonl` (`NX_DROPPED_WRITES_LOG_PATH` override).
+
+### Changed
+
+- **Serving connections wait 30s, not 5s, on WAL contention (RDR-129 B1).** Every daemon-owned domain-store connection now sets `busy_timeout=30000` (the shared `SERVING_BUSY_TIMEOUT_MS`, matching the bootstrap-migration window). Two production shakeouts showed 5s was too short to absorb sustained cross-store contention, dropping best-effort chash writes.
+- **The daemon dispatch retries on transient `database is locked` (RDR-129 B2).** A bounded lock-retry on the serving `_dispatch` turns a contention window past the busy_timeout into a wait rather than a dropped write. Non-lock (structural) errors still surface on the first attempt.
+- **The T2 daemon now guarantees exactly-one-daemon-per-db (RDR-129 A1/A2).** On startup it sweeps every live t2 daemon holding the data file open (open-fd probe: `/proc/<pid>/fd` on Linux, `lsof` on macOS) and reaps each non-self one, not just the addr-file pid. `stop()` no longer releases the spawn lock early (the OS drops it on process exit), and `nx daemon t2 ensure-running` waits on the predecessor's PID liveness before respawning, so a version cycle converges to exactly one daemon, never zero.
+
+### Fixed
+
+- **`nx doctor` no longer reports a transient FTS5 write-lock as a hard failure (RDR-129 B4).** When the T2-integrity probe is blocked by a legitimate concurrent writer (e.g. an active `nx index repo`), it now retries briefly and reports a soft warning (`busy (write in progress, retry)`) rather than a red X. A genuine corruption still hard-fails.
+
 ## [5.1.5] - 2026-05-27
 
 Completes RDR-130 (all 25 slash commands now gather their preamble via the
