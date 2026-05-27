@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 import structlog
 
+from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
 from nexus.db.t2.memory_store import _sanitize_fts5
 
 if TYPE_CHECKING:  # pragma: no cover — import for type hints only
@@ -325,7 +326,7 @@ class CatalogStore:
         # (5 s busy_timeout + WAL) so cross-process writers don't immediately
         # raise ``OperationalError: database is locked`` when the CLI races
         # an indexing writer.
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute(f"PRAGMA busy_timeout={SERVING_BUSY_TIMEOUT_MS}")
         self._conn.execute("PRAGMA journal_mode=WAL")
         # RDR-108 D2 + D5 (nexus-mydi): enable foreign-key enforcement
         # so the document_chunks manifest cannot reference a deleted

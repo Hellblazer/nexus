@@ -57,6 +57,7 @@ import json
 import os
 import signal
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -72,6 +73,25 @@ _log = structlog.get_logger(__name__)
 # Grace period after SIGTERM before escalating to SIGKILL when reaping a
 # lingering predecessor daemon on takeover (RDR-128 single-writer backstop).
 _PREDECESSOR_REAP_TIMEOUT: float = 5.0
+
+# RDR-129 B2 (nexus-qi1zb): bounded lock-retry for the serving dispatch.
+# Mirrors the bootstrap-migration retry
+# (``nexus.db.t2._apply_pending_with_lock_retry``): three attempts with two
+# inter-attempt async sleeps. The per-store ``busy_timeout``
+# (``SERVING_BUSY_TIMEOUT_MS`` = 30s) already absorbs most cross-store WAL
+# contention, so this only fires when a window exceeds the timeout; it turns a
+# >30s contention spike into a wait rather than a dropped best-effort write.
+# Module constant so tests can shrink the sleeps.
+_DISPATCH_RETRY_SLEEPS: tuple[float, ...] = (0.1, 0.25)
+
+
+def _is_locked_error(exc: BaseException) -> bool:
+    """True when *exc* is transient WAL writer-lock contention
+    (``database is locked`` / ``database is busy``), not a structural error.
+    Mirrors the discriminator in
+    ``nexus.db.t2._apply_pending_with_lock_retry``."""
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -814,7 +834,29 @@ class T2Daemon:
         callable_ = self._dispatch_table[op]
         # All current dispatch methods are sync; offload to a thread so
         # the event loop doesn't block on SQLite writes.
-        return await asyncio.to_thread(callable_, *args, **kwargs)
+        #
+        # RDR-129 B2 (nexus-qi1zb): retry on transient WAL writer-lock
+        # contention so a cross-store contention window past the per-store
+        # busy_timeout becomes a wait, not a dropped best-effort write (the
+        # shakeout drop class). Non-lock errors propagate on the first attempt;
+        # the final attempt re-raises so a genuinely stuck lock still surfaces
+        # (logged upstream as t2_daemon_dispatch_failed). Re-running the whole
+        # op is safe: SQLITE_BUSY fires at lock acquisition before the
+        # statement executes, and the store writes are upserts / single
+        # transactions that roll back cleanly on failure.
+        sleeps = _DISPATCH_RETRY_SLEEPS
+        max_attempts = len(sleeps) + 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await asyncio.to_thread(callable_, *args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                if not _is_locked_error(exc) or attempt == max_attempts:
+                    raise
+                _log.warning(
+                    "t2_daemon_dispatch_lock_retry",
+                    op=op, attempt=attempt, exc=str(exc),
+                )
+                await asyncio.sleep(sleeps[attempt - 1])
 
     @staticmethod
     def _send_error(

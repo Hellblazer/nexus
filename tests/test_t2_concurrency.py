@@ -536,3 +536,46 @@ def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
         f"baseline_p95={baseline_p95:.2f}ms load_p95={load_p95:.2f}ms "
         f"ratio={ratio:.2f}x (threshold 3.0x)"
     )
+
+
+# ── RDR-129 B1 (nexus-qi1zb): serving busy_timeout raised 5000 -> 30000 ──────
+
+
+import pytest as _pytest
+
+
+def test_serving_busy_timeout_constant_matches_bootstrap() -> None:
+    """The shared serving timeout is 30s and equals the bootstrap-migration
+    window (RDR-129 B1 'matching the bootstrap path')."""
+    from nexus.db.t2 import _BOOTSTRAP_BUSY_TIMEOUT_MS
+    from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
+
+    assert SERVING_BUSY_TIMEOUT_MS == 30000
+    assert SERVING_BUSY_TIMEOUT_MS == _BOOTSTRAP_BUSY_TIMEOUT_MS
+
+
+@_pytest.mark.parametrize(
+    "store_attr,conn_attr",
+    [
+        ("memory", "conn"),
+        ("plans", "conn"),
+        ("chash_index", "conn"),
+        ("taxonomy", "conn"),
+        ("telemetry", "conn"),
+        ("document_aspects", "conn"),
+        ("catalog", "_conn"),
+    ],
+)
+def test_every_serving_store_connection_uses_30s_busy_timeout(
+    tmp_path: Path, store_attr: str, conn_attr: str,
+) -> None:
+    """Each daemon-owned domain-store connection applies the 30s serving
+    busy_timeout. A partial bump would leave some stores at 5s and re-open the
+    cross-store contention drop class, so every store is pinned."""
+    from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
+
+    with T2Database(tmp_path / "memory.db") as db:
+        store = getattr(db, store_attr)
+        conn = getattr(store, conn_attr)
+        got = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert got == SERVING_BUSY_TIMEOUT_MS == 30000

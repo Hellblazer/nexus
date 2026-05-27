@@ -66,6 +66,8 @@ import sqlite3
 
 import structlog
 
+from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
+
 # Cheap import only: ``_sanitize_fts5`` is needed by
 # ``nexus.catalog.catalog_db`` at module import time, and the
 # memory_store module's top-level imports are stdlib + structlog only
@@ -549,7 +551,7 @@ class T2Database:
         conn: sqlite3.Connection
         if owned:
             conn = sqlite3.connect(str(self._path), check_same_thread=False)
-            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute(f"PRAGMA busy_timeout={SERVING_BUSY_TIMEOUT_MS}")
             conn.execute("PRAGMA journal_mode=WAL")
         else:
             conn = _conn  # type: ignore[assignment]
