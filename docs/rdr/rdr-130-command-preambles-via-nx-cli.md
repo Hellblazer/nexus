@@ -2,16 +2,17 @@
 title: "Command Preambles via the nx CLI: Thin Commands, Tested Logic, No Inlined Bash"
 id: RDR-130
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-26
 accepted_date: 2026-05-26
+closed_date: 2026-05-27
 related_issues: [nexus-61fzg, nexus-ln9y5, nexus-t1b1k]
 related_rdrs: [RDR-120, RDR-128]
 supersedes: []
-related_tests: [tests/test_plugin_structure.py, tests/test_command_preamble_sync.py, tests/cc-validation/scenarios/19_command_bash_injection_renders.sh]
+related_tests: [tests/test_plugin_structure.py, tests/test_command_context_command.py, tests/test_command_context_detector.py, tests/cc-validation/scenarios/21_rdr130_output_fence_safe.sh, tests/cc-validation/scenarios/24_rdr130_agent_relay_renders.sh, tests/cc-validation/scenarios/25_rdr130_continuation_renders.sh]
 ---
 
 # RDR-130: Command Preambles via the nx CLI: Thin Commands, Tested Logic, No Inlined Bash
@@ -217,3 +218,11 @@ Gate result in T2: `nexus_rdr/130-gate-latest`.
 - 2026-05-26: Gate PASSED (0 critical, 5 significant resolved in-place). Inline
   form verified (scenario 22); P1 storage-boundary-lint step, 25-command
   inventory, continuation special case, P0-done, and `$ARGUMENTS` quoting added.
+- 2026-05-27: CLOSED. Shipped P0 (5.1.3 interim fence-strip), P1 (5.1.4 — 9 RDR
+  commands via `nx rdr preamble`), P2 (5.1.5 — 16 agent-relay commands via
+  `nx command-context`), P3 (residue retired, docs updated, holistic validation).
+  All 25 commands are thin single-line `nx` invocations; no inlined bash; a
+  static guard enforces the form. P3-GATE §Validation cross-walk PASSED (static
+  guard 25/25, output-fence cc-validation scenario 21, categorical real-CC
+  scenarios 23/24/25, full suite green). Out-of-scope follow-ups tracked:
+  nexus-exa2p (daemon side-orphan reap), nexus-u3mfr (cold-start probe timeout).
