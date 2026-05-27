@@ -32,6 +32,7 @@ def test_all_command_modules_registered():
     # Map module names to expected CLI command names
     # (some modules use different names via add_command(..., name="X"))
     _MODULE_TO_CLI = {
+        "command_context": "command-context",
         "config_cmd": "config",
         "context_cmd": "context",
         "doctor": "doctor",
