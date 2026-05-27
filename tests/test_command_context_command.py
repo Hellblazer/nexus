@@ -1750,6 +1750,56 @@ def test_continuation_non_git_dir_does_not_crash(
     assert result.exit_code == 0, result.output
 
 
+# ---------------------------------------------------------------------------
+# P2.4: fallback WIRING -- the subcommand applies repo/session fallbacks and
+# they flow into the emitted target path (not just the _sanitize_slug unit).
+# ---------------------------------------------------------------------------
+
+
+def test_continuation_repo_safe_fallback_in_target_path(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """A cwd whose basename sanitizes to empty yields '-repo-' in the path.
+
+    Drives REPO_SAFE = _sanitize_slug(cwd.name) or "repo" through the live
+    subcommand (cwd basename "---" sanitizes to ""), with a well-formed topic
+    so only the repo segment exercises the fallback.
+    """
+    degenerate = tmp_path / "---"
+    degenerate.mkdir()
+    monkeypatch.chdir(degenerate)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(
+        main, ["command-context", "continuation", "--", "release notes"]
+    )
+    assert result.exit_code == 0, result.output
+    # repo segment fell back to "repo"; slug came from the topic.
+    assert "nexus-continuation-repo-release-notes-" in result.output
+
+
+def test_continuation_session_slug_fallback_in_target_path(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """A topic that sanitizes to empty yields '-session-' in the path.
+
+    Drives SLUG = _sanitize_slug(topic) or "session" through the live
+    subcommand (topic "..." sanitizes to ""), with a well-formed cwd basename
+    so only the slug segment exercises the fallback.
+    """
+    named = tmp_path / "myproj"
+    named.mkdir()
+    monkeypatch.chdir(named)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation", "--", "..."])
+    assert result.exit_code == 0, result.output
+    # repo segment came from cwd basename; slug fell back to "session".
+    assert "nexus-continuation-myproj-session-" in result.output
+
+
 def test_continuation_double_dash_terminator(
     tmp_path: Path, monkeypatch, stub_continuation_subprocess
 ) -> None:
