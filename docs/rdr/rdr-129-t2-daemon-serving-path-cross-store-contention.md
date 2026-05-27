@@ -2,18 +2,33 @@
 title: "T2 Daemon Write-Path Hardening: Guaranteed-Single-Daemon Enforcement and Contention-Free Internal Serialization"
 id: RDR-129
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-25
 accepted_date: 2026-05-27
-related_issues: [nexus-qi1zb, nexus-kwqhd, nexus-exa2p, nexus-izpcb, nexus-uq8a4, nexus-070e2]
+closed_date: 2026-05-27
+related_issues: [nexus-qi1zb, nexus-kwqhd, nexus-exa2p, nexus-izpcb, nexus-uq8a4, nexus-070e2, nexus-azsqe]
 related_rdrs: [RDR-128, RDR-120, RDR-063]
 epic_bead: nexus-70qc9
 supersedes: []
-related_tests: []
-implementation_notes: ""
+related_tests: [tests/test_doctor_integrity.py, tests/test_dropped_writes.py, tests/test_health.py, tests/daemon/test_t2_daemon_startup_invariant.py, tests/daemon/test_t2_ensure_running.py, tests/daemon/test_t2_daemon_lifecycle.py, tests/test_t2_concurrency.py]
+implementation_notes: >
+  Closed 2026-05-27 (reason: implemented). P1+P2 shipped across four PRs:
+  B4 doctor soft-WARN + dropped-write meter (uq8a4 #982); A1 same-db open-fd
+  sweep + A3 doctor multiplicity hard-error (exa2p #983); A2 defer spawn-lock
+  release-to-exit + ensure-running PID-liveness interlock (kwqhd #984); B1
+  serving busy_timeout 5000->30000 via shared SERVING_BUSY_TIMEOUT_MS + B2
+  bounded dispatch lock-retry (qi1zb #985). B1 RPC-timeout prerequisite
+  verified (no per-call read deadline). P2 phase-review gate PASSED with
+  explicit deferrals (T2 nexus_rdr/129-gate-p2-phase-review). DEFERRED:
+  P3/B3 (nexus-izpcb) conditional, revisit only if the production B4 drop
+  meter shows residual unrecovered drops post-P2; A2 bounded-shutdown-guard
+  (nexus-azsqe, P3 follow-up). Test-plan deviations: sweep/version-cycle use
+  monkeypatched primitives (this suite's nexus-9eaz flake-avoidance
+  convention); the multi-writer load-test property is instrumented in
+  production by the B4 meter rather than a one-shot CI load test.
 ---
 
 # RDR-129: T2 Daemon Write-Path Hardening: Guaranteed-Single-Daemon Enforcement and Contention-Free Internal Serialization
