@@ -159,38 +159,58 @@ locked'` entries; the 5.1.5 two-daemon census (canonical pid + orphan, both
 `nexus-qi1zb`, `nexus-izpcb`, `nexus-uq8a4`, `nexus-070e2` (reap, shipped
 5.1.5).
 
-## Research Findings (to verify before gate)
+## Research Findings (verified 2026-05-27 against the daemon code)
 
 Layer A:
 
-- **RF-A1 (to verify):** characterise *how* the flock is bypassed across a
-  version transition. Candidates: the predecessor releases the flock during
-  its own SIGTERM drain but lingers alive briefly; the lock path differs
-  between versions; `ensure-running`'s RF-4 "do not SIGTERM a healthy stale
-  daemon" path spawns a new daemon while the old one is mid-drain. Confirm
-  from `t2_daemon._acquire_spawn_lock`, `_spawn_lock_path_for_db`, and
-  `commands/daemon.py` `ensure-running`. Reproduce the two-daemon state
-  deterministically.
-- **RF-A2 (to verify):** confirm the reap (`_reap_predecessor_daemon`) reads
-  only the addr-file pid and cannot see a side-orphan; confirm that a full
-  enumeration of same-db daemons is feasible and can be scoped to the db path
-  (the cmdline `nx daemon t2 start` does not name the db, so scoping needs the
-  db-path spawn-lock identity, an open-fd probe, or an advertised db_path).
+- **RF-A1 — VERIFIED, with a correction.** The flock bypass is NOT a lock-path
+  mismatch across versions. `_spawn_lock_path_for_db` (`t2_daemon.py:139`)
+  anchors the db-path lock at `<db_path>.spawn_lock`, a sibling of the data
+  file — version-stable and config-dir-independent. So a 5.1.1 and a 5.1.5
+  daemon against the same `memory.db` contend on the *same* lock file. The
+  actual bypass is **release-before-exit**: `T2Daemon.stop()` calls
+  `_release_spawn_lock()` at `t2_daemon.py:611`, which unlocks the flock while
+  the process is still shutting down (draining RPCs, closing connections).
+  During that window the lock is free but the process is alive. A respawn —
+  notably `ensure-running` on version skew, which SIGTERMs the old daemon then
+  spawns a new one (the RDR-128 RF-4 path) — acquires the freed lock and runs
+  alongside the still-draining predecessor. The OS would otherwise hold a
+  flock until process exit; the *early* release in `stop()` is the precise
+  enabler. Correction to the draft: drop "make the lock version-stable" (it
+  already is); the fix is purely defer-release-to-exit + an ensure-running
+  interlock that waits for the predecessor's full exit before spawning.
+- **RF-A2 — VERIFIED.** `_reap_predecessor_daemon` reads `t2_discovery_path`
+  (the addr file) and signals only that single pid; a side-orphan never named
+  in the addr file is invisible to it. A full same-db enumeration is feasible
+  but the cmdline `nx daemon t2 start` does not name the db, so scoping needs
+  the db-path spawn-lock identity, an open-fd probe (`lsof` on `memory.db`),
+  or an advertised `db_path` — RF for A1's sweep mechanism resolves to the
+  open-fd probe or db-path lock identity.
 
 Layer B:
 
-- **RF-B1 (to verify):** the daemon serving connections use
-  `busy_timeout=5000` and `_dispatch` has no `database is locked` retry.
-  Confirm from `src/nexus/daemon/t2_daemon.py` plus
-  `src/nexus/db/t2/__init__.py` store connection setup.
-- **RF-B2 (to verify):** the failing op is the RDR-086 best-effort chash
-  dual-write, swallowed by `chash_dual_write_batch_hook` (debug log, no
-  metric). Confirm the drop is silent and recoverable via an existing chash
-  backfill/repair path.
-- **RF-B3 (to verify):** the contention is daemon-internal (per-store
-  connections), reproducible deterministically with N concurrent routed
-  writers spanning >=2 stores against one daemon. Measure drop rate under
-  single-indexer vs multi-indexer load.
+- **RF-B1 — VERIFIED.** Every serving store sets `PRAGMA busy_timeout=5000`
+  (`chash_index.py:84`, `document_aspects.py:202`, `plan_library.py:224`,
+  `catalog_taxonomy.py:242`, `telemetry.py:129`, `memory_store.py`,
+  `db/t2/__init__.py:552`). Only the bootstrap migration got the 30s timeout +
+  bounded retry (`db/t2/__init__.py:454-459`, RDR-128 RF-3). The serving
+  `_dispatch` (`t2_daemon.py:708`) runs the store call via
+  `asyncio.to_thread` under a generic `except Exception` with no
+  `database is locked` retry, so a >5s contention window fails the op (logged
+  `t2_daemon_dispatch_failed`).
+- **RF-B2 — VERIFIED.** `chash_dual_write_batch_hook` (`mcp_infra.py:506`)
+  swallows the failure at `debug` level (`mcp_infra.py:544`,
+  `chash_dual_write_batch_failed`) with no metric; the inline comment
+  (`mcp_infra.py:558`) confirms the row is "current without manual backfill",
+  i.e. recoverable via a chash backfill/reconcile path (`ln-reconcile` /
+  `chash_index` rebuild).
+- **RF-B3 — VERIFIED.** Per RDR-063 each store has its own connection + its
+  own `threading.Lock`; cross-store writes coordinate only via SQLite's file
+  lock + `busy_timeout` (`db/t2/__init__.py:42-44` documents exactly this).
+  There is no daemon-internal write serialization. Deterministic reproduction
+  (N concurrent routed writers across >=2 stores vs one daemon) is a test-plan
+  item; the shakeout drop evidence (~11 in ~10 min under two indexers)
+  establishes it fires under sustained multi-writer load.
 
 ## Proposed Solution
 
@@ -206,13 +226,15 @@ open-fd probe on `memory.db` / an advertised `db_path` in the process
 metadata (RF-A2 decides the mechanism). This generalises `nexus-070e2` from
 "reap the addr-file predecessor" to "guarantee single occupancy."
 
-A2. **A lock that survives version transitions.** Make the spawn-lock
-identity stable and version-independent (anchored on the db path, not a
-config-dir or version-scoped path), and ensure a draining predecessor holds
-the lock until it has fully exited (release-on-exit, not release-early), so a
-new daemon cannot acquire the lock while a predecessor is alive. Close the
-`ensure-running` RF-4 window: when it spawns a new daemon on version skew, it
-must guarantee the old one is gone first.
+A2. **Hold the spawn lock until the predecessor has fully exited.** The
+db-path spawn lock is already version-stable (RF-A1: `<db_path>.spawn_lock`),
+so the fix is not "make it stable" but "stop releasing it early." Defer the
+release to process exit: remove the early `_release_spawn_lock()` call in
+`stop()` (let the OS drop the flock on exit) or hold an exit-scoped lock, so a
+respawn cannot acquire the lock while the predecessor is alive. Close the
+`ensure-running` RF-4 window in tandem: when it spawns a new daemon on version
+skew, it must wait for the old one's full exit (not just its SIGTERM) before
+spawning.
 
 A3. **Fail loud on multiplicity.** If, despite A1/A2, more than one daemon is
 ever observed for a db, `nx doctor` reports it as a hard error with the
@@ -339,3 +361,9 @@ multi-writer load test produces zero silent drops; (4) full unit suite green.
   internal serialization (B1-B4, beads qi1zb/izpcb/uq8a4). Priority raised
   medium -> high. Implementation tracked by epic nexus-70qc9. Next: verify
   RFs against the daemon code, then gate.
+- 2026-05-27: Research pass complete. All five RFs verified against the daemon
+  code with file:line evidence. RF-A1 corrected: the db-path spawn lock is
+  already version-stable (`t2_daemon.py:139`), so the bypass is not a
+  path-mismatch but release-before-exit (`stop()` unlocks at
+  `t2_daemon.py:611` while the process is still draining); A2 sharpened to
+  defer-release-to-exit + ensure-running full-exit interlock. Gate-ready.
