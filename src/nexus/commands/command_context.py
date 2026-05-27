@@ -16,7 +16,10 @@ stays clean).
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -580,6 +583,335 @@ def render_nx_preflight(cwd: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
+# P2.4: continuation path computation and context helpers
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_slug(text: str) -> str:
+    """Return a filesystem-safe lowercase slug from *text*.
+
+    Mirrors the bash pipeline used in continuation.md:
+      tr A-Z a-z | tr -c a-z0-9 - | sed 's/--*/-/g' | sed 's/^-//;s/-$//'
+
+    Algorithm:
+      1. Lowercase.
+      2. Replace each run of non-``[a-z0-9]`` chars with a single ``-``.
+      3. Strip leading and trailing ``-``.
+
+    Returns an empty string when no alnum chars are present; callers apply
+    their own fallback (``"repo"``, ``"session"``, etc.).
+
+    Args:
+        text: Any string (branch name, topic, repo basename, etc.).
+
+    Returns:
+        A slug string containing only ``[a-z0-9-]``, with no leading or
+        trailing dash, or ``""`` when the input has no alnum content.
+    """
+    lowered = text.lower()
+    dashed = re.sub(r"[^a-z0-9]+", "-", lowered)
+    return dashed.strip("-")
+
+
+def compute_continuation_path(
+    *,
+    repo_safe: str,
+    slug: str,
+    now: datetime,
+    out_dir: Path,
+    exists: Callable[[Path], bool],
+) -> Path:
+    """Return the target path for a continuation handoff file.
+
+    Constructs ``<out_dir>/nexus-continuation-<repo_safe>-<slug>-<YYYY-MM-DD>.md``.
+    When *exists* returns ``True`` for the base path (i.e., a same-day file
+    already exists), appends a ``-HHMM`` suffix so successive invocations on
+    the same day do not silently overwrite prior handoffs.
+
+    The *now* and *exists* parameters are mandatory injection points so the
+    function is deterministic under test: callers pass a fixed ``datetime``
+    and a ``lambda`` predicate rather than the function consulting wall-clock
+    or the filesystem internally.
+
+    Args:
+        repo_safe: Sanitized repo basename (e.g. ``"nexus"``).
+        slug: Sanitized topic or branch slug (e.g. ``"rdr-130-p2"``).
+        now: The datetime to use for date/time formatting.
+        out_dir: Directory for the handoff file (e.g. ``Path("/tmp")``).
+        exists: Predicate called with the base ``Path``; returns ``True`` when
+                the file already exists.
+
+    Returns:
+        Absolute ``Path`` to the target handoff file.
+    """
+    date_str = now.strftime("%Y-%m-%d")
+    base = out_dir / f"nexus-continuation-{repo_safe}-{slug}-{date_str}.md"
+    if exists(base):
+        hhmm = now.strftime("%H%M")
+        return out_dir / f"nexus-continuation-{repo_safe}-{slug}-{date_str}-{hhmm}.md"
+    return base
+
+
+def _git_working_state(cwd: Path) -> list[str]:
+    """Return working-state bullet lines for the continuation block.
+
+    Emits cwd, and -- when inside a git repo -- branch, HEAD, upstream, and
+    ahead/behind counts.  Degrades gracefully when git is absent or cwd is
+    not a repo.
+
+    Args:
+        cwd: The working directory to probe.
+
+    Returns:
+        List of markdown bullet lines for the ``## Working state`` section.
+    """
+    lines: list[str] = [f"- **cwd:** `{cwd}`"]
+    # Check if git repo
+    try:
+        subprocess.check_output(
+            ["git", "-C", str(cwd), "rev-parse", "--git-dir"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        lines.append("- **branch:** (not a git repo)")
+        return lines
+
+    # Branch
+    try:
+        branch = subprocess.check_output(
+            ["git", "-C", str(cwd), "branch", "--show-current"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        branch = "(unknown)"
+    lines.append(f"- **branch:** `{branch}`")
+
+    # HEAD
+    try:
+        head = subprocess.check_output(
+            ["git", "-C", str(cwd), "log", "--oneline", "-1"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        lines.append(f"- **HEAD:** `{head}`")
+    except Exception:
+        lines.append("- **HEAD:** (no commits)")
+
+    # Upstream
+    try:
+        upstream = subprocess.check_output(
+            ["git", "-C", str(cwd), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        upstream = "(no upstream)"
+    lines.append(f"- **upstream:** {upstream}")
+
+    # Ahead / behind
+    try:
+        ahead = subprocess.check_output(
+            ["git", "-C", str(cwd), "rev-list", "--count", "@{u}..HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        behind = subprocess.check_output(
+            ["git", "-C", str(cwd), "rev-list", "--count", "HEAD..@{u}"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        lines.append(f"- **ahead/behind:** {ahead} / {behind}")
+    except Exception:
+        lines.append("- **ahead/behind:** ? / ?")
+
+    return lines
+
+
+def _git_uncommitted_block(cwd: Path) -> list[str]:
+    """Return the ### Uncommitted block lines (git status --short, head 20).
+
+    Args:
+        cwd: The working directory to probe.
+
+    Returns:
+        List starting with ``"### Uncommitted"`` followed by status lines or
+        a fallback.
+    """
+    header = "### Uncommitted"
+    try:
+        output = subprocess.check_output(
+            ["git", "-C", str(cwd), "status", "--short"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        lines = output.splitlines()[:20] if output else []
+        return [header] + lines if lines else [header, "(clean)"]
+    except Exception:
+        return [header, "(no git status)"]
+
+
+def _git_recent_commits_block(cwd: Path) -> list[str]:
+    """Return the ### Recent commits block lines (git log --oneline -10).
+
+    Args:
+        cwd: The working directory to probe.
+
+    Returns:
+        List starting with ``"### Recent commits (last 10 on this branch)"``
+        followed by commit lines or a fallback.
+    """
+    header = "### Recent commits (last 10 on this branch)"
+    try:
+        output = subprocess.check_output(
+            ["git", "-C", str(cwd), "log", "--oneline", "-10"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        lines = output.splitlines() if output else []
+        return [header] + lines if lines else [header, "(no log)"]
+    except Exception:
+        return [header, "(no log)"]
+
+
+def _git_open_prs_block(cwd: Path, branch: str) -> list[str]:
+    """Return open-PR lines for *branch* via ``gh pr list``.
+
+    Falls back to ``(gh not installed)`` when gh is absent.
+
+    Args:
+        cwd: Working directory for the gh subprocess.
+        branch: Branch name to query.
+
+    Returns:
+        List starting with ``"### Open PRs from this branch"``.
+    """
+    header = "### Open PRs from this branch"
+    try:
+        subprocess.check_output(["gh", "--version"], stderr=subprocess.DEVNULL, text=True)
+    except Exception:
+        return [header, "(gh not installed)"]
+
+    try:
+        output = subprocess.check_output(
+            [
+                "gh", "pr", "list",
+                "--head", branch,
+                "--state", "open",
+                "--json", "number,title,baseRefName",
+                "--jq", '.[] | "PR #\\(.number) -> \\(.baseRefName): \\(.title)"',
+            ],
+            cwd=str(cwd),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        lines = output.splitlines()[:5] if output else []
+        return [header] + lines if lines else [header, "(none)"]
+    except Exception:
+        return [header, "(none)"]
+
+
+def _ready_beads_block(cwd: Path) -> list[str]:
+    """Return ready-beads lines via ``bd ready --limit=10`` (head 25).
+
+    Args:
+        cwd: Working directory for the bd subprocess.
+
+    Returns:
+        List starting with ``"### Ready beads (top 10)"``.
+    """
+    header = "### Ready beads (top 10)"
+    try:
+        output = subprocess.check_output(
+            ["bd", "ready", "--limit=10"],
+            cwd=str(cwd),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        lines = output.splitlines()[:25] if output else []
+        return [header] + lines if lines else [header, "- (none)"]
+    except Exception:
+        return [header, "- (bd unavailable or no results)"]
+
+
+def _nx_memory_titles_block(repo: str) -> list[str]:
+    """Return nx-memory title lines for the ``<repo>_active`` project.
+
+    Shells to ``nx memory get --project <repo>_active --title ""``.
+
+    Args:
+        repo: The repo name (sanitized) to build the project namespace.
+
+    Returns:
+        List starting with the heading.
+    """
+    proj_active = f"{repo}_active"
+    header = f"### nx memory ({proj_active}) titles"
+    try:
+        output = subprocess.check_output(
+            ["nx", "memory", "get", "--project", proj_active, "--title", ""],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        lines = output.splitlines()[:15] if output else []
+        return [header] + lines if lines else [header, "(no active-project memory)"]
+    except Exception:
+        return [header, "(no active-project memory)"]
+
+
+def _feedback_memories_block(cwd: Path) -> list[str]:
+    """Return feedback-memory filenames from the Claude Code auto-memory dir.
+
+    Computes ``PWD_KEY`` by replacing every non-alnum char in the absolute
+    cwd with a dash (mirroring Claude Code's session-dir naming).  Lists
+    ``feedback_*`` files under
+    ``~/.claude/projects/<PWD_KEY>/memory/``, head 10.
+
+    Args:
+        cwd: The working directory (absolute path).
+
+    Returns:
+        List starting with ``"### Feedback memories (auto-memory dir, if present)"``.
+    """
+    header = "### Feedback memories (auto-memory dir, if present)"
+    pwd_key = re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+    proj_dir = Path.home() / ".claude" / "projects" / pwd_key / "memory"
+    try:
+        if proj_dir.is_dir():
+            files = sorted(
+                p.name
+                for p in proj_dir.iterdir()
+                if p.name.startswith("feedback_")
+            )[:10]
+            if files:
+                return [header] + [f"- {f}" for f in files]
+        return [header, "(none; auto-memory not configured for this repo)"]
+    except OSError:
+        return [header, "(none; auto-memory not configured for this repo)"]
+
+
+def _current_branch(cwd: Path) -> str:
+    """Return current git branch name, or ``"no-branch"`` on failure.
+
+    Args:
+        cwd: Directory to probe.
+
+    Returns:
+        Branch string or ``"no-branch"``.
+    """
+    try:
+        branch = subprocess.check_output(
+            ["git", "-C", str(cwd), "branch", "--show-current"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return branch if branch else "no-branch"
+    except Exception:
+        return "no-branch"
+
+
+# ---------------------------------------------------------------------------
 # P2.2: Click group + proof subcommand
 # ---------------------------------------------------------------------------
 
@@ -996,3 +1328,92 @@ def nx_preflight(args: tuple[str, ...]) -> None:
     agent readiness.  Reports PASS/FAIL/WARN per dependency.
     """
     print(render_nx_preflight(Path.cwd()))
+
+
+@command_context.command("continuation")
+@click.argument("args", nargs=-1)
+def continuation(args: tuple[str, ...]) -> None:
+    """Print path and mechanical session context for a continuation handoff.
+
+    Computes the dated ``/tmp/nexus-continuation-*.md`` target path and
+    gathers working-state context (cwd, branch, HEAD, upstream, ahead/behind,
+    git status, recent commits, open PRs, in-progress and ready beads,
+    nx-memory titles, feedback-memory filenames).  Does NOT write the handoff
+    file -- that is the agent's responsibility via ``## Action`` in the skill.
+
+    The topic is taken from trailing ``args`` (joined with spaces).  When no
+    topic is supplied, the current git branch is used as slug.
+
+    Output mirrors the shell block in ``continuation.md`` lines 11-124.
+    """
+    cwd = Path.cwd()
+    topic = " ".join(args).strip()
+
+    # ---- Resolve repo + slug -----------------------------------------------
+    repo_safe = _sanitize_slug(cwd.name) or "repo"
+
+    branch = _current_branch(cwd)
+
+    if topic:
+        slug = _sanitize_slug(topic) or "session"
+        title_topic = topic
+    else:
+        slug = _sanitize_slug(branch) or "session"
+        title_topic = f"current branch {branch}"
+
+    # ---- Compute output path ------------------------------------------------
+    out = compute_continuation_path(
+        repo_safe=repo_safe,
+        slug=slug,
+        now=datetime.now(),
+        out_dir=Path("/tmp"),
+        exists=Path.exists,
+    )
+
+    # ---- Emit header lines --------------------------------------------------
+    print(f"**Target file:** `{out}`")
+    print("")
+    print(f"**Topic:** {title_topic}")
+    print("")
+
+    # ---- Working state ------------------------------------------------------
+    print("## Working state")
+    print("")
+    for line in _git_working_state(cwd):
+        print(line)
+    print("")
+
+    # ---- Uncommitted --------------------------------------------------------
+    for line in _git_uncommitted_block(cwd):
+        print(line)
+    print("")
+
+    # ---- Recent commits -----------------------------------------------------
+    for line in _git_recent_commits_block(cwd):
+        print(line)
+    print("")
+
+    # ---- Open PRs -----------------------------------------------------------
+    for line in _git_open_prs_block(cwd, branch):
+        print(line)
+    print("")
+
+    # ---- In-progress beads --------------------------------------------------
+    for line in beads_block(cwd, ["--status=in_progress", "--limit=10"], "### In-progress beads"):
+        print(line)
+    print("")
+
+    # ---- Ready beads --------------------------------------------------------
+    for line in _ready_beads_block(cwd):
+        print(line)
+    print("")
+
+    # ---- nx memory titles ---------------------------------------------------
+    for line in _nx_memory_titles_block(repo_safe):
+        print(line)
+    print("")
+
+    # ---- Feedback memories --------------------------------------------------
+    for line in _feedback_memories_block(cwd):
+        print(line)
+    print("")

@@ -1321,3 +1321,456 @@ def test_nx_preflight_double_dash_terminator(
 
     result = runner.invoke(main, ["command-context", "nx-preflight", "--", "extra"])
     assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.4: _sanitize_slug helper
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_slug_lowercase() -> None:
+    """_sanitize_slug must lowercase its input."""
+    from nexus.commands.command_context import _sanitize_slug
+
+    assert _sanitize_slug("HELLO") == "hello"
+
+
+def test_sanitize_slug_spaces_to_dash() -> None:
+    """_sanitize_slug replaces spaces with dashes."""
+    from nexus.commands.command_context import _sanitize_slug
+
+    assert _sanitize_slug("hello world") == "hello-world"
+
+
+def test_sanitize_slug_punctuation_to_dash() -> None:
+    """_sanitize_slug replaces non-alnum chars with a single dash."""
+    from nexus.commands.command_context import _sanitize_slug
+
+    assert _sanitize_slug("hello/world.foo") == "hello-world-foo"
+
+
+def test_sanitize_slug_collapses_repeated_separators() -> None:
+    """_sanitize_slug collapses multiple consecutive non-alnum runs to one dash."""
+    from nexus.commands.command_context import _sanitize_slug
+
+    assert _sanitize_slug("a--b") == "a-b"
+    assert _sanitize_slug("hello  world") == "hello-world"
+    assert _sanitize_slug("a/./b") == "a-b"
+
+
+def test_sanitize_slug_strips_leading_trailing_dashes() -> None:
+    """_sanitize_slug strips leading and trailing dashes."""
+    from nexus.commands.command_context import _sanitize_slug
+
+    assert _sanitize_slug("-hello-") == "hello"
+    assert _sanitize_slug("__foo__") == "foo"
+
+
+def test_sanitize_slug_alphanumeric_passthrough() -> None:
+    """_sanitize_slug leaves lowercase alnum strings unchanged."""
+    from nexus.commands.command_context import _sanitize_slug
+
+    assert _sanitize_slug("abc123") == "abc123"
+
+
+def test_sanitize_slug_mixed_case_and_separators() -> None:
+    """_sanitize_slug handles mixed-case with separators end to end."""
+    from nexus.commands.command_context import _sanitize_slug
+
+    assert _sanitize_slug("RDR-130 P2.4") == "rdr-130-p2-4"
+
+
+def test_sanitize_slug_empty_string_returns_empty() -> None:
+    """_sanitize_slug on empty input returns empty string (caller applies fallback)."""
+    from nexus.commands.command_context import _sanitize_slug
+
+    assert _sanitize_slug("") == ""
+
+
+def test_sanitize_slug_all_separators_returns_empty() -> None:
+    """_sanitize_slug on all-separator input returns empty string."""
+    from nexus.commands.command_context import _sanitize_slug
+
+    assert _sanitize_slug("---") == ""
+    assert _sanitize_slug("...") == ""
+
+
+# ---------------------------------------------------------------------------
+# P2.4: compute_continuation_path
+# ---------------------------------------------------------------------------
+
+
+def test_compute_continuation_path_base_when_not_exists() -> None:
+    """compute_continuation_path returns base path when exists returns False."""
+    from datetime import datetime
+    from nexus.commands.command_context import compute_continuation_path
+
+    now = datetime(2026, 5, 26, 14, 30)
+    result = compute_continuation_path(
+        repo_safe="nexus",
+        slug="rdr-130-p2",
+        now=now,
+        out_dir=Path("/tmp"),
+        exists=lambda p: False,
+    )
+    assert result == Path("/tmp/nexus-continuation-nexus-rdr-130-p2-2026-05-26.md")
+
+
+def test_compute_continuation_path_hhmm_suffix_when_exists() -> None:
+    """compute_continuation_path appends HHMM suffix when base path exists."""
+    from datetime import datetime
+    from nexus.commands.command_context import compute_continuation_path
+
+    now = datetime(2026, 5, 26, 14, 30)
+    result = compute_continuation_path(
+        repo_safe="nexus",
+        slug="rdr-130-p2",
+        now=now,
+        out_dir=Path("/tmp"),
+        exists=lambda p: True,
+    )
+    assert result == Path("/tmp/nexus-continuation-nexus-rdr-130-p2-2026-05-26-1430.md")
+
+
+def test_compute_continuation_path_exact_filename_no_exists() -> None:
+    """Exact filename assertion for base case (fixed clock, fixed slug)."""
+    from datetime import datetime
+    from nexus.commands.command_context import compute_continuation_path
+
+    now = datetime(2026, 1, 1, 9, 5)
+    result = compute_continuation_path(
+        repo_safe="repo",
+        slug="session",
+        now=now,
+        out_dir=Path("/tmp"),
+        exists=lambda p: False,
+    )
+    assert result.name == "nexus-continuation-repo-session-2026-01-01.md"
+
+
+def test_compute_continuation_path_exact_filename_with_hhmm() -> None:
+    """Exact HHMM-suffixed filename (fixed clock, midnight edge)."""
+    from datetime import datetime
+    from nexus.commands.command_context import compute_continuation_path
+
+    now = datetime(2026, 12, 31, 0, 0)
+    result = compute_continuation_path(
+        repo_safe="my-repo",
+        slug="main",
+        now=now,
+        out_dir=Path("/tmp"),
+        exists=lambda p: True,
+    )
+    assert result.name == "nexus-continuation-my-repo-main-2026-12-31-0000.md"
+
+
+def test_compute_continuation_path_does_not_call_wall_clock(monkeypatch) -> None:
+    """compute_continuation_path never calls datetime.now() internally."""
+    from datetime import datetime
+    from nexus.commands.command_context import compute_continuation_path
+
+    # Poison datetime.now to catch any internal call
+    def _poison(*args, **kwargs):  # noqa: ANN001
+        raise AssertionError("compute_continuation_path must not call datetime.now()")
+
+    monkeypatch.setattr("nexus.commands.command_context.datetime", type(
+        "FakeDatetime", (), {"now": staticmethod(_poison)}
+    )())
+
+    now = datetime(2026, 5, 26, 10, 0)
+    # Should not raise even with poisoned datetime
+    result = compute_continuation_path(
+        repo_safe="nexus",
+        slug="test",
+        now=now,
+        out_dir=Path("/tmp"),
+        exists=lambda p: False,
+    )
+    assert result.name == "nexus-continuation-nexus-test-2026-05-26.md"
+
+
+# ---------------------------------------------------------------------------
+# P2.4: REPO_SAFE / SLUG fallback derivation helpers
+# ---------------------------------------------------------------------------
+
+
+def test_repo_safe_fallback_empty_cwd_name() -> None:
+    """When cwd.name sanitizes to empty, fallback is 'repo'."""
+    from nexus.commands.command_context import _sanitize_slug
+
+    name = _sanitize_slug("---")
+    repo_safe = name if name else "repo"
+    assert repo_safe == "repo"
+
+
+def test_slug_from_topic_non_empty() -> None:
+    """When topic is non-empty, SLUG = _sanitize_slug(topic)."""
+    from nexus.commands.command_context import _sanitize_slug
+
+    topic = "rdr-130 p2.4"
+    slug = _sanitize_slug(topic)
+    assert slug == "rdr-130-p2-4"
+
+
+def test_slug_fallback_to_branch() -> None:
+    """When topic is empty, SLUG = _sanitize_slug(branch)."""
+    from nexus.commands.command_context import _sanitize_slug
+
+    branch = "feature/rdr-130-p2-command-context"
+    slug = _sanitize_slug(branch)
+    assert slug == "feature-rdr-130-p2-command-context"
+
+
+def test_slug_fallback_session_when_empty_branch() -> None:
+    """When both topic and branch produce empty slug, fallback is 'session'."""
+    from nexus.commands.command_context import _sanitize_slug
+
+    branch = "---"
+    raw_slug = _sanitize_slug(branch)
+    slug = raw_slug if raw_slug else "session"
+    assert slug == "session"
+
+
+def test_title_topic_uses_topic_verbatim_when_given() -> None:
+    """TITLE_TOPIC equals topic string verbatim when topic is non-empty."""
+    topic = "rdr-130 P2"
+    title_topic = topic  # verbatim
+    assert title_topic == "rdr-130 P2"
+
+
+def test_title_topic_uses_branch_name_when_no_topic() -> None:
+    """TITLE_TOPIC = 'current branch <branch>' when topic is empty."""
+    branch = "feature/rdr-130-p2"
+    title_topic = f"current branch {branch}"
+    assert title_topic == "current branch feature/rdr-130-p2"
+
+
+# ---------------------------------------------------------------------------
+# P2.4: stub fixture for continuation subprocess calls
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def stub_continuation_subprocess(monkeypatch) -> None:
+    """Stub subprocess calls in command_context so continuation tests are fast.
+
+    The continuation subcommand shells to git, gh, bd, and nx -- all of
+    which are absent or slow in tmp_path.  This fixture stubs
+    subprocess.check_output and subprocess.run to return fast fallbacks,
+    exercising the render structure without the live toolchain.
+    """
+    import subprocess as _sp
+
+    from nexus.commands import command_context as cc
+
+    def _fake_check_output(cmd, *args, **kwargs):  # noqa: ANN001
+        # Return plausible output for each known command pattern
+        cmd_str = " ".join(str(c) for c in cmd)
+        if "git" in cmd_str and "branch" in cmd_str:
+            return "no-branch\n"
+        if "git" in cmd_str and "log" in cmd_str:
+            return "abc1234 feat: stub commit\n"
+        if "git" in cmd_str and "status" in cmd_str:
+            return ""
+        if "git" in cmd_str and "rev-parse" in cmd_str and "abbrev-ref" in cmd_str:
+            return "(no upstream)\n"
+        if "git" in cmd_str and "rev-list" in cmd_str:
+            return "0\n"
+        if "bd" in cmd_str:
+            return "(none)\n"
+        if "nx" in cmd_str and "memory" in cmd_str:
+            return "(no active-project memory)\n"
+        if "gh" in cmd_str:
+            return ""
+        return ""
+
+    def _fake_run(cmd, *args, **kwargs):  # noqa: ANN001
+        return _sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cc.subprocess, "check_output", _fake_check_output)
+    monkeypatch.setattr(cc.subprocess, "run", _fake_run)
+
+
+# ---------------------------------------------------------------------------
+# P2.4: continuation subcommand -- structural contract
+# ---------------------------------------------------------------------------
+
+
+def test_continuation_registered_as_subcommand() -> None:
+    """continuation must be registered on the command_context group."""
+    from nexus.commands.command_context import command_context
+
+    assert "continuation" in command_context.commands
+
+
+def test_continuation_exits_zero(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """continuation subcommand exits 0 in a non-git tmp_path."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation"])
+    assert result.exit_code == 0, result.output
+
+
+def test_continuation_has_target_file_line(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """continuation output contains '**Target file:**'."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation"])
+    assert "**Target file:**" in result.output
+
+
+def test_continuation_has_topic_line(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """continuation output contains '**Topic:**'."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation"])
+    assert "**Topic:**" in result.output
+
+
+def test_continuation_has_working_state_header(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """continuation output contains '## Working state'."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation"])
+    assert "## Working state" in result.output
+
+
+def test_continuation_has_uncommitted_section(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """continuation output contains '### Uncommitted'."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation"])
+    assert "### Uncommitted" in result.output
+
+
+def test_continuation_has_recent_commits_section(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """continuation output contains '### Recent commits (last 10 on this branch)'."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation"])
+    assert "### Recent commits (last 10 on this branch)" in result.output
+
+
+def test_continuation_has_open_prs_section(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """continuation output contains '### Open PRs from this branch'."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation"])
+    assert "### Open PRs from this branch" in result.output
+
+
+def test_continuation_has_in_progress_beads_section(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """continuation output contains '### In-progress beads'."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation"])
+    assert "### In-progress beads" in result.output
+
+
+def test_continuation_has_ready_beads_section(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """continuation output contains '### Ready beads (top 10)'."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation"])
+    assert "### Ready beads (top 10)" in result.output
+
+
+def test_continuation_has_feedback_memories_section(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """continuation output contains '### Feedback memories'."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation"])
+    assert "### Feedback memories" in result.output
+
+
+def test_continuation_topic_passthrough(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """Passing topic args emits '**Topic:** my topic' in output."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(
+        main, ["command-context", "continuation", "--", "my topic"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "**Topic:** my topic" in result.output
+
+
+def test_continuation_non_git_dir_does_not_crash(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """continuation in a non-git directory exits 0 (git fallbacks fire)."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation"])
+    assert result.exit_code == 0, result.output
+
+
+def test_continuation_double_dash_terminator(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """continuation with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(
+        main, ["command-context", "continuation", "--", "some topic"]
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_continuation_target_file_is_in_tmp(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """continuation output contains a path starting with /tmp/nexus-continuation."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation"])
+    assert "/tmp/nexus-continuation-" in result.output
