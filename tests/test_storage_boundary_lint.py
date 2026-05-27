@@ -404,6 +404,6 @@ def test_dual_population_baseline_locked():
     # the taxonomy CLI factory (raw-cursor reads + chroma-interleaved writes
     # that cannot cross the daemon RPC). Each survivor's ``# epsilon-allow:``
     # reason states why it cannot route.
-    assert result.t2database_constructions == 30, (
+    assert result.t2database_constructions == 31, (
         f"T2Database documented-construction baseline moved: {result.t2database_constructions}"
     )
