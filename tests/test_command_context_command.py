@@ -214,7 +214,9 @@ def test_project_type_block_has_header_and_types(tmp_path: Path) -> None:
 
     lines = project_type_block(tmp_path)
     assert lines[0] == "**Project type:**"
-    assert len(lines) >= 2
+    # Single Python marker -> exactly header + one type line.
+    assert len(lines) == 2
+    assert lines[1] == "- Python"
 
 
 def test_top_level_structure_block_uses_passed_root(tmp_path: Path) -> None:
@@ -301,7 +303,8 @@ def test_source_locations_block_max_10(tmp_path: Path) -> None:
 
     lines = source_locations_block(tmp_path)
     src_lines = [ln for ln in lines if ln.startswith("- ")]
-    assert len(src_lines) <= 10
+    # 15 src dirs exist but the cap is 10 -- exact, so a removed cap is caught.
+    assert len(src_lines) == 10
 
 
 def test_source_locations_block_no_src(tmp_path: Path) -> None:
@@ -640,6 +643,22 @@ def test_debug_has_active_beads(tmp_path: Path, monkeypatch) -> None:
 
     result = runner.invoke(main, ["command-context", "debug"])
     assert "### Active Beads" in result.output
+
+
+def test_debug_surefire_lists_only_failure_reports(tmp_path: Path, monkeypatch) -> None:
+    """Under 'Recent Test Failures', list only surefire reports that contain a
+    FAILURE/ERROR, not passing reports (mirrors the original grep -l semantics)."""
+    surefire = tmp_path / "target" / "surefire-reports"
+    surefire.mkdir(parents=True)
+    (surefire / "com.example.FailingTest.txt").write_text("Tests run: 1, FAILURE!")
+    (surefire / "com.example.PassingTest.txt").write_text("Tests run: 1, OK")
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "debug"])
+    assert "com.example.FailingTest.txt" in result.output
+    assert "com.example.PassingTest.txt" not in result.output
 
 
 def test_debug_double_dash_terminator(tmp_path: Path, monkeypatch) -> None:
@@ -1798,6 +1817,25 @@ def test_continuation_session_slug_fallback_in_target_path(
     assert result.exit_code == 0, result.output
     # repo segment came from cwd basename; slug fell back to "session".
     assert "nexus-continuation-myproj-session-" in result.output
+
+
+def test_continuation_nx_memory_uses_raw_basename(
+    tmp_path: Path, monkeypatch, stub_continuation_subprocess
+) -> None:
+    """The <repo>_active memory project uses the RAW cwd basename, not the
+    sanitized slug (matches session_start_hook's basename convention)."""
+    named = tmp_path / "MyRepo"
+    named.mkdir()
+    monkeypatch.chdir(named)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "continuation"])
+    assert result.exit_code == 0, result.output
+    # Raw "MyRepo", not the sanitized slug "myrepo".
+    assert "### nx memory (MyRepo_active) titles" in result.output
+    # The handoff filename DOES use the sanitized slug.
+    assert "nexus-continuation-myrepo-" in result.output
 
 
 def test_continuation_double_dash_terminator(

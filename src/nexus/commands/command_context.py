@@ -63,6 +63,26 @@ _UNKNOWN = "- Unknown (no recognized build/marker file)"
 # Directories excluded from source-location scanning
 _SOURCE_SCAN_EXCLUDE: frozenset[str] = frozenset({"node_modules", "target", ".git"})
 
+# Ceiling for any tool subprocess a preamble shells out to (git/bd/gh/nx).
+# A preamble runs synchronously at slash-command invocation; without a bound a
+# wedged tool (e.g. ``nx doctor`` against a stuck daemon) would hang it
+# indefinitely.  ``subprocess.TimeoutExpired`` subclasses ``Exception``, so the
+# per-helper ``try/except Exception`` already routes a timeout to the graceful
+# fallback path.
+_PREAMBLE_TIMEOUT: int = 15
+
+
+def _check_output(cmd: list[str], **kwargs: object) -> str:
+    """``subprocess.check_output`` with a default ``timeout`` and text decoding.
+
+    Every preamble tool call routes through here so none can hang the
+    invocation.  Callers may still override ``timeout``/``stderr``/``text``.
+    """
+    kwargs.setdefault("timeout", _PREAMBLE_TIMEOUT)
+    kwargs.setdefault("stderr", subprocess.DEVNULL)
+    kwargs.setdefault("text", True)
+    return subprocess.check_output(cmd, **kwargs)  # type: ignore[no-any-return,arg-type]
+
 
 def detect_project_types(root: Path) -> list[str]:
     """Return a list of ``"- <Stack>"`` strings for every marker found in *root*.
@@ -130,7 +150,7 @@ def git_branch_block(root: Path) -> list[str]:
         ``["**Branch:** <branch>"]`` when successful, ``[]`` otherwise.
     """
     try:
-        branch = subprocess.check_output(
+        branch = _check_output(
             ["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
             stderr=subprocess.DEVNULL,
             text=True,
@@ -140,32 +160,36 @@ def git_branch_block(root: Path) -> list[str]:
         return []
 
 
-def beads_block(root: Path, args: list[str], heading: str) -> list[str]:
+def beads_block(root: Path, args: list[str], heading: str | None) -> list[str]:
     """Return bead-list lines under *heading* by shelling to ``bd list <args>``.
 
-    Degrades gracefully when ``bd`` is absent or exits non-zero: returns
-    ``[heading, "- (bd unavailable or no results)"]``.
+    Degrades gracefully when ``bd`` is absent or exits non-zero.
 
     Args:
         root: Working directory for the ``bd`` subprocess.
         args: Extra arguments forwarded verbatim to ``bd list``.
         heading: The markdown heading string to prepend (e.g. ``"### Beads"``).
+            Pass ``None`` to append the bead lines under a preceding section
+            without emitting a second heading (avoids a blank-line artifact when
+            two ``bd list`` calls share one section).
 
     Returns:
-        List of strings: heading, followed by bd output lines or a fallback.
+        List of strings: the optional heading, followed by bd output lines or a
+        fallback.
     """
+    prefix = [heading] if heading is not None else []
     try:
-        output = subprocess.check_output(
+        output = _check_output(
             ["bd", "list"] + args,
             cwd=str(root),
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
         if output:
-            return [heading] + output.splitlines()
-        return [heading, "- (no beads found)"]
+            return prefix + output.splitlines()
+        return prefix + ["- (no beads found)"]
     except Exception:
-        return [heading, "- (bd unavailable or no results)"]
+        return prefix + ["- (bd unavailable or no results)"]
 
 
 def top_level_structure_block(root: Path) -> list[str]:
@@ -286,7 +310,7 @@ def modified_files_block(root: Path) -> list[str]:
     """
     header = "### Modified Files"
     try:
-        output = subprocess.check_output(
+        output = _check_output(
             ["git", "-C", str(root), "diff", "--name-only", "HEAD"],
             stderr=subprocess.DEVNULL,
             text=True,
@@ -313,7 +337,7 @@ def diff_stat_block(root: Path) -> list[str]:
     """
     header = "### Diff Summary"
     try:
-        output = subprocess.check_output(
+        output = _check_output(
             ["git", "-C", str(root), "diff", "--stat", "HEAD"],
             stderr=subprocess.DEVNULL,
             text=True,
@@ -414,7 +438,7 @@ def tool_check_block(tool: str, section_heading: str, fail_message: str) -> list
     """
     lines: list[str] = [section_heading, ""]
     try:
-        version = subprocess.check_output(
+        version = _check_output(
             [tool, "--version"],
             stderr=subprocess.STDOUT,
             text=True,
@@ -443,6 +467,7 @@ def nx_doctor_block() -> list[str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            timeout=_PREAMBLE_TIMEOUT,
         )
         lines += proc.stdout.splitlines()
         lines.append("")
@@ -452,6 +477,10 @@ def nx_doctor_block() -> list[str]:
             lines.append("Status: FAIL - run 'nx doctor' for details")
     except FileNotFoundError:
         lines.append("Status: SKIP - nx not installed")
+    except Exception:
+        # TimeoutExpired (wedged daemon) or any other failure: degrade rather
+        # than hang or crash the preflight preamble.
+        lines.append("Status: SKIP - nx doctor unavailable")
     lines.append("")
     return lines
 
@@ -485,31 +514,30 @@ def claude_md_block(root: Path) -> list[str]:
     lines.append("[x] CLAUDE.md exists")
     try:
         content = claude_md.read_text(encoding="utf-8")
-        import re as _re
-        lang_match = _re.search(
+        lang_match = re.search(
             r"Python|Java|Go|Rust|TypeScript|Node\.js|C\+\+|C#|Ruby|Kotlin|Swift|Scala",
             content,
-            _re.IGNORECASE,
+            re.IGNORECASE,
         )
         if lang_match:
             lines.append(f"[x] Language detected: {lang_match.group(0)}")
         else:
             lines.append("[?] Language: not found (optional - agents can detect from build files)")
 
-        build_match = _re.search(
+        build_match = re.search(
             r"uv|maven|mvn|cargo|go build|go mod|npm|yarn|pnpm|gradle|make|cmake",
             content,
-            _re.IGNORECASE,
+            re.IGNORECASE,
         )
         if build_match:
             lines.append(f"[x] Build system detected: {build_match.group(0)}")
         else:
             lines.append("[?] Build system: not found (optional)")
 
-        test_match = _re.search(
+        test_match = re.search(
             r"pytest|mvn test|go test|cargo test|npm test|jest|vitest|make test|uv run pytest",
             content,
-            _re.IGNORECASE,
+            re.IGNORECASE,
         )
         if test_match:
             lines.append(f"[x] Test command detected: {test_match.group(0)}")
@@ -668,7 +696,7 @@ def _git_working_state(cwd: Path) -> list[str]:
     lines: list[str] = [f"- **cwd:** `{cwd}`"]
     # Check if git repo
     try:
-        subprocess.check_output(
+        _check_output(
             ["git", "-C", str(cwd), "rev-parse", "--git-dir"],
             stderr=subprocess.DEVNULL,
             text=True,
@@ -679,7 +707,7 @@ def _git_working_state(cwd: Path) -> list[str]:
 
     # Branch
     try:
-        branch = subprocess.check_output(
+        branch = _check_output(
             ["git", "-C", str(cwd), "branch", "--show-current"],
             stderr=subprocess.DEVNULL,
             text=True,
@@ -690,7 +718,7 @@ def _git_working_state(cwd: Path) -> list[str]:
 
     # HEAD
     try:
-        head = subprocess.check_output(
+        head = _check_output(
             ["git", "-C", str(cwd), "log", "--oneline", "-1"],
             stderr=subprocess.DEVNULL,
             text=True,
@@ -701,7 +729,7 @@ def _git_working_state(cwd: Path) -> list[str]:
 
     # Upstream
     try:
-        upstream = subprocess.check_output(
+        upstream = _check_output(
             ["git", "-C", str(cwd), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
             stderr=subprocess.DEVNULL,
             text=True,
@@ -712,12 +740,12 @@ def _git_working_state(cwd: Path) -> list[str]:
 
     # Ahead / behind
     try:
-        ahead = subprocess.check_output(
+        ahead = _check_output(
             ["git", "-C", str(cwd), "rev-list", "--count", "@{u}..HEAD"],
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
-        behind = subprocess.check_output(
+        behind = _check_output(
             ["git", "-C", str(cwd), "rev-list", "--count", "HEAD..@{u}"],
             stderr=subprocess.DEVNULL,
             text=True,
@@ -741,7 +769,7 @@ def _git_uncommitted_block(cwd: Path) -> list[str]:
     """
     header = "### Uncommitted"
     try:
-        output = subprocess.check_output(
+        output = _check_output(
             ["git", "-C", str(cwd), "status", "--short"],
             stderr=subprocess.DEVNULL,
             text=True,
@@ -764,7 +792,7 @@ def _git_recent_commits_block(cwd: Path) -> list[str]:
     """
     header = "### Recent commits (last 10 on this branch)"
     try:
-        output = subprocess.check_output(
+        output = _check_output(
             ["git", "-C", str(cwd), "log", "--oneline", "-10"],
             stderr=subprocess.DEVNULL,
             text=True,
@@ -789,12 +817,12 @@ def _git_open_prs_block(cwd: Path, branch: str) -> list[str]:
     """
     header = "### Open PRs from this branch"
     try:
-        subprocess.check_output(["gh", "--version"], stderr=subprocess.DEVNULL, text=True)
+        _check_output(["gh", "--version"], stderr=subprocess.DEVNULL, text=True)
     except Exception:
         return [header, "(gh not installed)"]
 
     try:
-        output = subprocess.check_output(
+        output = _check_output(
             [
                 "gh", "pr", "list",
                 "--head", branch,
@@ -823,7 +851,7 @@ def _ready_beads_block(cwd: Path) -> list[str]:
     """
     header = "### Ready beads (top 10)"
     try:
-        output = subprocess.check_output(
+        output = _check_output(
             ["bd", "ready", "--limit=10"],
             cwd=str(cwd),
             stderr=subprocess.DEVNULL,
@@ -841,7 +869,13 @@ def _nx_memory_titles_block(repo: str) -> list[str]:
     Shells to ``nx memory get --project <repo>_active --title ""``.
 
     Args:
-        repo: The repo name (sanitized) to build the project namespace.
+        repo: The RAW repo basename (``cwd.name``), matching the
+            ``<basename>_active`` convention that ``session_start_hook`` uses
+            (``os.path.basename(os.path.realpath(cwd))``).  NOT the sanitized
+            slug: the sanitized form is only for the on-disk handoff filename.
+            (The original continuation shell left ``$REPO`` unset, so it
+            queried the prefixless ``_active`` project; routing the real
+            basename here is the intended fix.)
 
     Returns:
         List starting with the heading.
@@ -849,7 +883,7 @@ def _nx_memory_titles_block(repo: str) -> list[str]:
     proj_active = f"{repo}_active"
     header = f"### nx memory ({proj_active}) titles"
     try:
-        output = subprocess.check_output(
+        output = _check_output(
             ["nx", "memory", "get", "--project", proj_active, "--title", ""],
             stderr=subprocess.DEVNULL,
             text=True,
@@ -901,7 +935,7 @@ def _current_branch(cwd: Path) -> str:
         Branch string or ``"no-branch"``.
     """
     try:
-        branch = subprocess.check_output(
+        branch = _check_output(
             ["git", "-C", str(cwd), "branch", "--show-current"],
             stderr=subprocess.DEVNULL,
             text=True,
@@ -966,7 +1000,7 @@ def architecture(args: tuple[str, ...]) -> None:
     parts.append("")
     parts.extend(beads_block(cwd, ["--status=in_progress", "--limit=5"], "### Active Beads"))
     parts.append("")
-    parts.extend(beads_block(cwd, ["--type=epic", "--limit=3"], ""))
+    parts.extend(beads_block(cwd, ["--type=epic", "--limit=3"], None))
     parts.append("")
     parts.extend([
         "### Pipeline Position",
@@ -999,7 +1033,7 @@ def create_plan(args: tuple[str, ...]) -> None:
         parts.append("")
     parts.extend(beads_block(cwd, ["--type=epic", "--limit=5"], "### Existing Epics/Features"))
     parts.append("")
-    parts.extend(beads_block(cwd, ["--type=feature", "--status=open", "--limit=5"], ""))
+    parts.extend(beads_block(cwd, ["--type=feature", "--status=open", "--limit=5"], None))
     parts.append("")
     parts.append("### Project Structure")
     parts.extend(project_type_block(cwd))
@@ -1051,11 +1085,21 @@ def debug(args: tuple[str, ...]) -> None:
     surefire = cwd / "target" / "surefire-reports"
     reports = cwd / "reports"
     if surefire.is_dir():
-        failures = sorted(
-            str(p.relative_to(cwd))
-            for p in surefire.glob("*.txt")
-            if p.is_file()
-        )[:5]
+        # Match the original shell semantics (grep -l "FAILURE\|ERROR"): list
+        # only reports that actually contain a failure/error, not every report
+        # file, so the "### Recent Test Failures" heading is truthful.
+        failures: list[str] = []
+        for p in sorted(surefire.glob("*.txt")):
+            if not p.is_file():
+                continue
+            try:
+                content = p.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if "FAILURE" in content or "ERROR" in content:
+                failures.append(str(p.relative_to(cwd)))
+                if len(failures) >= 5:
+                    break
         if failures:
             parts.extend(failures)
         else:
@@ -1299,7 +1343,7 @@ def test_validate(args: tuple[str, ...]) -> None:
     if branch:
         parts.append("### Recently Modified Files")
         try:
-            output = subprocess.check_output(
+            output = _check_output(
                 ["git", "-C", str(cwd), "diff", "--name-only", "HEAD~5"],
                 stderr=subprocess.DEVNULL,
                 text=True,
@@ -1409,7 +1453,10 @@ def continuation(args: tuple[str, ...]) -> None:
     print("")
 
     # ---- nx memory titles ---------------------------------------------------
-    for line in _nx_memory_titles_block(repo_safe):
+    # Raw basename, not repo_safe: the <basename>_active memory project follows
+    # session_start_hook's unsanitized basename convention (repo_safe is only
+    # for the handoff filename).
+    for line in _nx_memory_titles_block(cwd.name):
         print(line)
     print("")
 
