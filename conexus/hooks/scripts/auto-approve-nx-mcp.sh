@@ -33,6 +33,11 @@ case "$TOOL_NAME" in
   mcp__plugin_conexus_nexus__operator_rank|\
   mcp__plugin_conexus_nexus__operator_compare|\
   mcp__plugin_conexus_nexus__operator_generate|\
+  mcp__plugin_conexus_nexus__operator_filter|\
+  mcp__plugin_conexus_nexus__operator_check|\
+  mcp__plugin_conexus_nexus__operator_verify|\
+  mcp__plugin_conexus_nexus__operator_groupby|\
+  mcp__plugin_conexus_nexus__operator_aggregate|\
   mcp__plugin_conexus_nexus-catalog__search|\
   mcp__plugin_conexus_nexus-catalog__show|\
   mcp__plugin_conexus_nexus-catalog__list|\
