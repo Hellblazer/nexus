@@ -397,3 +397,927 @@ def test_spdx_header_is_agpl() -> None:
     src = Path(_mod.__file__).read_text(encoding="utf-8")
     assert "AGPL-3.0-or-later" in src
     assert "Apache-2.0" not in src
+
+
+# ---------------------------------------------------------------------------
+# P2.3: architecture subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_architecture_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """architecture subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "architecture"])
+    assert result.exit_code == 0, result.output
+
+
+def test_architecture_has_context_header(tmp_path: Path, monkeypatch) -> None:
+    """architecture output contains ## Context header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "architecture"])
+    assert "## Context" in result.output
+
+
+def test_architecture_has_project_structure(tmp_path: Path, monkeypatch) -> None:
+    """architecture output contains ### Project Structure heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "architecture"])
+    assert "### Project Structure" in result.output
+
+
+def test_architecture_has_active_beads(tmp_path: Path, monkeypatch) -> None:
+    """architecture output contains ### Active Beads heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "architecture"])
+    assert "### Active Beads" in result.output
+
+
+def test_architecture_has_pipeline_position(tmp_path: Path, monkeypatch) -> None:
+    """architecture output contains ### Pipeline Position with static text."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "architecture"])
+    assert "### Pipeline Position" in result.output
+    assert "strategic-planner" in result.output
+    assert "architect-planner" in result.output
+
+
+def test_architecture_has_tip(tmp_path: Path, monkeypatch) -> None:
+    """architecture output contains ### Tip section."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "architecture"])
+    assert "### Tip" in result.output
+
+
+def test_architecture_double_dash_terminator(tmp_path: Path, monkeypatch) -> None:
+    """architecture with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "architecture", "--", "extra"])
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.3: create-plan subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_create_plan_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """create-plan subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "create-plan"])
+    assert result.exit_code == 0, result.output
+
+
+def test_create_plan_has_context_header(tmp_path: Path, monkeypatch) -> None:
+    """create-plan output contains ## Context header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "create-plan"])
+    assert "## Context" in result.output
+
+
+def test_create_plan_has_existing_epics(tmp_path: Path, monkeypatch) -> None:
+    """create-plan output contains ### Existing Epics/Features heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "create-plan"])
+    assert "### Existing Epics/Features" in result.output
+
+
+def test_create_plan_has_project_structure(tmp_path: Path, monkeypatch) -> None:
+    """create-plan output contains ### Project Structure heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "create-plan"])
+    assert "### Project Structure" in result.output
+
+
+def test_create_plan_double_dash_terminator(tmp_path: Path, monkeypatch) -> None:
+    """create-plan with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "create-plan", "--", "extra"])
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.3: implement subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_implement_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """implement subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "implement"])
+    assert result.exit_code == 0, result.output
+
+
+def test_implement_has_context_header(tmp_path: Path, monkeypatch) -> None:
+    """implement output contains ## Context header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "implement"])
+    assert "## Context" in result.output
+
+
+def test_implement_has_plan_audit_note(tmp_path: Path, monkeypatch) -> None:
+    """implement output contains the plan-audit Note static line."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "implement"])
+    assert "**Note:**" in result.output
+    assert "plan" in result.output.lower()
+
+
+def test_implement_has_active_work(tmp_path: Path, monkeypatch) -> None:
+    """implement output contains ### Active Work heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "implement"])
+    assert "### Active Work" in result.output
+
+
+def test_implement_has_project_info(tmp_path: Path, monkeypatch) -> None:
+    """implement output contains ### Project Info heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "implement"])
+    assert "### Project Info" in result.output
+
+
+def test_implement_double_dash_terminator(tmp_path: Path, monkeypatch) -> None:
+    """implement with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "implement", "--", "extra"])
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.3: debug subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_debug_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """debug subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "debug"])
+    assert result.exit_code == 0, result.output
+
+
+def test_debug_has_context_header(tmp_path: Path, monkeypatch) -> None:
+    """debug output contains ## Context header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "debug"])
+    assert "## Context" in result.output
+
+
+def test_debug_has_recent_test_failures(tmp_path: Path, monkeypatch) -> None:
+    """debug output contains ### Recent Test Failures heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "debug"])
+    assert "### Recent Test Failures" in result.output
+
+
+def test_debug_has_active_beads(tmp_path: Path, monkeypatch) -> None:
+    """debug output contains ### Active Beads heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "debug"])
+    assert "### Active Beads" in result.output
+
+
+def test_debug_double_dash_terminator(tmp_path: Path, monkeypatch) -> None:
+    """debug with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "debug", "--", "some issue"])
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.3: deep-analysis subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_deep_analysis_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """deep-analysis subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "deep-analysis"])
+    assert result.exit_code == 0, result.output
+
+
+def test_deep_analysis_has_context_header(tmp_path: Path, monkeypatch) -> None:
+    """deep-analysis output contains ## Context header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "deep-analysis"])
+    assert "## Context" in result.output
+
+
+def test_deep_analysis_has_active_beads(tmp_path: Path, monkeypatch) -> None:
+    """deep-analysis output contains ### Active Beads heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "deep-analysis"])
+    assert "### Active Beads" in result.output
+
+
+def test_deep_analysis_has_tip(tmp_path: Path, monkeypatch) -> None:
+    """deep-analysis output contains ### Tip section."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "deep-analysis"])
+    assert "### Tip" in result.output
+
+
+def test_deep_analysis_double_dash_terminator(tmp_path: Path, monkeypatch) -> None:
+    """deep-analysis with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "deep-analysis", "--", "extra"])
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.3: enrich-plan subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_enrich_plan_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """enrich-plan subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "enrich-plan"])
+    assert result.exit_code == 0, result.output
+
+
+def test_enrich_plan_has_context_header(tmp_path: Path, monkeypatch) -> None:
+    """enrich-plan output contains ## Context header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "enrich-plan"])
+    assert "## Context" in result.output
+
+
+def test_enrich_plan_has_related_beads(tmp_path: Path, monkeypatch) -> None:
+    """enrich-plan output contains ### Related Beads heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "enrich-plan"])
+    assert "### Related Beads" in result.output
+
+
+def test_enrich_plan_double_dash_terminator(tmp_path: Path, monkeypatch) -> None:
+    """enrich-plan with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "enrich-plan", "--", "extra"])
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.3: knowledge-tidy subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_knowledge_tidy_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """knowledge-tidy subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "knowledge-tidy"])
+    assert result.exit_code == 0, result.output
+
+
+def test_knowledge_tidy_has_context_header(tmp_path: Path, monkeypatch) -> None:
+    """knowledge-tidy output contains ## Context header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "knowledge-tidy"])
+    assert "## Context" in result.output
+
+
+def test_knowledge_tidy_has_existing_knowledge(tmp_path: Path, monkeypatch) -> None:
+    """knowledge-tidy output contains ### Existing Knowledge heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "knowledge-tidy"])
+    assert "### Existing Knowledge" in result.output
+
+
+def test_knowledge_tidy_has_recently_completed_beads(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """knowledge-tidy output contains ### Recently Completed Beads heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "knowledge-tidy"])
+    assert "### Recently Completed Beads" in result.output
+
+
+def test_knowledge_tidy_has_storage_standards(tmp_path: Path, monkeypatch) -> None:
+    """knowledge-tidy output contains ### Storage Standards heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "knowledge-tidy"])
+    assert "### Storage Standards" in result.output
+
+
+def test_knowledge_tidy_double_dash_terminator(tmp_path: Path, monkeypatch) -> None:
+    """knowledge-tidy with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "knowledge-tidy", "--", "extra"])
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.3: pdf-process subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_pdf_process_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """pdf-process subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "pdf-process"])
+    assert result.exit_code == 0, result.output
+
+
+def test_pdf_process_has_context_header(tmp_path: Path, monkeypatch) -> None:
+    """pdf-process output contains ## Context header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "pdf-process"])
+    assert "## Context" in result.output
+
+
+def test_pdf_process_has_pdf_files_heading(tmp_path: Path, monkeypatch) -> None:
+    """pdf-process output contains ### PDF Files in Current Directory heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "pdf-process"])
+    assert "### PDF Files in Current Directory" in result.output
+
+
+def test_pdf_process_lists_pdf_files(tmp_path: Path, monkeypatch) -> None:
+    """pdf-process output lists PDF files found in cwd."""
+    (tmp_path / "paper.pdf").touch()
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "pdf-process"])
+    assert "paper.pdf" in result.output
+
+
+def test_pdf_process_no_pdfs_fallback(tmp_path: Path, monkeypatch) -> None:
+    """pdf-process output shows fallback when no PDFs present."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "pdf-process"])
+    assert "No PDF files found" in result.output
+
+
+def test_pdf_process_has_indexed_collections(tmp_path: Path, monkeypatch) -> None:
+    """pdf-process output contains ### Existing Indexed Collections heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "pdf-process"])
+    assert "### Existing Indexed Collections" in result.output
+
+
+def test_pdf_process_has_tip(tmp_path: Path, monkeypatch) -> None:
+    """pdf-process output contains ### Tip section."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "pdf-process"])
+    assert "### Tip" in result.output
+
+
+def test_pdf_process_double_dash_terminator(tmp_path: Path, monkeypatch) -> None:
+    """pdf-process with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "pdf-process", "--", "file.pdf"])
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.3: plan-audit subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_plan_audit_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """plan-audit subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "plan-audit"])
+    assert result.exit_code == 0, result.output
+
+
+def test_plan_audit_has_context_header(tmp_path: Path, monkeypatch) -> None:
+    """plan-audit output contains ## Context header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "plan-audit"])
+    assert "## Context" in result.output
+
+
+def test_plan_audit_has_provide_plan_line(tmp_path: Path, monkeypatch) -> None:
+    """plan-audit output contains the static 'Provide the plan' instruction."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "plan-audit"])
+    assert "Provide the plan" in result.output
+
+
+def test_plan_audit_has_related_beads(tmp_path: Path, monkeypatch) -> None:
+    """plan-audit output contains ### Related Beads heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "plan-audit"])
+    assert "### Related Beads" in result.output
+
+
+def test_plan_audit_double_dash_terminator(tmp_path: Path, monkeypatch) -> None:
+    """plan-audit with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "plan-audit", "--", "plan.json"])
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.3: research subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_research_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """research subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "research"])
+    assert result.exit_code == 0, result.output
+
+
+def test_research_has_context_header(tmp_path: Path, monkeypatch) -> None:
+    """research output contains ## Context header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "research"])
+    assert "## Context" in result.output
+
+
+def test_research_has_available_knowledge_sources(tmp_path: Path, monkeypatch) -> None:
+    """research output contains ### Available Knowledge Sources heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "research"])
+    assert "### Available Knowledge Sources" in result.output
+
+
+def test_research_has_tip(tmp_path: Path, monkeypatch) -> None:
+    """research output contains ### Tip section."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "research"])
+    assert "### Tip" in result.output
+
+
+def test_research_double_dash_terminator(tmp_path: Path, monkeypatch) -> None:
+    """research with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "research", "--", "topic"])
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.3: review-code subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_review_code_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """review-code subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "review-code"])
+    assert result.exit_code == 0, result.output
+
+
+def test_review_code_has_context_header(tmp_path: Path, monkeypatch) -> None:
+    """review-code output contains ## Context header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "review-code"])
+    assert "## Context" in result.output
+
+
+def test_review_code_has_modified_files_or_note(tmp_path: Path, monkeypatch) -> None:
+    """review-code output contains ### Modified Files or Not a git repository note."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "review-code"])
+    # Non-git dir: should show the "not a git repository" note
+    assert "### Modified Files" in result.output or "Not a git repository" in result.output
+
+
+def test_review_code_has_active_beads(tmp_path: Path, monkeypatch) -> None:
+    """review-code output contains ### Active Beads heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "review-code"])
+    assert "### Active Beads" in result.output
+
+
+def test_review_code_double_dash_terminator(tmp_path: Path, monkeypatch) -> None:
+    """review-code with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "review-code", "--", "extra"])
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.3: substantive-critique subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_substantive_critique_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """substantive-critique subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "substantive-critique"])
+    assert result.exit_code == 0, result.output
+
+
+def test_substantive_critique_has_context_header(tmp_path: Path, monkeypatch) -> None:
+    """substantive-critique output contains ## Context header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "substantive-critique"])
+    assert "## Context" in result.output
+
+
+def test_substantive_critique_has_active_beads(tmp_path: Path, monkeypatch) -> None:
+    """substantive-critique output contains ### Active Beads heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "substantive-critique"])
+    assert "### Active Beads" in result.output
+
+
+def test_substantive_critique_has_tip(tmp_path: Path, monkeypatch) -> None:
+    """substantive-critique output contains ### Tip section."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "substantive-critique"])
+    assert "### Tip" in result.output
+
+
+def test_substantive_critique_double_dash_terminator(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """substantive-critique with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(
+        main, ["command-context", "substantive-critique", "--", "artifact"]
+    )
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.3: test-validate subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_test_validate_exits_zero(tmp_path: Path, monkeypatch) -> None:
+    """test-validate subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "test-validate"])
+    assert result.exit_code == 0, result.output
+
+
+def test_test_validate_has_context_header(tmp_path: Path, monkeypatch) -> None:
+    """test-validate output contains ## Context header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "test-validate"])
+    assert "## Context" in result.output
+
+
+def test_test_validate_has_test_locations(tmp_path: Path, monkeypatch) -> None:
+    """test-validate output contains ### Test Locations heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "test-validate"])
+    assert "### Test Locations" in result.output
+
+
+def test_test_validate_has_active_beads(tmp_path: Path, monkeypatch) -> None:
+    """test-validate output contains ### Active Beads heading."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "test-validate"])
+    assert "### Active Beads" in result.output
+
+
+def test_test_validate_finds_tests_directory(tmp_path: Path, monkeypatch) -> None:
+    """test-validate output lists discovered tests directory."""
+    (tmp_path / "tests").mkdir()
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "test-validate"])
+    assert "tests" in result.output
+
+
+def test_test_validate_double_dash_terminator(tmp_path: Path, monkeypatch) -> None:
+    """test-validate with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "test-validate", "--", "extra"])
+    assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# P2.3: nx-preflight subcommand
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def stub_preflight_subprocess(monkeypatch) -> None:
+    """Stub subprocess so nx-preflight tests are fast and deterministic.
+
+    nx-preflight shells to ``nx --version``, ``nx doctor``, ``bd --version``,
+    ``uv --version``, ``npx --version``.  ``nx doctor`` in particular spawns
+    the T2 daemon and touches storage, so running it once per test is slow
+    and has side effects (orphan daemons, WAL contention).  Stubbing both
+    subprocess entry points keeps these tests exercising the render
+    structure rather than the live toolchain (the PASS/FAIL/SKIP branches
+    are covered by direct helper unit tests).
+    """
+    import subprocess as _sp
+
+    from nexus.commands import command_context as cc
+
+    def _fake_check_output(cmd, *args, **kwargs):
+        return "stub 1.0.0\n"
+
+    def _fake_run(cmd, *args, **kwargs):
+        return _sp.CompletedProcess(cmd, 0, stdout="doctor: ok\n", stderr="")
+
+    monkeypatch.setattr(cc.subprocess, "check_output", _fake_check_output)
+    monkeypatch.setattr(cc.subprocess, "run", _fake_run)
+
+
+def test_nx_preflight_exits_zero(
+    tmp_path: Path, monkeypatch, stub_preflight_subprocess
+) -> None:
+    """nx-preflight subcommand exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "nx-preflight"])
+    assert result.exit_code == 0, result.output
+
+
+def test_nx_preflight_has_plugin_preflight_header(
+    tmp_path: Path, monkeypatch, stub_preflight_subprocess
+) -> None:
+    """nx-preflight output contains the ## conexus Plugin Preflight Check header."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "nx-preflight"])
+    assert "## conexus Plugin Preflight Check" in result.output
+
+
+def test_nx_preflight_has_nx_cli_section(
+    tmp_path: Path, monkeypatch, stub_preflight_subprocess
+) -> None:
+    """nx-preflight output contains ### 1. nx CLI section."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "nx-preflight"])
+    assert "### 1. nx CLI" in result.output
+
+
+def test_nx_preflight_has_bd_cli_section(
+    tmp_path: Path, monkeypatch, stub_preflight_subprocess
+) -> None:
+    """nx-preflight output contains ### 3. bd (Beads) CLI section."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "nx-preflight"])
+    assert "### 3. bd (Beads) CLI" in result.output
+
+
+def test_nx_preflight_has_uv_section(
+    tmp_path: Path, monkeypatch, stub_preflight_subprocess
+) -> None:
+    """nx-preflight output contains ### 4. uv (package manager) section."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "nx-preflight"])
+    assert "### 4. uv (package manager)" in result.output
+
+
+def test_nx_preflight_has_node_section(
+    tmp_path: Path, monkeypatch, stub_preflight_subprocess
+) -> None:
+    """nx-preflight output contains ### 5. Node.js / npx section."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "nx-preflight"])
+    assert "### 5. Node.js / npx" in result.output
+
+
+def test_nx_preflight_has_claude_md_section(
+    tmp_path: Path, monkeypatch, stub_preflight_subprocess
+) -> None:
+    """nx-preflight output contains ### 6. CLAUDE.md Agent Readiness section."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "nx-preflight"])
+    assert "### 6. CLAUDE.md Agent Readiness" in result.output
+
+
+def test_nx_preflight_double_dash_terminator(
+    tmp_path: Path, monkeypatch, stub_preflight_subprocess
+) -> None:
+    """nx-preflight with -- terminator exits 0."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    from nexus.cli import main
+
+    result = runner.invoke(main, ["command-context", "nx-preflight", "--", "extra"])
+    assert result.exit_code == 0, result.output
