@@ -433,6 +433,36 @@ class TestCommandStructure:
                 )
                 break  # first ```-line is the bare closer — good
 
+    # RDR-130: agent-relay commands still inject via multi-line ```! blocks.
+    # P2 (nexus-kjknj) migrates them to inline `nx command-context` calls and
+    # DELETES this exemption — at which point the guard below covers all 25.
+    _P2_PENDING_AGENT_RELAY = frozenset({
+        "analyze-code", "architecture", "continuation", "create-plan", "debug",
+        "deep-analysis", "enrich-plan", "implement", "knowledge-tidy", "nx-preflight",
+        "pdf-process", "plan-audit", "research", "review-code", "substantive-critique",
+        "test-validate",
+    })
+
+    @pytest.mark.parametrize("cmd_path", _command_params())
+    def test_migrated_command_uses_single_line_nx(self, cmd_path: Path) -> None:
+        """RDR-130 P1.5: a migrated command injects bash via a single-line
+        inline ``!`nx …` `` call — never a fenced ```! block or inlined
+        heredoc. This locks the thin-command contract (logic lives in the nx
+        CLI, not the .md). The 16 agent-relay commands are exempt until P2
+        migrates them; removing ``_P2_PENDING_AGENT_RELAY`` in P2.5
+        (nexus-kjknj) extends this guard to all commands.
+        """
+        if cmd_path.stem in self._P2_PENDING_AGENT_RELAY:
+            pytest.skip(f"{cmd_path.stem}: P2-pending agent-relay (not yet migrated)")
+        text = cmd_path.read_text()
+        assert _command_bash_block(text) is None, (
+            f"{cmd_path.name}: migrated command must inject via a single-line "
+            "!`nx …` call, not a fenced ```! block (RDR-130 P1.5)."
+        )
+        assert re.search(r"(?m)^!`nx [^`]+`\s*$", text), (
+            f"{cmd_path.name}: expected a single-line !`nx …` injection (RDR-130 P1.5)."
+        )
+
 
 
 class TestCrossReferenceIntegrity:
