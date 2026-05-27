@@ -424,6 +424,116 @@ class TestCycleInterlock:
         assert "cycle deferred" in result.output.lower()
         assert result.exit_code == 0
 
+    def test_cycle_aborts_when_predecessor_outlives_window(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """RDR-129 A2 (nexus-kwqhd): if the SIGTERM'd stale daemon does not
+        exit within the cycle window, ensure-running ABORTS — it does not
+        cold-spawn a replacement (which would EAGAIN on the still-held spawn
+        lock and leave zero daemons). The stale-but-working daemon is left up
+        (RF-4)."""
+        import signal as _signal
+
+        import nexus.commands.daemon as _daemon
+
+        _write_discovery(tmp_path, pid=424242, version="0.0.1-stale")
+        monkeypatch.setattr(
+            "importlib.metadata.version", lambda _name: "9.9.9-installed"
+        )
+        _seed_wal_db(tmp_path / "memory.db")  # exists, unlocked → probe passes
+        monkeypatch.setattr(_daemon, "_T2_CYCLE_EXIT_TIMEOUT", 0.3)
+
+        sigterms: list[int] = []
+
+        def _fake_kill(pid, sig):  # noqa: ANN001
+            if pid != 424242:
+                raise ProcessLookupError
+            if sig == _signal.SIGTERM:
+                sigterms.append(pid)
+                return
+            if sig == 0:
+                return  # predecessor never exits
+
+        monkeypatch.setattr(os, "kill", _fake_kill)
+        # The still-alive pid genuinely looks like a t2 daemon (PID-reuse guard).
+        monkeypatch.setattr(
+            "nexus.daemon.t2_daemon._is_t2_daemon_process", lambda pid: True
+        )
+        monkeypatch.setattr(
+            subprocess, "Popen",
+            lambda *a, **kw: pytest.fail(
+                "must NOT spawn while the predecessor is still alive"
+            ),
+        )
+
+        result = CliRunner().invoke(
+            main,
+            ["daemon", "t2", "ensure-running",
+             "--config-dir", str(tmp_path), "--timeout", "0.2"],
+        )
+        assert sigterms == [424242], "predecessor should have been SIGTERM'd"
+        assert "cycle aborted" in result.output.lower()
+        assert result.exit_code == 0  # never trade a working daemon for none
+
+    def test_cycle_waits_for_pid_exit_then_spawns(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """The cycle wait polls PID liveness, not the discovery file: even
+        after stop() unlinks the discovery file early, ensure-running waits
+        for the predecessor to actually exit and then cold-spawns exactly one
+        replacement (never zero)."""
+        import signal as _signal
+
+        import nexus.commands.daemon as _daemon
+
+        _write_discovery(tmp_path, pid=424242, version="0.0.1-stale")
+        monkeypatch.setattr(
+            "importlib.metadata.version", lambda _name: "9.9.9-installed"
+        )
+        _seed_wal_db(tmp_path / "memory.db")
+        monkeypatch.setattr(_daemon, "_T2_CYCLE_EXIT_TIMEOUT", 5.0)
+
+        disc = _discovery_path(tmp_path)
+        state = {"polls": 0}
+
+        def _fake_kill(pid, sig):  # noqa: ANN001
+            if pid != 424242:
+                raise ProcessLookupError
+            if sig == _signal.SIGTERM:
+                # stop() unlinks the discovery file BEFORE the process exits.
+                disc.unlink(missing_ok=True)
+                return
+            if sig == 0:
+                state["polls"] += 1
+                if state["polls"] >= 2:
+                    raise ProcessLookupError  # predecessor finally exits
+                return
+
+        monkeypatch.setattr(os, "kill", _fake_kill)
+        monkeypatch.setattr(
+            "nexus.daemon.t2_daemon._is_t2_daemon_process", lambda pid: True
+        )
+
+        spawned: list[list[str]] = []
+
+        class _FakePopen:
+            def __init__(self, argv, **_kw):  # noqa: ANN001
+                spawned.append(argv)
+
+        monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+        CliRunner().invoke(
+            main,
+            ["daemon", "t2", "ensure-running",
+             "--config-dir", str(tmp_path), "--timeout", "0.2"],
+        )
+        assert state["polls"] >= 2, (
+            "should have polled PID liveness past the unlinked discovery file"
+        )
+        assert len(spawned) == 1, (
+            "exactly one replacement spawned after the predecessor exited"
+        )
+
     def test_stale_daemon_cycled_when_db_lock_free(
         self, tmp_path, monkeypatch,
     ) -> None:
