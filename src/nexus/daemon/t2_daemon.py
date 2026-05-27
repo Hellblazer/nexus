@@ -587,8 +587,22 @@ class T2Daemon:
         _log.info("t2_daemon_stop_requested", signal_received=True)
 
     async def stop(self) -> None:
-        """Close servers, drop discovery file, release spawn lock,
-        close T2Database."""
+        """Close servers, drop discovery file, close T2Database.
+
+        RDR-129 A2 (nexus-kwqhd): ``stop()`` deliberately does NOT release the
+        spawn lock. The lock is held for the whole process lifetime and dropped
+        by the OS when the process exits. Releasing it here (the prior
+        behaviour) opened a *released-but-alive* window: ``stop()`` runs while
+        the process is still draining/exiting, so a respawn (notably
+        ``ensure-running`` on version skew) could acquire the freed lock and
+        run alongside the still-living predecessor, violating single-writer.
+        Deferring the release to OS-on-exit closes that window: the lock stops
+        being held at exactly the moment the pid stops being alive. The
+        co-dependent ``ensure-running`` interlock (``commands/daemon.py``) now
+        waits on the predecessor's PID liveness before cold-spawning, so it
+        never spawns into the lock-still-held window. ``_release_spawn_lock``
+        remains callable for explicit teardown (tests simulate process exit).
+        """
         if self._uds_server is not None:
             self._uds_server.close()
             await self._uds_server.wait_closed()
@@ -608,7 +622,7 @@ class T2Daemon:
             except Exception as exc:  # noqa: BLE001
                 _log.warning("t2_daemon_t2db_close_failed", error=str(exc))
             self._t2db = None
-        self._release_spawn_lock()
+        # NB: spawn lock intentionally NOT released here — see docstring.
         _log.info("t2_daemon_stopped")
 
     # ── socket binding ──────────────────────────────────────────────────
