@@ -2,11 +2,12 @@
 title: "T2 Daemon Write-Path Hardening: Guaranteed-Single-Daemon Enforcement and Contention-Free Internal Serialization"
 id: RDR-129
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-25
+accepted_date: 2026-05-27
 related_issues: [nexus-qi1zb, nexus-kwqhd, nexus-exa2p, nexus-izpcb, nexus-uq8a4, nexus-070e2]
 related_rdrs: [RDR-128, RDR-120, RDR-063]
 epic_bead: nexus-70qc9
