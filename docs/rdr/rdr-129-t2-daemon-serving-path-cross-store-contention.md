@@ -167,33 +167,32 @@ locked'` entries; the 5.1.5 two-daemon census (canonical pid + orphan, both
 
 Layer A:
 
-- **RF-A1 — VERIFIED, with a correction.** The flock bypass is NOT a lock-path
+- **RF-A1: VERIFIED, with a correction.** The flock bypass is NOT a lock-path
   mismatch across versions. `_spawn_lock_path_for_db` (`t2_daemon.py:139`)
   anchors the db-path lock at `<db_path>.spawn_lock`, a sibling of the data
-  file — version-stable and config-dir-independent. So a 5.1.1 and a 5.1.5
+  file, version-stable and config-dir-independent. So a 5.1.1 and a 5.1.5
   daemon against the same `memory.db` contend on the *same* lock file. The
   actual bypass is **release-before-exit**: `T2Daemon.stop()` calls
   `_release_spawn_lock()` at `t2_daemon.py:611`, which unlocks the flock while
   the process is still shutting down (draining RPCs, closing connections).
-  During that window the lock is free but the process is alive. A respawn —
-  notably `ensure-running` on version skew, which SIGTERMs the old daemon then
-  spawns a new one (the RDR-128 RF-4 path) — acquires the freed lock and runs
+  During that window the lock is free but the process is alive. A respawn, notably `ensure-running` on version skew, which SIGTERMs the old daemon then
+  spawns a new one (the RDR-128 RF-4 path), acquires the freed lock and runs
   alongside the still-draining predecessor. The OS would otherwise hold a
   flock until process exit; the *early* release in `stop()` is the precise
   enabler. Correction to the draft: drop "make the lock version-stable" (it
   already is); the fix is purely defer-release-to-exit + an ensure-running
   interlock that waits for the predecessor's full exit before spawning.
-- **RF-A2 — VERIFIED.** `_reap_predecessor_daemon` reads `t2_discovery_path`
+- **RF-A2: VERIFIED.** `_reap_predecessor_daemon` reads `t2_discovery_path`
   (the addr file) and signals only that single pid; a side-orphan never named
   in the addr file is invisible to it. A full same-db enumeration is feasible
   but the cmdline `nx daemon t2 start` does not name the db, so scoping needs
   the db-path spawn-lock identity, an open-fd probe (`lsof` on `memory.db`),
-  or an advertised `db_path` — RF for A1's sweep mechanism resolves to the
+  or an advertised `db_path`, RF for A1's sweep mechanism resolves to the
   open-fd probe or db-path lock identity.
 
 Layer B:
 
-- **RF-B1 — VERIFIED.** Every serving store sets `PRAGMA busy_timeout=5000`
+- **RF-B1: VERIFIED.** Every serving store sets `PRAGMA busy_timeout=5000`
   (`chash_index.py:84`, `document_aspects.py:202`, `plan_library.py:224`,
   `catalog_taxonomy.py:242`, `telemetry.py:129`, `memory_store.py`,
   `db/t2/__init__.py:552`). Only the bootstrap migration got the 30s timeout +
@@ -202,7 +201,7 @@ Layer B:
   `asyncio.to_thread` under a generic `except Exception` with no
   `database is locked` retry, so a >5s contention window fails the op (logged
   `t2_daemon_dispatch_failed`).
-- **RF-B2 — VERIFIED.** `chash_dual_write_batch_hook` (`mcp_infra.py:506`)
+- **RF-B2: VERIFIED.** `chash_dual_write_batch_hook` (`mcp_infra.py:506`)
   swallows the failure at `debug` level (`mcp_infra.py:544`,
   `chash_dual_write_batch_failed`) with no metric; the dropped row is a
   rebuildable `chash_index` cache entry, recoverable via a chash
@@ -210,7 +209,7 @@ Layer B:
   "current without manual backfill" phrasing in the draft was attributed to
   the wrong line; the load-bearing fact is the silent debug-level swallow at
   `mcp_infra.py:544`, confirmed.)
-- **RF-B3 — VERIFIED.** Per RDR-063 each store has its own connection + its
+- **RF-B3: VERIFIED.** Per RDR-063 each store has its own connection + its
   own `threading.Lock`; cross-store writes coordinate only via SQLite's file
   lock + `busy_timeout` (`db/t2/__init__.py:42-44` documents exactly this).
   There is no daemon-internal write serialization. Deterministic reproduction
@@ -247,7 +246,7 @@ releasing the lock (`:611`), and `ensure-running`'s wait polls
 the old daemon's discovery file disappears, `ensure-running` sees "no daemon"
 and cold-spawns a new one, the new daemon's `_acquire_spawn_lock` hits EAGAIN
 because the still-draining predecessor holds the flock, and the new process
-exits — leaving **zero** daemons, the exact failure RDR-128 prevents. The
+exits, leaving **zero** daemons, the exact failure RDR-128 prevents. The
 interlock therefore replaces the discovery-file poll with a **bounded PID-
 liveness poll** (`os.kill(pid, 0)`, reusing the `_is_t2_daemon_process`
 cmdline guard) on the prior pid: wait up to a bounded timeout for the
@@ -269,8 +268,7 @@ prerequisites: (a) audit the `T2Client` per-call RPC timeout and raise it
 commensurately (or confirm it already exceeds 30s) so a daemon-side 30s wait
 does not surface to callers as an RPC-timeout error of a different type than
 `database is locked`; (b) `_dispatch` runs each store call on
-`asyncio.to_thread`, so a 30s blocking wait holds a pool thread for 30s —
-acceptable for one daemon, but under multi-daemon coexistence (Layer A still
+`asyncio.to_thread`, so a 30s blocking wait holds a pool thread for 30s, acceptable for one daemon, but under multi-daemon coexistence (Layer A still
 unfixed pre-P2) N daemons each saturating their thread pool can stall RPC
 dispatch. B1 therefore ships **paired with P2**, not as a standalone pre-P2
 change (see Implementation Plan), so the longer wait never runs while two
@@ -294,7 +292,7 @@ enforcement ships, an FTS5 lock on the serving path should be impossible in
 steady state, so a B4 fire then *indicates a single-daemon invariant
 violation* (two daemons, or a direct writer bypassing the daemon) and should
 be investigated. A3 detects the violation on the daemon census (hard error);
-B4 detects it on live-write lock contention (soft signal + counter) — the two
+B4 detects it on live-write lock contention (soft signal + counter), the two
 are complementary, and B4 stays soft so the drop metric is never lost to a
 hard fail. A future maintainer must not flip B4 to hard without understanding
 this relationship.
@@ -400,11 +398,11 @@ deterministic multi-writer load test produces zero *unrecovered* drops
 
 ## Finalization Gate
 
-**PASSED — 2026-05-27.** Layer 1 (structural): 5 digit-numbered gaps, all
+**PASSED, 2026-05-27.** Layer 1 (structural): 5 digit-numbered gaps, all
 sections present and non-empty. Layer 2 (assumption audit): all five RFs
 VERIFIED against the daemon code with file:line evidence, no unevidenced
 "Assumed" findings. Layer 3 (substantive-critic): 0 Critical, 3 Significant, 4
-Observations — all resolved in-place before accept:
+Observations, all resolved in-place before accept:
 
 1. A2 ensure-running interlock under-specified (could leave *zero* daemons
    after a version cycle, since `stop()` unlinks the discovery file at
