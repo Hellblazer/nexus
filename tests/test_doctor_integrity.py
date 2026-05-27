@@ -12,6 +12,7 @@ import pytest
 from nexus.health import (
     _check_orphan_t1,
     _check_t2_integrity,
+    _check_t2_dropped_writes,
     _check_chroma_pagination,
     _check_orphan_checkpoints,
     HealthResult,
@@ -81,7 +82,160 @@ class TestCheckT2Integrity:
             db.put(project="p", title="t", content="data", ttl=1)
         corrupt_fn(db_path)
         ok, results = self._run(db_path)
-        assert ok is False and results[0].ok is False
+        # Genuine corruption is a HARD failure, never a soft WARN: warn stays
+        # False so the operator sees a red X, not a yellow ⚠ (RDR-129 B4).
+        assert ok is False
+        assert results[0].ok is False
+        assert results[0].warn is False
+
+    def test_transient_write_lock_is_soft_warn(self, tmp_path, monkeypatch):
+        """RDR-129 B4 (nexus-uq8a4): a held WAL writer slot makes the FTS5
+        integrity probe a soft WARN, not a hard red X. The DB is healthy,
+        just busy with a legitimate concurrent writer (e.g. nx index repo)."""
+        import sqlite3 as _sqlite3
+
+        from nexus import health
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            db.put(project="p", title="t", content="data", ttl=1)
+
+        # Fail fast so the test never waits the production timeout.
+        monkeypatch.setattr(health, "_INTEGRITY_BUSY_TIMEOUT_MS", 50)
+        monkeypatch.setattr(health, "_INTEGRITY_RETRY_SLEEPS_BETWEEN", (0.0,))
+
+        # Hold the single WAL writer slot for the whole probe.
+        holder = _sqlite3.connect(str(db_path), timeout=0)
+        try:
+            holder.execute("PRAGMA busy_timeout = 0")
+            holder.execute("BEGIN IMMEDIATE")
+            ok, results = self._run(db_path)
+        finally:
+            holder.rollback()
+            holder.close()
+
+        assert ok is False
+        r = results[0]
+        assert r.ok is False
+        assert r.warn is True
+        assert r.fatal is False
+        assert "busy" in r.detail.lower()
+
+    def test_non_lock_fts_error_stays_hard(self, tmp_path, monkeypatch):
+        """A non-lock OperationalError on the FTS5 probe (genuine FTS
+        corruption) is a HARD failure, distinct from transient contention."""
+        import sqlite3 as _sqlite3
+
+        from nexus import health
+
+        db_path = tmp_path / "memory.db"
+        db_path.write_text("placeholder")  # only .exists() matters here
+
+        class _Cursor:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def fetchall(self):
+                return self._rows
+
+        class _FakeConn:
+            def execute(self, sql, *args):
+                if sql.startswith("PRAGMA busy_timeout"):
+                    return _Cursor([])
+                if sql == "PRAGMA integrity_check":
+                    return _Cursor([("ok",)])
+                if "INSERT INTO memory_fts" in sql:
+                    raise _sqlite3.OperationalError("malformed database schema")
+                return _Cursor([])
+
+            def rollback(self):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(health.sqlite3, "connect", lambda *a, **k: _FakeConn())
+        ok, results = self._run(db_path)
+        r = results[0]
+        assert ok is False
+        assert r.ok is False
+        assert r.warn is False
+        assert "FTS5" in r.detail
+
+    def test_lock_fts_error_via_fake_conn_is_soft(self, tmp_path, monkeypatch):
+        """The discriminator at the FTS5 layer: a lock OperationalError on the
+        probe → soft WARN even when surfaced through a stand-in connection."""
+        import sqlite3 as _sqlite3
+
+        from nexus import health
+
+        db_path = tmp_path / "memory.db"
+        db_path.write_text("placeholder")
+
+        monkeypatch.setattr(health, "_INTEGRITY_RETRY_SLEEPS_BETWEEN", (0.0,))
+
+        class _Cursor:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def fetchall(self):
+                return self._rows
+
+        class _FakeConn:
+            def execute(self, sql, *args):
+                if sql == "PRAGMA integrity_check":
+                    return _Cursor([("ok",)])
+                if "INSERT INTO memory_fts" in sql:
+                    raise _sqlite3.OperationalError("database is locked")
+                return _Cursor([])
+
+            def rollback(self):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(health.sqlite3, "connect", lambda *a, **k: _FakeConn())
+        ok, results = self._run(db_path)
+        r = results[0]
+        assert ok is False
+        assert r.ok is False
+        assert r.warn is True
+        assert "busy" in r.detail.lower()
+
+
+# ── T2 best-effort write drops (RDR-129 B4, nexus-uq8a4) ────────────────────
+
+class TestCheckT2DroppedWrites:
+    def test_no_drops_is_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(
+            "NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl")
+        )
+        results = _check_t2_dropped_writes()
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is True
+        assert r.warn is False
+        assert "no drops" in r.detail.lower()
+
+    def test_recorded_drops_are_soft_warn(self, tmp_path, monkeypatch):
+        from nexus import dropped_writes
+
+        monkeypatch.setenv(
+            "NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl")
+        )
+        dropped_writes.record_drop(
+            hook="chash_dual_write_batch_hook",
+            collection="code__nexus",
+            rows=3,
+            error="database is locked",
+        )
+        results = _check_t2_dropped_writes()
+        r = results[0]
+        assert r.ok is False
+        assert r.warn is True
+        assert r.fatal is False  # never a hard fail — the metric must survive
+        assert "1" in r.detail
 
 
 # ── Step 7: ChromaDB pagination ─────────────────────────────────────────────
