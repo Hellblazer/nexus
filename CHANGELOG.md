@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.1.4] - 2026-05-27
+
+Completes the durable fix for the slash-command preamble regression class
+(5.1.3 was the interim hotfix; RDR-130 is the structural fix).
+
+### Changed
+
+- **RDR-130 P1: the 9 RDR-lifecycle slash commands gather their preamble via `nx rdr preamble <name>`** instead of an inlined bash block. `rdr-create`, `rdr-list`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`, `rdr-audit`, and `phase-review-gate` are now single-line `` !`nx rdr preamble <name> -- "$ARGUMENTS"` `` invocations; the preamble logic lives in the tested `nx` CLI (`nexus.commands.rdr`) rather than in the command markdown. This eliminates the fenced-block truncation brittleness that caused the 5.1.2 regression (nexus-61fzg / nexus-ln9y5): there is no longer any inlined bash for Claude Code's fence parser to choke on. The 9 dead `resources/rdr_commands/*.py` scripts and their byte-sync test were removed; a static guard asserts every migrated command uses the single-line form.
+
 ## [5.1.3] - 2026-05-26
 
 Hotfix for a 5.1.2 regression in slash-command preambles.

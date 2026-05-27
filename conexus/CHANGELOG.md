@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.1.4] - 2026-05-27
+
+### Changed
+
+- **RDR-130 P1: the 9 RDR-lifecycle commands now inject their preamble via `` !`nx rdr preamble <name> -- "$ARGUMENTS"` ``** instead of inlined bash. rdr-create, rdr-list, rdr-show, rdr-gate, rdr-accept, rdr-close, rdr-research, rdr-audit, and phase-review-gate became single-line invocations; the preamble logic moved into the tested `nx` CLI. Removes the fenced-block truncation brittleness (the 5.1.3 hotfix was interim; this is the structural fix). The 9 dead `resources/rdr_commands/*.py` scripts were deleted and a static guard locks the single-line form.
+
 ## [5.1.3] - 2026-05-26
 
 ### Fixed
