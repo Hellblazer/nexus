@@ -24,17 +24,31 @@ _log = structlog.get_logger(__name__)
 
 _CHECK = "✓"
 _WARN = "✗"
+# RDR-129 B4 (nexus-uq8a4): a third, soft state — the check could not complete
+# but the condition is benign/transient (e.g. a healthy-but-busy database), so
+# it renders distinctly from both a pass (✓) and a hard fail (✗) and never
+# marks the run as failed.
+_SOFT_WARN = "⚠"
 
 
 @dataclass
 class HealthResult:
-    """One health check result."""
+    """One health check result.
+
+    ``ok`` / ``warn`` encode three states:
+
+    * ``ok=True``                  → pass (✓)
+    * ``ok=False, warn=True``      → soft warning (⚠) — benign/transient,
+      never fatal, never marks the run failed (RDR-129 B4)
+    * ``ok=False, warn=False``     → hard failure (✗)
+    """
 
     label: str
     ok: bool
     detail: str = ""
     fix_suggestions: list[str] = field(default_factory=list)
     fatal: bool = False
+    warn: bool = False
 
 
 # ── Formatting ────────────────────────────────────────────────────────────────
@@ -52,7 +66,12 @@ def format_health_for_cli(
     failed = False
 
     for r in results:
-        status = _CHECK if r.ok else _WARN
+        if r.ok:
+            status = _CHECK
+        elif r.warn:
+            status = _SOFT_WARN
+        else:
+            status = _WARN
         msg = f"  {status} {r.label}"
         if r.detail:
             msg += f": {r.detail}"
@@ -768,7 +787,33 @@ def _check_mineru_server() -> list[HealthResult]:
     )]
 
 
+# RDR-129 B4 (nexus-uq8a4): the FTS5 integrity probe
+# (``INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')``) is a
+# *write* — it needs ``memory.db``'s single WAL writer slot. A legitimate
+# concurrent writer (typically an active ``nx index repo``) holds that slot,
+# and the probe would block to ``busy_timeout`` and then report a hard red X
+# for a database that is perfectly healthy, just busy. We give each attempt a
+# bounded ``busy_timeout`` and retry briefly; on continued contention we emit a
+# SOFT WARN (the DB is fine) rather than a hard failure. A genuine corruption
+# (a non-lock error, or a failing ``PRAGMA integrity_check``) still hard-fails.
+_INTEGRITY_BUSY_TIMEOUT_MS: int = 2000
+_INTEGRITY_RETRY_SLEEPS_BETWEEN: tuple[float, ...] = (0.25, 0.5)
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    """True when *exc* is transient writer-slot contention, not corruption.
+
+    Mirrors the discriminator in ``nexus.db.t2._apply_pending_with_lock_retry``:
+    ``database is locked`` / ``database is busy`` (including the
+    ``SQLITE_BUSY_SNAPSHOT`` variant, whose message also contains "locked").
+    """
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
+
+
 def _check_t2_integrity() -> list[HealthResult]:
+    import time
+
     db_path = default_db_path()
     if not db_path.exists():
         return [HealthResult(label="T2 integrity", ok=True, detail="not created yet")]
@@ -776,16 +821,53 @@ def _check_t2_integrity() -> list[HealthResult]:
     try:
         conn = sqlite3.connect(str(db_path))  # epsilon-allow: health PRAGMA integrity_check diagnostic — must operate when daemon offline; read-only
         try:
+            conn.execute(f"PRAGMA busy_timeout = {_INTEGRITY_BUSY_TIMEOUT_MS}")
             rows = conn.execute("PRAGMA integrity_check").fetchall()
             pragma_ok = len(rows) == 1 and rows[0][0] == "ok"
             if not pragma_ok:
                 issues = "; ".join(r[0] for r in rows[:3])
                 return [HealthResult(label="T2 integrity", ok=False, detail=f"PRAGMA: {issues}")]
 
-            conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')")
-            fts_ok = True
-        except sqlite3.OperationalError as exc:
-            return [HealthResult(label="T2 integrity", ok=False, detail=f"FTS5: {exc}")]
+            # FTS5 integrity probe — a write that takes the WAL writer slot.
+            # Retry on transient lock contention; a non-lock error is genuine
+            # FTS5 corruption and must hard-fail immediately.
+            sleeps = _INTEGRITY_RETRY_SLEEPS_BETWEEN
+            max_attempts = len(sleeps) + 1
+            fts_ok = False
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    conn.execute(
+                        "INSERT INTO memory_fts(memory_fts) VALUES('integrity-check')"
+                    )
+                    fts_ok = True
+                    break
+                except sqlite3.OperationalError as exc:
+                    if not _is_lock_error(exc):
+                        return [HealthResult(label="T2 integrity", ok=False, detail=f"FTS5: {exc}")]
+                    # Clear any partial transaction so the retry re-reads a
+                    # fresh snapshot (handles SQLITE_BUSY_SNAPSHOT too).
+                    try:
+                        conn.rollback()
+                    except sqlite3.Error:
+                        pass
+                    if attempt == max_attempts:
+                        # Transient writer-lock contention, not corruption.
+                        # Stays SOFT by design — and *stays* soft even after
+                        # RDR-129's single-daemon enforcement ships: a lock
+                        # here post-P2 indicates a single-daemon invariant
+                        # violation (a second daemon, or a direct writer
+                        # bypassing the daemon), which the A3 daemon census
+                        # reports as a hard error. The two are complementary;
+                        # keeping B4 soft means the drop metric is never lost
+                        # to a hard fail. Do NOT flip this to a hard failure
+                        # without understanding that relationship (RDR-129 §B4).
+                        return [HealthResult(
+                            label="T2 integrity",
+                            ok=False,
+                            warn=True,
+                            detail="FTS5: busy (write in progress, retry)",
+                        )]
+                    time.sleep(sleeps[attempt - 1])
         finally:
             conn.close()
     except Exception as exc:
@@ -794,6 +876,48 @@ def _check_t2_integrity() -> list[HealthResult]:
     if pragma_ok and fts_ok:
         return [HealthResult(label="T2 integrity", ok=True, detail="PRAGMA ok, FTS5 ok")]
     return [HealthResult(label="T2 integrity", ok=False, detail="check failed")]
+
+
+def _check_t2_dropped_writes() -> list[HealthResult]:
+    """Surface the dropped-best-effort-write meter (RDR-129 B4, nexus-uq8a4).
+
+    A nonzero count is a SOFT WARN, never a hard fail: pre-single-daemon-
+    enforcement, a drop under heavy concurrent indexing is expected, and the
+    whole point of the meter is to keep the completeness gap observable rather
+    than lose it to a red X. Post-enforcement a growing count complements the
+    A3 daemon-census hard error (it means a writer is bypassing the daemon).
+    """
+    from nexus.dropped_writes import count_drops
+
+    try:
+        summary = count_drops()
+    except Exception as exc:  # pragma: no cover — defensive
+        return [HealthResult(
+            label="T2 best-effort writes", ok=True, detail=f"meter unavailable: {exc}",
+        )]
+
+    if summary.total == 0:
+        return [HealthResult(
+            label="T2 best-effort writes", ok=True, detail="no drops recorded",
+        )]
+
+    detail = (
+        f"{summary.total} dropped under lock contention "
+        f"({summary.rows} rows)"
+    )
+    if summary.last_ts:
+        detail += f", last {summary.last_ts}"
+    return [HealthResult(
+        label="T2 best-effort writes",
+        ok=False,
+        warn=True,
+        detail=detail,
+        fix_suggestions=[
+            "transient under heavy concurrent indexing (RDR-129 B4); a "
+            "persistent or growing count means the T2 daemon is down or a "
+            "writer is bypassing it. Check `nx daemon t2 status`",
+        ],
+    )]
 
 
 def _check_chroma_pagination(client: object, db_name: str) -> list[HealthResult]:
@@ -1017,6 +1141,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_orphan_pipelines())
     results.extend(_check_mineru_server())
     results.extend(_check_t2_integrity())
+    results.extend(_check_t2_dropped_writes())
 
     # ChromaDB pagination audit (cloud only)
     if not _local:
