@@ -920,6 +920,53 @@ def _check_t2_dropped_writes() -> list[HealthResult]:
     )]
 
 
+def _check_t2_daemon_singleton() -> list[HealthResult]:
+    """Fail loud when more than one T2 daemon serves the same db (RDR-129 A3,
+    nexus-exa2p). Exactly one daemon per ``memory.db`` is the single-writer
+    invariant; two daemons contend on the WAL and produce the ``FTS5: database
+    is locked`` flicker. This is the **hard** census error, complementary to
+    the soft live-contention signal in ``_check_t2_integrity``: A1/A2 enforce
+    single occupancy, A3 makes a residual violation observable instead of
+    silent. Names the offending pids so an operator can act without reading
+    code.
+    """
+    db_path = default_db_path()
+    if not db_path.exists():
+        return [HealthResult(
+            label="T2 daemon singleton", ok=True, detail="no T2 database yet",
+        )]
+    try:
+        from nexus.daemon.t2_daemon import _enumerate_t2_daemon_pids_for_db
+
+        pids = sorted(set(_enumerate_t2_daemon_pids_for_db(db_path)))
+    except Exception as exc:  # pragma: no cover — defensive
+        # Absence of evidence is not evidence of multiplicity: a failed probe
+        # must not flip doctor red.
+        return [HealthResult(
+            label="T2 daemon singleton", ok=True, detail=f"probe unavailable: {exc}",
+        )]
+
+    if len(pids) <= 1:
+        detail = "1 daemon" if pids else "no daemon running"
+        return [HealthResult(label="T2 daemon singleton", ok=True, detail=detail)]
+
+    pid_list = ", ".join(str(p) for p in pids)
+    return [HealthResult(
+        label="T2 daemon singleton",
+        ok=False,
+        fatal=True,
+        detail=(
+            f"{len(pids)} daemons for {db_path.name} (pids: {pid_list}); "
+            f"single-writer invariant violated"
+        ),
+        fix_suggestions=[
+            "two T2 daemons are contending on the same memory.db (RDR-129 A3). "
+            "Stop the extras: `nx daemon t2 stop`, then "
+            "`nx daemon t2 ensure-running` to leave exactly one",
+        ],
+    )]
+
+
 def _check_chroma_pagination(client: object, db_name: str) -> list[HealthResult]:
     try:
         cols = client.list_collections()  # type: ignore[union-attr]
@@ -1142,6 +1189,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_mineru_server())
     results.extend(_check_t2_integrity())
     results.extend(_check_t2_dropped_writes())
+    results.extend(_check_t2_daemon_singleton())
 
     # ChromaDB pagination audit (cloud only)
     if not _local:
