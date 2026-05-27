@@ -13,6 +13,7 @@ from nexus.health import (
     _check_orphan_t1,
     _check_t2_integrity,
     _check_t2_dropped_writes,
+    _check_t2_daemon_singleton,
     _check_chroma_pagination,
     _check_orphan_checkpoints,
     HealthResult,
@@ -236,6 +237,64 @@ class TestCheckT2DroppedWrites:
         assert r.warn is True
         assert r.fatal is False  # never a hard fail — the metric must survive
         assert "1" in r.detail
+
+
+# ── T2 daemon singleton / multiplicity (RDR-129 A3, nexus-exa2p) ────────────
+
+class TestCheckT2DaemonSingleton:
+    def _run(self, db_path: Path) -> tuple[bool, list[HealthResult]]:
+        with patch("nexus.health.default_db_path", return_value=db_path):
+            results = _check_t2_daemon_singleton()
+        ok = all(r.ok for r in results)
+        return ok, results
+
+    def test_no_db_is_ok(self, tmp_path):
+        ok, results = self._run(tmp_path / "absent.db")
+        assert ok is True
+        assert results[0].ok is True
+
+    @pytest.mark.parametrize("pids", [[], [4242]], ids=["zero", "one"])
+    def test_zero_or_one_daemon_ok(self, tmp_path, monkeypatch, pids):
+        db = tmp_path / "memory.db"
+        db.write_text("x")
+        monkeypatch.setattr(
+            "nexus.daemon.t2_daemon._enumerate_t2_daemon_pids_for_db",
+            lambda p: list(pids),
+        )
+        ok, results = self._run(db)
+        assert ok is True
+        assert results[0].ok is True
+        assert results[0].fatal is False
+
+    def test_multiple_daemons_hard_error_names_pids(self, tmp_path, monkeypatch):
+        db = tmp_path / "memory.db"
+        db.write_text("x")
+        monkeypatch.setattr(
+            "nexus.daemon.t2_daemon._enumerate_t2_daemon_pids_for_db",
+            lambda p: [4242, 5353],
+        )
+        ok, results = self._run(db)
+        r = results[0]
+        assert ok is False
+        assert r.ok is False
+        assert r.fatal is True  # multiplicity is a HARD failure (A3), unlike B4
+        assert r.warn is False
+        assert "4242" in r.detail and "5353" in r.detail
+
+    def test_probe_failure_degrades_to_ok(self, tmp_path, monkeypatch):
+        """A probe that itself errors must not flip doctor red — absence of
+        evidence is not evidence of multiplicity."""
+        db = tmp_path / "memory.db"
+        db.write_text("x")
+
+        def _boom(p):
+            raise RuntimeError("lsof exploded")
+
+        monkeypatch.setattr(
+            "nexus.daemon.t2_daemon._enumerate_t2_daemon_pids_for_db", _boom
+        )
+        ok, results = self._run(db)
+        assert ok is True
 
 
 # ── Step 7: ChromaDB pagination ─────────────────────────────────────────────

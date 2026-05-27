@@ -336,3 +336,131 @@ class TestDaemonReapsPredecessor:
         # no discovery file written
         td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
         assert kills == []
+
+
+class TestDaemonSweepsSideOrphans:
+    """RDR-129 A1 (nexus-exa2p): generalise the addr-file reap to a same-db
+    SWEEP. A side-orphan daemon that started AFTER the canonical daemon (so it
+    was never the addr-file pid) holds memory.db open but is invisible to the
+    addr-file reap. The startup sweep enumerates all live t2 daemons holding
+    THIS db open (open-fd probe) and reaps every non-self one, guaranteeing
+    single occupancy rather than just the common takeover case.
+    """
+
+    @staticmethod
+    def _write_discovery(config_dir: Path, pid: int) -> Path:
+        import json
+
+        from nexus.daemon.t2_daemon import t2_discovery_path
+
+        p = t2_discovery_path(config_dir)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"pid": pid, "tcp_port": 1234}))
+        return p
+
+    def test_sweeps_side_orphan_not_in_addr_file(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        import signal
+
+        from nexus.daemon import t2_daemon as td
+
+        # addr file names the canonical predecessor; a side-orphan holds the
+        # db open but is absent from the addr file.
+        self._write_discovery(config_dir, 111111)
+        monkeypatch.setattr(
+            td, "_enumerate_t2_daemon_pids_for_db", lambda p: [222222],
+        )
+        monkeypatch.setattr(td, "_is_t2_daemon_process", lambda pid: True)
+        state = {111111: True, 222222: True}
+        monkeypatch.setattr(td, "_pid_is_alive", lambda pid: state.get(pid, False))
+        kills: list[tuple[int, int]] = []
+
+        def fake_kill(pid: int, sig: int) -> None:
+            kills.append((pid, sig))
+            if sig == signal.SIGTERM:
+                state[pid] = False
+
+        monkeypatch.setattr(td.os, "kill", fake_kill)
+
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+
+        assert (111111, signal.SIGTERM) in kills, "addr-file pid not reaped"
+        assert (222222, signal.SIGTERM) in kills, "side-orphan not reaped by sweep"
+
+    def test_sweep_excludes_self(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        import os
+
+        from nexus.daemon import t2_daemon as td
+
+        # No addr file; the open-fd probe surfaces only our own pid.
+        monkeypatch.setattr(
+            td, "_enumerate_t2_daemon_pids_for_db", lambda p: [os.getpid()],
+        )
+        monkeypatch.setattr(td, "_is_t2_daemon_process", lambda pid: True)
+        monkeypatch.setattr(td, "_pid_is_alive", lambda pid: True)
+        kills: list = []
+        monkeypatch.setattr(td.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert kills == []
+
+    def test_addr_and_sweep_dedup_single_reap(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        """The addr-file pid that also surfaces in the open-fd sweep is reaped
+        exactly once, not twice."""
+        import signal
+
+        from nexus.daemon import t2_daemon as td
+
+        self._write_discovery(config_dir, 333333)
+        monkeypatch.setattr(
+            td, "_enumerate_t2_daemon_pids_for_db", lambda p: [333333],
+        )
+        monkeypatch.setattr(td, "_is_t2_daemon_process", lambda pid: True)
+        state = {333333: True}
+        monkeypatch.setattr(td, "_pid_is_alive", lambda pid: state.get(pid, False))
+        kills: list[tuple[int, int]] = []
+
+        def fake_kill(pid: int, sig: int) -> None:
+            kills.append((pid, sig))
+            if sig == signal.SIGTERM:
+                state[pid] = False
+
+        monkeypatch.setattr(td.os, "kill", fake_kill)
+
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert kills.count((333333, signal.SIGTERM)) == 1
+
+
+class TestEnumerateT2DaemonPids:
+    """RDR-129 A1 (nexus-exa2p): the open-fd enumeration helper used by both
+    the startup sweep and the doctor multiplicity check."""
+
+    def test_missing_db_short_circuits_empty(self, tmp_path, monkeypatch) -> None:
+        from nexus.daemon import t2_daemon as td
+
+        # A db file that does not exist can have no open-fd holders; the probe
+        # must short-circuit (and never shell out to lsof / scan /proc).
+        called = {"probe": False}
+
+        def _boom(target):  # pragma: no cover — must not run
+            called["probe"] = True
+            return [1]
+
+        monkeypatch.setattr(td, "_open_fd_holder_pids", _boom)
+        assert td._enumerate_t2_daemon_pids_for_db(tmp_path / "absent.db") == []
+        assert called["probe"] is False
+
+    def test_filters_non_daemon_holders(self, tmp_path, monkeypatch) -> None:
+        from nexus.daemon import t2_daemon as td
+
+        db = tmp_path / "memory.db"
+        db.write_text("x")  # only .exists() matters
+        monkeypatch.setattr(td, "_open_fd_holder_pids", lambda target: [10, 20, 30])
+        # 20 is some unrelated process holding the file; only daemons count.
+        monkeypatch.setattr(td, "_is_t2_daemon_process", lambda pid: pid in (10, 30))
+        assert td._enumerate_t2_daemon_pids_for_db(db) == [10, 30]
