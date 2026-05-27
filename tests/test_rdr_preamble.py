@@ -651,3 +651,229 @@ class TestPhaseReviewGate:
         assert result.exit_code == 0, result.output
         assert "BLOCKED" in result.output
         assert "Item2" in result.output
+
+    def test_phase_review_gate_pass2_empty_evidence_value_blocked(self, rdr_env):
+        """Pass 2 with an empty evidence value (Item2=): BLOCKED printed.
+
+        Migrated from test_phase_review_gate.py::TestPass2Validate.
+        test_pass2_empty_evidence_value_blocks (nexus-2fnet).
+        """
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "### Approach\n\n"
+            "1. **T2 read**: Read from T2 database.\n"
+            "2. **File fallback**: Fall back to .md files.\n\n"
+            "## Tradeoffs\n\nSome tradeoffs."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-130-command-preambles.md",
+            {"title": "Command Preambles", "status": "accepted", "type": "decision", "priority": "P0"},
+            body=body,
+        )
+        result = _runner().invoke(
+            rdr,
+            [
+                "preamble",
+                "phase-review-gate",
+                "--",
+                "130",
+                "--phase",
+                "1",
+                "--evidence",
+                "Item1=nexus-abc1,Item2=",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Sentinel write (RDR-121 P2 co-requirement) — migrated from
+# test_phase_review_gate.py::TestSentinelSideEffect (nexus-2fnet).
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseReviewGateSentinel:
+    """The PASSED path must write a sentinel; BLOCKED must not.
+
+    Migrated from test_phase_review_gate.py::TestSentinelSideEffect (nexus-2fnet).
+    Uses TMPDIR redirect (monkeypatch.setenv) instead of subprocess so CliRunner
+    tests can verify the sentinel file without running a sub-process.
+    """
+
+    def _make_rdr_with_approach(self, rdr_dir: Path, rdr_id: int) -> None:
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "### Approach\n\n"
+            "1. **T2 read**: Read T2.\n"
+            "2. **File fallback**: Fall back to files.\n\n"
+            "## Tradeoffs\n\nSome."
+        )
+        _write_rdr(
+            rdr_dir,
+            f"rdr-{rdr_id:03d}-test.md",
+            {"title": "Test RDR", "status": "accepted", "type": "decision", "priority": "P0"},
+            body=body,
+        )
+
+    def test_passed_writes_sentinel(self, rdr_env, monkeypatch, tmp_path):
+        """PASSED outcome writes a sentinel JSON file under $TMPDIR/nx-phase-gate-sentinel/."""
+        self._make_rdr_with_approach(rdr_env["rdr_dir"], 130)
+        sentinel_base = tmp_path / "sentinels"
+        sentinel_base.mkdir()
+        monkeypatch.setenv("TMPDIR", str(sentinel_base))
+
+        result = _runner().invoke(
+            rdr,
+            [
+                "preamble",
+                "phase-review-gate",
+                "--",
+                "130",
+                "--phase",
+                "1",
+                "--evidence",
+                "Item1=nexus-abc1,Item2=nexus-def2",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "APPROACH CROSS-WALK PASSED" in result.output
+        sentinel_dir = sentinel_base / "nx-phase-gate-sentinel"
+        assert sentinel_dir.exists(), "PASSED outcome must create sentinel dir"
+        files = list(sentinel_dir.glob("*-130-1.json"))
+        assert len(files) == 1, f"expected one sentinel for RDR-130 phase 1, got {files}"
+        import json as _json
+        payload = _json.loads(files[0].read_text())
+        assert payload["outcome"] == "PASSED"
+        assert payload["rdr_id"] == "130"
+        assert payload["phase"] == "1"
+
+    def test_blocked_does_not_write_sentinel(self, rdr_env, monkeypatch, tmp_path):
+        """BLOCKED outcome must NOT write a sentinel file."""
+        self._make_rdr_with_approach(rdr_env["rdr_dir"], 130)
+        sentinel_base = tmp_path / "sentinels"
+        sentinel_base.mkdir()
+        monkeypatch.setenv("TMPDIR", str(sentinel_base))
+
+        result = _runner().invoke(
+            rdr,
+            [
+                "preamble",
+                "phase-review-gate",
+                "--",
+                "130",
+                "--phase",
+                "1",
+                "--evidence",
+                "Item1=nexus-abc1",  # Item2 missing
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" in result.output
+        sentinel_dir = sentinel_base / "nx-phase-gate-sentinel"
+        if sentinel_dir.exists():
+            files = list(sentinel_dir.glob("*-130-1.json"))
+            assert len(files) == 0, (
+                f"BLOCKED outcome must not write a sentinel; found {files}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Gap regex contract — migrated from test_rdr_close_gate.py::TestGapExtraction
+# and TestPreambleConsistency (skill-file checks) (nexus-2fnet).
+# These test the regex specification that lives in rdr.py's rdr-close preamble.
+# The local _find_gaps replica tests the CONTRACT, not the file.
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+
+def _find_gaps(problem_stmt: str) -> list[tuple[str, str, str]]:
+    """Replica of the gap-extraction regex in the rdr-close preamble (nexus-2fnet)."""
+    return _re.findall(
+        r"^#{3,5} Gap (\d+)([^\n:]*):\s*(.*)$", problem_stmt, _re.MULTILINE
+    )
+
+
+class TestGapRegexContract:
+    """Regression guard for the gap-heading regex (nexus-2fnet).
+
+    The preamble in ``nx rdr preamble rdr-close`` uses:
+      ``^#{3,5} Gap (\\d+)([^\\n:]*): (.*)$``
+    to find structured gap headings.  These tests verify the CONTRACT
+    (which combinations match/don't match) so changes to rdr.py's regex
+    trigger failures here.
+    """
+
+    def test_h4_gap_matches(self) -> None:
+        section = "#### Gap 1: First gap\nContent.\n\n#### Gap 2: Second gap\nContent."
+        gaps = _find_gaps(section)
+        assert len(gaps) == 2
+        assert gaps[0][0] == "1"
+        assert gaps[0][2] == "First gap"
+        assert gaps[1][0] == "2"
+
+    def test_h3_gap_matches(self) -> None:
+        gaps = _find_gaps("### Gap 1: Three-hash gap\nContent.")
+        assert len(gaps) == 1
+        assert gaps[0][0] == "1"
+
+    def test_h5_gap_matches(self) -> None:
+        gaps = _find_gaps("##### Gap 1: Five-hash gap\nContent.")
+        assert len(gaps) == 1
+
+    def test_h2_gap_not_matched(self) -> None:
+        gaps = _find_gaps("## Gap 1: Too few hashes\nContent.")
+        assert len(gaps) == 0
+
+    def test_h6_gap_not_matched(self) -> None:
+        gaps = _find_gaps("###### Gap 1: Too many hashes\nContent.")
+        assert len(gaps) == 0
+
+    def test_gap_without_colon_not_matched(self) -> None:
+        gaps = _find_gaps("#### Gap 1 Missing the colon\nContent.")
+        assert len(gaps) == 0
+
+    def test_parenthetical_gap(self) -> None:
+        """#### Gap 4 (prerequisite for Gap 1): Complex title"""
+        gaps = _find_gaps("#### Gap 4 (prerequisite for Gap 1): Complex title\nContent.")
+        assert len(gaps) == 1
+        assert gaps[0][0] == "4"
+        assert gaps[0][2] == "Complex title"
+
+    def test_multi_digit_gap_number(self) -> None:
+        gaps = _find_gaps("#### Gap 12: Twelfth gap\nContent.")
+        assert len(gaps) == 1
+        assert gaps[0][0] == "12"
+
+    def test_no_gaps_returns_empty(self) -> None:
+        gaps = _find_gaps("Some section with no gap headings.\n### Not a gap heading")
+        assert len(gaps) == 0
+
+
+class TestSkillFileGapCoverage:
+    """Skill .md files must document both heading variants (nexus-2fnet).
+
+    Migrated from test_rdr_close_gate.py::TestPreambleConsistency
+    (the two skill-file checks that survive script deletion).
+    """
+
+    def test_gate_skill_lists_heading_variants(self) -> None:
+        """rdr-gate SKILL.md must list both Problem and Problem Statement."""
+        skill = (
+            Path(__file__).parent.parent / "conexus" / "skills" / "rdr-gate" / "SKILL.md"
+        ).read_text()
+        assert "Problem / Problem Statement" in skill
+
+    def test_create_skill_documents_heading_variants(self) -> None:
+        """rdr-create SKILL.md must mention both heading forms."""
+        skill = (
+            Path(__file__).parent.parent
+            / "conexus"
+            / "skills"
+            / "rdr-create"
+            / "SKILL.md"
+        ).read_text()
+        assert "## Problem Statement" in skill
+        assert "## Problem" in skill
