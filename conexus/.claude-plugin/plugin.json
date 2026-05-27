@@ -1,6 +1,6 @@
 {
   "name": "conexus",
-  "version": "5.1.3",
+  "version": "5.1.4",
   "description": "Self-hosted three-tier knowledge management with plan-centric retrieval (nx_answer), specialized agents, semantic search, and RDR decision tracking for Claude Code.",
   "author": {
     "name": "Hal Hildebrand",
