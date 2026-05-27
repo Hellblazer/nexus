@@ -58,6 +58,8 @@ import os
 import signal
 import socket
 import struct
+import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -65,6 +67,44 @@ from typing import Any
 import structlog
 
 _log = structlog.get_logger(__name__)
+
+# Grace period after SIGTERM before escalating to SIGKILL when reaping a
+# lingering predecessor daemon on takeover (RDR-128 single-writer backstop).
+_PREDECESSOR_REAP_TIMEOUT: float = 5.0
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """True iff signalling pid 0 to *pid* succeeds (EPERM => exists, treat
+    as alive). Mirrors the T3 daemon's liveness probe."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        return exc.errno != errno.ESRCH
+    return True
+
+
+def _is_t2_daemon_process(pid: int) -> bool:
+    """Best-effort: confirm *pid*'s command line looks like a T2 daemon.
+
+    Guards against PID reuse before we send a kill signal: the addr-file
+    pid could have been recycled by an unrelated process after the old
+    daemon died. When the command line cannot be read we return ``False``
+    (refuse to kill rather than risk collateral)."""
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return False
+    cmd = out.stdout.strip()
+    return "daemon t2" in cmd or "t2_daemon" in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +532,12 @@ class T2Daemon:
         """Acquire spawn lock, open T2Database, bind sockets, write discovery."""
         self._ensure_dirs()
         self._acquire_spawn_lock()
+        # RDR-128 single-writer backstop (nexus-070e2): we now hold the spawn
+        # lock, so we are the legitimate single writer. Reap any predecessor
+        # daemon still named in the addr file BEFORE opening T2Database, so its
+        # WAL writer is gone before we migrate and two daemons cannot coexist
+        # when the flock was bypassed (version transition / released-but-alive).
+        self._reap_predecessor_daemon()
 
         # RDR-120 P3b (nexus-e9x4l): daemon is the sole ``apply_pending``
         # caller. T2Database.__init__ no longer auto-runs migrations; the
@@ -698,6 +744,65 @@ class T2Daemon:
         self._config_dir.mkdir(parents=True, exist_ok=True)
         try:
             self._config_dir.chmod(0o700)
+        except OSError:
+            pass
+
+    def _reap_predecessor_daemon(self) -> None:
+        """Reap a lingering predecessor daemon named in the addr file.
+
+        Precondition: the spawn lock is held (called from :meth:`start`
+        immediately after :meth:`_acquire_spawn_lock`). Holding the lock
+        means we are the legitimate single writer, so any OTHER live pid in
+        the pre-existing discovery file is a zombie that escaped the flock
+        (e.g. across a version transition, or a released-but-alive window) and
+        must be reaped to honour RDR-128 single-writer — otherwise two daemons
+        contend on the same WAL ("FTS5: database is locked"; the 5.0.2-5.0.4
+        daemon-churn class). Run BEFORE opening T2Database so the predecessor's
+        WAL writer is gone before we migrate.
+
+        Best-effort and non-fatal: any failure to read the file or signal the
+        pid leaves startup to proceed (the flock already guarantees we are the
+        sole new writer).
+        """
+        disc_path = t2_discovery_path(self._config_dir)
+        try:
+            raw = disc_path.read_text()
+        except OSError:
+            return
+        try:
+            payload = json.loads(raw) if raw.strip() else None
+        except ValueError:
+            return
+        if not isinstance(payload, dict):
+            return
+        pid = payload.get("pid")
+        if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+            return
+        if not _pid_is_alive(pid):
+            return
+        if not _is_t2_daemon_process(pid):
+            _log.warning("t2_predecessor_pid_not_daemon_skip_reap", pid=pid)
+            return
+
+        _log.warning("t2_reaping_predecessor_daemon", pid=pid)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except OSError as exc:
+            _log.warning("t2_predecessor_sigterm_failed", pid=pid, err=str(exc))
+            return
+
+        deadline = time.monotonic() + _PREDECESSOR_REAP_TIMEOUT
+        while time.monotonic() < deadline:
+            if not _pid_is_alive(pid):
+                _log.info("t2_predecessor_reaped", pid=pid, via="SIGTERM")
+                return
+            time.sleep(0.1)
+
+        try:
+            os.kill(pid, signal.SIGKILL)
+            _log.warning("t2_predecessor_sigkilled", pid=pid)
         except OSError:
             pass
 

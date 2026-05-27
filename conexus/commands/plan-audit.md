@@ -5,24 +5,7 @@ description: Audit a plan using mcp__plugin_conexus_nexus__nx_plan_audit (RDR-08
 
 # Plan Audit Request
 
-```!
-  echo "## Context"
-  echo ""
-  echo "**Working directory:** $(pwd)"
-  echo ""
-
-  echo "Provide the plan to audit in the arguments or reference existing documentation."
-  echo ""
-
-  # Bead context
-  echo ""
-  echo "### Related Beads"
-  if command -v bd &> /dev/null; then
-    bd list --type=epic --status=open --limit=3 2>/dev/null || echo "No open epics"
-  else
-    echo "Beads not available"
-  fi
-```
+!`nx command-context plan-audit -- "$ARGUMENTS"`
 
 ## Plan to Audit
 

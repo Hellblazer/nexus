@@ -5,33 +5,7 @@ description: Thorough analysis of complex problems using deep-analyst agent
 
 # Deep Analysis Request
 
-```!
-  echo "## Context"
-  echo ""
-  echo "**Working directory:** $(pwd)"
-  echo ""
-
-  # Git context
-  if git rev-parse --git-dir > /dev/null 2>&1; then
-    echo "**Branch:** $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"
-    echo ""
-  fi
-
-  # Active beads context
-  echo "### Active Beads"
-  if command -v bd &> /dev/null; then
-    bd list --status=in_progress --limit=5 2>/dev/null || echo "No in-progress beads"
-  else
-    echo "Beads not available"
-  fi
-  echo ""
-
-  echo "### Tip"
-  echo ""
-  echo "The deep-analyst uses mcp__plugin_conexus_sequential-thinking__sequentialthinking: hypothesis → evidence → evaluation → conclusion."
-  echo "For cross-cutting issues, this agent explores multiple components before converging on root cause."
-
-```
+!`nx command-context deep-analysis -- "$ARGUMENTS"`
 
 ### Project Context
 

@@ -5,31 +5,7 @@ description: Persist and organize knowledge into the T3 store using mcp__plugin_
 
 # Knowledge Tidying Request
 
-```!
-  echo "## Context"
-  echo ""
-  echo "**Working directory:** $(pwd)"
-  echo ""
-
-  echo "### Existing Knowledge"
-  echo ""
-  echo "Use **store_list** tool: collection='knowledge' to list existing knowledge entries."
-  echo ""
-
-  # Active beads context
-  echo "### Recently Completed Beads"
-  if command -v bd &> /dev/null; then
-    bd list --status=done --limit=5 2>/dev/null || echo "No recently completed beads"
-  else
-    echo "Beads not available"
-  fi
-  echo ""
-
-  echo "### Storage Standards"
-  echo ""
-  echo "Title conventions: research-{topic}, decision-{component}-{name}, pattern-{name}, debug-{component}-{issue}"
-  echo "All entries stored via store_put tool: collection='knowledge'"
-```
+!`nx command-context knowledge-tidy -- "$ARGUMENTS"`
 
 ### Project Context
 

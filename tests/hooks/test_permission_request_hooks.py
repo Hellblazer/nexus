@@ -40,7 +40,45 @@ def _parse_decision(output: str) -> str | None:
     return data["hookSpecificOutput"]["decision"]["behavior"]
 
 
+def _registered_conexus_tools() -> list[str]:
+    """Full ``mcp__plugin_conexus_<server>__<tool>`` names for every tool the
+    conexus MCP servers register.
+
+    Enumerates the live FastMCP tool registries so the auto-approve allow-list
+    is validated against what the servers ACTUALLY expose. This catches drift
+    where a new tool ships without a hook entry and therefore prompts the user
+    (the operator_filter/check/verify/groupby/aggregate gap, 2026-05-27).
+    sequential-thinking is an external npx server (not introspectable here), so
+    its single tool is appended as a known constant.
+    """
+    import importlib
+
+    names: list[str] = []
+    for module, server in (
+        ("nexus.mcp.core", "nexus"),
+        ("nexus.mcp.catalog", "nexus-catalog"),
+    ):
+        mcp = importlib.import_module(module).mcp
+        for tool in mcp._tool_manager._tools:  # FastMCP registry
+            names.append(f"mcp__plugin_conexus_{server}__{tool}")
+    names.append("mcp__plugin_conexus_sequential-thinking__sequentialthinking")
+    return sorted(names)
+
+
 # ── conexus plugin hook ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("tool_name", _registered_conexus_tools())
+def test_every_registered_conexus_tool_is_auto_approved(tool_name: str) -> None:
+    """Drift guard: every tool the conexus MCP servers register MUST be
+    auto-approved by auto-approve-nx-mcp.sh. A registered tool missing from the
+    hook's explicit allow-list would make Claude Code prompt for permission.
+    """
+    output = _run_hook(NX_SCRIPT, tool_name)
+    assert _parse_decision(output) == "allow", (
+        f"{tool_name} is registered by an MCP server but NOT auto-approved by "
+        f"{NX_SCRIPT.name} -- add it to the case list (it will prompt otherwise)."
+    )
 
 
 class TestNxPermissionHook:
