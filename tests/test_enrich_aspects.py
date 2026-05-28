@@ -534,6 +534,62 @@ class TestDefaultExtraction:
             ).fetchone()[0]
         assert count == 2
 
+    def test_aspect_persist_routes_through_t2_index_write(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RDR-137 followup (nexus-hb99x): the per-paper aspect persist
+        must route through t2_index_write (daemon-serialized writer)
+        rather than a direct db.document_aspects.upsert that competes
+        for the WAL writer lock and crashes on 'database is locked'.
+
+        Spy on t2_index_write: it must be called once per extracted
+        record, and the records must still persist (the test has no
+        daemon, so t2_index_write's direct-fallback does the write)."""
+        _, db_path, cat = env
+        _register_entries(cat, ["/papers/p1.pdf", "/papers/p2.pdf"])
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects",
+            lambda content, source_path, collection, **_kw: _make_record(
+                source_path=source_path,
+            ),
+        )
+
+        # Wrap the real t2_index_write so we both count calls AND let
+        # the direct-fallback persist the row.
+        import nexus.mcp_infra as _mi
+        real = _mi.t2_index_write
+        calls: list[int] = []
+
+        def _spy(write_fn):
+            calls.append(1)
+            return real(write_fn)
+
+        monkeypatch.setattr(_mi, "t2_index_write", _spy)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich,
+            ["aspects", "knowledge__delos", "--validate-sample", "0"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "2 extracted" in result.output
+
+        # One routed write per extracted record.
+        assert len(calls) == 2, (
+            f"expected 2 t2_index_write calls (one per aspect upsert); "
+            f"saw {len(calls)}. A direct db.document_aspects.upsert "
+            f"would bypass routing and regress nexus-hb99x."
+        )
+
+        # And the rows actually persisted (routed write landed).
+        from nexus.db.t2 import T2Database
+        with T2Database(db_path) as db:
+            count = db.document_aspects.conn.execute(
+                "SELECT COUNT(*) FROM document_aspects"
+            ).fetchone()[0]
+        assert count == 2
+
     def test_extract_fail_skips_without_upsert(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
