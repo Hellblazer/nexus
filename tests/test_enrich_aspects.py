@@ -590,6 +590,57 @@ class TestDefaultExtraction:
             ).fetchone()[0]
         assert count == 2
 
+    def test_per_doc_write_failure_skips_and_continues_batch(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-24rf9: a single per-doc aspect write failure (classically
+        'database is locked' under multi-writer WAL contention, even with
+        RDR-129 B1's 30s busy_timeout) must be logged, counted, and
+        SKIPPED — the batch continues and every other doc's already-paid
+        LLM extraction is preserved, rather than an uncaught exception
+        aborting the whole run."""
+        import sqlite3
+
+        _, db_path, cat = env
+        _register_entries(cat, ["/papers/p1.pdf", "/papers/p2.pdf"])
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects",
+            lambda content, source_path, collection, **_kw: _make_record(
+                source_path=source_path,
+            ),
+        )
+
+        # First routed write raises a lock error; the second succeeds.
+        import nexus.mcp_infra as _mi
+        real = _mi.t2_index_write
+        state = {"n": 0}
+
+        def _flaky(write_fn):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return real(write_fn)
+
+        monkeypatch.setattr(_mi, "t2_index_write", _flaky)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich,
+            ["aspects", "knowledge__delos", "--validate-sample", "0"],
+        )
+        # The batch did NOT abort on the first doc's write failure.
+        assert result.exit_code == 0, result.output
+        # The failure is surfaced (loud, not silent) in the summary…
+        assert "1 skipped (write-failure)" in result.output
+        # …and the surviving doc's row persisted (batch continued past it).
+        from nexus.db.t2 import T2Database
+        with T2Database(db_path) as db:
+            count = db.document_aspects.conn.execute(
+                "SELECT COUNT(*) FROM document_aspects"
+            ).fetchone()[0]
+        assert count == 1
+
     def test_extract_fail_skips_without_upsert(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

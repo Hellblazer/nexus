@@ -957,6 +957,7 @@ def _run_extraction(
     null_fields = 0
     skipped = 0
     skipped_unreadable = 0
+    write_skipped = 0
     by_reason: dict[str, int] = {}
 
     # nexus-o6aa.10.1: a single catalog projection serves every entry
@@ -1036,11 +1037,37 @@ def _run_extraction(
             # row (idempotent no-op when the CLI batch path has no queued
             # row for this (collection, source_path)). Daemon path when
             # reachable; direct-T2Database fallback otherwise.
-            t2_index_write(
-                lambda t2db, _rec=record: t2db.complete_aspect(
-                    _dataclasses.asdict(_rec)
+            try:
+                t2_index_write(
+                    lambda t2db, _rec=record: t2db.complete_aspect(
+                        _dataclasses.asdict(_rec)
+                    )
                 )
-            )
+            except Exception as exc:  # noqa: BLE001
+                # nexus-24rf9: a single per-doc write failure (classically
+                # 'database is locked' under multi-writer WAL contention,
+                # even with RDR-129 B1's 30s busy_timeout) must NOT abort
+                # the batch and discard every already-extracted doc's
+                # paid-for LLM work. Log + count + skip + continue. This is
+                # LOUD (structured warning + per-doc echo + summary tally),
+                # not a silent fallback — the doc simply misses its row this
+                # run and a re-run picks it up (complete_aspect is
+                # idempotent). B1's busy_timeout is the wait/retry layer; no
+                # app-level retry is stacked here (it would 3x the
+                # worst-case stall under a long checkpoint).
+                write_skipped += 1
+                _log.warning(
+                    "aspect_write_skip",
+                    source_path=source_path,
+                    collection=collection,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                click.echo(
+                    f"  [{i}/{len(entries)}] {Path(source_path).name}: "
+                    f"write-skipped ({type(exc).__name__})"
+                )
+                continue
 
             if record.problem_formulation is None:
                 null_fields += 1
@@ -1058,6 +1085,7 @@ def _run_extraction(
     summary = (
         f"Done: {success} extracted, {null_fields} null-fields, "
         f"{skipped_unreadable} skipped (read-failure), "
+        f"{write_skipped} skipped (write-failure), "
         f"{skipped} skipped (other)"
     )
     if by_reason:
