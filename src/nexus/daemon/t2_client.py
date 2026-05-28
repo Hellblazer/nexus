@@ -285,6 +285,12 @@ class T2Client:
     def rename_collection_cascade(self, *args: Any, **kwargs: Any) -> Any:
         return self.database.rename_collection_cascade(*args, **kwargs)
 
+    def complete_aspect(self, *args: Any, **kwargs: Any) -> Any:
+        # nexus-zir76: aspect-worker persist (document_aspects.upsert +
+        # aspect_queue.mark_done) folded into one daemon-routable call so
+        # the worker stays off the direct memory.db write path.
+        return self.database.complete_aspect(*args, **kwargs)
+
     def put(self, *args: Any, **kwargs: Any) -> Any:
         # T2Database.put is a thin facade over memory.put; mirror it so a
         # write_fn (or a helper handed the writer, e.g. T1Database.promote)
