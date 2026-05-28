@@ -1073,7 +1073,7 @@ class Catalog:
         the top of :mod:`nexus.db.t2.catalog`.
         """
         owner_str = str(owner)
-        cur = self._db.execute(  # epsilon-allow: derived staleness signal — no event-sourcing replay-equality concern (RDR-137 P3.8)
+        cur = self._db.execute(  # epsilon-allow: derived staleness signal — not an event; the JSONL append below is for rebuild-survival (RDR-137 P3.8 + nexus-43qgm.1), not replay-equality
             "UPDATE owners SET head_hash = ? WHERE tumbler_prefix = ?",
             (head_hash, owner_str),
         )

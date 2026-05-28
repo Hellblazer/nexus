@@ -400,6 +400,10 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # docs__ collection names used as fixtures for the catalog
     # writer+reader cycle; no Voyage call.
     "test_index_corpus_knowledge_e2e.py",
+    # RDR-137 followup CRITICAL-3/4/5 (nexus-43qgm.3-5): voyage tokens
+    # appear in synthetic conformant collection names used as
+    # adapter-test fixtures; no Voyage call is ever made.
+    "test_rdr137_followup_critical_345.py",
     # RDR-137 P3.5 (nexus-tts0d.10): same pattern — phantom
     # docs__1-2188 in the regression fixture for nexus-9iw41.
     "test_context_catalog_cutover.py",
