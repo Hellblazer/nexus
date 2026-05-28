@@ -539,17 +539,39 @@ def reindex_cmd(name: str, force: bool) -> None:
             # collections with no registered owner (the L1 step is the
             # only thing in the chain that requires a path, and it
             # short-circuits cleanly when ``repo_path`` is ``None``).
+            # RDR-137 Phase 3.4 (nexus-tts0d.9): catalog-backed lookup.
+            # Find the collection's owner, then read repo_root from
+            # owners. Falls back to RepoRegistry walk only if catalog
+            # has no row for this collection (pre-Phase-1.5a installs).
             repo_path: Path | None = None
             try:
-                from nexus.indexer import RepoRegistry
-                from nexus.commands._helpers import default_db_path  # noqa: F401
-                from nexus.config import nexus_config_dir
-                reg = RepoRegistry(nexus_config_dir() / "repos.json")
-                for rp_str, info in reg.all_info().items():
-                    coll = info.get("collection") or info.get("docs_collection")
-                    if coll == name or info.get("docs_collection") == name:
-                        repo_path = Path(rp_str)
-                        break
+                from nexus.catalog.catalog import Catalog
+                from nexus.config import catalog_path, nexus_config_dir
+                cat_dir = catalog_path()
+                cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+                row = cat._db.execute(
+                    "SELECT owner_id FROM collections WHERE name = ?",
+                    (name,),
+                ).fetchone()
+                if row and row[0]:
+                    owner_tumbler = row[0].replace("-", ".")
+                    o_row = cat._db.execute(
+                        "SELECT repo_root FROM owners "
+                        "WHERE tumbler_prefix = ?",
+                        (owner_tumbler,),
+                    ).fetchone()
+                    if o_row and o_row[0]:
+                        repo_path = Path(o_row[0])
+                if repo_path is None:
+                    # Fallback: legacy registry walk for pre-Phase-1.5a
+                    # installs where collections.owner_id is empty.
+                    from nexus.registry import RepoRegistry
+                    reg = RepoRegistry(nexus_config_dir() / "repos.json")
+                    for rp_str, info in reg.all_info().items():
+                        coll = info.get("collection") or info.get("docs_collection")
+                        if coll == name or info.get("docs_collection") == name:
+                            repo_path = Path(rp_str)
+                            break
             except Exception:
                 pass  # repo-path resolution is best-effort
             run_collection_postprocessing([name], repo_path=repo_path)
