@@ -397,7 +397,36 @@ def backfill_collections_cmd(dry_run: bool) -> None:
     if dry_run:
         return
 
+    # RDR-137 followup SIG-7 (nexus-43qgm.7): pass content_type +
+    # owner_id when the collection name is conformant so the OQ-5
+    # reader inference cannot silently shadow other owners' docs
+    # selections with anonymous knowledge__ rows. Legacy 2-segment
+    # names (e.g. ``knowledge__delos``) fall through to the bare
+    # register_collection call — their owner_id remains empty and
+    # the reader's owner_id JOIN excludes them from owner-scoped
+    # lookups, which is the desired behaviour.
+    from nexus.corpus import (  # noqa: PLC0415
+        is_conformant_collection_name,
+        parse_conformant_collection_name,
+    )
     for name in to_register:
+        if is_conformant_collection_name(name):
+            try:
+                parsed = parse_conformant_collection_name(name)
+                cat.register_collection(
+                    name,
+                    content_type=parsed["content_type"],
+                    owner_id=parsed["owner_id"],
+                    embedding_model=parsed["embedding_model"],
+                    model_version=parsed["model_version"],
+                )
+                continue
+            except (KeyError, ValueError) as exc:
+                _log.warning(
+                    "backfill_collections_conformant_parse_failed",
+                    name=name, error=str(exc),
+                )
+        # Non-conformant fallback (legacy 2-segment names).
         cat.register_collection(name)
 
     click.echo(

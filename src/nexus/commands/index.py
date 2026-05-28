@@ -119,10 +119,14 @@ class _CatalogBackedRegistry:
         return success
 
     def all_info(self) -> dict:
-        # The two indexer call sites (_run_index_frecency_only line
-        # 1065 + _run_index line 1956) only use this for code_collection
-        # / docs_collection extraction on the current repo, which now
-        # flows through ``get(repo)``. Returning {} here is safe.
+        # RDR-137 followup SIG-15 (nexus-43qgm.15): the indexer's
+        # `index_repository` chain uses `get(repo)` (single-repo
+        # lookup) rather than `all_info()`. The actual `all_info()`
+        # consumer in production is `_backfill_repos` in
+        # commands/catalog.py, which uses a separate
+        # `_LegacyRegistryReader` adapter — NOT this class. Returning
+        # {} from this adapter is therefore safe; no production path
+        # consumes the return value.
         return {}
 
 

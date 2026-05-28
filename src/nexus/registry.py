@@ -26,22 +26,46 @@ import json
 import os
 import tempfile
 import threading
+import warnings
 from pathlib import Path
 from typing import Any
 
 import structlog
 
-from nexus.repo_identity import (  # noqa: F401
-    _repo_identity,
-    _repo_identity_with_main,
-    _resolve_main_repo,
-    _resolve_repo_collection,
-    _safe_collection,
-    _sanitise_owner_segment,
-    list_sibling_collections,
-)
-
 _log = structlog.get_logger()
+
+
+# RDR-137 followup SIG-12 (nexus-43qgm.12): module-level __getattr__
+# emits a DeprecationWarning + redirects when callers import a
+# relocated helper from this module instead of from nexus.repo_identity
+# (the new home). Test code and any plugin/operator code still using
+# the old path receives a clear signal during the deprecation window;
+# the next-major delete of this whole module then raises a clean
+# ImportError instead of an opaque AttributeError.
+_RELOCATED_HELPERS = frozenset({
+    "_repo_identity",
+    "_repo_identity_with_main",
+    "_resolve_main_repo",
+    "_resolve_repo_collection",
+    "_safe_collection",
+    "_sanitise_owner_segment",
+    "list_sibling_collections",
+})
+
+
+def __getattr__(name: str) -> Any:
+    if name in _RELOCATED_HELPERS:
+        warnings.warn(
+            f"nexus.registry.{name} is deprecated and will be removed in "
+            f"the next major release. Import from nexus.repo_identity instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        import nexus.repo_identity as _ri  # noqa: PLC0415
+        return getattr(_ri, name)
+    raise AttributeError(
+        f"module 'nexus.registry' has no attribute {name!r}"
+    )
 
 
 __all__ = (
@@ -90,8 +114,12 @@ class RepoRegistry:
     def add(self, repo: Path, *, cat: Any = None) -> None:
         key = str(repo)
         name = repo.name
-        code_col = _resolve_repo_collection(repo, "code", cat=cat)
-        docs_col = _resolve_repo_collection(repo, "docs", cat=cat)
+        # Direct import from the new home — avoids triggering this
+        # module's __getattr__ DeprecationWarning on our own internal
+        # use (the warning is for EXTERNAL imports from nexus.registry).
+        from nexus.repo_identity import _resolve_repo_collection as _rrc
+        code_col = _rrc(repo, "code", cat=cat)
+        docs_col = _rrc(repo, "docs", cat=cat)
         with self._lock:
             self._data["repos"][key] = {
                 "name": name,

@@ -36,13 +36,25 @@ _REPOS_JSON_PARSE_ALLOW = {
 # ``class RepoRegistry`` must not exist anywhere — the class was
 # deleted in nexus-tts0d.20.
 _REPO_REGISTRY_CLASS_RE = re.compile(r"^class\s+RepoRegistry\b", re.MULTILINE)
-# Direct file reads of the legacy path (json.loads on a path whose
-# basename is repos.json). Heuristic match for ``json.loads(`` near
-# a ``repos.json`` literal.
+# RDR-137 followup SIG-16 (nexus-43qgm.16): direct file reads of the
+# legacy path. Tightened from a broad 200-char proximity match (which
+# false-positived on unrelated json.loads near a 'repos.json' comment
+# / variable) to two precise patterns:
+#
+# (1) `json.loads(<anything with repos.json>.read_text())` —
+#     anchored inside the loads() call.
+# (2) `Path(<anything with 'repos.json'>).read_text()`
+#     or `.read_bytes()` — anchored inside the Path() constructor.
+#
+# Both require the literal `repos.json` to appear INSIDE the read
+# expression itself; unrelated json operations near a comment that
+# happens to mention repos.json no longer trip the guard.
 _REPOS_JSON_DIRECT_READ_RE = re.compile(
-    r"(json\.loads|json\.load|Path\([^)]*repos\.json|\.read_text\(\)|\.read_bytes\(\))"
-    r"[\s\S]{0,200}repos\.json|"
-    r"repos\.json[\s\S]{0,200}(json\.loads|json\.load|\.read_text\(\)|\.read_bytes\(\))"
+    # Pattern 1: json.loads(...read_text()...) with repos.json inside.
+    r"(?:json\.loads|json\.load)\s*\([^)]*repos\.json[^)]*\.(?:read_text|read_bytes)\s*\(\)"
+    r"|"
+    # Pattern 2: Path("repos.json").read_text() / .read_bytes().
+    r"Path\s*\([^)]*repos\.json[^)]*\)\s*\.\s*(?:read_text|read_bytes)\s*\(\)"
 )
 
 
