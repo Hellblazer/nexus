@@ -163,29 +163,68 @@ class TestResolvePath:
         ):
             assert cat.resolve_path(tumbler) is None
 
-    def test_resolve_path_fallback_to_registry(self, tmp_path: Path) -> None:
-        """repo_root empty but registry has matching hash -> resolve via registry."""
+    def test_resolve_path_empty_repo_root_returns_none_no_registry_consult(
+        self, tmp_path: Path,
+    ) -> None:
+        """RDR-137 Phase 3.6 (nexus-tts0d.11, OQ-11): legacy owners with
+        empty ``repo_root`` no longer fall back to ``repos.json``. The
+        previous RepoRegistry-iteration path is excised; the function
+        now returns ``None`` and emits a DEBUG event so the legacy
+        owner is observable for re-index.
+        """
+        import logging
+        import structlog
+        from structlog.testing import capture_logs
+
         repo_dir = tmp_path / "myrepo"
         repo_dir.mkdir()
         repo_hash = hashlib.sha256(str(repo_dir).encode()).hexdigest()[:8]
 
-        db_path = tmp_path / "db"
-        db_path.mkdir()
-        registry_data = {
-            "repos": {str(repo_dir): {"name": "myrepo", "collection": "code__myrepo"}},
-        }
-        (db_path / "repos.json").write_text(json.dumps(registry_data))
-
-        cat = self._make_catalog(tmp_path)
-        owner = cat.register_owner("test-repo", "repo", repo_hash=repo_hash)
-        tumbler = cat.register(
-            owner, "test.py", content_type="code", file_path="src/test.py",
+        # Bump structlog so the DEBUG event fires under capture_logs.
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
         )
-        with patch(
-            "nexus.catalog.catalog._default_registry_path",
-            return_value=db_path / "repos.json",
-        ):
-            assert cat.resolve_path(tumbler) == repo_dir / "src" / "test.py"
+        try:
+            cat = self._make_catalog(tmp_path)
+            owner = cat.register_owner("test-repo", "repo", repo_hash=repo_hash)
+            tumbler = cat.register(
+                owner, "test.py", content_type="code", file_path="src/test.py",
+            )
+            with capture_logs() as cap:
+                result = cat.resolve_path(tumbler)
+            assert result is None
+            # DEBUG event names the owner and gives a hint.
+            assert any(
+                e.get("event") == "catalog_resolve_path_legacy_owner_missing_repo_root"
+                and e.get("repo_hash") == repo_hash
+                for e in cap
+            )
+        finally:
+            structlog.configure(
+                wrapper_class=structlog.make_filtering_bound_logger(
+                    logging.WARNING,
+                ),
+            )
+
+    def test_resolve_path_no_RepoRegistry_import_in_module(self) -> None:
+        """RDR-137 Phase 3.6 OQ-11 acceptance gate: ``RepoRegistry`` is
+        no longer imported in ``catalog_docs.py`` after this cutover.
+
+        Note: ``_repo_identity`` (a pure helper, not registry-coupled)
+        stays for now — it migrates with the other helpers in
+        ``nexus-tts0d.21`` (relocation to ``nexus.repo_identity``).
+        Phase 5's lint guard fires on ``RepoRegistry`` and
+        ``repos.json`` re-introduction, not on the helpers.
+        """
+        from pathlib import Path as _Path
+
+        src = _Path(__file__).resolve().parent.parent / (
+            "src/nexus/catalog/catalog_docs.py"
+        )
+        text = src.read_text()
+        assert "RepoRegistry" not in text
+        assert "_default_registry_path" not in text
+        assert "repos.json" not in text
 
 
 # ── make_relative (nexus-1p4g.3) ─────────────────────────────────────────────
