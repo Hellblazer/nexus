@@ -396,6 +396,13 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # — the catalog-backed reader tests register synthetic conformant
     # collection names and read them back; no Voyage call.
     "test_repos_reader.py",
+    # RDR-137 P4.3 (nexus-tts0d.17): same pattern — knowledge__ /
+    # docs__ collection names used as fixtures for the catalog
+    # writer+reader cycle; no Voyage call.
+    "test_index_corpus_knowledge_e2e.py",
+    # RDR-137 P3.5 (nexus-tts0d.10): same pattern — phantom
+    # docs__1-2188 in the regression fixture for nexus-9iw41.
+    "test_context_catalog_cutover.py",
     "test_commands_dt.py",
     "test_corpus.py",
     "test_doc_indexer_hash_sync.py",
