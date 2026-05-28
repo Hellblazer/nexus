@@ -100,7 +100,12 @@ diagnosis one layer up — the taxonomy is built, the recall path does not read 
 [To be completed during `/conexus:rdr-research`: confirm exactly where
 `nx_answer`/`plan_run` build the `search` step args and whether a taxonomy can
 be injected there; measure recall/latency of a topic-centroid prefilter vs the
-current blind fan-out; decide Gap-2 granularity empirically.]
+current blind fan-out; decide Gap-2 granularity empirically; evaluate top-K vs
+**band-similarity** centroid-neighbor selection per Dehghankar et al. 2026
+("Random-Access Ranked Retrieval and Similarity Search", catalog tumbler
+`1.12.6`, §2 Example 2 and §6 Stripe Range Retrieval) — selecting all topics
+whose centroid similarity falls in a band around the best avoids silently
+dropping equally-relevant boundary clusters that strict top-K drops.]
 
 ### Key Discoveries
 
@@ -120,6 +125,10 @@ current blind fan-out; decide Gap-2 granularity empirically.]
   build per-collection summaries) — **Status**: Unverified — **Method**: Spike
 - [ ] An empty/low-confidence prefilter fails honestly rather than degrading
   (depends on `nexus-n1908`) — **Status**: Unverified — **Method**: Spike
+- [ ] Top-K centroid neighbor selection does not silently drop equally-relevant
+  boundary clusters; evaluate band-similarity selection (per Dehghankar et al.
+  2026, catalog tumbler `1.12.6`) as a design variant before committing to
+  top-K — **Status**: Unverified — **Method**: Spike
 
 ## Proposed Solution
 
@@ -152,4 +161,10 @@ to be completed during research.]
   consolidation).
 - Beads: `nexus-9napz` (superseded by this RDR), `nexus-n1908` (nx_answer
   empty-retrieval honesty — prerequisite).
+- Dehghankar, Asudeh, Mittal, Shetiya, Das. 2026. "Random-Access Ranked
+  Retrieval and Similarity Search." Catalog tumbler `1.12.6`, T3 collection
+  `knowledge__dt-papers__voyage-context-3__v1`. Source for the band-similarity
+  centroid-neighbor selection question (§2 Example 2 and §6 Stripe Range
+  Retrieval). See T3 `research-random-access-ranked-retrieval-nexus-leverage-2026-05-28`
+  (synthesis) + T2 `nexus_rdr/rar-synthesis-critique-2026-05-28` (critique).
 - T3 synthesis: `research-memforest-nexus-leverage-2026-05-27` (idea #2 origin).
