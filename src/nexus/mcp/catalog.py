@@ -280,13 +280,19 @@ def catalog_register(
             from nexus.repos import list_repos_dual
 
             reg_path = _default_registry_path()
-            for repo_path_str in list_repos_dual(
-                cat=cat, registry_path=reg_path,
-            ):
-                rel = make_relative(fp, _Path(repo_path_str))
-                if rel != fp:
-                    fp = rel
-                    break
+            # RDR-137 followup IMP-19 (nexus-43qgm.19): prefer the
+            # LONGEST matching prefix so a nested-repo scenario
+            # (parent + child both registered) anchors the path under
+            # the child, not the parent. Pre-fix iteration picked the
+            # first sorted match (typically parent), producing a
+            # longer-than-needed relative path.
+            candidates = [
+                rp for rp in list_repos_dual(cat=cat, registry_path=reg_path)
+                if make_relative(fp, _Path(rp)) != fp
+            ]
+            if candidates:
+                best = max(candidates, key=len)
+                fp = make_relative(fp, _Path(best))
 
         tumbler = cat.register(
             Tumbler.parse(owner), title,

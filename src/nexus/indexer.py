@@ -174,7 +174,7 @@ def _current_head(repo: Path) -> str:
         return ""
 
 
-def _set_owner_head_hash(repo: Path, head_hash: str) -> None:
+def _set_owner_head_hash(repo: Path, head_hash: str, *, cat=None) -> None:
     """RDR-137 Phase 3.8 (nexus-tts0d.13): persist *head_hash* on the
     owner row for *repo*.
 
@@ -183,16 +183,23 @@ def _set_owner_head_hash(repo: Path, head_hash: str) -> None:
     initialised or the owner is not registered yet — both are
     legitimate states during a first-time index, and ``index_repository``
     will register the owner in its catalog hook.
+
+    RDR-137 followup IMP-26 (nexus-43qgm.26): accepts an optional
+    ``cat`` parameter so callers that already have a Catalog open
+    can avoid the per-call connection overhead (Catalog.__init__ runs
+    migration probes + the RDR-108 D2 backfill scan). The default-
+    None path preserves standalone-helper semantics.
     """
     try:
         from nexus.catalog.catalog import Catalog
         from nexus.config import catalog_path
         from nexus.repo_identity import _repo_identity
 
-        cat_dir = catalog_path()
-        if not (cat_dir / ".catalog.db").exists():
-            return
-        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        if cat is None:
+            cat_dir = catalog_path()
+            if not (cat_dir / ".catalog.db").exists():
+                return
+            cat = Catalog(cat_dir, cat_dir / ".catalog.db")
         _, repo_hash = _repo_identity(repo)
         owner = cat.owner_for_repo(repo_hash)
         if owner is None:
@@ -1005,18 +1012,17 @@ def index_repository(
         # writes dropped per A2 verdict — status is write-only with no
         # consumers. head_hash now writes to owners.head_hash on the
         # catalog (Phase 1.5b column) via _set_owner_head_hash.
-        try:
-            if frecency_only:
-                _run_index_frecency_only(repo, registry)
-                stats: dict[str, int] = {}
-            else:
-                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_start=on_start, on_file=on_file, on_phase=on_phase, on_stage_timers=on_stage_timers, hooks=hooks)
-                _set_owner_head_hash(repo, _current_head(repo))
-            return stats
-        except CredentialsMissingError:
-            raise
-        except Exception:
-            raise
+        # RDR-137 followup IMP-21 (nexus-43qgm.21): inner try/except
+        # removed — both handlers unconditionally re-raised and added
+        # zero behaviour; the outer try/finally is the only meaningful
+        # guard. Vestige of the dropped status-write path.
+        if frecency_only:
+            _run_index_frecency_only(repo, registry)
+            stats: dict[str, int] = {}
+        else:
+            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_start=on_start, on_file=on_file, on_phase=on_phase, on_stage_timers=on_stage_timers, hooks=hooks)
+            _set_owner_head_hash(repo, _current_head(repo))
+        return stats
     finally:
         if lock_fd is not None:
             unlock_file(lock_fd)

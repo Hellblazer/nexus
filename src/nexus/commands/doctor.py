@@ -1336,7 +1336,18 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
         # Load owners for repo_root lookup
         owners_path = cat._owners_path
-        owners = read_owners(owners_path) if owners_path.exists() else {}
+        # RDR-137 followup IMP-18 (nexus-43qgm.18): early exit when
+        # owners.jsonl is absent. Pre-fix code degraded to owners={},
+        # skipped every row in the loop, and reported "Fixed 0
+        # entries" — indistinguishable from "all paths already
+        # relative". Surface the actionable cause instead.
+        if not owners_path.exists():
+            click.echo(
+                "Warning: owners.jsonl not found — run 'nx index repo "
+                "<path>' to populate catalog owners before fix-paths."
+            )
+            return
+        owners = read_owners(owners_path)
 
         # RDR-137 Phase 3.7 (nexus-tts0d.12): registry fallback removed.
         # Post-nexus-nzyrh owner.repo_root is always populated for

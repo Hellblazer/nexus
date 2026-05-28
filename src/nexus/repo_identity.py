@@ -22,12 +22,41 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import structlog
 
 _log = structlog.get_logger()
+
+
+# RDR-137 followup IMP-24 (nexus-43qgm.24): LRU-memoize the subprocess
+# call. _repo_identity_with_main intentionally invokes
+# _resolve_main_repo twice per call (once via _repo_identity for the
+# monkeypatch contract, once directly to expose main_repo). The
+# memoization halves the subprocess cost without changing semantics
+# — git-worktree status is stable for the process lifetime, so the
+# cache is safe. Cache keyed by str(repo) (Path objects with equal
+# string form hash identically).
+@lru_cache(maxsize=128)
+def _resolve_main_repo_cached(repo_str: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=repo_str,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            git_common = Path(result.stdout.strip())
+            if not git_common.is_absolute():
+                git_common = (Path(repo_str) / git_common).resolve()
+            return str(git_common.parent)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _log.debug("git rev-parse failed, using repo path directly", error=str(exc))
+    return repo_str
 
 
 def _resolve_main_repo(repo: Path) -> Path:
@@ -37,23 +66,12 @@ def _resolve_main_repo(repo: Path) -> Path:
     root even when *repo* is a worktree path.  Falls back to the given
     *repo* path when git is unavailable (not installed, not a git repo,
     etc.).
+
+    LRU-memoized via :func:`_resolve_main_repo_cached` so repeated
+    calls within the same process do not re-spawn subprocesses
+    (RDR-137 followup IMP-24).
     """
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            git_common = Path(result.stdout.strip())
-            if not git_common.is_absolute():
-                git_common = (repo / git_common).resolve()
-            return git_common.parent
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        _log.debug("git rev-parse failed, using repo path directly", error=str(exc))
-    return repo
+    return Path(_resolve_main_repo_cached(str(repo)))
 
 
 def _repo_identity(repo: Path) -> tuple[str, str]:
@@ -176,15 +194,45 @@ def list_sibling_collections(
     collection_name: str,
     t3_client: Any,
 ) -> list[str]:
-    """Return all T3 collections sharing the same repo identity suffix.
+    """Return all T3 collections sharing the same repo identity.
 
-    For ``docs__art-architecture-8c2e74c0``, returns all collections whose
-    name ends with ``-8c2e74c0``, excluding the input and ``taxonomy__*``.
+    Handles both forms:
+
+    * **Legacy 2-segment** (``docs__art-architecture-8c2e74c0``):
+      siblings are collections whose name ends with ``-8c2e74c0``
+      (the 8-char hash suffix).
+    * **RDR-103 conformant 4-segment**
+      (``code__owner-1-2__voyage-code-3__v1``):
+      siblings are collections that share the same ``__<owner_id>__``
+      segment regardless of content_type, embedding_model, or
+      version. RDR-137 followup IMP-27 (nexus-43qgm.27): pre-fix the
+      function silently returned ``[]`` for ALL conformant names
+      because ``rsplit('-', 1)`` produced ``("...__v", "1")`` and the
+      8-char length check failed.
+
+    Always excludes the input + ``taxonomy__*``.
     """
-    parts = collection_name.rsplit("-", 1)
-    if len(parts) != 2 or len(parts[1]) != 8:
-        return []
-    hash8 = parts[1]
+    from nexus.corpus import (  # noqa: PLC0415
+        is_conformant_collection_name,
+        parse_conformant_collection_name,
+    )
+
+    matcher: Any = None
+    if is_conformant_collection_name(collection_name):
+        # Conformant path — share by owner_id segment.
+        try:
+            owner_id = parse_conformant_collection_name(collection_name)["owner_id"]
+        except (KeyError, ValueError):
+            return []
+        owner_segment = f"__{owner_id}__"
+        matcher = lambda n: owner_segment in n  # noqa: E731
+    else:
+        # Legacy 2-segment path — share by 8-char hash suffix.
+        parts = collection_name.rsplit("-", 1)
+        if len(parts) != 2 or len(parts[1]) != 8:
+            return []
+        hash8 = parts[1]
+        matcher = lambda n: n.endswith(f"-{hash8}")  # noqa: E731
 
     try:
         all_colls = t3_client.list_collections()
@@ -198,7 +246,7 @@ def list_sibling_collections(
             continue
         if name.startswith("taxonomy__"):
             continue
-        if name.endswith(f"-{hash8}"):
+        if matcher(name):
             siblings.append(name)
 
     return sorted(siblings)

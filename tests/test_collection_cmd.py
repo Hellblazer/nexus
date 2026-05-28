@@ -636,6 +636,13 @@ def test_corpus_knowledge_rewrites_docs_collection(tmp_path, monkeypatch) -> Non
             catch_exceptions=False,
         )
 
+    # RDR-137 followup IMP-23 (nexus-43qgm.23): assert exit_code == 0
+    # explicitly. catch_exceptions=False propagates Python exceptions,
+    # but a command that emits expected output and then sets exit code
+    # 1 (e.g. via click.exceptions.ClickException with a swallowed
+    # message) would otherwise pass the assertions vacuously.
+    assert result.exit_code == 0, result.output
+
     # The catalog should now hold a knowledge__ collection registered
     # to the owner for this repo. repos.json is NOT created.
     repos_json = tmp_path / "repos.json"

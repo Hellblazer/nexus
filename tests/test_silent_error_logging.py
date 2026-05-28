@@ -326,3 +326,117 @@ def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
         )
     finally:
         _reset_singletons()
+
+
+# ── RDR-137 followup IMP-25 (nexus-43qgm.25) ──────────────────────────────────
+# Coverage for four RDR-137-introduced warning paths that had none.
+
+
+def test_repos_json_migration_failed_logs_warning(tmp_path, monkeypatch):
+    """commands/upgrade.py:_migrate_repos_json_to_catalog catches
+    Exception around the catalog open + parity check and emits
+    repos_json_migration_failed."""
+    from nexus.commands.upgrade import _migrate_repos_json_to_catalog
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    cat_dir = cfg / "catalog"
+    cat_dir.mkdir()
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
+    # Seed a repos.json so the migration enters the body, then make
+    # Catalog construction raise inside.
+    (cfg / "repos.json").write_text('{"repos": {}}')
+    # Force the catalog db marker present so the absent-short-circuit
+    # doesn't fire; raise from Catalog.__init__.
+    (cat_dir / ".catalog.db").write_bytes(b"")
+    with patch(
+        "nexus.catalog.catalog.Catalog",
+        side_effect=RuntimeError("simulated catalog init failure"),
+    ):
+        with capture_logs() as cap:
+            _migrate_repos_json_to_catalog(dry_run=False)
+    assert any(
+        e.get("event") == "repos_json_migration_failed"
+        and e.get("log_level") == "warning"
+        for e in cap
+    )
+
+
+def test_repo_collection_or_legacy_failed_logs_debug():
+    """context.py:_repo_collections wraps the rdr-fallback try/except
+    around _repo_collection_or_legacy — RDR-137 followup SIG-14
+    removed the synthesis call entirely, so this DEBUG path is now
+    only hit via the OUTER except (discover_repo_collections_failed)
+    instead. Verify the outer warning still emits."""
+    from nexus.context import _repo_collections
+
+    repo = Path("/nonexistent/repo/path/does/not/exist")
+    with patch(
+        "nexus.repos.read_dual",
+        side_effect=RuntimeError("simulated reader failure"),
+    ):
+        with capture_logs() as cap:
+            result = _repo_collections(repo)
+    assert result is None
+    assert any(
+        e.get("event") == "discover_repo_collections_failed"
+        and e.get("log_level") == "warning"
+        for e in cap
+    )
+
+
+def test_set_owner_head_hash_failed_logs_warning(tmp_path, monkeypatch):
+    """indexer.py:_set_owner_head_hash catches Exception around the
+    full chain and emits set_owner_head_hash_failed."""
+    from nexus.indexer import _set_owner_head_hash
+
+    cat_dir = tmp_path / "catalog"
+    cat_dir.mkdir()
+    (cat_dir / ".catalog.db").write_bytes(b"")
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
+    with patch(
+        "nexus.catalog.catalog.Catalog",
+        side_effect=RuntimeError("simulated catalog open failure"),
+    ):
+        with capture_logs() as cap:
+            _set_owner_head_hash(tmp_path / "myrepo", "abc")
+    assert any(
+        e.get("event") == "set_owner_head_hash_failed"
+        and e.get("log_level") == "warning"
+        for e in cap
+    )
+
+
+def test_catalog_registry_adapter_register_failed_logs_warning(tmp_path):
+    """_CatalogBackedRegistry.update catches Exception around
+    cat.register_collection and emits
+    catalog_registry_adapter_register_failed before returning
+    success=False to the caller."""
+    from nexus.commands.index import _CatalogBackedRegistry
+    from nexus.catalog.catalog import Catalog
+
+    cat_dir = tmp_path / "catalog"
+    cat_dir.mkdir()
+    Catalog.init(cat_dir)
+    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+
+    import subprocess
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+
+    adapter = _CatalogBackedRegistry(
+        cat=cat, registry_path=tmp_path / "repos.json",
+    )
+    with patch.object(
+        cat, "register_collection",
+        side_effect=RuntimeError("simulated catalog write failure"),
+    ):
+        with capture_logs() as cap:
+            adapter.update(repo, docs_collection="knowledge__x-1-1__voyage-context-3__v1")
+    assert any(
+        e.get("event") == "catalog_registry_adapter_register_failed"
+        and e.get("log_level") == "warning"
+        for e in cap
+    )

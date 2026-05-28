@@ -538,7 +538,13 @@ def _check_git_hooks() -> list[HealthResult]:
         cat = Catalog(cat_dir, cat_dir / ".catalog.db")
         repos = list_repos_dual(cat=cat, registry_path=registry_path)
     except Exception as exc:
-        _log.warning("doctor_registry_load_failed", error=str(exc))
+        # RDR-137 followup IMP-20 (nexus-43qgm.20): exc_info=True so
+        # the operator sees the traceback alongside the error message
+        # (NameError / AttributeError otherwise appear only as the
+        # rendered str(exc) with no source location).
+        _log.warning(
+            "doctor_registry_load_failed", error=str(exc), exc_info=True,
+        )
         repos = []
 
     if not repos:

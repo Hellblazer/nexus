@@ -366,11 +366,19 @@ def test_check_helper_detail():
 # ── Local mode ──────────────────────────────────────────────────────────────
 
 def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
+    # RDR-137 followup IMP-22 (nexus-43qgm.22): the legacy
+    # nexus.registry.RepoRegistry patch is dead code post-RDR-137
+    # (health.py routes through nexus.repos.list_repos_dual). Patch
+    # the live path instead so the test exercises actual production
+    # code rather than passing for unrelated reasons.
     with (
         patch("nexus.config.is_local_mode", return_value=True),
         patch("nexus.config._default_local_path", return_value=tmp_path / "chroma"),
         patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
-        patch("nexus.registry.RepoRegistry", return_value=mock_reg),
+        patch(
+            "nexus.repos.list_repos_dual",
+            side_effect=lambda **_: list(mock_reg.all()),
+        ),
     ):
         result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0
@@ -400,11 +408,17 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
     class _Stub:
         _client = client
 
+    # RDR-137 followup IMP-22 (nexus-43qgm.22): patch the live
+    # nexus.repos.list_repos_dual path, not the dead nexus.registry
+    # one (see sibling test for rationale).
     with (
         patch("nexus.config.is_local_mode", return_value=True),
         patch("nexus.config._default_local_path", return_value=chroma_path),
         patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
-        patch("nexus.registry.RepoRegistry", return_value=mock_reg),
+        patch(
+            "nexus.repos.list_repos_dual",
+            side_effect=lambda **_: list(mock_reg.all()),
+        ),
         patch("nexus.daemon.t3_client.make_t3_client", return_value=_Stub()),
     ):
         result = runner.invoke(main, ["doctor"])
