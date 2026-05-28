@@ -392,6 +392,10 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # ``code__nexus-1-1__voyage-code-3__v1``). Tests exercise pure
     # SQLite + string parsing; no Voyage call is ever made.
     "test_collections_owner_backfill.py",
+    # RDR-137 P2a (nexus-tts0d.4): same voyage-token-in-fixture pattern
+    # — the catalog-backed reader tests register synthetic conformant
+    # collection names and read them back; no Voyage call.
+    "test_repos_reader.py",
     "test_commands_dt.py",
     "test_corpus.py",
     "test_doc_indexer_hash_sync.py",
