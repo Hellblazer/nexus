@@ -1083,13 +1083,32 @@ class Catalog:
             # preserves the value (the catalog's rebuild path replays
             # owners.jsonl as last-wins; without this append the most
             # recent head_hash would be lost on the next rebuild).
+            #
+            # CRITICAL: preserve next_seq from the most-recent existing
+            # OwnerRecord. next_seq is JSONL-only state (not in the
+            # SQLite owners table); ``register`` reads owners.jsonl
+            # last-wins to compute the next document number. If this
+            # snapshot defaults next_seq=1 (the dataclass default), the
+            # next register() will allocate tumblers starting from 1
+            # and reuse already-allocated document slots — REGRESSION
+            # uncovered by test_tumblers_stable_across_delete_compact_reindex
+            # in the RDR-137 follow-up CI run.
             row = self._db.execute(
                 "SELECT name, owner_type, repo_hash, description, repo_root, head_hash "
                 "FROM owners WHERE tumbler_prefix = ?",
                 (owner_str,),
             ).fetchone()
             if row is not None:
-                from nexus.catalog.tumbler import OwnerRecord  # noqa: PLC0415
+                from nexus.catalog.tumbler import OwnerRecord, read_owners  # noqa: PLC0415
+
+                # Read current JSONL state to recover next_seq.
+                if self._owners_path.exists():
+                    existing = read_owners(self._owners_path).get(owner_str)
+                    preserved_next_seq = (
+                        existing.next_seq if existing else 1
+                    )
+                else:
+                    preserved_next_seq = 1
                 rec = OwnerRecord(
                     owner=owner_str,
                     name=row[0],
@@ -1097,6 +1116,7 @@ class Catalog:
                     repo_hash=row[2] or "",
                     description=row[3] or "",
                     repo_root=row[4] or "",
+                    next_seq=preserved_next_seq,
                     head_hash=row[5] or "",
                 )
                 self._append_jsonl(self._owners_path, rec.__dict__)

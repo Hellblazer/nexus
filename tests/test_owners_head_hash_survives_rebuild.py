@@ -194,7 +194,7 @@ class TestSig9SetOwnerHeadHashSurfacesNoMatch:
 
         # Now simulate concurrent deletion: hard-delete the owner row
         # while keeping the in-process Catalog handle alive.
-        cat._db.execute("DELETE FROM owners")
+        cat._db.execute("DELETE FROM owners")  # epsilon-allow: test simulates concurrent owner-deletion race for SIG-9 coverage
         cat._db.commit()
 
         with capture_logs() as cap:
@@ -210,7 +210,7 @@ class TestSig9SetOwnerHeadHashSurfacesNoMatch:
         original = cat.set_owner_head_hash
 
         def _delete_then_call(o, h):
-            cat._db.execute(
+            cat._db.execute(  # epsilon-allow: test simulates concurrent owner-deletion race for SIG-9 coverage
                 "DELETE FROM owners WHERE tumbler_prefix = ?", (str(o),),
             )
             cat._db.commit()
