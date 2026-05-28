@@ -1,35 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""T2 prefix-scan: surface all namespaces matching a project prefix.
+"""T2 prefix-scan: surface T2 namespaces matching a project prefix.
 
-Usage: t2_prefix_scan.py <project_name>
-
-Queries T2 for every namespace whose name starts with *project_name*
-(e.g. "nexus", "nexus_rdr", "nexus_knowledge") and prints a compact summary
-formatted for session injection.
-
-**Stdlib-only** (nexus-vg6d4): this script must run under whatever bare
-Python interpreter ``_run_python_hook.sh`` resolves (probes
-``python3.13`` → ``python3.12`` → ``python3``), which on a
-``uv tool install conexus`` deployment is the system Python that
-cannot import the ``nexus`` package (it lives in conexus's own venv).
-Importing ``nexus.db.t2`` would silently fail and the entire
-``## T2 Memory (Active Project)`` section would be omitted from the
-session-start context. Using ``sqlite3`` directly keeps the hook
-portable across the wrapper's interpreter probe.
-
-The SQL mirrors ``MemoryStore.get_projects_with_prefix`` and
-``MemoryStore.get_all`` verbatim (including the ``ESCAPE '\\'`` clause
-that prevents ``LIKE`` metacharacters in the prefix from matching
-unintended namespaces).
-
-Cap algorithm:
-  Per namespace (entries ranked by recency within that namespace):
-    entries 1–5   : title + 1-line snippet (≤120 chars)
-    entries 6–8   : title only
-    beyond 8      : omitted; trailing count appended
-  Cross-namespace hard cap: 15 rendered entries total (snippet or title).
-  Namespaces are processed in recency order (most-recently-updated first).
+Stdlib-only (nexus-vg6d4) so it runs under whichever bare interpreter
+``_run_python_hook.sh`` resolves — ``uv tool install conexus`` puts
+``nexus`` in a venv that bare ``python3`` cannot import. Long-form
+notes (cap algorithm, SQL parity rationale) live below the imports.
 """
 from __future__ import annotations
 
