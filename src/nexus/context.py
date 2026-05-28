@@ -126,9 +126,27 @@ def generate_context_l1(
     if not rows:
         return None
 
+    # nexus-9iw41 defensive dedup: collapse rows with identical
+    # (collection, label, doc_count) to one. Production has surfaced
+    # degenerate clustering states where N root topics in a single
+    # collection share an identical label+count (observed 2026-05-28:
+    # 5 rows all "Project knowledge findings content (144)" in a
+    # phantom docs__1-2188 collection, IDs 3401/3564/3727/3890/4053).
+    # Without dedup those N rows would all show as separate top-N
+    # entries in the Knowledge Map. Dedup is keyed on the exact tuple
+    # so legitimate distinct labels are unaffected.
+    seen: set[tuple[str, str, int]] = set()
+    deduped: list[tuple[str, str, int]] = []
+    for collection, label, doc_count in rows:
+        key = (collection, label, doc_count)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((collection, label, doc_count))
+
     # Group by collection prefix, filtered by repo if specified
     prefixes: dict[str, list[tuple[str, int]]] = {}
-    for collection, label, doc_count in rows:
+    for collection, label, doc_count in deduped:
         if allowed is not None and collection not in allowed:
             continue
         prefix = collection.split("__")[0] if "__" in collection else collection
