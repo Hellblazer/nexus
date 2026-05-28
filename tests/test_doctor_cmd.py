@@ -44,9 +44,24 @@ def mock_reg():
 
 def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
             cloud_client=None, extra_patches=None):
+    # RDR-137 Phase 3.1 (nexus-tts0d.6): health.py now reads repos via
+    # nexus.repos.list_repos_dual instead of RepoRegistry directly.
+    # The legacy RepoRegistry patch stays for whatever doctor sub-checks
+    # still reach it (e.g. the integrity path); the new patch wires the
+    # catalog-backed reader to the same mock so existing test
+    # expectations (``/some/repo`` appears in hook output) keep
+    # holding. Once the doctor.py cutover (nexus-tts0d.12) lands the
+    # legacy patch becomes ineffective and can drop.
     patches = [
         patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.registry.RepoRegistry", return_value=mock_reg),
+        # Patch at definition site (nexus.repos) because health.py
+        # imports lazily inside _check_hooks — no module-level
+        # symbol exists to patch on nexus.health itself.
+        patch(
+            "nexus.repos.list_repos_dual",
+            side_effect=lambda **_: list(mock_reg.all()),
+        ),
     ]
     if callable(cred):
         patches.append(patch("nexus.config.get_credential",
