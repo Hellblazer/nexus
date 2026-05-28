@@ -77,18 +77,22 @@ class _CatalogBackedRegistry:
         if self._cat is not None:
             self._cat.ensure_owner_for_repo(repo)
 
-    def update(self, repo: Path, **fields: Any) -> None:
-        # docs_collection rewrite (--corpus knowledge): register the
-        # knowledge variant on the catalog. OQ-5 lock: the catalog-
-        # backed reader prefers knowledge__ over docs__ in its
-        # docs_collection slot, so subsequent reads pick up the new
-        # name without any further mutation.
+    def update(self, repo: Path, **fields: Any) -> bool:
+        """Apply field updates. Returns True on success (or no-op),
+        False when a catalog write was attempted but failed.
+
+        RDR-137 followup SIG-10 (nexus-43qgm.10): pre-fix the method
+        returned None and swallowed catalog-write exceptions, so the
+        caller's "Routing prose to ..." echo fired even when the
+        write didn't land. Returning the success flag lets the caller
+        gate user-visible messages on actual catalog state.
+        """
+        success = True
         if "docs_collection" in fields and self._cat is not None:
             new_name = fields["docs_collection"]
             if new_name:
                 owner = self._cat.ensure_owner_for_repo(repo)
                 owner_id = str(owner).replace(".", "-")
-                # content_type derived from prefix (knowledge__ or docs__)
                 ct = new_name.split("__", 1)[0]
                 try:
                     self._cat.register_collection(
@@ -97,13 +101,10 @@ class _CatalogBackedRegistry:
                         owner_id=owner_id,
                         embedding_model="voyage-context-3",
                         # RDR-137 followup CRITICAL-3 (nexus-43qgm.3):
-                        # parse_conformant_collection_name returns
-                        # f"v{ver}" — "v1", never "1". Conforming
-                        # writers must match so the idempotency check
-                        # in register_collection (which compares the
-                        # stored model_version against the new one)
-                        # short-circuits instead of emitting a
-                        # duplicate CollectionCreated event.
+                        # 'v1' matches parse_conformant_collection_name's
+                        # f'v{ver}' contract; '1' would trip the
+                        # idempotency check + spawn duplicate
+                        # CollectionCreated events.
                         model_version="v1",
                     )
                 except Exception as exc:
@@ -111,9 +112,11 @@ class _CatalogBackedRegistry:
                         "catalog_registry_adapter_register_failed",
                         repo=str(repo), new=new_name, error=str(exc),
                     )
+                    success = False
         # head_hash + status: dropped per nexus-tts0d.13. The indexer
         # already writes head_hash to owners.head_hash; status was A2
         # write-only and has no consumers.
+        return success
 
     def all_info(self) -> dict:
         # The two indexer call sites (_run_index_frecency_only line
@@ -403,10 +406,22 @@ def index_repo_cmd(
             if synth.startswith("docs__"):
                 new_docs = "knowledge__" + synth.removeprefix("docs__")
         if new_docs:
-            reg.update(path, docs_collection=new_docs)
-            click.echo(
-                f"Routing prose to {new_docs} (--corpus knowledge)."
-            )
+            # RDR-137 followup SIG-10 (nexus-43qgm.10): gate the echo
+            # on the adapter's success flag so a failed catalog write
+            # doesn't print a misleading "Routing prose to ..."
+            # success message.
+            ok = reg.update(path, docs_collection=new_docs)
+            if ok:
+                click.echo(
+                    f"Routing prose to {new_docs} (--corpus knowledge)."
+                )
+            else:
+                click.echo(
+                    f"WARN: --corpus knowledge requested but the catalog "
+                    f"write for {new_docs} failed; check structured logs "
+                    f"for catalog_registry_adapter_register_failed event.",
+                    err=True,
+                )
 
     if force:
         label = "Force-indexing"

@@ -570,7 +570,16 @@ def reindex_cmd(name: str, force: bool) -> None:
                         nexus_config_dir() / "repos.json"
                     ).items():
                         coll = info.get("collection") or info.get("docs_collection")
-                        if coll == name or info.get("docs_collection") == name:
+                        # RDR-137 followup SIG-13 (nexus-43qgm.13):
+                        # also check code_collection so reindex on a
+                        # code__* collection resolves on pre-Phase-1.5a
+                        # installs. Pre-fix the omission silently
+                        # skipped L1 refresh for code reindexes.
+                        if (
+                            coll == name
+                            or info.get("docs_collection") == name
+                            or info.get("code_collection") == name
+                        ):
                             repo_path = Path(rp_str)
                             break
             except Exception:

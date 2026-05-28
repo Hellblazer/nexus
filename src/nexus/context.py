@@ -80,25 +80,15 @@ def _repo_collections(repo_path: Path | None) -> set[str] | None:
             colls.add(rec.docs_collection)
         if rec.rdr_collection:
             colls.add(rec.rdr_collection)
-        else:
-            # rdr collection not registered in catalog (common for
-            # freshly-indexed code+docs-only repos). Fall back to the
-            # indexer's name-resolver to synthesise the conformant
-            # 4-segment shape (RDR-103 Phase 5).
-            try:
-                from nexus.indexer import _repo_collection_or_legacy  # noqa: PLC0415
-
-                colls.add(_repo_collection_or_legacy(repo_path, "rdr"))
-            except Exception:
-                # Recoverable: rdr collection may legitimately not
-                # exist for this repo. DEBUG-with-exc_info so the
-                # signal is observable without flooding production
-                # logs.
-                _log.debug(
-                    "repo_collection_or_legacy_failed",
-                    repo_path=str(repo_path),
-                    exc_info=True,
-                )
+        # RDR-137 followup SIG-14 (nexus-43qgm.14): do NOT synthesize
+        # a rdr__* collection name when the catalog has none registered.
+        # Pre-fix code called _repo_collection_or_legacy(repo_path, "rdr")
+        # which synthesized a conformant name that may not exist in T3
+        # or in the taxonomy topics table. Benign today for the
+        # Knowledge Map (SQLite-only filter against topics) but carried
+        # latent collision risk with other repos sharing the hash8
+        # suffix. If the repo has no rdr content, the allowed set
+        # simply omits rdr; downstream code handles that cleanly.
         return colls if colls else None
     except Exception:
         # Outer — degrades the entire L1 context (taxonomy +

@@ -23,9 +23,14 @@ SRC = ROOT / "src" / "nexus"
 # ``repos.json`` either passes the path through to one of these
 # parsers, or is a docstring — both are fine; only direct file reads
 # need to be policed.
+#
+# RDR-137 followup SIG-17 (nexus-43qgm.17): ``commands/upgrade.py``
+# was historically in this allowlist but routes through
+# ``nexus.repos._read_repos_json`` and does NOT directly parse. The
+# entry was superfluous + created false safety for future direct-
+# parse additions. Removed.
 _REPOS_JSON_PARSE_ALLOW = {
-    SRC / "commands" / "upgrade.py",
-    SRC / "repos.py",
+    SRC / "repos.py",  # stdlib fallback helper _read_repos_json
 }
 
 # ``class RepoRegistry`` must not exist anywhere — the class was
