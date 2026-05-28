@@ -406,6 +406,72 @@ def backfill_collections_cmd(dry_run: bool) -> None:
     )
 
 
+@catalog.command("backfill-owner-id")
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=True,
+    help="Report-only (default). Use --no-dry-run to actually update. "
+    "Matches the safe-default convention of the other Phase 6 verbs.",
+)
+@click.option(
+    "--from-documents/--no-from-documents",
+    default=True,
+    help="Use the documents-table fallback to recover owner_id for legacy "
+    "2-segment names (default). Disable to restrict the backfill to "
+    "the auto-migration's conformant-name path only.",
+)
+def backfill_owner_id_cmd(dry_run: bool, from_documents: bool) -> None:
+    """Populate ``collections.owner_id`` for empty rows (RDR-137 P1.5a).
+
+    \b
+    The CatalogStore's auto-migration handles conformant RDR-103
+    four-segment names on every DB open. This verb adds the documents-
+    table fallback that recovers owner_id for legacy 2-segment names
+    (e.g. ``knowledge__delos``) by inferring owner from documents that
+    are physically registered against the collection.
+
+    \b
+    Ambiguous rows (documents from multiple distinct owners) are
+    skipped with a warning. The auto-migration is idempotent — running
+    this with ``--from-documents=false`` is equivalent to opening any
+    CatalogStore connection.
+
+    \b
+    Examples:
+      nx catalog backfill-owner-id --dry-run
+      nx catalog backfill-owner-id --no-dry-run
+      nx catalog backfill-owner-id --no-dry-run --no-from-documents
+    """
+    from nexus.catalog.collections_owner_backfill import (  # noqa: PLC0415
+        backfill_owner_id,
+    )
+
+    cat = _get_catalog()
+    with cat._db:
+        result = backfill_owner_id(
+            cat._db,
+            include_documents_fallback=from_documents,
+            dry_run=dry_run,
+        )
+
+    verb = "would update" if dry_run else "updated"
+    click.echo(
+        f"{verb} {result.updated_from_name} via name + "
+        f"{result.updated_from_documents} via documents fallback "
+        f"(total empty: {result.total_empty})"
+    )
+    if result.skipped_ambiguous:
+        click.echo(
+            f"  skipped {result.skipped_ambiguous} ambiguous "
+            f"(multi-owner) collection(s)"
+        )
+    if result.skipped_unresolvable:
+        click.echo(
+            f"  skipped {result.skipped_unresolvable} unresolvable "
+            f"collection(s) — manual review required"
+        )
+
+
 @catalog.command("migrate-fallback")
 @click.argument("source")
 @click.option(

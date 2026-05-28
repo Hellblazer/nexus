@@ -669,6 +669,20 @@ class CatalogStore:
                     )
                 self._backfilled_collections = candidates
 
+        # RDR-137 Phase 1.5a (nexus-tts0d.1): follow-on pass that
+        # populates ``collections.owner_id`` for rows synthesised above
+        # (and any pre-existing row with empty owner_id). The
+        # conformant-name path is the only one enabled here — it
+        # parses RDR-103 four-segment names and extracts the 2nd
+        # segment, which is always correct when the name is well-formed.
+        # Documents-table fallback for legacy 2-segment names is
+        # operator-driven via ``nx catalog backfill-owner-id``.
+        from nexus.catalog.collections_owner_backfill import (  # noqa: PLC0415
+            backfill_owner_id,
+        )
+        with self._conn:
+            backfill_owner_id(self._conn, include_documents_fallback=False)
+
     # ── identity ──────────────────────────────────────────────────────
 
     @property
