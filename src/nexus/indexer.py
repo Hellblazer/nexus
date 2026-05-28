@@ -175,6 +175,41 @@ def _current_head(repo: Path) -> str:
         return ""
 
 
+def _set_owner_head_hash(repo: Path, head_hash: str) -> None:
+    """RDR-137 Phase 3.8 (nexus-tts0d.13): persist *head_hash* on the
+    owner row for *repo*.
+
+    Writes ``owners.head_hash`` (Phase 1.5b column from
+    ``nexus-tts0d.2``). Silently degrades when the catalog is not
+    initialised or the owner is not registered yet — both are
+    legitimate states during a first-time index, and ``index_repository``
+    will register the owner in its catalog hook.
+    """
+    try:
+        from nexus.catalog.catalog import Catalog
+        from nexus.config import catalog_path
+        from nexus.registry import _repo_identity
+
+        cat_dir = catalog_path()
+        if not (cat_dir / ".catalog.db").exists():
+            return
+        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        _, repo_hash = _repo_identity(repo)
+        owner = cat.owner_for_repo(repo_hash)
+        if owner is None:
+            return
+        cat._db.execute(
+            "UPDATE owners SET head_hash = ? WHERE tumbler_prefix = ?",
+            (head_hash, str(owner)),
+        )
+        cat._db.commit()
+    except Exception as exc:
+        _log.warning(
+            "set_owner_head_hash_failed",
+            repo=str(repo), error=str(exc),
+        )
+
+
 def _repo_lock_path(repo: Path) -> Path:
     """Return the per-repo lock file path: ~/.config/nexus/locks/<hash8>.lock.
 
@@ -958,21 +993,21 @@ def index_repository(
         install_default_hooks(hooks)
 
     try:
-        registry.update(repo, status="indexing")
+        # RDR-137 Phase 3.8 (nexus-tts0d.13): registry.update(status=...)
+        # writes dropped per A2 verdict — status is write-only with no
+        # consumers. head_hash now writes to owners.head_hash on the
+        # catalog (Phase 1.5b column) via _set_owner_head_hash.
         try:
             if frecency_only:
                 _run_index_frecency_only(repo, registry)
                 stats: dict[str, int] = {}
             else:
                 stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_start=on_start, on_file=on_file, on_phase=on_phase, on_stage_timers=on_stage_timers, hooks=hooks)
-                registry.update(repo, head_hash=_current_head(repo))
-            registry.update(repo, status="ready")
+                _set_owner_head_hash(repo, _current_head(repo))
             return stats
         except CredentialsMissingError:
-            registry.update(repo, status="pending_credentials")
             raise
         except Exception:
-            registry.update(repo, status="error")
             raise
     finally:
         if lock_fd is not None:
