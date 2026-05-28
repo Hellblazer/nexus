@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.3.1] - 2026-05-28
+
+Two SessionStart injection bugs and a new hygiene signal. All hook-only,
+no public API change. Activation requires the hosting `nx-mcp` to
+restart onto this wheel (the worker code is loaded in-process).
+
+### Fixed
+
+- **T2 memory injection at SessionStart and SubagentStart silently broken (nexus-vg6d4).** `conexus/hooks/scripts/_run_python_hook.sh` probes bare `python3.13` / `python3.12`, which on a `uv tool install conexus` deployment cannot import the `nexus` package (it lives in conexus's own venv). `t2_prefix_scan.py` previously did `from nexus.db.t2 import T2Database` and silently failed with "T2 not available: No module named nexus"; `session_start_hook.py` saw empty stdout and omitted the entire `## T2 Memory (Active Project)` section from the injected context. Refactored to stdlib `sqlite3` only; the SQL mirrors `MemoryStore.get_projects_with_prefix` and `get_all` verbatim (including the `ESCAPE '\'` clause that prevents LIKE metacharacters in the prefix from matching unintended namespaces). Read-only connection; honours `NEXUS_CONFIG_DIR` / `NX_CONFIG_DIR` for sandbox parity.
+- **Knowledge Map at SessionStart showed duplicate / wrong labels (nexus-9iw41).** Production surfaced a degenerate state where multiple ROOT topic rows in a single collection shared identical `(label, doc_count)` (observed: 5 identical rows "Project knowledge findings content (144)" in a phantom collection). `generate_context_l1` faithfully reported top-N by `doc_count`, so the docs side of the injected Knowledge Map showed the same entry five times. `generate_context_l1` now collapses rows with identical `(collection, label, doc_count)` before grouping; legitimate same-label rows with different counts both survive (the dedup key includes `doc_count`).
+
+### Added
+
+- **`## Hygiene` SessionStart block (nexus-1if7b).** A new strategic-hints section emits only when something is actionable. v1 carries one signal: L1 cache age > 7 days with the refresh command (`nx context refresh`). This is the signal that would have surfaced nexus-9iw41's 10-day-stale cache long before manual diagnosis. Stdlib-only by the same constraint that pins `t2_prefix_scan.py`; silent when healthy.
+
 ## [5.3.0] - 2026-05-27
 
 Adds an opt-in canonical-fact merge to the memory write path and closes the
