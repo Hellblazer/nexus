@@ -1,9 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Repo registry: JSON persistence with atomic write and thread safety."""
-import hashlib
+"""Repo registry: JSON persistence + helper re-exports.
+
+RDR-137 Phase 5.2b (nexus-tts0d.21): the five pure helpers
+(:func:`_repo_identity`, :func:`_repo_identity_with_main`,
+:func:`_safe_collection`, :func:`_resolve_repo_collection`,
+:func:`_sanitise_owner_segment`, plus :func:`list_sibling_collections`)
+have moved to :mod:`nexus.repo_identity`. This module re-exports them
+verbatim so the ~15 legacy import sites continue to work for one
+release cycle; new code should import from ``nexus.repo_identity``
+directly. Phase 5.3 (nexus-tts0d.20) deletes :class:`RepoRegistry`
+itself plus the ``~/.config/nexus/repos.json`` file path.
+"""
 import json
 import os
-import subprocess
 import tempfile
 import threading
 from pathlib import Path
@@ -11,215 +20,37 @@ from typing import Any
 
 import structlog
 
+from nexus.repo_identity import (
+    _repo_identity,
+    _repo_identity_with_main,
+    _resolve_main_repo,
+    _resolve_repo_collection,
+    _safe_collection,
+    _sanitise_owner_segment,
+    list_sibling_collections,
+)
+
 _log = structlog.get_logger()
 
 
-def _resolve_main_repo(repo: Path) -> Path:
-    """Return the canonical main-repo Path for *repo*.
-
-    Uses ``git rev-parse --git-common-dir`` to resolve the main repository
-    root even when *repo* is a worktree path.  Falls back to the given
-    *repo* path when git is unavailable (not installed, not a git repo,
-    etc.).
-    """
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            git_common = Path(result.stdout.strip())
-            if not git_common.is_absolute():
-                git_common = (repo / git_common).resolve()
-            return git_common.parent
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        _log.debug("git rev-parse failed, using repo path directly", error=str(exc))
-    return repo
-
-
-def _repo_identity(repo: Path) -> tuple[str, str]:
-    """Return ``(basename, hash8)`` for collection naming, stable across worktrees.
-
-    The hash is the first 8 hex characters of the SHA-256 digest of the
-    resolved main repo path.  Two worktrees of the same repo produce
-    identical collection names.
-
-    ~15 call sites and the test-mock surface
-    (``monkeypatch.setattr("nexus.registry._repo_identity", ...)``) depend
-    on this 2-tuple signature.  New callers that need the main-repo path
-    should use :func:`_repo_identity_with_main`.
-    """
-    main_repo = _resolve_main_repo(repo)
-    path_hash = hashlib.sha256(str(main_repo).encode()).hexdigest()[:8]
-    return main_repo.name, path_hash
-
-
-def _repo_identity_with_main(repo: Path) -> tuple[str, str, Path]:
-    """Return ``(basename, hash8, main_repo_path)`` for *repo*.
-
-    nexus-zr2ie / RDR-137 gate critique 2026-05-28: callers that need to
-    persist the canonical main-repo path (e.g. catalog owner ``repo_root``)
-    should use this 3-tuple variant instead of writing ``str(repo)``.
-    Before this helper, ``ensure_owner_for_repo`` and ``_catalog_hook``
-    wrote ``repo_root=str(repo)``, which contaminated the catalog with
-    transient worktree paths on first-run-from-worktree indexing; after
-    worktree deletion ``resolve_path`` produced broken paths for every
-    relative-path document under that owner.
-
-    Delegates the ``(name, hash)`` pair to :func:`_repo_identity` so the
-    widely-used ``monkeypatch.setattr("nexus.registry._repo_identity", ...)``
-    test-mock pattern continues to control the lookup key for callers
-    that now route through this 3-tuple variant.  Main-repo path is
-    derived via :func:`_resolve_main_repo`, which can be mocked
-    independently when a test needs to assert what gets persisted as
-    ``repo_root``.
-    """
-    name, path_hash = _repo_identity(repo)
-    main_repo = _resolve_main_repo(repo)
-    return name, path_hash, main_repo
-
-
-def _safe_collection(
-    prefix: str, name: str, path_hash: str, *, suffix: str = "",
-) -> str:
-    """Build ``{prefix}{name}-{hash8}{suffix}``, truncating *name* to
-    stay within 63 chars.
-
-    ChromaDB enforces a 63-character limit on collection names.  The
-    fixed overhead is ``len(prefix) + 1 (hyphen) + 8 (hash) + len(suffix)``,
-    leaving the remainder for the basename.  When truncation occurs the
-    full name is still recoverable via the hash.
-
-    The optional *suffix* is appended verbatim so callers that need to
-    emit conformant ``__<model>__v<n>`` trailers (RDR-103) can share
-    this truncation logic instead of recomputing the budget themselves.
-    """
-    max_name = 63 - len(prefix) - 1 - len(path_hash) - len(suffix)
-    truncated = name[:max_name]
-    return f"{prefix}{truncated}-{path_hash}{suffix}"
-
-
-def _resolve_repo_collection(
-    repo: Path, content_type: str, *, cat: Any = None,
-) -> str:
-    """Return the conformant collection name for ``(repo, content_type)``.
-
-    Catalog-aware path: when ``cat`` is supplied AND has an owner
-    registered for ``repo``, returns the catalog-minted
-    ``<ct>__<owner>__<model>__v<n>`` name from
-    :meth:`Catalog.collection_for_repo`.
-
-    No-catalog / unregistered-owner path: synthesizes a conformant
-    name from the path-derived ``<basename>-<hash8>`` identity. This
-    keeps tests and ad-hoc CLI runs working post Phase-5 strict-flip
-    while still emitting a 4-segment conformant shape that satisfies
-    :meth:`T3Database.get_or_create_collection`'s strict-naming guard.
-    """
-    if cat is not None:
-        try:
-            return cat.collection_for_repo(repo, content_type).render()
-        except LookupError:
-            # Owner not registered; fall through to synthesis.
-            pass
-        except Exception as exc:
-            _log.debug(
-                "registry_resolve_catalog_failed",
-                repo=str(repo),
-                content_type=content_type,
-                error=str(exc),
-            )
-    from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
-
-    if content_type not in ("code", "docs", "rdr"):
-        raise ValueError(
-            f"_resolve_repo_collection: unknown content_type {content_type!r}"
-        )
-    name, path_hash = _repo_identity(repo)
-    # The conformant collection-name grammar accepts only alphanumerics
-    # and hyphens inside the owner segment. Sanitise the basename so
-    # repos with ``_`` (segment separator) AND repos like
-    # ``com.conductor.sys.monitoring`` (Java reverse-domain naming) or
-    # other non-alnum characters in the basename still produce a name
-    # ``validate_collection_name`` accepts.
-    #
-    # GH #551: pre-fix, only ``_`` was replaced; dots and other chars
-    # passed through verbatim, so the registry persisted a name like
-    # ``code__com.conductor.sys.monitoring-b25083f0`` that subsequent
-    # ``get_or_create_collection`` calls then failed to validate -- and
-    # since the registry entry was already written, the failure looped
-    # forever in the index log on every git hook fire.
-    sanitised = _sanitise_owner_segment(name)
-    model = effective_embedding_model_for_writes(content_type)
-    return _safe_collection(
-        f"{content_type}__", sanitised, path_hash, suffix=f"__{model}__v1",
-    )
-
-
-def _sanitise_owner_segment(name: str) -> str:
-    """Return *name* with any character that ``validate_collection_name``
-    would reject collapsed to ``-``.
-
-    Conformant grammar (RDR-103): owner segment must contain only
-    alphanumerics and hyphens. ``_`` is the segment separator and must
-    not appear inside the segment. Dots, slashes, spaces, and any other
-    glyph map to ``-``. Repeated hyphens collapse to a single hyphen
-    and leading / trailing hyphens are stripped so the resulting
-    segment also satisfies the start-and-end-with-alphanumeric guard
-    in ``validate_collection_name``.
-    """
-    out_chars: list[str] = []
-    for ch in name:
-        if ch.isalnum():
-            out_chars.append(ch)
-        else:
-            out_chars.append("-")
-    collapsed = "".join(out_chars)
-    while "--" in collapsed:
-        collapsed = collapsed.replace("--", "-")
-    return collapsed.strip("-")
-
-
-def list_sibling_collections(
-    collection_name: str,
-    t3_client: Any,
-) -> list[str]:
-    """Return all T3 collections sharing the same repo identity suffix.
-
-    For ``docs__art-architecture-8c2e74c0``, returns all collections whose
-    name ends with ``-8c2e74c0``, excluding the input and ``taxonomy__*``.
-
-    Limitation: ``knowledge__*`` collections without a ``{hash8}`` suffix
-    are not detected — use explicit ``--against`` for those.
-    """
-    # Extract hash8 suffix: last 8 chars after the final hyphen
-    parts = collection_name.rsplit("-", 1)
-    if len(parts) != 2 or len(parts[1]) != 8:
-        return []
-    hash8 = parts[1]
-
-    try:
-        all_colls = t3_client.list_collections()
-    except Exception:
-        return []
-
-    siblings = []
-    for coll in all_colls:
-        name = coll.name if hasattr(coll, "name") else str(coll)
-        if name == collection_name:
-            continue
-        if name.startswith("taxonomy__"):
-            continue
-        if name.endswith(f"-{hash8}"):
-            siblings.append(name)
-
-    return sorted(siblings)
+__all__ = (
+    # Legacy class + helper re-exports (helpers from nexus.repo_identity).
+    "RepoRegistry",
+    "_repo_identity",
+    "_repo_identity_with_main",
+    "_resolve_main_repo",
+    "_resolve_repo_collection",
+    "_safe_collection",
+    "_sanitise_owner_segment",
+    "list_sibling_collections",
+)
 
 
 class RepoRegistry:
-    """Thread-safe registry of indexed repositories stored as JSON."""
+    """Thread-safe registry of indexed repositories stored as JSON.
+
+    Deletion scheduled in nexus-tts0d.20 (RDR-137 Phase 5.3).
+    """
 
     # Paths matching these prefixes are never persisted — they come from test
     # runs, worktrees, or accidental indexing of temp directories.
@@ -243,15 +74,7 @@ class RepoRegistry:
     # ── public API ────────────────────────────────────────────────────────────
 
     def add(self, repo: Path, *, cat: Any = None) -> None:
-        """Register *repo*, initialising collection names and head_hash.
-
-        Collection names always come back conformant. When ``cat`` is
-        supplied AND has an owner row for ``repo``, the catalog-minted
-        ``<ct>__<owner>__<model>__v1`` name is used. Otherwise
-        :func:`_resolve_repo_collection` synthesises the conformant
-        4-segment name from the path-derived ``<basename>-<hash8>``
-        identity (RDR-103 Phase 5).
-        """
+        """Register *repo*, initialising collection names and head_hash."""
         key = str(repo)
         name = repo.name
         code_col = _resolve_repo_collection(repo, "code", cat=cat)
@@ -259,13 +82,6 @@ class RepoRegistry:
         with self._lock:
             self._data["repos"][key] = {
                 "name": name,
-                # ``collection`` is a backward-compat alias for callers
-                # written before ``code_collection`` existed (e.g.
-                # indexer.py:1003,1893 still falls back to it). Read
-                # paths in the post-pass prefer ``code_collection`` and
-                # treat the alias as the legacy fallback only —
-                # nexus-cxg9. Don't remove the alias without auditing
-                # those call sites.
                 "collection": code_col,
                 "code_collection": code_col,
                 "docs_collection": docs_col,
@@ -275,30 +91,25 @@ class RepoRegistry:
             self._save()
 
     def remove(self, repo: Path) -> None:
-        """Remove *repo* from the registry."""
         key = str(repo)
         with self._lock:
             self._data["repos"].pop(key, None)
             self._save()
 
     def get(self, repo: Path) -> dict[str, Any] | None:
-        """Return registry entry for *repo*, or None if not registered."""
         with self._lock:
             entry = self._data["repos"].get(str(repo))
             return dict(entry) if entry is not None else None
 
     def all(self) -> list[str]:
-        """Return list of all registered repo paths."""
         with self._lock:
             return list(self._data["repos"].keys())
 
     def all_info(self) -> dict[str, dict[str, Any]]:
-        """Return dict of all registered repos: path -> full entry dict."""
         with self._lock:
             return {k: dict(v) for k, v in self._data["repos"].items()}
 
     def update(self, repo: Path, **kwargs: Any) -> None:
-        """Update fields for *repo* (e.g. head_hash, status)."""
         key = str(repo)
         with self._lock:
             if key in self._data["repos"]:
@@ -309,7 +120,6 @@ class RepoRegistry:
 
     @classmethod
     def _is_ephemeral(cls, path: str) -> bool:
-        """Return True if *path* looks like a pytest temp dir or orphaned worktree."""
         if "/pytest-" in path:
             return True
         if "/worktrees/" in path and not Path(path).exists():
@@ -317,7 +127,6 @@ class RepoRegistry:
         return False
 
     def _prune_stale(self) -> None:
-        """Remove entries whose paths no longer exist on disk."""
         repos = self._data.get("repos", {})
         before = len(repos)
         clean = {k: v for k, v in repos.items() if Path(k).exists()}
@@ -328,12 +137,6 @@ class RepoRegistry:
             _log.info("registry_pruned_stale", removed=pruned, remaining=len(clean))
 
     def _save(self) -> None:
-        """Atomic write via mkstemp + os.replace(), safe against concurrent processes.
-
-        Using a fixed .tmp name would allow two concurrent nx processes to collide:
-        both write to the same temp file and one silently loses its update.
-        mkstemp creates a uniquely-named temp file so each process writes independently.
-        """
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp_fd, tmp_path_str = tempfile.mkstemp(dir=self._path.parent, prefix=".repos_")
         try:
@@ -344,5 +147,5 @@ class RepoRegistry:
             try:
                 os.unlink(tmp_path_str)
             except OSError:
-                pass  # intentional: cleanup after re-raise
+                pass
             raise
