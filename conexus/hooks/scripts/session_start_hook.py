@@ -120,6 +120,7 @@ def main() -> None:
     output_lines.append("")
 
     # --- L1 Knowledge Map (RDR-072) — per-repo cached topic labels ---
+    context_l1_path: str | None = None
     try:
         import hashlib
         cwd = os.getcwd()
@@ -139,10 +140,55 @@ def main() -> None:
     except Exception:
         pass  # Non-fatal — hook must never fail
 
+    # --- Hygiene (nexus-1if7b) — actionable maintenance signals ---
+    # Strict "in moderation" surface: emit a section only when there's
+    # something to act on; stay silent when everything is healthy.
+    # Currently checks one signal (L1 cache staleness > 7 days, which
+    # caught nexus-9iw41's 10-day-stale cache). Add more signals only
+    # when each pays for the line-count it costs.
+    _emit_hygiene_block(output_lines, context_l1_path)
+
     if output_lines:
         print("\n".join(output_lines))
 
     sys.exit(0)
+
+
+def _emit_hygiene_block(output_lines: list, context_l1_path: str | None) -> None:
+    """Append a ``## Hygiene`` section to *output_lines* iff actionable.
+
+    nexus-1if7b: high-leverage, low-volume curation prompts at session
+    start. Stdlib-only so it runs under whichever bare interpreter
+    ``_run_python_hook.sh`` resolves (same constraint as
+    ``t2_prefix_scan.py``; see nexus-vg6d4).
+
+    Signals (each line only when triggered):
+      * L1 cache age > 7 days — actionable: ``nx context refresh``.
+
+    Non-fatal: any check that raises is dropped silently.
+    """
+    import time as _time
+
+    signals: list[str] = []
+
+    if context_l1_path:
+        try:
+            if os.path.exists(context_l1_path):
+                age_days = int(
+                    (_time.time() - os.path.getmtime(context_l1_path)) // 86400
+                )
+                if age_days > 7:
+                    signals.append(
+                        f"- L1 cache {age_days}d old — refresh: `nx context refresh`"
+                    )
+        except OSError:
+            pass
+
+    if signals:
+        output_lines.append("## Hygiene")
+        output_lines.append("")
+        output_lines.extend(signals)
+        output_lines.append("")
 
 
 if __name__ == "__main__":
