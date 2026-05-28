@@ -115,6 +115,14 @@ CREATE TABLE IF NOT EXISTS owners (
     UNIQUE(name, owner_type)
 );
 
+-- RDR-137 followup CRITICAL-5 (nexus-43qgm.5): partial unique index
+-- on repo_hash so the TOCTOU race in ensure_owner_for_repo (lookup-
+-- then-register) cannot create duplicate owner rows for the same
+-- repository. Excludes empty / NULL repo_hash so curator owners
+-- (which never carry a repo_hash) coexist without conflict.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_repo_hash
+    ON owners(repo_hash) WHERE repo_hash IS NOT NULL AND repo_hash != '';
+
 CREATE TABLE IF NOT EXISTS documents (
     tumbler TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -436,6 +444,17 @@ class CatalogStore:
                     self._conn.execute(
                         "ALTER TABLE owners_nexus7vuw_new RENAME TO owners"
                     )
+
+        # RDR-137 followup CRITICAL-5 (nexus-43qgm.5): partial unique
+        # index on owners.repo_hash. Idempotent via IF NOT EXISTS;
+        # closes the TOCTOU race in ensure_owner_for_repo. Adding it
+        # here (rather than relying on _SCHEMA_SQL alone) covers
+        # legacy DBs created before the schema declaration shipped.
+        with self._conn:
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_repo_hash "
+                "ON owners(repo_hash) WHERE repo_hash IS NOT NULL AND repo_hash != ''"
+            )
 
         # nexus-8luh: add source_mtime column to existing databases so
         # RDR-087 Phase 3.4's stale_source_ratio has something to read

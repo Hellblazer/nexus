@@ -1026,13 +1026,25 @@ class Catalog:
         existing = self.owner_for_repo(repo_hash)
         if existing is not None:
             return existing
-        return self.register_owner(
-            name=repo_name or derived_name,
-            owner_type="repo",
-            repo_hash=repo_hash,
-            repo_root=str(main_repo),
-            description=description or f"Git repository: {repo_name or derived_name}",
-        )
+        try:
+            return self.register_owner(
+                name=repo_name or derived_name,
+                owner_type="repo",
+                repo_hash=repo_hash,
+                repo_root=str(main_repo),
+                description=description or f"Git repository: {repo_name or derived_name}",
+            )
+        except sqlite3.IntegrityError:
+            # RDR-137 followup CRITICAL-5 (nexus-43qgm.5): partial
+            # UNIQUE on owners.repo_hash trips when two concurrent
+            # ensure_owner_for_repo calls both miss the lookup and
+            # both attempt to register. The losing thread re-lookups
+            # to return the winner's tumbler. Without the catch, the
+            # second thread would crash on the duplicate-key error.
+            existing = self.owner_for_repo(repo_hash)
+            if existing is not None:
+                return existing
+            raise
 
     def set_owner_head_hash(
         self, owner: "Tumbler | str", head_hash: str,

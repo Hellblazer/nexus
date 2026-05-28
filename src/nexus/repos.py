@@ -157,8 +157,17 @@ def _read_repos_json(registry_path: Path) -> dict[str, dict]:
 
     RDR-137 Phase 5.3 (nexus-tts0d.20): replaces the old
     ``RepoRegistry(path).all_info()`` round-trip. Returns the inner
-    ``{"<path>": {...entry}}`` mapping; empty dict on missing or
-    malformed file.
+    ``{"<path>": {...entry}}`` mapping; empty dict on missing file.
+
+    **RDR-137 followup CRITICAL-4 (nexus-43qgm.4):** malformed
+    ``repos.json`` is NOT silently treated as empty — the function
+    emits ``repos_json_malformed`` at WARNING (so the cause is
+    observable) AND still returns ``{}`` to keep the read-only
+    callers crash-free. Callers that drive destructive operations
+    (the migration verb) MUST pre-validate the file separately, or
+    the malformed-but-recoverable file gets deleted on the false
+    parity. See ``commands/upgrade._migrate_repos_json_to_catalog``
+    for the pre-validation pattern.
 
     The migration verb + dual-read shim both need to read the legacy
     file shape during the deprecation window; everything else has
@@ -171,10 +180,36 @@ def _read_repos_json(registry_path: Path) -> dict[str, dict]:
         return {}
     try:
         data = json.loads(registry_path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        _log.warning(
+            "repos_json_malformed",
+            path=str(registry_path),
+            error=str(exc),
+            hint="file present but unparseable; callers that delete on parity "
+                 "must pre-validate before consuming the empty-dict return",
+        )
         return {}
     repos = data.get("repos") if isinstance(data, dict) else None
     return repos if isinstance(repos, dict) else {}
+
+
+def _repos_json_is_parseable(registry_path: Path) -> bool:
+    """Return True iff *registry_path* is absent OR parseable as the
+    legacy ``repos.json`` shape. Used by the migration verb to refuse
+    deletion on parse failure.
+
+    Absent file → True (idempotent migration no-op).
+    Parseable file → True (proceed to the parity check).
+    Malformed file → False (refuse to delete; surface to operator).
+    """
+    import json
+    if not registry_path.exists():
+        return True
+    try:
+        json.loads(registry_path.read_text())
+        return True
+    except (OSError, json.JSONDecodeError):
+        return False
 
 
 def from_registry(

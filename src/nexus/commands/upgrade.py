@@ -372,7 +372,27 @@ def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:
         from nexus.catalog.catalog import Catalog
         from nexus.config import catalog_path
         from nexus.repo_identity import _repo_identity
-        from nexus.repos import _read_repos_json
+        from nexus.repos import _read_repos_json, _repos_json_is_parseable
+
+        # RDR-137 followup CRITICAL-4 (nexus-43qgm.4): refuse to delete
+        # a malformed/truncated repos.json. _read_repos_json returns
+        # {} on parse failure (with a warning log); without this
+        # pre-validation the parity check would vacuously hold and
+        # the file would be silently unlinked, losing recoverable
+        # data.
+        if not _repos_json_is_parseable(reg_path):
+            _log.warning(
+                "repos_json_malformed",
+                path=str(reg_path),
+                hint="file present but unparseable; migration refused to delete",
+            )
+            click.echo(
+                f"\nERROR: {reg_path} is malformed/unparseable; NOT deleting.\n"
+                f"Inspect manually with `cat {reg_path}` and either repair the JSON or move it aside, "
+                f"then re-run nx upgrade.",
+                err=True,
+            )
+            return
 
         cat_dir = catalog_path()
         if not (cat_dir / ".catalog.db").exists():

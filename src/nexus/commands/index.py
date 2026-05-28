@@ -96,7 +96,15 @@ class _CatalogBackedRegistry:
                         content_type=ct,
                         owner_id=owner_id,
                         embedding_model="voyage-context-3",
-                        model_version="1",
+                        # RDR-137 followup CRITICAL-3 (nexus-43qgm.3):
+                        # parse_conformant_collection_name returns
+                        # f"v{ver}" — "v1", never "1". Conforming
+                        # writers must match so the idempotency check
+                        # in register_collection (which compares the
+                        # stored model_version against the new one)
+                        # short-circuits instead of emitting a
+                        # duplicate CollectionCreated event.
+                        model_version="v1",
                     )
                 except Exception as exc:
                     _log.warning(
