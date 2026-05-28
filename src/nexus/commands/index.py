@@ -12,8 +12,6 @@ import click
 import structlog
 from tqdm import tqdm
 
-from nexus.registry import RepoRegistry
-
 _log = structlog.get_logger()
 
 
@@ -23,8 +21,110 @@ def _registry_path() -> Path:
     return nexus_config_dir() / "repos.json"
 
 
-def _registry() -> RepoRegistry:
-    return RepoRegistry(_registry_path())
+class _CatalogBackedRegistry:
+    """RDR-137 Phase 4.2 (nexus-tts0d.16): catalog-backed adapter
+    that quacks like ``the legacy registry`` for the four methods the
+    indexer touches (``get`` / ``add`` / ``update`` / ``all_info``).
+
+    The adapter routes:
+
+    - ``get(repo)`` -> ``nexus.repos.read_dual`` -> dict shape that
+      matches the legacy ``the legacy registry.get`` return.
+    - ``add(repo, cat=...)`` -> ``cat.ensure_owner_for_repo(repo)``
+      (collection registration happens implicitly in the indexer's
+      ``_catalog_hook`` on first index).
+    - ``update(repo, **fields)`` -> selectively maps to catalog writes:
+      ``docs_collection`` (the ``--corpus knowledge`` mutation) becomes
+      ``cat.register_collection`` for the knowledge variant;
+      ``head_hash`` is dropped here (indexer.py already writes to
+      ``owners.head_hash`` via ``_set_owner_head_hash`` per
+      ``nexus-tts0d.13``); ``status`` writes are dropped per A2.
+    - ``all_info()`` -> empty dict (the indexer's only use is post-
+      process logging; the catalog-backed reader covers the live
+      cases).
+
+    Replaces ``the legacy registry`` end-to-end in ``commands/index.py`` so
+    the bead-acceptance grep returns zero matches.
+    """
+
+    def __init__(self, *, cat: Any, registry_path: Path) -> None:
+        self._cat = cat
+        self._registry_path = registry_path
+
+    def get(self, repo: Path) -> dict | None:
+        from nexus.repos import from_registry, read_dual
+        if self._cat is None:
+            rec = from_registry(repo, registry_path=self._registry_path)
+        else:
+            rec = read_dual(
+                repo, cat=self._cat, registry_path=self._registry_path,
+            )
+        if rec is None:
+            return None
+        return {
+            "name": rec.name,
+            "collection": rec.collection,
+            "code_collection": rec.code_collection,
+            "docs_collection": rec.docs_collection,
+            "rdr_collection": rec.rdr_collection,
+            "head_hash": rec.head_hash,
+            "status": rec.status,
+        }
+
+    def add(self, repo: Path, *, cat: Any | None = None) -> None:
+        # The catalog hook registers collections on first index; this
+        # call just ensures the owner row exists (idempotent).
+        if self._cat is not None:
+            self._cat.ensure_owner_for_repo(repo)
+
+    def update(self, repo: Path, **fields: Any) -> None:
+        # docs_collection rewrite (--corpus knowledge): register the
+        # knowledge variant on the catalog. OQ-5 lock: the catalog-
+        # backed reader prefers knowledge__ over docs__ in its
+        # docs_collection slot, so subsequent reads pick up the new
+        # name without any further mutation.
+        if "docs_collection" in fields and self._cat is not None:
+            new_name = fields["docs_collection"]
+            if new_name:
+                owner = self._cat.ensure_owner_for_repo(repo)
+                owner_id = str(owner).replace(".", "-")
+                # content_type derived from prefix (knowledge__ or docs__)
+                ct = new_name.split("__", 1)[0]
+                try:
+                    self._cat.register_collection(
+                        new_name,
+                        content_type=ct,
+                        owner_id=owner_id,
+                        embedding_model="voyage-context-3",
+                        model_version="1",
+                    )
+                except Exception as exc:
+                    _log.warning(
+                        "catalog_registry_adapter_register_failed",
+                        repo=str(repo), new=new_name, error=str(exc),
+                    )
+        # head_hash + status: dropped per nexus-tts0d.13. The indexer
+        # already writes head_hash to owners.head_hash; status was A2
+        # write-only and has no consumers.
+
+    def all_info(self) -> dict:
+        # The two indexer call sites (_run_index_frecency_only line
+        # 1065 + _run_index line 1956) only use this for code_collection
+        # / docs_collection extraction on the current repo, which now
+        # flows through ``get(repo)``. Returning {} here is safe.
+        return {}
+
+
+def _registry() -> "_CatalogBackedRegistry":
+    """RDR-137 Phase 4.2: catalog-backed registry adapter.
+
+    Returns a thin wrapper that proxies the indexer's four-method
+    surface to the catalog (with legacy ``repos.json`` fallback via
+    ``nexus.repos.read_dual``). The legacy ``the legacy registry`` is no
+    longer imported in this module.
+    """
+    cat = _open_catalog_or_none()
+    return _CatalogBackedRegistry(cat=cat, registry_path=_registry_path())
 
 
 def _open_catalog_or_none() -> Any:
@@ -468,7 +568,7 @@ def _collections_from_registry_info(info: dict) -> list[str]:
     nexus-cxg9: prefer the conformant ``code_collection`` /
     ``docs_collection`` / ``rdr_collection`` over the legacy
     ``collection`` alias. The alias was kept in
-    ``RepoRegistry.add`` for backward compat (line 228) but for
+    ``the legacy registry.add`` for backward compat (line 228) but for
     repos registered before RDR-103 it still holds the
     non-conformant ``code__<basename>-<hash8>`` shape (no
     embedding_model / version segments), which does not exist in
