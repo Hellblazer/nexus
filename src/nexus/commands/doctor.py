@@ -9,7 +9,6 @@ from typing import Any
 import click
 import structlog
 
-from nexus.registry import RepoRegistry
 
 _log = structlog.get_logger(__name__)
 
@@ -1339,12 +1338,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         owners_path = cat._owners_path
         owners = read_owners(owners_path) if owners_path.exists() else {}
 
-        # Get registry for fallback
-        from nexus.config import nexus_config_dir
-
-        registry_path = nexus_config_dir() / "repos.json"
-        registry = RepoRegistry(registry_path) if registry_path.exists() else None
-
+        # RDR-137 Phase 3.7 (nexus-tts0d.12): registry fallback removed.
+        # Post-nexus-nzyrh owner.repo_root is always populated for
+        # freshly-registered owners; legacy owners with empty
+        # repo_root surface via the WARN below for re-index targeting.
         t3_db = None
         if not dry_run:
             t3_db = make_t3()
@@ -1361,19 +1358,15 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             if owner_rec.owner_type == "curator":
                 continue
 
-            # Determine repo_root
-            repo_root = None
-            if owner_rec.repo_root:
-                repo_root = Path(owner_rec.repo_root)
-            elif owner_rec.repo_hash and registry:
-                for rp in registry.all_info():
-                    h = hashlib.sha256(rp.encode()).hexdigest()[:8]
-                    if h == owner_rec.repo_hash:
-                        repo_root = Path(rp)
-                        break
+            # Determine repo_root (catalog-only; no registry fallback)
+            repo_root = Path(owner_rec.repo_root) if owner_rec.repo_root else None
 
             if repo_root is None:
-                _log.warning("fix_paths_no_root", tumbler=tumbler_str, file_path=file_path)
+                _log.warning(
+                    "fix_paths_no_root",
+                    tumbler=tumbler_str, file_path=file_path,
+                    hint="re-run 'nx index repo' on the source repo to backfill owners.repo_root",
+                )
                 continue
 
             new_rel = make_relative(file_path, repo_root)
