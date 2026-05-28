@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.3.1] - 2026-05-28
+
+Plugin SessionStart hook updates only (no agent / skill / command
+changes). Two silent-failure bugs fixed and one new strategic-hint
+signal added. Activation requires the hosting `nx-mcp` to restart.
+
+### Fixed
+
+- `t2_prefix_scan.py` now uses stdlib `sqlite3` instead of importing `nexus.db.t2`, so the `## T2 Memory (Active Project)` SessionStart section no longer silently disappears on bare-Python wrappers (nexus-vg6d4).
+- `generate_context_l1` dedups identical `(collection, label, doc_count)` rows so the `## Knowledge Map` SessionStart section no longer shows the same label five times when a collection is in a degenerate clustering state (nexus-9iw41).
+
+### Added
+
+- `## Hygiene` block in `session_start_hook.py`: emits actionable maintenance signals only when present, silent when healthy. v1 signal: L1 cache age > 7 days (nexus-1if7b).
+
 ## [5.3.0] - 2026-05-27
 
 Plugin version aligned with conexus 5.3.0. No plugin-component
