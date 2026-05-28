@@ -89,7 +89,7 @@ def test_ensure_owner_for_repo_writes_main_repo_root_not_input_path(
     # _git rev-parse --git-common-dir_ resolution that both worktree
     # and main produce the same main repo).
     monkeypatch.setattr(
-        "nexus.registry._repo_identity_with_main",
+        "nexus.repo_identity._repo_identity_with_main",
         lambda r: ("main_nexus", "abcd1234", main_repo),
     )
 
@@ -147,7 +147,7 @@ def test_catalog_hook_passes_main_repo_path_to_register_owner(
     # Mock _repo_identity_with_main to return main_repo as the third
     # element. The hook must use this value, not str(worktree).
     monkeypatch.setattr(
-        "nexus.registry._repo_identity_with_main",
+        "nexus.repo_identity._repo_identity_with_main",
         lambda r: ("main_nexus", "abcd1234", main_repo),
     )
 

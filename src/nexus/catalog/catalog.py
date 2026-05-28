@@ -1009,7 +1009,7 @@ class Catalog:
         :func:`nexus.registry._repo_identity`; ``description`` defaults
         to ``"Git repository: {repo_name}"``.
         """
-        from nexus.registry import _repo_identity_with_main  # noqa: PLC0415
+        from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415
 
         # nexus-zr2ie (RDR-137 gate critique 2026-05-28): use the
         # 3-tuple variant so ``repo_root`` is the canonical main-repo

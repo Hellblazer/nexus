@@ -104,7 +104,7 @@ def from_catalog(repo: Path, *, cat: Catalog) -> RepoRecord | None:
     ``docs__*`` name — the user's ``--corpus knowledge`` opt-in is
     the canonical intent.
     """
-    from nexus.registry import _repo_identity_with_main  # noqa: PLC0415
+    from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415
 
     name, repo_hash, _main_repo = _repo_identity_with_main(repo)
     owner = cat.owner_for_repo(repo_hash)

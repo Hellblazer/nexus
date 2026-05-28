@@ -188,7 +188,7 @@ def _set_owner_head_hash(repo: Path, head_hash: str) -> None:
     try:
         from nexus.catalog.catalog import Catalog
         from nexus.config import catalog_path
-        from nexus.registry import _repo_identity
+        from nexus.repo_identity import _repo_identity
 
         cat_dir = catalog_path()
         if not (cat_dir / ".catalog.db").exists():
@@ -217,7 +217,7 @@ def _repo_lock_path(repo: Path) -> Path:
     of the same repo map to a single lock.
     """
     from nexus.config import nexus_config_dir
-    from nexus.registry import _repo_identity
+    from nexus.repo_identity import _repo_identity
 
     _, path_hash = _repo_identity(repo)
     return nexus_config_dir() / "locks" / f"{path_hash}.lock"
@@ -324,7 +324,7 @@ def _conformant_name_for_repo(repo: Path, content_type: str) -> str:
     ad-hoc fallbacks.
     """
     from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
-    from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
+    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -359,7 +359,7 @@ def _legacy_collection_name(repo: "Path", content_type: str) -> str:
     in place to the conformant 4-segment shape on the first index after
     the catalog upgrade.
     """
-    from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
+    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -400,7 +400,7 @@ def _migration_source_candidates(
     collections.
     """
     from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
-    from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
+    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -475,7 +475,7 @@ def _migrate_legacy_collections(
         rename_collection_data_plane,
     )
     from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
-    from nexus.registry import _repo_identity  # noqa: PLC0415
+    from nexus.repo_identity import _repo_identity  # noqa: PLC0415
 
     result: dict[str, str] = {}
 
@@ -676,7 +676,7 @@ def _catalog_hook(
             # paths for every relative-path document under this owner
             # once the worktree was deleted. ``_repo_identity_with_main``
             # uses ``git rev-parse --git-common-dir`` to resolve.
-            from nexus.registry import _repo_identity_with_main  # noqa: PLC0415
+            from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415
             _name, _hash, main_repo = _repo_identity_with_main(repo)
             owner = cat.register_owner(
                 name=repo_name,
@@ -1036,7 +1036,7 @@ def _build_frecency_doc_id_map(
     try:
         from nexus.catalog import Catalog
         from nexus.config import catalog_path
-        from nexus.registry import _repo_identity
+        from nexus.repo_identity import _repo_identity
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
@@ -1525,7 +1525,7 @@ def _discover_and_index_rdrs(
     # catalog for a conformant ``rdr__<owner>__voyage-context-3__v<n>``,
     # falling back to the legacy ``rdr__<basename>-<hash8>`` shape when
     # the catalog is not initialized or the owner is not yet registered.
-    from nexus.registry import _repo_identity
+    from nexus.repo_identity import _repo_identity
     basename, _ = _repo_identity(repo)
     collection = _repo_collection_or_legacy(repo, "rdr")
 
@@ -2131,7 +2131,7 @@ def _run_index(
 
     # Update ripgrep cache (code + prose text files, not PDFs)
     from nexus.config import nexus_config_dir
-    from nexus.registry import _repo_identity
+    from nexus.repo_identity import _repo_identity
     _repo_basename, _repo_hash = _repo_identity(repo)
     cache_path = nexus_config_dir() / f"{_repo_basename}-{_repo_hash}.cache"
     build_cache(repo, cache_path, all_text_scored)

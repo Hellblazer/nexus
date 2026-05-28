@@ -32,7 +32,7 @@ from nexus.corpus import (
     LOCAL_EMBEDDING_MODELS,
     effective_embedding_model_for_writes,
 )
-from nexus.registry import _repo_identity
+from nexus.repo_identity import _repo_identity
 
 # ``CatalogEntry`` is imported lazily inside the methods that need
 # it. ``catalog.py`` imports this module from inside
@@ -374,7 +374,7 @@ class _DocumentOps:
         replaced was removed in Phase 5.
         """
         cat = self._cat
-        from nexus.registry import _repo_identity  # noqa: PLC0415
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415
 
         _, repo_hash = _repo_identity(repo)
         owner = cat.owner_for_repo(repo_hash)

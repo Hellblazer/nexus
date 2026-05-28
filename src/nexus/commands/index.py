@@ -1124,7 +1124,7 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
     """
     from nexus.doc_indexer import batch_index_markdowns
     from nexus.indexer import _repo_collection_or_legacy
-    from nexus.registry import _repo_identity
+    from nexus.repo_identity import _repo_identity
 
     path = path.resolve()
 
