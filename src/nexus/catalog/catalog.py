@@ -1009,9 +1009,15 @@ class Catalog:
         :func:`nexus.registry._repo_identity`; ``description`` defaults
         to ``"Git repository: {repo_name}"``.
         """
-        from nexus.registry import _repo_identity  # noqa: PLC0415
+        from nexus.registry import _repo_identity_with_main  # noqa: PLC0415
 
-        derived_name, repo_hash = _repo_identity(repo)
+        # nexus-zr2ie (RDR-137 gate critique 2026-05-28): use the
+        # 3-tuple variant so ``repo_root`` is the canonical main-repo
+        # path even when *repo* is a worktree. Pre-fix this wrote
+        # ``str(repo)`` and contaminated the catalog on first-run-
+        # from-worktree indexing; after worktree deletion the stored
+        # path was broken for every relative-path document.
+        derived_name, repo_hash, main_repo = _repo_identity_with_main(repo)
         existing = self.owner_for_repo(repo_hash)
         if existing is not None:
             return existing
@@ -1019,7 +1025,7 @@ class Catalog:
             name=repo_name or derived_name,
             owner_type="repo",
             repo_hash=repo_hash,
-            repo_root=str(repo),
+            repo_root=str(main_repo),
             description=description or f"Git repository: {repo_name or derived_name}",
         )
 

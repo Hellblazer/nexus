@@ -633,11 +633,21 @@ def _catalog_hook(
         # existing owners short-circuit without a re-register.
         owner = cat.owner_for_repo(repo_hash)
         if owner is None:
+            # nexus-zr2ie (RDR-137 gate critique 2026-05-28): derive the
+            # canonical main-repo path so ``repo_root`` is worktree-
+            # stable. Pre-fix this wrote ``str(repo)`` and contaminated
+            # the catalog when the caller's ``repo`` argument was a
+            # worktree path; ``resolve_path`` then produced broken
+            # paths for every relative-path document under this owner
+            # once the worktree was deleted. ``_repo_identity_with_main``
+            # uses ``git rev-parse --git-common-dir`` to resolve.
+            from nexus.registry import _repo_identity_with_main  # noqa: PLC0415
+            _name, _hash, main_repo = _repo_identity_with_main(repo)
             owner = cat.register_owner(
                 name=repo_name,
                 owner_type="repo",
                 repo_hash=repo_hash,
-                repo_root=str(repo),
+                repo_root=str(main_repo),
                 description=f"Git repository: {repo_name}",
             )
             _log.info("catalog_owner_created", owner=str(owner), repo=repo_name)
