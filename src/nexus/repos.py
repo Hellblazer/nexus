@@ -222,9 +222,55 @@ def _diff_fields(a: RepoRecord, b: RepoRecord) -> dict[str, dict[str, str]]:
     return diffs
 
 
+def list_repos_dual(
+    *, cat: Catalog, registry_path: Path,
+) -> list[str]:
+    """Enumerate every known repo path (catalog ∪ registry), sorted.
+
+    Catalog source: ``owners WHERE owner_type='repo'`` projected via
+    ``repo_root``.  Registry source: ``RepoRegistry.all()``.  Union is
+    a set merge (deterministic via ``sorted``); paths the catalog
+    knows about that the registry does NOT (or vice versa) are
+    surfaced via a single DEBUG event so cutover-progress is observable
+    without one source overriding the other.
+
+    Used by ``health.py``'s git-hook check and by any other consumer
+    that needs to iterate every registered repo.  When ``registry_path``
+    does not exist (post-Phase-5 install), returns the catalog set
+    alone; the DEBUG event is suppressed so the steady state is silent.
+    """
+    cat_paths: set[str] = set()
+    rows = cat._db.execute(
+        "SELECT repo_root FROM owners "
+        "WHERE owner_type = 'repo' AND repo_root != ''"
+    ).fetchall()
+    for (rr,) in rows:
+        if rr:
+            cat_paths.add(rr)
+
+    reg_paths: set[str] = set()
+    if registry_path.exists():
+        from nexus.registry import RepoRegistry  # noqa: PLC0415
+        reg = RepoRegistry(registry_path)
+        reg_paths = set(reg.all())
+
+    only_cat = cat_paths - reg_paths
+    only_reg = reg_paths - cat_paths
+    if registry_path.exists() and (only_cat or only_reg):
+        _log.debug(
+            "repos_list_dual_disagreement",
+            only_catalog=sorted(only_cat),
+            only_registry=sorted(only_reg),
+            both_count=len(cat_paths & reg_paths),
+        )
+
+    return sorted(cat_paths | reg_paths)
+
+
 __all__ = (
     "RepoRecord",
     "from_catalog",
     "from_registry",
+    "list_repos_dual",
     "read_dual",
 )

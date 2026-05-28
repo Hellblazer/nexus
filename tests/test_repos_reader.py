@@ -27,7 +27,13 @@ from structlog.testing import capture_logs
 
 from nexus.catalog.catalog import Catalog
 from nexus.registry import RepoRegistry
-from nexus.repos import RepoRecord, from_catalog, from_registry, read_dual
+from nexus.repos import (
+    RepoRecord,
+    from_catalog,
+    from_registry,
+    list_repos_dual,
+    read_dual,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -254,3 +260,66 @@ class TestReadDualShim:
             "code__myrepo-1-2__voyage-code-3__v1"
         )
         assert diffs["code_collection"]["registry"] == "code__myrepo-FAKE"
+
+
+class TestListReposDual:
+    def test_returns_catalog_only_paths_when_no_registry(
+        self, cat: Catalog, repo: Path, tmp_path: Path,
+    ) -> None:
+        cat.ensure_owner_for_repo(repo)
+        paths = list_repos_dual(
+            cat=cat, registry_path=tmp_path / "absent.json",
+        )
+        assert paths == [str(repo)]
+
+    def test_unions_catalog_and_registry(
+        self, cat: Catalog, repo: Path, tmp_path: Path,
+    ) -> None:
+        """Catalog has repo A, registry has repo B; result is sorted union."""
+        cat.ensure_owner_for_repo(repo)
+        other = tmp_path / "other"
+        other.mkdir()
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=other, check=True)
+        reg_path = tmp_path / "repos.json"
+        reg = RepoRegistry(reg_path)
+        reg.add(other)
+
+        paths = list_repos_dual(cat=cat, registry_path=reg_path)
+        assert str(repo) in paths
+        assert str(other) in paths
+        assert paths == sorted(paths)
+
+    def test_disagreement_event_fires_on_set_difference(
+        self, cat: Catalog, repo: Path, tmp_path: Path,
+    ) -> None:
+        cat.ensure_owner_for_repo(repo)
+        other = tmp_path / "registry_only"
+        other.mkdir()
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=other, check=True)
+        reg_path = tmp_path / "repos.json"
+        reg = RepoRegistry(reg_path)
+        reg.add(other)
+
+        with capture_logs() as cap:
+            list_repos_dual(cat=cat, registry_path=reg_path)
+
+        disagree = [
+            e for e in cap if e.get("event") == "repos_list_dual_disagreement"
+        ]
+        assert len(disagree) == 1
+        assert str(repo) in disagree[0]["only_catalog"]
+        assert str(other) in disagree[0]["only_registry"]
+
+    def test_no_disagreement_event_when_registry_absent(
+        self, cat: Catalog, repo: Path, tmp_path: Path,
+    ) -> None:
+        """Steady-state post-Phase-5 install: registry doesn't exist,
+        no DEBUG noise."""
+        cat.ensure_owner_for_repo(repo)
+        with capture_logs() as cap:
+            list_repos_dual(cat=cat, registry_path=tmp_path / "absent.json")
+        assert not any(
+            e.get("event") == "repos_list_dual_disagreement" for e in cap
+        )
