@@ -2,12 +2,13 @@
 title: "Eliminate repos.json: Catalog as the Canonical Repo→Collection Source of Truth"
 id: RDR-137
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-28
 accepted_date: 2026-05-28
+closed_date: 2026-05-28
 related_issues: [nexus-tts0d, nexus-9iw41, nexus-9z1qy, nexus-nzyrh]
 related_rdrs: [RDR-049, RDR-101, RDR-103, RDR-108, RDR-120]
 supersedes: []
