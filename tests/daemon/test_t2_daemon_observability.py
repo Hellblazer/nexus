@@ -155,3 +155,54 @@ class TestStatusLiveness:
         )
         assert result.exit_code != 0
         assert "no t2 daemon discovery file" in result.output.lower()
+
+
+class TestStopBreadcrumbDurability:
+    """nexus-61539: the t2_daemon_stop_requested breadcrumb must be flushed
+    to disk immediately after it is written and BEFORE stop() (which can
+    stall on a hung close). Under CI load the daemon could otherwise exit
+    before the RotatingFileHandler flushed the line, losing the diagnostic
+    in production as well as flaking the observability test."""
+
+    def test_run_until_signal_flushes_after_breadcrumb(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        import asyncio
+        import nexus.daemon.t2_daemon as t2d
+        import nexus.logging_setup as ls
+
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir()
+        daemon = t2d.T2Daemon(
+            config_dir=config_dir, db_path=tmp_path / "memory.db",
+        )
+
+        order: list[str] = []
+
+        class _FakeLog:
+            def info(self, event, **kw):
+                if event == "t2_daemon_stop_requested":
+                    order.append("breadcrumb")
+
+            def __getattr__(self, _name):
+                return lambda *a, **k: None
+
+        monkeypatch.setattr(t2d, "_log", _FakeLog())
+        # run_until_signal does `from nexus.logging_setup import flush_logging`
+        # at call time, so patching the module attr is picked up.
+        monkeypatch.setattr(ls, "flush_logging", lambda: order.append("flush"))
+
+        async def _drive() -> None:
+            daemon._stop_event = asyncio.Event()
+            daemon._stop_event.set()  # signal already arrived
+            await daemon.run_until_signal()
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_drive())
+        finally:
+            loop.close()
+
+        assert order == ["breadcrumb", "flush"], (
+            f"breadcrumb must be written THEN flushed; saw {order}"
+        )

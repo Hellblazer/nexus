@@ -146,3 +146,23 @@ def configure_logging(
     handler.setLevel(level)
     handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
     root.addHandler(handler)
+
+
+def flush_logging() -> None:
+    """Flush every handler on the root logger so buffered records are
+    durable on disk before the process exits.
+
+    nexus-61539: under CI load the T2 daemon could exit after logging the
+    ``t2_daemon_stop_requested`` breadcrumb but before its
+    ``RotatingFileHandler`` flushed that line, so the diagnostic was lost
+    both in the test and in production. Callers on a shutdown path invoke
+    this immediately after writing a must-survive breadcrumb and before
+    any teardown that might stall (e.g. a hung DB close). Best-effort: a
+    handler that raises on flush is skipped rather than masking the
+    shutdown.
+    """
+    for h in logging.getLogger().handlers:
+        try:
+            h.flush()
+        except Exception:  # noqa: BLE001 - best-effort durability on shutdown
+            pass

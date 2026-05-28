@@ -215,3 +215,62 @@ def test_structlog_warning_below_default_filtered(tmp_path, monkeypatch):
     ]:
         root.removeHandler(h)
         h.close()
+
+
+def test_flush_logging_flushes_root_handlers():
+    """nexus-61539: flush_logging() must flush every handler on the root
+    logger so a shutdown breadcrumb is durable before process exit."""
+    from nexus.logging_setup import flush_logging
+
+    flushed: list[bool] = []
+
+    class _RecordingHandler(logging.Handler):
+        def flush(self) -> None:  # noqa: D401
+            flushed.append(True)
+
+        def emit(self, record: logging.LogRecord) -> None:
+            pass
+
+    root = logging.getLogger()
+    h = _RecordingHandler()
+    root.addHandler(h)
+    try:
+        flush_logging()
+    finally:
+        root.removeHandler(h)
+
+    assert flushed, "flush_logging() did not flush the root handler"
+
+
+def test_flush_logging_skips_handler_that_raises():
+    """A handler whose flush() raises must not propagate out of
+    flush_logging() (best-effort durability on a shutdown path)."""
+    from nexus.logging_setup import flush_logging
+
+    other_flushed: list[bool] = []
+
+    class _BadHandler(logging.Handler):
+        def flush(self) -> None:
+            raise RuntimeError("flush boom")
+
+        def emit(self, record: logging.LogRecord) -> None:
+            pass
+
+    class _GoodHandler(logging.Handler):
+        def flush(self) -> None:
+            other_flushed.append(True)
+
+        def emit(self, record: logging.LogRecord) -> None:
+            pass
+
+    root = logging.getLogger()
+    bad, good = _BadHandler(), _GoodHandler()
+    root.addHandler(bad)
+    root.addHandler(good)
+    try:
+        flush_logging()  # must not raise
+    finally:
+        root.removeHandler(bad)
+        root.removeHandler(good)
+
+    assert other_flushed, "a raising handler blocked flushing the others"

@@ -427,3 +427,42 @@ class TestDispatchLockRetry:
         with pytest.raises(sqlite3.OperationalError, match="no such table"):
             asyncio.run(d._dispatch(self._frame(), is_uds=True))
         assert calls["n"] == 1  # structural error surfaces on the first attempt
+
+
+class TestStopBoundedClose:
+    """nexus-azsqe (RDR-129 A2 follow-up): a hung T2Database.close() must
+    not wedge stop() open-ended."""
+
+    def test_stop_bounds_hung_t2db_close(
+        self, config_dir: Path, db_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import nexus.daemon.t2_daemon as t2d
+
+        # Small bound so the test is fast; the close blocks far longer.
+        monkeypatch.setattr(t2d, "_DB_CLOSE_TIMEOUT", 0.2)
+        daemon = t2d.T2Daemon(config_dir=config_dir, db_path=db_path)
+
+        class _HungDB:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                time.sleep(2.0)  # stalled WAL checkpoint, longer than the bound
+                self.closed = True
+
+        daemon._t2db = _HungDB()
+        # servers / discovery untouched (None) so stop() only exercises close.
+
+        loop = asyncio.new_event_loop()
+        try:
+            start = time.monotonic()
+            loop.run_until_complete(daemon.stop())
+            elapsed = time.monotonic() - start
+        finally:
+            loop.close()
+
+        # Guard fired at ~0.2s; WITHOUT the fix the synchronous close would
+        # block the event loop the full 2s. Ceiling has margin for CI jitter
+        # while still well below the 2s unguarded path.
+        assert elapsed < 1.2, f"stop() not bounded — took {elapsed:.2f}s"
+        assert daemon._t2db is None
