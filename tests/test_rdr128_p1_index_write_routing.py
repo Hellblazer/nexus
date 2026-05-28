@@ -105,6 +105,67 @@ def test_falls_back_to_direct_t2database_when_unreachable(
         assert db.chash_index.lookup("x2")
 
 
+def test_recovers_through_daemon_after_it_returns(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """nexus-op10y: t2_index_write probes the daemon on EVERY call (fresh
+    make_t2_client + hello()), so there is no sticky per-process fallback.
+    A write that degraded to direct-SQLite while the daemon was down must
+    route back through the daemon as soon as it returns — proven here by a
+    second write landing on the client, not the fallback T2Database.
+
+    This guards against re-introducing a cached 'daemon unreachable'
+    decision that would strand a long indexer run (nx dt index, bulk
+    MinerU) on the fallback path for the rest of the process even after
+    `nx daemon t2 start` brought the daemon back.
+    """
+    import nexus.daemon.t2_client as t2c
+    import nexus.mcp_infra as mi
+
+    state = {"up": False}
+
+    class _Store:
+        def upsert_many(self, **_kw) -> None:  # noqa: ANN003
+            pass
+
+    class _Client:
+        def __init__(self) -> None:
+            # Reachability reflects the CURRENT state at construct time —
+            # make_t2_client is called fresh per t2_index_write invocation.
+            self.database = _FakeDatabaseProxy(reachable=state["up"])
+            self.chash_index = _Store()
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(t2c, "make_t2_client", lambda **_kw: _Client())
+    db_path = tmp_path / "memory.db"
+    monkeypatch.setattr(mi, "default_db_path", lambda: db_path)
+
+    from nexus.mcp_infra import t2_index_write
+
+    seen: list[str] = []
+
+    def _write(db) -> None:  # noqa: ANN001
+        seen.append(type(db).__name__)
+        db.chash_index.upsert_many(chashes=["c1"], collection="code__c")
+
+    # Call 1: daemon DOWN → degrade to the direct T2Database fallback.
+    t2_index_write(_write)
+    # Daemon recovers mid-run (operator ran `nx daemon t2 start`).
+    state["up"] = True
+    # Call 2: must re-probe and route through the daemon client again.
+    t2_index_write(_write)
+
+    assert seen[0] == "T2Database", "first write should use the direct fallback"
+    assert seen[1] == "_Client", (
+        "second write must route through the daemon client once it recovered; "
+        "a sticky per-process fallback (the nexus-op10y hypothesis) would keep "
+        "it on T2Database for the rest of the run"
+    )
+
+
 def test_non_unreachable_error_propagates_no_fallback(
     monkeypatch, tmp_path: Path,
 ) -> None:
