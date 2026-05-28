@@ -177,12 +177,19 @@ def test_index_creates_chunks_in_t3(
     col = local_t3.get_or_create_collection(registry.get(mini_repo)["collection"])
     assert col.count() > 0
 
-def test_index_status_transitions_to_ready(
+def test_index_does_not_write_repo_status(
     mini_repo: Path, registry: RepoRegistry, local_t3: T3Database
 ) -> None:
+    """RDR-137 Phase 3.8 (nexus-tts0d.13) dropped indexer status writes:
+    the per-repo ``status`` field was write-only with no consumer (RDR-137
+    Gap5), so the indexer no longer transitions it from ``registered`` to
+    ``ready``. Indexing success is verified by the chunk-count and
+    source-path tests; ``status`` is now vestigial and must stay untouched.
+    This guards against re-introducing the dropped status write."""
     assert registry.get(mini_repo)["status"] == "registered"
     _index(mini_repo, registry, local_t3)
-    assert registry.get(mini_repo)["status"] == "ready"
+    # No transition to "ready" — RDR-137 removed indexer status tracking.
+    assert registry.get(mini_repo)["status"] == "registered"
 
 
 @pytest.mark.parametrize("expected_file", ["ttl.py", "session.py"])
