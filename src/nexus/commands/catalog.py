@@ -1062,19 +1062,21 @@ def register_cmd(
     from nexus.catalog.catalog import make_relative
 
     cat = _get_catalog()
-    # Relativize absolute file_path if under a known repo (RDR-060)
+    # Relativize absolute file_path if under a known repo (RDR-060).
+    # RDR-137 Phase 3.3 (nexus-tts0d.8): catalog-backed enumeration.
     fp = file_path
     if fp and Path(fp).is_absolute():
         from nexus.catalog.catalog import _default_registry_path
-        from nexus.registry import RepoRegistry
+        from nexus.repos import list_repos_dual
 
         reg_path = _default_registry_path()
-        if reg_path.exists():
-            for repo_path_str in RepoRegistry(reg_path).all_info():
-                rel = make_relative(fp, Path(repo_path_str))
-                if rel != fp:
-                    fp = rel
-                    break
+        for repo_path_str in list_repos_dual(
+            cat=cat, registry_path=reg_path,
+        ):
+            rel = make_relative(fp, Path(repo_path_str))
+            if rel != fp:
+                fp = rel
+                break
 
     try:
         tumbler = cat.register(
@@ -3052,18 +3054,23 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
                     _default_registry_path,
                     make_relative,
                 )
-                from nexus.registry import RepoRegistry
+                from nexus.repos import list_repos_dual
 
+                # RDR-137 Phase 3.3 (nexus-tts0d.8): catalog-backed
+                # enumeration. Iterate every known repo_root, hash it,
+                # match the trailing hash8 suffix on the collection
+                # name; first match wins.
                 reg_path = _default_registry_path()
-                if reg_path.exists():
-                    for repo_path_str in RepoRegistry(reg_path).all_info():
-                        h = hashlib.sha256(
-                            repo_path_str.encode(),
-                        ).hexdigest()[:8]
-                        if col_name.endswith(h):
-                            repo_root = Path(repo_path_str)
-                            owner = cat.owner_for_repo(h)
-                            break
+                for repo_path_str in list_repos_dual(
+                    cat=cat, registry_path=reg_path,
+                ):
+                    h = hashlib.sha256(
+                        repo_path_str.encode(),
+                    ).hexdigest()[:8]
+                    if col_name.endswith(h):
+                        repo_root = Path(repo_path_str)
+                        owner = cat.owner_for_repo(h)
+                        break
             except Exception:
                 _log.warning(
                     "backfill_rdrs_repo_lookup_failed",
