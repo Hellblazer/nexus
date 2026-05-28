@@ -1029,6 +1029,29 @@ class Catalog:
             description=description or f"Git repository: {repo_name or derived_name}",
         )
 
+    def set_owner_head_hash(
+        self, owner: "Tumbler | str", head_hash: str,
+    ) -> None:
+        """Persist *head_hash* on the owner row.
+
+        RDR-137 Phase 3.8 (nexus-tts0d.13): per-repo git HEAD identity
+        moves from ``~/.config/nexus/repos.json`` into the
+        ``owners.head_hash`` column (Phase 1.5b, ``nexus-tts0d.2``).
+        The indexer calls this after a successful full-index run so the
+        next staleness check can compare current HEAD against the
+        recorded value.
+
+        Direct write rather than event-sourced because head_hash is a
+        pure derived signal (one query on the source git tree); no
+        replay-equality concerns. See ``§A8-exempt content writes`` at
+        the top of :mod:`nexus.db.t2.catalog`.
+        """
+        self._db.execute(  # epsilon-allow: derived staleness signal — no event-sourcing replay-equality concern (RDR-137 P3.8)
+            "UPDATE owners SET head_hash = ? WHERE tumbler_prefix = ?",
+            (head_hash, str(owner)),
+        )
+        self._db.commit()
+
     # ── Documents ──────────────────────────────────────────────────────────
 
     def _owner_repo_root(self, owner: Tumbler) -> str:

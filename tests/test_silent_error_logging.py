@@ -210,11 +210,21 @@ def test_hook_detection_failed_logs_debug(tmp_path):
 # ── Site 12: commands/doctor.py registry load failure ─────────────────────────
 
 def test_doctor_registry_load_failed_logs_warning():
-    """Site 12: corrupt registry emits warning-level log in doctor."""
-    from nexus.commands.doctor import RepoRegistry, doctor_cmd
-    from click.testing import CliRunner
+    """Site 12: enumeration failure during git-hook health check
+    emits warning-level log.
 
-    with patch.object(RepoRegistry, "__init__", side_effect=RuntimeError("corrupt")):
+    RDR-137 Phase 3.1 (nexus-tts0d.6) moved repo enumeration off
+    RepoRegistry onto ``nexus.repos.list_repos_dual``. The warning
+    fires when that helper raises; the event name is preserved
+    (``doctor_registry_load_failed``) so existing log-scrape pipelines
+    keep matching.
+    """
+    from click.testing import CliRunner
+    from nexus.commands.doctor import doctor_cmd
+
+    # Patch at definition site (nexus.repos) because health.py
+    # imports lazily inside _check_hooks_for_known_repos.
+    with patch("nexus.repos.list_repos_dual", side_effect=RuntimeError("corrupt")):
         with capture_logs() as cap:
             runner = CliRunner()
             runner.invoke(doctor_cmd)

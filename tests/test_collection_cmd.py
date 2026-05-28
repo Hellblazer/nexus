@@ -598,24 +598,34 @@ def test_index_repo_cmd_help_shows_corpus_flag(runner) -> None:
 
 
 def test_corpus_knowledge_rewrites_docs_collection(tmp_path, monkeypatch) -> None:
-    """GH #451: ``--corpus knowledge`` mutates the registry's
-    ``docs_collection`` field so the indexer routes prose to
-    ``knowledge__<owner>__...`` instead of ``docs__<owner>__...``.
+    """GH #451 + RDR-137 Phase 4.2 (nexus-tts0d.16): ``--corpus
+    knowledge`` registers a ``knowledge__*`` collection on the
+    repo's catalog owner so the indexer routes prose to that
+    collection (the OQ-5-locked reader prefers ``knowledge__`` over
+    ``docs__`` in the docs slot).
 
-    Pure registry-level test; the indexer call is mocked so we
+    Post-RDR-137 the assertion shifts from the legacy ``repos.json``
+    file to the catalog projection — the file is no longer written.
+    Pure catalog-level test; the indexer call is mocked so we
     isolate the routing decision from the embed pipeline.
     """
-    import json
     from unittest.mock import patch
 
+    import subprocess
     from click.testing import CliRunner
+    from nexus.catalog.catalog import Catalog
     from nexus.commands.index import index_repo_cmd
 
-    # Set up an isolated config dir so the registry path is sandboxed.
+    # Sandbox config + catalog dirs.
+    cat_dir = tmp_path / "catalog"
+    cat_dir.mkdir()
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
+    Catalog.init(cat_dir)
+
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / ".git").mkdir()  # so _git_ls_files won't crash; not strictly
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     (repo / "README.md").write_text("# repo\n")
 
     runner = CliRunner()
@@ -626,36 +636,51 @@ def test_corpus_knowledge_rewrites_docs_collection(tmp_path, monkeypatch) -> Non
             catch_exceptions=False,
         )
 
-    # The registry should now hold a knowledge__ docs_collection.
+    # The catalog should now hold a knowledge__ collection registered
+    # to the owner for this repo. repos.json is NOT created.
     repos_json = tmp_path / "repos.json"
-    assert repos_json.exists(), "registry never written"
-    data = json.loads(repos_json.read_text())
-    entry = data["repos"][str(repo.resolve())]
-    assert entry["docs_collection"].startswith("knowledge__"), (
-        f"--corpus knowledge did not rewrite docs_collection; "
-        f"registry holds {entry['docs_collection']!r}"
+    assert not repos_json.exists(), (
+        "RDR-137: --corpus knowledge must not write the legacy registry"
     )
-    assert entry["code_collection"].startswith("code__"), (
-        "code_collection must NOT be touched by --corpus knowledge"
+
+    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+    rows = cat._db.execute(
+        "SELECT name FROM collections WHERE name LIKE 'knowledge__%'"
+    ).fetchall()
+    assert any(r[0].startswith("knowledge__") for r in rows), (
+        f"--corpus knowledge did not register a knowledge__ collection "
+        f"on the catalog; saw: {[r[0] for r in rows]}"
     )
     # Output mentions the routing decision.
     assert "knowledge__" in result.output
 
 
 def test_corpus_default_keeps_docs_collection(tmp_path, monkeypatch) -> None:
-    """GH #451: omitting ``--corpus`` (or passing ``--corpus docs``)
-    is the default; prose continues to route to ``docs__``.
+    """GH #451 + RDR-137 Phase 4.2 (nexus-tts0d.16): omitting
+    ``--corpus`` is the default; no ``knowledge__`` collection is
+    registered, and the catalog-backed reader returns the standard
+    ``docs__`` slot when the indexer's catalog hook fires.
+
+    Post-RDR-137 the assertion shifts from the legacy ``repos.json``
+    file to the catalog: ``knowledge__*`` is absent from the
+    collections projection unless explicitly requested.
     """
-    import json
+    import subprocess
     from unittest.mock import patch
 
     from click.testing import CliRunner
+    from nexus.catalog.catalog import Catalog
     from nexus.commands.index import index_repo_cmd
 
+    cat_dir = tmp_path / "catalog"
+    cat_dir.mkdir()
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
+    Catalog.init(cat_dir)
+
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / ".git").mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     (repo / "README.md").write_text("# repo\n")
 
     runner = CliRunner()
@@ -664,11 +689,16 @@ def test_corpus_default_keeps_docs_collection(tmp_path, monkeypatch) -> None:
             index_repo_cmd, [str(repo), "--no-taxonomy"], catch_exceptions=False,
         )
 
-    repos_json = tmp_path / "repos.json"
-    data = json.loads(repos_json.read_text())
-    entry = data["repos"][str(repo.resolve())]
-    assert entry["docs_collection"].startswith("docs__"), (
-        f"default routing changed; got {entry['docs_collection']!r}"
+    # repos.json is not created either way.
+    assert not (tmp_path / "repos.json").exists()
+
+    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+    knowledge_rows = cat._db.execute(
+        "SELECT name FROM collections WHERE name LIKE 'knowledge__%'"
+    ).fetchall()
+    assert not knowledge_rows, (
+        f"default routing planted a knowledge__ collection; saw: "
+        f"{[r[0] for r in knowledge_rows]}"
     )
 
 

@@ -375,10 +375,26 @@ def index_repo_cmd(
     # is unaffected (the rewrite touches only the docs_collection
     # field, never code_collection).
     if corpus_choice == "knowledge":
+        # RDR-137 Phase 4.2 (nexus-tts0d.16): derive the knowledge
+        # collection name from the existing docs entry when present;
+        # otherwise synthesize from the catalog-known docs collection
+        # for this owner so the rewrite still fires on first-index
+        # runs (where the docs__ default has not yet been registered).
         info = reg.get(path) or {}
         existing_docs = info.get("docs_collection", "")
+        new_docs = ""
         if existing_docs.startswith("docs__"):
             new_docs = "knowledge__" + existing_docs.removeprefix("docs__")
+        else:
+            # Synthesize from the conformant docs-collection shape.
+            from nexus.repo_identity import _resolve_repo_collection
+            cat_for_resolve = _open_catalog_or_none()
+            synth = _resolve_repo_collection(
+                path, "docs", cat=cat_for_resolve,
+            )
+            if synth.startswith("docs__"):
+                new_docs = "knowledge__" + synth.removeprefix("docs__")
+        if new_docs:
             reg.update(path, docs_collection=new_docs)
             click.echo(
                 f"Routing prose to {new_docs} (--corpus knowledge)."

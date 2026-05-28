@@ -197,11 +197,7 @@ def _set_owner_head_hash(repo: Path, head_hash: str) -> None:
         owner = cat.owner_for_repo(repo_hash)
         if owner is None:
             return
-        cat._db.execute(
-            "UPDATE owners SET head_hash = ? WHERE tumbler_prefix = ?",
-            (head_hash, str(owner)),
-        )
-        cat._db.commit()
+        cat.set_owner_head_hash(owner, head_hash)
     except Exception as exc:
         _log.warning(
             "set_owner_head_hash_failed",
