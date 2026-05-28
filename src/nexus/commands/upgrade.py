@@ -372,7 +372,7 @@ def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:
         from nexus.catalog.catalog import Catalog
         from nexus.config import catalog_path
         from nexus.repo_identity import _repo_identity
-        from nexus.registry import RepoRegistry
+        from nexus.repos import _read_repos_json
 
         cat_dir = catalog_path()
         if not (cat_dir / ".catalog.db").exists():
@@ -383,9 +383,8 @@ def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:
             return
 
         cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-        reg = RepoRegistry(reg_path)
         disagreements: list[str] = []
-        for repo_str in reg.all():
+        for repo_str in _read_repos_json(reg_path).keys():
             repo = Path(repo_str)
             if not repo.exists():
                 continue  # stale registry entry; skip

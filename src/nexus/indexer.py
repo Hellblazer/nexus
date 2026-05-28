@@ -55,7 +55,6 @@ if TYPE_CHECKING:
     from nexus.catalog.tumbler import Tumbler
     from nexus.hook_registry import HookRegistry
     from nexus.indexer_utils import StalenessCache
-    from nexus.registry import RepoRegistry
     from nexus.stage_timers import StageTimers
 
 # Re-export from indexer_utils for backward compatibility (tests import from here).
@@ -929,7 +928,7 @@ def _run_housekeeping(
 
 def index_repository(
     repo: Path,
-    registry: "RepoRegistry",
+    registry: "object",
     *,
     frecency_only: bool = False,
     chunk_lines: int | None = None,
@@ -1062,7 +1061,7 @@ def _build_frecency_doc_id_map(
     return file_to_doc_id
 
 
-def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
+def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     """Update frecency_score metadata on all indexed chunks without re-embedding.
 
     Handles both code__ and docs__ collections.
@@ -1955,7 +1954,7 @@ def _prune_deleted_files(
 
 def _run_index(
     repo: Path,
-    registry: "RepoRegistry",
+    registry: "object",
     chunk_lines: int | None = None,
     *,
     force: bool = False,

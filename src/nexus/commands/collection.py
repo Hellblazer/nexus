@@ -565,9 +565,10 @@ def reindex_cmd(name: str, force: bool) -> None:
                 if repo_path is None:
                     # Fallback: legacy registry walk for pre-Phase-1.5a
                     # installs where collections.owner_id is empty.
-                    from nexus.registry import RepoRegistry
-                    reg = RepoRegistry(nexus_config_dir() / "repos.json")
-                    for rp_str, info in reg.all_info().items():
+                    from nexus.repos import _read_repos_json
+                    for rp_str, info in _read_repos_json(
+                        nexus_config_dir() / "repos.json"
+                    ).items():
                         coll = info.get("collection") or info.get("docs_collection")
                         if coll == name or info.get("docs_collection") == name:
                             repo_path = Path(rp_str)

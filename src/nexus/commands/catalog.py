@@ -3267,10 +3267,23 @@ def _make_t3():
 
 
 def _make_registry():
+    """RDR-137 Phase 5.3 (nexus-tts0d.20): tiny adapter exposing the
+    two methods ``_backfill_repos`` consumes (``all_info``). Reads
+    the legacy file shape with stdlib json so the catalog backfill
+    verb keeps working without depending on the deleted RepoRegistry
+    class.
+    """
     from nexus.config import nexus_config_dir
-    from nexus.registry import RepoRegistry
+    from nexus.repos import _read_repos_json
 
-    return RepoRegistry(nexus_config_dir() / "repos.json")
+    class _LegacyRegistryReader:
+        def __init__(self, path):
+            self._path = path
+
+        def all_info(self):
+            return _read_repos_json(self._path)
+
+    return _LegacyRegistryReader(nexus_config_dir() / "repos.json")
 
 
 def _backfill_per_file_from_t3(

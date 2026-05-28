@@ -152,6 +152,31 @@ def from_catalog(repo: Path, *, cat: Catalog) -> RepoRecord | None:
     )
 
 
+def _read_repos_json(registry_path: Path) -> dict[str, dict]:
+    """Parse the legacy ``repos.json`` file shape with stdlib json.
+
+    RDR-137 Phase 5.3 (nexus-tts0d.20): replaces the old
+    ``RepoRegistry(path).all_info()`` round-trip. Returns the inner
+    ``{"<path>": {...entry}}`` mapping; empty dict on missing or
+    malformed file.
+
+    The migration verb + dual-read shim both need to read the legacy
+    file shape during the deprecation window; everything else has
+    already cut over to the catalog. Keeping this as a stdlib helper
+    means deleting :class:`RepoRegistry` does not break the migration.
+    """
+    import json
+
+    if not registry_path.exists():
+        return {}
+    try:
+        data = json.loads(registry_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    repos = data.get("repos") if isinstance(data, dict) else None
+    return repos if isinstance(repos, dict) else {}
+
+
 def from_registry(
     repo: Path, *, registry_path: Path,
 ) -> RepoRecord | None:
@@ -162,12 +187,7 @@ def from_registry(
     :func:`from_catalog` so the dual-read shim can compare them
     field-for-field.
     """
-    from nexus.registry import RepoRegistry  # noqa: PLC0415
-
-    if not registry_path.exists():
-        return None
-    reg = RepoRegistry(registry_path)
-    entry = reg.get(repo)
+    entry = _read_repos_json(registry_path).get(str(repo))
     if entry is None:
         return None
     return RepoRecord(
@@ -273,11 +293,7 @@ def list_repos_dual(
         if rr:
             cat_paths.add(rr)
 
-    reg_paths: set[str] = set()
-    if registry_path.exists():
-        from nexus.registry import RepoRegistry  # noqa: PLC0415
-        reg = RepoRegistry(registry_path)
-        reg_paths = set(reg.all())
+    reg_paths: set[str] = set(_read_repos_json(registry_path).keys())
 
     only_cat = cat_paths - reg_paths
     only_reg = reg_paths - cat_paths

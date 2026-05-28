@@ -1,15 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Repo registry: JSON persistence + helper re-exports.
+"""Legacy ``repos.json`` registry — back-compat shim + helper re-exports.
 
-RDR-137 Phase 5.2b (nexus-tts0d.21): the five pure helpers
-(:func:`_repo_identity`, :func:`_repo_identity_with_main`,
-:func:`_safe_collection`, :func:`_resolve_repo_collection`,
-:func:`_sanitise_owner_segment`, plus :func:`list_sibling_collections`)
-have moved to :mod:`nexus.repo_identity`. This module re-exports them
-verbatim so the ~15 legacy import sites continue to work for one
-release cycle; new code should import from ``nexus.repo_identity``
-directly. Phase 5.3 (nexus-tts0d.20) deletes :class:`RepoRegistry`
-itself plus the ``~/.config/nexus/repos.json`` file path.
+RDR-137 Phase 5.3 (nexus-tts0d.20): production code no longer reads
+or writes the legacy registry; every consumer routes through
+:mod:`nexus.repos` (catalog-backed) instead. The :class:`RepoRegistry`
+class is preserved here for:
+
+1. **Test fixtures** that need to materialise the legacy file shape on
+   disk during the deprecation window (a substantial body of regression
+   tests still seeds ``repos.json`` to verify the catalog cutover
+   handles the legacy data).
+2. **The lint guard** in
+   ``tests/test_no_repo_registry_resurrection.py`` whitelists this one
+   file as the *only* permitted location for ``class RepoRegistry``.
+
+The five pure helpers (``_repo_identity`` and friends) moved to
+:mod:`nexus.repo_identity` in nexus-tts0d.21; this module re-exports
+them for one release cycle of import-path back-compat. New code
+should import from ``nexus.repo_identity`` directly.
+
+The whole module disappears in the release after the legacy ``repos.json``
+deprecation window closes.
 """
 import json
 import os
@@ -20,7 +31,7 @@ from typing import Any
 
 import structlog
 
-from nexus.repo_identity import (
+from nexus.repo_identity import (  # noqa: F401
     _repo_identity,
     _repo_identity_with_main,
     _resolve_main_repo,
@@ -34,7 +45,6 @@ _log = structlog.get_logger()
 
 
 __all__ = (
-    # Legacy class + helper re-exports (helpers from nexus.repo_identity).
     "RepoRegistry",
     "_repo_identity",
     "_repo_identity_with_main",
@@ -47,13 +57,19 @@ __all__ = (
 
 
 class RepoRegistry:
-    """Thread-safe registry of indexed repositories stored as JSON.
+    """**Deprecated** — legacy ``repos.json`` registry.
 
-    Deletion scheduled in nexus-tts0d.20 (RDR-137 Phase 5.3).
+    Preserved as a test-fixture helper during the deprecation window
+    (RDR-137 Phase 5.3, ``nexus-tts0d.20``). Production code has cut
+    over to :mod:`nexus.repos` (catalog-backed). The class disappears
+    in the release after the deprecation window closes.
+
+    The :mod:`nexus.commands.upgrade` migration verb reads the file via
+    :func:`nexus.repos._read_repos_json` (stdlib json) instead of this
+    class so the deletion does not block migration; the dual-read shim
+    similarly uses the stdlib path.
     """
 
-    # Paths matching these prefixes are never persisted — they come from test
-    # runs, worktrees, or accidental indexing of temp directories.
     _EPHEMERAL_PREFIXES = ("/private/tmp", "/private/var", "/tmp", "/var/folders")
 
     def __init__(self, path: Path) -> None:
@@ -71,10 +87,7 @@ class RepoRegistry:
                 self._data = {"repos": {}}
             self._prune_stale()
 
-    # ── public API ────────────────────────────────────────────────────────────
-
     def add(self, repo: Path, *, cat: Any = None) -> None:
-        """Register *repo*, initialising collection names and head_hash."""
         key = str(repo)
         name = repo.name
         code_col = _resolve_repo_collection(repo, "code", cat=cat)
@@ -115,8 +128,6 @@ class RepoRegistry:
             if key in self._data["repos"]:
                 self._data["repos"][key].update(kwargs)
                 self._save()
-
-    # ── internal ──────────────────────────────────────────────────────────────
 
     @classmethod
     def _is_ephemeral(cls, path: str) -> bool:
