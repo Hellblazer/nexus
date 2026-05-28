@@ -433,8 +433,12 @@ def test_catalog_registry_adapter_register_failed_logs_warning(tmp_path):
         cat, "register_collection",
         side_effect=RuntimeError("simulated catalog write failure"),
     ):
+        # Non-voyage collection name: register_collection is mocked to
+        # raise, so the literal never reaches validation. Using a plain
+        # name keeps this file out of the RDR-109 mode-lint scope (it is
+        # not a cloud-mode test file).
         with capture_logs() as cap:
-            adapter.update(repo, docs_collection="knowledge__x-1-1__voyage-context-3__v1")
+            adapter.update(repo, docs_collection="knowledge__xrepo")
     assert any(
         e.get("event") == "catalog_registry_adapter_register_failed"
         and e.get("log_level") == "warning"
