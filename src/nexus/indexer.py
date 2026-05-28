@@ -197,7 +197,20 @@ def _set_owner_head_hash(repo: Path, head_hash: str) -> None:
         owner = cat.owner_for_repo(repo_hash)
         if owner is None:
             return
-        cat.set_owner_head_hash(owner, head_hash)
+        rowcount = cat.set_owner_head_hash(owner, head_hash)
+        # RDR-137 followup SIG-9 (nexus-43qgm.9): owner_for_repo returned
+        # a non-None tumbler but the UPDATE matched zero rows — the only
+        # plausible cause is a concurrent owner deletion between the
+        # lookup and the write. Surface as a warning so the lost write
+        # is observable.
+        if rowcount == 0:
+            _log.warning(
+                "set_owner_head_hash_no_match",
+                repo=str(repo),
+                owner=str(owner),
+                repo_hash=repo_hash,
+                hint="owner row deleted between lookup and update — re-index will heal",
+            )
     except Exception as exc:
         _log.warning(
             "set_owner_head_hash_failed",

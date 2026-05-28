@@ -405,6 +405,10 @@ class CatalogStore:
                     break
             if needs_rebuild:
                 with self._conn:
+                    # RDR-137 followup CRITICAL-2 (nexus-43qgm.2): include
+                    # head_hash in the new table + INSERT so the rebuild
+                    # path preserves the column. The preceding head_hash
+                    # ALTER (line ~374) guarantees the source side has it.
                     self._conn.execute(
                         "CREATE TABLE owners_nexus7vuw_new ("
                         "    tumbler_prefix TEXT PRIMARY KEY, "
@@ -413,6 +417,7 @@ class CatalogStore:
                         "    repo_hash TEXT, "
                         "    description TEXT, "
                         "    repo_root TEXT DEFAULT '', "
+                        "    head_hash TEXT, "
                         "    UNIQUE(name, owner_type)"
                         ")"
                     )
@@ -423,9 +428,9 @@ class CatalogStore:
                     self._conn.execute(
                         "INSERT OR IGNORE INTO owners_nexus7vuw_new "
                         "(tumbler_prefix, name, owner_type, repo_hash, "
-                        " description, repo_root) "
+                        " description, repo_root, head_hash) "
                         "SELECT tumbler_prefix, name, owner_type, repo_hash, "
-                        "       description, repo_root FROM owners"
+                        "       description, repo_root, head_hash FROM owners"
                     )
                     self._conn.execute("DROP TABLE owners")
                     self._conn.execute(
@@ -801,10 +806,19 @@ class CatalogStore:
             self._conn.execute("DELETE FROM collections")
 
             for prefix, o in owners.items():
+                # RDR-137 followup CRITICAL-1 (nexus-43qgm.1): include
+                # head_hash so rebuild from JSONL preserves the value.
+                # ``getattr`` with default keeps replay-compat for
+                # legacy OwnerRecord rows that pre-date the field.
                 self._conn.execute(
-                    "INSERT OR REPLACE INTO owners (tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (prefix, o.name, o.owner_type, o.repo_hash, o.description, o.repo_root),
+                    "INSERT OR REPLACE INTO owners "
+                    "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root, head_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        prefix, o.name, o.owner_type, o.repo_hash,
+                        o.description, o.repo_root,
+                        getattr(o, "head_hash", "") or "",
+                    ),
                 )
 
             for tumbler, d in documents.items():

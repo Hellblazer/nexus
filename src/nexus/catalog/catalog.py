@@ -972,11 +972,16 @@ class Catalog:
                 self._append_jsonl(self._owners_path, rec.__dict__)
             else:
                 self._append_jsonl(self._owners_path, rec.__dict__)
-                # Upsert SQLite
+                # RDR-137 followup CRITICAL-1: COALESCE-preserve head_hash
+                # so the legacy non-event-sourced re-register path doesn't
+                # wipe the column (set_owner_head_hash writes are epsilon-
+                # allowed and live only in SQLite + the JSONL replay layer).
                 self._db.execute(
-                    "INSERT OR REPLACE INTO owners (tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (prefix, name, owner_type, repo_hash, description, repo_root),
+                    "INSERT OR REPLACE INTO owners "
+                    "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root, head_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, "
+                    "COALESCE((SELECT head_hash FROM owners WHERE name = ? AND owner_type = ?), ''))",
+                    (prefix, name, owner_type, repo_hash, description, repo_root, name, owner_type),
                 )
                 self._db.commit()
                 self._emit_shadow_event(event)
@@ -1031,8 +1036,8 @@ class Catalog:
 
     def set_owner_head_hash(
         self, owner: "Tumbler | str", head_hash: str,
-    ) -> None:
-        """Persist *head_hash* on the owner row.
+    ) -> int:
+        """Persist *head_hash* on the owner row. Returns rowcount.
 
         RDR-137 Phase 3.8 (nexus-tts0d.13): per-repo git HEAD identity
         moves from ``~/.config/nexus/repos.json`` into the
@@ -1041,16 +1046,49 @@ class Catalog:
         next staleness check can compare current HEAD against the
         recorded value.
 
+        RDR-137 followup CRITICAL-1 (nexus-43qgm.1): also appends a
+        fresh OwnerRecord to ``owners.jsonl`` so the value survives a
+        rebuild from JSONL. The pre-fix path wrote only to SQLite; the
+        next rebuild silently wiped the column.
+
+        RDR-137 followup SIG-9 (nexus-43qgm.9): returns ``cursor.rowcount``
+        so callers can detect a no-match (e.g. owner concurrently
+        deleted between owner_for_repo lookup and set call).
+
         Direct write rather than event-sourced because head_hash is a
         pure derived signal (one query on the source git tree); no
         replay-equality concerns. See ``§A8-exempt content writes`` at
         the top of :mod:`nexus.db.t2.catalog`.
         """
-        self._db.execute(  # epsilon-allow: derived staleness signal — no event-sourcing replay-equality concern (RDR-137 P3.8)
+        owner_str = str(owner)
+        cur = self._db.execute(  # epsilon-allow: derived staleness signal — no event-sourcing replay-equality concern (RDR-137 P3.8)
             "UPDATE owners SET head_hash = ? WHERE tumbler_prefix = ?",
-            (head_hash, str(owner)),
+            (head_hash, owner_str),
         )
         self._db.commit()
+        if cur.rowcount > 0:
+            # Append a snapshot OwnerRecord to JSONL so rebuild
+            # preserves the value (the catalog's rebuild path replays
+            # owners.jsonl as last-wins; without this append the most
+            # recent head_hash would be lost on the next rebuild).
+            row = self._db.execute(
+                "SELECT name, owner_type, repo_hash, description, repo_root, head_hash "
+                "FROM owners WHERE tumbler_prefix = ?",
+                (owner_str,),
+            ).fetchone()
+            if row is not None:
+                from nexus.catalog.tumbler import OwnerRecord  # noqa: PLC0415
+                rec = OwnerRecord(
+                    owner=owner_str,
+                    name=row[0],
+                    owner_type=row[1],
+                    repo_hash=row[2] or "",
+                    description=row[3] or "",
+                    repo_root=row[4] or "",
+                    head_hash=row[5] or "",
+                )
+                self._append_jsonl(self._owners_path, rec.__dict__)
+        return cur.rowcount
 
     # ── Documents ──────────────────────────────────────────────────────────
 

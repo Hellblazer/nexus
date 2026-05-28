@@ -140,6 +140,11 @@ class OwnerRecord:
     description: str
     repo_root: str = ""  # absolute path to repo working tree (RDR-060)
     next_seq: int = 1  # high-water mark — next document number to assign (never decreases)
+    # RDR-137 followup CRITICAL-1 (nexus-43qgm.1): per-repo git HEAD identity
+    # (RDR-137 Phase 1.5b owners.head_hash column). Must round-trip through
+    # OwnerRecord so catalog rebuilds from owners.jsonl preserve the value;
+    # pre-fix the dataclass was missing the field and rebuilds wiped the column.
+    head_hash: str = ""
 
 
 @dataclass
