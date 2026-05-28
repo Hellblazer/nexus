@@ -32,11 +32,22 @@
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <!--
+      nexus-kmvf2: always-keep-alive. The prior ``KeepAlive={Crashed:
+      true}`` only restarted the daemon on a NON-zero-exit crash. A
+      clean SIGTERM (``nx daemon t2 stop``, a macOS shutdown/sleep that
+      terminates the process group, log-rotation watchdogs) sets
+      ``last exit code = 0`` and launchd did NOT restart — leaving the
+      persistent T2 daemon down until something demand-spawned it
+      outside launchd's supervision. ``KeepAlive=<true/>`` is the
+      canonical macOS pattern for a daemon that must persist regardless
+      of exit reason; ``ExitTimeOut`` bounds a stuck graceful shutdown
+      so launchd does not loop too aggressively.
+    -->
     <key>KeepAlive</key>
-    <dict>
-        <key>Crashed</key>
-        <true/>
-    </dict>
+    <true/>
+    <key>ExitTimeOut</key>
+    <integer>20</integer>
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardOutPath</key>
