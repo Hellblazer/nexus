@@ -828,6 +828,138 @@ class TestPhaseReviewGate:
         assert result.exit_code == 0, result.output
         assert "BLOCKED" in result.output
 
+    # nexus-4u6mt: phase-block sub-bullet §Approach enumeration (RDR-120 style)
+
+    _PHASE_BLOCK_BODY = (
+        "## Problem Statement\n\nProblem.\n\n"
+        "### Approach\n\n"
+        "**Phase 0: Lint + cutover flag scaffolding**\n\n"
+        "- Implement nx doctor --check-storage-boundary\n"
+        "- Add NX_STORAGE_MODE env-var\n\n"
+        "**Phase 1: T3 daemon**\n\n"
+        "- Stand up the T3 daemon process\n"
+        "- Route T3 reads through T3Client\n"
+        "- Add storage_boundary_lint T3 enforcement\n\n"
+        "## Tradeoffs\n\nSome tradeoffs."
+    )
+
+    def test_phase_block_enumerates_requested_phase_bullets(self, rdr_env):
+        """RDR-120-style phase blocks: --phase 1 enumerates Phase 1's
+        three sub-bullets as Item1..Item3 (nexus-4u6mt)."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-120-storage-substrate-split.md",
+            {"title": "Storage Substrate Split", "status": "accepted",
+             "type": "architecture", "priority": "P1"},
+            body=self._PHASE_BLOCK_BODY,
+        )
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "phase-review-gate", "--", "120", "--phase", "1"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "§Approach Cross-Walk" in result.output
+        # Phase 1 has exactly 3 bullets -> Item1..Item3, none from Phase 0.
+        assert "Item1" in result.output
+        assert "Item2" in result.output
+        assert "Item3" in result.output
+        assert "Item4" not in result.output
+        assert "Phase 1: Stand up the T3 daemon process" in result.output
+        # Phase 0 bullets must NOT leak into the Phase 1 cross-walk.
+        assert "check-storage-boundary" not in result.output
+
+    def test_phase_block_phase0_enumerates_phase0_bullets(self, rdr_env):
+        """--phase 0 enumerates Phase 0's two sub-bullets (nexus-4u6mt
+        acceptance: matches the manual RDR-120 P0 cross-walk)."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-120-storage-substrate-split.md",
+            {"title": "Storage Substrate Split", "status": "accepted",
+             "type": "architecture", "priority": "P1"},
+            body=self._PHASE_BLOCK_BODY,
+        )
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "phase-review-gate", "--", "120", "--phase", "0"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Item1" in result.output
+        assert "Item2" in result.output
+        assert "Item3" not in result.output
+        assert "check-storage-boundary" in result.output
+
+    def test_numbered_items_still_work_unchanged(self, rdr_env):
+        """RDR-121/125-style numbered §Approach items must continue to
+        enumerate phase-agnostically (regression guard for nexus-4u6mt)."""
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "### Approach\n\n"
+            "1. **Vendor the hook**: Copy _lib.py into sn.\n"
+            "2. **Byte-equality CI guard**: Assert identical bytes.\n\n"
+            "## Tradeoffs\n\nT."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-125-routing-hook-plugin-ownership.md",
+            {"title": "Routing Hook Ownership", "status": "accepted",
+             "type": "architecture", "priority": "P1"},
+            body=body,
+        )
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "phase-review-gate", "--", "125", "--phase", "1"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Item1" in result.output
+        assert "Vendor the hook" in result.output
+        assert "Item2" in result.output
+        assert "Byte-equality CI guard" in result.output
+
+
+class TestPhaseBlockParser:
+    """Unit tests for _prg_parse_phase_block_items (nexus-4u6mt)."""
+
+    _APPROACH = (
+        "**Phase 0: Scaffolding**\n\n"
+        "- bullet zero a\n"
+        "- bullet zero b\n\n"
+        "**Phase 1: Core**\n\n"
+        "- **Daemon**: stand it up\n"
+        "- route reads\n"
+    )
+
+    def test_selects_only_requested_phase(self):
+        from nexus.commands.rdr import _prg_parse_phase_block_items
+        items = _prg_parse_phase_block_items(self._APPROACH, phase="1")
+        assert [n for n, _, _ in items] == [1, 2]
+        assert items[0][1] == "Phase 1: Daemon"
+        assert items[0][2] == "stand it up"
+        assert items[1][1].startswith("Phase 1:")
+
+    def test_phase0_selects_phase0(self):
+        from nexus.commands.rdr import _prg_parse_phase_block_items
+        items = _prg_parse_phase_block_items(self._APPROACH, phase="0")
+        assert len(items) == 2
+        assert all("Phase 0" in lbl for _, lbl, _ in items)
+
+    def test_no_phase_enumerates_all_blocks(self):
+        from nexus.commands.rdr import _prg_parse_phase_block_items
+        items = _prg_parse_phase_block_items(self._APPROACH, phase=None)
+        assert [n for n, _, _ in items] == [1, 2, 3, 4]
+
+    def test_empty_on_non_phase_block_text(self):
+        from nexus.commands.rdr import _prg_parse_phase_block_items
+        # Numbered-item §Approach has no **Phase N:** header -> [].
+        items = _prg_parse_phase_block_items(
+            "1. **Foo**: bar\n2. **Baz**: qux\n", phase="1",
+        )
+        assert items == []
+
+    def test_phase_arg_accepts_phase_n_prose(self):
+        from nexus.commands.rdr import _prg_parse_phase_block_items
+        items = _prg_parse_phase_block_items(self._APPROACH, phase="Phase 1")
+        assert [n for n, _, _ in items] == [1, 2]
+
 
 # ---------------------------------------------------------------------------
 # Sentinel write (RDR-121 P2 co-requirement) — migrated from
