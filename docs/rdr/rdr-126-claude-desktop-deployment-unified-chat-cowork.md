@@ -58,7 +58,7 @@ The Claude Code plugin's SessionStart hook runs silently. The `.mcpb` install pa
 
 Strategic synthesis on 2026-05-23 (persisted to T2 as `nexus-plugin-connector-strategy-2026-05-23`) ranked R4 "Build a .mcpb Desktop Extension (uv type)" as an M-effort recommendation and R5 "Reduce install to two steps with a shell installer" as an S-M alternative. The same synthesis surfaced that Cowork integration was claimed working but never verified, and identified daemon lifecycle inconsistency across surfaces as a cross-cutting concern.
 
-The MCPB v2.1.2 spec (released December 2025) added `server.type: "uv"` for Python servers with compiled-extension dependencies. This is what unblocks Nexus packaging: `chromadb`, `tree-sitter`, and `pydantic-core` all have C / Rust extensions that the traditional `"type": "python"` MCPB cannot portably bundle. Azure MCP Server ships using the `"uv"` path in production (Microsoft Azure SDK blog, April 2026), establishing the precedent.
+The MCPB v2.1.2 spec (released December 2025) added `server.type: "uv"` for Python servers with compiled-extension dependencies. This is what unblocks Nexus packaging: `chromadb`, `tree-sitter`, and `pydantic-core` all have C / Rust extensions that the traditional `"type": "python"` MCPB cannot portably bundle. No confirmed production `server.type: "uv"` MCPB exists in the ecosystem as of May 2026 (the Azure MCP Server, sometimes cited as a precedent, actually uses `server.type: "binary"` per its blog announcement; see "Assumption Research / A1" below). Whether the host provides `uv` at MCP-spawn time is the load-bearing assumption (A1).
 
 The RDR-120 substrate split (conexus 4.34.0+, shipped 2026-05-22) is what makes one daemon serve all surfaces. Without it, each surface would have its own SQLite file and silently diverge.
 
@@ -93,19 +93,57 @@ The RDR-120 substrate split (conexus 4.34.0+, shipped 2026-05-22) is what makes 
 
 - **Verified** — RDR-120's daemon substrate is the load-bearing piece that makes this RDR's cross-surface story possible. Without one arbitrated writer, each MCP consumer would have its own SQLite file.
 - **Verified** — Cowork uses SDK transport, not network. The Cowork VM has a strict allowlist (`api.anthropic.com`, `pypi.org`, `registry.npmjs.org`); TCP loopback and UDS mount paths do not apply. State sharing happens through the SDK bridge.
-- **Documented** — MCPB v0.4 `"uv"` server type handles compiled dependencies in production (Azure MCP Server precedent, April 2026).
+- **Documented** — MCPB v0.4 `"uv"` server type is specified to handle compiled dependencies via host-provided uv. No confirmed production `"uv"`-type MCPB exists as of May 2026 (Azure MCP Server uses `"binary"`, not `"uv"`); see Assumption Research / A1.
 - **Documented** — Claude Desktop has three MCP integration models: local MCP (manual config), Desktop Extensions (`.mcpb`), Custom Connectors (remote MCP via OAuth). Only `.mcpb` matches Nexus's local-first architecture.
 - **Documented** — MCPB has no signing-trust signal in either Anthropic marketplace as of May 2026; distribution carries no signing guarantee.
 - **Assumed** — Claude Desktop's MCP-spawn context provides `uv` (host application manages runtime). Needs spike.
 - **Assumed** — `notifications/message` renders in Claude Desktop chat in a user-visible way. Needs spike.
 
+### Assumption Research
+
+Resolution of the three remaining unverified assumptions (A1, A2, A5) as of 2026-05-28. Sources cited inline; full investigation persisted to T3 (`research-rdr126-claude-desktop-deployment-2026-05-28`).
+
+#### A1 Research — uv runtime availability in Claude Desktop MCP-spawn context
+
+**Sources**: MCPB MANIFEST.md v0.4 (`github.com/anthropics/mcpb/blob/main/MANIFEST.md`); MCPB schema v0.4 (`schemas/mcpb-manifest-v0.4.schema.json`); Anthropic Desktop Extensions engineering post (`anthropic.com/engineering/desktop-extensions`); MCPB issue #84 (`github.com/modelcontextprotocol/mcpb/issues/84`, closed as not planned, July 2025); MCPB issue #89 (`github.com/modelcontextprotocol/mcpb/issues/89`, open).
+
+MCPB MANIFEST.md states "host application manages Python and dependencies automatically" for `server.type: "uv"` and "no user Python installation required." However, the Anthropic engineering post confirms only Node.js is bundled with Claude Desktop. MCPB issue #84 reports Claude Desktop marks uv-based extensions as incompatible when system Python is absent, even with uv installed. Issue #89 explicitly states the documentation gap: Python is not bundled with Claude Desktop.
+
+The nexus `mcpb/manifest.json` includes `mcp_config.command: "uv"`. If Claude Desktop uses this field (as the schema requires), uv must be on the PATH that Claude Desktop inherits at GUI process spawn time, which on macOS typically does not include `~/.local/bin` or homebrew paths. The "Azure MCP Server = uv precedent" claim previously made in Background and Key Discoveries is incorrect; Azure uses `server.type: "binary"`.
+
+The key ambiguity: MANIFEST.md calls `mcp_config` optional for the uv type (host manages uv internally), but the v0.4 JSON schema lists it as required. Whether Claude Desktop uses the `entry_point` field alone (host-managed uv path) or `mcp_config.command` (user-PATH-dependent uv path) is only resolvable by running the A1 spike.
+
+**Verdict**: Likely-false on current docs. Spike required.
+
+**Minimal spike spec**: Author a minimal MCPB with `server.type: "uv"`, `mcp_config.command: "uv"`, and one compiled dep (e.g. `pydantic>=2`). Test on macOS with uv at `/opt/homebrew/bin/uv` (typically NOT in GUI-inherited PATH), then with uv at `/usr/local/bin/uv`, then at `~/.local/bin/uv`. Observe: (a) does Claude Desktop accept the extension as compatible? (b) does the MCP server reach `serve()`? (c) what error appears if uv is not found? Also test removing `mcp_config` to probe the host-managed-uv path via `entry_point` alone. If uv is absent from GUI PATH, the fallback mitigation (document `brew install uv` as prerequisite) is the correct resolution.
+
+#### A2 Research — notifications/message rendering in Claude Desktop
+
+**Sources**: MCP spec JSON schema 2024-11-05 (`github.com/modelcontextprotocol/specification`); Claude Code issue #3174 (`github.com/anthropics/claude-code/issues/3174`, closed as not planned, July 2025).
+
+MCP spec defines `notifications/message` with severity levels matching RFC 5424 syslog: `debug`, `info`, `notice`, `warning`, `error`, `critical`, `alert`, `emergency`. Client obligation is **MAY** present log messages in the UI (not MUST). Claude Code issue #3174 confirms Claude Code receives these notifications at the MCP layer but does not surface them in the chat interface; Anthropic closed this as "not planned." No evidence Claude Desktop chat differs from Claude Code in this regard.
+
+The RDR's dual-channel design (tool-response content prepend as primary, notification as best-effort) is confirmed correct. A2's likely failure does not invalidate the design; tool-content prepend is the reliable channel and is already the dominant delivery mechanism.
+
+**Verdict**: Notification channel likely-false; design unaffected. Spike confirms behaviour but is not gate-blocking.
+
+#### A5 Research — Cowork SDK transport state-sharing
+
+**Sources**: `docs/container-integration.md` § Cowork (lines 182-220); T2 memory (project `nexus`) search for cowork/sentinel/sdk transport spike (no result); T3 knowledge corpus search (no result).
+
+The documented transport model is architecturally verified: Claude Desktop passes configured MCP servers into the Cowork VM via `--mcp-config` with `"type": "sdk"`; tool calls bridge through the Anthropic SDK channel to host `nx-mcp` and host T2/T3 daemons. Shell-side `nx memory put` inside the VM does NOT work (no network path). T1 is process-local (RDR-105); cross-VM coordination requires T2.
+
+No end-to-end sentinel run has been recorded. The "live test executing in user's session at draft time" note in A5 was aspirational, not a completed result.
+
+**Verdict**: Architecture verified by docs and code. Bidirectional behavioural claim still requires the live sentinel test (Cowork agent writes T2 sentinel, host reads it; host writes T2 sentinel, Cowork agent reads it).
+
 ### Critical Assumptions
 
-- [ ] **A1**: Claude Desktop's MCP-spawn context provides a `uv` runtime such that a `"type": "uv"` MCPB resolves `conexus` and its compiled C-extension dependencies on first launch — **Status**: Unverified — **Method**: Spike
-- [ ] **A2**: `notifications/message` (severity `info`) emitted by the MCP server renders in Claude Desktop chat in a way the user notices — **Status**: Unverified — **Method**: Spike
+- [ ] **A1**: Claude Desktop's MCP-spawn context provides a `uv` runtime such that a `"type": "uv"` MCPB resolves `conexus` and its compiled C-extension dependencies on first launch — **Status**: Unverified (docs suggest likely-false; see Assumption Research / A1) — **Method**: Spike
+- [ ] **A2**: `notifications/message` (severity `info`) emitted by the MCP server renders in Claude Desktop chat in a way the user notices — **Status**: Unverified (docs suggest likely-false; design's primary channel is tool-response content prepend, which is reliable; see Assumption Research / A2) — **Method**: Spike (not gate-blocking)
 - [ ] **A3**: LaunchAgent install from inside MCP startup succeeds without elevated privileges (writes to `~/Library/LaunchAgents/` which is user-owned) — **Status**: Verified — **Method**: Source Search (`src/nexus/commands/daemon.py` already does this)
 - [ ] **A4**: MCPB uninstall via Claude Desktop removes the bundle but does NOT cascade to LaunchAgent removal — **Status**: Verified — **Method**: Docs Only (no manifest hook in MCPB spec for uninstall-time actions)
-- [ ] **A5**: Cowork SDK transport end-to-end bidirectional state-sharing works as documented (sentinel test) — **Status**: Unverified — **Method**: Spike (live test executing in user's session at draft time)
+- [ ] **A5**: Cowork SDK transport end-to-end bidirectional state-sharing works as documented (sentinel test) — **Status**: Partially Verified (architecture verified by docs + code per Assumption Research / A5; live sentinel still required) — **Method**: Spike (sentinel: Cowork agent writes T2, host reads; host writes T2, Cowork agent reads)
 - [ ] **A6**: First-run marker (`~/.config/nexus/.mcp_first_run_complete`) is the right granularity to distinguish "banner shown" from "OS unit installed"; OS unit is the source of truth for install state — **Status**: Verified — **Method**: Source Search (no current code conflates these)
 
 **Method definitions**:
@@ -192,7 +230,7 @@ The spike packs a hello-world MCPB declaring `conexus` as a dep, installs it on 
 
 The unified scope (chat + Cowork + Claude Code first-run) is correct because all three surfaces share the same substrate (RDR-120 daemon) and the same MCP entry points. Designing the `.mcpb` first-run logic in isolation would force a second design pass when the same logic obviously applies to the Claude Code plugin SessionStart path. Designing the daemon-install lifecycle without a Cowork verification artifact would leave Cowork at "documented, untested" forever.
 
-Treating MCPB `server.type: "uv"` as the only viable Python path was driven by the compiled-C-extension constraint. `"type": "python"` cannot portably bundle `chromadb` / `tree-sitter` / `pydantic-core`; the Azure MCP Server precedent and the explicit MCPB v0.4 release notes both point at `"uv"` as the intended solution.
+Treating MCPB `server.type: "uv"` as the only viable Python path was driven by the compiled-C-extension constraint. `"type": "python"` cannot portably bundle `chromadb` / `tree-sitter` / `pydantic-core`; the MCPB v0.4 release notes point at `"uv"` as the intended solution. (An earlier draft cited the Azure MCP Server as a `"uv"` precedent; that was incorrect — Azure actually uses `server.type: "binary"`. See Assumption Research / A1.)
 
 Idempotency rules treat the OS unit as the source of truth, not the marker file, because the OS unit is what determines whether the daemon survives reboots. The marker only records UX state ("have we surfaced the banner once").
 
