@@ -1276,13 +1276,29 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if fix:
-        from nexus.config import is_local_mode, _default_local_path
-        from nexus.db.t3 import T3Database, apply_hnsw_ef
+        from nexus.config import is_local_mode
+        from nexus.db import make_t3
+        from nexus.db.t3 import apply_hnsw_ef
         if not is_local_mode():
             click.echo("SPANN defaults adequate — no HNSW tuning needed (cloud mode)")
             return
-        local_path = _default_local_path()
-        db = T3Database(local_mode=True, local_path=str(local_path))
+        # RDR-120 P4.B (nexus-vyqah): route through make_t3() so the
+        # HNSW-tuning probe uses the T3 daemon's HttpClient in local
+        # mode instead of opening its own PersistentClient. A direct
+        # T3Database(local_mode=True, ...) here contended with the
+        # daemon for the same on-disk chroma store (the T3 analogue of
+        # the T2 multi-process WAL contention RDR-120 closed). make_t3()
+        # returns a daemon-backed T3Database with _local_mode=True, so
+        # apply_hnsw_ef's local-mode gate + col.modify() calls work
+        # unchanged over the HttpClient.
+        try:
+            db = make_t3()
+        except Exception as exc:
+            raise click.ClickException(
+                f"T3 daemon unreachable for HNSW tuning: {exc}\n"
+                "Start it with `nx daemon t3 start`, then re-run "
+                "`nx doctor --fix`."
+            ) from exc
         count = apply_hnsw_ef(db)
         click.echo(f"Updated HNSW search_ef on {count} collection(s).")
         return

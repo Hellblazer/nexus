@@ -53,22 +53,39 @@ DEFAULT_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 CATALOG_PHASE_ALLOWLIST_PREFIX: str = "src/nexus/catalog/"
 
 
-#: RDR-128 (RF-5): class names whose *direct construction* outside
-#: daemon-internal code is a single-writer-invariant offender. Each
-#: ``T2Database(...)`` outside the daemon opens eight SQLite connections
-#: that contend on memory.db's one WAL writer lock. P0c counted these as
-#: a baseline population; P3 (nexus-sbxbe.3) flipped the lint to ENFORCE —
-#: an un-annotated construction outside the construction-allowlist is now
-#: a hard violation, while one carrying ``# epsilon-allow: <reason>`` is a
-#: documented exception (counted in ``t2database_constructions``). Mirrors
-#: the ``sqlite3.connect`` treatment exactly.
-BANNED_CONSTRUCTORS: tuple[str, ...] = ("T2Database",)
+#: RDR-128 (RF-5) + RDR-120 P4.B (nexus-vyqah): class names whose
+#: *direct construction* outside daemon-internal code is a
+#: single-writer / single-client-contention offender.
+#:
+#: - ``T2Database(...)`` outside the daemon opens eight SQLite
+#:   connections that contend on memory.db's one WAL writer lock.
+#: - ``T3Database(local_mode=True, ...)`` WITHOUT an injected
+#:   ``_client`` opens its own ``chromadb.PersistentClient`` on the
+#:   local on-disk store, the T3 analogue of the same multi-process
+#:   contention (the ``chromadb.PersistentClient`` call itself lives
+#:   in the allowlisted ``db/t3.py`` so the BANLIST scan cannot catch
+#:   it — the consumer-side ``T3Database(...)`` construction is the
+#:   detectable boundary). Consumers must call ``make_t3()`` /
+#:   ``make_t3_client()`` (RDR-120 P6 made ``make_t3()`` route through
+#:   the daemon in local mode) instead of constructing T3Database
+#:   directly.
+#:
+#: P3 (nexus-sbxbe.3) flipped the lint to ENFORCE — an un-annotated
+#: construction outside the construction-allowlist is a hard violation,
+#: while one carrying ``# epsilon-allow: <reason>`` is a documented
+#: exception (counted in ``t2database_constructions``). Mirrors the
+#: ``sqlite3.connect`` treatment exactly. The metric field name is
+#: historical (T2 came first); it now counts both T2Database and
+#: T3Database documented constructions.
+BANNED_CONSTRUCTORS: tuple[str, ...] = ("T2Database", "T3Database")
 
 
-#: Prefixes allowed to construct ``T2Database`` directly: the substrate
-#: that defines it and the daemon that runs it as the single writer.
-#: Distinct from the connect-allowlist (which includes ``catalog/`` P0-P4
-#: but not ``daemon/``).
+#: Prefixes allowed to construct ``T2Database`` / ``T3Database``
+#: directly: the substrate that defines them (``db/``) and the daemon
+#: that runs them (``daemon/`` — e.g. ``make_t3_client`` builds the
+#: daemon-backed ``T3Database`` with an injected ``HttpClient``).
+#: Distinct from the connect-allowlist (which includes ``catalog/``
+#: P0-P4 but not ``daemon/``).
 T2DATABASE_CONSTRUCTION_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     "src/nexus/db/",
     "src/nexus/daemon/",
