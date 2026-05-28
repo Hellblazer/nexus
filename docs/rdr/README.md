@@ -152,6 +152,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-134](rdr-134-taxonomy-aware-recall-in-nx-answer.md) | RDR-070 Phase 5: Taxonomy-Aware Recall in nx_answer — Teach the Composed-Retrieval Path to Read the Taxonomy It Already Has | Architecture | Draft | 2026-05-27 |
 | [RDR-135](rdr-135-windowed-aspect-extraction.md) | Windowed Aspect Extraction with Cross-Window Merge: Stop Whole-Paper Single-Shot Extraction from Degrading on Long Inputs | Architecture | Draft | 2026-05-27 |
 | [RDR-136](rdr-136-messagedisplay-projection-substrate.md) | Display Projection via the MessageDisplay Hook: One-Way Output Mirroring and Routing-Marker Hiding | Architecture | Draft | 2026-05-27 |
+| [RDR-137](rdr-137-eliminate-repos-json.md) | Eliminate repos.json: Catalog as the Canonical Repo→Collection Source of Truth | Architecture | Accepted | 2026-05-28 |
 
 > **Scrapped 2026-05-19 (RDR-110-119 arc).** Bundled the storage-substrate split with new abstractions (tuplespace, ORB, host-trust, surfaces-as-tuples, UI fabric); scope discipline failed across nine RDRs and 67 stranded beads. Files preserved as tombstones per the "never delete RDR files" rule. Postmortem: [docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md](../postmortem/2026-05-16-rdr110-113-remediation-chain.md). Active substrate work continues as [RDR-120](rdr-120-storage-substrate-split.md) with an explicit moratorium on co-shipped consumers. Numbers RDR-114 through RDR-117 are unused on `main` (drafted on feature branches that never merged).
 
