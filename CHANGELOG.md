@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.0] - 2026-05-28
+
+### Changed
+
+- **`repos.json` eliminated; the catalog is now the canonical repo→collection source of truth (RDR-137).** `~/.config/nexus/repos.json` and the `nexus.registry.RepoRegistry` class are removed from production. All eleven consumers (indexer, doctor, health git-hook check, context, MCP catalog enumeration, collection post-process, `resolve_path`, etc.) now read repo registration from the catalog via a single catalog-backed reader (`nexus.repos.list_repos_dual`). Repo head-hash tracking moved to a new `owners.head_hash` catalog column. Pure path/identity helpers relocated from `nexus.registry` to `nexus.repo_identity`. This closes the two-sources-of-truth gap where `repos.json` and the catalog could disagree about which collection a repo maps to.
+
+### Added
+
+- **One-shot `repos.json` → catalog migration on `nx upgrade` (RDR-137 Phase 5.2).** An existing `repos.json` is folded into the catalog and then removed. The migration refuses to delete a malformed `repos.json` (it logs `repos_json_malformed` and leaves the file in place rather than lose unparseable registration data).
+- **`phase-review-gate` recognizes phase-block sub-bullets in an RDR's §Approach (nexus-4u6mt).** The Pass-1 enumerator now parses `**Phase N: title**` headings with bulleted item blocks, so phase-scoped review gates account for items expressed in that form instead of only flat numbered lists.
+
+### Fixed
+
+- **T2 daemon shutdown hardening.** `T2Daemon.stop()` now bounds the blocking `T2Database.close()` with a 10s cap (offloaded to a thread) so a stalled WAL checkpoint can no longer wedge `stop()` and block an upgrade restart on the stale daemon version (nexus-azsqe). The `t2_daemon_stop_requested` breadcrumb is flushed to disk before `stop()` runs, so a graceful shutdown's diagnostic survives even under load (nexus-61539). The T2 daemon LaunchAgent uses always-on `KeepAlive` (nexus-kmvf2).
+- **`nx daemon t2 ensure-running` no longer warns spuriously on a healthy cold start (nexus-u3mfr).** A cold-start daemon runs its one-time startup migration (which can take several seconds and holds the write lock) before it binds, so reachability legitimately lags the spawn. The default `--timeout` is raised to 15s and the wait is migration-aware: it keeps waiting while the spawned process is alive and fails fast (with the child's exit code) only if the process actually dies.
+- **`nx enrich aspects` survives a single per-doc write failure (nexus-24rf9).** A write that hits `database is locked` under multi-writer contention is now logged, counted, and skipped (the batch continues and an idempotent re-run picks up the skipped doc) instead of an uncaught exception aborting the run and discarding every already-extracted doc's work. The per-paper aspect persist also routes through the daemon-serialized `t2_index_write` path (nexus-hb99x).
+- **`nx doctor --fix` HNSW tuning routes through the T3 daemon in local mode (RDR-120 P4.B, nexus-vyqah)** instead of opening its own ChromaDB `PersistentClient` that contended with the daemon. The storage-boundary lint now bans consumer-side `T3Database` construction to keep this closed.
+- **`nx_answer` scope normalization and empty-retrieval guard (nexus-n1908).** A comma-separated `scope` is normalized (with a warning) rather than silently mis-routing, and a retrieval-bearing plan that returns zero evidence is surfaced instead of presenting an empty answer as if grounded.
+- **Catalog owner-registration race and head-hash durability (RDR-137 follow-ups).** Closed a TOCTOU race in `ensure_owner_for_repo` (threading lock + flock + in-lock re-check), preserved `owners.head_hash` across projection rebuild / re-register, and preserved `next_seq` in the `set_owner_head_hash` JSONL snapshot so tumbler slots are not reused after delete/compact.
+
+### Internal
+
+- Test-suite reduction: safe inner-axis parametrize-collapse in `test_plugin_structure.py` removed 110 redundant collected nodes with zero coverage loss (nexus-wuerf, under nexus-w1ip).
+
 ## [5.3.1] - 2026-05-28
 
 Two SessionStart injection bugs and a new hygiene signal. All hook-only,

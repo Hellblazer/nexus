@@ -387,6 +387,38 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     "test_checkpoint.py",
     "test_collection_gc.py",
     "test_collection_name_migration.py",
+    # RDR-137 P1.5a: voyage tokens appear in synthetic conformant
+    # collection names used as backfill fixtures (e.g.
+    # ``code__nexus-1-1__voyage-code-3__v1``). Tests exercise pure
+    # SQLite + string parsing; no Voyage call is ever made.
+    "test_collections_owner_backfill.py",
+    # RDR-137 P2a (nexus-tts0d.4): same voyage-token-in-fixture pattern
+    # — the catalog-backed reader tests register synthetic conformant
+    # collection names and read them back; no Voyage call.
+    "test_repos_reader.py",
+    # RDR-137 P4.3 (nexus-tts0d.17): same pattern — knowledge__ /
+    # docs__ collection names used as fixtures for the catalog
+    # writer+reader cycle; no Voyage call.
+    "test_index_corpus_knowledge_e2e.py",
+    # RDR-137 followup CRITICAL-3/4/5 (nexus-43qgm.3-5): voyage tokens
+    # appear in synthetic conformant collection names used as
+    # adapter-test fixtures; no Voyage call is ever made.
+    "test_rdr137_followup_critical_345.py",
+    # RDR-137 followup SIG-6/8/11 (nexus-43qgm.6,8,11): same pattern
+    # — voyage tokens in synthetic collection-name fixtures for the
+    # OQ-5 deterministic-ordering and catalog-missing observability
+    # tests; no Voyage call.
+    "test_rdr137_followup_reader_sigs.py",
+    # RDR-137 followup SIG-10/13/14/17 (nexus-43qgm.10,13,14,17):
+    # voyage tokens in adapter / context / collection synthetic
+    # fixtures; no Voyage call.
+    "test_rdr137_followup_batch_sigs.py",
+    # RDR-137 followup IMP-18..27 (nexus-43qgm.18-27): voyage tokens
+    # in list_sibling_collections + adapter fixtures; no Voyage call.
+    "test_rdr137_followup_p2_batch.py",
+    # RDR-137 P3.5 (nexus-tts0d.10): same pattern — phantom
+    # docs__1-2188 in the regression fixture for nexus-9iw41.
+    "test_context_catalog_cutover.py",
     "test_commands_dt.py",
     "test_corpus.py",
     "test_doc_indexer_hash_sync.py",

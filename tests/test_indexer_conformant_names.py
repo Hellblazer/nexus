@@ -60,7 +60,7 @@ def repo_with_owner(catalog, tmp_path, monkeypatch):
         repo_root=str(repo),
     )
     monkeypatch.setattr(
-        "nexus.registry._repo_identity",
+        "nexus.repo_identity._repo_identity",
         lambda r: ("myproject", "cafef00d"),
     )
     return repo
@@ -138,7 +138,7 @@ def test_repo_registry_add_catalog_without_owner_synthesises_conformant(
     repo = tmp_path / "no_owner_repo"
     repo.mkdir()
     monkeypatch.setattr(
-        "nexus.registry._repo_identity",
+        "nexus.repo_identity._repo_identity",
         lambda r: ("no_owner_repo", "deadbeef"),
     )
     reg = RepoRegistry(tmp_path / "repos.json")
@@ -179,7 +179,7 @@ def test_repo_collection_or_legacy_synthesises_conformant_when_catalog_absent(
     repo.mkdir()
     monkeypatch.setattr("nexus.config.catalog_path", lambda: tmp_path / "no_such_catalog")
     monkeypatch.setattr(
-        "nexus.registry._repo_identity",
+        "nexus.repo_identity._repo_identity",
         lambda r: ("isolated", "abcdef12"),
     )
 

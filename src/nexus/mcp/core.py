@@ -3099,6 +3099,66 @@ def _nx_answer_match_is_hit(
     return confidence >= threshold
 
 
+def _nx_answer_normalize_scope(scope: str) -> tuple[str, str | None]:
+    """Normalize the ``nx_answer`` *scope* argument; return
+    ``(normalized_scope, warning_or_None)``.
+
+    RDR-137 followup (nexus-n1908): ``scope`` is a SINGLE corpus prefix
+    (``"knowledge"``) or catalog subtree (``"1.2"``). A comma-list like
+    ``"rdr,code,docs"`` is malformed — it filters retrieval to a
+    literal collection named ``"rdr,code,docs"`` (which matches
+    nothing), and the empty retrieval then lets the operator
+    subprocess synthesize a confident off-topic answer from its
+    ambient SessionStart hook context. Treating an unparseable
+    comma-scope as "no scope" (broad search) turns a silent wrong
+    answer into a correct broad answer plus an operator-visible
+    warning. Whitespace-only scope normalizes to ``""`` as well.
+    """
+    s = (scope or "").strip()
+    if "," in s:
+        return "", (
+            f"scope {scope!r} is a comma-list; scope expects a single "
+            f"corpus prefix or catalog subtree. Treating as unscoped "
+            f"(broad search). Pass one scope token to filter."
+        )
+    return s, None
+
+
+def _nx_answer_is_empty_retrieval(steps: "list") -> bool:
+    """Return True when a plan's retrieval steps collectively returned
+    zero evidence.
+
+    RDR-137 followup (nexus-n1908): when a plan HAS retrieval steps
+    (steps carrying an ``ids`` or ``tumblers`` list) but every one of
+    them came back empty, the final synthesis step (a ``generate`` /
+    ``summarize`` ``claude -p`` subprocess) is at risk of latching onto
+    its ambient SessionStart hook context and confidently answering an
+    unrelated "describe my environment" instead of signalling the
+    miss. Detecting zero-evidence lets ``nx_answer`` return an explicit
+    no-match message instead of the misleading synthesis.
+
+    Conservative by construction (never over-fires on the canonical
+    query path): only considers a plan "retrieval-bearing" when at
+    least one step exposes an ``ids`` or ``tumblers`` key. A pure
+    ``generate`` plan (no retrieval) is exempt — it legitimately
+    synthesizes without evidence.
+    """
+    had_retrieval = False
+    total_evidence = 0
+    for step_out in steps:
+        if not isinstance(step_out, dict):
+            continue
+        ids = step_out.get("ids")
+        tumblers = step_out.get("tumblers")
+        if isinstance(ids, list):
+            had_retrieval = True
+            total_evidence += len(ids)
+        if isinstance(tumblers, list):
+            had_retrieval = True
+            total_evidence += len(tumblers)
+    return had_retrieval and total_evidence == 0
+
+
 #: Common English stop-words stripped when synthesizing a grown plan's
 #: ``name`` from the question. Kept narrow on purpose; aggressive
 #: filtering drops the content words R10 needs for match-text signal.
@@ -3557,6 +3617,15 @@ async def nx_answer(
     _log = _slog.get_logger()
     start = time.monotonic()
 
+    # RDR-137 followup (nexus-n1908): normalize a malformed comma-list
+    # scope to broad search (with a warning) so it doesn't filter
+    # retrieval to nothing and trigger the ambient-context synthesis
+    # failure. Done before any scope use (plan_match scope_preference,
+    # plan-miss planner, grown-plan scope_tags).
+    scope, _scope_warning = _nx_answer_normalize_scope(scope)
+    if _scope_warning:
+        _log.warning("nx_answer_scope_normalized", detail=_scope_warning)
+
     # RDR-086 Phase 3.3: envelope builder. String mode returns the text
     # directly; structured mode wraps it into the documented envelope.
     def _result(text: str, *, plan_id: int = 0, step_count: int = 0,
@@ -3875,6 +3944,43 @@ async def nx_answer(
                     "collection": coll,
                     "distance": dists[i] if i < len(dists) else None,
                 })
+
+    # RDR-137 followup (nexus-n1908): empty-retrieval guard. If the plan
+    # had retrieval steps but they collectively returned zero evidence,
+    # the synthesized final_text is at risk of being a confident
+    # off-topic answer built from the operator subprocess's ambient
+    # SessionStart hook context. Return an explicit no-match message
+    # (naming the scope so a malformed/over-narrow scope is visible)
+    # instead of the misleading synthesis. Fires BEFORE plan-grow so we
+    # never persist an ad-hoc plan that produced no evidence.
+    if _nx_answer_is_empty_retrieval(result.steps):
+        _log.info(
+            "nx_answer_empty_retrieval_guard",
+            plan_id=best.plan_id,
+            scope=scope or "(unscoped)",
+        )
+        no_match = (
+            f"No matching evidence found for {question!r}"
+            + (f" in scope {scope!r}" if scope else "")
+            + ". The plan's retrieval steps returned zero results — "
+            "rephrase the question, correct/widen the scope, or use "
+            "search/query directly."
+        )
+        try:
+            with _t2_ctx() as db:
+                _nx_answer_record_run(
+                    db.telemetry.conn, question=question, plan_id=best.plan_id,
+                    matched_confidence=best.confidence,
+                    step_count=len(result.steps),
+                    final_text=no_match[:2000], cost_usd=0.0,
+                    duration_ms=elapsed_ms, trace=trace,
+                )
+        except Exception:
+            pass
+        return _result(
+            no_match, plan_id=best.plan_id,
+            step_count=len(result.steps), chunks=[],
+        )
 
     _log.info(
         "nx_answer_complete",

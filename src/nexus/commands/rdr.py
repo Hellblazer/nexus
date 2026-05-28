@@ -1419,6 +1419,90 @@ def _prg_parse_approach_items(
     return items
 
 
+def _prg_parse_phase_block_items(
+    approach_text: str, phase: str | None = None,
+) -> list[tuple[int, str, str]]:
+    """Parse phase-block sub-bullet §Approach structure (nexus-4u6mt).
+
+    Some RDRs (e.g. RDR-120) structure §Approach as phase blocks rather
+    than top-level numbered items::
+
+        **Phase 0: Lint + cutover flag scaffolding**
+
+        - Implement nx doctor --check-storage-boundary
+        - Add NX_STORAGE_MODE env-var
+
+        **Phase 1: T3 daemon**
+
+        - ...
+
+    When *phase* is given (e.g. ``"1"`` or ``"Phase 1"``), enumerate the
+    bullets of the MATCHING phase block as Items 1..K. When *phase* is
+    ``None``, enumerate bullets across ALL phase blocks sequentially.
+
+    Returns ``[]`` when no ``**Phase N: ...**`` header is present (so the
+    caller can distinguish "not phase-block structured" from "phase
+    block has no bullets"). Label is the bullet's leading bold span if
+    present, else a truncated prefix of the bullet text.
+    """
+    # Normalize the requested phase to its integer, if numeric.
+    want_phase: str | None = None
+    if phase:
+        pm = re.search(r"(\d+)", phase)
+        want_phase = pm.group(1) if pm else phase.strip()
+
+    lines = approach_text.splitlines()
+    # (phase_num_str, phase_title, [bullet_text, ...])
+    blocks: list[tuple[str, str, list[str]]] = []
+    cur: tuple[str, str, list[str]] | None = None
+    header_re = re.compile(r"^\s*\*\*Phase\s+([0-9.]+)\s*:?\s*([^*]*)\*\*\s*$")
+    bullet_re = re.compile(r"^\s*[-*]\s+(.*)")
+
+    for line in lines:
+        hm = header_re.match(line)
+        if hm:
+            if cur is not None:
+                blocks.append(cur)
+            cur = (hm.group(1).strip(), hm.group(2).strip(), [])
+            continue
+        if cur is not None:
+            bm = bullet_re.match(line)
+            if bm and bm.group(1).strip():
+                cur[2].append(bm.group(1).strip())
+    if cur is not None:
+        blocks.append(cur)
+
+    if not blocks:
+        return []
+
+    # Select blocks: matching phase, or all when unspecified.
+    selected: list[tuple[str, str, list[str]]]
+    if want_phase is not None:
+        selected = [b for b in blocks if b[0] == want_phase]
+    else:
+        selected = blocks
+
+    items: list[tuple[int, str, str]] = []
+    n = 0
+    for phase_num, phase_title, bullets in selected:
+        for bullet in bullets:
+            n += 1
+            # Label: leading **bold** span if present, else a short prefix.
+            lbl_m = re.match(r"\*\*([^*]+)\*\*[:\s]*(.*)", bullet)
+            if lbl_m:
+                label = lbl_m.group(1).strip()
+                summary = lbl_m.group(2).strip()
+            else:
+                # First clause / first 60 chars as the label.
+                label = bullet.split(".")[0][:60].strip()
+                summary = bullet
+            # Prefix the label with the phase so the cross-walk table
+            # is unambiguous when enumerating across multiple blocks.
+            phase_prefix = f"Phase {phase_num}"
+            items.append((n, f"{phase_prefix}: {label}", summary))
+    return items
+
+
 def _prg_parse_evidence(evidence_str: str) -> dict[int, str]:
     """Parse 'Item1=val1,Item2=val2,...' -> {1: 'val1', 2: 'val2'}."""
     out: dict[int, str] = {}
@@ -1511,8 +1595,19 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
 
     items = _prg_parse_approach_items(approach_text)
     if not items:
-        print("> **ERROR**: §Approach section found but no numbered items parsed.")
-        print("> Expected format: `N. **Label**: description`")
+        # nexus-4u6mt: fall back to phase-block sub-bullet enumeration
+        # (RDR-120-style §Approach). Filters to the requested --phase
+        # block; enumerates that block's bullets as Items 1..K.
+        items = _prg_parse_phase_block_items(approach_text, phase=phase_arg)
+    if not items:
+        print("> **ERROR**: §Approach section found but no items parsed.")
+        print("> Expected either `N. **Label**: description` numbered items")
+        print("> or `**Phase N: title**` blocks followed by `- bullet` lists.")
+        if phase_arg:
+            print(
+                f"> (Searched for phase-block matching `--phase {phase_arg}`; "
+                "check the phase number exists in §Approach.)"
+            )
         return
 
     # === PASS 1: enumerate approach items ===

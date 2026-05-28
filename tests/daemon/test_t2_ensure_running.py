@@ -127,6 +127,9 @@ class TestEnsureRunning:
             def __init__(self, argv, **_kw):  # noqa: ANN001
                 spawn_calls.append(argv)
 
+            def poll(self):  # real Popen exposes poll(); None = alive/migrating
+                return None
+
         monkeypatch.setattr(subprocess, "Popen", _FakePopen)
         result = CliRunner().invoke(
             main,
@@ -189,6 +192,9 @@ class TestEnsureRunning:
             def __init__(self, argv, **_kw):  # noqa: ANN001
                 spawn_calls.append(argv)
 
+            def poll(self):  # real Popen exposes poll(); None = alive/migrating
+                return None
+
         monkeypatch.setattr(subprocess, "Popen", _FakePopen)
         runner = CliRunner()
         # timeout=0.2 — we expect the spawn to fire but the new daemon
@@ -219,6 +225,9 @@ class TestEnsureRunning:
             def __init__(self, argv, **_kw):  # noqa: ANN001
                 spawn_calls.append(argv)
 
+            def poll(self):  # real Popen exposes poll(); None = alive/migrating
+                return None
+
         monkeypatch.setattr(subprocess, "Popen", _FakePopen)
         runner = CliRunner()
         result = runner.invoke(
@@ -243,7 +252,7 @@ class TestEnsureRunning:
         monkeypatch.setattr(
             subprocess, "Popen",
             lambda argv, **kw: spawn_calls.append(argv) or type(
-                "P", (), {"__init__": lambda self: None}
+                "P", (), {"__init__": lambda self: None, "poll": lambda self: None}
             )(),
         )
         runner = CliRunner()
@@ -262,7 +271,7 @@ class TestEnsureRunning:
         systemd log so they can self-diagnose without spelunking."""
         monkeypatch.setattr(
             subprocess, "Popen",
-            lambda argv, **kw: type("P", (), {"__init__": lambda self: None})(),
+            lambda argv, **kw: type("P", (), {"__init__": lambda self: None, "poll": lambda self: None})(),
         )
         runner = CliRunner()
         result = runner.invoke(
@@ -275,6 +284,81 @@ class TestEnsureRunning:
         # know which platform the operator is on, so it names both).
         assert "nexus-t2.err" in result.output
         assert "journalctl --user -u nexus-t2.service" in result.output
+
+    def test_spawn_reachable_after_migration_delay_no_warning(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-u3mfr: a cold-start daemon binds only AFTER its multi-second
+        startup migration. The wait must keep polling while the spawned
+        child is alive and succeed (no spurious warning / exit-1) once the
+        daemon becomes reachable, even though reachability lagged the spawn.
+        """
+        import time as _t
+
+        # Spawned child stays alive (poll() == None) throughout.
+        class _AlivePopen:
+            def __init__(self, argv, **_kw):  # noqa: ANN001
+                pass
+
+            def poll(self):
+                return None
+
+        monkeypatch.setattr(subprocess, "Popen", _AlivePopen)
+
+        # Simulate the daemon binding mid-wait: on the 2nd poll interval the
+        # discovery file appears (migration finished, socket bound). Patch
+        # sleep so the test doesn't actually wait.
+        state = {"n": 0}
+        real_sleep = _t.sleep
+
+        def _fake_sleep(_s):  # noqa: ANN001
+            state["n"] += 1
+            if state["n"] == 2:
+                _write_discovery(tmp_path, os.getpid())
+
+        monkeypatch.setattr(_t, "sleep", _fake_sleep)
+
+        result = CliRunner().invoke(
+            main,
+            ["daemon", "t2", "ensure-running",
+             "--config-dir", str(tmp_path), "--timeout", "30"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "reachable" in result.output
+        assert "did not become reachable" not in result.output
+        assert "exited" not in result.output
+
+    def test_spawn_child_dies_fails_fast(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-u3mfr: if the spawned daemon process EXITS without becoming
+        reachable (e.g. a failed migration), ensure-running reports the exit
+        code and fails fast — it does NOT wait out the full --timeout budget
+        on a corpse, and the message names the exit, not 'still alive'."""
+        import time as _t
+
+        class _DeadPopen:
+            returncode = 1
+
+            def __init__(self, argv, **_kw):  # noqa: ANN001
+                pass
+
+            def poll(self):
+                return 1  # exited
+
+        monkeypatch.setattr(subprocess, "Popen", _DeadPopen)
+        # No-op sleep so a hypothetical budget-wait would be fast too; the
+        # point is fail-fast returns on the first poll, before the budget.
+        monkeypatch.setattr(_t, "sleep", lambda _s: None)
+
+        result = CliRunner().invoke(
+            main,
+            ["daemon", "t2", "ensure-running",
+             "--config-dir", str(tmp_path), "--timeout", "30"],
+        )
+        assert result.exit_code == 1
+        assert "exited (code 1)" in result.output
+        assert "did not become reachable" not in result.output
 
 
 # ---------------------------------------------------------------------------

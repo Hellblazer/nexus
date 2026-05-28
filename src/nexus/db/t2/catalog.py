@@ -94,6 +94,15 @@ CREATE TABLE IF NOT EXISTS owners (
     repo_hash TEXT,
     description TEXT,
     repo_root TEXT DEFAULT '',
+    -- RDR-137 Phase 1.5b (nexus-tts0d.2): per-repo git HEAD identity,
+    -- previously held by ~/.config/nexus/repos.json. The indexer's
+    -- staleness skip compares the running repo's git HEAD against this
+    -- column; A1 verdict rejected documents.source_mtime as equivalent
+    -- because a repo HEAD can advance without any tracked file's mtime
+    -- changing (remote-only merge, ff-only pull of tag-only commits).
+    -- NULL on pre-migration rows AND on owners without a tracked HEAD
+    -- (e.g. ``curator`` owners minted by ``nx index pdf --corpus name``).
+    head_hash TEXT,
     -- nexus-7vuw: name UNIQUE was a too-strict invariant. A repo and a
     -- curator are different namespaces, so a repo named "nexus" should
     -- coexist with a curator named "nexus" (e.g. ``nx index pdf
@@ -105,6 +114,14 @@ CREATE TABLE IF NOT EXISTS owners (
     -- belongs (within an owner_type).
     UNIQUE(name, owner_type)
 );
+
+-- RDR-137 followup CRITICAL-5 (nexus-43qgm.5): partial unique index
+-- on repo_hash so the TOCTOU race in ensure_owner_for_repo (lookup-
+-- then-register) cannot create duplicate owner rows for the same
+-- repository. Excludes empty / NULL repo_hash so curator owners
+-- (which never carry a repo_hash) coexist without conflict.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_repo_hash
+    ON owners(repo_hash) WHERE repo_hash IS NOT NULL AND repo_hash != '';
 
 CREATE TABLE IF NOT EXISTS documents (
     tumbler TEXT PRIMARY KEY,
@@ -358,6 +375,15 @@ class CatalogStore:
             with self._conn:
                 self._conn.execute("ALTER TABLE owners ADD COLUMN repo_root TEXT DEFAULT ''")
 
+        # RDR-137 Phase 1.5b (nexus-tts0d.2): add owners.head_hash for per-
+        # repo git HEAD identity. NULL on pre-migration rows; populated by
+        # writers wired in Phase 3 (indexer cutover bead nexus-tts0d.13).
+        try:
+            self._conn.execute("SELECT head_hash FROM owners LIMIT 0")
+        except sqlite3.OperationalError:
+            with self._conn:
+                self._conn.execute("ALTER TABLE owners ADD COLUMN head_hash TEXT")
+
         # nexus-7vuw: drop the legacy single-column UNIQUE(name) index
         # on owners (replaced with composite UNIQUE(name, owner_type) in
         # the schema above). Pre-fix DBs carry a sqlite_autoindex_owners_*
@@ -387,6 +413,10 @@ class CatalogStore:
                     break
             if needs_rebuild:
                 with self._conn:
+                    # RDR-137 followup CRITICAL-2 (nexus-43qgm.2): include
+                    # head_hash in the new table + INSERT so the rebuild
+                    # path preserves the column. The preceding head_hash
+                    # ALTER (line ~374) guarantees the source side has it.
                     self._conn.execute(
                         "CREATE TABLE owners_nexus7vuw_new ("
                         "    tumbler_prefix TEXT PRIMARY KEY, "
@@ -395,6 +425,7 @@ class CatalogStore:
                         "    repo_hash TEXT, "
                         "    description TEXT, "
                         "    repo_root TEXT DEFAULT '', "
+                        "    head_hash TEXT, "
                         "    UNIQUE(name, owner_type)"
                         ")"
                     )
@@ -405,14 +436,25 @@ class CatalogStore:
                     self._conn.execute(
                         "INSERT OR IGNORE INTO owners_nexus7vuw_new "
                         "(tumbler_prefix, name, owner_type, repo_hash, "
-                        " description, repo_root) "
+                        " description, repo_root, head_hash) "
                         "SELECT tumbler_prefix, name, owner_type, repo_hash, "
-                        "       description, repo_root FROM owners"
+                        "       description, repo_root, head_hash FROM owners"
                     )
                     self._conn.execute("DROP TABLE owners")
                     self._conn.execute(
                         "ALTER TABLE owners_nexus7vuw_new RENAME TO owners"
                     )
+
+        # RDR-137 followup CRITICAL-5 (nexus-43qgm.5): partial unique
+        # index on owners.repo_hash. Idempotent via IF NOT EXISTS;
+        # closes the TOCTOU race in ensure_owner_for_repo. Adding it
+        # here (rather than relying on _SCHEMA_SQL alone) covers
+        # legacy DBs created before the schema declaration shipped.
+        with self._conn:
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_repo_hash "
+                "ON owners(repo_hash) WHERE repo_hash IS NOT NULL AND repo_hash != ''"
+            )
 
         # nexus-8luh: add source_mtime column to existing databases so
         # RDR-087 Phase 3.4's stale_source_ratio has something to read
@@ -651,6 +693,20 @@ class CatalogStore:
                     )
                 self._backfilled_collections = candidates
 
+        # RDR-137 Phase 1.5a (nexus-tts0d.1): follow-on pass that
+        # populates ``collections.owner_id`` for rows synthesised above
+        # (and any pre-existing row with empty owner_id). The
+        # conformant-name path is the only one enabled here — it
+        # parses RDR-103 four-segment names and extracts the 2nd
+        # segment, which is always correct when the name is well-formed.
+        # Documents-table fallback for legacy 2-segment names is
+        # operator-driven via ``nx catalog backfill-owner-id``.
+        from nexus.catalog.collections_owner_backfill import (  # noqa: PLC0415
+            backfill_owner_id,
+        )
+        with self._conn:
+            backfill_owner_id(self._conn, include_documents_fallback=False)
+
     # ── identity ──────────────────────────────────────────────────────
 
     @property
@@ -769,10 +825,19 @@ class CatalogStore:
             self._conn.execute("DELETE FROM collections")
 
             for prefix, o in owners.items():
+                # RDR-137 followup CRITICAL-1 (nexus-43qgm.1): include
+                # head_hash so rebuild from JSONL preserves the value.
+                # ``getattr`` with default keeps replay-compat for
+                # legacy OwnerRecord rows that pre-date the field.
                 self._conn.execute(
-                    "INSERT OR REPLACE INTO owners (tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (prefix, o.name, o.owner_type, o.repo_hash, o.description, o.repo_root),
+                    "INSERT OR REPLACE INTO owners "
+                    "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root, head_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        prefix, o.name, o.owner_type, o.repo_hash,
+                        o.description, o.repo_root,
+                        getattr(o, "head_hash", "") or "",
+                    ),
                 )
 
             for tumbler, d in documents.items():

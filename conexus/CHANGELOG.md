@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.0] - 2026-05-28
+
+Plugin version aligned with conexus 5.4.0. One plugin-side change; the
+release is otherwise nx CLI / library work (RDR-137 `repos.json`
+elimination, T2/T3 daemon reliability, `nx enrich aspects` hardening).
+
+### Changed
+
+- SessionStart hook `nx daemon t2 ensure-running` raised from
+  `--timeout=5` to `--timeout=10`, and the hook step's wrapper timeout
+  from 10s to 15s (nexus-u3mfr). A cold-start T2 daemon runs its one-time
+  startup migration before it binds, which can cross 5s on a healthy boot
+  and printed a spurious "did not become reachable" warning. The larger
+  budget lets a healthy cold start complete; the underlying wait now also
+  fails fast if the spawned process actually dies.
+
 ## [5.3.1] - 2026-05-28
 
 Plugin SessionStart hook updates only (no agent / skill / command

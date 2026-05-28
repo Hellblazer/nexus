@@ -252,31 +252,32 @@ def test_frecency_only_bypasses_lock(tmp_path: Path, registry, lock_home: Path) 
 
 
 def test_head_hash_updated_after_full_index(tmp_path: Path, registry, lock_home: Path) -> None:
-    """head_hash is updated in registry after a successful full-index run."""
+    """head_hash is persisted after a successful full-index run.
+
+    RDR-137 Phase 3.8 (nexus-tts0d.13): the write now goes to
+    ``owners.head_hash`` via the ``_set_owner_head_hash`` helper
+    instead of to the legacy registry's ``head_hash`` field.
+    """
     with patch("nexus.indexer._run_index", return_value={}):
         with patch("nexus.indexer._current_head", return_value="deadbeef") as mock_head:
-            index_repository(tmp_path, registry)
+            with patch("nexus.indexer._set_owner_head_hash") as mock_set:
+                index_repository(tmp_path, registry)
 
     mock_head.assert_called_once_with(tmp_path)
-    assert call(tmp_path, head_hash="deadbeef") in registry.update.call_args_list
-
-
-def _has_head_hash_call(registry: MagicMock) -> bool:
-    """Return True if any registry.update call includes a head_hash keyword arg."""
-    return any(
-        "head_hash" in (c.kwargs if hasattr(c, "kwargs") else {})
-        for c in registry.update.call_args_list
-    )
+    mock_set.assert_called_once_with(tmp_path, "deadbeef")
 
 
 def test_head_hash_not_updated_on_frecency_only(tmp_path: Path, registry, lock_home: Path) -> None:
-    """head_hash is NOT updated when frecency_only=True."""
+    """head_hash is NOT updated when frecency_only=True (RDR-137 P3.8:
+    write now flows through ``_set_owner_head_hash`` on the catalog;
+    frecency-only runs must not touch it)."""
     with patch("nexus.indexer._run_index_frecency_only"):
         with patch("nexus.indexer._current_head") as mock_head:
-            index_repository(tmp_path, registry, frecency_only=True)
+            with patch("nexus.indexer._set_owner_head_hash") as mock_set:
+                index_repository(tmp_path, registry, frecency_only=True)
 
     mock_head.assert_not_called()
-    assert not _has_head_hash_call(registry)
+    mock_set.assert_not_called()
 
 
 def test_head_hash_not_updated_on_credentials_error(tmp_path: Path, registry, lock_home: Path) -> None:
@@ -285,20 +286,22 @@ def test_head_hash_not_updated_on_credentials_error(tmp_path: Path, registry, lo
 
     with patch("nexus.indexer._run_index", side_effect=CredentialsMissingError("no creds")):
         with patch("nexus.indexer._current_head", return_value="abc"):
-            with pytest.raises(CredentialsMissingError):
-                index_repository(tmp_path, registry)
+            with patch("nexus.indexer._set_owner_head_hash") as mock_set:
+                with pytest.raises(CredentialsMissingError):
+                    index_repository(tmp_path, registry)
 
-    assert not _has_head_hash_call(registry)
+    mock_set.assert_not_called()
 
 
 def test_head_hash_not_updated_on_other_error(tmp_path: Path, registry, lock_home: Path) -> None:
     """head_hash is NOT updated when indexing raises any other exception."""
     with patch("nexus.indexer._run_index", side_effect=RuntimeError("boom")):
         with patch("nexus.indexer._current_head", return_value="abc"):
-            with pytest.raises(RuntimeError):
-                index_repository(tmp_path, registry)
+            with patch("nexus.indexer._set_owner_head_hash") as mock_set:
+                with pytest.raises(RuntimeError):
+                    index_repository(tmp_path, registry)
 
-    assert not _has_head_hash_call(registry)
+    mock_set.assert_not_called()
 
 
 # ── lock released after indexing ─────────────────────────────────────────────

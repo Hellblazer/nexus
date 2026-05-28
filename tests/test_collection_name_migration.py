@@ -88,7 +88,7 @@ def repo_with_owner(catalog: Catalog, tmp_path: Path, monkeypatch) -> Path:
         repo_root=str(repo),
     )
     monkeypatch.setattr(
-        "nexus.registry._repo_identity",
+        "nexus.repo_identity._repo_identity",
         lambda r: ("myproject", "cafef00d"),
     )
     return repo
@@ -322,7 +322,7 @@ def test_migration_no_op_when_catalog_uninitialized(
     repo = tmp_path / "uncataloged"
     repo.mkdir()
     monkeypatch.setattr(
-        "nexus.registry._repo_identity",
+        "nexus.repo_identity._repo_identity",
         lambda r: ("uncataloged", "abcdef12"),
     )
     legacy = _collection_name(repo)
@@ -350,7 +350,7 @@ def test_migration_no_op_when_owner_unregistered(
     repo = tmp_path / "unregistered"
     repo.mkdir()
     monkeypatch.setattr(
-        "nexus.registry._repo_identity",
+        "nexus.repo_identity._repo_identity",
         lambda r: ("unregistered", "fade1234"),
     )
     legacy = _collection_name(repo)

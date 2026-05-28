@@ -143,10 +143,19 @@ class Projector:
     # ── v: 0 handlers (synthesized from existing JSONL state) ────────────
 
     def _v0_owner_registered(self, payload: Any) -> None:
+        # RDR-137 followup CRITICAL-1 (nexus-43qgm.1): head_hash is a
+        # derived staleness signal written separately via the
+        # epsilon-allowed Catalog.set_owner_head_hash (no event for
+        # replay-equality). Preserve any existing value via COALESCE so
+        # idempotent re-registration does not wipe the column.
+        # COALESCE on (name, owner_type) — the UNIQUE conflict key —
+        # so re-register paths that allocate a new prefix still
+        # preserve head_hash from the prior row that gets REPLACEd.
         self._db.execute(
             "INSERT OR REPLACE INTO owners "
-            "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root, head_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, "
+            "COALESCE((SELECT head_hash FROM owners WHERE name = ? AND owner_type = ?), ''))",
             (
                 payload.owner_id,
                 payload.name,
@@ -154,6 +163,8 @@ class Projector:
                 payload.repo_hash,
                 payload.description,
                 payload.repo_root,
+                payload.name,
+                payload.owner_type,
             ),
         )
 

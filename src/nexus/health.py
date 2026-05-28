@@ -495,9 +495,9 @@ def _check_git_hooks() -> list[HealthResult]:
     from nexus import _git_hooks_meta as _ghm
     from nexus._git_hooks_meta import SENTINEL_BEGIN, SENTINEL_END
     _effective_hooks_dir = _ghm.effective_hooks_dir
-    from nexus.registry import RepoRegistry
-
-    from nexus.config import nexus_config_dir
+    from nexus.catalog.catalog import Catalog
+    from nexus.config import catalog_path, nexus_config_dir
+    from nexus.repos import list_repos_dual
 
     results: list[HealthResult] = []
     hook_names = ("post-commit", "post-merge", "post-rewrite")
@@ -529,11 +529,22 @@ def _check_git_hooks() -> list[HealthResult]:
 
     canonical = _canonical_stanza_body()
 
+    # RDR-137 Phase 3.1 (nexus-tts0d.6): catalog-backed enumeration with
+    # legacy ``repos.json`` fallback via the dual-read shim. Catalog
+    # paths come from ``owners WHERE owner_type='repo'``; the registry
+    # provides legacy installs that have not yet been re-indexed.
     try:
-        reg = RepoRegistry(registry_path)
-        repos = reg.all()
+        cat_dir = catalog_path()
+        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        repos = list_repos_dual(cat=cat, registry_path=registry_path)
     except Exception as exc:
-        _log.warning("doctor_registry_load_failed", error=str(exc))
+        # RDR-137 followup IMP-20 (nexus-43qgm.20): exc_info=True so
+        # the operator sees the traceback alongside the error message
+        # (NameError / AttributeError otherwise appear only as the
+        # rendered str(exc) with no source location).
+        _log.warning(
+            "doctor_registry_load_failed", error=str(exc), exc_info=True,
+        )
         repos = []
 
     if not repos:

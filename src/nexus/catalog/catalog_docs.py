@@ -32,16 +32,15 @@ from nexus.corpus import (
     LOCAL_EMBEDDING_MODELS,
     effective_embedding_model_for_writes,
 )
-from nexus.registry import RepoRegistry, _repo_identity
+from nexus.repo_identity import _repo_identity
 
-# ``CatalogEntry`` and ``_default_registry_path`` are imported
-# lazily inside the methods that need them. ``catalog.py`` imports
-# this module from inside ``Catalog.__init__`` (instance time,
-# after ``catalog`` finishes loading), so a top-level
-# ``from nexus.catalog.catalog import ...`` would also work — but
-# the lazy form keeps the import direction one-way
-# (catalog → catalog_docs only at instantiation), which makes the
-# dependency easier to read.
+# ``CatalogEntry`` is imported lazily inside the methods that need
+# it. ``catalog.py`` imports this module from inside
+# ``Catalog.__init__`` (instance time, after ``catalog`` finishes
+# loading), so a top-level ``from nexus.catalog.catalog import ...``
+# would also work — but the lazy form keeps the import direction
+# one-way (catalog → catalog_docs only at instantiation), which
+# makes the dependency easier to read.
 if TYPE_CHECKING:
     from nexus.catalog.catalog import Catalog, CatalogEntry
 
@@ -375,7 +374,7 @@ class _DocumentOps:
         replaced was removed in Phase 5.
         """
         cat = self._cat
-        from nexus.registry import _repo_identity  # noqa: PLC0415
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415
 
         _, repo_hash = _repo_identity(repo)
         owner = cat.owner_for_repo(repo_hash)
@@ -432,18 +431,23 @@ class _DocumentOps:
         Resolution order:
         1. Look up entry via cat.resolve(tumbler)
         2. If entry not found: return None
-        3. Find owner: tumbler.owner_address() -> str, look up in JSONL
+        3. Find owner: tumbler.owner_address() -> str, look up in SQLite
         4. If owner not found or owner.owner_type == "curator": return None
         5. If entry.file_path is already absolute: return Path(entry.file_path)
         6. If owner.repo_root is non-empty: return Path(owner.repo_root) / entry.file_path
-        7. Fallback: iterate registry to find path matching owner.repo_hash
-        8. If fallback found: return Path(repo_path) / entry.file_path
-        9. Otherwise: return None
+        7. Otherwise: log ``catalog_resolve_path_legacy_owner_missing_repo_root``
+           at DEBUG and return None.
+
+        RDR-137 Phase 3.6 (nexus-tts0d.11, OQ-11): the previous
+        legacy-registry fallback (iterate registry rows matching
+        repo_hash) is removed. Post-nexus-nzyrh every freshly-registered owner
+        gets a canonical main_repo path in ``repo_root``; any
+        ``repo_root=''`` row in the live catalog is a pre-RDR-137
+        artifact that the next ``nx index repo`` run on the same
+        repo will heal. The DEBUG event surfaces which owners still
+        need that healing pass.
         """
         cat = self._cat
-        import hashlib
-
-        from nexus.registry import RepoRegistry
 
         entry = cat.resolve(tumbler)
         if not entry:
@@ -472,17 +476,16 @@ class _DocumentOps:
         if repo_root:
             return Path(repo_root) / entry.file_path
 
-        # Fallback: find repo_root from registry by matching repo_hash
-        if repo_hash:
-            from nexus.catalog.catalog import _default_registry_path
-            registry_path = _default_registry_path()
-            if registry_path.exists():
-                reg = RepoRegistry(registry_path)
-                for path_str in reg.all_info():
-                    path_hash = hashlib.sha256(path_str.encode()).hexdigest()[:8]
-                    if path_hash == repo_hash:
-                        return Path(path_str) / entry.file_path
-
+        # Post-RDR-137 P3.6: no registry fallback. Legacy owners with
+        # empty repo_root cannot be resolved without a re-index pass.
+        _log.debug(
+            "catalog_resolve_path_legacy_owner_missing_repo_root",
+            tumbler=str(tumbler),
+            owner_prefix=owner_prefix,
+            repo_hash=repo_hash,
+            file_path=entry.file_path,
+            hint="re-run 'nx index repo' on the source repo to backfill repo_root",
+        )
         return None
 
     def descendants(self, prefix: str) -> list[dict]:

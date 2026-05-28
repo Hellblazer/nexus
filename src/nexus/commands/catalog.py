@@ -397,13 +397,108 @@ def backfill_collections_cmd(dry_run: bool) -> None:
     if dry_run:
         return
 
+    # RDR-137 followup SIG-7 (nexus-43qgm.7): pass content_type +
+    # owner_id when the collection name is conformant so the OQ-5
+    # reader inference cannot silently shadow other owners' docs
+    # selections with anonymous knowledge__ rows. Legacy 2-segment
+    # names (e.g. ``knowledge__delos``) fall through to the bare
+    # register_collection call — their owner_id remains empty and
+    # the reader's owner_id JOIN excludes them from owner-scoped
+    # lookups, which is the desired behaviour.
+    from nexus.corpus import (  # noqa: PLC0415
+        is_conformant_collection_name,
+        parse_conformant_collection_name,
+    )
     for name in to_register:
+        if is_conformant_collection_name(name):
+            try:
+                parsed = parse_conformant_collection_name(name)
+                cat.register_collection(
+                    name,
+                    content_type=parsed["content_type"],
+                    owner_id=parsed["owner_id"],
+                    embedding_model=parsed["embedding_model"],
+                    model_version=parsed["model_version"],
+                )
+                continue
+            except (KeyError, ValueError) as exc:
+                _log.warning(
+                    "backfill_collections_conformant_parse_failed",
+                    name=name, error=str(exc),
+                )
+        # Non-conformant fallback (legacy 2-segment names).
         cat.register_collection(name)
 
     click.echo(
         f"\nDone: {len(to_register)} new, "
         f"{len(already)} already registered."
     )
+
+
+@catalog.command("backfill-owner-id")
+@click.option(
+    "--dry-run/--no-dry-run",
+    default=True,
+    help="Report-only (default). Use --no-dry-run to actually update. "
+    "Matches the safe-default convention of the other Phase 6 verbs.",
+)
+@click.option(
+    "--from-documents/--no-from-documents",
+    default=True,
+    help="Use the documents-table fallback to recover owner_id for legacy "
+    "2-segment names (default). Disable to restrict the backfill to "
+    "the auto-migration's conformant-name path only.",
+)
+def backfill_owner_id_cmd(dry_run: bool, from_documents: bool) -> None:
+    """Populate ``collections.owner_id`` for empty rows (RDR-137 P1.5a).
+
+    \b
+    The CatalogStore's auto-migration handles conformant RDR-103
+    four-segment names on every DB open. This verb adds the documents-
+    table fallback that recovers owner_id for legacy 2-segment names
+    (e.g. ``knowledge__delos``) by inferring owner from documents that
+    are physically registered against the collection.
+
+    \b
+    Ambiguous rows (documents from multiple distinct owners) are
+    skipped with a warning. The auto-migration is idempotent — running
+    this with ``--from-documents=false`` is equivalent to opening any
+    CatalogStore connection.
+
+    \b
+    Examples:
+      nx catalog backfill-owner-id --dry-run
+      nx catalog backfill-owner-id --no-dry-run
+      nx catalog backfill-owner-id --no-dry-run --no-from-documents
+    """
+    from nexus.catalog.collections_owner_backfill import (  # noqa: PLC0415
+        backfill_owner_id,
+    )
+
+    cat = _get_catalog()
+    with cat._db:
+        result = backfill_owner_id(
+            cat._db,
+            include_documents_fallback=from_documents,
+            dry_run=dry_run,
+        )
+
+    verb = "would update" if dry_run else "updated"
+    click.echo(
+        f"{verb} {result.updated_from_name} via name + "
+        f"{result.updated_from_documents} via documents fallback "
+        f"(total empty: {result.total_empty})"
+    )
+    if result.skipped_ambiguous:
+        click.echo(
+            f"  skipped {result.skipped_ambiguous} ambiguous "
+            f"(multi-owner) collection(s)"
+        )
+    if result.skipped_unresolvable:
+        click.echo(
+            f"  skipped {result.skipped_unresolvable} unresolvable "
+            f"collection(s) — manual review required"
+        )
 
 
 @catalog.command("migrate-fallback")
@@ -996,19 +1091,21 @@ def register_cmd(
     from nexus.catalog.catalog import make_relative
 
     cat = _get_catalog()
-    # Relativize absolute file_path if under a known repo (RDR-060)
+    # Relativize absolute file_path if under a known repo (RDR-060).
+    # RDR-137 Phase 3.3 (nexus-tts0d.8): catalog-backed enumeration.
     fp = file_path
     if fp and Path(fp).is_absolute():
         from nexus.catalog.catalog import _default_registry_path
-        from nexus.registry import RepoRegistry
+        from nexus.repos import list_repos_dual
 
         reg_path = _default_registry_path()
-        if reg_path.exists():
-            for repo_path_str in RepoRegistry(reg_path).all_info():
-                rel = make_relative(fp, Path(repo_path_str))
-                if rel != fp:
-                    fp = rel
-                    break
+        for repo_path_str in list_repos_dual(
+            cat=cat, registry_path=reg_path,
+        ):
+            rel = make_relative(fp, Path(repo_path_str))
+            if rel != fp:
+                fp = rel
+                break
 
     try:
         tumbler = cat.register(
@@ -2986,18 +3083,23 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
                     _default_registry_path,
                     make_relative,
                 )
-                from nexus.registry import RepoRegistry
+                from nexus.repos import list_repos_dual
 
+                # RDR-137 Phase 3.3 (nexus-tts0d.8): catalog-backed
+                # enumeration. Iterate every known repo_root, hash it,
+                # match the trailing hash8 suffix on the collection
+                # name; first match wins.
                 reg_path = _default_registry_path()
-                if reg_path.exists():
-                    for repo_path_str in RepoRegistry(reg_path).all_info():
-                        h = hashlib.sha256(
-                            repo_path_str.encode(),
-                        ).hexdigest()[:8]
-                        if col_name.endswith(h):
-                            repo_root = Path(repo_path_str)
-                            owner = cat.owner_for_repo(h)
-                            break
+                for repo_path_str in list_repos_dual(
+                    cat=cat, registry_path=reg_path,
+                ):
+                    h = hashlib.sha256(
+                        repo_path_str.encode(),
+                    ).hexdigest()[:8]
+                    if col_name.endswith(h):
+                        repo_root = Path(repo_path_str)
+                        owner = cat.owner_for_repo(h)
+                        break
             except Exception:
                 _log.warning(
                     "backfill_rdrs_repo_lookup_failed",
@@ -3194,10 +3296,23 @@ def _make_t3():
 
 
 def _make_registry():
+    """RDR-137 Phase 5.3 (nexus-tts0d.20): tiny adapter exposing the
+    two methods ``_backfill_repos`` consumes (``all_info``). Reads
+    the legacy file shape with stdlib json so the catalog backfill
+    verb keeps working without depending on the deleted RepoRegistry
+    class.
+    """
     from nexus.config import nexus_config_dir
-    from nexus.registry import RepoRegistry
+    from nexus.repos import _read_repos_json
 
-    return RepoRegistry(nexus_config_dir() / "repos.json")
+    class _LegacyRegistryReader:
+        def __init__(self, path):
+            self._path = path
+
+        def all_info(self):
+            return _read_repos_json(self._path)
+
+    return _LegacyRegistryReader(nexus_config_dir() / "repos.json")
 
 
 def _backfill_per_file_from_t3(

@@ -221,16 +221,42 @@ class TestDoctorFixFlag:
         from nexus.commands.doctor import doctor_cmd
 
         runner = CliRunner()
+        # RDR-120 P4.B (nexus-vyqah): --fix now routes through make_t3()
+        # (daemon-backed in local mode) instead of constructing its own
+        # T3Database/PersistentClient. Patch the factory, not the class.
         with (
             patch("nexus.config.is_local_mode", return_value=True),
             patch("nexus.db.t3.apply_hnsw_ef", return_value=3),
-            patch("nexus.db.t3.T3Database") as MockT3,
+            patch("nexus.db.make_t3") as MockMakeT3,
         ):
-            MockT3.return_value = MagicMock()
+            MockMakeT3.return_value = MagicMock()
             result = runner.invoke(doctor_cmd, ["--fix"])
 
         assert result.exit_code == 0
         assert "3" in result.output
+        # The daemon-backed factory is what gets called, not a direct ctor.
+        MockMakeT3.assert_called_once()
+
+    def test_doctor_fix_local_mode_daemon_unreachable_is_actionable(self) -> None:
+        """RDR-120 P4.B: when the T3 daemon is down, --fix must fail with an
+        actionable ClickException (start-the-daemon hint), not an opaque
+        connection traceback."""
+        from click.testing import CliRunner
+        from nexus.commands.doctor import doctor_cmd
+
+        runner = CliRunner()
+        with (
+            patch("nexus.config.is_local_mode", return_value=True),
+            patch(
+                "nexus.db.make_t3",
+                side_effect=ConnectionError("connection refused"),
+            ),
+        ):
+            result = runner.invoke(doctor_cmd, ["--fix"])
+
+        assert result.exit_code != 0
+        assert "daemon" in result.output.lower()
+        assert "nx daemon t3 start" in result.output
 
     def test_doctor_fix_cloud_mode_skips_hnsw(self) -> None:
         """doctor --fix in cloud mode prints skip message and returns."""

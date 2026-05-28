@@ -270,19 +270,29 @@ def catalog_register(
         from nexus.catalog.catalog import make_relative
         from nexus.catalog.tumbler import Tumbler
 
-        # Relativize absolute file_path if it falls under a known repo (RDR-060)
+        # Relativize absolute file_path if it falls under a known repo
+        # (RDR-060). RDR-137 Phase 3.2 (nexus-tts0d.7): use the catalog-
+        # backed list_repos_dual reader. Catalog owners contribute
+        # canonical repo_root; registry fills in pre-catalog installs.
         fp = file_path
         if fp and _Path(fp).is_absolute():
             from nexus.catalog.catalog import _default_registry_path
-            from nexus.registry import RepoRegistry
+            from nexus.repos import list_repos_dual
 
             reg_path = _default_registry_path()
-            if reg_path.exists():
-                for repo_path_str in RepoRegistry(reg_path).all_info():
-                    rel = make_relative(fp, _Path(repo_path_str))
-                    if rel != fp:
-                        fp = rel
-                        break
+            # RDR-137 followup IMP-19 (nexus-43qgm.19): prefer the
+            # LONGEST matching prefix so a nested-repo scenario
+            # (parent + child both registered) anchors the path under
+            # the child, not the parent. Pre-fix iteration picked the
+            # first sorted match (typically parent), producing a
+            # longer-than-needed relative path.
+            candidates = [
+                rp for rp in list_repos_dual(cat=cat, registry_path=reg_path)
+                if make_relative(fp, _Path(rp)) != fp
+            ]
+            if candidates:
+                best = max(candidates, key=len)
+                fp = make_relative(fp, _Path(best))
 
         tumbler = cat.register(
             Tumbler.parse(owner), title,

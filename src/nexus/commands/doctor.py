@@ -9,7 +9,6 @@ from typing import Any
 import click
 import structlog
 
-from nexus.registry import RepoRegistry
 
 _log = structlog.get_logger(__name__)
 
@@ -1277,13 +1276,29 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if fix:
-        from nexus.config import is_local_mode, _default_local_path
-        from nexus.db.t3 import T3Database, apply_hnsw_ef
+        from nexus.config import is_local_mode
+        from nexus.db import make_t3
+        from nexus.db.t3 import apply_hnsw_ef
         if not is_local_mode():
             click.echo("SPANN defaults adequate — no HNSW tuning needed (cloud mode)")
             return
-        local_path = _default_local_path()
-        db = T3Database(local_mode=True, local_path=str(local_path))
+        # RDR-120 P4.B (nexus-vyqah): route through make_t3() so the
+        # HNSW-tuning probe uses the T3 daemon's HttpClient in local
+        # mode instead of opening its own PersistentClient. A direct
+        # T3Database(local_mode=True, ...) here contended with the
+        # daemon for the same on-disk chroma store (the T3 analogue of
+        # the T2 multi-process WAL contention RDR-120 closed). make_t3()
+        # returns a daemon-backed T3Database with _local_mode=True, so
+        # apply_hnsw_ef's local-mode gate + col.modify() calls work
+        # unchanged over the HttpClient.
+        try:
+            db = make_t3()
+        except Exception as exc:
+            raise click.ClickException(
+                f"T3 daemon unreachable for HNSW tuning: {exc}\n"
+                "Start it with `nx daemon t3 start`, then re-run "
+                "`nx doctor --fix`."
+            ) from exc
         count = apply_hnsw_ef(db)
         click.echo(f"Updated HNSW search_ef on {count} collection(s).")
         return
@@ -1337,14 +1352,23 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
         # Load owners for repo_root lookup
         owners_path = cat._owners_path
-        owners = read_owners(owners_path) if owners_path.exists() else {}
+        # RDR-137 followup IMP-18 (nexus-43qgm.18): early exit when
+        # owners.jsonl is absent. Pre-fix code degraded to owners={},
+        # skipped every row in the loop, and reported "Fixed 0
+        # entries" — indistinguishable from "all paths already
+        # relative". Surface the actionable cause instead.
+        if not owners_path.exists():
+            click.echo(
+                "Warning: owners.jsonl not found — run 'nx index repo "
+                "<path>' to populate catalog owners before fix-paths."
+            )
+            return
+        owners = read_owners(owners_path)
 
-        # Get registry for fallback
-        from nexus.config import nexus_config_dir
-
-        registry_path = nexus_config_dir() / "repos.json"
-        registry = RepoRegistry(registry_path) if registry_path.exists() else None
-
+        # RDR-137 Phase 3.7 (nexus-tts0d.12): registry fallback removed.
+        # Post-nexus-nzyrh owner.repo_root is always populated for
+        # freshly-registered owners; legacy owners with empty
+        # repo_root surface via the WARN below for re-index targeting.
         t3_db = None
         if not dry_run:
             t3_db = make_t3()
@@ -1361,19 +1385,15 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             if owner_rec.owner_type == "curator":
                 continue
 
-            # Determine repo_root
-            repo_root = None
-            if owner_rec.repo_root:
-                repo_root = Path(owner_rec.repo_root)
-            elif owner_rec.repo_hash and registry:
-                for rp in registry.all_info():
-                    h = hashlib.sha256(rp.encode()).hexdigest()[:8]
-                    if h == owner_rec.repo_hash:
-                        repo_root = Path(rp)
-                        break
+            # Determine repo_root (catalog-only; no registry fallback)
+            repo_root = Path(owner_rec.repo_root) if owner_rec.repo_root else None
 
             if repo_root is None:
-                _log.warning("fix_paths_no_root", tumbler=tumbler_str, file_path=file_path)
+                _log.warning(
+                    "fix_paths_no_root",
+                    tumbler=tumbler_str, file_path=file_path,
+                    hint="re-run 'nx index repo' on the source repo to backfill owners.repo_root",
+                )
                 continue
 
             new_rel = make_relative(file_path, repo_root)

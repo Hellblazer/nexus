@@ -44,51 +44,57 @@ _TOPICS_PER_PREFIX = 5
 
 
 def _repo_collections(repo_path: Path | None) -> set[str] | None:
-    """Return collection names registered to a repo, or None for all."""
+    """Return collection names registered to a repo, or None for all.
+
+    RDR-137 Phase 3.5 (nexus-tts0d.10): catalog-backed via
+    :func:`nexus.repos.read_dual`.  The catalog is authoritative;
+    when both catalog and ``repos.json`` carry an entry the dual-read
+    shim logs disagreements at DEBUG so cutover-progress is observable.
+    This closed the loop on nexus-9iw41 — the bug where a phantom
+    ``docs__1-2188`` registered to the nexus repo while the catalog
+    and chroma both had the real ``docs__1-1``.
+
+    The ``rdr`` collection follows the existing indexer-name-resolver
+    fallback when the catalog has no ``rdr__*`` row for the owner —
+    a freshly-indexed repo with only ``code``+``docs`` content is the
+    common case and the synthesized 4-segment name (RDR-103 Phase 5)
+    is the right shape.
+    """
     if repo_path is None:
         return None
     try:
-        from nexus.registry import RepoRegistry
+        from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+        from nexus.config import catalog_path  # noqa: PLC0415
+        from nexus.repos import read_dual  # noqa: PLC0415
 
+        cat_dir = catalog_path()
+        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
         reg_path = _ctx_nexus_config_dir() / "repos.json"
-        if not reg_path.exists():
-            return None
-        reg = RepoRegistry(reg_path)
-        entry = reg.get(repo_path)
-        if not entry:
+        rec = read_dual(repo_path, cat=cat, registry_path=reg_path)
+        if rec is None:
             return None
         colls: set[str] = set()
-        for key in ("collection", "docs_collection"):
-            if entry.get(key):
-                colls.add(entry[key])
-        # Also include the rdr__ collection for this repo. Source it
-        # from the catalog when available so conformant repos pick up
-        # the catalog-minted name; fall back to the indexer's
-        # name-resolver when the catalog is absent so the fallback
-        # synthesises a conformant 4-segment shape (RDR-103 Phase 5)
-        # rather than splicing the legacy 2-segment suffix from a
-        # registry value that may now itself be conformant.
-        try:
-            from nexus.indexer import _repo_collection_or_legacy  # noqa: PLC0415
-
-            colls.add(_repo_collection_or_legacy(repo_path, "rdr"))
-        except Exception:
-            # nexus-8g79.8: inner — recoverable, the rdr collection
-            # may legitimately not exist. DEBUG-with-exc_info so
-            # debugging surfaces it without flooding production logs.
-            import structlog
-            structlog.get_logger(__name__).debug(
-                "repo_collection_or_legacy_failed",
-                repo_path=str(repo_path),
-                exc_info=True,
-            )
+        if rec.code_collection:
+            colls.add(rec.code_collection)
+        if rec.docs_collection:
+            colls.add(rec.docs_collection)
+        if rec.rdr_collection:
+            colls.add(rec.rdr_collection)
+        # RDR-137 followup SIG-14 (nexus-43qgm.14): do NOT synthesize
+        # a rdr__* collection name when the catalog has none registered.
+        # Pre-fix code called _repo_collection_or_legacy(repo_path, "rdr")
+        # which synthesized a conformant name that may not exist in T3
+        # or in the taxonomy topics table. Benign today for the
+        # Knowledge Map (SQLite-only filter against topics) but carried
+        # latent collision risk with other repos sharing the hash8
+        # suffix. If the repo has no rdr content, the allowed set
+        # simply omits rdr; downstream code handles that cleanly.
         return colls if colls else None
     except Exception:
-        # nexus-8g79.8: outer — degrades the entire L1 context
-        # (taxonomy + collections) silently. WARNING because a
-        # recurring failure produces wrong LLM prompts with no signal.
-        import structlog
-        structlog.get_logger(__name__).warning(
+        # Outer — degrades the entire L1 context (taxonomy +
+        # collections) silently. WARNING because a recurring failure
+        # produces wrong LLM prompts with no signal.
+        _log.warning(
             "discover_repo_collections_failed",
             exc_info=True,
         )

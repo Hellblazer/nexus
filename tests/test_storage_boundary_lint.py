@@ -328,6 +328,99 @@ def test_t2database_construction_short_reason_is_violation(tmp_path):
     ]
 
 
+# ───────────────────────────────────────────────────────────────────────
+# RDR-120 P4.B (nexus-vyqah): T3Database construction detection.
+#
+# A consumer-side ``T3Database(local_mode=True, ...)`` without an injected
+# ``_client`` opens its own ``chromadb.PersistentClient`` on the local
+# on-disk store — the T3 analogue of the T2 multi-process WAL contention.
+# The ``chromadb.PersistentClient`` call itself lives in the allowlisted
+# ``db/t3.py``, so the BANLIST module-attr scan cannot catch it; the
+# consumer-side ``T3Database(...)`` construction is the detectable boundary.
+# Consumers must call ``make_t3()`` / ``make_t3_client()`` instead.
+# ───────────────────────────────────────────────────────────────────────
+
+
+def test_t3database_construction_unannotated_is_violation(tmp_path):
+    """A direct un-annotated ``T3Database(...)`` outside the
+    construction-allowlist is a HARD VIOLATION, exactly like T2Database."""
+    target = tmp_path / "t3_ctor_offender.py"
+    target.write_text(
+        "from nexus.db.t3 import T3Database\n"
+        "def bad():\n"
+        "    return T3Database(local_mode=True, local_path='/tmp/x')\n"
+    )
+    result = _check(extra_files=[target])
+    matched = [
+        v for v in result.violations
+        if v.file == str(target) and v.symbol == "T3Database"
+    ]
+    assert len(matched) == 1
+    assert matched[0].line == 3
+
+
+def test_t3database_construction_aliased_import_is_violation(tmp_path):
+    """``from ... import T3Database as DB; DB(...)`` resolves to a violation."""
+    target = tmp_path / "t3_ctor_aliased.py"
+    target.write_text(
+        "from nexus.db.t3 import T3Database as DB\n"
+        "def bad():\n"
+        "    return DB(local_mode=True, local_path='/tmp/x')\n"
+    )
+    result = _check(extra_files=[target])
+    matched = [
+        v for v in result.violations
+        if v.file == str(target) and v.symbol == "T3Database"
+    ]
+    assert len(matched) == 1
+
+
+def test_t3database_construction_annotated_is_documented(tmp_path):
+    """A ``T3Database(...)`` carrying a valid ``# epsilon-allow:`` is counted
+    into the documented population and is NOT a hard violation — the mirror
+    of the T2Database / sqlite3.connect epsilon-allow treatment."""
+    base = _check().t2database_constructions
+    target = tmp_path / "t3_ctor_documented.py"
+    target.write_text(
+        "from nexus.db.t3 import T3Database\n"
+        "def ok():\n"
+        "    return T3Database(local_mode=True, local_path='/tmp/x')  "
+        "# epsilon-allow: read-only diagnostic, no daemon to contend with\n"
+    )
+    result = _check(extra_files=[target])
+    assert result.t2database_constructions == base + 1
+    assert [v for v in result.violations if v.file == str(target)] == []
+
+
+def test_t3database_is_in_banned_constructors():
+    """RDR-120 P4.B: the T3 consumer boundary is enforced by listing
+    ``T3Database`` alongside ``T2Database`` in BANNED_CONSTRUCTORS — not by
+    a separate code path. Lock the membership so a future refactor cannot
+    silently drop the T3 boundary."""
+    from nexus.storage_boundary_lint import BANNED_CONSTRUCTORS
+    assert "T3Database" in BANNED_CONSTRUCTORS
+    assert "T2Database" in BANNED_CONSTRUCTORS
+
+
+def test_doctor_fix_does_not_construct_t3database_directly():
+    """RDR-120 P4.B (nexus-vyqah): ``nx doctor --fix`` HNSW tuning was the
+    sole consumer-side direct ``T3Database(local_mode=True, ...)`` site. It
+    now routes through ``make_t3()`` (daemon-backed in local mode). Assert
+    the source carries no direct construction so a regression is caught at
+    the file level, independent of the whole-repo scan."""
+    import pathlib
+    src = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "src" / "nexus" / "commands" / "doctor.py"
+    )
+    result = _check(extra_files=[src])
+    direct = [
+        v for v in result.violations
+        if v.symbol == "T3Database" and "doctor.py" in v.file
+    ]
+    assert direct == [], f"doctor.py must not construct T3Database directly: {direct}"
+
+
 def test_epsilon_allow_connect_counted_as_population(tmp_path):
     """An epsilon-allow'd ``sqlite3.connect`` is counted (population 1),
     not silently dropped, and is NOT a hard violation."""

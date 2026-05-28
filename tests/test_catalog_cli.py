@@ -1458,7 +1458,7 @@ class TestCollectionNameCommand:
             repo_root=str(repo),
         )
         monkeypatch.setattr(
-            "nexus.registry._repo_identity",
+            "nexus.repo_identity._repo_identity",
             lambda r: ("myproject", "cafef00d"),
         )
         runner = CliRunner()
@@ -1485,7 +1485,7 @@ class TestCollectionNameCommand:
             repo_root=str(repo),
         )
         monkeypatch.setattr(
-            "nexus.registry._repo_identity",
+            "nexus.repo_identity._repo_identity",
             lambda r: ("myproject", "cafef00d"),
         )
         runner = CliRunner()
@@ -1523,7 +1523,7 @@ class TestCollectionNameCommand:
         repo = tmp_path / "fresh"
         repo.mkdir()
         monkeypatch.setattr(
-            "nexus.registry._repo_identity",
+            "nexus.repo_identity._repo_identity",
             lambda r: ("fresh", "deadbeef"),
         )
         runner = CliRunner()
@@ -1570,7 +1570,7 @@ class TestCollectionNameCommand:
             repo_root=str(repo),
         )
         monkeypatch.setattr(
-            "nexus.registry._repo_identity",
+            "nexus.repo_identity._repo_identity",
             lambda r: ("myproject", "cafef00d"),
         )
         monkeypatch.chdir(repo)

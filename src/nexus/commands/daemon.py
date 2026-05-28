@@ -739,12 +739,16 @@ def _t2_db_write_lock_acquirable(db_path: Path, timeout_ms: int) -> bool:
 )
 @click.option(
     "--timeout",
-    default=5.0,
+    default=15.0,
     type=float,
     help=(
         "Seconds to wait for the daemon to become reachable after a "
-        "cold spawn. Default: 5.0. macOS Docker Desktop boot adds "
-        "VM-layer latency; raise this to 10+ on slow hosts."
+        "cold spawn. Default: 15.0 — a cold-start daemon runs its "
+        "one-time startup migration (which can take several seconds and "
+        "holds the write lock) BEFORE it binds, so a tighter budget "
+        "spuriously warns on a healthy boot (nexus-u3mfr). The wait "
+        "fails fast if the spawned process dies, so a larger budget only "
+        "affects a genuinely slow migration, not a failed spawn."
     ),
 )
 @click.option(
@@ -884,7 +888,7 @@ def t2_ensure_running_cmd(
         argv.extend(["--config-dir", config_dir_str])
     if not quiet:
         click.echo(f"Spawning T2 daemon: {' '.join(argv)}")
-    subprocess.Popen(
+    proc = subprocess.Popen(
         argv,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -892,17 +896,37 @@ def t2_ensure_running_cmd(
         start_new_session=True,
     )
 
+    # nexus-u3mfr: migration-aware wait. A cold-start daemon runs its
+    # one-time startup migration (multi-second, holds the write lock)
+    # BEFORE it binds and writes the discovery file, so reachability
+    # legitimately lags the spawn by several seconds. The fix is two-fold:
+    # the default budget is generous enough to cover the migration
+    # (--timeout default raised to 15s), AND we distinguish "still alive,
+    # migrating" from "the process died" — if the spawned child exits
+    # without becoming reachable we fail fast with its exit code rather
+    # than waiting out the whole budget on a corpse. The warning therefore
+    # only fires on a genuinely slow/stuck migration, not a healthy boot.
     deadline = _time.monotonic() + timeout
     while _time.monotonic() < deadline:
         if _daemon_is_alive():
             if not quiet:
                 click.echo("T2 daemon is reachable.")
             return
+        if proc.poll() is not None:
+            click.echo(
+                f"Error: T2 daemon process exited (code {proc.returncode}) "
+                "before becoming reachable. Check ~/Library/Logs/nexus-t2.err "
+                "(macOS) or `journalctl --user -u nexus-t2.service` (Linux) "
+                "for the failure.",
+                err=True,
+            )
+            sys.exit(1)
         _time.sleep(0.1)
 
     click.echo(
-        f"Warning: T2 daemon did not become reachable within {timeout}s. "
-        "Check ~/Library/Logs/nexus-t2.err (macOS) or "
+        f"Warning: T2 daemon did not become reachable within {timeout}s "
+        "(process still alive — likely a slow or stalled startup "
+        "migration). Check ~/Library/Logs/nexus-t2.err (macOS) or "
         "`journalctl --user -u nexus-t2.service` (Linux) for the failure.",
         err=True,
     )

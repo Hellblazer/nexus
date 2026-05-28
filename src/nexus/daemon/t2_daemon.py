@@ -264,6 +264,16 @@ _READY_TIMEOUT: float = 30.0
 #: Graceful-stop window before escalating to forced socket teardown.
 _GRACEFUL_STOP_TIMEOUT: float = 5.0
 
+#: nexus-azsqe (RDR-129 A2 follow-up): bound on the blocking
+#: ``T2Database.close()`` inside ``stop()``. A close that stalls on a
+#: pending WAL checkpoint must not wedge ``stop()`` open-ended (which,
+#: with defer-release-to-exit, would hold the spawn lock and block an
+#: upgrade restart on the stale daemon version). Generous enough that a
+#: legitimate checkpoint completes; finite so a genuinely hung close is
+#: bounded. On timeout ``stop()`` logs and proceeds to exit — the OS
+#: reaps the offloaded thread and releases the lock.
+_DB_CLOSE_TIMEOUT: float = 10.0
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -686,6 +696,15 @@ class T2Daemon:
             loop.add_signal_handler(sig, self._stop_event.set)
         await self._stop_event.wait()
         _log.info("t2_daemon_stop_requested", signal_received=True)
+        # nexus-61539: make the breadcrumb durable BEFORE stop() runs.
+        # stop() can stall (a hung WAL checkpoint in close()), and under
+        # CI load the process could otherwise exit before the
+        # RotatingFileHandler flushed this line — losing the shutdown
+        # diagnostic in production, not just flaking the observability
+        # test. flush() pushes the record to the OS; a peer process
+        # reading the log then sees it.
+        from nexus.logging_setup import flush_logging
+        flush_logging()
 
     async def stop(self) -> None:
         """Close servers, drop discovery file, close T2Database.
@@ -718,8 +737,27 @@ class T2Daemon:
         if self._uds_path is not None and self._uds_path.exists():
             self._uds_path.unlink(missing_ok=True)
         if self._t2db is not None:
+            # nexus-azsqe (RDR-129 A2 follow-up): bound the blocking close.
+            # close() is synchronous and can stall on a pending WAL
+            # checkpoint; offload it to a thread and cap it with
+            # _DB_CLOSE_TIMEOUT so a hung close can't wedge stop()
+            # open-ended and block an upgrade restart. On timeout, log and
+            # proceed to exit — the OS reaps the thread and releases the
+            # spawn lock at process exit. Defense-in-depth: the
+            # ensure-running PID-liveness interlock already prevents the
+            # zero-daemon case; this prevents the wedged-on-stale-version
+            # case. The existing _GRACEFUL_STOP_TIMEOUT guards socket
+            # teardown above, not this DB close.
             try:
-                self._t2db.close()
+                await asyncio.wait_for(
+                    asyncio.to_thread(self._t2db.close),
+                    timeout=_DB_CLOSE_TIMEOUT,
+                )
+            except TimeoutError:
+                _log.warning(
+                    "t2_daemon_t2db_close_timeout",
+                    timeout_s=_DB_CLOSE_TIMEOUT,
+                )
             except Exception as exc:  # noqa: BLE001
                 _log.warning("t2_daemon_t2db_close_failed", error=str(exc))
             self._t2db = None

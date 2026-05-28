@@ -352,7 +352,7 @@ def test_collection_for_repo_uses_registered_owner(catalog, tmp_path) -> None:
         repo_hash="deadbeef",
         repo_root=str(repo_root),
     )
-    import nexus.registry as reg_mod
+    import nexus.repo_identity as reg_mod
     original = reg_mod._repo_identity
     reg_mod._repo_identity = lambda r: ("myrepo", "deadbeef")
     try:
@@ -374,7 +374,7 @@ def test_collection_for_repo_docs_uses_voyage_context_3(catalog, tmp_path) -> No
         repo_hash="cafe1234",
         repo_root=str(repo_root),
     )
-    import nexus.registry as reg_mod
+    import nexus.repo_identity as reg_mod
     original = reg_mod._repo_identity
     reg_mod._repo_identity = lambda r: ("docs-repo", "cafe1234")
     try:
@@ -392,7 +392,7 @@ def test_collection_for_repo_unregistered_owner_raises(catalog, tmp_path) -> Non
     """
     repo_root = tmp_path / "unregistered"
     repo_root.mkdir()
-    import nexus.registry as reg_mod
+    import nexus.repo_identity as reg_mod
     original = reg_mod._repo_identity
     reg_mod._repo_identity = lambda r: ("unregistered", "unknown1")
     try:
@@ -419,7 +419,7 @@ def test_collection_for_repo_bump_propagates(catalog, tmp_path) -> None:
         embedding_model="voyage-code-3",
         model_version="v1",
     )
-    import nexus.registry as reg_mod
+    import nexus.repo_identity as reg_mod
     original = reg_mod._repo_identity
     reg_mod._repo_identity = lambda r: ("bumprepo", "b00b1e55")
     try:

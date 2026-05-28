@@ -55,7 +55,6 @@ if TYPE_CHECKING:
     from nexus.catalog.tumbler import Tumbler
     from nexus.hook_registry import HookRegistry
     from nexus.indexer_utils import StalenessCache
-    from nexus.registry import RepoRegistry
     from nexus.stage_timers import StageTimers
 
 # Re-export from indexer_utils for backward compatibility (tests import from here).
@@ -175,6 +174,57 @@ def _current_head(repo: Path) -> str:
         return ""
 
 
+def _set_owner_head_hash(repo: Path, head_hash: str, *, cat=None) -> None:
+    """RDR-137 Phase 3.8 (nexus-tts0d.13): persist *head_hash* on the
+    owner row for *repo*.
+
+    Writes ``owners.head_hash`` (Phase 1.5b column from
+    ``nexus-tts0d.2``). Silently degrades when the catalog is not
+    initialised or the owner is not registered yet — both are
+    legitimate states during a first-time index, and ``index_repository``
+    will register the owner in its catalog hook.
+
+    RDR-137 followup IMP-26 (nexus-43qgm.26): accepts an optional
+    ``cat`` parameter so callers that already have a Catalog open
+    can avoid the per-call connection overhead (Catalog.__init__ runs
+    migration probes + the RDR-108 D2 backfill scan). The default-
+    None path preserves standalone-helper semantics.
+    """
+    try:
+        from nexus.catalog.catalog import Catalog
+        from nexus.config import catalog_path
+        from nexus.repo_identity import _repo_identity
+
+        if cat is None:
+            cat_dir = catalog_path()
+            if not (cat_dir / ".catalog.db").exists():
+                return
+            cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        _, repo_hash = _repo_identity(repo)
+        owner = cat.owner_for_repo(repo_hash)
+        if owner is None:
+            return
+        rowcount = cat.set_owner_head_hash(owner, head_hash)
+        # RDR-137 followup SIG-9 (nexus-43qgm.9): owner_for_repo returned
+        # a non-None tumbler but the UPDATE matched zero rows — the only
+        # plausible cause is a concurrent owner deletion between the
+        # lookup and the write. Surface as a warning so the lost write
+        # is observable.
+        if rowcount == 0:
+            _log.warning(
+                "set_owner_head_hash_no_match",
+                repo=str(repo),
+                owner=str(owner),
+                repo_hash=repo_hash,
+                hint="owner row deleted between lookup and update — re-index will heal",
+            )
+    except Exception as exc:
+        _log.warning(
+            "set_owner_head_hash_failed",
+            repo=str(repo), error=str(exc),
+        )
+
+
 def _repo_lock_path(repo: Path) -> Path:
     """Return the per-repo lock file path: ~/.config/nexus/locks/<hash8>.lock.
 
@@ -182,7 +232,7 @@ def _repo_lock_path(repo: Path) -> Path:
     of the same repo map to a single lock.
     """
     from nexus.config import nexus_config_dir
-    from nexus.registry import _repo_identity
+    from nexus.repo_identity import _repo_identity
 
     _, path_hash = _repo_identity(repo)
     return nexus_config_dir() / "locks" / f"{path_hash}.lock"
@@ -289,7 +339,7 @@ def _conformant_name_for_repo(repo: Path, content_type: str) -> str:
     ad-hoc fallbacks.
     """
     from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
-    from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
+    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -324,7 +374,7 @@ def _legacy_collection_name(repo: "Path", content_type: str) -> str:
     in place to the conformant 4-segment shape on the first index after
     the catalog upgrade.
     """
-    from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
+    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -365,7 +415,7 @@ def _migration_source_candidates(
     collections.
     """
     from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
-    from nexus.registry import _repo_identity, _safe_collection  # noqa: PLC0415
+    from nexus.repo_identity import _repo_identity, _safe_collection  # noqa: PLC0415
 
     if content_type not in ("code", "docs", "rdr"):
         raise ValueError(
@@ -440,7 +490,7 @@ def _migrate_legacy_collections(
         rename_collection_data_plane,
     )
     from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415
-    from nexus.registry import _repo_identity  # noqa: PLC0415
+    from nexus.repo_identity import _repo_identity  # noqa: PLC0415
 
     result: dict[str, str] = {}
 
@@ -633,11 +683,21 @@ def _catalog_hook(
         # existing owners short-circuit without a re-register.
         owner = cat.owner_for_repo(repo_hash)
         if owner is None:
+            # nexus-zr2ie (RDR-137 gate critique 2026-05-28): derive the
+            # canonical main-repo path so ``repo_root`` is worktree-
+            # stable. Pre-fix this wrote ``str(repo)`` and contaminated
+            # the catalog when the caller's ``repo`` argument was a
+            # worktree path; ``resolve_path`` then produced broken
+            # paths for every relative-path document under this owner
+            # once the worktree was deleted. ``_repo_identity_with_main``
+            # uses ``git rev-parse --git-common-dir`` to resolve.
+            from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415
+            _name, _hash, main_repo = _repo_identity_with_main(repo)
             owner = cat.register_owner(
                 name=repo_name,
                 owner_type="repo",
                 repo_hash=repo_hash,
-                repo_root=str(repo),
+                repo_root=str(main_repo),
                 description=f"Git repository: {repo_name}",
             )
             _log.info("catalog_owner_created", owner=str(owner), repo=repo_name)
@@ -884,7 +944,7 @@ def _run_housekeeping(
 
 def index_repository(
     repo: Path,
-    registry: "RepoRegistry",
+    registry: "object",
     *,
     frecency_only: bool = False,
     chunk_lines: int | None = None,
@@ -948,22 +1008,21 @@ def index_repository(
         install_default_hooks(hooks)
 
     try:
-        registry.update(repo, status="indexing")
-        try:
-            if frecency_only:
-                _run_index_frecency_only(repo, registry)
-                stats: dict[str, int] = {}
-            else:
-                stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_start=on_start, on_file=on_file, on_phase=on_phase, on_stage_timers=on_stage_timers, hooks=hooks)
-                registry.update(repo, head_hash=_current_head(repo))
-            registry.update(repo, status="ready")
-            return stats
-        except CredentialsMissingError:
-            registry.update(repo, status="pending_credentials")
-            raise
-        except Exception:
-            registry.update(repo, status="error")
-            raise
+        # RDR-137 Phase 3.8 (nexus-tts0d.13): registry.update(status=...)
+        # writes dropped per A2 verdict — status is write-only with no
+        # consumers. head_hash now writes to owners.head_hash on the
+        # catalog (Phase 1.5b column) via _set_owner_head_hash.
+        # RDR-137 followup IMP-21 (nexus-43qgm.21): inner try/except
+        # removed — both handlers unconditionally re-raised and added
+        # zero behaviour; the outer try/finally is the only meaningful
+        # guard. Vestige of the dropped status-write path.
+        if frecency_only:
+            _run_index_frecency_only(repo, registry)
+            stats: dict[str, int] = {}
+        else:
+            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_start=on_start, on_file=on_file, on_phase=on_phase, on_stage_timers=on_stage_timers, hooks=hooks)
+            _set_owner_head_hash(repo, _current_head(repo))
+        return stats
     finally:
         if lock_fd is not None:
             unlock_file(lock_fd)
@@ -991,7 +1050,7 @@ def _build_frecency_doc_id_map(
     try:
         from nexus.catalog import Catalog
         from nexus.config import catalog_path
-        from nexus.registry import _repo_identity
+        from nexus.repo_identity import _repo_identity
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
@@ -1017,7 +1076,7 @@ def _build_frecency_doc_id_map(
     return file_to_doc_id
 
 
-def _run_index_frecency_only(repo: Path, registry: "RepoRegistry") -> None:
+def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     """Update frecency_score metadata on all indexed chunks without re-embedding.
 
     Handles both code__ and docs__ collections.
@@ -1480,7 +1539,7 @@ def _discover_and_index_rdrs(
     # catalog for a conformant ``rdr__<owner>__voyage-context-3__v<n>``,
     # falling back to the legacy ``rdr__<basename>-<hash8>`` shape when
     # the catalog is not initialized or the owner is not yet registered.
-    from nexus.registry import _repo_identity
+    from nexus.repo_identity import _repo_identity
     basename, _ = _repo_identity(repo)
     collection = _repo_collection_or_legacy(repo, "rdr")
 
@@ -1910,7 +1969,7 @@ def _prune_deleted_files(
 
 def _run_index(
     repo: Path,
-    registry: "RepoRegistry",
+    registry: "object",
     chunk_lines: int | None = None,
     *,
     force: bool = False,
@@ -2086,7 +2145,7 @@ def _run_index(
 
     # Update ripgrep cache (code + prose text files, not PDFs)
     from nexus.config import nexus_config_dir
-    from nexus.registry import _repo_identity
+    from nexus.repo_identity import _repo_identity
     _repo_basename, _repo_hash = _repo_identity(repo)
     cache_path = nexus_config_dir() / f"{_repo_basename}-{_repo_hash}.cache"
     build_cache(repo, cache_path, all_text_scored)

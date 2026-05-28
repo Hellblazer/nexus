@@ -95,7 +95,7 @@ class TestEnsureOwnerForRepo:
         repo = tmp_path / "alpha"
         repo.mkdir()
         monkeypatch.setattr(
-            "nexus.registry._repo_identity",
+            "nexus.repo_identity._repo_identity",
             lambda r: ("alpha", "deadbeef"),
         )
         owner = cat.ensure_owner_for_repo(repo)
@@ -113,7 +113,7 @@ class TestEnsureOwnerForRepo:
         repo = tmp_path / "preregistered"
         repo.mkdir()
         monkeypatch.setattr(
-            "nexus.registry._repo_identity",
+            "nexus.repo_identity._repo_identity",
             lambda r: ("preregistered", "feedface"),
         )
         first = cat.register_owner(
@@ -141,7 +141,7 @@ class TestEnsureOwnerForRepo:
         repo = tmp_path / "myrepo"
         repo.mkdir()
         monkeypatch.setattr(
-            "nexus.registry._repo_identity",
+            "nexus.repo_identity._repo_identity",
             lambda r: ("myrepo", "abcd1234"),
         )
         owner = cat.ensure_owner_for_repo(repo)
@@ -158,7 +158,7 @@ class TestEnsureOwnerForRepo:
         repo = tmp_path / "auto-derived-name"
         repo.mkdir()
         monkeypatch.setattr(
-            "nexus.registry._repo_identity",
+            "nexus.repo_identity._repo_identity",
             lambda r: ("auto-derived-name", "11223344"),
         )
         owner = cat.ensure_owner_for_repo(repo, repo_name="explicit-override")

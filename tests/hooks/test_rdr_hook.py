@@ -64,7 +64,7 @@ def catalog_with_owner(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("nexus.config.catalog_path", lambda: cat_dir)
     monkeypatch.setattr(
-        "nexus.registry._repo_identity",
+        "nexus.repo_identity._repo_identity",
         lambda r: ("myproject", "cafef00d"),
     )
     return cat_dir
@@ -97,7 +97,7 @@ def test_resolve_rdr_collection_synthesises_conformant_when_catalog_absent(
         lambda: tmp_path / "no_such_catalog",
     )
     monkeypatch.setattr(
-        "nexus.registry._repo_identity",
+        "nexus.repo_identity._repo_identity",
         lambda r: ("isolated", "abcdef12"),
     )
     name = rdr_hook_module._resolve_rdr_collection(repo)
@@ -121,7 +121,7 @@ def test_resolve_rdr_collection_synthesises_conformant_when_owner_unregistered(
     repo = tmp_path / "fresh"
     repo.mkdir()
     monkeypatch.setattr(
-        "nexus.registry._repo_identity",
+        "nexus.repo_identity._repo_identity",
         lambda r: ("fresh", "deadbeef"),
     )
     name = rdr_hook_module._resolve_rdr_collection(repo)
