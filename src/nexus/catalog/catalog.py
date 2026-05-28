@@ -522,6 +522,15 @@ class Catalog:
     def __init__(self, catalog_dir: Path, db_path: Path) -> None:
         self._dir = catalog_dir
         self._db = CatalogDB(db_path)
+        # RDR-137 followup CRITICAL-5 (nexus-43qgm.5): within-process
+        # serialization for the owner check-then-register critical
+        # section. The directory flock (_acquire_lock) only serializes
+        # ACROSS processes; fcntl locks do not block sibling threads in
+        # the same process, so two threads sharing one Catalog can both
+        # pass owner_for_repo()==None and both register, producing
+        # duplicate owners for the same repo_hash. This RLock closes
+        # that window; the flock still handles the cross-process case.
+        self._owner_register_lock = threading.RLock()
         self._owners_path = catalog_dir / "owners.jsonl"
         self._documents_path = catalog_dir / "documents.jsonl"
         self._links_path = catalog_dir / "links.jsonl"
@@ -920,74 +929,95 @@ class Catalog:
             )
         if repo_root and not Path(repo_root).is_absolute():
             raise ValueError(f"repo_root must be an absolute path: {repo_root!r}")
-        dir_fd = self._acquire_lock()
-        try:
-            # Compute next owner number. Under event-sourced mode the
-            # events.jsonl is canonical and SQLite is its projection,
-            # which means SQLite is consistent with all committed
-            # events even after a crash that lost the JSONL append
-            # (events.jsonl is written FIRST, SQLite committed second,
-            # JSONL appended last). Reading the high-water-mark from
-            # JSONL would re-allocate a colliding tumbler in that
-            # crash window. Under legacy mode JSONL is canonical, so
-            # read from JSONL.
-            if self._event_sourced_enabled:
-                row = self._db.execute(
-                    "SELECT COALESCE(MAX(CAST(SUBSTR(tumbler_prefix, "
-                    "INSTR(tumbler_prefix, '.') + 1) AS INTEGER)), 0) "
-                    "FROM owners WHERE tumbler_prefix LIKE '1.%'"
-                ).fetchone()
-                next_num = (row[0] or 0) + 1
-            else:
-                owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
-                next_num = max(
-                    (Tumbler.parse(k).owner for k in owners), default=0
-                ) + 1
-            prefix = f"1.{next_num}"
-            rec = OwnerRecord(
-                owner=prefix,
-                name=name,
-                owner_type=owner_type,
-                repo_hash=repo_hash,
-                description=description,
-                repo_root=repo_root,
-            )
-            event = _make_event(
-                _OwnerRegisteredPayload(
-                    owner_id=prefix,
+        # RDR-137 followup CRITICAL-5 (nexus-43qgm.5): threading lock
+        # (within-process) wraps the flock (cross-process) so the
+        # check-then-register critical section is atomic against BOTH
+        # sibling threads and sibling processes. Lock order is always
+        # threading-then-flock to avoid deadlock.
+        with self._owner_register_lock:
+            dir_fd = self._acquire_lock()
+            try:
+                # RDR-137 followup CRITICAL-5: re-check inside both
+                # locks. ensure_owner_for_repo's owner_for_repo() runs
+                # OUTSIDE this critical section; a concurrent caller may
+                # have registered the same repo_hash in the meantime.
+                # The projector's INSERT OR REPLACE would silently
+                # replace the first owner's row (deleting its tumbler)
+                # rather than raise IntegrityError, so the re-check —
+                # not the UNIQUE-index error path — is what guarantees
+                # a single stable owner per repo_hash. Curator owners
+                # (no repo_hash) are intentionally exempt: name
+                # collisions across owner_types are allowed.
+                if owner_type == "repo" and repo_hash.strip():
+                    existing = self._docs.owner_for_repo(repo_hash)
+                    if existing is not None:
+                        return existing
+                # Compute next owner number. Under event-sourced mode the
+                # events.jsonl is canonical and SQLite is its projection,
+                # which means SQLite is consistent with all committed
+                # events even after a crash that lost the JSONL append
+                # (events.jsonl is written FIRST, SQLite committed second,
+                # JSONL appended last). Reading the high-water-mark from
+                # JSONL would re-allocate a colliding tumbler in that
+                # crash window. Under legacy mode JSONL is canonical, so
+                # read from JSONL.
+                if self._event_sourced_enabled:
+                    row = self._db.execute(
+                        "SELECT COALESCE(MAX(CAST(SUBSTR(tumbler_prefix, "
+                        "INSTR(tumbler_prefix, '.') + 1) AS INTEGER)), 0) "
+                        "FROM owners WHERE tumbler_prefix LIKE '1.%'"
+                    ).fetchone()
+                    next_num = (row[0] or 0) + 1
+                else:
+                    owners = read_owners(self._owners_path) if self._owners_path.exists() else {}
+                    next_num = max(
+                        (Tumbler.parse(k).owner for k in owners), default=0
+                    ) + 1
+                prefix = f"1.{next_num}"
+                rec = OwnerRecord(
+                    owner=prefix,
                     name=name,
                     owner_type=owner_type,
-                    repo_root=repo_root,
                     repo_hash=repo_hash,
                     description=description,
-                ),
-                v=0,
-            )
-            if self._event_sourced_enabled:
-                # Event-sourced path: events.jsonl first, projector
-                # writes SQLite, legacy JSONL last for back-compat.
-                self._write_to_event_log(event)
-                self._projector.apply(event)
-                self._db.commit()
-                self._append_jsonl(self._owners_path, rec.__dict__)
-            else:
-                self._append_jsonl(self._owners_path, rec.__dict__)
-                # RDR-137 followup CRITICAL-1: COALESCE-preserve head_hash
-                # so the legacy non-event-sourced re-register path doesn't
-                # wipe the column (set_owner_head_hash writes are epsilon-
-                # allowed and live only in SQLite + the JSONL replay layer).
-                self._db.execute(
-                    "INSERT OR REPLACE INTO owners "
-                    "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root, head_hash) "
-                    "VALUES (?, ?, ?, ?, ?, ?, "
-                    "COALESCE((SELECT head_hash FROM owners WHERE name = ? AND owner_type = ?), ''))",
-                    (prefix, name, owner_type, repo_hash, description, repo_root, name, owner_type),
+                    repo_root=repo_root,
                 )
-                self._db.commit()
-                self._emit_shadow_event(event)
-            return Tumbler.parse(prefix)
-        finally:
-            self._release_lock(dir_fd)
+                event = _make_event(
+                    _OwnerRegisteredPayload(
+                        owner_id=prefix,
+                        name=name,
+                        owner_type=owner_type,
+                        repo_root=repo_root,
+                        repo_hash=repo_hash,
+                        description=description,
+                    ),
+                    v=0,
+                )
+                if self._event_sourced_enabled:
+                    # Event-sourced path: events.jsonl first, projector
+                    # writes SQLite, legacy JSONL last for back-compat.
+                    self._write_to_event_log(event)
+                    self._projector.apply(event)
+                    self._db.commit()
+                    self._append_jsonl(self._owners_path, rec.__dict__)
+                else:
+                    self._append_jsonl(self._owners_path, rec.__dict__)
+                    # RDR-137 followup CRITICAL-1: COALESCE-preserve head_hash
+                    # so the legacy non-event-sourced re-register path doesn't
+                    # wipe the column (set_owner_head_hash writes are epsilon-
+                    # allowed and live only in SQLite + the JSONL replay layer).
+                    self._db.execute(
+                        "INSERT OR REPLACE INTO owners "
+                        "(tumbler_prefix, name, owner_type, repo_hash, description, repo_root, head_hash) "
+                        "VALUES (?, ?, ?, ?, ?, ?, "
+                        "COALESCE((SELECT head_hash FROM owners WHERE name = ? AND owner_type = ?), ''))",
+                        (prefix, name, owner_type, repo_hash, description, repo_root, name, owner_type),
+                    )
+                    self._db.commit()
+                    self._emit_shadow_event(event)
+                return Tumbler.parse(prefix)
+            finally:
+                self._release_lock(dir_fd)
 
     def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
         """Delegates to ``_DocumentOps.owner_for_repo`` (nexus-mbm)."""

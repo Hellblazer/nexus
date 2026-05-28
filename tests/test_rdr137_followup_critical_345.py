@@ -240,3 +240,50 @@ class TestCriticalFiveTOCTOUOwnerRace:
             f"Expected 1 owner row for repo_hash={repo_hash!r}; "
             f"saw {len(rows)}: {rows}. TOCTOU race created duplicates."
         )
+
+    def test_register_owner_rechecks_repo_hash_inside_lock(
+        self, cat: Catalog, repo: Path,
+    ) -> None:
+        """register_owner re-checks repo_hash inside its locked
+        critical section and returns the existing owner instead of
+        allocating a new prefix. This is the cross-process fix path:
+        the directory flock serializes processes, then the re-check
+        returns the winner's tumbler. (Threads can't easily simulate
+        the flock-serialized cross-process case in a unit test, so we
+        exercise the synchronous re-check directly — a second
+        register_owner call for the same repo_hash must NOT mint a
+        second prefix.)
+
+        The projector uses INSERT OR REPLACE which does NOT raise
+        IntegrityError on the UNIQUE(repo_hash) conflict, so the
+        re-check — not the index error path — is the load-bearing
+        guarantee.
+        """
+        from nexus.repo_identity import _repo_identity
+        _, repo_hash = _repo_identity(repo)
+
+        first = cat.register_owner(
+            "myrepo", "repo", repo_hash=repo_hash, repo_root=str(repo),
+        )
+        # Direct second register_owner with the SAME repo_hash — the
+        # in-lock re-check must short-circuit and return `first`.
+        second = cat.register_owner(
+            "myrepo", "repo", repo_hash=repo_hash, repo_root=str(repo),
+        )
+        assert str(first) == str(second)
+
+        rows = cat._db.execute(
+            "SELECT tumbler_prefix FROM owners WHERE repo_hash = ?",
+            (repo_hash,),
+        ).fetchall()
+        assert len(rows) == 1
+
+    def test_curator_owners_exempt_from_repo_hash_recheck(
+        self, cat: Catalog,
+    ) -> None:
+        """Curator owners (no repo_hash) are exempt from the re-check;
+        two curator registrations with distinct names produce distinct
+        owners (the composite UNIQUE(name, owner_type) still applies)."""
+        a = cat.register_owner("papers-a", "curator")
+        b = cat.register_owner("papers-b", "curator")
+        assert str(a) != str(b)
