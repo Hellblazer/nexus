@@ -961,3 +961,31 @@ class T2Database:
             **extra,
         )
         return len(expired_ids)
+
+    def complete_aspect(self, record_fields: dict[str, Any]) -> bool:
+        """Persist an extracted aspect and clear its queue row in one call.
+
+        nexus-zir76 (RDR-128 follow-up): the aspect worker previously
+        upserted ``document_aspects`` and called ``aspect_queue.mark_done``
+        via two DIRECT ``memory.db`` writes, competing with the daemon for
+        the single WAL writer lock. When the direct ``mark_done`` (or the
+        failure path's ``mark_failed``) lost that race, the row was
+        orphaned ``in_progress`` until the ``reclaim_stale`` backstop.
+        Folding both writes into one daemon-routable method keeps the
+        worker off the direct write path and closes that window.
+
+        *record_fields* is ``dataclasses.asdict(AspectRecord)`` — a plain
+        JSON-shaped dict, because the daemon wire protocol decodes a
+        dataclass argument to its field dict (it does not reconstruct the
+        object). The ``AspectRecord`` is rebuilt here, server-side.
+
+        Returns the ``document_aspects.upsert`` result. ``mark_done`` is
+        idempotent, so a reclaim-driven re-extraction after a crash
+        between the two writes simply re-upserts — no duplicate, no stuck
+        row.
+        """
+        from nexus.db.t2.document_aspects import AspectRecord
+        record = AspectRecord(**record_fields)
+        upserted = self.document_aspects.upsert(record)
+        self.aspect_queue.mark_done(record.collection, record.source_path)
+        return upserted

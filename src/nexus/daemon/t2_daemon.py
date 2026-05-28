@@ -433,6 +433,7 @@ _T2_STORE_ATTRS: tuple[str, ...] = (
 _T2_DATABASE_METHODS: tuple[str, ...] = (
     "rename_collection_cascade",
     "expire",
+    "complete_aspect",
     "hello",
 )
 
