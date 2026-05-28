@@ -104,6 +104,81 @@ class TestGenerateContextL1:
         assert "Code Topic 4" in content
         assert "Code Topic 5" not in content
 
+    def test_dedups_identical_root_topic_rows(self, db: T2Database, tmp_path: Path) -> None:
+        """nexus-9iw41: collapse rows with identical (collection, label, doc_count).
+
+        Production surfaced a phantom collection ``docs__1-2188`` with 5
+        ROOT topic rows all labelled ``Project knowledge findings content``
+        with ``doc_count=144`` (IDs 3401/3564/3727/3890/4053). Pre-fix the
+        Knowledge Map showed all 5 as separate top-N entries — the docs
+        side of the injected map was literally
+        ``Project knowledge findings content (144), Project knowledge
+        findings content (144), …`` five times.
+
+        Dedup is keyed on the exact tuple ``(collection, label, doc_count)``
+        so legitimate distinct labels (or distinct doc_counts on the same
+        label) are unaffected.
+        """
+        from nexus.context import generate_context_l1
+
+        # Five identical phantom rows (the production smoking-gun shape) +
+        # one legitimate distinct topic in the same collection so the test
+        # can prove the dedup didn't accidentally drop the real entry.
+        for _ in range(5):
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("Phantom Duplicate", "docs__phantom", 144,
+                 "2026-05-28T00:00:00Z", "accepted"),
+            )
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("Legitimate Distinct", "docs__phantom", 90,
+             "2026-05-28T00:00:00Z", "accepted"),
+        )
+        db.taxonomy.conn.commit()
+
+        out = tmp_path / "context_l1.txt"
+        generate_context_l1(db.taxonomy, output_path=out)
+        content = out.read_text()
+
+        # The phantom label appears AT MOST ONCE (the five copies collapsed).
+        assert content.count("Phantom Duplicate") == 1, (
+            "dedup failed: phantom label appears more than once in the output"
+        )
+        # The legitimate distinct row in the same collection is preserved.
+        assert "Legitimate Distinct" in content
+
+    def test_dedups_preserves_same_label_distinct_count(
+        self, db: T2Database, tmp_path: Path,
+    ) -> None:
+        """Dedup must NOT collapse same-label rows with different doc_counts.
+
+        Same label across two collections with different counts is a
+        legitimate case (e.g. ``Project knowledge findings`` at 596 in
+        ``docs__1-1`` vs 144 in some other live collection). The dedup
+        key includes ``doc_count`` so both survive.
+        """
+        from nexus.context import generate_context_l1
+
+        db.taxonomy.conn.executemany(
+            "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                ("Shared Label", "docs__a", 100, "2026-05-28T00:00:00Z", "accepted"),
+                ("Shared Label", "docs__b", 50, "2026-05-28T00:00:00Z", "accepted"),
+            ],
+        )
+        db.taxonomy.conn.commit()
+
+        out = tmp_path / "context_l1.txt"
+        generate_context_l1(db.taxonomy, output_path=out)
+        content = out.read_text()
+
+        # Both rows survive because doc_count differs.
+        assert content.count("Shared Label") == 2
+
     def test_excludes_child_topics(self, db: T2Database, tmp_path: Path) -> None:
         """Only root topics (parent_id IS NULL), not children from split."""
         from nexus.context import generate_context_l1
