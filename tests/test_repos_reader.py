@@ -323,3 +323,40 @@ class TestListReposDual:
         assert not any(
             e.get("event") == "repos_list_dual_disagreement" for e in cap
         )
+
+
+class TestShimWarnGraduation:
+    """RDR-137 P2b (nexus-tts0d.5, OQ-10): env-var flips shim log level."""
+
+    def test_default_level_is_debug(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from nexus.repos import _shim_log_level
+        monkeypatch.delenv("NEXUS_REPOS_SHIM_WARN", raising=False)
+        assert _shim_log_level() == "debug"
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes"])
+    def test_env_var_promotes_to_warning(
+        self, monkeypatch: pytest.MonkeyPatch, value: str,
+    ) -> None:
+        from nexus.repos import _shim_log_level
+        monkeypatch.setenv("NEXUS_REPOS_SHIM_WARN", value)
+        assert _shim_log_level() == "warning"
+
+    def test_fallback_event_fires_at_warning_when_promoted(
+        self, cat: Catalog, repo: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NEXUS_REPOS_SHIM_WARN", "1")
+        reg = RegistryHelper(tmp_path / "repos.json")
+        reg.add(repo)
+        with capture_logs() as cap:
+            read_dual(repo, cat=cat, registry_path=tmp_path / "repos.json")
+        events = [
+            e for e in cap if e.get("event") == "repos_read_dual_fallback"
+        ]
+        assert events
+        assert events[0]["log_level"] == "warning"
+
+
+# Alias so the TestShimWarnGraduation test can import without trampling on
+# the conftest-level pytest fixture machinery.
+RegistryHelper = RepoRegistry

@@ -34,6 +34,7 @@ the import one PR at a time without changing field names.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -44,6 +45,30 @@ if TYPE_CHECKING:  # pragma: no cover — type-hint-only import
     from nexus.catalog.catalog import Catalog
 
 _log = structlog.get_logger(__name__)
+
+
+def _shim_log_level() -> str:
+    """Return the log-level token for the dual-read shim events.
+
+    RDR-137 Phase 2b (nexus-tts0d.5, OQ-10): DEBUG→WARN graduation
+    mechanism. Defaults to ``"debug"`` (Phase 1.5 backfill
+    incompleteness produces legitimate fallback fires during cutover).
+
+    Operators flip to WARN by setting ``NEXUS_REPOS_SHIM_WARN=1``
+    after observing 24 consecutive hours of zero fallback fires in
+    ``~/.config/nexus/logs/mcp.log`` (the documented threshold).
+    Promotion is a config flip, not a code edit — once the env var
+    is set, the next process restart picks it up.
+    """
+    if os.environ.get("NEXUS_REPOS_SHIM_WARN", "").strip() in ("1", "true", "yes"):
+        return "warning"
+    return "debug"
+
+
+def _emit_shim_event(event: str, **fields: object) -> None:
+    """Emit a shim observability event at the currently configured level."""
+    level = _shim_log_level()
+    getattr(_log, level)(event, **fields)
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,7 +208,7 @@ def read_dual(
         if reg_rec is not None:
             disagreements = _diff_fields(cat_rec, reg_rec)
             if disagreements:
-                _log.debug(
+                _emit_shim_event(
                     "repos_read_dual_disagreement",
                     repo=str(repo),
                     disagreements=disagreements,
@@ -191,7 +216,7 @@ def read_dual(
         return cat_rec
 
     if reg_rec is not None:
-        _log.debug(
+        _emit_shim_event(
             "repos_read_dual_fallback",
             repo=str(repo),
             fallback_branch="registry",
@@ -257,7 +282,7 @@ def list_repos_dual(
     only_cat = cat_paths - reg_paths
     only_reg = reg_paths - cat_paths
     if registry_path.exists() and (only_cat or only_reg):
-        _log.debug(
+        _emit_shim_event(
             "repos_list_dual_disagreement",
             only_catalog=sorted(only_cat),
             only_registry=sorted(only_reg),
