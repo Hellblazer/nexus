@@ -60,7 +60,12 @@ def _shim_log_level() -> str:
     Promotion is a config flip, not a code edit — once the env var
     is set, the next process restart picks it up.
     """
-    if os.environ.get("NEXUS_REPOS_SHIM_WARN", "").strip() in ("1", "true", "yes"):
+    # RDR-137 followup SIG-11 (nexus-43qgm.11): case-insensitive so
+    # `True` / `YES` / `On` (common operator habits, shell-script
+    # idioms, k8s ConfigMap booleans) all flip the gate.
+    if os.environ.get("NEXUS_REPOS_SHIM_WARN", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
         return "warning"
     return "debug"
 
@@ -112,8 +117,17 @@ def from_catalog(repo: Path, *, cat: Catalog) -> RepoRecord | None:
         return None
 
     owner_id = str(owner).replace(".", "-")
+    # RDR-137 followup SIG-6 (nexus-43qgm.6): ORDER BY name DESC so
+    # the OQ-5 first-wins selection is deterministic. For conformant
+    # names the trailing ``__v<n>`` segment makes lex-latest the
+    # highest model version (e.g. ``knowledge__owner__voyage-context-3__v2``
+    # wins over ``__v1``). Without the ORDER BY, SQLite's
+    # implementation-defined row order made the docs_collection slot
+    # non-deterministic for owners with multiple collections of the
+    # same content_type (post-model-upgrade state).
     rows = cat._db.execute(
-        "SELECT name, content_type FROM collections WHERE owner_id = ?",
+        "SELECT name, content_type FROM collections WHERE owner_id = ? "
+        "ORDER BY name DESC",
         (owner_id,),
     ).fetchall()
 
@@ -268,6 +282,19 @@ def read_dual(
                     repo=str(repo),
                     disagreements=disagreements,
                 )
+            # RDR-137 followup SIG-8 (nexus-43qgm.8): also surface the
+            # asymmetric case where the catalog has the owner but a
+            # field is empty AND the registry has a value. _diff_fields
+            # intentionally suppresses empty-vs-non-empty as a partial-
+            # record case; we still want operators to see when catalog
+            # is silently stale relative to registry during cutover.
+            catalog_missing = _catalog_missing_fields(cat_rec, reg_rec)
+            if catalog_missing:
+                _emit_shim_event(
+                    "repos_read_dual_catalog_missing",
+                    repo=str(repo),
+                    catalog_missing=catalog_missing,
+                )
         return cat_rec
 
     if reg_rec is not None:
@@ -282,12 +309,38 @@ def read_dual(
     return None
 
 
+def _catalog_missing_fields(
+    cat_rec: RepoRecord, reg_rec: RepoRecord,
+) -> dict[str, str]:
+    """RDR-137 followup SIG-8: surface fields the catalog is silently
+    missing but the registry has populated.
+
+    Distinct from :func:`_diff_fields` (mutual disagreement). This
+    captures the asymmetric case that arises during Phase 3 cutover
+    when the catalog has the owner but not all per-content-type
+    collections registered yet, while the legacy registry still has
+    them.
+    """
+    fields = (
+        "name", "collection", "code_collection", "docs_collection",
+        "rdr_collection", "head_hash",
+    )
+    missing: dict[str, str] = {}
+    for f in fields:
+        if not getattr(cat_rec, f) and getattr(reg_rec, f):
+            missing[f] = getattr(reg_rec, f)
+    return missing
+
+
 def _diff_fields(a: RepoRecord, b: RepoRecord) -> dict[str, dict[str, str]]:
     """Return field-by-field disagreements between two RepoRecords.
 
     Empty fields on either side are NOT a disagreement (catalog may
     have not registered the docs_collection yet for a code-only
     indexed repo; that's a partial-record case, not a divergence).
+    The asymmetric catalog-empty/registry-has-value case is surfaced
+    separately via :func:`_catalog_missing_fields` so cutover
+    observability is preserved (RDR-137 followup SIG-8).
     """
     fields = (
         "name", "collection", "code_collection", "docs_collection",

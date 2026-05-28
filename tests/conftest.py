@@ -404,6 +404,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # appear in synthetic conformant collection names used as
     # adapter-test fixtures; no Voyage call is ever made.
     "test_rdr137_followup_critical_345.py",
+    # RDR-137 followup SIG-6/8/11 (nexus-43qgm.6,8,11): same pattern
+    # — voyage tokens in synthetic collection-name fixtures for the
+    # OQ-5 deterministic-ordering and catalog-missing observability
+    # tests; no Voyage call.
+    "test_rdr137_followup_reader_sigs.py",
     # RDR-137 P3.5 (nexus-tts0d.10): same pattern — phantom
     # docs__1-2188 in the regression fixture for nexus-9iw41.
     "test_context_catalog_cutover.py",
