@@ -158,7 +158,7 @@ class AspectExtractionWorker:
         self,
         *,
         poll_interval: float = 2.0,
-        stale_timeout_seconds: int = 300,
+        stale_timeout_seconds: int = 60,
         batch_size: int = _DEFAULT_BATCH_SIZE,
     ) -> None:
         self._poll_interval = poll_interval
@@ -272,10 +272,12 @@ class AspectExtractionWorker:
                 # contending on its single WAL writer lock. This is the
                 # every-2s contention behind the recurring
                 # `aspect_worker_claim_failed` / `database is locked`
-                # incidents (memory: daemon-restart-not-worker-fix). The
-                # work-bounded persist below stays direct (t2_ctx) because
-                # document_aspects.upsert takes an AspectRecord the daemon
-                # wire protocol cannot round-trip.
+                # incidents (memory: daemon-restart-not-worker-fix).
+                # nexus-zir76: the persist path (_process_row /
+                # _process_batch) now routes too, via the daemon-side
+                # `complete_aspect` method (AspectRecord travels as an
+                # asdict() field dict). The worker no longer opens
+                # memory.db on ANY path.
                 def _poll(t2):
                     if do_reclaim:
                         t2.aspect_queue.reclaim_stale(
@@ -316,8 +318,10 @@ class AspectExtractionWorker:
         P5.1 / nexus-8g79.34 — the batch path now mirrors the
         single-doc extractor's read contract).
         """
+        import dataclasses
+
         from nexus.aspect_extractor import select_config
-        from nexus.mcp_infra import t2_ctx
+        from nexus.mcp_infra import t2_index_write
 
         # extract_aspects_batch requires every input to share a single
         # ExtractorConfig. claim_batch grabs FIFO across collections, so
@@ -360,13 +364,14 @@ class AspectExtractionWorker:
                 row_count=len(rows),
                 exc_info=True,
             )
+            # nexus-zir76: route through the daemon, never direct memory.db.
+            def _fail_all(db):  # noqa: ANN001
+                for row in rows:
+                    db.aspect_queue.mark_failed(
+                        row.collection, row.source_path, error=str(exc),
+                    )
             try:
-                with t2_ctx() as t2:
-                    for row in rows:
-                        t2.aspect_queue.mark_failed(
-                            row.collection, row.source_path,
-                            error=str(exc),
-                        )
+                t2_index_write(_fail_all)
             except Exception:
                 _log.warning(
                     "aspect_worker_batch_mark_failed_persist_failed",
@@ -374,45 +379,78 @@ class AspectExtractionWorker:
                 )
             return
 
-        try:
-            with t2_ctx() as t2:
-                for row, record in zip(rows, records):
-                    if record is None:
-                        # Unsupported collection — drop silently.
-                        t2.aspect_queue.mark_done(
-                            row.collection, row.source_path,
-                        )
-                        continue
-                    # nexus-8g79.34: ExtractFail per-row — typed read-
-                    # failure sentinel from URI-based reading. Mark
-                    # queue done so we don't retry an unreadable
-                    # source on every drain; operators re-enqueue
-                    # manually after fixing source identity (mirrors
-                    # _process_row's handling).
-                    if isinstance(record, ExtractFail):
-                        _log.info(
-                            "aspect_worker_batch_extract_skip",
-                            uri=record.uri,
-                            reason=record.reason,
-                            detail=record.detail,
-                        )
-                        t2.aspect_queue.mark_done(
-                            row.collection, row.source_path,
-                        )
-                        continue
-                    t2.document_aspects.upsert(record)
-                    t2.aspect_queue.mark_done(
+        # nexus-zir76: one routed write_fn does the whole batch's persist;
+        # each row clears via the daemon (``complete_aspect`` /
+        # ``mark_done``) instead of a direct memory.db transaction.
+        def _persist_all(db):  # noqa: ANN001
+            for row, record in zip(rows, records):
+                if record is None:
+                    # Unsupported collection — drop silently.
+                    db.aspect_queue.mark_done(
                         row.collection, row.source_path,
                     )
+                    continue
+                # nexus-8g79.34: ExtractFail per-row — typed read-failure
+                # sentinel from URI-based reading. Mark queue done so we
+                # don't retry an unreadable source on every drain;
+                # operators re-enqueue manually after fixing source
+                # identity (mirrors _process_row's handling).
+                if isinstance(record, ExtractFail):
+                    _log.info(
+                        "aspect_worker_batch_extract_skip",
+                        uri=record.uri,
+                        reason=record.reason,
+                        detail=record.detail,
+                    )
+                    db.aspect_queue.mark_done(
+                        row.collection, row.source_path,
+                    )
+                    continue
+                db.complete_aspect(dataclasses.asdict(record))
+        try:
+            t2_index_write(_persist_all)
         except Exception:
             _log.warning(
                 "aspect_worker_batch_persist_failed",
                 exc_info=True,
             )
 
+    def _mark_failed_routed(self, row, error: str) -> None:
+        """Route a queue ``mark_failed`` through the daemon (nexus-zir76).
+
+        The failure path must not open ``memory.db`` directly either: a
+        direct ``mark_failed`` losing the WAL writer race is exactly what
+        orphaned rows ``in_progress`` until the reclaim backstop. If even
+        the routed write raises (daemon down AND the direct fallback
+        contended), ``reclaim_stale`` recovers the row; we log and move on
+        without killing the worker thread.
+        """
+        from nexus.mcp_infra import t2_index_write
+        try:
+            t2_index_write(
+                lambda db: db.aspect_queue.mark_failed(
+                    row.collection, row.source_path, error=error,
+                )
+            )
+        except Exception:
+            _log.warning(
+                "aspect_worker_mark_failed_persist_failed",
+                collection=row.collection,
+                source_path=row.source_path,
+                exc_info=True,
+            )
+
     def _process_row(self, row) -> None:
-        """Run extraction on one queue row and dispatch on the result."""
-        from nexus.mcp_infra import t2_ctx
+        """Run extraction on one queue row and dispatch on the result.
+
+        nexus-zir76: every persist routes through ``t2_index_write`` (the
+        daemon when reachable, a direct fallback when not) so the worker
+        never opens ``memory.db`` directly and cannot contend with the
+        daemon for the single WAL writer lock.
+        """
+        import dataclasses
+
+        from nexus.mcp_infra import t2_index_write
         try:
             # Content was captured at enqueue time when in scope (MCP
             # store_put). For CLI rows where content was not in scope
@@ -451,52 +489,46 @@ class AspectExtractionWorker:
                 source_path=row.source_path,
                 exc_info=True,
             )
-            try:
-                with t2_ctx() as t2:
-                    t2.aspect_queue.mark_failed(
-                        row.collection, row.source_path,
-                        error=str(exc),
-                    )
-            except Exception:
-                _log.warning(
-                    "aspect_worker_mark_failed_persist_failed",
-                    exc_info=True,
-                )
+            self._mark_failed_routed(row, str(exc))
             return
 
         try:
-            with t2_ctx() as t2:
-                if record is None:
-                    # Unsupported collection — drop silently.
-                    t2.aspect_queue.mark_done(
+            if record is None:
+                # Unsupported collection — drop silently.
+                t2_index_write(
+                    lambda db: db.aspect_queue.mark_done(
                         row.collection, row.source_path,
                     )
-                    return
-                # RDR-096 P1.2: ExtractFail is the typed read-failure
-                # sentinel. No row written; mark queue done so we
-                # don't retry the unreadable source on every drain.
-                # Operators can re-enqueue manually after fixing the
-                # source identity.
-                if isinstance(record, ExtractFail):
-                    _log.info(
-                        "aspect_worker_extract_skip",
-                        uri=record.uri,
-                        reason=record.reason,
-                        detail=record.detail,
-                    )
-                    t2.aspect_queue.mark_done(
-                        row.collection, row.source_path,
-                    )
-                    return
-                # AspectRecord — either a populated record or a null-
-                # fields record from a subprocess-side failure (the
-                # extractor already retried up to 3 attempts
-                # internally for those paths). Persist and remove
-                # from the queue.
-                t2.document_aspects.upsert(record)
-                t2.aspect_queue.mark_done(
-                    row.collection, row.source_path,
                 )
+                return
+            # RDR-096 P1.2: ExtractFail is the typed read-failure
+            # sentinel. No row written; mark queue done so we
+            # don't retry the unreadable source on every drain.
+            # Operators can re-enqueue manually after fixing the
+            # source identity.
+            if isinstance(record, ExtractFail):
+                _log.info(
+                    "aspect_worker_extract_skip",
+                    uri=record.uri,
+                    reason=record.reason,
+                    detail=record.detail,
+                )
+                t2_index_write(
+                    lambda db: db.aspect_queue.mark_done(
+                        row.collection, row.source_path,
+                    )
+                )
+                return
+            # AspectRecord — either a populated record or a null-fields
+            # record from a subprocess-side failure (the extractor
+            # already retried up to 3 attempts internally for those
+            # paths). nexus-zir76: persist + clear the queue row in one
+            # daemon-routed call (``complete_aspect``) so the worker
+            # never writes memory.db directly. asdict() because the wire
+            # protocol decodes a dataclass arg to its field dict.
+            t2_index_write(
+                lambda db: db.complete_aspect(dataclasses.asdict(record))
+            )
         except Exception as exc:
             _log.warning(
                 "aspect_worker_persist_failed",
@@ -504,17 +536,7 @@ class AspectExtractionWorker:
                 source_path=row.source_path,
                 exc_info=True,
             )
-            try:
-                with t2_ctx() as t2:
-                    t2.aspect_queue.mark_failed(
-                        row.collection, row.source_path,
-                        error=str(exc),
-                    )
-            except Exception:
-                _log.warning(
-                    "aspect_worker_mark_failed_secondary_persist_failed",
-                    exc_info=True,
-                )
+            self._mark_failed_routed(row, str(exc))
 
 
 # ── Module-level singleton ──────────────────────────────────────────────────
@@ -545,18 +567,56 @@ def _worker_lock_path(locks_dir: Path | None = None) -> Path:
     return base / f"aspect_worker.{os.getpid()}"
 
 
+def _sweep_dead_worker_locks(locks_dir: Path) -> None:
+    """Remove ``aspect_worker.<pid>`` lock files whose PID is dead.
+
+    nexus-zir76: ``_remove_worker_lock`` only runs on a clean
+    ``stop_worker``; a ``-9`` or a crash leaks the file. Over many
+    sessions these accumulate unbounded (85 found in the wild on
+    2026-05-27). Sweeping dead-PID locks at worker startup bounds the
+    pileup. Live locks (including this process's own) are left intact;
+    non-PID-shaped files are ignored. Best-effort — never raises.
+    """
+    import os
+
+    if not locks_dir.exists():
+        return
+    own_pid = os.getpid()
+    for lock_file in locks_dir.glob("aspect_worker.*"):
+        try:
+            pid = int(lock_file.name.rsplit(".", 1)[-1])
+        except ValueError:
+            continue  # not a PID-suffixed lock file
+        if pid == own_pid:
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            try:
+                lock_file.unlink(missing_ok=True)
+                _log.info("aspect_worker_stale_lock_swept", pid=pid)
+            except Exception:
+                pass
+        except PermissionError:
+            # Alive under another user — leave it.
+            continue
+
+
 def _write_worker_lock(locks_dir: Path | None = None) -> None:
     """Write a process-scoped lock file advertising this worker.
 
-    Non-fatal if the locks directory cannot be created or the file cannot
-    be written — the lock is advisory; a missing file merely means
-    ``drain_worker`` from another process will not detect this worker.
+    Sweeps dead-PID lock files first (nexus-zir76) so leaked locks from
+    crashed/killed predecessors do not accumulate. Non-fatal if the locks
+    directory cannot be created or the file cannot be written — the lock
+    is advisory; a missing file merely means ``drain_worker`` from another
+    process will not detect this worker.
     """
     import os
 
     try:
         lock = _worker_lock_path(locks_dir)
         lock.parent.mkdir(parents=True, exist_ok=True)
+        _sweep_dead_worker_locks(lock.parent)
         lock.write_text(str(os.getpid()))
     except Exception:
         _log.warning("aspect_worker_lock_write_failed", exc_info=True)
@@ -576,7 +636,7 @@ def _remove_worker_lock(locks_dir: Path | None = None) -> None:
 def ensure_worker_started(
     *,
     poll_interval: float = 2.0,
-    stale_timeout_seconds: int = 300,
+    stale_timeout_seconds: int = 60,
     _locks_dir: Path | None = None,
 ) -> AspectExtractionWorker:
     """Lazy-start the singleton worker. Returns the worker.

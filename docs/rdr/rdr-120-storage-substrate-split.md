@@ -2,17 +2,29 @@
 title: "Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers"
 id: RDR-120
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-19
 accepted_date: 2026-05-21
-related_issues: []
+closed_date: 2026-05-27
+related_issues: [nexus-gxjn2]
 related_rdrs: [RDR-004, RDR-041, RDR-105, RDR-108, RDR-112]
 supersedes: [RDR-112]
 related_tests: []
-implementation_notes: ""
+implementation_notes: >
+  Closed 2026-05-27 (reason: implemented). Substrate-only scope shipped in
+  full across releases 4.34.0-4.34.2: P0 lint scaffold + content-seeding
+  audit, P1 T3 daemon, P2 T3 cutover, P3a/P3b T2 daemon + migration-ownership
+  transfer, P4 T2 cutover, P5 catalog collapse, P6 direct-mode decommission.
+  Epic nexus-gxjn2 closed 2026-05-22. The 30-day calendar moratorium-lift was
+  replaced by the empirical substrate stress-validation arc (nexus-57pwo,
+  closed) plus the container-integration operator guide (nexus-ai5ic, closed).
+  Out-of-scope-by-design follow-ons remain tracked as separate open beads
+  (RDR-120 is "substrate-only, no co-shipped consumers"): consumer cutover
+  (nexus-vyqah P4.B, nexus-dxb4), the phase-review-gate skill enhancement
+  (nexus-4u6mt), and the P3.2 regression-alert tuning (nexus-lky6).
 ---
 
 # RDR-120: Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers

@@ -24,10 +24,38 @@ def memory() -> None:
 @click.option("--title", "-t", required=True, help="Entry title/filename")
 @click.option("--tags", default="", help="Comma-separated tags")
 @click.option("--ttl", default="30d", show_default=True, help="TTL: Nd, Nw, or permanent")
-def put_cmd(content: str, project: str, title: str, tags: str, ttl: str) -> None:
+@click.option(
+    "--merge",
+    is_flag=True,
+    default=False,
+    help="Canonical-fact merge: fold into an existing high-overlap entry "
+    "(non-destructive) instead of inserting a near-duplicate.",
+)
+@click.option(
+    "--merge-threshold",
+    type=float,
+    default=0.5,
+    show_default=True,
+    help="Word-set Jaccard threshold for --merge.",
+)
+def put_cmd(
+    content: str,
+    project: str,
+    title: str,
+    tags: str,
+    ttl: str,
+    merge: bool,
+    merge_threshold: float,
+) -> None:
     """Write content to the T2 memory bank.
 
     Use '-' as CONTENT to read from stdin.
+
+    With ``--merge`` (bead nexus-lhxz4), the new content is folded into the
+    most word-set-overlapping existing entry in the project when overlap is
+    at or above ``--merge-threshold`` (non-destructive: both texts are kept),
+    instead of inserting a near-duplicate. Without it, the default upsert
+    keyed on (project, title) is unchanged.
 
     RDR-120 P6 follow-up (nexus-w6txl): routes through the T2 daemon
     so host CLI + Cowork-bridged MCP + dev-container CLI all share
@@ -41,10 +69,19 @@ def put_cmd(content: str, project: str, title: str, tags: str, ttl: str) -> None
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     with t2_handle() as db:
-        row_id = db.memory.put(
-            project=project, title=title, content=content, tags=tags, ttl=ttl_days,
-        )
-    click.echo(f"Stored: {project}/{title} (id={row_id})")
+        if merge:
+            row_id, action = db.memory.put_or_merge(
+                project=project, title=title, content=content, tags=tags,
+                ttl=ttl_days, min_similarity=merge_threshold,
+            )
+        else:
+            row_id = db.memory.put(
+                project=project, title=title, content=content, tags=tags,
+                ttl=ttl_days,
+            )
+            action = "inserted"
+    verb = "Merged into" if action == "merged" else "Stored"
+    click.echo(f"{verb}: {project}/{title} (id={row_id})")
 
 
 @memory.command("get")

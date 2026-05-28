@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.3.0] - 2026-05-27
+
+Adds an opt-in canonical-fact merge to the memory write path and closes the
+last single-writer hole in the T2 aspect-extraction worker: the persist path
+that RDR-128/129 left on the direct `memory.db` write path.
+
+### Added
+
+- **`nx memory put --merge` / `--merge-threshold`: opt-in canonical-fact merge at write time (nexus-lhxz4).** `MemoryStore.put_or_merge` folds new content into the most word-set-overlapping existing entry in the project when Jaccard overlap is at or above the threshold (default 0.5), preserving both source texts under a provenance separator, instead of a blind upsert. Same-title collisions still take the identity-upsert path, and empty content always inserts. The default `nx memory put` path is unchanged; the merge is strictly opt-in.
+
+### Fixed
+
+- **The aspect-extraction worker no longer writes `memory.db` directly (nexus-zir76).** RDR-128 routed the worker's poll/claim/reclaim through the T2 daemon but left the persist path (`document_aspects.upsert` plus queue `mark_done` / `mark_failed`) on direct `memory.db` writes, where it competed with the daemon for the single WAL writer lock. A failed direct `mark_failed` then orphaned the queue row `in_progress` until the reclaim backstop fired (observed: a row stuck about 5 minutes during a PDF incorporation). A new daemon-routable `T2Database.complete_aspect` folds the upsert and `mark_done` into one server-side call; `_process_row` and `_process_batch` now persist exclusively through `t2_index_write`; and the worker sweeps dead `aspect_worker.<pid>` lock files at startup. The stuck-row reclaim backstop drops from 300s to 60s.
+
+### Docs
+
+- RDR-131/132/133 stubbed from the MemForest x nexus leverage synthesis (#987). RDR-120 closed (substrate-only scope shipped in 4.34.x).
+
 ## [5.2.0] - 2026-05-27
 
 Completes RDR-129 (T2 daemon write-path hardening): a comprehensive two-layer
