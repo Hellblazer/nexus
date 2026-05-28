@@ -60,30 +60,62 @@ Surfaced during the 2026-05-28 SessionStart injection audit. nexus-9iw41 fixed t
 
 ## Research Findings
 
-### Investigation
+### Investigation (2026-05-28 codebase-deep-analyzer dispatch)
 
-To be completed during `/conexus:rdr-research`. Outline of the work:
+**Consumer inventory** — 11 modules grep'd from `src/nexus/`; each access pattern classified with `file:line` precision (T2: `nexus_rdr/137-research-consumer-inventory-2026-05-28`).
 
-1. **Consumer inventory** — for each of the 11 modules: classify as read-only, write-only, or read-modify-write; capture the exact fields touched; note whether the consumer needs `status` or only the collection mapping. Output: a table that scopes the cutover work.
-2. **Catalog query catalog** — for each access pattern in (1), draft the equivalent catalog SQL (or T2Database/T2Client call). Confirm the catalog actually carries the needed information; surface any gaps that need a schema addition.
-3. **Worktree-handling probe** — read `nexus.indexer`'s code path that calls `RepoRegistry.put(...)` for a new repo. Determine why main and worktree get different tumblers in some cases and the same in others. Document the intended semantics; choose whether to preserve, collapse, or formalise.
-4. **Failure-mode spike** — reproduce the 1-2188 misassignment in a sandbox. Confirm the writer's path, then verify the catalog-backed replacement rejects an analogous bad input.
+| Module | Access pattern | Fields touched |
+|---|---|---|
+| `registry.py` | source being killed | — |
+| `health.py:498-534` | read-only path enumeration | none (only `reg.all()` keys) |
+| `context.py:46-86` | read-only | `collection`, `docs_collection` — the nexus-9iw41 source |
+| `indexer.py:885-965, 1939-1949` | read-modify-write | reads `code_collection`/`docs_collection`; writes `status` lifecycle + `head_hash`. Primary writer. |
+| `catalog/catalog.py:1012` | uses `_repo_identity()` utility only, NOT the registry class | — |
+| `catalog/catalog_docs.py:446-484` | fallback-only enumeration (fires only when `owners.repo_root` empty) | repo path strings |
+| `mcp/catalog.py:277-285` | read-only path enumeration for absolute-path relativization | repo path strings |
+| `commands/catalog.py:1003 / 2989 / 3196` | read-only at 3 sites | repo paths + hash8 suffix |
+| `commands/collection.py:544-554` | read-only collection→repo lookup | `collection`/`docs_collection` |
+| `commands/doctor.py:1343-1373` | fallback-only (identical to catalog_docs.py) | repo path strings |
+| `commands/index.py:15-27, 244-284, 437-439, 462-503` | read-modify-write | reads collection names; **uniquely** mutates `docs_collection` prefix via `--corpus knowledge` rewrite (lines 277-282) |
+
+**Catalog parity probe** — every collection-name field and the repo path resolve to direct catalog equivalents (`collections.name` joined to `owners.repo_root` by `owner_id`). Live catalog has 10 repo owners with non-empty `repo_root`. One narrow gap: `head_hash` is per-repo in registry but per-document in catalog (`documents.head_hash`); see A1 verdict.
+
+**`status` read-site sweep** — exhaustive search finds **zero readers** of `repos.json::status`. Every consumer reads collection names or repo paths. `status` is write-only from the consumer perspective. Live `repos.json` has four repos crash-stranded at `status="indexing"`, confirming the field is already unreliable as a live signal.
+
+**External-consumer sweep** — no readers outside `src/nexus/` and the test suite. 20+ test files use `RepoRegistry(tmp_path / "repos.json")` fixtures; two doc files (`docs/configuration.md`, `docs/rdr/rdr-030-*.md`) are descriptive references.
 
 ### Critical Assumptions
 
-- [ ] **A1**: The catalog already carries every fact a consumer reads from `repos.json` except `status`. — **Status**: Unverified — **Method**: Source Search.
-- [ ] **A2**: `status` (indexing/ready/error) can be replaced by a derived signal from the catalog (e.g. "ready" iff doc_count > 0 and no in-flight indexing claim), without a schema addition. — **Status**: Unverified — **Method**: Source Search.
-- [ ] **A3**: No external tool reads `repos.json` directly (no `~/.config/nexus/repos.json` references in scripts or other packages on disk). — **Status**: Unverified — **Method**: Filesystem grep.
-- [ ] **A4**: Worktree-vs-main-repo dual registration is unintentional; collapsing to a single registration per logical repo is acceptable. — **Status**: Unverified — **Method**: Spike + user confirmation.
-- [ ] **A5**: A dual-read shim (read from catalog first, fall back to `repos.json`, log when they disagree) is a safe transition mechanism — consumers see consistent reads during cutover, drift is observable as it happens. — **Status**: Unverified — **Method**: Code review.
+- [x] **A1**: catalog carries every fact a consumer reads from `repos.json` except `status`. — **Status**: **Verified-with-gaps** — **Method**: Source Search.
+  - Verdict: every collection-name + path field has a direct catalog equivalent. Single gap: `head_hash` (per-repo, used by indexer staleness skip) has no per-repo catalog home. Mitigations: (a) add `owners.head_hash` column (small schema add); (b) switch staleness check to `documents.source_mtime` (already populated).
+- [x] **A2**: `status` can be replaced by a derived signal without schema addition. — **Status**: **Verified, stronger than expected** — **Method**: Source Search.
+  - Verdict: `status` is **write-only**. No consumer reads it. The "replacement signal" question dissolves: just drop the writes. In-flight detection (when something genuinely needs it) is already in `~/.config/nexus/locks/<hash8>.lock` via `_clear_stale_lock`. Caveat: the `--corpus knowledge` mutation in `commands/index.py:277-282` rewrites `docs_collection` prefix at registry-write time; that routing preference has no catalog home and needs a Phase 4 design decision (separate from `status`).
+- [x] **A3**: no external tool reads `repos.json` directly. — **Status**: **Verified-with-noise** — **Method**: Filesystem grep.
+  - Verdict: no production readers outside `src/nexus/`. 20+ test fixtures use `RepoRegistry(tmp_path / "repos.json")` (need updating during migration but not external consumers). Two doc references are descriptive only.
+- [ ] **A4**: Worktree-vs-main-repo dual registration is unintentional; collapse is acceptable. — **Status**: **Unverified, scope expanded** — **Method**: Spike + user confirmation.
+  - **Surprise**: dual registration exists in BOTH `repos.json` AND the catalog. Catalog owners `1.1` (nexus, `/Users/hal.hildebrand/git/nexus`) and `1.22` (qmrr-zm2n worktree) are separate. Eliminating `repos.json` does NOT auto-consolidate; A4 must explicitly decide whether owner 1.22 should be merged into 1.1 or kept separate.
+- [ ] **A5**: A dual-read shim is a safe transition mechanism. — **Status**: **Unverified** — **Method**: Code review.
+
+### Surfaced surprises (added to Approach + Open Questions)
+
+1. **`collections.owner_id` is empty in live catalog data.** Column exists per RDR-103 but values are unpopulated. **Prerequisite** for any catalog-backed reader: Phase 2's parity audit will hit empty JOIN results until owner_id is backfilled. Add Phase 1.5 work item: backfill `collections.owner_id` from existing data (collection prefix → owner tumbler).
+2. **`--corpus knowledge` routing mutation has no catalog home** (`commands/index.py:277-282`). The only registry write that is NOT a lifecycle signal. Phase 4 design question.
+3. **Worktree dual-registration is catalog-wide, not registry-only** (see A4 above). Affects scope of the migration.
+4. **`head_hash` mitigation path** (see A1 above). Choose between schema add and using `source_mtime` during Phase 1.
+5. **`status="error"` semantics narrower than they look**: only credential failures + unhandled exceptions trigger it; per-file failures are silently absorbed via `skipped_files`. No consumer reads `status` anyway, so this is informational.
+6. **`_repo_identity()` (from `registry.py`) is NOT registry-coupled** — uses `git rev-parse --git-common-dir` for worktree stability. Extract as standalone helper before deleting the module.
 
 ## Approach
 
 Phased migration: build the replacement, prove parity, swap consumers one-at-a-time, then delete.
 
-**Phase 1 — Consumer inventory + catalog parity audit**
+**Phase 1 — Consumer inventory + catalog parity audit** ✓ DONE (2026-05-28)
 
-Complete the consumer inventory (Investigation step 1). For each consumer, write a parity assertion: "for every repo in `repos.json`, the catalog-backed lookup returns the same fact." Run the assertions against the current local DB; record disagreements (the phantom-collection class) as drift evidence. Output: enumerated consumer list with cutover priority, and a parity-failure ledger that shows the cost of the status quo.
+Complete the consumer inventory (Investigation step 1). For each consumer, write a parity assertion: "for every repo in `repos.json`, the catalog-backed lookup returns the same fact." Run the assertions against the current local DB; record disagreements (the phantom-collection class) as drift evidence. Output: enumerated consumer list with cutover priority, and a parity-failure ledger that shows the cost of the status quo. Inventory + verified A1/A2/A3 above; A4/A5 still pending.
+
+**Phase 1.5 — Prerequisite catalog backfill** (added 2026-05-28 from research)
+
+Backfill `collections.owner_id` for all rows where the column is empty. The RDR-103 migration introduced the column but did not populate existing rows; without this, any JOIN-based catalog reader returns no results. Inferring `owner_id` from collection-prefix → tumbler mapping is straightforward (tumbler `1.N` maps to a single owner). Add a `nx catalog backfill-owner-id` subcommand or a one-shot migration step; idempotent. Also resolve the `head_hash` mitigation path here: either add `owners.head_hash` column (small schema change) or switch indexer staleness to `documents.source_mtime`. Decision lives in Phase 1.5 implementation.
 
 **Phase 2 — Catalog-backed reader**
 
@@ -118,10 +150,12 @@ One-shot migration reads the final `repos.json` state, asserts catalog parity, a
 
 ## Open Questions
 
-1. Is the `status` field used as a UI signal that the catalog cannot derive (e.g. "this repo is mid-index"), or is it strictly bookkeeping that can be replaced by a derived signal?
+1. ~~Is the `status` field used as a UI signal that the catalog cannot derive?~~ **Resolved 2026-05-28**: `status` is write-only; no consumer reads it. Just drop the writes; in-flight detection (when needed) is already in `~/.config/nexus/locks/<hash8>.lock`.
 2. Should worktrees register as distinct repos (current behaviour, sometimes) or always collapse to the canonical repo's collections?
 3. Should the migration be one-shot at upgrade time, or per-consumer over a release cycle? One-shot is simpler if Phase 2's parity audit holds; per-release is safer if parity reveals surprises.
-4. Where does the `head_hash` field live post-migration? Catalog or per-repo-derived?
+4. Where does the `head_hash` field live post-migration? Catalog or per-repo-derived? **2026-05-28 update**: choose during Phase 1.5 between (a) new `owners.head_hash` column, (b) switching staleness to `documents.source_mtime`.
+5. (**New 2026-05-28**) Where does the `--corpus knowledge` routing preference live post-migration? Today `commands/index.py:277-282` mutates `docs_collection` prefix from `docs__` to `knowledge__` in the registry. Options: (a) per-owner config column in the catalog, (b) inferred from existing collection-name prefix at read time, (c) move the rewrite to the caller and never persist it.
+6. (**New 2026-05-28**) Should `collections.owner_id` backfill (Phase 1.5) be a one-shot migration in `nx upgrade`, an explicit `nx catalog backfill-owner-id` subcommand, or both?
 
 ## Related
 
