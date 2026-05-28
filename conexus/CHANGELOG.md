@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.3.0] - 2026-05-27
+
+Plugin version aligned with conexus 5.3.0. No plugin-component
+(agent/skill/command/hook) files changed; the release is a memory write-path
+feature (`nx memory put --merge`) plus a T2 aspect-worker single-writer fix,
+both in the `nx` CLI / MCP substrate the plugin consumes.
+
 ## [5.2.0] - 2026-05-27
 
 Plugin version aligned with conexus 5.2.0 (RDR-129 T2 daemon write-path
