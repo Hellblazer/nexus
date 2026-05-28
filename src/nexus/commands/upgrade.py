@@ -336,8 +336,92 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
         if not auto_mode and not skip_t3:
             _emit_name_vs_embed_dim_advisory()
 
+        # RDR-137 Phase 5.2 (nexus-tts0d.19): one-shot migration of
+        # ~/.config/nexus/repos.json into the catalog. Idempotent: no-op
+        # when the file is already absent. Safety: refuses to delete on
+        # any catalog-vs-registry disagreement (per OQ-7 lock).
+        if not auto_mode:
+            _migrate_repos_json_to_catalog(dry_run=dry_run)
+
     finally:
         conn.close()
+
+
+def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:
+    """RDR-137 Phase 5.2 (nexus-tts0d.19): one-shot migration.
+
+    Reads ``~/.config/nexus/repos.json``, verifies every entry has a
+    matching catalog owner with the same ``repo_hash``. On full parity,
+    deletes the file. On any disagreement, logs the divergent entries
+    and leaves the file in place for operator review.
+
+    OQ-7 lock: the safe-by-default behaviour. Operators who want
+    forced cleanup of a stale repos.json copied from another machine
+    can run ``nx catalog migrate-repos --force`` once that verb lands;
+    until then they delete the file manually after reading the log.
+    """
+    from pathlib import Path
+
+    from nexus.config import nexus_config_dir
+
+    reg_path = nexus_config_dir() / "repos.json"
+    if not reg_path.exists():
+        return  # idempotent — no-op when already absent
+
+    try:
+        from nexus.catalog.catalog import Catalog
+        from nexus.config import catalog_path
+        from nexus.repo_identity import _repo_identity
+        from nexus.registry import RepoRegistry
+
+        cat_dir = catalog_path()
+        if not (cat_dir / ".catalog.db").exists():
+            click.echo(
+                f"Note: {reg_path} present but catalog not initialised; "
+                f"skipping migration (run 'nx catalog setup' first)."
+            )
+            return
+
+        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        reg = RepoRegistry(reg_path)
+        disagreements: list[str] = []
+        for repo_str in reg.all():
+            repo = Path(repo_str)
+            if not repo.exists():
+                continue  # stale registry entry; skip
+            _, repo_hash = _repo_identity(repo)
+            owner = cat.owner_for_repo(repo_hash)
+            if owner is None:
+                disagreements.append(
+                    f"  {repo_str} (repo_hash {repo_hash}) — no catalog owner"
+                )
+
+        if disagreements:
+            click.echo(
+                f"\nRepos.json migration: {len(disagreements)} entry(ies) "
+                f"lack catalog parity. File NOT deleted; entries:"
+            )
+            for d in disagreements:
+                click.echo(d)
+            click.echo(
+                "\nRe-run 'nx index repo <path>' on each listed path to "
+                "register the missing owner, then re-run 'nx upgrade'."
+            )
+            return
+
+        # Full parity — safe to delete.
+        if dry_run:
+            click.echo(
+                f"\nDry-run: would delete {reg_path} (catalog parity holds)."
+            )
+            return
+        reg_path.unlink()
+        click.echo(
+            f"\nRepos.json migration: catalog parity confirmed; "
+            f"{reg_path} deleted."
+        )
+    except Exception as exc:
+        _log.warning("repos_json_migration_failed", error=str(exc))
 
 
 def _emit_name_vs_embed_dim_advisory() -> None:
