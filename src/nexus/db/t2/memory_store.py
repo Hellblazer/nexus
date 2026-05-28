@@ -890,6 +890,92 @@ class MemoryStore:
                     delete_ids,
                 )
 
+    def _content_words(self, text: str) -> set[str]:
+        """Lowercased word set for Jaccard overlap: drop short tokens and
+        stopwords. Shared by write-time merge (``put_or_merge``); mirrors the
+        word-set logic inside ``find_overlapping_memories``."""
+        return {
+            w.lower()
+            for w in text.split()
+            if len(w) > 2 and w.lower() not in self._STOPWORDS
+        }
+
+    def put_or_merge(
+        self,
+        project: str,
+        title: str,
+        content: str,
+        tags: str = "",
+        ttl: int | None = 30,
+        agent: str | None = None,
+        session: str | None = None,
+        min_similarity: float = 0.5,
+    ) -> tuple[int, str]:
+        """Opt-in canonical-fact merge at write time (bead nexus-lhxz4).
+
+        MemForest-inspired (T3 research-memforest-nexus-leverage-2026-05-27,
+        idea #1): instead of accumulating near-duplicate entries that later
+        need a reactive ``memory_consolidate`` pass, fold the new content into
+        the most-overlapping existing entry at write time.
+
+        Returns ``(row_id, action)`` where ``action`` is ``"inserted"`` or
+        ``"merged"``.
+
+        Merge is **non-destructive**: when ``content``'s word set overlaps an
+        existing *different-title* entry in ``project`` at Jaccard
+        ``>= min_similarity``, the new content is appended to that entry under
+        a provenance separator (both texts preserved), its timestamp is
+        refreshed, and ``(existing_id, "merged")`` is returned — the requested
+        ``title`` is not created. Otherwise a normal upsert runs and
+        ``(row_id, "inserted")`` is returned.
+
+        Exact ``(project, title)`` collisions always take the normal upsert
+        path (identity update), never the cross-title merge. Empty content
+        (no word set) always inserts.
+
+        Selection is best-overlap-wins across the project's entries. There is
+        a benign TOCTOU window between the scan and the merge UPDATE (an entry
+        could change concurrently); accepted because the merge is opt-in and
+        non-destructive, mirroring ``merge_memories``' race posture.
+        """
+        new_words = self._content_words(content)
+        if new_words:
+            best_id: int | None = None
+            best_jaccard = 0.0
+            best_content = ""
+            for entry in self.get_all(project):
+                if entry.get("title") == title:
+                    continue  # identity upsert, not a cross-title merge
+                existing_words = self._content_words(entry.get("content", ""))
+                if not existing_words:
+                    continue
+                jaccard = len(new_words & existing_words) / len(
+                    new_words | existing_words
+                )
+                if jaccard > best_jaccard:
+                    best_jaccard = jaccard
+                    best_id = entry["id"]
+                    best_content = entry.get("content", "")
+            if best_id is not None and best_jaccard >= min_similarity:
+                timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                merged = (
+                    f"{best_content}\n\n"
+                    f"<!-- merged from {title!r} @ {timestamp} "
+                    f"(jaccard={best_jaccard:.2f}) -->\n{content}"
+                )
+                with self._lock, self.conn:
+                    self.conn.execute(
+                        "UPDATE memory SET content = ?, timestamp = ? "
+                        "WHERE id = ?",
+                        (merged, timestamp, best_id),
+                    )
+                return best_id, "merged"
+        row_id = self.put(
+            project, title, content,
+            tags=tags, ttl=ttl, agent=agent, session=session,
+        )
+        return row_id, "inserted"
+
     def flag_stale_memories(
         self,
         project: str,

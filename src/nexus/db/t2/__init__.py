@@ -684,6 +684,28 @@ class T2Database:
             session=session,
         )
 
+    def put_or_merge(
+        self,
+        project: str,
+        title: str,
+        content: str,
+        tags: str = "",
+        ttl: int | None = 30,
+        agent: str | None = None,
+        session: str | None = None,
+        min_similarity: float = 0.5,
+    ) -> tuple[int, str]:
+        return self.memory.put_or_merge(
+            project=project,
+            title=title,
+            content=content,
+            tags=tags,
+            ttl=ttl,
+            agent=agent,
+            session=session,
+            min_similarity=min_similarity,
+        )
+
     def get(
         self,
         project: str | None = None,
