@@ -94,6 +94,15 @@ CREATE TABLE IF NOT EXISTS owners (
     repo_hash TEXT,
     description TEXT,
     repo_root TEXT DEFAULT '',
+    -- RDR-137 Phase 1.5b (nexus-tts0d.2): per-repo git HEAD identity,
+    -- previously held by ~/.config/nexus/repos.json. The indexer's
+    -- staleness skip compares the running repo's git HEAD against this
+    -- column; A1 verdict rejected documents.source_mtime as equivalent
+    -- because a repo HEAD can advance without any tracked file's mtime
+    -- changing (remote-only merge, ff-only pull of tag-only commits).
+    -- NULL on pre-migration rows AND on owners without a tracked HEAD
+    -- (e.g. ``curator`` owners minted by ``nx index pdf --corpus name``).
+    head_hash TEXT,
     -- nexus-7vuw: name UNIQUE was a too-strict invariant. A repo and a
     -- curator are different namespaces, so a repo named "nexus" should
     -- coexist with a curator named "nexus" (e.g. ``nx index pdf
@@ -357,6 +366,15 @@ class CatalogStore:
         except sqlite3.OperationalError:
             with self._conn:
                 self._conn.execute("ALTER TABLE owners ADD COLUMN repo_root TEXT DEFAULT ''")
+
+        # RDR-137 Phase 1.5b (nexus-tts0d.2): add owners.head_hash for per-
+        # repo git HEAD identity. NULL on pre-migration rows; populated by
+        # writers wired in Phase 3 (indexer cutover bead nexus-tts0d.13).
+        try:
+            self._conn.execute("SELECT head_hash FROM owners LIMIT 0")
+        except sqlite3.OperationalError:
+            with self._conn:
+                self._conn.execute("ALTER TABLE owners ADD COLUMN head_hash TEXT")
 
         # nexus-7vuw: drop the legacy single-column UNIQUE(name) index
         # on owners (replaced with composite UNIQUE(name, owner_type) in
