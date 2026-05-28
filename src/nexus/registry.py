@@ -14,16 +14,13 @@ import structlog
 _log = structlog.get_logger()
 
 
-def _repo_identity(repo: Path) -> tuple[str, str]:
-    """Return ``(basename, hash8)`` for collection naming, stable across worktrees.
+def _resolve_main_repo(repo: Path) -> Path:
+    """Return the canonical main-repo Path for *repo*.
 
-    Uses ``git rev-parse --git-common-dir`` to resolve the main repository root
-    even when called from a worktree.  Falls back to the given *repo* path when
-    git is unavailable (not installed, not a git repo, etc.).
-
-    The hash is the first 8 hex characters of the SHA-256 digest of the
-    resolved main repo path.  Two worktrees of the same repo produce identical
-    collection names.
+    Uses ``git rev-parse --git-common-dir`` to resolve the main repository
+    root even when *repo* is a worktree path.  Falls back to the given
+    *repo* path when git is unavailable (not installed, not a git repo,
+    etc.).
     """
     try:
         result = subprocess.run(
@@ -37,15 +34,52 @@ def _repo_identity(repo: Path) -> tuple[str, str]:
             git_common = Path(result.stdout.strip())
             if not git_common.is_absolute():
                 git_common = (repo / git_common).resolve()
-            main_repo = git_common.parent
-        else:
-            main_repo = repo
+            return git_common.parent
     except (OSError, subprocess.TimeoutExpired) as exc:
         _log.debug("git rev-parse failed, using repo path directly", error=str(exc))
-        main_repo = repo
+    return repo
 
+
+def _repo_identity(repo: Path) -> tuple[str, str]:
+    """Return ``(basename, hash8)`` for collection naming, stable across worktrees.
+
+    The hash is the first 8 hex characters of the SHA-256 digest of the
+    resolved main repo path.  Two worktrees of the same repo produce
+    identical collection names.
+
+    ~15 call sites and the test-mock surface
+    (``monkeypatch.setattr("nexus.registry._repo_identity", ...)``) depend
+    on this 2-tuple signature.  New callers that need the main-repo path
+    should use :func:`_repo_identity_with_main`.
+    """
+    main_repo = _resolve_main_repo(repo)
     path_hash = hashlib.sha256(str(main_repo).encode()).hexdigest()[:8]
     return main_repo.name, path_hash
+
+
+def _repo_identity_with_main(repo: Path) -> tuple[str, str, Path]:
+    """Return ``(basename, hash8, main_repo_path)`` for *repo*.
+
+    nexus-zr2ie / RDR-137 gate critique 2026-05-28: callers that need to
+    persist the canonical main-repo path (e.g. catalog owner ``repo_root``)
+    should use this 3-tuple variant instead of writing ``str(repo)``.
+    Before this helper, ``ensure_owner_for_repo`` and ``_catalog_hook``
+    wrote ``repo_root=str(repo)``, which contaminated the catalog with
+    transient worktree paths on first-run-from-worktree indexing; after
+    worktree deletion ``resolve_path`` produced broken paths for every
+    relative-path document under that owner.
+
+    Delegates the ``(name, hash)`` pair to :func:`_repo_identity` so the
+    widely-used ``monkeypatch.setattr("nexus.registry._repo_identity", ...)``
+    test-mock pattern continues to control the lookup key for callers
+    that now route through this 3-tuple variant.  Main-repo path is
+    derived via :func:`_resolve_main_repo`, which can be mocked
+    independently when a test needs to assert what gets persisted as
+    ``repo_root``.
+    """
+    name, path_hash = _repo_identity(repo)
+    main_repo = _resolve_main_repo(repo)
+    return name, path_hash, main_repo
 
 
 def _safe_collection(
