@@ -387,6 +387,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     "test_checkpoint.py",
     "test_collection_gc.py",
     "test_collection_name_migration.py",
+    # RDR-137 P1.5a: voyage tokens appear in synthetic conformant
+    # collection names used as backfill fixtures (e.g.
+    # ``code__nexus-1-1__voyage-code-3__v1``). Tests exercise pure
+    # SQLite + string parsing; no Voyage call is ever made.
+    "test_collections_owner_backfill.py",
     "test_commands_dt.py",
     "test_corpus.py",
     "test_doc_indexer_hash_sync.py",
