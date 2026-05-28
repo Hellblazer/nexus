@@ -184,54 +184,48 @@ class TestAgentStructure:
 
 class TestPlannerReviewGates:
 
-    @pytest.mark.parametrize("check", [
-        pytest.param("section", id="has-review-gates-section"),
-        pytest.param("code-review-expert", id="gates-mention-code-review-expert"),
-        pytest.param("execution", id="execution-instructions-include-review"),
-    ])
-    def test_planner_review_gates(self, check: str) -> None:
+    def test_planner_review_gates(self) -> None:
+        # wuerf: inner-axis collapse — three independent assertions over the
+        # one strategic-planner.md file, formerly 3 parametrized nodes. Same
+        # coverage, one file read.
         text = (AGENTS_DIR / "strategic-planner.md").read_text()
-        if check == "section":
-            assert "### Review Gates" in text
-        elif check == "code-review-expert":
-            start = text.index("### Review Gates")
-            end = text.index("###", start + 1)
-            assert "code-review-expert" in text[start:end]
-        elif check == "execution":
-            start = text.index("**Execution Instructions**")
-            end = text.index("**Parallelization", start)
-            section = text[start:end]
-            assert "Code review" in section or "code-review" in section
+        # has-review-gates-section
+        assert "### Review Gates" in text
+        # gates-mention-code-review-expert
+        start = text.index("### Review Gates")
+        end = text.index("###", start + 1)
+        assert "code-review-expert" in text[start:end]
+        # execution-instructions-include-review
+        start = text.index("**Execution Instructions**")
+        end = text.index("**Parallelization", start)
+        section = text[start:end]
+        assert "Code review" in section or "code-review" in section
 
 
 
 class TestRecoverProtocol:
 
     @pytest.mark.parametrize("agent_path", _agent_params())
-    @pytest.mark.parametrize("check", [
-        pytest.param("six_steps", id="six-steps"),
-        pytest.param("t1_scratch", id="t1-scratch"),
-        pytest.param("memory_search", id="memory-search"),
-    ])
-    def test_recover_block(self, agent_path: Path, check: str) -> None:
+    def test_recover_block(self, agent_path: Path) -> None:
+        # wuerf: inner-axis collapse — the three checks all inspect the same
+        # RECOVER block of the same agent. Formerly _agent_params() × 3 nodes;
+        # now one node per agent (per-agent granularity preserved), reading
+        # the file and extracting the block once instead of three times.
         text = agent_path.read_text()
         block = _extract_recover_block(text)
-        if check == "memory_search" and not block:
-            pytest.skip(f"{agent_path.name}: no RECOVER block")
-            return
         assert block, f"{agent_path.name}: no 'If validation fails' block found"
-        if check == "six_steps":
-            assert "6. Proceed with available context" in block, \
-                f"{agent_path.name}: RECOVER block missing step 6"
-        elif check == "t1_scratch":
-            assert "nx scratch search" in block or 'action="search"' in block or "scratch" in block.lower(), \
-                f"{agent_path.name}: RECOVER block missing T1 scratch search step"
-        elif check == "memory_search":
-            has_cli = "nx memory search" in block
-            has_mcp = "memory_search" in block
-            has_stale = "nx memory get --project" in block
-            assert has_cli or has_mcp or not has_stale, \
-                f"{agent_path.name}: RECOVER uses stale 'nx memory get' instead of 'memory_search'"
+        # six_steps
+        assert "6. Proceed with available context" in block, \
+            f"{agent_path.name}: RECOVER block missing step 6"
+        # t1_scratch
+        assert "nx scratch search" in block or 'action="search"' in block or "scratch" in block.lower(), \
+            f"{agent_path.name}: RECOVER block missing T1 scratch search step"
+        # memory_search (stale-usage guard)
+        has_cli = "nx memory search" in block
+        has_mcp = "memory_search" in block
+        has_stale = "nx memory get --project" in block
+        assert has_cli or has_mcp or not has_stale, \
+            f"{agent_path.name}: RECOVER uses stale 'nx memory get' instead of 'memory_search'"
 
 
 
@@ -240,16 +234,14 @@ class TestCliSyntax:
     @pytest.mark.parametrize("md_path", [
         pytest.param(p, id=str(p.relative_to(PLUGIN_DIR))) for p in ALL_MD_FILES
     ])
-    @pytest.mark.parametrize("pattern,msg", [
-        pytest.param("pm::", "stale 'pm::' notation", id="no-pm-colon"),
-        pytest.param(None, "stale 'nx health' command", id="no-nx-health"),
-    ])
-    def test_no_stale_patterns(self, md_path: Path, pattern: str | None, msg: str) -> None:
+    def test_no_stale_patterns(self, md_path: Path) -> None:
+        # wuerf: inner-axis collapse — both stale-pattern scans run over the
+        # same file. Formerly ALL_MD_FILES × 2 nodes; now one node per file
+        # (per-file granularity preserved), reading the file once.
         text = md_path.read_text()
-        if pattern == "pm::":
-            assert "pm::" not in text, f"{md_path}: {msg}"
-        else:
-            assert not re.search(r"`nx health`|nx health\b", text), f"{md_path}: {msg}"
+        assert "pm::" not in text, f"{md_path}: stale 'pm::' notation"
+        assert not re.search(r"`nx health`|nx health\b", text), \
+            f"{md_path}: stale 'nx health' command"
 
     @pytest.mark.parametrize("agent_path", _agent_params())
     def test_nx_store_put_has_pipe_source(self, agent_path: Path) -> None:
