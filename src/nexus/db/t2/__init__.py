@@ -59,6 +59,7 @@ extend the tier.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -306,6 +307,38 @@ class T2Database:
         if effective:
             T2Database.bootstrap_schema(path)
 
+        # ── RDR-138 T1.1 (nexus-tgzvt): process-wide rename coordination lock ──
+        #
+        # RENAME_LOCK is the OUTERMOST lock in the daemon process. It
+        # serializes ``rename_collection_cascade`` against every queue and
+        # aspect mutator, closing the rename-cascade vs aspect-worker race
+        # (Gaps 1-3 per the RDR).
+        #
+        # Lock type: ``threading.RLock`` (reentrant), NOT ``threading.Lock``.
+        # Rationale: T1.2 will guard ``claim_batch`` AND the inner
+        # ``claim_next`` it calls in a loop. A plain Lock would self-deadlock
+        # when the outer claim_batch acquire re-enters for each claim_next
+        # call. RLock allows the same thread to acquire again without blocking.
+        # An alternative shape (unlocked ``_claim_next_locked`` helper) is
+        # documented in ``AspectExtractionQueue`` but the RLock approach is
+        # chosen for its simplicity.
+        #
+        # Lock ordering (forward constraint for T1.2 authors):
+        #   RENAME_LOCK -> per-store self._lock   (RENAME_LOCK acquired FIRST)
+        #   NEVER acquire RENAME_LOCK while already inside a self._lock region.
+        #
+        # The daemon runs exactly ONE T2Database instance (verified by
+        # t2_daemon.py's ``_build_dispatch_table`` receiving a single
+        # ``self._t2db``). The lock is instance-held: tests that construct
+        # T2Database directly each get their own lock, isolating them from each
+        # other. Stand-alone AspectExtractionQueue construction (outside
+        # T2Database) falls back to its own RLock via the default parameter.
+        #
+        # The cascade (rename_collection_cascade) bypasses all per-store
+        # self._lock regions by design — it uses its own dedicated connection.
+        # It acquires only RENAME_LOCK.
+        self.RENAME_LOCK: threading.RLock = threading.RLock()
+
         # ── Construct domain stores ───────────────────────────────────
         self.memory: MemoryStore = MemoryStore(path)
         self.plans: PlanLibrary = PlanLibrary(path)
@@ -324,7 +357,11 @@ class T2Database:
         # RDR-089 follow-up (nexus-qeo8): durable queue feeding the
         # async aspect-extraction worker. The hook fires fast (just
         # an enqueue); the worker drains in a background thread.
-        self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(path)
+        # RDR-138 T1.1: inject RENAME_LOCK so the queue shares the same
+        # lock instance as the cascade. T1.2 will wrap mutator bodies.
+        self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(
+            path, rename_lock=self.RENAME_LOCK
+        )
 
         # RDR-120 P5.A.1 (nexus-9zmpl): catalog is the eighth domain
         # store. Constructed lazily via the ``catalog`` property so
@@ -532,7 +569,27 @@ class T2Database:
         ``_conn`` is a private test-seam parameter. Production callers
         omit it; the method opens a fresh dedicated connection. Tests
         pass a wrapper object to inject mid-cascade failures.
+
+        RDR-138 T1.1 (nexus-tgzvt): acquires ``self.RENAME_LOCK`` for the
+        ENTIRE method body — including the connection open, BEGIN, all
+        UPDATEs, COMMIT, and connection close. This serializes the cascade
+        against every queue/aspect mutator that T1.2 will also guard with
+        the same lock. Lock is held across the full SQLite transaction to
+        close Gaps 1-3 (aspect-worker observes a consistent view).
+        Lock ordering: RENAME_LOCK is the outermost lock. The cascade
+        bypasses all per-store ``self._lock`` regions by design (own conn).
         """
+        with self.RENAME_LOCK:
+            return self._rename_collection_cascade_locked(old=old, new=new, _conn=_conn)
+
+    def _rename_collection_cascade_locked(
+        self,
+        *,
+        old: str,
+        new: str,
+        _conn: "sqlite3.Connection | None" = None,
+    ) -> dict[str, int]:
+        """Inner implementation — called only while RENAME_LOCK is held."""
         counts: dict[str, int] = {
             "chash": 0,
             "aspects": 0,
@@ -1005,9 +1062,20 @@ class T2Database:
         idempotent, so a reclaim-driven re-extraction after a crash
         between the two writes simply re-upserts — no duplicate, no stuck
         row.
+
+        RDR-138 T1.2 (nexus-ra2vj): wraps the ENTIRE call — both the
+        ``document_aspects.upsert`` AND the ``aspect_queue.mark_done`` —
+        under ONE ``RENAME_LOCK`` acquisition. This closes Gap 3: a
+        ``rename_collection_cascade`` cannot interleave between the two
+        writes (which would rename the document_aspects row under the OLD
+        collection name before mark_done can clear the queue row, leaving
+        an orphaned queue row under OLD). The ``mark_done`` call
+        re-acquires RENAME_LOCK via the now-guarded mutator; the RLock
+        makes the re-entrant acquisition safe.
         """
         from nexus.db.t2.document_aspects import AspectRecord
         record = AspectRecord(**record_fields)
-        upserted = self.document_aspects.upsert(record)
-        self.aspect_queue.mark_done(record.collection, record.source_path)
+        with self.RENAME_LOCK:
+            upserted = self.document_aspects.upsert(record)
+            self.aspect_queue.mark_done(record.collection, record.source_path)
         return upserted

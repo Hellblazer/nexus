@@ -5,7 +5,7 @@ description: Create a new RDR — scaffold from template, assign sequential ID, 
 
 # New RDR
 
-!`nx rdr preamble rdr-create -- "$ARGUMENTS"`
+!`nx rdr preamble rdr-create`
 
 ## Title / Details
 

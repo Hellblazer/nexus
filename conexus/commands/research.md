@@ -5,7 +5,7 @@ description: Research topic using deep-research-synthesizer agent
 
 # Research Request
 
-!`nx command-context research -- "$ARGUMENTS"`
+!`nx command-context research`
 
 ### Project Context
 

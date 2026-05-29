@@ -5,7 +5,7 @@ description: Accept a gated RDR — verifies gate PASSED in T2, updates status t
 
 # RDR Accept
 
-!`nx rdr preamble rdr-accept -- "$ARGUMENTS"`
+!`nx rdr preamble rdr-accept -- '$ARGUMENTS'`
 
 ## RDR to Accept
 

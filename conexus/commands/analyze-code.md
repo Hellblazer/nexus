@@ -5,7 +5,7 @@ description: Analyze codebase using codebase-deep-analyzer agent
 
 # Codebase Analysis Request
 
-!`nx command-context analyze-code -- "$ARGUMENTS"`
+!`nx command-context analyze-code`
 
 ### Project Context
 

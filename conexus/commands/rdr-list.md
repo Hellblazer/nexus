@@ -5,7 +5,7 @@ description: List all RDRs with status, type, and priority
 
 # RDR List
 
-!`nx rdr preamble rdr-list -- "$ARGUMENTS"`
+!`nx rdr preamble rdr-list`
 
 ## Filters
 

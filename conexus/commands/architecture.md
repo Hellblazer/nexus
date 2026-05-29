@@ -5,7 +5,7 @@ description: Design architecture and create phased execution plans using archite
 
 # Architecture Request
 
-!`nx command-context architecture -- "$ARGUMENTS"`
+!`nx command-context architecture`
 
 ### Project Context
 

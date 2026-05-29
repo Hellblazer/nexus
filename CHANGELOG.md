@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.2] - 2026-05-29
+
+### Fixed
+
+- **Concurrent collection rename no longer loses in-flight aspect-extraction work or drifts the aspect denorm (RDR-138).** `rename_collection_cascade` and the `aspect_extraction_queue` mutators ran as uncoordinated separate transactions on the same `memory.db` (post-nexus-zir76 both route through the T2 daemon, which serializes individual statements but not the multi-statement cascade against a worker's claim→complete sequence). A rename racing an in-flight extraction could lose a queued row or write a `document_aspects` row under the old collection name after the cascade already moved it. A coarse daemon-held `RENAME_LOCK` (a `threading.RLock`, since daemon RPCs run on threadpool threads via `asyncio.to_thread`) now serializes the whole cascade against every queue writer — `enqueue`, `claim_next`/`claim_batch`, `mark_done`/`mark_failed`/`mark_retry`, `reclaim_stale`, and `complete_aspect` (whole upsert+mark_done). The cascade keeps its single dedicated connection for all stores, preserving K4 cross-store atomicity. Verified: claim-latency overhead is <1% amortized at realistic rename rates. This was first seen as a recurring `test_collection_rename` "flake" and confirmed a real concurrency canary.
+- **Slash-command shell-quoting safety (conexus plugin, #1007 / #1008).** `$ARGUMENTS` substituted into a command's `` !`…` `` preamble before shell parsing broke any command whose argument contained a quote, backtick, paren, or `$`. All 25 slash commands were hardened (drop-arg, single-quote, or body-parse-then-Bash-preamble), with an end-to-end injection test against bash and zsh and a static guard. See `conexus/CHANGELOG.md`.
+
+### Internal
+
+- Test-suite hardening: dedicated `RENAME_LOCK` regression suite (in-flight preservation, Gap-3 atomicity, throughput guardrail); fixed two pre-existing test-isolation flakes (`test_projection_quality` chromadb shared-backend leak; `nx_answer` plan-miss LLM-wording assertion).
+
 ## [5.4.1] - 2026-05-28
 
 ### Fixed

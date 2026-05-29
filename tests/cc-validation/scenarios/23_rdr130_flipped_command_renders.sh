@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scenario 23 — RDR-130 P1.7: a FLIPPED RDR command renders via real Claude Code.
-# rdr-list.md now injects via `!`nx rdr preamble rdr-list -- "$ARGUMENTS"`` (P1.4);
+# rdr-list.md now injects via `!`nx rdr preamble rdr-list`` (P1.4);
 # the nx subcommand (P1.2) reads T2 with a file fallback and prints the RDR table.
 # This proves the full chain — inline injection -> nx subgroup -> markdown output —
 # works end to end (requires the repo nx with the preamble subgroup on PATH).

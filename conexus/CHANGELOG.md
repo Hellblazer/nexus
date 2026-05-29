@@ -6,6 +6,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.2] - 2026-05-29
+
+### Fixed
+
+- **Shell-quoting safety for all 25 slash commands.** `$ARGUMENTS` is
+  substituted textually into the `` !`…` `` preamble line *before* the shell
+  parses it (confirmed against Claude Code skills docs), so any prompt
+  containing a double-quote, backtick, paren, or `$` broke the command with
+  `(eval):1: unmatched "`. Hit in practice by `/conexus:architecture` with a
+  prose task description. Fix: the 16 `command-context` commands (which ignore
+  their args) and `rdr-create` / `rdr-list` (preamble ignores args; title is
+  free-form) drop the arg entirely. The 5 `rdr preamble` commands whose arg is
+  a pure token (`rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-research`,
+  `rdr-audit` — id / `add N` / project name) switch to single-quoted
+  `'$ARGUMENTS'`: behaviourally identical (the preamble re-joins args), immune
+  to every metacharacter, and the token form cannot contain the lone
+  single-quote residual (a literal apostrophe). The 2 commands that can carry
+  free-form text (`rdr-close --reason`, `phase-review-gate` deferral
+  justifications) drop the arg from the shell line entirely and instead parse
+  the id from `$ARGUMENTS` in the body, then load targeted context by invoking
+  the preamble via the Bash tool with the id as a real argv token — closing the
+  apostrophe residual completely.
+- Verified end-to-end, not just by reasoning: `test_command_shell_quoting_e2e`
+  reproduces Claude Code's textual-substitution + shell `eval` against hostile
+  inputs (quotes, parens, backticks, `$(…)`, `&&`) in both bash and zsh, and
+  asserts dropped-arg commands survive every input while single-quoted commands
+  pass injection payloads through INERT (the program receives one intact literal
+  token; no subshell/operator executes). A static guard
+  (`test_no_command_file_double_quotes_arguments_in_backtick`) locks the safe
+  form across every command surface. Hooks were audited and are clean (they
+  escape stdin via `python3 … json.dumps`, never splicing untrusted input into a
+  shell line).
+
 ## [5.4.1] - 2026-05-28
 
 Plugin version aligned with conexus 5.4.1. No plugin-side changes; the
