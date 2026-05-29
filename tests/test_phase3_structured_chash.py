@@ -172,6 +172,7 @@ class TestNxAnswerStructuredEnvelope:
         ))
         assert isinstance(result, str), f"expected str, got {type(result)}"
 
+    @pytest.mark.slow  # ~40s: real nx_answer plan executing claude -p operator composition
     def test_nx_answer_structured_true_single_step_returns_envelope(
         self, t3, t1,
     ):
