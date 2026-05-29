@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.2] - 2026-05-29
+
 ### Fixed
 
 - **Shell-quoting safety for all 25 slash commands.** `$ARGUMENTS` is

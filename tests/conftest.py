@@ -338,9 +338,16 @@ def _reap_spawned_daemons(tmp_path: Path):
     yield
     from tests._daemon_leak_guard import reap_tmp_daemons
 
+    # Scoped to the autouse ``_isolate_config_dir`` default
+    # (``tmp_path/.config/nexus``) only. A full-suite sweep confirmed this is
+    # leak-free: the ``tests/daemon`` lifecycle tests that spawn real daemons
+    # under the ``--config-dir str(tmp_path)`` root form self-clean. Scanning
+    # the tmp_path root too would reach the fake discovery files those tests
+    # pre-seed (with mocked ``subprocess.run`` / ``os.kill``) and trip their
+    # "must not spawn" guards at teardown — cost with no proven benefit.
     try:
         reap_tmp_daemons(tmp_path / ".config" / "nexus")
-    except Exception:  # noqa: BLE001 — teardown guard must never fail a test
+    except BaseException:  # noqa: BLE001 — teardown guard must never fail a test
         pass
 
 
