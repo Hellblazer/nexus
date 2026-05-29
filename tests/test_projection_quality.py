@@ -177,8 +177,21 @@ class TestAddProjectionQualityColumns:
 
 @pytest.fixture()
 def chroma_client() -> chromadb.ClientAPI:
-    """Ephemeral ChromaDB client per test."""
-    return chromadb.EphemeralClient()
+    """Ephemeral ChromaDB client per test.
+
+    nexus-alnpa: ``chromadb.EphemeralClient()`` instances share a
+    process-global in-memory backend, so collections leak across tests and
+    across files within the same process. A sibling test that leaves a
+    same-named collection (e.g. ``nt_coll``) pollutes this file's
+    ``discover_topics``/``assign_single`` calls, which then fail ONLY under
+    full-suite ordering (passes solo). Clear all collections on entry so each
+    test starts from a clean backend regardless of what ran before. See the
+    ``project_chromadb_ephemeral_shared_state`` note.
+    """
+    client = chromadb.EphemeralClient()
+    for coll in client.list_collections():
+        client.delete_collection(coll.name)
+    return client
 
 
 @pytest.fixture()
