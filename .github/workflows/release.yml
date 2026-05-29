@@ -15,9 +15,12 @@ jobs:
     # v4.18.0 tag-push hit it: pytest 3.13 ran 36+ min before manual
     # cancel. 4.32.1 hit a different boundary — Python 3.12 ran 15m22s
     # while 3.13 ran 11m33s. The suite grew under RDR-109 (cross-
-    # encoder substrate; lazy ONNX-runtime imports). Bumped to 20m to
-    # match ``ci.yml`` while still catching genuine hangs.
-    timeout-minutes: 20
+    # encoder substrate; lazy ONNX-runtime imports). 20m was then too
+    # tight: the v5.4.2 tag-push run passed both pytest matrices (~16m)
+    # but timed out DURING the post-job cache-save upload, which counts
+    # toward this budget. Bumped to 25m — still well under the 36m
+    # genuine-hang signature, with headroom for the cache upload.
+    timeout-minutes: 25
     strategy:
       fail-fast: true
       matrix:
@@ -56,7 +59,7 @@ jobs:
         run: uv sync --group dev
 
       - name: Run tests
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ -q --durations=25
 
   publish:
     name: Build and publish to PyPI
