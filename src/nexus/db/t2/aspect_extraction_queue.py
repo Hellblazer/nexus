@@ -619,23 +619,32 @@ class AspectExtractionQueue:
         Returns row count updated (0 when no rows match -- safe no-op).
         Idempotent: a second call with the same ``old`` name returns 0
         without error.
+
+        RDR-138 follow-up (nexus-k44w4): this standalone queue-rename has no
+        production caller — ``rename_collection_cascade`` re-homes the queue
+        inline on its own dedicated connection. It survives as a tested store
+        primitive. It acquires ``rename_lock`` (outermost, before ``self._lock``)
+        so that if it IS ever invoked directly it serializes against the cascade
+        and every queue mutator, the same as the 7 guarded mutators. Lock
+        ordering matches the rest of the store: ``rename_lock`` -> ``self._lock``.
         """
-        with self._lock:
-            # Drop any pre-existing new-collection rows that would collide
-            # with the rename (same source_path). Mirrors ChashIndex pattern.
-            self.conn.execute(
-                "DELETE FROM aspect_extraction_queue "
-                "WHERE collection = ? "
-                "  AND source_path IN ("
-                "    SELECT source_path FROM aspect_extraction_queue"
-                "    WHERE collection = ?"
-                "  )",
-                (new, old),
-            )
-            cur = self.conn.execute(
-                "UPDATE aspect_extraction_queue "
-                "SET collection = ? WHERE collection = ?",
-                (new, old),
-            )
-            self.conn.commit()
-            return cur.rowcount
+        with self.rename_lock:
+            with self._lock:
+                # Drop any pre-existing new-collection rows that would collide
+                # with the rename (same source_path). Mirrors ChashIndex pattern.
+                self.conn.execute(
+                    "DELETE FROM aspect_extraction_queue "
+                    "WHERE collection = ? "
+                    "  AND source_path IN ("
+                    "    SELECT source_path FROM aspect_extraction_queue"
+                    "    WHERE collection = ?"
+                    "  )",
+                    (new, old),
+                )
+                cur = self.conn.execute(
+                    "UPDATE aspect_extraction_queue "
+                    "SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                self.conn.commit()
+                return cur.rowcount

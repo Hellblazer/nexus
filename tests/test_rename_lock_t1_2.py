@@ -888,6 +888,22 @@ class TestMutatorLockGuardStructural:
             except Exception:
                 pass
 
+    def test_rename_collection_acquires_rename_lock(self, tmp_path: Path) -> None:
+        # nexus-k44w4: the standalone queue rename_collection (no prod caller,
+        # superseded by the cascade) is guarded for consistency so a direct
+        # call serializes against the cascade.
+        db = _make_db(tmp_path)
+        try:
+            db.aspect_queue.enqueue("code__c", "/f.py", "h")
+            lock = self._install_tracking_lock(db)
+            db.aspect_queue.rename_collection(old="code__c", new="code__d")
+            assert lock.acquire_count >= 1, "rename_collection must acquire rename_lock"
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
     def test_complete_aspect_acquires_rename_lock(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         try:
