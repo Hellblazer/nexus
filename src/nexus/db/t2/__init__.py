@@ -1062,9 +1062,20 @@ class T2Database:
         idempotent, so a reclaim-driven re-extraction after a crash
         between the two writes simply re-upserts — no duplicate, no stuck
         row.
+
+        RDR-138 T1.2 (nexus-ra2vj): wraps the ENTIRE call — both the
+        ``document_aspects.upsert`` AND the ``aspect_queue.mark_done`` —
+        under ONE ``RENAME_LOCK`` acquisition. This closes Gap 3: a
+        ``rename_collection_cascade`` cannot interleave between the two
+        writes (which would rename the document_aspects row under the OLD
+        collection name before mark_done can clear the queue row, leaving
+        an orphaned queue row under OLD). The ``mark_done`` call
+        re-acquires RENAME_LOCK via the now-guarded mutator; the RLock
+        makes the re-entrant acquisition safe.
         """
         from nexus.db.t2.document_aspects import AspectRecord
         record = AspectRecord(**record_fields)
-        upserted = self.document_aspects.upsert(record)
-        self.aspect_queue.mark_done(record.collection, record.source_path)
+        with self.RENAME_LOCK:
+            upserted = self.document_aspects.upsert(record)
+            self.aspect_queue.mark_done(record.collection, record.source_path)
         return upserted

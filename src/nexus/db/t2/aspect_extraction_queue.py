@@ -302,15 +302,16 @@ class AspectExtractionQueue:
         if not source_path:
             raise ValueError("source_path must not be empty")
         now = datetime.now(UTC).isoformat()
-        with self._lock:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO aspect_extraction_queue "
-                "(collection, source_path, doc_id, content_hash, content, "
-                " status, retry_count, enqueued_at, last_attempt_at, last_error) "
-                "VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL)",
-                (collection, source_path, doc_id, content_hash, content, now),
-            )
-            self.conn.commit()
+        with self.rename_lock:
+            with self._lock:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO aspect_extraction_queue "
+                    "(collection, source_path, doc_id, content_hash, content, "
+                    " status, retry_count, enqueued_at, last_attempt_at, last_error) "
+                    "VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL)",
+                    (collection, source_path, doc_id, content_hash, content, now),
+                )
+                self.conn.commit()
 
     def claim_next(self) -> QueueRow | None:
         """Atomically claim the oldest pending row.
@@ -337,40 +338,41 @@ class AspectExtractionQueue:
         sequences across separate connections.
         """
         now = datetime.now(UTC).isoformat()
-        for _ in range(_MAX_CAS_RETRIES):
-            with self._lock:
-                row = self.conn.execute(
-                    "SELECT collection, source_path, content_hash, content, "
-                    "       retry_count, doc_id "
-                    "FROM aspect_extraction_queue "
-                    "WHERE status = 'pending' "
-                    "ORDER BY enqueued_at ASC, source_path ASC "
-                    "LIMIT 1"
-                ).fetchone()
-                if row is None:
-                    return None
-                collection, source_path, content_hash, content, retry_count, doc_id = row
-                cur = self.conn.execute(
-                    "UPDATE aspect_extraction_queue "
-                    "SET status = 'in_progress', last_attempt_at = ? "
-                    "WHERE collection = ? "
-                    "  AND source_path = ? "
-                    "  AND status = 'pending'",
-                    (now, collection, source_path),
-                )
-                self.conn.commit()
-                if cur.rowcount == 1:
-                    return QueueRow(
-                        collection=collection,
-                        source_path=source_path,
-                        content_hash=content_hash,
-                        content=content,
-                        retry_count=retry_count,
-                        doc_id=doc_id or "",
+        with self.rename_lock:
+            for _ in range(_MAX_CAS_RETRIES):
+                with self._lock:
+                    row = self.conn.execute(
+                        "SELECT collection, source_path, content_hash, content, "
+                        "       retry_count, doc_id "
+                        "FROM aspect_extraction_queue "
+                        "WHERE status = 'pending' "
+                        "ORDER BY enqueued_at ASC, source_path ASC "
+                        "LIMIT 1"
+                    ).fetchone()
+                    if row is None:
+                        return None
+                    collection, source_path, content_hash, content, retry_count, doc_id = row
+                    cur = self.conn.execute(
+                        "UPDATE aspect_extraction_queue "
+                        "SET status = 'in_progress', last_attempt_at = ? "
+                        "WHERE collection = ? "
+                        "  AND source_path = ? "
+                        "  AND status = 'pending'",
+                        (now, collection, source_path),
                     )
-                # rowcount == 0 → another process / thread won the
-                # CAS; loop and try a different row.
-        return None
+                    self.conn.commit()
+                    if cur.rowcount == 1:
+                        return QueueRow(
+                            collection=collection,
+                            source_path=source_path,
+                            content_hash=content_hash,
+                            content=content,
+                            retry_count=retry_count,
+                            doc_id=doc_id or "",
+                        )
+                    # rowcount == 0 → another process / thread won the
+                    # CAS; loop and try a different row.
+            return None
 
     def claim_batch(self, limit: int) -> list[QueueRow]:
         """Claim up to ``limit`` pending rows in FIFO order.
@@ -387,11 +389,12 @@ class AspectExtractionQueue:
         if limit <= 0:
             return []
         out: list[QueueRow] = []
-        for _ in range(limit):
-            row = self.claim_next()
-            if row is None:
-                break
-            out.append(row)
+        with self.rename_lock:
+            for _ in range(limit):
+                row = self.claim_next()
+                if row is None:
+                    break
+                out.append(row)
         return out
 
     def mark_done(
@@ -412,22 +415,23 @@ class AspectExtractionQueue:
         Returns deleted row count (0 when the row was already gone —
         idempotent under concurrent worker invocations).
         """
-        with self._lock:
-            if doc_id:
-                cur = self.conn.execute(
-                    "DELETE FROM aspect_extraction_queue WHERE doc_id = ?",
-                    (doc_id,),
-                )
-            elif collection or source_path:
-                cur = self.conn.execute(
-                    "DELETE FROM aspect_extraction_queue "
-                    "WHERE collection = ? AND source_path = ?",
-                    (collection, source_path),
-                )
-            else:
-                return 0
-            self.conn.commit()
-            return cur.rowcount
+        with self.rename_lock:
+            with self._lock:
+                if doc_id:
+                    cur = self.conn.execute(
+                        "DELETE FROM aspect_extraction_queue WHERE doc_id = ?",
+                        (doc_id,),
+                    )
+                elif collection or source_path:
+                    cur = self.conn.execute(
+                        "DELETE FROM aspect_extraction_queue "
+                        "WHERE collection = ? AND source_path = ?",
+                        (collection, source_path),
+                    )
+                else:
+                    return 0
+                self.conn.commit()
+                return cur.rowcount
 
     def mark_failed(
         self,
@@ -442,16 +446,17 @@ class AspectExtractionQueue:
         the row — re-extraction triggers can find failed rows and
         re-enqueue them.
         """
-        with self._lock:
-            self.conn.execute(
-                "UPDATE aspect_extraction_queue "
-                "SET status = 'failed', "
-                "    retry_count = retry_count + 1, "
-                "    last_error = ? "
-                "WHERE collection = ? AND source_path = ?",
-                (error[:2000], collection, source_path),
-            )
-            self.conn.commit()
+        with self.rename_lock:
+            with self._lock:
+                self.conn.execute(
+                    "UPDATE aspect_extraction_queue "
+                    "SET status = 'failed', "
+                    "    retry_count = retry_count + 1, "
+                    "    last_error = ? "
+                    "WHERE collection = ? AND source_path = ?",
+                    (error[:2000], collection, source_path),
+                )
+                self.conn.commit()
 
     def mark_retry(self, collection: str, source_path: str) -> None:
         """Reset the row to ``pending`` and increment ``retry_count``.
@@ -460,16 +465,17 @@ class AspectExtractionQueue:
         and the retry budget has not been exhausted. The next
         ``claim_next`` call will pick it up.
         """
-        with self._lock:
-            self.conn.execute(
-                "UPDATE aspect_extraction_queue "
-                "SET status = 'pending', "
-                "    retry_count = retry_count + 1, "
-                "    last_attempt_at = NULL "
-                "WHERE collection = ? AND source_path = ?",
-                (collection, source_path),
-            )
-            self.conn.commit()
+        with self.rename_lock:
+            with self._lock:
+                self.conn.execute(
+                    "UPDATE aspect_extraction_queue "
+                    "SET status = 'pending', "
+                    "    retry_count = retry_count + 1, "
+                    "    last_attempt_at = NULL "
+                    "WHERE collection = ? AND source_path = ?",
+                    (collection, source_path),
+                )
+                self.conn.commit()
 
     # nexus-v4m7y: retry-with-backoff for reclaim_stale. Three attempts
     # with two inter-attempt sleeps (0.1s, 0.5s) on top of the 30s
@@ -510,21 +516,22 @@ class AspectExtractionQueue:
         max_attempts = len(sleeps_between) + 1
         for attempt in range(1, max_attempts + 1):
             try:
-                with self._lock:
-                    cur = self.conn.execute(
-                        "UPDATE aspect_extraction_queue "
-                        "SET status = 'pending', last_attempt_at = NULL "
-                        "WHERE status = 'in_progress' "
-                        f"  AND datetime(last_attempt_at) < {cutoff_clause}",
-                    )
-                    self.conn.commit()
-                    if attempt > 1:
-                        _log.debug(
-                            "aspect_queue_reclaim_stale_recovered",
-                            attempt=attempt,
-                            rowcount=cur.rowcount,
+                with self.rename_lock:
+                    with self._lock:
+                        cur = self.conn.execute(
+                            "UPDATE aspect_extraction_queue "
+                            "SET status = 'pending', last_attempt_at = NULL "
+                            "WHERE status = 'in_progress' "
+                            f"  AND datetime(last_attempt_at) < {cutoff_clause}",
                         )
-                    return cur.rowcount
+                        self.conn.commit()
+                        if attempt > 1:
+                            _log.debug(
+                                "aspect_queue_reclaim_stale_recovered",
+                                attempt=attempt,
+                                rowcount=cur.rowcount,
+                            )
+                        return cur.rowcount
             except sqlite3.OperationalError as exc:
                 # Only retry on writer-slot contention. Anything else
                 # (schema corruption, FK violation, etc.) propagates
