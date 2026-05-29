@@ -44,13 +44,16 @@ nexus-u0u8a debugger investigation (T3:
 
 #### Gap 1: cascade and worker run as uncoordinated separate transactions
 
-`rename_collection_cascade` and `aspect_queue.claim_next` /
-`mark_done` / `mark_failed` are distinct transactions on distinct
-connections. Single-writer (RDR-128/129) guarantees one writer at a time
-per statement but does not make the cascade atomic with respect to the
-worker's claim-then-complete pair. The fix must establish a critical
-section so a rename and a queue mutation cannot interleave on the same
-collection's rows.
+`rename_collection_cascade` and the queue mutators run as distinct
+transactions on distinct connections. Single-writer (RDR-128/129)
+guarantees one writer at a time per statement but does not make the
+cascade atomic with respect to any mutator's multi-statement sequence.
+The parties are NOT just the worker (research Finding 1): the critical
+section must serialize the cascade against ALL queue writers — ingest
+`enqueue`, the worker lifecycle (`claim_next`/`claim_batch`/`mark_done`/
+`mark_failed`/`mark_retry`/`reclaim_stale`), AND the `nx enrich aspects`
+synchronous `complete_aspect`. The fix establishes one critical section
+so a rename and any queue mutation cannot interleave.
 
 #### Gap 2: queued-row loss / re-pend churn on rename
 
@@ -171,14 +174,45 @@ Three candidate mechanisms to evaluate during research (lead: A):
 - **(C) Fold queue-maintenance into the cascade RPC.** Make the cascade
   and any pending queue completion for the affected collection a single
   daemon RPC under one transaction. Strongest atomicity; largest change.
-- **(A') Cascade reuses the stores' existing locks** (surfaced by research
-  Finding 2). Rather than invent a new coarse lock, make
-  `rename_collection_cascade` route its per-store portions through the
-  store objects that already hold `self._lock` (e.g. delegate the queue
-  portion to `AspectExtractionQueue.rename_collection`), so the cascade and
-  every store mutator serialize on one shared lock instance within the
-  daemon. Narrower than (A); reuses existing discipline rather than adding
-  a parallel lock. **Leading candidate** pending the throughput spike.
+- **(A') Cascade reuses the stores' existing locks** — surfaced by research
+  Finding 2, then **REJECTED at gate (round 1)**. Delegating the queue
+  portion to `AspectExtractionQueue.rename_collection` would commit it on
+  the store's OWN connection (`self.conn`), separate from the cascade's
+  dedicated connection (`t2/__init__.py:553`). Two SQLite connections
+  cannot share one transaction, so this splits the cascade into two commits
+  and BREAKS the K4 / nexus-nhyh cross-store atomicity invariant documented
+  at `t2/__init__.py:511-516` ("all UPDATEs inside a single transaction ...
+  no partial-update window"). That invariant is load-bearing for RDR-129.
+  Not viable without first restructuring store construction to share the
+  cascade's connection — out of proportion to this fix.
+
+### Decision: approach A
+
+**Approach A is the implementation path.** The cascade keeps its single
+dedicated connection for ALL stores (preserving K4 atomicity); a coarse
+`RENAME_LOCK` held inside the daemon guards the whole cascade against every
+concurrent queue/aspect mutator (enqueue, claim_next/claim_batch,
+mark_done, mark_failed, mark_retry, reclaim_stale, and complete_aspect).
+Every such mutator acquires `RENAME_LOCK` for its write; the cascade holds
+it for its whole transaction. B is rejected (only quiesces the worker, not
+enqueue/complete_aspect — research Finding 1). A' is rejected (breaks K4).
+C remains a heavier alternative if A's coarseness proves costly.
+
+**complete_aspect atomicity (closes Gap 3):** the critical section for
+`complete_aspect` (`t2/__init__.py:1011-1012`) MUST wrap the ENTIRE call —
+both `document_aspects.upsert` AND `aspect_queue.mark_done` — as one unit
+under `RENAME_LOCK`. If only the `mark_done` portion is guarded, a cascade
+can rename `document_aspects` OLD→NEW while complete_aspect writes a fresh
+row under OLD, leaving Gap 3 open. document_aspects has no OTHER concurrent
+writer, so this is the single path that can drift it.
+
+**Lock ordering (deadlock avoidance):** `RENAME_LOCK` must be acquired
+exclusively OUTSIDE any per-store `self._lock` region. Acquiring
+`self._lock` while holding `RENAME_LOCK` on the same thread (e.g. a
+lock-guarded cascade calling into a locked store method) is prohibited —
+it would construct a lock cycle. The cascade today takes no `self._lock`,
+so no cycle exists now; this is a forward constraint for the
+implementation.
 
 ### Decision Rationale
 
@@ -219,9 +253,13 @@ removes the need.
 - **Scenario**: concurrent rename + worker claim/mark_done on the same
   collection, looped — **Verify**: the queued row is never lost
   (`aq_new==1` deterministically; never `(0,0)`).
-- **Scenario**: rename while a `document_aspects` write is in flight —
-  **Verify**: the persisted `collection` matches the post-rename T3
-  collection (no OLD/NEW drift).
+- **Scenario** (Gap 3, exact ordering): worker claims a queue row under
+  OLD; the cascade runs and renames all stores OLD→NEW; the worker's
+  extraction finishes and calls `complete_aspect(collection=OLD, ...)` —
+  **Verify**: no `document_aspects` row is left under OLD; the persisted
+  `collection` matches the post-rename T3 collection (no drift). This
+  specifically exercises the complete_aspect-mid-rename race, not an
+  easier variant.
 - **Scenario**: throughput probe — worker claim latency with and without
   an active rename — **Verify**: no material regression in steady state.
 
@@ -234,4 +272,20 @@ removes the need.
 
 ## Revision History
 
-(Gate findings appended here.)
+### Gate round 1 — 2026-05-28 (substantive-critic; in-place fixes applied)
+
+- **CRITICAL (resolved):** approach A' was designated "leading candidate"
+  but would split the cascade across two SQLite connections, breaking the
+  K4 / nexus-nhyh cross-store atomicity invariant (`t2/__init__.py:511-516`)
+  that RDR-129 relies on. → A' demoted/rejected; **approach A** (single
+  dedicated connection for all stores + coarse `RENAME_LOCK`) named the
+  implementation path.
+- **SIGNIFICANT (resolved):** `complete_aspect` must wrap BOTH
+  `document_aspects.upsert` and `aspect_queue.mark_done` inside the critical
+  section, else Gap 3 stays open. → stated explicitly in the Decision.
+- **SIGNIFICANT (resolved):** lock-ordering between `RENAME_LOCK` and
+  per-store `self._lock` was unspecified. → documented: `RENAME_LOCK`
+  acquired only outside any `self._lock` region.
+- **OBSERVATIONS (addressed):** Gap 1 language broadened to the three
+  writer domains; Test Plan Gap-3 scenario pinned to the exact
+  complete_aspect-mid-rename ordering; `claim_batch` already enumerated.
