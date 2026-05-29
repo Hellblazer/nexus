@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.1] - 2026-05-28
+
+Plugin version aligned with conexus 5.4.1. No plugin-side changes; the
+release is a single nx CLI fix (`nx index repo` crash on a never-cataloged
+repo with a legacy `repos.json` collection name, nexus-5ut2a).
+
 ## [5.4.0] - 2026-05-28
 
 Plugin version aligned with conexus 5.4.0. One plugin-side change; the

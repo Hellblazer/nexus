@@ -192,6 +192,56 @@ def test_index_does_not_write_repo_status(
     assert registry.get(mini_repo)["status"] == "registered"
 
 
+def test_index_legacy_registry_name_no_catalog_owner_succeeds(
+    mini_repo: Path, registry: RepoRegistry, local_t3: T3Database
+) -> None:
+    """nexus-5ut2a: a repos.json entry carrying a pre-RDR-103 legacy
+    2-segment collection name (``code__<basename>-<hash8>``) for a repo
+    with NO catalog owner must not crash on the strict conformant-name
+    guard. ``_run_index`` re-routes the non-conformant registry value
+    through the path-derived conformant synth, so the first index of a
+    never-cataloged / stale-entry repo succeeds and creates a conformant
+    collection.
+
+    Reproduces the arcaneum post-release shakeout crash (pre-existing
+    since v4.23.0): before the fix, ``db.get_or_create_collection`` got the
+    legacy 2-segment name and raised ``ValueError: ... is not conformant``.
+    """
+    from nexus.corpus import is_conformant_collection_name
+    from nexus.indexer import _legacy_collection_name
+
+    # RepoRegistry.add now mints conformant names; force the entry to the
+    # legacy 2-segment shape to simulate a pre-RDR-103 repos.json entry.
+    legacy_code = _legacy_collection_name(mini_repo, "code")
+    legacy_docs = _legacy_collection_name(mini_repo, "docs")
+    assert not is_conformant_collection_name(legacy_code), (
+        "fixture precondition: the seeded name must be genuinely legacy"
+    )
+    entry = registry._data["repos"][str(mini_repo)]
+    entry["collection"] = legacy_code
+    entry["code_collection"] = legacy_code
+    entry["docs_collection"] = legacy_docs
+    registry._save()
+
+    # No catalog owner in this tmp env → the no-owner fallback path that
+    # crashed for arcaneum. Must complete without raising.
+    _index(mini_repo, registry, local_t3)
+
+    # Every code collection this repo created must be conformant — the fix
+    # re-routed the legacy name through the synth.
+    from nexus.repo_identity import _repo_identity
+    _, path_hash = _repo_identity(mini_repo)
+    code_cols = [
+        e["name"]
+        for e in local_t3.list_collections()
+        if path_hash in e["name"] and e["name"].startswith("code__")
+    ]
+    assert code_cols, f"index created no code collection (path_hash={path_hash})"
+    assert all(is_conformant_collection_name(c) for c in code_cols), (
+        f"index created a non-conformant code collection: {code_cols}"
+    )
+
+
 @pytest.mark.parametrize("expected_file", ["ttl.py", "session.py"])
 def test_index_chunks_carry_source_path(
     mini_repo: Path, registry: RepoRegistry, local_t3: T3Database, expected_file: str

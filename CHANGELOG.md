@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.1] - 2026-05-28
+
+### Fixed
+
+- **`nx index repo` on a never-cataloged repo no longer crashes (nexus-5ut2a).** A `repos.json` entry carrying a pre-RDR-103 legacy 2-segment collection name (`code__<basename>-<hash8>`) for a repo with no catalog owner reached the strict conformant-name guard in `get_or_create_collection` and aborted the whole index with `ValueError: ... is not conformant`. The catalog owner is registered later in the run, and the Phase-4 migration is a no-op without an owner, so the legacy name was used verbatim for collection creation and the first index of such a repo could never complete. `_run_index` now re-routes any non-conformant `code_collection` / `docs_collection` through the path-derived conformant synth (`code__<owner>__<model>__v1`), which needs no registered owner and self-adjusts the model segment to local/cloud mode. Pre-existing since v4.23.0; surfaced during the 5.4.0 post-release shakeout while indexing a repo to complete the RDR-137 `repos.json` migration.
+
 ## [5.4.0] - 2026-05-28
 
 ### Changed
