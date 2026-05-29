@@ -459,3 +459,92 @@ class TestRenameThroughput:
             f"contended median={contended * 1e3:.3f}ms "
             f"ceiling={ceiling * 1e3:.3f}ms"
         )
+
+
+# ── Hardening (T4 test-validator follow-ups) ──────────────────────────────────
+
+
+class _TrackingRLock:
+    """RLock wrapper recording acquire calls (for negative-structural gates)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.acquire_count = 0
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        result = self._lock.acquire(blocking=blocking, timeout=timeout)
+        if result:
+            self.acquire_count += 1
+        return result
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> "_TrackingRLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.release()
+
+
+class TestReadOnlyMethodsDoNotSerialize:
+    """Negative-structural gate: read-only queue methods must NOT acquire
+    rename_lock.
+
+    pending_count / is_drained / list_pending intentionally hold only
+    self._lock — the design keeps reads unblocked while a cascade holds
+    RENAME_LOCK. This gate catches a future refactor that accidentally
+    promotes a reader into a rename-serialized participant (test-validator
+    gap, 2026-05-29).
+    """
+
+    def test_read_only_methods_omit_rename_lock(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path / "memory.db")
+        try:
+            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id="")
+            tracking = _TrackingRLock()
+            db.aspect_queue.rename_lock = tracking  # type: ignore[assignment]
+
+            db.aspect_queue.pending_count()
+            db.aspect_queue.is_drained()
+            db.aspect_queue.list_pending()
+
+            assert tracking.acquire_count == 0, (
+                "a read-only queue method acquired rename_lock — reads must "
+                "stay unblocked while a cascade holds the lock"
+            )
+        finally:
+            db.close()
+
+
+class TestCompleteAspectReleasesLockOnError:
+    """complete_aspect must release RENAME_LOCK even when a write raises
+    between the upsert and mark_done.
+
+    The ``with self.RENAME_LOCK:`` block guarantees release on exception
+    (Python semantics), but a future refactor to manual acquire/release could
+    leak the lock and wedge every subsequent rename + queue mutator. This
+    locks the release-on-error contract (test-validator gap, 2026-05-29).
+    """
+
+    def test_lock_released_after_upsert_raises(self, tmp_path: Path) -> None:
+        db = _make_db(tmp_path / "memory.db")
+        try:
+            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id="")
+            db.aspect_queue.claim_next()
+
+            def boom(_record: Any) -> Any:
+                raise RuntimeError("upsert exploded")
+
+            db.document_aspects.upsert = boom  # type: ignore[method-assign]
+
+            with pytest.raises(RuntimeError, match="upsert exploded"):
+                db.complete_aspect(_aspect_fields(_OLD, _SRC))
+
+            # Lock must be free — a leaked lock would wedge all renames.
+            got = db.RENAME_LOCK.acquire(blocking=False)
+            assert got, "RENAME_LOCK leaked after complete_aspect raised"
+            db.RENAME_LOCK.release()
+        finally:
+            db.close()
