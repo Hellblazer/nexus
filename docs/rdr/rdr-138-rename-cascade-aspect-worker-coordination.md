@@ -120,12 +120,32 @@ Full root cause and reproduction in T3:
 
 ### Critical Assumptions
 
-- [ ] The cascade and worker mutations are the ONLY two writers that can
-  touch a collection's `aspect_extraction_queue` rows concurrently —
-  **Status**: Unverified — **Method**: Source Search
+- [x] ~~The cascade and worker mutations are the ONLY two writers~~ —
+  **Status**: REFUTED-AS-STATED, refined (Source Search, 2026-05-28, T2
+  `138-research-1`). The queue has writers across THREE concurrency
+  domains: ingest `enqueue` (`aspect_extraction_queue.py:241`), worker
+  lifecycle (`claim_next`/`claim_batch`/`mark_done`/`mark_failed`/
+  `mark_retry`/`reclaim_stale`), and the `nx enrich aspects` synchronous
+  `complete_aspect` -> `mark_done` (`db/t2/__init__.py:1012`). Consequence:
+  approach (B) `stop_claiming()` is INSUFFICIENT (quiesces only the worker,
+  not enqueue or complete_aspect). The lock must guard ALL queue writes.
+- [x] All queue writers funnel through the single T2 daemon process
+  post-zir76 — **Status**: Verified (Source Search). A daemon-held mutex
+  (approach A) acquired by the cascade AND every queue mutator is viable.
 - [ ] A coarse per-`memory.db` queue-maintenance lock does not measurably
   regress steady-state worker throughput (claims are short) —
-  **Status**: Unverified — **Method**: Spike
+  **Status**: Unverified — **Method**: Spike (defer to implementation)
+
+### The precise coordination gap (Verified, Source Search)
+
+There are TWO queue-rename implementations: `AspectExtractionQueue.
+rename_collection` (`aspect_extraction_queue.py:587-605`) which ACQUIRES
+the store's `self._lock` on `self.conn`, and `T2Database.
+rename_collection_cascade` (`db/t2/__init__.py:594-608`) which runs the
+same DELETE+UPDATE on a SEPARATE dedicated connection that does NOT
+acquire `self._lock`. The cascade therefore bypasses the store's own
+serialization even in-process — that is the concrete race surface on top
+of the cross-process separate-transaction gap.
 
 ## Proposed Solution
 
@@ -151,6 +171,14 @@ Three candidate mechanisms to evaluate during research (lead: A):
 - **(C) Fold queue-maintenance into the cascade RPC.** Make the cascade
   and any pending queue completion for the affected collection a single
   daemon RPC under one transaction. Strongest atomicity; largest change.
+- **(A') Cascade reuses the stores' existing locks** (surfaced by research
+  Finding 2). Rather than invent a new coarse lock, make
+  `rename_collection_cascade` route its per-store portions through the
+  store objects that already hold `self._lock` (e.g. delegate the queue
+  portion to `AspectExtractionQueue.rename_collection`), so the cascade and
+  every store mutator serialize on one shared lock instance within the
+  daemon. Narrower than (A); reuses existing discipline rather than adding
+  a parallel lock. **Leading candidate** pending the throughput spike.
 
 ### Decision Rationale
 
