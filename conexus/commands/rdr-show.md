@@ -5,7 +5,7 @@ description: Show detailed information about a specific RDR including content, r
 
 # RDR Show
 
-!`nx rdr preamble rdr-show -- "$ARGUMENTS"`
+!`nx rdr preamble rdr-show -- '$ARGUMENTS'`
 
 ## RDR to Show
 

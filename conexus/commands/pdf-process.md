@@ -5,7 +5,7 @@ description: Index PDF files into the T3 knowledge store for semantic search
 
 # PDF Processing Request
 
-!`nx command-context pdf-process -- "$ARGUMENTS"`
+!`nx command-context pdf-process`
 
 ## PDFs to Process
 

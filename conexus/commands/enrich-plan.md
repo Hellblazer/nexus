@@ -5,7 +5,7 @@ description: Enrich beads with execution context using mcp__plugin_conexus_nexus
 
 # Enrich Plan
 
-!`nx command-context enrich-plan -- "$ARGUMENTS"`
+!`nx command-context enrich-plan`
 
 ## Plan to Enrich
 

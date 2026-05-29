@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Scenario 24 — RDR-130 P2.5/P2.6: the migrated AGENT-RELAY injection form renders
 # its preamble via real Claude Code. P2.5 flipped the 16 agent-relay commands to a
-# single-line `!`nx command-context <name> -- "$ARGUMENTS"`` call; the nx subcommand
+# single-line `!`nx command-context <name>`` call; the nx subcommand
 # (P2.2) prints the shared preamble (## Context, project-type table, top-level
 # structure, source locations). This isolates exactly what P2 changed — the
 # injection line — using the proven minimal-probe mechanism (scenarios 21/22), not
@@ -26,7 +26,7 @@ description: RDR-130 P2 agent-relay preamble probe
 
 # Agent-relay Preamble Probe
 
-!`nx command-context analyze-code -- "$ARGUMENTS"`
+!`nx command-context analyze-code`
 
 Report verbatim whether the "### Source Locations" heading and the "**Project type:**" list appear above.
 EOF

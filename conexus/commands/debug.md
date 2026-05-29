@@ -5,7 +5,7 @@ description: Debug test failures using debugger agent
 
 # Debug Request
 
-!`nx command-context debug -- "$ARGUMENTS"`
+!`nx command-context debug`
 
 ## Issue
 

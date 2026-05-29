@@ -5,7 +5,7 @@ description: Constructive critique of code, plans, designs, or documentation usi
 
 # Deep Critique Request
 
-!`nx command-context substantive-critique -- "$ARGUMENTS"`
+!`nx command-context substantive-critique`
 
 ### Project Context
 

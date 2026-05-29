@@ -5,7 +5,7 @@ description: Review code changes using code-review-expert agent
 
 # Code Review Request
 
-!`nx command-context review-code -- "$ARGUMENTS"`
+!`nx command-context review-code`
 
 ### Project Context
 

@@ -5,7 +5,7 @@ description: Add, track, or verify structured research findings for an active RD
 
 # RDR Research
 
-!`nx rdr preamble rdr-research -- "$ARGUMENTS"`
+!`nx rdr preamble rdr-research -- '$ARGUMENTS'`
 
 ## Subcommand and Arguments
 
