@@ -32,6 +32,25 @@ def _clear_module_state() -> None:
     catalog_taxonomy._migrated_paths.clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_daemon_nudge():
+    """nexus-scoo5: stop in-process ``nx upgrade`` tests from spawning a real
+    detached T2 daemon under the per-test config dir.
+
+    ``upgrade._cycle_daemon_to_current()`` shells out to ``nx daemon t2
+    ensure-running`` (spawning a detached ``nx daemon t2 start``), and
+    ``_quiesce_daemon()`` shells out to ``nx daemon t2 stop``. Neither
+    belongs in these migration-logic/exit-code e2e tests; the spawn was the
+    source of the leaked ``test_force0`` orphan daemons. Mirrors
+    ``test_upgrade_cmd._no_real_daemon_nudge``. The conftest
+    ``_reap_spawned_daemons`` backstop covers anything that slips through."""
+    with (
+        patch("nexus.commands.upgrade._cycle_daemon_to_current"),
+        patch("nexus.commands.upgrade._quiesce_daemon"),
+    ):
+        yield
+
+
 # ── SC-1: _nexus_version table ──────────────────────────────────────────────
 
 
