@@ -363,11 +363,19 @@ def test_run_index_excludes_rdr_paths_from_docs(tmp_path):
     with _patches(db, extra={"nexus.doc_indexer._embed_with_fallback": {"return_value": ([[0.1]*10], "voyage-context-3")},
                               "nexus.doc_indexer.batch_index_markdowns": {}}) as mocks:
         _run_index(repo, _reg())
-    if "docs__repo" in ups:
-        # RDR-102 D2: source_path is gone; title carries
-        # "{relpath}:chunk-{i}" per prose_indexer.py:96.
-        paths = [m.get("title", "") for m in ups["docs__repo"]]
-        assert any("README.md" in p for p in paths) and not any("ADR-001" in p for p in paths)
+    # nexus-5ut2a: _run_index re-routes the non-conformant fake registry
+    # name (code__repo/docs__repo) through the conformant synth, so key by
+    # content-type prefix rather than the literal legacy name.
+    docs_paths = [
+        m.get("title", "")
+        for k, v in ups.items() if k.startswith("docs__") for m in v
+    ]
+    assert docs_paths, "no docs collection received chunks"
+    # RDR-102 D2: source_path is gone; title carries
+    # "{relpath}:chunk-{i}" per prose_indexer.py:96.
+    assert any("README.md" in p for p in docs_paths) and not any(
+        "ADR-001" in p for p in docs_paths
+    )
     mb = mocks["batch_index_markdowns"]; mb.assert_called_once()
     assert any("ADR-001.md" in str(p) for p in mb.call_args[0][0])
 
@@ -419,8 +427,12 @@ def test_run_index_mixed_repo(tmp_path):
         _run_index(repo, _reg())
     # RDR-102 D2: source_path is gone; title carries
     # "{relpath}:chunk-{i}" per code_indexer.py:393 / prose_indexer.py:96.
-    assert any("main.py" in m.get("title", "") for m in ups["code__repo"])
-    dp = {m.get("title", "") for m in ups["docs__repo"]}
+    # nexus-5ut2a: key by content-type prefix — _run_index re-routes the
+    # non-conformant fake name (code__repo) through the conformant synth.
+    code_ups = [m for k, v in ups.items() if k.startswith("code__") for m in v]
+    docs_ups = [m for k, v in ups.items() if k.startswith("docs__") for m in v]
+    assert any("main.py" in m.get("title", "") for m in code_ups)
+    dp = {m.get("title", "") for m in docs_ups}
     assert any("README.md" in p for p in dp) and any("notes.rst" in p for p in dp)
     assert not any("data.txt" in p for p in dp), ".txt files should be SKIP"
 

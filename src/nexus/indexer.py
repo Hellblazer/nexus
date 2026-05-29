@@ -2006,6 +2006,21 @@ def _run_index(
     # these with conformant names before the indexer reads from T3.
     code_collection = info.get("code_collection", info["collection"])
     docs_collection = info.get("docs_collection") or _repo_collection_or_legacy(repo, "docs")
+    # nexus-5ut2a: the registry value can carry a legacy 2-segment name
+    # (``code__<owner>``) when repos.json holds a pre-RDR-103 entry for a
+    # repo that has no catalog owner yet (e.g. a stale entry from a prior
+    # failed run, or the RDR-137 migration's un-cataloged residue). The
+    # Phase-4 migration below is a no-op without an owner, so an
+    # un-reconciled legacy name would reach the strict get_or_create_collection
+    # guard (db/t3.py) and crash the whole index. Re-route any
+    # non-conformant value through the path-derived conformant synth, which
+    # builds ``code__<owner>__<model>__v1`` without needing a registered
+    # owner (model segment self-adjusts to local/cloud mode).
+    from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415
+    if not is_conformant_collection_name(code_collection):
+        code_collection = _repo_collection_or_legacy(repo, "code")
+    if not is_conformant_collection_name(docs_collection):
+        docs_collection = _repo_collection_or_legacy(repo, "docs")
     _migrated_names: dict[str, str] = {}
 
     # Load config (picks up per-repo .nexus.yml if present)
