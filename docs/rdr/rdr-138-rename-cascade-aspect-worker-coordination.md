@@ -2,16 +2,19 @@
 title: "Rename-Cascade / Aspect-Worker Coordination: Serialize T2 Collection Rename Against In-Flight Aspect Extraction"
 id: RDR-138
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-28
 accepted_date: 2026-05-29
+closed_date: 2026-05-29
+close_reason: implemented
+post_mortem: docs/rdr/post-mortem/138-rename-cascade-aspect-worker-coordination.md
 related_issues: [nexus-u0u8a]
 related_rdrs: [RDR-128, RDR-129, RDR-103]
-related_tests: [tests/test_collection_rename.py]
-implementation_notes: ""
+related_tests: [tests/test_collection_rename.py, tests/test_rename_lock_t1_1.py, tests/test_rename_lock_t1_2.py, tests/test_rename_lock_t2_race.py]
+implementation_notes: "Shipped on develop: T1.1 (RENAME_LOCK + cascade whole-txn hold), T1.2 (7 mutators + complete_aspect whole-call), T2 (race regression suite), T3 (code review PASS), T4 (test-validate + phase-review gate PASS). CA2 throughput spike verified (<1% amortized). Layer 2 test hygiene shipped earlier (4801675b). Accepted self-healing residue: cascade-before-complete_aspect stale-collection drift (reclaim_stale re-pends). See post-mortem."
 ---
 
 # RDR-138: Rename-Cascade / Aspect-Worker Coordination
