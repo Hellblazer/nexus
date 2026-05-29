@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Slash-command `$ARGUMENTS` shell-quoting hazard closed across all 25 commands (#1007, #1008).** Claude Code substitutes `$ARGUMENTS` textually into the `` !`…` `` preamble line *before* the shell parses it, so a prompt containing a quote, backtick, paren, or `$` aborted the command with `(eval):1: unmatched "` — hit in practice by `/conexus:architecture` with a prose task description. Commands that ignore their preamble arg (the 16 `command-context` commands plus `rdr-create` / `rdr-list`) drop it entirely; the pure-token `rdr preamble` commands (`rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-research`, `rdr-audit`) single-quote it; the two free-form commands (`rdr-close --reason`, `phase-review-gate` deferral justifications) drop the shell arg and instead load targeted context via the Bash tool with the id parsed from `$ARGUMENTS`. A new end-to-end test (`tests/test_command_shell_quoting_e2e.py`) reproduces the substitution+`eval` against hostile inputs in both bash and zsh and verifies injection payloads arrive inert (one intact literal argv token, no subshell executes); a static guard blocks reintroduction of the double-quoted form. Hooks were audited and are clean.
+
 ## [5.4.1] - 2026-05-28
 
 ### Fixed
