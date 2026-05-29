@@ -266,6 +266,29 @@ def _isolate_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "test-catalog"))
 
 
+@pytest.fixture(autouse=True)
+def _reset_aspect_worker_singleton() -> None:
+    """Reset the module-level aspect_worker singleton around every test.
+
+    nexus-u0u8a: ``aspect_extraction_enqueue_hook`` lazy-spawns a singleton
+    daemon-thread worker via ``ensure_worker_started()`` for any
+    supported-collection (knowledge__/rdr__/docs__) document hook. Only
+    ``test_aspect_worker.py`` / ``test_aspect_drain_protocol.py`` reset it,
+    so any OTHER test that fires such a hook leaks the singleton. The leaked
+    worker keeps polling ``t2_index_write`` (degraded fallback to
+    ``T2Database(default_db_path())``), and when a later test patches
+    ``default_db_path`` to its own tmp db the worker claims + ``mark_done``s
+    rows out from under that test — the exact mechanism behind the
+    ``test_collection_rename`` aspect-cascade canary (debugger verdict
+    2026-05-28: 95% repro). Resetting before AND after each test confines a
+    spawned worker to its own test so it can never poll a sibling's db.
+    """
+    from nexus.aspect_worker import reset_worker_for_tests
+    reset_worker_for_tests()
+    yield
+    reset_worker_for_tests()
+
+
 def set_credentials(monkeypatch) -> None:
     """Set required T3/Voyage credential env vars for tests that call _has_credentials().
 

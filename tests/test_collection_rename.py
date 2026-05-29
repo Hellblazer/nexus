@@ -706,45 +706,33 @@ class TestAspectCascadeIntegration:
         assert counts.get("aspects", 0) >= 0  # key present (even if 0)
         assert counts.get("aspect_queue", 0) >= 0
 
-        # nexus-989e1: bounded poll on the verify reads. The cascade
-        # commits on its own dedicated connection inside
-        # rename_collection_cascade; a fresh verify connection re-reading
-        # the same WAL file can momentarily miss that commit on a loaded
-        # 3.12 runner (full-suite-only flake; passed solo + on 3.13 +
-        # in-sequence). Polling converts the flake into a reliable pass
-        # WITHOUT masking a real product miss: the cascade write is
-        # synchronous, so if the row genuinely never moved, the poll
-        # exhausts its window and the assertion still fails.
-        import time as _time
-
-        def _counts() -> tuple[int, int, int, int]:
-            with T2Database(db_path) as verify:
-                da_old = verify.document_aspects.conn.execute(
-                    "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
-                    ("code__old",),
-                ).fetchone()[0]
-                da_new = verify.document_aspects.conn.execute(
-                    "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
-                    ("code__new",),
-                ).fetchone()[0]
-                aq_old = verify.aspect_queue.conn.execute(
-                    "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
-                    ("code__old",),
-                ).fetchone()[0]
-                aq_new = verify.aspect_queue.conn.execute(
-                    "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
-                    ("code__new",),
-                ).fetchone()[0]
-            return da_old, da_new, aq_old, aq_new
-
-        deadline = _time.monotonic() + 5.0
-        da_old, da_new, aq_old, aq_new = _counts()
-        while (
-            (da_old, da_new, aq_old, aq_new) != (0, 1, 0, 1)
-            and _time.monotonic() < deadline
-        ):
-            _time.sleep(0.05)
-            da_old, da_new, aq_old, aq_new = _counts()
+        # nexus-u0u8a: a single deterministic read. The former 5s poll
+        # (nexus-989e1) misdiagnosed the intermittent (0,0) failure as
+        # WAL-visibility lag; the debugger proved the real cause was a
+        # leaked module-level aspect_worker claiming + mark_done-ing the
+        # queued row mid-rename (deleting it from BOTH old and new — which a
+        # poll can never recover). The autouse _reset_aspect_worker_singleton
+        # fixture (conftest) now confines any spawned worker to its own test,
+        # so the cascade's synchronous write is deterministic here. (The
+        # production cascade-vs-worker coordination gap is tracked separately
+        # under RDR/nexus-u0u8a Layer 1.)
+        with T2Database(db_path) as verify:
+            da_old = verify.document_aspects.conn.execute(
+                "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
+                ("code__old",),
+            ).fetchone()[0]
+            da_new = verify.document_aspects.conn.execute(
+                "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
+                ("code__new",),
+            ).fetchone()[0]
+            aq_old = verify.aspect_queue.conn.execute(
+                "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
+                ("code__old",),
+            ).fetchone()[0]
+            aq_new = verify.aspect_queue.conn.execute(
+                "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
+                ("code__new",),
+            ).fetchone()[0]
 
         assert da_old == 0 and da_new == 1
         assert aq_old == 0 and aq_new == 1
