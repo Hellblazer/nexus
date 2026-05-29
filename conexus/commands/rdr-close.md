@@ -5,7 +5,7 @@ description: Close an RDR with optional post-mortem, bead status gate, and T3 ar
 
 # RDR Close
 
-!`nx rdr preamble rdr-close -- "$ARGUMENTS"`
+!`nx rdr preamble rdr-close -- '$ARGUMENTS'`
 
 ## RDR to Close
 

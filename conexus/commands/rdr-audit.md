@@ -5,7 +5,7 @@ description: Audit a project's RDR lifecycle for silent-scope-reduction base rat
 
 # RDR Audit
 
-!`nx rdr preamble rdr-audit -- "$ARGUMENTS"`
+!`nx rdr preamble rdr-audit -- '$ARGUMENTS'`
 
 ## Arguments
 

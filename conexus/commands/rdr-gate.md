@@ -5,7 +5,7 @@ description: Run finalization gate on an RDR — structural, assumption audit, a
 
 # RDR Gate
 
-!`nx rdr preamble rdr-gate -- "$ARGUMENTS"`
+!`nx rdr preamble rdr-gate -- '$ARGUMENTS'`
 
 ## RDR to Gate
 

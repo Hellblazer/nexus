@@ -5,7 +5,7 @@ description: Cross-walk RDR §Approach against closing beads at a phase boundary
 
 # Phase Review Gate
 
-!`nx rdr preamble phase-review-gate -- "$ARGUMENTS"`
+!`nx rdr preamble phase-review-gate -- '$ARGUMENTS'`
 
 ## Phase Review Gate
 

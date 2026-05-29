@@ -1866,19 +1866,31 @@ def test_continuation_target_file_is_in_tmp(
 
 # ---------------------------------------------------------------------------
 # (g) Shell-quoting safety: command .md files must NOT splice $ARGUMENTS into
-#     the `!`...`` backtick line. Claude Code substitutes $ARGUMENTS textually
-#     BEFORE the shell runs, so any prompt containing ", `, ( etc. breaks the
-#     double-quoted argument ((eval):1: unmatched "). The args are unused by
-#     every command-context subcommand (continuation falls back to branch),
-#     so the passthrough is both vestigial and a shell-injection hazard.
+#     a `!`...`` backtick line inside DOUBLE quotes. Claude Code substitutes
+#     $ARGUMENTS textually BEFORE the shell parses the line, so a prompt
+#     containing ", `, (, ), $ etc. breaks the double-quoted argument
+#     ((eval):1: unmatched "). No shell escaping survives textual
+#     substitution (confirmed against Claude Code skills docs).
+#
+#     Two safe forms:
+#       - drop the arg entirely (when the preamble ignores it, or the arg is
+#         free-form prose that has no safe form), or
+#       - single-quote it (`'$ARGUMENTS'`) when the arg is a shell-safe token
+#         (RDR id / flag / bead id) that can never contain a literal apostrophe.
+#         Single-quoting is behaviourally identical (the preamble re-joins
+#         args) but immune to every metacharacter except a literal '.
 # ---------------------------------------------------------------------------
 
 import re as _re
 
 
-def _command_md_files() -> list[Path]:
+def _all_command_md_files() -> list[Path]:
     cmd_dir = Path(__file__).parent.parent / "conexus" / "commands"
-    return sorted(p for p in cmd_dir.glob("*.md") if "nx command-context" in p.read_text())
+    return sorted(cmd_dir.glob("*.md"))
+
+
+def _command_md_files() -> list[Path]:
+    return [p for p in _all_command_md_files() if "nx command-context" in p.read_text()]
 
 
 def test_command_files_exist() -> None:
@@ -1886,12 +1898,11 @@ def test_command_files_exist() -> None:
     assert len(_command_md_files()) == 16
 
 
-def test_no_command_file_splices_arguments_into_shell() -> None:
-    """No `!`nx command-context ...`` line may interpolate $ARGUMENTS.
+def test_no_command_context_file_passes_arguments() -> None:
+    """command-context preamble lines never reference $ARGUMENTS.
 
-    Regression for the (eval):1: unmatched " failure: $ARGUMENTS is
-    substituted textually before the shell, so passing it inside a
-    double-quoted arg breaks on any shell metacharacter in the prompt.
+    The command-context subcommands ignore their args entirely (analyze-code
+    and continuation included), so the passthrough is purely a hazard.
     """
     offenders: list[str] = []
     pat = _re.compile(r"!`nx command-context [a-z-]+.*\$ARGUMENTS.*`")
@@ -1902,4 +1913,27 @@ def test_no_command_file_splices_arguments_into_shell() -> None:
     assert offenders == [], (
         "command-context backtick lines must not splice $ARGUMENTS:\n"
         + "\n".join(offenders)
+    )
+
+
+def test_no_command_file_double_quotes_arguments_in_backtick() -> None:
+    """No `!`...`` backtick line in ANY command .md may put $ARGUMENTS inside
+    double quotes.
+
+    Textual substitution means a double-quoted $ARGUMENTS breaks on the first
+    quote/backtick/paren in the user's input. This guard covers every command
+    surface (command-context AND rdr preamble), so a new command can never
+    re-introduce the (eval):1: unmatched " class. Single-quoted '$ARGUMENTS'
+    is permitted for shell-safe token args.
+    """
+    offenders: list[str] = []
+    # A backtick command line that contains a double-quoted $ARGUMENTS.
+    pat = _re.compile(r'!`[^`]*"\s*\$ARGUMENTS\s*"[^`]*`')
+    for p in _all_command_md_files():
+        for i, line in enumerate(p.read_text().splitlines(), 1):
+            if pat.search(line):
+                offenders.append(f"{p.name}:{i}: {line.strip()}")
+    assert offenders == [], (
+        'command .md backtick lines must not splice "$ARGUMENTS" (double-quoted); '
+        "drop the arg or single-quote it:\n" + "\n".join(offenders)
     )

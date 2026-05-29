@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Shell-quoting safety for all 25 slash commands.** `$ARGUMENTS` is
+  substituted textually into the `` !`…` `` preamble line *before* the shell
+  parses it (confirmed against Claude Code skills docs), so any prompt
+  containing a double-quote, backtick, paren, or `$` broke the command with
+  `(eval):1: unmatched "`. Hit in practice by `/conexus:architecture` with a
+  prose task description. Fix: the 16 `command-context` commands (which ignore
+  their args) and `rdr-create` / `rdr-list` (preamble ignores args; title is
+  free-form) drop the arg entirely; the 7 arg-consuming `rdr preamble`
+  commands switch to single-quoted `'$ARGUMENTS'` (behaviourally identical —
+  the preamble re-joins args — but immune to every metacharacter except a
+  literal apostrophe, which cannot occur in an RDR id / flag / bead id). A new
+  static guard (`test_no_command_file_double_quotes_arguments_in_backtick`)
+  locks the safe form across every command surface. Hooks were audited and are
+  clean (they escape stdin via `python3 … json.dumps`, never splicing untrusted
+  input into a shell line).
+
 ## [5.4.1] - 2026-05-28
 
 Plugin version aligned with conexus 5.4.1. No plugin-side changes; the
