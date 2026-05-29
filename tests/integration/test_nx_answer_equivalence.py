@@ -174,6 +174,8 @@ class TestGracefulDegradation:
             "can't answer", "unable to", "no data", "no results",
             "no documents", "static indexed", "knowledge base",
             "no tool",
+            # nexus-n1908 empty-retrieval guard wording.
+            "no matching evidence", "zero results", "rephrase",
         )
         assert any(m in lowered for m in accepted_markers), (
             f"nx_answer response didn't match any graceful-degrade marker; "
