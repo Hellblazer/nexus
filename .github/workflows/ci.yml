@@ -16,7 +16,10 @@ jobs:
   test:
     name: pytest (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 25m: the suite runs ~16m on the runners and the post-job cache-save
+    # step counts toward this budget. At 20m a v5.4.2 release run timed
+    # out DURING the cache upload (tests had already passed). See release.yml.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -65,4 +68,4 @@ jobs:
         run: uv sync --group dev
 
       - name: Run tests
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ -q --durations=25

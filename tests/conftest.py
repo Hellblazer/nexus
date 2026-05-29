@@ -31,7 +31,29 @@ def _enable_t2_test_auto_migrate() -> None:
     os.environ.setdefault(_t2._RUN_MIGRATIONS_ENV, "1")
 
 
+def _disable_aspect_worker_autostart() -> None:
+    """Stop the aspect-extraction-enqueue hook from lazy-spawning the
+    singleton polling worker during the unit suite.
+
+    A ``store_put`` / index / MCP test that touches a supported collection
+    fires ``aspect_extraction_enqueue_hook``, which (in production)
+    auto-spawns the polling worker. The worker then gets stuck mid
+    ``t2_index_write`` poll, so the autouse ``_reset_aspect_worker_singleton``
+    teardown's ``stop()`` join waits its full 5s timeout — a fixed ~5s tax on
+    every such test (≥140s across the suite). The worker is never asserted on
+    by those tests, and leaving it unspawned also removes the leaked-singleton
+    hazard (nexus-u0u8a) at its root. Worker-specific tests call
+    ``ensure_worker_started()`` directly, which ignores this gate, or
+    ``monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "1")`` to exercise the
+    hook path. ``setdefault`` so an explicit opt-in set before import wins.
+    """
+    import os
+
+    os.environ.setdefault("NX_ASPECT_WORKER_AUTOSTART", "0")
+
+
 _enable_t2_test_auto_migrate()
+_disable_aspect_worker_autostart()
 
 
 def pytest_configure(config):

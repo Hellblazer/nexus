@@ -52,6 +52,7 @@ worker spawn).
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -941,4 +942,16 @@ def aspect_extraction_enqueue_hook(
         # The document_aspects row will simply not be populated until
         # a manual re-enqueue triggers extraction.
         return
-    ensure_worker_started()
+    # Auto-spawn gate (nexus test-suite trim): the enqueue hook lazy-spawns
+    # the singleton polling worker for every supported-collection document.
+    # The unit suite sets ``NX_ASPECT_WORKER_AUTOSTART=0`` (conftest) so a
+    # store_put / index test does NOT spawn a worker it never asserts on —
+    # which otherwise costs a fixed ~5s teardown per test (the stop() join
+    # waits on a worker stuck mid ``t2_index_write`` poll). This also removes
+    # the leaked-singleton hazard (nexus-u0u8a) at its root for those tests.
+    # Production leaves it unset → default-on. Worker-specific tests call
+    # ``ensure_worker_started()`` directly, which ignores this gate.
+    if os.environ.get("NX_ASPECT_WORKER_AUTOSTART", "1") not in (
+        "0", "false", "False", "no", "",
+    ):
+        ensure_worker_started()
