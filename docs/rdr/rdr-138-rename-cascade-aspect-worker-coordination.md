@@ -2,12 +2,12 @@
 title: "Rename-Cascade / Aspect-Worker Coordination: Serialize T2 Collection Rename Against In-Flight Aspect Extraction"
 id: RDR-138
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-28
-accepted_date:
+accepted_date: 2026-05-29
 related_issues: [nexus-u0u8a]
 related_rdrs: [RDR-128, RDR-129, RDR-103]
 related_tests: [tests/test_collection_rename.py]
