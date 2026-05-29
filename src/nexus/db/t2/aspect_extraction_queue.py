@@ -146,10 +146,39 @@ class AspectExtractionQueue:
     """Owns the ``aspect_extraction_queue`` table.
 
     See module docstring for state transitions and locking contract.
+
+    Locking hierarchy (RDR-138 T1.1, nexus-tgzvt):
+
+    ``rename_lock`` (process-wide ``threading.RLock`` owned by
+    ``T2Database``) is the OUTERMOST lock — it must be acquired BEFORE any
+    ``self._lock`` region, NEVER while ``self._lock`` is already held.
+    Ordering: ``rename_lock`` -> ``self._lock``.
+
+    ``rename_lock`` is an ``RLock`` (not a plain ``Lock``) because
+    ``claim_batch`` calls ``claim_next`` in a loop. When T1.2 wraps both
+    with ``rename_lock``, a non-reentrant lock would self-deadlock on the
+    inner ``claim_next`` call. The ``RLock`` allows the same thread to
+    acquire it again safely. An alternative is an unlocked
+    ``_claim_next_locked()`` helper (callable while lock held), but
+    ``RLock`` is the simpler shape here given the bounded call depth.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        rename_lock: "threading.RLock | None" = None,
+    ) -> None:
         self._lock = threading.Lock()
+        # RDR-138 T1.1 (nexus-tgzvt): process-wide outermost lock shared
+        # with T2Database and the rename_collection_cascade path. Injected
+        # by T2Database at construction so all three paths share the SAME
+        # lock instance. Falls back to a new RLock when constructed
+        # stand-alone (tests / direct construction outside T2Database).
+        # T1.2 will wrap every queue mutator body with this lock.
+        self.rename_lock: threading.RLock = (
+            rename_lock if rename_lock is not None else threading.RLock()
+        )
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         # nexus-v4m7y: bumped from 5s to 30s. Nine T2 stores hold their own
         # sqlite3.Connection against memory.db. Under WAL mode, only one
