@@ -6,9 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.2] - 2026-05-29
+
 ### Fixed
 
-- **Slash-command `$ARGUMENTS` shell-quoting hazard closed across all 25 commands (#1007, #1008).** Claude Code substitutes `$ARGUMENTS` textually into the `` !`…` `` preamble line *before* the shell parses it, so a prompt containing a quote, backtick, paren, or `$` aborted the command with `(eval):1: unmatched "` — hit in practice by `/conexus:architecture` with a prose task description. Commands that ignore their preamble arg (the 16 `command-context` commands plus `rdr-create` / `rdr-list`) drop it entirely; the pure-token `rdr preamble` commands (`rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-research`, `rdr-audit`) single-quote it; the two free-form commands (`rdr-close --reason`, `phase-review-gate` deferral justifications) drop the shell arg and instead load targeted context via the Bash tool with the id parsed from `$ARGUMENTS`. A new end-to-end test (`tests/test_command_shell_quoting_e2e.py`) reproduces the substitution+`eval` against hostile inputs in both bash and zsh and verifies injection payloads arrive inert (one intact literal argv token, no subshell executes); a static guard blocks reintroduction of the double-quoted form. Hooks were audited and are clean.
+- **Concurrent collection rename no longer loses in-flight aspect-extraction work or drifts the aspect denorm (RDR-138).** `rename_collection_cascade` and the `aspect_extraction_queue` mutators ran as uncoordinated separate transactions on the same `memory.db` (post-nexus-zir76 both route through the T2 daemon, which serializes individual statements but not the multi-statement cascade against a worker's claim→complete sequence). A rename racing an in-flight extraction could lose a queued row or write a `document_aspects` row under the old collection name after the cascade already moved it. A coarse daemon-held `RENAME_LOCK` (a `threading.RLock`, since daemon RPCs run on threadpool threads via `asyncio.to_thread`) now serializes the whole cascade against every queue writer — `enqueue`, `claim_next`/`claim_batch`, `mark_done`/`mark_failed`/`mark_retry`, `reclaim_stale`, and `complete_aspect` (whole upsert+mark_done). The cascade keeps its single dedicated connection for all stores, preserving K4 cross-store atomicity. Verified: claim-latency overhead is <1% amortized at realistic rename rates. This was first seen as a recurring `test_collection_rename` "flake" and confirmed a real concurrency canary.
+- **Slash-command shell-quoting safety (conexus plugin, #1007 / #1008).** `$ARGUMENTS` substituted into a command's `` !`…` `` preamble before shell parsing broke any command whose argument contained a quote, backtick, paren, or `$`. All 25 slash commands were hardened (drop-arg, single-quote, or body-parse-then-Bash-preamble), with an end-to-end injection test against bash and zsh and a static guard. See `conexus/CHANGELOG.md`.
+
+### Internal
+
+- Test-suite hardening: dedicated `RENAME_LOCK` regression suite (in-flight preservation, Gap-3 atomicity, throughput guardrail); fixed two pre-existing test-isolation flakes (`test_projection_quality` chromadb shared-backend leak; `nx_answer` plan-miss LLM-wording assertion).
 
 ## [5.4.1] - 2026-05-28
 

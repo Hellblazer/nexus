@@ -338,10 +338,16 @@ def _reap_spawned_daemons(tmp_path: Path):
     yield
     from tests._daemon_leak_guard import reap_tmp_daemons
 
-    try:
-        reap_tmp_daemons(tmp_path / ".config" / "nexus")
-    except Exception:  # noqa: BLE001 — teardown guard must never fail a test
-        pass
+    # Two config-dir conventions appear in the suite: the autouse
+    # ``_isolate_config_dir`` default (``tmp_path/.config/nexus``) and the
+    # ``tests/daemon`` ``--config-dir str(tmp_path)`` form (daemon lands at
+    # the tmp_path root). Scan both so a real daemon spawned under either,
+    # e.g. by a test that crashed before its own ``stop``, is reaped.
+    for config_dir in (tmp_path / ".config" / "nexus", tmp_path):
+        try:
+            reap_tmp_daemons(config_dir)
+        except Exception:  # noqa: BLE001 — teardown guard must never fail a test
+            pass
 
 
 def set_credentials(monkeypatch) -> None:
