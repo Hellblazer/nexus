@@ -466,10 +466,14 @@ class TestEnqueueHook:
         assert get_worker() is None  # no lazy start either
 
     def test_hook_starts_worker_on_first_supported_enqueue(
-        self, _isolate_t2: Path,
+        self, _isolate_t2: Path, monkeypatch,
     ) -> None:
         """The hook lazy-starts the worker on the first supported
         enqueue. Subsequent enqueues do not re-start."""
+        # Exercises the hook's auto-spawn path specifically, so opt back into
+        # autostart (conftest disables it suite-wide to drop the per-test
+        # worker-stop teardown tax — nexus test-suite trim).
+        monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "1")
         from nexus.aspect_worker import (
             aspect_extraction_enqueue_hook,
             get_worker,
