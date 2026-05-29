@@ -5,7 +5,7 @@ description: Thorough analysis of complex problems using deep-analyst agent
 
 # Deep Analysis Request
 
-!`nx command-context deep-analysis -- "$ARGUMENTS"`
+!`nx command-context deep-analysis`
 
 ### Project Context
 

@@ -4,7 +4,7 @@ description: Check that all conexus plugin dependencies are correctly installed 
 disable-model-invocation: false
 ---
 
-!`nx command-context nx-preflight -- "$ARGUMENTS"`
+!`nx command-context nx-preflight`
 
 ## Summary
 

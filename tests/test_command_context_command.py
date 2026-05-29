@@ -1862,3 +1862,44 @@ def test_continuation_target_file_is_in_tmp(
 
     result = runner.invoke(main, ["command-context", "continuation"])
     assert "/tmp/nexus-continuation-" in result.output
+
+
+# ---------------------------------------------------------------------------
+# (g) Shell-quoting safety: command .md files must NOT splice $ARGUMENTS into
+#     the `!`...`` backtick line. Claude Code substitutes $ARGUMENTS textually
+#     BEFORE the shell runs, so any prompt containing ", `, ( etc. breaks the
+#     double-quoted argument ((eval):1: unmatched "). The args are unused by
+#     every command-context subcommand (continuation falls back to branch),
+#     so the passthrough is both vestigial and a shell-injection hazard.
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+
+def _command_md_files() -> list[Path]:
+    cmd_dir = Path(__file__).parent.parent / "conexus" / "commands"
+    return sorted(p for p in cmd_dir.glob("*.md") if "nx command-context" in p.read_text())
+
+
+def test_command_files_exist() -> None:
+    """Sanity: the command-context command files are discoverable."""
+    assert len(_command_md_files()) == 16
+
+
+def test_no_command_file_splices_arguments_into_shell() -> None:
+    """No `!`nx command-context ...`` line may interpolate $ARGUMENTS.
+
+    Regression for the (eval):1: unmatched " failure: $ARGUMENTS is
+    substituted textually before the shell, so passing it inside a
+    double-quoted arg breaks on any shell metacharacter in the prompt.
+    """
+    offenders: list[str] = []
+    pat = _re.compile(r"!`nx command-context [a-z-]+.*\$ARGUMENTS.*`")
+    for p in _command_md_files():
+        for i, line in enumerate(p.read_text().splitlines(), 1):
+            if pat.search(line):
+                offenders.append(f"{p.name}:{i}: {line.strip()}")
+    assert offenders == [], (
+        "command-context backtick lines must not splice $ARGUMENTS:\n"
+        + "\n".join(offenders)
+    )

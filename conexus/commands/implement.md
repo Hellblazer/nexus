@@ -5,7 +5,7 @@ description: Implement feature using developer agent
 
 # Implementation Request
 
-!`nx command-context implement -- "$ARGUMENTS"`
+!`nx command-context implement`
 
 ### Project Context
 

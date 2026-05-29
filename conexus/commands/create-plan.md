@@ -5,7 +5,7 @@ description: Create implementation plan using strategic-planner agent
 
 # Planning Request
 
-!`nx command-context create-plan -- "$ARGUMENTS"`
+!`nx command-context create-plan`
 
 ### Project Context
 

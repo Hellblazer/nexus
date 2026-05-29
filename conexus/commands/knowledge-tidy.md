@@ -5,7 +5,7 @@ description: Persist and organize knowledge into the T3 store using mcp__plugin_
 
 # Knowledge Tidying Request
 
-!`nx command-context knowledge-tidy -- "$ARGUMENTS"`
+!`nx command-context knowledge-tidy`
 
 ### Project Context
 

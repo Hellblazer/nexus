@@ -5,7 +5,7 @@ description: Audit a plan using mcp__plugin_conexus_nexus__nx_plan_audit (RDR-08
 
 # Plan Audit Request
 
-!`nx command-context plan-audit -- "$ARGUMENTS"`
+!`nx command-context plan-audit`
 
 ## Plan to Audit
 

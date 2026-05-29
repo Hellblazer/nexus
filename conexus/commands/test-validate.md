@@ -5,7 +5,7 @@ description: Validate tests using test-validator agent
 
 # Test Validation Request
 
-!`nx command-context test-validate -- "$ARGUMENTS"`
+!`nx command-context test-validate`
 
 ### Project Context
 
