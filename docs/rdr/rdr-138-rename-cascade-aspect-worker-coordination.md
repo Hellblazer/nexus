@@ -135,9 +135,14 @@ Full root cause and reproduction in T3:
 - [x] All queue writers funnel through the single T2 daemon process
   post-zir76 — **Status**: Verified (Source Search). A daemon-held mutex
   (approach A) acquired by the cascade AND every queue mutator is viable.
-- [ ] A coarse per-`memory.db` queue-maintenance lock does not measurably
+- [x] A coarse per-`memory.db` queue-maintenance lock does not measurably
   regress steady-state worker throughput (claims are short) —
-  **Status**: Unverified — **Method**: Spike (defer to implementation)
+  **Status**: VERIFIED (Spike, 2026-05-29, nexus-2evpz, T2
+  `rdr-138-ca2-throughput-spike`). Uncontended `claim_next` median 0.048ms;
+  cascade rename median 0.52ms; amortized regression <1% at 1 rename/1000
+  claims, ~0% at realistic rates. A claim only waits if it directly races an
+  in-flight rename. Approach A coarseness is acceptable — Approach C escalation
+  not warranted.
 
 ### The precise coordination gap (Verified, Source Search)
 
