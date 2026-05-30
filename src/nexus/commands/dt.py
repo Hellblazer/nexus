@@ -337,7 +337,11 @@ def _index_dt_content_record(
             extraction_source=extraction_source,
         )
         if not count:
-            _log.warning("dt_content_no_chunks", uuid=uuid)
+            # We had non-empty text above, so a 0-chunk return is the
+            # index_markdown staleness skip: this record's content is already
+            # indexed and unchanged. That is a benign idempotent no-op (the
+            # catalog row is not duplicated), not a failure — log at debug.
+            _log.debug("dt_content_unchanged", uuid=uuid)
             return False
         return _stamp_dt_uri_on_entry(cache_path, uuid)
     except (RuntimeError, ImportError, OSError) as exc:
