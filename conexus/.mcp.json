@@ -19,5 +19,13 @@
       "CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
     },
     "alwaysLoad": true
+  },
+  "devonthink": {
+    "command": "nx-mcp-devonthink",
+    "args": [],
+    "env": {
+      "CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
+    },
+    "alwaysLoad": false
   }
 }
