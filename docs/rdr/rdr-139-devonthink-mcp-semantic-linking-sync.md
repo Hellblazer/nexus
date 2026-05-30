@@ -70,13 +70,22 @@ aspect tags, annotations, or structured custom metadata. A user inside
 DEVONthink cannot see what is in the knowledge graph or navigate to its
 nexus identity.
 
-#### Gap 3: nexus has no MCP-client substrate
+#### Gap 3: nexus has no MCP-client substrate, and DT cannot reach the agent surface safely
 
 nexus has never consumed an external MCP server (a repo search for
 `ClientSession` / `stdio_client` in `src/nexus/` returns nothing). Every
 capability layer here needs an MCP client inside a synchronous CLI path. This
 substrate is shared with draft RDR-126 (Qwen-MCP); whichever lands first
 establishes the reusable pattern.
+
+Separately, DT's MCP tools cannot be exposed to Claude Code / subagents (the
+"agent surface") by declaring DT's server in the conexus plugin `.mcp.json`:
+conexus ships to every consumer, most without DEVONthink (Linux, CI, non-DT
+Macs), and a declared plugin MCP server is spawned unconditionally — there is
+no gate, so a hard-wired DT server errors on every DT-less session. The
+agent-surface path therefore also needs a nexus-owned shim that can gate on DT
+availability internally. Both needs are met by one two-faced substrate
+(Layer A + A′).
 
 #### Gap 4: Non-file-backed DT records are unreachably or poorly indexed
 
@@ -228,6 +237,25 @@ unavailable and asserts the legacy result is byte-identical to pre-RDR-139.
   bridged into the sync CLI via `asyncio.run` per call. `available()` gate
   (`is_running` + reachability, cached per-invocation). Result-or-None
   contract: any failure → log + skip, never abort. Shared with RDR-126.
+  This is the Python-API face used by every CLI layer below.
+- **Layer A′ — `nx-mcp-devonthink` agent-surface wrapper (Gap 3).** A
+  nexus-owned MCP *server* (a third sibling to `nx-mcp` / `nx-mcp-catalog`,
+  declared in conexus `.mcp.json`, `alwaysLoad: false`) that is simultaneously
+  an MCP *client* to DT via the Layer A core. It exposes DT to Claude Code and
+  subagents, solving the agent-surface gap that a direct plugin-`.mcp.json`
+  declaration cannot: because the wrapper is nexus code, it gates internally.
+  On startup it probes `available()`; **DT present → advertise the curated
+  toolset; DT absent → advertise zero tools (or a single `devonthink_status`
+  stub)** — a harmless always-present server, never a spawn error on a DT-less
+  consumer. It also (a) curates the surface to ~20 relevant tools (dropping the
+  out-of-scope file-management verbs and shrinking the ~28.6k full-schema
+  footprint to roughly a third), and (b) adds nexus-aware *composite* tools
+  that run the layers below server-side — e.g. `dt_incorporate(uuid)` =
+  Layer B + F (find similar → map UUIDs → tumblers → `relates` links →
+  write-back) as one agent call. Tools appear as
+  `mcp__plugin_conexus_devonthink__*`. Layers A and A′ share one DT-client core
+  (gate, redaction handling, UUID↔tumbler mapping); the CLI uses the Python
+  face, the agent uses the server face.
 - **Layer B — Semantic & structural linking (Gap 1).** On
   `nx dt index --link-semantic`: `find_similar_records` (above a similarity
   floor) + `get_record_links` (DT's explicit links, higher precision) +
@@ -280,6 +308,7 @@ reminders).
 
 | Layer | DT present | DT absent (tested fallback) |
 | --- | --- | --- |
+| A′ agent-surface wrapper | curated DT toolset + composites advertised | zero tools (or `devonthink_status` stub); server loads cleanly, no spawn error |
 | B linking | similarity / DT-link / classify edges | metadata-only linking, zero semantic edges |
 | C enrich | DT CrossRef fills `bib_*` gaps | Semantic-Scholar only |
 | D content | DT-extracted text for non-file records | file-path extraction only |
@@ -323,7 +352,8 @@ capture`, which is DT-bound by definition and exits cleanly).
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| MCP-client helper + `available()` gate | (none) | New `devonthink_mcp.py`; coordinate shape with RDR-126 |
+| MCP-client helper + `available()` gate (Layer A) | (none) | New `devonthink_mcp.py`; coordinate shape with RDR-126 |
+| Agent-surface wrapper server (Layer A′) | `nx-mcp`, `nx-mcp-catalog` (siblings) | New `nx-mcp-devonthink`; reuses Layer A core; declared in conexus `.mcp.json`, `alwaysLoad:false` |
 | `relates`/`cites` edge writer | `catalog.py:link_if_absent` | Reuse (`created_by` = `dt_similar`/`dt_link`) |
 | Semantic-link generator | `link_generator.py` / `auto_linker.py` | Extend pattern (new generator), don't modify existing |
 | Bib enrichment | `nx enrich bib` (Semantic Scholar) | Extend: DT CrossRef as fallback `--source dt` |
@@ -436,10 +466,14 @@ Layer C (DT CrossRef bib fallback), Layer D (content extraction for
 non-file-backed records). Folds into `nx dt index --enrich` and the lxy5n
 pipeline. Each ships with its fallback-suite case.
 
-### Phase 3 — Highlights + capture
+### Phase 3 — Highlights + capture + agent-surface wrapper
 
 Layer E (annotations/highlights as aspects), Layer G (`nx dt capture <url>`,
-`download_pdf_from_doi`, `import_file`).
+`download_pdf_from_doi`, `import_file`), and Layer A′ (`nx-mcp-devonthink`
+wrapper): the internal-gate + curated passthrough ship here, and the composite
+`dt_incorporate` tool wraps the Phase-1 Layer B+F pipeline (hence after it
+exists). The wrapper's own fallback case — DT absent → server loads with zero
+tools, no error — joins the Gap-0 suite.
 
 ### Phase 4 — AI delegation (experimental)
 
@@ -585,3 +619,18 @@ pre-RDR-139 behaviour when DT is absent. MVV made two-sided (enhanced +
 fallback). Bounded with an explicit out-of-scope list; four-phase plan keeps
 the MemForest edge + write-back as the Phase-1 MVV. Layer H flagged
 experimental / possibly deferred.
+
+### 2026-05-29 — Layer A′ agent-surface wrapper (draft)
+
+Added **Layer A′** (`nx-mcp-devonthink`): a nexus-owned, two-faced MCP server
+(client to DT via the Layer A core, server to Claude Code / subagents). It is
+the answer to "how does the agent surface get DT" without breaking DT-less
+consumers: a directly-declared DT server in conexus `.mcp.json` is spawned
+unconditionally and errors wherever DEVONthink is absent, whereas the wrapper
+is nexus code that gates internally — DT present → curated toolset; DT absent →
+zero tools / status stub, no spawn error. It also curates the surface to ~20
+tools (shrinking the ~28.6k full-schema footprint by ~2/3) and adds composite
+nexus-aware tools (`dt_incorporate` = Layer B+F server-side). Extended Gap 3,
+the Optionality contract, the Existing-Infrastructure audit, and Phase 3 (the
+wrapper shell gates early; the composite tool follows the Phase-1 B+F pipeline
+it wraps). Layers A and A′ share one DT-client core.
