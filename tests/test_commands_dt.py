@@ -1034,3 +1034,55 @@ class TestStampDtUriOnEntry:
             dry_run=True,
         )
         assert stamps == []
+
+
+# ── Layer F write-back (RDR-139 P1.7) ─────────────────────────────────────────
+
+
+class TestWriteback:
+    """``nx dt index --writeback`` stamps the nexus identity back onto DT.
+
+    The DT-side stamp itself is exercised by ``tests/test_dt_writeback.py``
+    against a fake DT client; here we pin the CLI wiring: the flag gates the
+    call, it fires once per successfully-stamped record, and the summary
+    reports the count.
+    """
+
+    def test_writeback_invoked_per_stamped_record(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._writeback_record",
+            lambda uuid: calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--writeback"])
+        assert result.exit_code == 0, result.output
+        assert calls == ["U1"]
+        assert "written back to DT" in result.output
+
+    def test_no_writeback_flag_skips_call(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._writeback_record",
+            lambda uuid: calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1"])
+        assert result.exit_code == 0, result.output
+        assert calls == []
+        assert "written back" not in result.output
+
+    def test_writeback_help_documents_namespace(self, runner):
+        from nexus.cli import main
+
+        result = runner.invoke(main, ["dt", "index", "--help"])
+        assert result.exit_code == 0
+        assert "--writeback" in result.output

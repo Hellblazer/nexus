@@ -194,6 +194,43 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
         cat._db.close()
 
 
+def _writeback_record(uuid: str) -> bool:
+    """Stamp the nexus identity back onto a just-indexed DT record (Layer F).
+
+    Resolves the record's tumbler via ``Catalog.by_source_uri`` (the entry was
+    just stamped with ``x-devonthink-item://<uuid>``) and calls
+    :func:`nexus.dt_writeback.writeback_record`. Returns ``True`` when at least
+    one nexus-owned field was written. Fail-soft: any error or an unresolvable
+    tumbler logs and returns ``False`` — write-back never aborts the index batch.
+
+    Aspect-keyword tags (``nx-kw:*``) are supported by ``writeback_record`` but
+    not sourced here: RDR-089 aspect extraction is queued AFTER index, so no
+    keywords exist at ``nx dt index`` time. Stamping them is deferred to a
+    follow-on re-stamp pass (tracked) rather than stamped empty.
+    """
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.config import catalog_path  # noqa: PLC0415
+    from nexus.dt_writeback import writeback_record  # noqa: PLC0415
+
+    dt_uri = f"x-devonthink-item://{uuid}"
+    cat_path = catalog_path()
+    if not Catalog.is_initialized(cat_path):
+        return False
+    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    try:
+        entry = cat.by_source_uri(dt_uri)
+        if entry is None:
+            _log.warning("dt_writeback_no_entry", uuid=uuid)
+            return False
+        result = writeback_record(uuid, str(entry.tumbler))
+        return any(result[k] for k in ("tags", "annotation", "metadata"))
+    except Exception as e:
+        _log.warning("dt_writeback_failed", uuid=uuid, error=str(e))
+        return False
+    finally:
+        cat._db.close()
+
+
 @click.group("dt")
 def dt() -> None:
     """DEVONthink integration verbs (macOS only).
@@ -272,6 +309,18 @@ def dt() -> None:
     default=False,
     help="Print the records that would be indexed; make no T3 writes.",
 )
+@click.option(
+    "--writeback",
+    is_flag=True,
+    default=False,
+    help=(
+        "After a record indexes, stamp the nexus identity back onto the "
+        "DEVONthink record (Layer F): nx-indexed / nx-tumbler:<t> tags "
+        "(add-mode, no clobber), a tumbler backlink annotation, and "
+        "nxtumbler custom metadata. nexus-owned nx-* namespace only; never "
+        "edits user content; honours Exclude-from-AI&MCP. Opt-in, default off."
+    ),
+)
 def index_cmd(
     use_selection: bool,
     tag: str | None,
@@ -282,6 +331,7 @@ def index_cmd(
     collection: str | None,
     corpus: str,
     dry_run: bool,
+    writeback: bool,
 ) -> None:
     """Index DEVONthink records into Nexus.
 
@@ -331,6 +381,7 @@ def index_cmd(
     indexed = 0
     skipped = 0
     stamp_failed = 0
+    written_back = 0
     failed: list[tuple[str, str, str]] = []  # (uuid, path, error)
     for uuid, path in records:
         ext = Path(path).suffix.lower()
@@ -373,7 +424,11 @@ def index_cmd(
         indexed += 1
         if not stamped:
             stamp_failed += 1
+        elif writeback and _writeback_record(uuid):
+            written_back += 1
     summary = f"Indexed {indexed} record(s) ({skipped} skipped"
+    if writeback:
+        summary += f", {written_back} written back to DT"
     if failed:
         summary += f", {len(failed)} failed"
     if stamp_failed:
