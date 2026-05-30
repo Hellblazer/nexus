@@ -2,6 +2,12 @@
 # E2E test helpers — local tmux-based Claude Code interaction
 
 TMUX_SESSION="e2e"
+# Optional dedicated tmux socket. When NX_TMUX_SOCKET is set, every tmux
+# command runs against that private socket (tmux -L <name>), so the harness
+# cannot see or kill sessions on the user's default socket. Empty = default
+# socket (unchanged behaviour for the e2e harness).
+: "${NX_TMUX_SOCKET:=}"
+_tmux() { command tmux ${NX_TMUX_SOCKET:+-L "$NX_TMUX_SOCKET"} "$@"; }
 PASS=0
 FAIL=0
 SKIP=0
@@ -29,17 +35,17 @@ crun() {
 send_keys() {
     local text="$1" key="${2:-Enter}"
     if [[ -n "$text" && -n "$key" ]]; then
-        tmux send-keys -t "${TMUX_SESSION}" "$text" "$key"
+        _tmux send-keys -t "${TMUX_SESSION}" "$text" "$key"
     elif [[ -n "$text" ]]; then
-        tmux send-keys -t "${TMUX_SESSION}" "$text"
+        _tmux send-keys -t "${TMUX_SESSION}" "$text"
     elif [[ -n "$key" ]]; then
-        tmux send-keys -t "${TMUX_SESSION}" "$key"
+        _tmux send-keys -t "${TMUX_SESSION}" "$key"
     fi
 }
 
 # Capture last N lines of pane output
 capture() {
-    tmux capture-pane -t "${TMUX_SESSION}" -p -S "${1:--150}"
+    _tmux capture-pane -t "${TMUX_SESSION}" -p -S "${1:--150}"
 }
 
 # ─── Timing helpers ──────────────────────────────────────────────────────────
@@ -103,31 +109,31 @@ claude_start() {
 
         if [[ $_trust_done -eq 0 ]] && echo "$pane" | grep -qiE "trust this folder|project you trust"; then
             echo "    [auth] Workspace trust — accepting..."
-            tmux send-keys -t "${TMUX_SESSION}" Enter
+            _tmux send-keys -t "${TMUX_SESSION}" Enter
             _trust_done=1
             sleep 2
 
         elif [[ $_bypass_done -eq 0 ]] && echo "$pane" | grep -qiE "Bypass Permissions|Yes, I accept"; then
             echo "    [auth] Bypass permissions — accepting..."
-            # Use direct tmux send-keys (not the send_keys wrapper) to avoid
+            # Use direct _tmux send-keys (not the send_keys wrapper) to avoid
             # any issue with empty-string first arg swallowing the arrow key.
-            tmux send-keys -t "${TMUX_SESSION}" Down
+            _tmux send-keys -t "${TMUX_SESSION}" Down
             sleep 0.5
-            tmux send-keys -t "${TMUX_SESSION}" Enter
+            _tmux send-keys -t "${TMUX_SESSION}" Enter
             _bypass_done=1
             sleep 5
 
         elif echo "$pane" | grep -qiE "custom API key|Do you want to use this API key"; then
             echo "    [auth] Custom API key prompt — keeping OAuth session (No)..."
             # Default selection is already "No (recommended)" — just Enter
-            tmux send-keys -t "${TMUX_SESSION}" Enter
+            _tmux send-keys -t "${TMUX_SESSION}" Enter
             sleep 5  # long pause: screen transition takes a moment after Enter
 
         elif [[ $_login_done -eq 0 ]] && echo "$pane" | grep -qiE "Select login|login method|How would you like"; then
             echo "    [auth] Login selector — selecting option 2 (API key)..."
-            tmux send-keys -t "${TMUX_SESSION}" Down
+            _tmux send-keys -t "${TMUX_SESSION}" Down
             sleep 0.5
-            tmux send-keys -t "${TMUX_SESSION}" Enter
+            _tmux send-keys -t "${TMUX_SESSION}" Enter
             _login_done=1
             sleep 6
 
@@ -152,16 +158,16 @@ claude_start() {
 
 # Send a prompt to an already-running Claude session.
 # Must be called AFTER claude_start has finished (splash gone).
-# Uses tmux buffer paste for the text (avoids issues with tmux send-keys
+# Uses tmux buffer paste for the text (avoids issues with _tmux send-keys
 # and long strings) then sends Enter as a separate key.
 claude_prompt() {
     local prompt="$1"
     # Load text into tmux buffer and paste into pane — more reliable than
     # send-keys for long prompts.
-    printf '%s' "$prompt" | tmux load-buffer -
-    tmux paste-buffer -t "${TMUX_SESSION}"
+    printf '%s' "$prompt" | _tmux load-buffer -
+    _tmux paste-buffer -t "${TMUX_SESSION}"
     sleep 0.5
-    tmux send-keys -t "${TMUX_SESSION}" Enter
+    _tmux send-keys -t "${TMUX_SESSION}" Enter
     sleep 0.5  # brief pause to let input register
 }
 
