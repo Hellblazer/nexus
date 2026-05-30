@@ -1086,3 +1086,66 @@ class TestWriteback:
         result = runner.invoke(main, ["dt", "index", "--help"])
         assert result.exit_code == 0
         assert "--writeback" in result.output
+
+
+# ── Layer B semantic linking (RDR-139 P1.5 CLI wiring) ────────────────────────
+
+
+class TestLinkSemantic:
+    """``nx dt index --link-semantic`` invokes Layer B edge generation."""
+
+    def test_link_semantic_invoked_per_stamped_record(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._link_semantic_record",
+            lambda uuid: calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--link-semantic"])
+        assert result.exit_code == 0, result.output
+        assert calls == ["U1"]
+        assert "semantically linked" in result.output
+
+    def test_no_link_semantic_flag_skips_call(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._link_semantic_record",
+            lambda uuid: calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1"])
+        assert result.exit_code == 0, result.output
+        assert calls == []
+        assert "semantically linked" not in result.output
+
+    def test_link_and_writeback_compose(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        link_calls: list[str] = []
+        wb_calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._link_semantic_record",
+            lambda uuid: link_calls.append(uuid) or True,
+        )
+        monkeypatch.setattr(
+            "nexus.commands.dt._writeback_record",
+            lambda uuid: wb_calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(
+            main, ["dt", "index", "--uuid", "U1", "--link-semantic", "--writeback"],
+        )
+        assert result.exit_code == 0, result.output
+        assert link_calls == ["U1"] and wb_calls == ["U1"]
+        assert "semantically linked" in result.output
+        assert "written back to DT" in result.output
