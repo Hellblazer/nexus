@@ -263,6 +263,84 @@ def _writeback_record(uuid: str) -> bool:
         cat._db.close()
 
 
+#: RDR-139 Layer D extraction-source provenance values for DT-sourced text.
+_DT_EXTRACTION_SOURCES: frozenset[str] = frozenset(
+    {"dt_content", "dt_ocr", "dt_transcribe"}
+)
+
+
+def _index_dt_content_record(
+    uuid: str,
+    *,
+    collection: str,
+    corpus: str,
+    extraction_source: str = "dt_content",
+) -> bool:
+    """RDR-139 Layer D: index a non-file-backed DT record from DT-extracted
+    text (rather than an on-disk file).
+
+    Sources the AI-optimised body via :func:`devonthink.dt_extract_content`,
+    writes it through the existing Markdown chunking pipeline with every chunk
+    stamped ``extraction_source`` (``dt_content`` by default), and stamps the
+    DT identity (``x-devonthink-item://<uuid>``) onto the catalog entry so the
+    record is addressable even though no real file backs it.
+
+    Fail-soft: empty/unavailable DT text -> ``False`` (the caller skips the
+    record), never an exception. Returns ``True`` only when chunks were written
+    AND the DT identity was stamped.
+    """
+    import json  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    from nexus.doc_indexer import index_markdown  # noqa: PLC0415
+    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+
+    if extraction_source not in _DT_EXTRACTION_SOURCES:
+        raise ValueError(
+            f"extraction_source {extraction_source!r} not a DT source "
+            f"{sorted(_DT_EXTRACTION_SOURCES)}"
+        )
+
+    text = _dt.dt_extract_content(uuid)
+    if not text or not text.strip():
+        _log.warning("dt_content_empty", uuid=uuid, extraction_source=extraction_source)
+        return False
+
+    name = _dt.dt_record_name(uuid) or uuid
+    # JSON-quote the title so a name with a colon / quote can't break the
+    # strict frontmatter parse. The body follows verbatim.
+    front = f"---\ntitle: {json.dumps(name)}\n---\n\n{text}"
+
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".md", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write(front)
+            tmp_path = Path(fh.name)
+        count = index_markdown(
+            tmp_path,
+            corpus=corpus,
+            collection_name=collection,
+            extraction_source=extraction_source,
+        )
+        if not count:
+            _log.warning("dt_content_no_chunks", uuid=uuid)
+            return False
+        return _stamp_dt_uri_on_entry(tmp_path, uuid)
+    except (RuntimeError, ImportError, OSError) as exc:
+        _log.error(
+            "dt_content_index_failed",
+            uuid=uuid,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return False
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
 @click.group("dt")
 def dt() -> None:
     """DEVONthink integration verbs (macOS only).
@@ -380,6 +458,20 @@ def dt() -> None:
         "S2/OpenAlex value. DT unavailable -> primary-only. Opt-in, default off."
     ),
 )
+@click.option(
+    "--dt-content",
+    "dt_content",
+    is_flag=True,
+    default=False,
+    help=(
+        "Index non-file-backed records (web archives, bookmarks, formatted "
+        "notes — anything without a .pdf/.md file) from DEVONthink's "
+        "AI-extracted text instead of skipping them (RDR-139 Layer D). Every "
+        "chunk is stamped extraction_source=dt_content; file-backed records "
+        "still index from their file (provenance absent == file). DT "
+        "unavailable -> records skipped exactly as today. Opt-in, default off."
+    ),
+)
 def index_cmd(
     use_selection: bool,
     tag: str | None,
@@ -393,6 +485,7 @@ def index_cmd(
     link_semantic: bool,
     writeback: bool,
     enrich: bool,
+    dt_content: bool,
 ) -> None:
     """Index DEVONthink records into Nexus.
 
@@ -444,11 +537,40 @@ def index_cmd(
     stamp_failed = 0
     written_back = 0
     linked = 0
+    content_extracted = 0
     touched_collections: set[str] = set()
     failed: list[tuple[str, str, str]] = []  # (uuid, path, error)
+
+    # RDR-139 Layer D: only probe DT availability once, and only when the
+    # opt-in flag is set. Flag off -> the unsupported-extension skip path is
+    # byte-identical to today (Gap 0).
+    dt_content_active = False
+    if dt_content:
+        from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+
+        dt_content_active = _dt.available()
+
     for uuid, path in records:
         ext = Path(path).suffix.lower()
         if ext not in _SUPPORTED_EXTS:
+            # RDR-139 Layer D: non-file-backed record. With --dt-content and a
+            # reachable DT, index it from DT-extracted text; otherwise skip
+            # exactly as before.
+            if dt_content_active:
+                dt_collection = _resolve_dt_collection(collection, corpus, ext)
+                if _index_dt_content_record(
+                    uuid, collection=dt_collection, corpus=corpus,
+                ):
+                    content_extracted += 1
+                    indexed += 1
+                    touched_collections.add(dt_collection)
+                    if link_semantic and _link_semantic_record(uuid):
+                        linked += 1
+                    if writeback and _writeback_record(uuid):
+                        written_back += 1
+                else:
+                    skipped += 1
+                continue
             _log.warning(
                 "dt_skip_unsupported_extension",
                 uuid=uuid,
@@ -505,6 +627,8 @@ def index_cmd(
             run_bib_enrichment(coll, source="dt")
 
     summary = f"Indexed {indexed} record(s) ({skipped} skipped"
+    if content_extracted:
+        summary += f", {content_extracted} from DT content"
     if link_semantic:
         summary += f", {linked} semantically linked"
     if writeback:
