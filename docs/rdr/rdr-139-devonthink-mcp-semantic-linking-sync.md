@@ -279,7 +279,7 @@ A shared MCP-client substrate plus eight capability layers. Selectors/CRUD
 missing, closed, or MCP-disabled DEVONthink degrades to nexus's existing
 behaviour with no error and no partial write. "DT enhances; it is never
 required." This is enforced by a single capability gate
-(`devonthink_mcp.available()`, a cached `is_running` + reachable probe) that
+(`mcp_client.devonthink.available()`, a cached `is_running` + reachable probe) that
 every layer consults before any call, and it is verified by a dedicated
 fallback suite that runs every `nx dt` / enrich path with the DT MCP forced
 unavailable and asserts the legacy result is byte-identical to pre-RDR-139.
@@ -443,7 +443,7 @@ def dt_set_tags(uuid, tags, *, mode="add") -> bool
 def dt_set_custom_metadata(uuid, fields: dict) -> bool
 
 // every layer guards on the gate first
-if not devonthink_mcp.available():
+if not available():                    # mcp_client.devonthink.available()
     return legacy_path(...)            # the tested fallback
 for n in dt_find_similar(uuid, limit=K, floor=F):
     entry = catalog.by_source_uri(f"x-devonthink-item://{n['uuid']}")
@@ -576,7 +576,7 @@ Two-sided, both in scope:
 
 ### Phase 1 — Substrate + core linking + write-back + fallback suite (MVV)
 
-Layer A (`devonthink_mcp.py` + `available()` gate), the new
+Layer A (`mcp_client/devonthink.py` + `available()` gate), the new
 `Catalog.by_source_uri(uri) -> CatalogEntry | None` inverse lookup, Layer B
 (`find_similar_records` + `get_record_links` → `relates`), Layer F
 (tag/annotation write-back), and the Gap-0 fallback suite. Ships both MVV
