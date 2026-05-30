@@ -2,12 +2,12 @@
 title: "DEVONthink MCP Integration: Semantic Linking, Bibliographic Enrichment, Content Extraction, Bidirectional Sync, and Capture"
 id: RDR-139
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-29
-accepted_date:
+accepted_date: 2026-05-30
 related_issues: [nexus-qtbuh, nexus-lxy5n]
 related_rdrs: [RDR-099, RDR-126, RDR-049, RDR-051, RDR-089]
 ---
