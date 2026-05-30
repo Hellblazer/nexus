@@ -210,6 +210,50 @@ def dt_record_name(uuid: str) -> str:
     return name if isinstance(name, str) else ""
 
 
+#: Prefixes DT returns when a record carries zero annotations/mentions. These
+#: are status messages, not content — treated as "no highlights" (None).
+_NO_CONTENT_PREFIXES: tuple[str, ...] = (
+    "no highlights found",
+    "no mentions found",
+    "no annotations",
+)
+
+
+def _dt_markdown_or_none(result: dict[str, Any] | None) -> str | None:
+    """Pull a markdown body from a DT highlights/mentions result, or ``None``.
+
+    ``extract_record_highlights`` / ``extract_record_mentions`` return either
+    the markdown text (success) or a "No highlights found ..." status string
+    (zero annotations). core wraps a plain-text content as ``{"text": ...}``;
+    partial-success returns ``{"markdown": ..., ...}``. Accept both keys and
+    map any no-content status message to ``None`` so callers don't store it.
+    """
+    if not result:
+        return None
+    text = result.get("text")
+    if not isinstance(text, str) or not text:
+        md = result.get("markdown")
+        text = md if isinstance(md, str) else None
+    if not text or not text.strip():
+        return None
+    if text.strip().lower().startswith(_NO_CONTENT_PREFIXES):
+        return None
+    return text
+
+
+def dt_extract_highlights(uuid: str) -> str | None:
+    """Markdown summary of a record's annotations/highlights, or ``None`` (Layer E).
+
+    Maps DT's zero-annotation status message to ``None``. Fail-soft.
+    """
+    return _dt_markdown_or_none(dt_call("extract_record_highlights", {"uuid": uuid}))
+
+
+def dt_extract_mentions(uuid: str) -> str | None:
+    """Markdown summary of a record's mentions, or ``None`` (Layer E). Fail-soft."""
+    return _dt_markdown_or_none(dt_call("extract_record_mentions", {"uuid": uuid}))
+
+
 def dt_set_tags(uuid: str, tags: list[str], *, mode: str = "add") -> bool:
     """Write tags onto a record (default additive). ``True`` on success (Layer F)."""
     if not tags:

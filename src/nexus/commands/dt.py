@@ -263,6 +263,66 @@ def _writeback_record(uuid: str) -> bool:
         cat._db.close()
 
 
+def _ingest_highlights_record(uuid: str) -> bool:
+    """RDR-139 Layer E: ingest a just-indexed record's DEVONthink highlights +
+    mentions as a note attached to its catalog tumbler.
+
+    Resolves the tumbler via ``Catalog.by_source_uri`` (the entry was just
+    stamped with ``x-devonthink-item://<uuid>``), pulls the markdown blobs via
+    :func:`devonthink.dt_extract_highlights` / ``dt_extract_mentions``, and
+    upserts a :class:`HighlightRecord` into the dedicated ``document_highlights``
+    T2 table. Returns ``True`` only when at least one blob had content AND the
+    row was written. Fail-soft: no tumbler / no highlights / any error -> log +
+    ``False``; highlight ingest never aborts the index batch.
+    """
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.config import catalog_path  # noqa: PLC0415
+    from nexus.db.t2.document_highlights import (  # noqa: PLC0415
+        DocumentHighlights,
+        HighlightRecord,
+    )
+    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+
+    dt_uri = f"x-devonthink-item://{uuid}"
+    cat_path = catalog_path()
+    if not Catalog.is_initialized(cat_path):
+        return False
+    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    try:
+        entry = cat.by_source_uri(dt_uri)
+        if entry is None:
+            _log.warning("dt_highlights_no_entry", uuid=uuid)
+            return False
+        highlights_md = _dt.dt_extract_highlights(uuid) or ""
+        mentions_md = _dt.dt_extract_mentions(uuid) or ""
+        if not (highlights_md or mentions_md):
+            _log.debug("dt_highlights_none", uuid=uuid)
+            return False
+        # One-shot CLI ingest of a new, cascade-free store: construct the
+        # DocumentHighlights store directly (not the daemon RPC path, which
+        # has no highlights method, and not T2Database, which the storage
+        # boundary lint reserves for the daemon). Low contention: one write
+        # per indexed record, not a long-lived worker (RDR-128 hazard N/A).
+        from nexus.config import default_db_path  # noqa: PLC0415
+
+        store = DocumentHighlights(default_db_path())
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        return store.upsert(HighlightRecord(
+            doc_id=str(entry.tumbler),
+            source_uri=dt_uri,
+            collection=getattr(entry, "physical_collection", "") or "",
+            highlights_md=highlights_md,
+            mentions_md=mentions_md,
+            ingested_at=datetime.now(timezone.utc).isoformat(),
+        ))
+    except Exception as e:
+        _log.warning("dt_highlights_failed", uuid=uuid, error=str(e))
+        return False
+    finally:
+        cat._db.close()
+
+
 #: RDR-139 Layer D extraction-source provenance values for DT-sourced text.
 #: Only ``dt_content`` (extract_record_content) is routed today; ``dt_ocr``
 #: (ocr_record, scanned PDFs/images) and ``dt_transcribe`` (transcribe_record,
@@ -485,6 +545,19 @@ def dt() -> None:
         "unavailable -> records skipped exactly as today. Opt-in, default off."
     ),
 )
+@click.option(
+    "--highlights",
+    "highlights",
+    is_flag=True,
+    default=False,
+    help=(
+        "After a record indexes, ingest its DEVONthink highlights + mentions "
+        "(extract_record_highlights / extract_record_mentions) as a markdown "
+        "note attached to the record's catalog tumbler in the document_highlights "
+        "T2 table (RDR-139 Layer E). DT unavailable or no highlights -> nothing "
+        "ingested. Opt-in, default off."
+    ),
+)
 def index_cmd(
     use_selection: bool,
     tag: str | None,
@@ -499,6 +572,7 @@ def index_cmd(
     writeback: bool,
     enrich: bool,
     dt_content: bool,
+    highlights: bool,
 ) -> None:
     """Index DEVONthink records into Nexus.
 
@@ -551,6 +625,7 @@ def index_cmd(
     written_back = 0
     linked = 0
     content_extracted = 0
+    highlighted = 0
     touched_collections: set[str] = set()
     failed: list[tuple[str, str, str]] = []  # (uuid, path, error)
 
@@ -581,6 +656,8 @@ def index_cmd(
                         linked += 1
                     if writeback and _writeback_record(uuid):
                         written_back += 1
+                    if highlights and _ingest_highlights_record(uuid):
+                        highlighted += 1
                 else:
                     skipped += 1
                 continue
@@ -628,6 +705,8 @@ def index_cmd(
             linked += 1
         if writeback and _writeback_record(uuid):
             written_back += 1
+        if highlights and _ingest_highlights_record(uuid):
+            highlighted += 1
 
     # RDR-139 Layer C: gap-fill bibliographic metadata over the collections we
     # just wrote to. Runs once per distinct collection (title-group oriented),
@@ -646,6 +725,8 @@ def index_cmd(
         summary += f", {linked} semantically linked"
     if writeback:
         summary += f", {written_back} written back to DT"
+    if highlights:
+        summary += f", {highlighted} highlights ingested"
     if failed:
         summary += f", {len(failed)} failed"
     if stamp_failed:
@@ -823,6 +904,40 @@ def open_cmd(tumbler_or_uuid: str) -> None:
         )
 
     subprocess.run(["open", uri], check=True)  # noqa: S603,S607
+
+
+@dt.command("highlights")
+@click.argument("tumbler_or_uuid")
+def highlights_cmd(tumbler_or_uuid: str) -> None:
+    """Show the DEVONthink highlights + mentions ingested for a record (Layer E).
+
+    Accepts a tumbler (``1.2.3``) or a DEVONthink UUID. Reads the
+    ``document_highlights`` T2 table populated by ``nx dt index --highlights``.
+    This is a pure T2 read — DEVONthink need not be running.
+    """
+    from nexus.config import default_db_path  # noqa: PLC0415
+    from nexus.db.t2.document_highlights import DocumentHighlights  # noqa: PLC0415
+
+    store = DocumentHighlights(default_db_path())
+    if _UUID_RE.match(tumbler_or_uuid):
+        rec = store.get_by_source_uri(f"x-devonthink-item://{tumbler_or_uuid}")
+    elif _TUMBLER_RE.match(tumbler_or_uuid):
+        rec = store.get(tumbler_or_uuid)
+    else:
+        raise click.ClickException(
+            "argument is neither a tumbler (e.g. 1.2.3) nor a UUID.",
+        )
+    if rec is None:
+        raise click.ClickException(
+            f"no ingested highlights for {tumbler_or_uuid} "
+            "(run 'nx dt index --highlights' first).",
+        )
+    click.echo(f"# Highlights for tumbler {rec.doc_id}")
+    click.echo(f"source: {rec.source_uri}  (ingested {rec.ingested_at})")
+    if rec.highlights_md:
+        click.echo("\n" + rec.highlights_md)
+    if rec.mentions_md:
+        click.echo("\n## Mentions\n" + rec.mentions_md)
 
 
 # ── DT-side AppleScript installer (nexus-tv5u) ────────────────────────────────

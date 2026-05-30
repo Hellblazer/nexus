@@ -518,11 +518,14 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     "test_metadata_consistency.py",
     "test_metadata_extraction_source.py",  # RDR-139 Layer D: pure schema unit
     "test_metadata_schema.py",
-    # RDR-139 Phase 2 (Layers C/D): pure metadata-schema / CLI-routing unit
-    # tests; the voyage-context-3 literal is an incidental placeholder
-    # embedding_model / collection-name segment, not cloud-mode behavior.
+    # RDR-139 Phase 2/3 (Layers C/D/E): pure metadata-schema / CLI-routing /
+    # T2-store unit tests; the voyage-context-3 literal is an incidental
+    # placeholder embedding_model / collection-name segment, not cloud-mode
+    # behavior.
     "test_dt_content_layer_d.py",
     "test_dt_mcp_fallback.py",
+    "test_document_highlights.py",
+    "test_dt_highlights_layer_e.py",
     "test_migrations_rdr108_phase1c.py",
     "test_plan_run.py",
     "test_rdr_hook.py",  # tests/hooks/ — collection-name shape only

@@ -196,3 +196,18 @@ class TestLayerDFallback:
             embedding_model="voyage-context-3",
         )
         assert "extraction_source" not in meta  # absent == file
+
+
+class TestLayerEFallback:
+    """Layer E: DT absent → no highlight ingest (dt_call yields None, so the
+    highlight/mention helpers yield None and nothing is stored)."""
+
+    def test_extract_highlights_none_when_dt_down(self):
+        from nexus.mcp_client.devonthink import dt_extract_highlights
+        with patch("nexus.mcp_client.devonthink.dt_call", return_value=None):
+            assert dt_extract_highlights("U") is None
+
+    def test_extract_mentions_none_when_dt_down(self):
+        from nexus.mcp_client.devonthink import dt_extract_mentions
+        with patch("nexus.mcp_client.devonthink.dt_call", return_value=None):
+            assert dt_extract_mentions("U") is None

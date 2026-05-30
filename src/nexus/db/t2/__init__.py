@@ -282,6 +282,7 @@ class T2Database:
         from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
         from nexus.db.t2.chash_index import ChashIndex
         from nexus.db.t2.document_aspects import DocumentAspects
+        from nexus.db.t2.document_highlights import DocumentHighlights
         from nexus.db.t2.memory_store import MemoryStore
         from nexus.db.t2.plan_library import PlanLibrary
         from nexus.db.t2.telemetry import Telemetry
@@ -362,6 +363,11 @@ class T2Database:
         self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(
             path, rename_lock=self.RENAME_LOCK
         )
+        # RDR-139 Layer E: per-document DEVONthink highlight/mention notes,
+        # keyed by tumbler. Dedicated table (NOT document_aspects) so
+        # free-text highlights never contend with the aspect worker's
+        # whole-row overwrite or its confidence gate.
+        self.document_highlights: DocumentHighlights = DocumentHighlights(path)
 
         # RDR-120 P5.A.1 (nexus-9zmpl): catalog is the eighth domain
         # store. Constructed lazily via the ``catalog`` property so
