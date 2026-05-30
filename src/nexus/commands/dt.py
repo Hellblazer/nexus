@@ -940,6 +940,112 @@ def highlights_cmd(tumbler_or_uuid: str) -> None:
         click.echo("\n## Mentions\n" + rec.mentions_md)
 
 
+@dt.command("capture")
+@click.argument("url", required=False)
+@click.option("--doi", default=None, help="Capture by DOI: download the open-access PDF (Unpaywall).")
+@click.option("--file", "file_path", default=None, help="Capture a loose file from this POSIX path.")
+@click.option(
+    "--type",
+    "capture_type",
+    type=click.Choice(["html", "webarchive", "markdown", "pdf"], case_sensitive=False),
+    default="webarchive",
+    show_default=True,
+    help="Web-capture format (URL captures only). pdf is file-backed; the others are not.",
+)
+@click.option(
+    "--contact-email",
+    default=None,
+    help="Caller email for Unpaywall PDF discovery on --doi (else $OPENALEX_MAILTO).",
+)
+@click.option("--collection", default=None, help="T3 collection override for the index step.")
+@click.option("--corpus", default="dt", show_default=True, help="Corpus tag for the index step.")
+@click.option("--link-semantic", "link_semantic", is_flag=True, default=False,
+              help="After indexing, create Layer B 'relates' edges (see nx dt index).")
+@click.option("--writeback", is_flag=True, default=False,
+              help="After indexing, stamp nexus identity back onto the DT record (Layer F).")
+@click.option("--highlights", "highlights", is_flag=True, default=False,
+              help="After indexing, ingest the record's highlights (Layer E).")
+@click.pass_context
+def capture_cmd(
+    ctx: click.Context,
+    url: str | None,
+    doi: str | None,
+    file_path: str | None,
+    capture_type: str,
+    contact_email: str | None,
+    collection: str | None,
+    corpus: str,
+    link_semantic: bool,
+    writeback: bool,
+    highlights: bool,
+) -> None:
+    """Capture a URL, DOI, or file into DEVONthink and index it (RDR-139 Layer G).
+
+    Provide exactly one source: a URL argument, ``--doi``, or ``--file``. The
+    captured record is then indexed (and optionally linked / written-back /
+    highlight-ingested) end to end.
+
+    This is the ONE DT-bound verb: unlike ``nx dt index`` / ``--enrich`` (which
+    degrade silently when DEVONthink is absent), ``nx dt capture`` reports
+    DT-required and exits NON-ZERO, because capture is impossible without DT.
+    """
+    if not _is_darwin():
+        raise click.ClickException("DEVONthink integration is macOS-only")
+
+    sources = [bool(url), doi is not None, file_path is not None]
+    if sum(sources) != 1:
+        raise click.UsageError(
+            "Provide exactly one capture source: a URL argument, --doi, or --file.",
+        )
+
+    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+
+    if not _dt.available():
+        # Gap-0 NON-OPTIONAL exception: capture cannot proceed without DT, so it
+        # fails loud (non-zero) rather than silently doing nothing.
+        raise click.ClickException(
+            "nx dt capture requires DEVONthink to be running — this verb is "
+            "DT-bound by design (unlike nx dt index, which degrades silently).",
+        )
+
+    if url:
+        uuid = _dt.dt_capture_web_page(url, capture_type=capture_type)
+        file_backed = capture_type.lower() == "pdf"
+        what = url
+    elif doi is not None:
+        import os as _os  # noqa: PLC0415
+
+        email = contact_email or _os.environ.get("OPENALEX_MAILTO", "")
+        uuid = _dt.dt_download_pdf_from_doi(doi, contact_email=email)
+        file_backed = True
+        what = f"doi:{doi}"
+    else:
+        uuid = _dt.dt_import_file(file_path or "")
+        file_backed = True
+        what = file_path or ""
+
+    if not uuid:
+        hint = (
+            " (no open-access PDF found for this DOI)" if doi is not None else ""
+        )
+        raise click.ClickException(f"capture failed for {what}{hint} — no record created.")
+
+    click.echo(f"Captured {what} -> DEVONthink record {uuid}")
+    # Reuse the full index path. Non-file-backed captures (html/webarchive/
+    # markdown) route through Layer D's --dt-content; pdf/doi/file captures are
+    # file-backed and index normally (CA6 finding).
+    ctx.invoke(
+        index_cmd,
+        uuids=(uuid,),
+        collection=collection,
+        corpus=corpus,
+        dt_content=not file_backed,
+        link_semantic=link_semantic,
+        writeback=writeback,
+        highlights=highlights,
+    )
+
+
 # ── DT-side AppleScript installer (nexus-tv5u) ────────────────────────────────
 
 

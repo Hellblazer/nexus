@@ -526,6 +526,7 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     "test_dt_mcp_fallback.py",
     "test_document_highlights.py",
     "test_dt_highlights_layer_e.py",
+    "test_dt_capture_cmd.py",
     "test_migrations_rdr108_phase1c.py",
     "test_plan_run.py",
     "test_rdr_hook.py",  # tests/hooks/ — collection-name shape only

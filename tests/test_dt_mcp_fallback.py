@@ -211,3 +211,19 @@ class TestLayerEFallback:
         from nexus.mcp_client.devonthink import dt_extract_mentions
         with patch("nexus.mcp_client.devonthink.dt_call", return_value=None):
             assert dt_extract_mentions("U") is None
+
+
+class TestLayerGException:
+    """Layer G (capture) is the DELIBERATE Gap-0 exception: unlike every other
+    layer (silent degrade, exit 0), nx dt capture fails LOUD when DT is absent
+    — non-zero exit + a DT-required message — because capture is impossible
+    without DEVONthink."""
+
+    def test_capture_exits_nonzero_when_dt_absent(self):
+        from click.testing import CliRunner
+        from nexus.cli import main
+        with patch("nexus.commands.dt._is_darwin", lambda: True), \
+             patch("nexus.mcp_client.devonthink.available", lambda **k: False):
+            result = CliRunner().invoke(main, ["dt", "capture", "https://example.com"])
+        assert result.exit_code != 0  # NOT a silent exit-0 no-op
+        assert "requires DEVONthink" in result.output

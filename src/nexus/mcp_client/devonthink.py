@@ -267,6 +267,70 @@ def dt_extract_mentions(uuid: str) -> str | None:
     return _dt_markdown_or_none(dt_call("extract_record_mentions", {"uuid": uuid}))
 
 
+def _uuid_from_capture_result(result: dict[str, Any] | None) -> str | None:
+    """Pull the new record's UUID from a capture/import/download result.
+
+    ``capture_web_page`` / ``import_file`` put ``uuid`` at the top level;
+    ``download_pdf_from_doi`` nests the imported record under ``record`` (or
+    ``imported``) and returns metadata-only (no UUID) when no PDF was found.
+    """
+    if not isinstance(result, dict):
+        return None
+    uuid = result.get("uuid")
+    if isinstance(uuid, str) and uuid:
+        return uuid
+    for key in ("record", "imported"):
+        nested = result.get(key)
+        if isinstance(nested, dict):
+            nuuid = nested.get("uuid")
+            if isinstance(nuuid, str) and nuuid:
+                return nuuid
+    return None
+
+
+def dt_capture_web_page(
+    url: str, *, capture_type: str = "webarchive", name: str | None = None,
+) -> str | None:
+    """Capture ``url`` into DEVONthink, returning the new record's UUID (Layer G).
+
+    ``capture_type`` is one of html/webarchive/markdown/pdf. ``None`` on failure
+    (fail-soft). PDF captures are file-backed; the others are not.
+    """
+    args: dict[str, Any] = {"url": url, "type": capture_type}
+    if name:
+        args["name"] = name
+    return _uuid_from_capture_result(dt_call("capture_web_page", args))
+
+
+def dt_download_pdf_from_doi(
+    doi: str, *, contact_email: str = "", name: str | None = None,
+) -> str | None:
+    """Resolve ``doi`` and download its open-access PDF into DEVONthink (Layer G).
+
+    Returns the imported record's UUID, or ``None`` when no open-access PDF was
+    found (metadata-only result) or DT is unavailable. ``contact_email`` enables
+    Unpaywall's PDF discovery (without it only CrossRef metadata is fetched).
+    """
+    if not doi:
+        return None
+    args: dict[str, Any] = {"doi": doi}
+    if contact_email:
+        args["contact_email"] = contact_email
+    if name:
+        args["name"] = name
+    return _uuid_from_capture_result(dt_call("download_pdf_from_doi", args))
+
+
+def dt_import_file(path: str, *, mode: str = "import") -> str | None:
+    """Import a loose file into DEVONthink, returning the new record's UUID (Layer G).
+
+    ``mode`` is import (copy in) or index (reference in place). ``None`` on failure.
+    """
+    if not path:
+        return None
+    return _uuid_from_capture_result(dt_call("import_file", {"path": path, "mode": mode}))
+
+
 def dt_set_tags(uuid: str, tags: list[str], *, mode: str = "add") -> bool:
     """Write tags onto a record (default additive). ``True`` on success (Layer F)."""
     if not tags:
