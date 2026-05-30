@@ -166,14 +166,20 @@ Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought
 
 ### Review Gates (MANDATORY in every plan)
 
-Every plan must include code review steps. For each implementation phase
-or logical batch of implementation tasks, add a review task:
+Every plan must include a stacked review at each implementation phase. The two
+reviewers are NOT interchangeable and BOTH run: code-review-expert catches
+line-level bugs, security, and missing edge cases; substantive-critic catches
+unvalidated assumptions, silent scope reduction, vacuous test assertions, and
+spec-vs-implementation drift. A clean code review does not permit skipping the
+critic. For each implementation phase or logical batch of implementation tasks,
+add both review tasks:
 
 ```
 Phase N: Implement feature X
   Task N.1: Write tests + implement (developer)
   Task N.2: Code review (code-review-expert) ← MANDATORY, depends on N.1
-  Task N.3: Test validation (test-validator) ← after review
+  Task N.3: Substantive critique (substantive-critic) ← MANDATORY, depends on N.1
+  Task N.4: Test validation (test-validator) ← after both reviews
 ```
 
 Do NOT create plans where multiple phases of implementation run without
@@ -214,7 +220,7 @@ Each bead must contain sufficient context for autonomous execution:
 3. Write tests FIRST (TDD)
 4. Implement to pass tests
 5. Ensure compilation including all tests
-6. **Code review** (mandatory after implementation, dispatch code-review-expert)
+6. **Stacked review** (mandatory after implementation, dispatch code-review-expert AND substantive-critic; both run, the critic is not optional)
 
 **Parallelization Guidance**
 - SPAWN parallel agents/tasks when: [specific conditions]
@@ -227,7 +233,7 @@ Each bead must contain sufficient context for autonomous execution:
 - Track: current step, completed items, blocking issues, next actions
 
 **Validation**
-- Use code-review-expert agent for code review
+- Use code-review-expert AND substantive-critic agents for the stacked review (both run; the critic is not optional)
 - Ensure code compiles with tests before marking complete
 
 ## Beads Integration

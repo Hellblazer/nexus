@@ -1,6 +1,6 @@
 # Orchestration Reference
 
-Routing tables, pipeline templates, and decision framework for multi-agent workflows. This is a reference document — no agent is dispatched.
+Routing tables, pipeline templates, and decision framework for multi-agent workflows. This is a reference document, no agent is dispatched.
 
 ## Routing Graph
 
@@ -44,7 +44,8 @@ digraph routing {
     "developer" -> "code-review-expert" [label="then"];
     "developer" -> "debugger" [label="on escalation"];
     "debugger" -> "developer" [label="fix applied, resume"];
-    "code-review-expert" -> "test-validator" [label="then"];
+    "code-review-expert" -> "substantive-critic" [label="then (always)"];
+    "substantive-critic" -> "test-validator" [label="then"];
 
     "Debug issue" -> "debugger";
     "debugger" -> "deep-analyst" [label="if cross-cutting"];
@@ -65,7 +66,7 @@ digraph routing {
 | Request Type | Primary Agent | Pipeline |
 |-------------|---------------|----------|
 | Plan a feature | strategic-planner | -> nx_plan_audit (MCP) -> architect-planner |
-| Implement code | developer | -> code-review-expert -> test-validator |
+| Implement code | developer | -> code-review-expert -> substantive-critic -> test-validator |
 | Implement code (circuit breaker fired) | debugger | [after developer stops] -> debugger -> developer resumes |
 | Debug issue | debugger | -> (if cross-cutting) deep-analyst |
 | Review code | code-review-expert | -> (if critical) substantive-critic |
@@ -92,37 +93,39 @@ If the task requires multiple stages:
 
 ### Step 3: Route or Dispatch
 - **Single Agent**: Dispatch directly with context via relay
-- **Pipeline**: Dispatch sequentially — the caller orchestrates each stage
+- **Pipeline**: Dispatch sequentially, the caller orchestrates each stage
 
 ## Standard Pipelines
 
 ### Feature Development Pipeline
 1. strategic-planner: Create plan with beads
-2. `mcp__plugin_conexus_nexus__nx_plan_audit`: Validate plan (RDR-080 — no agent spawn)
+2. `mcp__plugin_conexus_nexus__nx_plan_audit`: Validate plan (RDR-080, no agent spawn)
 3. architect-planner: Design architecture
 4. developer: Implement with TDD
-5. code-review-expert: Review implementation
-6. test-validator: Verify test coverage
+5. code-review-expert: Review implementation (line-level bugs, security, edge cases)
+6. substantive-critic: Critique implementation (assumptions, scope reduction, vacuous assertions, spec drift). Both reviewers run; a clean code review does not permit skipping the critic.
+7. test-validator: Verify test coverage
 
 ### Bug Fix Pipeline
 1. debugger: Investigate and identify root cause
 2. developer: Implement fix
 3. code-review-expert: Review fix
-4. test-validator: Verify fix and regression tests
+4. substantive-critic: Critique fix (both reviewers run)
+5. test-validator: Verify fix and regression tests
 
 ### Catalog Query Pipeline
-Use `/conexus:query` skill directly — it calls `mcp__plugin_conexus_nexus__nx_answer` internally (RDR-080).
+Use `/conexus:query` skill directly, it calls `mcp__plugin_conexus_nexus__nx_answer` internally (RDR-080).
 Route here when the question involves: specific authors, paper citations, "what cites X",
 "what research informed Y", corpus-scoped retrieval, or document provenance chains.
 
 ### Research Pipeline
 1. deep-research-synthesizer: Gather information
-2. `mcp__plugin_conexus_nexus__nx_tidy`: Consolidate findings (RDR-080 — no agent spawn needed)
+2. `mcp__plugin_conexus_nexus__nx_tidy`: Consolidate findings (RDR-080, no agent spawn needed)
 3. (optional) architect-planner: Apply findings to design
 
 ### Plan Validation Pipeline
 1. strategic-planner or architect-planner: Create plan
-2. `mcp__plugin_conexus_nexus__nx_plan_audit`: Validate technical accuracy (RDR-080 — no agent spawn needed)
+2. `mcp__plugin_conexus_nexus__nx_plan_audit`: Validate technical accuracy (RDR-080, no agent spawn needed)
 3. substantive-critic: Critique for gaps and assumptions
 
 ## Pipeline Pattern Catalog
@@ -131,10 +134,10 @@ These patterns are stored in the T2 plan library and are returned by `plan_searc
 
 | Pattern | Agents | When to Use | Prerequisites |
 |---------|--------|-------------|---------------|
-| RDR Chain | deep-research-synthesizer → `/conexus:rdr-gate` → `/conexus:rdr-accept` → strategic-planner → `nx_plan_audit` → developer → code-review-expert → test-validator | Non-trivial features needing design documentation before coding | RDR created and populated with research findings |
-| Plan-Audit-Implement | strategic-planner → `nx_plan_audit` → developer → code-review-expert → test-validator | Standard feature development with clear requirements | Requirements defined, no RDR needed |
+| RDR Chain | deep-research-synthesizer → `/conexus:rdr-gate` → `/conexus:rdr-accept` → strategic-planner → `nx_plan_audit` → developer → code-review-expert → substantive-critic → test-validator | Non-trivial features needing design documentation before coding | RDR created and populated with research findings |
+| Plan-Audit-Implement | strategic-planner → `nx_plan_audit` → developer → code-review-expert → substantive-critic → test-validator | Standard feature development with clear requirements | Requirements defined, no RDR needed |
 | Research-Synthesize | deep-research-synthesizer → `nx_tidy` | Gathering information on unfamiliar topics or comparing approaches | Topic identified |
-| Code Review | code-review-expert → test-validator | Post-implementation quality gate before merge or PR | Code changes committed |
+| Code Review | code-review-expert → substantive-critic → test-validator | Post-implementation quality gate before merge or PR | Code changes committed |
 | Debug | debugger → developer → test-validator | Test failures or non-deterministic behavior, especially after 2+ failed manual fix attempts | Reproducible failure or clear symptom |
 
 ## Agent Ecosystem
@@ -145,13 +148,13 @@ These patterns are stored in the T2 plan library and are returned by `plan_searc
 | developer | Execute implementation plans, write code with TDD |
 | architect-planner | Design architecture, create execution plans |
 | debugger | Complex bugs, non-deterministic failures, performance issues |
-| (none — use `/conexus:query`) | Analytical operations are handled by `nx_answer` internally (RDR-080) |
+| (none, use `/conexus:query`) | Analytical operations are handled by `nx_answer` internally (RDR-080) |
 
 ### Review Agents
 | Agent | When to Use |
 |-------|-------------|
 | code-review-expert | Review implemented code for quality and best practices |
-| `mcp__plugin_conexus_nexus__nx_plan_audit` | Validate plans before implementation (RDR-080 — MCP tool, not agent) |
+| `mcp__plugin_conexus_nexus__nx_plan_audit` | Validate plans before implementation (RDR-080, MCP tool, not agent) |
 | substantive-critic | Deep critique of any content (code, docs, designs) |
 
 ### Analysis Agents
@@ -164,7 +167,7 @@ These patterns are stored in the T2 plan library and are returned by `plan_searc
 | Agent | When to Use |
 |-------|-------------|
 | deep-research-synthesizer | Multi-source research across all knowledge bases |
-| query (skill: `/conexus:query`) | Author, citation, corpus, or provenance questions — catalog-aware multi-step retrieval |
+| query (skill: `/conexus:query`) | Author, citation, corpus, or provenance questions, catalog-aware multi-step retrieval |
 
 ### Infrastructure Agents
 | Agent | When to Use |
