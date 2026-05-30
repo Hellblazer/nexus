@@ -361,8 +361,10 @@ def dt() -> None:
         "After a record indexes, stamp the nexus identity back onto the "
         "DEVONthink record (Layer F): nx-indexed / nx-tumbler:<t> tags "
         "(add-mode, no clobber), a tumbler backlink annotation, and "
-        "nxtumbler custom metadata. nexus-owned nx-* namespace only; never "
-        "edits user content; honours Exclude-from-AI&MCP. Opt-in, default off."
+        "nxtumbler custom metadata. nexus-owned namespace only; never edits "
+        "user content; honours Exclude-from-AI&MCP on a best-effort basis "
+        "(records with empty AI-extracted content are skipped). Opt-in, "
+        "default off."
     ),
 )
 def index_cmd(

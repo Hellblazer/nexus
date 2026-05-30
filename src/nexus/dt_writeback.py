@@ -84,9 +84,12 @@ def writeback_record(
     # records (live finding, CA5 part b / 139-research-CA5), so the only signal
     # we have is that excluded records return empty AI-extracted content. Skip
     # write-back when content is empty — this honours the exclusion flag's
-    # intent and also correctly skips genuinely empty records (which carry no
-    # nexus value to back-link). False-positive risk is low: a record indexed
-    # into nexus has extractable content by construction.
+    # intent and also skips genuinely empty records. Known false-negative: a
+    # record indexed via file-path extraction (e.g. an image-only PDF whose
+    # text layer PyMuPDF read) can still return empty DT AI-content and be
+    # skipped here — "indexed by nexus" and "DT AI-extracts content" are
+    # independent. Accepted for write-back (an additive convenience), since the
+    # alternative (stamping excluded records) is the worse failure.
     if not dt_client.dt_extract_content(dt_uuid):
         log.info("dt_writeback_skipped_excluded_or_empty", dt_uuid=dt_uuid, tumbler=tumbler)
         result["skipped"] = True

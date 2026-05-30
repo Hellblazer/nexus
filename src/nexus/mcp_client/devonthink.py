@@ -243,6 +243,8 @@ def dt_set_custom_metadata(uuid: str, fields: dict[str, Any], *, mode: str = "me
     )
     if result is None:
         return False
-    dropped = result.get("dropped_fields") or []
+    dropped = result.get("dropped_fields")
+    if not isinstance(dropped, list):
+        dropped = []
     # If DT dropped as many fields as we sent, nothing was committed.
     return len(dropped) < len(fields)

@@ -1126,6 +1126,37 @@ class TestLinkSemantic:
         assert calls == []
         assert "semantically linked" not in result.output
 
+    def test_stamp_failed_record_skips_link_and_writeback(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        # A record that fails to stamp has no resolvable tumbler, so neither
+        # link nor write-back may run on it (the `continue` after stamp_failed).
+        from nexus.cli import main
+
+        link_calls: list[str] = []
+        wb_calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_record",
+            lambda uuid, path, *, collection, corpus, dry_run: uuid == "U-OK",
+        )
+        monkeypatch.setattr(
+            "nexus.commands.dt._link_semantic_record",
+            lambda uuid: link_calls.append(uuid) or True,
+        )
+        monkeypatch.setattr(
+            "nexus.commands.dt._writeback_record",
+            lambda uuid: wb_calls.append(uuid) or True,
+        )
+        fake_selectors["selection"].return_value = [("U-OK", "/a.pdf"), ("U-FAIL", "/b.pdf")]
+        result = runner.invoke(
+            main, ["dt", "index", "--selection", "--link-semantic", "--writeback"],
+        )
+        assert result.exit_code == 0, result.output
+        # Only the stamped record reached link + write-back.
+        assert link_calls == ["U-OK"]
+        assert wb_calls == ["U-OK"]
+        assert "1 DT-URI stamp-failed" in result.output
+
     def test_link_and_writeback_compose(
         self, runner, fake_selectors, fake_dispatcher, monkeypatch,
     ):
