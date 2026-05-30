@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.4] - 2026-05-30
+
+### Fixed
+
+- **sn session-start banner is now backend-agnostic.** The compact Serena
+  reminder injected at session start still hardcoded the `jet_brains_` tool
+  prefix (`jet_brains_find_symbol` … `jet_brains_rename`), the same hardcoding
+  the 5.4.3 grep→Serena redirect fix removed. A 5.4.3 post-release shakeout
+  caught that the banner edit was never committed in 5.4.3 (only the grep-hook
+  message landed). The banner now uses bare capability names and notes the
+  prefix varies by backend (JetBrains prefixes `jet_brains_`, LSP is
+  unprefixed), matching the redirect message and the serena-code-nav skill.
+
 ## [5.4.3] - 2026-05-29
 
 ### Fixed

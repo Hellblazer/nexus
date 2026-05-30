@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.4] - 2026-05-30
+
+### Fixed
+
+- sn session-start banner made backend-agnostic (JetBrains + LSP), completing
+  the 5.4.3 backend-agnostic work. The banner edit was lost in 5.4.3 (only the
+  grep→Serena redirect message landed); a post-release shakeout caught it.
+
 ## [5.4.3] - 2026-05-29
 
 ### Fixed
