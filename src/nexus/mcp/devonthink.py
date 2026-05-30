@@ -37,6 +37,12 @@ from mcp.server.fastmcp import FastMCP
 from nexus.mcp_client.core import MCPEndpoint, call_tool, open_session
 from nexus.mcp_client.devonthink import dt_mcp_url
 
+#: Whether the curated DT surface was registered at startup. Set by
+#: :func:`build_server`. The availability gate is probed ONCE at startup, so a
+#: server that started before DEVONthink launched advertises only the stub for
+#: its lifetime; ``devonthink_status`` surfaces a restart hint in that case.
+_STARTED_WITH_DT: bool = False
+
 
 async def _dt_proxy(tool: str, args: dict[str, Any]) -> str:
     """Forward one call to DEVONthink's built-in MCP server, async-native.
@@ -70,8 +76,9 @@ def _incorporate_sync(uuid: str) -> dict[str, Any]:
     cp = catalog_path()
     if not Catalog.is_initialized(cp):
         return {"error": "nexus catalog is not initialized"}
-    cat = Catalog(cp, cp / ".catalog.db")
+    cat = None
     try:
+        cat = Catalog(cp, cp / ".catalog.db")
         entry = cat.by_source_uri(f"x-devonthink-item://{uuid}")
         if entry is None:
             return {
@@ -84,7 +91,8 @@ def _incorporate_sync(uuid: str) -> dict[str, Any]:
         writeback = writeback_record(uuid, str(tumbler))
         return {"tumbler": str(tumbler), "links": links, "writeback": writeback}
     finally:
-        cat._db.close()
+        if cat is not None:
+            cat._db.close()
 
 
 # ── Tool handlers (registered conditionally by build_server) ─────────────────
@@ -103,37 +111,30 @@ async def devonthink_status() -> str:
     except Exception as exc:
         return json.dumps({"available": False, "reason": f"{type(exc).__name__}: {exc}"})
     available = bool(running) and bool(running.get("running"))
-    n_dbs = len(dbs.get("result", dbs)) if isinstance(dbs, dict) else 0
-    return json.dumps({"available": available, "databases": n_dbs})
-
-
-async def search_records(query: str, limit: int = 20, kind: str = "") -> str:
-    """Search DEVONthink with its query syntax (kind:, tags:, name:, etc.). Returns brief hits."""
-    args: dict[str, Any] = {"query": query, "limit": limit}
-    if kind:
-        args["query"] = f"{query} kind:{kind}"
-    return await _dt_proxy("search_records", args)
-
-
-async def lookup_records(name: str = "", url: str = "", path: str = "", comment: str = "") -> str:
-    """Look up records by exact name / URL / path / comment (dedupe before capture)."""
-    args = {k: v for k, v in {"name": name, "url": url, "path": path, "comment": comment}.items() if v}
-    return await _dt_proxy("lookup_records", args)
+    dbs_payload = dbs.get("result", dbs) if isinstance(dbs, dict) else dbs
+    n_dbs = len(dbs_payload) if isinstance(dbs_payload, list) else 0
+    status: dict[str, Any] = {"available": available, "databases": n_dbs}
+    # Startup-only gate: if DT is reachable NOW but the curated surface was not
+    # registered at startup (server started before DT launched), the DT tools
+    # are absent until restart. Surface that so the agent isn't confused.
+    if available and not _STARTED_WITH_DT:
+        status["restart_required"] = True
+        status["note"] = (
+            "DEVONthink is reachable but this server started before it was "
+            "available, so the DT tools are not registered. Restart "
+            "nx-mcp-devonthink to advertise the full surface."
+        )
+    return json.dumps(status)
 
 
 async def get_record_text(uuid: str) -> str:
-    """Get a record's plain-text body."""
+    """Get a record's plain-text body (content read; UUID comes from a nexus search)."""
     return await _dt_proxy("get_record_text", {"uuid": uuid})
 
 
-async def get_record_properties(uuid: str) -> str:
-    """Get a record's metadata, dates, and metrics."""
-    return await _dt_proxy("get_record_properties", {"uuid": uuid})
-
-
-async def get_record_children(uuid: str) -> str:
-    """List the children of a group / smart group record."""
-    return await _dt_proxy("get_record_children", {"uuid": uuid})
+async def get_record_annotation(uuid: str) -> str:
+    """Get the UUID of a record's annotation note (read with get_record_text)."""
+    return await _dt_proxy("get_record_annotation", {"uuid": uuid})
 
 
 async def find_similar_records(uuid: str, limit: int = 25) -> str:
@@ -177,9 +178,9 @@ async def resolve_google_books_metadata(isbn: str = "", query: str = "") -> str:
     return await _dt_proxy("resolve_google_books_metadata", args)
 
 
-async def capture_web_page(url: str, type: str = "webarchive") -> str:
+async def capture_web_page(url: str, capture_type: str = "webarchive") -> str:
     """Capture a URL into DEVONthink (html/webarchive/markdown/pdf). Returns the new record."""
-    return await _dt_proxy("capture_web_page", {"url": url, "type": type})
+    return await _dt_proxy("capture_web_page", {"url": url, "type": capture_type})
 
 
 async def download_pdf_from_doi(doi: str, contact_email: str = "") -> str:
@@ -220,9 +221,18 @@ async def dt_incorporate(uuid: str) -> str:
 
 #: The curated DT toolset advertised only when DEVONthink is reachable.
 #: ``devonthink_status`` is excluded here — it is registered unconditionally.
+#:
+#: Curation respects the RDR's "Explicitly out of scope" boundary: DT's own
+#: SELECTORS / CRUD (search_records, lookup_records, get_record_properties,
+#: get_selected_records, get_current_record, open_record, group/parent walks,
+#: versions) and file-management verbs (move/trash/duplicate/merge/convert/
+#: export) stay on osascript and are NOT exposed here. The agent's DT entry
+#: point is a record UUID obtained from a NEXUS search (the indexed corpus),
+#: after which it uses these AI / content / bib / capture / link tools and the
+#: dt_incorporate composite. (Code review found the selectors had slipped in;
+#: removed.)
 _DT_TOOLS = (
-    search_records, lookup_records, get_record_text, get_record_properties,
-    get_record_children, find_similar_records, classify_record,
+    get_record_text, get_record_annotation, find_similar_records, classify_record,
     extract_record_content, extract_record_highlights, extract_record_mentions,
     resolve_doi_metadata, search_crossref, resolve_google_books_metadata,
     capture_web_page, download_pdf_from_doi, import_file, get_databases,
@@ -239,6 +249,8 @@ def build_server(*, available: bool) -> FastMCP:
     the registered tool count is asserted by the Phase-3 alwaysLoad-independence
     test, independent of any ``.mcp.json`` value.
     """
+    global _STARTED_WITH_DT
+    _STARTED_WITH_DT = available
     mcp = FastMCP("nexus-devonthink")
     mcp.add_tool(devonthink_status)
     if available:

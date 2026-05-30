@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from nexus.mcp import devonthink as srv
 
@@ -30,19 +30,26 @@ def test_zero_dt_tools_when_unavailable() -> None:
 def test_full_curated_surface_when_available() -> None:
     mcp = srv.build_server(available=True)
     names = _tool_names(mcp)
-    # ~20 curated tools: status + the 19 DT tools/composites.
-    assert len(names) == 20
+    # Curated surface = status + 16 in-scope DT tools/composites.
+    assert len(names) == 17
     assert "devonthink_status" in names
-    # spot-check the curated set across categories
+    # spot-check the in-scope set across categories
     for expected in (
-        "search_records", "get_record_text", "find_similar_records",
-        "extract_record_content", "resolve_doi_metadata", "capture_web_page",
-        "download_pdf_from_doi", "import_file", "get_databases", "dt_incorporate",
+        "get_record_text", "find_similar_records", "classify_record",
+        "extract_record_content", "extract_record_highlights",
+        "resolve_doi_metadata", "search_crossref", "capture_web_page",
+        "download_pdf_from_doi", "import_file", "get_databases",
+        "get_record_links", "dt_incorporate",
     ):
         assert expected in names, f"missing curated tool {expected}"
-    # out-of-scope file-management verbs are NOT exposed
-    for banned in ("move_record", "trash_record", "merge_records", "duplicate_record"):
-        assert banned not in names
+    # RDR "Explicitly out of scope": DT selectors/CRUD stay on osascript and are
+    # NOT exposed on the agent surface.
+    for banned in (
+        "search_records", "lookup_records", "get_record_properties",
+        "get_record_children", "get_selected_records", "open_record",
+        "move_record", "trash_record", "merge_records", "duplicate_record",
+    ):
+        assert banned not in names, f"out-of-scope tool {banned} must not be exposed"
 
 
 def test_status_always_present_independent_of_gate() -> None:
@@ -52,22 +59,17 @@ def test_status_always_present_independent_of_gate() -> None:
 
 # ── Proxies forward to DT via the async core ────────────────────────────────
 
-def test_search_records_proxies() -> None:
-    with patch.object(srv, "_dt_proxy", new=AsyncMock(return_value="{}")) as m:
-        asyncio.run(srv.search_records("memory systems", limit=5))
-    m.assert_awaited_once_with("search_records", {"query": "memory systems", "limit": 5})
-
-
-def test_search_records_kind_filter_merges_into_query() -> None:
-    with patch.object(srv, "_dt_proxy", new=AsyncMock(return_value="{}")) as m:
-        asyncio.run(srv.search_records("x", kind="pdf"))
-    assert m.await_args.args[1]["query"] == "x kind:pdf"
-
-
 def test_get_record_text_proxies() -> None:
-    with patch.object(srv, "_dt_proxy", new=AsyncMock(return_value="{}")) as m:
-        asyncio.run(srv.get_record_text("U1"))
+    with patch.object(srv, "_dt_proxy", new=AsyncMock(return_value='{"text":"x"}')) as m:
+        out = asyncio.run(srv.get_record_text("U1"))
     m.assert_awaited_once_with("get_record_text", {"uuid": "U1"})
+    assert out == '{"text":"x"}'  # the proxy's return flows back to the caller
+
+
+def test_resolve_doi_proxies() -> None:
+    with patch.object(srv, "_dt_proxy", new=AsyncMock(return_value="{}")) as m:
+        asyncio.run(srv.resolve_doi_metadata("10.1/x"))
+    m.assert_awaited_once_with("resolve_doi_metadata", {"doi": "10.1/x"})
 
 
 def test_find_similar_proxies_record_mode() -> None:
@@ -104,6 +106,60 @@ def test_incorporate_unindexed_record_returns_error() -> None:
     with patch.object(srv, "_incorporate_sync", return_value=fake):
         out = asyncio.run(srv.dt_incorporate("U1"))
     assert "not indexed" in json.loads(out)["error"]
+
+
+def test_incorporate_sync_unindexed_returns_error(tmp_path, monkeypatch) -> None:
+    """SIG-3: exercise _incorporate_sync's real body (catalog routing), not a
+    mock of the whole function. An unindexed UUID -> structured error, no
+    Layer B/F calls, and the catalog connection is closed."""
+    cat = MagicMock()
+    cat.by_source_uri.return_value = None
+    cat._db = MagicMock()
+    CatalogMock = MagicMock(return_value=cat)
+    CatalogMock.is_initialized = staticmethod(lambda p: True)
+    monkeypatch.setattr("nexus.catalog.catalog.Catalog", CatalogMock)
+    monkeypatch.setattr("nexus.config.catalog_path", lambda: tmp_path)
+    called = {"links": False, "wb": False}
+    monkeypatch.setattr("nexus.catalog.dt_link_generator.generate_dt_links",
+                        lambda *a, **k: called.__setitem__("links", True))
+    monkeypatch.setattr("nexus.dt_writeback.writeback_record",
+                        lambda *a, **k: called.__setitem__("wb", True))
+    out = srv._incorporate_sync("NO-SUCH-UUID")
+    assert "not indexed" in out["error"]
+    assert called == {"links": False, "wb": False}  # never reached Layer B/F
+    cat._db.close.assert_called_once()  # connection released even on the error path
+
+
+def test_incorporate_sync_uninitialized_catalog(tmp_path, monkeypatch) -> None:
+    CatalogMock = MagicMock()
+    CatalogMock.is_initialized = staticmethod(lambda p: False)
+    monkeypatch.setattr("nexus.catalog.catalog.Catalog", CatalogMock)
+    monkeypatch.setattr("nexus.config.catalog_path", lambda: tmp_path)
+    out = srv._incorporate_sync("U1")
+    assert "not initialized" in out["error"]
+
+
+def test_status_restart_hint_when_started_without_dt(monkeypatch) -> None:
+    """SIG-2: a server started before DT launched advertises only the stub;
+    devonthink_status surfaces a restart hint once DT becomes reachable."""
+    srv.build_server(available=False)  # sets _STARTED_WITH_DT = False
+
+    async def _fake_call(session, tool, args):
+        return {"running": True} if tool == "is_running" else {"result": [1, 2]}
+
+    class _FakeSession:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+    import contextlib
+    @contextlib.asynccontextmanager
+    async def _fake_open(endpoint):
+        yield object()
+    monkeypatch.setattr(srv, "open_session", _fake_open)
+    monkeypatch.setattr(srv, "call_tool", _fake_call)
+    out = json.loads(asyncio.run(srv.devonthink_status()))
+    assert out["available"] is True
+    assert out.get("restart_required") is True
 
 
 # ── main() probes the gate and builds accordingly ───────────────────────────

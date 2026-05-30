@@ -113,6 +113,36 @@ def test_catalog_has_main():
     assert callable(main)
 
 
+def test_devonthink_module_importable():
+    """devonthink.py (RDR-139 Layer A') imports cleanly with no DT dependency."""
+    from nexus.mcp.devonthink import build_server
+    assert build_server(available=False).name == "nexus-devonthink"
+
+
+def test_devonthink_has_main():
+    """devonthink.py exposes a main() entry point (console-script target)."""
+    from nexus.mcp.devonthink import main
+    assert callable(main)
+
+
+def test_devonthink_registered_tools():
+    """The gate decides the surface: stub-only when DT absent, full curated
+    surface when present. Pins the count so a _DT_TOOLS edit can't drift
+    silently (mirrors the sibling-register guard for core/catalog)."""
+    from nexus.mcp.devonthink import build_server
+
+    absent = {t.name for t in build_server(available=False)._tool_manager.list_tools()}
+    assert absent == {"devonthink_status"}
+
+    present = {t.name for t in build_server(available=True)._tool_manager.list_tools()}
+    assert len(present) == 17
+    # out-of-scope DT selectors/CRUD must never appear (RDR out-of-scope)
+    assert present.isdisjoint({
+        "search_records", "lookup_records", "get_record_properties",
+        "move_record", "trash_record",
+    })
+
+
 def test_helper_moved_with_store_list():
     """_store_list_docs helper is co-located with store_list in core.py."""
     from nexus.mcp.core import _store_list_docs

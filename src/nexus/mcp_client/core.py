@@ -145,11 +145,16 @@ async def open_session(endpoint: MCPEndpoint) -> AsyncIterator[Any]:
         headers=dict(endpoint.headers) or None,
         timeout=httpx.Timeout(endpoint.timeout_s),
     )
-    async with streamable_http_client(endpoint.url, http_client=http_client) as (
-        read_stream,
-        write_stream,
-        _get_session_id,
-    ):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-            yield session
+    # ``streamable_http_client`` does NOT own a caller-provided client's
+    # lifecycle (it skips its own ``aclose`` when ``http_client`` is passed in).
+    # Close it ourselves so the long-running Layer A' server does not leak one
+    # AsyncClient + connection pool per call (RDR-139 Layer A' code review).
+    async with http_client:
+        async with streamable_http_client(endpoint.url, http_client=http_client) as (
+            read_stream,
+            write_stream,
+            _get_session_id,
+        ):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                yield session
