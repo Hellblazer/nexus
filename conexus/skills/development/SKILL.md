@@ -10,13 +10,13 @@ Delegates to the **developer** agent (sonnet). See [registry.yaml](../../registr
 
 ## Code Navigation
 
-**REQUIRED SUB-SKILL:** Use **/conexus:serena-code-nav** for all symbol-level navigation — finding definitions, callers, type hierarchies, and surgical edits. Serena replaces text-pattern Grep for any symbol task.
+**REQUIRED SUB-SKILL:** Use **/conexus:serena-code-nav** for all symbol-level navigation, finding definitions, callers, type hierarchies, and surgical edits. Serena replaces text-pattern Grep for any symbol task.
 
 - **Before modifying interfaces**: `find_referencing_symbols` to find all implementers and callers
 - **Before refactoring methods**: `find_referencing_symbols` to find all callers
 - **Class structure**: `get_symbols_overview` for method/field inventory without reading the file
 - **Finding method definitions**: `find_symbol` instead of Grep
-- **Replacing a method body**: `replace_symbol_body` — no line arithmetic, immune to drift
+- **Replacing a method body**: `replace_symbol_body`, no line arithmetic, immune to drift
 
 ### Example Workflow
 ```
@@ -30,7 +30,7 @@ Delegates to the **developer** agent (sonnet). See [registry.yaml](../../registr
 
 ## When This Skill Activates
 
-- After `mcp__plugin_conexus_nexus__nx_plan_audit` validates a plan (required prerequisite — RDR-080)
+- After `mcp__plugin_conexus_nexus__nx_plan_audit` validates a plan (required prerequisite, RDR-080)
 - When a bead for an implementation task is in_progress
 - Executing tasks from an approved implementation plan
 - Writing or modifying production code
@@ -73,7 +73,7 @@ For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agen
 If the developer agent returns with `## ESCALATION: Debugger Required` in its output (detect by scanning for `<!-- ESCALATION -->` or the literal string `ESCALATION: Debugger Required`):
 
 1. **Do not re-dispatch the developer.** The circuit breaker fired for a reason.
-2. **Escalation guard — check before dispatching:**
+2. **Escalation guard, check before dispatching:**
    mcp__plugin_conexus_nexus__scratch(action="search", query="circuit-breaker-fired-for-[bead-id]", limit=1
    - **If found**: do NOT dispatch the debugger. Report to the user: "Developer circuit breaker has fired twice for bead [ID]. The debugger's fix did not resolve the issue. Human investigation recommended." **Stop here.**
    - **If not found**: write the guard entry NOW: mcp__plugin_conexus_nexus__scratch(action="put", content="circuit-breaker-fired-for-[bead-id]", tags="escalation-guard". Then proceed to step 3.
@@ -88,9 +88,9 @@ If the developer agent returns with `## ESCALATION: Debugger Required` in its ou
 ### Input Artifacts
 - Error: [Error field from escalation report]
 - Hypothesis: [Hypothesis field from escalation report]
-- What was tried: [What I tried field — both attempts]
+- What was tried: [What I tried field, both attempts]
 - Diagnostic suggestion: [Diagnostic suggestion field]
-- nx scratch: [search scratch for tag "failed-approach" — include any pre-escalation entries the developer wrote during earlier attempts]
+- nx scratch: [search scratch for tag "failed-approach", include any pre-escalation entries the developer wrote during earlier attempts]
 - Files: [files from original developer relay]
 
 ### Deliverable
@@ -127,12 +127,36 @@ Do not retry approaches listed in scratch under tag "failed-approach".
 - [ ] Remaining plan steps completed
 ```
 
-## Post-Implementation Review
+## Post-Implementation Review + Commit (orchestrator-driven, MANDATORY)
 
-Code review steps are baked into plans by the strategic planner. When
-executing a plan, follow the review tasks at the designated points.
-For ad-hoc implementation outside a plan, use `/conexus:review-code` when
-the scope warrants it.
+The developer agent CANNOT run this tail itself, it has no Agent tool and
+cannot spawn sibling agents. When the developer returns its
+`## Next Step: code-review-expert, substantive-critic, test-validator` block,
+YOU (the orchestrator running this skill) drive the loop. Do not stop at the
+developer's return; do not let the developer self-commit.
+
+Run BOTH reviewers, they catch different, non-overlapping classes of issue:
+
+1. **code-review-expert** (`/conexus:review-code`): line-level bugs, security,
+   missing edge cases, convention violations.
+2. **substantive-critic** (`/conexus:substantive-critique`): unvalidated
+   assumptions, silent scope reduction, vacuous test assertions, spec-vs-
+   implementation drift, "what does this leave undefended downstream." Brief it
+   with the locked spec (RDR `## Decision` / plan / phase boundary) so it checks
+   implementation-vs-design, not style.
+
+**This is a gate, not a suggestion.** A clean code-review-expert verdict does
+NOT permit skipping the critic, that is the documented failure mode. Iterate:
+Critical/High finding → fix → re-review the affected reviewer. Only when BOTH
+return clean do you proceed to commit.
+
+3. **Commit**: stage the code changes (explicit paths, never `git add -A`) plus
+   the beads file, commit with the bead reference, and close the bead. The
+   developer does not self-commit; the commit is the proof both gates passed.
+
+When executing a strategic plan, the planner bakes review tasks into the plan at
+designated points, follow those, and they include both reviewers. For ad-hoc
+implementation outside a plan, run the loop above directly.
 
 ## TDD Methodology
 
@@ -144,7 +168,7 @@ The developer agent follows test-driven development:
 5. Ensure all existing tests still pass
 
 **REQUIRED:** Run verification (tests pass, no regressions) before claiming any task is done.
-**REQUIRED SUB-SKILL:** Use `/conexus:review-code` after implementation for quality review.
+**REQUIRED SUB-SKILLS (both, in this order):** `/conexus:review-code` (code-review-expert) THEN `/conexus:substantive-critique` (substantive-critic) after implementation. Commit only after both return clean. See "Post-Implementation Review + Commit" above.
 
 ## Success Criteria
 
@@ -152,7 +176,9 @@ The developer agent follows test-driven development:
 - [ ] Code follows project conventions
 - [ ] No regressions in existing tests
 - [ ] Implementation matches plan requirements
-- [ ] Ready for code-review-expert relay
+- [ ] code-review-expert returned clean (Critical/High fixed, re-reviewed)
+- [ ] substantive-critic returned clean (Critical/High fixed, re-reviewed)
+- [ ] Committed only after BOTH reviewers clean (orchestrator commits; developer does not self-commit)
 
 ## Agent-Specific PRODUCE
 

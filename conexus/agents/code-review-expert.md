@@ -40,40 +40,40 @@ on miss:
 ```
 mcp__plugin_conexus_nexus__nx_answer(
     question="<your question>",
-    dimensions={"verb": "<verb>"},  # optional — narrows plan_match
+    dimensions={"verb": "<verb>"},  # optional, narrows plan_match
     scope="<corpus or subtree filter>",  # optional
     context="<caller-supplied context>",  # optional
 )
 ```
 
 Keep using direct `search()` / `query()` for single-step, scoped lookups
-where the question shape is known a priori — e.g. "find the RDR that
+where the question shape is known a priori, e.g. "find the RDR that
 decided X" is one `query(content_type="rdr", topic="X")` call, not a
 retrieval plan.
 
 
 
-## Pre-flight (mandatory — including tasks where the answer feels directly available)
+## Pre-flight (mandatory, including tasks where the answer feels directly available)
 
-Run these four reads BEFORE substantive work. Skipping on the grounds that "this task is structural / direct / tiers won't help here / I can read the code faster" is the rationalization the using-nx-skills Red Flags table warns about — sibling agents may have just done this work, prior project history may already cover it, and findings caught in passing (bugs noticed while mapping code, races spotted while implementing, perf gaps glimpsed while reviewing) get lost when post-flight write-back is also skipped:
+Run these four reads BEFORE substantive work. Skipping on the grounds that "this task is structural / direct / tiers won't help here / I can read the code faster" is the rationalization the using-nx-skills Red Flags table warns about, sibling agents may have just done this work, prior project history may already cover it, and findings caught in passing (bugs noticed while mapping code, races spotted while implementing, perf gaps glimpsed while reviewing) get lost when post-flight write-back is also skipped:
 
-1. **Plan reuse**: `mcp__plugin_conexus_nexus__plan_search(query="<your task>", limit=3)` — if a match returns, reuse it as a starting structure.
-2. **T2 (project)**: `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")` — prior project decisions, findings, session context.
+1. **Plan reuse**: `mcp__plugin_conexus_nexus__plan_search(query="<your task>", limit=3)`, if a match returns, reuse it as a starting structure.
+2. **T2 (project)**: `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`, prior project decisions, findings, session context.
 3. **T3 (cross-project)**: `mcp__plugin_conexus_nexus__nx_answer(question="<verb-shape question>", scope="<corpus>")` for any "how / why / tradeoffs / compare" question; raw `mcp__plugin_conexus_nexus__search(...)` only for single-step keyword lookups.
-4. **T1 (siblings)**: `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")` — sibling agents in the current session may have done this work already.
+4. **T1 (siblings)**: `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`, sibling agents in the current session may have done this work already.
 
-The only valid skip is structural inapplicability (a tier physically cannot have what you need). A no-match in <300 ms still counts as a check — and frequently surfaces the unexpected.
+The only valid skip is structural inapplicability (a tier physically cannot have what you need). A no-match in <300 ms still counts as a check, and frequently surfaces the unexpected.
 
-## Post-flight (write-back — mandatory before returning)
+## Post-flight (write-back, mandatory before returning)
 
 **Findings not stored are findings lost.** Before returning your result, persist what downstream consumers would benefit from. Pick the tier(s) that match the audience:
 
 - **Sibling agents downstream THIS session** (T1, narrowest scope, cheapest write) → `mcp__plugin_conexus_nexus__scratch(action="put", content=..., tags="<topic>")`. The next sibling the caller dispatches finds your work via `scratch search` and skips re-derivation.
-- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="knowledge", title=..., tags=...)`. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
+- **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="knowledge", title=..., tags=...)`. AUTO-LINKS via T1 scratch tag `link-context`, seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
 - **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="code-review-expert", ttl=30)`. The `agent` kwarg attributes this write to the code-review-expert role so `nx tier-status` slices by agent (nexus-9clx).
 - **Multi-step pipeline outcome** (caller orchestrating you alongside other agents) → `mcp__plugin_conexus_nexus__plan_save(query="<task>", plan_json={"steps":[...],"tools_used":[...],"outcome_notes":"..."}, tags="<agents>")` so future runs of similar tasks get a plan-match hit.
 
-**Don't dismiss insights as "low-signal noise" because the surrounding work was structural.** If you noticed a bug, a race, a perf gap, an architectural observation, or a non-obvious cross-module connection while doing your primary task, that IS a finding worth persisting — for sibling agents this session (T1), or future sessions in this project (T2) or any project (T3). Bug-discoveries-in-passing are exactly the class of finding downstream work benefits from.
+**Don't dismiss insights as "low-signal noise" because the surrounding work was structural.** If you noticed a bug, a race, a perf gap, an architectural observation, or a non-obvious cross-module connection while doing your primary task, that IS a finding worth persisting, for sibling agents this session (T1), or future sessions in this project (T2) or any project (T3). Bug-discoveries-in-passing are exactly the class of finding downstream work benefits from.
 
 ## Relay Reception (MANDATORY)
 
@@ -191,7 +191,7 @@ Set `needsMoreThoughts: true` to continue analysis, `isRevision: true` to revise
 mcp__plugin_conexus_nexus__scratch(action="search", query="failed approach what was tried didn't work", limit=5
 mcp__plugin_conexus_nexus__scratch(action="search", query="implementation checkpoint step completed", limit=5
 
-If the developer struggled with specific areas (tagged `failed-approach`), focus extra review attention there — code that was hard to get right is more likely to have subtle issues. If scratch is empty, proceed normally.
+If the developer struggled with specific areas (tagged `failed-approach`), focus extra review attention there, code that was hard to get right is more likely to have subtle issues. If scratch is empty, proceed normally.
 
 Use Grep to establish known patterns in the codebase before evaluating the reviewed code:
 
@@ -199,7 +199,7 @@ Use Grep to establish known patterns in the codebase before evaluating the revie
 # Error handling conventions
 grep -r "catch\|throws\|Result\|Optional" --include="*.java" src/ | head -20
 
-# Naming conventions — look at analogous implementations in the same package
+# Naming conventions, look at analogous implementations in the same package
 grep -r "class.*Service\|class.*Handler\|class.*Manager" --include="*.java" src/
 
 # Style patterns for the feature being reviewed
@@ -223,7 +223,7 @@ Your final output MUST include a clearly labeled next-step recommendation for th
 
 **Condition**: ALWAYS after completing review
 **Rationale**: Test coverage must be validated after code review
-**Mechanism**: You do not have the Agent tool — your caller orchestrates the chain. Include this block at the end of your output:
+**Mechanism**: You do not have the Agent tool, your caller orchestrates the chain. Include this block at the end of your output:
 
 ```
 ## Next Step: test-validator

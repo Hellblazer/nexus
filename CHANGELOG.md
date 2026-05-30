@@ -6,6 +6,78 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.5] - 2026-05-30
+
+### Fixed
+
+- **substantive-critic wired into the developer review loop across all five
+  orchestration surfaces.** The developer agent stopped after the code-review
+  verdict in every implementation phase, skipping substantive-critic and
+  commit, because the critic was named nowhere in the orchestration path:
+  `developer.md`, the `development` skill, and `implement.md` listed only
+  code-review-expert (the ad-hoc path); `orchestration/reference.md` (routing
+  graph, quick-reference table, Feature Development / Bug Fix pipelines, pattern
+  catalog) read `developer -> code-review-expert -> test-validator` with the
+  critic only "if critical"; and strategic-planner's Review Gates mandated only
+  a code-review task per phase. A compliant orchestrator skipped the critic by
+  construction on both the ad-hoc and plan-driven paths. All five surfaces now
+  name both reviewers as a non-optional pair (they catch different,
+  non-overlapping issue classes; a clean code review does not permit skipping
+  the critic), and developer.md's handback model is explicit: the developer
+  implements and self-verifies, then the caller runs both reviewers, gates on
+  both clean, and commits. The developer no longer self-commits.
+
+### Internal
+
+- Removed em-dashes from ten agent/skill/command markdown files
+  (developer, debugger, strategic-planner, code-review-expert, deep-analyst,
+  substantive-critic, the development skill, implement command, the
+  orchestration reference) that violated the no-em-dashes convention.
+
+## [5.4.4] - 2026-05-30
+
+### Fixed
+
+- **sn session-start banner is now backend-agnostic.** The compact Serena
+  reminder injected at session start still hardcoded the `jet_brains_` tool
+  prefix (`jet_brains_find_symbol` … `jet_brains_rename`), the same hardcoding
+  the 5.4.3 grep→Serena redirect fix removed. A 5.4.3 post-release shakeout
+  caught that the banner edit was never committed in 5.4.3 (only the grep-hook
+  message landed). The banner now uses bare capability names and notes the
+  prefix varies by backend (JetBrains prefixes `jet_brains_`, LSP is
+  unprefixed), matching the redirect message and the serena-code-nav skill.
+
+## [5.4.3] - 2026-05-29
+
+### Fixed
+
+- **Routing-hook deny reason now reaches the model.** `_lib.deny_envelope`
+  emitted the redirect message only under `hookSpecificOutput.reason`, a key
+  current Claude Code does not read on a PreToolUse deny. Every routing deny
+  (grep→Serena, git-add-all, phase-review-gate) therefore arrived as a bare
+  "denied" with no cause and no remediation. The envelope now also emits the
+  canonical `permissionDecisionReason` plus a top-level `systemMessage`, so the
+  redirect text is actually delivered. Mirrored across both vendored `_lib.py`
+  copies (sn + conexus); `test_routing_lib_drift` keeps them byte-equal.
+- **grep→Serena redirect is backend-agnostic (JetBrains + LSP).** The message
+  and the sn session-start banner hardcoded the `jet_brains_` Serena tool
+  prefix, handing wrong tool names to anyone on the LSP backend. Both now use
+  bare capability names (`find_symbol`, `find_referencing_symbols`,
+  `get_symbols_overview`), show the `ToolSearch` both-variant load, note the
+  prefix varies by backend, and the redirect echoes the actual pattern/file and
+  names all three remedies (Serena, the built-in Grep tool, the
+  `# routing-allow:` escape).
+
+### Internal
+
+- **cc-validation harness isolated on a private tmux socket.** The harness ran
+  on the user's default tmux socket, so its `kill-session`/`kill-server`
+  cleanup could take down the developer's interactive Claude Code session. A
+  new `_tmux` wrapper in `tests/e2e/lib.sh` routes every tmux call through a
+  dedicated socket when `NX_TMUX_SOCKET` is set; cc-validation sets it. Adds
+  scenario 26, an end-to-end guard that a routing deny surfaces its reason to a
+  real sandboxed model and stays backend-agnostic.
+
 ## [5.4.2] - 2026-05-29
 
 ### Fixed

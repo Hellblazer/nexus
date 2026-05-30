@@ -132,15 +132,32 @@ def _has_code_file(files: list[str]) -> bool:
     return any(f.lower().endswith(CODE_EXTENSIONS) for f in files)
 
 
-def _redirect_message() -> str:
+def _redirect_message(pattern: str, files: list[str]) -> str:
+    file_arg = files[0] if files else "<file>"
+    target = " ".join(files) if files else "<file>"
     return (
-        "grep / rg on code files for identifier-shaped patterns is a "
-        "symbol-navigation task. Use Serena instead:\n"
-        "  - Definitions: mcp__plugin_sn_serena__jet_brains_find_symbol\n"
-        "  - Callers:     mcp__plugin_sn_serena__jet_brains_find_referencing_symbols\n"
-        "  - File map:    mcp__plugin_sn_serena__jet_brains_get_symbols_overview\n"
-        "To override (e.g. genuine text search), append "
-        "`# routing-allow: <reason>` (>=8 chars) to the command."
+        f"Blocked: `grep {pattern} {target}` searches a code file for an "
+        f"identifier-shaped pattern ('{pattern}'). That is a symbol-"
+        "navigation task, so it was redirected to a structural tool that "
+        "resolves definitions and callers instead of returning raw text "
+        "lines.\n\n"
+        "Why blocked: grep/rg for a bare identifier on a code file misses "
+        "overloads, hits string/comment false positives, and gives you no "
+        "call graph. Do one of these instead:\n\n"
+        "  1. Serena (best for symbols). Tool names vary by backend, so "
+        "load whichever resolves, then call it:\n"
+        "       ToolSearch(\"select:mcp__plugin_sn_serena__jet_brains_find_symbol,"
+        "mcp__plugin_sn_serena__find_symbol\")\n"
+        f"     - Definition: find_symbol(name_path_pattern=\"{pattern}\")\n"
+        f"     - Callers:    find_referencing_symbols(name_path=\"{pattern}\", "
+        f"relative_path=\"{file_arg}\")\n"
+        f"     - File map:   get_symbols_overview(relative_path=\"{file_arg}\")\n"
+        "     (JetBrains backend prefixes jet_brains_; LSP backend is "
+        "unprefixed. See the sn serena-code-nav skill for the full table.)\n"
+        "  2. The built-in Grep tool: faster than bash grep and "
+        "structured, if you genuinely want text matches not symbols.\n"
+        "  3. Keep bash grep by appending an escape reason (>=8 chars):\n"
+        f"     grep {pattern} {target}  # routing-allow: <why text search fits>"
     )
 
 
@@ -171,7 +188,7 @@ def body(payload: dict[str, Any]) -> None:
         rule=RULE_NAME, outcome="deny", tool_name="Bash",
         command_fragment=command,
     )
-    _lib.deny(_redirect_message())
+    _lib.deny(_redirect_message(pattern, files))
 
 
 if __name__ == "__main__":

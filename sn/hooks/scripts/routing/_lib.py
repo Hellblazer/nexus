@@ -59,13 +59,29 @@ def allow_envelope(context: str = "") -> str:
 
 
 def deny_envelope(reason: str) -> str:
-    """Return a deny envelope as a JSON string."""
+    """Return a deny envelope as a JSON string.
+
+    The reason rides in three fields for cross-version robustness:
+
+    * ``permissionDecisionReason`` -- the canonical PreToolUse field
+      current Claude Code feeds back to the model on a deny.
+    * ``systemMessage`` (top-level) -- surfaced in the transcript.
+    * ``reason`` -- the legacy key earlier envelopes used.
+
+    Earlier envelopes carried *only* ``reason``, which current Claude
+    Code does not read: a deny then arrived as a bare "denied" with no
+    cause and no remediation, leaving the model to guess what to do
+    next. Emitting the canonical field is what makes the redirect
+    message actually reach the model.
+    """
+    reason = reason or "(no reason provided)"
     payload = {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
         "reason": reason,
     }
-    return json.dumps({"hookSpecificOutput": payload})
+    return json.dumps({"hookSpecificOutput": payload, "systemMessage": reason})
 
 
 def warn_envelope(message: str) -> str:
