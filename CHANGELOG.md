@@ -6,6 +6,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.5] - 2026-05-30
+
+### Fixed
+
+- **substantive-critic wired into the developer review loop across all five
+  orchestration surfaces.** The developer agent stopped after the code-review
+  verdict in every implementation phase, skipping substantive-critic and
+  commit, because the critic was named nowhere in the orchestration path:
+  `developer.md`, the `development` skill, and `implement.md` listed only
+  code-review-expert (the ad-hoc path); `orchestration/reference.md` (routing
+  graph, quick-reference table, Feature Development / Bug Fix pipelines, pattern
+  catalog) read `developer -> code-review-expert -> test-validator` with the
+  critic only "if critical"; and strategic-planner's Review Gates mandated only
+  a code-review task per phase. A compliant orchestrator skipped the critic by
+  construction on both the ad-hoc and plan-driven paths. All five surfaces now
+  name both reviewers as a non-optional pair (they catch different,
+  non-overlapping issue classes; a clean code review does not permit skipping
+  the critic), and developer.md's handback model is explicit: the developer
+  implements and self-verifies, then the caller runs both reviewers, gates on
+  both clean, and commits. The developer no longer self-commits.
+
+### Internal
+
+- Removed em-dashes from ten agent/skill/command markdown files
+  (developer, debugger, strategic-planner, code-review-expert, deep-analyst,
+  substantive-critic, the development skill, implement command, the
+  orchestration reference) that violated the no-em-dashes convention.
+
 ## [5.4.4] - 2026-05-30
 
 ### Fixed
