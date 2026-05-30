@@ -367,6 +367,19 @@ def dt() -> None:
         "default off."
     ),
 )
+@click.option(
+    "--enrich",
+    "enrich",
+    is_flag=True,
+    default=False,
+    help=(
+        "After indexing, run a DT-CrossRef bibliographic gap-fill pass over "
+        "each touched collection (RDR-139 Layer C): the 'auto' primary "
+        "backend, then DEVONthink's CrossRef resolver fills only still-empty "
+        "bib_* fields. Strictly lowest-precedence; never overwrites an "
+        "S2/OpenAlex value. DT unavailable -> primary-only. Opt-in, default off."
+    ),
+)
 def index_cmd(
     use_selection: bool,
     tag: str | None,
@@ -379,6 +392,7 @@ def index_cmd(
     dry_run: bool,
     link_semantic: bool,
     writeback: bool,
+    enrich: bool,
 ) -> None:
     """Index DEVONthink records into Nexus.
 
@@ -430,6 +444,7 @@ def index_cmd(
     stamp_failed = 0
     written_back = 0
     linked = 0
+    touched_collections: set[str] = set()
     failed: list[tuple[str, str, str]] = []  # (uuid, path, error)
     for uuid, path in records:
         ext = Path(path).suffix.lower()
@@ -470,6 +485,7 @@ def index_cmd(
             failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
             continue
         indexed += 1
+        touched_collections.add(resolved_collection)
         if not stamped:
             stamp_failed += 1
             continue
@@ -477,6 +493,17 @@ def index_cmd(
             linked += 1
         if writeback and _writeback_record(uuid):
             written_back += 1
+
+    # RDR-139 Layer C: gap-fill bibliographic metadata over the collections we
+    # just wrote to. Runs once per distinct collection (title-group oriented),
+    # after all records land so a multi-record paper enriches as one group.
+    if enrich and touched_collections:
+        from nexus.commands.enrich import run_bib_enrichment
+
+        for coll in sorted(touched_collections):
+            click.echo(f"\nEnriching bibliographic metadata: {coll}")
+            run_bib_enrichment(coll, source="dt")
+
     summary = f"Indexed {indexed} record(s) ({skipped} skipped"
     if link_semantic:
         summary += f", {linked} semantically linked"
