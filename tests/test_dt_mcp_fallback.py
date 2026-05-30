@@ -19,6 +19,7 @@ import pytest
 
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.dt_link_generator import generate_dt_links
+from nexus.dt_writeback import writeback_record
 
 
 @pytest.fixture
@@ -42,6 +43,21 @@ class _UnavailableDT:
 
     def dt_call(self, *a, **k):  # pragma: no cover
         raise AssertionError("dt_call called despite available()=False")
+
+    def dt_set_tags(self, *a, **k):  # pragma: no cover
+        raise AssertionError("dt_set_tags called despite available()=False")
+
+    def dt_set_annotation(self, *a, **k):  # pragma: no cover
+        raise AssertionError("dt_set_annotation called despite available()=False")
+
+    def dt_set_custom_metadata(self, *a, **k):  # pragma: no cover
+        raise AssertionError("dt_set_custom_metadata called despite available()=False")
+
+    def dt_annotation_text(self, *a, **k):  # pragma: no cover
+        raise AssertionError("dt_annotation_text called despite available()=False")
+
+    def dt_extract_content(self, *a, **k):  # pragma: no cover
+        raise AssertionError("dt_extract_content called despite available()=False")
 
 
 @pytest.fixture
@@ -91,6 +107,18 @@ class TestLayerBFallback:
         generate_dt_links(cat, this, "THIS", dt_client=_UnavailableDT())
 
 
-# Layer F fallback (no DT-side mutation, index/enrich unchanged, exit 0) is added
-# with P1.7 write-back (nexus-x70wg). Placed here intentionally so the Gap-0
-# contract lives in one suite — see module docstring.
+class TestLayerFFallback:
+    """Layer F: DT absent → no DT-side mutation; write-back is skipped, exit clean."""
+
+    def test_writeback_skipped_no_mutation_when_unavailable(self):
+        # _UnavailableDT raises if any write helper is reached; the available()
+        # gate must short-circuit before any DT write is attempted.
+        out = writeback_record("U", "1.2.3", dt_client=_UnavailableDT())
+        assert out == {"tags": False, "annotation": False, "metadata": False, "skipped": True}
+
+    def test_writeback_with_keywords_still_skips_when_unavailable(self):
+        out = writeback_record(
+            "U", "1.2.3", aspect_keywords=["TPC-C", "RAG"], dt_client=_UnavailableDT()
+        )
+        assert out["skipped"] is True
+        assert not any(out[k] for k in ("tags", "annotation", "metadata"))

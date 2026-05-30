@@ -1034,3 +1034,149 @@ class TestStampDtUriOnEntry:
             dry_run=True,
         )
         assert stamps == []
+
+
+# ── Layer F write-back (RDR-139 P1.7) ─────────────────────────────────────────
+
+
+class TestWriteback:
+    """``nx dt index --writeback`` stamps the nexus identity back onto DT.
+
+    The DT-side stamp itself is exercised by ``tests/test_dt_writeback.py``
+    against a fake DT client; here we pin the CLI wiring: the flag gates the
+    call, it fires once per successfully-stamped record, and the summary
+    reports the count.
+    """
+
+    def test_writeback_invoked_per_stamped_record(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._writeback_record",
+            lambda uuid: calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--writeback"])
+        assert result.exit_code == 0, result.output
+        assert calls == ["U1"]
+        assert "written back to DT" in result.output
+
+    def test_no_writeback_flag_skips_call(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._writeback_record",
+            lambda uuid: calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1"])
+        assert result.exit_code == 0, result.output
+        assert calls == []
+        assert "written back" not in result.output
+
+    def test_writeback_help_documents_namespace(self, runner):
+        from nexus.cli import main
+
+        result = runner.invoke(main, ["dt", "index", "--help"])
+        assert result.exit_code == 0
+        assert "--writeback" in result.output
+
+
+# ── Layer B semantic linking (RDR-139 P1.5 CLI wiring) ────────────────────────
+
+
+class TestLinkSemantic:
+    """``nx dt index --link-semantic`` invokes Layer B edge generation."""
+
+    def test_link_semantic_invoked_per_stamped_record(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._link_semantic_record",
+            lambda uuid: calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--link-semantic"])
+        assert result.exit_code == 0, result.output
+        assert calls == ["U1"]
+        assert "semantically linked" in result.output
+
+    def test_no_link_semantic_flag_skips_call(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._link_semantic_record",
+            lambda uuid: calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1"])
+        assert result.exit_code == 0, result.output
+        assert calls == []
+        assert "semantically linked" not in result.output
+
+    def test_stamp_failed_record_skips_link_and_writeback(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        # A record that fails to stamp has no resolvable tumbler, so neither
+        # link nor write-back may run on it (the `continue` after stamp_failed).
+        from nexus.cli import main
+
+        link_calls: list[str] = []
+        wb_calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_record",
+            lambda uuid, path, *, collection, corpus, dry_run: uuid == "U-OK",
+        )
+        monkeypatch.setattr(
+            "nexus.commands.dt._link_semantic_record",
+            lambda uuid: link_calls.append(uuid) or True,
+        )
+        monkeypatch.setattr(
+            "nexus.commands.dt._writeback_record",
+            lambda uuid: wb_calls.append(uuid) or True,
+        )
+        fake_selectors["selection"].return_value = [("U-OK", "/a.pdf"), ("U-FAIL", "/b.pdf")]
+        result = runner.invoke(
+            main, ["dt", "index", "--selection", "--link-semantic", "--writeback"],
+        )
+        assert result.exit_code == 0, result.output
+        # Only the stamped record reached link + write-back.
+        assert link_calls == ["U-OK"]
+        assert wb_calls == ["U-OK"]
+        assert "1 DT-URI stamp-failed" in result.output
+
+    def test_link_and_writeback_compose(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        link_calls: list[str] = []
+        wb_calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._link_semantic_record",
+            lambda uuid: link_calls.append(uuid) or True,
+        )
+        monkeypatch.setattr(
+            "nexus.commands.dt._writeback_record",
+            lambda uuid: wb_calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(
+            main, ["dt", "index", "--uuid", "U1", "--link-semantic", "--writeback"],
+        )
+        assert result.exit_code == 0, result.output
+        assert link_calls == ["U1"] and wb_calls == ["U1"]
+        assert "semantically linked" in result.output
+        assert "written back to DT" in result.output

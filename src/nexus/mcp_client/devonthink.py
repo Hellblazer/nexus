@@ -121,8 +121,17 @@ def dt_find_similar(uuid: str, *, limit: int = 25, floor: float = 0.0) -> list[N
     )
     if not result:
         return []
+    # Single-record mode returns a BARE neighbour array; core wraps a bare JSON
+    # array as {"result": [...]}. Batch/summary mode would use {"results": [...]}.
+    # Accept both shapes (live finding — the spike's {count, results} shape did
+    # not match single-uuid mode).
+    neighbours = result.get("results")
+    if neighbours is None:
+        neighbours = result.get("result")
     out: list[Neighbour] = []
-    for r in result.get("results", []) or []:
+    for r in neighbours or []:
+        if not isinstance(r, dict):
+            continue
         ruuid = r.get("uuid")
         score = float(r.get("score", 0.0) or 0.0)
         if not ruuid or score < floor:
@@ -172,10 +181,15 @@ def dt_extract_content(uuid: str) -> str | None:
     result = dt_call("extract_record_content", {"uuid": uuid})
     if not result:
         return None
+    # Short/plain docs return a single text body ({"text": ...}); structured
+    # docs (Markdown/PDF/EPUB) return a BARE array of section/page dicts, which
+    # core wraps as {"result": [...]}. Handle both (live finding — sectioned
+    # PDFs are the common paper case and were returning None, wrongly tripping
+    # the Layer F exclusion guard).
     text = result.get("text")
     if isinstance(text, str) and text:
         return text
-    sections = result.get("sections") or result.get("pages")
+    sections = result.get("sections") or result.get("pages") or result.get("result")
     if isinstance(sections, list):
         parts = [s.get("text", "") for s in sections if isinstance(s, dict)]
         joined = "\n".join(p for p in parts if p)
@@ -189,6 +203,26 @@ def dt_set_tags(uuid: str, tags: list[str], *, mode: str = "add") -> bool:
         return False
     result = dt_call("set_record_tags", {"uuid": uuid, "tags": tags, "mode": mode})
     return result is not None
+
+
+def dt_annotation_text(uuid: str) -> str | None:
+    """Current annotation body of a record, or ``None`` (no annotation / excluded).
+
+    Two-hop: ``get_record_annotation`` yields the annotation record's UUID, then
+    ``get_record_text`` reads its body. Used to make annotation write-back
+    idempotent (append only when the backlink is not already present).
+    """
+    meta = dt_call("get_record_annotation", {"uuid": uuid})
+    if not meta:
+        return None
+    ann_uuid = meta.get("annotation_uuid")
+    if not ann_uuid:
+        return None
+    result = dt_call("get_record_text", {"uuid": ann_uuid})
+    if not result:
+        return None
+    text = result.get("text") if isinstance(result, dict) else None
+    return text if isinstance(text, str) else None
 
 
 def dt_set_annotation(uuid: str, text: str, *, mode: str = "append") -> bool:
@@ -206,10 +240,25 @@ def dt_set_annotation(uuid: str, text: str, *, mode: str = "append") -> bool:
 
 
 def dt_set_custom_metadata(uuid: str, fields: dict[str, Any], *, mode: str = "merge") -> bool:
-    """Write custom-metadata fields onto a record (default merge). ``True`` on success (Layer F)."""
+    """Write custom-metadata fields onto a record (default merge). ``True`` only on a real write.
+
+    DEVONthink custom-metadata identifiers must be PRE-DEFINED in the database's
+    custom-metadata schema; unknown fields are silently dropped server-side (the
+    response lists them in ``dropped_fields``). Also: DT strips ``-``/``.`` from
+    identifiers, so ``nxtumbler`` is the maximally-namespaced legal key. This
+    helper returns ``False`` when DT dropped every field (an honest no-op, not a
+    false success) so callers don't believe a write happened that didn't. Empty
+    fields short-circuit to ``False``.
+    """
     if not fields:
         return False
     result = dt_call(
         "set_record_custom_metadata", {"uuid": uuid, "metadata": fields, "mode": mode}
     )
-    return result is not None
+    if result is None:
+        return False
+    dropped = result.get("dropped_fields")
+    if not isinstance(dropped, list):
+        dropped = []
+    # If DT dropped as many fields as we sent, nothing was committed.
+    return len(dropped) < len(fields)

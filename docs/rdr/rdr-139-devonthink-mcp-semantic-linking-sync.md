@@ -370,8 +370,17 @@ unavailable and asserts the legacy result is byte-identical to pre-RDR-139.
   `nx-tumbler:<t>`, top aspect keywords), `set_record_annotation` (backlink
   to tumbler), and `set_record_custom_metadata` (structured tumbler / aspect
   fields). Authoritative-source contract: nexus owns only the metadata it
-  writes; never edits user content; respects "Exclude from AI & MCP".
-  Fallback: no DT → no write-back (index still succeeds).
+  writes; never edits user content; respects "Exclude from AI & MCP" on a
+  **best-effort** basis. (CA5 part b finding: DT does not refuse metadata
+  writes to excluded records and the flag is not readable via the API, so
+  write-back skips any record whose AI-extracted content is empty — the one
+  available exclusion signal. This also skips genuinely empty records, and has
+  a known false-negative on file-path-indexed records with no DT AI content,
+  e.g. image-only PDFs.) Custom-metadata keys are `nxtumbler`/`nxindexed` (DT
+  strips separators from identifiers) and require pre-defined DT fields, so
+  that write is additive/best-effort; the tumbler is always recoverable from
+  the `nx-tumbler:<t>` tag. Fallback: no DT → no write-back (index still
+  succeeds).
 - **Layer G — Capture into graph (Gap 7).** `nx dt capture <url>`:
   `capture_web_page` → DT record → `nx dt index` in one verb;
   `download_pdf_from_doi` for DOI capture; `import_file` for loose files.
@@ -531,8 +540,11 @@ of scope here.)
   "DT unavailable, layer skipped" line; `nx dt index` summary reports which
   enhancements ran vs were skipped.
 - **Risk**: write-back pollutes the user's DB. **Mitigation**: `--writeback`
-  opt-in, nexus-owned namespace only (`nx-*`), never touch user content;
-  honour exclusion flag.
+  opt-in, nexus-owned namespace only (`nx-*` tags, `nxtumbler`/`nxindexed`
+  metadata), never touch user content; honour the exclusion flag on a
+  best-effort basis (empty-AI-content skip — see Layer F; CA5 part b found the
+  server does not refuse writes to excluded records and the flag is not
+  API-readable).
 - **Risk**: a Layer B/C/D helper is called from inside a running event loop
   (aspect worker, future daemon path) → `asyncio.run` raises `RuntimeError`,
   which the fail-soft contract would otherwise swallow as a `None`/"DT

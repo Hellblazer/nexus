@@ -92,6 +92,21 @@ def test_dt_find_similar_maps_and_applies_floor(monkeypatch) -> None:
     assert out == [{"uuid": "A", "score": 0.9, "name": "alpha"}]
 
 
+def test_dt_find_similar_parses_bare_array_shape(monkeypatch) -> None:
+    # Single-record mode returns a BARE neighbour array; core wraps a bare JSON
+    # array as {"result": [...]}. dt_find_similar must read that shape, not only
+    # {"results": [...]}. (Live MVV finding 2026-05-30 — the spike's assumed
+    # {count, results} shape did not match single-uuid mode; the mismatch made
+    # Layer B silently emit zero edges for every record.)
+    payload = {"result": [
+        {"uuid": "A", "score": 0.72, "name": "alpha"},
+        {"uuid": "B", "score": 0.70, "name": "beta"},
+    ]}
+    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: payload)
+    out = dt.dt_find_similar("Q", limit=10, floor=0.5)
+    assert [n["uuid"] for n in out] == ["A", "B"]
+
+
 def test_dt_record_links_merges_and_dedups(monkeypatch) -> None:
     payload = {
         "incoming": [{"uuid": "A", "name": "a"}],
@@ -132,6 +147,66 @@ def test_write_helpers_true_on_success_and_pass_no_clobber_mode(monkeypatch) -> 
     assert by_tool["set_record_custom_metadata"]["mode"] == "merge"
     assert by_tool["set_record_annotation"]["mode"] == "append"
     assert by_tool["set_record_annotation"]["text"] == "see nx tumbler 1.2.3"
+
+
+def test_dt_set_custom_metadata_false_when_all_dropped(monkeypatch) -> None:
+    # DT drops unknown (not pre-defined) fields; helper must report the no-op
+    # as False rather than a false success.
+    monkeypatch.setattr(
+        dt, "dt_call",
+        lambda tool, args=None: {"metadata": {}, "dropped_fields": ["nxtumbler", "nxindexed"]},
+    )
+    assert dt.dt_set_custom_metadata("Q", {"nxtumbler": "1.2.3", "nxindexed": "true"}) is False
+
+
+def test_dt_set_custom_metadata_true_on_partial_write(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dt, "dt_call",
+        lambda tool, args=None: {"metadata": {"nxtumbler": "1.2.3"}, "dropped_fields": ["nxindexed"]},
+    )
+    assert dt.dt_set_custom_metadata("Q", {"nxtumbler": "1.2.3", "nxindexed": "true"}) is True
+
+
+def test_dt_annotation_text_two_hop(monkeypatch) -> None:
+    # get_record_annotation → annotation_uuid, then get_record_text → body.
+    def _fake(tool, args=None):
+        if tool == "get_record_annotation":
+            return {"annotation_uuid": "ANN"}
+        if tool == "get_record_text":
+            assert args == {"uuid": "ANN"}
+            return {"text": "existing body"}
+        raise AssertionError(f"unexpected tool {tool}")
+
+    monkeypatch.setattr(dt, "dt_call", _fake)
+    assert dt.dt_annotation_text("Q") == "existing body"
+
+
+def test_dt_annotation_text_none_when_no_annotation(monkeypatch) -> None:
+    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: {"annotation_uuid": None})
+    assert dt.dt_annotation_text("Q") is None
+
+
+def test_dt_annotation_text_none_when_unreachable(monkeypatch) -> None:
+    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: None)
+    assert dt.dt_annotation_text("Q") is None
+
+
+def test_dt_extract_content_joins_sectioned_bare_array(monkeypatch) -> None:
+    # Structured docs (PDF/MD) return a bare section array; core wraps it as
+    # {"result": [...]}. dt_extract_content must join those, not return None.
+    # (Live finding — sectioned PDFs were returning None, wrongly tripping the
+    # Layer F exclusion guard so write-back skipped every multi-section paper.)
+    payload = {"result": [
+        {"link": "", "text": "section one", "page": 0},
+        {"link": "", "text": "section two", "page": 1},
+    ]}
+    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: payload)
+    assert dt.dt_extract_content("Q") == "section one\nsection two"
+
+
+def test_dt_extract_content_single_text_body(monkeypatch) -> None:
+    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: {"text": "short body"})
+    assert dt.dt_extract_content("Q") == "short body"
 
 
 def test_write_helpers_reject_empty_input(monkeypatch) -> None:
