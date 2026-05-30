@@ -19,16 +19,21 @@ from nexus.dt_writeback import writeback_record
 
 class _FakeDT:
     def __init__(self, *, available=True, tag_ok=True, ann_ok=True, meta_ok=True,
-                 existing_annotation=""):
+                 existing_annotation="", content="some indexed content"):
         self._available = available
         self._tag_ok = tag_ok
         self._ann_ok = ann_ok
         self._meta_ok = meta_ok
         self._annotation = existing_annotation
+        self._content = content
         self.calls: list[tuple[str, tuple, dict]] = []
 
     def available(self, *, refresh=False):
         return self._available
+
+    def dt_extract_content(self, uuid):
+        self.calls.append(("extract", (uuid,), {}))
+        return self._content
 
     def dt_set_tags(self, uuid, tags, *, mode="add"):
         self.calls.append(("tags", (uuid, tuple(tags)), {"mode": mode}))
@@ -126,6 +131,22 @@ def test_writeback_metadata_failure_is_fail_soft():
     out = writeback_record("U", "1.2.3", dt_client=dt)
     assert out["metadata"] is False
     assert out["tags"] is True and out["annotation"] is True
+
+
+def test_writeback_skips_excluded_or_empty_record():
+    # Empty AI-extracted content = excluded (or genuinely empty) → skip, no writes.
+    dt = _FakeDT(content="")
+    out = writeback_record("U", "1.2.3", dt_client=dt)
+    assert out == {"tags": False, "annotation": False, "metadata": False, "skipped": True}
+    # Only the content probe ran; no write helper was reached.
+    assert {c[0] for c in dt.calls} == {"extract"}
+
+
+def test_writeback_proceeds_when_content_present():
+    dt = _FakeDT(content="real body text")
+    out = writeback_record("U", "1.2.3", dt_client=dt)
+    assert out["skipped"] is False
+    assert out["tags"] is True
 
 
 def test_writeback_empty_identity_skips():

@@ -18,9 +18,10 @@ Authoritative-source contract (RDR §Approach Layer F, §Risks):
   metadata fields — the record body is never touched.
 - **no-clobber**: tags add-mode, annotation append-mode, metadata merge-mode
   (verified live, CA5 / nexus-ymcrt).
-- **honours Exclude-from-AI&MCP**: the DT server rejects writes to excluded
-  records; each helper is fail-soft (``None`` → ``False``) so an excluded record
-  yields a clean skip, never a silent partial write.
+- **honours Exclude-from-AI&MCP (best-effort)**: the DT server does NOT refuse
+  metadata writes to excluded records and the flag is not readable (live finding,
+  CA5 part b), so write-back skips any record whose AI-extracted content is empty
+  — the one exclusion signal available. This also skips genuinely empty records.
 - **opt-in**: the CLI flag defaults off; this function is only called when the
   user asks for it.
 """
@@ -75,6 +76,19 @@ def writeback_record(
         return result
     if not dt_client.available():
         log.info("dt_writeback_skipped_unavailable", dt_uuid=dt_uuid, tumbler=tumbler)
+        result["skipped"] = True
+        return result
+
+    # Best-effort exclusion guard. The DT 'Exclude from AI & MCP' flag is not
+    # readable via the API and write tools are NOT server-refused for excluded
+    # records (live finding, CA5 part b / 139-research-CA5), so the only signal
+    # we have is that excluded records return empty AI-extracted content. Skip
+    # write-back when content is empty — this honours the exclusion flag's
+    # intent and also correctly skips genuinely empty records (which carry no
+    # nexus value to back-link). False-positive risk is low: a record indexed
+    # into nexus has extractable content by construction.
+    if not dt_client.dt_extract_content(dt_uuid):
+        log.info("dt_writeback_skipped_excluded_or_empty", dt_uuid=dt_uuid, tumbler=tumbler)
         result["skipped"] = True
         return result
 
