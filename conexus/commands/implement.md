@@ -47,7 +47,7 @@ Working implementation with passing tests, following TDD red-green-refactor cycl
 - [ ] Code follows project conventions (check CLAUDE.md)
 - [ ] No regressions introduced in existing tests
 
-**IMPORTANT**: After implementation completes, MUST delegate to code-review-expert for quality review.
+**IMPORTANT**: The developer agent implements and hands back; it cannot run reviewers or commit. After it returns, the development skill's orchestrator MUST drive the full tail: dispatch **code-review-expert** AND **substantive-critic** (both, they catch different issue classes), gate on both returning clean, then commit. A clean code review does not excuse skipping the critic. See the development skill's "Post-Implementation Review + Commit" section.
 ```
 
 For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).
