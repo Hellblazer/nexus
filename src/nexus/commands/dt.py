@@ -940,6 +940,138 @@ def highlights_cmd(tumbler_or_uuid: str) -> None:
         click.echo("\n## Mentions\n" + rec.mentions_md)
 
 
+@dt.command("capture")
+@click.argument("url", required=False)
+@click.option("--doi", default=None, help="Capture by DOI: download the open-access PDF (Unpaywall).")
+@click.option("--file", "file_path", default=None, help="Capture a loose file from this POSIX path.")
+@click.option(
+    "--type",
+    "capture_type",
+    type=click.Choice(["html", "webarchive", "markdown", "pdf"], case_sensitive=False),
+    default="webarchive",
+    show_default=True,
+    help="Web-capture format (URL captures only). pdf and markdown index from "
+         "the on-disk file DT creates; html and webarchive are non-file-backed.",
+)
+@click.option(
+    "--contact-email",
+    default=None,
+    help="Caller email for Unpaywall PDF discovery on --doi (else $OPENALEX_MAILTO).",
+)
+@click.option("--collection", default=None, help="T3 collection override for the index step.")
+@click.option("--corpus", default="dt", show_default=True, help="Corpus tag for the index step.")
+@click.option("--link-semantic", "link_semantic", is_flag=True, default=False,
+              help="After indexing, create Layer B 'relates' edges (see nx dt index).")
+@click.option("--writeback", is_flag=True, default=False,
+              help="After indexing, stamp nexus identity back onto the DT record (Layer F).")
+@click.option("--highlights", "highlights", is_flag=True, default=False,
+              help="After indexing, ingest the record's highlights (Layer E).")
+@click.option("--enrich", "enrich", is_flag=True, default=False,
+              help="After indexing, run DT-CrossRef bib gap-fill over the collection (Layer C).")
+@click.pass_context
+def capture_cmd(
+    ctx: click.Context,
+    url: str | None,
+    doi: str | None,
+    file_path: str | None,
+    capture_type: str,
+    contact_email: str | None,
+    collection: str | None,
+    corpus: str,
+    link_semantic: bool,
+    writeback: bool,
+    highlights: bool,
+    enrich: bool,
+) -> None:
+    """Capture a URL, DOI, or file into DEVONthink and index it (RDR-139 Layer G).
+
+    Provide exactly one source: a URL argument, ``--doi``, or ``--file``. The
+    captured record is then indexed (and optionally linked / written-back /
+    highlight-ingested) end to end.
+
+    This is the ONE DT-bound verb: unlike ``nx dt index`` / ``--enrich`` (which
+    degrade silently when DEVONthink is absent), ``nx dt capture`` reports
+    DT-required and exits NON-ZERO, because capture is impossible without DT.
+    """
+    if not _is_darwin():
+        raise click.ClickException("DEVONthink integration is macOS-only")
+
+    # Count by truthiness so an empty --doi "" / --file "" is "no source" with
+    # a clear message, not a confusing blank-target failure downstream.
+    sources = [bool(url), bool(doi), bool(file_path)]
+    if sum(sources) != 1:
+        raise click.UsageError(
+            "Provide exactly one capture source: a URL argument, --doi, or --file.",
+        )
+
+    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+
+    if not _dt.available():
+        # Gap-0 NON-OPTIONAL exception: capture cannot proceed without DT, so it
+        # fails loud (non-zero) rather than silently doing nothing.
+        raise click.ClickException(
+            "nx dt capture requires DEVONthink to be running — this verb is "
+            "DT-bound by design (unlike nx dt index, which degrades silently).",
+        )
+
+    if url:
+        # pdf AND markdown captures are stored by DT as on-disk files (.pdf /
+        # .md) — they index from the file (better fidelity than AI re-extract).
+        # html / webarchive captures are non-file-backed -> Layer D dt_content.
+        file_backed = capture_type.lower() in {"pdf", "markdown"}
+        uuid = _dt.dt_capture_web_page(url, capture_type=capture_type)
+        what = url
+    elif doi:
+        import os as _os  # noqa: PLC0415
+
+        email = contact_email or _os.environ.get("OPENALEX_MAILTO", "")
+        if not email:
+            click.echo(
+                "Warning: no contact email (--contact-email / $OPENALEX_MAILTO); "
+                "Unpaywall open-access PDF discovery is disabled, CrossRef "
+                "metadata only.",
+                err=True,
+            )
+        uuid = _dt.dt_download_pdf_from_doi(doi, contact_email=email)
+        file_backed = True
+        what = f"doi:{doi}"
+    else:
+        uuid = _dt.dt_import_file(file_path or "")
+        file_backed = True
+        what = file_path or ""
+
+    if not uuid:
+        hint = " (no open-access PDF found for this DOI)" if doi else ""
+        raise click.ClickException(f"capture failed for {what}{hint} — no record created.")
+
+    click.echo(f"Captured {what} -> DEVONthink record {uuid}")
+    # Reuse the full index path. file_backed (pdf/markdown/doi/file) indexes
+    # from the on-disk file; non-file-backed (html/webarchive) routes through
+    # Layer D's --dt-content (CA6 finding).
+    try:
+        ctx.invoke(
+            index_cmd,
+            uuids=(uuid,),
+            collection=collection,
+            corpus=corpus,
+            dt_content=not file_backed,
+            link_semantic=link_semantic,
+            writeback=writeback,
+            highlights=highlights,
+            enrich=enrich,
+        )
+    except click.ClickException:
+        # Capture succeeded but indexing failed: the DT record exists but is
+        # un-indexed (no catalog entry, invisible to nx dt open / de-index).
+        # Surface the recovery path before propagating.
+        click.echo(
+            f"Note: DEVONthink record {uuid} was captured but indexing failed. "
+            f"Recover with: nx dt index --uuid {uuid}",
+            err=True,
+        )
+        raise
+
+
 # ── DT-side AppleScript installer (nexus-tv5u) ────────────────────────────────
 
 
