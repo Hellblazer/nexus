@@ -181,10 +181,15 @@ def dt_extract_content(uuid: str) -> str | None:
     result = dt_call("extract_record_content", {"uuid": uuid})
     if not result:
         return None
+    # Short/plain docs return a single text body ({"text": ...}); structured
+    # docs (Markdown/PDF/EPUB) return a BARE array of section/page dicts, which
+    # core wraps as {"result": [...]}. Handle both (live finding — sectioned
+    # PDFs are the common paper case and were returning None, wrongly tripping
+    # the Layer F exclusion guard).
     text = result.get("text")
     if isinstance(text, str) and text:
         return text
-    sections = result.get("sections") or result.get("pages")
+    sections = result.get("sections") or result.get("pages") or result.get("result")
     if isinstance(sections, list):
         parts = [s.get("text", "") for s in sections if isinstance(s, dict)]
         joined = "\n".join(p for p in parts if p)

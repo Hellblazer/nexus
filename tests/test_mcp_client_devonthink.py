@@ -191,6 +191,24 @@ def test_dt_annotation_text_none_when_unreachable(monkeypatch) -> None:
     assert dt.dt_annotation_text("Q") is None
 
 
+def test_dt_extract_content_joins_sectioned_bare_array(monkeypatch) -> None:
+    # Structured docs (PDF/MD) return a bare section array; core wraps it as
+    # {"result": [...]}. dt_extract_content must join those, not return None.
+    # (Live finding — sectioned PDFs were returning None, wrongly tripping the
+    # Layer F exclusion guard so write-back skipped every multi-section paper.)
+    payload = {"result": [
+        {"link": "", "text": "section one", "page": 0},
+        {"link": "", "text": "section two", "page": 1},
+    ]}
+    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: payload)
+    assert dt.dt_extract_content("Q") == "section one\nsection two"
+
+
+def test_dt_extract_content_single_text_body(monkeypatch) -> None:
+    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: {"text": "short body"})
+    assert dt.dt_extract_content("Q") == "short body"
+
+
 def test_write_helpers_reject_empty_input(monkeypatch) -> None:
     # Empty tags/fields short-circuit without a call.
     monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: pytest.fail("should not call"))
