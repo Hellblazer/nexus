@@ -49,6 +49,14 @@ partial corruption. This fallback is a first-class, separately-tested path —
 not an incidental `try/except`. The fallback suite must pass with the DT MCP
 forced unavailable.
 
+There is exactly **one intentional exception**: Layer G (`nx dt capture`) is
+inherently DT-bound — capturing a URL/DOI *into* DEVONthink has no meaning
+without DEVONthink. It does not degrade silently; it exits non-zero with a
+clean "DEVONthink required" message. Every *other* layer (B–F, A′) degrades to
+its pre-RDR-139 behaviour with exit 0. This exception is called out here so the
+"every capability is optional" invariant is not read as "every capability
+silently no-ops" — Layer G fails loud by design.
+
 #### Gap 1: Papers with no bibliographic match get zero graph edges
 
 The catalog auto-linker is metadata-only. `generate_citation_links`
@@ -73,19 +81,46 @@ nexus identity.
 #### Gap 3: nexus has no MCP-client substrate, and DT cannot reach the agent surface safely
 
 nexus has never consumed an external MCP server (a repo search for
-`ClientSession` / `stdio_client` in `src/nexus/` returns nothing). Every
-capability layer here needs an MCP client inside a synchronous CLI path. This
-substrate is shared with draft RDR-126 (Qwen-MCP); whichever lands first
-establishes the reusable pattern.
+`ClientSession` / `stdio_client` in `src/nexus/` returns nothing; the
+`src/nexus/mcp_client/` module does not yet exist). Every capability layer here
+needs an MCP client inside a synchronous CLI path.
+
+**Cross-RDR shape decision (vs RDR-126).** Draft RDR-126 (Qwen-MCP) also
+introduces `src/nexus/mcp_client/`, but as a *daemon-resident* `NexusMcpClient`
+with a connection held open across calls (lazy connect, reconnect-with-backoff,
+shutdown on daemon stop). RDR-139's need is the opposite lifecycle: a
+*per-call, short-lived* HTTP session in a synchronous CLI process with no
+daemon. These two lifecycles are not interchangeable, so "whichever lands first
+establishes the pattern" is rejected as hand-waving. The explicit decision:
+both live under `src/nexus/mcp_client/` and share only a thin transport-and-
+fail-soft **core** (`mcp_client/core.py`: open a session over a configured
+transport, `call_tool(name, args) -> dict | None` with the result-or-None /
+structured-log contract, redaction-aware). Lifecycle wrappers are separate and
+deliberately not shared: RDR-139 contributes `mcp_client/devonthink.py` (a
+per-call HTTP wrapper, used by the sync CLI via `asyncio.run`); RDR-126
+contributes the daemon-resident held-open wrapper. Neither RDR depends on the
+other landing first; each adds its own wrapper over the shared core. If RDR-126
+lands first, RDR-139 conforms its wrapper to the then-existing `core.py`; if
+RDR-139 lands first, it authors `core.py` to this seam and RDR-126 builds on
+it.
 
 Separately, DT's MCP tools cannot be exposed to Claude Code / subagents (the
-"agent surface") by declaring DT's server in the conexus plugin `.mcp.json`:
-conexus ships to every consumer, most without DEVONthink (Linux, CI, non-DT
-Macs), and a declared plugin MCP server is spawned unconditionally — there is
-no gate, so a hard-wired DT server errors on every DT-less session. The
-agent-surface path therefore also needs a nexus-owned shim that can gate on DT
-availability internally. Both needs are met by one two-faced substrate
-(Layer A + A′).
+"agent surface") by declaring DT's *own* server binary in the conexus plugin
+`.mcp.json`: conexus ships to every consumer, most without DEVONthink (Linux,
+CI, non-DT Macs), and on those hosts there is no DT MCP endpoint to reach, so a
+hard-wired DT server entry is dead or erroring. The agent-surface path
+therefore needs a nexus-owned shim that gates on DT availability internally.
+This is met by a nexus-owned MCP *server* (`nx-mcp-devonthink`) — a conexus
+console-script that, like its siblings `nx-mcp` / `nx-mcp-catalog`, is **always
+installed with the package and always spawns successfully** regardless of
+whether DEVONthink is present. The optionality is internal: on startup the
+wrapper probes DT and advertises the DT toolset only if DT is reachable,
+otherwise zero tools. Spawn never fails on a DT-less consumer because the
+process being spawned is nexus code, not DT's binary. (The `.mcp.json` entry
+carries `alwaysLoad: false`, but only to defer tool-search registration until
+first use — it is **not** the optionality mechanism and is **not** load-bearing
+for it; the internal gate is. See Layer A′.) Both faces — CLI Python client and
+agent-surface server — share one two-faced substrate (Layer A + A′).
 
 #### Gap 4: Non-file-backed DT records are unreachably or poorly indexed
 
@@ -199,21 +234,39 @@ Verified live against DEVONthink 4 built-in MCP (LoginItem
 
 ### Critical Assumptions
 
-All four verified by the 2026-05-29 spike.
+The four *read-path* assumptions are verified by the 2026-05-29 spike. The
+spike was deliberately read-only (no write tool executed against the user's
+DB), so the two *write-path* assumptions below are **not yet behaviourally
+verified** — they are presence-and-signature only and are scheduled for
+behavioural verification at the phase that first exercises them.
 
-- [x] **DT AI tools reachable from a nexus CLI MCP client, returning
+- [x] **CA1 — DT AI tools reachable from a nexus CLI MCP client, returning
   UUID-bearing results.** — Verified — Spike.
-- [x] **DT UUIDs map to catalog entries via
+- [x] **CA2 — DT UUIDs map to catalog entries via
   `source_uri = x-devonthink-item://<UUID>`** (un-indexed neighbours
   skipped). — Verified — Spike.
-- [x] **"Exclude from AI & MCP" enforced server-side** so nexus need not
+- [x] **CA3 — "Exclude from AI & MCP" enforced server-side** so nexus need not
   re-filter. — Verified — Docs.
-- [x] **One built-in server covers every layer**; community server
-  unnecessary. — Verified — Spike + Config.
+- [x] **CA4 — One built-in server covers every layer's *tool surface*;
+  community server unnecessary.** — Verified (presence) — Spike + Config.
+  *Note:* "covers" here means the tools exist on one server; the write tools'
+  *behaviour* is CA5 below, not part of CA4's verification.
+- [ ] **CA5 (Phase 1, write-path) — `set_record_tags` in add-mode appends
+  without clobbering the user's existing tags, and write tools refuse a
+  record flagged "Exclude from AI & MCP" with a clean error (not a silent
+  partial write).** — Presence + signature only (spike read-only). Behavioural
+  verification is a Phase-1 obligation before Layer F ships, against a
+  throwaway DT record.
+- [ ] **CA6 (Phase 3, capture-path) — `capture_web_page(url)` returns a
+  record UUID that immediately resolves through the same
+  `x-devonthink-item://<UUID>` → catalog join, so a captured page is
+  indexable end-to-end.** — Presence only. Behavioural verification is a
+  Phase-3 obligation before Layer G ships.
 
 **Method definitions**: Source Search = verified against dependency source;
-Spike = behaviour verified against the live service; Docs Only = insufficient
-for load-bearing assumptions.
+Spike = behaviour verified against the live service; Presence = tool exists
+with the expected signature but its I/O behaviour was not executed; Docs Only =
+insufficient for load-bearing assumptions.
 
 ## Proposed Solution
 
@@ -231,23 +284,42 @@ every layer consults before any call, and it is verified by a dedicated
 fallback suite that runs every `nx dt` / enrich path with the DT MCP forced
 unavailable and asserts the legacy result is byte-identical to pre-RDR-139.
 
-- **Layer A — MCP-client substrate (Gap 3).** `nexus/devonthink_mcp.py`: an
-  HTTP MCP client (`mcp.client.streamable_http`) to
-  `http://localhost:8420/mcp` (config-overridable `devonthink.mcp.url`),
-  bridged into the sync CLI via `asyncio.run` per call. `available()` gate
-  (`is_running` + reachability, cached per-invocation). Result-or-None
-  contract: any failure → log + skip, never abort. Shared with RDR-126.
-  This is the Python-API face used by every CLI layer below.
+- **Layer A — MCP-client substrate (Gap 3).** `nexus/mcp_client/devonthink.py`
+  (per-call HTTP wrapper) over the shared `nexus/mcp_client/core.py`: an HTTP
+  MCP client (`mcp.client.streamable_http`) to `http://localhost:8420/mcp`
+  (config-overridable `devonthink.mcp.url`), bridged into the sync CLI via
+  `asyncio.run` per call. `available()` gate (`is_running` + reachability,
+  cached per-invocation). Result-or-None contract: any failure → log + skip,
+  never abort. **Async-context guard:** `dt_call` first checks for a running
+  event loop (`asyncio.get_running_loop()` in a `try`); if one is found (e.g.
+  an aspect-worker or future daemon path called a Layer B/C/D helper from
+  inside async code), it does **not** call `asyncio.run` (which would raise
+  `RuntimeError: asyncio.run() cannot be called from a running event loop`,
+  the hazard documented at `taxonomy_cmd.py:1163-1169`). Instead it logs a
+  *distinct* `dt_asyncio_context_error` event and returns `None` — so the
+  failure is visible as a misuse signal, never silently conflated with
+  "DT unavailable". Layer A is **CLI-path-only by contract**; any async caller
+  must use the Layer A′ server face (which owns its own loop), not the sync
+  wrapper. The shared `core.py` is the seam with RDR-126 (above). This is the
+  Python-API face used by every CLI layer below.
 - **Layer A′ — `nx-mcp-devonthink` agent-surface wrapper (Gap 3).** A
   nexus-owned MCP *server* (a third sibling to `nx-mcp` / `nx-mcp-catalog`,
-  declared in conexus `.mcp.json`, `alwaysLoad: false`) that is simultaneously
-  an MCP *client* to DT via the Layer A core. It exposes DT to Claude Code and
-  subagents, solving the agent-surface gap that a direct plugin-`.mcp.json`
-  declaration cannot: because the wrapper is nexus code, it gates internally.
-  On startup it probes `available()`; **DT present → advertise the curated
-  toolset; DT absent → advertise zero tools (or a single `devonthink_status`
-  stub)** — a harmless always-present server, never a spawn error on a DT-less
-  consumer. It also (a) curates the surface to ~20 relevant tools (dropping the
+  a conexus console-script declared in conexus `.mcp.json`) that is
+  simultaneously an MCP *client* to DT via the Layer A core. It exposes DT to
+  Claude Code and subagents, solving the agent-surface gap that declaring DT's
+  own binary cannot: because the wrapper is nexus code that ships with the
+  package, it **always spawns successfully** on every consumer (DT-present or
+  not) and gates internally. On startup it probes `available()`; **DT present →
+  advertise the curated toolset; DT absent → advertise zero tools (or a single
+  `devonthink_status` stub)** — a harmless always-present server, never a spawn
+  error on a DT-less consumer. The `.mcp.json` entry carries `alwaysLoad: false`
+  purely to defer tool-search registration until first use; this is a
+  startup-cost optimisation, **not** the optionality mechanism — the internal
+  `available()` gate is, and the wrapper would be equally optionality-correct
+  with `alwaysLoad: true`. (This must be validated at implementation: a Phase-3
+  test asserts the wrapper process exits 0 / lists zero tools with DT absent,
+  independent of the `alwaysLoad` value.) It also (a) curates the surface to
+  ~20 relevant tools (dropping the
   out-of-scope file-management verbs and shrinking the ~28.6k full-schema
   footprint to roughly a third), and (b) adds nexus-aware *composite* tools
   that run the layers below server-side — e.g. `dt_incorporate(uuid)` =
@@ -267,14 +339,28 @@ unavailable and asserts the legacy result is byte-identical to pre-RDR-139.
   (and `nx enrich bib --source dt`): for a DOI-bearing record with no
   Semantic-Scholar hit, fall back to DT `resolve_doi_metadata` /
   `search_crossref` (and `resolve_google_books_metadata` for books). Stamps
-  the same `bib_*` catalog fields the existing enricher writes. Fallback: no
-  DT → Semantic-Scholar-only enrichment (today's behaviour).
+  the same `bib_*` catalog fields the existing enricher writes.
+  **Merge precedence (explicit):** the existing enricher
+  (`commands/enrich.py:255-285`) writes `bib_*` *unconditionally* per backend.
+  DT-CrossRef is strictly a **gap-filler**: it writes a `bib_*` field **only
+  when that field is currently empty/zero**, and **never overwrites** a value
+  already set by Semantic Scholar or OpenAlex. Concretely, DT is a *lowest-
+  precedence* source (S2 > OpenAlex > DT-CrossRef); a partial S2 match keeps
+  its `bib_doi` even if DT-CrossRef would resolve a different DOI form. This is
+  enforced by a per-field `if not merged.get(k):` guard in the DT enrich path,
+  not by call ordering. Fallback: no DT → Semantic-Scholar-only enrichment
+  (today's behaviour).
 - **Layer D — Content extraction (Gap 4).** For non-file-backed or
   poorly-extracted records, source text via `extract_record_content` (AI-
   optimised) / `get_record_text`, `ocr_record` for scanned PDFs/images,
   `transcribe_record` for A/V, feeding nexus's existing chunking pipeline.
-  Fallback: no DT → file-path extraction only (today's behaviour; non-file-
-  backed records skipped as today).
+  **Provenance:** every chunk sourced via DT (rather than the on-disk file)
+  is stamped with a `extraction_source` metadata field (values: `file` |
+  `dt_content` | `dt_ocr` | `dt_transcribe`); file-path extraction stays the
+  default and is stamped `file`. This makes "DT content quietly worse than
+  file extraction" auditable rather than invisible. Fallback: no DT →
+  file-path extraction only, all chunks `extraction_source=file` (today's
+  behaviour; non-file-backed records skipped as today).
 - **Layer E — Annotations & highlights (Gap 6).** `extract_record_highlights`
   / `summarize_record_highlights` and `*_mentions` → ingested as
   highlight-aspects / notes attached to the document's tumbler. Fallback: no
@@ -308,7 +394,7 @@ reminders).
 
 | Layer | DT present | DT absent (tested fallback) |
 | --- | --- | --- |
-| A′ agent-surface wrapper | curated DT toolset + composites advertised | zero tools (or `devonthink_status` stub); server loads cleanly, no spawn error |
+| A′ agent-surface wrapper | curated DT toolset + composites advertised | wrapper process spawns + exits 0, advertises zero tools (or `devonthink_status` stub); no spawn error (wrapper is nexus code, always installed) |
 | B linking | similarity / DT-link / classify edges | metadata-only linking, zero semantic edges |
 | C enrich | DT CrossRef fills `bib_*` gaps | Semantic-Scholar only |
 | D content | DT-extracted text for non-file records | file-path extraction only |
@@ -317,8 +403,25 @@ reminders).
 | G capture | URL/DOI/file → DT → indexed | `nx dt capture` exits non-zero, DT-required |
 
 The fallback column is the pre-RDR-139 behaviour. The fallback test suite
-(`tests/test_dt_mcp_fallback.py`) forces `devonthink_mcp.available()` False
-and asserts each path equals that column — exact, not "no crash."
+(`tests/test_dt_mcp_fallback.py`) forces `available()` False and asserts each
+path equals that column — exact, not "no crash."
+
+**What "exact" means is per-layer, not a single byte-for-byte rule** (the
+assertion is written to the layer's own contract):
+
+- **Layer B (linking)**: *zero new edges* — the catalog edge set after the run
+  equals the edge set before (no `created_by=dt_*` rows added).
+- **Layer C (enrich)**: the `bib_*` fields written equal what the
+  Semantic-Scholar-only path writes — *same fields, same values*. This is
+  field-level equality, **not** byte-identity of any API response.
+- **Layer D (content)**: the chunk set equals the file-path-only chunk set;
+  every chunk `extraction_source=file`; non-file-backed records skipped.
+- **Layer E (highlights)**: no highlight-aspects ingested.
+- **Layer F (write-back)**: no DT-side mutation; the index/enrich result is
+  unchanged and exits 0.
+- **Layer A′ (wrapper)**: process spawns and exits 0, lists zero tools.
+- **Layer G (capture)**: the deliberate exception — non-zero exit with a
+  DT-required message (see Gap 0).
 
 ### Technical Design
 
@@ -326,9 +429,12 @@ Tool I/O verified by spike (`find_similar_records` →
 `{count, results:[{score, uuid, name, …}]}`).
 
 ```text
-// devonthink_mcp.py — HTTP MCP client to http://localhost:8420/mcp
+// mcp_client/devonthink.py — per-call HTTP MCP client to http://localhost:8420/mcp
+// (over shared mcp_client/core.py; CLI-path-only)
 def available() -> bool                                  # cached is_running + reachable
 def dt_call(tool: str, args: dict) -> dict | None        # asyncio.run bridge, fail-soft
+    # guard: if asyncio.get_running_loop() succeeds -> log dt_asyncio_context_error,
+    #        return None (do NOT call asyncio.run from a running loop)
 def dt_find_similar(uuid, *, limit, floor) -> list[Neighbour]   # {uuid,score,name}
 def dt_record_links(uuid) -> list[Neighbour]
 def dt_resolve_doi(doi) -> BibFields | None
@@ -340,8 +446,9 @@ def dt_set_custom_metadata(uuid, fields: dict) -> bool
 if not devonthink_mcp.available():
     return legacy_path(...)            # the tested fallback
 for n in dt_find_similar(uuid, limit=K, floor=F):
-    to = catalog.tumbler_for_source_uri(f"x-devonthink-item://{n['uuid']}")
-    if to: cat.link_if_absent(this, to, "relates", created_by="dt_similar")
+    entry = catalog.by_source_uri(f"x-devonthink-item://{n['uuid']}")
+    if entry:                                   # un-indexed neighbour → skip
+        cat.link_if_absent(this, entry.tumbler, "relates", created_by="dt_similar")
 ```
 
 Error contract: every DT call returns result-or-None; None → structured log +
@@ -352,14 +459,16 @@ capture`, which is DT-bound by definition and exits cleanly).
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| MCP-client helper + `available()` gate (Layer A) | (none) | New `devonthink_mcp.py`; coordinate shape with RDR-126 |
+| MCP-client core (transport + fail-soft `call_tool`) | (none; `src/nexus/mcp_client/` absent) | New `mcp_client/core.py`; **shared seam with RDR-126** (RDR-126 adds daemon held-open wrapper, RDR-139 adds per-call wrapper — see Gap 3) |
+| DT per-call client + `available()` gate + async guard (Layer A) | (none) | New `mcp_client/devonthink.py` over `core.py`; CLI-path-only |
 | Agent-surface wrapper server (Layer A′) | `nx-mcp`, `nx-mcp-catalog` (siblings) | New `nx-mcp-devonthink`; reuses Layer A core; declared in conexus `.mcp.json`, `alwaysLoad:false` |
 | `relates`/`cites` edge writer | `catalog.py:link_if_absent` | Reuse (`created_by` = `dt_similar`/`dt_link`) |
 | Semantic-link generator | `link_generator.py` / `auto_linker.py` | Extend pattern (new generator), don't modify existing |
 | Bib enrichment | `nx enrich bib` (Semantic Scholar) | Extend: DT CrossRef as fallback `--source dt` |
 | Content extraction | `nx index pdf|md` chunking | Extend: DT-sourced text for non-file-backed records |
 | Aspect/highlight ingest | RDR-089 aspects | Extend: highlight-aspects from DT annotations |
-| UUID↔tumbler join | `dt.py:_select_dt_uri_from_entry` | Reuse; add inverse `source_uri → tumbler` lookup |
+| UUID↔tumbler join (forward) | `dt.py:_select_dt_uri_from_entry` | Reuse |
+| UUID↔tumbler join (inverse) | (none — `Catalog` has `by_file_path` / `by_doc_id` but no `source_uri` lookup) | **New** `Catalog.by_source_uri(uri: str) -> CatalogEntry \| None` (SQL `SELECT … FROM documents WHERE source_uri = ?`); assigned to **Phase 1**. Returns `None` for un-indexed neighbours → caller skips |
 | Selectors/CRUD | `devonthink.py:_run_osascript` | Keep (gjz52) |
 
 ### Decision Rationale
@@ -424,6 +533,14 @@ of scope here.)
 - **Risk**: write-back pollutes the user's DB. **Mitigation**: `--writeback`
   opt-in, nexus-owned namespace only (`nx-*`), never touch user content;
   honour exclusion flag.
+- **Risk**: a Layer B/C/D helper is called from inside a running event loop
+  (aspect worker, future daemon path) → `asyncio.run` raises `RuntimeError`,
+  which the fail-soft contract would otherwise swallow as a `None`/"DT
+  unavailable" result, masking a real misuse. **Mitigation**: `dt_call`'s
+  running-loop guard logs a distinct `dt_asyncio_context_error` and returns
+  `None`; Layer A is contractually CLI-path-only (async callers use the Layer
+  A′ server face). A unit test asserts the guard fires and logs distinctly
+  when invoked under a running loop.
 
 ### Failure Modes
 
@@ -437,7 +554,11 @@ extraction — mitigated by provenance stamping + file-path preference.
 
 ### Prerequisites
 
-- [x] All four Critical Assumptions verified (spike).
+- [x] The four read-path Critical Assumptions (CA1–CA4) verified (spike).
+- [ ] CA5 (write-path no-clobber + exclusion error) verified behaviourally in
+  Phase 1 before Layer F ships.
+- [ ] CA6 (`capture_web_page` returns an indexable UUID) verified
+  behaviourally in Phase 3 before Layer G ships.
 - [ ] Phase boundaries + per-phase MVV agreed at gate.
 
 ### Minimum Viable Validation
@@ -455,7 +576,8 @@ Two-sided, both in scope:
 
 ### Phase 1 — Substrate + core linking + write-back + fallback suite (MVV)
 
-Layer A (`devonthink_mcp.py` + `available()` gate), Layer B
+Layer A (`devonthink_mcp.py` + `available()` gate), the new
+`Catalog.by_source_uri(uri) -> CatalogEntry | None` inverse lookup, Layer B
 (`find_similar_records` + `get_record_links` → `relates`), Layer F
 (tag/annotation write-back), and the Gap-0 fallback suite. Ships both MVV
 sides.
@@ -465,6 +587,12 @@ sides.
 Layer C (DT CrossRef bib fallback), Layer D (content extraction for
 non-file-backed records). Folds into `nx dt index --enrich` and the lxy5n
 pipeline. Each ships with its fallback-suite case.
+**Phase 2 MVV (two-sided):** (enhanced) a DOI-bearing record with no S2 hit
+gains `bib_*` from DT-CrossRef *as gap-fill only* (partial-S2 precedence test
+green), **and** a web-archive record with no clean file path is indexed via
+`extract_record_content` with `extraction_source=dt_content`; (fallback) both
+with DT forced absent equal the Layer C/D fallback rows exactly (S2-only
+fields; record skipped, all chunks `extraction_source=file`).
 
 ### Phase 3 — Highlights + capture + agent-surface wrapper
 
@@ -473,12 +601,26 @@ Layer E (annotations/highlights as aspects), Layer G (`nx dt capture <url>`,
 wrapper): the internal-gate + curated passthrough ship here, and the composite
 `dt_incorporate` tool wraps the Phase-1 Layer B+F pipeline (hence after it
 exists). The wrapper's own fallback case — DT absent → server loads with zero
-tools, no error — joins the Gap-0 suite.
+tools, no error — joins the Gap-0 suite. **CA6 is verified behaviourally here**
+before Layer G ships.
+**Phase 3 MVV (two-sided):** (enhanced) `nx dt capture <url>` creates a DT
+record, the returned UUID resolves through the catalog join (CA6), and the page
+is indexed + linked end-to-end; the `nx-mcp-devonthink` wrapper, started with
+DT present, advertises the curated toolset and `dt_incorporate` runs the B+F
+pipeline as one agent call; (fallback) the wrapper started with DT absent
+spawns, exits 0, and lists zero tools — asserted independent of the `alwaysLoad`
+value (CRITICAL-1 resolution).
 
 ### Phase 4 — AI delegation (experimental)
 
 Layer H (`research_topic`, `chat_response`), opt-in, evaluated against
 nexus's own retrieval. May be deferred out entirely.
+**Phase 4 MVV:** on a held-out question set, `research_topic`/`chat_response`
+augmentation produces a *measurable* retrieval-quality delta over nexus's own
+retrieval on the same questions (precision/recall or a rubric score), recorded
+in the Phase-4 review. If the delta is not positive and material, Layer H is
+dropped rather than shipped — this MVV is explicitly a go/no-go, not a
+ship-gate.
 
 ### Day 2 Operations
 
@@ -496,6 +638,10 @@ nexus's own retrieval. May be deferred out entirely.
 
 - **Scenario**: `find_similar_records` returns neighbours, 2/3 catalog-known —
   **Verify**: exactly 2 `relates` edges, idempotent on re-run.
+- **Scenario**: `find_similar_records` returns a neighbour whose
+  `x-devonthink-item://<uuid>` is **not** in the catalog — **Verify**:
+  `Catalog.by_source_uri` returns `None`, that neighbour is skipped, no edge,
+  no error.
 - **Scenario**: `get_record_links` mirrors a DT link — **Verify**: one
   `relates` edge `created_by=dt_link`, deduped against similarity edges.
 - **Scenario (fallback, Gap 0)**: every layer with `available()` False —
@@ -503,11 +649,19 @@ nexus's own retrieval. May be deferred out entirely.
   exit 0 (except `nx dt capture` → clean non-zero, DT-required).
 - **Scenario**: DOI record, no S2 hit, DT present — **Verify**: DT CrossRef
   fills `bib_*`. DT absent — **Verify**: fields stay empty as today.
+- **Scenario (merge precedence)**: record with a *partial* S2 match
+  (`bib_doi` set, `bib_year` empty), DT present — **Verify**: DT-CrossRef fills
+  only `bib_year`; the S2 `bib_doi` is **unchanged** even when DT resolves a
+  different DOI form.
 - **Scenario**: web-archive record, DT present — **Verify**:
-  `extract_record_content` text indexed with provenance stamp. DT absent —
-  **Verify**: record skipped as today.
+  `extract_record_content` text indexed with `extraction_source=dt_content`.
+  DT absent — **Verify**: record skipped as today.
 - **Scenario**: excluded-from-MCP record — **Verify**: never a neighbour;
-  content read refused (CA3).
+  content read refused (CA3); and a `--writeback` attempt against it returns a
+  clean error, not a silent partial write (CA5).
+- **Scenario (CA5 no-clobber)**: `--writeback` against a record that already
+  has user tags — **Verify**: `set_record_tags` add-mode appends `nx-indexed`
+  / `nx-tumbler` and leaves the user's existing tags intact; re-run idempotent.
 - **Scenario**: `--writeback`, DT present — **Verify**: `nx-indexed` +
   `nx-tumbler` tags, user content untouched, idempotent.
 - **Scenario**: `nx dt capture <url>`, DT present — **Verify**: record created
@@ -543,8 +697,12 @@ stands on the no-capability-gain + churn-avoidance grounds; no contradiction.
 
 ### Assumption Verification
 
-All four Critical Assumptions Verified (spike). No Docs-Only load-bearing
-assumptions remain.
+The four read-path Critical Assumptions (CA1–CA4) are Verified (spike). Two
+write-path assumptions remain Presence-only and are explicitly deferred to the
+phase that first exercises them: **CA5** (write-back no-clobber + exclusion
+error) gates Layer F in Phase 1; **CA6** (`capture_web_page` returns an
+indexable UUID) gates Layer G in Phase 3. No Docs-Only load-bearing assumption
+is relied on for a path shipping before its behavioural verification.
 
 #### API Verification
 
@@ -553,8 +711,8 @@ assumptions remain.
 | `find_similar_records` / `classify_record` / `get_record_links` | DT MCP | Spike (done) |
 | `resolve_doi_metadata` / `search_crossref` | DT MCP | Spike presence; I/O at impl |
 | `extract_record_content` / `ocr_record` | DT MCP | Spike presence; I/O at impl |
-| `set_record_tags` / `set_record_custom_metadata` | DT MCP | Presence only (not executed) |
-| `capture_web_page` | DT MCP | Presence only |
+| `set_record_tags` / `set_record_custom_metadata` | DT MCP | Presence only (not executed) — behavioural verification is **CA5**, Phase 1 |
+| `capture_web_page` | DT MCP | Presence only — behavioural verification is **CA6**, Phase 3 |
 | `is_running` (gate) | DT MCP | Spike (done) |
 | `streamable_http` `ClientSession` | `mcp` SDK | Spike (done) |
 | `link_if_absent` | nexus catalog | Source Search (done) |
@@ -601,6 +759,31 @@ Phase 4 review.
 
 ## Revision History
 
+### 2026-05-30 — Gate remediation (draft)
+
+Cleared the 2026-05-29 substantive-critic gate (BLOCKED: 2 criticals, 4
+significants, 5 observations). **CRITICAL-1**: reframed Layer A′ optionality —
+the wrapper is a nexus console-script that always installs and always spawns;
+the internal `available()` gate (not `.mcp.json` `alwaysLoad: false`, which
+only defers tool-search) is the load-bearing optionality mechanism; added a
+Phase-3 test asserting zero-tools/exit-0 independent of `alwaysLoad`.
+**CRITICAL-2**: named and specced the missing inverse lookup as
+`Catalog.by_source_uri(uri) -> CatalogEntry | None` (new `SELECT … WHERE
+source_uri = ?`), assigned to Phase 1, fixed the pseudocode, added a
+UUID-not-in-catalog skip test. **SIG-1**: made the RDR-126 substrate decision
+explicit — shared `mcp_client/core.py` seam, separate per-call (139) vs
+daemon-held-open (126) wrappers; dropped "whichever lands first." **SIG-2**:
+split the CA list into verified read-path (CA1–CA4) and deferred write-path
+(CA5 Phase-1 no-clobber + exclusion error, CA6 Phase-3 capture-UUID); removed
+the "all four verified" overclaim. **SIG-3**: specified Layer C bib-merge as
+gap-fill-only (S2 > OpenAlex > DT-CrossRef, per-field `if not set` guard) with
+a partial-match precedence test. **SIG-4**: added the `dt_call` running-loop
+guard logging a distinct `dt_asyncio_context_error`, Layer-A CLI-path-only
+contract. **Observations**: per-phase MVVs for Phases 2–4; Layer G's
+non-optional capture exception called out in Gap-0 text; Layer D provenance
+field named `extraction_source`; the per-layer meaning of "exact" fallback
+spelled out (not a single byte-identity rule).
+
 ### 2026-05-29 — CA spike (draft)
 
 Spiked all four Critical Assumptions against the live DT4 built-in MCP. All
@@ -625,10 +808,15 @@ experimental / possibly deferred.
 Added **Layer A′** (`nx-mcp-devonthink`): a nexus-owned, two-faced MCP server
 (client to DT via the Layer A core, server to Claude Code / subagents). It is
 the answer to "how does the agent surface get DT" without breaking DT-less
-consumers: a directly-declared DT server in conexus `.mcp.json` is spawned
-unconditionally and errors wherever DEVONthink is absent, whereas the wrapper
-is nexus code that gates internally — DT present → curated toolset; DT absent →
-zero tools / status stub, no spawn error. It also curates the surface to ~20
+consumers: declaring DT's *own* binary in conexus `.mcp.json` is dead/erroring
+wherever DEVONthink is absent, whereas the wrapper is a nexus console-script
+that ships with the package, always spawns successfully, and gates internally —
+DT present → curated toolset; DT absent → zero tools / status stub, no spawn
+error. (Gate-correction 2026-05-30: the optionality comes from the internal
+`available()` gate, NOT from `.mcp.json` `alwaysLoad: false` — `alwaysLoad`
+only defers tool-search and is not load-bearing for optionality. A Phase-3 test
+asserts the wrapper lists zero tools / exits 0 with DT absent independent of the
+`alwaysLoad` value.) It also curates the surface to ~20
 tools (shrinking the ~28.6k full-schema footprint by ~2/3) and adds composite
 nexus-aware tools (`dt_incorporate` = Layer B+F server-side). Extended Gap 3,
 the Optionality contract, the Existing-Infrastructure audit, and Phase 3 (the
