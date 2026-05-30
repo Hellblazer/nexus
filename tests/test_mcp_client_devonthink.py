@@ -134,6 +134,24 @@ def test_write_helpers_true_on_success_and_pass_no_clobber_mode(monkeypatch) -> 
     assert by_tool["set_record_annotation"]["text"] == "see nx tumbler 1.2.3"
 
 
+def test_dt_set_custom_metadata_false_when_all_dropped(monkeypatch) -> None:
+    # DT drops unknown (not pre-defined) fields; helper must report the no-op
+    # as False rather than a false success.
+    monkeypatch.setattr(
+        dt, "dt_call",
+        lambda tool, args=None: {"metadata": {}, "dropped_fields": ["nxtumbler", "nxindexed"]},
+    )
+    assert dt.dt_set_custom_metadata("Q", {"nxtumbler": "1.2.3", "nxindexed": "true"}) is False
+
+
+def test_dt_set_custom_metadata_true_on_partial_write(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dt, "dt_call",
+        lambda tool, args=None: {"metadata": {"nxtumbler": "1.2.3"}, "dropped_fields": ["nxindexed"]},
+    )
+    assert dt.dt_set_custom_metadata("Q", {"nxtumbler": "1.2.3", "nxindexed": "true"}) is True
+
+
 def test_dt_annotation_text_two_hop(monkeypatch) -> None:
     # get_record_annotation → annotation_uuid, then get_record_text → body.
     def _fake(tool, args=None):

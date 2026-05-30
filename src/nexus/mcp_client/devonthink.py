@@ -226,10 +226,23 @@ def dt_set_annotation(uuid: str, text: str, *, mode: str = "append") -> bool:
 
 
 def dt_set_custom_metadata(uuid: str, fields: dict[str, Any], *, mode: str = "merge") -> bool:
-    """Write custom-metadata fields onto a record (default merge). ``True`` on success (Layer F)."""
+    """Write custom-metadata fields onto a record (default merge). ``True`` only on a real write.
+
+    DEVONthink custom-metadata identifiers must be PRE-DEFINED in the database's
+    custom-metadata schema; unknown fields are silently dropped server-side (the
+    response lists them in ``dropped_fields``). Also: DT strips ``-``/``.`` from
+    identifiers, so ``nxtumbler`` is the maximally-namespaced legal key. This
+    helper returns ``False`` when DT dropped every field (an honest no-op, not a
+    false success) so callers don't believe a write happened that didn't. Empty
+    fields short-circuit to ``False``.
+    """
     if not fields:
         return False
     result = dt_call(
         "set_record_custom_metadata", {"uuid": uuid, "metadata": fields, "mode": mode}
     )
-    return result is not None
+    if result is None:
+        return False
+    dropped = result.get("dropped_fields") or []
+    # If DT dropped as many fields as we sent, nothing was committed.
+    return len(dropped) < len(fields)

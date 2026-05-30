@@ -9,10 +9,11 @@ CLI wires it after a successful index.
 
 Authoritative-source contract (RDR §Approach Layer F, §Risks):
 
-- **nexus-owned namespace only**: every tag nexus writes is ``nx-*`` prefixed
-  and every custom-metadata key is ``nx.*`` prefixed (DT forbids ``-`` in
-  metadata identifiers, so the metadata namespace is the dotted form), so a
-  later audit/revoke pass finds exactly what nexus wrote and nothing else.
+- **nexus-owned namespace only**: every tag nexus writes is ``nx-*`` prefixed.
+  Custom-metadata keys are ``nxtumbler`` / ``nxindexed`` (DT strips separators
+  from metadata identifiers, so a hyphen/dot is not possible — ``nx``-prefixed
+  is the maximally-namespaced legal form). A later audit/revoke pass matches
+  ``nx-*`` tags and the ``nx``-prefixed metadata keys.
 - **never edits user content**: only tags, an appended annotation, and custom
   metadata fields — the record body is never touched.
 - **no-clobber**: tags add-mode, annotation append-mode, metadata merge-mode
@@ -91,12 +92,14 @@ def writeback_record(
     else:
         result["annotation"] = dt_client.dt_set_annotation(dt_uuid, backlink, mode="append")
 
-    # Custom-metadata identifiers: DT rejects '-' (alphanumeric + '?'/'.' only),
-    # so the nexus namespace for metadata is the dotted ``nx.*`` form (the tag
-    # namespace is ``nx-*``). Both are nexus-owned and matched by the Day-2
-    # revoke pass — see module docstring.
+    # Custom metadata is best-effort: DT strips separators from identifiers and
+    # only accepts PRE-DEFINED custom-metadata fields, so ``nxtumbler`` is the
+    # maximally-namespaced legal key and the write is a no-op (honestly reported
+    # as metadata=False) unless the user has defined nexus fields in DT. The
+    # tumbler is always recoverable from the ``nx-tumbler:<t>`` tag regardless,
+    # so this is additive, not load-bearing. (Live finding, CA5 / 139-research-CA5.)
     result["metadata"] = dt_client.dt_set_custom_metadata(
-        dt_uuid, {"nx.tumbler": str(tumbler), "nx.indexed": "true"}, mode="merge"
+        dt_uuid, {"nxtumbler": str(tumbler), "nxindexed": "true"}, mode="merge"
     )
 
     log.info(

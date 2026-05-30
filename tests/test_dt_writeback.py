@@ -66,9 +66,9 @@ def test_writeback_stamps_all_three_with_no_clobber_modes():
     assert by_kind["annotation"][2]["mode"] == "append"
     assert "1.2.3" in by_kind["annotation"][1][1]
     assert by_kind["metadata"][2]["mode"] == "merge"
-    # Metadata keys are nexus-owned (nx.* dotted form — DT forbids '-' in keys).
+    # Metadata keys are nexus-owned (nx-prefixed; DT strips separators in keys).
     _, (_uuid, meta_items), _ = by_kind["metadata"]
-    assert all(k.startswith("nx.") for k, _v in meta_items)
+    assert all(k.startswith("nx") for k, _v in meta_items)
 
 
 def test_writeback_unavailable_makes_no_writes():
