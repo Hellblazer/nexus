@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.5] - 2026-05-30
+
+### Fixed
+
+- substantive-critic is now wired into the developer review loop across all five
+  orchestration surfaces (developer agent, development skill, implement command,
+  orchestration reference pipelines, strategic-planner review gates). The
+  developer agent previously stopped after code-review, skipping the critic,
+  because no surface named it on the ad-hoc OR plan-driven path. Both reviewers
+  now run as a non-optional pair; the developer hands back rather than
+  self-committing.
+
 ## [5.4.4] - 2026-05-30
 
 ### Fixed
