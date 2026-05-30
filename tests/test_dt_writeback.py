@@ -18,11 +18,13 @@ from nexus.dt_writeback import writeback_record
 
 
 class _FakeDT:
-    def __init__(self, *, available=True, tag_ok=True, ann_ok=True, meta_ok=True):
+    def __init__(self, *, available=True, tag_ok=True, ann_ok=True, meta_ok=True,
+                 existing_annotation=""):
         self._available = available
         self._tag_ok = tag_ok
         self._ann_ok = ann_ok
         self._meta_ok = meta_ok
+        self._annotation = existing_annotation
         self.calls: list[tuple[str, tuple, dict]] = []
 
     def available(self, *, refresh=False):
@@ -32,8 +34,14 @@ class _FakeDT:
         self.calls.append(("tags", (uuid, tuple(tags)), {"mode": mode}))
         return self._tag_ok
 
+    def dt_annotation_text(self, uuid):
+        self.calls.append(("read_annotation", (uuid,), {}))
+        return self._annotation
+
     def dt_set_annotation(self, uuid, text, *, mode="append"):
         self.calls.append(("annotation", (uuid, text), {"mode": mode}))
+        if self._ann_ok:
+            self._annotation = (self._annotation + "\n" + text) if self._annotation else text
         return self._ann_ok
 
     def dt_set_custom_metadata(self, uuid, fields, *, mode="merge"):
@@ -58,6 +66,9 @@ def test_writeback_stamps_all_three_with_no_clobber_modes():
     assert by_kind["annotation"][2]["mode"] == "append"
     assert "1.2.3" in by_kind["annotation"][1][1]
     assert by_kind["metadata"][2]["mode"] == "merge"
+    # Metadata keys are nexus-owned (nx.* dotted form — DT forbids '-' in keys).
+    _, (_uuid, meta_items), _ = by_kind["metadata"]
+    assert all(k.startswith("nx.") for k, _v in meta_items)
 
 
 def test_writeback_unavailable_makes_no_writes():
@@ -67,13 +78,30 @@ def test_writeback_unavailable_makes_no_writes():
     assert dt.calls == []
 
 
-def test_writeback_idempotent_args_on_rerun():
+def test_writeback_annotation_idempotent_no_duplicate_append():
+    # First run appends the backlink; second run must NOT append again (the
+    # backlink is already present), so the user's annotation never accumulates
+    # duplicate "nexus: indexed as tumbler" lines on re-index.
     dt = _FakeDT()
-    writeback_record("U", "1.2.3", dt_client=dt)
-    first = list(dt.calls)
+    first = writeback_record("U", "1.2.3", dt_client=dt)
+    assert first["annotation"] is True
+    appends_first = [c for c in dt.calls if c[0] == "annotation"]
+    assert len(appends_first) == 1
+
     dt.calls.clear()
+    second = writeback_record("U", "1.2.3", dt_client=dt)
+    assert second["annotation"] is True  # idempotent success
+    appends_second = [c for c in dt.calls if c[0] == "annotation"]
+    assert appends_second == []  # NO second append — backlink already present
+    # The annotation body still contains exactly one backlink line.
+    assert dt._annotation.count("nexus: indexed as tumbler 1.2.3") == 1
+
+
+def test_writeback_preserves_existing_user_annotation():
+    dt = _FakeDT(existing_annotation="user's own note")
     writeback_record("U", "1.2.3", dt_client=dt)
-    assert dt.calls == first  # same add/append/merge calls — DT dedups server-side
+    assert "user's own note" in dt._annotation
+    assert "nexus: indexed as tumbler 1.2.3" in dt._annotation
 
 
 def test_writeback_excluded_record_clean_partial_not_crash():
@@ -83,7 +111,21 @@ def test_writeback_excluded_record_clean_partial_not_crash():
     out = writeback_record("U", "1.2.3", dt_client=dt)
     assert out["tags"] is False
     assert out["skipped"] is False
-    assert {c[0] for c in dt.calls} == {"tags", "annotation", "metadata"}
+    assert {c[0] for c in dt.calls} >= {"tags", "annotation", "metadata"}
+
+
+def test_writeback_annotation_failure_is_fail_soft():
+    dt = _FakeDT(ann_ok=False)
+    out = writeback_record("U", "1.2.3", dt_client=dt)
+    assert out["annotation"] is False
+    assert out["tags"] is True and out["metadata"] is True  # others still attempt
+
+
+def test_writeback_metadata_failure_is_fail_soft():
+    dt = _FakeDT(meta_ok=False)
+    out = writeback_record("U", "1.2.3", dt_client=dt)
+    assert out["metadata"] is False
+    assert out["tags"] is True and out["annotation"] is True
 
 
 def test_writeback_empty_identity_skips():

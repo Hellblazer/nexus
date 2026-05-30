@@ -191,6 +191,26 @@ def dt_set_tags(uuid: str, tags: list[str], *, mode: str = "add") -> bool:
     return result is not None
 
 
+def dt_annotation_text(uuid: str) -> str | None:
+    """Current annotation body of a record, or ``None`` (no annotation / excluded).
+
+    Two-hop: ``get_record_annotation`` yields the annotation record's UUID, then
+    ``get_record_text`` reads its body. Used to make annotation write-back
+    idempotent (append only when the backlink is not already present).
+    """
+    meta = dt_call("get_record_annotation", {"uuid": uuid})
+    if not meta:
+        return None
+    ann_uuid = meta.get("annotation_uuid")
+    if not ann_uuid:
+        return None
+    result = dt_call("get_record_text", {"uuid": ann_uuid})
+    if not result:
+        return None
+    text = result.get("text") if isinstance(result, dict) else None
+    return text if isinstance(text, str) else None
+
+
 def dt_set_annotation(uuid: str, text: str, *, mode: str = "append") -> bool:
     """Write an annotation note onto a record. ``True`` on success (Layer F backlink).
 

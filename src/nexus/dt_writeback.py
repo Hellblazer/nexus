@@ -9,8 +9,10 @@ CLI wires it after a successful index.
 
 Authoritative-source contract (RDR §Approach Layer F, §Risks):
 
-- **nexus-owned namespace only**: every tag nexus writes is ``nx-*`` prefixed,
-  so a later audit/revoke can find exactly what nexus wrote and nothing else.
+- **nexus-owned namespace only**: every tag nexus writes is ``nx-*`` prefixed
+  and every custom-metadata key is ``nx.*`` prefixed (DT forbids ``-`` in
+  metadata identifiers, so the metadata namespace is the dotted form), so a
+  later audit/revoke pass finds exactly what nexus wrote and nothing else.
 - **never edits user content**: only tags, an appended annotation, and custom
   metadata fields — the record body is never touched.
 - **no-clobber**: tags add-mode, annotation append-mode, metadata merge-mode
@@ -77,11 +79,24 @@ def writeback_record(
 
     tags = ["nx-indexed", f"nx-tumbler:{tumbler}", *_nx_keyword_tags(aspect_keywords)]
     result["tags"] = dt_client.dt_set_tags(dt_uuid, tags, mode="add")
-    result["annotation"] = dt_client.dt_set_annotation(
-        dt_uuid, f"nexus: indexed as tumbler {tumbler}", mode="append"
-    )
+
+    # Annotation append is NOT idempotent server-side (DT has no dedup on append),
+    # so re-indexing would accumulate duplicate backlink lines and pollute the
+    # user's annotation. Guard: only append when the backlink is absent. Treat an
+    # already-present backlink as success (idempotent no-op).
+    backlink = f"nexus: indexed as tumbler {tumbler}"
+    existing = dt_client.dt_annotation_text(dt_uuid) or ""
+    if backlink in existing:
+        result["annotation"] = True
+    else:
+        result["annotation"] = dt_client.dt_set_annotation(dt_uuid, backlink, mode="append")
+
+    # Custom-metadata identifiers: DT rejects '-' (alphanumeric + '?'/'.' only),
+    # so the nexus namespace for metadata is the dotted ``nx.*`` form (the tag
+    # namespace is ``nx-*``). Both are nexus-owned and matched by the Day-2
+    # revoke pass — see module docstring.
     result["metadata"] = dt_client.dt_set_custom_metadata(
-        dt_uuid, {"nxtumbler": str(tumbler), "nxindexed": "true"}, mode="merge"
+        dt_uuid, {"nx.tumbler": str(tumbler), "nx.indexed": "true"}, mode="merge"
     )
 
     log.info(

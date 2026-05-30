@@ -134,6 +134,30 @@ def test_write_helpers_true_on_success_and_pass_no_clobber_mode(monkeypatch) -> 
     assert by_tool["set_record_annotation"]["text"] == "see nx tumbler 1.2.3"
 
 
+def test_dt_annotation_text_two_hop(monkeypatch) -> None:
+    # get_record_annotation → annotation_uuid, then get_record_text → body.
+    def _fake(tool, args=None):
+        if tool == "get_record_annotation":
+            return {"annotation_uuid": "ANN"}
+        if tool == "get_record_text":
+            assert args == {"uuid": "ANN"}
+            return {"text": "existing body"}
+        raise AssertionError(f"unexpected tool {tool}")
+
+    monkeypatch.setattr(dt, "dt_call", _fake)
+    assert dt.dt_annotation_text("Q") == "existing body"
+
+
+def test_dt_annotation_text_none_when_no_annotation(monkeypatch) -> None:
+    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: {"annotation_uuid": None})
+    assert dt.dt_annotation_text("Q") is None
+
+
+def test_dt_annotation_text_none_when_unreachable(monkeypatch) -> None:
+    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: None)
+    assert dt.dt_annotation_text("Q") is None
+
+
 def test_write_helpers_reject_empty_input(monkeypatch) -> None:
     # Empty tags/fields short-circuit without a call.
     monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: pytest.fail("should not call"))

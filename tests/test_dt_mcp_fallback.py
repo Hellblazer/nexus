@@ -53,6 +53,9 @@ class _UnavailableDT:
     def dt_set_custom_metadata(self, *a, **k):  # pragma: no cover
         raise AssertionError("dt_set_custom_metadata called despite available()=False")
 
+    def dt_annotation_text(self, *a, **k):  # pragma: no cover
+        raise AssertionError("dt_annotation_text called despite available()=False")
+
 
 @pytest.fixture
 def indexed(cat):
