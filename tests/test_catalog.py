@@ -1426,3 +1426,32 @@ class TestOwnerRepoRootDefensive:
         result = cat._owner_repo_root(owner)
         assert os.path.isabs(result)
         assert result == os.path.abspath("relative/path")
+
+
+class TestBySourceUri:
+    """RDR-139 P1.4: inverse lookup documents.source_uri -> CatalogEntry.
+
+    Backs the DT semantic-linking join: a DEVONthink neighbour's
+    ``x-devonthink-item://<UUID>`` resolves to its catalog entry (or None
+    when the neighbour is not indexed, so the caller skips it). Global
+    lookup (no owner scope) — source_uri is globally unique by construction.
+    """
+
+    def test_known_uri_returns_entry(self, cat_with_owner):
+        cat, owner = cat_with_owner
+        uri = "x-devonthink-item://8EDC855D-213F-40AD-A9CF-9543CC76476B"
+        doc = cat.register(
+            owner, "graph-rag", content_type="paper", file_path="", source_uri=uri,
+        )
+        entry = cat.by_source_uri(uri)
+        assert entry is not None
+        assert entry.tumbler == doc
+        assert entry.source_uri == uri
+
+    def test_unknown_uri_returns_none(self, cat_with_owner):
+        cat, _owner = cat_with_owner
+        assert cat.by_source_uri("x-devonthink-item://does-not-exist") is None
+
+    def test_empty_uri_returns_none(self, cat_with_owner):
+        cat, _owner = cat_with_owner
+        assert cat.by_source_uri("") is None

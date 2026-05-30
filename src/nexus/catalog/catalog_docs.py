@@ -579,6 +579,43 @@ class _DocumentOps:
             source_uri=row[13] or "",
         )
 
+    def by_source_uri(self, uri: str) -> CatalogEntry | None:
+        """Inverse lookup ``documents.source_uri`` -> entry (RDR-139 P1.4).
+
+        Global (not owner-scoped): ``source_uri`` is globally unique by
+        construction, so a DEVONthink neighbour's ``x-devonthink-item://<UUID>``
+        resolves directly. Returns ``None`` for an empty URI or an unindexed
+        neighbour, so the semantic-linking caller skips rather than links.
+        """
+        if not uri:
+            return None
+        cat = self._cat
+        from nexus.catalog.catalog import CatalogEntry
+        row = cat._db.execute(
+            "SELECT tumbler, title, author, year, content_type, file_path, "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
+            "FROM documents WHERE source_uri = ?",
+            (uri,),
+        ).fetchone()
+        if not row:
+            return None
+        return CatalogEntry(
+            tumbler=Tumbler.parse(row[0]),
+            title=row[1],
+            author=row[2],
+            year=row[3],
+            content_type=row[4],
+            file_path=row[5],
+            corpus=row[6],
+            physical_collection=row[7],
+            chunk_count=row[8],
+            head_hash=row[9],
+            indexed_at=row[10],
+            meta=json.loads(row[11]) if row[11] else {},
+            source_mtime=row[12] or 0.0,
+            source_uri=row[13] or "",
+        )
+
     def by_owner(self, owner: Tumbler) -> list[CatalogEntry]:
         cat = self._cat
         from nexus.catalog.catalog import CatalogEntry
