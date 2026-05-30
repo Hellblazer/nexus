@@ -107,6 +107,7 @@ Documentation = "https://github.com/Hellblazer/nexus/tree/main/docs"
 nx = "nexus.cli:main"
 nx-mcp = "nexus.mcp.core:main"
 nx-mcp-catalog = "nexus.mcp.catalog:main"
+nx-mcp-devonthink = "nexus.mcp.devonthink:main"
 nx-session-end-launcher = "nexus._session_end_launcher:main"
 
 [tool.hatch.build.targets.wheel]
