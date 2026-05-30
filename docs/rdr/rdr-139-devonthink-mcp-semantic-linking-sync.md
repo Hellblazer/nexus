@@ -2,12 +2,13 @@
 title: "DEVONthink MCP Integration: Semantic Linking, Bibliographic Enrichment, Content Extraction, Bidirectional Sync, and Capture"
 id: RDR-139
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-29
 accepted_date: 2026-05-30
+closed_date: 2026-05-30
 related_issues: [nexus-qtbuh, nexus-lxy5n]
 related_rdrs: [RDR-099, RDR-126, RDR-049, RDR-051, RDR-089]
 ---
@@ -395,9 +396,16 @@ unavailable and asserts the legacy result is byte-identical to pre-RDR-139.
   Fallback: no DT → `nx dt capture` reports DT-required and exits non-zero
   (capture is inherently DT-bound; this is the one verb that *needs* DT, and
   it says so cleanly rather than silently doing nothing).
-- **Layer H — AI delegation (experimental, later).** `research_topic` and
-  `chat_response` as optional augmentation of nexus's own retrieval. Gated
-  behind explicit opt-in; precision/utility unproven — last phase or deferred.
+- **Layer H — AI delegation (experimental). DROPPED at the Phase-4 go/no-go
+  (2026-05-30).** `research_topic` and `chat_response` were evaluated as
+  optional augmentation of nexus's own retrieval and did NOT earn a positive,
+  material delta: live `research_topic` returned zero usable results for both
+  targeted and broad queries, while `nx_answer` produced a thorough cited
+  synthesis on the same question; `chat_response` is uncomposed generation with
+  no citation discipline and cannot beat `nx_answer` on the same-corpus
+  retrieval-quality metric. Per the go/no-go contract (below), Layer H is
+  dropped rather than shipped — `research_topic`/`chat_response` are NOT added
+  to the Layer A′ surface. Evidence: T2 `139-phase4-layer-h-gonogo-2026-05-30`.
 
 **Explicitly out of scope** (bounding the expansion): selectors/CRUD stay on
 osascript (`search_records`, `lookup_records`, `get_record_properties`,
@@ -631,16 +639,27 @@ pipeline as one agent call; (fallback) the wrapper started with DT absent
 spawns, exits 0, and lists zero tools — asserted independent of the `alwaysLoad`
 value (CRITICAL-1 resolution).
 
-### Phase 4 — AI delegation (experimental)
+### Phase 4 — AI delegation (experimental) — OUTCOME: NO-GO, Layer H dropped (2026-05-30)
 
 Layer H (`research_topic`, `chat_response`), opt-in, evaluated against
-nexus's own retrieval. May be deferred out entirely.
+nexus's own retrieval.
 **Phase 4 MVV:** on a held-out question set, `research_topic`/`chat_response`
 augmentation produces a *measurable* retrieval-quality delta over nexus's own
 retrieval on the same questions (precision/recall or a rubric score), recorded
 in the Phase-4 review. If the delta is not positive and material, Layer H is
 dropped rather than shipped — this MVV is explicitly a go/no-go, not a
 ship-gate.
+
+**Go/no-go result (2026-05-30): NO-GO — Layer H dropped, no production code
+shipped.** Live `research_topic` returned zero usable results for both a
+targeted and a broad query; `nx_answer` produced a thorough cited synthesis on
+the same question; `chat_response` is uncomposed generation (no citation
+discipline, invokes the user's configured AI) and cannot beat `nx_answer` on
+the same-corpus retrieval-quality metric. The one place DT AI could add value
+(external arxiv/pubmed/web discovery) returned empty and is a capture-feeder
+concern already served by Layer G, not the retrieval-augmentation metric the
+MVV defines. Decision ratified by the maintainer. Evidence: T2
+`139-phase4-layer-h-gonogo-2026-05-30`.
 
 ### Day 2 Operations
 
@@ -778,6 +797,18 @@ Phase 4 review.
   59 tools), `mcp-tools.json`, `mcp-config-default.json`, `appendix-mcp.html`
 
 ## Revision History
+
+### 2026-05-30 — Phase 4 go/no-go: Layer H DROPPED
+
+Phases 1-3 shipped (Layers A, A′, B, C, D, E, F, G), each live-MVV-verified
+against real DEVONthink. Phase 4 Layer H (AI delegation) was evaluated at its
+go/no-go and DROPPED: `research_topic` returned zero usable results live and
+`chat_response` is uncomposed generation that cannot beat `nx_answer` on the
+same-corpus retrieval-quality metric. No Phase 4 code shipped. Deferred,
+bead-tracked follow-ons remain outside the RDR's core scope: `nexus-kpnqy`
+(highlights→retrieval), `nexus-fqsm5` (Layer C search_crossref/google_books),
+`nexus-39b0f` (Layer D dt_ocr/dt_transcribe), `nexus-slq1g` (Layer F nx-kw
+aspect-keyword tags). RDR-139 is functionally complete.
 
 ### 2026-05-30 — Gate remediation (draft)
 
