@@ -121,8 +121,17 @@ def dt_find_similar(uuid: str, *, limit: int = 25, floor: float = 0.0) -> list[N
     )
     if not result:
         return []
+    # Single-record mode returns a BARE neighbour array; core wraps a bare JSON
+    # array as {"result": [...]}. Batch/summary mode would use {"results": [...]}.
+    # Accept both shapes (live finding — the spike's {count, results} shape did
+    # not match single-uuid mode).
+    neighbours = result.get("results")
+    if neighbours is None:
+        neighbours = result.get("result")
     out: list[Neighbour] = []
-    for r in result.get("results", []) or []:
+    for r in neighbours or []:
+        if not isinstance(r, dict):
+            continue
         ruuid = r.get("uuid")
         score = float(r.get("score", 0.0) or 0.0)
         if not ruuid or score < floor:

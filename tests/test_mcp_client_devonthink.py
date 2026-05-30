@@ -92,6 +92,21 @@ def test_dt_find_similar_maps_and_applies_floor(monkeypatch) -> None:
     assert out == [{"uuid": "A", "score": 0.9, "name": "alpha"}]
 
 
+def test_dt_find_similar_parses_bare_array_shape(monkeypatch) -> None:
+    # Single-record mode returns a BARE neighbour array; core wraps a bare JSON
+    # array as {"result": [...]}. dt_find_similar must read that shape, not only
+    # {"results": [...]}. (Live MVV finding 2026-05-30 — the spike's assumed
+    # {count, results} shape did not match single-uuid mode; the mismatch made
+    # Layer B silently emit zero edges for every record.)
+    payload = {"result": [
+        {"uuid": "A", "score": 0.72, "name": "alpha"},
+        {"uuid": "B", "score": 0.70, "name": "beta"},
+    ]}
+    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: payload)
+    out = dt.dt_find_similar("Q", limit=10, floor=0.5)
+    assert [n["uuid"] for n in out] == ["A", "B"]
+
+
 def test_dt_record_links_merges_and_dedups(monkeypatch) -> None:
     payload = {
         "incoming": [{"uuid": "A", "name": "a"}],
