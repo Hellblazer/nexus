@@ -155,26 +155,67 @@ Grounded in current `develop`:
 
 ### Critical Assumptions
 
-- [ ] **DT `compare`/`classify` are reachable from a nexus-spawned MCP
-  client and return UUID-bearing neighbour lists.** — **Status**:
-  Unverified — **Method**: Spike
-- [ ] **DT neighbour UUIDs map to existing catalog tumblers via
-  `source_uri = x-devonthink-item://<UUID>`** (records not yet indexed are
-  simply skipped, not errors). — **Status**: Unverified — **Method**:
-  Source Search (catalog) + Spike
-- [ ] **The per-item "Exclude from Chat & MCP" flag removes a record from
-  `compare`/`classify` results and blocks `get_record_content`**, so the
-  privacy boundary is enforced server-side and nexus need not re-filter.
-  — **Status**: Unverified — **Method**: Spike + Docs
-- [ ] **A single DT MCP server choice (built-in vs community) covers both
-  `compare`/`classify` (Layer 2) and `add_tags`/annotation write-back
-  (Layer 3)** without needing both servers. — **Status**: Unverified —
-  **Method**: Spike
+All four verified by the 2026-05-29 spike against the live DEVONthink 4
+built-in MCP server (see Spike Results below).
+
+- [x] **DT similarity/classify are reachable from a nexus CLI MCP client
+  and return UUID-bearing neighbour lists.** — **Status**: Verified —
+  **Method**: Spike. The nexus venv connected to `http://localhost:8420/mcp`
+  from a CLI subprocess; `find_similar_records` returned ranked
+  `{score, uuid, name}` neighbours (0.52–0.60), `classify_record` returned
+  uuid-keyed group proposals. Tool names corrected: `find_similar_records`
+  (not `compare`), `classify_record`.
+- [x] **DT neighbour UUIDs map to catalog entries via
+  `source_uri = x-devonthink-item://<UUID>`** (un-indexed records skipped,
+  not errors). — **Status**: Verified — **Method**: Spike. Every DT record
+  (`search_records`, `find_similar_records`, `classify_record`) is
+  uuid-addressed; the join is `x-devonthink-item://<uuid>`. Catalog-side
+  match is a `source_uri` lookup; non-catalog neighbours are simply absent
+  from the result map.
+- [x] **The per-item "Exclude from AI & MCP" flag removes a record
+  server-side**, so nexus need not re-filter. — **Status**: Verified —
+  **Method**: Docs (DT MCP appendix): "items excluded from AI & MCP access
+  are fully ignored"; sensitive data (credit cards, passwords) is stripped
+  before the LLM (server `redaction` categories: credit_card, auth_tokens,
+  labeled_secrets, url, email).
+- [x] **A single DT MCP server covers both layers.** — **Status**: Verified
+  — **Method**: Spike + Config. The built-in server exposes 59 tools
+  including `find_similar_records` + `classify_record` (Layer 2) and
+  `set_record_tags` + `set_record_annotation` (Layer 3). The community
+  `dvcrn` server is unnecessary.
 
 **Method definitions**: Source Search = API verified against dependency
 source; Spike = behaviour verified against the live service (DT is opaque,
 so spikes are mandatory here); Docs Only = insufficient for load-bearing
 assumptions.
+
+### Spike Results (2026-05-29)
+
+Verified against DEVONthink 4 (`com.devon-technologies.think`, built-in MCP
+LoginItem `DEVONthink MCP.app`):
+
+- **Transport is HTTP, not stdio** — the built-in server is a persistent
+  localhost HTTP MCP endpoint at `http://localhost:8420/mcp`
+  (`mcp-config-default.json`: `port 8420`, `access localhost`,
+  `tlsIdentity ""` → plain HTTP, `auth.required false`,
+  `devonthink.launchIfNeeded true`). nexus connects as an HTTP MCP client
+  (`mcp.client.streamable_http`) to an always-on server — **no process
+  spawn, no stdio, no teardown lifecycle**. This invalidates the original
+  stdio design (Gap 3 / `devonthink_mcp.py`) and simplifies it.
+- **`mcp` Python SDK** is importable in the nexus venv and drove the live
+  handshake — the only new dependency.
+- **Bonus tools that reshape scope** (in the same 59-tool server):
+  - `get_record_links` — DT's own record link graph (linked to/from): a
+    second, higher-precision edge source than similarity alone.
+  - `resolve_doi_metadata` / `search_crossref` / `download_pdf_from_doi` /
+    `resolve_google_books_metadata` — overlap nexus's Semantic-Scholar
+    bib-enrich (relevant to nexus-lxy5n; potential alternative/secondary
+    enrichment source via DT's CrossRef path).
+  - `capture_web_page` — the `create_from_url` capture flow Layer 3
+    deferred; it is one tool call, not bespoke orchestration.
+  - `research_topic`, `chat_response`, `extract_record_content` (AI-
+    optimised text), `get_record_custom_metadata` (write-back target richer
+    than tags alone).
 
 ## Proposed Solution
 
@@ -184,11 +225,14 @@ Introduce a minimal, lazily-constructed MCP-client helper and two
 incorporation stages that consume it. Selectors stay on osascript.
 
 1. **MCP-client substrate (Gap 3).** A small `nexus/devonthink_mcp.py`
-   module wrapping the `mcp` SDK stdio client: lazy connect, one call,
-   teardown — bridged into the synchronous CLI via `asyncio.run` at the
-   call boundary (mirroring how the daemon bridges sync RPCs). Server
-   command + transport are config-driven (`~/.config/nexus/config.yml`,
-   `devonthink.mcp.*`), defaulting to the chosen server from the spike.
+   module wrapping the `mcp` SDK **HTTP** client
+   (`mcp.client.streamable_http`) against the always-on built-in server at
+   `http://localhost:8420/mcp` (spike-verified; endpoint + port
+   config-overridable via `devonthink.mcp.url`). Each call: connect → one
+   tool call → close, bridged into the synchronous CLI via `asyncio.run` at
+   the call boundary. No process spawn or teardown lifecycle — the server
+   is a persistent DEVONthink LoginItem, and `launchIfNeeded` starts
+   DEVONthink itself if closed. `auth.required` is false on localhost.
    Fail-soft: if the server is unreachable, Layer 2/3 log and skip — never
    abort an index.
 
@@ -198,7 +242,7 @@ incorporation stages that consume it. Selectors stay on osascript.
    take the top-k neighbours above a similarity floor, map each neighbour
    UUID → catalog tumbler via `source_uri`, and create `relates` edges with
    `cat.link_if_absent(from, to, "relates",
-   created_by="dt_compare")`. Neighbours not in the catalog are skipped (or
+   created_by="dt_similar")`. Neighbours not in the catalog are skipped (or
    optionally surfaced as "index candidates"). This is the semantic-linking
    sub-step nexus-lxy5n's auto-link phase calls.
 
@@ -214,22 +258,22 @@ incorporation stages that consume it. Selectors stay on osascript.
 
 ### Technical Design
 
+Tool I/O verified by spike (DT MCP `find_similar_records` returns
+`{count, results:[{score, uuid, name, doi, ...}]}`; `classify_record`
+returns uuid-keyed group records):
+
 ```text
-// Illustrative — verify SDK + DT tool I/O during the spike.
-
-// devonthink_mcp.py
-async def dt_compare(uuid: str, *, top_k: int, floor: float) -> list[Neighbour]
+// devonthink_mcp.py — HTTP MCP client to http://localhost:8420/mcp
+def dt_find_similar(uuid, *, limit, floor) -> list[Neighbour]   # asyncio.run bridge
 //   Neighbour = {uuid: str, score: float, name: str}
-def dt_compare_sync(uuid, *, top_k, floor) -> list[Neighbour]   # asyncio.run bridge
-
-async def dt_add_tags(uuid: str, tags: list[str]) -> bool
-async def dt_annotate(uuid: str, text: str) -> bool
+def dt_set_tags(uuid: str, tags: list[str], *, mode="add") -> bool
+def dt_set_annotation(uuid: str, text: str) -> bool
 
 // linking (Layer 2), reuses existing catalog primitive
-for n in dt_compare_sync(uuid, top_k=K, floor=F):
-    to_tumbler = catalog.tumbler_for_source_uri(f"x-devonthink-item://{n.uuid}")
+for n in dt_find_similar(uuid, limit=K, floor=F):
+    to_tumbler = catalog.tumbler_for_source_uri(f"x-devonthink-item://{n['uuid']}")
     if to_tumbler:
-        cat.link_if_absent(this_tumbler, to_tumbler, "relates", created_by="dt_compare")
+        cat.link_if_absent(this_tumbler, to_tumbler, "relates", created_by="dt_similar")
 ```
 
 Error contract: every DT-MCP call returns a result-or-None; callers treat
@@ -241,7 +285,7 @@ failure may fail an index or an enrich.
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
 | MCP-client helper | (none) | New — `nexus/devonthink_mcp.py`; coordinate shape with RDR-126 |
-| `relates` edge writer | `catalog.py:link_if_absent` | Reuse as-is (`created_by="dt_compare"`) |
+| `relates` edge writer | `catalog.py:link_if_absent` | Reuse as-is (`created_by="dt_similar"`) |
 | Semantic-link generator | `link_generator.py` / `auto_linker.py` | Extend pattern (third generator), do not modify existing ones |
 | UUID↔tumbler join | `dt.py:_select_dt_uri_from_entry`, `_resolve_dt_uri_from_tumbler` | Reuse; add the inverse `source_uri → tumbler` lookup if absent |
 | Selector/CRUD | `devonthink.py:_run_osascript` | Keep (gjz52: do not migrate) |
@@ -251,7 +295,7 @@ failure may fail an index or an enrich.
 Reusing `link_if_absent` makes Layer 2 a thin generator over a proven
 idempotent primitive — the only genuinely new code is the MCP client and
 the compare→tumbler mapping. Opt-in flags gate precision-sensitive edges
-behind explicit user intent until `dt_compare` precision is measured.
+behind explicit user intent until `find_similar_records` precision is measured.
 Fail-soft keeps the DT-AI dependency strictly additive: a missing/asleep DT
 app degrades to today's metadata-only behaviour, never a broken index.
 
@@ -295,8 +339,8 @@ problem; loses DT's cross-database reach.
 - **Risk**: the built-in DT MCP is only exposable to Claude Desktop, not a
   CLI subprocess. **Mitigation**: spike both servers; the community stdio
   server is the fallback transport.
-- **Risk**: `dt_compare` precision is low → noisy `relates` edges.
-  **Mitigation**: opt-in flag, similarity floor, `created_by="dt_compare"`
+- **Risk**: `find_similar_records` precision is low → noisy `relates` edges.
+  **Mitigation**: opt-in flag, similarity floor, `created_by="dt_similar"`
   so edges are filterable/revocable; measure precision before defaulting on.
 - **Risk**: privacy leak via `get_record_content` on excluded items.
   **Mitigation**: CA-3 spike verifies server-side enforcement before any
@@ -305,7 +349,7 @@ problem; loses DT's cross-database reach.
 ### Failure Modes
 
 DT app closed / MCP unreachable → Layer 2/3 skipped, structured log,
-index succeeds (visible: no `dt_compare` edges, a one-line warning).
+index succeeds (visible: no `dt_similar` edges, a one-line warning).
 Wrong-server config → connect fails fast at first call, skipped same as
 above. Silent risk: a UUID→tumbler mapping bug could create `relates` edges
 to the wrong node — mitigated by `created_by` attribution enabling a bulk
@@ -330,7 +374,7 @@ This is in scope, not deferred.
 ### Phase 1: Code Implementation
 
 #### Step 1: MCP-client substrate (`devonthink_mcp.py`) + config + spike harness
-#### Step 2: Layer 2 `dt_compare` → `relates` generator, wired into `nx dt index --link-semantic`
+#### Step 2: Layer 2 `find_similar_records` → `relates` generator, wired into `nx dt index --link-semantic`
 #### Step 3: Layer 3 `add_tags`/annotation write-back, wired into `nx dt index --writeback`
 
 ### Phase 2: Operational Activation
@@ -342,7 +386,7 @@ Config keys documented; opt-in flags default off until precision measured.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| `relates` edges (`created_by=dt_compare`) | `catalog_link_query` | `catalog_links` | `link delete` by creator | doctor link census | catalog JSONL |
+| `relates` edges (`created_by=dt_similar`) | `catalog_link_query` | `catalog_links` | `link delete` by creator | doctor link census | catalog JSONL |
 | DT-side `nx-*` tags | DT search | DT record | `add_tags` removal verb (deferred) | spot-check | DT's own backup |
 
 ### New Dependencies
@@ -352,7 +396,7 @@ benign; no legal review needed.
 
 ## Test Plan
 
-- **Scenario**: `dt_compare` returns neighbours, 2 of 3 are catalog-known —
+- **Scenario**: `find_similar_records` returns neighbours, 2 of 3 are catalog-known —
   **Verify**: exactly 2 `relates` edges created, 1 skipped, idempotent on
   re-run.
 - **Scenario**: DT MCP unreachable — **Verify**: index succeeds, zero
@@ -376,8 +420,8 @@ MVV passes and all five Test Plan scenarios are green.
 ### Performance Expectations
 
 One `compare` call per indexed record; negligible against index/enrich
-cost. No throughput target — measure `dt_compare` precision empirically
-before defaulting `--link-semantic` on.
+cost. No throughput target — measure `find_similar_records` precision empirically
+before defaulting `--link-semantic` on (default off until precision measured).
 
 ## Finalization Gate
 
@@ -438,4 +482,18 @@ server is CLI-unreachable (then the RDR narrows to the community server).
 
 ## Revision History
 
-[Gate findings appended here.]
+### 2026-05-29 — Critical Assumption spike (draft)
+
+Spiked all four Critical Assumptions against the live DEVONthink 4 built-in
+MCP server. All verified. Material corrections folded into the design:
+
+- **Transport**: HTTP `http://localhost:8420/mcp` (persistent LoginItem),
+  not a nexus-spawned stdio server. `devonthink_mcp.py` becomes an HTTP MCP
+  client with no process lifecycle — simpler than the draft.
+- **Tool names**: `find_similar_records` (was "compare"), `classify_record`.
+  Edge `created_by` → `dt_similar`.
+- **Server choice**: built-in only; community `dvcrn` server dropped.
+- **Scope inputs surfaced**: `get_record_links` (DT's own link graph, a
+  second edge source), `capture_web_page` (the deferred capture flow is one
+  call), and DT's CrossRef/DOI tools (overlap nexus bib-enrich — note for
+  nexus-lxy5n). To be triaged into phases at the gate.
