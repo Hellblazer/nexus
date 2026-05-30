@@ -210,6 +210,63 @@ def dt_record_name(uuid: str) -> str:
     return name if isinstance(name, str) else ""
 
 
+#: Status messages DT returns when a record carries zero annotations/mentions.
+#: These are not content — a result that IS one of these (the whole stripped
+#: body starts with the phrase AND is short) maps to None. The full-phrase form
+#: ("...found") plus a length guard avoids false-positives on a real highlight
+#: blob that merely opens with "No annotations ..." prose.
+_NO_CONTENT_PREFIXES: tuple[str, ...] = (
+    "no highlights found",
+    "no mentions found",
+    "no annotations found",
+)
+#: A body longer than this is treated as real content even if it opens with a
+#: sentinel-looking phrase (the status messages are short, one-liners).
+_NO_CONTENT_MAX_LEN: int = 200
+
+
+def _dt_markdown_or_none(result: dict[str, Any] | None) -> str | None:
+    """Pull a markdown body from a DT highlights/mentions result, or ``None``.
+
+    ``extract_record_highlights`` / ``extract_record_mentions`` return either
+    the markdown text (success) or a "No highlights found ..." status string
+    (zero annotations). core wraps a plain-text content as ``{"text": ...}``;
+    partial-success returns ``{"markdown": ..., ...}``. Accept both keys and
+    map any no-content status message to ``None`` so callers don't store it.
+    """
+    if not result:
+        return None
+    text = result.get("text")
+    if not isinstance(text, str) or not text:
+        md = result.get("markdown")
+        text = md if isinstance(md, str) else None
+    stripped = text.strip() if text else ""
+    if not stripped:
+        return None
+    # A short body that opens with a "No ... found" status phrase is the
+    # zero-annotation sentinel; a long body that merely mentions the phrase is
+    # real content and is kept.
+    if (
+        len(stripped) <= _NO_CONTENT_MAX_LEN
+        and stripped.lower().startswith(_NO_CONTENT_PREFIXES)
+    ):
+        return None
+    return text
+
+
+def dt_extract_highlights(uuid: str) -> str | None:
+    """Markdown summary of a record's annotations/highlights, or ``None`` (Layer E).
+
+    Maps DT's zero-annotation status message to ``None``. Fail-soft.
+    """
+    return _dt_markdown_or_none(dt_call("extract_record_highlights", {"uuid": uuid}))
+
+
+def dt_extract_mentions(uuid: str) -> str | None:
+    """Markdown summary of a record's mentions, or ``None`` (Layer E). Fail-soft."""
+    return _dt_markdown_or_none(dt_call("extract_record_mentions", {"uuid": uuid}))
+
+
 def dt_set_tags(uuid: str, tags: list[str], *, mode: str = "add") -> bool:
     """Write tags onto a record (default additive). ``True`` on success (Layer F)."""
     if not tags:

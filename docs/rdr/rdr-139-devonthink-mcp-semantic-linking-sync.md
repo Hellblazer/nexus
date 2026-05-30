@@ -362,9 +362,17 @@ unavailable and asserts the legacy result is byte-identical to pre-RDR-139.
   file-path extraction only, all chunks `extraction_source=file` (today's
   behaviour; non-file-backed records skipped as today).
 - **Layer E — Annotations & highlights (Gap 6).** `extract_record_highlights`
-  / `summarize_record_highlights` and `*_mentions` → ingested as
-  highlight-aspects / notes attached to the document's tumbler. Fallback: no
-  DT → no highlight ingest (today's behaviour).
+  and `extract_record_mentions` → ingested as a markdown note attached to the
+  document's tumbler. **Storage (settled P3.1):** a dedicated
+  `document_highlights` T2 table keyed by tumbler, NOT `document_aspects`.
+  `extract_record_highlights` returns a markdown blob (not structured
+  per-span fields), and `document_aspects` is confidence-gated, scholarly-
+  shaped, and `INSERT OR REPLACE` under the aspect worker (a clobber-race
+  hazard, RDR-128); a separate table sidesteps both. Surface: `nx dt index
+  --highlights` ingests, `nx dt highlights <tumbler|uuid>` reads back. The
+  `summarize_*` variants (which create a summary artifact INSIDE DEVONthink)
+  are write-back territory and out of Layer E's read-only ingest scope.
+  Fallback: no DT → no highlight ingest (today's behaviour).
 - **Layer F — Bidirectional write-back (Gap 2).** After a successful
   index+enrich (`--writeback`): `set_record_tags` (`nx-indexed`,
   `nx-tumbler:<t>`, top aspect keywords), `set_record_annotation` (backlink
@@ -475,7 +483,7 @@ capture`, which is DT-bound by definition and exits cleanly).
 | Semantic-link generator | `link_generator.py` / `auto_linker.py` | Extend pattern (new generator), don't modify existing |
 | Bib enrichment | `nx enrich bib` (Semantic Scholar) | Extend: DT CrossRef as fallback `--source dt` |
 | Content extraction | `nx index pdf|md` chunking | Extend: DT-sourced text for non-file-backed records |
-| Aspect/highlight ingest | RDR-089 aspects | Extend: highlight-aspects from DT annotations |
+| Highlight ingest | (none — `document_aspects` is scholarly/confidence-gated) | **New** `document_highlights` T2 table (tumbler-keyed markdown blobs); NOT `document_aspects` (avoids the aspect-worker clobber race) |
 | UUID↔tumbler join (forward) | `dt.py:_select_dt_uri_from_entry` | Reuse |
 | UUID↔tumbler join (inverse) | (none — `Catalog` has `by_file_path` / `by_doc_id` but no `source_uri` lookup) | **New** `Catalog.by_source_uri(uri: str) -> CatalogEntry \| None` (SQL `SELECT … FROM documents WHERE source_uri = ?`); assigned to **Phase 1**. Returns `None` for un-indexed neighbours → caller skips |
 | Selectors/CRUD | `devonthink.py:_run_osascript` | Keep (gjz52) |
