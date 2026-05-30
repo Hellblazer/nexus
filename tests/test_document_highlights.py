@@ -85,6 +85,37 @@ def test_get_missing_returns_none(store) -> None:
     assert store.get("9.9.9") is None
 
 
+def test_close_releases_connection(store) -> None:
+    store.upsert(_rec())
+    store.close()
+    import sqlite3
+    with pytest.raises(sqlite3.ProgrammingError):
+        store.conn.execute("SELECT 1")
+
+
+def test_rename_cascade_updates_highlights_collection(tmp_path) -> None:
+    """HIGH-2: rename_collection_cascade must carry document_highlights rows."""
+    from nexus.db.t2 import T2Database
+
+    db = T2Database(tmp_path / "memory.db")
+    try:
+        db.document_highlights.upsert(HighlightRecord(
+            doc_id="1.2.3", source_uri="x-devonthink-item://A",
+            collection="docs__old__voyage-context-3__v1",
+            highlights_md="## h", mentions_md="",
+            ingested_at="2026-05-30T00:00:00Z",
+        ))
+        counts = db.rename_collection_cascade(
+            old="docs__old__voyage-context-3__v1",
+            new="docs__new__voyage-context-3__v1",
+        )
+        assert counts["highlights"] == 1
+        rec = db.document_highlights.get("1.2.3")
+        assert rec.collection == "docs__new__voyage-context-3__v1"
+    finally:
+        db.close()
+
+
 def test_list_and_delete(store) -> None:
     store.upsert(_rec(doc_id="1.1.1", source_uri="x-devonthink-item://A"))
     store.upsert(_rec(doc_id="1.1.2", source_uri="x-devonthink-item://B"))

@@ -166,3 +166,7 @@ class DocumentHighlights:
             )
             self.conn.commit()
             return cur.rowcount > 0
+
+    def close(self) -> None:
+        with self._lock:
+            self.conn.close()

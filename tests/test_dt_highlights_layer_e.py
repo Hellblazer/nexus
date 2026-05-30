@@ -44,6 +44,28 @@ def test_extract_highlights_empty_text_is_none() -> None:
         assert dt_extract_highlights("U") is None
 
 
+def test_short_no_content_sentinel_is_none() -> None:
+    from nexus.mcp_client.devonthink import dt_extract_highlights
+    with patch("nexus.mcp_client.devonthink.dt_call",
+               return_value={"text": "No annotations found across 1 source record(s)"}):
+        assert dt_extract_highlights("U") is None
+
+
+def test_long_body_opening_with_sentinel_phrase_is_kept() -> None:
+    """MEDIUM-2: a real highlight blob that merely opens with 'No annotations'
+    prose must NOT be discarded as a no-content sentinel."""
+    from nexus.mcp_client.devonthink import dt_extract_highlights
+    body = (
+        "No annotations were strictly required, but the author's key claim, "
+        "that paged attention dominates throughput, is highlighted here, "
+        "along with twelve supporting passages spanning the whole paper and "
+        "several margin notes the reader added during a second close reading."
+    )
+    assert len(body) > 200
+    with patch("nexus.mcp_client.devonthink.dt_call", return_value={"text": body}):
+        assert dt_extract_highlights("U") == body
+
+
 # ── _ingest_highlights_record ───────────────────────────────────────────────
 
 def _patch_catalog(monkeypatch, tmp_path, tumbler="1.2.3", collection="c"):

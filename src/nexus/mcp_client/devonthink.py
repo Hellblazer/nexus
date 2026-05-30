@@ -210,13 +210,19 @@ def dt_record_name(uuid: str) -> str:
     return name if isinstance(name, str) else ""
 
 
-#: Prefixes DT returns when a record carries zero annotations/mentions. These
-#: are status messages, not content — treated as "no highlights" (None).
+#: Status messages DT returns when a record carries zero annotations/mentions.
+#: These are not content — a result that IS one of these (the whole stripped
+#: body starts with the phrase AND is short) maps to None. The full-phrase form
+#: ("...found") plus a length guard avoids false-positives on a real highlight
+#: blob that merely opens with "No annotations ..." prose.
 _NO_CONTENT_PREFIXES: tuple[str, ...] = (
     "no highlights found",
     "no mentions found",
-    "no annotations",
+    "no annotations found",
 )
+#: A body longer than this is treated as real content even if it opens with a
+#: sentinel-looking phrase (the status messages are short, one-liners).
+_NO_CONTENT_MAX_LEN: int = 200
 
 
 def _dt_markdown_or_none(result: dict[str, Any] | None) -> str | None:
@@ -234,9 +240,16 @@ def _dt_markdown_or_none(result: dict[str, Any] | None) -> str | None:
     if not isinstance(text, str) or not text:
         md = result.get("markdown")
         text = md if isinstance(md, str) else None
-    if not text or not text.strip():
+    stripped = text.strip() if text else ""
+    if not stripped:
         return None
-    if text.strip().lower().startswith(_NO_CONTENT_PREFIXES):
+    # A short body that opens with a "No ... found" status phrase is the
+    # zero-annotation sentinel; a long body that merely mentions the phrase is
+    # real content and is kept.
+    if (
+        len(stripped) <= _NO_CONTENT_MAX_LEN
+        and stripped.lower().startswith(_NO_CONTENT_PREFIXES)
+    ):
         return None
     return text
 

@@ -518,7 +518,7 @@ class T2Database:
         self.close()
 
     def close(self) -> None:
-        """Close all eight domain connections.
+        """Close all domain connections.
 
         Each store closes its own connection under its own lock. The
         close order is reverse of construction so the most recently
@@ -533,6 +533,9 @@ class T2Database:
             except Exception:  # noqa: BLE001
                 pass
             self._catalog = None
+        # Reverse-construction order: document_highlights was built after
+        # aspect_queue (RDR-139 Layer E), so it closes first.
+        self.document_highlights.close()
         self.aspect_queue.close()
         self.document_aspects.close()
         self.chash_index.close()
@@ -600,6 +603,7 @@ class T2Database:
             "chash": 0,
             "aspects": 0,
             "aspect_queue": 0,
+            "highlights": 0,
             "tax_topics": 0,
             "tax_assignments": 0,
             "tax_meta": 0,
@@ -669,6 +673,15 @@ class T2Database:
                 (new, old),
             )
             counts["aspect_queue"] = cur.rowcount
+
+            # document_highlights (RDR-139 Layer E). PK is doc_id (tumbler),
+            # so the denorm collection column cannot collide on rename — a
+            # plain UPDATE suffices (no collision-defense DELETE needed).
+            cur = conn.execute(
+                "UPDATE document_highlights SET collection = ? WHERE collection = ?",
+                (new, old),
+            )
+            counts["highlights"] = cur.rowcount
 
             # taxonomy (three sub-tables)
             cur = conn.execute(
