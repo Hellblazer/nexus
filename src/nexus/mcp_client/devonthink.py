@@ -191,6 +191,20 @@ def dt_set_tags(uuid: str, tags: list[str], *, mode: str = "add") -> bool:
     return result is not None
 
 
+def dt_set_annotation(uuid: str, text: str, *, mode: str = "append") -> bool:
+    """Write an annotation note onto a record. ``True`` on success (Layer F backlink).
+
+    The RDR Layer F design uses this to stamp a backlink to the nexus tumbler.
+    Defaults to ``mode="append"`` so a nexus backlink never clobbers an existing
+    annotation (no-clobber; DEVONthink also auto-checkpoints prior content when
+    the host DB has versioning enabled). Empty text short-circuits to ``False``.
+    """
+    if not text:
+        return False
+    result = dt_call("set_record_annotation", {"uuid": uuid, "text": text, "mode": mode})
+    return result is not None
+
+
 def dt_set_custom_metadata(uuid: str, fields: dict[str, Any], *, mode: str = "merge") -> bool:
     """Write custom-metadata fields onto a record (default merge). ``True`` on success (Layer F)."""
     if not fields:

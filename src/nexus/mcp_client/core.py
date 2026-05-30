@@ -136,14 +136,20 @@ async def open_session(endpoint: MCPEndpoint) -> AsyncIterator[Any]:
     are local so importing this module never costs the ``mcp`` SDK transport
     machinery until a connection is actually opened.
     """
+    import httpx
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
+    from mcp.shared._httpx_utils import create_mcp_http_client
 
-    async with streamablehttp_client(
-        endpoint.url,
+    http_client = create_mcp_http_client(
         headers=dict(endpoint.headers) or None,
-        timeout=endpoint.timeout_s,
-    ) as (read_stream, write_stream, _get_session_id):
+        timeout=httpx.Timeout(endpoint.timeout_s),
+    )
+    async with streamable_http_client(endpoint.url, http_client=http_client) as (
+        read_stream,
+        write_stream,
+        _get_session_id,
+    ):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             yield session

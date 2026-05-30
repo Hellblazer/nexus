@@ -552,6 +552,20 @@ class CatalogStore:
                     "ON documents(physical_collection)"
                 )
 
+        # RDR-139 P1.4 (nexus-ft2i1): index documents.source_uri for existing
+        # databases so the DT inverse-lookup join is not a full table scan.
+        # Probe-guarded for legacy schemas lacking the column.
+        try:
+            self._conn.execute("SELECT source_uri FROM documents LIMIT 0")
+        except sqlite3.OperationalError:
+            pass
+        else:
+            with self._conn:
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_documents_source_uri "
+                    "ON documents(source_uri) WHERE source_uri != ''"
+                )
+
         # RDR-108 K1 (nexus-lh8c): add ON DELETE CASCADE to document_chunks
         # for existing databases that were created before this constraint was
         # declared in the schema. SQLite cannot ALTER a FK constraint in place;

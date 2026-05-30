@@ -60,6 +60,8 @@ def generate_dt_links(
     :mod:`nexus.mcp_client.devonthink` module.
     """
     counts = {"similar": 0, "link": 0}
+    if not dt_uuid:
+        return counts
     if not dt_client.available():
         log.info("dt_link_skipped_unavailable", tumbler=str(this), dt_uuid=dt_uuid)
         return counts
@@ -86,11 +88,14 @@ def generate_dt_links(
 
     if classify:
         proposals = dt_client.dt_call("classify_record", {"uuid": dt_uuid}) or {}
+        # core._parse_result wraps a JSON array as {"result": [...]}; the actual
+        # group-proposal count is the length of that list, not the dict.
+        groups = proposals.get("result", proposals.get("proposals", [])) if isinstance(proposals, dict) else []
         log.info(
             "dt_classify_advisory",
             tumbler=str(this),
             dt_uuid=dt_uuid,
-            proposal_count=len(proposals) if isinstance(proposals, dict) else 0,
+            proposal_count=len(groups) if isinstance(groups, list) else 0,
         )
 
     log.info(

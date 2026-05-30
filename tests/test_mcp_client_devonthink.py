@@ -111,12 +111,27 @@ def test_helpers_fail_soft_when_unavailable(monkeypatch) -> None:
     assert dt.dt_extract_content("Q") is None
     assert dt.dt_set_tags("Q", ["nx-related"]) is False
     assert dt.dt_set_custom_metadata("Q", {"x": "y"}) is False
+    assert dt.dt_set_annotation("Q", "note") is False
 
 
-def test_write_helpers_true_on_success(monkeypatch) -> None:
-    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: {"uuid": "Q", "tags": ["nx-related"]})
+def test_write_helpers_true_on_success_and_pass_no_clobber_mode(monkeypatch) -> None:
+    seen: list[tuple[str, dict]] = []
+
+    def _capture(tool, args=None):
+        seen.append((tool, dict(args or {})))
+        return {"uuid": "Q"}
+
+    monkeypatch.setattr(dt, "dt_call", _capture)
     assert dt.dt_set_tags("Q", ["nx-related"]) is True
     assert dt.dt_set_custom_metadata("Q", {"mddoi": "10.1/x"}) is True
+    assert dt.dt_set_annotation("Q", "see nx tumbler 1.2.3") is True
+
+    by_tool = {tool: args for tool, args in seen}
+    # CA5 no-clobber: writes must be additive/merge, never replace the user's data.
+    assert by_tool["set_record_tags"]["mode"] == "add"
+    assert by_tool["set_record_custom_metadata"]["mode"] == "merge"
+    assert by_tool["set_record_annotation"]["mode"] == "append"
+    assert by_tool["set_record_annotation"]["text"] == "see nx tumbler 1.2.3"
 
 
 def test_write_helpers_reject_empty_input(monkeypatch) -> None:
@@ -124,4 +139,5 @@ def test_write_helpers_reject_empty_input(monkeypatch) -> None:
     monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: pytest.fail("should not call"))
     assert dt.dt_set_tags("Q", []) is False
     assert dt.dt_set_custom_metadata("Q", {}) is False
+    assert dt.dt_set_annotation("Q", "") is False
     assert dt.dt_resolve_doi("") is None

@@ -105,6 +105,23 @@ def test_unavailable_makes_zero_edges(indexed):
     assert cat.links_from(this) == []
 
 
+def test_empty_dt_uuid_makes_no_edges_and_no_calls(indexed):
+    cat, _owner, this, _a, _b = indexed
+    dt = _FakeDT(similar=[{"uuid": "A", "score": 0.9, "name": "alpha"}])
+    counts = generate_dt_links(cat, this, "", dt_client=dt)
+    assert counts == {"similar": 0, "link": 0}
+    assert cat.links_from(this) == []
+
+
+def test_classify_is_advisory_only_no_edges(indexed):
+    cat, _owner, this, _a, _b = indexed
+    dt = _FakeDT(similar=[])
+    counts = generate_dt_links(cat, this, "THIS", classify=True, dt_client=dt)
+    # classify produces no edges (it suggests groups, not record links).
+    assert counts == {"similar": 0, "link": 0}
+    assert dt.classify_calls == 1
+
+
 def test_floor_filters_low_similarity(indexed):
     cat, _owner, this, a, b = indexed
     dt = _FakeDT(similar=[
