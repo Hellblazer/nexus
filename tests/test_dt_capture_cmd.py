@@ -76,7 +76,26 @@ def test_pdf_capture_is_file_backed(runner, monkeypatch) -> None:
     assert file_calls == ["PDF-UUID"]
 
 
-def test_doi_capture_downloads_pdf(runner, monkeypatch) -> None:
+def test_markdown_capture_is_file_backed(runner, monkeypatch) -> None:
+    """SIG-1: a markdown capture is stored by DT as a .md file -> index from the
+    file (file-backed), NOT the AI re-extract (dt_content) path."""
+    from nexus.cli import main
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_capture_web_page",
+                        lambda url, **kw: "MD-UUID")
+    monkeypatch.setattr("nexus.commands.dt._gather_records",
+                        lambda **kw: [(kw["uuids"][0], "/captured.md")])
+    file_calls: list[str] = []
+    monkeypatch.setattr("nexus.commands.dt._index_record",
+                        lambda uuid, path, **kw: file_calls.append(uuid) or True)
+    monkeypatch.setattr("nexus.commands.dt._index_dt_content_record",
+                        lambda uuid, **kw: (_ for _ in ()).throw(AssertionError("markdown must not route to dt_content")))
+    result = runner.invoke(main, ["dt", "capture", "https://e.com", "--type", "markdown"])
+    assert result.exit_code == 0, result.output
+    assert file_calls == ["MD-UUID"]
+
+
+def test_doi_capture_downloads_pdf_and_indexes(runner, monkeypatch) -> None:
     from nexus.cli import main
     monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
     seen = {}
@@ -85,12 +104,52 @@ def test_doi_capture_downloads_pdf(runner, monkeypatch) -> None:
     monkeypatch.setattr("nexus.mcp_client.devonthink.dt_download_pdf_from_doi", _dl)
     monkeypatch.setattr("nexus.commands.dt._gather_records",
                         lambda **kw: [(kw["uuids"][0], "/p.pdf")])
+    indexed: list[str] = []
     monkeypatch.setattr("nexus.commands.dt._index_record",
-                        lambda uuid, path, **kw: True)
+                        lambda uuid, path, **kw: indexed.append(uuid) or True)
     result = runner.invoke(main, ["dt", "capture", "--doi", "10.1/x",
                                   "--contact-email", "me@x.co"])
     assert result.exit_code == 0, result.output
     assert seen == {"doi": "10.1/x", "email": "me@x.co"}
+    assert indexed == ["DOI-UUID"]  # the captured record was actually indexed
+
+
+def test_doi_without_email_warns(runner, monkeypatch) -> None:
+    from nexus.cli import main
+    monkeypatch.delenv("OPENALEX_MAILTO", raising=False)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_download_pdf_from_doi",
+                        lambda doi, **kw: "U")
+    monkeypatch.setattr("nexus.commands.dt._gather_records",
+                        lambda **kw: [(kw["uuids"][0], "/p.pdf")])
+    monkeypatch.setattr("nexus.commands.dt._index_record", lambda uuid, path, **kw: True)
+    result = runner.invoke(main, ["dt", "capture", "--doi", "10.1/x"])
+    assert result.exit_code == 0, result.output
+    assert "Unpaywall open-access PDF discovery is disabled" in result.output
+
+
+def test_empty_file_source_errors(runner, monkeypatch) -> None:
+    from nexus.cli import main
+    result = runner.invoke(main, ["dt", "capture", "--file", ""])
+    assert result.exit_code != 0
+    assert "exactly one capture source" in result.output
+
+
+def test_partial_failure_surfaces_recovery_hint(runner, monkeypatch) -> None:
+    """MEDIUM-4: capture succeeds but indexing fails -> recovery hint + non-zero."""
+    import click as _click
+    from nexus.cli import main
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_capture_web_page",
+                        lambda url, **kw: "ORPHAN-UUID")
+
+    def _boom(**kw):
+        raise _click.ClickException("indexing blew up")
+    monkeypatch.setattr("nexus.commands.dt._gather_records", _boom)
+    result = runner.invoke(main, ["dt", "capture", "https://e.com"])
+    assert result.exit_code != 0
+    assert "ORPHAN-UUID was captured but indexing failed" in result.output
+    assert "nx dt index --uuid ORPHAN-UUID" in result.output
 
 
 def test_capture_failure_is_clean_error(runner, monkeypatch) -> None:
