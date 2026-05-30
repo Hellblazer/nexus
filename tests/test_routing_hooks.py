@@ -76,6 +76,11 @@ def test_deny_envelope_shape():
     assert env["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
     assert env["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert env["hookSpecificOutput"]["reason"] == "blocked because"
+    # Current Claude Code reads permissionDecisionReason on a deny; the
+    # legacy "reason"-only envelope arrived as a bare "denied" with no
+    # cause or remediation. systemMessage surfaces it in the transcript.
+    assert env["hookSpecificOutput"]["permissionDecisionReason"] == "blocked because"
+    assert env["systemMessage"] == "blocked because"
 
 
 def test_warn_envelope_is_allow():

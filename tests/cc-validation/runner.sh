@@ -21,9 +21,14 @@ ONLY_SCENARIO=""
 # Distinct from e2e harness — keeps state separate so concurrent runs don't collide.
 TEST_HOME="${TMPDIR%/}/nexus-cc-val-home"
 TMUX_SESSION="cc-val"
+# Dedicated tmux socket: the harness runs on its OWN socket, invisible to the
+# user's default socket. This is a hard isolation boundary — a kill-session
+# (or even kill-server) here can never touch the interactive session the
+# developer is working in. lib.sh's _tmux wrapper honours NX_TMUX_SOCKET.
+NX_TMUX_SOCKET="cc-val-sock"
 STUB_LOG="$TEST_HOME/stub_calls.log"
 HOOK_LOG="$TEST_HOME/hook.log"
-export TEST_HOME REPO_ROOT TMUX_SESSION STUB_LOG HOOK_LOG
+export TEST_HOME REPO_ROOT TMUX_SESSION STUB_LOG HOOK_LOG NX_TMUX_SOCKET
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -43,7 +48,10 @@ TMUX_SESSION="cc-val"  # override the e2e default after sourcing
 cleanup() {
     echo ""
     echo "Cleaning up..."
-    tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    # Tear down the whole private socket — safe precisely because it is ours
+    # alone (NX_TMUX_SOCKET). Falls back to a scoped kill-session if the
+    # server is already gone.
+    _tmux kill-server 2>/dev/null || _tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     rm -rf "$TEST_HOME"
 }
 trap cleanup EXIT
@@ -134,13 +142,13 @@ export -f write_command
 
 # ─── Start tmux ───────────────────────────────────────────────────────────────
 
-echo "Starting tmux session '$TMUX_SESSION'..."
-echo "  (run 'tmux attach -t $TMUX_SESSION' to watch live)"
+echo "Starting tmux session '$TMUX_SESSION' on private socket '$NX_TMUX_SOCKET'..."
+echo "  (run 'tmux -L $NX_TMUX_SOCKET attach -t $TMUX_SESSION' to watch live)"
 
-tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50
+_tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+_tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50
 
-tmux send-keys -t "$TMUX_SESSION" "source $TEST_HOME/.env.test" Enter
+_tmux send-keys -t "$TMUX_SESSION" "source $TEST_HOME/.env.test" Enter
 sleep 1
 touch "$TEST_HOME/.zshrc"
 

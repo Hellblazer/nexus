@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.4.3] - 2026-05-29
+
+### Fixed
+
+- Routing-hook deny messages now reach the model via `permissionDecisionReason`
+  + `systemMessage` (previously emitted only under the unread `reason` key, so
+  denies arrived as a bare "denied"). The grep→Serena redirect is now
+  backend-agnostic (JetBrains + LSP) and lists concrete remedies.
+
 ## [5.4.2] - 2026-05-29
 
 ### Fixed

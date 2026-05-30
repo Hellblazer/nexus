@@ -311,6 +311,46 @@ def _reset_aspect_worker_singleton() -> None:
     reset_worker_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _reap_spawned_daemons(tmp_path: Path):
+    """nexus-scoo5: reap any T2/T3 daemon a test spawned under its own
+    isolated tmp ``NEXUS_CONFIG_DIR``.
+
+    A test that drives a real ``nx upgrade`` (non-``--auto``) reaches
+    ``upgrade._cycle_daemon_to_current()``, which shells out to ``nx daemon
+    t2 ensure-running`` and spawns a *detached* ``nx daemon t2 start`` bound
+    to the per-test config dir. ``subprocess.run`` returns once the daemon
+    is up, so the process outlives the test body and lingers as an orphan
+    after pytest GCs the tmp dir (observed: three orphan daemons on
+    ``garbage-*/test_force0/.config/nexus/memory.db``).
+
+    The autouse ``_isolate_config_dir`` fixture sets ``NEXUS_CONFIG_DIR`` to
+    ``tmp_path / ".config" / "nexus"``, so a spawned daemon's discovery file
+    lands there. This teardown is the process-level analog of the
+    ``pytest_sessionfinish`` cache-file leak guard: it is scoped strictly to
+    that per-test tmp path (and double-guarded by a cmdline check in
+    ``reap_tmp_daemons``), so it can never signal the user's real daemon,
+    whose discovery file lives under ``~/.config/nexus``.
+
+    Best-effort; never raises. Tests that suppress the spawn at source
+    (patching ``_cycle_daemon_to_current``) make this a no-op.
+    """
+    yield
+    from tests._daemon_leak_guard import reap_tmp_daemons
+
+    # Scoped to the autouse ``_isolate_config_dir`` default
+    # (``tmp_path/.config/nexus``) only. A full-suite sweep confirmed this is
+    # leak-free: the ``tests/daemon`` lifecycle tests that spawn real daemons
+    # under the ``--config-dir str(tmp_path)`` root form self-clean. Scanning
+    # the tmp_path root too would reach the fake discovery files those tests
+    # pre-seed (with mocked ``subprocess.run`` / ``os.kill``) and trip their
+    # "must not spawn" guards at teardown — cost with no proven benefit.
+    try:
+        reap_tmp_daemons(tmp_path / ".config" / "nexus")
+    except BaseException:  # noqa: BLE001 — teardown guard must never fail a test
+        pass
+
+
 def set_credentials(monkeypatch) -> None:
     """Set required T3/Voyage credential env vars for tests that call _has_credentials().
 

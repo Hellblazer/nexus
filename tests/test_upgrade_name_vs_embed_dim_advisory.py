@@ -28,6 +28,20 @@ def _clear_upgrade_done() -> None:
     migrations._upgrade_done.clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_daemon_nudge():
+    """nexus-scoo5: these in-process ``nx upgrade`` invocations would
+    otherwise reach ``_cycle_daemon_to_current()`` and spawn a detached T2
+    daemon under the per-test config dir that nothing reaps. Suppress the
+    daemon cycle at source (mirrors ``test_upgrade_cmd._no_real_daemon_nudge``)
+    — these tests assert advisory text + exit code, not the daemon nudge."""
+    with (
+        patch("nexus.commands.upgrade._cycle_daemon_to_current"),
+        patch("nexus.commands.upgrade._quiesce_daemon"),
+    ):
+        yield
+
+
 class TestUpgradeAdvisory:
     def test_no_advisory_when_no_mismatches(
         self, runner: CliRunner, tmp_path: Path,

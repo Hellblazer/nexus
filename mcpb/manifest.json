@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "conexus",
   "display_name": "Conexus",
-  "version": "5.4.2",
+  "version": "5.4.3",
   "description": "Three-tier semantic memory + knowledge management for Claude Desktop chat. Persistent code/docs/RDR indexing, plan-centric retrieval via nx_answer, and a daemon-mediated storage substrate that interoperates with the Claude Code plugin and the nx CLI on the same host.",
   "long_description": "Conexus is the Claude Desktop Extension form of Nexus. Same MCP tools and storage tiers as the Claude Code plugin and the nx CLI, packaged as a .mcpb bundle that uv resolves on first install. On first launch, the host's T2 daemon is auto-installed (LaunchAgent on macOS, systemd user unit on Linux) so the MCP server has a daemon to talk to. State is shared with any other consumer on the same host (Claude Code plugin, nx CLI, Cowork via SDK bridge).",
   "author": {
