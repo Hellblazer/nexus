@@ -8,12 +8,20 @@ not "no crash":
   ``available()=False`` equals the edge set before; no ``created_by=dt_*`` rows.
 - **Layer F (write-back)**: no DT-side mutation; index/enrich result unchanged,
   exit 0.  *(Added when P1.7 Layer F lands — nexus-x70wg.)*
+- **Layer C (bib enrich)**: DT-CrossRef gap-fill is a no-op — the resolved bib
+  dict equals the primary-backend-only result; ``dt_resolve_doi`` is never
+  called.  *(Added when P2.1 Layer C lands — nexus-8h9t5.)*
+- **Layer D (content)**: non-file-backed records are skipped (no chunks
+  written, ``index_markdown`` never called); file-backed chunks carry NO
+  ``extraction_source`` key (absent == file).  *(P2.2 Layer D — nexus-t62jy.)*
 
 Integration over mocks: a real ``Catalog`` on tmp SQLite; only the DT client's
 ``available()`` is forced False (the genuine fallback trigger).
 """
 
 from __future__ import annotations
+
+from unittest.mock import patch
 
 import pytest
 
@@ -122,3 +130,69 @@ class TestLayerFFallback:
         )
         assert out["skipped"] is True
         assert not any(out[k] for k in ("tags", "annotation", "metadata"))
+
+
+class TestLayerCFallback:
+    """Layer C: DT absent → bib gap-fill is a no-op; primary bib unchanged."""
+
+    def test_dt_crossref_bib_empty_when_dt_down(self):
+        # dt_resolve_doi returns None when DT is unreachable → empty supplement.
+        from nexus.commands.enrich import _dt_crossref_bib
+        with patch("nexus.mcp_client.devonthink.dt_resolve_doi", return_value=None):
+            assert _dt_crossref_bib("10.1/x") == {}
+
+    def test_merge_identity_when_supplement_empty(self):
+        # An empty DT supplement leaves the primary bib EXACTLY as-is.
+        from nexus.commands.enrich import _merge_bib_gapfill
+        primary = {"year": 2024, "venue": "VLDB", "authors": "A", "doi": "10.1/A"}
+        assert _merge_bib_gapfill(primary, {}) == primary
+
+    def test_enrich_source_dt_makes_no_dt_call_when_unavailable(self):
+        # CLI path: available()=False → dt_resolve_doi is never invoked, the
+        # primary miss is skipped, exit 0 (exact pre-RDR-139 behaviour).
+        from unittest.mock import MagicMock
+
+        from click.testing import CliRunner
+        from nexus.commands.enrich import enrich
+
+        meta = {"title": "P", "source_path": "/p.pdf"}
+        with patch("nexus.mcp_client.devonthink.available", return_value=False), \
+             patch("nexus.mcp_client.devonthink.dt_resolve_doi") as mock_resolve, \
+             patch("nexus.bib_enricher_openalex.enrich", return_value={}), \
+             patch("nexus.bib_enricher_openalex.enrich_by_doi", return_value={}), \
+             patch("nexus.db.make_t3") as mock_t3, \
+             patch("nexus.retry._chroma_with_retry") as mock_retry:
+            mock_retry.side_effect = [
+                {"ids": ["c1"], "metadatas": [dict(meta)]},
+                {"ids": ["c1"], "documents": ["body"], "metadatas": [dict(meta)]},
+            ]
+            mock_t3.return_value.get_or_create_collection.return_value = MagicMock()
+            res = CliRunner().invoke(
+                enrich, ["bib", "knowledge__t", "--delay", "0", "--source", "dt"],
+            )
+            assert res.exit_code == 0, res.output
+            mock_resolve.assert_not_called()
+            assert "1 titles had no" in res.output
+
+
+class TestLayerDFallback:
+    """Layer D: DT absent → non-file-backed records skipped; file chunks
+    carry no extraction_source key (absent == file)."""
+
+    def test_dt_content_record_skipped_when_dt_down(self):
+        from nexus.commands.dt import _index_dt_content_record
+        with patch("nexus.doc_indexer.index_markdown") as idx, \
+             patch("nexus.mcp_client.devonthink.dt_extract_content", return_value=None):
+            assert _index_dt_content_record("U", collection="c", corpus="dt") is False
+            idx.assert_not_called()  # never reached the chunking pipeline
+
+    def test_file_backed_chunk_has_no_extraction_source(self):
+        from nexus.metadata_schema import make_chunk_metadata
+        meta = make_chunk_metadata(
+            content_type="markdown",
+            chunk_text_hash="a" * 64,
+            content_hash="b" * 64,
+            indexed_at="2026-05-30T00:00:00Z",
+            embedding_model="voyage-context-3",
+        )
+        assert "extraction_source" not in meta  # absent == file

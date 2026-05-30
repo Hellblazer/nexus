@@ -1180,3 +1180,45 @@ class TestLinkSemantic:
         assert link_calls == ["U1"] and wb_calls == ["U1"]
         assert "semantically linked" in result.output
         assert "written back to DT" in result.output
+
+
+class TestEnrichWiring:
+    """RDR-139 Layer C: ``nx dt index --enrich`` runs a DT-CrossRef bib
+    gap-fill pass over each touched collection after indexing."""
+
+    def test_enrich_runs_bib_enrichment_once_per_collection(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            "nexus.commands.enrich.run_bib_enrichment",
+            lambda coll, **kw: calls.append((coll, kw)),
+        )
+        # Two records, one explicit collection -> a single enrichment pass.
+        fake_selectors["selection"].return_value = [
+            ("U1", "/a.pdf"), ("U2", "/b.pdf"),
+        ]
+        result = runner.invoke(main, [
+            "dt", "index", "--selection",
+            "--collection", "knowledge__test", "--enrich",
+        ])
+        assert result.exit_code == 0, result.output
+        assert calls == [("knowledge__test", {"source": "dt"})]
+        assert "Enriching bibliographic metadata" in result.output
+
+    def test_no_enrich_flag_skips_enrichment(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.enrich.run_bib_enrichment",
+            lambda coll, **kw: calls.append(coll),
+        )
+        fake_selectors["selection"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        assert calls == []

@@ -45,7 +45,9 @@ def _expected_keys_for_content_type(content_type: str) -> set[str]:
         "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
         "bib_semantic_scholar_id",
     }
-    return ALLOWED_TOP_LEVEL - bib_keys - {"git_meta"}
+    # RDR-139 Layer D: ``extraction_source`` defaults to ``file`` and is
+    # dropped by normalize (absent == file); only DT-sourced chunks carry it.
+    return ALLOWED_TOP_LEVEL - bib_keys - {"git_meta", "extraction_source"}
 
 
 def test_factory_emits_full_keyset_for_code() -> None:
@@ -173,6 +175,9 @@ def _full_keyset_minus_optional() -> set[str]:
         "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
         "bib_semantic_scholar_id",
         "git_meta",
+        # RDR-139 Layer D: extraction_source defaults to ``file`` and is
+        # dropped by normalize (absent == file); only DT chunks carry it.
+        "extraction_source",
     }
 
 

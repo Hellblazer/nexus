@@ -1018,6 +1018,7 @@ def _markdown_chunks(
     base_path: Path | None = None,
     git_meta: dict | None = None,
     doc_id: str = "",
+    extraction_source: str = "file",
 ) -> list[tuple[str, str, dict]]:
     """Chunk a Markdown file and return (id, text, metadata) tuples.
 
@@ -1086,6 +1087,7 @@ def _markdown_chunks(
             section_type=chunk.metadata.get("section_type", ""),
             tags="markdown",
             category="prose",
+            extraction_source=extraction_source,
         )
         prepared.append((chunk_id, chunk.text, meta))
     return prepared
@@ -1525,6 +1527,7 @@ def index_markdown(
     content_type: str = "prose",
     base_path: Path | None = None,
     hooks: "HookRegistry | None" = None,
+    extraction_source: str = "file",
 ) -> int | dict:
     """Index *md_path* into a T3 collection.
 
@@ -1584,7 +1587,10 @@ def index_markdown(
         _markdown_chunks,
         base_path=base_path,
         doc_id=doc_id,
-    ) if base_path else partial(_markdown_chunks, doc_id=doc_id)
+        extraction_source=extraction_source,
+    ) if base_path else partial(
+        _markdown_chunks, doc_id=doc_id, extraction_source=extraction_source,
+    )
     source_key = make_relative(md_path, base_path) if base_path else None
     raw = _index_document(
         md_path, corpus, chunk_fn, t3=t3,

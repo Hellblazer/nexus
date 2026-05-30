@@ -197,6 +197,19 @@ def dt_extract_content(uuid: str) -> str | None:
     return None
 
 
+def dt_record_name(uuid: str) -> str:
+    """Display name of a record, or ``""`` (Layer D title source).
+
+    Used to give a non-file-backed record's DT-extracted text a human title
+    for ``derive_title`` / search. Fail-soft: empty string when unavailable.
+    """
+    result = dt_call("get_record_properties", {"uuid": uuid})
+    if not result:
+        return ""
+    name = result.get("name")
+    return name if isinstance(name, str) else ""
+
+
 def dt_set_tags(uuid: str, tags: list[str], *, mode: str = "add") -> bool:
     """Write tags onto a record (default additive). ``True`` on success (Layer F)."""
     if not tags:

@@ -105,6 +105,12 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     # provenance JSON blob): zero non-self-referential readers in
     # src/. Catalog Document carries source git provenance at the
     # document level.
+    # Provenance (1) — RDR-139 Layer D. How the chunk's text was sourced:
+    # ``file`` (on-disk file, the default) | ``dt_content`` | ``dt_ocr`` |
+    # ``dt_transcribe`` (DEVONthink-extracted, for non-file-backed records).
+    # ``normalize`` drops the ``file`` default (absent == file) so only
+    # DT-sourced chunks spend the extra key — file chunks stay under the cap.
+    "extraction_source",
 })
 
 #: Allowed content_type values. Replaces the old overlapping pair
@@ -201,6 +207,13 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
         for field in _BIB_FIELDS:
             normalised.pop(field, None)
 
+    # Step 2c: drop the RDR-139 Layer D provenance key when it carries the
+    # ``file`` default (or is empty). Absent == file. Only DT-sourced chunks
+    # (``dt_content`` / ``dt_ocr`` / ``dt_transcribe``) keep the key, so the
+    # common file-backed chunk stays one key under the cap.
+    if normalised.get("extraction_source", "file") in ("", "file"):
+        normalised.pop("extraction_source", None)
+
     # Step 3: stamp content_type.
     normalised["content_type"] = content_type
 
@@ -289,6 +302,8 @@ def make_chunk_metadata(
     frecency_score: float = 0.0,
     source_agent: str = "nexus-indexer",
     session_id: str = "",
+    # Provenance — RDR-139 Layer D. ``file`` default is dropped by normalize.
+    extraction_source: str = "file",
 ) -> dict[str, Any]:
     """Build a complete chunk metadata dict and route through
     :func:`normalize` so it's safe to write directly to T3.
@@ -326,6 +341,7 @@ def make_chunk_metadata(
         "frecency_score": frecency_score,
         "source_agent": source_agent,
         "session_id": session_id,
+        "extraction_source": extraction_source,
     }
     return normalize(raw, content_type=content_type)
 

@@ -263,6 +263,97 @@ def _writeback_record(uuid: str) -> bool:
         cat._db.close()
 
 
+#: RDR-139 Layer D extraction-source provenance values for DT-sourced text.
+#: Only ``dt_content`` (extract_record_content) is routed today; ``dt_ocr``
+#: (ocr_record, scanned PDFs/images) and ``dt_transcribe`` (transcribe_record,
+#: A/V) are enum-ready but unrouted — deferred to nexus-39b0f, surfaced at
+#: Phase 2 close (substantive-critic), not silent scope reduction.
+_DT_EXTRACTION_SOURCES: frozenset[str] = frozenset(
+    {"dt_content", "dt_ocr", "dt_transcribe"}
+)
+
+
+def _index_dt_content_record(
+    uuid: str,
+    *,
+    collection: str,
+    corpus: str,
+    extraction_source: str = "dt_content",
+) -> bool:
+    """RDR-139 Layer D: index a non-file-backed DT record from DT-extracted
+    text (rather than an on-disk file).
+
+    Sources the AI-optimised body via :func:`devonthink.dt_extract_content`,
+    writes it through the existing Markdown chunking pipeline with every chunk
+    stamped ``extraction_source`` (``dt_content`` by default), and stamps the
+    DT identity (``x-devonthink-item://<uuid>``) onto the catalog entry so the
+    record is addressable even though no real file backs it.
+
+    Fail-soft: empty/unavailable DT text -> ``False`` (the caller skips the
+    record), never an exception. Returns ``True`` only when chunks were written
+    AND the DT identity was stamped.
+
+    The extracted text is cached at a STABLE per-UUID path
+    (``<catalog>/.dt-content/<uuid>.md``) rather than a throwaway temp file
+    (code-review HIGH-1). A throwaway path breaks re-index idempotency — the
+    catalog dedups by ``file_path``, so a fresh random name each run would
+    accumulate a duplicate entry per re-index and leave the row's
+    ``file_path`` pointing at a deleted file (a ghost path). The stable path
+    makes the catalog ``by_file_path`` lookup hit on re-index and keeps the
+    ``file_path`` column resolvable; the DT identity (``source_uri``) is still
+    the canonical reference.
+    """
+    import json  # noqa: PLC0415
+
+    from nexus.config import catalog_path  # noqa: PLC0415
+    from nexus.doc_indexer import index_markdown  # noqa: PLC0415
+    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+
+    if extraction_source not in _DT_EXTRACTION_SOURCES:
+        raise ValueError(
+            f"extraction_source {extraction_source!r} not a DT source "
+            f"{sorted(_DT_EXTRACTION_SOURCES)}"
+        )
+
+    text = _dt.dt_extract_content(uuid)
+    if not text or not text.strip():
+        _log.warning("dt_content_empty", uuid=uuid, extraction_source=extraction_source)
+        return False
+
+    name = _dt.dt_record_name(uuid) or uuid
+    # JSON-quote the title so a name with a colon / quote can't break the
+    # strict frontmatter parse. The body follows verbatim.
+    front = f"---\ntitle: {json.dumps(name)}\n---\n\n{text}"
+
+    cache_dir = catalog_path() / ".dt-content"
+    cache_path = cache_dir / f"{uuid}.md"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(front, encoding="utf-8")
+        count = index_markdown(
+            cache_path,
+            corpus=corpus,
+            collection_name=collection,
+            extraction_source=extraction_source,
+        )
+        if not count:
+            # We had non-empty text above, so a 0-chunk return is the
+            # index_markdown staleness skip: this record's content is already
+            # indexed and unchanged. That is a benign idempotent no-op (the
+            # catalog row is not duplicated), not a failure — log at debug.
+            _log.debug("dt_content_unchanged", uuid=uuid)
+            return False
+        return _stamp_dt_uri_on_entry(cache_path, uuid)
+    except (RuntimeError, ImportError, OSError) as exc:
+        _log.error(
+            "dt_content_index_failed",
+            uuid=uuid,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return False
+
+
 @click.group("dt")
 def dt() -> None:
     """DEVONthink integration verbs (macOS only).
@@ -367,6 +458,33 @@ def dt() -> None:
         "default off."
     ),
 )
+@click.option(
+    "--enrich",
+    "enrich",
+    is_flag=True,
+    default=False,
+    help=(
+        "After indexing, run a DT-CrossRef bibliographic gap-fill pass over "
+        "each touched collection (RDR-139 Layer C): the 'auto' primary "
+        "backend, then DEVONthink's CrossRef resolver fills only still-empty "
+        "bib_* fields. Strictly lowest-precedence; never overwrites an "
+        "S2/OpenAlex value. DT unavailable -> primary-only. Opt-in, default off."
+    ),
+)
+@click.option(
+    "--dt-content",
+    "dt_content",
+    is_flag=True,
+    default=False,
+    help=(
+        "Index non-file-backed records (web archives, bookmarks, formatted "
+        "notes — anything without a .pdf/.md file) from DEVONthink's "
+        "AI-extracted text instead of skipping them (RDR-139 Layer D). Every "
+        "chunk is stamped extraction_source=dt_content; file-backed records "
+        "still index from their file (provenance absent == file). DT "
+        "unavailable -> records skipped exactly as today. Opt-in, default off."
+    ),
+)
 def index_cmd(
     use_selection: bool,
     tag: str | None,
@@ -379,6 +497,8 @@ def index_cmd(
     dry_run: bool,
     link_semantic: bool,
     writeback: bool,
+    enrich: bool,
+    dt_content: bool,
 ) -> None:
     """Index DEVONthink records into Nexus.
 
@@ -430,10 +550,40 @@ def index_cmd(
     stamp_failed = 0
     written_back = 0
     linked = 0
+    content_extracted = 0
+    touched_collections: set[str] = set()
     failed: list[tuple[str, str, str]] = []  # (uuid, path, error)
+
+    # RDR-139 Layer D: only probe DT availability once, and only when the
+    # opt-in flag is set. Flag off -> the unsupported-extension skip path is
+    # byte-identical to today (Gap 0).
+    dt_content_active = False
+    if dt_content:
+        from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+
+        dt_content_active = _dt.available()
+
     for uuid, path in records:
         ext = Path(path).suffix.lower()
         if ext not in _SUPPORTED_EXTS:
+            # RDR-139 Layer D: non-file-backed record. With --dt-content and a
+            # reachable DT, index it from DT-extracted text; otherwise skip
+            # exactly as before.
+            if dt_content_active:
+                dt_collection = _resolve_dt_collection(collection, corpus, ext)
+                if _index_dt_content_record(
+                    uuid, collection=dt_collection, corpus=corpus,
+                ):
+                    content_extracted += 1
+                    indexed += 1
+                    touched_collections.add(dt_collection)
+                    if link_semantic and _link_semantic_record(uuid):
+                        linked += 1
+                    if writeback and _writeback_record(uuid):
+                        written_back += 1
+                else:
+                    skipped += 1
+                continue
             _log.warning(
                 "dt_skip_unsupported_extension",
                 uuid=uuid,
@@ -470,6 +620,7 @@ def index_cmd(
             failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
             continue
         indexed += 1
+        touched_collections.add(resolved_collection)
         if not stamped:
             stamp_failed += 1
             continue
@@ -477,7 +628,20 @@ def index_cmd(
             linked += 1
         if writeback and _writeback_record(uuid):
             written_back += 1
+
+    # RDR-139 Layer C: gap-fill bibliographic metadata over the collections we
+    # just wrote to. Runs once per distinct collection (title-group oriented),
+    # after all records land so a multi-record paper enriches as one group.
+    if enrich and touched_collections:
+        from nexus.commands.enrich import run_bib_enrichment
+
+        for coll in sorted(touched_collections):
+            click.echo(f"\nEnriching bibliographic metadata: {coll}")
+            run_bib_enrichment(coll, source="dt")
+
     summary = f"Indexed {indexed} record(s) ({skipped} skipped"
+    if content_extracted:
+        summary += f", {content_extracted} from DT content"
     if link_semantic:
         summary += f", {linked} semantically linked"
     if writeback:

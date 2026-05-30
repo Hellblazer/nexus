@@ -138,7 +138,7 @@ def enrich() -> None:
 )
 @click.option(
     "--source",
-    type=click.Choice(["auto", "s2", "openalex"], case_sensitive=False),
+    type=click.Choice(["auto", "s2", "openalex", "dt"], case_sensitive=False),
     default="auto",
     show_default=True,
     help=(
@@ -147,7 +147,11 @@ def enrich() -> None:
         "academic email required for key issuance). ``openalex`` "
         "queries OpenAlex (no key; set OPENALEX_MAILTO for the polite "
         "pool). ``auto`` picks ``s2`` when S2_API_KEY is set, else "
-        "``openalex``."
+        "``openalex``. ``dt`` (RDR-139 Layer C) runs the ``auto`` "
+        "primary backend and then gap-fills any still-empty ``bib_*`` "
+        "field from DEVONthink's CrossRef resolver — strictly "
+        "lowest-precedence, never overwriting an S2/OpenAlex value. "
+        "When DEVONthink is unavailable it degrades to ``auto`` exactly."
     ),
 )
 def enrich_bib(
@@ -165,11 +169,35 @@ def enrich_bib(
     Already-enriched chunks (the backend's ID field is non-empty) are
     skipped — the command is idempotent per backend.
     """
+    run_bib_enrichment(collection, delay=delay, limit=limit, source=source)
+
+
+def run_bib_enrichment(
+    collection: str, *, delay: float = 0.5, limit: int = 0, source: str = "auto",
+) -> None:
+    """Core of ``nx enrich bib``; also invoked by ``nx dt index --enrich``
+    (RDR-139 Layer C) to run a DT-CrossRef gap-fill pass over a freshly
+    indexed collection. ``source="dt"`` enables the gap-fill layer."""
     from nexus.db import make_t3
     from nexus.retry import _chroma_with_retry
 
-    backend, bib_enrich, id_field = _resolve_bib_backend(source)
-    click.echo(f"Backend: {backend} (id field: {id_field})")
+    # RDR-139 Layer C: ``--source dt`` is the ``auto`` primary backend plus a
+    # lowest-precedence DT-CrossRef gap-fill pass. Resolve the primary first.
+    dt_gapfill = source.lower() == "dt"
+    backend, bib_enrich, id_field = _resolve_bib_backend(
+        "auto" if dt_gapfill else source
+    )
+    dt_available = False
+    if dt_gapfill:
+        from nexus.mcp_client import devonthink as _dt
+
+        dt_available = _dt.available()
+        click.echo(
+            f"Backend: {backend} (id field: {id_field}) "
+            + ("+ DT-CrossRef gap-fill" if dt_available else "(DT unavailable; primary only)")
+        )
+    else:
+        click.echo(f"Backend: {backend} (id field: {id_field})")
 
     db = make_t3()
     col = db.get_or_create_collection(collection)
@@ -232,14 +260,40 @@ def enrich_bib(
         if i > 0:
             time.sleep(delay)
 
+        title_source_paths = sorted(title_to_source_paths.get(title, set()))
+        # Extract the record's DOI/arXiv identifiers once, up front, when
+        # either the OpenAlex primary path or the DT-CrossRef gap-fill will
+        # need them. Sharing the scan keeps the chunk read single-pass.
+        ids = None
+        if backend == "openalex" or dt_available:
+            ids = _extract_identifiers_for_title(
+                chunk_ids=chunk_ids, source_paths=title_source_paths, col=col,
+            )
+
         bib = _resolve_bib_for_title(
             title=title,
             chunk_ids=chunk_ids,
-            source_paths=sorted(title_to_source_paths.get(title, set())),
+            source_paths=title_source_paths,
             col=col,
             backend=backend,
             bib_enrich=bib_enrich,
+            ids=ids,
         )
+        # RDR-139 Layer C: gap-fill still-empty bib_* fields from DT-CrossRef.
+        # DT is strictly lowest-precedence — it fills only fields the primary
+        # backend left empty/zero and never overwrites a set value. The actual
+        # DT round-trip is DOI-gated below (``if doi``), so a partial-S2 record
+        # with no extractable DOI triggers no DT call — only the cheap, already
+        # -needed identifier scan runs.
+        if dt_available and (
+            not bib
+            or not all(bib.get(k) for k in ("year", "venue", "authors"))
+        ):
+            doi = (ids or {}).get("doi") or ""
+            if doi:
+                dt_bib = _dt_crossref_bib(doi)
+                if dt_bib:
+                    bib = _merge_bib_gapfill(bib, dt_bib)
         if bib.get("_resolved_via") in ("doi", "arxiv"):
             by_id_count += 1
             bib = {k: v for k, v in bib.items() if k != "_resolved_via"}
@@ -338,48 +392,25 @@ def enrich_bib(
             _log.debug("auto_citation_links_failed", exc_info=True)
 
 
-def _resolve_bib_for_title(
-    *,
-    title: str,
-    chunk_ids: list,
-    source_paths: list[str],
-    col,
-    backend: str,
-    bib_enrich,
+def _extract_identifiers_for_title(
+    *, chunk_ids: list, source_paths: list[str], col,
 ) -> dict:
-    """nexus-sbzr: DOI/arXiv-aware lookup with title fallback.
+    """Scan a title group's chunk text + filename for a DOI / arXiv ID.
 
-    Tries identifiers in order:
-      1. DOI extracted from first chunk's body text -> openalex by-doi
-      2. arXiv ID from filename or first chunk text -> openalex by-arxiv
-      3. Title search at the backend (current behavior)
+    Returns the ``extract_identifiers`` dict (``{"doi": ..., "arxiv": ...}``).
+    Shared by the OpenAlex direct-lookup path and the RDR-139 Layer C
+    DT-CrossRef gap-fill so the chunk scan happens at most once per title.
 
-    Returns the bib dict with a synthetic ``_resolved_via`` key
-    indicating which path produced the result (caller strips before
-    storage). Empty dict on miss across all three paths.
-
-    DOI/arXiv lookups are OpenAlex-only today; the S2 backend skips
-    straight to title search. If S2 ever adds direct-DOI lookup we
-    can extend the dispatcher.
+    Scans ALL chunks: Docling's reading-order extraction can put the page-1
+    DOI text into chunks 0-4 OR much deeper depending on column layout,
+    abstract length, and figure placement (live evidence on knowledge__delos:
+    9/15 papers have an extractable DOI somewhere in full text but only 2/15
+    in the first 5 chunks). Concatenating one title group is cheap — ChromaDB
+    reads are free, the regex is bounded, the direct lookup is unambiguous.
     """
-    if backend != "openalex":
-        bib = bib_enrich(title)
-        if bib:
-            bib["_resolved_via"] = "title"
-        return bib or {}
-
-    from nexus.bib_enricher_openalex import enrich_by_arxiv_id, enrich_by_doi
     from nexus.bib_extractor import extract_identifiers
     from nexus.retry import _chroma_with_retry
 
-    # Scan ALL chunks for DOI/arXiv ID. Docling's reading-order
-    # extraction can put the page-1 DOI text into chunks 0-4 OR much
-    # deeper, depending on column layout, abstract length, and figure
-    # placement (live evidence on knowledge__delos: 9/15 papers have
-    # an extractable DOI somewhere in their full text but only 2/15
-    # have it in the first 5 chunks). Concatenating all chunks of one
-    # title group is cheap — ChromaDB reads are free, the regex is
-    # bounded, and the OpenAlex direct lookup is unambiguous.
     body_text = ""
     filename = ""
     if chunk_ids:
@@ -403,13 +434,121 @@ def _resolve_bib_for_title(
                             break
             body_text = "\n".join(collected_docs)
         except Exception as exc:
-            _log.debug("enrich_chunk_scan_failed", title=title, error=str(exc))
+            _log.debug("enrich_chunk_scan_failed", error=str(exc))
 
     # Filename fallback when chunk metadata didn't carry source_path.
     if not filename and source_paths:
         filename = source_paths[0]
 
-    ids = extract_identifiers(filename=filename, body_text=body_text)
+    return extract_identifiers(filename=filename, body_text=body_text)
+
+
+def _crossref_author_str(a: object) -> str:
+    """Coerce one CrossRef author entry to a display string. Accepts a plain
+    string (live DT shape) or a ``{"given","family"}`` dict (CrossRef native)."""
+    if isinstance(a, str):
+        return a.strip()
+    if isinstance(a, dict):
+        return " ".join(
+            p for p in (str(a.get("given", "")).strip(), str(a.get("family", "")).strip()) if p
+        )
+    return ""
+
+
+def _dt_crossref_bib(doi: str) -> dict:
+    """RDR-139 Layer C: resolve ``doi`` to a nexus bib dict via DEVONthink's
+    CrossRef resolver, or ``{}`` when DT misses / is unavailable.
+
+    Maps the live ``resolve_doi_metadata`` shape (a flat dict; ``year`` is a
+    string, ``authors`` a list) onto the same keys the S2/OpenAlex enrichers
+    emit. CrossRef carries no citation count, so ``citation_count`` is 0 — a
+    permanent gap DT never fills.
+    """
+    # nexus-fqsm5 (deferred, surfaced at Phase 2 close): RDR §Approach Layer C
+    # also names search_crossref (title fallback for DOI-less records) and
+    # resolve_google_books_metadata (books). Only the DOI path ships here; the
+    # title/books fallbacks are tracked, not silently dropped.
+    if not doi:
+        return {}
+    from nexus.mcp_client import devonthink as _dt
+
+    raw = _dt.dt_resolve_doi(doi)
+    if not raw:
+        return {}
+    year_raw = raw.get("year")
+    try:
+        year = int(str(year_raw)) if year_raw else 0
+    except (TypeError, ValueError):
+        year = 0
+    authors = raw.get("authors")
+    if isinstance(authors, list):
+        # Live DT returns author strings, but CrossRef's native shape is
+        # ``[{"given","family"}]``; handle both so a dict form doesn't
+        # silently collapse to an empty author list.
+        authors_str = ", ".join(
+            s for s in (_crossref_author_str(a) for a in authors[:5]) if s
+        )
+    else:
+        authors_str = str(authors or "")
+    return {
+        "year": year,
+        "venue": raw.get("journal", "") or "",
+        "authors": authors_str,
+        "citation_count": 0,
+        "doi": raw.get("doi", "") or doi,
+    }
+
+
+def _merge_bib_gapfill(primary: dict, supplement: dict) -> dict:
+    """Per-field gap-fill: copy a ``supplement`` value into ``primary`` only
+    where ``primary`` left the field empty/zero/absent, and never overwrite a
+    set value (RDR-139 Layer C precedence guard). Falsy supplement values are
+    never inserted. The guard is per-field, not call-ordering."""
+    merged = dict(primary)
+    for k, v in supplement.items():
+        if v and not merged.get(k):
+            merged[k] = v
+    return merged
+
+
+def _resolve_bib_for_title(
+    *,
+    title: str,
+    chunk_ids: list,
+    source_paths: list[str],
+    col,
+    backend: str,
+    bib_enrich,
+    ids: dict | None = None,
+) -> dict:
+    """nexus-sbzr: DOI/arXiv-aware lookup with title fallback.
+
+    Tries identifiers in order:
+      1. DOI extracted from first chunk's body text -> openalex by-doi
+      2. arXiv ID from filename or first chunk text -> openalex by-arxiv
+      3. Title search at the backend (current behavior)
+
+    Returns the bib dict with a synthetic ``_resolved_via`` key
+    indicating which path produced the result (caller strips before
+    storage). Empty dict on miss across all three paths.
+
+    ``ids`` may be supplied by the caller (the enrich loop pre-extracts them
+    when both the primary path and the Layer C gap-fill need them); when
+    ``None`` they are scanned here. DOI/arXiv lookups are OpenAlex-only today;
+    the S2 backend skips straight to title search.
+    """
+    if backend != "openalex":
+        bib = bib_enrich(title)
+        if bib:
+            bib["_resolved_via"] = "title"
+        return bib or {}
+
+    from nexus.bib_enricher_openalex import enrich_by_arxiv_id, enrich_by_doi
+
+    if ids is None:
+        ids = _extract_identifiers_for_title(
+            chunk_ids=chunk_ids, source_paths=source_paths, col=col,
+        )
 
     if ids["doi"]:
         # nexus-yy1m: pass our title so the OpenAlex backend can reject
