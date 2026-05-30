@@ -28,17 +28,23 @@ def test_index_dt_content_happy_path(
     mock_name: MagicMock,
     mock_index: MagicMock,
     mock_stamp: MagicMock,
+    tmp_path,
 ) -> None:
     from nexus.commands.dt import _index_dt_content_record
 
-    ok = _index_dt_content_record(
-        "U1", collection="docs__dt__voyage-context-3__v1", corpus="dt",
-    )
+    with patch("nexus.config.catalog_path", return_value=tmp_path):
+        ok = _index_dt_content_record(
+            "U1", collection="docs__dt__voyage-context-3__v1", corpus="dt",
+        )
     assert ok is True
     # index_markdown stamped extraction_source=dt_content on the write path
     assert mock_index.call_args.kwargs["extraction_source"] == "dt_content"
     assert mock_index.call_args.kwargs["collection_name"] == "docs__dt__voyage-context-3__v1"
     mock_stamp.assert_called_once()
+    # text cached at a STABLE per-uuid path (re-index idempotency, HIGH-1)
+    cached = mock_index.call_args.args[0]
+    assert cached == tmp_path / ".dt-content" / "U1.md"
+    assert cached.exists()
 
 
 @patch("nexus.doc_indexer.index_markdown")
@@ -58,10 +64,35 @@ def test_index_dt_content_empty_text_skips(
 @patch("nexus.mcp_client.devonthink.dt_extract_content", return_value="body")
 def test_index_dt_content_zero_chunks_is_false(
     mock_extract: MagicMock, mock_name: MagicMock, mock_index: MagicMock,
+    tmp_path,
 ) -> None:
     from nexus.commands.dt import _index_dt_content_record
 
-    assert _index_dt_content_record("U1", collection="c", corpus="dt") is False
+    with patch("nexus.config.catalog_path", return_value=tmp_path):
+        assert _index_dt_content_record("U1", collection="c", corpus="dt") is False
+
+
+@patch("nexus.commands.dt._stamp_dt_uri_on_entry", return_value=True)
+@patch("nexus.doc_indexer.index_markdown", return_value=2)
+@patch("nexus.mcp_client.devonthink.dt_record_name", return_value="Clip")
+@patch("nexus.mcp_client.devonthink.dt_extract_content", return_value="body")
+def test_reindex_uses_same_stable_path(
+    mock_extract: MagicMock,
+    mock_name: MagicMock,
+    mock_index: MagicMock,
+    mock_stamp: MagicMock,
+    tmp_path,
+) -> None:
+    """Two indexes of the same UUID resolve to the SAME path so the catalog
+    by_file_path lookup dedups on re-index (HIGH-1 idempotency)."""
+    from nexus.commands.dt import _index_dt_content_record
+
+    with patch("nexus.config.catalog_path", return_value=tmp_path):
+        _index_dt_content_record("U9", collection="c", corpus="dt")
+        _index_dt_content_record("U9", collection="c", corpus="dt")
+    p1 = mock_index.call_args_list[0].args[0]
+    p2 = mock_index.call_args_list[1].args[0]
+    assert p1 == p2 == tmp_path / ".dt-content" / "U9.md"
 
 
 def test_index_dt_content_rejects_non_dt_source() -> None:

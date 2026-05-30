@@ -281,7 +281,10 @@ def run_bib_enrichment(
         )
         # RDR-139 Layer C: gap-fill still-empty bib_* fields from DT-CrossRef.
         # DT is strictly lowest-precedence — it fills only fields the primary
-        # backend left empty/zero and never overwrites a set value.
+        # backend left empty/zero and never overwrites a set value. The actual
+        # DT round-trip is DOI-gated below (``if doi``), so a partial-S2 record
+        # with no extractable DOI triggers no DT call — only the cheap, already
+        # -needed identifier scan runs.
         if dt_available and (
             not bib
             or not all(bib.get(k) for k in ("year", "venue", "authors"))
@@ -440,6 +443,18 @@ def _extract_identifiers_for_title(
     return extract_identifiers(filename=filename, body_text=body_text)
 
 
+def _crossref_author_str(a: object) -> str:
+    """Coerce one CrossRef author entry to a display string. Accepts a plain
+    string (live DT shape) or a ``{"given","family"}`` dict (CrossRef native)."""
+    if isinstance(a, str):
+        return a.strip()
+    if isinstance(a, dict):
+        return " ".join(
+            p for p in (str(a.get("given", "")).strip(), str(a.get("family", "")).strip()) if p
+        )
+    return ""
+
+
 def _dt_crossref_bib(doi: str) -> dict:
     """RDR-139 Layer C: resolve ``doi`` to a nexus bib dict via DEVONthink's
     CrossRef resolver, or ``{}`` when DT misses / is unavailable.
@@ -449,6 +464,10 @@ def _dt_crossref_bib(doi: str) -> dict:
     emit. CrossRef carries no citation count, so ``citation_count`` is 0 — a
     permanent gap DT never fills.
     """
+    # nexus-fqsm5 (deferred, surfaced at Phase 2 close): RDR §Approach Layer C
+    # also names search_crossref (title fallback for DOI-less records) and
+    # resolve_google_books_metadata (books). Only the DOI path ships here; the
+    # title/books fallbacks are tracked, not silently dropped.
     if not doi:
         return {}
     from nexus.mcp_client import devonthink as _dt
@@ -463,7 +482,12 @@ def _dt_crossref_bib(doi: str) -> dict:
         year = 0
     authors = raw.get("authors")
     if isinstance(authors, list):
-        authors_str = ", ".join(a for a in authors[:5] if isinstance(a, str))
+        # Live DT returns author strings, but CrossRef's native shape is
+        # ``[{"given","family"}]``; handle both so a dict form doesn't
+        # silently collapse to an empty author list.
+        authors_str = ", ".join(
+            s for s in (_crossref_author_str(a) for a in authors[:5]) if s
+        )
     else:
         authors_str = str(authors or "")
     return {

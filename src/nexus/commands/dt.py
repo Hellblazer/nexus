@@ -264,6 +264,10 @@ def _writeback_record(uuid: str) -> bool:
 
 
 #: RDR-139 Layer D extraction-source provenance values for DT-sourced text.
+#: Only ``dt_content`` (extract_record_content) is routed today; ``dt_ocr``
+#: (ocr_record, scanned PDFs/images) and ``dt_transcribe`` (transcribe_record,
+#: A/V) are enum-ready but unrouted — deferred to nexus-39b0f, surfaced at
+#: Phase 2 close (substantive-critic), not silent scope reduction.
 _DT_EXTRACTION_SOURCES: frozenset[str] = frozenset(
     {"dt_content", "dt_ocr", "dt_transcribe"}
 )
@@ -288,10 +292,20 @@ def _index_dt_content_record(
     Fail-soft: empty/unavailable DT text -> ``False`` (the caller skips the
     record), never an exception. Returns ``True`` only when chunks were written
     AND the DT identity was stamped.
+
+    The extracted text is cached at a STABLE per-UUID path
+    (``<catalog>/.dt-content/<uuid>.md``) rather than a throwaway temp file
+    (code-review HIGH-1). A throwaway path breaks re-index idempotency — the
+    catalog dedups by ``file_path``, so a fresh random name each run would
+    accumulate a duplicate entry per re-index and leave the row's
+    ``file_path`` pointing at a deleted file (a ghost path). The stable path
+    makes the catalog ``by_file_path`` lookup hit on re-index and keeps the
+    ``file_path`` column resolvable; the DT identity (``source_uri``) is still
+    the canonical reference.
     """
     import json  # noqa: PLC0415
-    import tempfile  # noqa: PLC0415
 
+    from nexus.config import catalog_path  # noqa: PLC0415
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415
     from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
 
@@ -311,15 +325,13 @@ def _index_dt_content_record(
     # strict frontmatter parse. The body follows verbatim.
     front = f"---\ntitle: {json.dumps(name)}\n---\n\n{text}"
 
-    tmp_path: Path | None = None
+    cache_dir = catalog_path() / ".dt-content"
+    cache_path = cache_dir / f"{uuid}.md"
     try:
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".md", delete=False, encoding="utf-8"
-        ) as fh:
-            fh.write(front)
-            tmp_path = Path(fh.name)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(front, encoding="utf-8")
         count = index_markdown(
-            tmp_path,
+            cache_path,
             corpus=corpus,
             collection_name=collection,
             extraction_source=extraction_source,
@@ -327,7 +339,7 @@ def _index_dt_content_record(
         if not count:
             _log.warning("dt_content_no_chunks", uuid=uuid)
             return False
-        return _stamp_dt_uri_on_entry(tmp_path, uuid)
+        return _stamp_dt_uri_on_entry(cache_path, uuid)
     except (RuntimeError, ImportError, OSError) as exc:
         _log.error(
             "dt_content_index_failed",
@@ -336,9 +348,6 @@ def _index_dt_content_record(
             error_type=type(exc).__name__,
         )
         return False
-    finally:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
 
 
 @click.group("dt")

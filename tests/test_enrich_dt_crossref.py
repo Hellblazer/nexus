@@ -53,6 +53,19 @@ def test_dt_crossref_bib_unresolvable_returns_empty() -> None:
         assert _dt_crossref_bib("10.0/nope") == {}
 
 
+def test_dt_crossref_bib_handles_crossref_author_dicts() -> None:
+    """CrossRef's native ``{given, family}`` author shape coerces to a string
+    rather than silently collapsing to empty (code-review MEDIUM-2)."""
+    raw = {
+        "doi": "10.1/x", "journal": "J", "year": "2020",
+        "authors": [{"given": "Ada", "family": "Lovelace"},
+                    {"given": "Alan", "family": "Turing"}],
+    }
+    with patch("nexus.mcp_client.devonthink.dt_resolve_doi", return_value=raw):
+        bib = _dt_crossref_bib("10.1/x")
+    assert bib["authors"] == "Ada Lovelace, Alan Turing"
+
+
 def test_dt_crossref_bib_handles_nonnumeric_year() -> None:
     """A malformed year coerces to 0 rather than raising."""
     raw = {"doi": "10.1/x", "journal": "J", "authors": [], "year": "n.d."}
