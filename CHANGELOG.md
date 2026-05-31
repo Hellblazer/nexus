@@ -6,6 +6,66 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.5.0] - 2026-05-31
+
+### Added
+
+- **RDR-139: DEVONthink MCP integration.** A nexus-owned bridge to DEVONthink's
+  built-in MCP server, exposed through both the `nx dt` CLI and a new
+  agent-surface MCP server. Every layer is opt-in and degrades cleanly to
+  pre-RDR-139 behaviour when DEVONthink is absent (Gap 0).
+  - `nx dt capture <url>` / `--doi` / `--file`: capture a web page, a DOI's
+    open-access PDF (Unpaywall), or a loose file into DEVONthink and index it
+    end to end, in one verb (Layer G). The one DT-bound verb: exits non-zero
+    when DEVONthink is not running.
+  - `nx dt index` layered opt-in flags: `--link-semantic` (DT-derived `relates`
+    edges to similarity + explicit-link neighbours, Layer B), `--writeback`
+    (stamp the nexus identity back onto the DT record: `nx-indexed` /
+    `nx-tumbler` tags + a tumbler backlink, Layer F), `--enrich` (DT-CrossRef
+    bibliographic gap-fill, lowest precedence, Layer C), `--dt-content` (index
+    non-file-backed records from DT-extracted text, stamped
+    `extraction_source`, Layer D), `--highlights` (ingest DT highlights and
+    mentions, Layer E), and `--extractor [auto|docling|mineru]` (PDF backend,
+    with the `docling` formula-stripped recovery).
+  - `nx dt highlights <tumbler|uuid>`: read the ingested highlights for a record.
+  - `nx enrich bib --source dt`: DT-CrossRef as a lowest-precedence
+    bibliographic gap-filler (S2 > OpenAlex > DT-CrossRef), filling only
+    still-empty `bib_*` fields and never overwriting a primary-backend value.
+  - `nx-mcp-devonthink`: a new agent-surface MCP server (third sibling to
+    `nx-mcp` / `nx-mcp-catalog`) advertising ~17 curated DEVONthink tools plus
+    the `dt_incorporate` composite (Layer B + F in one agent call). It always
+    spawns and gates internally on DEVONthink availability: present → the
+    curated surface, absent → only a `devonthink_status` stub. Tools surface as
+    `mcp__plugin_conexus_devonthink__*`.
+  - New `document_highlights` T2 store (the eighth eager store) holding
+    tumbler-keyed DEVONthink highlight / mention markdown notes, kept separate
+    from `document_aspects` to avoid contending with the aspect worker.
+- Two research proposal docs preserved under `docs/proposals/`
+  (Beyond-Similarity-Search application, Open-Ontologies application).
+
+### Changed
+
+- New `mcp` Python SDK dependency: the per-call MCP-client substrate behind the
+  DEVONthink integration (Layer A), shared with the RDR-126 daemon seam.
+- Excluded PyAV (`av`) from the resolved environment. It was pulled only by
+  MinerU's unused VLM backend and vendored an ffmpeg `libavdevice` (62.x) that
+  collided with opencv's bundled `libavdevice` (61.x) inside one process,
+  producing the macOS objc "Class AVFFrameReceiver implemented in both ... may
+  cause spurious casting failures and mysterious crashes" warning in the PDF
+  extraction stack. Verified safe: the MinerU pipeline backend and Docling both
+  import and run without `av`.
+
+### Notes
+
+- RDR-139 Layer H (AI delegation via DEVONthink's `research_topic` /
+  `chat_response`) was evaluated at its go/no-go and **dropped**: it produced no
+  positive, material retrieval-quality delta over nexus's own `nx_answer`
+  (live `research_topic` returned no usable results; `chat_response` is
+  uncomposed generation with no citation discipline). No Layer H code shipped.
+- New T2 migration `document_highlights` (introduced at 5.5.0). The store also
+  self-creates its table on construction, so fresh installs and tests do not
+  wait on the migration.
+
 ## [5.4.5] - 2026-05-30
 
 ### Fixed
