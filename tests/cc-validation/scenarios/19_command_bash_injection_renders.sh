@@ -74,7 +74,9 @@ paneA="$(capture -3000)"
 # one real RDR-NNN id reached the model (it cannot produce one in a /rdr-list
 # context without the injected table). Together these prove the block executed
 # and its data flowed, without depending on which/how-many RDRs the model echoes.
-rdr_ids="$(grep -oE 'RDR-[0-9]+' <<<"$paneA" | sort -u | wc -l | tr -d ' ')"
+# `|| true` so a no-match grep (exit 1) does not fail the pipeline under the
+# runner's `set -euo pipefail` and abort the whole suite. wc still emits 0.
+rdr_ids="$( { grep -oE 'RDR-[0-9]+' <<<"$paneA" || true; } | sort -u | wc -l | tr -d ' ')"
 if ! grep -qE 'python3 <<|CLAUDE_PLUGIN_ROOT|API Error|No RDRs found' <<<"$paneA" \
    && [[ "$rdr_ids" -ge 1 ]]; then
     pass "A: fenced-bang block executed — RDR data flowed ($rdr_ids RDR id(s) present), no failure markers"

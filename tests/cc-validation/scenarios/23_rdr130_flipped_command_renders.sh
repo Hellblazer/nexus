@@ -27,7 +27,10 @@ pane="$(capture -3000)"
 # the deterministic signals instead: command did not error, and at least one real
 # RDR-NNN id reached the model (proving the nx rdr preamble executed and its data
 # flowed). See scenario 19A for the same rationale.
-rdr_ids="$(grep -oE 'RDR-[0-9]+' <<<"$pane" | sort -u | wc -l | tr -d ' ')"
+# `|| true` so a no-match grep (exit 1) does not fail the pipeline under the
+# runner's `set -euo pipefail` and abort the whole suite (it did, on a run whose
+# pane had no RDR ids). wc still emits 0.
+rdr_ids="$( { grep -oE 'RDR-[0-9]+' <<<"$pane" || true; } | sort -u | wc -l | tr -d ' ')"
 if grep -qiE 'No such command|Shell command failed|unmatched|\(eval\):' <<<"$pane"; then
     fail "flipped command errored (subgroup missing or injection broke)"
     tail -25 <<<"$pane" | sed 's/^/    | /'
