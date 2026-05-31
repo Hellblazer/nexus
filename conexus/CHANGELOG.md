@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.5.1] - 2026-05-31
+
+### Fixed
+
+- **Routing hooks now deliver their deny reason to the model.** The conexus
+  routing hooks (`git add` wildcard guard, phase-review-close gate) emitted only
+  the legacy `reason` field, which current Claude Code does not read on a deny.
+  They now emit `permissionDecisionReason` (full remediation, model-facing) plus
+  a short top-level `systemMessage` transcript banner. Plugin version aligned
+  with conexus 5.5.1. [nexus-rpvqu]
+
 ## [5.5.0] - 2026-05-31
 
 ### Added

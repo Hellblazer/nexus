@@ -6,6 +6,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.5.1] - 2026-05-31
+
+### Fixed
+
+- **Routing hooks now deliver their deny reason to the model.** The PreToolUse
+  routing hooks (grep→Serena redirect, `git add` wildcard guard,
+  phase-review-close gate) emitted only the legacy `reason` field, which current
+  Claude Code does not read on a deny — so a blocked command arrived as a bare
+  "denied" with no cause or remediation. They now emit `permissionDecisionReason`
+  (the full remediation text, model-facing) plus a short top-level
+  `systemMessage` that renders as a terse one-line transcript banner instead of
+  the full remediation essay. `deny(reason, summary=...)` decouples the two
+  audiences. [nexus-rpvqu]
+
+### Changed
+
+- Tightened the grep→Serena redirect message (~38% smaller): the directive plus
+  the exact Serena tool calls, with the human-doc justification prose removed.
+
+### Internal
+
+- Substantial cc-validation harness overhaul (test infrastructure; not
+  user-facing): keychain-based credential provisioning, deterministic
+  `--mcp-config` launch with trust pre-seed, deferred-MCP-tool warmup, a
+  scenario-isolation fix, and elimination of vacuous-pass / model-output-fragile
+  assertions across the routing/MCP/permission scenarios.
+
 ## [5.5.0] - 2026-05-31
 
 ### Added
