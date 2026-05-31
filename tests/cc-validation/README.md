@@ -75,12 +75,16 @@ claude --mcp-config "$TEST_HOME/.mcp.json" --strict-mcp-config ...
 ```
 
 `--mcp-config` loads the servers directly, sidestepping the `.mcp.json`
-approval gate and the `~/.claude.json` per-project state dance. (User-scope
-`mcpServers` written into `~/.claude.json` also connects — verified via
-`claude mcp list` showing `✓ Connected` — but `--mcp-config` is cleaner and is
-the documented path. Note: even with the server connected, a `type: mcp_tool`
-**SubagentStart hook** was still not observed to invoke the tool interactively
-as of 2026-05-31; that remains an open question, tracked in `nexus-oay5b`.)
+approval gate and the `~/.claude.json` per-project state dance. **This is
+implemented**: `runner.sh`'s `claude_start` wrapper computes
+`--mcp-config $TEST_HOME/.mcp.json --strict-mcp-config` whenever a scenario
+declares a `.mcp.json`, and normalizes the launcher python (below). Verified
+2026-05-31: scenarios 03 and 05 went red→green. Once the server is genuinely
+connected this way, a `type: mcp_tool` **SubagentStart hook** DOES fire and
+inject `additionalContext` interactively (03 passes) — the earlier "doesn't
+inject" observation was purely the server never connecting, not a hook gap.
+(User-scope `mcpServers` in `~/.claude.json` also connects — `claude mcp list`
+shows `✓ Connected` — but `--mcp-config` is cleaner and gate-free.)
 
 ### 2. The stub's interpreter lacks `mcp`
 
@@ -164,11 +168,12 @@ before re-running.
 These scenarios fail because they document a real interactive-vs-`-p`
 asymmetry, not because the harness is broken. Do not "fix" them by masking:
 
-- **03 / 05 / 14c** — project `.mcp.json` servers don't connect interactively
-  (see [MCP servers](#mcp-servers-the-big-one)). 03 additionally probes whether a
-  `type: mcp_tool` SubagentStart hook injects; unresolved (`nexus-oay5b`).
+- **03 / 05** — FIXED 2026-05-31 by the `--mcp-config` + venv-python launch
+  upgrade (no longer characterization failures). **14c** likely benefits too
+  (it declares a project `.mcp.json`); confirm in the next full run.
 - **11 / 14a / 14b** — inline-agent-frontmatter `mcpServers` is a separate
-  mechanism from project `.mcp.json`; characterize independently.
+  mechanism from project `.mcp.json` and is NOT covered by `--mcp-config`;
+  characterize independently.
 - **01 / 06 / 07b** — assert that something does NOT happen (`-p` findings about
   stdout injection / wildcard matching / permission preemption). A pass here
   means absence, by design.

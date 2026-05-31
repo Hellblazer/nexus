@@ -51,6 +51,82 @@ fi
 source "$REPO_ROOT/tests/e2e/lib.sh"
 TMUX_SESSION="cc-val"  # override the e2e default after sourcing
 
+# ─── Deterministic launch: trust pre-seed + explicit MCP config ──────────────
+# (Patterns ported from ~/git/recording-rig; see tests/cc-validation/README.md.)
+#
+# Two robustness upgrades applied at every claude_start:
+#
+#   1. TRUST PRE-SEED. Instead of polling the pane for the "trust this folder"
+#      dialog and pressing Enter (fragile; the source of scenario 16's custom-
+#      launcher class of bug), write hasTrustDialogAccepted into
+#      $TEST_HOME/.claude.json for the project paths claude may resolve as cwd.
+#      The dialog then never fires.
+#
+#   2. EXPLICIT MCP CONFIG. Project-scoped .mcp.json servers do NOT connect in
+#      the interactive sandbox (approval gate #9189 non-functional; enable keys
+#      only honored in ~/.claude.json, #24657). Launch with
+#      `--mcp-config <file> --strict-mcp-config` to load the servers directly,
+#      bypassing the gate. Also normalize the stub launcher from bare `python3`
+#      (no `mcp` module) to the repo venv interpreter.
+VENV_PY="$REPO_ROOT/.venv/bin/python"
+
+_preseed_trust() {
+    python3 - "$TEST_HOME/.claude.json" "$TEST_HOME" "$REPO_ROOT" <<'PY'
+import json, os, pathlib, sys
+cfg_p = pathlib.Path(sys.argv[1])
+paths = sys.argv[2:]
+try:
+    data = json.loads(cfg_p.read_text())
+except Exception:
+    data = {}
+if not isinstance(data, dict):
+    data = {}
+projects = data.setdefault("projects", {})
+seen = set()
+for p in paths:
+    for key in {p, os.path.realpath(p)}:
+        if key in seen:
+            continue
+        seen.add(key)
+        entry = projects.setdefault(key, {})
+        entry["hasTrustDialogAccepted"] = True
+        entry["hasCompletedProjectOnboarding"] = True
+cfg_p.write_text(json.dumps(data, indent=2))
+PY
+}
+
+# Echo the --mcp-config flags for the next launch (empty when no .mcp.json).
+# Side effect: normalizes a python3/python launcher in the .mcp.json to $VENV_PY
+# so the stub's `import mcp` resolves.
+_prepare_mcp_args() {
+    local mcp="$TEST_HOME/.mcp.json"
+    [[ -f "$mcp" ]] || { printf ''; return 0; }
+    python3 - "$mcp" "$VENV_PY" <<'PY'
+import json, pathlib, sys
+mcp_p, venv_py = pathlib.Path(sys.argv[1]), sys.argv[2]
+data = json.loads(mcp_p.read_text())
+changed = False
+for spec in (data.get("mcpServers") or {}).values():
+    if isinstance(spec, dict) and spec.get("command") in ("python3", "python"):
+        spec["command"] = venv_py
+        changed = True
+if changed:
+    mcp_p.write_text(json.dumps(data, indent=2))
+PY
+    printf -- '--mcp-config %s --strict-mcp-config' "$mcp"
+}
+
+# Wrap lib.sh's claude_start: pre-seed trust and compute MCP launch flags just
+# before launch (the scenario writes settings/.mcp.json in its body, so this
+# must run at claude_start time, not at runner setup).
+eval "$(declare -f claude_start | sed '1s/claude_start/_lib_claude_start/')"
+claude_start() {
+    _preseed_trust
+    CLAUDE_EXTRA_ARGS="$(_prepare_mcp_args)"
+    export CLAUDE_EXTRA_ARGS
+    _lib_claude_start "$@"
+}
+
 cleanup() {
     echo ""
     echo "Cleaning up..."
