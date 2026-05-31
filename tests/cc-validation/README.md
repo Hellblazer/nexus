@@ -146,9 +146,8 @@ mis-labelled "allow-rule anomaly" and scenario 14a's flakiness):
 
 **Convention for any new MCP scenario:** warmup (list tools) before the measured
 call, instruct subagents to load the schema first, and assert on `STUB_LOG`
-forensics, not self-listed inventory. NOTE (2026-05-31): scenarios 05 and 07
-still use bare direct calls without a warmup — they pass on model auto-load but
-carry latent deferred-tool flakiness and should adopt the warmup convention.
+forensics, not self-listed inventory. The direct-call scenarios (05, 07, 16) all
+carry the warmup turn as of 2026-05-31; a new MCP scenario must too.
 
 ### Fast verification (no tmux, seconds)
 
@@ -229,8 +228,8 @@ the entire MCP stack broken. Two rules came out of the rework:
    require the precondition tool-run before trusting a hook/permission verdict
    (scenarios 07, 16).
 
-Reworked for validity 2026-05-31: 06, 07, 11, 14b, 16, 18, 19A, 23. Verified
-valid as-is: 01, 17 (explicit-token), 02–05/12/13/14a/14c/15/20–22/24–26
+Reworked for validity 2026-05-31: 05, 06, 07, 11, 14a, 14b, 16, 18, 19A, 23.
+Verified valid as-is: 01, 17 (explicit-token), 02/03/04/12/13/14c/15/20–22/24–26
 (forensic/positive). Latent (flagged, not yet fixed): 09/10 branch-1 token grep
 matches the user's own turn-1 message in scrollback.
 
@@ -254,39 +253,50 @@ The harness correctly surfaces these. A green here would be the bug:
   this harness the plugin agent isn't even registered by the manual install.
   Doubly unsupported → SKIP, not a finding about loading.
 
-## Honest non-deterministic failures (do not paper over)
+## Root causes resolved 2026-05-31 (recorded so they are not re-derived)
 
-These two fail correctly when a precondition is not met, rather than fabricate a
-green:
+Three failures looked like real CC anomalies/flakiness but were harness issues,
+each root-caused by *measuring* (stub startup markers, before/after snapshots)
+rather than hypothesising — twice the first hypothesis was wrong:
 
-- **16** — ANOMALY under investigation: in `--permission-mode=auto` the MCP tool
-  runs WITHOUT an allow rule (`tool_ran_b=1`) but NOT with one (`tool_ran_a=0`),
-  consistently across runs; a 12s MCP settle did not change it, so it is not a
-  connection-timing flake. The `tool_ran` guard refuses to assess the hook gate
-  when the tool never ran. Real finding, needs a dedicated investigation.
-- **14b** — depends on the model actually dispatching the plugin-shipped agent;
-  when it doesn't (`agent_ran=0`) the run is honestly indeterminate, not a pass.
+- **16 was NOT an "allow-rule anomaly".** The `tool_ran_a=0` / `tool_ran_b=1`
+  split was the deferred-tool first-call race (the pane showed "I'll load the
+  tool schema first"). A 12s settle didn't fix it; a warmup turn does. Fixed,
+  passes deterministically.
+- **14a was NOT "deferred-loading / spawn flakiness".** The inline-agent server
+  used bare `command: python3` → homebrew python without `mcp` → crashed on
+  import (`mcp_import_failed` in `STUB_LOG`). PATH-dependent python resolution
+  made it look intermittent. Fixed by pinning to `.venv/bin/python`.
+- **11 was NOT "inline mcpServers leak to the parent".** That reading came from
+  the bare-python3 era + the parent's unreliable self-reported tool list. The
+  startup markers prove the inline server spawns only at dispatch and the
+  parent's pre-dispatch call never lands: scoping works (see Known findings).
 
-## Patterns worth adopting from `~/git/recording-rig`
+Lesson encoded in the convention above: assert on forensic side-effects, and
+when a result is surprising, add a deterministic probe before believing a
+behavioural hypothesis.
+
+## Patterns from `~/git/recording-rig`
 
 `recording-rig` is a mature Claude-Code-driving harness (spec-driven, tmux +
-desktop backends). Proven patterns we should port:
+desktop backends). Two of its patterns are already ported; two remain.
 
-- **Pre-seed trust instead of poll-and-press-Enter.** The rig merges trusted
-  folders into config *before* launch (`lib/trusted-folders.sh`,
-  `localAgentModeTrustedFolders` for the desktop app; the CLI analogue is the
-  `~/.claude.json` `projects[path].hasTrustDialogAccepted` key). Removes the
-  fragile auth-screen poll loop in `claude_start` (the class scenario 16's
-  custom launcher tripped on).
-- **Deterministic config injection via flags.** The rig launches
-  `claude --settings <file>` (and we should add `--mcp-config <file>
-  --strict-mcp-config`) rather than relying on `~/.claude/settings.json`
-  discovery. Explicit, reproducible, gate-free.
+**Ported (implemented 2026-05-31):**
+- **Trust pre-seed instead of poll-and-press-Enter.** `runner.sh`'s
+  `claude_start` wrapper writes `hasTrustDialogAccepted` +
+  `hasCompletedProjectOnboarding` into `$TEST_HOME/.claude.json` for the project
+  paths before launch, so the trust dialog never fires.
+- **Deterministic config injection via flags.** The wrapper launches with
+  `--mcp-config $TEST_HOME/.mcp.json --strict-mcp-config` (via `CLAUDE_EXTRA_ARGS`
+  in `lib.sh`) when a scenario declares a `.mcp.json`, rather than relying on
+  `~/.claude.json` discovery and its broken approval gate.
+
+**Still worth porting:**
 - **Stop-hook sentinel for turn-completion.** Instead of scraping the TUI for
   "Simmering…"/"esc to interrupt" (our `claude_wait`), the rig has a `Stop`
   hook write `/tmp/$SESSION.turn-end` and blocks on its mtime going quiet
   (`lib/sentinels.sh::sentinel_wait_idle`). Deterministic, immune to TUI
-  rendering changes. This is the single biggest robustness upgrade available.
+  rendering changes. This is the single biggest robustness upgrade remaining.
 - **Capture the pane ID (`%N`) and target it** instead of `-t <session>`, so
   later splits/active-pane shifts can't misdirect keystrokes.
 
