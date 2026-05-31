@@ -188,7 +188,12 @@ def body(payload: dict[str, Any]) -> None:
         rule=RULE_NAME, outcome="deny", tool_name="Bash",
         command_fragment=command,
     )
-    _lib.deny(_redirect_message(pattern, files))
+    summary = (
+        f"grep for symbol '{pattern}' on a code file -> use Serena "
+        "(find_symbol / find_referencing_symbols), the built-in Grep tool, "
+        "or append '# routing-allow: <reason>' to keep bash grep."
+    )
+    _lib.deny(_redirect_message(pattern, files), summary=summary)
 
 
 if __name__ == "__main__":

@@ -83,6 +83,23 @@ def test_deny_envelope_shape():
     assert env["systemMessage"] == "blocked because"
 
 
+def test_deny_envelope_summary_decouples_banner_from_model_reason():
+    """A multi-line reason reaches the model in full; the transcript
+    banner carries only the short summary (or the first line by default)."""
+    lib = _load_lib()
+    full = "Blocked: do X.\n\nWhy: long remediation essay\nwith many lines."
+
+    # Default: systemMessage is the first line, not the whole essay.
+    env = json.loads(lib.deny_envelope(full))
+    assert env["hookSpecificOutput"]["permissionDecisionReason"] == full
+    assert env["systemMessage"] == "Blocked: do X."
+
+    # Explicit summary overrides the banner; model still gets the full reason.
+    env = json.loads(lib.deny_envelope(full, summary="one-line banner"))
+    assert env["hookSpecificOutput"]["permissionDecisionReason"] == full
+    assert env["systemMessage"] == "one-line banner"
+
+
 def test_warn_envelope_is_allow():
     lib = _load_lib()
     env = json.loads(lib.warn_envelope("just a warning"))
