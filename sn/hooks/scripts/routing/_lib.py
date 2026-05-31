@@ -10,12 +10,22 @@ Helpers every routing hook imports. The hook protocol is:
 
 Decision envelope shape (PreToolUse):
 
-    {"hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": "allow" | "deny",
-        "reason": "..."                 # only on deny
-        "additionalContext": "..."      # only on allow with context
-    }}
+    allow:
+        {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "additionalContext": "..."   # only when allow carries advisory text
+        }}
+
+    deny (see ``deny_envelope`` — the reason rides in two audience-specific
+    fields, with ``reason`` kept for legacy compatibility):
+        {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "<full reason>",   # what the MODEL reads
+            "reason": "<full reason>"                       # legacy alias
+         },
+         "systemMessage": "<short summary>"}                # the USER's transcript banner
 
 Fail-open is the default. Hooks opt in to fail-closed by passing
 ``fail_closed=True`` to ``run_hook``; the registry.yaml ``fail_closed:

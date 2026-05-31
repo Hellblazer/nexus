@@ -57,12 +57,26 @@ Every hook in this directory MUST honor:
 2. **JSON envelope on stdout, exit 0**. Never exit 2. The envelope shape
    is fixed by Claude Code's PreToolUse contract:
 
-       {"hookSpecificOutput": {
-           "hookEventName": "PreToolUse",
-           "permissionDecision": "allow" | "deny",
-           "reason": "..."              # deny only
-           "additionalContext": "..."   # optional advisory text on allow
-       }}
+       allow:
+         {"hookSpecificOutput": {
+             "hookEventName": "PreToolUse",
+             "permissionDecision": "allow",
+             "additionalContext": "..."   # optional advisory text on allow
+         }}
+
+       deny (the reason rides in two audience-specific fields):
+         {"hookSpecificOutput": {
+             "hookEventName": "PreToolUse",
+             "permissionDecision": "deny",
+             "permissionDecisionReason": "<full reason>",  # what the MODEL reads
+             "reason": "<full reason>"                       # legacy alias
+          },
+          "systemMessage": "<short summary>"}                # the USER's banner
+
+   Use ``deny(reason, summary=...)``: ``reason`` (full remediation) reaches
+   the model via ``permissionDecisionReason``; ``summary`` (a one-liner) is
+   the transcript banner. Omit ``summary`` and the first line of ``reason``
+   is used.
 
 3. **Per-hook budget**: <50ms p95 (40ms python startup + ~10ms logic).
 4. **Cumulative budget**: <300ms p95 with the cap of 4 active routing
