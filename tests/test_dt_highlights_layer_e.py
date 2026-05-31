@@ -131,7 +131,7 @@ def test_index_highlights_flag_routes_and_summarizes(runner, fake_gather, monkey
 
     fake_gather.append(("U1", "/a.pdf"))
     monkeypatch.setattr("nexus.commands.dt._index_record",
-                        lambda uuid, path, *, collection, corpus, dry_run: True)
+                        lambda uuid, path, *, collection, corpus, dry_run, extractor="auto": True)
     calls: list[str] = []
     monkeypatch.setattr("nexus.commands.dt._ingest_highlights_record",
                         lambda uuid: calls.append(uuid) or True)
@@ -146,7 +146,7 @@ def test_no_highlights_flag_skips_ingest(runner, fake_gather, monkeypatch) -> No
 
     fake_gather.append(("U1", "/a.pdf"))
     monkeypatch.setattr("nexus.commands.dt._index_record",
-                        lambda uuid, path, *, collection, corpus, dry_run: True)
+                        lambda uuid, path, *, collection, corpus, dry_run, extractor="auto": True)
     calls: list[str] = []
     monkeypatch.setattr("nexus.commands.dt._ingest_highlights_record",
                         lambda uuid: calls.append(uuid) or True)
