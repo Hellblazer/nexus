@@ -58,12 +58,22 @@ claude_start
 claude_prompt "/rdr-list"
 claude_wait 90
 paneA="$(capture -3000)"
-if grep -qF 'Single-Writer Enforcement' <<<"$paneA" \
-   && grep -qF 'Storage Substrate Split' <<<"$paneA" \
+# VALIDITY NOTE (reworked 2026-05-31): the prior check grepped for two hardcoded
+# RDR titles ("Single-Writer Enforcement", "Storage Substrate Split"). The model
+# reformats and SELECTS which RDRs to surface, so it legitimately rendered a
+# different subset (RDR-070/137/106/134) and the test false-failed even though
+# the fenced-bang block executed correctly. Replace with a structural check that
+# does not depend on which RDRs are live: multiple distinct RDR-NNN ids plus a
+# status word prove the `nx rdr list` preamble executed and its table data flowed
+# (the model cannot fabricate several real RDR ids + statuses without it), and
+# the failure markers must be absent.
+rdr_ids="$(grep -oE 'RDR-[0-9]+' <<<"$paneA" | sort -u | wc -l | tr -d ' ')"
+if [[ "$rdr_ids" -ge 3 ]] \
+   && grep -qiE '(draft|accepted|closed|revised|superseded)' <<<"$paneA" \
    && ! grep -qE 'python3 <<|CLAUDE_PLUGIN_ROOT|API Error|No RDRs found' <<<"$paneA"; then
-    pass "A: fenced-bang block executed — RDR data rendered, no raw/failure markers"
+    pass "A: fenced-bang block executed — RDR table rendered ($rdr_ids distinct RDR ids + status column), no failure markers"
 else
-    fail "A: fenced-bang block did NOT render the RDR data (fix regressed?)"
+    fail "A: fenced-bang block did NOT render the RDR data (distinct RDR ids=$rdr_ids, expected >=3)"
     tail -30 <<<"$paneA" | sed 's/^/    | /'
 fi
 

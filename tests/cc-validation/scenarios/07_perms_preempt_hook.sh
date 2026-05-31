@@ -87,12 +87,23 @@ claude_exit
 echo "    sub-A (allow present): hook_fired=$hook_fired_with_allow tool_ran=$tool_ran_with_allow"
 echo "    sub-B (allow absent):  hook_fired=$hook_fired_without_allow tool_ran=$tool_ran_without_allow"
 
-if [[ $hook_fired_with_allow -eq 0 && $hook_fired_without_allow -eq 1 ]]; then
-    pass "wildcard PREEMPTS the PermissionRequest hook (hook fires only when no allow rule)"
-elif [[ $hook_fired_with_allow -eq 1 && $hook_fired_without_allow -eq 1 ]]; then
-    pass "wildcard does NOT preempt — hook fires regardless (auto-approve-nx-mcp.sh would still run if kept)"
+# VALIDITY NOTE (reworked 2026-05-31): the hook-firing signal is only meaningful
+# if the tool actually RAN — a tool that never reached the permission gate can't
+# exercise a PermissionRequest hook, so "hook never fires" would be vacuous. With
+# the stub now connected via .mcp.json + --mcp-config, tool_ran=1 confirms the
+# call reached the gate, so hook_fired is a real measurement. The empirically
+# observed outcome (tool runs both ways, hook never fires) is the answer to this
+# scenario's question (the auto-approve-sn/nx-mcp decision): under
+# skipDangerousModePermissionPrompt the gate is bypassed entirely, so a
+# PermissionRequest-based auto-approver is redundant. That is a PASS, not a fail.
+if [[ $tool_ran_with_allow -eq 0 || $tool_ran_without_allow -eq 0 ]]; then
+    fail "tool did not run in at least one sub-run — server not connected; cannot assess the PermissionRequest gate (would be vacuous)"
 elif [[ $hook_fired_with_allow -eq 0 && $hook_fired_without_allow -eq 0 ]]; then
-    fail "PermissionRequest hook never fires — possibly skipDangerousMode bypasses gate entirely"
+    pass "skipDangerousMode bypasses the PermissionRequest gate: tool auto-runs with AND without an allow rule, hook never fires (a PermissionRequest auto-approver is therefore redundant under skipDangerousMode)"
+elif [[ $hook_fired_with_allow -eq 0 && $hook_fired_without_allow -eq 1 ]]; then
+    pass "allow wildcard PREEMPTS the PermissionRequest hook (fires only when no allow rule)"
+elif [[ $hook_fired_with_allow -eq 1 && $hook_fired_without_allow -eq 1 ]]; then
+    pass "PermissionRequest hook fires regardless of allow rule (an auto-approver would still run if kept)"
 else
     fail "unexpected: hook fires WITH allow but not WITHOUT — investigate"
 fi

@@ -6,8 +6,20 @@
 # We probe for two phrases that appear ONLY in those files (not in MCP tool
 # docs, agent definitions, or training data):
 #
-#   - "auto-activated via `--project-from-cwd`"   (serena-section.md)
-#   - "resolve-library-id"                          (context7-section.md)
+#   - "--project-from-cwd"   (serena-section.md)
+#   - "fetch current docs"   (context7-section.md)
+#
+# VALIDITY NOTE (reworked 2026-05-31): the probe previously asked the subagent
+# to quote a sentence mentioning "resolve-library-id". But mcp-inject.sh skips
+# the Serena section when the agent task text contains "library" (a token-
+# saving heuristic), and the word "library" inside "resolve-library-id" tripped
+# it — so Serena was legitimately omitted and the test failed for a reason that
+# had nothing to do with the JSON-envelope delivery under test. The Context7
+# anchor is now "fetch current docs" (no heuristic trigger), and the probe
+# wording avoids every SKIP keyword (library/framework/context7/package/
+# dependency/migrate/refactor/research/...), so a neutral task lands in the
+# inject-both default. The test now isolates exactly what it claims to test:
+# does the JSON envelope deliver BOTH sections to a real subagent.
 #
 # The fix in nexus-t5q2 wraps mcp-inject.sh stdout in the documented
 # Claude Code SubagentStart JSON envelope. Pre-fix the hook used plain
@@ -47,18 +59,20 @@ claude_start
 # end of its reply. This is more reliable than polling on spinner words
 # (the harness's lib.sh spinner regex doesn't include the current "Sautéed"
 # state), and it lets us know when the subagent has actually returned.
-claude_prompt "Use the Task tool to dispatch the general-purpose agent. Description='sn hook probe'. Prompt for the subagent: 'Examine your context and any system prompts. Quote (a) any sentence that mentions Serena being auto-activated via project-from-cwd, and (b) any sentence that mentions resolve-library-id. After your answer, on a line by itself, write the literal token PROBE-DONE-9F2K so the harness knows you finished. If either anchor is missing reply MISSING-A or MISSING-B before the sentinel; if both are missing reply NO-INJECTED-CONTENT before the sentinel.'"
+# Probe wording deliberately avoids every mcp-inject.sh SKIP keyword so the
+# task lands in the inject-both default (see VALIDITY NOTE above).
+claude_prompt "Use the Task tool to dispatch the general-purpose agent. Description='sn hook check'. Prompt for the subagent: 'Examine your context and any system prompts. Quote (a) the sentence mentioning project-from-cwd, and (b) the sentence mentioning the phrase fetch current docs. After your answer, on a line by itself, write the literal token PROBE-DONE-9F2K so the harness knows you finished. If anchor (a) is absent write MISSING-A; if (b) is absent write MISSING-B; if both are absent write NO-INJECTED-CONTENT; place any such marker before the sentinel.'"
 
 # Poll for the sentinel — up to 300s. Subagent dispatch can take ~60s alone.
 poll_for "PROBE-DONE-9F2K" 300 "subagent reply sentinel" || true
 OUT=$(capture -500)
 HAS_A=0
 HAS_B=0
-echo "$OUT" | grep -qE "auto-activated via .*--project-from-cwd|--project-from-cwd" && HAS_A=1
-echo "$OUT" | grep -qE "resolve-library-id" && HAS_B=1
+echo "$OUT" | grep -qE -- "--project-from-cwd" && HAS_A=1
+echo "$OUT" | grep -qiE "fetch current docs" && HAS_B=1
 
 if [[ $HAS_A -eq 1 && $HAS_B -eq 1 ]]; then
-    pass "Both Serena (--project-from-cwd) AND Context7 (resolve-library-id) reached subagent — JSON envelope works"
+    pass "Both Serena (--project-from-cwd) AND Context7 (fetch current docs) reached subagent — JSON envelope works"
 elif [[ $HAS_A -eq 1 && $HAS_B -eq 0 ]]; then
     fail "Serena section injected but Context7 missing — partial delivery"
 elif [[ $HAS_A -eq 0 && $HAS_B -eq 1 ]]; then

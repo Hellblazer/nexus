@@ -5,7 +5,14 @@
 
 # Custom claude launcher for this scenario — uses --permission-mode=auto, no bypass flag
 claude_start_auto() {
-    send_keys "claude --permission-mode=auto" Enter
+    # Mirror the standard claude_start wrapper's trust pre-seed + --mcp-config so
+    # the stub actually connects. Without this the tool never runs (tool_ran=0)
+    # and the "auto-approves" verdict is vacuous (it would pass with the MCP
+    # stack completely broken). _preseed_trust / _prepare_mcp_args are defined in
+    # runner.sh and in scope here.
+    _preseed_trust 2>/dev/null || true
+    local _extra; _extra="$(_prepare_mcp_args 2>/dev/null || true)"
+    send_keys "claude --permission-mode=auto ${_extra}" Enter
     sleep 8
     local deadline=$(( $(date +%s) + 60 ))
     local _trust_done=0
@@ -108,8 +115,14 @@ echo ""
 echo "    ──────────── 16 verdict (auto mode) ────────────"
 echo "    16a (with allow):    hook_fired=$hook_fired_a  tool_ran=$tool_ran_a"
 echo "    16b (without allow): hook_fired=$hook_fired_b  tool_ran=$tool_ran_b"
-if [[ $hook_fired_a -eq 0 && $hook_fired_b -eq 0 ]]; then
-    pass "auto mode auto-approves MCP tools without consulting PermissionRequest hook either way"
+# VALIDITY NOTE (reworked 2026-05-31): require tool_ran so the hook-firing
+# verdict is meaningful. A tool that never ran cannot exercise the
+# PermissionRequest gate, so "hook never fires" would be vacuous (it passed
+# previously with tool_ran=0, i.e. with the server never connected).
+if [[ $tool_ran_a -eq 0 || $tool_ran_b -eq 0 ]]; then
+    fail "tool did not run in at least one sub-run — server not connected; auto-mode verdict would be vacuous"
+elif [[ $hook_fired_a -eq 0 && $hook_fired_b -eq 0 ]]; then
+    pass "auto mode auto-approves MCP tools (tool ran both ways) without consulting PermissionRequest hook either way"
 elif [[ $hook_fired_a -eq 0 && $hook_fired_b -eq 1 ]]; then
     pass "wildcard PREEMPTS hook in auto mode (hook fires only when no rule matches)"
 elif [[ $hook_fired_a -eq 1 && $hook_fired_b -eq 1 ]]; then
