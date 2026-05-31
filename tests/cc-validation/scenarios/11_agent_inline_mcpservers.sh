@@ -45,8 +45,13 @@ grep -E "STUB_LOG|args" "$TEST_HOME/.claude/agents/scoped-tool-agent.md" | head 
 # Guard against cross-scenario pollution: this scenario tests INLINE-agent
 # scoping, so there must be NO project .mcp.json (a stale one from a prior
 # scenario would feed the stub to the parent via --mcp-config and manufacture a
-# false "leak"). reset_scenario_state now removes it; assert it's gone.
-[[ -f "$TEST_HOME/.mcp.json" ]] && echo "    WARNING: stale \$TEST_HOME/.mcp.json present — isolation broken"
+# false "leak"). reset_scenario_state now removes it; FAIL if it's present, since
+# the scenario's result would be untrustworthy (it must not silently pass).
+if [[ -f "$TEST_HOME/.mcp.json" ]]; then
+    fail "stale \$TEST_HOME/.mcp.json present — scenario 11 isolation broken (reset_scenario_state must remove it); result would be a false leak"
+    scenario_end
+    return 0
+fi
 
 claude_start
 
@@ -57,10 +62,15 @@ claude_start
 # ACTUAL access forensically: ask the parent to CALL the stub with a parent-
 # specific payload and check STUB_LOG. A landed payload is hard proof the parent
 # holds the tool; its absence is proof it does not.
-claude_prompt "Attempt to call the mcp__stub__record tool with payload='PARENT-CALL-PROBE'. If that tool is not available to you, reply PARENT-NO-STUB."
+claude_prompt "Attempt to call the mcp__stub__record tool with payload='PARENT-CALL-PROBE'. If that tool is not available to you, reply with the literal token PARENT-NO-STUB."
 claude_wait 30
 parent_called_stub=0
 [[ -s "$STUB_LOG" ]] && grep -q "PARENT-CALL-PROBE" "$STUB_LOG" && parent_called_stub=1
+# Strengthen the negative: parent_called_stub=0 alone could mean "scoped" OR
+# "model ignored the probe". Require the parent to have EXPLICITLY reported the
+# tool absent (PARENT-NO-STUB) so a non-compliant model doesn't read as scoped.
+parent_denied=0
+capture -60 | grep -q "PARENT-NO-STUB" && parent_denied=1
 
 claude_prompt "Use the Task tool to dispatch the scoped-tool-agent. Description='scope test'. Prompt: 'Run your instructions exactly.'"
 claude_wait 90
@@ -69,7 +79,8 @@ claude_wait 90
 agent_called_stub=0
 [[ -s "$STUB_LOG" ]] && grep -q "agent-scoped-XYZ-PROOF" "$STUB_LOG" && agent_called_stub=1
 
-echo "    parent_called_stub=$parent_called_stub (forensic: parent's own call landed in STUB_LOG)"
+echo "    parent_called_stub=$parent_called_stub (forensic: parent's call landed in STUB_LOG)"
+echo "    parent_denied=$parent_denied (parent explicitly reported PARENT-NO-STUB)"
 echo "    agent_called_stub=$agent_called_stub  (forensic: agent's call landed in STUB_LOG)"
 if [[ -f "$TEST_HOME/agent_tools.txt" ]]; then
     echo "    --- agent's tool inventory (first 20 lines) ---"
@@ -86,10 +97,12 @@ fi
 # report; the parent-call-attempt forensic + venv python fix corrected it.
 if [[ $agent_called_stub -eq 0 ]]; then
     fail "agent did NOT use the stub — inline mcpServers did not load for the subagent (precondition failed)"
-elif [[ $parent_called_stub -eq 0 ]]; then
-    pass "inline mcpServers SCOPED to subagent (documented behavior) — agent used the stub, parent forensically could not"
-else
+elif [[ $parent_called_stub -eq 1 ]]; then
     fail "inline mcpServers LEAKED to parent — parent called the stub too (contradicts documented per-agent scoping; investigate)"
+elif [[ $parent_denied -eq 1 ]]; then
+    pass "inline mcpServers SCOPED to subagent (documented behavior) — agent used the stub, parent explicitly reported PARENT-NO-STUB"
+else
+    fail "inconclusive — parent did not call the stub but also did not report PARENT-NO-STUB (model may have ignored the probe); cannot certify scoping this run"
 fi
 
 claude_exit

@@ -69,6 +69,15 @@ TMUX_SESSION="cc-val"  # override the e2e default after sourcing
 #      bypassing the gate. Also normalize the stub launcher from bare `python3`
 #      (no `mcp` module) to the repo venv interpreter.
 VENV_PY="$REPO_ROOT/.venv/bin/python"
+# Fail fast with a clear message if the venv interpreter (which must have `mcp`)
+# is missing — otherwise _prepare_mcp_args rewrites the stub command to a
+# non-existent path and every MCP scenario fails as "server never spawned",
+# which is far harder to diagnose than this up-front error.
+if [[ ! -x "$VENV_PY" ]]; then
+    echo "Error: venv interpreter not found at $VENV_PY — run 'uv sync' first." >&2
+    echo "       (MCP scenarios launch the stub with this python; it needs the 'mcp' package.)" >&2
+    exit 1
+fi
 
 _preseed_trust() {
     python3 - "$TEST_HOME/.claude.json" "$TEST_HOME" "$REPO_ROOT" <<'PY'

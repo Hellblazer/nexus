@@ -81,8 +81,13 @@ def deny_envelope(reason: str, summary: str | None = None) -> str:
     non-empty line of ``reason`` is used so callers that don't supply a
     summary still get a terse banner rather than the whole block.
     """
-    reason = reason or "(no reason provided)"
-    system_message = summary or reason.strip().splitlines()[0]
+    # Strip BEFORE the truthiness check: a whitespace-only reason is truthy, so
+    # ``reason or default`` would keep it, and ``"".splitlines()[0]`` would then
+    # IndexError. deny_envelope is on every routing hook's deny path, so it must
+    # never raise. Stripping makes the guard fire and keeps the first-line slice
+    # safe (reason is now non-empty).
+    reason = reason.strip() or "(no reason provided)"
+    system_message = summary or reason.splitlines()[0]
     payload = {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",

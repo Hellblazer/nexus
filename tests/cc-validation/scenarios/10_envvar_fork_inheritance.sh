@@ -14,7 +14,8 @@ agent: general-purpose
 ---
 
 Examine all of your context, including any prior conversation messages.
-If you see a token of the form ENVV-TOKEN-XXXXX (5 hex digits), reply with the EXACT token.
+If you see a token of the form ENVV-TOKEN-XXXXX (5 hex digits), reply with the
+literal text ENVV-SEEN: immediately followed by the exact token.
 If none, reply NO-INHERIT.
 EOF
 
@@ -34,8 +35,11 @@ claude_wait 30
 claude_prompt "Now invoke the inherit-probe-env skill via the Skill tool."
 claude_wait 90
 
-if capture -300 | grep -qE "ENVV-TOKEN-A1B2C" && ! capture -100 | grep -qE "NO-INHERIT"; then
-    pass "WITH env var, fork DID inherit context (env var works as docs claim)"
+# VALIDITY NOTE (reworked 2026-05-31): require the compound ENVV-SEEN:<token>,
+# which only the FORK can emit — the bare token is also in the user's turn-1
+# prompt in scrollback, so grepping it was a vacuous "DID inherit" pass.
+if capture -300 | grep -qE "ENVV-SEEN:ENVV-TOKEN-A1B2C"; then
+    pass "WITH env var, fork DID inherit context (fork emitted ENVV-SEEN:<token>)"
 elif capture -300 | grep -qE "NO-INHERIT"; then
     pass "WITH env var, fork still did NOT inherit (env var has no effect on per-skill fork)"
 else

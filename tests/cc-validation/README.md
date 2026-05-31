@@ -233,12 +233,15 @@ the entire MCP stack broken. Two rules came out of the rework:
    the NEXT scenario's parent (this manufactured a false "inline mcpServers
    leaked to parent" in 11). If an isolated `--scenario N` result disagrees with
    the full-suite result, suspect cross-scenario state first. Reproduce fast with
-   a comma-list: `runner.sh --scenario "05,07,11"`.
+   a comma-list: `runner.sh --scenario "05,07,11"` (scenario numbers are
+   zero-padded — use `05`, not `5`; the match is exact on the `NN_` prefix).
 
-Reworked for validity 2026-05-31: 05, 06, 07, 11, 14a, 14b, 16, 18, 19A, 23.
-Verified valid as-is: 01, 17 (explicit-token), 02/03/04/12/13/14c/15/20–22/24–26
-(forensic/positive). Latent (flagged, not yet fixed): 09/10 branch-1 token grep
-matches the user's own turn-1 message in scrollback.
+Reworked for validity 2026-05-31: 05, 06, 07, 09, 10, 11, 14a, 14b, 16, 18, 19A,
+23. Verified valid as-is: 01, 17 (explicit-token),
+02/03/04/12/13/14c/15/20–22/24–26 (forensic/positive). (09/10's branch-1 token
+grep used to match the user's own turn-1 prompt in scrollback — fixed by
+requiring a compound `INHERIT-SEEN:<token>` / `ENVV-SEEN:<token>` that only the
+fork can emit.)
 
 ## Known real findings (NOT harness bugs — do not mask)
 
