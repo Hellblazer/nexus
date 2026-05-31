@@ -320,6 +320,85 @@ class TestStartStopLifecycle:
 
 
 # ---------------------------------------------------------------------------
+# RDR-140 P1.1 (nexus-266iu): spawn-lock loser quiet-attach
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnLockLoserQuietAttach:
+    """A second daemon that loses the spawn lock must quiet-attach, not crash.
+
+    Intended behaviour (implemented in P1.3 / nexus-h2oko), pinned RED here:
+
+    - The losing process NEVER constructs ``T2Database`` (spy call count == 0;
+      A1-verified that the spawn lock at start() is strictly before the
+      T2Database open).
+    - ``run_t2_daemon`` returns cleanly (exit code 0 — no exception escapes).
+    - It logs ``t2_daemon_spawn_lost`` at info exactly once, and does NOT log
+      ``t2_daemon_crashed`` (no traceback).
+
+    Against current code this FAILS: the spawn-loss raises T2DaemonError which
+    lands in ``run_t2_daemon``'s ``except Exception: _log.exception(
+    "t2_daemon_crashed"); raise`` — a crash with traceback and non-zero exit.
+    """
+
+    def test_loser_quiet_attaches_without_constructing_t2db(
+        self, config_dir: Path, db_path: Path, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        import nexus.db.t2 as t2_module
+        import nexus.logging_setup as logging_setup
+        from nexus.daemon.t2_daemon import T2Daemon, run_t2_daemon
+        from structlog.testing import capture_logs
+
+        # Hold the spawn lock with a real first daemon.
+        first = T2Daemon(config_dir=config_dir, db_path=db_path)
+        ready = threading.Event()
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=_run_daemon_in_thread, args=(first, ready, stop),
+        )
+        thread.start()
+        try:
+            assert ready.wait(timeout=10.0)
+
+            # Spy on T2Database construction. The first daemon already opened
+            # its DB before this patch, so any call now can only come from the
+            # losing second daemon.
+            t2db_spy = MagicMock(name="T2Database")
+            monkeypatch.setattr(t2_module, "T2Database", t2db_spy)
+            # Keep capture_logs' structlog config in place: run_t2_daemon's
+            # configure_logging would otherwise reconfigure structlog away.
+            monkeypatch.setattr(logging_setup, "configure_logging", lambda *a, **k: None)
+
+            raised: Exception | None = None
+            with capture_logs() as logs:
+                try:
+                    result = run_t2_daemon(
+                        config_dir=config_dir, db_path=tmp_path / "second.db",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    raised = exc
+                    result = None
+
+            # Clean quiet-attach: no exception escaped, returned None (exit 0).
+            assert raised is None
+            assert result is None
+
+            # The loser never constructed T2Database.
+            assert t2db_spy.call_count == 0
+
+            spawn_lost = [e for e in logs if e.get("event") == "t2_daemon_spawn_lost"]
+            crashed = [e for e in logs if e.get("event") == "t2_daemon_crashed"]
+            assert len(spawn_lost) == 1
+            assert spawn_lost[0].get("log_level") == "info"
+            assert len(crashed) == 0
+        finally:
+            stop.set()
+            thread.join(timeout=10.0)
+
+
+# ---------------------------------------------------------------------------
 # Module exposes the expected public surface
 # ---------------------------------------------------------------------------
 
