@@ -151,13 +151,34 @@ map, 2026-05-31). Citations below are the load-bearing call sites.
   process exit; `ensure-running` polls PID liveness, not the discovery file,
   precisely because `stop` unlinks the file early. Any new attach/quiet-exit
   logic must respect this lifetime model.
+- **Verified (A1 source search, 2026-05-31) — Two invariants.** Daemon-spawn
+  serialization gives the **daemon-process single-writer** invariant only. The
+  **full `memory.db` single-writer** property is NOT achieved by it, because
+  three non-daemon paths open `T2Database` directly with no flock (WAL
+  `busy_timeout` only): (1) `t2_index_write` daemon-unreachable fallback
+  (`mcp_infra.py:184–219`) — and its `T2SchemaVersionMismatchError` arm opens a
+  second writer *even while a daemon is running*, the post-upgrade window; (2)
+  `aspect_worker` persist `t2_ctx()` (`mcp_infra.py:155`), always direct because
+  `document_aspects.upsert` is on `_RPC_DENY_OPS`; (3) `epsilon-allow`
+  irreducible writers (taxonomy rebuild, aspects gc, index auto-discover, upgrade
+  bootstrap) classified as documented-irreducible by RDR-128 P3. **This RDR
+  scopes to invariant (a)**; routing (1)–(3) through the daemon is RDR-128 P3
+  deferred work, out of scope here. Relevance to the thrash: the version-skew
+  fallback (#1) compounds it post-upgrade (clients open a direct writer AND
+  SIGTERM the stale daemon); the migration current-version fast-path + faster
+  daemon version-convergence shrink that window.
 
 ### Critical Assumptions
 
-- [ ] **A1 — Attaching the spawn-lock loser as a client never opens a second
-  writer.** The loser must use `T2Client` (socket) and never construct
-  `T2Database` after losing the race. — **Status**: Unverified —
-  **Method**: Source Search (confirm no code path opens `T2Database` post-discovery).
+- [x] **A1 — Attaching the spawn-lock loser as a client never opens a second
+  writer.** — **Status**: VERIFIED (daemon-process scope) — **Method**: Source
+  Search (codebase-deep-analyzer, 2026-05-31). `_acquire_spawn_lock`
+  (`t2_daemon.py:1013`) is strictly before `T2Database(...)` (`:658`); a
+  spawn-loser raises `T2DaemonError` at `:1034` and exits WITHOUT constructing
+  `T2Database`. **Scope boundary discovered** (see Key Discoveries → "Two
+  invariants"): daemon-spawn serialization does NOT by itself give full
+  `memory.db` single-writer — three non-daemon write paths remain. A1 is
+  confirmed for the daemon-process race only; the RDR must state both invariants.
 - [ ] **A2 — A persisted owner/version token in the discovery file is sufficient
   to make reaping ownership-aware without reintroducing orphan-writer risk.**
   The reap must still kill a genuinely orphaned writer (flock held by a dead
