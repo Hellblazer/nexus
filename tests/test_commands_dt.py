@@ -83,6 +83,7 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
         collection: str | None,
         corpus: str,
         dry_run: bool,
+        extractor: str = "auto",
     ) -> bool:
         calls.append({
             "uuid": uuid,
@@ -90,6 +91,7 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
             "collection": collection,
             "corpus": corpus,
             "dry_run": dry_run,
+            "extractor": extractor,
         })
         # Default success — tests that want to exercise the
         # stamp-failed summary path replace the dispatcher with
@@ -377,6 +379,30 @@ class TestPassthroughFlags:
         assert result.exit_code == 0, result.output
         assert fake_dispatcher[0]["corpus"] == "knowledge"
 
+    def test_extractor_passthrough(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        # nexus-pxxyn: --extractor reaches the PDF indexer so the MinerU-failure
+        # recovery (--extractor docling) is actionable on the DT path.
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        result = runner.invoke(main, [
+            "dt", "index", "--selection", "--extractor", "docling",
+        ])
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["extractor"] == "docling"
+
+    def test_extractor_defaults_to_auto(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["extractor"] == "auto"
+
 
 # ── nexus-cvaw: paper PDFs route to knowledge__ by default ──────────────────
 
@@ -529,7 +555,7 @@ class TestStampFailedSummary:
         ]
 
         # Dispatcher returns False for the two that should fail to stamp.
-        def maybe_fail(uuid, path, *, collection, corpus, dry_run):
+        def maybe_fail(uuid, path, *, collection, corpus, dry_run, extractor="auto"):
             return uuid == "U-OK"
 
         monkeypatch.setattr("nexus.commands.dt._index_record", maybe_fail)
@@ -1137,7 +1163,7 @@ class TestLinkSemantic:
         wb_calls: list[str] = []
         monkeypatch.setattr(
             "nexus.commands.dt._index_record",
-            lambda uuid, path, *, collection, corpus, dry_run: uuid == "U-OK",
+            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto": uuid == "U-OK",
         )
         monkeypatch.setattr(
             "nexus.commands.dt._link_semantic_record",

@@ -73,6 +73,7 @@ def _index_record(
     collection: str | None,
     corpus: str,
     dry_run: bool,
+    extractor: str = "auto",
 ) -> bool:
     """Dispatch a single supported ``(uuid, path)`` to the right indexer.
 
@@ -109,7 +110,10 @@ def _index_record(
     file_path = Path(path)
     ext = file_path.suffix.lower()
     if ext == ".pdf":
-        index_pdf(file_path, corpus=corpus, collection_name=collection)
+        # nexus-pxxyn: thread the operator's --extractor choice through so the
+        # documented MinerU-failure recovery ("rerun with --extractor docling")
+        # is actionable on the DT path. Markdown has no extractor backend.
+        index_pdf(file_path, corpus=corpus, collection_name=collection, extractor=extractor)
     else:  # .md — extension filtering happens in index_cmd
         index_markdown(file_path, corpus=corpus, collection_name=collection)
 
@@ -558,6 +562,18 @@ def dt() -> None:
         "ingested. Opt-in, default off."
     ),
 )
+@click.option(
+    "--extractor",
+    type=click.Choice(["auto", "docling", "mineru"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help=(
+        "PDF extraction backend for file-backed records. ``mineru`` is "
+        "formula-aware but OOM-fails on some formula-dense pages; the recovery "
+        "is ``--extractor docling`` (formula-stripped, but always completes). "
+        "``auto`` picks mineru when formulas are detected, else docling."
+    ),
+)
 def index_cmd(
     use_selection: bool,
     tag: str | None,
@@ -573,6 +589,7 @@ def index_cmd(
     enrich: bool,
     dt_content: bool,
     highlights: bool,
+    extractor: str,
 ) -> None:
     """Index DEVONthink records into Nexus.
 
@@ -677,6 +694,7 @@ def index_cmd(
                 collection=resolved_collection,
                 corpus=corpus,
                 dry_run=False,
+                extractor=extractor,
             )
         except (RuntimeError, ImportError) as exc:
             # nexus-2fyb code-review R4-I2: a single indexing failure must
@@ -968,6 +986,11 @@ def highlights_cmd(tumbler_or_uuid: str) -> None:
               help="After indexing, ingest the record's highlights (Layer E).")
 @click.option("--enrich", "enrich", is_flag=True, default=False,
               help="After indexing, run DT-CrossRef bib gap-fill over the collection (Layer C).")
+@click.option("--extractor",
+              type=click.Choice(["auto", "docling", "mineru"], case_sensitive=False),
+              default="auto", show_default=True,
+              help="PDF extraction backend for the index step (docling = formula-stripped "
+                   "recovery when mineru OOM-fails on formula-dense PDFs).")
 @click.pass_context
 def capture_cmd(
     ctx: click.Context,
@@ -982,6 +1005,7 @@ def capture_cmd(
     writeback: bool,
     highlights: bool,
     enrich: bool,
+    extractor: str,
 ) -> None:
     """Capture a URL, DOI, or file into DEVONthink and index it (RDR-139 Layer G).
 
@@ -1059,6 +1083,7 @@ def capture_cmd(
             writeback=writeback,
             highlights=highlights,
             enrich=enrich,
+            extractor=extractor,
         )
     except click.ClickException:
         # Capture succeeded but indexing failed: the DT record exists but is
