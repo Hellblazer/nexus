@@ -166,6 +166,47 @@ def _apply_pending_with_lock_retry(
             )
             time.sleep(sleep_seconds)
 
+
+def _cold_start_is_current_and_wal(path: Path) -> bool:
+    """Return True iff *path* is already at ``current_version`` AND already in
+    WAL journal mode, using only lock-free reads (RDR-140 P1.2 Gap 4, A3).
+
+    Both probes succeed under a held EXCLUSIVE writer lock, so this never
+    contends with a concurrent writer. Any read error, a missing/``0.0.0``
+    version row, a non-WAL journal, or a ``"0.0.0"`` current version (the
+    importlib fallback) returns False so the caller takes the full
+    flock+migration path — a genuine pending migration must always run.
+    """
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        try:
+            current_version = _pkg_version("conexus")
+        except Exception:  # noqa: BLE001
+            return False
+        if current_version == "0.0.0":
+            return False
+
+        conn = sqlite3.connect(str(path))
+        try:
+            try:
+                row = conn.execute(
+                    "SELECT value FROM _nexus_version WHERE key='cli_version'"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return False  # _nexus_version absent — uninitialised DB.
+            if not row or row[0] != current_version:
+                return False
+            mode = conn.execute("PRAGMA journal_mode").fetchone()
+            if not mode or str(mode[0]).lower() != "wal":
+                return False
+            return True
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+
+
 # Re-export surface for backward compatibility. Resolution happens
 # lazily through the module-level ``__getattr__`` below; the eager
 # imports were pulling sklearn/scipy/numpy through CatalogTaxonomy on
@@ -463,6 +504,25 @@ class T2Database:
         with _upgrade_lock:
             if path_key in _upgrade_done:
                 return
+
+        # RDR-140 P1.2 (nexus-2p52a) Gap 4: cold-start (cross-process) fast
+        # path. When a fresh process meets a DB that is already at
+        # current_version AND already in WAL, the existing flock-wait +
+        # connection-open + no-op apply_pending below is pure overhead that
+        # still takes SQLite's writer lock (PRAGMA journal_mode=WAL is a write
+        # when the file is not WAL, and bootstrap_version writes the version
+        # table). A3 (T2 rdr/140-research-A3, verified) proved both probes are
+        # lock-free: SELECT value FROM _nexus_version (mirrors
+        # ``stored_schema_version``) and PRAGMA journal_mode read succeed even
+        # under a held EXCLUSIVE writer lock. Short-circuit ONLY when BOTH
+        # conditions hold; anything else (missing/0.0.0 row, non-WAL journal,
+        # or any read error) falls through to the unchanged flock+migration
+        # path so a genuine pending migration always runs (no silent fallback
+        # for correctness, mem:feedback_no_silent_fallbacks_for_correctness).
+        if _cold_start_is_current_and_wal(path):
+            with _upgrade_lock:
+                _upgrade_done.add(path_key)
+            return
 
         # RDR-128 P2: acquire the cross-process migration flock BEFORE the
         # in-process ``_upgrade_lock`` so the lock order matches ``nx upgrade``

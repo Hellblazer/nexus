@@ -344,12 +344,23 @@ class TestSpawnLockLoserQuietAttach:
     def test_loser_quiet_attaches_without_constructing_t2db(
         self, config_dir: Path, db_path: Path, tmp_path: Path, monkeypatch,
     ) -> None:
+        import logging
         from unittest.mock import MagicMock
+
+        import structlog
 
         import nexus.db.t2 as t2_module
         import nexus.logging_setup as logging_setup
         from nexus.daemon.t2_daemon import T2Daemon, run_t2_daemon
         from structlog.testing import capture_logs
+
+        # conftest pins structlog to WARNING by default, which would filter the
+        # info-level spawn_lost event before capture_logs sees it. Lower to INFO
+        # for this test; the autouse _restore_structlog_after_test fixture
+        # restores the prior config afterwards.
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        )
 
         # Hold the spawn lock with a real first daemon.
         first = T2Daemon(config_dir=config_dir, db_path=db_path)
