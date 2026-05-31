@@ -83,6 +83,7 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
         collection: str | None,
         corpus: str,
         dry_run: bool,
+        extractor: str = "auto",
     ) -> bool:
         calls.append({
             "uuid": uuid,
@@ -90,6 +91,7 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
             "collection": collection,
             "corpus": corpus,
             "dry_run": dry_run,
+            "extractor": extractor,
         })
         # Default success — tests that want to exercise the
         # stamp-failed summary path replace the dispatcher with
@@ -377,6 +379,30 @@ class TestPassthroughFlags:
         assert result.exit_code == 0, result.output
         assert fake_dispatcher[0]["corpus"] == "knowledge"
 
+    def test_extractor_passthrough(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        # nexus-pxxyn: --extractor reaches the PDF indexer so the MinerU-failure
+        # recovery (--extractor docling) is actionable on the DT path.
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        result = runner.invoke(main, [
+            "dt", "index", "--selection", "--extractor", "docling",
+        ])
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["extractor"] == "docling"
+
+    def test_extractor_defaults_to_auto(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["extractor"] == "auto"
+
 
 # ── nexus-cvaw: paper PDFs route to knowledge__ by default ──────────────────
 
@@ -529,7 +555,7 @@ class TestStampFailedSummary:
         ]
 
         # Dispatcher returns False for the two that should fail to stamp.
-        def maybe_fail(uuid, path, *, collection, corpus, dry_run):
+        def maybe_fail(uuid, path, *, collection, corpus, dry_run, extractor="auto"):
             return uuid == "U-OK"
 
         monkeypatch.setattr("nexus.commands.dt._index_record", maybe_fail)
@@ -1034,3 +1060,191 @@ class TestStampDtUriOnEntry:
             dry_run=True,
         )
         assert stamps == []
+
+
+# ── Layer F write-back (RDR-139 P1.7) ─────────────────────────────────────────
+
+
+class TestWriteback:
+    """``nx dt index --writeback`` stamps the nexus identity back onto DT.
+
+    The DT-side stamp itself is exercised by ``tests/test_dt_writeback.py``
+    against a fake DT client; here we pin the CLI wiring: the flag gates the
+    call, it fires once per successfully-stamped record, and the summary
+    reports the count.
+    """
+
+    def test_writeback_invoked_per_stamped_record(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._writeback_record",
+            lambda uuid: calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--writeback"])
+        assert result.exit_code == 0, result.output
+        assert calls == ["U1"]
+        assert "written back to DT" in result.output
+
+    def test_no_writeback_flag_skips_call(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._writeback_record",
+            lambda uuid: calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1"])
+        assert result.exit_code == 0, result.output
+        assert calls == []
+        assert "written back" not in result.output
+
+    def test_writeback_help_documents_namespace(self, runner):
+        from nexus.cli import main
+
+        result = runner.invoke(main, ["dt", "index", "--help"])
+        assert result.exit_code == 0
+        assert "--writeback" in result.output
+
+
+# ── Layer B semantic linking (RDR-139 P1.5 CLI wiring) ────────────────────────
+
+
+class TestLinkSemantic:
+    """``nx dt index --link-semantic`` invokes Layer B edge generation."""
+
+    def test_link_semantic_invoked_per_stamped_record(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._link_semantic_record",
+            lambda uuid: calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--link-semantic"])
+        assert result.exit_code == 0, result.output
+        assert calls == ["U1"]
+        assert "semantically linked" in result.output
+
+    def test_no_link_semantic_flag_skips_call(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._link_semantic_record",
+            lambda uuid: calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1"])
+        assert result.exit_code == 0, result.output
+        assert calls == []
+        assert "semantically linked" not in result.output
+
+    def test_stamp_failed_record_skips_link_and_writeback(
+        self, runner, fake_selectors, monkeypatch,
+    ):
+        # A record that fails to stamp has no resolvable tumbler, so neither
+        # link nor write-back may run on it (the `continue` after stamp_failed).
+        from nexus.cli import main
+
+        link_calls: list[str] = []
+        wb_calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._index_record",
+            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto": uuid == "U-OK",
+        )
+        monkeypatch.setattr(
+            "nexus.commands.dt._link_semantic_record",
+            lambda uuid: link_calls.append(uuid) or True,
+        )
+        monkeypatch.setattr(
+            "nexus.commands.dt._writeback_record",
+            lambda uuid: wb_calls.append(uuid) or True,
+        )
+        fake_selectors["selection"].return_value = [("U-OK", "/a.pdf"), ("U-FAIL", "/b.pdf")]
+        result = runner.invoke(
+            main, ["dt", "index", "--selection", "--link-semantic", "--writeback"],
+        )
+        assert result.exit_code == 0, result.output
+        # Only the stamped record reached link + write-back.
+        assert link_calls == ["U-OK"]
+        assert wb_calls == ["U-OK"]
+        assert "1 DT-URI stamp-failed" in result.output
+
+    def test_link_and_writeback_compose(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        link_calls: list[str] = []
+        wb_calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.dt._link_semantic_record",
+            lambda uuid: link_calls.append(uuid) or True,
+        )
+        monkeypatch.setattr(
+            "nexus.commands.dt._writeback_record",
+            lambda uuid: wb_calls.append(uuid) or True,
+        )
+        fake_selectors["uuid"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(
+            main, ["dt", "index", "--uuid", "U1", "--link-semantic", "--writeback"],
+        )
+        assert result.exit_code == 0, result.output
+        assert link_calls == ["U1"] and wb_calls == ["U1"]
+        assert "semantically linked" in result.output
+        assert "written back to DT" in result.output
+
+
+class TestEnrichWiring:
+    """RDR-139 Layer C: ``nx dt index --enrich`` runs a DT-CrossRef bib
+    gap-fill pass over each touched collection after indexing."""
+
+    def test_enrich_runs_bib_enrichment_once_per_collection(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            "nexus.commands.enrich.run_bib_enrichment",
+            lambda coll, **kw: calls.append((coll, kw)),
+        )
+        # Two records, one explicit collection -> a single enrichment pass.
+        fake_selectors["selection"].return_value = [
+            ("U1", "/a.pdf"), ("U2", "/b.pdf"),
+        ]
+        result = runner.invoke(main, [
+            "dt", "index", "--selection",
+            "--collection", "knowledge__test", "--enrich",
+        ])
+        assert result.exit_code == 0, result.output
+        assert calls == [("knowledge__test", {"source": "dt"})]
+        assert "Enriching bibliographic metadata" in result.output
+
+    def test_no_enrich_flag_skips_enrichment(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        from nexus.cli import main
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.enrich.run_bib_enrichment",
+            lambda coll, **kw: calls.append(coll),
+        )
+        fake_selectors["selection"].return_value = [("U1", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--selection"])
+        assert result.exit_code == 0, result.output
+        assert calls == []

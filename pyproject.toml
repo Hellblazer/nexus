@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "5.4.5"
+version = "5.5.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -107,6 +107,7 @@ Documentation = "https://github.com/Hellblazer/nexus/tree/main/docs"
 nx = "nexus.cli:main"
 nx-mcp = "nexus.mcp.core:main"
 nx-mcp-catalog = "nexus.mcp.catalog:main"
+nx-mcp-devonthink = "nexus.mcp.devonthink:main"
 nx-session-end-launcher = "nexus._session_end_launcher:main"
 
 [tool.hatch.build.targets.wheel]
@@ -184,4 +185,20 @@ dev = [
     "pytest-cov>=7.0.0",
     "syrupy>=4.0",
     "twine>=6.2.0",
+]
+
+[tool.uv]
+# nexus-usppl: exclude PyAV. It is pulled transitively by MinerU's VLM backend
+# (mineru -> qwen-vl-utils -> av), which nexus never uses — nexus drives MinerU's
+# PIPELINE backend (`mineru.cli.common.do_parse`) and Docling, neither of which
+# imports `av`. PyAV vendors ffmpeg 62.x dylibs (libavdevice.62) that collide
+# with opencv's bundled ffmpeg 61.x dylibs (libavdevice.61) inside a single
+# process, producing the macOS objc "Class AVFFrameReceiver implemented in both
+# ... may cause spurious casting failures and mysterious crashes" warning that
+# destabilises the PDF extraction stack. Verified safe: `import mineru`,
+# `mineru.cli.common`, `qwen_vl_utils`, `docling`, and `cv2` all import cleanly
+# with `av` absent (qwen-vl-utils imports av lazily on its unused video path).
+# The never-true marker drops `av` from resolution on every platform.
+override-dependencies = [
+    "av; sys_platform == 'never'",
 ]

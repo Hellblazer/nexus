@@ -1754,6 +1754,10 @@ class Catalog:
         """Delegates to ``_DocumentOps.by_file_path`` (nexus-mbm)."""
         return self._docs.by_file_path(owner, file_path)
 
+    def by_source_uri(self, uri: str) -> CatalogEntry | None:
+        """Delegates to ``_DocumentOps.by_source_uri`` (RDR-139 P1.4)."""
+        return self._docs.by_source_uri(uri)
+
     def by_owner(self, owner: Tumbler) -> list[CatalogEntry]:
         """Delegates to ``_DocumentOps.by_owner`` (nexus-mbm)."""
         return self._docs.by_owner(owner)

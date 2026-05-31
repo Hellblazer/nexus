@@ -759,6 +759,34 @@ def migrate_document_aspects_table(conn: sqlite3.Connection) -> None:
     _log.info("Migrated: created document_aspects table (RDR-089)")
 
 
+def migrate_document_highlights_table(conn: sqlite3.Connection) -> None:
+    """Create the ``document_highlights`` table for RDR-139 Layer E.
+
+    Per-document DEVONthink highlight / mention markdown notes, keyed by the
+    catalog tumbler (``doc_id``). Deliberately separate from ``document_aspects``
+    so free-text highlights do not contend with the aspect worker's whole-row
+    overwrite or its confidence gate.
+
+    Idempotent: ``CREATE IF NOT EXISTS``. The ``DocumentHighlights`` store also
+    self-creates this table on construction, so fresh installs and tests get it
+    without waiting on this migration (mirrors ``document_aspects``).
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS document_highlights (
+            doc_id        TEXT PRIMARY KEY,
+            source_uri    TEXT,
+            collection    TEXT,
+            highlights_md TEXT,
+            mentions_md   TEXT,
+            ingested_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_document_highlights_source_uri
+            ON document_highlights(source_uri);
+    """)
+    conn.commit()
+    _log.info("Migrated: created document_highlights table (RDR-139 Layer E)")
+
+
 def migrate_aspect_extraction_queue_table(conn: sqlite3.Connection) -> None:
     """Create the ``aspect_extraction_queue`` table for RDR-089
     follow-up (nexus-qeo8).
@@ -2075,6 +2103,11 @@ MIGRATIONS: list[Migration] = [
         "RDR-109 Phase 5: add document_aspects.salient_sentences column",
         lambda conn: _migrate_add_aspects_salient_sentences(conn),
     ),
+    Migration(
+        "5.5.0",
+        "RDR-139 Layer E: add document_highlights table",
+        migrate_document_highlights_table,
+    ),
 ]
 
 
@@ -2100,6 +2133,7 @@ def _migrate_add_aspects_salient_sentences(conn: sqlite3.Connection) -> None:
         "ALTER TABLE document_aspects ADD COLUMN salient_sentences TEXT"
     )
     conn.commit()
+
 
 # ── T3 upgrade steps ────────────────────────────────────────────────────────
 # Separate from T2 migrations: these require a ChromaDB client, not sqlite3.

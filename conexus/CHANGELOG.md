@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.5.0] - 2026-05-31
+
+### Added
+
+- **DEVONthink integration (RDR-139).** New `devonthink` MCP server
+  (`nx-mcp-devonthink`) ships with the plugin alongside `nexus` and
+  `nexus-catalog`. It advertises ~17 curated DEVONthink tools plus the
+  `dt_incorporate` composite when DEVONthink is reachable, and only a
+  `devonthink_status` stub when it is absent (it always spawns, gating
+  internally). Tools surface as `mcp__plugin_conexus_devonthink__*`. Declared
+  `alwaysLoad:false` in `conexus/.mcp.json` as a tool-search startup
+  optimization. The `nx dt` CLI gains `capture`, `highlights`, and the layered
+  `index` flags (`--link-semantic` / `--writeback` / `--enrich` / `--dt-content`
+  / `--highlights` / `--extractor`). See the root CHANGELOG for the full layer
+  list and `docs/mcp-servers.md` for the tool catalog.
+
 ## [5.4.5] - 2026-05-30
 
 ### Fixed

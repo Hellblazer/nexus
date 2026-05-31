@@ -282,6 +282,7 @@ class T2Database:
         from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
         from nexus.db.t2.chash_index import ChashIndex
         from nexus.db.t2.document_aspects import DocumentAspects
+        from nexus.db.t2.document_highlights import DocumentHighlights
         from nexus.db.t2.memory_store import MemoryStore
         from nexus.db.t2.plan_library import PlanLibrary
         from nexus.db.t2.telemetry import Telemetry
@@ -362,6 +363,11 @@ class T2Database:
         self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(
             path, rename_lock=self.RENAME_LOCK
         )
+        # RDR-139 Layer E: per-document DEVONthink highlight/mention notes,
+        # keyed by tumbler. Dedicated table (NOT document_aspects) so
+        # free-text highlights never contend with the aspect worker's
+        # whole-row overwrite or its confidence gate.
+        self.document_highlights: DocumentHighlights = DocumentHighlights(path)
 
         # RDR-120 P5.A.1 (nexus-9zmpl): catalog is the eighth domain
         # store. Constructed lazily via the ``catalog`` property so
@@ -512,7 +518,7 @@ class T2Database:
         self.close()
 
     def close(self) -> None:
-        """Close all eight domain connections.
+        """Close all domain connections.
 
         Each store closes its own connection under its own lock. The
         close order is reverse of construction so the most recently
@@ -527,6 +533,9 @@ class T2Database:
             except Exception:  # noqa: BLE001
                 pass
             self._catalog = None
+        # Reverse-construction order: document_highlights was built after
+        # aspect_queue (RDR-139 Layer E), so it closes first.
+        self.document_highlights.close()
         self.aspect_queue.close()
         self.document_aspects.close()
         self.chash_index.close()
@@ -594,6 +603,7 @@ class T2Database:
             "chash": 0,
             "aspects": 0,
             "aspect_queue": 0,
+            "highlights": 0,
             "tax_topics": 0,
             "tax_assignments": 0,
             "tax_meta": 0,
@@ -663,6 +673,15 @@ class T2Database:
                 (new, old),
             )
             counts["aspect_queue"] = cur.rowcount
+
+            # document_highlights (RDR-139 Layer E). PK is doc_id (tumbler),
+            # so the denorm collection column cannot collide on rename — a
+            # plain UPDATE suffices (no collision-defense DELETE needed).
+            cur = conn.execute(
+                "UPDATE document_highlights SET collection = ? WHERE collection = ?",
+                (new, old),
+            )
+            counts["highlights"] = cur.rowcount
 
             # taxonomy (three sub-tables)
             cur = conn.execute(

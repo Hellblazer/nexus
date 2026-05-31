@@ -73,6 +73,7 @@ def _index_record(
     collection: str | None,
     corpus: str,
     dry_run: bool,
+    extractor: str = "auto",
 ) -> bool:
     """Dispatch a single supported ``(uuid, path)`` to the right indexer.
 
@@ -109,7 +110,10 @@ def _index_record(
     file_path = Path(path)
     ext = file_path.suffix.lower()
     if ext == ".pdf":
-        index_pdf(file_path, corpus=corpus, collection_name=collection)
+        # nexus-pxxyn: thread the operator's --extractor choice through so the
+        # documented MinerU-failure recovery ("rerun with --extractor docling")
+        # is actionable on the DT path. Markdown has no extractor backend.
+        index_pdf(file_path, corpus=corpus, collection_name=collection, extractor=extractor)
     else:  # .md — extension filtering happens in index_cmd
         index_markdown(file_path, corpus=corpus, collection_name=collection)
 
@@ -194,6 +198,226 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
         cat._db.close()
 
 
+def _link_semantic_record(uuid: str) -> bool:
+    """Create Layer B DT-derived 'relates' edges for a just-indexed record.
+
+    Resolves the record's tumbler via ``Catalog.by_source_uri`` (just stamped
+    with ``x-devonthink-item://<uuid>``) and calls
+    :func:`nexus.catalog.dt_link_generator.generate_dt_links`. Returns ``True``
+    when at least one edge was created. Fail-soft: any error or unresolvable
+    tumbler logs and returns ``False`` — linking never aborts the index batch.
+    """
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.catalog.dt_link_generator import generate_dt_links  # noqa: PLC0415
+    from nexus.config import catalog_path  # noqa: PLC0415
+
+    dt_uri = f"x-devonthink-item://{uuid}"
+    cat_path = catalog_path()
+    if not Catalog.is_initialized(cat_path):
+        return False
+    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    try:
+        entry = cat.by_source_uri(dt_uri)
+        if entry is None:
+            _log.warning("dt_link_no_entry", uuid=uuid)
+            return False
+        counts = generate_dt_links(cat, entry.tumbler, uuid)
+        return (counts["similar"] + counts["link"]) > 0
+    except Exception as e:
+        _log.warning("dt_link_failed", uuid=uuid, error=str(e))
+        return False
+    finally:
+        cat._db.close()
+
+
+def _writeback_record(uuid: str) -> bool:
+    """Stamp the nexus identity back onto a just-indexed DT record (Layer F).
+
+    Resolves the record's tumbler via ``Catalog.by_source_uri`` (the entry was
+    just stamped with ``x-devonthink-item://<uuid>``) and calls
+    :func:`nexus.dt_writeback.writeback_record`. Returns ``True`` when at least
+    one nexus-owned field was written. Fail-soft: any error or an unresolvable
+    tumbler logs and returns ``False`` — write-back never aborts the index batch.
+
+    Aspect-keyword tags (``nx-kw:*``) are supported by ``writeback_record`` but
+    not sourced here: RDR-089 aspect extraction is queued AFTER index, so no
+    keywords exist at ``nx dt index`` time. Stamping them is deferred to a
+    follow-on re-stamp pass (tracked) rather than stamped empty.
+    """
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.config import catalog_path  # noqa: PLC0415
+    from nexus.dt_writeback import writeback_record  # noqa: PLC0415
+
+    dt_uri = f"x-devonthink-item://{uuid}"
+    cat_path = catalog_path()
+    if not Catalog.is_initialized(cat_path):
+        return False
+    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    try:
+        entry = cat.by_source_uri(dt_uri)
+        if entry is None:
+            _log.warning("dt_writeback_no_entry", uuid=uuid)
+            return False
+        result = writeback_record(uuid, str(entry.tumbler))
+        return any(result[k] for k in ("tags", "annotation", "metadata"))
+    except Exception as e:
+        _log.warning("dt_writeback_failed", uuid=uuid, error=str(e))
+        return False
+    finally:
+        cat._db.close()
+
+
+def _ingest_highlights_record(uuid: str) -> bool:
+    """RDR-139 Layer E: ingest a just-indexed record's DEVONthink highlights +
+    mentions as a note attached to its catalog tumbler.
+
+    Resolves the tumbler via ``Catalog.by_source_uri`` (the entry was just
+    stamped with ``x-devonthink-item://<uuid>``), pulls the markdown blobs via
+    :func:`devonthink.dt_extract_highlights` / ``dt_extract_mentions``, and
+    upserts a :class:`HighlightRecord` into the dedicated ``document_highlights``
+    T2 table. Returns ``True`` only when at least one blob had content AND the
+    row was written. Fail-soft: no tumbler / no highlights / any error -> log +
+    ``False``; highlight ingest never aborts the index batch.
+    """
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.config import catalog_path  # noqa: PLC0415
+    from nexus.db.t2.document_highlights import (  # noqa: PLC0415
+        DocumentHighlights,
+        HighlightRecord,
+    )
+    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+
+    dt_uri = f"x-devonthink-item://{uuid}"
+    cat_path = catalog_path()
+    if not Catalog.is_initialized(cat_path):
+        return False
+    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    try:
+        entry = cat.by_source_uri(dt_uri)
+        if entry is None:
+            _log.warning("dt_highlights_no_entry", uuid=uuid)
+            return False
+        highlights_md = _dt.dt_extract_highlights(uuid) or ""
+        mentions_md = _dt.dt_extract_mentions(uuid) or ""
+        if not (highlights_md or mentions_md):
+            _log.debug("dt_highlights_none", uuid=uuid)
+            return False
+        # One-shot CLI ingest of a new, cascade-free store: construct the
+        # DocumentHighlights store directly (not the daemon RPC path, which
+        # has no highlights method, and not T2Database, which the storage
+        # boundary lint reserves for the daemon). Low contention: one write
+        # per indexed record, not a long-lived worker (RDR-128 hazard N/A).
+        from nexus.config import default_db_path  # noqa: PLC0415
+
+        store = DocumentHighlights(default_db_path())
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        return store.upsert(HighlightRecord(
+            doc_id=str(entry.tumbler),
+            source_uri=dt_uri,
+            collection=getattr(entry, "physical_collection", "") or "",
+            highlights_md=highlights_md,
+            mentions_md=mentions_md,
+            ingested_at=datetime.now(timezone.utc).isoformat(),
+        ))
+    except Exception as e:
+        _log.warning("dt_highlights_failed", uuid=uuid, error=str(e))
+        return False
+    finally:
+        cat._db.close()
+
+
+#: RDR-139 Layer D extraction-source provenance values for DT-sourced text.
+#: Only ``dt_content`` (extract_record_content) is routed today; ``dt_ocr``
+#: (ocr_record, scanned PDFs/images) and ``dt_transcribe`` (transcribe_record,
+#: A/V) are enum-ready but unrouted — deferred to nexus-39b0f, surfaced at
+#: Phase 2 close (substantive-critic), not silent scope reduction.
+_DT_EXTRACTION_SOURCES: frozenset[str] = frozenset(
+    {"dt_content", "dt_ocr", "dt_transcribe"}
+)
+
+
+def _index_dt_content_record(
+    uuid: str,
+    *,
+    collection: str,
+    corpus: str,
+    extraction_source: str = "dt_content",
+) -> bool:
+    """RDR-139 Layer D: index a non-file-backed DT record from DT-extracted
+    text (rather than an on-disk file).
+
+    Sources the AI-optimised body via :func:`devonthink.dt_extract_content`,
+    writes it through the existing Markdown chunking pipeline with every chunk
+    stamped ``extraction_source`` (``dt_content`` by default), and stamps the
+    DT identity (``x-devonthink-item://<uuid>``) onto the catalog entry so the
+    record is addressable even though no real file backs it.
+
+    Fail-soft: empty/unavailable DT text -> ``False`` (the caller skips the
+    record), never an exception. Returns ``True`` only when chunks were written
+    AND the DT identity was stamped.
+
+    The extracted text is cached at a STABLE per-UUID path
+    (``<catalog>/.dt-content/<uuid>.md``) rather than a throwaway temp file
+    (code-review HIGH-1). A throwaway path breaks re-index idempotency — the
+    catalog dedups by ``file_path``, so a fresh random name each run would
+    accumulate a duplicate entry per re-index and leave the row's
+    ``file_path`` pointing at a deleted file (a ghost path). The stable path
+    makes the catalog ``by_file_path`` lookup hit on re-index and keeps the
+    ``file_path`` column resolvable; the DT identity (``source_uri``) is still
+    the canonical reference.
+    """
+    import json  # noqa: PLC0415
+
+    from nexus.config import catalog_path  # noqa: PLC0415
+    from nexus.doc_indexer import index_markdown  # noqa: PLC0415
+    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+
+    if extraction_source not in _DT_EXTRACTION_SOURCES:
+        raise ValueError(
+            f"extraction_source {extraction_source!r} not a DT source "
+            f"{sorted(_DT_EXTRACTION_SOURCES)}"
+        )
+
+    text = _dt.dt_extract_content(uuid)
+    if not text or not text.strip():
+        _log.warning("dt_content_empty", uuid=uuid, extraction_source=extraction_source)
+        return False
+
+    name = _dt.dt_record_name(uuid) or uuid
+    # JSON-quote the title so a name with a colon / quote can't break the
+    # strict frontmatter parse. The body follows verbatim.
+    front = f"---\ntitle: {json.dumps(name)}\n---\n\n{text}"
+
+    cache_dir = catalog_path() / ".dt-content"
+    cache_path = cache_dir / f"{uuid}.md"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(front, encoding="utf-8")
+        count = index_markdown(
+            cache_path,
+            corpus=corpus,
+            collection_name=collection,
+            extraction_source=extraction_source,
+        )
+        if not count:
+            # We had non-empty text above, so a 0-chunk return is the
+            # index_markdown staleness skip: this record's content is already
+            # indexed and unchanged. That is a benign idempotent no-op (the
+            # catalog row is not duplicated), not a failure — log at debug.
+            _log.debug("dt_content_unchanged", uuid=uuid)
+            return False
+        return _stamp_dt_uri_on_entry(cache_path, uuid)
+    except (RuntimeError, ImportError, OSError) as exc:
+        _log.error(
+            "dt_content_index_failed",
+            uuid=uuid,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return False
+
+
 @click.group("dt")
 def dt() -> None:
     """DEVONthink integration verbs (macOS only).
@@ -272,6 +496,84 @@ def dt() -> None:
     default=False,
     help="Print the records that would be indexed; make no T3 writes.",
 )
+@click.option(
+    "--link-semantic",
+    "link_semantic",
+    is_flag=True,
+    default=False,
+    help=(
+        "After a record indexes, create 'relates' edges to its DEVONthink "
+        "similarity + explicit-link neighbours that are also indexed in nexus "
+        "(Layer B): created_by dt_similar / dt_link, deduped, idempotent. "
+        "DT unavailable -> zero edges. Opt-in, default off."
+    ),
+)
+@click.option(
+    "--writeback",
+    is_flag=True,
+    default=False,
+    help=(
+        "After a record indexes, stamp the nexus identity back onto the "
+        "DEVONthink record (Layer F): nx-indexed / nx-tumbler:<t> tags "
+        "(add-mode, no clobber), a tumbler backlink annotation, and "
+        "nxtumbler custom metadata. nexus-owned namespace only; never edits "
+        "user content; honours Exclude-from-AI&MCP on a best-effort basis "
+        "(records with empty AI-extracted content are skipped). Opt-in, "
+        "default off."
+    ),
+)
+@click.option(
+    "--enrich",
+    "enrich",
+    is_flag=True,
+    default=False,
+    help=(
+        "After indexing, run a DT-CrossRef bibliographic gap-fill pass over "
+        "each touched collection (RDR-139 Layer C): the 'auto' primary "
+        "backend, then DEVONthink's CrossRef resolver fills only still-empty "
+        "bib_* fields. Strictly lowest-precedence; never overwrites an "
+        "S2/OpenAlex value. DT unavailable -> primary-only. Opt-in, default off."
+    ),
+)
+@click.option(
+    "--dt-content",
+    "dt_content",
+    is_flag=True,
+    default=False,
+    help=(
+        "Index non-file-backed records (web archives, bookmarks, formatted "
+        "notes — anything without a .pdf/.md file) from DEVONthink's "
+        "AI-extracted text instead of skipping them (RDR-139 Layer D). Every "
+        "chunk is stamped extraction_source=dt_content; file-backed records "
+        "still index from their file (provenance absent == file). DT "
+        "unavailable -> records skipped exactly as today. Opt-in, default off."
+    ),
+)
+@click.option(
+    "--highlights",
+    "highlights",
+    is_flag=True,
+    default=False,
+    help=(
+        "After a record indexes, ingest its DEVONthink highlights + mentions "
+        "(extract_record_highlights / extract_record_mentions) as a markdown "
+        "note attached to the record's catalog tumbler in the document_highlights "
+        "T2 table (RDR-139 Layer E). DT unavailable or no highlights -> nothing "
+        "ingested. Opt-in, default off."
+    ),
+)
+@click.option(
+    "--extractor",
+    type=click.Choice(["auto", "docling", "mineru"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help=(
+        "PDF extraction backend for file-backed records. ``mineru`` is "
+        "formula-aware but OOM-fails on some formula-dense pages; the recovery "
+        "is ``--extractor docling`` (formula-stripped, but always completes). "
+        "``auto`` picks mineru when formulas are detected, else docling."
+    ),
+)
 def index_cmd(
     use_selection: bool,
     tag: str | None,
@@ -282,6 +584,12 @@ def index_cmd(
     collection: str | None,
     corpus: str,
     dry_run: bool,
+    link_semantic: bool,
+    writeback: bool,
+    enrich: bool,
+    dt_content: bool,
+    highlights: bool,
+    extractor: str,
 ) -> None:
     """Index DEVONthink records into Nexus.
 
@@ -331,10 +639,45 @@ def index_cmd(
     indexed = 0
     skipped = 0
     stamp_failed = 0
+    written_back = 0
+    linked = 0
+    content_extracted = 0
+    highlighted = 0
+    touched_collections: set[str] = set()
     failed: list[tuple[str, str, str]] = []  # (uuid, path, error)
+
+    # RDR-139 Layer D: only probe DT availability once, and only when the
+    # opt-in flag is set. Flag off -> the unsupported-extension skip path is
+    # byte-identical to today (Gap 0).
+    dt_content_active = False
+    if dt_content:
+        from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+
+        dt_content_active = _dt.available()
+
     for uuid, path in records:
         ext = Path(path).suffix.lower()
         if ext not in _SUPPORTED_EXTS:
+            # RDR-139 Layer D: non-file-backed record. With --dt-content and a
+            # reachable DT, index it from DT-extracted text; otherwise skip
+            # exactly as before.
+            if dt_content_active:
+                dt_collection = _resolve_dt_collection(collection, corpus, ext)
+                if _index_dt_content_record(
+                    uuid, collection=dt_collection, corpus=corpus,
+                ):
+                    content_extracted += 1
+                    indexed += 1
+                    touched_collections.add(dt_collection)
+                    if link_semantic and _link_semantic_record(uuid):
+                        linked += 1
+                    if writeback and _writeback_record(uuid):
+                        written_back += 1
+                    if highlights and _ingest_highlights_record(uuid):
+                        highlighted += 1
+                else:
+                    skipped += 1
+                continue
             _log.warning(
                 "dt_skip_unsupported_extension",
                 uuid=uuid,
@@ -351,6 +694,7 @@ def index_cmd(
                 collection=resolved_collection,
                 corpus=corpus,
                 dry_run=False,
+                extractor=extractor,
             )
         except (RuntimeError, ImportError) as exc:
             # nexus-2fyb code-review R4-I2: a single indexing failure must
@@ -371,9 +715,36 @@ def index_cmd(
             failed.append((uuid, path, f"{type(exc).__name__}: {exc}"))
             continue
         indexed += 1
+        touched_collections.add(resolved_collection)
         if not stamped:
             stamp_failed += 1
+            continue
+        if link_semantic and _link_semantic_record(uuid):
+            linked += 1
+        if writeback and _writeback_record(uuid):
+            written_back += 1
+        if highlights and _ingest_highlights_record(uuid):
+            highlighted += 1
+
+    # RDR-139 Layer C: gap-fill bibliographic metadata over the collections we
+    # just wrote to. Runs once per distinct collection (title-group oriented),
+    # after all records land so a multi-record paper enriches as one group.
+    if enrich and touched_collections:
+        from nexus.commands.enrich import run_bib_enrichment
+
+        for coll in sorted(touched_collections):
+            click.echo(f"\nEnriching bibliographic metadata: {coll}")
+            run_bib_enrichment(coll, source="dt")
+
     summary = f"Indexed {indexed} record(s) ({skipped} skipped"
+    if content_extracted:
+        summary += f", {content_extracted} from DT content"
+    if link_semantic:
+        summary += f", {linked} semantically linked"
+    if writeback:
+        summary += f", {written_back} written back to DT"
+    if highlights:
+        summary += f", {highlighted} highlights ingested"
     if failed:
         summary += f", {len(failed)} failed"
     if stamp_failed:
@@ -551,6 +922,179 @@ def open_cmd(tumbler_or_uuid: str) -> None:
         )
 
     subprocess.run(["open", uri], check=True)  # noqa: S603,S607
+
+
+@dt.command("highlights")
+@click.argument("tumbler_or_uuid")
+def highlights_cmd(tumbler_or_uuid: str) -> None:
+    """Show the DEVONthink highlights + mentions ingested for a record (Layer E).
+
+    Accepts a tumbler (``1.2.3``) or a DEVONthink UUID. Reads the
+    ``document_highlights`` T2 table populated by ``nx dt index --highlights``.
+    This is a pure T2 read — DEVONthink need not be running.
+    """
+    from nexus.config import default_db_path  # noqa: PLC0415
+    from nexus.db.t2.document_highlights import DocumentHighlights  # noqa: PLC0415
+
+    store = DocumentHighlights(default_db_path())
+    if _UUID_RE.match(tumbler_or_uuid):
+        rec = store.get_by_source_uri(f"x-devonthink-item://{tumbler_or_uuid}")
+    elif _TUMBLER_RE.match(tumbler_or_uuid):
+        rec = store.get(tumbler_or_uuid)
+    else:
+        raise click.ClickException(
+            "argument is neither a tumbler (e.g. 1.2.3) nor a UUID.",
+        )
+    if rec is None:
+        raise click.ClickException(
+            f"no ingested highlights for {tumbler_or_uuid} "
+            "(run 'nx dt index --highlights' first).",
+        )
+    click.echo(f"# Highlights for tumbler {rec.doc_id}")
+    click.echo(f"source: {rec.source_uri}  (ingested {rec.ingested_at})")
+    if rec.highlights_md:
+        click.echo("\n" + rec.highlights_md)
+    if rec.mentions_md:
+        click.echo("\n## Mentions\n" + rec.mentions_md)
+
+
+@dt.command("capture")
+@click.argument("url", required=False)
+@click.option("--doi", default=None, help="Capture by DOI: download the open-access PDF (Unpaywall).")
+@click.option("--file", "file_path", default=None, help="Capture a loose file from this POSIX path.")
+@click.option(
+    "--type",
+    "capture_type",
+    type=click.Choice(["html", "webarchive", "markdown", "pdf"], case_sensitive=False),
+    default="webarchive",
+    show_default=True,
+    help="Web-capture format (URL captures only). pdf and markdown index from "
+         "the on-disk file DT creates; html and webarchive are non-file-backed.",
+)
+@click.option(
+    "--contact-email",
+    default=None,
+    help="Caller email for Unpaywall PDF discovery on --doi (else $OPENALEX_MAILTO).",
+)
+@click.option("--collection", default=None, help="T3 collection override for the index step.")
+@click.option("--corpus", default="dt", show_default=True, help="Corpus tag for the index step.")
+@click.option("--link-semantic", "link_semantic", is_flag=True, default=False,
+              help="After indexing, create Layer B 'relates' edges (see nx dt index).")
+@click.option("--writeback", is_flag=True, default=False,
+              help="After indexing, stamp nexus identity back onto the DT record (Layer F).")
+@click.option("--highlights", "highlights", is_flag=True, default=False,
+              help="After indexing, ingest the record's highlights (Layer E).")
+@click.option("--enrich", "enrich", is_flag=True, default=False,
+              help="After indexing, run DT-CrossRef bib gap-fill over the collection (Layer C).")
+@click.option("--extractor",
+              type=click.Choice(["auto", "docling", "mineru"], case_sensitive=False),
+              default="auto", show_default=True,
+              help="PDF extraction backend for the index step (docling = formula-stripped "
+                   "recovery when mineru OOM-fails on formula-dense PDFs).")
+@click.pass_context
+def capture_cmd(
+    ctx: click.Context,
+    url: str | None,
+    doi: str | None,
+    file_path: str | None,
+    capture_type: str,
+    contact_email: str | None,
+    collection: str | None,
+    corpus: str,
+    link_semantic: bool,
+    writeback: bool,
+    highlights: bool,
+    enrich: bool,
+    extractor: str,
+) -> None:
+    """Capture a URL, DOI, or file into DEVONthink and index it (RDR-139 Layer G).
+
+    Provide exactly one source: a URL argument, ``--doi``, or ``--file``. The
+    captured record is then indexed (and optionally linked / written-back /
+    highlight-ingested) end to end.
+
+    This is the ONE DT-bound verb: unlike ``nx dt index`` / ``--enrich`` (which
+    degrade silently when DEVONthink is absent), ``nx dt capture`` reports
+    DT-required and exits NON-ZERO, because capture is impossible without DT.
+    """
+    if not _is_darwin():
+        raise click.ClickException("DEVONthink integration is macOS-only")
+
+    # Count by truthiness so an empty --doi "" / --file "" is "no source" with
+    # a clear message, not a confusing blank-target failure downstream.
+    sources = [bool(url), bool(doi), bool(file_path)]
+    if sum(sources) != 1:
+        raise click.UsageError(
+            "Provide exactly one capture source: a URL argument, --doi, or --file.",
+        )
+
+    from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415
+
+    if not _dt.available():
+        # Gap-0 NON-OPTIONAL exception: capture cannot proceed without DT, so it
+        # fails loud (non-zero) rather than silently doing nothing.
+        raise click.ClickException(
+            "nx dt capture requires DEVONthink to be running — this verb is "
+            "DT-bound by design (unlike nx dt index, which degrades silently).",
+        )
+
+    if url:
+        # pdf AND markdown captures are stored by DT as on-disk files (.pdf /
+        # .md) — they index from the file (better fidelity than AI re-extract).
+        # html / webarchive captures are non-file-backed -> Layer D dt_content.
+        file_backed = capture_type.lower() in {"pdf", "markdown"}
+        uuid = _dt.dt_capture_web_page(url, capture_type=capture_type)
+        what = url
+    elif doi:
+        import os as _os  # noqa: PLC0415
+
+        email = contact_email or _os.environ.get("OPENALEX_MAILTO", "")
+        if not email:
+            click.echo(
+                "Warning: no contact email (--contact-email / $OPENALEX_MAILTO); "
+                "Unpaywall open-access PDF discovery is disabled, CrossRef "
+                "metadata only.",
+                err=True,
+            )
+        uuid = _dt.dt_download_pdf_from_doi(doi, contact_email=email)
+        file_backed = True
+        what = f"doi:{doi}"
+    else:
+        uuid = _dt.dt_import_file(file_path or "")
+        file_backed = True
+        what = file_path or ""
+
+    if not uuid:
+        hint = " (no open-access PDF found for this DOI)" if doi else ""
+        raise click.ClickException(f"capture failed for {what}{hint} — no record created.")
+
+    click.echo(f"Captured {what} -> DEVONthink record {uuid}")
+    # Reuse the full index path. file_backed (pdf/markdown/doi/file) indexes
+    # from the on-disk file; non-file-backed (html/webarchive) routes through
+    # Layer D's --dt-content (CA6 finding).
+    try:
+        ctx.invoke(
+            index_cmd,
+            uuids=(uuid,),
+            collection=collection,
+            corpus=corpus,
+            dt_content=not file_backed,
+            link_semantic=link_semantic,
+            writeback=writeback,
+            highlights=highlights,
+            enrich=enrich,
+            extractor=extractor,
+        )
+    except click.ClickException:
+        # Capture succeeded but indexing failed: the DT record exists but is
+        # un-indexed (no catalog entry, invisible to nx dt open / de-index).
+        # Surface the recovery path before propagating.
+        click.echo(
+            f"Note: DEVONthink record {uuid} was captured but indexing failed. "
+            f"Recover with: nx dt index --uuid {uuid}",
+            err=True,
+        )
+        raise
 
 
 # ── DT-side AppleScript installer (nexus-tv5u) ────────────────────────────────
