@@ -160,6 +160,35 @@ class TestMigrationFastPath:
         assert _cold_start_is_current_and_wal(db) is False
         assert not db.exists()
 
+    def test_existing_db_without_version_table_returns_false(
+        self, tmp_path: Path,
+    ) -> None:
+        """An existing file with no ``_nexus_version`` table (skeleton DB /
+        bootstrap-in-progress) must fall through, not fast-path."""
+        from nexus.db.t2 import _cold_start_is_current_and_wal
+
+        db = tmp_path / "skeleton.db"
+        conn = sqlite3.connect(str(db))  # materialise an empty, schema-less DB
+        conn.close()
+        assert db.exists()
+        assert _cold_start_is_current_and_wal(db) is False
+
+    def test_zero_zero_zero_current_version_returns_false(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """A ``0.0.0`` current version (broken/editable install) must never
+        match a real stored version — the probe returns False so the full
+        path runs."""
+        from nexus.db.t2 import _cold_start_is_current_and_wal
+
+        db = tmp_path / "memory.db"
+        _make_migrated_wal_db(db)
+        assert _stored_version(db) == _current_version()
+        assert _journal_mode(db) == "wal"
+
+        monkeypatch.setattr("importlib.metadata.version", lambda _name: "0.0.0")
+        assert _cold_start_is_current_and_wal(db) is False
+
     def test_stale_stored_version_still_runs_full_migration_path(
         self, tmp_path: Path, installed_sentinels: dict,
     ) -> None:
