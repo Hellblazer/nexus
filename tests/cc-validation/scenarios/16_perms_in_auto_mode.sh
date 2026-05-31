@@ -13,10 +13,10 @@ claude_start_auto() {
         local pane; pane=$(capture)
         if [[ $_trust_done -eq 0 ]] && echo "$pane" | grep -qiE "trust this folder|project you trust"; then
             echo "    [auth] trust — accept"
-            tmux send-keys -t "${TMUX_SESSION}" Enter
+            _tmux send-keys -t "${TMUX_SESSION}" Enter
             _trust_done=1; sleep 2
         elif echo "$pane" | grep -qiE "custom API key"; then
-            tmux send-keys -t "${TMUX_SESSION}" Enter; sleep 5
+            _tmux send-keys -t "${TMUX_SESSION}" Enter; sleep 5
         elif echo "$pane" | grep -qiE "Type a message|auto.*on|❯ "; then
             break
         fi
