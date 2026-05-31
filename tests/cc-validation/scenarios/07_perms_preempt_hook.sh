@@ -11,6 +11,20 @@ python3 -c 'import json; print(json.dumps({"hookSpecificOutput":{"hookEventName"
 EOF
 chmod +x "$TEST_HOME/.claude/perm_hook.sh"
 
+# Stub MCP server in .mcp.json (NOT settings.json.mcpServers, which CC silently
+# ignores — see README trap #2). The runner's claude_start wrapper normalizes
+# the python3 launcher to the repo venv and launches with --mcp-config so the
+# server actually connects; otherwise the mcp__stub__ping call never executes
+# and the PermissionRequest hook has nothing to gate (the old confounded fail).
+# Written once here; it persists across both sub-runs (no reset between them).
+cat > "$TEST_HOME/.mcp.json" <<EOF
+{ "mcpServers": {
+    "stub": { "type": "stdio", "command": "python3",
+              "args": ["$REPO_ROOT/tests/cc-validation/fixtures/stub_server.py"],
+              "env": { "STUB_LOG": "$STUB_LOG" } }
+} }
+EOF
+
 # ── Sub-run A: allow wildcard PRESENT — does hook fire?
 scenario "07a perms_preempt: with allow wildcard, does PermissionRequest hook still fire?"
 
@@ -18,11 +32,6 @@ cat > "$TEST_HOME/.claude/settings.json" <<EOF
 {
   "skipDangerousModePermissionPrompt": true,
   "permissions": { "allow": ["mcp__stub__*"], "defaultMode": "default" },
-  "mcpServers": {
-    "stub": { "type": "stdio", "command": "python3",
-              "args": ["$REPO_ROOT/tests/cc-validation/fixtures/stub_server.py"],
-              "env": { "STUB_LOG": "$STUB_LOG" } }
-  },
   "hooks": {
     "PermissionRequest": [
       { "matcher": "mcp__stub__.*",
@@ -52,11 +61,6 @@ cat > "$TEST_HOME/.claude/settings.json" <<EOF
 {
   "skipDangerousModePermissionPrompt": true,
   "permissions": { "allow": [], "defaultMode": "default" },
-  "mcpServers": {
-    "stub": { "type": "stdio", "command": "python3",
-              "args": ["$REPO_ROOT/tests/cc-validation/fixtures/stub_server.py"],
-              "env": { "STUB_LOG": "$STUB_LOG" } }
-  },
   "hooks": {
     "PermissionRequest": [
       { "matcher": "mcp__stub__.*",
