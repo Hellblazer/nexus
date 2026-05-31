@@ -44,6 +44,10 @@ EOF
 : > "$HOOK_LOG"
 : > "$STUB_LOG"
 claude_start
+# Deferred-tool warmup (see README "Deferred MCP tools"): load the schema before
+# the measured call so it doesn't race discovery.
+claude_prompt "List your available tools whose name starts with mcp__, one per line. If none, reply NO-MCP-TOOLS."
+claude_wait 30
 claude_prompt "Call mcp__stub__ping. Reply DONE."
 claude_wait 60
 
@@ -73,6 +77,10 @@ EOF
 : > "$HOOK_LOG"
 : > "$STUB_LOG"
 claude_start
+# Deferred-tool warmup (see README "Deferred MCP tools"): load the schema before
+# the measured call so it doesn't race discovery.
+claude_prompt "List your available tools whose name starts with mcp__, one per line. If none, reply NO-MCP-TOOLS."
+claude_wait 30
 claude_prompt "Call mcp__stub__ping. Reply DONE."
 claude_wait 60
 

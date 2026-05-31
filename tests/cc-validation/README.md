@@ -104,6 +104,36 @@ start" and continues. Point the launcher at an interpreter that has `mcp`:
 Use `$REPO_ROOT/.venv/bin/python` (or the installed-tool venv
 `~/.local/share/uv/tools/conexus/bin/python3`), never bare `python3`.
 
+### Deferred MCP tools — the regime MUST account for this
+
+In interactive Claude Code, `mcp__*` tools are **deferred**: they do NOT appear
+in the tool list and are NOT callable until `ToolSearch` loads their schema. The
+TUI shows it explicitly ("I'll load the tool schema first, then call it"). This
+has three consequences every MCP scenario must respect, and which the original
+scenarios did NOT (root-caused 2026-05-31 — it was the cause of scenario 16's
+mis-labelled "allow-rule anomaly" and scenario 14a's flakiness):
+
+1. **The first call after launch races schema discovery.** A bare
+   `"Call mcp__stub__X"` issued immediately can land `tool_ran=0` because the
+   model tries to call before the schema is loaded. A fixed `sleep` does NOT fix
+   it (a 12s settle didn't); a WARMUP TURN does — issue a throwaway "list your
+   mcp__ tools" prompt first to force schema load, then make the measured call.
+   See scenario 16.
+2. **Self-listed inventory is unreliable.** Asking an agent to write its tool
+   inventory and grepping for `mcp__stub__` gives false negatives: a deferred
+   tool isn't listed until loaded. Assert on the forensic call landing in
+   `STUB_LOG` (the tool actually ran), or treat "listed OR called" as proof of
+   load. Never treat absence-from-inventory as "server didn't load". See 14a.
+3. **Subagents must load the schema too.** An agent that calls an MCP tool
+   should be instructed to load the deferred schema first; otherwise its first
+   call races the same way. See 14a's agent prompt.
+
+**Convention for any new MCP scenario:** warmup (list tools) before the measured
+call, instruct subagents to load the schema first, and assert on `STUB_LOG`
+forensics, not self-listed inventory. NOTE (2026-05-31): scenarios 05 and 07
+still use bare direct calls without a warmup — they pass on model auto-load but
+carry latent deferred-tool flakiness and should adopt the warmup convention.
+
 ### Fast verification (no tmux, seconds)
 
 `claude mcp list` does a live connection check. Use it to validate MCP config
