@@ -213,6 +213,20 @@ nx dt index --selection --dry-run
 | `--collection <name>` | T3 collection override. Wins over the extension-based default (e.g. `--collection knowledge__delos`) |
 | `--corpus <name>` | Corpus name used to derive the default collection (default: `dt`). PDFs route to `knowledge__<corpus>-papers` (paper-shaped, aspect-eligible); markdown notes route to `docs__<corpus>` |
 | `--dry-run` | Print records that would be indexed; make no T3 writes |
+| `--extractor [auto\|docling\|mineru]` | PDF extraction backend for file-backed records (default `auto`). `mineru` is formula-aware but can OOM-fail on formula-dense pages; the recovery is `--extractor docling` (formula-stripped, always completes) |
+| `--link-semantic` | After a record indexes, create `relates` edges to its DT similarity + explicit-link neighbours already indexed in nexus (RDR-139 Layer B). DT unavailable → zero edges. Opt-in |
+| `--writeback` | After a record indexes, stamp the nexus identity back onto the DT record (RDR-139 Layer F): `nx-indexed` / `nx-tumbler:<t>` tags + a tumbler backlink annotation. nexus-owned namespace only; never edits user content. Opt-in |
+| `--enrich` | After indexing, run a DT-CrossRef bibliographic gap-fill over each touched collection (RDR-139 Layer C): the `auto` primary backend, then DT's CrossRef resolver fills only still-empty `bib_*` fields (lowest precedence, never overwrites S2/OpenAlex). Opt-in |
+| `--dt-content` | Index non-file-backed records (web archives, bookmarks, formatted notes) from DT's AI-extracted text instead of skipping them (RDR-139 Layer D). Every such chunk is stamped `extraction_source=dt_content`; file-backed records still index from their file. DT unavailable → records skipped as before. Opt-in |
+| `--highlights` | After a record indexes, ingest its DT highlights + mentions as a markdown note attached to the record's tumbler in the `document_highlights` T2 table (RDR-139 Layer E). Read back with `nx dt highlights`. Opt-in |
+
+**RDR-139 layered ingest.** The opt-in flags above compose: a single
+`nx dt index --selection --link-semantic --writeback --enrich --highlights`
+indexes the selection, links it into the graph, gap-fills bibliographic
+metadata, stamps the nexus identity back onto each DT record, and ingests its
+highlights. Each flag degrades cleanly when DEVONthink is absent (zero edges /
+no write-back / primary-backend-only enrich / no highlight ingest); the index
+itself always succeeds. See [`docs/rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md`](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md).
 
 **Default routing by extension** (nexus-cvaw): `nx dt index --uuid X` without `--collection` picks the home based on file type. PDFs land in `knowledge__<corpus>-papers` so `nx enrich aspects` can extract structured fields via `scholarly-paper-v1`. Markdown notes land in `docs__<corpus>` (no aspect extraction; `docs__` is reserved for non-paper prose per nexus-z70w). Pre-nexus-cvaw both extensions defaulted to `docs__default`, which stranded paper PDFs.
 
@@ -229,6 +243,58 @@ Exit codes:
 - `0`: indexed (or dry-ran) successfully, including the no-records case.
 - `1`: DT not running, malformed selectors, or non-darwin platform.
 - `2`: Click usage error (missing or mutually-exclusive flags).
+
+### nx dt capture
+
+Capture a URL, DOI, or file into DEVONthink and index it end to end, in one
+verb (RDR-139 Layer G). Provide exactly one source: a URL argument, `--doi`,
+or `--file`. The captured record is then indexed (and optionally linked,
+written-back, highlight-ingested, enriched).
+
+This is the one DT-bound verb: unlike `nx dt index` (which degrades silently
+when DEVONthink is absent), `nx dt capture` reports DT-required and exits
+non-zero, because capture is impossible without DEVONthink.
+
+```bash
+# Capture a web page (default: web archive) and index it.
+nx dt capture https://example.com/article
+
+# Capture as a PDF and run the full incorporation chain.
+nx dt capture https://example.com/paper --type pdf --link-semantic --writeback
+
+# Download a DOI's open-access PDF (Unpaywall) and index it.
+nx dt capture --doi 10.1038/nature12373 --contact-email you@example.com
+
+# Import a loose file from disk.
+nx dt capture --file ~/Downloads/notes.pdf
+```
+
+| Flag | Description |
+| --- | --- |
+| `<URL>` | Capture a web page via `capture_web_page` |
+| `--doi <doi>` | Capture by DOI: download the open-access PDF (Unpaywall) |
+| `--file <path>` | Import a loose file from this POSIX path |
+| `--type [html\|webarchive\|markdown\|pdf]` | Web-capture format (default `webarchive`). `pdf` and `markdown` index from the on-disk file DT creates; `html` and `webarchive` are non-file-backed |
+| `--contact-email <addr>` | Caller email for Unpaywall PDF discovery on `--doi` (else `$OPENALEX_MAILTO`) |
+| `--collection` / `--corpus` | Index-step collection / corpus (as `nx dt index`) |
+| `--link-semantic` / `--writeback` / `--highlights` / `--enrich` / `--extractor` | Forwarded to the index step |
+
+Exit codes:
+
+- `0`: captured and indexed (or the index step surfaced a per-record failure with exit 0).
+- non-zero: DEVONthink not running (DT-required), no capture source / more than one, or capture produced no record.
+
+### nx dt highlights
+
+Show the DEVONthink highlights + mentions ingested for a record (RDR-139
+Layer E). Accepts a tumbler or a DT UUID. This is a pure T2 read of the
+`document_highlights` table populated by `nx dt index --highlights`;
+DEVONthink need not be running.
+
+```bash
+nx dt highlights 1.14.4
+nx dt highlights 886082AB-87B6-4AE6-AAF6-2E80891014B6
+```
 
 ### nx dt open
 

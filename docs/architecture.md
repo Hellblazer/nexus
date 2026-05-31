@@ -67,10 +67,10 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     └── Storage tiers (RDR-120 substrate split, daemon-mediated)
           T1: ChromaDB HTTP server (session scratch, shared across agent processes)
           T2: SQLite + FTS5 daemon ── nx daemon t2 start
-                Eight domain stores behind T2Database / T2Client
+                Nine domain stores behind T2Database / T2Client
                 Transport: UDS (UID-gated) + 127.0.0.1 loopback TCP
                 memory · plans · chash_index · taxonomy · telemetry ·
-                document_aspects · aspect_queue · catalog
+                document_aspects · aspect_queue · document_highlights · catalog
           T3: ChromaDB daemon ── nx daemon t3 start  (local mode only)
               OR ChromaDB Cloud + Voyage AI (cloud, higher quality;
                                               daemon does not apply)
@@ -359,7 +359,7 @@ The partial-commit failure mode (a batch hook commits an early sub-step then rai
 
 ## T2 Domain Stores
 
-`src/nexus/db/t2/` is a Python package split into seven domain-specific
+`src/nexus/db/t2/` is a Python package split into eight domain-specific
 stores. Each store owns its own tables in a shared SQLite file and runs
 against its own `sqlite3.Connection` in WAL mode. Reads in one domain
 are never blocked by writes in another (the Phase 1 global Python
@@ -380,10 +380,11 @@ wait rather than a dropped write.
 | Chash index       | `ChashIndex`              | `db.chash_index`       | Global chash → (collection, doc_id) lookup; populated via dual-write at every T3 upsert site (RDR-086 Phase 1) |
 | Document aspects  | `DocumentAspects`         | `db.document_aspects`  | Per-document structured aspects (problem, method, datasets, baselines, results, extras) keyed by `(collection, source_path)`; populated by the async aspect-extraction worker (RDR-089 P1.1) |
 | Aspect queue      | `AspectExtractionQueue`   | `db.aspect_queue`      | Durable WAL buffer feeding the aspect-extraction worker; FIFO `claim_next` with cross-process compare-and-swap atomicity; `reclaim_stale` recovers rows from crashed workers (RDR-089 follow-up) |
+| Document highlights | `DocumentHighlights`    | `db.document_highlights` | Per-document DEVONthink highlight / mention markdown notes, keyed by catalog tumbler (`doc_id`); populated by `nx dt index --highlights` (RDR-139 Layer E). Deliberately separate from `document_aspects`: free-text highlights must not contend with the aspect worker's whole-row overwrite or its confidence gate |
 
-`T2Database` is a composing facade: it constructs the seven stores in
+`T2Database` is a composing facade: it constructs the eight stores in
 order (memory → plans → taxonomy → telemetry → chash_index →
-document_aspects → aspect_queue), re-exposes the memory-domain public
+document_aspects → aspect_queue → document_highlights), re-exposes the memory-domain public
 methods as thin delegates for backward compatibility, and runs
 cross-domain operations like `expire()` over all of them. The
 chash_index, taxonomy, document_aspects, and aspect_queue domains are
@@ -531,7 +532,7 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 | **Taxonomy** | `db/t2/catalog_taxonomy.py`, `commands/taxonomy_cmd.py`, `taxonomy.py` (shim) | HDBSCAN topic discovery from T3 embeddings (RDR-070). T2 tables: `topics`, `topic_assignments`, `taxonomy_meta`, `topic_links`. ChromaDB `taxonomy__centroids` (cosine/HNSW) for centroid ANN. `discover_for_collection()` is the shared entry point for CLI and `nx index repo`. `taxonomy_assign_hook` in `mcp_infra.py` fires on every `store_put` for incremental assignment. `taxonomy.py` is a backward-compatibility shim that forwards old call sites to `db.taxonomy` |
 | **Hooks** | `commands/hooks.py`, `commands/hook.py` | `hooks.py`: Git hook install/uninstall/status, sentinel-bounded stanza management. `hook.py`: Claude Code SessionStart/SessionEnd lifecycle runners |
 | **Verification** | `config.py` (verification section), `conexus/hooks/scripts/stop_verification_hook.sh`, `conexus/hooks/scripts/pre_close_verification_hook.sh`, `conexus/hooks/scripts/read_verification_config.py` | Opt-in mechanical enforcement: Stop hook (session-end checks), PreToolUse hook (bd-close gate), standalone config reader. See [Verification config](configuration.md#verification) |
-| **MCP Servers** | `mcp/core.py`, `mcp/catalog.py`, `mcp_infra.py`, `mcp_server.py` (shim) | Dual-server FastMCP architecture (RDR-062). `nexus` core server (26 tools: storage, retrieval, operators, orchestration) + `nexus-catalog` (10 tools: catalog and link graph). Short-name convention: catalog tools drop the redundant `catalog_` prefix since the server namespace already provides context. Six destructive / maintenance operations are intentionally kept CLI-only. Backward-compat shim at `mcp_server.py` re-exports every function. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth); singletons and test injection live in `mcp_infra.py`. **For the full tool catalog see [MCP Servers](mcp-servers.md).** |
+| **MCP Servers** | `mcp/core.py`, `mcp/catalog.py`, `mcp/devonthink.py`, `mcp_infra.py`, `mcp_server.py` (shim) | Multi-server FastMCP architecture (RDR-062, RDR-139). `nexus` core server (26 tools: storage, retrieval, operators, orchestration) + `nexus-catalog` (10 tools: catalog and link graph) + `devonthink` (RDR-139 Layer A': the `nx-mcp-devonthink` agent-surface server, ~17 curated DEVONthink tools + the `dt_incorporate` composite). The devonthink server **always spawns** and gates internally on `available()`: DT present → the curated surface; DT absent → only a `devonthink_status` stub (zero DT tools, no spawn error). Declared `alwaysLoad:false` in `conexus/.mcp.json` as a tool-search startup optimization, not the optionality mechanism. Tools surface as `mcp__plugin_conexus_devonthink__*`. Short-name convention: catalog tools drop the redundant `catalog_` prefix since the server namespace already provides context. Six destructive / maintenance operations are intentionally kept CLI-only. Backward-compat shim at `mcp_server.py` re-exports every function. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth); singletons and test injection live in `mcp_infra.py`. **For the full tool catalog see [MCP Servers](mcp-servers.md).** |
 | **Enrichment** | `bib_enricher.py`, `aspect_extractor.py`, `aspect_worker.py`, `commands/enrich.py` | Two enrichment surfaces. (1) Bibliographic via Semantic Scholar (`bib_enricher.py` lookup + `nx enrich bib` CLI). (2) Structured aspects via Claude CLI (`aspect_extractor.py` synchronous extractor + `aspect_worker.py` async-queue daemon worker registered as the document-grain post-store hook + `nx enrich aspects` CLI). Aspect extraction is `knowledge__*` only in Phase 1 (RDR-089); the worker drains `aspect_extraction_queue` and writes to `document_aspects` |
 | **Health** | `health.py`, `logging_setup.py` | `health.py`: health check data model and runner used by `nx doctor` and `nx console`. `logging_setup.py`: structured logging configuration for CLI, console, MCP, and hook entry points (stderr + rotating file handler) |
 | **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `types.py`, `errors.py`, `retry.py`, `commands/_helpers.py`, `commands/_provision.py` | Configuration, naming, formatting, session lifecycle, transient-error retry. `_helpers.py`: shared CLI helpers (e.g. `default_db_path()`). `_provision.py`: ChromaDB Cloud database provisioning (tenant resolution, database creation) |
