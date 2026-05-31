@@ -662,3 +662,106 @@ class TestCycleInterlock:
         assert state["terminated"] is True, "free lock should allow the cycle"
         assert len(spawned) == 1
         assert "cycling to current" in result.output.lower()
+
+
+class TestEnsureRunningElectionLock:
+    """RDR-140 P2.2 (nexus-fkhe2): single-flight election-lock helpers and the
+    on-timeout graceful-degradation path."""
+
+    def test_acquire_election_lock_times_out_when_held(self, tmp_path) -> None:
+        import fcntl
+
+        from nexus.commands.daemon import (
+            _acquire_election_lock,
+            _election_lock_path_for_db,
+        )
+
+        db = tmp_path / "memory.db"
+        lock_path = _election_lock_path_for_db(db)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        holder = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            # A second exclusive lock on the held file must not be granted; the
+            # bounded wait returns None rather than blocking forever.
+            assert _acquire_election_lock(db, 0.2) is None
+        finally:
+            fcntl.flock(holder, fcntl.LOCK_UN)
+            os.close(holder)
+
+    def test_acquire_release_roundtrip_and_reacquire(self, tmp_path) -> None:
+        from nexus.commands.daemon import (
+            _acquire_election_lock,
+            _release_election_lock,
+        )
+
+        db = tmp_path / "memory.db"
+        fd = _acquire_election_lock(db, 1.0)
+        assert isinstance(fd, int)
+        _release_election_lock(fd)
+        # Re-acquirable once released.
+        fd2 = _acquire_election_lock(db, 1.0)
+        assert isinstance(fd2, int)
+        _release_election_lock(fd2)
+        # Releasing None is a no-op (does not raise).
+        _release_election_lock(None)
+
+    def test_election_wait_covers_worst_case_hold(self) -> None:
+        from nexus.commands.daemon import (
+            _T2_CYCLE_DB_PROBE_TIMEOUT_MS,
+            _T2_CYCLE_EXIT_TIMEOUT,
+            _election_wait_for,
+        )
+
+        # The waiter budget must exceed the holder's worst-case hold (stale
+        # write-lock probe + predecessor-exit poll + reachability poll), or the
+        # herd reappears on timeout.
+        timeout = 15.0
+        hold = _T2_CYCLE_DB_PROBE_TIMEOUT_MS / 1000.0 + _T2_CYCLE_EXIT_TIMEOUT + timeout
+        assert _election_wait_for(timeout) > hold
+
+    def test_election_timeout_proceeds_to_spawn_unguarded(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """When the election lock is held by another stack and the wait
+        elapses, ensure-running degrades to an unguarded spawn (the daemon
+        spawn lock remains the backstop) and warns — never deadlocks."""
+        import fcntl
+
+        from nexus.commands import daemon as daemon_mod
+
+        # No discovery file pre-seeded => no live daemon to attach to.
+        db = tmp_path / "memory.db"
+        lock_path = daemon_mod._election_lock_path_for_db(db)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        holder = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        # Shrink the election wait so the timeout path fires fast.
+        monkeypatch.setattr(daemon_mod, "_election_wait_for", lambda _t: 0.2)
+
+        spawn_calls: list[list[str]] = []
+
+        class _FakePopen:
+            def __init__(self, argv, **_kw):  # noqa: ANN001
+                spawn_calls.append(argv)
+
+            def poll(self):
+                return None  # alive/migrating; mocked daemon never reachable
+
+        monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+        try:
+            result = CliRunner().invoke(
+                main,
+                ["daemon", "t2", "ensure-running",
+                 "--config-dir", str(tmp_path), "--timeout", "0.2"],
+            )
+        finally:
+            fcntl.flock(holder, fcntl.LOCK_UN)
+            os.close(holder)
+
+        # Proceeded unguarded (one spawn), did not deadlock, warned.
+        assert len(spawn_calls) == 1
+        assert result.exit_code == 1  # mocked daemon never becomes reachable
+        err = result.stderr_bytes.decode() if result.stderr_bytes else ""
+        assert "election-lock wait timed out" in (result.output + err)

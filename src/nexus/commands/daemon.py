@@ -684,13 +684,34 @@ _T2_CYCLE_DB_PROBE_TIMEOUT_MS: int = 30000
 # shrink it.
 _T2_CYCLE_EXIT_TIMEOUT: float = 10.0
 
-# RDR-140 P2.2 (nexus-fkhe2): how long ``ensure-running`` blocks on the
-# single-flight election lock before giving up and proceeding to spawn anyway.
-# The election lock makes only one of K racing stacks cold-spawn; on timeout we
-# degrade to the pre-P2 behaviour (the daemon's own spawn lock is still the hard
-# backstop, so a redundant spawn merely quiet-attaches — never a deadlock).
-# Module constant so tests can shrink it.
-_T2_ELECTION_WAIT_TIMEOUT: float = 15.0
+# RDR-140 P2.2 (nexus-fkhe2): safety margin added on top of the holder's
+# worst-case hold time to derive how long a waiter blocks on the single-flight
+# election lock. The wait is computed DYNAMICALLY (see
+# ``_election_wait_for``) rather than fixed: the holder keeps the lock across
+# its whole discover→spawn→reachability path, whose worst case is
+# ``_T2_CYCLE_DB_PROBE_TIMEOUT_MS/1000`` (stale-version write-lock probe) +
+# ``_T2_CYCLE_EXIT_TIMEOUT`` (predecessor exit poll) + ``timeout`` (reachability
+# poll). A fixed wait shorter than that hold reproduces the pre-P2 thundering
+# herd on timeout (code-review H-1 / critic S-1): every waiter times out at
+# once, re-discovers the stale/absent daemon unguarded, and all cold-spawn.
+# Deriving the wait from the same budgets guarantees a waiter never gives up
+# before the holder releases, on any ``--timeout``. Releasing the lock earlier
+# (before the reachability poll) is NOT an option: a waiter acquiring it during
+# the winner's migration window would re-discover no live daemon and spawn too,
+# defeating single-flight. Margin is a module constant so tests can shrink it.
+_T2_ELECTION_WAIT_MARGIN: float = 5.0
+
+
+def _election_wait_for(timeout: float) -> float:
+    """Waiter election-lock budget: must exceed the holder's worst-case hold so
+    waiters block until the winner is reachable, then attach rather than
+    redundantly spawn (RDR-140 P2.2)."""
+    return (
+        _T2_CYCLE_DB_PROBE_TIMEOUT_MS / 1000.0
+        + _T2_CYCLE_EXIT_TIMEOUT
+        + timeout
+        + _T2_ELECTION_WAIT_MARGIN
+    )
 
 
 def _election_lock_path_for_db(db_path: Path) -> Path:
@@ -905,7 +926,7 @@ def t2_ensure_running_cmd(
     # that dies mid-spawn never deadlocks the waiters (they win the lock,
     # re-discover no daemon, and exactly one spawns).
     db_path = config_dir / "memory.db"
-    election_fd = _acquire_election_lock(db_path, _T2_ELECTION_WAIT_TIMEOUT)
+    election_fd = _acquire_election_lock(db_path, _election_wait_for(timeout))
     if election_fd is None and not quiet:
         click.echo(
             "T2 election-lock wait timed out; proceeding to spawn unguarded "

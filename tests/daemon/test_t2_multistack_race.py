@@ -276,12 +276,19 @@ class TestMultiStackRace:
         mask a herd regression.
         """
         total_spawn_lost = 0
-        for _i in range(_ITERATIONS):
+        for i in range(_ITERATIONS):
             cd = _fresh_config_dir()
             try:
                 _spawn_k_ensure_running(cd, _K)
                 _wait_for_convergence(cd)
-                total_spawn_lost += _count_daemon_events(cd)["t2_daemon_spawn_lost"]
+                events = _count_daemon_events(cd)
+                # Exactly one stack spawned (guards the silent-winner-death
+                # regression where a second waiter wins and starts a second
+                # daemon while spawn_lost stays 0).
+                assert events["t2_daemon_started"] == 1, (
+                    f"iter {i}: started={events['t2_daemon_started']} != 1"
+                )
+                total_spawn_lost += events["t2_daemon_spawn_lost"]
             finally:
                 _teardown(cd)
         assert total_spawn_lost == 0
