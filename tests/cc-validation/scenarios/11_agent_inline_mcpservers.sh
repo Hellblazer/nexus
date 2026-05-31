@@ -13,7 +13,7 @@ description: Validation agent — has inline mcpServers, reports forensic eviden
 mcpServers:
   - stub:
       type: stdio
-      command: python3
+      command: $REPO_ROOT/.venv/bin/python
       args: ["$REPO_ROOT/tests/cc-validation/fixtures/stub_server.py"]
       env:
         STUB_LOG: "$STUB_LOG"

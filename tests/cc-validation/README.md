@@ -104,6 +104,22 @@ start" and continues. Point the launcher at an interpreter that has `mcp`:
 Use `$REPO_ROOT/.venv/bin/python` (or the installed-tool venv
 `~/.local/share/uv/tools/conexus/bin/python3`), never bare `python3`.
 
+**This applies to agent-frontmatter inline `mcpServers` too — and the
+`--mcp-config` wrapper does NOT reach them.** The wrapper normalizes
+`python3`→venv only for `$TEST_HOME/.mcp.json`. A bare `command: python3` in an
+agent's frontmatter resolves to whatever `python3` is on PATH (often homebrew,
+no `mcp`), so the inline server crashes on import and the tool silently never
+loads — and because PATH resolution varies, it presents as flakiness, not a
+clean failure (this was scenario 14a's root cause). Pin agent-frontmatter
+inline servers to `$REPO_ROOT/.venv/bin/python` directly.
+
+**Diagnostic — stub startup markers.** `fixtures/stub_server.py` logs an
+`{"event":"process_launched","python":...}` line before importing `mcp`, then
+either `mcp_import_failed` (interpreter lacks `mcp`) or `mcp_imported_ok`. Grep
+`STUB_LOG` for `"event"` to tell apart the three cases: no marker = the server
+was never spawned by CC; `mcp_import_failed` = spawned with the wrong python;
+`mcp_imported_ok` = healthy. This is how 14a's bare-`python3` crash was found.
+
 ### Deferred MCP tools — the regime MUST account for this
 
 In interactive Claude Code, `mcp__*` tools are **deferred**: they do NOT appear

@@ -28,7 +28,7 @@ description: validation, no tools filter
 mcpServers:
   - stub:
       type: stdio
-      command: python3
+      command: $REPO_ROOT/.venv/bin/python
       args: ["$REPO_ROOT/tests/cc-validation/fixtures/stub_server.py"]
       env:
         STUB_LOG: "$STUB_LOG"
@@ -59,14 +59,19 @@ log_called=0; [[ -s "$STUB_LOG" ]] && grep -q "14a-PROOF" "$STUB_LOG" && log_cal
 mcp_in_inv=0; [[ -f "$TEST_HOME/14a_tools.txt" ]] && grep -qE "mcp__stub__" "$TEST_HOME/14a_tools.txt" && mcp_in_inv=1
 echo "    14a verdict: mcp_in_inv=$mcp_in_inv  stub_called=$log_called"
 
-# VALIDITY NOTE (reworked 2026-05-31): the question is whether the agent's inline
-# mcpServers LOADED. EITHER signal proves it: the stub appears in the agent's
-# self-listed inventory (mcp_in_inv=1 — schema loaded and visible) OR the agent's
-# call landed in STUB_LOG (stub_called=1 — callable). mcp__stub__ is a DEFERRED
-# tool, so the agent prompt instructs loading its schema first (same deferred-tool
-# root cause as scenario 16). Whether the subagent model then follows through on
-# the call is variable and NOT what this scenario tests — loading is. Only both
-# signals absent means the inline server genuinely did not load.
+# ROOT CAUSE (2026-05-31): this scenario was intermittently failing because the
+# inline-agent mcpServers `command` was bare `python3`, which resolves to a
+# python that may lack the `mcp` module (homebrew python3.13) — the server then
+# crashed on import ("No module named 'mcp'", proven by the stub's startup
+# markers in STUB_LOG) and the tool never loaded. The "flakiness" was python3
+# resolving to different interpreters across runs. The --mcp-config wrapper
+# normalizes python3->venv for $TEST_HOME/.mcp.json ONLY, not for agent
+# frontmatter, so the inline command is pinned to $REPO_ROOT/.venv/bin/python
+# directly above. The verdict accepts EITHER signal of a loaded server: the stub
+# in the agent's self-listed inventory (mcp_in_inv=1; note deferred tools may not
+# self-list until loaded, hence the schema-load instruction in the agent prompt)
+# OR the call landing in STUB_LOG (stub_called=1). Both absent = server did not
+# load.
 if [[ $mcp_in_inv -eq 1 || $log_called -eq 1 ]]; then
     pass "14a: inline mcpServers (no tools filter) LOADED for the agent (mcp_in_inv=$mcp_in_inv, stub_called=$log_called — either proves load)"
 else
@@ -93,7 +98,7 @@ description: validation via plugin agent
 mcpServers:
   - stub:
       type: stdio
-      command: python3
+      command: $REPO_ROOT/.venv/bin/python
       args: ["$REPO_ROOT/tests/cc-validation/fixtures/stub_server.py"]
       env:
         STUB_LOG: "$STUB_LOG"

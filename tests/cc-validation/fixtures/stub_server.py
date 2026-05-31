@@ -5,18 +5,32 @@ import json
 import os
 import sys
 import time
-from mcp.server.fastmcp import FastMCP
 
 LOG = os.environ.get("STUB_LOG", "/tmp/cc-val-stub.log")
 NAME = os.environ.get("STUB_NAME", "stub")
-
-mcp = FastMCP(NAME)
 
 
 def _log(payload: dict) -> None:
     payload["ts"] = time.time()
     with open(LOG, "a") as f:
         f.write(json.dumps(payload) + "\n")
+
+
+# Startup markers (diagnostic): these fire BEFORE the mcp import so STUB_LOG can
+# distinguish three cases for an inline-agent / project server: (1) no marker at
+# all = the process was never spawned by Claude Code; (2) process_launched +
+# mcp_import_failed = spawned but the interpreter lacks `mcp` (bare python3); (3)
+# mcp_imported_ok = healthy. They log `event`, not `tool`, so tool_ran checks are
+# unaffected.
+_log({"event": "process_launched", "python": sys.executable, "name": NAME})
+try:
+    from mcp.server.fastmcp import FastMCP
+except Exception as exc:  # pragma: no cover - diagnostic path
+    _log({"event": "mcp_import_failed", "python": sys.executable, "error": str(exc)})
+    raise
+_log({"event": "mcp_imported_ok", "python": sys.executable})
+
+mcp = FastMCP(NAME)
 
 
 @mcp.tool()
