@@ -5,7 +5,14 @@
 
 # Custom claude launcher for this scenario — uses --permission-mode=auto, no bypass flag
 claude_start_auto() {
-    send_keys "claude --permission-mode=auto" Enter
+    # Mirror the standard claude_start wrapper's trust pre-seed + --mcp-config so
+    # the stub actually connects. Without this the tool never runs (tool_ran=0)
+    # and the "auto-approves" verdict is vacuous (it would pass with the MCP
+    # stack completely broken). _preseed_trust / _prepare_mcp_args are defined in
+    # runner.sh and in scope here.
+    _preseed_trust 2>/dev/null || true
+    local _extra; _extra="$(_prepare_mcp_args 2>/dev/null || true)"
+    send_keys "claude --permission-mode=auto ${_extra}" Enter
     sleep 8
     local deadline=$(( $(date +%s) + 60 ))
     local _trust_done=0
@@ -13,10 +20,10 @@ claude_start_auto() {
         local pane; pane=$(capture)
         if [[ $_trust_done -eq 0 ]] && echo "$pane" | grep -qiE "trust this folder|project you trust"; then
             echo "    [auth] trust — accept"
-            tmux send-keys -t "${TMUX_SESSION}" Enter
+            _tmux send-keys -t "${TMUX_SESSION}" Enter
             _trust_done=1; sleep 2
         elif echo "$pane" | grep -qiE "custom API key"; then
-            tmux send-keys -t "${TMUX_SESSION}" Enter; sleep 5
+            _tmux send-keys -t "${TMUX_SESSION}" Enter; sleep 5
         elif echo "$pane" | grep -qiE "Type a message|auto.*on|❯ "; then
             break
         fi
@@ -62,6 +69,12 @@ EOF
 : > "$STUB_LOG"
 send_keys "cd $TEST_HOME" Enter; sleep 0.3
 claude_start_auto
+# WARMUP (see VALIDITY NOTE on the verdict): MCP tools are deferred — the first
+# call after launch races tool-schema discovery, so a single direct call landed
+# tool_ran=0 intermittently. A throwaway list-tools turn forces the model to load
+# the mcp__stub__ schema first; the measured call below is then deterministic.
+claude_prompt "List your available tools whose name starts with mcp__, one per line. If none, reply NO-MCP-TOOLS."
+claude_wait 30
 claude_prompt "Call mcp__stub__ping. Reply DONE."
 claude_wait 60
 
@@ -91,6 +104,9 @@ EOF
 : > "$HOOK_LOG"
 : > "$STUB_LOG"
 claude_start_auto
+# Same deferred-tool warmup as 16a.
+claude_prompt "List your available tools whose name starts with mcp__, one per line. If none, reply NO-MCP-TOOLS."
+claude_wait 30
 claude_prompt "Call mcp__stub__ping. Reply DONE."
 claude_wait 60
 
@@ -108,8 +124,20 @@ echo ""
 echo "    ──────────── 16 verdict (auto mode) ────────────"
 echo "    16a (with allow):    hook_fired=$hook_fired_a  tool_ran=$tool_ran_a"
 echo "    16b (without allow): hook_fired=$hook_fired_b  tool_ran=$tool_ran_b"
-if [[ $hook_fired_a -eq 0 && $hook_fired_b -eq 0 ]]; then
-    pass "auto mode auto-approves MCP tools without consulting PermissionRequest hook either way"
+# VALIDITY NOTE (reworked 2026-05-31): require tool_ran so the hook-firing
+# verdict is meaningful. A tool that never ran cannot exercise the
+# PermissionRequest gate, so "hook never fires" would be vacuous (it passed
+# previously with tool_ran=0, i.e. with the server never connected).
+if [[ $tool_ran_a -eq 0 || $tool_ran_b -eq 0 ]]; then
+    # Non-vacuous guard: a tool that never ran cannot exercise the
+    # PermissionRequest gate. The earlier intermittent tool_ran=0 was root-caused
+    # to deferred-tool schema discovery on the first call after launch (NOT an
+    # allow-rule anomaly — a 12s settle didn't fix it but the warmup turn above,
+    # which forces schema load, does). If this fires now, the warmup did not take
+    # — investigate the MCP connection, do NOT drop the tool_ran requirement.
+    fail "tool did not run in a sub-run (a=$tool_ran_a b=$tool_ran_b) despite the warmup — MCP connection issue; verdict would be vacuous"
+elif [[ $hook_fired_a -eq 0 && $hook_fired_b -eq 0 ]]; then
+    pass "auto mode auto-approves MCP tools (tool ran both ways) without consulting PermissionRequest hook either way"
 elif [[ $hook_fired_a -eq 0 && $hook_fired_b -eq 1 ]]; then
     pass "wildcard PREEMPTS hook in auto mode (hook fires only when no rule matches)"
 elif [[ $hook_fired_a -eq 1 && $hook_fired_b -eq 1 ]]; then

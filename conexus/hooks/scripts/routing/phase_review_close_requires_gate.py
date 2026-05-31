@@ -209,7 +209,10 @@ def body(payload: dict[str, Any]) -> None:
             rule=RULE_NAME, outcome="deny", tool_name="Bash",
             command_fragment=command,
         )
-        _lib.deny(_redirect_message(rdr_id, phase, reason))
+        _lib.deny(
+            _redirect_message(rdr_id, phase, reason),
+            summary=f"Phase-review close blocked ({rdr_id} phase {phase}): run the gate first.",
+        )
 
     claude_pid = _claude_pid()
     ok, reason = _check_sentinel(claude_pid, rdr_id, phase)
@@ -218,7 +221,10 @@ def body(payload: dict[str, Any]) -> None:
             rule=RULE_NAME, outcome="deny", tool_name="Bash",
             command_fragment=command,
         )
-        _lib.deny(_redirect_message(rdr_id, phase, reason))
+        _lib.deny(
+            _redirect_message(rdr_id, phase, reason),
+            summary=f"Phase-review close blocked ({rdr_id} phase {phase}): run the gate first.",
+        )
 
     _lib.log_routing_event(
         rule=RULE_NAME, outcome="allow", tool_name="Bash",
