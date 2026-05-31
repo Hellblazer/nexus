@@ -18,8 +18,14 @@ write_command "rdr-list" "$REPO_ROOT/conexus/commands/rdr-list.md"
 
 claude_start
 claude_prompt "/rdr-list"
-claude_wait 90
-
+# Poll for the render rather than a fixed wait: the slash-command preamble + the
+# model's table render can land AFTER claude_wait returns, leaving an empty
+# capture (a flaky 0-id fail — 19A and 23 run the same command, and 19A caught
+# the render while 23 missed it in the same suite run). Wait for an RDR id to
+# appear (up to 90s), then settle and capture. A genuine no-render still times
+# out and fails correctly.
+poll_for "RDR-[0-9]" 90 "rdr-list render" || true
+claude_wait 20
 pane="$(capture -3000)"
 # Robust check (reworked 2026-05-31): the prior version grepped for two hardcoded
 # RDR titles, which the model does not reliably echo (it summarizes the table and

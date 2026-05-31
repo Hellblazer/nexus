@@ -56,7 +56,11 @@ claude_start
 # Raw-failure markers (unexpanded heredoc / $CLAUDE_PLUGIN_ROOT / auth error /
 # empty-scan) must be absent.
 claude_prompt "/rdr-list"
-claude_wait 90
+# Poll for the render (see scenario 23): the table can land after claude_wait
+# returns, leaving an empty capture and a flaky 0-id fail. A genuine no-render
+# still times out and fails.
+poll_for "RDR-[0-9]" 90 "rdr-list render" || true
+claude_wait 20
 paneA="$(capture -3000)"
 # VALIDITY NOTE (reworked 2026-05-31): the prior check grepped for two hardcoded
 # RDR titles ("Single-Writer Enforcement", "Storage Substrate Split"). The model
