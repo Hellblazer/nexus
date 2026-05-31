@@ -163,20 +163,57 @@ Unit tests pass regardless (they import the package directly). This PATH-vs-sour
 gap is exactly what cc-val exists to catch: reinstall after any subcommand edit
 before re-running.
 
-## Known characterization failures (real CC behavior, not harness bugs)
+## Test validity — the vacuous-pass trap (read before adding a scenario)
 
-These scenarios fail because they document a real interactive-vs-`-p`
-asymmetry, not because the harness is broken. Do not "fix" them by masking:
+The 2026-05-31 MCP-connection fixes exposed that several scenarios were passing
+for the WRONG reason: a negative assertion ("tool rejected" / "hook never fires"
+/ "wildcard did not match") passed because the MCP server never connected, not
+because the behavior under test occurred. Such a scenario would stay green with
+the entire MCP stack broken. Two rules came out of the rework:
 
-- **03 / 05** — FIXED 2026-05-31 by the `--mcp-config` + venv-python launch
-  upgrade (no longer characterization failures). **14c** likely benefits too
-  (it declares a project `.mcp.json`); confirm in the next full run.
-- **11 / 14a / 14b** — inline-agent-frontmatter `mcpServers` is a separate
-  mechanism from project `.mcp.json` and is NOT covered by `--mcp-config`;
-  characterize independently.
-- **01 / 06 / 07b** — assert that something does NOT happen (`-p` findings about
-  stdout injection / wildcard matching / permission preemption). A pass here
-  means absence, by design.
+1. **A negative conclusion needs a positive signal.** Don't infer "X did not
+   happen" from absence. Require an explicit token (the subagent emits
+   `NO-MARKER` / `NESTED-SPAWN-BLOCKED`) or a connected-but-denied state. See
+   scenarios 01 and 17 for the canonical shape.
+2. **Assert on forensic side-effects, not model output.** A tool actually
+   running (`STUB_LOG`), a file written (`agent_tools.txt`) is deterministic. The
+   model quoting a sentence, echoing a count, or self-reporting its tool list is
+   NOT — those produce flaky pass/fails. When you must use the interactive path,
+   ask for a fixed confirmation TOKEN, not a verbatim quote (scenario 18), and
+   require the precondition tool-run before trusting a hook/permission verdict
+   (scenarios 07, 16).
+
+Reworked for validity 2026-05-31: 06, 07, 11, 14b, 16, 18, 19A, 23. Verified
+valid as-is: 01, 17 (explicit-token), 02–05/12/13/14a/14c/15/20–22/24–26
+(forensic/positive). Latent (flagged, not yet fixed): 09/10 branch-1 token grep
+matches the user's own turn-1 message in scrollback.
+
+## Known real findings (NOT harness bugs — do not mask)
+
+The harness correctly surfaces these. A green here would be the bug:
+
+- **06** — infix wildcard `mcp__plugin_*__*` MATCHES across the `__` boundary
+  (contradicts the older `-p` finding).
+- **07** — under `skipDangerousModePermissionPrompt` the PermissionRequest gate
+  is bypassed entirely (tool auto-runs both with and without an allow rule, the
+  hook never fires) — so a PermissionRequest auto-approver is redundant.
+- **11** — inline-agent `mcpServers` are NOT scoped to the subagent: both parent
+  and subagent can call the stub (forensic, via parent call-attempt).
+- **14b** — plugin-shipped agents' inline `mcpServers` do NOT load (vs 14a
+  project-level, which do). Passes as a characterization of the known limitation.
+
+## Honest non-deterministic failures (do not paper over)
+
+These two fail correctly when a precondition is not met, rather than fabricate a
+green:
+
+- **16** — ANOMALY under investigation: in `--permission-mode=auto` the MCP tool
+  runs WITHOUT an allow rule (`tool_ran_b=1`) but NOT with one (`tool_ran_a=0`),
+  consistently across runs; a 12s MCP settle did not change it, so it is not a
+  connection-timing flake. The `tool_ran` guard refuses to assess the hook gate
+  when the tool never ran. Real finding, needs a dedicated investigation.
+- **14b** — depends on the model actually dispatching the plugin-shipped agent;
+  when it doesn't (`agent_ran=0`) the run is honestly indeterminate, not a pass.
 
 ## Patterns worth adopting from `~/git/recording-rig`
 
