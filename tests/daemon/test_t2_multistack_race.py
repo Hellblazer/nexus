@@ -213,6 +213,58 @@ class TestMultiStackRace:
             finally:
                 _teardown(cd)
 
+    def test_holder_dies_mid_spawn_waiters_recover(self) -> None:
+        """A daemon that dies after acquiring the spawn lock but before binding
+        must not wedge the system: a subsequent K-way ensure-running race
+        recovers to exactly one live daemon, no crash, no deadlock.
+
+        Pre-P2 the contended lock is the fcntl spawn lock (the OS releases it on
+        the holder's death); P2's election lock generalises the same recovery
+        contract. Drivable and GREEN now — a regression guard either way. We
+        widen the kill window using the cold-start migration delay: a fresh DB
+        forces a multi-second migration while the spawn lock is held and before
+        discovery is written.
+        """
+        from nexus.daemon.t2_daemon import _SPAWN_LOCK_FILE, t2_discovery_path
+
+        cd = _fresh_config_dir()
+        try:
+            env = _child_env(cd)
+            start_argv = [
+                sys.executable, "-m", "nexus.cli", "daemon", "t2", "start",
+                "--config-dir", str(cd),
+            ]
+            holder = subprocess.Popen(
+                start_argv, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            # Wait until it has taken the spawn lock but not yet written
+            # discovery (mid-spawn), bounded; then kill it there.
+            lock_file = cd / _SPAWN_LOCK_FILE
+            disc = t2_discovery_path(cd)
+            deadline = time.monotonic() + _CONVERGE_TIMEOUT
+            while time.monotonic() < deadline:
+                if lock_file.exists() and not disc.exists():
+                    break
+                if holder.poll() is not None:
+                    break
+                time.sleep(0.02)
+            holder.kill()
+            holder.communicate(timeout=_ENSURE_TIMEOUT)
+
+            # Waiters recover: a fresh K-way race brings up exactly one daemon.
+            codes = _spawn_k_ensure_running(cd, _K)
+            _wait_for_convergence(cd)
+            events = _count_daemon_events(cd)
+
+            assert codes == [0] * _K, f"recovery racer exit codes {codes} != all-0"
+            assert events["t2_daemon_crashed"] == 0, (
+                f"crashed={events['t2_daemon_crashed']} != 0 after holder death"
+            )
+            assert _live_daemon_count(cd) == 1, "no single live daemon after recovery"
+        finally:
+            _teardown(cd)
+
     @pytest.mark.xfail(
         strict=True,
         reason="RED until P2.2 (nexus-fkhe2): a single-flight election lock "
