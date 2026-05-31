@@ -179,20 +179,43 @@ map, 2026-05-31). Citations below are the load-bearing call sites.
   invariants"): daemon-spawn serialization does NOT by itself give full
   `memory.db` single-writer — three non-daemon write paths remain. A1 is
   confirmed for the daemon-process race only; the RDR must state both invariants.
-- [ ] **A2 — A persisted owner/version token in the discovery file is sufficient
-  to make reaping ownership-aware without reintroducing orphan-writer risk.**
-  The reap must still kill a genuinely orphaned writer (flock held by a dead
-  PID's child, version-skew daemon), so the token must distinguish "healthy
-  same-version peer" (attach) from "stale/orphan" (reap). — **Status**: Unverified
-  — **Method**: Spike (multi-stack race harness).
-- [ ] **A3 — The `db_version == current_version` migration fast-path can skip the
-  WAL-enable write safely** (WAL is already enabled on a 237 MB production db;
-  re-enabling is a no-op write we can elide when the pragma already reports WAL).
-  — **Status**: Unverified — **Method**: Spike.
-- [ ] **A4 — Single-flighting the election (a coordination lock around
-  discover→spawn in `ensure-running`) converges N stacks to one daemon** without
-  deadlock when a holder dies mid-election. — **Status**: Unverified —
-  **Method**: Spike (kill the lock holder mid-spawn).
+- [x] **A2 — A version/identity token in the discovery file is sufficient to
+  make reaping ownership-aware without reintroducing orphan-writer risk.** —
+  **Status**: VERIFIED-FEASIBLE — **Method**: Multi-stack race harness +
+  discovery-file inspection (2026-05-31). The `t2_addr.<uid>` token ALREADY
+  carries `pid`, `daemon_version`, `uds_path`, `tcp_port`, `start_time`. Sufficient
+  to reap only when `(pid dead) OR (daemon_version != current) OR (health ping
+  fails)`; a healthy same-version peer is never reaped → attach. The orphan case
+  (flock held by a dead PID) is the pid-liveness check. No new persisted state
+  required (an explicit owner-uuid would only harden against pid reuse).
+- [x] **A3 — The `current_version` migration fast-path can elide the per-start
+  migration work safely.** — **Status**: VERIFIED (re-weighted) — **Method**:
+  SQLite lock spike + source reading. Reading `journal_mode` and `_nexus_version`
+  is lock-free (works under a held writer lock); `PRAGMA journal_mode=WAL` when
+  already WAL is a no-op (no writer lock). Migration is ALREADY flock-serialized
+  cross-process (`t2_migration_flock`, `db/t2/__init__.py:474`), so the original
+  "N concurrent BEGIN IMMEDIATE" framing was wrong. A `version==current && WAL`
+  fast-path before the flock elides the flock-wait + no-op `apply_pending` on
+  every cold start — real but MODEST. **Re-weight**: the dominant lock contention
+  is the non-daemon second-writer fallbacks (A1 boundary), not migration.
+- [x] **A4 — Single-flighting the election converges N stacks to one daemon
+  without deadlock when a holder dies mid-election.** — **Status**: VERIFIED —
+  **Method**: Multi-stack race harness (2026-05-31). The spawn lock already
+  converges to exactly 1 daemon (single-writer holds), but via crash + reap
+  churn (started=1, crashed=9, stop_requested=1 on a 5-way race). An election
+  **fcntl flock** (auto-released by the OS on holder death → no deadlock) around
+  discover→spawn, plus a re-check, makes it 1 start / K-1 quiet attaches / 0
+  crashes / 0 reaps.
+
+### New finding — self-healing discovery file (from the A2/A4 harness)
+
+The discovery-gap case (a healthy daemon alive but its `t2_addr` removed) made
+**all 5 racers crash** on the spawn lock they couldn't trace back to the live
+daemon. So Gap 1 (loser-attach) needs the loser to FIND the live daemon even
+when `t2_addr` is transiently absent: on spawn-lock `BlockingIOError`, poll for
+`t2_addr` to (re)appear AND have the spawn-lock holder periodically re-assert /
+validate its own discovery file so a transient gap self-heals. Add this to the
+Proposed Solution (item 2 + a holder-side discovery re-assert).
 
 ## Proposed Solution
 
@@ -206,10 +229,14 @@ single-writer guarantee itself.
    attach and return. Only the lock holder may cold-spawn. N stacks serialize;
    exactly one spawns; the rest attach.
 
-2. **Loser attaches, exits 0, quiet (Gap 1).** `_acquire_spawn_lock`
-   `BlockingIOError` becomes a typed, non-error outcome: poll briefly for the
-   winner's discovery file/socket, log `t2_daemon_spawn_lost` at `info`, exit 0.
-   No traceback. (Belt-and-suspenders behind the election lock.)
+2. **Loser attaches, exits 0, quiet + self-healing discovery (Gap 1).**
+   `_acquire_spawn_lock` `BlockingIOError` becomes a typed, non-error outcome:
+   poll briefly for the winner's discovery file/socket, log
+   `t2_daemon_spawn_lost` at `info`, exit 0. No traceback. Because a transient
+   `t2_addr` gap makes losers unable to trace the live daemon (verified: all 5
+   racers crashed in the discovery-gap case), the spawn-lock **holder periodically
+   re-asserts/validates its own discovery file** so a gap self-heals and losers
+   can attach. (Belt-and-suspenders behind the election lock.)
 
 3. **Ownership-/version-aware reaping (Gap 2).** Persist an owner token +
    `daemon_version` in the discovery file. `_reap_predecessor_daemon` reaps a PID
@@ -313,3 +340,12 @@ To be run via `/conexus:rdr-gate` once Critical Assumptions A1–A4 are verified
 ## Revision History
 
 - 2026-05-31: Draft created from GH #1041 root-cause analysis + daemon code map.
+- 2026-05-31: Research complete — all 4 Critical Assumptions verified.
+  A1 VERIFIED (daemon-process scope) + two-invariant scope boundary discovered.
+  A2 VERIFIED-FEASIBLE (discovery token already carries pid+version+conn; reap
+  guard needs no new state). A3 VERIFIED + re-weighted (migration is already
+  flock-serialized; fast-path is a modest win; second-writer fallbacks are the
+  dominant lock contention). A4 VERIFIED (spawn lock converges via crash/reap
+  churn; an fcntl election flock + re-check makes it clean, no deadlock).
+  New design finding: self-healing discovery file (holder re-asserts t2_addr).
+  Ready for /conexus:rdr-gate.
