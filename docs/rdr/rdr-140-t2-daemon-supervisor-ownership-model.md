@@ -154,19 +154,27 @@ map, 2026-05-31). Citations below are the load-bearing call sites.
 - **Verified (A1 source search, 2026-05-31) — Two invariants.** Daemon-spawn
   serialization gives the **daemon-process single-writer** invariant only. The
   **full `memory.db` single-writer** property is NOT achieved by it, because
-  three non-daemon paths open `T2Database` directly with no flock (WAL
-  `busy_timeout` only): (1) `t2_index_write` daemon-unreachable fallback
-  (`mcp_infra.py:184–219`) — and its `T2SchemaVersionMismatchError` arm opens a
-  second writer *even while a daemon is running*, the post-upgrade window; (2)
-  `aspect_worker` persist `t2_ctx()` (`mcp_infra.py:155`), always direct because
-  `document_aspects.upsert` is on `_RPC_DENY_OPS`; (3) `epsilon-allow`
+  non-daemon paths open `T2Database` directly with no flock (WAL `busy_timeout`
+  only). **Correction (gate, 2026-05-31):** an earlier draft listed
+  `aspect_worker` persist as a live direct-writer — that path was already routed
+  through the daemon by `nexus-zir76` (shipped 5.3.0): every `aspect_worker`
+  persist now goes via `t2_index_write` → the daemon's `complete_aspect` RPC
+  (`aspect_worker.py:277,447`; `complete_aspect` is NOT on `_RPC_DENY_OPS`,
+  `t2_daemon.py:458`). The actual remaining live direct-write paths are: (1) the
+  `t2_index_write` daemon-unreachable fallback (`mcp_infra.py:218`) — and its
+  `T2SchemaVersionMismatchError` arm opens a second writer *even while a daemon
+  is running*, the post-upgrade window; (2) `t2_ctx()` write-path calls in MCP
+  command implementations (`mcp/core.py`, `hook_registry.py` — a larger surface
+  than first stated; read-dominated but includes writes); (3) `epsilon-allow`
   irreducible writers (taxonomy rebuild, aspects gc, index auto-discover, upgrade
   bootstrap) classified as documented-irreducible by RDR-128 P3. **This RDR
   scopes to invariant (a)**; routing (1)–(3) through the daemon is RDR-128 P3
-  deferred work, out of scope here. Relevance to the thrash: the version-skew
-  fallback (#1) compounds it post-upgrade (clients open a direct writer AND
-  SIGTERM the stale daemon); the migration current-version fast-path + faster
-  daemon version-convergence shrink that window.
+  deferred work, out of scope here. The one path most relevant to the thrash is
+  the **schema-mismatch fallback arm of (1)**: post-upgrade, clients open a
+  direct writer AND supervisors SIGTERM the stale daemon, compounding both the
+  lock contention and the kill churn — the migration fast-path + faster daemon
+  version-convergence shrink that window (a candidate for in-scope mitigation, see
+  Trade-offs).
 
 ### Critical Assumptions
 
@@ -175,10 +183,12 @@ map, 2026-05-31). Citations below are the load-bearing call sites.
   Search (codebase-deep-analyzer, 2026-05-31). `_acquire_spawn_lock`
   (`t2_daemon.py:1013`) is strictly before `T2Database(...)` (`:658`); a
   spawn-loser raises `T2DaemonError` at `:1034` and exits WITHOUT constructing
-  `T2Database`. **Scope boundary discovered** (see Key Discoveries → "Two
-  invariants"): daemon-spawn serialization does NOT by itself give full
-  `memory.db` single-writer — three non-daemon write paths remain. A1 is
-  confirmed for the daemon-process race only; the RDR must state both invariants.
+  `T2Database`. **Scope boundary** (see Key Discoveries → "Two invariants",
+  corrected at gate): daemon-spawn serialization does NOT by itself give full
+  `memory.db` single-writer — the `t2_index_write` fallback (incl. its
+  schema-mismatch arm), MCP `t2_ctx()` writes, and epsilon-allow writers remain;
+  the `aspect_worker` path was already closed by `nexus-zir76`. A1 is confirmed
+  for the daemon-process race only; the full-db property is scoped to RDR-128 P3.
 - [x] **A2 — A version/identity token in the discovery file is sufficient to
   make reaping ownership-aware without reintroducing orphan-writer risk.** —
   **Status**: VERIFIED-FEASIBLE — **Method**: Multi-stack race harness +
@@ -199,13 +209,17 @@ map, 2026-05-31). Citations below are the load-bearing call sites.
   every cold start — real but MODEST. **Re-weight**: the dominant lock contention
   is the non-daemon second-writer fallbacks (A1 boundary), not migration.
 - [x] **A4 — Single-flighting the election converges N stacks to one daemon
-  without deadlock when a holder dies mid-election.** — **Status**: VERIFIED —
-  **Method**: Multi-stack race harness (2026-05-31). The spawn lock already
-  converges to exactly 1 daemon (single-writer holds), but via crash + reap
-  churn (started=1, crashed=9, stop_requested=1 on a 5-way race). An election
-  **fcntl flock** (auto-released by the OS on holder death → no deadlock) around
-  discover→spawn, plus a re-check, makes it 1 start / K-1 quiet attaches / 0
-  crashes / 0 reaps.
+  without deadlock when a holder dies mid-election.** — **Status**: VERIFIED
+  (mechanism) + DESIGNED (outcome, pending the P2 harness) — **Method**:
+  Multi-stack race harness against the CURRENT code (2026-05-31, single 5-way
+  run). VERIFIED: the current spawn lock converges to exactly 1 daemon
+  (single-writer holds) but via crash + reap churn (started=1, crashed=9,
+  stop_requested=1), and an `fcntl` flock auto-releases on holder death (the
+  no-deadlock property). DESIGNED, not yet code: the proposed
+  election-flock + re-check + loser-attach yielding "1 start / K-1 quiet
+  attaches / 0 crashes / 0 reaps" — that path does not exist yet; the Test Plan's
+  multi-stack race harness is the GATE for P2, run repeatedly (race outcomes are
+  stochastic — a single run is not sufficient at implementation time).
 
 ### New finding — self-healing discovery file (from the A2/A4 harness)
 
@@ -236,7 +250,18 @@ single-writer guarantee itself.
    `t2_addr` gap makes losers unable to trace the live daemon (verified: all 5
    racers crashed in the discovery-gap case), the spawn-lock **holder periodically
    re-asserts/validates its own discovery file** so a gap self-heals and losers
-   can attach. (Belt-and-suspenders behind the election lock.)
+   can attach. (Belt-and-suspenders behind the election lock.) Two constraints,
+   both load-bearing against RDR-129's deliberate early-unlink-on-stop (`stop()`
+   unlinks `t2_addr` at `t2_daemon.py:734` BEFORE the spawn-lock releases, to
+   signal departure): **(i)** the re-assert task MUST be cancelled at the START of
+   `stop()`, before the unlink, so it can never re-write a discovery file for a
+   daemon that is mid-shutdown (which would make a loser attach to a dying
+   socket); **(ii)** the re-assert interval and the loser's attach-poll timeout
+   must be provably consistent — `loser_poll_timeout >= reassert_interval +
+   worst_case_write_latency` — with documented defaults (proposed:
+   `reassert_interval = 1s`, `loser_poll_timeout = 3s`). The loser, on a
+   discovered-but-unreachable socket, falls back to polling (it must not treat a
+   stale `t2_addr` as a live attach).
 
 3. **Ownership-/version-aware reaping (Gap 2).** Persist an owner token +
    `daemon_version` in the discovery file. `_reap_predecessor_daemon` reaps a PID
@@ -264,7 +289,14 @@ contained (no invariant change); the invariant-touching phase (P3) is gated.
   (migration fast-path). Removes the crash tracebacks and the lock-contention
   amplifier. No ownership change.
 - **P2 — Single-flight election (contained).** Gap 3 coordination lock +
-  re-check. Converges N stacks without touching the reap.
+  re-check. Converges N stacks without touching the reap. **Caveat:** P1+P2 break
+  the *cascading* restart loop (only one supervisor spawns), but the new daemon's
+  startup `_reap_predecessor_daemon` (RDR-129's full same-db fd-sweep) is still
+  unconditional until P3 — so a same-version healthy peer found by the sweep (a
+  version-transition edge or a second config-dir) is still killed. P1+P2 bound
+  the healthy-peer-kill risk to the single-spawn case; P3 eliminates it. The
+  "earlier phases contained / no invariant change" claim is about not *weakening*
+  the single-writer flock, not about fully ending healthy-peer kills.
 - **P3 — Ownership-aware reaping (invariant-touching, gated).** Gap 2 owner/
   version token + guarded reap. Requires the A2 spike + a multi-stack race
   harness + `code-review-expert` + `substantive-critic` before merge.
@@ -280,7 +312,18 @@ contained (no invariant change); the invariant-touching phase (P3) is gated.
   `stop`-unlinks-early lifetime (RDR-129); mitigated by version+health being the
   primary signal and the flock remaining the hard backstop.
 - **Migration fast-path** trades a tiny "what if WAL got disabled" risk for
-  large contention relief; guarded by the explicit WAL-pragma check.
+  modest contention relief; guarded by the explicit WAL-pragma check.
+- **Scope honesty (gate):** this RDR fixes the *crash/kill thrash*; it does NOT
+  by itself fix `database is locked`, whose dominant source is the non-daemon
+  second-writer paths (A1 boundary), explicitly RDR-128-P3-deferred. The one
+  exception worth pulling IN-scope is the `t2_index_write`
+  `T2SchemaVersionMismatchError` fallback arm (`mcp_infra.py`): it is both a
+  thrash compounder (post-upgrade, clients open a direct writer while supervisors
+  reap the stale daemon) AND a genuine second-writer-while-daemon-alive. Faster
+  version-convergence (the election + ownership-aware reap reaching a single
+  current-version daemon quickly) shrinks that window; whether to additionally
+  make the fallback *wait briefly for daemon version-convergence* instead of
+  opening a direct writer is a P3 decision flagged here, not silently dropped.
 
 ## Alternatives Considered
 
@@ -349,3 +392,11 @@ To be run via `/conexus:rdr-gate` once Critical Assumptions A1–A4 are verified
   churn; an fcntl election flock + re-check makes it clean, no deadlock).
   New design finding: self-healing discovery file (holder re-asserts t2_addr).
   Ready for /conexus:rdr-gate.
+- 2026-05-31: Gate (substantive-critic) — BLOCKED on 2 criticals, fixed in place:
+  (1) A1 boundary cited the `aspect_worker` direct-write path, already CLOSED by
+  `nexus-zir76` (5.3.0) — corrected to the actual live paths; (2) self-healing
+  re-assert lacked a `stop()`-cancel spec + interval constraint — added
+  (cancel-before-unlink; `loser_poll_timeout >= reassert_interval + write
+  latency`). Also clarified A4 (VERIFIED mechanism / DESIGNED outcome), qualified
+  P1+P2 (startup reap unconditional until P3), and added the schema-mismatch
+  fallback scope note. Re-gate to confirm PASS.
