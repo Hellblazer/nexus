@@ -451,6 +451,187 @@ class TestDaemonSweepsSideOrphans:
         assert kills.count((333333, signal.SIGTERM)) == 1
 
 
+class TestDaemonReapDiscrimination:
+    """RDR-140 P3.1 (nexus-r9hq0): ownership/version-aware reap discrimination.
+
+    THE invariant the P3 gate (nexus-x2k4b) checks: ``_reap_predecessor_daemon``
+    must reap a peer ONLY IF (pid dead) OR (daemon_version != current) OR
+    (health-ping fails) — and must NEVER SIGTERM a healthy current-version peer
+    (attach instead). The RDR-128/129 single-writer flock backstop is NOT
+    weakened: orphaned writers (dead PID or unreachable health-ping) STILL get
+    reaped.
+
+    Seam contract these tests pin for the P3.2 implementation (nexus-7ffls):
+
+    * A module-level ``_peer_handshake(pid, payload) -> (version, reachable)``
+      yields the peer's reported daemon version and whether a health-ping
+      reached it. The real impl reads ``daemon_version`` from the discovery
+      payload for the addr-file pid, and live-handshakes open-fd-only peers;
+      these tests stub it per-pid for determinism.
+    * ``_reap_predecessor_daemon`` passes each target's discovery payload
+      (the addr-file token; ``None`` for open-fd-only peers) to
+      ``_reap_one_daemon(pid, payload)``.
+    * Discrimination in the reap path: after the existing liveness + cmdline
+      guards, SPARE (no kill, attach) iff ``reachable and version ==
+      _daemon_version()``; otherwise reap.
+
+    Tests (1) healthy-current-spared and the side-orphan variant are RED
+    against current code, which reaps every live t2-daemon pid unconditionally.
+    The reap-the-orphan tests are GREEN now and MUST STAY green (the backstop).
+    """
+
+    _CUR = "9.9.9-current"
+    _OLD = "1.0.0-stale"
+
+    @staticmethod
+    def _write_discovery(config_dir: Path, pid: int, daemon_version: str) -> Path:
+        import json
+
+        from nexus.daemon.t2_daemon import t2_discovery_path
+
+        p = t2_discovery_path(config_dir)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # A2: the token already carries pid + daemon_version; no NEW persisted
+        # state is introduced by P3.
+        p.write_text(json.dumps(
+            {"pid": pid, "tcp_port": 1234, "daemon_version": daemon_version},
+        ))
+        return p
+
+    @staticmethod
+    def _install_common(monkeypatch, td, handshakes: dict, kills: list) -> None:
+        """Pin current version, liveness, cmdline; stub the per-pid handshake
+        and capture kills. ``handshakes`` maps pid -> (version, reachable)."""
+        import signal
+
+        monkeypatch.setattr(td, "_daemon_version",
+                            lambda: TestDaemonReapDiscrimination._CUR)
+        monkeypatch.setattr(td, "_is_t2_daemon_process", lambda pid: True)
+        state = {pid: True for pid in handshakes}
+        monkeypatch.setattr(td, "_pid_is_alive", lambda pid: state.get(pid, False))
+
+        def _handshake(pid, payload=None):  # noqa: ANN001
+            return handshakes.get(pid, (None, False))
+
+        monkeypatch.setattr(td, "_peer_handshake", _handshake, raising=False)
+
+        def fake_kill(pid, sig):  # noqa: ANN001
+            kills.append((pid, sig))
+            if sig == signal.SIGTERM:
+                state[pid] = False
+
+        monkeypatch.setattr(td, "_PREDECESSOR_REAP_TIMEOUT", 0.2)
+        monkeypatch.setattr(td.os, "kill", fake_kill)
+
+    def test_healthy_current_addr_peer_is_spared(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        """RED against current code: a healthy, current-version predecessor
+        named in the addr file must be attached, NEVER reaped."""
+        from nexus.daemon import t2_daemon as td
+
+        self._write_discovery(config_dir, 700001, self._CUR)
+        kills: list = []
+        self._install_common(monkeypatch, td, {700001: (self._CUR, True)}, kills)
+
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert kills == []
+
+    def test_stale_version_addr_peer_is_reaped(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        """A reachable but stale-version peer IS reaped (ensure-a-current
+        daemon); guard stays green through P3.2."""
+        import signal
+
+        from nexus.daemon import t2_daemon as td
+
+        self._write_discovery(config_dir, 700002, self._OLD)
+        kills: list = []
+        self._install_common(monkeypatch, td, {700002: (self._OLD, True)}, kills)
+
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert (700002, signal.SIGTERM) in kills
+
+    def test_unreachable_current_peer_is_reaped(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        """Orphan backstop (RDR-128): a live current-version pid whose
+        health-ping FAILS is a wedged/orphaned writer and MUST be reaped."""
+        import signal
+
+        from nexus.daemon import t2_daemon as td
+
+        self._write_discovery(config_dir, 700003, self._CUR)
+        kills: list = []
+        self._install_common(monkeypatch, td, {700003: (self._CUR, False)}, kills)
+
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert (700003, signal.SIGTERM) in kills
+
+    def test_healthy_current_side_orphan_via_sweep_is_spared(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        """RED: a healthy current-version peer found via the open-fd SWEEP
+        (not the addr file) must also be spared, not just the addr-file one."""
+        from nexus.daemon import t2_daemon as td
+
+        # No addr file; the peer surfaces only through the open-fd probe.
+        monkeypatch.setattr(
+            td, "_enumerate_t2_daemon_pids_for_db", lambda p: [700004],
+        )
+        kills: list = []
+        self._install_common(monkeypatch, td, {700004: (self._CUR, True)}, kills)
+
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert kills == []
+
+    def test_unreachable_side_orphan_via_sweep_is_reaped(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        """Orphan backstop on the sweep path: an unreachable open-fd holder is
+        reaped (single-writer preserved)."""
+        import signal
+
+        from nexus.daemon import t2_daemon as td
+
+        monkeypatch.setattr(
+            td, "_enumerate_t2_daemon_pids_for_db", lambda p: [700005],
+        )
+        kills: list = []
+        self._install_common(monkeypatch, td, {700005: (self._CUR, False)}, kills)
+
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert (700005, signal.SIGTERM) in kills
+
+    def test_mixed_targets_reap_only_the_stale_one(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        """Convergence (case c, deterministic): among multiple live peers, only
+        the stale-version one is reaped; the healthy current-version peer is
+        spared. Exactly one reap, the rest attach."""
+        import signal
+
+        from nexus.daemon import t2_daemon as td
+
+        # addr-file peer is healthy+current (spare); a side-orphan is stale (reap).
+        self._write_discovery(config_dir, 700006, self._CUR)
+        monkeypatch.setattr(
+            td, "_enumerate_t2_daemon_pids_for_db", lambda p: [700007],
+        )
+        kills: list = []
+        self._install_common(
+            monkeypatch, td,
+            {700006: (self._CUR, True), 700007: (self._OLD, True)},
+            kills,
+        )
+
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert (700007, signal.SIGTERM) in kills
+        assert not any(pid == 700006 for pid, _sig in kills)
+        assert {pid for pid, _sig in kills} == {700007}
+
+
 class TestEnumerateT2DaemonPids:
     """RDR-129 A1 (nexus-exa2p): the open-fd enumeration helper used by both
     the startup sweep and the doctor multiplicity check."""
