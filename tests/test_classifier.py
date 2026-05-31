@@ -114,6 +114,64 @@ def test_skip_extensions(filename: str):
     assert classify_file(Path(filename)) == ContentClass.SKIP, f"{filename} should be SKIP"
 
 
+# ── Binary asset extensions (WeakAuras2 misclassification, 2026-05-31) ──────────
+#
+# Game/media repos (WoW addons, Unity projects, etc.) carry binary assets
+# tracked in git: textures, audio, fonts, compiled models. These have no
+# code/prose extension, so the step-7 fall-through ("everything else → PROSE")
+# routed them to voyage-context-3 embedding — 366 binary files in WeakAuras2
+# registered as "prose", producing zero usable vectors. Binary media must SKIP.
+
+@pytest.mark.parametrize("filename", [
+    "texture.tga",
+    "icon.blp",
+    "image.png",
+    "photo.jpg",
+    "photo.jpeg",
+    "anim.gif",
+    "favicon.ico",
+    "bitmap.bmp",
+    "render.tiff",
+    "sound.ogg",
+    "music.mp3",
+    "voice.wav",
+    "stream.flac",
+    "clip.m4a",
+    "movie.mp4",
+    "clip.webm",
+    "font.ttf",
+    "font.otf",
+    "font.woff",
+    "font.woff2",
+    "archive.zip",
+    "bundle.tar",
+    "package.gz",
+    "lib.so",
+    "app.dll",
+    "app.dylib",
+    "program.exe",
+    "module.wasm",
+    "cache.bin",
+])
+def test_binary_assets_classified_as_skip(filename: str):
+    from nexus.classifier import classify_file, ContentClass
+    assert classify_file(Path(filename)) == ContentClass.SKIP, f"{filename} should be SKIP"
+
+
+def test_binary_skip_is_case_insensitive():
+    from nexus.classifier import classify_file, ContentClass
+    assert classify_file(Path("TEXTURE.TGA")) == ContentClass.SKIP
+    assert classify_file(Path("Sound.OGG")) == ContentClass.SKIP
+
+
+def test_prose_override_wins_over_binary_skip():
+    """An operator can still force a binary extension to PROSE if they
+    have a genuine reason — prose_extensions wins over the skip list."""
+    from nexus.classifier import classify_file, ContentClass
+    cfg = {"prose_extensions": [".tga"]}
+    assert classify_file(Path("texture.tga"), indexing_config=cfg) == ContentClass.PROSE
+
+
 # ── New code extensions ────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("filename", [

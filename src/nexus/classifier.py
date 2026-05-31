@@ -43,6 +43,34 @@ _SKIP_EXTENSIONS: frozenset[str] = frozenset({
     ".txt", ".csv", ".tsv", ".dat", ".log",
 })
 
+# Binary asset extensions. The step-7 fall-through default is PROSE, so any
+# binary file without a code/prose extension would otherwise be embedded as
+# prose — producing zero search signal and wasting Voyage budget. Game/media
+# repos (WoW addons, Unity, etc.) track these in git: textures, audio, fonts,
+# compiled binaries. WeakAuras2 (2026-05-31) registered 366 such files
+# (.tga ×246, .ogg ×104, .blp, .ttf, .mp3) as "prose"; the resulting docs
+# collection held 0 usable vectors. Classify binary assets as SKIP.
+# Operators with a genuine need opt back in via ``prose_extensions``.
+_BINARY_EXTENSIONS: frozenset[str] = frozenset({
+    # Images / textures
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".tiff", ".tif",
+    ".webp", ".tga", ".blp", ".dds", ".psd", ".ai", ".eps",
+    # Audio
+    ".mp3", ".ogg", ".wav", ".flac", ".aac", ".m4a", ".opus", ".aiff",
+    # Video
+    ".mp4", ".webm", ".mov", ".avi", ".mkv", ".wmv", ".flv",
+    # Fonts
+    ".ttf", ".otf", ".woff", ".woff2", ".eot",
+    # Archives
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar", ".jar",
+    # Compiled / binary objects
+    ".so", ".dll", ".dylib", ".exe", ".o", ".a", ".obj", ".lib",
+    ".class", ".pyc", ".pyo", ".wasm", ".bin", ".dat.gz",
+    # Documents / misc binary
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".db", ".sqlite", ".sqlite3",
+})
+
 # nexus-haet (GH issue surfaced 2026-05-08): minified bundle filenames
 # (``htmx.min.js``, ``react.min.css``, ``vendor.min.mjs``) are
 # extension-wise indexable code, but the bytes are unreadable for
@@ -99,8 +127,9 @@ def classify_file(
     3. prose_extensions config override (wins over all)
     4. Effective code set (defaults + code_extensions config)
     5. _SKIP_EXTENSIONS (known-noise file types)
-    6. Extensionless files: shebang → CODE, else → SKIP
-    7. Everything else → PROSE
+    6. _BINARY_EXTENSIONS (binary assets — textures, audio, fonts, objects)
+    7. Extensionless files: shebang → CODE, else → SKIP
+    8. Everything else → PROSE
     """
     ext = path.suffix.lower()
 
@@ -131,6 +160,11 @@ def classify_file(
 
     # Known-noise extensions
     if ext in _SKIP_EXTENSIONS:
+        return ContentClass.SKIP
+
+    # Binary assets (textures, audio, fonts, compiled objects). Checked after
+    # prose_extensions so an operator override can still force one to PROSE.
+    if ext in _BINARY_EXTENSIONS:
         return ContentClass.SKIP
 
     # Extensionless files: shebang → CODE, else → SKIP

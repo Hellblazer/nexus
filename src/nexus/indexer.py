@@ -2122,7 +2122,16 @@ def _run_index(
                 pdf_files.append((score, path))
                 # PDF files not included in ripgrep text cache
             case ContentClass.SKIP:
-                pass  # known-noise file; silently ignore
+                # Known-noise or binary asset (nexus-6e6u1). Logged at debug so
+                # the operator can see what got dropped at classification time
+                # rather than having it silently vanish — WeakAuras2 dropped 366
+                # binary files this way. Distinct from the byte-sniff "skipped
+                # non-text file" emitted in prose/code indexers on decode failure.
+                _log.debug(
+                    "skipped non-indexable file",
+                    path=str(path),
+                    ext=path.suffix.lower(),
+                )
 
     # Sort all lists descending by frecency
     code_files.sort(key=lambda x: x[0], reverse=True)
