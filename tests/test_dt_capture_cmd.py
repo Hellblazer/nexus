@@ -114,6 +114,24 @@ def test_doi_capture_downloads_pdf_and_indexes(runner, monkeypatch) -> None:
     assert indexed == ["DOI-UUID"]  # the captured record was actually indexed
 
 
+def test_capture_forwards_extractor_to_index(runner, monkeypatch) -> None:
+    """nexus-pxxyn: nx dt capture --extractor docling reaches the PDF indexer
+    (so a formula-heavy captured PDF can use the docling recovery)."""
+    from nexus.cli import main
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_capture_web_page",
+                        lambda url, **kw: "PDF-UUID")
+    monkeypatch.setattr("nexus.commands.dt._gather_records",
+                        lambda **kw: [(kw["uuids"][0], "/captured.pdf")])
+    seen = {}
+    monkeypatch.setattr("nexus.commands.dt._index_record",
+                        lambda uuid, path, **kw: seen.update(kw) or True)
+    result = runner.invoke(main, ["dt", "capture", "https://e.com",
+                                  "--type", "pdf", "--extractor", "docling"])
+    assert result.exit_code == 0, result.output
+    assert seen.get("extractor") == "docling"
+
+
 def test_doi_without_email_warns(runner, monkeypatch) -> None:
     from nexus.cli import main
     monkeypatch.delenv("OPENALEX_MAILTO", raising=False)
