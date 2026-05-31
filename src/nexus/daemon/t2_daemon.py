@@ -74,6 +74,12 @@ _log = structlog.get_logger(__name__)
 # lingering predecessor daemon on takeover (RDR-128 single-writer backstop).
 _PREDECESSOR_REAP_TIMEOUT: float = 5.0
 
+# RDR-140 P3.2 (nexus-7ffls): per-connection timeout for the reap-discrimination
+# health-ping. A peer that does not accept a connection within this budget is
+# treated as unreachable (a wedged/orphaned writer) and reaped. Module constant
+# so tests can shrink it.
+_HEALTH_PING_TIMEOUT: float = 1.0
+
 # RDR-129 B2 (nexus-qi1zb): bounded lock-retry for the serving dispatch.
 # Mirrors the bootstrap-migration retry
 # (``nexus.db.t2._apply_pending_with_lock_retry``): three attempts with two
@@ -584,6 +590,50 @@ def _daemon_version() -> str:
         return "0.0.0"
 
 
+def _health_ping(payload: dict[str, Any]) -> bool:
+    """Best-effort liveness probe: can we open a connection to the peer named in
+    its discovery *payload*? Tries the UDS path first, then TCP. Never raises.
+
+    RDR-140 P3.2: a peer that accepts a connection is serving (healthy); one
+    that refuses/times out is a wedged or orphaned writer and must be reaped.
+    """
+    uds = payload.get("uds_path")
+    if isinstance(uds, str) and uds:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(_HEALTH_PING_TIMEOUT)
+            sock.connect(uds)
+            return True
+        except OSError:
+            pass
+        finally:
+            sock.close()
+    host, port = payload.get("tcp_host"), payload.get("tcp_port")
+    if isinstance(host, str) and host and isinstance(port, int) and port > 0:
+        try:
+            with socket.create_connection((host, port), timeout=_HEALTH_PING_TIMEOUT):
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def _peer_handshake(pid: int, payload: dict[str, Any] | None) -> tuple[str | None, bool]:
+    """Reap-discrimination probe for *pid*: return ``(daemon_version, reachable)``.
+
+    RDR-140 P3.2 (nexus-7ffls). ``daemon_version`` is read from the discovery
+    *payload* (the ``t2_addr`` token carries it — A2; no new persisted state).
+    ``reachable`` is a best-effort health-ping to the token's socket. A peer with
+    no token (``payload is None`` — an open-fd-only side-orphan) returns
+    ``(None, False)``: it has no socket we can reach and no version we can trust,
+    so the caller cannot spare it (single-writer backstop).
+    """
+    if not isinstance(payload, dict):
+        return (None, False)
+    version = payload.get("daemon_version")
+    return (version if isinstance(version, str) else None, _health_ping(payload))
+
+
 def _allocate_free_port() -> int:
     """Bind a free loopback port, then close it. No SO_REUSEADDR (see T3 daemon)."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1031,9 +1081,11 @@ class T2Daemon:
         signal a pid leaves startup to proceed (the flock already guarantees
         we are the sole new writer).
         """
-        targets: list[int] = []
-
-        # 1. addr-file pid.
+        # 1. addr-file pid + its discovery token. The token is the ONLY input
+        #    that lets us spare a healthy current-version peer (RDR-140 P3:
+        #    it carries daemon_version + the socket to health-ping).
+        addr_pid: int | None = None
+        addr_payload: dict[str, Any] | None = None
         disc_path = t2_discovery_path(self._config_dir)
         try:
             raw = disc_path.read_text()
@@ -1041,32 +1093,58 @@ class T2Daemon:
         except (OSError, ValueError):
             payload = None
         if isinstance(payload, dict):
+            addr_payload = payload
             pid = payload.get("pid")
             if isinstance(pid, int):
-                targets.append(pid)
+                addr_pid = pid
 
         # 2. same-db open-fd sweep (catches side-orphans absent from the addr
-        #    file).
-        targets.extend(_enumerate_t2_daemon_pids_for_db(self._db_path))
-
-        # Reap each distinct non-self target once.
+        #    file). These have NO token, so they pass payload=None and can
+        #    never be spared — they escaped the db spawn lock we hold and are
+        #    exactly the orphan case this sweep exists to reap.
         seen: set[int] = set()
-        for pid in targets:
-            if pid <= 0 or pid == os.getpid() or pid in seen:
-                continue
-            seen.add(pid)
-            self._reap_one_daemon(pid)
 
-    def _reap_one_daemon(self, pid: int) -> None:
+        def _reap(pid: int, tok: dict[str, Any] | None) -> None:
+            if pid <= 0 or pid == os.getpid() or pid in seen:
+                return
+            seen.add(pid)
+            self._reap_one_daemon(pid, tok)
+
+        if addr_pid is not None:
+            _reap(addr_pid, addr_payload)
+        for pid in _enumerate_t2_daemon_pids_for_db(self._db_path):
+            _reap(pid, None)
+
+    def _reap_one_daemon(
+        self, pid: int, payload: dict[str, Any] | None = None,
+    ) -> None:
         """SIGTERM (escalating to SIGKILL after ``_PREDECESSOR_REAP_TIMEOUT``)
         a single live t2-daemon *pid*. Guarded by a liveness check and a
         cmdline check (PID-reuse guard: refuse to kill a recycled pid whose
-        command line is not a t2 daemon). Best-effort; never raises."""
+        command line is not a t2 daemon). Best-effort; never raises.
+
+        RDR-140 P3.2 (nexus-7ffls): ownership/version-aware discrimination.
+        When *payload* is the peer's ``t2_addr`` token, SPARE it (attach instead
+        of kill) iff it health-pings AND its ``daemon_version`` equals ours — a
+        healthy current-version peer is the legitimate single writer and must
+        not be reaped. A stale-version or unreachable addr peer, and every
+        open-fd-only peer (``payload is None``), falls through to the reap: the
+        RDR-128/129 single-writer backstop is preserved, never weakened.
+        """
         if not _pid_is_alive(pid):
             return
         if not _is_t2_daemon_process(pid):
             _log.warning("t2_predecessor_pid_not_daemon_skip_reap", pid=pid)
             return
+
+        if payload is not None:
+            version, reachable = _peer_handshake(pid, payload)
+            if reachable and version == _daemon_version():
+                _log.info(
+                    "t2_predecessor_spared_healthy_current",
+                    pid=pid, daemon_version=version,
+                )
+                return
 
         _log.warning("t2_reaping_predecessor_daemon", pid=pid)
         try:
