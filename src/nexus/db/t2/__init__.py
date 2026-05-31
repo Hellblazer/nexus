@@ -177,6 +177,17 @@ def _cold_start_is_current_and_wal(path: Path) -> bool:
     importlib fallback) returns False so the caller takes the full
     flock+migration path — a genuine pending migration must always run.
     """
+    # A non-existent path is a fresh DB: there is nothing to fast-path, and we
+    # must NOT create the file here (this probe is read-only by contract — a
+    # plain ``sqlite3.connect`` would materialise a 0-byte DB). Fall through to
+    # the full bootstrap, which creates and migrates it. We use a plain
+    # read-write connection rather than ``mode=ro`` because read-only mode
+    # cannot create the ``-shm`` file a WAL DB needs when no other connection
+    # is open (the exact cold-start steady state we optimise), which would
+    # defeat the fast path. Reads on a plain connection are lock-free (A3),
+    # mirroring ``stored_schema_version``.
+    if not path.exists():
+        return False
     try:
         from importlib.metadata import version as _pkg_version
 
@@ -187,7 +198,7 @@ def _cold_start_is_current_and_wal(path: Path) -> bool:
         if current_version == "0.0.0":
             return False
 
-        conn = sqlite3.connect(str(path))
+        conn = sqlite3.connect(str(path), check_same_thread=False)
         try:
             try:
                 row = conn.execute(
@@ -521,6 +532,11 @@ class T2Database:
         # for correctness, mem:feedback_no_silent_fallbacks_for_correctness).
         if _cold_start_is_current_and_wal(path):
             with _upgrade_lock:
+                # Double-check (mirrors the full-migration path below): another
+                # thread may have finished a migration for this path while we
+                # ran the lock-free probe.
+                if path_key in _upgrade_done:
+                    return
                 _upgrade_done.add(path_key)
             return
 

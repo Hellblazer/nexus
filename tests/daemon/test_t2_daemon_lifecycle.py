@@ -403,10 +403,55 @@ class TestSpawnLockLoserQuietAttach:
             crashed = [e for e in logs if e.get("event") == "t2_daemon_crashed"]
             assert len(spawn_lost) == 1
             assert spawn_lost[0].get("log_level") == "info"
+            # The winner is alive and its UDS is accepting, so the loser's
+            # poll must report a live attach (not a vacuous timeout).
+            assert spawn_lost[0].get("attached") is True
             assert len(crashed) == 0
         finally:
             stop.set()
             thread.join(timeout=10.0)
+
+    def test_reassert_task_cancelled_before_discovery_unlink(
+        self, config_dir: Path, db_path: Path,
+    ) -> None:
+        """RDR-129 ordering: stop() must cancel the self-healing re-assert task
+        BEFORE unlinking the discovery file, else the task could resurrect a
+        mid-shutdown daemon's addr. Pin the order by recording the relative
+        sequence of Task.cancel and Path.unlink.
+        """
+        from nexus.daemon.t2_daemon import T2Daemon, t2_discovery_path
+
+        events: list[str] = []
+
+        async def _main() -> None:
+            daemon = T2Daemon(config_dir=config_dir, db_path=db_path)
+            await daemon.start()
+            assert daemon._reassert_task is not None
+
+            real_cancel = daemon._reassert_task.cancel
+            disc_path = t2_discovery_path(config_dir)
+            orig_unlink = Path.unlink
+
+            def spy_cancel(*a, **k):
+                events.append("cancel")
+                return real_cancel(*a, **k)
+
+            def spy_unlink(self_path, *a, **k):
+                if self_path == disc_path:
+                    events.append("unlink")
+                return orig_unlink(self_path, *a, **k)
+
+            daemon._reassert_task.cancel = spy_cancel  # type: ignore[method-assign]
+            import unittest.mock as _mock
+
+            with _mock.patch.object(Path, "unlink", spy_unlink):
+                await daemon.stop()
+
+        asyncio.run(_main())
+
+        assert "cancel" in events, "re-assert task was never cancelled"
+        assert "unlink" in events, "discovery file was never unlinked"
+        assert events.index("cancel") < events.index("unlink")
 
 
 # ---------------------------------------------------------------------------

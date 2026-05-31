@@ -529,8 +529,14 @@ def t2_start_cmd(config_dir_str: str | None, db_path_str: str | None) -> None:
     systemd via ``nx daemon t2 install --autostart`` for production
     use; the foreground requirement is what the supervisor watches.
 
-    Refuses to start if another T2 daemon already holds the spawn
-    lock on the same config_dir (raises T2DaemonError fail-loud).
+    If another T2 daemon already holds the spawn lock (a live winner
+    already owns the data file), this process quiet-attaches instead of
+    crashing (RDR-140 P1.3): ``run_t2_daemon`` logs ``t2_daemon_spawn_lost``
+    at info and returns, so the command exits 0 with no traceback. The
+    launchd/systemd template treats a zero exit as "do not restart"
+    (see the install command), so a loser does not trigger a respawn loop.
+    A genuine lifecycle error (bind failed, etc.) still raises
+    ``T2DaemonError`` and exits 2.
     """
     from nexus.commands._helpers import default_db_path
     from nexus.daemon.t2_daemon import T2DaemonError, run_t2_daemon

@@ -148,6 +148,18 @@ class TestMigrationFastPath:
         assert installed_sentinels["flock"] == 0
         assert installed_sentinels["apply"] == 0
 
+    def test_nonexistent_db_returns_false_without_creating_file(
+        self, tmp_path: Path,
+    ) -> None:
+        """The probe is read-only by contract: on a non-existent path it must
+        return False AND not materialise a 0-byte DB file (a plain
+        ``sqlite3.connect`` would)."""
+        from nexus.db.t2 import _cold_start_is_current_and_wal
+
+        db = tmp_path / "never.db"
+        assert _cold_start_is_current_and_wal(db) is False
+        assert not db.exists()
+
     def test_stale_stored_version_still_runs_full_migration_path(
         self, tmp_path: Path, installed_sentinels: dict,
     ) -> None:
