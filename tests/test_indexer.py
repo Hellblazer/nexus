@@ -337,7 +337,14 @@ def test_run_index_logs_skipped_binary_files(tmp_path):
                               "voyageai.Client": {"return_value": _voyage(1)}}):
         with patch("nexus.indexer._log") as l1, patch("nexus.prose_indexer._log") as l2:
             _run_index(repo, _reg())
-    assert any("skipped non-text file" in str(c) for c in l1.debug.call_args_list + l2.debug.call_args_list)
+    # Binary extensions (.bin) are now caught at classification time (nexus-6e6u1)
+    # and SKIP-logged as "skipped non-indexable file" rather than reaching the
+    # byte-sniff "skipped non-text file" path in the prose/code indexers.
+    calls = l1.debug.call_args_list + l2.debug.call_args_list
+    assert any(
+        "skipped non-indexable file" in str(c) or "skipped non-text file" in str(c)
+        for c in calls
+    )
 
 
 def test_run_index_logs_empty_chunks(tmp_path):
