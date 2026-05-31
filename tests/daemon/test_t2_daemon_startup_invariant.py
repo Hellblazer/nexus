@@ -454,30 +454,40 @@ class TestDaemonSweepsSideOrphans:
 class TestDaemonReapDiscrimination:
     """RDR-140 P3.1 (nexus-r9hq0): ownership/version-aware reap discrimination.
 
-    THE invariant the P3 gate (nexus-x2k4b) checks: ``_reap_predecessor_daemon``
-    must reap a peer ONLY IF (pid dead) OR (daemon_version != current) OR
-    (health-ping fails) — and must NEVER SIGTERM a healthy current-version peer
-    (attach instead). The RDR-128/129 single-writer flock backstop is NOT
-    weakened: orphaned writers (dead PID or unreachable health-ping) STILL get
+    THE invariant the P3 gate (nexus-x2k4b) checks: a healthy, current-version
+    peer named in OUR addr-file token must be attached, NEVER SIGTERM'd. The
+    RDR-128/129 single-writer flock backstop is NOT weakened: a stale-version or
+    unreachable addr-file peer, AND every open-fd-only side-orphan, STILL get
     reaped.
+
+    Discrimination scope (P3 design decision, 2026-05-31 — A2-faithful, single-
+    writer-safe; see the rdr140 P3 gate notes): the spare/attach path applies
+    ONLY to the addr-file pid, whose ``t2_addr`` token carries the
+    ``daemon_version`` + socket needed to handshake it. Open-fd-only peers
+    surfaced by the RDR-129 sweep have no token and no socket we can reach; they
+    are, by construction, writers that ESCAPED the db-scoped spawn lock we now
+    hold, so sparing one would re-admit a second writer. Therefore open-fd-only
+    peers are ALWAYS reaped — they are exactly the orphan case the sweep exists
+    to kill. (The literal "spare open-fd healthy peers too" reading was rejected:
+    the db-scoped spawn lock already prevents two healthy current daemons
+    coexisting, so a sparable open-fd peer cannot legitimately arise.)
 
     Seam contract these tests pin for the P3.2 implementation (nexus-7ffls):
 
     * A module-level ``_peer_handshake(pid, payload) -> (version, reachable)``
       yields the peer's reported daemon version and whether a health-ping
       reached it. The real impl reads ``daemon_version`` from the discovery
-      payload for the addr-file pid, and live-handshakes open-fd-only peers;
-      these tests stub it per-pid for determinism.
-    * ``_reap_predecessor_daemon`` passes each target's discovery payload
-      (the addr-file token; ``None`` for open-fd-only peers) to
-      ``_reap_one_daemon(pid, payload)``.
-    * Discrimination in the reap path: after the existing liveness + cmdline
-      guards, SPARE (no kill, attach) iff ``reachable and version ==
-      _daemon_version()``; otherwise reap.
+      payload and pings the token's socket; these tests stub it per-pid.
+    * ``_reap_predecessor_daemon`` passes the addr-file token to
+      ``_reap_one_daemon(pid, payload)`` for the addr pid, and ``payload=None``
+      for open-fd-only pids.
+    * Discrimination in the reap path: SPARE (no kill, attach) iff a token is
+      present AND ``reachable and version == _daemon_version()``; otherwise
+      reap (covers stale/unreachable addr peers and all open-fd-only peers).
 
-    Tests (1) healthy-current-spared and the side-orphan variant are RED
-    against current code, which reaps every live t2-daemon pid unconditionally.
-    The reap-the-orphan tests are GREEN now and MUST STAY green (the backstop).
+    The healthy-current addr-peer-spared tests are RED against current code,
+    which reaps every live t2-daemon pid unconditionally. The reap-the-orphan
+    tests are GREEN now and MUST STAY green (the backstop).
     """
 
     _CUR = "9.9.9-current"
@@ -569,14 +579,20 @@ class TestDaemonReapDiscrimination:
         td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
         assert (700003, signal.SIGTERM) in kills
 
-    def test_healthy_current_side_orphan_via_sweep_is_spared(
+    def test_side_orphan_via_sweep_is_always_reaped(
         self, config_dir: Path, db_path: Path, monkeypatch,
     ) -> None:
-        """RED: a healthy current-version peer found via the open-fd SWEEP
-        (not the addr file) must also be spared, not just the addr-file one."""
+        """Single-writer backstop: an open-fd-only peer (surfaced by the sweep,
+        absent from the addr file) is ALWAYS reaped — even if it would handshake
+        as healthy + current. It escaped the db-scoped spawn lock we hold, so it
+        cannot be a legitimately sparable peer; the spare path is addr-file-only.
+        """
+        import signal
+
         from nexus.daemon import t2_daemon as td
 
-        # No addr file; the peer surfaces only through the open-fd probe.
+        # No addr file; the peer surfaces only through the open-fd probe. Its
+        # handshake says healthy+current, but with no token it must still die.
         monkeypatch.setattr(
             td, "_enumerate_t2_daemon_pids_for_db", lambda p: [700004],
         )
@@ -584,7 +600,7 @@ class TestDaemonReapDiscrimination:
         self._install_common(monkeypatch, td, {700004: (self._CUR, True)}, kills)
 
         td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
-        assert kills == []
+        assert (700004, signal.SIGTERM) in kills
 
     def test_unreachable_side_orphan_via_sweep_is_reaped(
         self, config_dir: Path, db_path: Path, monkeypatch,
