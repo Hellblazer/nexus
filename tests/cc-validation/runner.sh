@@ -37,8 +37,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ ! -f "$AUTH_DIR/.credentials.json" ]]; then
-    echo "Error: $AUTH_DIR/.credentials.json missing — run tests/e2e/auth-login.sh first" >&2
+# Need a credential source: the live macOS keychain OR a captured snapshot.
+# provision_credentials (below) prefers the keychain and falls back to the
+# snapshot; only error here when neither is available.
+if ! { command -v security >/dev/null 2>&1 \
+       && security find-generic-password -s 'Claude Code-credentials' -w >/dev/null 2>&1; } \
+   && [[ ! -f "$AUTH_DIR/.credentials.json" ]]; then
+    echo "Error: no credentials — keychain miss and $AUTH_DIR/.credentials.json missing." >&2
+    echo "       run tests/e2e/auth-login.sh first." >&2
     exit 1
 fi
 
@@ -62,7 +68,38 @@ echo "Setting up isolated test home at $TEST_HOME..."
 rm -rf "$TEST_HOME"
 mkdir -p "$TEST_HOME/.claude/plugins" "$TEST_HOME/.claude/agents" "$TEST_HOME/.claude/skills" "$TEST_HOME/.claude/commands"
 
-cp "$AUTH_DIR/.credentials.json" "$TEST_HOME/.claude/.credentials.json"
+# Provision OAuth credentials into the isolated TEST_HOME.
+#
+# The sandbox session reads $TEST_HOME/.claude/.credentials.json (and
+# .env.test unsets ANTHROPIC_API_KEY so this file is the auth source).
+# A frozen snapshot file goes stale fast: OAuth access tokens are
+# short-lived and the refresh token rotates out from under a frozen copy
+# once the live CLI refreshes, so a stale snapshot 401s ("Invalid
+# authentication credentials") and every scenario fails before the model
+# runs anything. Prefer the live macOS keychain at runtime; refresh the
+# on-disk snapshot from it so the Linux/CI fallback path stays usable.
+provision_credentials() {
+    local dest="$TEST_HOME/.claude/.credentials.json"
+    local kc_json
+    if command -v security >/dev/null 2>&1 \
+       && kc_json="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)" \
+       && [[ -n "$kc_json" ]] \
+       && printf '%s' "$kc_json" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+        printf '%s' "$kc_json" > "$dest"
+        cp "$dest" "$AUTH_DIR/.credentials.json" 2>/dev/null || true
+        echo "  [auth] provisioned from macOS keychain (live)"
+    elif [[ -f "$AUTH_DIR/.credentials.json" ]]; then
+        cp "$AUTH_DIR/.credentials.json" "$dest"
+        echo "  [auth] provisioned from snapshot file (keychain unavailable)"
+    else
+        echo "Error: no credentials available — keychain miss and no snapshot at $AUTH_DIR/.credentials.json" >&2
+        echo "       run tests/e2e/auth-login.sh to capture credentials." >&2
+        exit 1
+    fi
+    chmod 600 "$dest"
+}
+provision_credentials
+
 if [[ -f "$AUTH_DIR/claude.json" ]]; then
     cp "$AUTH_DIR/claude.json" "$TEST_HOME/.claude.json"
 else
