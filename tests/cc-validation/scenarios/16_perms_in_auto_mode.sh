@@ -120,7 +120,14 @@ echo "    16b (without allow): hook_fired=$hook_fired_b  tool_ran=$tool_ran_b"
 # PermissionRequest gate, so "hook never fires" would be vacuous (it passed
 # previously with tool_ran=0, i.e. with the server never connected).
 if [[ $tool_ran_a -eq 0 || $tool_ran_b -eq 0 ]]; then
-    fail "tool did not run in at least one sub-run — server not connected; auto-mode verdict would be vacuous"
+    # ANOMALY (consistent across runs 2026-05-31): tool_ran_a=0 (allow rule
+    # present) but tool_ran_b=1 (allow empty), same launcher and .mcp.json, and a
+    # 12s extra MCP settle did NOT change it — so this is not a connection-timing
+    # flake. In --permission-mode=auto, the MCP tool runs WITHOUT an allow rule
+    # but not WITH one. Failing (not vacuously passing) is correct: the guard
+    # surfaces a real anomaly worth a dedicated investigation rather than papering
+    # over it. Do NOT "fix" this by removing the tool_ran requirement.
+    fail "auto-mode anomaly: tool ran in only one sub-run (a=$tool_ran_a allow-present, b=$tool_ran_b allow-empty) — cannot assess the hook gate without both running; needs investigation, not a vacuous pass"
 elif [[ $hook_fired_a -eq 0 && $hook_fired_b -eq 0 ]]; then
     pass "auto mode auto-approves MCP tools (tool ran both ways) without consulting PermissionRequest hook either way"
 elif [[ $hook_fired_a -eq 0 && $hook_fired_b -eq 1 ]]; then
