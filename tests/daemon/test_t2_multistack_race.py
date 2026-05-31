@@ -41,8 +41,6 @@ import tempfile
 import time
 from pathlib import Path
 
-import pytest
-
 # K racers per iteration; _ITERATIONS independent cold-start races. Both are
 # deliberately modest — every iteration spawns K+1 real processes, so the wall
 # cost is K*_ITERATIONS daemon spawns. Enough to surface a stochastic race
@@ -265,20 +263,17 @@ class TestMultiStackRace:
         finally:
             _teardown(cd)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="RED until P2.2 (nexus-fkhe2): a single-flight election lock "
-        "means only the winner spawns t2 start, so zero siblings reach the "
-        "spawn lock and quiet-attach. Pre-P2 the thundering herd produces "
-        "1..K-1 redundant spawns (t2_daemon_spawn_lost > 0).",
-    )
     def test_kway_race_is_single_flight(self) -> None:
-        """RED until P2.2: zero redundant spawns across all iterations.
+        """GREEN as of P2.2 (nexus-fkhe2): zero redundant spawns across all
+        iterations.
 
         The convergence guard above tolerates redundant spawns that quiet-
-        attach; this one demands the election lock eliminate them. Summed over
-        iterations so a single race that happens to serialise can't mask the
-        herd.
+        attach; this one demands the single-flight election lock eliminate them
+        — only the election holder cold-spawns ``t2 start``, waiters block then
+        re-discover the live winner and attach without spawning, so no sibling
+        ever reaches the daemon spawn lock (``t2_daemon_spawn_lost`` == 0).
+        Summed over iterations so a single race that happens to serialise can't
+        mask a herd regression.
         """
         total_spawn_lost = 0
         for _i in range(_ITERATIONS):
