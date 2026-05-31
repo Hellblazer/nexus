@@ -42,6 +42,12 @@ rm -f "$TEST_HOME/agent_tools.txt"
 echo "    --- agent file path expansion check ---"
 grep -E "STUB_LOG|args" "$TEST_HOME/.claude/agents/scoped-tool-agent.md" | head -3 | sed 's/^/    | /'
 
+# Guard against cross-scenario pollution: this scenario tests INLINE-agent
+# scoping, so there must be NO project .mcp.json (a stale one from a prior
+# scenario would feed the stub to the parent via --mcp-config and manufacture a
+# false "leak"). reset_scenario_state now removes it; assert it's gone.
+[[ -f "$TEST_HOME/.mcp.json" ]] && echo "    WARNING: stale \$TEST_HOME/.mcp.json present — isolation broken"
+
 claude_start
 
 # VALIDITY NOTE (reworked 2026-05-31): the prior version detected parent leakage

@@ -210,8 +210,15 @@ chmod 600 "$TEST_HOME/.env.test"
 
 # Wipe per-scenario state without disturbing the OAuth/credentials/plugin bits.
 reset_scenario_state() {
+    # NOTE (2026-05-31): scenarios write `.mcp.json` to the WORKSPACE ROOT
+    # ($TEST_HOME/.mcp.json), not under .claude/. Cleaning only
+    # .claude/.mcp.json left a stale project .mcp.json across scenarios — the
+    # claude_start wrapper then fed it via --mcp-config to a LATER scenario's
+    # parent, manufacturing a false "inline mcpServers leaked to parent" result
+    # in scenario 11. Remove BOTH paths so scenarios are isolated.
     rm -f "$TEST_HOME/.claude/settings.json" \
           "$TEST_HOME/.claude/.mcp.json" \
+          "$TEST_HOME/.mcp.json" \
           "$STUB_LOG" "$HOOK_LOG"
     rm -rf "$TEST_HOME/.claude/agents" "$TEST_HOME/.claude/skills" "$TEST_HOME/.claude/commands"
     mkdir -p "$TEST_HOME/.claude/agents" "$TEST_HOME/.claude/skills" "$TEST_HOME/.claude/commands"
@@ -271,7 +278,7 @@ run_scenario() {
     local file="$1"
     local num
     num=$(basename "$file" | cut -d_ -f1)
-    if [[ -n "$ONLY_SCENARIO" && "$num" != "$ONLY_SCENARIO" ]]; then
+    if [[ -n "$ONLY_SCENARIO" && ",$ONLY_SCENARIO," != *",$num,"* ]]; then
         return 0
     fi
     echo ""

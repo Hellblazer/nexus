@@ -227,6 +227,13 @@ the entire MCP stack broken. Two rules came out of the rework:
    ask for a fixed confirmation TOKEN, not a verbatim quote (scenario 18), and
    require the precondition tool-run before trusting a hook/permission verdict
    (scenarios 07, 16).
+3. **Keep scenarios isolated — reset must clean what scenarios write.** A
+   scenario's `$TEST_HOME/.mcp.json` (workspace root) must be removed by
+   `reset_scenario_state`, or the `--mcp-config` wrapper feeds a stale server to
+   the NEXT scenario's parent (this manufactured a false "inline mcpServers
+   leaked to parent" in 11). If an isolated `--scenario N` result disagrees with
+   the full-suite result, suspect cross-scenario state first. Reproduce fast with
+   a comma-list: `runner.sh --scenario "05,07,11"`.
 
 Reworked for validity 2026-05-31: 05, 06, 07, 11, 14a, 14b, 16, 18, 19A, 23.
 Verified valid as-is: 01, 17 (explicit-token), 02/03/04/12/13/14c/15/20–22/24–26
@@ -242,12 +249,18 @@ The harness correctly surfaces these. A green here would be the bug:
 - **07** — under `skipDangerousModePermissionPrompt` the PermissionRequest gate
   is bypassed entirely (tool auto-runs both with and without an allow rule, the
   hook never fires) — so a PermissionRequest auto-approver is redundant.
-- **11** — inline-agent `mcpServers` ARE scoped to the subagent, the documented
-  behavior. Verified via the stub startup markers: STUB_LOG is empty before
-  dispatch (server not spawned, parent's probe call does not land) and only shows
-  `process_launched` + the agent's call AFTER dispatch. (An earlier "not scoped"
-  reading was a measurement artifact of the bare-`python3` crash + unreliable
-  model self-report — corrected by the parent-call forensic + venv python.)
+- **11** — inline-agent `mcpServers` ARE scoped to the subagent (confirmed), the
+  documented behavior ("the subagent gets the tools; the parent conversation does
+  not"). The inline server spawns at subagent dispatch (stub startup markers show
+  no spawn before it); the parent's pre-dispatch probe call does not land
+  (`parent_called_stub=0`). A transient full-suite "leak" reading was a HARNESS
+  ISOLATION BUG, not a scoping failure: `reset_scenario_state` cleaned
+  `.claude/.mcp.json` but scenarios write `$TEST_HOME/.mcp.json` (workspace
+  root), so a stale project `.mcp.json` from a prior scenario (05/07) was fed to
+  scenario 11's PARENT via `--mcp-config`, giving it the stub. Fixed by removing
+  `$TEST_HOME/.mcp.json` in `reset_scenario_state`; 11 then reports SCOPED even
+  when run right after stub-using scenarios. (An even earlier "not scoped" claim
+  was a separate artifact of the bare-`python3` crash + model self-report.)
 - **14b** — plugin-shipped agents CANNOT declare `mcpServers` (CC blocks
   `hooks`/`mcpServers`/`permissionMode` on plugin agents for security), AND in
   this harness the plugin agent isn't even registered by the manual install.
