@@ -70,12 +70,20 @@ if [[ -f "$TEST_HOME/agent_tools.txt" ]]; then
     head -20 "$TEST_HOME/agent_tools.txt" | sed 's/^/    | /'
 fi
 
+# FINDING (verified 2026-05-31): inline-agent mcpServers ARE scoped to the
+# subagent — the documented behavior ("the subagent gets the tools; the parent
+# conversation does not"). Confirmed forensically: with the stub's startup
+# markers, STUB_LOG is EMPTY before dispatch (the inline server has not spawned
+# and the parent's probe call does not land) and only shows process_launched +
+# the agent's call AFTER dispatch. An earlier "not scoped" reading was a
+# measurement artifact of the bare-python3 crash era + unreliable model self-
+# report; the parent-call-attempt forensic + venv python fix corrected it.
 if [[ $agent_called_stub -eq 0 ]]; then
     fail "agent did NOT use the stub — inline mcpServers did not load for the subagent (precondition failed)"
 elif [[ $parent_called_stub -eq 0 ]]; then
-    pass "inline mcpServers SCOPED to subagent — agent used the stub, parent forensically could not"
+    pass "inline mcpServers SCOPED to subagent (documented behavior) — agent used the stub, parent forensically could not"
 else
-    pass "inline mcpServers NOT scoped — both parent and subagent call the stub (forensic; documents real CC behavior)"
+    fail "inline mcpServers LEAKED to parent — parent called the stub too (contradicts documented per-agent scoping; investigate)"
 fi
 
 claude_exit

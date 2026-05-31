@@ -243,10 +243,16 @@ The harness correctly surfaces these. A green here would be the bug:
 - **07** — under `skipDangerousModePermissionPrompt` the PermissionRequest gate
   is bypassed entirely (tool auto-runs both with and without an allow rule, the
   hook never fires) — so a PermissionRequest auto-approver is redundant.
-- **11** — inline-agent `mcpServers` are NOT scoped to the subagent: both parent
-  and subagent can call the stub (forensic, via parent call-attempt).
-- **14b** — plugin-shipped agents' inline `mcpServers` do NOT load (vs 14a
-  project-level, which do). Passes as a characterization of the known limitation.
+- **11** — inline-agent `mcpServers` ARE scoped to the subagent, the documented
+  behavior. Verified via the stub startup markers: STUB_LOG is empty before
+  dispatch (server not spawned, parent's probe call does not land) and only shows
+  `process_launched` + the agent's call AFTER dispatch. (An earlier "not scoped"
+  reading was a measurement artifact of the bare-`python3` crash + unreliable
+  model self-report — corrected by the parent-call forensic + venv python.)
+- **14b** — plugin-shipped agents CANNOT declare `mcpServers` (CC blocks
+  `hooks`/`mcpServers`/`permissionMode` on plugin agents for security), AND in
+  this harness the plugin agent isn't even registered by the manual install.
+  Doubly unsupported → SKIP, not a finding about loading.
 
 ## Honest non-deterministic failures (do not paper over)
 

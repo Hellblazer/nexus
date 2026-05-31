@@ -139,8 +139,10 @@ mcp_in_inv=0; [[ -f "$TEST_HOME/14b_tools.txt" ]] && grep -qE "mcp__stub__" "$TE
 agent_ran=0; [[ -f "$TEST_HOME/14b_tools.txt" ]] && agent_ran=1
 echo "    14b verdict: agent_ran=$agent_ran  mcp_in_inv=$mcp_in_inv  stub_called=$log_called"
 
-# VALIDITY NOTE (root-caused 2026-05-31): agent14b never runs because the
-# plugin-shipped AGENT is not registered. The sandbox installs the fake plugin
+# VALIDITY NOTE (root-caused 2026-05-31): this tests a config CC explicitly
+# DISALLOWS — the docs state hooks/mcpServers/permissionMode are not supported on
+# plugin-shipped agents (security). On top of that, agent14b never even runs
+# because the plugin AGENT is not registered. The sandbox installs the fake plugin
 # via installed_plugins.json + enabledPlugins, which loads plugin HOOKS (proven
 # by scenario 13b) but NOT plugin AGENTS — the dispatch errors with "Agent type
 # 'agent14b' not found. Available agents: agent14a, ...". So this scenario cannot
