@@ -52,6 +52,20 @@ def test_readme_exists():
     assert README_PATH.exists(), f"missing: {README_PATH}"
 
 
+def test_lib_copies_are_byte_identical():
+    """The routing framework lib is shipped in BOTH plugins. They must stay
+    byte-identical; a silent divergence makes one plugin's hooks behave
+    differently from the other's. Enforce parity here so an edit to one without
+    the other fails CI rather than shipping a latent split."""
+    sn_lib = PROJECT_ROOT / "sn" / "hooks" / "scripts" / "routing" / "_lib.py"
+    conexus_lib = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "_lib.py"
+    assert sn_lib.exists() and conexus_lib.exists()
+    assert sn_lib.read_bytes() == conexus_lib.read_bytes(), (
+        "sn/ and conexus/ routing _lib.py have diverged — they must be identical; "
+        "copy one over the other."
+    )
+
+
 # ---------------------------------------------------------------------------
 # JSON envelope shape — allow / deny / warn
 # ---------------------------------------------------------------------------
@@ -81,6 +95,35 @@ def test_deny_envelope_shape():
     # cause or remediation. systemMessage surfaces it in the transcript.
     assert env["hookSpecificOutput"]["permissionDecisionReason"] == "blocked because"
     assert env["systemMessage"] == "blocked because"
+
+
+def test_deny_envelope_summary_decouples_banner_from_model_reason():
+    """A multi-line reason reaches the model in full; the transcript
+    banner carries only the short summary (or the first line by default)."""
+    lib = _load_lib()
+    full = "Blocked: do X.\n\nWhy: long remediation essay\nwith many lines."
+
+    # Default: systemMessage is the first line, not the whole essay.
+    env = json.loads(lib.deny_envelope(full))
+    assert env["hookSpecificOutput"]["permissionDecisionReason"] == full
+    assert env["systemMessage"] == "Blocked: do X."
+
+    # Explicit summary overrides the banner; model still gets the full reason.
+    env = json.loads(lib.deny_envelope(full, summary="one-line banner"))
+    assert env["hookSpecificOutput"]["permissionDecisionReason"] == full
+    assert env["systemMessage"] == "one-line banner"
+
+
+def test_deny_envelope_whitespace_or_empty_reason_does_not_crash():
+    """deny_envelope is on every routing hook's deny path — it must never raise.
+    A whitespace-only reason is truthy, so the first-line slice would IndexError
+    unless reason is stripped before the default-guard."""
+    lib = _load_lib()
+    for raw in ("   ", "\n\n", "", "\t"):
+        env = json.loads(lib.deny_envelope(raw))
+        assert env["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert env["systemMessage"], f"empty systemMessage for {raw!r}"
+        assert env["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_warn_envelope_is_allow():

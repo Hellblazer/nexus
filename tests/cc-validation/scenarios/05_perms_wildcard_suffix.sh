@@ -20,6 +20,10 @@ send_keys "cd $TEST_HOME" Enter
 sleep 0.3
 
 claude_start
+# Deferred-tool warmup (see README "Deferred MCP tools"): force schema load before
+# the measured call so it doesn't race discovery (the scenario-16 root cause).
+claude_prompt "List your available tools whose name starts with mcp__, one per line. If none, reply NO-MCP-TOOLS."
+claude_wait 30
 claude_prompt "Call mcp__stub__record with payload='suffix-wildcard-test'. Reply DONE when complete."
 claude_wait 90
 

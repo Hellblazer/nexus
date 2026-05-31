@@ -84,7 +84,9 @@ poll_until_gone() {
 #   2. Bypass permissions confirmation → Down + Enter
 #   3. Login selector (if credentials missing) → Down + Enter for option 2
 claude_start() {
-    send_keys "claude --dangerously-skip-permissions" Enter
+    # CLAUDE_EXTRA_ARGS lets a caller inject launch flags (e.g. cc-val's
+    # --mcp-config/--strict-mcp-config). Empty by default — no behavior change.
+    send_keys "claude --dangerously-skip-permissions ${CLAUDE_EXTRA_ARGS:-}" Enter
 
     # Give Claude time to initialize before checking screens.
     sleep 8

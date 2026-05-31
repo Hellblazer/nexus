@@ -14,7 +14,8 @@ agent: general-purpose
 ---
 
 Examine all of your context, including any prior conversation messages.
-If you see a token of the form INHERIT-TOKEN-XXXXX (5 hex digits), reply with the EXACT token.
+If you see a token of the form INHERIT-TOKEN-XXXXX (5 hex digits), reply with the
+literal text INHERIT-SEEN: immediately followed by the exact token.
 If you see no such token, reply NO-INHERIT.
 EOF
 
@@ -33,8 +34,13 @@ claude_wait 30
 claude_prompt "Now invoke the inherit-probe skill via the Skill tool."
 claude_wait 90
 
-if capture -300 | grep -qE "INHERIT-TOKEN-A1B2C" && ! capture -100 | grep -qE "NO-INHERIT"; then
-    pass "fork DID inherit conversation context (skill saw the token from turn 1)"
+# VALIDITY NOTE (reworked 2026-05-31): the prior check grepped the bare token,
+# which is ALSO in the user's own turn-1 prompt in scrollback — so the "DID
+# inherit" branch matched regardless of the fork's behavior (a vacuous pass).
+# Require the compound INHERIT-SEEN:<token>, which only the FORK can emit (the
+# user's prompt contains the bare token, never the INHERIT-SEEN: prefix).
+if capture -300 | grep -qE "INHERIT-SEEN:INHERIT-TOKEN-A1B2C"; then
+    pass "fork DID inherit conversation context (fork emitted INHERIT-SEEN:<token>)"
 elif capture -300 | grep -qE "NO-INHERIT"; then
     pass "fork did NOT inherit conversation context (confirms -p finding)"
 else

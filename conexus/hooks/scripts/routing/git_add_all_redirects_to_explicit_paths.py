@@ -88,7 +88,12 @@ def body(payload: dict[str, Any]) -> None:
         rule=RULE_NAME, outcome="deny", tool_name="Bash",
         command_fragment=command,
     )
-    _lib.deny(_redirect_message())
+    # Explicit summary so the transcript banner stays a terse one-liner
+    # independent of _redirect_message's first line; full text reaches the model.
+    _lib.deny(
+        _redirect_message(),
+        summary="git add wildcard (-A/./--all) blocked: stage by explicit path.",
+    )
 
 
 if __name__ == "__main__":

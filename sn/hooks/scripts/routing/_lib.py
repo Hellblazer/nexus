@@ -10,12 +10,22 @@ Helpers every routing hook imports. The hook protocol is:
 
 Decision envelope shape (PreToolUse):
 
-    {"hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": "allow" | "deny",
-        "reason": "..."                 # only on deny
-        "additionalContext": "..."      # only on allow with context
-    }}
+    allow:
+        {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "additionalContext": "..."   # only when allow carries advisory text
+        }}
+
+    deny (see ``deny_envelope`` — the reason rides in two audience-specific
+    fields, with ``reason`` kept for legacy compatibility):
+        {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "<full reason>",   # what the MODEL reads
+            "reason": "<full reason>"                       # legacy alias
+         },
+         "systemMessage": "<short summary>"}                # the USER's transcript banner
 
 Fail-open is the default. Hooks opt in to fail-closed by passing
 ``fail_closed=True`` to ``run_hook``; the registry.yaml ``fail_closed:
@@ -58,14 +68,17 @@ def allow_envelope(context: str = "") -> str:
     return json.dumps({"hookSpecificOutput": payload})
 
 
-def deny_envelope(reason: str) -> str:
+def deny_envelope(reason: str, summary: str | None = None) -> str:
     """Return a deny envelope as a JSON string.
 
     The reason rides in three fields for cross-version robustness:
 
     * ``permissionDecisionReason`` -- the canonical PreToolUse field
-      current Claude Code feeds back to the model on a deny.
-    * ``systemMessage`` (top-level) -- surfaced in the transcript.
+      current Claude Code feeds back to the model on a deny. Carries the
+      *full* ``reason`` (cause + remediation) so the model can correct.
+    * ``systemMessage`` (top-level) -- surfaced in the user transcript.
+      Carries the short ``summary`` so the banner stays a one-liner
+      instead of the full remediation essay.
     * ``reason`` -- the legacy key earlier envelopes used.
 
     Earlier envelopes carried *only* ``reason``, which current Claude
@@ -73,15 +86,27 @@ def deny_envelope(reason: str) -> str:
     cause and no remediation, leaving the model to guess what to do
     next. Emitting the canonical field is what makes the redirect
     message actually reach the model.
+
+    ``summary`` decouples the two audiences. When omitted, the first
+    non-empty line of ``reason`` is used so callers that don't supply a
+    summary still get a terse banner rather than the whole block.
     """
-    reason = reason or "(no reason provided)"
+    # Strip BEFORE the truthiness check: a whitespace-only reason is truthy, so
+    # ``reason or default`` would keep it, and ``"".splitlines()[0]`` would then
+    # IndexError. deny_envelope is on every routing hook's deny path, so it must
+    # never raise. Stripping makes the guard fire and keeps the first-line slice
+    # safe (reason is now non-empty).
+    reason = reason.strip() or "(no reason provided)"
+    system_message = summary or reason.splitlines()[0]
     payload = {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
         "permissionDecisionReason": reason,
         "reason": reason,
     }
-    return json.dumps({"hookSpecificOutput": payload, "systemMessage": reason})
+    return json.dumps(
+        {"hookSpecificOutput": payload, "systemMessage": system_message}
+    )
 
 
 def warn_envelope(message: str) -> str:
@@ -106,9 +131,14 @@ def allow(context: str = "") -> None:
     sys.exit(0)
 
 
-def deny(reason: str) -> None:
-    """Emit deny envelope to stdout and ``exit 0`` (never exit 2)."""
-    sys.stdout.write(deny_envelope(reason) + "\n")
+def deny(reason: str, summary: str | None = None) -> None:
+    """Emit deny envelope to stdout and ``exit 0`` (never exit 2).
+
+    ``summary`` rides in ``systemMessage`` (the transcript banner);
+    ``reason`` rides in ``permissionDecisionReason`` (the model-facing
+    feedback). See :func:`deny_envelope`.
+    """
+    sys.stdout.write(deny_envelope(reason, summary) + "\n")
     sys.stdout.flush()
     sys.exit(0)
 
