@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from enum import Enum
 from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
 
@@ -918,47 +919,32 @@ def _t2_db_write_lock_acquirable(db_path: Path, timeout_ms: int) -> bool:
         conn.close()
 
 
-@t2_group.command("ensure-running")
-@click.option(
-    "--config-dir",
-    "config_dir_str",
-    default=None,
-    help="Config directory override.",
-)
-@click.option(
-    "--timeout",
-    default=15.0,
-    type=float,
-    help=(
-        "Seconds to wait for the daemon to become reachable after a "
-        "cold spawn. Default: 15.0 — a cold-start daemon runs its "
-        "one-time startup migration (which can take several seconds and "
-        "holds the write lock) BEFORE it binds, so a tighter budget "
-        "spuriously warns on a healthy boot (nexus-u3mfr). The wait "
-        "fails fast if the spawned process dies, so a larger budget only "
-        "affects a genuinely slow migration, not a failed spawn."
-    ),
-)
-@click.option(
-    "--quiet",
-    is_flag=True,
-    default=False,
-    help="Suppress 'already running' / 'spawned' messages; print only errors.",
-)
-def t2_ensure_running_cmd(
+class T2EnsureOutcome(Enum):
+    """Terminal state of an ensure-running attempt (RDR-141 P0, nexus-cvaip).
+
+    Richer than a bare bool so a programmatic caller (the RDR-141
+    self-healing re-assert in ``mcp_infra.t2_index_write``) can pick the
+    correct WARNING event and decide whether a direct-write fallback is a
+    true single-writer down-arm (D_old dead) or a cycle-deferred residual
+    (D_old still alive).
+    """
+    REACHABLE = "reachable"                      # a current-version daemon is up and serving
+    DEFERRED_WRITE_LOCK = "deferred_write_lock"  # stale daemon ALIVE; cycle deferred (WAL write-lock held)
+    DEFERRED_SIGTERM = "deferred_sigterm"        # stale daemon ALIVE; SIGTERM'd but did not exit in window
+    CRASHLOOP_SUPPRESSED = "crashloop_suppressed"  # no live incumbent daemon (never existed, or was fully reaped); crash-loop guard refused respawn
+    SPAWN_FAILED = "spawn_failed"                # no daemon: cold-spawned process died or never became reachable
+
+
+def _t2_ensure_running_inner(
     config_dir_str: str | None, timeout: float, quiet: bool,
-) -> None:
-    """Ensure the T2 daemon is running; spawn it in the background if not.
+) -> T2EnsureOutcome:
+    """Core logic of ``ensure-running``; returns a rich outcome enum.
 
-    Idempotent — safe to invoke from session-start hooks, post-install
-    scripts, or as a defensive prelude to any operation that needs the
-    daemon. The daemon's own spawn-lock arbitrates concurrent invocations
-    so a race between the plugin hook and a manual ``nx daemon t2 start``
-    can't double-start.
-
-    Exit codes:
-      0 — daemon is reachable (already running, or successfully spawned).
-      1 — daemon was spawned but did not become reachable within ``--timeout``.
+    Extracted from the Click command (RDR-141 P0, nexus-cvaip) so that
+    programmatic callers (``mcp_infra.t2_index_write``) can invoke the
+    self-healing logic without triggering ``sys.exit``.  The Click
+    command ``t2_ensure_running_cmd`` is a thin wrapper that maps the
+    enum to CLI exit codes.
     """
     import time as _time
     from nexus.daemon.t2_daemon import t2_discovery_path
@@ -1010,7 +996,7 @@ def t2_ensure_running_cmd(
         if not installed or running_ver == installed:
             if not quiet:
                 click.echo("T2 daemon already running.")
-            return
+            return T2EnsureOutcome.REACHABLE
 
     # RDR-140 P2.2 (nexus-fkhe2): single-flight election around the
     # discover→spawn decision. K racing stacks block on this lock; only the
@@ -1039,7 +1025,7 @@ def t2_ensure_running_cmd(
             if not installed or running_ver == installed:
                 if not quiet:
                     click.echo("T2 daemon already running.")
-                return
+                return T2EnsureOutcome.REACHABLE
             # Version skew: the daemon froze its code at start and predates the
             # last upgrade (nexus-5ldk1). "Ensure running" means ensure a
             # CURRENT daemon; gracefully cycle the stale one and respawn below.
@@ -1062,7 +1048,7 @@ def t2_ensure_running_cmd(
                     f"held; cycle deferred (will retry on next ensure-running).",
                     err=True,
                 )
-                return  # leave the stale daemon up — best-effort, retried later
+                return T2EnsureOutcome.DEFERRED_WRITE_LOCK
             if not quiet:
                 click.echo(
                     f"T2 daemon is stale (running {running_ver}, installed "
@@ -1095,7 +1081,7 @@ def t2_ensure_running_cmd(
                     "ensure-running).",
                     err=True,
                 )
-                return  # never trade a working daemon for none
+                return T2EnsureOutcome.DEFERRED_SIGTERM
             # predecessor fully exited; its spawn lock is released — cold spawn.
 
         # RDR-140 P4.2 (Gap 5): crash-loop guard. If we have already respawned
@@ -1123,7 +1109,7 @@ def t2_ensure_running_cmd(
                 "the daemon log, then 'nx daemon t2 status'.",
                 err=True,
             )
-            sys.exit(1)
+            return T2EnsureOutcome.CRASHLOOP_SUPPRESSED
         _record_restart(config_dir, now=_cl_now)
 
         # Cold spawn. Use the same nx binary the operator invoked (preserves
@@ -1160,7 +1146,7 @@ def t2_ensure_running_cmd(
                 _reset_crashloop(config_dir)
                 if not quiet:
                     click.echo("T2 daemon is reachable.")
-                return
+                return T2EnsureOutcome.REACHABLE
             if proc.poll() is not None:
                 click.echo(
                     f"Error: T2 daemon process exited (code {proc.returncode}) "
@@ -1169,7 +1155,7 @@ def t2_ensure_running_cmd(
                     "--user -u nexus-t2.service` (Linux) for the failure.",
                     err=True,
                 )
-                sys.exit(1)
+                return T2EnsureOutcome.SPAWN_FAILED
             _time.sleep(0.1)
 
         click.echo(
@@ -1179,9 +1165,58 @@ def t2_ensure_running_cmd(
             "`journalctl --user -u nexus-t2.service` (Linux) for the failure.",
             err=True,
         )
-        sys.exit(1)
+        return T2EnsureOutcome.SPAWN_FAILED
     finally:
         _release_election_lock(election_fd)
+
+
+@t2_group.command("ensure-running")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+@click.option(
+    "--timeout",
+    default=15.0,
+    type=float,
+    help=(
+        "Seconds to wait for the daemon to become reachable after a "
+        "cold spawn. Default: 15.0 — a cold-start daemon runs its "
+        "one-time startup migration (which can take several seconds and "
+        "holds the write lock) BEFORE it binds, so a tighter budget "
+        "spuriously warns on a healthy boot (nexus-u3mfr). The wait "
+        "fails fast if the spawned process dies, so a larger budget only "
+        "affects a genuinely slow migration, not a failed spawn."
+    ),
+)
+@click.option(
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Suppress 'already running' / 'spawned' messages; print only errors.",
+)
+def t2_ensure_running_cmd(
+    config_dir_str: str | None, timeout: float, quiet: bool,
+) -> None:
+    """Ensure the T2 daemon is running; spawn it in the background if not.
+
+    Idempotent — safe to invoke from session-start hooks, post-install
+    scripts, or as a defensive prelude to any operation that needs the
+    daemon. The daemon's own spawn-lock arbitrates concurrent invocations
+    so a race between the plugin hook and a manual ``nx daemon t2 start``
+    can't double-start.
+
+    Exit codes:
+      0 — daemon is reachable (already running or successfully spawned), or
+          a stale-daemon cycle was deferred (a working daemon is still up).
+      1 — daemon could not be made reachable: crash-loop suppressed, or the
+          spawned process died / did not become reachable within ``--timeout``.
+    """
+    outcome = _t2_ensure_running_inner(config_dir_str, timeout, quiet)
+    if outcome in (T2EnsureOutcome.CRASHLOOP_SUPPRESSED, T2EnsureOutcome.SPAWN_FAILED):
+        sys.exit(1)
 
 
 @t2_group.command("install")
