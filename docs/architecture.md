@@ -484,6 +484,23 @@ is locked` daemon incidents):
   and surfaces a dropped-best-effort-write meter as a soft warning (B4);
   the drop log path is `~/.config/nexus/dropped_writes.jsonl`
   (`NX_DROPPED_WRITES_LOG_PATH` override).
+- **Supervisor & ownership model (RDR-140).** Where RDR-129 made the
+  reap unconditional, RDR-140 makes the *election* single-flight and the
+  *reap* ownership-aware, ending the spawn-race / lock-thrash churn under
+  many concurrent stacks. `ensure-running` takes a blocking
+  coordination flock around the discover→spawn decision and re-discovers
+  after acquiring it, so K racing stacks converge to exactly one cold
+  spawn with the rest attaching (no thundering herd). A spawn-lock loser
+  quiet-attaches (exit 0, never opens `T2Database`) instead of crashing.
+  The startup reap spares a healthy, current-version peer named in the
+  addr token (wait-then-force: let a mid-shutdown peer drain, force only
+  if it overstays — never coexist) while still reaping stale-version and
+  unreachable/orphaned writers, so the single-writer backstop is
+  preserved. A bounded crash-loop guard (sentinel `t2_crashloop.json`)
+  stops `ensure-running` respawns after N failures in a window and
+  surfaces a `restarts_in_window` count in `nx daemon t2 status`. The
+  non-daemon direct-writer fallbacks (the `t2_index_write`
+  schema-mismatch arm) remain the RDR-128 A1 boundary, unchanged.
 
 **Migration Registry** (RDR-076): All T2 schema migrations are centralised in
 `src/nexus/db/migrations.py`. The `MIGRATIONS` list contains version-tagged

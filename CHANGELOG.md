@@ -6,6 +6,40 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.6.0] - 2026-05-31
+
+### Added
+
+- **T2 daemon supervisor & ownership model (RDR-140).** Ends the spawn-race /
+  SQLite-lock thrash that produced hundreds of `t2_daemon_crashed` events per day
+  when many stacks (CLI sessions, MCP servers, Desktop) started concurrently.
+  Four contained/gated phases:
+  - **Single-flight election.** `nx daemon t2 ensure-running` now takes a
+    blocking coordination lock around the discover→spawn decision and
+    re-discovers after acquiring it, so K racing stacks converge to exactly one
+    cold spawn with the rest attaching — no thundering herd.
+  - **Loser quiet-attach.** A process that loses the spawn lock attaches and
+    exits 0 (never opening a second writer) instead of crashing with a
+    traceback.
+  - **Ownership-aware reaping.** The startup reap spares a healthy,
+    current-version peer (wait-then-force: let a mid-shutdown peer drain, force
+    only if it overstays — never coexist) while still reaping stale-version and
+    orphaned writers. The RDR-128/129 single-writer backstop is preserved.
+  - **Crash-loop guard + status.** `nx daemon t2 status` surfaces a
+    `restarts_in_window` count; a bounded guard stops `ensure-running` respawns
+    after repeated failures in a window and logs once, instead of an endless
+    crash-loop. (Scope: the `ensure-running` path; launchd/systemd autostart is
+    bounded by the supervisor's own throttle.)
+  - **Migration cold-start fast-path.** When the DB is already at the current
+    schema version and in WAL, cold start skips the migration writer-lock via
+    lock-free reads.
+
+### Changed
+
+- **Binary assets are classified as SKIP, not embedded as prose.** Textures,
+  audio, fonts, and 3D-object files are now skipped at classification time (with
+  a `skipped non-indexable file` log) instead of being embedded as garbage text.
+
 ## [5.5.1] - 2026-05-31
 
 ### Fixed
