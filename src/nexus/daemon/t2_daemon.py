@@ -1196,8 +1196,26 @@ class T2Daemon:
         try:
             os.kill(pid, signal.SIGKILL)
             _log.warning("t2_predecessor_sigkilled", pid=pid)
+        except ProcessLookupError:
+            return  # already gone
         except OSError:
-            pass
+            return
+
+        # RDR-140 P3 (nexus-dzf1q re-review): SIGKILL delivery is asynchronous —
+        # os.kill returning does NOT mean the kernel has finished reaping the
+        # process and released its db fds. start() opens T2Database the instant
+        # _reap_predecessor_daemon returns, so we MUST confirm the pid is gone
+        # before returning, or two writers could briefly overlap. SIGKILL is
+        # unblockable, so this poll terminates quickly in practice; if it
+        # overstays (zombie / kernel stall) we log and return — the pid is
+        # doomed and its writer is effectively dead.
+        deadline = time.monotonic() + _PREDECESSOR_REAP_TIMEOUT
+        while time.monotonic() < deadline:
+            if not _pid_is_alive(pid):
+                _log.info("t2_predecessor_reaped", pid=pid, via="SIGKILL")
+                return
+            time.sleep(0.1)
+        _log.warning("t2_predecessor_still_alive_after_sigkill", pid=pid)
 
     def _acquire_spawn_lock(self) -> None:
         """Acquire exclusive fcntl locks on both the config_dir-scoped

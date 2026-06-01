@@ -511,6 +511,7 @@ class TestDaemonReapDiscrimination:
     def _install_common(
         monkeypatch, td, handshakes: dict, kills: list,
         graceful_exit: frozenset = frozenset(),
+        sigterm_ignored: frozenset = frozenset(),
     ) -> None:
         """Pin current version, cmdline, liveness; stub the per-pid handshake
         and capture kills. ``handshakes`` maps pid -> (version, reachable).
@@ -542,7 +543,9 @@ class TestDaemonReapDiscrimination:
 
         def fake_kill(pid, sig):  # noqa: ANN001
             kills.append((pid, sig))
-            if sig == signal.SIGTERM:
+            if sig == signal.SIGKILL:
+                alive[pid] = False  # SIGKILL is unblockable
+            elif sig == signal.SIGTERM and pid not in sigterm_ignored:
                 alive[pid] = False
 
         monkeypatch.setattr(td.os, "kill", fake_kill)
@@ -582,6 +585,30 @@ class TestDaemonReapDiscrimination:
 
         td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
         assert (700001, signal.SIGTERM) in kills
+
+    def test_overstay_peer_ignoring_sigterm_is_sigkilled_and_confirmed_dead(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        """Terminal escalation: a current-version peer that overstays the
+        graceful wait AND ignores SIGTERM is SIGKILL'd, and the reap confirms
+        it is dead before returning — start() must never open the DB while it
+        lives (single-writer)."""
+        import signal
+
+        from nexus.daemon import t2_daemon as td
+
+        self._write_discovery(config_dir, 700008, self._CUR)
+        kills: list = []
+        self._install_common(
+            monkeypatch, td, {700008: (self._CUR, True)}, kills,
+            sigterm_ignored=frozenset({700008}),
+        )
+
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert (700008, signal.SIGTERM) in kills
+        assert (700008, signal.SIGKILL) in kills
+        # The reap's post-SIGKILL poll observed it dead (SIGKILL flips alive).
+        assert td._pid_is_alive(700008) is False
 
     def test_stale_version_addr_peer_is_reaped(
         self, config_dir: Path, db_path: Path, monkeypatch,
