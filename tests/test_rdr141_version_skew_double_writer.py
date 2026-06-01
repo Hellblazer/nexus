@@ -319,3 +319,90 @@ def test_all_nonreachable_outcomes_have_a_distinct_event() -> None:
         "_reassert_t2_daemon — add it to the events table (and its test row) "
         "rather than letting it hit the generic fallback"
     )
+
+
+# ---------------------------------------------------------------------------
+# P3 (nexus-9a5zy): cross-module integration through the REAL _reassert +
+# _t2_ensure_running_inner, crash-loop-no-storm, and a concurrency-coverage
+# note. The single-attempt cap is already covered above.
+#
+# Concurrency (CA-2: the election lock collapses concurrent client re-asserts
+# to a single reap+spawn) is a PROCESS-level property — fcntl locks are
+# per-process, so a thread test here would not exercise it. It is verified by
+# the multi-process harness tests/daemon/test_t2_multistack_race.py and by
+# CA-2 (T2 nexus_rdr/141-research-CA1-CA4). Not re-tested at this seam.
+# ---------------------------------------------------------------------------
+
+
+def test_integration_crashloop_falls_to_direct_with_down_event_no_storm(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """Full path: t2_index_write -> real _reassert_t2_daemon -> real
+    _t2_ensure_running_inner with the crash-loop guard pre-tripped and no live
+    daemon. Asserts: (1) exactly one direct write, (2) the distinct
+    crashloop_down event (NOT the generic banner), (3) no respawn storm —
+    subprocess.Popen is never called even across repeated invocations."""
+    import subprocess
+
+    import nexus.commands.daemon as _daemon
+    import nexus.daemon.t2_client as t2c
+    import nexus.mcp_infra as mi
+
+    # The client always reports a version mismatch (stale daemon alive).
+    class _MismatchProxy:
+        def hello(self) -> dict:
+            from nexus.daemon.t2_client import T2SchemaVersionMismatchError
+
+            raise T2SchemaVersionMismatchError(
+                client_version="5.6.0", daemon_version="5.4.4"
+            )
+
+    class _Client:
+        def __init__(self) -> None:
+            self.database = _MismatchProxy()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(t2c, "make_t2_client", lambda **_kw: _Client())
+
+    # Real supervisor, pointed at an isolated config dir with NO daemon and the
+    # crash-loop guard pre-tripped (no discovery file -> running is None ->
+    # crash-loop guard fires -> CRASHLOOP_SUPPRESSED, no spawn).
+    monkeypatch.setattr(_daemon, "nexus_config_dir", lambda: tmp_path)
+    import time as _time
+
+    now = _time.time()
+    for _ in range(_daemon._CRASHLOOP_MAX_RESTARTS):
+        _daemon._record_restart(tmp_path, now=now)
+
+    spawned: list[object] = []
+    monkeypatch.setattr(
+        subprocess, "Popen",
+        lambda *a, **kw: spawned.append((a, kw)),  # records any (forbidden) spawn
+    )
+
+    db_path = tmp_path / "memory.db"
+    monkeypatch.setattr(mi, "default_db_path", lambda: db_path)
+
+    events = _capture_warnings(monkeypatch)
+
+    from nexus.mcp_infra import t2_index_write
+
+    seen: list[str] = []
+
+    def _write(db) -> str:  # noqa: ANN001
+        seen.append(type(db).__name__)
+        return "direct-ok"
+
+    # Invoke repeatedly — a crash-loop-suppressed daemon must never be respawned.
+    for _ in range(3):
+        assert t2_index_write(_write) == "direct-ok"
+
+    assert seen == ["T2Database", "T2Database", "T2Database"]
+    assert spawned == [], "crash-loop guard must suppress all respawns (no storm)"
+    # Every degraded call emits the distinct down-arm event, never the generic
+    # 'start the daemon' banner (which would be wrong advice here).
+    assert [e for e, _ in events] == [
+        "t2_index_write_version_skew_crashloop_down"
+    ] * 3
