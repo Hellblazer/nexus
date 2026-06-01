@@ -343,8 +343,40 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
         if not auto_mode:
             _migrate_repos_json_to_catalog(dry_run=dry_run)
 
+        # Refresh nexus-managed git hooks across every registered repo so a
+        # stanza change (e.g. a new pgrep guard) lands everywhere in one
+        # upgrade instead of a per-repo `nx hooks update`. Best-effort,
+        # non-auto, non-dry-run; only touches already-managed hooks.
+        if not auto_mode and not dry_run:
+            _refresh_all_git_hooks()
+
     finally:
         conn.close()
+
+
+def _refresh_all_git_hooks() -> None:
+    """Refresh nexus-managed git hooks across all registered repos.
+
+    Best-effort: never raises — a hook-refresh failure must not fail the
+    upgrade. Silent when no managed hooks exist anywhere.
+    """
+    try:
+        from nexus.commands.hooks import refresh_all_managed_hooks
+
+        summary = refresh_all_managed_hooks(echo=False)
+        if summary["refreshed"]:
+            click.echo(
+                f"\nRefreshed {summary['refreshed']} git hook(s) across "
+                f"{summary['repos']} repo(s)"
+                + (
+                    f"; {summary['errors']} repo(s) skipped "
+                    "(see `nx hooks update-all`)."
+                    if summary["errors"]
+                    else "."
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("upgrade_git_hook_refresh_failed", error=str(exc))
 
 
 def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:

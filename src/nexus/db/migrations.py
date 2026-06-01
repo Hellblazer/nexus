@@ -1442,7 +1442,7 @@ def _check_high_volume_orphans(conn: sqlite3.Connection, *, table: str) -> None:
     var (default ``_HIGH_VOLUME_ORPHAN_THRESHOLD`` = 10) on every call so
     operators can lower it for small installs without rebuilding.
 
-    SIG-4: The error message includes a ``nx catalog mark-superseded`` command
+    SIG-4: The error message includes a ``nx catalog rename-collection`` command
     template per orphan collection so operators have an actionable next step.
     """
     import os as _os
@@ -1468,15 +1468,25 @@ def _check_high_volume_orphans(conn: sqlite3.Connection, *, table: str) -> None:
 
     detail = "; ".join(f"{coll} ({n} rows)" for coll, n in rows)
     remediation_lines = "\n".join(
-        f"  nx catalog mark-superseded {coll} <new-collection-name>"
+        f"  nx catalog rename-collection {coll} <new-collection-name> --yes"
         for coll, _ in rows
     )
     raise MigrationError(
         f"RDR-108 Phase 1c: {table} has high-volume unmapped orphan collection(s): "
         f"{detail}.\n"
-        f"For each listed collection, register its superseded_by mapping:\n"
+        f"\n"
+        f"These are derived aspect rows (RDR-089) whose source documents are no "
+        f"longer in the catalog. You have two options:\n"
+        f"\n"
+        f"1. If the collection was RENAMED, point it at its successor so the rows "
+        f"re-map instead of dropping (sets collections.superseded_by):\n"
         f"{remediation_lines}\n"
-        f"Then re-run the migration."
+        f"   Then re-run `nx upgrade`.\n"
+        f"\n"
+        f"2. If the collection is STALE, let the migration drop the orphans "
+        f"(aspects are regenerable via `nx enrich aspects <collection>`). Raise "
+        f"the gate threshold for this run:\n"
+        f"   NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD=100000 nx upgrade"
     )
 
 
