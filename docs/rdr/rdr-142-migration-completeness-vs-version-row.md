@@ -45,21 +45,24 @@ Relevant code:
 
 ## Research Findings
 
-_To be populated via `/conexus:rdr-research`. Key questions to resolve:_
+_Verified 2026-06-01 (codebase-deep-analyzer; T2 `nexus_rdr/142-research-CA1-CA3`)._
 
-1. **Where exactly does the version row advance relative to a deferred step?** Does `apply_pending` stamp the row per-step (and a deferred step is skipped-not-stamped, so the row should NOT advance past it) or once at the end (advancing past deferred steps)? The `migration_skipped_not_marking_done` event suggests per-path stamping awareness exists — characterise precisely what it does and does not protect.
-2. **Is the disagreement a stamping bug or an inherent property?** If `apply_pending` already declines to mark-done when a step defers, why does `--dry-run` still report "no pending"? (Likely the dry-run "pending" computation keys on `cli_version != row` rather than "are there steps apply_pending would still run".)
-3. **Enumerate all deferring/gating steps**, current and structural (catalog-absent retry, high-volume-orphan gate, any future ALTER-pattern PK migration).
+**The root cause is (b) — the dry-run check, not (a) row-stamping. Row-stamping is already correct.**
+
+1. **Row-stamping is correct; it never advances past a deferred/gated step.** `apply_pending` stamps `_nexus_version` **once at the end of the pass** (`migrations.py:2490-2495`), guarded by `if any_skipped: return` (`:2477-2483`). A `MigrationRetry` is caught (`:2457-2465`), sets `any_skipped=True`, and `continue`s — so the row is **not** stamped and the path is **not** marked done. A `MigrationError` is **uncaught** and propagates (no stamp). So the watermark logic does the right thing.
+2. **The lie lives in the dry-run computation.** `upgrade.py:319-326` computes pending as a pure version-range filter (`introduced > last_seen AND introduced <= current`) — it **never consults `apply_pending`**. Failure sequence: a prior pass completed and stamped `row = current`; later the catalog is absent again, so `apply_pending` on bootstrap re-attempts and *defers* the RDR-108 Phase 1c PK steps — but dry-run sees `last_seen == current` → empty range → "no pending", blind to the steps `apply_pending` would still attempt. Cause **(b)**.
+3. **Defer is non-fatal; gate crashes the daemon.** `MigrationRetry` (catalog-absent) → daemon boots and retries on every open until the catalog appears. `MigrationError` (high-volume orphans, undrained queue, NULL `source_uri`) → uncaught → crashes daemon bootstrap. #1061 E2's daemon crash was specifically the **gate**, not the defer.
+4. **Defer/gate sites enumerated (7):** `document_aspects` PK (4.30.0; Retry on catalog-absent `:1900`, Error on orphans `:1579→1474`); `aspect_extraction_queue` PK (4.30.0; Retry `:1928`, Error on undrained queue `:1717`, Error on orphans `:1738`); `migrate_drop_source_path_column` (4.31.0; Retry on source_path-still-in-PK `:1328`, Error on NULL `source_uri` `:1304`). The fix must generalize across all of these, not hardcode the two #1061 E2 conditions.
 
 ## Proposed Solution
 
-_Draft — to be locked after research. Candidate directions (decide one):_
+**Direction A — make `--dry-run` ask `apply_pending`'s own step-resolution (LOCKED by research).** Extract the step-filter loop (`migrations.py:2446-2448`) into a side-effect-free resolver that returns the steps `apply_pending` *would attempt on this connection now* (including ones that would defer/gate), and have `upgrade.py`'s dry-run report from that instead of the `last_seen != current` version-range filter (`:319-326`). Single source of truth; generalizes across all 7 defer/gate sites by construction. The 5.6.2 `_check_deferred_migrations` stopgap (`upgrade.py:33-153`) is then **deleted** (subsumed) — no more per-condition hardcoded probes.
 
-- **A. Make `--dry-run` ask `apply_pending` itself (dry/no-op mode).** Instead of `cli_version != row`, have the dry-run path invoke the same step-resolution `apply_pending` uses and report any step that *would run or defer*. Single source of truth; no per-condition probe. The `_check_deferred_migrations` stopgap is then deleted.
-- **B. Persist a "deferred steps" set.** Record which steps deferred (vs completed) in a small table; the version row advances only when the deferred set is empty; `--dry-run` reads the set. Generalises beyond the two known conditions.
-- **C. Do not advance the version row past a deferred step.** Tighten the stamping so the row never moves ahead of the highest fully-applied step; the gate (`cli_version != row`) then correctly reports pending. Smallest conceptual change if stamping is the actual bug.
+**Rejected — Direction C (don't advance the row past a deferred step).** Research showed the row already does not advance past a deferred/gated step (`any_skipped: return`), so C addresses a non-bug. Worse, making the watermark per-step-persistent would mean the row never reaches `current` while any step legitimately defers (e.g. a long-lived catalog-absent install) → dry-run would list those steps as pending *forever* and every `apply_pending` would re-scan the full step range on every start. Counterproductive.
 
-Direction C is the cleanest if research confirms the row is advancing incorrectly; A is the most robust against future deferred steps; B is the heaviest. The 5.6.2 `_check_deferred_migrations` probe should be removed or subsumed by whichever lands (it is a documented stopgap, not permanent surface).
+**Rejected — Direction B (persist a deferred-steps set).** Heavier (new tracking table) and unnecessary once A makes the dry-run consult the live resolver; the steps are already individually idempotent so no persistence of "applied-ness" beyond the existing watermark is needed.
+
+**Adjacent (decide in the plan — possibly separate scope):** the `MigrationError` *gate* crashes daemon bootstrap (uncaught). A completeness fix could make the bootstrap path report-and-degrade (surface the gate loudly, let the daemon start in a known-degraded state) rather than hard-crash, instead of relying on the `NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD` env workaround. This is separable from the dry-run honesty fix (the core of this RDR) and may warrant its own phase or RDR; flagged so it isn't silently dropped.
 
 ## Implementation Plan
 
@@ -76,9 +79,11 @@ _To be detailed after the direction is locked. Must include: removal/subsumption
 
 ## Critical Assumptions
 
-- **CA-1**: The disagreement is reproducible — a DB at `cli_version` with a deferred (catalog-absent) RDR-108 Phase 1c PK migration reports "no pending" via `--dry-run` while `apply_pending` on bootstrap still attempts the step. [from #1061 E2 evidence; re-confirm against current code]
-- **CA-2**: `apply_pending`'s step resolution can be invoked in a dry/no-op mode (Direction A) without side effects, OR the version-row stamping can be made to not advance past a deferred step (Direction C) without breaking RDR-076 idempotency.
-- **CA-3**: A genuinely catalog-absent environment (legitimate, e.g. fresh install before first catalog write) must still bootstrap and defer gracefully — the fix must not convert a benign defer into a hard daemon-start failure.
+_Verified 2026-06-01 (codebase-deep-analyzer)._
+
+- **CA-1 — VERIFIED (root cause is (b))**: The disagreement is real and traced to the dry-run version-range filter (`upgrade.py:319-326`), not to row-stamping (which correctly does not advance on `any_skipped`/`MigrationError`, `migrations.py:2477-2495`). Dry-run reports "no pending" whenever `last_seen == current`, blind to steps `apply_pending` would re-attempt.
+- **CA-2 — VERIFIED (Direction A feasible)**: `apply_pending` has no dry-run mode today, but its step-filter loop (`migrations.py:2446-2448`) is cleanly extractable to a side-effect-free resolver. Steps are individually idempotent (`PRAGMA`/`sqlite_master`/`_is_already_migrated` guards), so a resolver that lists would-run steps needs no DDL. Direction C is rejected (see §Proposed Solution) — it would regress, not help.
+- **CA-3 — VERIFIED**: A catalog-absent defer is non-fatal — `MigrationRetry` is caught, the daemon boots and retries on every open. Only the `MigrationError` *gate* crashes bootstrap (uncaught). The dry-run fix (Direction A) does not change defer/gate runtime behaviour; the adjacent gate-crash hardening is tracked separately in §Proposed Solution.
 
 ## Finalization Gate
 
@@ -93,4 +98,5 @@ _Pending. Run `/conexus:rdr-gate` after research verifies CA-1..CA-3._
 
 ## Revision History
 
-- 2026-06-01: Draft. Filed as the architectural follow-up named by the 5.6.2 #1061 E2 hotfix (which shipped reporting-only). Direction to be locked after research (A: dry-run delegates to apply_pending / B: persisted deferred-set / C: don't advance the row past a deferred step).
+- 2026-06-01: Draft. Filed as the architectural follow-up named by the 5.6.2 #1061 E2 hotfix (which shipped reporting-only).
+- 2026-06-01: Research (CA-1..CA-3 verified, codebase-deep-analyzer). Root cause confirmed as the dry-run version-range filter, not row-stamping. **Direction A locked** (dry-run delegates to an extracted side-effect-free `apply_pending` step-resolver; delete the `_check_deferred_migrations` stopgap); **Directions B and C rejected** with reasoning. Adjacent gate-crashes-daemon hardening flagged as separable. Ready for gate.
