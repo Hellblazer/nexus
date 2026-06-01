@@ -427,6 +427,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # to exercise the (mode, name) matrix. Voyage names here are the
     # subject under test, not assertions of cloud-mode behavior.
     "test_rdr_109_phase2_dispatch.py",
+    # Local-daemon client-side embedding tests: voyage tokens are
+    # collection-NAME fixtures / Fix-4 display-dispatch subjects; every
+    # test pins mode explicitly via T3Database(local_mode=...), not the
+    # ambient cloud_mode fixture.
+    "test_local_daemon_client_embed.py",
     "test_catalog_path.py",
     "test_chroma_retry.py",
     "test_collection_cmd.py",
