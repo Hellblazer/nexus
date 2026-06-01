@@ -4,6 +4,7 @@ import stat
 from pathlib import Path
 from unittest.mock import patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -295,6 +296,115 @@ class TestUpdate:
         assert "pgrep -f" in new_content
         # Single sentinel block
         assert new_content.count(SENTINEL_BEGIN) == 1
+
+
+class TestUpdateAll:
+    """``nx hooks update-all`` (and the ``nx upgrade`` hook) refreshes every
+    nexus-managed hook across all registered repos in one sweep."""
+
+    def _legacy_stanza_file(self, hook_file: Path) -> None:
+        hook_file.write_text(
+            f"#!/bin/sh\n{SENTINEL_BEGIN}\n"
+            'nx index repo "$(git rev-parse --show-toplevel)" --on-locked=skip \\\n'
+            '  >> "$HOME/.config/nexus/index.log" 2>&1 &\n'
+            f"disown\n{SENTINEL_END}\n"
+        )
+
+    def _make_repo(self, tmp_path: Path, name: str) -> Path:
+        repo = tmp_path / name
+        (repo / ".git" / "hooks").mkdir(parents=True)
+        return repo
+
+    def test_refreshes_all_managed_repos(self, runner, tmp_path, monkeypatch):
+        from nexus.cli import main
+
+        repo_a = self._make_repo(tmp_path, "repo_a")
+        repo_b = self._make_repo(tmp_path, "repo_b")
+        for repo in (repo_a, repo_b):
+            self._legacy_stanza_file(repo / ".git" / "hooks" / "post-commit")
+
+        monkeypatch.setattr(
+            "nexus.commands.hooks._iter_managed_repo_roots",
+            lambda: [repo_a, repo_b],
+        )
+        monkeypatch.setattr(
+            "nexus.commands.hooks._effective_hooks_dir",
+            lambda repo: repo / ".git" / "hooks",
+        )
+
+        result = runner.invoke(main, ["hooks", "update-all"])
+        assert result.exit_code == 0, result.output
+        for repo in (repo_a, repo_b):
+            content = (repo / ".git" / "hooks" / "post-commit").read_text()
+            assert "pgrep -f" in content
+            assert content.count(SENTINEL_BEGIN) == 1
+        assert "2 repo(s)" in result.output
+
+    def test_skips_unmanaged_and_absent(self, runner, tmp_path, monkeypatch):
+        from nexus.cli import main
+
+        managed = self._make_repo(tmp_path, "managed")
+        unmanaged = self._make_repo(tmp_path, "unmanaged")
+        self._legacy_stanza_file(managed / ".git" / "hooks" / "post-commit")
+        (unmanaged / ".git" / "hooks" / "post-commit").write_text(
+            "#!/bin/sh\necho hi\n"
+        )
+
+        monkeypatch.setattr(
+            "nexus.commands.hooks._iter_managed_repo_roots",
+            lambda: [managed, unmanaged],
+        )
+        monkeypatch.setattr(
+            "nexus.commands.hooks._effective_hooks_dir",
+            lambda repo: repo / ".git" / "hooks",
+        )
+
+        result = runner.invoke(main, ["hooks", "update-all"])
+        assert result.exit_code == 0, result.output
+        # Unmanaged file untouched.
+        assert (
+            unmanaged / ".git" / "hooks" / "post-commit"
+        ).read_text() == "#!/bin/sh\necho hi\n"
+        assert "1 repo(s)" in result.output
+
+    def test_one_bad_repo_does_not_abort_sweep(self, runner, tmp_path, monkeypatch):
+        from nexus.cli import main
+
+        good = self._make_repo(tmp_path, "good")
+        bad = tmp_path / "bad"  # no .git → effective_hooks_dir raises
+        bad.mkdir()
+        self._legacy_stanza_file(good / ".git" / "hooks" / "post-commit")
+
+        def _hooks_dir(repo: Path):
+            if repo == bad:
+                raise click.ClickException("not a git repo")
+            return repo / ".git" / "hooks"
+
+        monkeypatch.setattr(
+            "nexus.commands.hooks._iter_managed_repo_roots",
+            lambda: [bad, good],
+        )
+        monkeypatch.setattr(
+            "nexus.commands.hooks._effective_hooks_dir", _hooks_dir
+        )
+
+        result = runner.invoke(main, ["hooks", "update-all"])
+        assert result.exit_code == 0, result.output
+        # Good repo still refreshed despite bad repo earlier in the list.
+        assert "pgrep -f" in (
+            good / ".git" / "hooks" / "post-commit"
+        ).read_text()
+        assert "1 repo(s) skipped" in result.output
+
+    def test_no_managed_hooks_anywhere(self, runner, monkeypatch):
+        from nexus.cli import main
+
+        monkeypatch.setattr(
+            "nexus.commands.hooks._iter_managed_repo_roots", lambda: []
+        )
+        result = runner.invoke(main, ["hooks", "update-all"])
+        assert result.exit_code == 0, result.output
+        assert "No nexus-managed hooks" in result.output
 
 
 # ── doctor stanza-drift check ──────────────────────────────────────────────────

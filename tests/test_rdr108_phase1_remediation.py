@@ -456,7 +456,7 @@ class TestAutoBootstrapCreatedAtEmpty:
 
 class TestSIG4ActionableErrorMessage:
     """SIG-4: _check_high_volume_orphans must include the
-    `nx catalog mark-superseded <legacy> <new>` template in the error message."""
+    `nx catalog rename-collection <legacy> <new>` template in the error message."""
 
     def _make_aspects_db_with_orphans(
         self, tmp_path: Path, collection: str, count: int
@@ -482,9 +482,9 @@ class TestSIG4ActionableErrorMessage:
         conn.commit()
         return conn
 
-    def test_error_message_contains_mark_superseded_template(self, tmp_path):
+    def test_error_message_contains_rename_collection_template(self, tmp_path):
         """MigrationError raised by _check_high_volume_orphans must include
-        the `nx catalog mark-superseded` command template."""
+        the `nx catalog rename-collection` command template."""
         from nexus.db.migrations import _check_high_volume_orphans, MigrationError
 
         orphan_collection = "code__legacy_orphan"
@@ -494,8 +494,8 @@ class TestSIG4ActionableErrorMessage:
             _check_high_volume_orphans(conn, table="document_aspects")
 
         msg = str(exc_info.value)
-        assert "nx catalog mark-superseded" in msg, (
-            f"Error message must include 'nx catalog mark-superseded' template, got: {msg!r}"
+        assert "nx catalog rename-collection" in msg, (
+            f"Error message must include 'nx catalog rename-collection' template, got: {msg!r}"
         )
         assert orphan_collection in msg, (
             f"Error message must name the orphan collection {orphan_collection!r}, got: {msg!r}"
@@ -526,7 +526,7 @@ class TestSIG4ActionableErrorMessage:
         msg = str(exc_info.value)
         assert "code__alpha" in msg
         assert "code__beta" in msg
-        assert "nx catalog mark-superseded" in msg
+        assert "nx catalog rename-collection" in msg
 
 
 # ── OBS-1: migration telemetry ────────────────────────────────────────────────
