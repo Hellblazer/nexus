@@ -13,6 +13,12 @@ _log = structlog.get_logger(__name__)
 # - May contain alphanumeric characters, hyphens, or underscores in the middle
 _COLLECTION_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{1,61}[a-zA-Z0-9]$")
 
+# Canonical content_type prefixes.  Defined here (before validate_collection_name)
+# so the overflow hint can include a concrete ``--content-type`` flag when the
+# name's prefix is recognisable.  The public alias ``CONTENT_TYPES`` is re-exported
+# below for backward-compat.
+_CONTENT_TYPES = ("code", "docs", "rdr", "knowledge")
+
 
 def validate_collection_name(name: str) -> None:
     """Raise ValueError if *name* violates ChromaDB collection name constraints.
@@ -26,7 +32,24 @@ def validate_collection_name(name: str) -> None:
     """
     # Length check fires first for <3 chars; regex rejects other invalid patterns.
     # Both gates are needed: length for clear error messages, regex for charset/boundary validation.
-    if not (3 <= len(name) <= 63):
+    if len(name) > 63:
+        # Overflow: derive an actionable hint.  The canonical remedy is to
+        # rename to the repo-id-conformant name (e.g. ``code__1-36__bge-base-en-v15-768__v1``,
+        # 35 chars) which fits under the cap and preserves vectors (no reindex).
+        # Derive content_type from the name prefix (before the first ``__``) when
+        # present so the hint can be concrete; fall back to a generic flag otherwise.
+        _ct_hint = ""
+        if "__" in name:
+            _prefix = name.split("__", 1)[0]
+            if _prefix in _CONTENT_TYPES:
+                _ct_hint = f" --content-type {_prefix}"
+        raise ValueError(
+            f"Collection name {name!r} must be 3–63 characters (got {len(name)}). "
+            f"The name is too long for ChromaDB's 63-character cap. "
+            f"To get a conformant name that fits and preserves vectors (no reindex), run:\n"
+            f"  nx catalog collection-name{_ct_hint} --repo <repo-path>"
+        )
+    if len(name) < 3:
         raise ValueError(
             f"Collection name {name!r} must be 3–63 characters (got {len(name)})"
         )
@@ -44,7 +67,6 @@ def validate_collection_name(name: str) -> None:
         )
 
 
-_CONTENT_TYPES = ("code", "docs", "rdr", "knowledge")
 CONTENT_TYPES: tuple[str, ...] = _CONTENT_TYPES
 """Public alias for the canonical content_type values used in the
 RDR-103 ``<content_type>__<owner_id>__<embedding_model>__v<n>`` schema.
