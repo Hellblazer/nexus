@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.6.2] - 2026-06-01
+
+Plugin version aligned with conexus 5.6.2. No plugin-side changes; the release
+ships the `nx`-core P0 hotfix (#1065) that restores local-mode `search` /
+`query` / `store_put` through the T3 daemon by embedding client-side, plus an
+all-collections-dimension-skipped diagnostic and a collection-model display fix.
+
 ## [5.6.1] - 2026-06-01
 
 Plugin version aligned with conexus 5.6.1. No plugin-side changes; the release

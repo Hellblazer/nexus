@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.6.2] - 2026-06-01
+
+P0 hotfix: restores `search` / `query` / `store_put` in local mode through the
+T3 daemon (broken on 5.6.0 and 5.6.1).
+
+### Fixed
+
+- **Local-mode daemon embedding (P0, #1065).** In local mode the T3 daemon
+  (`chroma run` via HttpClient) has no registration for nexus's `nexus_local`
+  embedding function, so any op relying on the collection's server-side EF fell
+  back to ChromaDB's 384-dim `DefaultEmbeddingFunction` against 768-dim bge
+  collections. Every `search`/`query` returned "No results" (dimension mismatch
+  → all collections silently skipped) and `store_put` failed with
+  `"expecting 768 got 384"`. nexus now embeds **client-side** for every
+  daemon-routed text op through a single `_maybe_client_embed()` chokepoint:
+  searches send `query_embeddings`, writes send `embeddings=`. Cloud mode
+  (server-side Voyage) and the CCE path are unchanged.
+- **Silent total-outage (#1065).** `search` now logs an ERROR
+  (`search_all_collections_dimension_skipped`) when every queried collection is
+  dimension-skipped, instead of a silent empty result.
+- **Collection-model display (#1065).** `collection_list` parses the 4-segment
+  conformant name first, so bge collections no longer mislabel as
+  `voyage-code-3` / `voyage-context-3`; legacy 2-segment names still fall back.
+
 ## [5.6.1] - 2026-06-01
 
 Bug-fix release: restores local-mode operation broken on the 4.28→5.6.0 upgrade
