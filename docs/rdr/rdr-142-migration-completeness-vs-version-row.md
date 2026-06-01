@@ -2,11 +2,12 @@
 title: "Migration Completeness vs the Version Row: apply_pending Advances `_nexus_version` While Deferred/Gated Steps Remain"
 id: RDR-142
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-01
+accepted_date: 2026-06-01
 related_issues: [nexus-qd1yp, nexus-3lbhb]
 related_rdrs: [RDR-108, RDR-076, RDR-096]
 supersedes: []
