@@ -34,7 +34,12 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "chromadb>=0.6",
+    # Upper bound (issue #1058): the unbounded ``>=0.6`` silently resolved
+    # chromadb 1.5.9, which tightened the embedding-function return contract
+    # (EFs must return numpy arrays; chromadb calls ``.tolist()`` itself) and
+    # broke all local-mode search until local_ef.py was aligned. Cap below the
+    # next major so a future breaking bump can't ship silently again.
+    "chromadb>=0.6,<2",
     "click>=8.1",
     "llama-index-core>=0.12.7,<0.15",
     "markdown-it-py>=4.0.0",

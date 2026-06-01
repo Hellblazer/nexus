@@ -115,6 +115,29 @@ _BOOTSTRAP_BUSY_TIMEOUT_MS: int = 30000
 _BOOTSTRAP_RETRY_SLEEPS_BETWEEN: tuple[float, ...] = (0.5, 1.0)
 
 
+def _rename_dedup_col(conn: "sqlite3.Connection", table: str) -> str:
+    """Return the column the rename-cascade collision-defense should dedup on
+    for ``table``: the live PRIMARY KEY, which depends on migration state.
+
+    RDR-108 Phase 1c migrates the aspect tables' PK
+    ``(collection, source_path) -> (doc_id)`` (and RDR-096 P5.2 then drops
+    ``source_path`` from ``document_aspects``), but both steps are deferred
+    until a catalog exists — so a DB can be in either shape. We prefer
+    ``doc_id`` (the migrated PK) when the column is present, else fall back to
+    ``source_path`` (the pre-migration PK). The result is interpolated into a
+    DELETE, so it must come from the schema (PRAGMA), never from user input.
+    Issue #1057.
+    """
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if "doc_id" in cols:
+        return "doc_id"
+    if "source_path" in cols:
+        return "source_path"
+    raise RuntimeError(
+        f"rename cascade: {table} has neither doc_id nor source_path to dedup on"
+    )
+
+
 def _apply_pending_with_lock_retry(
     conn: sqlite3.Connection, current_version: str
 ) -> None:
@@ -718,13 +741,23 @@ class T2Database:
             )
             counts["chash"] = cur.rowcount
 
-            # document_aspects (with collision defense)
+            # document_aspects (with collision defense). #1057: dedup on the
+            # live PRIMARY KEY, which differs by migration state. RDR-108
+            # Phase 1c migrates the PK (collection, source_path) -> (doc_id)
+            # and [4.31.0] RDR-096 P5.2 then DROPS source_path — but both are
+            # deferred until a catalog exists, so unmigrated DBs still carry
+            # source_path as the PK with no doc_id column. The old hardcoded
+            # source_path dedup raised "no such column: source_path" on
+            # migrated DBs and blocked ALL renames; a hardcoded doc_id would
+            # symmetrically break unmigrated DBs. Resolve the column from the
+            # live schema so both shapes work and dedup matches the real PK.
+            aspects_key = _rename_dedup_col(conn, "document_aspects")
             conn.execute(
-                "DELETE FROM document_aspects "
-                "WHERE collection = ? "
-                "  AND source_path IN ("
-                "    SELECT source_path FROM document_aspects WHERE collection = ?"
-                "  )",
+                f"DELETE FROM document_aspects "
+                f"WHERE collection = ? "
+                f"  AND {aspects_key} IN ("
+                f"    SELECT {aspects_key} FROM document_aspects WHERE collection = ?"
+                f"  )",
                 (new, old),
             )
             cur = conn.execute(
@@ -733,14 +766,20 @@ class T2Database:
             )
             counts["aspects"] = cur.rowcount
 
-            # aspect_extraction_queue (with collision defense)
+            # aspect_extraction_queue (with collision defense). Same PK
+            # migration (RDR-108 Phase 1c) applies; its source_path column is
+            # NOT dropped, so the old source_path dedup did not error — but it
+            # shared the latent bug of deduping on a non-PK column once the PK
+            # moved to doc_id (a same-doc_id/different-source_path pair would
+            # hit a PK collision on the UPDATE). Resolve the live PK column.
+            queue_key = _rename_dedup_col(conn, "aspect_extraction_queue")
             conn.execute(
-                "DELETE FROM aspect_extraction_queue "
-                "WHERE collection = ? "
-                "  AND source_path IN ("
-                "    SELECT source_path FROM aspect_extraction_queue"
-                "    WHERE collection = ?"
-                "  )",
+                f"DELETE FROM aspect_extraction_queue "
+                f"WHERE collection = ? "
+                f"  AND {queue_key} IN ("
+                f"    SELECT {queue_key} FROM aspect_extraction_queue"
+                f"    WHERE collection = ?"
+                f"  )",
                 (new, old),
             )
             cur = conn.execute(
