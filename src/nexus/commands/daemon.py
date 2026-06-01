@@ -27,8 +27,11 @@ from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
 
 import click
+import structlog
 
 from nexus.config import nexus_config_dir
+
+_log = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -647,8 +650,14 @@ def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         except (ProcessLookupError, PermissionError):
             alive = False
 
+    # RDR-140 P4.2 (Gap 5): surface how many restarts the crash-loop guard has
+    # recorded in the current window — a rising count is the crash-loop signal.
+    restarts = _restart_count(config_dir, now=time.time())
+
     if as_json:
-        click.echo(_json.dumps({**data, "alive": alive}, indent=2))
+        click.echo(_json.dumps(
+            {**data, "alive": alive, "restarts_in_window": restarts}, indent=2,
+        ))
         if not alive:
             sys.exit(1)
         return
@@ -657,6 +666,7 @@ def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     click.echo("-" * 40)
     for key, value in data.items():
         click.echo(f"  {key}: {value}")
+    click.echo(f"  restarts_in_window: {restarts}")
     if not alive:
         click.echo(
             f"  status: STALE (recorded pid {pid} is not running). "
@@ -768,6 +778,85 @@ def _release_election_lock(fd: int | None) -> None:
         pass
     try:
         os.close(fd)
+    except OSError:
+        pass
+
+
+# RDR-140 P4.2 (nexus-hrrpz) Gap 5: bounded crash-loop guard. Cold respawns are
+# one-shot (``t2 start`` per ``ensure-running`` / launchd KeepAlive), so the
+# guard is a persistent counter in a sentinel file beside the discovery file:
+# restart timestamps within a rolling window. After _CRASHLOOP_MAX_RESTARTS in
+# the window, ``ensure-running`` stops respawning and logs ONCE at error
+# (instead of an endless crash-loop with a traceback per attempt). A daemon
+# that converges (becomes reachable) clears the counter. This is suppression of
+# respawn attempts, NOT a writer-lock change — RDR-128/129 single-writer is
+# untouched. Module constants so tests can shrink the window/cap.
+_CRASHLOOP_WINDOW_S: float = 300.0
+_CRASHLOOP_MAX_RESTARTS: int = 5
+
+
+def _crashloop_sentinel_path(config_dir: Path) -> Path:
+    """Sentinel file path for the crash-loop guard, a sibling of the discovery
+    file under *config_dir*."""
+    return config_dir / "t2_crashloop.json"
+
+
+def _read_crashloop(config_dir: Path) -> dict:
+    try:
+        data = json.loads(_crashloop_sentinel_path(config_dir).read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"timestamps": [], "tripped_logged": False}
+    if not isinstance(data, dict):
+        return {"timestamps": [], "tripped_logged": False}
+    ts = data.get("timestamps")
+    data["timestamps"] = [t for t in ts if isinstance(t, (int, float))] if isinstance(ts, list) else []
+    data["tripped_logged"] = bool(data.get("tripped_logged"))
+    return data
+
+
+def _write_crashloop_atomic(config_dir: Path, data: dict) -> None:
+    """Atomic 0o600 write (mirrors ``_write_discovery_atomic``) so a concurrent
+    reader never sees a partial sentinel."""
+    path = _crashloop_sentinel_path(config_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    body = json.dumps(data).encode("utf-8")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, body)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(path))
+
+
+def _restart_count(config_dir: Path, *, now: float) -> int:
+    """Restarts recorded within the window ending at *now* (read-only)."""
+    cutoff = now - _CRASHLOOP_WINDOW_S
+    data = _read_crashloop(config_dir)
+    return sum(1 for t in data["timestamps"] if t >= cutoff)
+
+
+def _record_restart(config_dir: Path, *, now: float) -> int:
+    """Append a restart at *now*, prune entries older than the window, persist,
+    and return the in-window count."""
+    cutoff = now - _CRASHLOOP_WINDOW_S
+    data = _read_crashloop(config_dir)
+    kept = [t for t in data["timestamps"] if t >= cutoff]
+    kept.append(now)
+    data["timestamps"] = kept
+    _write_crashloop_atomic(config_dir, data)
+    return len(kept)
+
+
+def _crashloop_tripped(config_dir: Path, *, now: float) -> bool:
+    """True when the in-window restart count has reached the cap."""
+    return _restart_count(config_dir, now=now) >= _CRASHLOOP_MAX_RESTARTS
+
+
+def _reset_crashloop(config_dir: Path) -> None:
+    """Clear the guard on healthy convergence (best-effort; never raises)."""
+    try:
+        _crashloop_sentinel_path(config_dir).unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -1003,6 +1092,34 @@ def t2_ensure_running_cmd(
                 return  # never trade a working daemon for none
             # predecessor fully exited; its spawn lock is released — cold spawn.
 
+        # RDR-140 P4.2 (Gap 5): crash-loop guard. If we have already respawned
+        # _CRASHLOOP_MAX_RESTARTS times within the window without converging,
+        # stop — an endless crash-loop with a traceback per attempt helps no
+        # one. Log ONCE at error (the sentinel's tripped_logged flag prevents
+        # re-logging on every suppressed call) and refuse to respawn. A healthy
+        # convergence below clears the counter.
+        _cl_now = _time.time()
+        if _crashloop_tripped(config_dir, now=_cl_now):
+            _data = _read_crashloop(config_dir)
+            if not _data.get("tripped_logged"):
+                _log.error(
+                    "t2_daemon_crash_loop_suppressed",
+                    restarts=_restart_count(config_dir, now=_cl_now),
+                    window_s=_CRASHLOOP_WINDOW_S,
+                    max_restarts=_CRASHLOOP_MAX_RESTARTS,
+                )
+                _data["tripped_logged"] = True
+                _write_crashloop_atomic(config_dir, _data)
+            click.echo(
+                f"Error: T2 daemon crash-loop suppressed "
+                f"({_CRASHLOOP_MAX_RESTARTS}+ restarts in "
+                f"{_CRASHLOOP_WINDOW_S:.0f}s); refusing to respawn. Investigate "
+                "the daemon log, then 'nx daemon t2 status'.",
+                err=True,
+            )
+            sys.exit(1)
+        _record_restart(config_dir, now=_cl_now)
+
         # Cold spawn. Use the same nx binary the operator invoked (preserves
         # PATH/virtualenv assumptions). start_new_session detaches the child
         # so this command can exit while the daemon keeps running.
@@ -1033,6 +1150,8 @@ def t2_ensure_running_cmd(
         deadline = _time.monotonic() + timeout
         while _time.monotonic() < deadline:
             if _daemon_is_alive():
+                # Healthy convergence: clear the crash-loop counter.
+                _reset_crashloop(config_dir)
                 if not quiet:
                     click.echo("T2 daemon is reachable.")
                 return
