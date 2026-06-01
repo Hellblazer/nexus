@@ -559,7 +559,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "chromadb", specifier = ">=0.6" },
+    { name = "chromadb", specifier = ">=0.6,<2" },
     { name = "click", specifier = ">=8.1" },
     { name = "docling", specifier = ">=2.76.0" },
     { name = "fastapi", specifier = ">=0.115" },

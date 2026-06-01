@@ -751,10 +751,16 @@ class PDFExtractor:
             _HEALTH_POLL_INTERVAL,
             _find_free_port,
             _mineru_output_root,
+            _resolve_mineru_api_bin,
             _server_env,
         )
+        # GH #1059: resolve mineru-api from the venv bin first, then PATH.
+        mineru_bin = _resolve_mineru_api_bin()
+        if mineru_bin is None:
+            _log.warning("mineru_restart_failed", reason="mineru-api not found")
+            return False
         port = _find_free_port()
-        cmd = ["mineru-api", "--host", "127.0.0.1", "--port", str(port)]
+        cmd = [mineru_bin, "--host", "127.0.0.1", "--port", str(port)]
         # nexus-2fyb code-review C-sec-1: previously called _server_env() with
         # no arguments, but the function signature requires output_root. This
         # was a TypeError waiting to fire on the first server crash during a
@@ -768,7 +774,7 @@ class PDFExtractor:
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
                 start_new_session=True,
             )
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError):
             _log.warning("mineru_restart_failed", reason="mineru-api not found")
             return False
 
