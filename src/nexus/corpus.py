@@ -257,9 +257,25 @@ def default_projection_threshold(collection_name: str) -> float:
     return 0.70
 
 
-# Backward-compatible aliases — callers don't need to distinguish index vs query.
-embedding_model_for_collection = voyage_model_for_collection
-index_model_for_collection = voyage_model_for_collection
+def embedding_model_for_collection(collection_name: str) -> str:
+    """Return the embedding model for *collection_name*.
+
+    Fix 4 (nexus-6e6u1 / local-daemon-client-embed): conformant 4-segment
+    names (``<ct>__<owner>__<model>__v<n>``) carry the model token directly
+    in the name -- return that token instead of guessing from the prefix.
+    Legacy 2-segment names fall back to the voyage inference.
+
+    This ensures ``collection_list`` labels bge/minilm collections correctly
+    instead of displaying ``voyage-code-3`` / ``voyage-context-3``.
+    """
+    parsed = embedding_model_for_collection_name(collection_name)
+    if parsed is not None:
+        return parsed
+    return voyage_model_for_collection(collection_name)
+
+
+# index_model_for_collection is semantically the same (same model for index + query).
+index_model_for_collection = embedding_model_for_collection
 
 
 def t3_collection_name(user_arg: str, *, t3: object | None = None) -> str:
