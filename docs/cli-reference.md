@@ -1462,6 +1462,11 @@ an `"alive": false` field) and exits 1, so a daemon that died leaving a
 stale discovery file is not reported as running. Exit code 1 also when no
 discovery file exists.
 
+The output also includes `restarts_in_window` (RDR-140 P4): the number
+of cold respawns the crash-loop guard has recorded in the current window
+(see `ensure-running` below). A rising count across successive `status`
+calls is the crash-loop signal. `0` once the daemon converges.
+
 ### nx daemon t2 ensure-running
 
 Idempotent: silent no-op if the T2 daemon is already running on the
@@ -1481,6 +1486,29 @@ the running daemon matches the installed code. This is why `nx upgrade`,
 hooks all call `ensure-running` after an install: the daemon comes up on
 the new version without a manual restart. A daemon already matching the
 installed version is left untouched.
+
+Crash-loop guard (RDR-140 P4). Each cold respawn driven by
+`ensure-running` is recorded in a sentinel file beside the discovery
+file. After `_CRASHLOOP_MAX_RESTARTS` (default 5) respawns within
+`_CRASHLOOP_WINDOW_S` (default 300s) without the daemon converging,
+`ensure-running` stops respawning, logs once at `error`
+(`t2_daemon_crash_loop_suppressed`), and exits 1, instead of an endless
+crash-loop with a traceback per attempt. The counter clears when a
+spawned daemon becomes reachable, and re-arms for a fresh window once the
+prior restarts age out.
+
+Scope: this guard bounds the `ensure-running`-driven respawn path (the
+dominant source of churn, since the plugin / `.mcpb` session-start hooks
+call `ensure-running` on every MCP-server boot). It does NOT bound the
+launchd / systemd path: `install --autostart` runs `nx daemon t2 start`
+directly, which never consults the sentinel, so a daemon failing under
+`KeepAlive` is rate-limited only by the supervisor's own throttle
+(launchd `ThrottleInterval`, systemd `RestartSec`). Known limitation: a
+daemon that becomes briefly reachable then dies repeatedly (flapping)
+resets the counter each cycle, so the guard fires only for a daemon that
+never reaches the discovery-written state within the spawn timeout.
+Inspect the daemon log, then re-run `ensure-running` after fixing the
+root cause.
 
 | Flag | Description |
 |------|-------------|

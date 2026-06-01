@@ -206,3 +206,204 @@ class TestStopBreadcrumbDurability:
         assert order == ["breadcrumb", "flush"], (
             f"breadcrumb must be written THEN flushed; saw {order}"
         )
+
+
+# ---------------------------------------------------------------------------
+# RDR-140 P4.1 (nexus-0gyhe): Gap 5 — status surface + crash-loop guard
+# ---------------------------------------------------------------------------
+
+
+class TestStatusSurface:
+    """`nx daemon t2 status` must explicitly surface owner pid, socket
+    liveness, daemon version, AND a restart-count-in-interval. The first three
+    already render (the discovery dict is dumped); the restart count is NEW and
+    is RED until P4.2 (nexus-hrrpz) sources it from the crash-loop guard."""
+
+    def test_status_surfaces_owner_pid_version_and_liveness(
+        self, tmp_path: Path,
+    ) -> None:
+        _write_discovery(tmp_path, os.getpid())
+        result = CliRunner().invoke(
+            main, ["daemon", "t2", "status", "--config-dir", str(tmp_path)],
+        )
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert str(os.getpid()) in out          # owner pid
+        assert "5.0.2" in out                    # daemon version (token)
+        assert "running" in out.lower()          # socket/pid liveness
+
+    def test_status_surfaces_restart_count_field(self, tmp_path: Path) -> None:
+        """RED until P4.2: status reports how many restarts occurred in the
+        crash-loop window (sourced from the guard sentinel; 0 when none).
+
+        Asserts the explicit ``restarts_in_window`` label, NOT a bare
+        "restart" substring — the pytest tmp_path is derived from this test's
+        name and contains "restart", which would match the path vacuously."""
+        _write_discovery(tmp_path, os.getpid())
+        result = CliRunner().invoke(
+            main, ["daemon", "t2", "status", "--config-dir", str(tmp_path)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "restarts_in_window" in result.output
+
+
+class TestCrashLoopGuard:
+    """Bounded crash-loop guard (Gap 5). Seam contract pinned for P4.2
+    (nexus-hrrpz), all in ``nexus.commands.daemon``:
+
+    * constants ``_CRASHLOOP_WINDOW_S: float`` and ``_CRASHLOOP_MAX_RESTARTS: int``.
+    * ``_record_restart(config_dir, *, now) -> int`` — append a wall-clock
+      timestamp to the sentinel, prune entries older than the window, return
+      the count within the window.
+    * ``_restart_count(config_dir, *, now) -> int`` — read-only count within
+      the window (no write); used by status.
+    * ``_crashloop_tripped(config_dir, *, now) -> bool`` — count >= cap.
+    * ``_reset_crashloop(config_dir)`` — clear the sentinel (healthy converge).
+
+    The clock is injected (``now`` is a ``time.time()``-style float) so the
+    window logic is deterministic — no real wall clock, no sleeps. RED
+    (AttributeError) until P4.2 adds the seam.
+    """
+
+    def test_records_and_counts_within_window(self, tmp_path: Path) -> None:
+        from nexus.commands import daemon as dm
+
+        now = 1_000_000.0
+        assert dm._record_restart(tmp_path, now=now) == 1
+        assert dm._record_restart(tmp_path, now=now + 1) == 2
+        assert dm._record_restart(tmp_path, now=now + 2) == 3
+        assert dm._restart_count(tmp_path, now=now + 2) == 3
+
+    def test_count_excludes_entries_outside_window(self, tmp_path: Path) -> None:
+        from nexus.commands import daemon as dm
+
+        now = 1_000_000.0
+        dm._record_restart(tmp_path, now=now)
+        # A probe a full window + 1s later: the old entry has aged out.
+        later = now + dm._CRASHLOOP_WINDOW_S + 1.0
+        assert dm._restart_count(tmp_path, now=later) == 0
+
+    def test_tripped_after_cap(self, tmp_path: Path) -> None:
+        from nexus.commands import daemon as dm
+
+        now = 1_000_000.0
+        for i in range(dm._CRASHLOOP_MAX_RESTARTS):
+            dm._record_restart(tmp_path, now=now + i)
+            # Not tripped until the cap is reached.
+            expected = (i + 1) >= dm._CRASHLOOP_MAX_RESTARTS
+            assert dm._crashloop_tripped(tmp_path, now=now + i) is expected
+
+    def test_reset_clears_count(self, tmp_path: Path) -> None:
+        from nexus.commands import daemon as dm
+
+        now = 1_000_000.0
+        for i in range(dm._CRASHLOOP_MAX_RESTARTS):
+            dm._record_restart(tmp_path, now=now + i)
+        assert dm._crashloop_tripped(tmp_path, now=now) is True
+        dm._reset_crashloop(tmp_path)
+        assert dm._restart_count(tmp_path, now=now) == 0
+        assert dm._crashloop_tripped(tmp_path, now=now) is False
+
+    def test_tripped_logged_rearms_after_window_expiry(self, tmp_path: Path) -> None:
+        """code-review HIGH-1: a stale ``tripped_logged`` from a previous
+        window must not silence the error log for a NEW crash loop. The first
+        restart of a fresh window (all prior entries aged out) re-arms it."""
+        from nexus.commands import daemon as dm
+
+        now = 1_000_000.0
+        for i in range(dm._CRASHLOOP_MAX_RESTARTS):
+            dm._record_restart(tmp_path, now=now + i)
+        data = dm._read_crashloop(tmp_path)
+        data["tripped_logged"] = True
+        dm._write_crashloop_atomic(tmp_path, data)
+        assert dm._read_crashloop(tmp_path)["tripped_logged"] is True
+
+        later = now + dm._CRASHLOOP_WINDOW_S + 10.0  # a full window later
+        dm._record_restart(tmp_path, now=later)
+        assert dm._read_crashloop(tmp_path)["tripped_logged"] is False
+
+
+class TestCrashLoopRespawnRefusal:
+    """A tripped crash-loop guard must make ensure-running log ONCE at error
+    and STOP respawning — no Nth+1 spawn, no traceback. RED until P4.2 wires
+    the guard into ``t2_ensure_running_cmd``."""
+
+    def test_tripped_guard_refuses_respawn_and_logs_once(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        import nexus.commands.daemon as dm
+
+        # Pre-trip the guard: cap restarts inside the window.
+        now = 1_000_000.0
+        for i in range(dm._CRASHLOOP_MAX_RESTARTS):
+            dm._record_restart(tmp_path, now=now + i)
+        monkeypatch.setattr(dm.time, "time", lambda: now + dm._CRASHLOOP_MAX_RESTARTS)
+
+        spawns: list = []
+        monkeypatch.setattr(
+            dm.subprocess, "Popen",
+            lambda *a, **k: spawns.append(a) or _Unreachable(),
+        )
+        errors: list = []
+
+        class _FakeLog:
+            def error(self, event, **kw):
+                errors.append(event)
+
+            def __getattr__(self, _n):
+                return lambda *a, **k: None
+
+        monkeypatch.setattr(dm, "_log", _FakeLog(), raising=False)
+
+        # No live daemon (no discovery file) -> would normally cold-spawn.
+        result = CliRunner().invoke(
+            main, ["daemon", "t2", "ensure-running",
+                   "--config-dir", str(tmp_path), "--timeout", "0.2"],
+        )
+        assert spawns == [], "tripped guard must NOT spawn"
+        assert result.exit_code != 0
+        assert len(errors) == 1, f"crash-loop must log exactly once, saw {errors}"
+
+    def test_tripped_guard_logs_once_across_invocations(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """The error log fires once, not per suppressed ensure-running call:
+        the tripped_logged sentinel flag suppresses re-logging on the second
+        invocation of an already-tripped guard."""
+        import nexus.commands.daemon as dm
+
+        now = 1_000_000.0
+        for i in range(dm._CRASHLOOP_MAX_RESTARTS):
+            dm._record_restart(tmp_path, now=now + i)
+        monkeypatch.setattr(dm.time, "time", lambda: now + dm._CRASHLOOP_MAX_RESTARTS)
+
+        spawns: list = []
+        monkeypatch.setattr(
+            dm.subprocess, "Popen",
+            lambda *a, **k: spawns.append(a) or _Unreachable(),
+        )
+        errors: list = []
+
+        class _FakeLog:
+            def error(self, event, **kw):
+                errors.append(event)
+
+            def __getattr__(self, _n):
+                return lambda *a, **k: None
+
+        monkeypatch.setattr(dm, "_log", _FakeLog(), raising=False)
+
+        for _ in range(2):
+            CliRunner().invoke(
+                main, ["daemon", "t2", "ensure-running",
+                       "--config-dir", str(tmp_path), "--timeout", "0.2"],
+            )
+        assert spawns == []
+        assert len(errors) == 1, f"must log once across invocations, saw {errors}"
+
+
+class _Unreachable:
+    """A Popen stand-in that is alive but never becomes reachable."""
+
+    def poll(self):
+        return None
