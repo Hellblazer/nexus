@@ -27,8 +27,11 @@ from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
 
 import click
+import structlog
 
 from nexus.config import nexus_config_dir
+
+_log = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -529,8 +532,14 @@ def t2_start_cmd(config_dir_str: str | None, db_path_str: str | None) -> None:
     systemd via ``nx daemon t2 install --autostart`` for production
     use; the foreground requirement is what the supervisor watches.
 
-    Refuses to start if another T2 daemon already holds the spawn
-    lock on the same config_dir (raises T2DaemonError fail-loud).
+    If another T2 daemon already holds the spawn lock (a live winner
+    already owns the data file), this process quiet-attaches instead of
+    crashing (RDR-140 P1.3): ``run_t2_daemon`` logs ``t2_daemon_spawn_lost``
+    at info and returns, so the command exits 0 with no traceback. The
+    launchd/systemd template treats a zero exit as "do not restart"
+    (see the install command), so a loser does not trigger a respawn loop.
+    A genuine lifecycle error (bind failed, etc.) still raises
+    ``T2DaemonError`` and exits 2.
     """
     from nexus.commands._helpers import default_db_path
     from nexus.daemon.t2_daemon import T2DaemonError, run_t2_daemon
@@ -641,8 +650,14 @@ def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         except (ProcessLookupError, PermissionError):
             alive = False
 
+    # RDR-140 P4.2 (Gap 5): surface how many restarts the crash-loop guard has
+    # recorded in the current window — a rising count is the crash-loop signal.
+    restarts = _restart_count(config_dir, now=time.time())
+
     if as_json:
-        click.echo(_json.dumps({**data, "alive": alive}, indent=2))
+        click.echo(_json.dumps(
+            {**data, "alive": alive, "restarts_in_window": restarts}, indent=2,
+        ))
         if not alive:
             sys.exit(1)
         return
@@ -651,6 +666,7 @@ def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     click.echo("-" * 40)
     for key, value in data.items():
         click.echo(f"  {key}: {value}")
+    click.echo(f"  restarts_in_window: {restarts}")
     if not alive:
         click.echo(
             f"  status: STALE (recorded pid {pid} is not running). "
@@ -677,6 +693,178 @@ _T2_CYCLE_DB_PROBE_TIMEOUT_MS: int = 30000
 # RF-4: never trade a working daemon for none). Module constant so tests can
 # shrink it.
 _T2_CYCLE_EXIT_TIMEOUT: float = 10.0
+
+# RDR-140 P2.2 (nexus-fkhe2): safety margin added on top of the holder's
+# worst-case hold time to derive how long a waiter blocks on the single-flight
+# election lock. The wait is computed DYNAMICALLY (see
+# ``_election_wait_for``) rather than fixed: the holder keeps the lock across
+# its whole discover→spawn→reachability path, whose worst case is
+# ``_T2_CYCLE_DB_PROBE_TIMEOUT_MS/1000`` (stale-version write-lock probe) +
+# ``_T2_CYCLE_EXIT_TIMEOUT`` (predecessor exit poll) + ``timeout`` (reachability
+# poll). A fixed wait shorter than that hold reproduces the pre-P2 thundering
+# herd on timeout (code-review H-1 / critic S-1): every waiter times out at
+# once, re-discovers the stale/absent daemon unguarded, and all cold-spawn.
+# Deriving the wait from the same budgets guarantees a waiter never gives up
+# before the holder releases, on any ``--timeout``. Releasing the lock earlier
+# (before the reachability poll) is NOT an option: a waiter acquiring it during
+# the winner's migration window would re-discover no live daemon and spawn too,
+# defeating single-flight. Margin is a module constant so tests can shrink it.
+_T2_ELECTION_WAIT_MARGIN: float = 5.0
+
+
+def _election_wait_for(timeout: float) -> float:
+    """Waiter election-lock budget: must exceed the holder's worst-case hold so
+    waiters block until the winner is reachable, then attach rather than
+    redundantly spawn (RDR-140 P2.2)."""
+    return (
+        _T2_CYCLE_DB_PROBE_TIMEOUT_MS / 1000.0
+        + _T2_CYCLE_EXIT_TIMEOUT
+        + timeout
+        + _T2_ELECTION_WAIT_MARGIN
+    )
+
+
+def _election_lock_path_for_db(db_path: Path) -> Path:
+    """Election-coordination lock path for *db_path*.
+
+    RDR-140 P2.2: a sibling of the data file (``<db>.election_lock``) so stacks
+    started from different ``config_dir``s against the same data file contend
+    on one election. DISTINCT from the daemon's lifetime spawn lock
+    (``<db>.spawn_lock`` / ``t2_spawn.lock``): if ``ensure-running`` held the
+    daemon's own spawn lock, the spawned ``t2 start`` child would hit EAGAIN on
+    its ``_acquire_spawn_lock`` and exit, leaving zero daemons.
+    """
+    return db_path.parent / f"{db_path.name}.election_lock"
+
+
+def _acquire_election_lock(db_path: Path, timeout: float) -> int | None:
+    """Blocking-with-timeout ``LOCK_EX`` on the election lock. Returns the held
+    fd, or ``None`` if the timeout elapsed (caller proceeds unguarded).
+
+    Blocking (not ``LOCK_NB``-fail-fast) so waiters queue then re-discover; the
+    daemon's ``_acquire_spawn_lock`` uses ``LOCK_NB`` and must not, hence the
+    distinct lock file. Auto-releases on holder death (the OS drops the fd's
+    lock), so a holder that crashes mid-spawn never deadlocks the waiters.
+    """
+    import errno
+    import fcntl
+
+    path = _election_lock_path_for_db(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError as exc:
+            if exc.errno not in (errno.EAGAIN, errno.EACCES):
+                os.close(fd)
+                raise
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return None
+            time.sleep(0.05)
+
+
+def _release_election_lock(fd: int | None) -> None:
+    if fd is None:
+        return
+    import fcntl
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+# RDR-140 P4.2 (nexus-hrrpz) Gap 5: bounded crash-loop guard. Cold respawns are
+# one-shot (``t2 start`` per ``ensure-running`` / launchd KeepAlive), so the
+# guard is a persistent counter in a sentinel file beside the discovery file:
+# restart timestamps within a rolling window. After _CRASHLOOP_MAX_RESTARTS in
+# the window, ``ensure-running`` stops respawning and logs ONCE at error
+# (instead of an endless crash-loop with a traceback per attempt). A daemon
+# that converges (becomes reachable) clears the counter. This is suppression of
+# respawn attempts, NOT a writer-lock change — RDR-128/129 single-writer is
+# untouched. Module constants so tests can shrink the window/cap.
+_CRASHLOOP_WINDOW_S: float = 300.0
+_CRASHLOOP_MAX_RESTARTS: int = 5
+
+
+def _crashloop_sentinel_path(config_dir: Path) -> Path:
+    """Sentinel file path for the crash-loop guard, a sibling of the discovery
+    file under *config_dir*."""
+    return config_dir / "t2_crashloop.json"
+
+
+def _read_crashloop(config_dir: Path) -> dict:
+    try:
+        data = json.loads(_crashloop_sentinel_path(config_dir).read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"timestamps": [], "tripped_logged": False}
+    if not isinstance(data, dict):
+        return {"timestamps": [], "tripped_logged": False}
+    ts = data.get("timestamps")
+    data["timestamps"] = [t for t in ts if isinstance(t, (int, float))] if isinstance(ts, list) else []
+    data["tripped_logged"] = bool(data.get("tripped_logged"))
+    return data
+
+
+def _write_crashloop_atomic(config_dir: Path, data: dict) -> None:
+    """Atomic 0o600 write (mirrors ``_write_discovery_atomic``) so a concurrent
+    reader never sees a partial sentinel."""
+    path = _crashloop_sentinel_path(config_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    body = json.dumps(data).encode("utf-8")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, body)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(path))
+
+
+def _restart_count(config_dir: Path, *, now: float) -> int:
+    """Restarts recorded within the window ending at *now* (read-only)."""
+    cutoff = now - _CRASHLOOP_WINDOW_S
+    data = _read_crashloop(config_dir)
+    return sum(1 for t in data["timestamps"] if t >= cutoff)
+
+
+def _record_restart(config_dir: Path, *, now: float) -> int:
+    """Append a restart at *now*, prune entries older than the window, persist,
+    and return the in-window count."""
+    cutoff = now - _CRASHLOOP_WINDOW_S
+    data = _read_crashloop(config_dir)
+    kept = [t for t in data["timestamps"] if t >= cutoff]
+    if not kept:
+        # Fresh window (all prior restarts aged out): re-arm the one-shot
+        # error log so a NEW crash loop is reported, not silently swallowed
+        # by a stale tripped_logged flag from a previous window (code-review
+        # HIGH-1).
+        data["tripped_logged"] = False
+    kept.append(now)
+    data["timestamps"] = kept
+    _write_crashloop_atomic(config_dir, data)
+    return len(kept)
+
+
+def _crashloop_tripped(config_dir: Path, *, now: float) -> bool:
+    """True when the in-window restart count has reached the cap."""
+    return _restart_count(config_dir, now=now) >= _CRASHLOOP_MAX_RESTARTS
+
+
+def _reset_crashloop(config_dir: Path) -> None:
+    """Clear the guard on healthy convergence (best-effort; never raises)."""
+    try:
+        _crashloop_sentinel_path(config_dir).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _predecessor_alive(pid: int) -> bool:
@@ -812,125 +1000,188 @@ def t2_ensure_running_cmd(
         except PackageNotFoundError:
             return ""
 
+    # Fast pre-discovery (lock-free common case): a live matching-version
+    # daemon means we are done without ever touching the election lock —
+    # bounded boot latency is paid only on the actual spawn path.
     running = _running_daemon()
     if running is not None:
-        running_pid, running_ver = running
+        _running_pid, running_ver = running
         installed = _installed_version()
-        # A live daemon whose version matches the installed tool (or whose
-        # installed version can't be determined) is left alone (idempotent).
         if not installed or running_ver == installed:
             if not quiet:
                 click.echo("T2 daemon already running.")
             return
-        # Version skew: the daemon froze its code at start and predates the
-        # last upgrade (nexus-5ldk1). "Ensure running" means ensure a
-        # CURRENT daemon; gracefully cycle the stale one and respawn below.
-        # SIGTERM lets the daemon drain in-flight RPC (stop() awaits
-        # wait_closed) and remove its discovery file before we respawn.
-        #
-        # RDR-128 P0b (RF-4): but do NOT SIGTERM a healthy (if stale) daemon
-        # while memory.db's WAL writer lock is held — the respawn's startup
-        # migration would race the holder (typically `nx index repo`) and
-        # could crash-loop, and because ensure-running is one-shot we'd be
-        # left with NO daemon. Probe the lock with a bounded timeout; on
-        # timeout, ABORT the cycle: leave the stale-but-working daemon up and
-        # defer to the next ensure-running. Never hang; never trade a working
-        # daemon for none.
-        db_path = config_dir / "memory.db"
-        if not _t2_db_write_lock_acquirable(
-            db_path, timeout_ms=_T2_CYCLE_DB_PROBE_TIMEOUT_MS
-        ):
-            click.echo(
-                f"T2 daemon v{running_ver} stale but memory.db write lock "
-                f"held; cycle deferred (will retry on next ensure-running).",
-                err=True,
-            )
-            return  # leave the stale daemon up — best-effort, retried later
-        if not quiet:
-            click.echo(
-                f"T2 daemon is stale (running {running_ver}, installed "
-                f"{installed}); cycling to current."
-            )
-        try:
-            os.kill(running_pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-        # RDR-129 A2 (nexus-kwqhd): poll the predecessor's PID liveness, NOT
-        # the discovery file. stop() now holds the spawn lock until the
-        # process exits (defer-release-to-exit) while unlinking the discovery
-        # file early; a discovery-file poll would see "gone" while the pid is
-        # still alive and holding the lock, so the cold spawn below would hit
-        # EAGAIN on the spawn lock and leave ZERO daemons. Wait for the pid to
-        # actually exit (lock dropped by the OS); if it outlives the window,
-        # abort and keep the stale-but-working daemon (RF-4: never trade a
-        # working daemon for none).
-        cycle_deadline = _time.monotonic() + _T2_CYCLE_EXIT_TIMEOUT
-        while _time.monotonic() < cycle_deadline:
-            if not _predecessor_alive(running_pid):
-                break
-            _time.sleep(0.1)
-        else:
-            click.echo(
-                f"T2 daemon v{running_ver} (pid {running_pid}) did not exit "
-                f"within {_T2_CYCLE_EXIT_TIMEOUT}s of SIGTERM; cycle aborted, "
-                "leaving it up (will retry on next ensure-running).",
-                err=True,
-            )
-            return  # never trade a working daemon for none
-        # predecessor fully exited; its spawn lock is released — cold spawn.
 
-    # Cold spawn. Use the same nx binary the operator invoked (preserves
-    # PATH/virtualenv assumptions). start_new_session detaches the child
-    # so this command can exit while the daemon keeps running.
-    nx_bin = _resolve_nx_bin()
-    argv = [*nx_bin, "daemon", "t2", "start"]
-    if config_dir_str is not None:
-        argv.extend(["--config-dir", config_dir_str])
-    if not quiet:
-        click.echo(f"Spawning T2 daemon: {' '.join(argv)}")
-    proc = subprocess.Popen(
-        argv,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-
-    # nexus-u3mfr: migration-aware wait. A cold-start daemon runs its
-    # one-time startup migration (multi-second, holds the write lock)
-    # BEFORE it binds and writes the discovery file, so reachability
-    # legitimately lags the spawn by several seconds. The fix is two-fold:
-    # the default budget is generous enough to cover the migration
-    # (--timeout default raised to 15s), AND we distinguish "still alive,
-    # migrating" from "the process died" — if the spawned child exits
-    # without becoming reachable we fail fast with its exit code rather
-    # than waiting out the whole budget on a corpse. The warning therefore
-    # only fires on a genuinely slow/stuck migration, not a healthy boot.
-    deadline = _time.monotonic() + timeout
-    while _time.monotonic() < deadline:
-        if _daemon_is_alive():
+    # RDR-140 P2.2 (nexus-fkhe2): single-flight election around the
+    # discover→spawn decision. K racing stacks block on this lock; only the
+    # holder cold-spawns. We RE-DISCOVER after acquiring it so a stack that
+    # finished spawning while we waited is attached, not duplicated. The lock
+    # is anchored on the data file and is DISTINCT from the daemon's lifetime
+    # spawn lock; fcntl auto-releases it on the holder's death, so a holder
+    # that dies mid-spawn never deadlocks the waiters (they win the lock,
+    # re-discover no daemon, and exactly one spawns).
+    db_path = config_dir / "memory.db"
+    election_fd = _acquire_election_lock(db_path, _election_wait_for(timeout))
+    if election_fd is None and not quiet:
+        click.echo(
+            "T2 election-lock wait timed out; proceeding to spawn unguarded "
+            "(the daemon spawn lock remains the backstop).",
+            err=True,
+        )
+    try:
+        # Re-discover under the lock — the winner may have come up already.
+        running = _running_daemon()
+        if running is not None:
+            running_pid, running_ver = running
+            installed = _installed_version()
+            # A live daemon whose version matches the installed tool (or whose
+            # installed version can't be determined) is left alone (idempotent).
+            if not installed or running_ver == installed:
+                if not quiet:
+                    click.echo("T2 daemon already running.")
+                return
+            # Version skew: the daemon froze its code at start and predates the
+            # last upgrade (nexus-5ldk1). "Ensure running" means ensure a
+            # CURRENT daemon; gracefully cycle the stale one and respawn below.
+            # SIGTERM lets the daemon drain in-flight RPC (stop() awaits
+            # wait_closed) and remove its discovery file before we respawn.
+            #
+            # RDR-128 P0b (RF-4): but do NOT SIGTERM a healthy (if stale)
+            # daemon while memory.db's WAL writer lock is held — the respawn's
+            # startup migration would race the holder (typically `nx index
+            # repo`) and could crash-loop, and because ensure-running is
+            # one-shot we'd be left with NO daemon. Probe the lock with a
+            # bounded timeout; on timeout, ABORT the cycle: leave the
+            # stale-but-working daemon up and defer to the next ensure-running.
+            # Never hang; never trade a working daemon for none.
+            if not _t2_db_write_lock_acquirable(
+                db_path, timeout_ms=_T2_CYCLE_DB_PROBE_TIMEOUT_MS
+            ):
+                click.echo(
+                    f"T2 daemon v{running_ver} stale but memory.db write lock "
+                    f"held; cycle deferred (will retry on next ensure-running).",
+                    err=True,
+                )
+                return  # leave the stale daemon up — best-effort, retried later
             if not quiet:
-                click.echo("T2 daemon is reachable.")
-            return
-        if proc.poll() is not None:
+                click.echo(
+                    f"T2 daemon is stale (running {running_ver}, installed "
+                    f"{installed}); cycling to current."
+                )
+            try:
+                os.kill(running_pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            # RDR-129 A2 (nexus-kwqhd): poll the predecessor's PID liveness,
+            # NOT the discovery file. stop() now holds the spawn lock until the
+            # process exits (defer-release-to-exit) while unlinking the
+            # discovery file early; a discovery-file poll would see "gone"
+            # while the pid is still alive and holding the lock, so the cold
+            # spawn below would hit EAGAIN on the spawn lock and leave ZERO
+            # daemons. Wait for the pid to actually exit (lock dropped by the
+            # OS); if it outlives the window, abort and keep the
+            # stale-but-working daemon (RF-4: never trade a working daemon for
+            # none).
+            cycle_deadline = _time.monotonic() + _T2_CYCLE_EXIT_TIMEOUT
+            while _time.monotonic() < cycle_deadline:
+                if not _predecessor_alive(running_pid):
+                    break
+                _time.sleep(0.1)
+            else:
+                click.echo(
+                    f"T2 daemon v{running_ver} (pid {running_pid}) did not "
+                    f"exit within {_T2_CYCLE_EXIT_TIMEOUT}s of SIGTERM; cycle "
+                    "aborted, leaving it up (will retry on next "
+                    "ensure-running).",
+                    err=True,
+                )
+                return  # never trade a working daemon for none
+            # predecessor fully exited; its spawn lock is released — cold spawn.
+
+        # RDR-140 P4.2 (Gap 5): crash-loop guard. If we have already respawned
+        # _CRASHLOOP_MAX_RESTARTS times within the window without converging,
+        # stop — an endless crash-loop with a traceback per attempt helps no
+        # one. Log ONCE at error (the sentinel's tripped_logged flag prevents
+        # re-logging on every suppressed call) and refuse to respawn. A healthy
+        # convergence below clears the counter.
+        _cl_now = _time.time()
+        if _crashloop_tripped(config_dir, now=_cl_now):
+            _data = _read_crashloop(config_dir)
+            if not _data.get("tripped_logged"):
+                _log.error(
+                    "t2_daemon_crash_loop_suppressed",
+                    restarts=_restart_count(config_dir, now=_cl_now),
+                    window_s=_CRASHLOOP_WINDOW_S,
+                    max_restarts=_CRASHLOOP_MAX_RESTARTS,
+                )
+                _data["tripped_logged"] = True
+                _write_crashloop_atomic(config_dir, _data)
             click.echo(
-                f"Error: T2 daemon process exited (code {proc.returncode}) "
-                "before becoming reachable. Check ~/Library/Logs/nexus-t2.err "
-                "(macOS) or `journalctl --user -u nexus-t2.service` (Linux) "
-                "for the failure.",
+                f"Error: T2 daemon crash-loop suppressed "
+                f"({_CRASHLOOP_MAX_RESTARTS}+ restarts in "
+                f"{_CRASHLOOP_WINDOW_S:.0f}s); refusing to respawn. Investigate "
+                "the daemon log, then 'nx daemon t2 status'.",
                 err=True,
             )
             sys.exit(1)
-        _time.sleep(0.1)
+        _record_restart(config_dir, now=_cl_now)
 
-    click.echo(
-        f"Warning: T2 daemon did not become reachable within {timeout}s "
-        "(process still alive — likely a slow or stalled startup "
-        "migration). Check ~/Library/Logs/nexus-t2.err (macOS) or "
-        "`journalctl --user -u nexus-t2.service` (Linux) for the failure.",
-        err=True,
-    )
-    sys.exit(1)
+        # Cold spawn. Use the same nx binary the operator invoked (preserves
+        # PATH/virtualenv assumptions). start_new_session detaches the child
+        # so this command can exit while the daemon keeps running.
+        nx_bin = _resolve_nx_bin()
+        argv = [*nx_bin, "daemon", "t2", "start"]
+        if config_dir_str is not None:
+            argv.extend(["--config-dir", config_dir_str])
+        if not quiet:
+            click.echo(f"Spawning T2 daemon: {' '.join(argv)}")
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        # nexus-u3mfr: migration-aware wait. A cold-start daemon runs its
+        # one-time startup migration (multi-second, holds the write lock)
+        # BEFORE it binds and writes the discovery file, so reachability
+        # legitimately lags the spawn by several seconds. The fix is two-fold:
+        # the default budget is generous enough to cover the migration
+        # (--timeout default raised to 15s), AND we distinguish "still alive,
+        # migrating" from "the process died" — if the spawned child exits
+        # without becoming reachable we fail fast with its exit code rather
+        # than waiting out the whole budget on a corpse. The warning therefore
+        # only fires on a genuinely slow/stuck migration, not a healthy boot.
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            if _daemon_is_alive():
+                # Healthy convergence: clear the crash-loop counter.
+                _reset_crashloop(config_dir)
+                if not quiet:
+                    click.echo("T2 daemon is reachable.")
+                return
+            if proc.poll() is not None:
+                click.echo(
+                    f"Error: T2 daemon process exited (code {proc.returncode}) "
+                    "before becoming reachable. Check "
+                    "~/Library/Logs/nexus-t2.err (macOS) or `journalctl "
+                    "--user -u nexus-t2.service` (Linux) for the failure.",
+                    err=True,
+                )
+                sys.exit(1)
+            _time.sleep(0.1)
+
+        click.echo(
+            f"Warning: T2 daemon did not become reachable within {timeout}s "
+            "(process still alive — likely a slow or stalled startup "
+            "migration). Check ~/Library/Logs/nexus-t2.err (macOS) or "
+            "`journalctl --user -u nexus-t2.service` (Linux) for the failure.",
+            err=True,
+        )
+        sys.exit(1)
+    finally:
+        _release_election_lock(election_fd)
 
 
 @t2_group.command("install")

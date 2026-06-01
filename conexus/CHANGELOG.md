@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.6.0] - 2026-05-31
+
+Plugin version aligned with conexus 5.6.0. No plugin-side changes; the release
+ships the RDR-140 T2 daemon supervisor & ownership model (single-flight
+election, loser quiet-attach, ownership-aware reaping, crash-loop guard +
+`restarts_in_window` status) and the binary-asset SKIP classifier in the
+`nx` core.
+
 ## [5.5.1] - 2026-05-31
 
 ### Fixed

@@ -74,6 +74,21 @@ _log = structlog.get_logger(__name__)
 # lingering predecessor daemon on takeover (RDR-128 single-writer backstop).
 _PREDECESSOR_REAP_TIMEOUT: float = 5.0
 
+# RDR-140 P3.2 (nexus-7ffls): per-connection timeout for the reap-discrimination
+# health-ping. A peer that does not accept a connection within this budget is
+# treated as unreachable (a wedged/orphaned writer) and reaped. Module constant
+# so tests can shrink it.
+_HEALTH_PING_TIMEOUT: float = 1.0
+
+# RDR-140 P3.2 option B (nexus-7ffls): a reachable, current-version peer found
+# during the startup reap is a same-version daemon mid-shutdown — it released
+# the spawn lock at the start of exit (we now hold it) but has not fully gone.
+# Single-writer forbids opening the DB while it lives, but it is draining its
+# own writes, so we give it this bounded window to exit on its own before
+# forcing a reap. We NEVER coexist: it either exits here or we kill it. Module
+# constant so tests can shrink it.
+_GRACEFUL_PEER_EXIT_WAIT: float = 3.0
+
 # RDR-129 B2 (nexus-qi1zb): bounded lock-retry for the serving dispatch.
 # Mirrors the bootstrap-migration retry
 # (``nexus.db.t2._apply_pending_with_lock_retry``): three attempts with two
@@ -83,6 +98,18 @@ _PREDECESSOR_REAP_TIMEOUT: float = 5.0
 # >30s contention spike into a wait rather than a dropped best-effort write.
 # Module constant so tests can shrink the sleeps.
 _DISPATCH_RETRY_SLEEPS: tuple[float, ...] = (0.1, 0.25)
+
+# RDR-140 P1.3 (nexus-h2oko): self-healing discovery re-assert + loser poll.
+# The spawn-lock HOLDER re-asserts its own t2_addr discovery file every
+# ``_REASSERT_INTERVAL`` so a transient gap (a stale/lost addr file while the
+# daemon is alive) self-heals instead of stranding clients. A spawn-lock LOSER
+# polls for the winner's discovery file/socket for up to ``_LOSER_POLL_TIMEOUT``
+# before quiet-exiting 0. Invariant: ``_LOSER_POLL_TIMEOUT`` >=
+# ``_REASSERT_INTERVAL`` + worst-case write latency, so a loser polling for the
+# winner's file never times out inside a window where the holder is mid-
+# re-assert. Module-level so tests can shrink them.
+_REASSERT_INTERVAL: float = 1.0
+_LOSER_POLL_TIMEOUT: float = 3.0
 
 
 def _is_locked_error(exc: BaseException) -> bool:
@@ -287,6 +314,17 @@ class ProtocolError(Exception):
 class T2DaemonError(RuntimeError):
     """Raised on daemon lifecycle errors (bind failed, address in use,
     discovery write failed, etc.)."""
+
+
+class T2SpawnLockLost(T2DaemonError):
+    """RDR-140 P1.3 (nexus-h2oko): the spawn lock is already held by a live
+    winner, so this process must quiet-attach and exit 0 — NOT crash.
+
+    Subclasses :class:`T2DaemonError` so existing callers that catch the base
+    (and assert ``"spawn lock"`` in the message) keep working; ``run_t2_daemon``
+    catches this subtype first to short-circuit the crash path. A1-verified:
+    raised from ``_acquire_spawn_lock`` (start():645) strictly BEFORE any
+    ``T2Database`` construction (:658), so a loser never opens the DB."""
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +599,54 @@ def _daemon_version() -> str:
         return "0.0.0"
 
 
+def _health_ping(payload: dict[str, Any]) -> bool:
+    """Best-effort liveness probe: can we open a connection to the peer named in
+    its discovery *payload*? Tries the UDS path first, then TCP. Never raises.
+
+    RDR-140 P3.2: a peer that accepts a connection is serving (healthy); one
+    that refuses/times out is a wedged or orphaned writer and must be reaped.
+    """
+    uds = payload.get("uds_path")
+    if isinstance(uds, str) and uds:
+        sock = None
+        try:
+            # socket() itself can raise (EMFILE) — create inside the try so the
+            # "never raises" contract holds even under fd exhaustion.
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(_HEALTH_PING_TIMEOUT)
+            sock.connect(uds)
+            return True
+        except OSError:
+            pass
+        finally:
+            if sock is not None:
+                sock.close()
+    host, port = payload.get("tcp_host"), payload.get("tcp_port")
+    if isinstance(host, str) and host and isinstance(port, int) and port > 0:
+        try:
+            with socket.create_connection((host, port), timeout=_HEALTH_PING_TIMEOUT):
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def _peer_handshake(pid: int, payload: dict[str, Any] | None) -> tuple[str | None, bool]:
+    """Reap-discrimination probe for *pid*: return ``(daemon_version, reachable)``.
+
+    RDR-140 P3.2 (nexus-7ffls). ``daemon_version`` is read from the discovery
+    *payload* (the ``t2_addr`` token carries it — A2; no new persisted state).
+    ``reachable`` is a best-effort health-ping to the token's socket. A peer with
+    no token (``payload is None`` — an open-fd-only side-orphan) returns
+    ``(None, False)``: it has no socket we can reach and no version we can trust,
+    so the caller cannot spare it (single-writer backstop).
+    """
+    if not isinstance(payload, dict):
+        return (None, False)
+    version = payload.get("daemon_version")
+    return (version if isinstance(version, str) else None, _health_ping(payload))
+
+
 def _allocate_free_port() -> int:
     """Bind a free loopback port, then close it. No SO_REUSEADDR (see T3 daemon)."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -612,6 +698,9 @@ class T2Daemon:
         self._spawn_lock_fd: int | None = None
         self._spawn_lock_fd_path: int | None = None
         self._stop_event: asyncio.Event | None = None
+        # RDR-140 P1.3: self-healing discovery re-assert (holder only).
+        self._discovery_payload: dict[str, Any] | None = None
+        self._reassert_task: asyncio.Task[None] | None = None
 
     # ── public properties ───────────────────────────────────────────────
 
@@ -677,6 +766,14 @@ class T2Daemon:
             daemon_version=_daemon_version(),
         )
         _write_discovery_atomic(self._discovery_path, payload)
+        self._discovery_payload = payload
+
+        # RDR-140 P1.3: start the self-healing re-assert task now that the
+        # discovery file is written. It re-creates the file if it ever goes
+        # missing while we (the spawn-lock holder) are alive. stop() cancels
+        # it BEFORE unlinking the discovery file so it cannot resurrect a
+        # mid-shutdown daemon's addr (RDR-129 early-unlink ordering).
+        self._reassert_task = asyncio.create_task(self._reassert_discovery_loop())
 
         self._stop_event = asyncio.Event()
         _log.info(
@@ -686,6 +783,40 @@ class T2Daemon:
             tcp_port=self._tcp_port,
             db_path=str(self._db_path),
         )
+
+    async def _reassert_discovery_loop(self) -> None:
+        """Periodically re-assert our own discovery file (holder self-heal).
+
+        RDR-140 P1.3 (nexus-h2oko): a transient loss of the t2_addr file while
+        the daemon is alive otherwise strands clients (the race-harness saw all
+        racers crash in the discovery-gap case). Every ``_REASSERT_INTERVAL``
+        we re-write the file iff it is missing or no longer names our pid;
+        when it is intact this is a cheap stat + read with no write. Cancelled
+        at the START of :meth:`stop` so it can never resurrect a file the
+        shutdown unlink just removed.
+        """
+        while True:
+            await asyncio.sleep(_REASSERT_INTERVAL)
+            path = self._discovery_path
+            payload = self._discovery_payload
+            if path is None or payload is None:
+                continue
+            try:
+                needs_write = True
+                if path.exists():
+                    try:
+                        current = json.loads(path.read_text())
+                        needs_write = current.get("pid") != payload["pid"]
+                    except (OSError, json.JSONDecodeError):
+                        needs_write = True
+                if needs_write:
+                    _write_discovery_atomic(path, payload)
+                    _log.info("t2_daemon_discovery_reasserted", pid=payload["pid"])
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                # Self-heal is best-effort; never let it crash the daemon.
+                _log.warning("t2_daemon_discovery_reassert_failed", exc=str(exc))
 
     async def run_until_signal(self) -> None:
         """Block until SIGTERM/SIGINT arrives."""
@@ -723,6 +854,18 @@ class T2Daemon:
         never spawns into the lock-still-held window. ``_release_spawn_lock``
         remains callable for explicit teardown (tests simulate process exit).
         """
+        # RDR-140 P1.3 (nexus-h2oko): cancel the self-healing re-assert task
+        # FIRST — before the discovery-file unlink below — so it can never
+        # re-create the addr file for a daemon that is shutting down (the
+        # resurrection race against RDR-129 early-unlink-on-stop ordering).
+        if self._reassert_task is not None:
+            self._reassert_task.cancel()
+            try:
+                await self._reassert_task
+            except BaseException:  # noqa: BLE001
+                pass
+            self._reassert_task = None
+
         if self._uds_server is not None:
             self._uds_server.close()
             await self._uds_server.wait_closed()
@@ -951,9 +1094,11 @@ class T2Daemon:
         signal a pid leaves startup to proceed (the flock already guarantees
         we are the sole new writer).
         """
-        targets: list[int] = []
-
-        # 1. addr-file pid.
+        # 1. addr-file pid + its discovery token. The token is the ONLY input
+        #    that lets us spare a healthy current-version peer (RDR-140 P3:
+        #    it carries daemon_version + the socket to health-ping).
+        addr_pid: int | None = None
+        addr_payload: dict[str, Any] | None = None
         disc_path = t2_discovery_path(self._config_dir)
         try:
             raw = disc_path.read_text()
@@ -961,32 +1106,76 @@ class T2Daemon:
         except (OSError, ValueError):
             payload = None
         if isinstance(payload, dict):
+            addr_payload = payload
             pid = payload.get("pid")
             if isinstance(pid, int):
-                targets.append(pid)
+                addr_pid = pid
 
         # 2. same-db open-fd sweep (catches side-orphans absent from the addr
-        #    file).
-        targets.extend(_enumerate_t2_daemon_pids_for_db(self._db_path))
-
-        # Reap each distinct non-self target once.
+        #    file). These have NO token, so they pass payload=None and can
+        #    never be spared — they escaped the db spawn lock we hold and are
+        #    exactly the orphan case this sweep exists to reap.
         seen: set[int] = set()
-        for pid in targets:
-            if pid <= 0 or pid == os.getpid() or pid in seen:
-                continue
-            seen.add(pid)
-            self._reap_one_daemon(pid)
 
-    def _reap_one_daemon(self, pid: int) -> None:
+        def _reap(pid: int, tok: dict[str, Any] | None) -> None:
+            if pid <= 0 or pid == os.getpid() or pid in seen:
+                return
+            seen.add(pid)
+            self._reap_one_daemon(pid, tok)
+
+        if addr_pid is not None:
+            _reap(addr_pid, addr_payload)
+        for pid in _enumerate_t2_daemon_pids_for_db(self._db_path):
+            _reap(pid, None)
+
+    def _reap_one_daemon(
+        self, pid: int, payload: dict[str, Any] | None = None,
+    ) -> None:
         """SIGTERM (escalating to SIGKILL after ``_PREDECESSOR_REAP_TIMEOUT``)
         a single live t2-daemon *pid*. Guarded by a liveness check and a
         cmdline check (PID-reuse guard: refuse to kill a recycled pid whose
-        command line is not a t2 daemon). Best-effort; never raises."""
+        command line is not a t2 daemon). Best-effort; never raises.
+
+        RDR-140 P3.2 option B (nexus-7ffls): ownership/version-aware
+        discrimination — WAIT, never coexist. When *payload* is the peer's
+        ``t2_addr`` token and it health-pings AND its ``daemon_version`` equals
+        ours, the peer is a same-version daemon mid-shutdown (it could not still
+        hold the db spawn lock we just acquired, so it has released it at the
+        start of its own exit). We do NOT SIGTERM it immediately — it is
+        draining its own writes — but we also NEVER open the DB alongside it:
+        we wait up to ``_GRACEFUL_PEER_EXIT_WAIT`` for it to exit on its own,
+        and only if it overstays do we force the reap. Either way this method
+        does not return until the peer is gone, so ``start()`` (which opens
+        ``T2Database`` right after the sweep) is guaranteed single-writer.
+
+        A stale-version or unreachable addr peer, and every open-fd-only peer
+        (``payload is None``), is reaped immediately: the RDR-128/129
+        single-writer backstop is preserved, never weakened.
+        """
         if not _pid_is_alive(pid):
             return
         if not _is_t2_daemon_process(pid):
             _log.warning("t2_predecessor_pid_not_daemon_skip_reap", pid=pid)
             return
+
+        if payload is not None:
+            version, reachable = _peer_handshake(pid, payload)
+            if reachable and version == _daemon_version():
+                # Same-version peer mid-shutdown: let it drain and exit, but
+                # never coexist — force the reap if it overstays the window.
+                deadline = time.monotonic() + _GRACEFUL_PEER_EXIT_WAIT
+                while time.monotonic() < deadline:
+                    if not _pid_is_alive(pid):
+                        _log.info(
+                            "t2_predecessor_exited_gracefully",
+                            pid=pid, daemon_version=version,
+                        )
+                        return
+                    time.sleep(0.1)
+                _log.warning(
+                    "t2_predecessor_overstayed_graceful_wait_forcing_reap",
+                    pid=pid, daemon_version=version,
+                )
 
         _log.warning("t2_reaping_predecessor_daemon", pid=pid)
         try:
@@ -1007,8 +1196,26 @@ class T2Daemon:
         try:
             os.kill(pid, signal.SIGKILL)
             _log.warning("t2_predecessor_sigkilled", pid=pid)
+        except ProcessLookupError:
+            return  # already gone
         except OSError:
-            pass
+            return
+
+        # RDR-140 P3 (nexus-dzf1q re-review): SIGKILL delivery is asynchronous —
+        # os.kill returning does NOT mean the kernel has finished reaping the
+        # process and released its db fds. start() opens T2Database the instant
+        # _reap_predecessor_daemon returns, so we MUST confirm the pid is gone
+        # before returning, or two writers could briefly overlap. SIGKILL is
+        # unblockable, so this poll terminates quickly in practice; if it
+        # overstays (zombie / kernel stall) we log and return — the pid is
+        # doomed and its writer is effectively dead.
+        deadline = time.monotonic() + _PREDECESSOR_REAP_TIMEOUT
+        while time.monotonic() < deadline:
+            if not _pid_is_alive(pid):
+                _log.info("t2_predecessor_reaped", pid=pid, via="SIGKILL")
+                return
+            time.sleep(0.1)
+        _log.warning("t2_predecessor_still_alive_after_sigkill", pid=pid)
 
     def _acquire_spawn_lock(self) -> None:
         """Acquire exclusive fcntl locks on both the config_dir-scoped
@@ -1031,7 +1238,7 @@ class T2Daemon:
         except OSError as exc:
             os.close(fd)
             if exc.errno in (errno.EAGAIN, errno.EACCES):
-                raise T2DaemonError(
+                raise T2SpawnLockLost(
                     f"another T2 daemon already holds the spawn lock at "
                     f"{lock_path}; refusing to start a second instance"
                 ) from exc
@@ -1056,7 +1263,7 @@ class T2Daemon:
                 pass
             self._spawn_lock_fd = None
             if exc.errno in (errno.EAGAIN, errno.EACCES):
-                raise T2DaemonError(
+                raise T2SpawnLockLost(
                     f"another T2 daemon already holds the db_path spawn "
                     f"lock at {path_lock}; refusing to start a second "
                     f"instance against the same data file"
@@ -1085,6 +1292,41 @@ class T2Daemon:
 # ---------------------------------------------------------------------------
 # Sync entrypoint for the CLI verb
 # ---------------------------------------------------------------------------
+
+
+def _poll_for_winner(config_dir: Path, timeout: float) -> bool:
+    """Poll for the spawn-lock winner's discovery file + reachable socket.
+
+    RDR-140 P1.3 (nexus-h2oko): a spawn-lock loser calls this purely for
+    observability before exiting 0. Returns True once the winner's t2_addr
+    file names a live pid AND its UDS is connectable; False if the timeout
+    elapses first. A discovered-but-unreachable target (set file, socket not
+    yet accepting) or a stale addr (dead pid) is NOT treated as a live
+    attach — we keep polling and report False at timeout rather than claim a
+    stale attach. Never raises.
+    """
+    deadline = time.monotonic() + timeout
+    disc_path = t2_discovery_path(config_dir)
+    while time.monotonic() < deadline:
+        try:
+            if disc_path.exists():
+                payload = json.loads(disc_path.read_text())
+                pid = payload.get("pid")
+                uds = payload.get("uds_path")
+                if isinstance(pid, int) and _pid_is_alive(pid) and uds:
+                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    try:
+                        sock.settimeout(0.5)
+                        sock.connect(str(uds))
+                        return True
+                    except OSError:
+                        pass  # set-but-unreachable — keep polling.
+                    finally:
+                        sock.close()
+        except (OSError, json.JSONDecodeError):
+            pass
+        time.sleep(0.05)
+    return False
 
 
 def run_t2_daemon(
@@ -1126,6 +1368,17 @@ def run_t2_daemon(
 
     try:
         asyncio.run(_main())
+    except T2SpawnLockLost:
+        # RDR-140 P1.3 (nexus-h2oko): losing the spawn lock is a benign
+        # quiet-attach, NOT a crash. A live winner already owns the data
+        # file; poll briefly for its discovery file/socket (best-effort
+        # observability — a discovered-but-unreachable or stale addr just
+        # keeps polling until the timeout), then exit 0 with an info-level
+        # breadcrumb and no traceback. A1-verified: T2Database was never
+        # constructed, so there is nothing to tear down.
+        attached = _poll_for_winner(config_dir, _LOSER_POLL_TIMEOUT)
+        _log.info("t2_daemon_spawn_lost", attached=attached)
+        return
     except Exception:
         # Last-resort: an exception escaping the loop (e.g. start()
         # raising before the handler is installed) must hit the log
