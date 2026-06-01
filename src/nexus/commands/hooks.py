@@ -238,6 +238,117 @@ def hooks_update(path: Path) -> None:
     click.echo("Done. New stanza in effect from the next commit.")
 
 
+def _refresh_managed_hooks(hooks_dir: Path) -> list[tuple[str, str]]:
+    """Refresh every nexus-managed hook in *hooks_dir* to the current stanza.
+
+    Only rewrites hooks that already carry the sentinel block; never touches
+    unmanaged or absent hook files. Returns a list of ``(hook_name, action)``
+    where action is ``refreshed:<install-action>`` | ``unmanaged`` |
+    ``not installed``.
+    """
+    results: list[tuple[str, str]] = []
+    for name in _HOOK_NAMES:
+        hook_file = hooks_dir / name
+        if not hook_file.exists():
+            results.append((name, "not installed"))
+            continue
+        if SENTINEL_BEGIN not in hook_file.read_text():
+            results.append((name, "unmanaged"))
+            continue
+        _uninstall_hook(hooks_dir, name)
+        action = _install_hook(hooks_dir, name)
+        results.append((name, f"refreshed:{action}"))
+    return results
+
+
+def _iter_managed_repo_roots() -> list[Path]:
+    """Return existing registered repo working trees (catalog ∪ registry).
+
+    Reuses ``list_repos_dual`` — the same canonical enumeration ``nx doctor``
+    uses for its git-hook drift check — so every repo the doctor reports drift
+    for is reachable here. Resilient: returns ``[]`` when the catalog is
+    uninitialised or unreadable rather than raising, because the caller
+    (``nx upgrade``) treats hook refresh as best-effort.
+    """
+    try:
+        from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+        from nexus.config import catalog_path, nexus_config_dir  # noqa: PLC0415
+        from nexus.repos import list_repos_dual  # noqa: PLC0415
+
+        cat_dir = catalog_path()
+        if not (cat_dir / ".catalog.db").exists():
+            return []
+        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        registry_path = nexus_config_dir() / "repos.json"
+        repo_strs = list_repos_dual(cat=cat, registry_path=registry_path)
+    except Exception:  # noqa: BLE001 — best-effort enumeration
+        return []
+
+    seen: set[Path] = set()
+    repos: list[Path] = []
+    for repo_str in repo_strs:
+        repo = Path(repo_str)
+        if repo in seen or not repo.is_dir():
+            continue
+        seen.add(repo)
+        repos.append(repo)
+    return repos
+
+
+def refresh_all_managed_hooks(*, echo: bool = False) -> dict[str, int]:
+    """Refresh nexus-managed git hooks across every catalog-registered repo.
+
+    Best-effort: a repo that can't be resolved (non-git, hooks dir not
+    writable, etc.) is counted under ``errors`` and skipped — one bad repo
+    never aborts the sweep. Returns a summary dict with ``repos``,
+    ``refreshed``, and ``errors`` counts.
+    """
+    summary = {"repos": 0, "refreshed": 0, "errors": 0}
+    for repo in _iter_managed_repo_roots():
+        try:
+            hooks_dir = _effective_hooks_dir(repo)
+            if hooks_dir.exists() and not _is_writable(hooks_dir):
+                summary["errors"] += 1
+                if echo:
+                    click.echo(f"  ! {repo}  (hooks dir not writable; skipped)")
+                continue
+            results = _refresh_managed_hooks(hooks_dir)
+        except click.ClickException as exc:
+            summary["errors"] += 1
+            if echo:
+                click.echo(f"  ! {repo}  ({exc.format_message()})")
+            continue
+
+        refreshed = [n for n, a in results if a.startswith("refreshed")]
+        if refreshed:
+            summary["repos"] += 1
+            summary["refreshed"] += len(refreshed)
+            if echo:
+                click.echo(f"  ✓ {repo}  ({len(refreshed)} hook(s) refreshed)")
+    return summary
+
+
+@hooks.command("update-all")
+def hooks_update_all() -> None:
+    """Refresh nexus-managed git hooks across ALL catalog-registered repos.
+
+    Sweeps every ``repo`` owner in the catalog and refreshes any hook that
+    already carries the nexus stanza, so a single command brings every repo
+    to the current stanza after a conexus upgrade. Unmanaged and uninstalled
+    hooks are left untouched. This is also run automatically by ``nx upgrade``.
+    """
+    click.echo("Refreshing nexus hooks across all registered repos…")
+    summary = refresh_all_managed_hooks(echo=True)
+    if summary["repos"] == 0 and summary["errors"] == 0:
+        click.echo("No nexus-managed hooks found in any registered repo.")
+        return
+    click.echo(
+        f"Done. {summary['refreshed']} hook(s) refreshed across "
+        f"{summary['repos']} repo(s)"
+        + (f"; {summary['errors']} repo(s) skipped." if summary["errors"] else ".")
+    )
+
+
 @hooks.command("status")
 @click.argument("path", type=click.Path(file_okay=False, path_type=Path), default=".")
 def hooks_status(path: Path) -> None:
