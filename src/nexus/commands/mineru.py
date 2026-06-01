@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -128,6 +130,44 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _resolve_mineru_api_bin() -> str | None:
+    """Locate the mineru-api executable, returning an absolute path or None.
+
+    Search order (GH #1059):
+
+    (a) ``Path(sys.executable).parent / "mineru-api"`` — sibling of the
+        running interpreter.  Covers ``nx mineru start`` (CLI) and any path
+        where the conexus tool-venv Python is the active interpreter.
+    (b) Walk up from this module's own ``__file__`` checking each ancestor's
+        ``bin/mineru-api``, bounded to 8 levels.  Covers the MCP/daemon
+        auto-restart path where the *running* interpreter may differ from the
+        conexus venv (e.g. system Python or a project venv) while nexus is
+        still installed inside the conexus venv.  Both nexus and mineru are in
+        the same venv (``conexus[local]``), so walking up from this file's
+        site-packages location eventually reaches the venv root and its bin/.
+    (c) ``shutil.which("mineru-api")`` — standard PATH lookup, covers manual
+        installs and developer environments where the script IS on PATH.
+    (d) None — caller emits the existing not-found error/log (unchanged).
+
+    Every candidate in (a) and (b) is validated with ``is_file()`` AND
+    ``os.access(X_OK)``; shutil.which already checks X_OK internally.
+    """
+    # (a) interpreter-sibling candidate
+    candidate_a = Path(sys.executable).parent / "mineru-api"
+    if candidate_a.is_file() and os.access(str(candidate_a), os.X_OK):
+        return str(candidate_a)
+
+    # (b) __file__-anchored walk — interpreter-agnostic venv-bin discovery
+    _here = Path(__file__).resolve()
+    for ancestor in _here.parents[:8]:
+        candidate_b = ancestor / "bin" / "mineru-api"
+        if candidate_b.is_file() and os.access(str(candidate_b), os.X_OK):
+            return str(candidate_b)
+
+    # (c) PATH fallback
+    return shutil.which("mineru-api")
+
+
 @mineru_group.command()
 @click.option("--port", type=int, default=0, help="Port for mineru-api (0 = auto-assign).")
 def start(port: int) -> None:
@@ -142,7 +182,15 @@ def start(port: int) -> None:
         return
 
     # Launch subprocess — start_new_session=True so server survives terminal close
-    cmd = ["mineru-api", "--host", "127.0.0.1", "--port", str(port)]
+    # GH #1059: resolve mineru-api from the venv bin first, then fall back to
+    # PATH.  uv tool install only links conexus's own entry points, not
+    # dependencies', so the bare name "mineru-api" fails even though the script
+    # exists at <venv>/bin/mineru-api.
+    mineru_bin = _resolve_mineru_api_bin()
+    if mineru_bin is None:
+        click.echo("Error: mineru-api not found on PATH. Install MinerU first.", err=True)
+        raise click.exceptions.Exit(1)
+    cmd = [mineru_bin, "--host", "127.0.0.1", "--port", str(port)]
     output_root = _mineru_output_root()
     try:
         proc = subprocess.Popen(
@@ -152,7 +200,7 @@ def start(port: int) -> None:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError):
         click.echo("Error: mineru-api not found on PATH. Install MinerU first.", err=True)
         raise click.exceptions.Exit(1)
 
