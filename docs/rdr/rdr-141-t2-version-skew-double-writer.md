@@ -2,17 +2,18 @@
 title: "T2 Version-Skew Double-Writer: Split t2_index_write Exception Arms + Self-Healing Daemon Re-Assert"
 id: RDR-141
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-01
 accepted_date: 2026-06-01
+closed_date: 2026-06-01
 related_issues: [nexus-fcfhz]
 related_rdrs: [RDR-128, RDR-129, RDR-140]
 supersedes: []
-related_tests: []
-implementation_notes: ""
+related_tests: [tests/test_rdr141_version_skew_double_writer.py, tests/daemon/test_t2_ensure_running_inner.py]
+implementation_notes: "Closed implemented 2026-06-01. Epic nexus-4bgkx (8 task beads) merged on feature/nexus-4bgkx-rdr141 (PR #1055). Post-mortem: docs/rdr/post-mortem/141-t2-version-skew-double-writer.md"
 ---
 
 # RDR-141: T2 Version-Skew Double-Writer: Split t2_index_write Exception Arms + Self-Healing Daemon Re-Assert
