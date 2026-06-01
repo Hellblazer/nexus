@@ -471,6 +471,41 @@ class T3Database:
             id=id, document=document, embedding=embedding, metadata=metadata, uri=uri
         )
 
+    def _maybe_client_embed(
+        self, texts: list[str], collection_name: str
+    ) -> list[list[float]] | None:
+        """Single chokepoint for the local-mode client-side embedding invariant.
+
+        In LOCAL mode the T3 daemon (``chroma run`` / HttpClient) has no
+        registration for nexus's ``nexus_local`` embedding function.  Any op
+        that passes ``query_texts`` or upserts without explicit embeddings lets
+        the server fall through to its ``DefaultEmbeddingFunction`` (384-dim),
+        which mismatches local collections (768-dim bge or 384-dim minilm) and
+        produces silent dimension-skip on search or an ``InvalidArgumentError``
+        on write.
+
+        All current and future query/write paths that need text-based embedding
+        MUST funnel through this method so the invariant cannot silently regress
+        when a new method is added:
+
+        - Returns a ``list[list[float]]`` of pre-computed, normalised embeddings
+          in local mode.
+        - Returns ``None`` in cloud mode; callers then pass ``query_texts`` /
+          rely on the server-registered Voyage EF as before.
+
+        Normalisation: the EF may return ``np.ndarray`` rows (TIER0 ONNX /
+        TIER1 fastembed).  ChromaDB's query path is stricter than upsert --
+        normalise all the way down to native Python ``float`` values here so
+        both callers get a consistent type.
+        """
+        if not self._local_mode:
+            return None
+        vecs = self._embedding_fn(collection_name)(texts)
+        return [
+            v.tolist() if hasattr(v, "tolist") else [float(x) for x in v]
+            for v in vecs
+        ]
+
     def _write_batch(
         self,
         col,
@@ -609,7 +644,23 @@ class T3Database:
                         metadatas=chunk_metas,
                     )
                 else:
-                    _chroma_with_retry(col.upsert, ids=chunk_ids, documents=chunk_docs, metadatas=chunk_metas)
+                    # Fix 2: route through the invariant chokepoint.
+                    # In local mode _maybe_client_embed returns pre-computed
+                    # embeddings so the daemon receives explicit vectors rather
+                    # than delegating to its unregistered server-side EF.
+                    # In cloud mode it returns None and the server embeds via
+                    # its registered Voyage EF.
+                    chunk_embs = self._maybe_client_embed(chunk_docs, collection_name)
+                    if chunk_embs is not None:
+                        _chroma_with_retry(
+                            col.upsert,
+                            ids=chunk_ids,
+                            documents=chunk_docs,
+                            embeddings=chunk_embs,
+                            metadatas=chunk_metas,
+                        )
+                    else:
+                        _chroma_with_retry(col.upsert, ids=chunk_ids, documents=chunk_docs, metadatas=chunk_metas)
 
     def _delete_batch(self, col, collection_name: str, ids: list[str]) -> None:
         """Split *ids* into ≤300-record chunks and delete each.
@@ -955,6 +1006,9 @@ class T3Database:
         *where* is an optional ChromaDB metadata filter applied to every collection.
         """
         results: list[dict] = []
+        # Fix 3: track queried vs dimension-skipped counts for all-skipped ERROR.
+        queried_count = 0
+        dim_skipped_count = 0
         for name in collection_names:
             # CCE collections must be queried with voyage-context-3 via
             # contextualized_embed(); using query_texts would invoke the
@@ -995,13 +1049,36 @@ class T3Database:
                     "include": ["documents", "metadatas", "distances"],
                 }
             else:
-                query_kwargs = {
-                    "query_texts": [query],
-                    "n_results": actual_n,
-                    "include": ["documents", "metadatas", "distances"],
-                }
+                # Fix 1: route through the invariant chokepoint.
+                # In local mode _maybe_client_embed returns [norm_vec] so the
+                # daemon receives an explicit embedding rather than delegating
+                # to its unregistered server-side DefaultEmbeddingFunction.
+                # In cloud mode it returns None and we pass query_texts so the
+                # server embeds via its registered Voyage EF.
+                embs = self._maybe_client_embed([query], name)
+                if embs is not None:
+                    query_kwargs = {
+                        "query_embeddings": embs,
+                        "n_results": actual_n,
+                        "include": ["documents", "metadatas", "distances"],
+                    }
+                else:
+                    query_kwargs = {
+                        "query_texts": [query],
+                        "n_results": actual_n,
+                        "include": ["documents", "metadatas", "distances"],
+                    }
             if where is not None:
                 query_kwargs["where"] = where
+            # queried_count tracks only collections that reached col.query().
+            # Empty collections (count==0) and missing collections
+            # (NotFoundError) are skipped by earlier continue statements and
+            # intentionally do NOT count -- the all-skipped ERROR is about
+            # dimension mismatches on collections that exist and have data,
+            # not about empty or absent ones.
+            # Note: CCE collections raise fatally on dimension mismatch (no
+            # dimension-skip path) and are not part of this count by design.
+            queried_count += 1
             try:
                 qr = _chroma_with_retry(col.query, **query_kwargs)
             except _ChromaInvalidArgumentError as exc:
@@ -1019,6 +1096,7 @@ class T3Database:
                         collection=name,
                         error=str(exc),
                     )
+                    dim_skipped_count += 1
                     continue
                 raise
             for doc_id, doc, meta, dist in zip(
@@ -1050,6 +1128,25 @@ class T3Database:
                     )
                     meta = {}
                 results.append({"id": doc_id, "content": doc, "distance": dist, **meta})
+
+        # Fix 3: defense-in-depth — if every queried collection was
+        # dimension-skipped (all vectors mismatch the active embedder), the
+        # silent zero-result path is indistinguishable from "no matching docs".
+        # Log a distinct ERROR so operators can correlate with the root cause
+        # (wrong embedder, or collections need reindexing) rather than assuming
+        # the query had no relevant content.
+        if queried_count > 0 and queried_count == dim_skipped_count:
+            _log.error(
+                "search_all_collections_dimension_skipped",
+                queried=queried_count,
+                skipped=dim_skipped_count,
+                hint=(
+                    "The active embedder's dimension does not match any indexed "
+                    "collection. Either install the matching embedder or reindex "
+                    "the affected collections."
+                ),
+            )
+
         return sorted(results, key=lambda r: r["distance"])
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
