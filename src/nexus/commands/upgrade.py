@@ -30,6 +30,129 @@ def _db_path() -> "Path":  # noqa: F821 — lazy import
     return default_db_path()
 
 
+def _check_deferred_migrations(conn: sqlite3.Connection) -> list[dict]:
+    """Probe for known deferred/gated migration conditions in the current DB.
+
+    GH-1061 E2 (bounded fix): the version-range filter in ``nx upgrade --dry-run``
+    can show ``pending = []`` even when a migration step will block the next daemon
+    start — because the step raised ``MigrationRetry`` (catalog absent) or will
+    raise ``MigrationError`` (high-volume orphans) rather than advancing the stored
+    version.
+
+    Probes the known conditions for the RDR-108 Phase 1c PK migrations, which
+    share the same defer/gate pattern on both ``document_aspects`` and
+    ``aspect_extraction_queue``:
+
+    1. Table still has the legacy ``(collection, source_path)`` PK AND the
+       catalog ``.catalog.db`` is absent → ``MigrationRetry`` on next start.
+    2. Table still has the legacy PK AND high-volume orphan rows (doc_id='')
+       exist → ``MigrationError`` on next start.
+
+    Returns a list of ``{"name": str, "reason": str, "remediation": str}`` dicts,
+    one entry per affected table.  An empty list means no known deferred/gated
+    work was detected.
+    """
+    import os
+
+    from nexus.db.migrations import _catalog_db_path_from_conn, _HIGH_VOLUME_ORPHAN_THRESHOLD
+
+    deferred: list[dict] = []
+
+    threshold = int(
+        os.environ.get(
+            "NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD",
+            str(_HIGH_VOLUME_ORPHAN_THRESHOLD),
+        )
+    )
+
+    try:
+        catalog_db_path = _catalog_db_path_from_conn(conn)
+    except Exception:
+        catalog_db_path = None
+
+    catalog_present = catalog_db_path is not None and catalog_db_path.exists()
+
+    # Both document_aspects and aspect_extraction_queue share the same RDR-108
+    # Phase 1c defer/gate pattern (_migrate_document_aspects_pk_via_apply_pending
+    # and _migrate_aspect_queue_pk_via_apply_pending in migrations.py).
+    tables = [
+        (
+            "document_aspects",
+            "RDR-108 Phase 1c: PK switch document_aspects to doc_id",
+        ),
+        (
+            "aspect_extraction_queue",
+            "RDR-108 Phase 1c: PK switch aspect_extraction_queue to doc_id",
+        ),
+    ]
+
+    for table_name, migration_name in tables:
+        # Skip if table does not exist (fresh install without aspects).
+        has_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        if not has_table:
+            continue
+
+        # Skip if already migrated to doc_id PK.
+        pk_cols = {
+            r[1]
+            for r in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            if r[5] == 1  # pk flag
+        }
+        if pk_cols == {"doc_id"}:
+            continue
+
+        # Migration is still pending.  Check which gate would fire.
+        if not catalog_present:
+            deferred.append({
+                "name": migration_name,
+                "reason": (
+                    "Catalog database absent — migration raises MigrationRetry "
+                    "and will be retried on next daemon start once the catalog exists."
+                ),
+                "remediation": (
+                    "Run `nx catalog setup` to initialise the catalog, "
+                    "then re-run `nx upgrade`."
+                ),
+            })
+            continue
+
+        # Catalog present — check for high-volume orphans (doc_id='').
+        try:
+            rows = conn.execute(
+                """
+                SELECT collection, COUNT(*) AS n
+                FROM {} WHERE doc_id = ''
+                GROUP BY collection HAVING n > ?
+                ORDER BY n DESC
+                """.format(table_name),  # noqa: S608 — table_name is a literal constant
+                (threshold,),
+            ).fetchall()
+        except Exception:
+            rows = []
+
+        if rows:
+            detail = "; ".join(f"{coll} ({n} rows)" for coll, n in rows)
+            deferred.append({
+                "name": migration_name,
+                "reason": (
+                    f"High-volume unmapped orphan collection(s) detected: {detail}. "
+                    f"Migration will raise MigrationError on next daemon start."
+                ),
+                "remediation": (
+                    f"Option 1 — if collection was renamed, map it:\n"
+                    f"    nx catalog rename-collection <old> <new> --yes\n"
+                    f"  then re-run `nx upgrade`.\n"
+                    f"Option 2 — if collection is stale, drop orphans by raising the threshold:\n"
+                    f"    NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD=100000 nx upgrade"
+                ),
+            })
+
+    return deferred
+
+
 def _current_version() -> str:
     try:
         from importlib.metadata import version as _pkg_version
@@ -213,6 +336,22 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
 
         if dry_run:
             if not pending_t2 and not pending_t3:
+                # GH-1061 E2: even when the version-range filter shows no pending
+                # migrations, there may be deferred or gated work that will block
+                # the next daemon start.  Probe for known conditions so the dry-run
+                # output is honest.
+                deferred = _check_deferred_migrations(conn)
+                if deferred:
+                    click.echo(
+                        f"Up to date (v{current}) by version gate, but "
+                        f"{len(deferred)} deferred/gated migration step(s) will "
+                        f"run on next daemon start:"
+                    )
+                    for item in deferred:
+                        click.echo(f"  [deferred] {item['name']}")
+                        click.echo(f"    Reason:      {item['reason']}")
+                        click.echo(f"    Remediation: {item['remediation']}")
+                    return
                 click.echo(f"Up to date (v{current}). No pending migrations.")
                 return
 
@@ -343,8 +482,40 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
         if not auto_mode:
             _migrate_repos_json_to_catalog(dry_run=dry_run)
 
+        # Refresh nexus-managed git hooks across every registered repo so a
+        # stanza change (e.g. a new pgrep guard) lands everywhere in one
+        # upgrade instead of a per-repo `nx hooks update`. Best-effort,
+        # non-auto, non-dry-run; only touches already-managed hooks.
+        if not auto_mode and not dry_run:
+            _refresh_all_git_hooks()
+
     finally:
         conn.close()
+
+
+def _refresh_all_git_hooks() -> None:
+    """Refresh nexus-managed git hooks across all registered repos.
+
+    Best-effort: never raises — a hook-refresh failure must not fail the
+    upgrade. Silent when no managed hooks exist anywhere.
+    """
+    try:
+        from nexus.commands.hooks import refresh_all_managed_hooks
+
+        summary = refresh_all_managed_hooks(echo=False)
+        if summary["refreshed"]:
+            click.echo(
+                f"\nRefreshed {summary['refreshed']} git hook(s) across "
+                f"{summary['repos']} repo(s)"
+                + (
+                    f"; {summary['errors']} repo(s) skipped "
+                    "(see `nx hooks update-all`)."
+                    if summary["errors"]
+                    else "."
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("upgrade_git_hook_refresh_failed", error=str(exc))
 
 
 def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:

@@ -6,6 +6,66 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.6.1] - 2026-06-01
+
+Bug-fix release: restores local-mode operation broken on the 4.28→5.6.0 upgrade
+path, plus the RDR-141 single-writer hardening. Promotes develop (#1055, #1056,
+#1063) to main.
+
+### Added
+
+- **`nx hooks update-all` (#1056).** Refreshes the nexus stanza in already-managed
+  git hooks across all catalog-registered repos, bringing every repo to the
+  current stanza after an upgrade. Unmanaged/uninstalled hooks are untouched; also
+  run automatically by `nx upgrade`.
+
+### Fixed
+
+- **RDR-108 orphan-migration error message (#1056).** The high-volume orphan gate
+  pointed at a non-existent `nx catalog mark-superseded` command; it now references
+  the real `nx catalog rename-collection`.
+
+- **Local-mode search restored (#1058).** The local bge embedding function
+  pre-converted fastembed's numpy arrays to Python lists; chromadb ≥1.x calls
+  `.tolist()` on each element itself, so every local-mode (bge) search raised
+  `'list' object has no attribute 'tolist'`. The embedding function now returns
+  numpy arrays. Added a `chromadb<2` upper bound — the unbounded `>=0.6` silently
+  resolved the contract-tightening 1.5.9.
+- **Collection renames restored (#1057).** `rename_collection_cascade` referenced
+  the `document_aspects.source_path` column dropped at 4.31.0, so every rename
+  failed with `no such column: source_path` on migrated databases. The
+  collision-defense now resolves the live primary-key column (`doc_id` when
+  migrated, else `source_path`) for both the `document_aspects` and
+  `aspect_extraction_queue` cascades.
+- **`nx mineru start` on a stock install (#1059).** `mineru-api` (a bundled
+  dependency's console script) is not linked onto `PATH` by `uv tool install`.
+  Resolution now tries the interpreter's venv bin, then a module-anchored venv
+  walk (fixes the MCP/daemon auto-restart path under a different interpreter),
+  then `PATH`.
+- **Collection-name overflow guidance (#1060).** Relabeling to the longer bge
+  token could exceed ChromaDB's 63-char cap; the error now points at the
+  canonical repo-id name via `nx catalog collection-name` instead of a bare
+  `ValueError`.
+- **Daemon-unreachable log spam (#1048).** `t2_index_write` logged a fallback
+  warning on every write while the daemon was alive-but-busy; it now
+  distinguishes daemon-absent from alive-but-unresponsive and rate-limits the
+  warning per event.
+- **Version-skew double-writer (RDR-141, #1055).** `t2_index_write` split its
+  conflated `except`: a schema-version mismatch (a stale daemon still serving)
+  now re-asserts the supervisor instead of opening a second direct writer on
+  `memory.db`.
+
+### Changed
+
+- **`nx doctor` (#1061 E1).** Now fails (instead of false-green "could not
+  query") when the active embedder's dimension does not match the stored
+  collections' — a total search outage is a failure with remediation.
+- **`nx upgrade --dry-run` (#1061 E2).** Reports deferred/gated RDR-108 migrations
+  (both aspect tables) instead of "no pending migrations" when a gated step would
+  still run on the next daemon bootstrap.
+- **T2-backed commands (#1061 E3).** Print a clean one-liner when the T2 daemon is
+  down instead of a raw `DaemonNotRunningError` traceback.
+
 ## [5.6.0] - 2026-05-31
 
 ### Added

@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.6.1] - 2026-06-01
+
+Plugin version aligned with conexus 5.6.1. No plugin-side changes; the release
+ships `nx`-core bug fixes that restore local-mode search (#1058) and collection
+renames (#1057) on the 4.28→5.6.0 upgrade path, the `mineru-api` PATH resolver
+(#1059), collection-name overflow guidance (#1060), daemon-unreachable log
+de-spam (#1048), the RDR-141 version-skew single-writer fix (#1055), and
+`nx doctor` / `nx upgrade --dry-run` / T2-down diagnostics improvements (#1061).
+
 ## [5.6.0] - 2026-05-31
 
 Plugin version aligned with conexus 5.6.0. No plugin-side changes; the release

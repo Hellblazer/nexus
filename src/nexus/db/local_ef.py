@@ -154,5 +154,11 @@ class LocalEmbeddingFunction:
             # ONNXMiniLM_L6_V2 already returns list[list[float]]
             return self._ef(input)
         else:
-            # fastembed TextEmbedding.embed() returns a generator of numpy arrays
-            return [vec.tolist() for vec in self._ef.embed(input)]
+            # fastembed TextEmbedding.embed() returns a generator of numpy
+            # arrays. Return them as-is: chromadb >= 1.x (issue #1058) calls
+            # ``.tolist()`` on each element itself during serialization
+            # (convert_np_embeddings_to_list), so pre-converting to Python
+            # lists here raised ``'list' object has no attribute 'tolist'`` and
+            # broke ALL local-mode (bge) search. doc_indexer._local_embed
+            # already normalizes np arrays via a hasattr('tolist') guard.
+            return list(self._ef.embed(input))

@@ -545,6 +545,11 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
 _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # Reserved for individual mixed-file exclusions. Format:
     # "tests/test_file.py::test_func"  (no parametrize suffix).
+    #
+    # #1060: pure collection-NAME validation (length/charset) — references a
+    # legacy voyage-named collection as realistic input but makes no cloud-mode
+    # embedder assertion, so the cloud_mode fixture is not applicable.
+    "tests/test_issue_1060_collection_name_overflow.py::test_short_known_voyage_name_passes",
 })
 
 
