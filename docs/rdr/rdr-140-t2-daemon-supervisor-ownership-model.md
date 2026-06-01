@@ -2,12 +2,14 @@
 title: "T2 Daemon Supervisor & Ownership Model: Single-Flight Election to End the Spawn-Race / SQLite-Lock Thrash"
 id: RDR-140
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-31
 accepted_date: 2026-05-31
+closed_date: 2026-05-31
+closed_reason: implemented
 related_issues: [nexus-13bcq]
 related_rdrs: [RDR-128, RDR-129, RDR-120]
 ---
