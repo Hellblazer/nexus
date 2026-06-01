@@ -54,11 +54,30 @@ def t2_handle() -> Iterator[Any]:
     continue to construct ``T2Database(default_db_path())`` directly
     with ``# epsilon-allow`` tokens — this helper is for the user-
     facing memory/plan surface only.
+
+    Note: ``nx plan`` commands open T2 directly (epsilon-allow) and
+    do NOT go through this helper — they must tolerate offline mode.
     """
-    from nexus.daemon.t2_client import make_t2_client
+    import click
+    from nexus.daemon.t2_client import (
+        T2DaemonNotReachableError,
+        T2SchemaVersionMismatchError,
+        make_t2_client,
+    )
 
     client = make_t2_client()
     try:
         yield client
+    except T2DaemonNotReachableError:
+        # T2Client connects lazily on first RPC; the error surfaces here,
+        # not during make_t2_client() construction. Convert to a clean
+        # one-liner so the user sees an actionable message, not a traceback.
+        raise click.ClickException(
+            "No T2 daemon discovery resolved. "
+            "Start with: `nx daemon t2 start`"
+        )
+    except T2SchemaVersionMismatchError as exc:
+        # __str__ already carries client/daemon version + recovery hint.
+        raise click.ClickException(str(exc))
     finally:
         client.close()

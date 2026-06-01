@@ -254,6 +254,60 @@ def _check_t3_local() -> list[HealthResult]:
                 label="Local collections", ok=True,
                 detail=f"{col_count} collections{empty_note}, {size_str} on disk",
             ))
+
+            # GH-1061 E1: dimension-mismatch detection.  Probe each non-empty
+            # collection with a dummy vector of the active ef's dimension.  If
+            # ChromaDB rejects it with "dimension" in the error, the collection
+            # was indexed with a different embedder.  A total mismatch (every
+            # queryable collection rejects the active dim) is a FAIL; a partial
+            # mismatch is a WARN.  Both surface remediation hints.
+            non_empty_cols = [c for c in cols if c.count() > 0]
+            if non_empty_cols:
+                dummy = [0.0] * ef.dimensions
+                mismatched: list[str] = []
+                for col in non_empty_cols:
+                    try:
+                        col.query(query_embeddings=[dummy], n_results=1)
+                    except Exception as probe_exc:
+                        if "dimension" in str(probe_exc).lower():
+                            mismatched.append(col.name)
+                        # Other errors (e.g. collection empty race) are benign.
+
+                if mismatched:
+                    total_queryable = len(non_empty_cols)
+                    mismatch_count = len(mismatched)
+                    is_total = mismatch_count == total_queryable
+                    detail_msg = (
+                        f"active embedder is {ef.dimensions}d ({ef.model_name}) "
+                        f"but {mismatch_count} of {total_queryable} collection(s) "
+                        f"use a different dimension — search returns nothing for those"
+                    )
+                    # L-1: wording must be unambiguous about which side is "wrong".
+                    # The stored vectors were indexed with a different embedder;
+                    # the user must either activate the matching embedder or reindex.
+                    fix_hints = []
+                    if ef.model_name == "all-MiniLM-L6-v2":
+                        fix_hints.append(
+                            "Your collections were indexed with a 768d embedder "
+                            "(bge-base-en-v1.5) but the active embedder is 384d "
+                            "(all-MiniLM-L6-v2 fallback).  "
+                            "Activate the matching embedder: "
+                            "pip install conexus[local]"
+                        )
+                    fix_hints.append(
+                        "Or reindex the mismatched collection(s) with the active "
+                        f"{ef.dimensions}d embedder: "
+                        "nx collection reindex <collection>"
+                    )
+                    results.append(HealthResult(
+                        label="Local collections dimension",
+                        ok=False,
+                        warn=not is_total,   # partial = soft warn; total = hard fail
+                        detail=detail_msg,
+                        fix_suggestions=fix_hints,
+                        fatal=is_total,
+                    ))
+
         except Exception as exc:
             _log.debug("doctor_local_collections_failed", error=str(exc))
             results.append(HealthResult(label="Local collections", ok=True, detail="could not query"))
