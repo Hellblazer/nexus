@@ -512,6 +512,7 @@ class TestDaemonReapDiscrimination:
         monkeypatch, td, handshakes: dict, kills: list,
         graceful_exit: frozenset = frozenset(),
         sigterm_ignored: frozenset = frozenset(),
+        sigkill_ignored: frozenset = frozenset(),
     ) -> None:
         """Pin current version, cmdline, liveness; stub the per-pid handshake
         and capture kills. ``handshakes`` maps pid -> (version, reachable).
@@ -543,7 +544,7 @@ class TestDaemonReapDiscrimination:
 
         def fake_kill(pid, sig):  # noqa: ANN001
             kills.append((pid, sig))
-            if sig == signal.SIGKILL:
+            if sig == signal.SIGKILL and pid not in sigkill_ignored:
                 alive[pid] = False  # SIGKILL is unblockable
             elif sig == signal.SIGTERM and pid not in sigterm_ignored:
                 alive[pid] = False
@@ -609,6 +610,31 @@ class TestDaemonReapDiscrimination:
         assert (700008, signal.SIGKILL) in kills
         # The reap's post-SIGKILL poll observed it dead (SIGKILL flips alive).
         assert td._pid_is_alive(700008) is False
+
+    def test_reap_is_bounded_when_peer_survives_even_sigkill(
+        self, config_dir: Path, db_path: Path, monkeypatch,
+    ) -> None:
+        """The post-SIGKILL confirmation poll must be BOUNDED — a peer that
+        somehow survives SIGTERM and SIGKILL (zombie / kernel stall) must not
+        hang startup. This pins the poll as load-bearing: it loops until
+        _PREDECESSOR_REAP_TIMEOUT then returns (logging the overstay), rather
+        than returning instantly or looping forever."""
+        import signal
+
+        from nexus.daemon import t2_daemon as td
+
+        self._write_discovery(config_dir, 700009, self._CUR)
+        kills: list = []
+        self._install_common(
+            monkeypatch, td, {700009: (self._CUR, True)}, kills,
+            sigterm_ignored=frozenset({700009}),
+            sigkill_ignored=frozenset({700009}),  # never dies
+        )
+
+        # Returns (does not hang) despite the peer never dying.
+        td.T2Daemon(config_dir=config_dir, db_path=db_path)._reap_predecessor_daemon()
+        assert (700009, signal.SIGTERM) in kills
+        assert (700009, signal.SIGKILL) in kills
 
     def test_stale_version_addr_peer_is_reaped(
         self, config_dir: Path, db_path: Path, monkeypatch,
