@@ -13,6 +13,62 @@ import warnings
 
 from nexus.config import default_db_path
 
+# ── T2 daemon-unreachable rate-limiter (GH #1048) ────────────────────────────
+# Emit the daemon-unreachable warning at most once per _WARN_RATE_LIMIT_SECS
+# rather than once per write. Under load (nx dt index, bulk indexing) the
+# function can be called dozens of times for one run; collapse the spam to a
+# single emit plus a suppressed_count field on the next window's emit.
+_WARN_RATE_LIMIT_SECS: float = 60.0
+_warn_lock = threading.Lock()
+# Per-EVENT window: event-name -> (last_emit_monotonic, suppressed_since_emit).
+# Keying by event (not a single global window) means the "daemon absent" and
+# "daemon alive but unresponsive" arms have independent windows, so a state
+# transition (absent->alive or back) surfaces IMMEDIATELY rather than being
+# masked by the other state's still-open window (review S-1, GH #1048).
+_warn_state: dict[str, tuple[float, int]] = {}
+
+
+def _reset_warn_rate_limiter_for_tests() -> None:
+    """Test helper: reset the daemon-unreachable warning rate-limiter."""
+    with _warn_lock:
+        _warn_state.clear()
+
+
+def _emit_unreachable_warn(event: str, **fields) -> None:
+    """Emit a daemon-unreachable warning subject to per-event rate-limiting
+    (GH #1048).
+
+    The first call for an ``event`` (or the first after its window elapses)
+    fires immediately, attaching any ``suppressed_count`` accumulated for that
+    event since its last emit. Calls within the same window increment the
+    event's counter silently.
+
+    The structlog call is made AFTER releasing the lock (we only capture the
+    payload under the lock) so a slow log handler can never serialise other
+    threads on ``_warn_lock`` (review M-2).
+
+    Known limitation (review S-2): on a bulk run shorter than the window the
+    operator sees the first emit (so the condition IS surfaced) but never the
+    trailing ``suppressed_count`` (it only rides the next window's emit, which
+    never comes). Exact per-run totals would need an at-exit flush; deferred as
+    a follow-up since first-occurrence visibility is the load-bearing signal.
+    """
+    payload: tuple[str, dict] | None = None
+    with _warn_lock:
+        last, suppressed = _warn_state.get(event, (0.0, 0))
+        now = time.monotonic()
+        if now - last >= _WARN_RATE_LIMIT_SECS:
+            extra: dict = {"suppressed_count": suppressed} if suppressed else {}
+            _warn_state[event] = (now, 0)
+            payload = (event, {**fields, **extra})
+        else:
+            _warn_state[event] = (last, suppressed + 1)
+    if payload is not None:
+        import structlog
+        ev, kw = payload
+        structlog.get_logger().warning(ev, **kw)
+
+
 # ── Lazy singletons ──────────────────────────────────────────────────────────
 
 _t1_instance = None
@@ -271,20 +327,47 @@ def t2_index_write(write_fn):
     import structlog
 
     client = None
-    # True once a version-skew degradation has emitted its own distinct event
-    # (in _reassert_t2_daemon, or the re-probe-failed sub-path). Suppresses the
-    # generic "start the daemon" banner below, whose hint is WRONG when a stale
-    # daemon is still running (RDR-141 operator-visibility requirement).
-    skew_degraded = False
+    # True once a degraded arm has emitted its OWN distinct, accurate event,
+    # so the generic "start the daemon" banner below is suppressed (its hint is
+    # WRONG when a daemon is actually running — RDR-141 version-skew arm and the
+    # GH #1048 daemon-alive-but-unresponsive arm).
+    degraded_logged = False
     try:
         client = make_t2_client()
         client.database.hello()  # force the lazy connect; raises if down
     except T2DaemonNotReachableError:
-        # No daemon writer exists. Degrading to a direct write is safe — this
-        # is the RDR-128 documented-irreducible availability fallback.
+        # Degrading to a direct write is safe (RDR-128 documented-irreducible
+        # availability fallback). GH #1048: distinguish "daemon absent" from
+        # "daemon alive but unresponsive/timed-out under load" via a read-only
+        # discovery liveness probe (no spawn/reap — that's the supervisor's
+        # job), and rate-limit the warning so a bulk run does not spam it.
         if client is not None:
             client.close()
         client = None
+        # The probe runs on every degraded write (not just emitting ones) so a
+        # state transition is classified accurately each time; the cost is one
+        # stat + os.kill(pid, 0), negligible against the direct DB write this
+        # path is already doing (review M-1/S-3 — accepted by design).
+        from nexus.daemon.discovery import find_t2_daemon
+
+        if find_t2_daemon() is not None:
+            # A live daemon IS registered but did not answer hello() — likely
+            # load / timeout / contention (#1046), NOT a missing daemon.
+            # "start the daemon" would be wrong (it is running).
+            _emit_unreachable_warn(
+                "t2_index_write_daemon_unreachable_but_alive",
+                hint=(
+                    "T2 daemon is running but did not respond to hello(); likely "
+                    "load/timeout/contention — writes degraded to direct until it "
+                    "becomes responsive again"
+                ),
+            )
+        else:
+            _emit_unreachable_warn(
+                "t2_index_write_daemon_unreachable_fallback",
+                hint="start the T2 daemon (`nx daemon t2 start`) to route indexer writes",
+            )
+        degraded_logged = True
     except T2SchemaVersionMismatchError:
         # RDR-141: a stale-VERSION daemon is ALIVE, holds the spawn lock, and
         # is actively serving. Opening a direct writer here would put a SECOND
@@ -293,7 +376,7 @@ def t2_index_write(write_fn):
         # one) and re-probe ONCE through the fresh daemon. Single attempt, no
         # retry loop: on a second mismatch/unreachable we fall through to the
         # bounded direct write. Every degraded sub-path here emits its OWN
-        # distinct event (so the generic banner is suppressed via skew_degraded).
+        # distinct event (so the generic banner is suppressed via degraded_logged).
         if client is not None:
             client.close()
         client = None
@@ -309,7 +392,7 @@ def t2_index_write(write_fn):
                 if client is not None:
                     client.close()
                 client = None
-                skew_degraded = True
+                degraded_logged = True
                 structlog.get_logger().warning(
                     "t2_index_write_version_skew_reprobe_failed",
                     hint=(
@@ -319,7 +402,7 @@ def t2_index_write(write_fn):
                     ),
                 )
         else:
-            skew_degraded = True  # _reassert already emitted its distinct event
+            degraded_logged = True  # _reassert already emitted its distinct event
 
     if client is not None:
         try:
@@ -328,12 +411,13 @@ def t2_index_write(write_fn):
             client.close()
 
     # Degraded path: this is the direct-lock behavior RDR-128 exists to
-    # eliminate, so log it at warning (not debug) — a persistently
-    # unreachable daemon during indexing is operator-actionable. Suppressed
-    # for version-skew degradations, which already logged a distinct event
-    # with accurate advice (the daemon IS running in the DEFERRED cases, so
-    # "start the daemon" would be wrong and could induce a second daemon).
-    if not skew_degraded:
+    # eliminate. Every arm that reaches here with ``client is None`` now sets
+    # ``degraded_logged`` after emitting its own accurate, rate-limited event
+    # (GH #1048 absent/alive split + the RDR-141 version-skew events), so in
+    # practice this guard is always True here. Retained as a forward-compat
+    # backstop: any future arm that degrades WITHOUT logging still surfaces a
+    # warning rather than silently falling through to a direct write.
+    if not degraded_logged:
         structlog.get_logger().warning(
             "t2_index_write_daemon_unreachable_fallback",
             hint="start the T2 daemon (`nx daemon t2 start`) to route indexer writes",
