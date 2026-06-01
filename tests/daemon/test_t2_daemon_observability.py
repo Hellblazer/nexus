@@ -304,6 +304,24 @@ class TestCrashLoopGuard:
         assert dm._restart_count(tmp_path, now=now) == 0
         assert dm._crashloop_tripped(tmp_path, now=now) is False
 
+    def test_tripped_logged_rearms_after_window_expiry(self, tmp_path: Path) -> None:
+        """code-review HIGH-1: a stale ``tripped_logged`` from a previous
+        window must not silence the error log for a NEW crash loop. The first
+        restart of a fresh window (all prior entries aged out) re-arms it."""
+        from nexus.commands import daemon as dm
+
+        now = 1_000_000.0
+        for i in range(dm._CRASHLOOP_MAX_RESTARTS):
+            dm._record_restart(tmp_path, now=now + i)
+        data = dm._read_crashloop(tmp_path)
+        data["tripped_logged"] = True
+        dm._write_crashloop_atomic(tmp_path, data)
+        assert dm._read_crashloop(tmp_path)["tripped_logged"] is True
+
+        later = now + dm._CRASHLOOP_WINDOW_S + 10.0  # a full window later
+        dm._record_restart(tmp_path, now=later)
+        assert dm._read_crashloop(tmp_path)["tripped_logged"] is False
+
 
 class TestCrashLoopRespawnRefusal:
     """A tripped crash-loop guard must make ensure-running log ONCE at error
@@ -345,6 +363,43 @@ class TestCrashLoopRespawnRefusal:
         assert spawns == [], "tripped guard must NOT spawn"
         assert result.exit_code != 0
         assert len(errors) == 1, f"crash-loop must log exactly once, saw {errors}"
+
+    def test_tripped_guard_logs_once_across_invocations(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """The error log fires once, not per suppressed ensure-running call:
+        the tripped_logged sentinel flag suppresses re-logging on the second
+        invocation of an already-tripped guard."""
+        import nexus.commands.daemon as dm
+
+        now = 1_000_000.0
+        for i in range(dm._CRASHLOOP_MAX_RESTARTS):
+            dm._record_restart(tmp_path, now=now + i)
+        monkeypatch.setattr(dm.time, "time", lambda: now + dm._CRASHLOOP_MAX_RESTARTS)
+
+        spawns: list = []
+        monkeypatch.setattr(
+            dm.subprocess, "Popen",
+            lambda *a, **k: spawns.append(a) or _Unreachable(),
+        )
+        errors: list = []
+
+        class _FakeLog:
+            def error(self, event, **kw):
+                errors.append(event)
+
+            def __getattr__(self, _n):
+                return lambda *a, **k: None
+
+        monkeypatch.setattr(dm, "_log", _FakeLog(), raising=False)
+
+        for _ in range(2):
+            CliRunner().invoke(
+                main, ["daemon", "t2", "ensure-running",
+                       "--config-dir", str(tmp_path), "--timeout", "0.2"],
+            )
+        assert spawns == []
+        assert len(errors) == 1, f"must log once across invocations, saw {errors}"
 
 
 class _Unreachable:

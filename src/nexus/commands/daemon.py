@@ -842,6 +842,12 @@ def _record_restart(config_dir: Path, *, now: float) -> int:
     cutoff = now - _CRASHLOOP_WINDOW_S
     data = _read_crashloop(config_dir)
     kept = [t for t in data["timestamps"] if t >= cutoff]
+    if not kept:
+        # Fresh window (all prior restarts aged out): re-arm the one-shot
+        # error log so a NEW crash loop is reported, not silently swallowed
+        # by a stale tripped_logged flag from a previous window (code-review
+        # HIGH-1).
+        data["tripped_logged"] = False
     kept.append(now)
     data["timestamps"] = kept
     _write_crashloop_atomic(config_dir, data)
