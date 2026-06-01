@@ -80,6 +80,15 @@ _PREDECESSOR_REAP_TIMEOUT: float = 5.0
 # so tests can shrink it.
 _HEALTH_PING_TIMEOUT: float = 1.0
 
+# RDR-140 P3.2 option B (nexus-7ffls): a reachable, current-version peer found
+# during the startup reap is a same-version daemon mid-shutdown — it released
+# the spawn lock at the start of exit (we now hold it) but has not fully gone.
+# Single-writer forbids opening the DB while it lives, but it is draining its
+# own writes, so we give it this bounded window to exit on its own before
+# forcing a reap. We NEVER coexist: it either exits here or we kill it. Module
+# constant so tests can shrink it.
+_GRACEFUL_PEER_EXIT_WAIT: float = 3.0
+
 # RDR-129 B2 (nexus-qi1zb): bounded lock-retry for the serving dispatch.
 # Mirrors the bootstrap-migration retry
 # (``nexus.db.t2._apply_pending_with_lock_retry``): three attempts with two
@@ -599,15 +608,19 @@ def _health_ping(payload: dict[str, Any]) -> bool:
     """
     uds = payload.get("uds_path")
     if isinstance(uds, str) and uds:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock = None
         try:
+            # socket() itself can raise (EMFILE) — create inside the try so the
+            # "never raises" contract holds even under fd exhaustion.
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.settimeout(_HEALTH_PING_TIMEOUT)
             sock.connect(uds)
             return True
         except OSError:
             pass
         finally:
-            sock.close()
+            if sock is not None:
+                sock.close()
     host, port = payload.get("tcp_host"), payload.get("tcp_port")
     if isinstance(host, str) and host and isinstance(port, int) and port > 0:
         try:
@@ -1123,13 +1136,21 @@ class T2Daemon:
         cmdline check (PID-reuse guard: refuse to kill a recycled pid whose
         command line is not a t2 daemon). Best-effort; never raises.
 
-        RDR-140 P3.2 (nexus-7ffls): ownership/version-aware discrimination.
-        When *payload* is the peer's ``t2_addr`` token, SPARE it (attach instead
-        of kill) iff it health-pings AND its ``daemon_version`` equals ours — a
-        healthy current-version peer is the legitimate single writer and must
-        not be reaped. A stale-version or unreachable addr peer, and every
-        open-fd-only peer (``payload is None``), falls through to the reap: the
-        RDR-128/129 single-writer backstop is preserved, never weakened.
+        RDR-140 P3.2 option B (nexus-7ffls): ownership/version-aware
+        discrimination — WAIT, never coexist. When *payload* is the peer's
+        ``t2_addr`` token and it health-pings AND its ``daemon_version`` equals
+        ours, the peer is a same-version daemon mid-shutdown (it could not still
+        hold the db spawn lock we just acquired, so it has released it at the
+        start of its own exit). We do NOT SIGTERM it immediately — it is
+        draining its own writes — but we also NEVER open the DB alongside it:
+        we wait up to ``_GRACEFUL_PEER_EXIT_WAIT`` for it to exit on its own,
+        and only if it overstays do we force the reap. Either way this method
+        does not return until the peer is gone, so ``start()`` (which opens
+        ``T2Database`` right after the sweep) is guaranteed single-writer.
+
+        A stale-version or unreachable addr peer, and every open-fd-only peer
+        (``payload is None``), is reaped immediately: the RDR-128/129
+        single-writer backstop is preserved, never weakened.
         """
         if not _pid_is_alive(pid):
             return
@@ -1140,11 +1161,21 @@ class T2Daemon:
         if payload is not None:
             version, reachable = _peer_handshake(pid, payload)
             if reachable and version == _daemon_version():
-                _log.info(
-                    "t2_predecessor_spared_healthy_current",
+                # Same-version peer mid-shutdown: let it drain and exit, but
+                # never coexist — force the reap if it overstays the window.
+                deadline = time.monotonic() + _GRACEFUL_PEER_EXIT_WAIT
+                while time.monotonic() < deadline:
+                    if not _pid_is_alive(pid):
+                        _log.info(
+                            "t2_predecessor_exited_gracefully",
+                            pid=pid, daemon_version=version,
+                        )
+                        return
+                    time.sleep(0.1)
+                _log.warning(
+                    "t2_predecessor_overstayed_graceful_wait_forcing_reap",
                     pid=pid, daemon_version=version,
                 )
-                return
 
         _log.warning("t2_reaping_predecessor_daemon", pid=pid)
         try:
