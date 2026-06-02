@@ -212,6 +212,127 @@ def install_autostart(*, force: bool = False) -> InstallResult:
     )
 
 
+@dataclass(frozen=True)
+class DaemonUninstallReport:
+    """Result of the higher-level ``daemon_uninstall`` orchestration."""
+
+    confirmed: bool
+    unit_status: UninstallStatus
+    unit_dest: Path
+    marker_removed: bool
+    data_removed: bool
+    data_dir: Path
+    daemon_stopped: bool
+    warnings: tuple[str, ...]
+    message: str
+
+
+def _stop_daemon_best_effort() -> tuple[bool, str | None]:
+    """Best-effort ``nx daemon t2 stop``. Returns (stopped, warning)."""
+    from nexus.commands import daemon as _daemon
+
+    cmd = [*_daemon._resolve_nx_bin(), "daemon", "t2", "stop"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
+    except Exception as exc:  # noqa: BLE001 — stop is best-effort
+        return False, f"daemon stop failed: {type(exc).__name__}: {exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip() or (result.stdout or "").strip()
+        return False, f"daemon stop exited {result.returncode}: {detail}"
+    return True, None
+
+
+def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> DaemonUninstallReport:
+    """Orchestrate full daemon removal for the ``daemon_uninstall`` MCP tool.
+
+    With ``confirm=False`` this is a dry run: it reports what WOULD be
+    removed and touches nothing. With ``confirm=True`` it removes the OS
+    autostart unit, stops the daemon (best-effort), and removes the
+    first-run marker. With ``remove_data=True`` it additionally wipes the
+    nexus config / data directory (``nexus_config_dir()``).
+    """
+    from nexus.commands import daemon as _daemon
+    from nexus.config import nexus_config_dir
+    from nexus.mcp._first_run import _first_run_marker_path
+
+    unit_dest = _daemon._autostart_install_dir() / _daemon._autostart_filename_t2()
+    data_dir = nexus_config_dir()
+    marker = _first_run_marker_path()
+
+    if not confirm:
+        parts = [f"the autostart unit at {unit_dest}", "stop the running daemon"]
+        if marker.exists():
+            parts.append(f"the first-run marker at {marker}")
+        if remove_data:
+            parts.append(f"ALL nexus data under {data_dir}")
+        plan = "; ".join(parts)
+        return DaemonUninstallReport(
+            confirmed=False,
+            unit_status=(
+                UninstallStatus.REMOVED if unit_dest.exists() else UninstallStatus.NOT_INSTALLED
+            ),
+            unit_dest=unit_dest,
+            marker_removed=False,
+            data_removed=False,
+            data_dir=data_dir,
+            daemon_stopped=False,
+            warnings=(),
+            message=(
+                f"This would remove: {plan}. Re-run with confirm=true to proceed"
+                + (" (remove_data=true is set: this DELETES your notes and search index)." if remove_data else ".")
+            ),
+        )
+
+    warnings: list[str] = []
+
+    # 1. Remove the OS autostart unit.
+    unit_result = uninstall_autostart()
+    warnings.extend(unit_result.warnings)
+
+    # 2. Stop the running daemon (best-effort).
+    daemon_stopped, stop_warning = _stop_daemon_best_effort()
+    if stop_warning:
+        warnings.append(stop_warning)
+
+    # 3. Remove the first-run marker so a reinstall re-shows the banner.
+    marker_removed = False
+    if marker.exists():
+        try:
+            marker.unlink()
+            marker_removed = True
+        except OSError as exc:
+            warnings.append(f"could not remove first-run marker: {exc}")
+
+    # 4. Optionally wipe all nexus data.
+    data_removed = False
+    if remove_data and data_dir.exists():
+        import shutil
+
+        try:
+            shutil.rmtree(data_dir)
+            data_removed = True
+        except OSError as exc:
+            warnings.append(f"could not remove data dir {data_dir}: {exc}")
+
+    summary = [f"autostart unit: {unit_result.status.value}"]
+    summary.append("daemon stopped" if daemon_stopped else "daemon stop not confirmed")
+    if marker_removed:
+        summary.append("first-run marker removed")
+    if data_removed:
+        summary.append(f"data dir {data_dir} wiped")
+    return DaemonUninstallReport(
+        confirmed=True,
+        unit_status=unit_result.status,
+        unit_dest=unit_result.dest,
+        marker_removed=marker_removed,
+        data_removed=data_removed,
+        data_dir=data_dir,
+        daemon_stopped=daemon_stopped,
+        warnings=tuple(warnings),
+        message="Daemon uninstall complete: " + "; ".join(summary) + ".",
+    )
+
+
 def uninstall_autostart() -> UninstallResult:
     """Remove the T2 daemon OS autostart unit for the current user.
 

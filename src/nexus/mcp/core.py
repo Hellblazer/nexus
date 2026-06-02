@@ -4262,6 +4262,37 @@ async def nx_plan_audit(
     return str(payload)
 
 
+@mcp.tool(
+    title="Uninstall Nexus Daemon",
+    annotations={"destructiveHint": True, "idempotentHint": True},
+)
+def daemon_uninstall(confirm: bool = False, remove_data: bool = False) -> str:
+    """Remove the background nexus T2 daemon installed on first run (RDR-126 §4).
+
+    Removes the OS autostart unit (LaunchAgent on macOS, systemd user unit
+    on Linux), stops the running daemon, and clears the first-run marker.
+
+    Destructive: by default this only DESCRIBES what would be removed and
+    asks you to re-call with ``confirm=true``. Nothing is removed until
+    ``confirm=true``.
+
+    Args:
+        confirm: Must be true to actually remove anything. When false
+            (default), returns a description of what would be removed.
+        remove_data: When true (and ``confirm=true``), ALSO deletes the
+            entire nexus data directory (``~/.config/nexus/``) — your
+            notes, plans, and search index. Irreversible.
+    """
+    from nexus.daemon import installer
+
+    report = installer.uninstall_daemon(confirm=confirm, remove_data=remove_data)
+    lines = [report.message]
+    if report.warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  - {w}" for w in report.warnings)
+    return "\n".join(lines)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
