@@ -420,12 +420,19 @@ def migrate_collection_safe(
         before=before,
         after=after,
         catalog_docs_purged=cascade.catalog_docs_deleted,
+        cascade_failures=cascade.failures,
     )
+    reason = "reindexed and verified; old collection removed"
+    if cascade.failures:
+        # T3 is clean (old collection gone), but derived-state cleanup was
+        # incomplete -- surface it so the caller does not report a fully-clean
+        # migration when catalog/taxonomy orphans may remain.
+        reason += f" (cleanup incomplete: {'; '.join(cascade.failures)})"
     return MigrationOutcome(
         name=stale.name,
         target_name=stale.target_name,
         status="migrated",
         before=before,
         after=after,
-        reason="reindexed and verified; old collection removed",
+        reason=reason,
     )

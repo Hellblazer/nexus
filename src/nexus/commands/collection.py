@@ -118,6 +118,9 @@ def delete_cmd(name: str, yes: bool) -> None:
             f"note: T3 collection '{name}' already absent — running cascade anyway",
             err=True,
         )
+    # Surface any cascade-step failure to the user (orphan rows may remain).
+    for failure in cascade.failures:
+        click.echo(f"warn: {failure}", err=True)
 
     taxonomy_counts = cascade.taxonomy
     chash_deleted = cascade.chash_deleted

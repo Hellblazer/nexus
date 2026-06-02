@@ -16,7 +16,7 @@ environment (no catalog, no daemon) still deletes what it can.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import structlog
 
@@ -25,7 +25,15 @@ _log = structlog.get_logger(__name__)
 
 @dataclass
 class CascadeCounts:
-    """Per-step outcome of :func:`purge_collection_cascade`."""
+    """Per-step outcome of :func:`purge_collection_cascade`.
+
+    ``failures`` carries a human-readable message for each derived-state step
+    that raised. The physical T3 delete still happens (or already happened),
+    but a non-empty ``failures`` means orphan rows may remain; callers should
+    surface it (``nx collection delete`` echoes to stderr, the migration folds
+    it into its outcome). Silence here was the regression both P4-follow-up
+    reviewers flagged.
+    """
 
     t3_absent: bool = False
     taxonomy: dict[str, int] | None = None
@@ -33,6 +41,7 @@ class CascadeCounts:
     pipeline_rows_deleted: int = 0
     catalog_docs_deleted: int = 0
     catalog_projection_deleted: int = 0
+    failures: list[str] = field(default_factory=list)
 
 
 def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
@@ -65,6 +74,7 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
         counts.taxonomy, counts.chash_deleted = t2_index_write(_cascade)
     except Exception as exc:  # noqa: BLE001 — best-effort cleanup
         _log.warning("purge_cascade_t2_failed", collection=name, error=str(exc))
+        counts.failures.append(f"taxonomy/chash cascade failed: {exc}")
 
     # Streaming-pipeline rows (otherwise the next index returns skip/0-chunks).
     try:
@@ -75,6 +85,7 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
         ).delete_pipeline_data_for_collection(name)
     except Exception as exc:  # noqa: BLE001
         _log.warning("purge_cascade_pipeline_failed", collection=name, error=str(exc))
+        counts.failures.append(f"pipeline-state cleanup failed: {exc}")
 
     # Catalog: document rows pointing at the gone collection + projection row.
     try:
@@ -103,5 +114,6 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
                 counts.catalog_projection_deleted = 1
     except Exception as exc:  # noqa: BLE001
         _log.warning("purge_cascade_catalog_failed", collection=name, error=str(exc))
+        counts.failures.append(f"catalog cascade failed: {exc}")
 
     return counts

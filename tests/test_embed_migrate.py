@@ -440,3 +440,61 @@ class TestDefaultReindexCounting:
         )
 
         assert indexed == 2
+
+    def test_rdr_branch_counts_only_indexed_status(
+        self, t3: T3Database, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """rdr__ branch uses batch_index_markdowns -> count only "indexed"
+        (not "skipped"/"failed") so a failed/empty source can't inflate."""
+        good = tmp_path / "good.md"; good.write_text("# Good\n\nx\n")
+        bad = tmp_path / "bad.md"; bad.write_text("# Bad\n\ny\n")
+
+        def _fake_batch(paths, *, corpus, collection_name, force):
+            return {str(good): "indexed", str(bad): "failed"}
+
+        monkeypatch.setattr("nexus.doc_indexer.batch_index_markdowns", _fake_batch)
+
+        indexed, _after = _default_reindex(
+            t3, "rdr__proj__bge-base-en-v15-768__v1",
+            frozenset({str(good), str(bad)}), "proj",
+        )
+
+        assert indexed == 1  # only the "indexed" source
+
+
+class TestCascadeFailureSurfacing:
+    """nexus-prgf4 follow-up: a migration whose delete-cascade leaves orphans
+    must SAY SO in the outcome, not report a fully-clean migration."""
+
+    def test_cascade_failures_folded_into_reason(
+        self, t3: T3Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        old = "docs__proj__minilm-l6-v2-384__v1"
+        target = "docs__proj__bge-base-en-v15-768__v1"
+        _seed(t3, old, _DIM_384)
+
+        import nexus.db.collection_purge as cp
+        from nexus.db.collection_purge import CascadeCounts
+
+        def _failing_cascade(db, name):
+            db.delete_collection(name)
+            return CascadeCounts(failures=["catalog cascade failed: boom"])
+
+        monkeypatch.setattr(cp, "purge_collection_cascade", _failing_cascade)
+
+        def _reindex_fn(db, tgt, sources, corpus):
+            col = db._client.get_or_create_collection(tgt)
+            col.add(ids=[f"{tgt}:0"], embeddings=[_vec(_DIM_768)],
+                    documents=["a"], metadatas=[{"source_path": "doc.md"}])
+            return (1, 1)
+
+        outcome = migrate_collection_safe(
+            t3,
+            StaleCollection(name=old, count=2, source_paths=frozenset({"doc.md"}),
+                            sourceless=0, target_name=target, kind="reindexable"),
+            dry_run=False, reindex_fn=_reindex_fn,
+        )
+
+        assert outcome.status == "migrated"
+        assert "cleanup incomplete" in outcome.reason
+        assert "boom" in outcome.reason
