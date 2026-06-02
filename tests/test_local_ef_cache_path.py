@@ -22,6 +22,68 @@ from nexus.config import fastembed_cache_dir
 from nexus.db.local_ef import LocalEmbeddingFunction, _TIER0_MODEL, _TIER1_MODEL
 
 
+# ── (C) config-driven model selection (RDR-144 P3 deliverable C) ──────────────
+
+
+class TestConfiguredModelSelection:
+    """When constructed with no explicit model_name, LocalEmbeddingFunction
+    honours the ``local.embed_model`` choice persisted by ``nx init`` (P2),
+    falling back to the legacy fastembed-availability auto-select only when
+    no choice is recorded."""
+
+    def test_no_config_key_uses_legacy_autoselect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Backward-compat: absent the key, behaviour is the pre-P3 auto-select."""
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: None)
+        monkeypatch.setattr("nexus.db.local_ef._fastembed_available", lambda: True)
+        assert LocalEmbeddingFunction().model_name == _TIER1_MODEL
+
+        monkeypatch.setattr("nexus.db.local_ef._fastembed_available", lambda: False)
+        assert LocalEmbeddingFunction().model_name == _TIER0_MODEL
+
+    def test_config_bge_with_fastembed_selects_tier1(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: _TIER1_MODEL)
+        monkeypatch.setattr("nexus.db.local_ef._fastembed_available", lambda: True)
+        assert LocalEmbeddingFunction().model_name == _TIER1_MODEL
+
+    def test_config_minilm_forces_tier0_even_with_fastembed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit 384 choice is honoured even when fastembed is available."""
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: _TIER0_MODEL)
+        monkeypatch.setattr("nexus.db.local_ef._fastembed_available", lambda: True)
+        assert LocalEmbeddingFunction().model_name == _TIER0_MODEL
+
+    def test_config_bge_without_fastembed_falls_back_loud(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """bge chosen but extra not installed: fall back to tier0 and WARN
+        (not silent — P5a doctor surfaces it). Never raise."""
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: _TIER1_MODEL)
+        monkeypatch.setattr("nexus.db.local_ef._fastembed_available", lambda: False)
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            "nexus.db.local_ef._log",
+            type("L", (), {"warning": lambda self, ev, **k: warnings.append(ev),
+                           "debug": lambda self, ev, **k: None})(),
+        )
+        ef = LocalEmbeddingFunction()
+        assert ef.model_name == _TIER0_MODEL
+        assert warnings, "expected a structured warning on bge→tier0 fallback"
+
+    def test_explicit_model_name_arg_ignores_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit model_name= always wins over the config choice."""
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: _TIER1_MODEL)
+        assert (
+            LocalEmbeddingFunction(model_name=_TIER0_MODEL).model_name == _TIER0_MODEL
+        )
+
+
 # ── fastembed_cache_dir() resolution ──────────────────────────────────────────
 
 

@@ -67,6 +67,34 @@ def _fastembed_available() -> bool:
         return False
 
 
+def _select_model_name() -> str:
+    """Resolve the local embedding model when none is explicitly given.
+
+    RDR-144 P3 (C): honour the ``local.embed_model`` choice persisted by
+    ``nx init`` before falling back to the legacy fastembed-availability
+    auto-select. Backward-compatible: absent the config key, behaviour is
+    unchanged (tier-1 if fastembed importable, else tier-0).
+
+    If the user chose bge-768 but the ``[local]`` extra is not installed,
+    fall back to tier-0 with a structured WARNING (never silent — ``nx
+    doctor`` surfaces it; P5a) rather than crashing on a missing import.
+    """
+    from nexus.config import local_embed_model_choice
+
+    configured = local_embed_model_choice()
+    if configured in _MODEL_DIMS:
+        if configured == _TIER1_MODEL and not _fastembed_available():
+            _log.warning(
+                "local_embed_model_unavailable",
+                chosen=configured,
+                fallback=_TIER0_MODEL,
+                hint="install conexus[local] (or run `nx init`) to use bge-768",
+            )
+            return _TIER0_MODEL
+        return configured  # type: ignore[return-value]
+    return _TIER1_MODEL if _fastembed_available() else _TIER0_MODEL
+
+
 class LocalEmbeddingFunction:
     """ChromaDB-compatible embedding function using local ONNX models.
 
@@ -80,11 +108,10 @@ class LocalEmbeddingFunction:
 
     def __init__(self, model_name: str | None = None) -> None:
         if model_name is not None:
+            # Explicit arg always wins (forced-tier callers, build_from_config).
             self._model_name = model_name
-        elif _fastembed_available():
-            self._model_name = _TIER1_MODEL
         else:
-            self._model_name = _TIER0_MODEL
+            self._model_name = _select_model_name()
 
         self._dimensions = _MODEL_DIMS.get(self._model_name, 384)
         self._ef: Any = None  # lazy init

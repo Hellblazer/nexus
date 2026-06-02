@@ -129,20 +129,131 @@ class TestLocalMode:
         # repo_root=cfg_dir so the repo's own .nexus.yml does not bleed in.
         assert load_config(repo_root=cfg_dir)["local"]["embed_model"] == _TIER1_MODEL
 
-    def test_no_model_fetch_in_p2(
+    def test_no_warmup_when_extra_absent(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """P2 scope guard: nx init must NOT construct ANY embedding function
-        (no fetch / no extra-add — that is P3). Make instance construction
-        fatal at ``__new__`` so the guard fires regardless of how an EF might
-        be reached, and independent of whether fastembed is installed."""
+        """When the [local] extra is not installed in-process, nx init must
+        NOT attempt an in-process warmup (it cannot — fastembed is absent). It
+        takes the extra-add / instruction path instead."""
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        import nexus.db.local_ef as local_ef
-
-        def _fatal_new(cls, *a, **kw):  # noqa: ANN001, ANN002, ANN003
-            raise AssertionError("nx init must not construct an EF in P2")
-
-        monkeypatch.setattr(local_ef.LocalEmbeddingFunction, "__new__", _fatal_new)
+        monkeypatch.setattr("nexus.commands.init._local_extra_installed", lambda: False)
+        monkeypatch.setattr("nexus.commands.init._uv_receipt_path", lambda: None)
+        monkeypatch.setattr(
+            "nexus.commands.init._warmup_bge",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("must not warmup when extra absent")
+            ),
+        )
 
         result = CliRunner().invoke(init_cmd, ["--yes"])
+        assert result.exit_code == 0, result.output
+
+
+# ── P3: extra-add (A) + warmup pre-fetch (B) ──────────────────────────────────
+
+
+class TestExtraAddAndWarmup:
+    def test_bge_with_extra_present_warms_up(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fresh-local + fastembed available in-process → warmup-embed runs."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._local_extra_installed", lambda: True)
+        called: list[list[str]] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._warmup_bge", lambda: called.append(["warm"])
+        )
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert called == [["warm"]]
+
+    def test_offline_warmup_is_graceful_not_crash(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Offline / cache-miss during warmup → actionable message, exit 0,
+        never a crash or hang (CA-1 Refinement B)."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._local_extra_installed", lambda: True)
+
+        # Real _warmup_bge, but the embed call raises (simulated offline).
+        import nexus.db.local_ef as local_ef
+
+        def _boom(self, *a, **kw):  # noqa: ANN001
+            raise RuntimeError("offline: could not fetch model")
+
+        monkeypatch.setattr(local_ef.LocalEmbeddingFunction, "__call__", _boom)
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        out = result.output.lower()
+        assert "offline" in out or "cache" in out or "could not" in out
+
+    def test_editable_tree_no_receipt_prints_manual_no_reinstall(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Editable/dev tree (no uv-receipt.toml) → manual instruction, and
+        the reinstall subprocess is NEVER shelled (clobber-a-dev-tree guard)."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._local_extra_installed", lambda: False)
+        monkeypatch.setattr("nexus.commands.init._uv_receipt_path", lambda: None)
+        import subprocess
+
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("must not shell reinstall on a dev tree")
+            ),
+        )
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert "pip install" in result.output.lower() or "conexus[local]" in result.output
+
+    def test_receipt_present_shells_reinstall(
+        self, cfg_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """uv-tool install (receipt present) → shell the editable-safe
+        reinstall adding [local]; no in-process warmup (new venv)."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._local_extra_installed", lambda: False)
+        receipt = tmp_path / "uv-receipt.toml"
+        receipt.write_text("[tool]\n")
+        monkeypatch.setattr("nexus.commands.init._uv_receipt_path", lambda: receipt)
+        calls: list[list[str]] = []
+        import subprocess
+
+        def _fake_run(cmd, *a, **k):  # noqa: ANN001
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert len(calls) == 1
+        cmd = calls[0]
+        assert "uv" in cmd[0] and "install" in cmd and "--reinstall" in cmd
+        assert any("[local]" in part for part in cmd)
+
+    def test_minilm_choice_does_not_fetch_or_install(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Choosing the bundled 384 model fetches/installs nothing."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr(
+            "nexus.commands.init._warmup_bge",
+            lambda: (_ for _ in ()).throw(AssertionError("no warmup for minilm")),
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._ensure_local_extra",
+            lambda: (_ for _ in ()).throw(AssertionError("no extra-add for minilm")),
+        )
+
+        result = CliRunner().invoke(init_cmd, ["--embedder", "minilm-384"])
         assert result.exit_code == 0, result.output

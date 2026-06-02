@@ -426,6 +426,22 @@ def fastembed_cache_dir() -> Path:
     return Path.home() / ".local" / "share" / "nexus" / "fastembed_cache"
 
 
+def local_embed_model_choice() -> str | None:
+    """Return the local embedder the user selected via ``nx init`` (RDR-144).
+
+    Reads ``local.embed_model`` from ``~/.config/nexus/config.yml`` — the key
+    ``nx init`` (P2) persists. ``None`` when no choice has been recorded, in
+    which case ``LocalEmbeddingFunction`` keeps its legacy
+    fastembed-availability auto-select.
+    """
+    path = _global_config_path()
+    if path.exists():
+        data = yaml.safe_load(path.read_text()) or {}
+        value = (data.get("local") or {}).get("embed_model", "")
+        return value or None
+    return None
+
+
 def catalog_path() -> Path:
     """Return the catalog directory path.
 

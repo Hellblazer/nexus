@@ -12,11 +12,18 @@ guaranteed present). This module performs NO network or install work.
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
+from pathlib import Path
+
 import click
+import structlog
 
 import nexus.config as _config
 from nexus.config import set_config_value
-from nexus.db.local_ef import _TIER0_MODEL, _TIER1_MODEL
+from nexus.db.local_ef import _TIER0_MODEL, _TIER1_MODEL, _fastembed_available
+
+_log = structlog.get_logger(__name__)
 
 #: User-facing choice token → canonical model id understood by
 #: ``LocalEmbeddingFunction(model_name=...)``.
@@ -32,6 +39,96 @@ _EMBED_MODEL_KEY = "local.embed_model"
 #: Approximate one-time download size for the bge-768 ONNX model, stated up
 #: front so the user makes an informed choice.
 _BGE_DOWNLOAD_HINT = "~140 MB"
+
+
+# ── P3 (A) extra-add, editable-safe ───────────────────────────────────────────
+
+
+def _local_extra_installed() -> bool:
+    """True when the ``[local]`` extra (fastembed) is importable in-process."""
+    return _fastembed_available()
+
+
+def _uv_receipt_path() -> Path | None:
+    """Return the uv-tool install receipt path, or None when this is not a
+    uv-tool install (dev/editable tree, or ``uv`` not on PATH).
+
+    Presence of ``$(uv tool dir)/conexus/uv-receipt.toml`` is the signal that
+    a ``uv tool install --reinstall`` is safe (it won't clobber a dev tree).
+    """
+    if shutil.which("uv") is None:
+        return None
+    try:
+        out = subprocess.run(
+            ["uv", "tool", "dir"], capture_output=True, text=True, timeout=10, check=True
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    receipt = Path(out.stdout.strip()) / "conexus" / "uv-receipt.toml"
+    return receipt if receipt.is_file() else None
+
+
+def _ensure_local_extra() -> bool:
+    """Install the ``[local]`` extra when safe.
+
+    uv-tool install (receipt present) → shell an editable-safe reinstall that
+    adds ``[local]``. Dev/editable tree (no receipt) → print the manual
+    instruction and do NOT shell anything (clobber-a-dev-tree guard, CA-2).
+
+    Returns True when a reinstall was shelled (the model fetches on first
+    embed of the freshly-installed venv), False when the user must act.
+    """
+    receipt = _uv_receipt_path()
+    if receipt is None:
+        click.echo(
+            "\nThe local embedder needs the [local] extra. This looks like a "
+            "dev/editable tree, so install it manually:"
+        )
+        click.echo("  pip install 'conexus[local]'   # or: uv sync --extra local")
+        return False
+
+    click.echo("\nInstalling the [local] extra (fastembed) …")
+    subprocess.run(
+        ["uv", "tool", "install", "--reinstall", "--from", "conexus[local]", "conexus"],
+        check=True,
+    )
+    click.echo(
+        "Installed. The bge-768 model fetches automatically on first local "
+        "embed — or re-run `nx init` to provision it now."
+    )
+    return True
+
+
+# ── P3 (B) model pre-fetch warmup, offline-safe ───────────────────────────────
+
+
+def _warmup_bge() -> None:
+    """Pre-fetch the bge-768 model by running one warmup embed through the P1
+    chokepoint (lands in the stable XDG cache, not $TMPDIR).
+
+    Wrapped so an offline / cache-miss never crashes or wedges first search:
+    fastembed logs an error and returns None on a failed download, which would
+    otherwise None-deref (CA-1 Refinement B). Convert any failure into an
+    actionable message naming the cache path.
+    """
+    from nexus.db.local_ef import LocalEmbeddingFunction
+
+    click.echo(f"\nFetching bge-768 ({_BGE_DOWNLOAD_HINT}) — one-time download …")
+    try:
+        ef = LocalEmbeddingFunction(model_name=_TIER1_MODEL)
+        vectors = ef(["warmup"])
+        if not vectors:
+            raise RuntimeError("embedder returned no vectors")
+        click.echo("Done — bge-768 is cached and ready.")
+    except Exception as exc:  # noqa: BLE001 — any failure must stay actionable
+        cache = _config.fastembed_cache_dir()
+        _log.warning("bge_warmup_failed", error=str(exc), cache=str(cache))
+        click.echo(
+            f"Could not fetch the bge-768 model (offline or download failed): {exc}\n"
+            f"It will be retried automatically on your next local search/index.\n"
+            f"Cache location: {cache}",
+            err=True,
+        )
 
 
 @click.command("init")
@@ -92,8 +189,14 @@ def init_cmd(embedder: str | None, assume_yes: bool) -> None:
     set_config_value(_EMBED_MODEL_KEY, model)
     click.echo(f"\nSaved: {_EMBED_MODEL_KEY} = {model}")
 
-    if choice == "bge-768":
-        click.echo(
-            f"The bge-768 model ({_BGE_DOWNLOAD_HINT}) downloads automatically to a "
-            "stable cache on first local embed, once the [local] extra is installed."
-        )
+    if choice != "bge-768":
+        # minilm-384 is bundled — nothing to fetch or install.
+        return
+
+    # bge-768: provision the extra + model. If fastembed is already importable
+    # in THIS process, warmup now. Otherwise add the extra (a fresh venv the
+    # running process can't import from) and let first-embed fetch the model.
+    if _local_extra_installed():
+        _warmup_bge()
+    else:
+        _ensure_local_extra()
