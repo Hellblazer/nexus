@@ -2,11 +2,12 @@
 title: "Guided Install / Onboarding & Local-Embedder Provisioning (nx init): Make the 384-vs-768 Embedder an Explicit Guided Choice, Not a Blunt Packaging Default"
 id: RDR-144
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-01
+accepted_date: 2026-06-01
 related_issues: [nexus-qwl7o]
 related_rdrs: [RDR-076, RDR-126, RDR-143, RDR-038, RDR-109]
 supersedes: []

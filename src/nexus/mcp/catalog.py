@@ -694,6 +694,12 @@ def main():
     )
     # RDR-126 P2 (nexus-bsjro): see nexus/mcp/core.py for rationale.
     ensure_installed_and_running()
+    # RDR-144 P5b: the embedder advisory notice is deliberately NOT applied
+    # here. It rides core.main()'s server instructions. The .mcpb bundle
+    # routes Desktop/Cowork users to nexus.mcp.core only (mcpb/manifest.json),
+    # so the target population always gets it via core. Wiring it here too
+    # would double the notice for Claude Code users (who connect to BOTH the
+    # core and catalog servers). Single channel, on core.
     try:
         check_version_compatibility()
         mcp.run(transport="stdio")

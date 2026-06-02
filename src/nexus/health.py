@@ -188,6 +188,66 @@ def _check_cli_version() -> list[HealthResult]:
     return [r]
 
 
+def local_embedder_advisory(
+    choice: str | None, active_model: str
+) -> HealthResult | None:
+    """Surface the two user-invisible local-embedder states (RDR-144 P5a).
+
+    The active embedder is resolved silently by ``_resolve_local_model``; the
+    user never sees which model actually ran. ``nx doctor`` renders the two
+    divergences that matter:
+
+    * **State 1 — default 384**: no ``nx init`` choice recorded and the
+      bundled 384-dim minilm is active. An advisory nudge toward ``nx init``
+      for the materially better bge-768.
+    * **State 2 — degraded bge**: the user chose bge-768 via ``nx init`` but
+      the ``[local]`` extra is missing, so the resolver silently fell back to
+      384. This is a no-silent-fallback-for-correctness violation; flag it as
+      actionable, not a structlog line only.
+
+    ``choice`` is :func:`nexus.config.local_embed_model_choice` (the persisted
+    ``local.embed_model`` or ``None``); ``active_model`` is the resolved
+    ``LocalEmbeddingFunction.model_name``. Returns a soft-warning
+    ``HealthResult`` (never fatal — search still works, just sub-optimally) or
+    ``None`` when the active model already matches the user's intent.
+    """
+    from nexus.db.local_ef import _TIER0_MODEL, _TIER1_MODEL
+
+    if choice == _TIER1_MODEL and active_model == _TIER0_MODEL:
+        # State 2: chose bge, but the extra is missing -> silent 384 fallback.
+        return HealthResult(
+            label="Local embedder",
+            ok=False,
+            warn=True,
+            detail=(
+                "you selected bge-768 (nx init) but the [local] extra is not "
+                "installed — search is silently running at 384-dim "
+                "(all-MiniLM-L6-v2), materially worse than your choice"
+            ),
+            fix_suggestions=[
+                "Install the local extra and provision bge-768: nx init",
+                "Or directly: pip install 'conexus[local]'",
+            ],
+        )
+
+    if choice is None and active_model == _TIER0_MODEL:
+        # State 1: default 384, never chose -> advisory upgrade nudge.
+        return HealthResult(
+            label="Local embedder",
+            ok=False,
+            warn=True,
+            detail=(
+                "running with the default 384-dim embedder (all-MiniLM-L6-v2)"
+            ),
+            fix_suggestions=[
+                "Run `nx init` to upgrade to bge-768 for materially better "
+                "local search quality",
+            ],
+        )
+
+    return None
+
+
 def _check_t3_local() -> list[HealthResult]:
     from nexus.config import _default_local_path
 
@@ -220,10 +280,20 @@ def _check_t3_local() -> list[HealthResult]:
     # Embedding model
     from nexus.db.local_ef import LocalEmbeddingFunction
     ef = LocalEmbeddingFunction()
-    r = HealthResult(label="Embedding model", ok=True, detail=f"{ef.model_name} ({ef.dimensions}d)")
-    if ef.model_name == "all-MiniLM-L6-v2":
-        r.fix_suggestions = ["Upgrade: pip install conexus[local]  (768d bge-base, better quality)"]
-    results.append(r)
+    results.append(
+        HealthResult(
+            label="Embedding model", ok=True, detail=f"{ef.model_name} ({ef.dimensions}d)"
+        )
+    )
+
+    # RDR-144 P5a: config-aware upgrade / degradation advisory. Replaces the
+    # old unconditional minilm nudge (which pestered users who explicitly
+    # chose 384 and never caught the chose-bge-but-extra-missing degrade).
+    from nexus.config import local_embed_model_choice
+
+    advisory = local_embedder_advisory(local_embed_model_choice(), ef.model_name)
+    if advisory is not None:
+        results.append(advisory)
 
     # Collection count and disk usage. Empty collections are kept on purpose
     # (they preserve embedding-model metadata so the next store_put doesn't

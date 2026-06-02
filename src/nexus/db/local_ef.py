@@ -42,13 +42,20 @@ _MODEL_TOKENS: dict[str, str] = {
 def local_model_token(model_name: str | None = None) -> str:
     """Return the RDR-109 normalized token for a local embedding model.
 
-    ``model_name=None`` picks the active tier (tier 1 if fastembed is
-    importable, else tier 0). Used by the write path
-    (``effective_embedding_model_for_writes`` in ``corpus.py``) and by
-    ``nx doctor`` to report what's actually embedding the collection.
+    ``model_name=None`` resolves the active model the same way
+    ``LocalEmbeddingFunction`` does (RDR-144 P3 (C)): the ``local.embed_model``
+    choice persisted by ``nx init`` first, else the fastembed-availability
+    auto-select. This MUST stay aligned with ``_select_model_name`` — the
+    write path (``effective_embedding_model_for_writes`` in ``corpus.py``)
+    stamps the returned token into the collection name, so a divergence
+    would name a collection bge-768 while embedding 384-dim vectors.
+
+    Resolves quietly (``warn=False``): this is called per collection-name
+    derivation on the write path, so the bge-but-no-extra warning is left to
+    the EF-construction path to avoid log spam.
     """
     if model_name is None:
-        model_name = _TIER1_MODEL if _fastembed_available() else _TIER0_MODEL
+        model_name = _resolve_local_model(warn=False)
     return _MODEL_TOKENS.get(model_name, "minilm-l6-v2-384")
 
 
@@ -67,6 +74,42 @@ def _fastembed_available() -> bool:
         return False
 
 
+def _resolve_local_model(*, warn: bool) -> str:
+    """Resolve the active local embedding model (single source of truth).
+
+    RDR-144 P3 (C): honour the ``local.embed_model`` choice persisted by
+    ``nx init`` before falling back to the legacy fastembed-availability
+    auto-select. Backward-compatible: absent the config key, behaviour is
+    unchanged (tier-1 if fastembed importable, else tier-0).
+
+    If the user chose bge-768 but the ``[local]`` extra is not installed,
+    fall back to tier-0. When ``warn`` is True (the EF-construction path) a
+    structured WARNING is emitted — never silent; ``nx doctor`` (P5a) surfaces
+    it to the user. ``warn`` is False on the write-path token derivation to
+    avoid emitting the same warning once per collection-name lookup.
+    """
+    from nexus.config import local_embed_model_choice
+
+    configured = local_embed_model_choice()
+    if configured in _MODEL_DIMS:
+        if configured == _TIER1_MODEL and not _fastembed_available():
+            if warn:
+                _log.warning(
+                    "local_embed_model_unavailable",
+                    chosen=configured,
+                    fallback=_TIER0_MODEL,
+                    hint="install conexus[local] (or run `nx init`) to use bge-768",
+                )
+            return _TIER0_MODEL
+        return configured  # type: ignore[return-value]
+    return _TIER1_MODEL if _fastembed_available() else _TIER0_MODEL
+
+
+def _select_model_name() -> str:
+    """EF-construction model resolver — warns on bge→tier0 fallback."""
+    return _resolve_local_model(warn=True)
+
+
 class LocalEmbeddingFunction:
     """ChromaDB-compatible embedding function using local ONNX models.
 
@@ -80,11 +123,10 @@ class LocalEmbeddingFunction:
 
     def __init__(self, model_name: str | None = None) -> None:
         if model_name is not None:
+            # Explicit arg always wins (forced-tier callers, build_from_config).
             self._model_name = model_name
-        elif _fastembed_available():
-            self._model_name = _TIER1_MODEL
         else:
-            self._model_name = _TIER0_MODEL
+            self._model_name = _select_model_name()
 
         self._dimensions = _MODEL_DIMS.get(self._model_name, 384)
         self._ef: Any = None  # lazy init
@@ -135,10 +177,19 @@ class LocalEmbeddingFunction:
 
             self._ef = ONNXMiniLM_L6_V2()
         else:
-            # Tier 1: fastembed
+            # Tier 1: fastembed. Thread a stable, XDG-respecting cache_dir so
+            # the bge-768 model is not re-downloaded to a volatile $TMPDIR on
+            # every cold start (RDR-144 P1 / CRITICAL-1). The resolver is read
+            # here — the sole EF-construction chokepoint — so launchd-spawned
+            # daemon/MCP processes that never see the nx-init shell env still
+            # land on the stable dir.
             from fastembed import TextEmbedding
 
-            self._ef = TextEmbedding(model_name=self._model_name)
+            from nexus.config import fastembed_cache_dir
+
+            cache_dir = fastembed_cache_dir()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            self._ef = TextEmbedding(model_name=self._model_name, cache_dir=str(cache_dir))
         _log.debug("local_ef_initialized", model=self._model_name, dims=self._dimensions)
 
     def __call__(self, input: list[str]) -> list[list[float]]:

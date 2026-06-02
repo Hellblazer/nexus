@@ -179,3 +179,38 @@ def test_local_collections_omits_empty_note_when_none(tmp_path, monkeypatch) -> 
     )
     assert local_collections_line is not None
     assert "(including" not in local_collections_line.detail
+
+
+def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> None:
+    """RDR-144 P5a integration: when the user chose bge-768 but the [local]
+    extra is missing (EF resolves to 384), `_check_t3_local` emits the
+    actionable degraded-embedder advisory — not just a structlog line.
+
+    Uses a non-existent local path so the daemon collection-probe block is
+    skipped; the advisory runs before it and needs no chroma.
+    """
+    from nexus.db.local_ef import _TIER0_MODEL, _TIER1_MODEL
+    from nexus.health import _check_t3_local
+
+    monkeypatch.setattr(
+        "nexus.config._default_local_path", lambda: tmp_path / "does_not_exist"
+    )
+    # User chose bge; the active EF resolved to the 384 fallback (extra absent).
+    monkeypatch.setattr(
+        "nexus.config.local_embed_model_choice", lambda: _TIER1_MODEL
+    )
+
+    class _FakeEF:
+        model_name = _TIER0_MODEL
+        dimensions = 384
+
+    monkeypatch.setattr(
+        "nexus.db.local_ef.LocalEmbeddingFunction", lambda *a, **k: _FakeEF()
+    )
+
+    results = _check_t3_local()
+    advisory = next((r for r in results if r.label == "Local embedder"), None)
+    assert advisory is not None
+    assert advisory.warn is True and advisory.fatal is False
+    joined = advisory.detail + " " + " ".join(advisory.fix_suggestions)
+    assert "bge-768" in joined and "384" in joined

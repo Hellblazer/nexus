@@ -48,13 +48,14 @@ For the full deployment story across all three surfaces (install, daemon lifecyc
 
 ```bash
 uv tool install conexus                  # install the nx CLI (built-in ONNX MiniLM embedder)
-# or, for the higher-quality local embedder (BAAI/bge-base-en-v1.5, 768-dim):
-uv tool install "conexus[local]"
+nx init                                  # guided: choose your local embedder (384 vs bge-768)
 nx daemon t2 install --autostart         # register the T2 daemon (one-time)
 nx doctor                                # verify installation
 nx index repo .                          # index your repo + discover topics
 nx search "how does retry work"          # semantic search, fully local
 ```
+
+`nx init` presents the embedder choice (recommended bge-768, ~140 MB one-time download, for materially better local search, vs the bundled 384-dim MiniLM), adds the `[local]` extra for you when you pick bge-768, and migrates any pre-existing 384-dim collections safely. To request the higher-quality embedder directly at install time instead: `uv tool install "conexus[local]"`.
 
 The `nx` CLI provides direct access to all storage tiers, indexing, search, the catalog, and taxonomy. See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for a walkthrough, [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md) for every command and flag.
 

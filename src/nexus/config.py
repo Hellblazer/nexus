@@ -389,6 +389,59 @@ def _default_local_path() -> Path:
     return Path.home() / ".local" / "share" / "nexus" / "chroma"
 
 
+def fastembed_cache_dir() -> Path:
+    """Return the stable on-disk cache dir for the Tier-1 (bge-768) fastembed model.
+
+    RDR-144 P1 (CA-1): without an explicit ``cache_dir`` fastembed downloads
+    to a volatile ``tempfile.gettempdir()/fastembed_cache`` that the OS wipes
+    on reboot, re-downloading the 768-dim model on every cold start and
+    breaking offline-after-first-run. The sole embedding-function
+    construction chokepoint (``LocalEmbeddingFunction._init_ef``) reads this
+    resolver so the launchd-spawned daemon/MCP processes — which never see
+    the ``nx init`` shell env (CRITICAL-1) — still land on a stable dir.
+
+    Precedence:
+      1. ``local.fastembed_cache_path`` in ``~/.config/nexus/config.yml``
+      2. ``$XDG_DATA_HOME/nexus/fastembed_cache``
+      3. ``~/.local/share/nexus/fastembed_cache``
+
+    ``FASTEMBED_CACHE_PATH`` env is intentionally NOT consulted: it does not
+    reach launchd-spawned daemon/MCP processes (the CRITICAL-1 root cause),
+    so this resolver — read at the EF-construction chokepoint — owns the
+    address and always passes an explicit ``cache_dir`` to fastembed.
+
+    Nothing is created here — the construction site materialises the dir.
+    """
+    path = _global_config_path()
+    if path.exists():
+        data = yaml.safe_load(path.read_text()) or {}
+        configured = (data.get("local") or {}).get("fastembed_cache_path", "")
+        if configured:
+            # expanduser so a hand-edited ``~/models`` resolves to $HOME, not
+            # a literal ``./~/models`` created relative to the daemon's cwd.
+            return Path(configured).expanduser()
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return Path(xdg) / "nexus" / "fastembed_cache"
+    return Path.home() / ".local" / "share" / "nexus" / "fastembed_cache"
+
+
+def local_embed_model_choice() -> str | None:
+    """Return the local embedder the user selected via ``nx init`` (RDR-144).
+
+    Reads ``local.embed_model`` from ``~/.config/nexus/config.yml`` — the key
+    ``nx init`` (P2) persists. ``None`` when no choice has been recorded, in
+    which case ``LocalEmbeddingFunction`` keeps its legacy
+    fastembed-availability auto-select.
+    """
+    path = _global_config_path()
+    if path.exists():
+        data = yaml.safe_load(path.read_text()) or {}
+        value = (data.get("local") or {}).get("embed_model", "")
+        return value or None
+    return None
+
+
 def catalog_path() -> Path:
     """Return the catalog directory path.
 

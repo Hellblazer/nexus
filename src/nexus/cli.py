@@ -50,6 +50,7 @@ from nexus.commands.enrich import enrich
 from nexus.commands.hook import hook_group
 from nexus.commands.hooks import hooks
 from nexus.commands.index import index
+from nexus.commands.init import init_cmd
 from nexus.commands.memory import memory
 from nexus.commands.mineru import mineru_group
 from nexus.commands.plan import plan as plan_group
@@ -101,6 +102,7 @@ hook_group.hidden = True
 main.add_command(hook_group, name="hook")
 main.add_command(hooks)
 main.add_command(index)
+main.add_command(init_cmd, name="init")
 main.add_command(memory)
 main.add_command(mineru_group, name="mineru")
 main.add_command(plan_group, name="plan")
