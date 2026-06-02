@@ -335,10 +335,16 @@ def deliver_pending_banner(content_blocks: list[Any]) -> bool:
     ``False`` when there was nothing pending or delivery failed.
 
     Marker discipline (RDR-126 §3, load-bearing): the marker is written
-    ONLY on a successful prepend. On a malformed result (empty list, a
+    ONLY after a successful prepend. On a malformed result (empty list, a
     first block with no ``text`` attribute) the banner stays pending and
     retries on the next tool call — a failed delivery never burns the
     one-shot.
+
+    If the prepend succeeds but the marker WRITE then fails (e.g. read-only
+    config dir), the banner was already delivered this session so the queue
+    is cleared and we return ``True``; because the marker is absent, the
+    next process startup re-queues the banner (an at-most-double show, not
+    a silent burn).
     """
     global _PENDING_BANNER
     spec = _PENDING_BANNER
@@ -377,7 +383,16 @@ def install_banner_dispatch_hook(server: object) -> bool:
     hook is logged at debug and returns ``False`` so MCP boot is never
     blocked. The notification channel is intentionally not used here
     (RDR-126 A2: ``notifications/message`` rendering is unverified; the
-    tool-response content prepend is the primary, load-bearing channel).
+    tool-response content prepend is the primary, load-bearing channel —
+    see the §3 deferral note in the RDR).
+
+    FRAGILE COUPLING (review): this reaches into ``server._mcp_server``
+    and patches ``request_handlers[CallToolRequest]`` — both private
+    FastMCP internals, not public MCP SDK API. Verified against mcp
+    1.27.1. A library bump that restructures these returns ``False``
+    here (no banner, logged at debug). The TestDispatchHook integration
+    test exercises the real FastMCP path and will go red if the internals
+    move, catching the breakage in CI rather than in production.
     """
     try:
         from mcp import types  # type: ignore[import-not-found]

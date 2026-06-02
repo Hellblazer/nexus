@@ -228,7 +228,14 @@ class DaemonUninstallReport:
 
 
 def _stop_daemon_best_effort() -> tuple[bool, str | None]:
-    """Best-effort ``nx daemon t2 stop``. Returns (stopped, warning)."""
+    """Best-effort ``nx daemon t2 stop``. Returns (stopped, warning).
+
+    Intentionally a subprocess: stopping the daemon is daemon-lifecycle,
+    not installer logic, so it stays a shell-out per the RDR-126 §2
+    installer-lift decision (same rationale that keeps ``ensure-running``
+    a subprocess). Depends on ``nx`` being resolvable; failure is
+    best-effort and surfaced as a warning, never raised.
+    """
     from nexus.commands import daemon as _daemon
 
     cmd = [*_daemon._resolve_nx_bin(), "daemon", "t2", "stop"]
@@ -308,11 +315,27 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     if remove_data and data_dir.exists():
         import shutil
 
-        try:
-            shutil.rmtree(data_dir)
-            data_removed = True
-        except OSError as exc:
-            warnings.append(f"could not remove data dir {data_dir}: {exc}")
+        # Path-safety guard (review H2): a misconfigured NEXUS_CONFIG_DIR
+        # (e.g. "/", "/Users", or a bare home dir) must never let rmtree
+        # wipe a broad tree. confirm=True gates accidents; this gates a
+        # confused caller with a bad env. Refuse the home dir itself and
+        # any shallow path (<=3 components covers "/", "/Users",
+        # "/Users/<user>", "/home/<user>", "/etc", "/var/lib"); a real
+        # config dir (~/.config/nexus) and test tmp dirs are deeper.
+        resolved = data_dir.resolve()
+        home = Path.home().resolve()
+        if resolved == home or len(resolved.parts) <= 3:
+            warnings.append(
+                f"refusing to remove data dir {data_dir}: path is too shallow "
+                "to be a nexus config dir; skipping data removal "
+                "(check NEXUS_CONFIG_DIR)."
+            )
+        else:
+            try:
+                shutil.rmtree(data_dir)
+                data_removed = True
+            except OSError as exc:
+                warnings.append(f"could not remove data dir {data_dir}: {exc}")
 
     summary = [f"autostart unit: {unit_result.status.value}"]
     summary.append("daemon stopped" if daemon_stopped else "daemon stop not confirmed")

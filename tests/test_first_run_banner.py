@@ -143,6 +143,31 @@ class TestDeliveryAndMarkerDiscipline:
         assert blocks[0].text.startswith(spec.text)
         assert _first_run._first_run_marker_path().exists()
 
+    def test_marker_write_failure_after_prepend_still_delivers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the prepend succeeds but mark_shown() raises, the banner was
+        delivered (return True, queue cleared) and the marker is absent so
+        the next startup re-queues — an at-most-double show, never a burn."""
+        spec = _first_run.maybe_banner(
+            InstallStatus.NEWLY_INSTALLED, Path("/x/com.nexus.t2.plist")
+        )
+        assert spec is not None
+        _first_run.queue_banner(spec)
+
+        def _boom() -> None:
+            raise OSError("read-only config dir")
+
+        monkeypatch.setattr(_first_run, "mark_shown", _boom)
+        blocks = [_Block("output")]
+        delivered = _first_run.deliver_pending_banner(blocks)
+
+        assert delivered is True
+        assert blocks[0].text.startswith(spec.text)
+        assert not _first_run._first_run_marker_path().exists()
+        # Queue cleared this session (no double-show within the session).
+        assert _first_run.deliver_pending_banner([_Block("next")]) is False
+
     def test_block_without_text_attr_is_treated_as_failure(self) -> None:
         spec = _first_run.maybe_banner(
             InstallStatus.NEWLY_INSTALLED, Path("/x/com.nexus.t2.plist")

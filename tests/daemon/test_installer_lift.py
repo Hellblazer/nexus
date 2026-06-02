@@ -46,12 +46,14 @@ def _stub_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestPublicSurface:
-    def test_status_enums_present(self) -> None:
-        assert installer.InstallStatus.NEWLY_INSTALLED
-        assert installer.InstallStatus.ALREADY_PRESENT
-        assert installer.InstallStatus.FAILED
-        assert installer.UninstallStatus.REMOVED
-        assert installer.UninstallStatus.NOT_INSTALLED
+    def test_status_enum_values(self) -> None:
+        # Values are serialized into the daemon_uninstall MCP tool's text
+        # response (report.unit_status.value), so lock them exactly.
+        assert installer.InstallStatus.NEWLY_INSTALLED.value == "newly_installed"
+        assert installer.InstallStatus.ALREADY_PRESENT.value == "already_present"
+        assert installer.InstallStatus.FAILED.value == "failed"
+        assert installer.UninstallStatus.REMOVED.value == "removed"
+        assert installer.UninstallStatus.NOT_INSTALLED.value == "not_installed"
 
     def test_error_hierarchy(self) -> None:
         assert issubclass(installer.SymlinkRefusedError, installer.InstallerError)

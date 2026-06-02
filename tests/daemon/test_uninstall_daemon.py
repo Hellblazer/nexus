@@ -93,9 +93,9 @@ class TestConfirmedUninstall:
         # Data dir preserved when remove_data is False.
         assert report.data_removed is False
         assert config_dir.exists()
-        # A daemon-stop command was issued.
+        # A daemon-stop command was issued (exact argv, not substring).
         stop_cmds = [c.args[0] for c in mock_run.call_args_list]
-        assert any("stop" in " ".join(map(str, cmd)) for cmd in stop_cmds)
+        assert ["/opt/conexus/bin/nx", "daemon", "t2", "stop"] in stop_cmds
 
     def test_remove_data_wipes_config_dir(self, _env: Path) -> None:
         config_dir = _env / "cfg"
@@ -110,6 +110,21 @@ class TestConfirmedUninstall:
         assert report.confirmed is True
         assert report.data_removed is True
         assert not config_dir.exists()
+
+    def test_remove_data_refuses_shallow_config_dir(
+        self, _env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A misconfigured NEXUS_CONFIG_DIR pointing at a shallow path
+        (review H2) must NOT be rmtree'd even with confirm+remove_data."""
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", "/Users")
+        with patch.object(installer.subprocess, "run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stderr = ""
+            mock_run.return_value.stdout = ""
+            report = installer.uninstall_daemon(confirm=True, remove_data=True)
+        assert report.data_removed is False
+        assert any("refusing to remove" in w for w in report.warnings)
+        assert Path("/Users").exists()
 
     def test_confirmed_when_unit_already_absent_is_graceful(
         self, _env: Path, monkeypatch: pytest.MonkeyPatch
