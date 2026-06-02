@@ -13,6 +13,7 @@ related_issues:
 related_rdrs:
   - RDR-120
   - RDR-105
+  - RDR-143
 ---
 
 # RDR-126: Claude Desktop Deployment: Unified Chat and Cowork Surface
@@ -96,8 +97,8 @@ The RDR-120 substrate split (conexus 4.34.0+, shipped 2026-05-22) is what makes 
 - **Documented** — MCPB v0.4 `"uv"` server type is specified to handle compiled dependencies via host-provided uv. No confirmed production `"uv"`-type MCPB exists as of May 2026 (Azure MCP Server uses `"binary"`, not `"uv"`); see Assumption Research / A1.
 - **Documented** — Claude Desktop has three MCP integration models: local MCP (manual config), Desktop Extensions (`.mcpb`), Custom Connectors (remote MCP via OAuth). Only `.mcpb` matches Nexus's local-first architecture.
 - **Documented** — MCPB has no signing-trust signal in either Anthropic marketplace as of May 2026; distribution carries no signing guarantee.
-- **Assumed** — Claude Desktop's MCP-spawn context provides `uv` (host application manages runtime). Needs spike.
-- **Assumed** — `notifications/message` renders in Claude Desktop chat in a user-visible way. Needs spike.
+- **Verified (live spike, 2026-06-02)** — Claude Desktop's MCP-spawn context resolves `uv` (by absolute path, via an injected login-shell PATH) and launches the uv-type extension; the installed conexus `.mcpb` extension's `.venv` resolves `nexus` + compiled deps and `nx-mcp` serves. See §A1 below and Revision History.
+- **Assumed** — `notifications/message` renders in Claude Desktop chat in a user-visible way. Likely-false (see §A2); the design uses tool-response content prepend as the primary channel, so this is not gate-blocking.
 
 ### Assumption Research
 
@@ -113,9 +114,9 @@ The nexus `mcpb/manifest.json` includes `mcp_config.command: "uv"`. If Claude De
 
 The key ambiguity: MANIFEST.md calls `mcp_config` optional for the uv type (host manages uv internally), but the v0.4 JSON schema lists it as required. Whether Claude Desktop uses the `entry_point` field alone (host-managed uv path) or `mcp_config.command` (user-PATH-dependent uv path) is only resolvable by running the A1 spike.
 
-**Verdict**: Likely-false on current docs. Spike required.
+**Verdict**: **VERIFIED by live spike (2026-06-02)** — the docs-only "likely-false" prediction below was OVERTURNED. The pre-spike reasoning (uv absent from the bare launchd GUI PATH) did not model Claude Desktop's actual behavior: Desktop injects a login-shell-like PATH at extension spawn and resolves `uv` by absolute path (`/Users/.../.local/bin/uv`). Evidence: the installed conexus uv-type `.mcpb` extension has a built `.venv` importing `nexus` + `chromadb` + `pydantic` (compiled C-extensions); `~/Library/Logs/Claude/mcp-server-Conexus.log` shows `Using MCP server command: .../.local/bin/uv` → `Server started and connected successfully` → `nx-mcp` over stdio → full `tools/list`; a prior `Nexus (Spike)` extension launched cleanly 2026-05-23. The `brew install uv` fallback is therefore adequate-to-unnecessary; an astral-installer `uv` at `~/.local/bin` suffices. Install surface: Settings → Extensions (Desktop Extensions), NOT the Claude Code `/plugin` installer (which rejects `.mcpb`). Full evidence: T2 `nexus_rdr/126-research-A1-A2-A5`.
 
-**Minimal spike spec**: Author a minimal MCPB with `server.type: "uv"`, `mcp_config.command: "uv"`, and one compiled dep (e.g. `pydantic>=2`). Test on macOS with uv at `/opt/homebrew/bin/uv` (typically NOT in GUI-inherited PATH), then with uv at `/usr/local/bin/uv`, then at `~/.local/bin/uv`. Observe: (a) does Claude Desktop accept the extension as compatible? (b) does the MCP server reach `serve()`? (c) what error appears if uv is not found? Also test removing `mcp_config` to probe the host-managed-uv path via `entry_point` alone. If uv is absent from GUI PATH, the fallback mitigation (document `brew install uv` as prerequisite) is the correct resolution.
+_Historical (pre-spike) reasoning, retained for the record: docs suggested likely-false because MANIFEST.md claims the host manages uv while only Node.js is bundled (issues #84/#89), and the bare launchd GUI PATH excludes `~/.local/bin`/homebrew. The live spike showed Desktop augments PATH, so this prediction did not hold._
 
 #### A2 Research — notifications/message rendering in Claude Desktop
 
@@ -139,12 +140,12 @@ No end-to-end sentinel run has been recorded. The "live test executing in user's
 
 ### Critical Assumptions
 
-- [ ] **A1**: Claude Desktop's MCP-spawn context provides a `uv` runtime such that a `"type": "uv"` MCPB resolves `conexus` and its compiled C-extension dependencies on first launch — **Status**: Unverified (docs suggest likely-false; see Assumption Research / A1) — **Method**: Spike
+- [x] **A1**: Claude Desktop's MCP-spawn context provides a `uv` runtime such that a `"type": "uv"` MCPB resolves `conexus` and its compiled C-extension dependencies on first launch — **Status**: VERIFIED (live spike, 2026-06-02; the docs-only "likely-false" is OVERTURNED) — **Method**: Spike. Evidence on Claude Desktop 1.9255.2: conexus is installed as a uv-type `.mcpb` extension with a fully-built `.venv` (imports `nexus` + `chromadb` + `pydantic` compiled C-extensions); `~/Library/Logs/Claude/mcp-server-Conexus.log` shows `Using MCP server command: /Users/.../.local/bin/uv` → `Server started and connected successfully` → `nx-mcp` over stdio → full `tools/list`. A prior `Nexus (Spike)` extension also launched cleanly 2026-05-23. Claude Desktop injects a login-shell-like PATH at extension spawn and resolves `uv` by absolute path (NOT the bare launchd default), so the earlier "uv not on GUI PATH" concern is moot; `uv` at `~/.local/bin` (astral installer) suffices.
 - [ ] **A2**: `notifications/message` (severity `info`) emitted by the MCP server renders in Claude Desktop chat in a way the user notices — **Status**: Unverified (docs suggest likely-false; design's primary channel is tool-response content prepend, which is reliable; see Assumption Research / A2) — **Method**: Spike (not gate-blocking)
-- [ ] **A3**: LaunchAgent install from inside MCP startup succeeds without elevated privileges (writes to `~/Library/LaunchAgents/` which is user-owned) — **Status**: Verified — **Method**: Source Search (`src/nexus/commands/daemon.py` already does this)
-- [ ] **A4**: MCPB uninstall via Claude Desktop removes the bundle but does NOT cascade to LaunchAgent removal — **Status**: Verified — **Method**: Docs Only (no manifest hook in MCPB spec for uninstall-time actions)
-- [ ] **A5**: Cowork SDK transport end-to-end bidirectional state-sharing works as documented (sentinel test) — **Status**: Partially Verified (architecture verified by docs + code per Assumption Research / A5; live sentinel still required) — **Method**: Spike (sentinel: Cowork agent writes T2, host reads; host writes T2, Cowork agent reads)
-- [ ] **A6**: First-run marker (`~/.config/nexus/.mcp_first_run_complete`) is the right granularity to distinguish "banner shown" from "OS unit installed"; OS unit is the source of truth for install state — **Status**: Verified — **Method**: Source Search (no current code conflates these)
+- [x] **A3**: LaunchAgent install from inside MCP startup succeeds without elevated privileges (writes to `~/Library/LaunchAgents/` which is user-owned) — **Status**: Verified — **Method**: Source Search (`src/nexus/commands/daemon.py` already does this)
+- [x] **A4**: MCPB uninstall via Claude Desktop removes the bundle but does NOT cascade to LaunchAgent removal — **Status**: Verified — **Method**: Docs Only (no manifest hook in MCPB spec for uninstall-time actions)
+- [x] **A5**: Cowork SDK transport end-to-end bidirectional state-sharing works as documented (sentinel test) — **Status**: VERIFIED (live, 2026-06-02, user-attested) — **Method**: Spike. Architecture was already verified by docs + code; the live cross-surface interaction (Cowork VM ↔ host T2/T3 daemons, shared with CLI/plugin) was confirmed in a Cowork session. All surfaces interact correctly.
+- [x] **A6**: First-run marker (`~/.config/nexus/.mcp_first_run_complete`) is the right granularity to distinguish "banner shown" from "OS unit installed"; OS unit is the source of truth for install state — **Status**: Verified — **Method**: Source Search (no current code conflates these)
 
 **Method definitions**:
 
@@ -158,7 +159,7 @@ No end-to-end sentinel run has been recorded. The "live test executing in user's
 
 The work decomposes into nine specification items, numbered for phase-review-gate cross-walk:
 
-1. **Distribution architecture (three-surface).** Claude Code: marketplace path unchanged. Claude Cowork: SDK transport unchanged (no new install artifact; verification artifact added). Claude Desktop chat: new `.mcpb` Desktop Extension via `"type": "uv"`, deps declared in a bundled `pyproject.toml` pinning `conexus>=<version>`. The three surfaces are documented as one unified product surface in `docs/desktop-deployment.md` (new doc).
+1. **Distribution architecture (three-surface).** Claude Code: marketplace path unchanged. Claude Cowork: SDK transport unchanged (no new install artifact; verification artifact added). Claude Desktop chat: new `.mcpb` Desktop Extension via `"type": "uv"`, deps declared in a bundled `pyproject.toml` pinning `conexus>=<version>`, **installed via Claude Desktop Settings → Extensions** (the Desktop Extensions surface — NOT the Claude Code `/plugin` installer, which rejects `.mcpb` with "plugin validation failed"). The three surfaces are documented as one unified product surface in `docs/desktop-deployment.md` (new doc).
 
 2. **Daemon first-run on MCP startup.** All MCP entry points (`nx-mcp`, `nx-mcp-catalog`) call a shared `_first_run.ensure_installed()` function before serving tools. The function: (a) checks if the OS unit exists (LaunchAgent / systemd file) — if yes, skip install; (b) if no, invokes the existing install logic from `nexus.daemon.installer` (lifted from `src/nexus/commands/daemon.py`); (c) always calls `daemon t2 ensure-running` so the current session works. Idempotent across clean state, pre-installed state, and marker-only state. The OS unit is the source of truth.
 
@@ -170,7 +171,7 @@ The work decomposes into nine specification items, numbered for phase-review-gat
 
 6. **Cross-surface consistency.** The same `_first_run.ensure_installed()` runs in all MCP startup paths. This means installing the Claude Code plugin and starting a session for the first time also runs the install (currently only `ensure-running`). Side effect: patches Gap 3 (plugin installed but daemon never persistently installed). The SessionStart hook continues to call `ensure-running` for the rare case where the MCP server has not been started yet in the session, but the install-on-first-MCP-spawn path dominates in practice.
 
-7. **`.mcpb` manifest schema v0.4 with `server.type: "uv"`.** Repository layout: new `mcpb/` directory at repo root containing `manifest.json` and a bundled `pyproject.toml` pinned to `conexus>=<version>`. Manifest fields: `manifest_version: "0.4"`, `name: "nexus"`, `version: <from pyproject.toml>`, `description`, `author`, `server.type: "uv"`, `server.entry_point: "src/server.py"` (or equivalent), `compatibility.claude_desktop: ">=1.0.0"`, `compatibility.platforms: ["darwin", "linux"]`. `user_config` optional for nexus data directory.
+7. **`.mcpb` manifest schema v0.4 with `server.type: "uv"`.** Repository layout: new `mcpb/` directory at repo root containing `manifest.json` and a bundled `pyproject.toml` pinned to `conexus>=<version>`. Manifest fields: `manifest_version: "0.4"`, `name: "conexus"` (matches the installed extension identifier `local.mcpb.<owner>.conexus` and the 5.0 package rename — NOT the legacy `nexus`), `version: <from pyproject.toml>`, `description`, `author`, `server.type: "uv"`, `server.entry_point: "src/server.py"` (or equivalent), `compatibility.claude_desktop: ">=1.0.0"`, `compatibility.platforms: ["darwin", "linux"]`. `user_config` optional for nexus data directory.
 
 8. **Out of scope.** Signing trust signals (no spec support in MCPB v2.1.2). Windows Claude Desktop (daemon installer has no Windows path; defer to a follow-up RDR). MCP Apps interactive UI for `nx_answer` (LB2 in the strategic synthesis; separate large bet). Marketplace submission of the Claude Code plugin and Smithery listing (QW2/QW3 in the strategic synthesis; not technical, do separately).
 
@@ -308,10 +309,13 @@ The `daemon_uninstall` tool with default `confirm=false` matches MCP destructive
 - **Risk**: Existing CLI users see unexpected behavior when MCP startup now installs the daemon unit
   **Mitigation**: Idempotent install (OS unit detection); pre-existing units are detected and skipped. Banner text variant handles this case.
 
+- **Risk**: The installed `.mcpb` Desktop extension does not auto-update with PyPI/marketplace releases — users silently run the version bundled at install time (a THIRD version-drift surface beyond the plugin↔CLI lockstep RDR-143 addresses). Observed live: an installed conexus 5.1.0 extension while CLI/plugin were 5.8.0.
+  **Mitigation**: The mcpb runtime already self-reports staleness at launch (`mcp-server-Conexus.log`: `[conexus-mcpb] installed conexus=X, latest on PyPI=Y … re-download the .mcpb to upgrade. NX_MCPB_SKIP_UPDATE_CHECK=1 to silence`) — this is the primary user signal. Day-2 recipe: download the current `nexus.mcpb` from the GitHub release and reinstall via Settings → Extensions (see Day 2 Operations). Whether to extend RDR-143-style nudging/automation to this surface is tracked as a follow-up bead (filed 2026-06-02); manual re-install is the v1 story.
+
 ### Failure Modes
 
 - **MCP startup install fails (write permission, unsupported platform)**: `ensure_installed()` returns `FAILED`; daemon still spawned via `ensure-running` so the current session works; banner shows the failure with manual-install instructions. Visible to developer through MCP server stderr.
-- **Banner content malformed**: Tool response is malformed; first tool call appears to fail. Mitigated by treating banner as best-effort: try/except around prepend; on exception, log to stderr and serve the tool response unchanged. Marker still gets written (one-shot semantics preserved).
+- **Banner content malformed**: Tool response is malformed; first tool call appears to fail. Mitigated by treating banner as best-effort: try/except around prepend; on exception, log to stderr and serve the tool response unchanged. **The marker is NOT written on a prepend exception** — it is written only after the banner is actually delivered on a channel (§Approach §3 "mark shown after either channel succeeds"), so a failed prepend retries on the next tool call rather than silently burning the one-shot banner. (This resolves the earlier ambiguity where the marker was written on exception, which would permanently lose the first-run banner — the exact Gap-5 contract — when prepend fails and notifications are not rendered.)
 - **uv runtime absent on Claude Desktop chat host**: MCPB install fails with "uv not found"; no daemon installed; user sees a Claude Desktop install error. Mitigated by README documentation pointing at `brew install uv` (macOS) or `pip install uv` / `pipx install uv` (Linux).
 - **Cowork SDK bridge dropped a tool call**: Test sentinel write never appears on host side. Diagnostic recipe: check `nx daemon t2 status` then `nx memory list -p _cowork_test`.
 
@@ -319,7 +323,7 @@ The `daemon_uninstall` tool with default `confirm=false` matches MCP destructive
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified (A1, A2, A5 — currently unverified)
+- [x] All Critical Assumptions resolved: A1 + A5 VERIFIED by live spike (2026-06-02); A3/A4/A6 source-search verified; A2 likely-false but not gate-blocking (design routes around it via tool-response content prepend)
 - [ ] RDR-126 accepted via `/conexus:rdr-gate` + `/conexus:rdr-accept`
 - [ ] Strategic-synthesis rename decision (`nexus-mkj6u`) made and shipped, OR explicitly deferred to a later RDR (decoupled scope)
 
@@ -333,13 +337,13 @@ A user with no prior Nexus install on a fresh macOS user account can: (1) double
 
 Author a minimal `mcpb/manifest.json` and `mcpb/pyproject.toml` declaring `conexus>=<current>`. Pack with `mcpb pack`. Install in fresh Claude Desktop on macOS.
 
-#### Step 2: A1 verification
+#### Step 2: A1 verification — DONE (2026-06-02)
 
-Observe whether `uv` resolves `conexus` and its compiled-C-extension deps in Claude Desktop's MCP-spawn context. Record verdict.
+Observe whether `uv` resolves `conexus` and its compiled-C-extension deps in Claude Desktop's MCP-spawn context. **Verdict: VERIFIED** (uv resolved by absolute path; `.venv` built; `nx-mcp` serves). See §A1 / Revision History.
 
-#### Step 3: A2 verification
+#### Step 3: A2 verification — DONE (docs + prior evidence)
 
-Emit a `notifications/message` of severity `info` from the MCP server startup. Observe whether it appears anywhere user-visible in Claude Desktop chat. Record verdict.
+Emit a `notifications/message` of severity `info` from the MCP server startup. Observe whether it appears user-visible in Claude Desktop chat. **Verdict: likely-false** (MCP spec MAY-render; Claude Code #3174 receives-but-doesn't-display); design routes around it. Not gate-blocking. A confirmatory live observation may still be run in Phase 1.
 
 #### Step 4: Idempotency test matrix
 
@@ -347,7 +351,7 @@ Manually toggle states: clean / OS unit pre-installed / marker pre-existing. Ver
 
 #### Step 5: Spike report
 
-Write `mcpb/SPIKE.md` documenting A1, A2, gotchas, and concrete decisions for Phase 2.
+The spike evidence lives in T2 (`nexus_rdr/126-research-A1-A2-A5`, `126-research-A5-update`) and the Desktop MCP logs; producing a dedicated `mcpb/SPIKE.md` is OPTIONAL (retire this step in favor of the T2 record + Revision History, or distill them into SPIKE.md at Phase 2 start for a single Phase-2 reference).
 
 ### Phase 2: Library lift + daemon install/uninstall (RDR-126 §2, §4, §6)
 
@@ -407,7 +411,9 @@ Test full install + first-run + uninstall on a fresh macOS user account and a Li
 | --- | --- | --- | --- | --- | --- |
 | LaunchAgent / systemd unit | `nx daemon t2 status` | `nx daemon t2 status` | `nx daemon t2 uninstall --autostart` OR `daemon_uninstall` MCP tool | OS unit absent after delete | OS unit recreatable from CLI |
 | First-run marker | `ls ~/.config/nexus/.mcp_first_run_complete` | `cat` for timestamp | Removed by `daemon_uninstall` | Banner re-shows after deletion | Stateless; no backup needed |
-| `.mcpb` bundle in Claude Desktop | Claude Desktop Settings → Extensions | Claude Desktop UI | Claude Desktop Uninstall (LaunchAgent orphans — documented) | UI no longer lists | Re-download from GitHub release |
+| `.mcpb` bundle in Claude Desktop | Claude Desktop Settings → Extensions | Claude Desktop UI (shows installed version) | Claude Desktop Uninstall (LaunchAgent orphans — documented) | UI no longer lists | Re-download from GitHub release |
+
+**Update (`.mcpb` does not auto-update).** The installed extension stays on the version bundled at install; it does not track PyPI/marketplace releases. The mcpb runtime self-reports staleness at launch (`mcp-server-Conexus.log`: `installed conexus=X, latest=Y … re-download the .mcpb to upgrade`). Recipe: download the current `nexus.mcpb` from the latest GitHub release and reinstall via Settings → Extensions (re-install replaces the bundle and rebuilds the `.venv`). This is the same drift class as RDR-143 (plugin↔CLI) but for the Desktop surface; automating it is a tracked follow-up.
 
 ### New Dependencies
 
@@ -451,11 +457,15 @@ First-run install adds one LaunchAgent file write to MCP startup. Sub-second. Su
 
 ### Contradiction Check
 
-[To be filled at gate time.]
+Checked 2026-06-02 at gate:
+1. **RDR-143 consistency (version drift + SessionStart daemon).** RDR-143's Shape B SessionStart hook (plugin↔CLI lockstep) and this RDR's `_first_run.ensure_installed()` fire at different lifecycle points (session start vs MCP-server startup) and target different surfaces (CLI binary vs daemon OS unit). No conflict. This RDR adds a third drift surface (the `.mcpb` extension) which is now explicitly documented (Risks + Day 2 Update recipe) rather than left undefended.
+2. **Install-surface distinction.** `.mcpb` installs via Settings → Extensions, NOT the Claude Code `/plugin` installer (which rejects `.mcpb`) — verified live. Captured in §A1, Day 2, and §Approach.
+3. **A1 verdict propagation.** The pre-spike "likely-false" reasoning in §Research Findings is now marked historical; §Key Discoveries, §A1 verdict, and §Critical Assumptions all read VERIFIED consistently.
+No remaining contradictions between Research Findings, the design, and the related RDRs.
 
 ### Assumption Verification
 
-[To be filled at gate time. A1, A2, A5 require spike completion before gate-pass.]
+All critical assumptions resolved (2026-06-02): A1 VERIFIED (live spike — uv resolves, `.venv` builds, `nx-mcp` serves), A5 VERIFIED (live Cowork attestation), A3/A4/A6 source-search/docs verified, A2 likely-false but not gate-blocking (design's primary banner channel is tool-response content prepend; notification is best-effort). No unverified load-bearing assumption remains. Evidence: T2 `nexus_rdr/126-research-A1-A2-A5`, `126-research-A5-update`.
 
 #### API Verification
 
@@ -468,7 +478,7 @@ First-run install adds one LaunchAgent file write to MCP startup. Sub-second. Su
 
 ### Scope Verification
 
-[To be filled at gate time. Minimum Viable Validation is in-scope (Phase 1 spike result drives whether it remains feasible).]
+All 9 §Approach spec items have phase coverage (cross-walked at gate): §1/§7 → Phase 1 (spike) + Phase 3 (manifest); §2/§4/§6 → Phase 2 (library lift + install/uninstall); §3 → Phase 1/2 (first-run banner); §5 → Phase 5 (Cowork verification); release integration → Phase 4; clean-machine → Phase 6. No orphaned spec item. The Minimum Viable Validation (fresh-account install → banner → memory_put/get → uninstall) is in-scope and feasible (A1 verified, so the uv-resolve step is proven). Phase 1 Steps 1-3 are already complete (spikes done); the remaining phases are net-new implementation.
 
 ### Cross-Cutting Concerns
 
@@ -499,4 +509,6 @@ The RDR is sized for a cross-surface lifecycle change. Sections covering individ
 
 ## Revision History
 
+- 2026-06-02: **Gate run — PASSED** (0 Critical, 5 Significant, 4 Observations; all resolved in-place). substantive-critic Layer-3 review found no critical issues and judged the RDR structurally sound for acceptance. Significant fixes applied in-place: (1) propagated the A1 VERIFIED verdict through §Key Discoveries + §A1 (stale "likely-false"/spike-spec text marked historical); (2) checked A3/A4/A6 boxes + corrected the Prerequisites parenthetical; (3) resolved the banner marker-on-exception ambiguity (marker NOT written on prepend failure → retries, preserving the Gap-5 contract); (4) integrated the `.mcpb` staleness drift surface into §Risks + the Day 2 Update recipe (+ follow-up bead); (5) filled the Finalization Gate Contradiction/Assumption/Scope sections. Observations: marked Phase-1 spike steps done (SPIKE.md optional), named the install surface in §Approach §1, added RDR-143 to related_rdrs, corrected the manifest `name` to `conexus`.
+- 2026-06-02: Spike results. **A1 VERIFIED** by live Claude Desktop evidence (installed uv-type `.mcpb` extension with built `.venv`; MCP logs show `uv` resolved by absolute path + `nx-mcp` serving + full `tools/list`; a prior `Nexus (Spike)` launched cleanly 2026-05-23) — the docs-only "likely-false" verdict is overturned; Desktop injects a login-shell PATH, so the GUI-PATH concern is moot. **A5 VERIFIED** (user-attested live Cowork session: all surfaces interact correctly). A2 remains likely-false but the design routes around it (not gate-blocking). With A1/A5 cleared, all critical assumptions are resolved. Side-findings: (1) the installed Desktop extension is stale (conexus 5.1.0 vs 5.8.0) — the `.mcpb` surface does not auto-update with the marketplace/PyPI, a third drift surface beyond plugin↔CLI (RDR-143) [follow-up bead]; (2) `.mcpb` installs via Settings → Extensions, NOT the Claude Code plugin installer (which rejects it); (3) an orphaned `local.mcpb.hal-hildebrand.nexus.json` settings file (rename residue) can be removed. Evidence: T2 `nexus_rdr/126-research-A1-A2-A5`.
 - 2026-05-23: Initial draft.
