@@ -272,6 +272,7 @@ If no marker file is found and no command is configured, the test check is skipp
 | `~/.config/nexus/catalog/.catalog.db` | Catalog: canonical repo→collection registration, documents, and links (`nx index repo` writes here). Replaced `repos.json` as the source of truth in 5.4.0 (RDR-137); a one-shot migration on `nx upgrade` folds any legacy `repos.json` into the catalog and removes it. |
 | `~/.config/nexus/sessions/` | JSON session records (T1 server address, session ID, `created_at`, `tmpdir`) + `session.lock` |
 | `~/.config/nexus/index.log` | Background indexing log (written by git hooks) |
+| `~/.config/nexus/cli_lockstep_marker` | Last CLI version confirmed in lockstep with the plugin (RDR-143). Written by the version-lockstep SessionStart hook only after a confirmed upgrade; absence or a stale value triggers a re-nudge next session. |
 | `.nexus.yml` | Per-repo config overrides |
 
 ## Logging
