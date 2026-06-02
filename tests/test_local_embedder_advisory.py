@@ -56,7 +56,8 @@ class TestState2DegradedBge:
         # choice = bge, but active resolved to 384 => silent degrade.
         r = local_embedder_advisory(_TIER1_MODEL, _TIER0_MODEL)
         assert r is not None
-        assert r.ok is False and r.warn is True
+        # advisory, never fatal — a degraded embedder must not fail doctor.
+        assert r.ok is False and r.warn is True and r.fatal is False
         joined = r.detail + " " + " ".join(r.fix_suggestions)
         # must name the degradation AND the actionable fix
         assert "384" in joined
