@@ -19,11 +19,12 @@ If you're on 3.14+, install 3.13 with `uv python install 3.13` — uv will use i
 
 ```bash
 uv tool install conexus
-# or, for the higher-quality local embedder (BAAI/bge-base-en-v1.5, 768-dim):
-uv tool install "conexus[local]"
+nx init                       # guided: choose your local embedder
 ```
 
-The default install uses the built-in ONNX MiniLM embedder (384-dim); the optional `[local]` extra adds the larger bge-768 embedder for better local search. The default install also includes MinerU for math-aware PDF extraction (~500 MB of Python deps; first PDF index downloads ~2-3 GB of models — see [PDF indexing notes](#pdf-indexing-and-mineru-models) below).
+The default install uses the built-in ONNX MiniLM embedder (384-dim). `nx init` then walks you through the embedder choice as a guided, informed decision (see [Choosing a local embedder](#choosing-a-local-embedder-nx-init) below): the recommended **bge-768** (BAAI/bge-base-en-v1.5, 768-dim, materially better local search, ~140 MB one-time model download) or the bundled **minilm-384** (instant, lower quality). Choosing bge-768 adds the `[local]` extra for you and provisions the model. The default install also includes MinerU for math-aware PDF extraction (~500 MB of Python deps; first PDF index downloads ~2-3 GB of models, see [PDF indexing notes](#pdf-indexing-and-mineru-models) below).
+
+You can still request the extra directly at install time with `uv tool install "conexus[local]"`, but `nx init` is the recommended path: it presents the trade-off, provisions the model, and detects pre-existing 384-dim collections that would need migrating.
 
 ### Updating
 
@@ -42,6 +43,45 @@ nx doctor --check-mineru   # confirms MinerU is importable (since nexus-2fyb)
 ```
 
 `nx doctor` checks dependencies, credentials, and connectivity. Everything should show `✓` except cloud credentials (which are optional).
+
+### Choosing a local embedder (`nx init`)
+
+`nx init` is the guided first-run setup for local mode. It is distinct from `nx config init` (the cloud-credentials wizard).
+
+```bash
+nx init                       # interactive: prompts for the embedder
+nx init --yes                 # accept the recommended bge-768 non-interactively
+nx init --embedder minilm-384 # pick a specific embedder, no prompt
+```
+
+In **local mode** it presents the two on-device embedders and records your choice in `~/.config/nexus/config.yml` under `local.embed_model`:
+
+- **bge-768** (BAAI/bge-base-en-v1.5, 768-dim): recommended. Materially better local search quality. One-time ~140 MB model download on first use.
+- **minilm-384** (all-MiniLM-L6-v2, 384-dim): bundled, instant, lower quality.
+
+When you choose bge-768, `nx init`:
+
+1. Adds the `[local]` extra if it is missing. For a `uv tool` install it runs an extras-preserving reinstall for you; in a dev/editable checkout it prints the manual command (`pip install 'conexus[local]'` or `uv sync --extra local`) rather than touching your tree.
+2. Pre-fetches the bge-768 model into a stable cache (`local.fastembed_cache_path`, default `~/.local/share/nexus/fastembed_cache`) so it is not re-downloaded on every reboot. If you are offline it prints an actionable message and retries automatically on your next local search.
+3. Detects any pre-existing collections indexed with the old 384-dim embedder (which would otherwise silently return nothing under bge-768) and offers a safe migration, see [Migrating collections after an embedder change](#migrating-collections-after-an-embedder-change).
+
+In **cloud mode** `nx init` is a no-op: embeddings run server-side via Voyage, so there is no local model to provision. It points you at `nx config init` for credentials.
+
+If you skip `nx init`, local mode keeps working on the default 384-dim embedder; `nx doctor` will remind you that bge-768 is available, and will also flag the degraded case where you chose bge-768 but the `[local]` extra is missing.
+
+### Migrating collections after an embedder change
+
+Changing the active embedder (for example default 384 → bge-768 via `nx init`) does **not** silently re-index existing collections. New content is embedded into new collection names; the old 384-dim collections remain and `nx search` returns nothing for them. `nx init` detects this and offers a safe, ordered migration:
+
+1. **Dry-run preview** of exactly what would change.
+2. **Double confirmation** before any destructive step.
+3. **Reindex first** into the new 768-dim collections.
+4. **Delete the old collections only after** the reindex is verified populated.
+
+If a reindex fails partway, the old collection is left fully intact; there is no delete-before-reindex path. Two cases are reported but never auto-deleted (there is no source to re-embed from, so deleting would lose data):
+
+- **`code__` collections**: reindex these yourself with `nx index repo <path>`.
+- **Manual entries** (notes added via `nx store put` / the MCP `store_put` tool, with no source file). A collection that mixes indexed files with manual notes is migrated only after an explicit confirmation that names the note loss, and never under `--yes`.
 
 ### PDF indexing and MinerU models
 
