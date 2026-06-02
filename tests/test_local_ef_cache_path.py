@@ -41,6 +41,23 @@ class TestFastembedCacheDirResolution:
 
         assert fastembed_cache_dir() == configured
 
+    def test_config_key_expands_tilde(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A hand-edited ``~/models`` config value resolves to $HOME, not a
+        literal ``./~/models`` created relative to the daemon's cwd."""
+        cfg_dir = tmp_path / "cfg"
+        cfg_dir.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        (cfg_dir / "config.yml").write_text(
+            "local:\n  fastembed_cache_path: ~/models\n"
+        )
+
+        resolved = fastembed_cache_dir()
+        assert resolved == tmp_path / "home" / "models"
+        assert "~" not in str(resolved)
+
     def test_xdg_fallback_when_no_config_key(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

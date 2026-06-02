@@ -405,6 +405,11 @@ def fastembed_cache_dir() -> Path:
       2. ``$XDG_DATA_HOME/nexus/fastembed_cache``
       3. ``~/.local/share/nexus/fastembed_cache``
 
+    ``FASTEMBED_CACHE_PATH`` env is intentionally NOT consulted: it does not
+    reach launchd-spawned daemon/MCP processes (the CRITICAL-1 root cause),
+    so this resolver — read at the EF-construction chokepoint — owns the
+    address and always passes an explicit ``cache_dir`` to fastembed.
+
     Nothing is created here — the construction site materialises the dir.
     """
     path = _global_config_path()
@@ -412,7 +417,9 @@ def fastembed_cache_dir() -> Path:
         data = yaml.safe_load(path.read_text()) or {}
         configured = (data.get("local") or {}).get("fastembed_cache_path", "")
         if configured:
-            return Path(configured)
+            # expanduser so a hand-edited ``~/models`` resolves to $HOME, not
+            # a literal ``./~/models`` created relative to the daemon's cwd.
+            return Path(configured).expanduser()
     xdg = os.environ.get("XDG_DATA_HOME")
     if xdg:
         return Path(xdg) / "nexus" / "fastembed_cache"
