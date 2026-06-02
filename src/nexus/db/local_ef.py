@@ -135,10 +135,19 @@ class LocalEmbeddingFunction:
 
             self._ef = ONNXMiniLM_L6_V2()
         else:
-            # Tier 1: fastembed
+            # Tier 1: fastembed. Thread a stable, XDG-respecting cache_dir so
+            # the bge-768 model is not re-downloaded to a volatile $TMPDIR on
+            # every cold start (RDR-144 P1 / CRITICAL-1). The resolver is read
+            # here — the sole EF-construction chokepoint — so launchd-spawned
+            # daemon/MCP processes that never see the nx-init shell env still
+            # land on the stable dir.
             from fastembed import TextEmbedding
 
-            self._ef = TextEmbedding(model_name=self._model_name)
+            from nexus.config import fastembed_cache_dir
+
+            cache_dir = fastembed_cache_dir()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            self._ef = TextEmbedding(model_name=self._model_name, cache_dir=str(cache_dir))
         _log.debug("local_ef_initialized", model=self._model_name, dims=self._dimensions)
 
     def __call__(self, input: list[str]) -> list[list[float]]:

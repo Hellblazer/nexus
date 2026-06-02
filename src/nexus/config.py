@@ -389,6 +389,36 @@ def _default_local_path() -> Path:
     return Path.home() / ".local" / "share" / "nexus" / "chroma"
 
 
+def fastembed_cache_dir() -> Path:
+    """Return the stable on-disk cache dir for the Tier-1 (bge-768) fastembed model.
+
+    RDR-144 P1 (CA-1): without an explicit ``cache_dir`` fastembed downloads
+    to a volatile ``tempfile.gettempdir()/fastembed_cache`` that the OS wipes
+    on reboot, re-downloading the 768-dim model on every cold start and
+    breaking offline-after-first-run. The sole embedding-function
+    construction chokepoint (``LocalEmbeddingFunction._init_ef``) reads this
+    resolver so the launchd-spawned daemon/MCP processes — which never see
+    the ``nx init`` shell env (CRITICAL-1) — still land on a stable dir.
+
+    Precedence:
+      1. ``local.fastembed_cache_path`` in ``~/.config/nexus/config.yml``
+      2. ``$XDG_DATA_HOME/nexus/fastembed_cache``
+      3. ``~/.local/share/nexus/fastembed_cache``
+
+    Nothing is created here — the construction site materialises the dir.
+    """
+    path = _global_config_path()
+    if path.exists():
+        data = yaml.safe_load(path.read_text()) or {}
+        configured = (data.get("local") or {}).get("fastembed_cache_path", "")
+        if configured:
+            return Path(configured)
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return Path(xdg) / "nexus" / "fastembed_cache"
+    return Path.home() / ".local" / "share" / "nexus" / "fastembed_cache"
+
+
 def catalog_path() -> Path:
     """Return the catalog directory path.
 
