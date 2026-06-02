@@ -413,6 +413,13 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
     # one (see sibling test for rationale).
     with (
         patch("nexus.config.is_local_mode", return_value=True),
+        # Pin the active local embedder to the 384-dim tier so doctor's
+        # dimension probe matches the 384-seeded collection. Without this the
+        # probe builds LocalEmbeddingFunction() which auto-selects bge-768 in a
+        # [local]-extra dev env, fails the 384 collection as a dimension
+        # mismatch, and doctor exits non-zero (passes in CI only because CI
+        # lacks the extra). mem:feedback_pin_local_mode_in_cloud_tests.
+        patch("nexus.config.local_embed_model_choice", return_value="all-MiniLM-L6-v2"),
         patch("nexus.config._default_local_path", return_value=chroma_path),
         patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
         patch(
