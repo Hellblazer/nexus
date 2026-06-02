@@ -141,7 +141,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-120](rdr-120-storage-substrate-split.md) | Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers | Architecture | Accepted 2026-05-21 | 2026-05-19 |
 | [RDR-121](rdr-121-hook-enforced-tool-routing.md) | Hook-Enforced Tool Routing: PreToolUse as Backstop for Soft Guidance | Architecture | Closed 2026-05-20 (shipped in 4.33.0) | 2026-05-19 |
 | [RDR-125](rdr-125-routing-hook-plugin-ownership.md) | Routing-Hook Plugin Ownership: Each Plugin Ships Its Own Rules | Architecture | Closed 2026-05-21 (shipped in 4.33.1) | 2026-05-20 |
-| [RDR-126](rdr-126-claude-desktop-deployment-unified-chat-cowork.md) | Claude Desktop Deployment: Unified Chat and Cowork Surface | Architecture | Draft | 2026-05-23 |
+| [RDR-126](rdr-126-claude-desktop-deployment-unified-chat-cowork.md) | Claude Desktop Deployment: Unified Chat and Cowork Surface | Architecture | Accepted | 2026-05-23 |
 | [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md) | Substrate-Decoupled Surface Rendering | Architecture | Draft | 2026-05-24 |
 | [RDR-128](rdr-128-t2-single-writer-enforcement.md) | T2 Single-Writer Enforcement: One Owner for memory.db, or an Enforced Lock Discipline | Architecture | Closed 2026-05-25 (implemented, shipped 5.1.0) | 2026-05-25 |
 | [RDR-129](rdr-129-t2-daemon-serving-path-cross-store-contention.md) | T2 Daemon Write-Path Hardening: Guaranteed-Single-Daemon Enforcement and Contention-Free Internal Serialization | Architecture | Accepted | 2026-05-25 |
