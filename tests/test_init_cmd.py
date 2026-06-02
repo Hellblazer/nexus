@@ -245,6 +245,30 @@ class TestExtraAddAndWarmup:
         assert "--from" in cmd
         assert any("[local]" in part for part in cmd)
 
+    def test_install_failure_prints_manual_fallback(
+        self, cfg_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-zero uv exit (or timeout) during extra-add must be caught and
+        converted to a manual-install fallback, never a raw traceback."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._local_extra_installed", lambda: False)
+        receipt = tmp_path / "uv-receipt.toml"
+        receipt.write_text("[tool]\n")
+        monkeypatch.setattr("nexus.commands.init._uv_receipt_path", lambda: receipt)
+        import subprocess
+
+        def _boom(cmd, *a, **k):  # noqa: ANN001
+            raise subprocess.CalledProcessError(1, cmd)
+
+        monkeypatch.setattr(subprocess, "run", _boom)
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        out = result.output.lower()
+        assert "failed to install" in out
+        assert "manually" in out
+
     def test_minilm_choice_does_not_fetch_or_install(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
