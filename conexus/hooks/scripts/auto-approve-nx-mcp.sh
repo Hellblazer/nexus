@@ -28,6 +28,7 @@ case "$TOOL_NAME" in
   mcp__plugin_conexus_nexus__nx_tidy|\
   mcp__plugin_conexus_nexus__nx_enrich_beads|\
   mcp__plugin_conexus_nexus__nx_plan_audit|\
+  mcp__plugin_conexus_nexus__daemon_uninstall|\
   mcp__plugin_conexus_nexus__operator_summarize|\
   mcp__plugin_conexus_nexus__operator_extract|\
   mcp__plugin_conexus_nexus__operator_rank|\

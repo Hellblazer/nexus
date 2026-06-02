@@ -731,21 +731,49 @@ class TestMarketplaceVersion:
         version. CI catches forgot-to-bump-mcpb releases."""
         mcpb_manifest = REPO_ROOT / "mcpb" / "manifest.json"
         mcpb_pyproject = REPO_ROOT / "mcpb" / "pyproject.toml"
-        if not mcpb_manifest.exists():
-            return  # mcpb bundle not yet shipped on this branch
+        # RDR-126 §7 (nexus-2yajx): the .mcpb bundle ships, so its
+        # manifest is a hard requirement, not a soft skip. A missing
+        # manifest is a regression, not a no-op.
+        assert mcpb_manifest.exists(), (
+            "mcpb/manifest.json is missing — the Claude Desktop .mcpb "
+            "bundle is a shipped product surface (RDR-126); it must exist."
+        )
+        assert mcpb_pyproject.exists(), (
+            "mcpb/pyproject.toml is missing — the .mcpb bundle pins the "
+            "published conexus version; it must exist."
+        )
         pv = self._pyproject_version()
         manifest_version = json.loads(mcpb_manifest.read_text()).get("version")
         assert manifest_version == pv, (
             f"mcpb/manifest.json version {manifest_version!r} "
             f"!= pyproject.toml {pv!r}"
         )
-        if mcpb_pyproject.exists():
-            with mcpb_pyproject.open("rb") as f:
-                mcpb_pv = tomllib.load(f)["project"]["version"]
-            assert mcpb_pv == pv, (
-                f"mcpb/pyproject.toml version {mcpb_pv!r} "
-                f"!= pyproject.toml {pv!r}"
-            )
+        with mcpb_pyproject.open("rb") as f:
+            mcpb_pv = tomllib.load(f)["project"]["version"]
+        assert mcpb_pv == pv, (
+            f"mcpb/pyproject.toml version {mcpb_pv!r} "
+            f"!= pyproject.toml {pv!r}"
+        )
+
+    def test_release_workflow_verifies_mcpb_version(self) -> None:
+        """RDR-126 §7 (nexus-2yajx): the release workflow must guard the
+        .mcpb manifest version against the tag at release time, as a
+        belt-and-braces companion to the pytest parity check. Without
+        this, a forgot-to-bump-mcpb release could ship a stale bundle
+        version even though CI's pytest run is green on the release SHA
+        (the tag is applied after merge)."""
+        workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
+        body = workflow.read_text()
+        assert "mcpb/manifest.json" in body, (
+            "release.yml has no step referencing mcpb/manifest.json; the "
+            "release-time mcpb version-sync guard is missing."
+        )
+        # The guard must compare against the tag (same mechanism as the
+        # pyproject tag check just above it).
+        assert re.search(r"mcpb/manifest\.json.*version|version.*mcpb/manifest\.json", body, re.DOTALL), (
+            "release.yml references mcpb/manifest.json but not its version; "
+            "the sync guard must check the manifest version."
+        )
 
     def test_plugin_source_sha_is_well_formed_when_present(self) -> None:
         """Optional `source.sha` for tag-force-push protection. When

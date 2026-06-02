@@ -28,9 +28,14 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    from nexus.daemon.installer import InstallStatus
 
 _log = structlog.get_logger(__name__)
 
@@ -55,6 +60,18 @@ def _os_unit_exists() -> bool:
     if platform.startswith("linux"):
         return _linux_systemd_unit_path().exists()
     return True
+
+
+def _installed_unit_path() -> Path | None:
+    """Path of the installed T2 autostart unit for this platform, or
+    ``None`` on an unsupported platform. Used to surface the unit
+    location in the first-run banner's "already configured" variant."""
+    platform = sys.platform
+    if platform == "darwin":
+        return _macos_launchagent_path()
+    if platform.startswith("linux"):
+        return _linux_systemd_unit_path()
+    return None
 
 
 def _find_nx_binary() -> str | None:
@@ -104,42 +121,57 @@ def ensure_installed_and_running() -> None:
         )
         return
 
+    from nexus.daemon import installer
+
+    status: InstallStatus
+    dest: Path | None = None
     if not _os_unit_exists():
-        # OS unit missing — install it. Idempotent within ``nx daemon
-        # t2 install --autostart`` itself; it checks the destination
-        # and bails with "already up to date" if the file matches.
+        # OS unit missing — install it in-process via the lifted
+        # ``nexus.daemon.installer`` (RDR-126 §2). Calling the library
+        # function rather than shelling out to ``nx daemon t2 install``
+        # gives us a structured InstallResult (status + dest path) that
+        # the first-run banner (§3) consumes to pick its text variant
+        # and surface the installed unit path.
         try:
-            result = subprocess.run(
-                [nx_bin, "daemon", "t2", "install", "--autostart"],
-                capture_output=True, text=True, timeout=30, check=False,
-            )
-            if result.returncode != 0:
-                _log.warning(
-                    "first_run_install_failed",
-                    returncode=result.returncode,
-                    stderr=(result.stderr or "").strip()[:500],
-                    hint=(
-                        "T2 daemon autostart install failed; current MCP "
-                        "session will work via ensure-running but the "
-                        "daemon will not survive reboots. Re-run "
-                        "'nx daemon t2 install --autostart' manually."
-                    ),
-                )
-            else:
-                _log.info(
-                    "first_run_install_ok",
-                    stdout=(result.stdout or "").strip()[:500],
-                )
-        except subprocess.TimeoutExpired:
-            _log.warning(
-                "first_run_install_timeout",
-                hint="`nx daemon t2 install --autostart` timed out after 30s",
+            result = installer.install_autostart()
+            status = result.status
+            dest = result.dest
+            _log.info(
+                "first_run_install_ok",
+                status=result.status.value,
+                dest=str(result.dest),
+                warnings=list(result.warnings),
             )
         except Exception as exc:
+            # installer raises typed InstallerError on symlink / content
+            # diff / activation failure; all are best-effort here — the
+            # session still works via ensure-running below.
+            status = installer.InstallStatus.FAILED
             _log.warning(
-                "first_run_install_exception",
+                "first_run_install_failed",
                 error=f"{type(exc).__name__}: {exc}",
+                hint=(
+                    "T2 daemon autostart install failed; current MCP "
+                    "session will work via ensure-running but the "
+                    "daemon will not survive reboots. Re-run "
+                    "'nx daemon t2 install --autostart' manually."
+                ),
             )
+    else:
+        # OS unit already present — pre-installed user. Surface the
+        # "already configured" banner variant.
+        status = installer.InstallStatus.ALREADY_PRESENT
+        dest = _installed_unit_path()
+
+    # RDR-126 §3: queue the one-shot first-run banner (best-effort; never
+    # blocks startup). Delivered on the first tool response by the
+    # dispatch path (see deliver_pending_banner).
+    try:
+        spec = maybe_banner(status, dest)
+        if spec is not None:
+            queue_banner(spec)
+    except Exception as exc:  # noqa: BLE001 — banner must never break boot
+        _log.debug("first_run_banner_queue_failed", error=f"{type(exc).__name__}: {exc}")
 
     # Always ensure-running so the current session has a daemon.
     try:
@@ -212,4 +244,180 @@ def apply_embedder_notice(server: object) -> bool:
         return True
     except Exception as exc:  # noqa: BLE001 — never block startup on an advisory
         _log.debug("embedder_notice_apply_failed", error=f"{type(exc).__name__}: {exc}")
+        return False
+
+
+# ── RDR-126 §3: first-run banner ──────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class BannerSpec:
+    """A one-shot first-run banner queued for the first tool response."""
+
+    text: str
+
+
+# Module-level pending banner. Single MCP process == single first-run, so a
+# module global is the natural home. Delivered (and cleared) on the first tool
+# response by ``deliver_pending_banner``.
+_PENDING_BANNER: BannerSpec | None = None
+
+_UNINSTALL_HINT = (
+    "To remove the background daemon later, ask me to run the "
+    "`daemon_uninstall` tool (it will confirm before removing anything)."
+)
+
+
+def _first_run_marker_path() -> Path:
+    """Location of the one-shot first-run marker. Lives under
+    ``nexus_config_dir()`` so it honours ``NEXUS_CONFIG_DIR`` for tests
+    and multi-profile installs."""
+    from nexus.config import nexus_config_dir
+
+    return nexus_config_dir() / ".mcp_first_run_complete"
+
+
+def maybe_banner(status: InstallStatus, dest: Path | None) -> BannerSpec | None:
+    """Build the first-run banner for ``status``, or ``None`` when there is
+    nothing to say (marker already written, or the install FAILED so there
+    is no daemon to announce).
+
+    Two variants (RDR-126 §3): NEWLY_INSTALLED -> "installed at <path>";
+    ALREADY_PRESENT -> "already configured at <path>". Both carry the
+    in-chat uninstall instruction.
+    """
+    from nexus.daemon.installer import InstallStatus
+
+    if _first_run_marker_path().exists():
+        return None
+
+    where = f" at `{dest}`" if dest is not None else ""
+    if status is InstallStatus.NEWLY_INSTALLED:
+        body = (
+            f"nexus: background knowledge daemon installed{where} and started. "
+            "It runs at login so your notes and search index stay available."
+        )
+    elif status is InstallStatus.ALREADY_PRESENT:
+        body = (
+            f"nexus: background knowledge daemon already configured{where}. "
+            "It runs at login so your notes and search index stay available."
+        )
+    else:  # FAILED or anything else — nothing to announce.
+        return None
+
+    return BannerSpec(text=f"{body} {_UNINSTALL_HINT}")
+
+
+def mark_shown() -> None:
+    """Write the first-run marker after the banner has been delivered on a
+    channel. Idempotent; creates parent directories as needed."""
+    marker = _first_run_marker_path()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch(exist_ok=True)
+
+
+def queue_banner(spec: BannerSpec) -> None:
+    """Queue ``spec`` for delivery on the first tool response."""
+    global _PENDING_BANNER
+    _PENDING_BANNER = spec
+
+
+def _clear_pending_banner() -> None:
+    """Drop any pending banner without marking it shown (test helper / reset)."""
+    global _PENDING_BANNER
+    _PENDING_BANNER = None
+
+
+def deliver_pending_banner(content_blocks: list[Any]) -> bool:
+    """Prepend any pending first-run banner to ``content_blocks[0].text``.
+
+    Returns ``True`` when the banner was delivered (and the marker written),
+    ``False`` when there was nothing pending or delivery failed.
+
+    Marker discipline (RDR-126 §3, load-bearing): the marker is written
+    ONLY after a successful prepend. On a malformed result (empty list, a
+    first block with no ``text`` attribute) the banner stays pending and
+    retries on the next tool call — a failed delivery never burns the
+    one-shot.
+
+    If the prepend succeeds but the marker WRITE then fails (e.g. read-only
+    config dir), the banner was already delivered this session so the queue
+    is cleared and we return ``True``; because the marker is absent, the
+    next process startup re-queues the banner (an at-most-double show, not
+    a silent burn).
+    """
+    global _PENDING_BANNER
+    spec = _PENDING_BANNER
+    if spec is None:
+        return False
+
+    try:
+        first = content_blocks[0]
+        existing = first.text  # AttributeError if not a text block
+        if not isinstance(existing, str):
+            raise TypeError("content block .text is not a str")
+        first.text = f"{spec.text}\n\n{existing}"
+    except Exception as exc:  # noqa: BLE001 — best-effort; retry next call
+        _log.debug(
+            "first_run_banner_delivery_failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return False
+
+    # Delivered — write the marker and clear the queue.
+    try:
+        mark_shown()
+    except Exception as exc:  # noqa: BLE001 — marker write must not break the tool result
+        _log.debug("first_run_marker_write_failed", error=f"{type(exc).__name__}: {exc}")
+    _PENDING_BANNER = None
+    return True
+
+
+def install_banner_dispatch_hook(server: object) -> bool:
+    """Wrap the MCP server's CallToolRequest handler so the first tool
+    response carries the pending first-run banner (RDR-126 §3).
+
+    The wrapper calls :func:`deliver_pending_banner` on the result's
+    content blocks; once delivered (marker written) it is a no-op for the
+    rest of the process's life. Best-effort: any failure to install the
+    hook is logged at debug and returns ``False`` so MCP boot is never
+    blocked. The notification channel is intentionally not used here
+    (RDR-126 A2: ``notifications/message`` rendering is unverified; the
+    tool-response content prepend is the primary, load-bearing channel —
+    see the §3 deferral note in the RDR).
+
+    FRAGILE COUPLING (review): this reaches into ``server._mcp_server``
+    and patches ``request_handlers[CallToolRequest]`` — both private
+    FastMCP internals, not public MCP SDK API. Verified against mcp
+    1.27.1. A library bump that restructures these returns ``False``
+    here (no banner, logged at debug). The TestDispatchHook integration
+    test exercises the real FastMCP path and will go red if the internals
+    move, catching the breakage in CI rather than in production.
+    """
+    try:
+        from mcp import types  # type: ignore[import-not-found]
+
+        low = server._mcp_server  # type: ignore[attr-defined]
+        key = types.CallToolRequest
+        original = low.request_handlers.get(key)
+        if original is None:
+            return False
+
+        async def _wrapped(req: object) -> object:
+            result = await original(req)
+            try:
+                inner = getattr(result, "root", result)
+                content = getattr(inner, "content", None)
+                if content:
+                    deliver_pending_banner(content)
+            except Exception as exc:  # noqa: BLE001 — never corrupt a tool result
+                _log.debug(
+                    "first_run_banner_hook_failed", error=f"{type(exc).__name__}: {exc}"
+                )
+            return result
+
+        low.request_handlers[key] = _wrapped
+        return True
+    except Exception as exc:  # noqa: BLE001 — never block boot on the banner hook
+        _log.debug("first_run_banner_hook_install_failed", error=f"{type(exc).__name__}: {exc}")
         return False
