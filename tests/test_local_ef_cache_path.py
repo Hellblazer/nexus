@@ -83,6 +83,27 @@ class TestConfiguredModelSelection:
             LocalEmbeddingFunction(model_name=_TIER0_MODEL).model_name == _TIER0_MODEL
         )
 
+    def test_local_model_token_tracks_config_choice(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """HIGH-1 (P3 stacked review): the write-path token MUST match the EF
+        the user actually gets. minilm chosen + fastembed available must yield
+        the 384 token, NOT the bge 768 token — otherwise the collection is
+        named bge-768 while embedding 384-dim vectors (identity lie / dim
+        mismatch)."""
+        from nexus.db.local_ef import local_model_token
+
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: _TIER0_MODEL)
+        monkeypatch.setattr("nexus.db.local_ef._fastembed_available", lambda: True)
+
+        # EF and write-path token agree on tier-0.
+        assert LocalEmbeddingFunction().model_name == _TIER0_MODEL
+        assert local_model_token() == "minilm-l6-v2-384"
+
+        # And the bge choice round-trips to the 768 token when available.
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: _TIER1_MODEL)
+        assert local_model_token() == "bge-base-en-v15-768"
+
 
 # ── fastembed_cache_dir() resolution ──────────────────────────────────────────
 

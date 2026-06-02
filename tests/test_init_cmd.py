@@ -189,7 +189,10 @@ class TestExtraAddAndWarmup:
 
         assert result.exit_code == 0, result.output
         out = result.output.lower()
-        assert "offline" in out or "cache" in out or "could not" in out
+        assert "could not" in out
+        # the cache-path line is the ACTIONABLE part — assert it specifically,
+        # not just the exception message text.
+        assert "cache location:" in out
 
     def test_editable_tree_no_receipt_prints_manual_no_reinstall(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -239,6 +242,7 @@ class TestExtraAddAndWarmup:
         assert len(calls) == 1
         cmd = calls[0]
         assert "uv" in cmd[0] and "install" in cmd and "--reinstall" in cmd
+        assert "--from" in cmd
         assert any("[local]" in part for part in cmd)
 
     def test_minilm_choice_does_not_fetch_or_install(

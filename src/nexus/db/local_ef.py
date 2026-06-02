@@ -42,13 +42,20 @@ _MODEL_TOKENS: dict[str, str] = {
 def local_model_token(model_name: str | None = None) -> str:
     """Return the RDR-109 normalized token for a local embedding model.
 
-    ``model_name=None`` picks the active tier (tier 1 if fastembed is
-    importable, else tier 0). Used by the write path
-    (``effective_embedding_model_for_writes`` in ``corpus.py``) and by
-    ``nx doctor`` to report what's actually embedding the collection.
+    ``model_name=None`` resolves the active model the same way
+    ``LocalEmbeddingFunction`` does (RDR-144 P3 (C)): the ``local.embed_model``
+    choice persisted by ``nx init`` first, else the fastembed-availability
+    auto-select. This MUST stay aligned with ``_select_model_name`` — the
+    write path (``effective_embedding_model_for_writes`` in ``corpus.py``)
+    stamps the returned token into the collection name, so a divergence
+    would name a collection bge-768 while embedding 384-dim vectors.
+
+    Resolves quietly (``warn=False``): this is called per collection-name
+    derivation on the write path, so the bge-but-no-extra warning is left to
+    the EF-construction path to avoid log spam.
     """
     if model_name is None:
-        model_name = _TIER1_MODEL if _fastembed_available() else _TIER0_MODEL
+        model_name = _resolve_local_model(warn=False)
     return _MODEL_TOKENS.get(model_name, "minilm-l6-v2-384")
 
 
@@ -67,8 +74,8 @@ def _fastembed_available() -> bool:
         return False
 
 
-def _select_model_name() -> str:
-    """Resolve the local embedding model when none is explicitly given.
+def _resolve_local_model(*, warn: bool) -> str:
+    """Resolve the active local embedding model (single source of truth).
 
     RDR-144 P3 (C): honour the ``local.embed_model`` choice persisted by
     ``nx init`` before falling back to the legacy fastembed-availability
@@ -76,23 +83,31 @@ def _select_model_name() -> str:
     unchanged (tier-1 if fastembed importable, else tier-0).
 
     If the user chose bge-768 but the ``[local]`` extra is not installed,
-    fall back to tier-0 with a structured WARNING (never silent — ``nx
-    doctor`` surfaces it; P5a) rather than crashing on a missing import.
+    fall back to tier-0. When ``warn`` is True (the EF-construction path) a
+    structured WARNING is emitted — never silent; ``nx doctor`` (P5a) surfaces
+    it to the user. ``warn`` is False on the write-path token derivation to
+    avoid emitting the same warning once per collection-name lookup.
     """
     from nexus.config import local_embed_model_choice
 
     configured = local_embed_model_choice()
     if configured in _MODEL_DIMS:
         if configured == _TIER1_MODEL and not _fastembed_available():
-            _log.warning(
-                "local_embed_model_unavailable",
-                chosen=configured,
-                fallback=_TIER0_MODEL,
-                hint="install conexus[local] (or run `nx init`) to use bge-768",
-            )
+            if warn:
+                _log.warning(
+                    "local_embed_model_unavailable",
+                    chosen=configured,
+                    fallback=_TIER0_MODEL,
+                    hint="install conexus[local] (or run `nx init`) to use bge-768",
+                )
             return _TIER0_MODEL
         return configured  # type: ignore[return-value]
     return _TIER1_MODEL if _fastembed_available() else _TIER0_MODEL
+
+
+def _select_model_name() -> str:
+    """EF-construction model resolver — warns on bge→tier0 fallback."""
+    return _resolve_local_model(warn=True)
 
 
 class LocalEmbeddingFunction:

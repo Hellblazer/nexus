@@ -88,10 +88,20 @@ def _ensure_local_extra() -> bool:
         return False
 
     click.echo("\nInstalling the [local] extra (fastembed) …")
-    subprocess.run(
-        ["uv", "tool", "install", "--reinstall", "--from", "conexus[local]", "conexus"],
-        check=True,
-    )
+    try:
+        subprocess.run(
+            ["uv", "tool", "install", "--reinstall", "--from", "conexus[local]", "conexus"],
+            check=True,
+            timeout=300,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        _log.warning("local_extra_install_failed", error=str(exc))
+        click.echo(f"\nFailed to install the [local] extra: {exc}", err=True)
+        click.echo(
+            "Install it manually: uv tool install --reinstall 'conexus[local]' conexus",
+            err=True,
+        )
+        return False
     click.echo(
         "Installed. The bge-768 model fetches automatically on first local "
         "embed — or re-run `nx init` to provision it now."
