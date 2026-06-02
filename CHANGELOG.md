@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.8.0] - 2026-06-02
+
+Plugin to CLI version lockstep (RDR-143): the conexus plugin and the `nx` CLI
+ship the same version but update through independent channels, so they could
+silently drift apart (the root of the recent version-skew incidents). A new
+SessionStart hook now keeps them in sync.
+
+### Added
+
+- **Plugin to CLI version-lockstep hook (RDR-143).** A stdlib-only
+  `SessionStart` (matcher `startup`) hook detects when the installed `nx` CLI
+  is older than the plugin and, on skew, emits a one-line nudge and dispatches
+  a detached, extras-preserving upgrade in the background (`uv tool upgrade
+  conexus` then `nx upgrade`). The upgrade takes effect on the next session and
+  never blocks startup. It skips dev/editable trees (uv-receipt gate), never
+  uses a raw `uv tool install` (which would strip the `[local]` extra), and
+  records `~/.config/nexus/cli_lockstep_marker` only after a confirmed upgrade,
+  so a failed attempt simply retries next session. Two new hook scripts
+  (`version_lockstep_hook.py`, `version_lockstep_action.py`) wired into a
+  dedicated `SessionStart` block.
+
 ## [5.7.0] - 2026-06-02
 
 Guided onboarding for the local embedder (RDR-144): the 384-vs-768 choice is
