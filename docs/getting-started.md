@@ -19,9 +19,19 @@ If you're on 3.14+, install 3.13 with `uv python install 3.13` — uv will use i
 
 ```bash
 uv tool install conexus
+# or, for the higher-quality local embedder (BAAI/bge-base-en-v1.5, 768-dim):
+uv tool install "conexus[local]"
 ```
 
-The default install includes MinerU for math-aware PDF extraction (~500 MB of Python deps; first PDF index downloads ~2-3 GB of models — see [PDF indexing notes](#pdf-indexing-and-mineru-models) below).
+The default install uses the built-in ONNX MiniLM embedder (384-dim); the optional `[local]` extra adds the larger bge-768 embedder for better local search. The default install also includes MinerU for math-aware PDF extraction (~500 MB of Python deps; first PDF index downloads ~2-3 GB of models — see [PDF indexing notes](#pdf-indexing-and-mineru-models) below).
+
+### Updating
+
+```bash
+uv tool upgrade conexus
+```
+
+Always upgrade with `uv tool upgrade conexus` — it preserves the spec you installed with, so a `[local]` install stays `[local]`. **Do not** re-run `uv tool install conexus` (or `--force`) just to upgrade: that resets the environment and **drops `[local]`**, silently downgrading the embedder 768→384-dim, which dimension-mismatches existing 768-dim collections and makes search return nothing. To recover: `uv tool install --reinstall "conexus[local]"`. When you update the Claude Code plugin, upgrade the CLI to the matching version at the same time.
 
 Verify:
 
@@ -87,8 +97,10 @@ including TCP / UDS / Cowork transport details.
 ## Update
 
 ```bash
-uv tool update conexus
+uv tool upgrade conexus
 ```
+
+`uv tool upgrade` preserves the spec you installed with (so a `[local]` install stays `[local]`). Do **not** upgrade by re-running `uv tool install conexus` / `--force` — that resets the environment and drops `[local]`, silently downgrading the embedder 768→384-dim (see [Updating](#updating) above).
 
 After upgrading conexus, restart the daemon so it picks up the new
 binary:
@@ -257,10 +269,10 @@ taxonomy:
 
 ```bash
 uv python install 3.13
-uv tool install conexus --force --python 3.13
+uv tool install conexus --force --python 3.13   # use "conexus[local]" here if you rely on the bge-768 embedder
 ```
 
-Note: `uv tool update` reuses the existing environment's Python — it won't switch from 3.14 to 3.13 automatically. You must use `--force --python 3.13` to rebuild the environment.
+Note: `uv tool upgrade` reuses the existing environment's Python — it won't switch from 3.14 to 3.13 automatically. You must use `--force --python 3.13` to rebuild the environment. Because `--force` rebuilds from scratch it drops optional extras, so re-include `[local]` (i.e. install `"conexus[local]"`) if you use the bge-768 embedder.
 
 **`nx doctor` reports credentials not set** — Expected for local mode. Only needed if you want cloud embeddings — run `nx config init`.
 
@@ -268,7 +280,7 @@ Note: `uv tool update` reuses the existing environment's Python — it won't swi
 
 **`nx index repo .` fails with "credentials not set"** — In cloud mode, indexing requires T3 credentials. Run `nx config init` first, or use local mode (no credentials needed).
 
-**`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14. Fix: `uv tool install conexus --force --python 3.13` (install 3.13 first with `uv python install 3.13` if needed).
+**`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14. Fix: `uv tool install conexus --force --python 3.13` (install 3.13 first with `uv python install 3.13` if needed; re-include `[local]` — `"conexus[local]"` — if you use the bge-768 embedder, since `--force` drops extras).
 
 **First index is slow or hits a rate limit** — Large repos may take a few minutes. Add `--monitor` for per-file progress. Re-running is safe — unchanged files are skipped.
 

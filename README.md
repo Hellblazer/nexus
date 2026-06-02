@@ -47,7 +47,9 @@ For the full deployment story across all three surfaces (install, daemon lifecyc
 ## CLI quick-start
 
 ```bash
-uv tool install conexus                  # install the nx CLI
+uv tool install conexus                  # install the nx CLI (built-in ONNX MiniLM embedder)
+# or, for the higher-quality local embedder (BAAI/bge-base-en-v1.5, 768-dim):
+uv tool install "conexus[local]"
 nx daemon t2 install --autostart         # register the T2 daemon (one-time)
 nx doctor                                # verify installation
 nx index repo .                          # index your repo + discover topics
@@ -55,6 +57,16 @@ nx search "how does retry work"          # semantic search, fully local
 ```
 
 The `nx` CLI provides direct access to all storage tiers, indexing, search, the catalog, and taxonomy. See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for a walkthrough, [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md) for every command and flag.
+
+## Updating
+
+```bash
+uv tool upgrade conexus                  # upgrade the nx CLI — PRESERVES your extras (e.g. [local])
+```
+
+**Always upgrade with `uv tool upgrade conexus`.** It retains the spec you installed with, so a `[local]` install stays a `[local]` install. **Do not** upgrade with `uv tool install conexus --force` / `uv tool install conexus` — that *resets* the install and **drops `[local]`**, silently downgrading your embedder from 768-dim to 384-dim. With existing 768-dim collections that produces a dimension mismatch and search returns nothing. If you hit that, reinstall the extra: `uv tool install --reinstall "conexus[local]"`.
+
+When you update the **Claude Code plugin** (`/plugin update`), upgrade the CLI to the matching version at the same time so the two stay in lockstep.
 
 ## Going deeper
 

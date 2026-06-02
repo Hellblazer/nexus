@@ -13,7 +13,7 @@ Each level is deep-merged, with higher-priority values winning.
 
 ## Local Mode
 
-Nexus auto-detects local mode when cloud credentials are absent. No configuration needed — just `uv tool install conexus && nx index repo .`.
+Nexus auto-detects local mode when cloud credentials are absent. No configuration needed — just `uv tool install "conexus[local]" && nx index repo .` (the `[local]` extra adds the bge-768 embedder for better local search; plain `conexus` uses the built-in 384-dim MiniLM). Upgrade with `uv tool upgrade conexus` to keep your extras — never `uv tool install --force`, which drops `[local]`.
 
 | Env var | Default | Description |
 |---|---|---|
@@ -25,11 +25,11 @@ Nexus auto-detects local mode when cloud credentials are absent. No configuratio
 
 **Auto-detection**: When either `CHROMA_API_KEY` or `VOYAGE_API_KEY` is absent, local mode activates — both are required for cloud mode. Set `NX_LOCAL=1` to force local mode even with cloud credentials.
 
-**Embedding tiers**: Tier 0 (bundled MiniLM-L6-v2, 384d) is always available. Install with `uv tool install conexus --with "conexus[local]" --force` for tier 1 (bge-base-en-v1.5, 768d, better quality).
+**Embedding tiers**: Tier 0 (bundled MiniLM-L6-v2, 384d) is always available. Install `uv tool install "conexus[local]"` for tier 1 (bge-base-en-v1.5, 768d, better quality; downloads the model on first embed). To add the extra to an existing install: `uv tool install --reinstall "conexus[local]"`. Upgrade later with `uv tool upgrade conexus`, which preserves the extra — never `uv tool install --force`, which drops it.
 
 **Storage path**: Defaults to `$XDG_DATA_HOME/nexus/chroma` or `~/.local/share/nexus/chroma`. Override with `NX_LOCAL_CHROMA_PATH`.
 
-**Switching modes**: Changing between local and cloud mode triggers automatic re-indexing on the next `nx index repo .` (embedding model mismatch detected by staleness check). Local and cloud embeddings are incompatible — there is no automatic migration.
+**Switching embedders or modes**: Changing the embedding model — switching local↔cloud, *or* switching local tiers (384-dim MiniLM ↔ 768-dim bge) — makes the existing vectors incompatible (different dimensions/space). On the next `nx index repo .` the staleness check detects the model change and re-embeds into **new** collections under the new model token. **It does NOT delete or migrate the old collections** — they remain behind under the previous token and will silently return no results (their dimension no longer matches the active embedder). After switching, delete or reindex the stale collections (`nx doctor` flags the dimension mismatch; use `nx collection` to remove the orphaned ones). There is no automatic migration of existing vectors.
 
 ## Cloud Credentials
 
