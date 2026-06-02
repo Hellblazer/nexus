@@ -42,13 +42,14 @@ The missing capability is not a different package manager — it is a **provisio
 
 ## Research Findings
 
-_To be populated via `/conexus:rdr-research`. Key questions:_
+_Verified 2026-06-01 (codebase-deep-analyzer; T2 `nexus_rdr/144-research-CA1-CA4`). All four CAs hold; Shape A + sub-(i) is confirmed feasible with no blocker forcing the packaging default. Three refinements materially sharpen the implementation contract:_
 
-1. **Model-fetch mechanics & UX.** How does `fastembed`/bge fetch + cache the model? Can `nx init` pre-fetch it with a progress bar (and offline/air-gapped failure handling) so it is a deliberate, visible step rather than a surprise mid-`search`?
-2. **Can `nx` add its own extra cleanly at runtime?** `reinstall-tool.sh` shells `uv tool install --reinstall "conexus[local]"`; can `nx init` invoke that safely (editable-install detection, extras preservation, no clobber of a dev tree)?
-3. **Default-for-local mechanism.** Three sub-mechanisms to compare (see §Proposed Solution): packaging default (promote `[local]` deps), guided `nx init` default, or a hybrid. Which delivers "768 by default for local" without bloating cloud-only installs or breaking instant-first-run?
-4. **Existing-user migration.** A user already on MiniLM-384 with 384-dim collections who moves to bge-768 needs a **reindex** (vectors are dimension-incompatible — RDR-109 / the staleness check). What does the guided flow do for them — detect, warn, offer reindex?
-5. **Where does the choice get recorded** (config key / `NX_LOCAL_EMBED_MODEL`) and how do `nx doctor` + the daemon read it consistently?
+1. **Model pre-fetch (CA-1).** Tier-1 bge is fetched lazily on first `__call__` via `fastembed.TextEmbedding` (`local_ef.py:141`); `nx init` pre-fetches by calling `_init_ef()` / a warmup embed (no dedicated download-only API). Cache dir = `FASTEMBED_CACHE_PATH` else **`$TMPDIR/fastembed_cache`** (`fastembed/common/utils.py:48-58`). **Refinement A — the `$TMPDIR` default is fragile** (wiped on reboot → model re-downloads); `nx init` must set a **stable** `FASTEMBED_CACHE_PATH` (e.g. under `~/.local/share/nexus/`). **Refinement B — offline failure is NOT a clean exception**: with `HF_HUB_OFFLINE` + cache-miss, fastembed `logger.error`s and returns `None` → `None`-deref crash; `nx init` must wrap the warmup in `except Exception` and emit an actionable message (point at the cache path). MinerU's download notice (`commands/mineru.py:243`) is the UX precedent (message-only).
+2. **Runtime extra-add, editable-safe (CA-2).** `scripts/reinstall-tool.sh` (`uv tool install --reinstall --from "SOURCE[extras]"` reading `$(uv tool dir)/conexus/uv-receipt.toml`) is the correct shell-out for uv-tool installs. **Editable/dev detection = absence of `uv-receipt.toml`** (a `uv sync` dev tree has none) → skip auto-reinstall, instruct manual (`pip install "conexus[local]"`). Receipt present + a `directory` key = local-source install, safe to reinstall. The clobber-a-dev-tree hazard is ruled out by receipt absence.
+3. **Existing-corpus detection + reindex (CA-3).** `nx doctor` / `health._check_t3_local` (`health.py:258-309`, the #1061 E1 check) already does a dummy-vector **dimension probe** and emits the 384→768 fix hint (`:289-295`); it is dimension-based so it covers local→local 384→768, and `nx init` can reuse it. **Critical refinement — "automatic re-indexing on model change" is misleading**: `doc_indexer.py:637-641` re-embeds into **new** collection names on a model change but does **not** delete/merge the **old 384-dim collections**, which remain as orphan dead weight that `nx search` silently returns zero from. `nx init` MUST explicitly offer old-collection cleanup/reindex — it cannot rely on "automatic."
+4. **No cloud bloat (CA-4, clean).** `fastembed` is optional-only (`pyproject.toml:103` `local = ["fastembed>=0.7.0"]`), not in base deps; cloud installs carry zero fastembed (cloud uses `voyageai`). So "768 default for local, lean for cloud" works purely via guided `nx init` conditionally adding `[local]` (Shape A + sub-i) — **the packaging default (sub-ii) is unnecessary**. `NX_LOCAL_EMBED_MODEL` (`t3_client.py:102-104`) is an optional override `nx init` may write.
+
+**Strongest implementation risks:** the offline/`None`-deref crash (CA-1 Refinement B) and the orphan-old-collections gap (CA-3 — must actively clean up; the docs lie).
 
 ## Proposed Solution
 
@@ -61,11 +62,19 @@ _Draft — lock after research. Spectrum from lightest to most capable; the embe
   - **(i) Guided default** — `nx init` defaults the *recommendation* to bge-768 for local and provisions it; bare `uv tool install conexus` still ships MiniLM until the user runs init. Pairs with Shape A; no packaging bloat for cloud users.
   - **(ii) Packaging default** — promote `fastembed`+bge into base deps (like mineru was promoted) so `uv tool install conexus` *is* bge-768. True zero-config 768, but heavier install for everyone + first-use model download for all. Rejected-leaning unless we accept the universal weight.
 
-Leaning: **Shape A + (i)** — "768 by default for local, presented as an informed choice via `nx init`, model fetched visibly" — delivers the maintainer's intent (768 default for local) without imposing bge weight on cloud-only installs or silently downloading a model. Confirm at research/gate.
+**LOCKED (research-confirmed): Shape A + sub-(i)** — "768 by default for local, presented as an informed choice via `nx init`, model fetched visibly." Research (CA-4) confirmed this delivers the maintainer's intent (768 default for local) without imposing bge weight on cloud-only installs or silently downloading a model, and that the packaging default (sub-ii) is **unnecessary** — so (ii) is rejected (kept only as a documented fallback if zero-config-768-for-all is ever explicitly wanted). Shapes B/C remain future options layered on the same `nx init` core.
 
 ## Implementation Plan
 
-_To be detailed after the shape is locked. Likely includes: an `nx init` / first-run guided flow; bge model pre-fetch with progress + offline failure handling; runtime extra-add via the reinstall-tool path (editable-install-safe); choice recorded to config and read consistently by `nx doctor` + daemon; existing-384-user detect-and-offer-reindex; docs rewritten so the embedder choice is presented at onboarding (not buried); plugin first-run invokes/surfaces `nx init`. Tests: fresh-local → bge-768 provisioned + model fetched (mocked); cloud → no bge; existing-384 → reindex offered; offline → graceful failure not a wedged search._
+_Shape A + sub-(i) locked; phase-detail at accept. Must include (research-derived):_
+
+- **`nx init` guided flow** (or broadened `nx config init`): detect cloud vs local → for local, recommend bge-768 with the one-time model-download cost stated, offer light-384 → record choice (config; optionally `NX_LOCAL_EMBED_MODEL`).
+- **Extra-add, editable-safe (CA-2):** gate on `$(uv tool dir)/conexus/uv-receipt.toml` — present → shell `reinstall-tool.sh`-style `uv tool install --reinstall "conexus[local]"`; **absent (uv-sync dev tree) → do NOT auto-reinstall**, print the manual `pip install "conexus[local]"` instruction.
+- **Model pre-fetch (CA-1):** warmup-embed to fetch bge, with a **stable `FASTEMBED_CACHE_PATH`** under `~/.local/share/nexus/` (NOT the fragile `$TMPDIR` default), and a `try/except Exception` around the warmup that converts an offline/cache-miss failure into an actionable message (never a `None`-deref crash or a wedged first `search`).
+- **Existing-384 handling (CA-3):** reuse `health._check_t3_local`'s dimension probe to detect 384-dim collections under an active 768 embedder; **explicitly offer cleanup/reindex of the OLD collections** — do not rely on the "automatic re-index" (it creates new collections and orphans the old ones, which then silently return zero).
+- **Surfacing:** plugin first-run / `_first_run.py` invokes or points at `nx init`; `nx doctor` flags "ran with default 384, run `nx init` for bge-768."
+- **Docs:** present the embedder choice at onboarding (supersede the 5.6.x doc stopgap's secondary "or" framing).
+- **Tests:** fresh-local → bge provisioned + warmup fetch (mocked); cloud → no fastembed touched; existing-384 → cleanup/reindex offered (not silent orphan); offline → graceful message, not crash/hang; editable tree → manual instruction, no reinstall.
 
 ## Trade-offs
 
@@ -82,14 +91,16 @@ _To be detailed after the shape is locked. Likely includes: an `nx init` / first
 
 ## Critical Assumptions
 
-- **CA-1**: `nx init` can pre-fetch the bge model with visible progress and degrade gracefully offline (no wedged first `search`).
-- **CA-2**: `nx` can add the `[local]` extra to its own install at runtime safely (extras-preserving, editable-install-aware) via the `reinstall-tool.sh` mechanism.
-- **CA-3**: The guided flow can detect an existing 384-dim corpus and offer reindex rather than silently dimension-mismatching (ties to RDR-109 / #1061 E1).
-- **CA-4**: "768 default for local" is achievable via guided provisioning (Shape A + (i)) WITHOUT bloating cloud-only installs or imposing a universal model download — i.e. the maintainer's intent does not actually require the packaging default (ii).
+_Verified 2026-06-01 (codebase-deep-analyzer)._
+
+- **CA-1 — VERIFIED (with refinements)**: `nx init` can pre-fetch bge via `_init_ef()`/warmup (`local_ef.py:141`); fastembed shows progress. Refinements folded into the plan: set a stable `FASTEMBED_CACHE_PATH` (the `$TMPDIR` default is wiped on reboot) and wrap the warmup in `except Exception` (offline cache-miss is a `logger.error`+`None`-deref, not a clean exception).
+- **CA-2 — VERIFIED (with refinement)**: runtime extra-add via the `reinstall-tool.sh` mechanism is safe; editable/dev installs are reliably excluded by the **absence of `$(uv tool dir)/conexus/uv-receipt.toml`** (uv-sync trees have none → instruct manual, don't auto-reinstall).
+- **CA-3 — VERIFIED (with critical refinement)**: `health._check_t3_local` (`:258-309`) already detects the 384-under-768 dimension mismatch and is dimension-based (covers local→local). BUT the "automatic re-index" is misleading — it orphans the old 384 collections; `nx init` must **explicitly** offer cleanup/reindex.
+- **CA-4 — VERIFIED (clean)**: `fastembed` is optional-only (`pyproject.toml:103`); cloud installs carry none. "768 default for local, lean for cloud" is achievable via guided `nx init` (Shape A + sub-i) with **no packaging change** — the packaging default (ii) is unnecessary.
 
 ## Finalization Gate
 
-_Pending. Run `/conexus:rdr-gate` after research verifies CA-1..CA-4._
+_Pending. Run `/conexus:rdr-gate` — research (CA-1..CA-4) complete and verified._
 
 ## References
 
@@ -100,4 +111,5 @@ _Pending. Run `/conexus:rdr-gate` after research verifies CA-1..CA-4._
 
 ## Revision History
 
-- 2026-06-01: Draft. Originated from the realization that `uv tool install` is delivery, not onboarding, and a blunt packaging default cannot express the 384-vs-768 embedder choice. Pulls the "768 default for local" decision out of RDR-143 into this guided-provisioning RDR. Leaning Shape A (guided `nx init`) + sub-option (i) (guided default), with the packaging default (ii) retained only if zero-config-768-for-all is explicitly chosen. Direction to be locked after research.
+- 2026-06-01: Draft. Originated from the realization that `uv tool install` is delivery, not onboarding, and a blunt packaging default cannot express the 384-vs-768 embedder choice. Pulls the "768 default for local" decision out of RDR-143 into this guided-provisioning RDR.
+- 2026-06-01: Research (CA-1..CA-4 verified, codebase-deep-analyzer). **Shape A + sub-(i) locked**; packaging default (ii) rejected as unnecessary (CA-4). Three refinements folded into the plan: stable `FASTEMBED_CACHE_PATH` + offline-wrap (CA-1), uv-receipt-presence as the editable-install gate (CA-2), and explicit old-collection cleanup because "automatic re-index" orphans the 384 collections (CA-3). Ready for gate.
