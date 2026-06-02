@@ -115,8 +115,17 @@ class TestConfirmedUninstall:
         self, _env: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A misconfigured NEXUS_CONFIG_DIR pointing at a shallow path
-        (review H2) must NOT be rmtree'd even with confirm+remove_data."""
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", "/Users")
+        (review H2) must NOT be rmtree'd even with confirm+remove_data.
+
+        ``/tmp`` exists on both macOS (resolves to /private/tmp, 3 parts)
+        and Linux (2 parts) and is shallow enough to trip the guard.
+        rmtree is mocked so a future guard regression can never delete a
+        real directory from this test."""
+        import shutil
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", "/tmp")
+        rmtree_calls: list = []
+        monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: rmtree_calls.append(a))
         with patch.object(installer.subprocess, "run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stderr = ""
@@ -124,7 +133,7 @@ class TestConfirmedUninstall:
             report = installer.uninstall_daemon(confirm=True, remove_data=True)
         assert report.data_removed is False
         assert any("refusing to remove" in w for w in report.warnings)
-        assert Path("/Users").exists()
+        assert rmtree_calls == []  # guard fired before any rmtree
 
     def test_confirmed_when_unit_already_absent_is_graceful(
         self, _env: Path, monkeypatch: pytest.MonkeyPatch

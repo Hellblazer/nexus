@@ -21,7 +21,8 @@ def test_catalog_module_importable():
 
 
 def test_core_registered_tools():
-    """28 core tools are registered with @mcp.tool() (RDR-088 added filter, check, verify)."""
+    """29 core tools are registered with @mcp.tool() (RDR-088 added filter, check,
+    verify; RDR-126 added daemon_uninstall)."""
     from nexus.mcp.core import mcp
 
     tool_names = {t.name for t in mcp._tool_manager.list_tools()}
@@ -36,6 +37,7 @@ def test_core_registered_tools():
         "operator_filter", "operator_check", "operator_verify",
         "operator_groupby", "operator_aggregate",
         "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
+        "daemon_uninstall",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 
