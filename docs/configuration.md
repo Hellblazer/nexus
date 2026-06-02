@@ -29,7 +29,7 @@ Nexus auto-detects local mode when cloud credentials are absent. No configuratio
 
 **Storage path**: Defaults to `$XDG_DATA_HOME/nexus/chroma` or `~/.local/share/nexus/chroma`. Override with `NX_LOCAL_CHROMA_PATH`.
 
-**Switching modes**: Changing between local and cloud mode triggers automatic re-indexing on the next `nx index repo .` (embedding model mismatch detected by staleness check). Local and cloud embeddings are incompatible — there is no automatic migration.
+**Switching embedders or modes**: Changing the embedding model — switching local↔cloud, *or* switching local tiers (384-dim MiniLM ↔ 768-dim bge) — makes the existing vectors incompatible (different dimensions/space). On the next `nx index repo .` the staleness check detects the model change and re-embeds into **new** collections under the new model token. **It does NOT delete or migrate the old collections** — they remain behind under the previous token and will silently return no results (their dimension no longer matches the active embedder). After switching, delete or reindex the stale collections (`nx doctor` flags the dimension mismatch; use `nx collection` to remove the orphaned ones). There is no automatic migration of existing vectors.
 
 ## Cloud Credentials
 
