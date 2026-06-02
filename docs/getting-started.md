@@ -62,7 +62,7 @@ In **local mode** it presents the two on-device embedders and records your choic
 When you choose bge-768, `nx init`:
 
 1. Adds the `[local]` extra if it is missing. For a `uv tool` install it runs an extras-preserving reinstall for you; in a dev/editable checkout it prints the manual command (`pip install 'conexus[local]'` or `uv sync --extra local`) rather than touching your tree.
-2. Pre-fetches the bge-768 model into a stable cache (`local.fastembed_cache_path`, default `~/.local/share/nexus/fastembed_cache`) so it is not re-downloaded on every reboot. If you are offline it prints an actionable message and retries automatically on your next local search.
+2. Pre-fetches the bge-768 model into a stable cache (`local.fastembed_cache_path`, default `~/.local/share/nexus/fastembed_cache`) so it is not re-downloaded on every reboot. If you are offline it prints an actionable message and retries automatically on your next local search. (When the `[local]` extra had to be installed in this same run, the running process cannot import the freshly-installed package, so the model is fetched on your first local search instead; re-run `nx init` to provision it immediately.)
 3. Detects any pre-existing collections indexed with the old 384-dim embedder (which would otherwise silently return nothing under bge-768) and offers a safe migration, see [Migrating collections after an embedder change](#migrating-collections-after-an-embedder-change).
 
 In **cloud mode** `nx init` is a no-op: embeddings run server-side via Voyage, so there is no local model to provision. It points you at `nx config init` for credentials.
@@ -73,7 +73,7 @@ If you skip `nx init`, local mode keeps working on the default 384-dim embedder;
 
 Changing the active embedder (for example default 384 → bge-768 via `nx init`) does **not** silently re-index existing collections. New content is embedded into new collection names; the old 384-dim collections remain and `nx search` returns nothing for them. `nx init` detects this and offers a safe, ordered migration:
 
-1. **Dry-run preview** of exactly what would change.
+1. **Preview** of exactly what would change (the stale collections are listed before anything runs).
 2. **Double confirmation** before any destructive step.
 3. **Reindex first** into the new 768-dim collections.
 4. **Delete the old collections only after** the reindex is verified populated.

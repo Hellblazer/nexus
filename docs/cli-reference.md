@@ -1204,7 +1204,7 @@ When `bge-768` is chosen, `nx init` also:
    default `~/.local/share/nexus/fastembed_cache`). Offline failures print an
    actionable message and retry on the next local search.
 3. **Offers safe migration** of any pre-existing 384-dim collections that would
-   otherwise become silently unsearchable under bge-768 (dry-run preview →
+   otherwise become silently unsearchable under bge-768 (preview →
    double-confirm → reindex-first → delete-after-verify; `code__` and manual-note
    collections are reported, never auto-deleted; mixed file+note collections
    require an explicit note-loss confirmation and are never migrated under `--yes`).
@@ -1213,7 +1213,7 @@ When `bge-768` is chosen, `nx init` also:
 points you at `nx config init` for credentials.
 
 `nx doctor` reminds you if you are on the default 384-dim embedder, and flags
-the degraded case where `local.embed_model` is `bge-768` but the `[local]`
+the degraded case where `local.embed_model` is `BAAI/bge-base-en-v1.5` but the `[local]`
 extra is missing (so search silently runs at 384-dim).
 
 ---
