@@ -3,7 +3,7 @@
 **TL;DR — one new command after upgrading:**
 
 ```bash
-uv tool update conexus
+uv tool upgrade conexus
 nx daemon t2 install --autostart       # NEW — register T2 daemon at login
 # (local-mode T3 only)
 nx daemon t3 install --autostart       # NEW — register T3 daemon at login
@@ -101,7 +101,7 @@ T2SchemaVersionMismatchError: Client version X does not match daemon Y.
 Restart the daemon: `nx daemon t2 stop && nx daemon t2 start`.
 ```
 
-After `uv tool update conexus`, **always restart the daemon** so it
+After `uv tool upgrade conexus`, **always restart the daemon** so it
 picks up the new binary. The LaunchAgent / systemd unit will respawn
 the daemon at the new version automatically when stopped:
 

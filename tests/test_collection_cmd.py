@@ -124,6 +124,22 @@ def test_delete_aborts_without_confirmation(runner, env_creds, mock_db) -> None:
     mock_db.delete_collection.assert_not_called()
 
 
+def test_delete_surfaces_cascade_failures(runner, env_creds, mock_db) -> None:
+    """nexus-prgf4 follow-up: a cascade-step failure must reach the CLI user
+    on stderr, not vanish into structlog (the silence regression)."""
+    from nexus.db.collection_purge import CascadeCounts
+
+    fake = CascadeCounts(failures=["catalog cascade failed: boom"])
+    with patch(
+        "nexus.db.collection_purge.purge_collection_cascade", return_value=fake
+    ):
+        result = _invoke(runner, mock_db, ["delete", "old", "--yes"])
+
+    assert result.exit_code == 0
+    assert "warn:" in result.output
+    assert "catalog cascade failed: boom" in result.output
+
+
 # ── verify ──────────────────────────────────────────────────────────────────
 
 

@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.7.0] - 2026-06-02
+
+Plugin version aligned with conexus 5.7.0. No plugin-side component changes; the
+release ships the `nx`-core RDR-144 guided-onboarding feature (`nx init`,
+embedder choice, safe 384 to 768 migration, `nx doctor` advisories). The MCP
+server now surfaces the embedder advisory to plugin/Desktop/Cowork users via
+its server instructions.
+
 ## [5.6.2] - 2026-06-01
 
 Plugin version aligned with conexus 5.6.2. No plugin-side changes; the release

@@ -1170,6 +1170,54 @@ matchers (zero fires), or overly broad blocks (high block rate).
 
 ---
 
+## nx init
+
+Guided first-run setup for the local embedder (RDR-144). Distinct from
+`nx config init` (the cloud-credentials wizard): `nx init` chooses and
+provisions the on-device embedding model for local mode.
+
+```
+nx init                       # interactive: prompt for the embedder
+nx init --yes                 # accept the recommended bge-768, no prompt
+nx init --embedder minilm-384 # pick a specific embedder, no prompt
+```
+
+| Flag | Description |
+|------|-------------|
+| `--embedder [bge-768\|minilm-384]` | Select the embedder non-interactively (skips the prompt) |
+| `--yes` / `-y` | Accept the recommended default (bge-768) without prompting |
+
+**Local mode** presents the two on-device embedders and records the choice in
+`~/.config/nexus/config.yml` under `local.embed_model`:
+
+| Choice | Model | Dim | Notes |
+|--------|-------|-----|-------|
+| `bge-768` | BAAI/bge-base-en-v1.5 | 768 | Recommended. Materially better local search. One-time ~140 MB model download. |
+| `minilm-384` | all-MiniLM-L6-v2 | 384 | Bundled, instant, lower quality. |
+
+When `bge-768` is chosen, `nx init` also:
+
+1. **Adds the `[local]` extra** if missing. For a `uv tool` install it runs an
+   extras-preserving reinstall; in a dev/editable checkout it prints the manual
+   command instead of touching the tree.
+2. **Pre-fetches the model** into the stable cache (`local.fastembed_cache_path`,
+   default `~/.local/share/nexus/fastembed_cache`). Offline failures print an
+   actionable message and retry on the next local search.
+3. **Offers safe migration** of any pre-existing 384-dim collections that would
+   otherwise become silently unsearchable under bge-768 (preview →
+   double-confirm → reindex-first → delete-after-verify; `code__` and manual-note
+   collections are reported, never auto-deleted; mixed file+note collections
+   require an explicit note-loss confirmation and are never migrated under `--yes`).
+
+**Cloud mode** is a no-op: embeddings run server-side via Voyage. `nx init`
+points you at `nx config init` for credentials.
+
+`nx doctor` reminds you if you are on the default 384-dim embedder, and flags
+the degraded case where `local.embed_model` is `BAAI/bge-base-en-v1.5` but the `[local]`
+extra is missing (so search silently runs at 384-dim).
+
+---
+
 ## nx config
 
 Configuration management.
@@ -1404,12 +1452,14 @@ leave them running. For a brand-new install the recommended setup
 sequence is:
 
 ```
-uv tool install conexus
+uv tool install conexus                    # or "conexus[local]" for the bge-768 local embedder
 nx daemon t2 install --autostart           # writes LaunchAgent/systemd unit
 nx daemon t2 status                        # confirm running
 # (local-mode T3 only)
 nx daemon t3 install --autostart
 ```
+
+Upgrade later with `uv tool upgrade conexus` (preserves extras like `[local]`); avoid `uv tool install --force`, which resets the environment and drops them.
 
 Cloud-mode T3 uses HTTP transport directly to ChromaDB Cloud and
 has no daemon; only `t2` is needed in that configuration.

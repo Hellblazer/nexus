@@ -13,7 +13,7 @@ Each level is deep-merged, with higher-priority values winning.
 
 ## Local Mode
 
-Nexus auto-detects local mode when cloud credentials are absent. No configuration needed — just `uv tool install conexus && nx index repo .`.
+Nexus auto-detects local mode when cloud credentials are absent. The recommended setup is `uv tool install conexus && nx init`: `nx init` (RDR-144) presents the 384-vs-768 embedder choice, adds the `[local]` extra for you when you pick bge-768, and provisions the model (see [nx init](cli-reference.md#nx-init)). You can still request the extra at install time with `uv tool install "conexus[local]"`; the `[local]` extra adds the bge-768 embedder for better local search, while plain `conexus` uses the built-in 384-dim MiniLM. Upgrade with `uv tool upgrade conexus` to keep your extras, never `uv tool install --force`, which drops `[local]`.
 
 | Env var | Default | Description |
 |---|---|---|
@@ -23,13 +23,22 @@ Nexus auto-detects local mode when cloud credentials are absent. No configuratio
 | `NEXUS_CATALOG_PATH` | `~/.config/nexus/catalog` | Override catalog git repo location |
 | `NEXUS_CATALOG_ALLOW_CROSS_PROJECT` | unset | Set to `1` to bypass the register-time cross-project source_uri guard. Emergency-only escape hatch for known-good recovery scripts that legitimately need to register rows across project boundaries; never the right answer for normal indexing |
 
-**Auto-detection**: When either `CHROMA_API_KEY` or `VOYAGE_API_KEY` is absent, local mode activates — both are required for cloud mode. Set `NX_LOCAL=1` to force local mode even with cloud credentials.
+**`config.yml` keys** (set by `nx init`, under the `local:` block in `~/.config/nexus/config.yml`):
 
-**Embedding tiers**: Tier 0 (bundled MiniLM-L6-v2, 384d) is always available. Install with `uv tool install conexus --with "conexus[local]" --force` for tier 1 (bge-base-en-v1.5, 768d, better quality).
+| Key | Default | Description |
+|---|---|---|
+| `local.embed_model` | (auto-select) | The embedder `nx init` recorded (`BAAI/bge-base-en-v1.5` or `all-MiniLM-L6-v2`). Absent = legacy auto-select (bge if the `[local]` extra is importable, else MiniLM). |
+| `local.fastembed_cache_path` | `~/.local/share/nexus/fastembed_cache` (XDG-aware) | Stable cache dir for the bge-768 model so it is not re-downloaded to a volatile `$TMPDIR` on every reboot. |
+
+**Auto-detection**: When either `CHROMA_API_KEY` or `VOYAGE_API_KEY` is absent, local mode activates, both are required for cloud mode. Set `NX_LOCAL=1` to force local mode even with cloud credentials.
+
+**Embedding tiers**: Tier 0 (bundled MiniLM-L6-v2, 384d) is always available. Install `uv tool install "conexus[local]"` for tier 1 (bge-base-en-v1.5, 768d, better quality; downloads the model on first embed). To add the extra to an existing install: `uv tool install --reinstall "conexus[local]"`. Upgrade later with `uv tool upgrade conexus`, which preserves the extra — never `uv tool install --force`, which drops it.
 
 **Storage path**: Defaults to `$XDG_DATA_HOME/nexus/chroma` or `~/.local/share/nexus/chroma`. Override with `NX_LOCAL_CHROMA_PATH`.
 
-**Switching modes**: Changing between local and cloud mode triggers automatic re-indexing on the next `nx index repo .` (embedding model mismatch detected by staleness check). Local and cloud embeddings are incompatible — there is no automatic migration.
+**Switching embedders or modes**: Changing the embedding model (switching local↔cloud, *or* switching local tiers 384-dim MiniLM ↔ 768-dim bge) makes the existing vectors incompatible (different dimensions/space). On the next `nx index repo .` the staleness check detects the model change and re-embeds into **new** collections under the new model token. **It does NOT automatically delete or migrate the old collections**: they remain behind under the previous token and silently return no results (their dimension no longer matches the active embedder).
+
+When you switch local tiers via `nx init` (the common 384 → bge-768 upgrade), `nx init` detects these stale collections and offers a safe, ordered migration (preview → double-confirm → reindex-first → delete-after-verify; old collections deleted only after the new ones are verified populated, so a failed reindex never loses data). `code__` and manual-note (`store_put`) collections are reported but never auto-deleted. Outside the `nx init` flow you can clean up manually: `nx doctor` flags the dimension mismatch, `nx collection reindex <name>` rebuilds one from source, and `nx collection delete <name>` removes an orphan.
 
 ## Cloud Credentials
 

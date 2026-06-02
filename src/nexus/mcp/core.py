@@ -4282,7 +4282,7 @@ def main():
     import structlog
 
     from nexus.logging_setup import configure_logging
-    from nexus.mcp._first_run import ensure_installed_and_running
+    from nexus.mcp._first_run import apply_embedder_notice, ensure_installed_and_running
     from nexus.mcp_infra import check_version_compatibility
 
     configure_logging("mcp")
@@ -4301,6 +4301,11 @@ def main():
     # every memory_put / search call fails opaquely. Best-effort:
     # logs warnings on failure, never blocks startup.
     ensure_installed_and_running()
+    # RDR-144 P5b: surface the embedder advisory to plugin/Desktop/Cowork-first
+    # users who never run the Claude Code SessionStart hook. The MCP server
+    # cannot print (stdout is JSON-RPC), so the notice rides the server
+    # `instructions` delivered at initialize. Best-effort; never blocks boot.
+    apply_embedder_notice(mcp)
     # The FastMCP lifespan finally is the design's primary cleanup
     # path; the signal handlers below are belt-and-braces for the
     # cases where the lifespan does not fire. Empirically, FastMCP's

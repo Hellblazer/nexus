@@ -19,9 +19,20 @@ If you're on 3.14+, install 3.13 with `uv python install 3.13` — uv will use i
 
 ```bash
 uv tool install conexus
+nx init                       # guided: choose your local embedder
 ```
 
-The default install includes MinerU for math-aware PDF extraction (~500 MB of Python deps; first PDF index downloads ~2-3 GB of models — see [PDF indexing notes](#pdf-indexing-and-mineru-models) below).
+The default install uses the built-in ONNX MiniLM embedder (384-dim). `nx init` then walks you through the embedder choice as a guided, informed decision (see [Choosing a local embedder](#choosing-a-local-embedder-nx-init) below): the recommended **bge-768** (BAAI/bge-base-en-v1.5, 768-dim, materially better local search, ~140 MB one-time model download) or the bundled **minilm-384** (instant, lower quality). Choosing bge-768 adds the `[local]` extra for you and provisions the model. The default install also includes MinerU for math-aware PDF extraction (~500 MB of Python deps; first PDF index downloads ~2-3 GB of models, see [PDF indexing notes](#pdf-indexing-and-mineru-models) below).
+
+You can still request the extra directly at install time with `uv tool install "conexus[local]"`, but `nx init` is the recommended path: it presents the trade-off, provisions the model, and detects pre-existing 384-dim collections that would need migrating.
+
+### Updating
+
+```bash
+uv tool upgrade conexus
+```
+
+Always upgrade with `uv tool upgrade conexus` — it preserves the spec you installed with, so a `[local]` install stays `[local]`. **Do not** re-run `uv tool install conexus` (or `--force`) just to upgrade: that resets the environment and **drops `[local]`**, silently downgrading the embedder 768→384-dim, which dimension-mismatches existing 768-dim collections and makes search return nothing. To recover: `uv tool install --reinstall "conexus[local]"`. When you update the Claude Code plugin, upgrade the CLI to the matching version at the same time.
 
 Verify:
 
@@ -32,6 +43,45 @@ nx doctor --check-mineru   # confirms MinerU is importable (since nexus-2fyb)
 ```
 
 `nx doctor` checks dependencies, credentials, and connectivity. Everything should show `✓` except cloud credentials (which are optional).
+
+### Choosing a local embedder (`nx init`)
+
+`nx init` is the guided first-run setup for local mode. It is distinct from `nx config init` (the cloud-credentials wizard).
+
+```bash
+nx init                       # interactive: prompts for the embedder
+nx init --yes                 # accept the recommended bge-768 non-interactively
+nx init --embedder minilm-384 # pick a specific embedder, no prompt
+```
+
+In **local mode** it presents the two on-device embedders and records your choice in `~/.config/nexus/config.yml` under `local.embed_model`:
+
+- **bge-768** (BAAI/bge-base-en-v1.5, 768-dim): recommended. Materially better local search quality. One-time ~140 MB model download on first use.
+- **minilm-384** (all-MiniLM-L6-v2, 384-dim): bundled, instant, lower quality.
+
+When you choose bge-768, `nx init`:
+
+1. Adds the `[local]` extra if it is missing. For a `uv tool` install it runs an extras-preserving reinstall for you; in a dev/editable checkout it prints the manual command (`pip install 'conexus[local]'` or `uv sync --extra local`) rather than touching your tree.
+2. Pre-fetches the bge-768 model into a stable cache (`local.fastembed_cache_path`, default `~/.local/share/nexus/fastembed_cache`) so it is not re-downloaded on every reboot. If you are offline it prints an actionable message and retries automatically on your next local search. (When the `[local]` extra had to be installed in this same run, the running process cannot import the freshly-installed package, so the model is fetched on your first local search instead; re-run `nx init` to provision it immediately.)
+3. Detects any pre-existing collections indexed with the old 384-dim embedder (which would otherwise silently return nothing under bge-768) and offers a safe migration, see [Migrating collections after an embedder change](#migrating-collections-after-an-embedder-change).
+
+In **cloud mode** `nx init` is a no-op: embeddings run server-side via Voyage, so there is no local model to provision. It points you at `nx config init` for credentials.
+
+If you skip `nx init`, local mode keeps working on the default 384-dim embedder; `nx doctor` will remind you that bge-768 is available, and will also flag the degraded case where you chose bge-768 but the `[local]` extra is missing.
+
+### Migrating collections after an embedder change
+
+Changing the active embedder (for example default 384 → bge-768 via `nx init`) does **not** silently re-index existing collections. New content is embedded into new collection names; the old 384-dim collections remain and `nx search` returns nothing for them. `nx init` detects this and offers a safe, ordered migration:
+
+1. **Preview** of exactly what would change (the stale collections are listed before anything runs).
+2. **Double confirmation** before any destructive step.
+3. **Reindex first** into the new 768-dim collections.
+4. **Delete the old collections only after** the reindex is verified populated.
+
+If a reindex fails partway, the old collection is left fully intact; there is no delete-before-reindex path. Two cases are reported but never auto-deleted (there is no source to re-embed from, so deleting would lose data):
+
+- **`code__` collections**: reindex these yourself with `nx index repo <path>`.
+- **Manual entries** (notes added via `nx store put` / the MCP `store_put` tool, with no source file). A collection that mixes indexed files with manual notes is migrated only after an explicit confirmation that names the note loss, and never under `--yes`.
 
 ### PDF indexing and MinerU models
 
@@ -87,8 +137,10 @@ including TCP / UDS / Cowork transport details.
 ## Update
 
 ```bash
-uv tool update conexus
+uv tool upgrade conexus
 ```
+
+`uv tool upgrade` preserves the spec you installed with (so a `[local]` install stays `[local]`). Do **not** upgrade by re-running `uv tool install conexus` / `--force` — that resets the environment and drops `[local]`, silently downgrading the embedder 768→384-dim (see [Updating](#updating) above).
 
 After upgrading conexus, restart the daemon so it picks up the new
 binary:
@@ -257,10 +309,10 @@ taxonomy:
 
 ```bash
 uv python install 3.13
-uv tool install conexus --force --python 3.13
+uv tool install conexus --force --python 3.13   # use "conexus[local]" here if you rely on the bge-768 embedder
 ```
 
-Note: `uv tool update` reuses the existing environment's Python — it won't switch from 3.14 to 3.13 automatically. You must use `--force --python 3.13` to rebuild the environment.
+Note: `uv tool upgrade` reuses the existing environment's Python — it won't switch from 3.14 to 3.13 automatically. You must use `--force --python 3.13` to rebuild the environment. Because `--force` rebuilds from scratch it drops optional extras, so re-include `[local]` (i.e. install `"conexus[local]"`) if you use the bge-768 embedder.
 
 **`nx doctor` reports credentials not set** — Expected for local mode. Only needed if you want cloud embeddings — run `nx config init`.
 
@@ -268,7 +320,7 @@ Note: `uv tool update` reuses the existing environment's Python — it won't swi
 
 **`nx index repo .` fails with "credentials not set"** — In cloud mode, indexing requires T3 credentials. Run `nx config init` first, or use local mode (no credentials needed).
 
-**`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14. Fix: `uv tool install conexus --force --python 3.13` (install 3.13 first with `uv python install 3.13` if needed).
+**`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14. Fix: `uv tool install conexus --force --python 3.13` (install 3.13 first with `uv python install 3.13` if needed; re-include `[local]` — `"conexus[local]"` — if you use the bge-768 embedder, since `--force` drops extras).
 
 **First index is slow or hits a rate limit** — Large repos may take a few minutes. Add `--monitor` for per-file progress. Re-running is safe — unchanged files are skipped.
 

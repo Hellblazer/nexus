@@ -6,6 +6,54 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.7.0] - 2026-06-02
+
+Guided onboarding for the local embedder (RDR-144): the 384-vs-768 choice is
+now an informed `nx init` step, not a silent packaging default.
+
+### Added
+
+- **`nx init` guided onboarding.** New top-level verb (distinct from
+  `nx config init`). In local mode it presents the embedder choice and records
+  it to `config.yml` `local.embed_model`: recommended **bge-768**
+  (BAAI/bge-base-en-v1.5, materially better local search, ~140 MB one-time
+  download) or bundled **minilm-384**. Choosing bge-768 adds the `[local]`
+  extra (editable-safe: a `uv tool` install reinstalls in place; a dev/editable
+  tree gets a manual instruction), pre-fetches the model into a stable XDG
+  cache (`local.fastembed_cache_path`, no more re-download to a volatile
+  `$TMPDIR` on reboot), and offers to migrate pre-existing 384-dim collections.
+  Cloud mode is a no-op. Flags: `--embedder`, `--yes`.
+- **Safe 384 to 768 collection migration.** `nx init` detects collections
+  indexed with the old embedder (which silently return nothing under bge-768)
+  and migrates them under a gate-locked protocol: dry-run preview,
+  double-confirm, reindex-first, delete-after-verify. The old collection is
+  removed only after the new one is verified populated, so a failed reindex
+  never loses data. `code__` and manual-note collections are reported, never
+  auto-deleted; mixed file+note collections require an explicit note-loss
+  confirmation and are never migrated under `--yes`.
+- **`nx doctor` embedder advisories.** Flags two previously-invisible states:
+  running on the default 384 embedder (nudge to `nx init`), and the degraded
+  case where bge-768 was chosen but the `[local]` extra is missing (so search
+  silently runs at 384-dim). The MCP server also surfaces the notice to
+  plugin/Desktop/Cowork users via its server `instructions`.
+
+### Fixed
+
+- **No orphan state after a collection delete or migration.** `nx collection
+  delete` and the new migration share one cascade (`purge_collection_cascade`),
+  so removing a collection also purges its catalog, taxonomy, chash, and
+  pipeline rows; cascade-step failures are surfaced to the user instead of
+  swallowed.
+- **Reindex verification no longer miscounts empty sources.** A source file
+  that now produces zero chunks can no longer inflate the migration's
+  verification and trigger a data-losing delete.
+
+### Docs
+
+- Onboarding presents the embedder choice as the primary path across README,
+  getting-started, cli-reference, and configuration; supersedes the 5.6.x
+  "or install conexus[local]" stopgap framing for the default decision.
+
 ## [5.6.2] - 2026-06-01
 
 P0 hotfix: restores `search` / `query` / `store_put` in local mode through the
