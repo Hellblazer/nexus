@@ -1404,12 +1404,14 @@ leave them running. For a brand-new install the recommended setup
 sequence is:
 
 ```
-uv tool install conexus
+uv tool install conexus                    # or "conexus[local]" for the bge-768 local embedder
 nx daemon t2 install --autostart           # writes LaunchAgent/systemd unit
 nx daemon t2 status                        # confirm running
 # (local-mode T3 only)
 nx daemon t3 install --autostart
 ```
+
+Upgrade later with `uv tool upgrade conexus` (preserves extras like `[local]`); avoid `uv tool install --force`, which resets the environment and drops them.
 
 Cloud-mode T3 uses HTTP transport directly to ChromaDB Cloud and
 has no daemon; only `t2` is needed in that configuration.

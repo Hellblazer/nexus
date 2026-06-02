@@ -13,7 +13,7 @@ Each level is deep-merged, with higher-priority values winning.
 
 ## Local Mode
 
-Nexus auto-detects local mode when cloud credentials are absent. No configuration needed — just `uv tool install conexus && nx index repo .`.
+Nexus auto-detects local mode when cloud credentials are absent. No configuration needed — just `uv tool install "conexus[local]" && nx index repo .` (the `[local]` extra adds the bge-768 embedder for better local search; plain `conexus` uses the built-in 384-dim MiniLM). Upgrade with `uv tool upgrade conexus` to keep your extras — never `uv tool install --force`, which drops `[local]`.
 
 | Env var | Default | Description |
 |---|---|---|
