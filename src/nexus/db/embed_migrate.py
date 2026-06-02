@@ -249,24 +249,38 @@ def _default_reindex(
 
     from nexus.doc_indexer import batch_index_markdowns, index_markdown, index_pdf
 
+    def _chunks(result: object) -> int:
+        # index_markdown / index_pdf return the chunk count (int) unless
+        # return_metadata=True (dict). We never request the dict here.
+        if isinstance(result, dict):
+            return int(result.get("chunks", 0))
+        return int(result or 0)
+
     indexed = 0
     if target_name.startswith("rdr__"):
         rdr_files = [Path(sp) for sp in source_paths if Path(sp).exists()]
         if rdr_files:
-            batch_index_markdowns(
+            # batch returns {path: "indexed"|"skipped"|"failed"}; "skipped"
+            # means 0 chunks were produced. Count only content-producing
+            # files so a now-empty source cannot inflate the verification
+            # (nexus-s5m44): an inflated count would let delete-after-verify
+            # drop the old collection while the new one is short content.
+            results = batch_index_markdowns(
                 rdr_files, corpus=corpus, collection_name=target_name, force=True
             )
-            indexed = len(rdr_files)
+            indexed = sum(1 for status in results.values() if status == "indexed")
     else:  # docs__ / knowledge__
         for sp in source_paths:
             p = Path(sp)
             if not p.exists():
                 continue
             if p.suffix.lower() == ".pdf":
-                index_pdf(p, corpus=corpus, collection_name=target_name, force=True)
+                count = index_pdf(p, corpus=corpus, collection_name=target_name, force=True)
             else:
-                index_markdown(p, corpus=corpus, collection_name=target_name, force=True)
-            indexed += 1
+                count = index_markdown(p, corpus=corpus, collection_name=target_name, force=True)
+            # Only count sources that actually produced chunks (nexus-s5m44).
+            if _chunks(count) > 0:
+                indexed += 1
 
     try:
         after = db.collection_info(target_name)["count"]
@@ -392,13 +406,20 @@ def migrate_collection_safe(
             ),
         )
 
-    db.delete_collection(stale.name)
+    # Delete the old collection AND cascade-purge its derived state
+    # (taxonomy, chash, pipeline, catalog docs + projection). A bare
+    # db.delete_collection here orphaned the old catalog rows, surfacing as
+    # doctor t3-vs-catalog / collections-drift FAILs (nexus-prgf4).
+    from nexus.db.collection_purge import purge_collection_cascade
+
+    cascade = purge_collection_cascade(db, stale.name)
     _log.info(
         "embed_migrate_succeeded",
         collection=stale.name,
         target=stale.target_name,
         before=before,
         after=after,
+        catalog_docs_purged=cascade.catalog_docs_deleted,
     )
     return MigrationOutcome(
         name=stale.name,

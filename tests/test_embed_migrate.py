@@ -28,6 +28,7 @@ from nexus.db.embed_migrate import (
     StaleCollection,
     detect_stale_local_collections,
     migrate_collection_safe,
+    _default_reindex,
     _target_name,
 )
 from nexus.db.t3 import T3Database
@@ -331,6 +332,49 @@ class TestMigrateSafe:
         assert outcome.status == "migrated"
         assert not t3.collection_exists(old)
 
+    def test_old_collection_delete_runs_full_cascade(self, t3: T3Database) -> None:
+        """nexus-prgf4 (O1): the migration must purge the old collection via the
+        full cascade (catalog/taxonomy/chash), not a bare delete that orphans
+        catalog rows."""
+        old = "docs__proj__minilm-l6-v2-384__v1"
+        target = "docs__proj__bge-base-en-v15-768__v1"
+        _seed(t3, old, _DIM_384)
+        try:
+            t3._client.delete_collection(target)
+        except Exception:
+            pass
+
+        calls: list[tuple] = []
+
+        def _spy_cascade(db, name):
+            calls.append((db, name))
+            db.delete_collection(name)  # still performs the physical delete
+            from nexus.db.collection_purge import CascadeCounts
+
+            return CascadeCounts(catalog_docs_deleted=2)
+
+        import nexus.db.collection_purge as cp
+
+        # patch the symbol embed_migrate imports at call time
+        orig = cp.purge_collection_cascade
+        cp.purge_collection_cascade = _spy_cascade
+        try:
+            def _reindex_fn(db, tgt, sources, corpus):
+                col = db._client.get_or_create_collection(tgt)
+                col.add(ids=[f"{tgt}:0"], embeddings=[_vec(_DIM_768)],
+                        documents=["a"], metadatas=[{"source_path": "doc.md"}])
+                return (1, 1)
+
+            outcome = migrate_collection_safe(
+                t3, self._stale(old, target), dry_run=False, reindex_fn=_reindex_fn
+            )
+        finally:
+            cp.purge_collection_cascade = orig
+
+        assert outcome.status == "migrated"
+        assert calls == [(t3, old)]          # cascade invoked, not bare delete
+        assert not t3.collection_exists(old)  # old physically gone
+
     def test_deferred_kinds_are_skipped_never_deleted(self, t3: T3Database) -> None:
         old = "code__proj__minilm-l6-v2-384__v1"
         _seed(t3, old, _DIM_384)
@@ -349,3 +393,50 @@ class TestMigrateSafe:
 
         assert outcome.status == "skipped"
         assert t3.collection_exists(old)  # never deleted
+
+
+class TestDefaultReindexCounting:
+    """nexus-s5m44 (S2): _default_reindex must count only content-producing
+    sources, so a now-empty/broken file cannot inflate ``indexed`` and let
+    delete-after-verify drop the old collection while the new one is short."""
+
+    def test_zero_chunk_source_not_counted(
+        self, t3: T3Database, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        good = tmp_path / "good.md"
+        good.write_text("# Good\n\nReal content.\n")
+        empty = tmp_path / "empty.md"
+        empty.write_text("")  # exists, but produces 0 chunks
+
+        def _fake_index_markdown(p, *, corpus, collection_name, force):
+            return 3 if p.name == "good.md" else 0
+
+        monkeypatch.setattr("nexus.doc_indexer.index_markdown", _fake_index_markdown)
+
+        indexed, _after = _default_reindex(
+            t3,
+            "docs__proj__bge-base-en-v15-768__v1",
+            frozenset({str(good), str(empty)}),
+            "proj",
+        )
+
+        # only the content-producing source counts
+        assert indexed == 1
+
+    def test_all_content_sources_counted(
+        self, t3: T3Database, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = tmp_path / "a.md"; a.write_text("# A\n\nx\n")
+        b = tmp_path / "b.md"; b.write_text("# B\n\ny\n")
+
+        monkeypatch.setattr(
+            "nexus.doc_indexer.index_markdown",
+            lambda p, *, corpus, collection_name, force: 2,
+        )
+
+        indexed, _after = _default_reindex(
+            t3, "docs__proj__bge-base-en-v15-768__v1",
+            frozenset({str(a), str(b)}), "proj",
+        )
+
+        assert indexed == 2

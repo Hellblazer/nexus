@@ -104,107 +104,26 @@ def delete_cmd(name: str, yes: bool) -> None:
     if not yes:
         click.confirm(f"Delete collection '{name}'? This cannot be undone.", abort=True)
 
-    # nexus-lub: T3 delete may fail with NotFoundError when the caller
-    # is recovering from an orphan-taxonomy state where the collection
-    # was deleted previously but the cascade didn't run (pre-4.5.0). We
-    # still run the cascade in that case so the orphan rows are cleaned.
-    # Any other T3 error aborts before cascade.
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError
-    t3_absent = False
-    try:
-        _t3().delete_collection(name)
-    except _ChromaNotFoundError:
-        t3_absent = True
+    # nexus-jm3z / nexus-8a8e / nexus-vxz3: the full delete cascade (T3 +
+    # taxonomy + chash + pipeline + catalog docs + projection) is the
+    # canonical ``purge_collection_cascade`` (RDR-144 nexus-prgf4), shared
+    # with the 384->768 migration so both leave the same clean state.
+    # nexus-lub: a T3 delete may find the collection already absent (a prior
+    # half-delete); the cascade still runs to clean the orphan rows.
+    from nexus.db.collection_purge import purge_collection_cascade
+
+    cascade = purge_collection_cascade(_t3(), name)
+    if cascade.t3_absent:
         click.echo(
             f"note: T3 collection '{name}' already absent — running cascade anyway",
             err=True,
         )
 
-    # Cascade-purge taxonomy state (topics, assignments, links, meta)
-    # so `nx taxonomy status` / hub detection don't drag ghost rows.
-    # RDR-086 Phase 1.4: same block also purges chash_index so Phase 2's
-    # Catalog.resolve_chash never returns (collection, doc_id) tuples
-    # pointing at chunks that no longer exist in T3.
-    taxonomy_counts: dict[str, int] | None = None
-    chash_deleted = 0
-    try:
-        # RDR-128 P3 (nexus-sbxbe.3): route the cascade through the daemon.
-        # Both purge_collection and delete_collection are routable store
-        # ops (str arg, dict/int return).
-        from nexus.mcp_infra import t2_index_write
-
-        def _cascade(db):
-            return (
-                db.taxonomy.purge_collection(name),
-                db.chash_index.delete_collection(name),
-            )
-
-        taxonomy_counts, chash_deleted = t2_index_write(_cascade)
-    except Exception as exc:
-        prefix = "absent" if t3_absent else "succeeded"
-        click.echo(
-            f"warn: T3 delete {prefix} but T2 cascade failed: {exc}",
-            err=True,
-        )
-
-    # nexus-8a8e: purge streaming-pipeline rows keyed to this collection.
-    # pdf_pipeline.status='completed' otherwise makes the next `nx index pdf`
-    # return "skip" (0 chunks) for every content_hash that was previously
-    # indexed into *name*, even though T3 + T2 are now empty.
-    pipeline_rows_deleted = 0
-    try:
-        from nexus.pipeline_buffer import PIPELINE_DB_PATH, PipelineDB
-        pipeline_rows_deleted = PipelineDB(PIPELINE_DB_PATH).delete_pipeline_data_for_collection(name)
-    except Exception as exc:
-        click.echo(f"warn: pipeline-state cleanup failed: {exc}", err=True)
-
-    # nexus-jm3z: cascade to catalog. Pre-fix, `nx collection delete`
-    # left catalog.documents rows whose physical_collection pointed at
-    # the now-gone collection, plus a stale catalog.collections
-    # projection row. Both surfaced as doctor FAILs (t3-vs-catalog +
-    # collections-drift) requiring per-tumbler manual cleanup. Run the
-    # cascade here so a single delete leaves the catalog clean.
-    catalog_docs_deleted = 0
-    catalog_projection_deleted = 0
-    try:
-        from nexus.catalog.catalog import Catalog
-        from nexus.config import catalog_path
-
-        cat_path = catalog_path()
-        if Catalog.is_initialized(cat_path):
-            cat = Catalog(cat_path, cat_path / ".catalog.db")
-            # Delete every document row pointing at the gone collection.
-            # Use the public delete_document so the event log + JSONL
-            # tombstone stay in sync with the SQLite projection.
-            orphan_tumblers = [
-                row[0]
-                for row in cat._db.execute(
-                    "SELECT tumbler FROM documents WHERE physical_collection = ?",
-                    (name,),
-                ).fetchall()
-            ]
-            for tumbler in orphan_tumblers:
-                try:
-                    if cat.delete_document(tumbler):
-                        catalog_docs_deleted += 1
-                except Exception:
-                    _log.debug(
-                        "collection_delete_cascade_document_failed",
-                        tumbler=tumbler, exc_info=True,
-                    )
-            # nexus-vxz3: emit CollectionDeleted event so replay
-            # produces SQLite state matching the live delete. The
-            # projector's _v0_collection_deleted handler drops the
-            # projection row. Routed through Catalog.delete_collection_projection
-            # so the SQL stays inside src/nexus/catalog/ — RDR-101
-            # Phase 3 ε lint gate forbids direct catalog writes from
-            # outside the projector module.
-            if cat.delete_collection_projection(
-                name, reason="nx collection delete"
-            ):
-                catalog_projection_deleted = 1
-    except Exception as exc:
-        click.echo(f"warn: catalog cascade failed: {exc}", err=True)
+    taxonomy_counts = cascade.taxonomy
+    chash_deleted = cascade.chash_deleted
+    pipeline_rows_deleted = cascade.pipeline_rows_deleted
+    catalog_docs_deleted = cascade.catalog_docs_deleted
+    catalog_projection_deleted = cascade.catalog_projection_deleted
 
     parts: list[str] = []
     if taxonomy_counts and any(taxonomy_counts.values()):
