@@ -160,6 +160,14 @@ The host-side substrate round-trip is regression-tested by `tests/test_cowork_sd
 
 Both directions resolving the sentinel confirms the bridge shares one T2 with the host. A failure on step 1 points at the SDK transport (the VM never reached the host daemon); a failure on step 2 points at write-attribution or a stale read in the shared substrate — start with `nx daemon t2 status` then `nx memory list -p _cowork_test`.
 
+### Minimum Viable Validation (RDR-126 P6)
+
+The first-run banner + `daemon_uninstall` lifecycle is validated in two halves.
+
+**P6-A — automated, pre-release (`scripts/p6-clean-run.sh`).** Exercises this repo's `nx-mcp` code in an isolated `$HOME` sandbox with a shimmed `launchctl`/`systemctl`, driven over a raw MCP stdio client (no model, no auth — `memory_*` is pure T2/SQLite). Verifies: `NEWLY_INSTALLED` banner variant on the first tool call (with the uninstall hint), LaunchAgent + first-run marker written, memory round-trip, banner one-shot, `daemon_uninstall` dry-run no-op, and `confirm=true` removal. The real `~/Library/LaunchAgents` daemon is never touched (the shim proves it). Run on a Linux VM as-is to cover the systemd path — `nx-mcp` branches on `sys.platform`, so the same script writes a `nexus-t2.service` unit there.
+
+**P6-B — manual, post-release (`scripts/p6-desktop-profile.sh`).** The literal fresh-account Desktop `.mcpb` run. The Desktop extension resolves `conexus` from PyPI, so this only carries the banner/uninstall code once a release is cut. The helper stands up an isolated Claude Desktop profile (`--user-data-dir`) so a second, independently-authed instance acts as the fresh account without disturbing your primary Desktop. Constraint: quit your primary Claude Desktop first (a concurrent OAuth login across instances collides). The in-window checklist: sign in -> install `conexus.mcpb` via Settings -> Extensions -> confirm the banner on the first turn -> `memory_put`/`memory_get` round-trip -> `daemon_uninstall(confirm=true)` -> relaunch and confirm the host LaunchAgent/systemd unit stays gone. Note the Desktop `.mcpb` installs the daemon into your **real** host (`~/Library/LaunchAgents`), not the profile — that is the one host-level side effect; step 5's `daemon_uninstall` cleans it back up.
+
 ## Failure modes
 
 - **uv not on PATH (Claude Desktop chat install)**: `.mcpb` install fails with a cryptic error. Mitigation: README documents `brew install uv` / `pipx install uv` as pre-requisite.
