@@ -7,7 +7,7 @@ priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-01
-related_issues: []
+related_issues: [nexus-qwl7o]
 related_rdrs: [RDR-076, RDR-126, RDR-143, RDR-038, RDR-109]
 supersedes: []
 related_tests: []
