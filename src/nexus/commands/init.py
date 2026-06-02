@@ -122,14 +122,19 @@ def _offer_stale_migration(assume_yes: bool) -> None:
     from = deleting is pure loss). Any detection failure is non-fatal:
     ``nx init`` must still complete.
     """
-    from nexus.db.embed_migrate import (
-        detect_stale_local_collections,
-        migrate_collection_safe,
+    from nexus.db.embed_migrate import detect_stale_local_collections
+    from nexus.db.local_ef import (
+        _MODEL_DIMS,
+        _MODEL_TOKENS,
+        _resolve_local_model,
     )
-    from nexus.db.local_ef import _MODEL_DIMS, _TIER1_MODEL, local_model_token
 
-    active_token = local_model_token()
-    active_dim = _MODEL_DIMS.get(_TIER1_MODEL, 768)
+    # Derive dim AND token from the SAME model resolution so a future
+    # caller (e.g. P5a's doctor hint, or a third local model) cannot probe
+    # with one model's dimension while naming another's token.
+    active_model = _resolve_local_model(warn=False)
+    active_token = _MODEL_TOKENS.get(active_model, "bge-base-en-v15-768")
+    active_dim = _MODEL_DIMS.get(active_model, 768)
 
     try:
         from nexus.commands.store import _t3
@@ -145,17 +150,26 @@ def _offer_stale_migration(assume_yes: bool) -> None:
     if not stale:
         return
 
-    reindexable = [s for s in stale if s.kind == "reindexable"]
-    deferred = [s for s in stale if s.kind != "reindexable"]
+    # A reindexable collection with sourceless chunks (e.g. indexed files +
+    # manual store_put notes) can only be migrated with explicit acceptance
+    # of the note loss — keep it separate from the clean reindexable set.
+    clean = [s for s in stale if s.kind == "reindexable" and s.sourceless == 0]
+    mixed = [s for s in stale if s.kind == "reindexable" and s.sourceless > 0]
 
     click.echo(
         f"\nFound {len(stale)} collection(s) indexed with a different "
         f"embedder than bge-768 — search returns nothing for these:"
     )
     for s in stale:
-        if s.kind == "reindexable":
+        if s.kind == "reindexable" and s.sourceless == 0:
             click.echo(
                 f"  • {s.name} ({s.count} chunks) -> reindex into {s.target_name}"
+            )
+        elif s.kind == "reindexable":  # mixed
+            click.echo(
+                f"  • {s.name} ({s.count} chunks, including {s.sourceless} manual "
+                f"note(s) with no source) -> reindexes files only; the manual "
+                f"notes CANNOT be re-embedded"
             )
         elif s.kind == "code":
             click.echo(
@@ -168,7 +182,7 @@ def _offer_stale_migration(assume_yes: bool) -> None:
                 f"to reindex (left as-is; `nx collection delete {s.name}` to remove)"
             )
 
-    if not reindexable:
+    if not clean and not mixed:
         click.echo(
             "\nNothing can be migrated automatically — see the manual steps above."
         )
@@ -176,33 +190,63 @@ def _offer_stale_migration(assume_yes: bool) -> None:
 
     # Double-confirm: the old collections are DELETED after a verified
     # reindex. Make the destructive step explicit and ask twice.
-    if not assume_yes:
-        if not click.confirm(
-            f"\nReindex {len(reindexable)} collection(s) into bge-768 now?",
-            default=True,
-        ):
-            click.echo("Skipped. Run `nx init` again any time to migrate.")
-            return
-        if not click.confirm(
-            "This DELETES each old collection after its reindex is verified. "
-            "Proceed?",
+    if clean:
+        if not assume_yes:
+            if not click.confirm(
+                f"\nReindex {len(clean)} collection(s) into bge-768 now?",
+                default=True,
+            ):
+                click.echo("Skipped. Run `nx init` again any time to migrate.")
+                return
+            if not click.confirm(
+                "This DELETES each old collection after its reindex is verified. "
+                "Proceed?",
+                default=False,
+            ):
+                click.echo("Skipped. Run `nx init` again any time to migrate.")
+                return
+        for s in clean:
+            _run_migration(db, s, allow_sourceless_loss=False)
+
+    # Mixed collections lose their manual notes on migration. Never under
+    # --yes (we cannot auto-confirm a lossy delete); interactive only, with
+    # a dedicated confirmation that names the loss.
+    for s in mixed:
+        if assume_yes:
+            click.echo(
+                f"\n{s.name}: {s.sourceless} manual note(s) cannot be "
+                f"re-embedded — skipped to avoid silent loss. Re-run `nx init` "
+                f"interactively (without --yes) to migrate it and accept the "
+                f"note loss, or export the notes first.",
+                err=True,
+            )
+            continue
+        if click.confirm(
+            f"\n{s.name} has {s.sourceless} manual note(s) that will be "
+            f"PERMANENTLY LOST (only file-backed chunks can be re-embedded). "
+            f"Migrate and accept that loss?",
             default=False,
         ):
-            click.echo("Skipped. Run `nx init` again any time to migrate.")
-            return
-
-    for s in reindexable:
-        click.echo(f"\nReindexing {s.name} -> {s.target_name} …")
-        outcome = migrate_collection_safe(db, s, dry_run=False)
-        if outcome.status == "migrated":
-            click.echo(
-                f"  Done: {outcome.after} chunks in {s.target_name}; "
-                f"old collection removed."
-            )
+            _run_migration(db, s, allow_sourceless_loss=True)
         else:
-            click.echo(
-                f"  {outcome.status.upper()}: {outcome.reason}", err=True
-            )
+            click.echo(f"Skipped {s.name}.")
+
+
+def _run_migration(db, stale, *, allow_sourceless_loss: bool) -> None:
+    """Run one migration and report the outcome (RDR-144 P4)."""
+    from nexus.db.embed_migrate import migrate_collection_safe
+
+    click.echo(f"\nReindexing {stale.name} -> {stale.target_name} …")
+    outcome = migrate_collection_safe(
+        db, stale, dry_run=False, allow_sourceless_loss=allow_sourceless_loss
+    )
+    if outcome.status == "migrated":
+        click.echo(
+            f"  Done: {outcome.after} chunks in {stale.target_name}; "
+            f"old collection removed."
+        )
+    else:
+        click.echo(f"  {outcome.status.upper()}: {outcome.reason}", err=True)
 
 
 # ── P3 (B) model pre-fetch warmup, offline-safe ───────────────────────────────

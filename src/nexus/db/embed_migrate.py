@@ -281,6 +281,7 @@ def migrate_collection_safe(
     *,
     dry_run: bool,
     reindex_fn: ReindexFn | None = None,
+    allow_sourceless_loss: bool = False,
 ) -> MigrationOutcome:
     """Migrate one stale collection under the gate-locked safety protocol.
 
@@ -288,9 +289,16 @@ def migrate_collection_safe(
       1. ``dry_run`` short-circuits with ZERO mutation.
       2. Deferred kinds (``code``, ``sourceless``) are skipped — never
          deleted (no source to reindex from = deleting is pure loss).
-      3. Reindex sources into ``target_name`` FIRST.
-      4. Verify the target is populated AND every expected source indexed.
-      5. Delete the old collection ONLY after that verification.
+      3. A ``reindexable`` collection that ALSO holds sourceless chunks
+         (e.g. a ``knowledge__`` collection mixing indexed files with
+         manual ``store_put`` notes) is skipped UNLESS
+         ``allow_sourceless_loss=True``: the reindex only re-embeds the
+         file-backed chunks, so deleting the old collection would silently
+         drop the notes. Safe-by-default; the CLI opts in only after an
+         explicit, non-``--yes`` confirmation that names the loss.
+      4. Reindex sources into ``target_name`` FIRST.
+      5. Verify the target is populated AND every expected source indexed.
+      6. Delete the old collection ONLY after that verification.
 
     On any reindex failure or verification shortfall the old collection is
     left fully intact and ``status="failed"`` is returned. Never
@@ -321,6 +329,24 @@ def migrate_collection_safe(
             before=before,
             after=0,
             reason=reason,
+        )
+
+    if stale.sourceless > 0 and not allow_sourceless_loss:
+        # Mixed collection: re-embedding covers only the file-backed chunks.
+        # Deleting the old collection would silently lose the sourceless
+        # ones. Refuse by default — the caller must explicitly accept the
+        # loss after warning the user.
+        return MigrationOutcome(
+            name=stale.name,
+            target_name=stale.target_name,
+            status="skipped",
+            before=before,
+            after=0,
+            reason=(
+                f"{stale.name} has {stale.sourceless} chunk(s) with no source "
+                f"file (e.g. manual notes) that cannot be re-embedded; left "
+                f"intact to avoid silent loss"
+            ),
         )
 
     expected_sources = len(stale.source_paths)

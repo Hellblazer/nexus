@@ -419,6 +419,68 @@ class TestStaleMigrationOffer:
         assert calls == []
         assert "skipped" in result.output.lower()
 
+    def test_second_confirm_decline_skips_migration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Accept the first confirm, decline the second (the load-bearing
+        delete gate) -> no migration."""
+        stale = [_reindexable("docs__proj__minilm-l6-v2-384__v1")]
+        calls: list = []
+        self._wire(monkeypatch, stale, lambda *a, **k: calls.append(a))
+
+        # "y" accepts first confirm, "n" declines the delete gate.
+        result = CliRunner().invoke(_wrap(lambda: _real_offer(False)), input="y\nn\n")
+
+        assert result.exit_code == 0, result.output
+        assert calls == []
+        assert "skipped" in result.output.lower()
+
+    def _mixed(self, name: str, sourceless: int = 2) -> StaleCollection:
+        return StaleCollection(
+            name=name, count=5, source_paths=frozenset({"doc.md"}),
+            sourceless=sourceless,
+            target_name=name.replace("minilm-l6-v2-384", "bge-base-en-v15-768"),
+            kind="reindexable",
+        )
+
+    def test_mixed_collection_deferred_under_assume_yes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mixed (file + manual-note) collection is NEVER auto-migrated
+        under --yes — we cannot auto-confirm a lossy delete."""
+        stale = [self._mixed("knowledge__notes__minilm-l6-v2-384__v1")]
+        calls: list = []
+        self._wire(monkeypatch, stale, lambda *a, **k: calls.append(a))
+
+        result = CliRunner().invoke(_wrap(lambda: _real_offer(True)))
+
+        assert result.exit_code == 0, result.output
+        assert calls == []  # not migrated
+        out = result.output.lower()
+        assert "cannot be re-embedded" in out or "skipped" in out
+
+    def test_mixed_collection_migrates_after_explicit_loss_confirm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Interactive: confirming the note-loss prompt migrates the mixed
+        collection with allow_sourceless_loss=True."""
+        stale = [self._mixed("knowledge__notes__minilm-l6-v2-384__v1")]
+        seen: list = []
+
+        def _spy(db, s, *, dry_run, allow_sourceless_loss=False, **k):
+            seen.append((s.name, allow_sourceless_loss))
+            return MigrationOutcome(
+                name=s.name, target_name=s.target_name, status="migrated",
+                before=5, after=2, reason="ok",
+            )
+
+        self._wire(monkeypatch, stale, _spy)
+        # "y" accepts the single note-loss confirmation.
+        result = CliRunner().invoke(_wrap(lambda: _real_offer(False)), input="y\n")
+
+        assert result.exit_code == 0, result.output
+        assert seen == [("knowledge__notes__minilm-l6-v2-384__v1", True)]
+
 
 def _wrap(fn):
     """Wrap a bare callable in a trivial Click command so CliRunner can drive
