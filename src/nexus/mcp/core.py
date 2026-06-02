@@ -4262,6 +4262,37 @@ async def nx_plan_audit(
     return str(payload)
 
 
+@mcp.tool(
+    title="Uninstall Nexus Daemon",
+    annotations={"destructiveHint": True, "idempotentHint": True},
+)
+def daemon_uninstall(confirm: bool = False, remove_data: bool = False) -> str:
+    """Remove the background nexus T2 daemon installed on first run (RDR-126 §4).
+
+    Removes the OS autostart unit (LaunchAgent on macOS, systemd user unit
+    on Linux), stops the running daemon, and clears the first-run marker.
+
+    Destructive: by default this only DESCRIBES what would be removed and
+    asks you to re-call with ``confirm=true``. Nothing is removed until
+    ``confirm=true``.
+
+    Args:
+        confirm: Must be true to actually remove anything. When false
+            (default), returns a description of what would be removed.
+        remove_data: When true (and ``confirm=true``), ALSO deletes the
+            entire nexus data directory (``~/.config/nexus/``) — your
+            notes, plans, and search index. Irreversible.
+    """
+    from nexus.daemon import installer
+
+    report = installer.uninstall_daemon(confirm=confirm, remove_data=remove_data)
+    lines = [report.message]
+    if report.warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  - {w}" for w in report.warnings)
+    return "\n".join(lines)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
@@ -4282,7 +4313,11 @@ def main():
     import structlog
 
     from nexus.logging_setup import configure_logging
-    from nexus.mcp._first_run import apply_embedder_notice, ensure_installed_and_running
+    from nexus.mcp._first_run import (
+        apply_embedder_notice,
+        ensure_installed_and_running,
+        install_banner_dispatch_hook,
+    )
     from nexus.mcp_infra import check_version_compatibility
 
     configure_logging("mcp")
@@ -4301,6 +4336,10 @@ def main():
     # every memory_put / search call fails opaquely. Best-effort:
     # logs warnings on failure, never blocks startup.
     ensure_installed_and_running()
+    # RDR-126 §3: deliver the one-shot first-run banner queued by
+    # ensure_installed_and_running on the first tool response. Wrapping
+    # the CallToolRequest handler is best-effort; never blocks boot.
+    install_banner_dispatch_hook(mcp)
     # RDR-144 P5b: surface the embedder advisory to plugin/Desktop/Cowork-first
     # users who never run the Claude Code SessionStart hook. The MCP server
     # cannot print (stdout is JSON-RPC), so the notice rides the server

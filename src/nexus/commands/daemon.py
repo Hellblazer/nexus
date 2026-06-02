@@ -1237,80 +1237,39 @@ def t2_ensure_running_cmd(
     "differs from the freshly rendered template.",
 )
 def t2_install_cmd(autostart: bool, force: bool) -> None:
-    """Install the T2 daemon autostart entry for the current user."""
+    """Install the T2 daemon autostart entry for the current user.
+
+    Thin wrapper over :func:`nexus.daemon.installer.install_autostart`
+    (RDR-126 §2 lift): the library function owns the file placement /
+    activation logic; this command translates its structured result into
+    ``click.echo`` lines and exit codes.
+    """
     if not autostart:  # pragma: no cover
         raise click.UsageError("--autostart is required")
 
-    install_dir = _autostart_install_dir()
-    install_dir.mkdir(parents=True, exist_ok=True)
-    log_dir = _autostart_log_dir()
-    log_dir.mkdir(parents=True, exist_ok=True)
+    from nexus.daemon import installer
 
-    template_name = _autostart_filename_t2()
-    nx_bin = _resolve_nx_bin()
-    rendered = _render_template(
-        template_name,
-        nx_bin=nx_bin,
-        log_dir=str(log_dir),
-        path_env=os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-    )
-    dest = install_dir / template_name
-
-    if dest.is_symlink():
-        click.echo(
-            f"Error: {dest} is a symlink; refusing to install autostart "
-            "through it. Remove the symlink first and re-run.",
-            err=True,
-        )
-        sys.exit(1)
-    if dest.exists():
-        try:
-            existing = dest.read_text()
-        except OSError:
-            existing = None
-        if existing == rendered:
-            click.echo(f"{dest} already up to date; no changes")
-            return
-        if not force and existing is not None:
-            click.echo(
-                f"Error: {dest} exists and its content differs from the "
-                "rendered template; refusing to overwrite. Re-run with "
-                "--force to replace.",
-                err=True,
-            )
-            sys.exit(1)
-
-    dest.write_text(rendered)
-    dest.chmod(0o644)
-    click.echo(f"Wrote {dest}")
-
-    platform = _autostart_platform()
-    if platform == "darwin":
-        uid = os.getuid()
-        cmd = ["launchctl", "bootstrap", f"gui/{uid}", str(dest)]
-    else:
-        cmd = ["systemctl", "--user", "enable", "--now", template_name]
-    label = "Warning" if force else "Error"
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    except FileNotFoundError as exc:
-        click.echo(
-            f"{label}: {cmd[0]} not found on PATH; file installed but not activated ({exc}).",
-            err=True,
-        )
-        if not force:
-            sys.exit(1)
+        result = installer.install_autostart(force=force)
+    except installer.SymlinkRefusedError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    except installer.ContentDiffersError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    except installer.ActivationError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if result.status is installer.InstallStatus.ALREADY_PRESENT:
+        click.echo(result.detail)
         return
-    if result.returncode != 0:
-        click.echo(
-            f"{label}: {' '.join(cmd)} exited {result.returncode}: "
-            f"{result.stderr.strip() or result.stdout.strip()}",
-            err=True,
-        )
-        if not force:
-            sys.exit(1)
-        return
-    click.echo(f"Activated via: {' '.join(cmd)}")
+
+    click.echo(f"Wrote {result.dest}")
+    for warning in result.warnings:
+        click.echo(f"Warning: {warning}", err=True)
+    if result.activated_cmd is not None:
+        click.echo(f"Activated via: {' '.join(result.activated_cmd)}")
 
 
 @t2_group.command("uninstall")
@@ -1321,34 +1280,20 @@ def t2_install_cmd(autostart: bool, force: bool) -> None:
     help="Remove OS autostart entry installed by ``install --autostart``.",
 )
 def t2_uninstall_cmd(autostart: bool) -> None:
-    """Remove the T2 daemon autostart entry for the current user."""
+    """Remove the T2 daemon autostart entry for the current user.
+
+    Thin wrapper over :func:`nexus.daemon.installer.uninstall_autostart`
+    (RDR-126 §2 lift).
+    """
     if not autostart:  # pragma: no cover
         raise click.UsageError("--autostart is required")
 
-    install_dir = _autostart_install_dir()
-    template_name = _autostart_filename_t2()
-    dest = install_dir / template_name
+    from nexus.daemon import installer
 
-    if not dest.exists():
-        click.echo(f"Autostart not installed (nothing at {dest}).")
+    result = installer.uninstall_autostart()
+    if result.status is installer.UninstallStatus.NOT_INSTALLED:
+        click.echo(f"Autostart not installed (nothing at {result.dest}).")
         return
-
-    platform = _autostart_platform()
-    if platform == "darwin":
-        uid = os.getuid()
-        cmd = ["launchctl", "bootout", f"gui/{uid}/{_T2_LAUNCHD_LABEL}"]
-    else:
-        cmd = ["systemctl", "--user", "disable", "--now", template_name]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            click.echo(
-                f"Warning: {' '.join(cmd)} exited {result.returncode}: "
-                f"{result.stderr.strip() or result.stdout.strip()}",
-                err=True,
-            )
-    except FileNotFoundError as exc:
-        click.echo(f"Warning: {cmd[0]} not found ({exc}); removing file anyway.", err=True)
-
-    dest.unlink()
-    click.echo(f"Removed {dest}")
+    for warning in result.warnings:
+        click.echo(f"Warning: {warning}", err=True)
+    click.echo(f"Removed {result.dest}")

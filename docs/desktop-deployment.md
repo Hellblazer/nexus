@@ -137,6 +137,37 @@ rm -rf ~/.config/nexus                 # remove T2 SQLite + config
 
 `tests/e2e/upgrade-shakeout.sh` exercises the full surface story in a sandbox: install OLD conexus → install hooks → upgrade to current → verify drift detection → run `nx hooks update` → verify drift resolved → verify marketplace.json rename → verify plugin-name-drift detection. 11/11 green is the gate before any release.
 
+### Cowork bidirectional sentinel (manual)
+
+The host-side substrate round-trip is regression-tested by `tests/test_cowork_sdk_bridge.py` (a `memory_put` is visible to a later `memory_get` against the same T2, both directions). The cross-process SDK bridge itself can only be confirmed by hand, because it needs a running Claude Desktop and a Cowork session. Run this recipe after any change to the daemon substrate, the SDK transport wiring, or the MCP server entry points:
+
+1. **Host writes, VM reads.** In the host CLI (or host Claude Code):
+   ```bash
+   nx memory put -p _cowork_test -t host-to-vm "sentinel from host $(date +%s)"
+   ```
+   Open a Cowork session on the same host and ask it to call `memory_get` for `project="_cowork_test", title="host-to-vm"`. It must return the sentinel payload.
+
+2. **VM writes, host reads.** In the Cowork session, ask it to call `memory_put` with `project="_cowork_test", title="vm-to-host", content="sentinel from vm"`. Back on the host:
+   ```bash
+   nx memory get -p _cowork_test -t vm-to-host    # must show "sentinel from vm"
+   ```
+
+3. **Cleanup.**
+   ```bash
+   nx memory delete -p _cowork_test -t host-to-vm
+   nx memory delete -p _cowork_test -t vm-to-host
+   ```
+
+Both directions resolving the sentinel confirms the bridge shares one T2 with the host. A failure on step 1 points at the SDK transport (the VM never reached the host daemon); a failure on step 2 points at write-attribution or a stale read in the shared substrate — start with `nx daemon t2 status` then `nx memory list -p _cowork_test`.
+
+### Minimum Viable Validation (RDR-126 P6)
+
+The first-run banner + `daemon_uninstall` lifecycle is validated in two halves.
+
+**P6-A — automated, pre-release (`scripts/p6-clean-run.sh`).** Exercises this repo's `nx-mcp` code in an isolated `$HOME` sandbox with a shimmed `launchctl`/`systemctl`, driven over a raw MCP stdio client (no model, no auth — `memory_*` is pure T2/SQLite). Verifies: `NEWLY_INSTALLED` banner variant on the first tool call (with the uninstall hint), LaunchAgent + first-run marker written, memory round-trip, banner one-shot, `daemon_uninstall` dry-run no-op, and `confirm=true` removal. The real `~/Library/LaunchAgents` daemon is never touched (the shim proves it). Run on a Linux VM as-is to cover the systemd path — `nx-mcp` branches on `sys.platform`, so the same script writes a `nexus-t2.service` unit there.
+
+**P6-B — manual, post-release (`scripts/p6-desktop-profile.sh`).** The literal fresh-account Desktop `.mcpb` run. The Desktop extension resolves `conexus` from PyPI, so this only carries the banner/uninstall code once a release is cut. The helper stands up an isolated Claude Desktop profile (`--user-data-dir`) so a second, independently-authed instance acts as the fresh account without disturbing your primary Desktop. Constraint: quit your primary Claude Desktop first (a concurrent OAuth login across instances collides). The in-window checklist: sign in -> install `conexus.mcpb` via Settings -> Extensions -> confirm the banner on the first turn -> `memory_put`/`memory_get` round-trip -> `daemon_uninstall(confirm=true)` -> relaunch and confirm the host LaunchAgent/systemd unit stays gone. Note the Desktop `.mcpb` installs the daemon into your **real** host (`~/Library/LaunchAgents`), not the profile — that is the one host-level side effect; step 5's `daemon_uninstall` cleans it back up.
+
 ## Failure modes
 
 - **uv not on PATH (Claude Desktop chat install)**: `.mcpb` install fails with a cryptic error. Mitigation: README documents `brew install uv` / `pipx install uv` as pre-requisite.

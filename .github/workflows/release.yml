@@ -103,6 +103,21 @@ jobs:
           fi
           echo "Version check passed: $PKG"
 
+      - name: Verify mcpb/manifest.json version matches tag (RDR-126 nexus-2yajx)
+        run: |
+          # The Claude Desktop .mcpb bundle is a separate version-drift
+          # surface: its manifest.json carries its own version field. The
+          # pytest parity test catches drift on the release SHA, but the
+          # tag is applied after merge — this release-time guard fails the
+          # publish loud if the bundle was not bumped in lock-step.
+          TAG="${GITHUB_REF_NAME#v}"
+          MCPB=$(python3 -c "import json; print(json.load(open('mcpb/manifest.json')).get('version',''))")
+          if [ "$TAG" != "$MCPB" ]; then
+            echo "ERROR: tag '$TAG' does not match mcpb/manifest.json version '$MCPB'"
+            exit 1
+          fi
+          echo "mcpb version check passed: $MCPB"
+
       - name: Extract release notes from CHANGELOG
         id: changelog
         run: |
