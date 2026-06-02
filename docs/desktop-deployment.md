@@ -137,6 +137,29 @@ rm -rf ~/.config/nexus                 # remove T2 SQLite + config
 
 `tests/e2e/upgrade-shakeout.sh` exercises the full surface story in a sandbox: install OLD conexus → install hooks → upgrade to current → verify drift detection → run `nx hooks update` → verify drift resolved → verify marketplace.json rename → verify plugin-name-drift detection. 11/11 green is the gate before any release.
 
+### Cowork bidirectional sentinel (manual)
+
+The host-side substrate round-trip is regression-tested by `tests/test_cowork_sdk_bridge.py` (a `memory_put` is visible to a later `memory_get` against the same T2, both directions). The cross-process SDK bridge itself can only be confirmed by hand, because it needs a running Claude Desktop and a Cowork session. Run this recipe after any change to the daemon substrate, the SDK transport wiring, or the MCP server entry points:
+
+1. **Host writes, VM reads.** In the host CLI (or host Claude Code):
+   ```bash
+   nx memory put -p _cowork_test -t host-to-vm "sentinel from host $(date +%s)"
+   ```
+   Open a Cowork session on the same host and ask it to call `memory_get` for `project="_cowork_test", title="host-to-vm"`. It must return the sentinel payload.
+
+2. **VM writes, host reads.** In the Cowork session, ask it to call `memory_put` with `project="_cowork_test", title="vm-to-host", content="sentinel from vm"`. Back on the host:
+   ```bash
+   nx memory get -p _cowork_test -t vm-to-host    # must show "sentinel from vm"
+   ```
+
+3. **Cleanup.**
+   ```bash
+   nx memory delete -p _cowork_test -t host-to-vm
+   nx memory delete -p _cowork_test -t vm-to-host
+   ```
+
+Both directions resolving the sentinel confirms the bridge shares one T2 with the host. A failure on step 1 points at the SDK transport (the VM never reached the host daemon); a failure on step 2 points at write-attribution or a stale read in the shared substrate — start with `nx daemon t2 status` then `nx memory list -p _cowork_test`.
+
 ## Failure modes
 
 - **uv not on PATH (Claude Desktop chat install)**: `.mcpb` install fails with a cryptic error. Mitigation: README documents `brew install uv` / `pipx install uv` as pre-requisite.
