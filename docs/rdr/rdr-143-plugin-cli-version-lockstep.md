@@ -2,17 +2,18 @@
 title: "Plugin↔CLI Version Lockstep: a SessionStart Version-Marker Hook That Keeps the nx CLI in Sync With the conexus Plugin"
 id: RDR-143
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-01
 accepted_date: 2026-06-02
+closed_date: 2026-06-02
 related_issues: []
 related_rdrs: [RDR-076, RDR-125, RDR-141, RDR-142]
 supersedes: []
-related_tests: []
-implementation_notes: ""
+related_tests: [tests/hooks/test_version_lockstep_hook.py, tests/hooks/test_version_lockstep_action.py]
+implementation_notes: "Shipped in PR #1077 (squash 9abd6e7e on develop). Shape B: version_lockstep_hook.py + detached version_lockstep_action.py, wired into hooks.json SessionStart matcher startup. Epic nexus-cuocb (P1.1-P1.9) closed. Post-mortem: post-mortem/143-plugin-cli-version-lockstep.md"
 ---
 
 # RDR-143: Plugin↔CLI Version Lockstep: a SessionStart Version-Marker Hook That Keeps the nx CLI in Sync With the conexus Plugin
@@ -119,6 +120,7 @@ _Pending. CA-1..CA-4 verified above. Next: `/conexus:rdr-gate`._
 
 ## Revision History
 
+- 2026-06-02: **CLOSED (implemented).** Shipped in PR #1077 (squash `9abd6e7e` on `develop`). Shape B delivered: `conexus/hooks/scripts/version_lockstep_hook.py` (detect/nudge/dispatch, never blocks startup, never writes marker) + detached `version_lockstep_action.py` (uv-receipt editable gate, ordered `uv tool upgrade conexus` then `nx upgrade`, marker on confirmed lockstep only), wired into a dedicated `SessionStart` matcher `startup` block. Epic `nexus-cuocb` (P1.1-P1.9) closed; stacked review + test-validator + phase-review-gate all passed; full suite green (8732). Two doc surfaces updated (conexus/README.md hooks table, configuration.md file-locations). Post-mortem: [post-mortem/143-plugin-cli-version-lockstep.md](post-mortem/143-plugin-cli-version-lockstep.md).
 - 2026-06-02: **Shape B LOCKED** by author with nexus user-base concurrence. Detect-only (Shape A) leaves the nudge-ignoring 10% unprotected, which is the population that caused RDR-141/142. Shape A retained as the in-session signal alongside the detached action (user gets nudge + upgrade in the same session); accepted next-session-lockstep limitation per CA-4.
 - 2026-06-02: CA-1..CA-4 verified (Research Findings section added). Material CA-2 correction propagated through Context, Dominant Hazard, Proposed Solution, and Implementation Plan: `nx upgrade` is migration-only and does not touch the binary, so the safe action is two commands, `uv tool upgrade conexus` (extras-preserving binary upgrade) then `nx upgrade` (migrations). Shape B now records its detached-subprocess requirement (CA-4) and the resulting next-session-only lockstep limitation, the uv-receipt editable gate (CA-3), and an open marker-write-timing question for planning. Gate run: PASSED (0 Critical, 2 Significant, both resolved in-place).
 - 2026-06-01: Draft. Originated from the realization that the plugin and nx CLI update through independent channels with nothing keeping them in lockstep, the root of this session's RDR-141 / RDR-142 / 5.6.2 P0s. Capability finding: no self-removing plugin hook; `SessionStart`/`startup` + version-marker file is the once-per-version idiom. Dominant hazard: raw `uv tool install` strips `[local]` and reintroduces the 5.6.2 search P0, so any action must route through `nx upgrade`. Shapes A (nudge, leaning) / B (`nx upgrade`) / C (rejected). Doc-footgun correction in-scope and "do first." CA-1..CA-4 pending research. Embedder-default decision pulled out into RDR-144.
