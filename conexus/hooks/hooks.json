@@ -40,6 +40,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/version_lockstep_hook.py",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "SessionEnd": [

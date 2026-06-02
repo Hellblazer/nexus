@@ -2,17 +2,18 @@
 title: "Guided Install / Onboarding & Local-Embedder Provisioning (nx init): Make the 384-vs-768 Embedder an Explicit Guided Choice, Not a Blunt Packaging Default"
 id: RDR-144
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-01
 accepted_date: 2026-06-01
+closed_date: 2026-06-02
 related_issues: [nexus-qwl7o]
 related_rdrs: [RDR-076, RDR-126, RDR-143, RDR-038, RDR-109]
 supersedes: []
 related_tests: []
-implementation_notes: ""
+implementation_notes: "Shipped in conexus 5.7.0 (P1-P6 + phase-review gate, all beads closed). Post-mortem: docs/rdr/post-mortem/144-guided-onboarding-embedder-provisioning.md"
 ---
 
 # RDR-144: Guided Install / Onboarding & Local-Embedder Provisioning (`nx init`)

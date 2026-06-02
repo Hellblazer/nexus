@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.8.0] - 2026-06-02
+
+### Added
+
+- **Version-lockstep SessionStart hook (RDR-143).** The plugin now ships two
+  new hook scripts, `hooks/scripts/version_lockstep_hook.py` and
+  `hooks/scripts/version_lockstep_action.py`, wired into a dedicated
+  `SessionStart` (matcher `startup`) block in `hooks/hooks.json`. On a detected
+  plugin/CLI version skew the hook nudges and runs a detached, extras-preserving
+  upgrade that takes effect next session. Fail-safe (never blocks startup), skips
+  dev/editable installs, and never strips the `[local]` extra. This closes the
+  silent-drift gap between the marketplace-pinned plugin version and the
+  independently-updated `nx` CLI.
+
 ## [5.7.0] - 2026-06-02
 
 Plugin version aligned with conexus 5.7.0. No plugin-side component changes; the
