@@ -97,8 +97,10 @@ including TCP / UDS / Cowork transport details.
 ## Update
 
 ```bash
-uv tool update conexus
+uv tool upgrade conexus
 ```
+
+`uv tool upgrade` preserves the spec you installed with (so a `[local]` install stays `[local]`). Do **not** upgrade by re-running `uv tool install conexus` / `--force` — that resets the environment and drops `[local]`, silently downgrading the embedder 768→384-dim (see [Updating](#updating) above).
 
 After upgrading conexus, restart the daemon so it picks up the new
 binary:

@@ -25,7 +25,7 @@ Nexus auto-detects local mode when cloud credentials are absent. No configuratio
 
 **Auto-detection**: When either `CHROMA_API_KEY` or `VOYAGE_API_KEY` is absent, local mode activates — both are required for cloud mode. Set `NX_LOCAL=1` to force local mode even with cloud credentials.
 
-**Embedding tiers**: Tier 0 (bundled MiniLM-L6-v2, 384d) is always available. Install with `uv tool install conexus --with "conexus[local]" --force` for tier 1 (bge-base-en-v1.5, 768d, better quality).
+**Embedding tiers**: Tier 0 (bundled MiniLM-L6-v2, 384d) is always available. Install `uv tool install "conexus[local]"` for tier 1 (bge-base-en-v1.5, 768d, better quality; downloads the model on first embed). To add the extra to an existing install: `uv tool install --reinstall "conexus[local]"`. Upgrade later with `uv tool upgrade conexus`, which preserves the extra — never `uv tool install --force`, which drops it.
 
 **Storage path**: Defaults to `$XDG_DATA_HOME/nexus/chroma` or `~/.local/share/nexus/chroma`. Override with `NX_LOCAL_CHROMA_PATH`.
 
