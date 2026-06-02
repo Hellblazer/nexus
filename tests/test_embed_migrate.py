@@ -78,7 +78,13 @@ def _seed(db: T3Database, name: str, dim: int, *, n: int = 2,
     except Exception:
         pass
     col = db._client.get_or_create_collection(name)
-    meta = {"chunk_text_hash": "c" * 64}
+    # Per-collection-unique chash so a shared placeholder ("c"*64) can't
+    # collide with another suite test's catalog entry and resolve a
+    # "sourceless" chunk as sourced under the process-shared EphemeralClient.
+    import hashlib
+
+    chash = hashlib.sha256(name.encode()).hexdigest()
+    meta = {"chunk_text_hash": chash}
     if source_path is not None:
         meta = {**meta, "source_path": source_path}
     col.add(
@@ -130,7 +136,12 @@ class TestDetect:
         _seed(t3, "code__proj__minilm-l6-v2-384__v1", _DIM_384)
 
         stale = detect_stale_local_collections(t3, active_dim=_DIM_768)
-        match = next(s for s in stale if s.name.startswith("code__"))
+        # Match the EXACT seeded name: the process-shared EphemeralClient holds
+        # other tests' code__ collections in a full-suite run, so a
+        # startswith() next() can grab the wrong one (CI 3.12 flake).
+        match = next(
+            s for s in stale if s.name == "code__proj__minilm-l6-v2-384__v1"
+        )
 
         assert match.kind == "code"
 
@@ -139,7 +150,11 @@ class TestDetect:
               source_path=None)
 
         stale = detect_stale_local_collections(t3, active_dim=_DIM_768)
-        match = next(s for s in stale if s.name.startswith("knowledge__"))
+        # Exact seeded name (see code__ test above): other tests' knowledge__
+        # collections coexist in the shared EphemeralClient in a full-suite run.
+        match = next(
+            s for s in stale if s.name == "knowledge__notes__minilm-l6-v2-384__v1"
+        )
 
         assert match.kind == "sourceless"
         assert match.sourceless == 2
