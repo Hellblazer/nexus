@@ -112,6 +112,28 @@ class TestInstallCli:
         assert "<!-- old -->" not in dest.read_text()
 
 
+    def test_force_activation_failure_warns_but_exits_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Under --force, a failed launchctl/systemctl activation is a
+        warning, not an error: the file is written, 'Wrote' is printed,
+        the warning goes to stderr, and the command exits 0."""
+        _stub(tmp_path, monkeypatch)
+        with patch.object(daemon_cmd.subprocess, "run") as mock_run:
+            mock_run.return_value.returncode = 1
+            mock_run.return_value.stderr = "boom"
+            mock_run.return_value.stdout = ""
+            result = CliRunner().invoke(
+                daemon_cmd.daemon_group, ["t2", "install", "--autostart", "--force"]
+            )
+        assert result.exit_code == 0, result.output
+        dest = tmp_path / "units" / "com.nexus.t2.plist"
+        assert f"Wrote {dest}" in result.output
+        assert "Warning:" in result.output
+        assert "boom" in result.output
+        assert dest.exists()
+
+
 class TestUninstallCli:
     def test_uninstall_present_reports_removed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
