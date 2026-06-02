@@ -255,6 +255,7 @@ See `hooks/hooks.json` for exact wiring. Paths below use `$CLAUDE_PLUGIN_ROOT` a
 | `SessionStart` | `hooks/scripts/session_start_hook.py` | Surface T2 memory, ready beads, and scratch context at session start |
 | `SessionStart` | `hooks/scripts/rdr_hook.py` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
 | `SessionStart` | `skills/using-nx-skills/SKILL.md` | Inject skill invocation discipline reminder |
+| `SessionStart` (matcher `startup`) | `hooks/scripts/version_lockstep_hook.py` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
 | `PostCompact` | `hooks/scripts/post_compact_hook.sh` | Re-prime context (memory, beads, scratch) after `/compact` |
 | `Stop` | `hooks/scripts/stop_verification_hook.sh` | Opt-in session-end verification: tests + git state (see [Configuration § Verification](../docs/configuration.md#verification)) |
 | `StopFailure` | `hooks/scripts/stop_failure_hook.py` | Advisory on abnormal session termination |
