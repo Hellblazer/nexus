@@ -66,11 +66,11 @@ def init_cmd(embedder: str | None, assume_yes: bool) -> None:
 
     click.echo("Nexus local mode — choose your on-device embedding model.\n")
     click.echo(
-        f"  bge-768     BAAI/bge-base-en-v1.5 (768-dim) — RECOMMENDED. Materially"
+        "  bge-768     BAAI/bge-base-en-v1.5 (768-dim) — RECOMMENDED. Materially"
     )
     click.echo(
         f"              better local search quality. One-time {_BGE_DOWNLOAD_HINT} "
-        f"model download on first use."
+        "model download on first use."
     )
     click.echo(
         "  minilm-384  all-MiniLM-L6-v2 (384-dim) — bundled, instant, lower quality.\n"
@@ -94,8 +94,6 @@ def init_cmd(embedder: str | None, assume_yes: bool) -> None:
 
     if choice == "bge-768":
         click.echo(
-            f"The bge-768 model ({_BGE_DOWNLOAD_HINT}) will be downloaded to a stable "
-            "cache on first embed."
+            f"The bge-768 model ({_BGE_DOWNLOAD_HINT}) downloads automatically to a "
+            "stable cache on first local embed, once the [local] extra is installed."
         )
-        click.echo("Run `nx init --embedder bge-768` after installing the local extra "
-                   "to provision it ahead of time.")

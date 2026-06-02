@@ -126,23 +126,23 @@ class TestLocalMode:
 
         from nexus.config import load_config
 
-        assert load_config()["local"]["embed_model"] == _TIER1_MODEL
+        # repo_root=cfg_dir so the repo's own .nexus.yml does not bleed in.
+        assert load_config(repo_root=cfg_dir)["local"]["embed_model"] == _TIER1_MODEL
 
     def test_no_model_fetch_in_p2(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """P2 scope guard: nx init must NOT construct a fastembed model or
-        create the cache dir — fetch/extra-add is P3. Make both fatal."""
+        """P2 scope guard: nx init must NOT construct ANY embedding function
+        (no fetch / no extra-add — that is P3). Make instance construction
+        fatal at ``__new__`` so the guard fires regardless of how an EF might
+        be reached, and independent of whether fastembed is installed."""
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
         import nexus.db.local_ef as local_ef
 
-        monkeypatch.setattr(
-            local_ef.LocalEmbeddingFunction,
-            "_init_ef",
-            lambda self: (_ for _ in ()).throw(
-                AssertionError("nx init must not construct an EF in P2")
-            ),
-        )
+        def _fatal_new(cls, *a, **kw):  # noqa: ANN001, ANN002, ANN003
+            raise AssertionError("nx init must not construct an EF in P2")
+
+        monkeypatch.setattr(local_ef.LocalEmbeddingFunction, "__new__", _fatal_new)
 
         result = CliRunner().invoke(init_cmd, ["--yes"])
         assert result.exit_code == 0, result.output
