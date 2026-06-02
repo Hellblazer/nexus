@@ -109,6 +109,102 @@ def _ensure_local_extra() -> bool:
     return True
 
 
+# ── P4 existing-384 detection + SAFE cleanup/reindex ─────────────────────────
+
+
+def _offer_stale_migration(assume_yes: bool) -> None:
+    """Detect 384-dim collections under the now-active 768 embedder and
+    offer the gate-locked safe migration (RDR-144 P4 / CA-3).
+
+    The protocol is dry-run preview -> double-confirm -> reindex-first ->
+    delete-after-verify. ``code__`` and sourceless collections are reported
+    with their remediation but never auto-deleted (no source to reindex
+    from = deleting is pure loss). Any detection failure is non-fatal:
+    ``nx init`` must still complete.
+    """
+    from nexus.db.embed_migrate import (
+        detect_stale_local_collections,
+        migrate_collection_safe,
+    )
+    from nexus.db.local_ef import _MODEL_DIMS, _TIER1_MODEL, local_model_token
+
+    active_token = local_model_token()
+    active_dim = _MODEL_DIMS.get(_TIER1_MODEL, 768)
+
+    try:
+        from nexus.commands.store import _t3
+
+        db = _t3()
+        stale = detect_stale_local_collections(
+            db, active_dim=active_dim, active_token=active_token
+        )
+    except Exception as exc:  # noqa: BLE001 — detection must never block init
+        _log.debug("stale_detection_failed", error=str(exc))
+        return
+
+    if not stale:
+        return
+
+    reindexable = [s for s in stale if s.kind == "reindexable"]
+    deferred = [s for s in stale if s.kind != "reindexable"]
+
+    click.echo(
+        f"\nFound {len(stale)} collection(s) indexed with a different "
+        f"embedder than bge-768 — search returns nothing for these:"
+    )
+    for s in stale:
+        if s.kind == "reindexable":
+            click.echo(
+                f"  • {s.name} ({s.count} chunks) -> reindex into {s.target_name}"
+            )
+        elif s.kind == "code":
+            click.echo(
+                f"  • {s.name} ({s.count} chunks) -> reindex manually: "
+                f"nx index repo <path>"
+            )
+        else:  # sourceless
+            click.echo(
+                f"  • {s.name} ({s.count} chunks) -> manual entries, no source "
+                f"to reindex (left as-is; `nx collection delete {s.name}` to remove)"
+            )
+
+    if not reindexable:
+        click.echo(
+            "\nNothing can be migrated automatically — see the manual steps above."
+        )
+        return
+
+    # Double-confirm: the old collections are DELETED after a verified
+    # reindex. Make the destructive step explicit and ask twice.
+    if not assume_yes:
+        if not click.confirm(
+            f"\nReindex {len(reindexable)} collection(s) into bge-768 now?",
+            default=True,
+        ):
+            click.echo("Skipped. Run `nx init` again any time to migrate.")
+            return
+        if not click.confirm(
+            "This DELETES each old collection after its reindex is verified. "
+            "Proceed?",
+            default=False,
+        ):
+            click.echo("Skipped. Run `nx init` again any time to migrate.")
+            return
+
+    for s in reindexable:
+        click.echo(f"\nReindexing {s.name} -> {s.target_name} …")
+        outcome = migrate_collection_safe(db, s, dry_run=False)
+        if outcome.status == "migrated":
+            click.echo(
+                f"  Done: {outcome.after} chunks in {s.target_name}; "
+                f"old collection removed."
+            )
+        else:
+            click.echo(
+                f"  {outcome.status.upper()}: {outcome.reason}", err=True
+            )
+
+
 # ── P3 (B) model pre-fetch warmup, offline-safe ───────────────────────────────
 
 
@@ -208,5 +304,9 @@ def init_cmd(embedder: str | None, assume_yes: bool) -> None:
     # running process can't import from) and let first-embed fetch the model.
     if _local_extra_installed():
         _warmup_bge()
+        # bge is now the active embedder in this process; any pre-existing
+        # 384-dim collections are now stale and silently unsearchable.
+        # Offer the gate-locked safe migration (P4 / CA-3).
+        _offer_stale_migration(assume_yes)
     else:
         _ensure_local_extra()

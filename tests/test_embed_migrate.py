@@ -1,0 +1,291 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""RDR-144 P4: safe 384->768 local-embedder migration engine.
+
+The engine detects collections whose stored vectors do not match the
+active local embedder's dimension (the canonical case: a corpus indexed
+with the bundled 384-dim minilm fallback, then the user upgrades to
+bge-768 via ``nx init``) and migrates them under a gate-locked safety
+protocol:
+
+    dry-run preview  ->  double-confirm  ->  reindex-first  ->  delete-after-verify
+
+The hard invariant is NO DATA LOSS on failure: the old collection is
+deleted ONLY after the new one is verified populated. A mid-reindex
+failure must leave the old collection fully intact.
+
+Tests seed raw vectors via the underlying client (explicit ``embeddings=``
+bypasses the configured EF) so detection works without a real bge model,
+and inject the reindex driver so the dangerous ordering logic is exercised
+deterministically.
+"""
+from __future__ import annotations
+
+import chromadb
+import pytest
+
+from nexus.db.embed_migrate import (
+    MigrationOutcome,
+    StaleCollection,
+    detect_stale_local_collections,
+    migrate_collection_safe,
+    _target_name,
+)
+from nexus.db.t3 import T3Database
+
+_DIM_384 = 384
+_DIM_768 = 768
+
+
+def _vec(dim: int, fill: float = 0.1) -> list[float]:
+    return [fill] * dim
+
+
+_TEST_COLLECTIONS = [
+    "docs__proj__minilm-l6-v2-384__v1",
+    "docs__proj__bge-base-en-v15-768__v1",
+    "code__proj__minilm-l6-v2-384__v1",
+    "code__proj__bge-base-en-v15-768__v1",
+    "knowledge__notes__minilm-l6-v2-384__v1",
+]
+
+
+@pytest.fixture()
+def t3() -> T3Database:
+    """Fresh EphemeralClient-backed T3Database. EphemeralClient is a
+    process-shared singleton, so drop every collection this module uses
+    on entry — otherwise a prior test's target leaks in and a later
+    "nothing created" assertion silently passes."""
+    client = chromadb.EphemeralClient()
+    for name in _TEST_COLLECTIONS:
+        try:
+            client.delete_collection(name)
+        except Exception:
+            pass
+    return T3Database(_client=client)
+
+
+def _seed(db: T3Database, name: str, dim: int, *, n: int = 2,
+          source_path: str | None = "doc.md") -> None:
+    """Seed ``n`` raw vectors of dimension ``dim`` into ``name``.
+
+    EphemeralClient is shared across tests in a process — delete first so
+    a prior test's vectors (possibly a different dimension) don't leak in
+    and pin the collection dimension.
+    """
+    try:
+        db._client.delete_collection(name)
+    except Exception:
+        pass
+    col = db._client.get_or_create_collection(name)
+    meta = {"chunk_text_hash": "c" * 64}
+    if source_path is not None:
+        meta = {**meta, "source_path": source_path}
+    col.add(
+        ids=[f"{name}:{i}" for i in range(n)],
+        embeddings=[_vec(dim) for _ in range(n)],
+        documents=[f"chunk {i}" for i in range(n)],
+        metadatas=[dict(meta) for _ in range(n)],
+    )
+
+
+# ── _target_name ──────────────────────────────────────────────────────────────
+
+
+class TestTargetName:
+    def test_swaps_conformant_model_segment(self) -> None:
+        old = "docs__nexus-1-1__minilm-l6-v2-384__v1"
+        assert (
+            _target_name(old, "bge-base-en-v15-768")
+            == "docs__nexus-1-1__bge-base-en-v15-768__v1"
+        )
+
+    def test_legacy_two_segment_name_unchanged(self) -> None:
+        # Legacy names do not encode the model; reindex lands in place.
+        assert _target_name("docs__legacy", "bge-base-en-v15-768") == "docs__legacy"
+
+
+# ── detection ─────────────────────────────────────────────────────────────────
+
+
+class TestDetect:
+    def test_384_under_active_768_is_detected_not_silent(self, t3: T3Database) -> None:
+        _seed(t3, "docs__proj__minilm-l6-v2-384__v1", _DIM_384)
+
+        stale = detect_stale_local_collections(t3, active_dim=_DIM_768)
+
+        names = {s.name for s in stale}
+        assert "docs__proj__minilm-l6-v2-384__v1" in names
+
+    def test_matching_dim_collection_not_flagged(self, t3: T3Database) -> None:
+        _seed(t3, "docs__proj__bge-base-en-v15-768__v1", _DIM_768)
+
+        stale = detect_stale_local_collections(t3, active_dim=_DIM_768)
+
+        assert all(
+            s.name != "docs__proj__bge-base-en-v15-768__v1" for s in stale
+        )
+
+    def test_code_collection_classified_as_deferred(self, t3: T3Database) -> None:
+        _seed(t3, "code__proj__minilm-l6-v2-384__v1", _DIM_384)
+
+        stale = detect_stale_local_collections(t3, active_dim=_DIM_768)
+        match = next(s for s in stale if s.name.startswith("code__"))
+
+        assert match.kind == "code"
+
+    def test_all_sourceless_classified_as_deferred(self, t3: T3Database) -> None:
+        _seed(t3, "knowledge__notes__minilm-l6-v2-384__v1", _DIM_384,
+              source_path=None)
+
+        stale = detect_stale_local_collections(t3, active_dim=_DIM_768)
+        match = next(s for s in stale if s.name.startswith("knowledge__"))
+
+        assert match.kind == "sourceless"
+        assert match.sourceless == 2
+
+
+# ── migration safety protocol ─────────────────────────────────────────────────
+
+
+class TestMigrateSafe:
+    def _stale(self, name: str, target: str) -> StaleCollection:
+        return StaleCollection(
+            name=name,
+            count=2,
+            source_paths=frozenset({"doc.md"}),
+            sourceless=0,
+            target_name=target,
+            kind="reindexable",
+        )
+
+    def test_dry_run_mutates_nothing(self, t3: T3Database) -> None:
+        old = "docs__proj__minilm-l6-v2-384__v1"
+        target = "docs__proj__bge-base-en-v15-768__v1"
+        _seed(t3, old, _DIM_384)
+
+        def _reindex_fn(db, tgt, sources, corpus):  # pragma: no cover - must not run
+            raise AssertionError("dry-run must not invoke the reindex driver")
+
+        outcome = migrate_collection_safe(
+            t3, self._stale(old, target), dry_run=True, reindex_fn=_reindex_fn
+        )
+
+        assert outcome.status == "dry-run"
+        assert t3.collection_info(old)["count"] == 2  # old untouched
+        assert not t3.collection_exists(target)  # nothing created
+
+    def test_success_reindexes_then_deletes_old(self, t3: T3Database) -> None:
+        old = "docs__proj__minilm-l6-v2-384__v1"
+        target = "docs__proj__bge-base-en-v15-768__v1"
+        _seed(t3, old, _DIM_384)
+        # target must not pre-exist
+        try:
+            t3._client.delete_collection(target)
+        except Exception:
+            pass
+
+        def _reindex_fn(db, tgt, sources, corpus):
+            # Simulate a real reindex: populate target with 768-dim vectors.
+            col = db._client.get_or_create_collection(tgt)
+            col.add(
+                ids=[f"{tgt}:0", f"{tgt}:1"],
+                embeddings=[_vec(_DIM_768), _vec(_DIM_768)],
+                documents=["a", "b"],
+                metadatas=[{"source_path": "doc.md"}, {"source_path": "doc.md"}],
+            )
+            return (1, 2)  # (indexed_sources, after_count)
+
+        outcome = migrate_collection_safe(
+            t3, self._stale(old, target), dry_run=False, reindex_fn=_reindex_fn
+        )
+
+        assert outcome.status == "migrated"
+        assert outcome.after == 2
+        assert t3.collection_exists(target)
+        assert t3.collection_info(target)["count"] == 2
+        assert not t3.collection_exists(old)  # deleted ONLY after verify
+
+    def test_reindex_failure_midway_leaves_old_intact(self, t3: T3Database) -> None:
+        old = "docs__proj__minilm-l6-v2-384__v1"
+        target = "docs__proj__bge-base-en-v15-768__v1"
+        _seed(t3, old, _DIM_384)
+
+        def _reindex_fn(db, tgt, sources, corpus):
+            # Partially write to target, then blow up — the classic
+            # mid-reindex crash that must NOT cost the user their data.
+            col = db._client.get_or_create_collection(tgt)
+            col.add(
+                ids=[f"{tgt}:0"],
+                embeddings=[_vec(_DIM_768)],
+                documents=["a"],
+                metadatas=[{"source_path": "doc.md"}],
+            )
+            raise RuntimeError("simulated mid-reindex failure")
+
+        outcome = migrate_collection_safe(
+            t3, self._stale(old, target), dry_run=False, reindex_fn=_reindex_fn
+        )
+
+        assert outcome.status == "failed"
+        assert t3.collection_exists(old)  # NO loss
+        assert t3.collection_info(old)["count"] == 2  # exact, full
+
+    def test_partial_reindex_does_not_delete_old(self, t3: T3Database) -> None:
+        """reindex driver reports fewer sources indexed than expected =>
+        treat as failure, keep old (no silent partial-loss)."""
+        old = "docs__proj__minilm-l6-v2-384__v1"
+        target = "docs__proj__bge-base-en-v15-768__v1"
+        _seed(t3, old, _DIM_384)
+
+        def _reindex_fn(db, tgt, sources, corpus):
+            col = db._client.get_or_create_collection(tgt)
+            col.add(
+                ids=[f"{tgt}:0"],
+                embeddings=[_vec(_DIM_768)],
+                documents=["a"],
+                metadatas=[{"source_path": "doc.md"}],
+            )
+            return (0, 1)  # 0 of the expected sources indexed
+
+        outcome = migrate_collection_safe(
+            t3, self._stale(old, target), dry_run=False, reindex_fn=_reindex_fn
+        )
+
+        assert outcome.status == "failed"
+        assert t3.collection_exists(old)
+        assert t3.collection_info(old)["count"] == 2
+
+    def test_empty_target_after_reindex_keeps_old(self, t3: T3Database) -> None:
+        old = "docs__proj__minilm-l6-v2-384__v1"
+        target = "docs__proj__bge-base-en-v15-768__v1"
+        _seed(t3, old, _DIM_384)
+
+        def _reindex_fn(db, tgt, sources, corpus):
+            return (1, 0)  # claims a source but target ended up empty
+
+        outcome = migrate_collection_safe(
+            t3, self._stale(old, target), dry_run=False, reindex_fn=_reindex_fn
+        )
+
+        assert outcome.status == "failed"
+        assert t3.collection_exists(old)
+        assert t3.collection_info(old)["count"] == 2
+
+    def test_deferred_kinds_are_skipped_never_deleted(self, t3: T3Database) -> None:
+        old = "code__proj__minilm-l6-v2-384__v1"
+        _seed(t3, old, _DIM_384)
+        stale = StaleCollection(
+            name=old, count=2, source_paths=frozenset({"a.py"}),
+            sourceless=0, target_name="code__proj__bge-base-en-v15-768__v1",
+            kind="code",
+        )
+
+        def _reindex_fn(db, tgt, sources, corpus):  # pragma: no cover
+            raise AssertionError("deferred kinds must not reindex")
+
+        outcome = migrate_collection_safe(
+            t3, stale, dry_run=False, reindex_fn=_reindex_fn
+        )
+
+        assert outcome.status == "skipped"
+        assert t3.collection_exists(old)  # never deleted

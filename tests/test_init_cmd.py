@@ -37,6 +37,18 @@ def cfg_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return d
 
 
+@pytest.fixture(autouse=True)
+def _no_real_stale_migration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RDR-144 P4: the bge ``--yes`` path now calls ``_offer_stale_migration``,
+    which touches the real local T3 store and (with ``--yes``) would AUTO-
+    MIGRATE real collections. Default every test to a no-op offer; the
+    dedicated P4 wiring tests override this with a controlled stub.
+    """
+    monkeypatch.setattr(
+        "nexus.commands.init._offer_stale_migration", lambda assume_yes: None
+    )
+
+
 # ── cloud mode ────────────────────────────────────────────────────────────────
 
 
@@ -285,3 +297,136 @@ class TestExtraAddAndWarmup:
 
         result = CliRunner().invoke(init_cmd, ["--embedder", "minilm-384"])
         assert result.exit_code == 0, result.output
+
+
+# ── P4: existing-384 detection + safe migration offer ─────────────────────────
+
+
+from nexus.commands.init import _offer_stale_migration as _real_offer  # noqa: E402
+from nexus.db.embed_migrate import MigrationOutcome, StaleCollection  # noqa: E402
+
+
+def _reindexable(name: str) -> StaleCollection:
+    return StaleCollection(
+        name=name,
+        count=4,
+        source_paths=frozenset({"doc.md"}),
+        sourceless=0,
+        target_name=name.replace("minilm-l6-v2-384", "bge-base-en-v15-768"),
+        kind="reindexable",
+    )
+
+
+class TestStaleMigrationWiring:
+    def test_bge_yes_invokes_offer_with_assume_yes(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bge ``--yes`` path reaches the migration offer, forwarding the
+        ``--yes`` flag so the destructive confirms are auto-accepted."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._local_extra_installed", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._warmup_bge", lambda: None)
+        seen: list[bool] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._offer_stale_migration",
+            lambda assume_yes: seen.append(assume_yes),
+        )
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert seen == [True]
+
+
+class TestStaleMigrationOffer:
+    """Direct tests of the real ``_offer_stale_migration`` (autouse stub is
+    overridden by calling the module-level real reference)."""
+
+    def _wire(self, monkeypatch, stale, migrate_spy):
+        monkeypatch.setattr("nexus.commands.store._t3", lambda: object())
+        monkeypatch.setattr(
+            "nexus.db.embed_migrate.detect_stale_local_collections",
+            lambda db, *, active_dim, active_token: stale,
+        )
+        monkeypatch.setattr(
+            "nexus.db.embed_migrate.migrate_collection_safe", migrate_spy
+        )
+
+    def test_no_stale_is_silent_no_migrate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list = []
+        self._wire(monkeypatch, [], lambda *a, **k: calls.append(a))
+
+        runner = CliRunner()
+        result = runner.invoke(_wrap(lambda: _real_offer(True)))
+
+        assert result.exit_code == 0, result.output
+        assert calls == []
+        assert result.output.strip() == ""
+
+    def test_reindexable_migrated_under_assume_yes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stale = [_reindexable("docs__proj__minilm-l6-v2-384__v1")]
+        calls: list = []
+
+        def _spy(db, s, *, dry_run, **k):
+            calls.append((s.name, dry_run))
+            return MigrationOutcome(
+                name=s.name, target_name=s.target_name, status="migrated",
+                before=4, after=4, reason="ok",
+            )
+
+        self._wire(monkeypatch, stale, _spy)
+        result = CliRunner().invoke(_wrap(lambda: _real_offer(True)))
+
+        assert result.exit_code == 0, result.output
+        # migration actually ran, NOT a dry-run
+        assert calls == [("docs__proj__minilm-l6-v2-384__v1", False)]
+        assert "old collection removed" in result.output.lower() or "done" in result.output.lower()
+
+    def test_code_collection_reported_never_migrated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stale = [
+            StaleCollection(
+                name="code__proj__minilm-l6-v2-384__v1", count=9,
+                source_paths=frozenset({"a.py"}), sourceless=0,
+                target_name="code__proj__bge-base-en-v15-768__v1", kind="code",
+            )
+        ]
+        calls: list = []
+        self._wire(monkeypatch, stale, lambda *a, **k: calls.append(a))
+
+        result = CliRunner().invoke(_wrap(lambda: _real_offer(True)))
+
+        assert result.exit_code == 0, result.output
+        assert calls == []  # never auto-migrated
+        assert "nx index repo" in result.output
+
+    def test_double_confirm_decline_skips_migration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stale = [_reindexable("docs__proj__minilm-l6-v2-384__v1")]
+        calls: list = []
+        self._wire(monkeypatch, stale, lambda *a, **k: calls.append(a))
+
+        # assume_yes=False -> first confirm prompts; "n" declines.
+        result = CliRunner().invoke(_wrap(lambda: _real_offer(False)), input="n\n")
+
+        assert result.exit_code == 0, result.output
+        assert calls == []
+        assert "skipped" in result.output.lower()
+
+
+def _wrap(fn):
+    """Wrap a bare callable in a trivial Click command so CliRunner can drive
+    its ``click.echo`` / ``click.confirm`` I/O."""
+    import click as _click
+
+    @_click.command()
+    def _cmd() -> None:
+        fn()
+
+    return _cmd
