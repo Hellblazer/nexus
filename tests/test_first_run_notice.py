@@ -53,7 +53,9 @@ class TestEmbedderStartupNotice:
         _pin(monkeypatch, local=True, choice=_TIER1_MODEL, active=_TIER0_MODEL)
         notice = embedder_startup_notice()
         assert notice is not None
-        assert "nx init" in notice or "conexus[local]" in notice
+        # fix_suggestions[0] for State 2 is the nx init line — assert it
+        # directly rather than a disjunction that obscures the behavior.
+        assert "nx init" in notice
         assert "384" in notice
 
     def test_notice_is_single_line(self, monkeypatch: pytest.MonkeyPatch) -> None:
