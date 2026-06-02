@@ -220,6 +220,7 @@ class TestDispatchIsNonBlocking:
                 calls["start_new_session"] = k.get("start_new_session")
                 calls["stdout"] = k.get("stdout")
                 calls["stderr"] = k.get("stderr")
+                calls["stdin"] = k.get("stdin")
 
             def wait(self, *a, **k):  # pragma: no cover - must not be called
                 calls["waited"] = True
@@ -238,6 +239,7 @@ class TestDispatchIsNonBlocking:
         assert calls.get("start_new_session") is True
         assert calls.get("stdout") is mod.subprocess.DEVNULL
         assert calls.get("stderr") is mod.subprocess.DEVNULL
+        assert calls.get("stdin") is mod.subprocess.DEVNULL
         # The detached command must carry the target version as an argv token.
         flat = " ".join(map(str, calls["args"])) if isinstance(calls["args"], (list, tuple)) else str(calls["args"])
         assert "9.9.9" in flat
