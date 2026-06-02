@@ -105,40 +105,35 @@ def ensure_installed_and_running() -> None:
         return
 
     if not _os_unit_exists():
-        # OS unit missing — install it. Idempotent within ``nx daemon
-        # t2 install --autostart`` itself; it checks the destination
-        # and bails with "already up to date" if the file matches.
+        # OS unit missing — install it in-process via the lifted
+        # ``nexus.daemon.installer`` (RDR-126 §2). Calling the library
+        # function rather than shelling out to ``nx daemon t2 install``
+        # gives us a structured InstallResult (status + dest path) that
+        # the first-run banner (§3) consumes to pick its text variant
+        # and surface the installed unit path.
         try:
-            result = subprocess.run(
-                [nx_bin, "daemon", "t2", "install", "--autostart"],
-                capture_output=True, text=True, timeout=30, check=False,
-            )
-            if result.returncode != 0:
-                _log.warning(
-                    "first_run_install_failed",
-                    returncode=result.returncode,
-                    stderr=(result.stderr or "").strip()[:500],
-                    hint=(
-                        "T2 daemon autostart install failed; current MCP "
-                        "session will work via ensure-running but the "
-                        "daemon will not survive reboots. Re-run "
-                        "'nx daemon t2 install --autostart' manually."
-                    ),
-                )
-            else:
-                _log.info(
-                    "first_run_install_ok",
-                    stdout=(result.stdout or "").strip()[:500],
-                )
-        except subprocess.TimeoutExpired:
-            _log.warning(
-                "first_run_install_timeout",
-                hint="`nx daemon t2 install --autostart` timed out after 30s",
+            from nexus.daemon import installer
+
+            result = installer.install_autostart()
+            _log.info(
+                "first_run_install_ok",
+                status=result.status.value,
+                dest=str(result.dest),
+                warnings=list(result.warnings),
             )
         except Exception as exc:
+            # installer raises typed InstallerError on symlink / content
+            # diff / activation failure; all are best-effort here — the
+            # session still works via ensure-running below.
             _log.warning(
-                "first_run_install_exception",
+                "first_run_install_failed",
                 error=f"{type(exc).__name__}: {exc}",
+                hint=(
+                    "T2 daemon autostart install failed; current MCP "
+                    "session will work via ensure-running but the "
+                    "daemon will not survive reboots. Re-run "
+                    "'nx daemon t2 install --autostart' manually."
+                ),
             )
 
     # Always ensure-running so the current session has a daemon.
