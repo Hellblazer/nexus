@@ -47,10 +47,26 @@ from pathlib import Path
 
 DEBUG = os.environ.get("NX_HOOK_DEBUG", "0") == "1"
 
+def _env_int(name: str, default: int) -> int:
+    """Parse an int env var; fall back to *default* on anything malformed.
+
+    Module-level so a bad env value cannot raise at import time, before
+    ``main()``'s fail-safe guard runs (the action must never crash).
+    """
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 # uv tool upgrade can be network-bound; it runs detached so a long wait is
 # harmless, but bound it. nx upgrade is migration-only and fast.
-_UV_TIMEOUT = int(os.environ.get("NX_LOCKSTEP_UV_TIMEOUT", "300"))
-_NX_UPGRADE_TIMEOUT = int(os.environ.get("NX_LOCKSTEP_NX_TIMEOUT", "120"))
+_UV_TIMEOUT = _env_int("NX_LOCKSTEP_UV_TIMEOUT", 300)
+_NX_UPGRADE_TIMEOUT = _env_int("NX_LOCKSTEP_NX_TIMEOUT", 120)
+# Matches a leading dotted-numeric core (X.Y.Z) plus an optional separated
+# suffix. Nexus ships plain X.Y.Z release tags to users, so a bare
+# pre-release like "5.7.0a1" (no separator before the suffix) is out of
+# scope and would parse as its numeric core.
 _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:[.\-+][0-9A-Za-z.\-]+)?)")
 
 
@@ -115,6 +131,37 @@ def installed_nx_version() -> str | None:
     return m.group(1) if m else None
 
 
+def _version_core(version: str) -> tuple[int, ...] | None:
+    """Parse the leading dotted-numeric core into a comparable tuple.
+
+    "5.7.0" -> (5, 7, 0). Returns None when no numeric core is present.
+    Used for ordering only; pre-release suffixes are ignored (see _VERSION_RE).
+    """
+    m = re.match(r"(\d+(?:\.\d+)*)", version.strip())
+    if not m:
+        return None
+    return tuple(int(p) for p in m.group(1).split("."))
+
+
+def satisfies(installed: str | None, target: str) -> bool:
+    """True when the installed CLI is at least the target plugin version.
+
+    Lockstep cares only that the CLI is not OLDER than the plugin (an older
+    CLI lacks migrations/features the plugin expects). A CLI that equals or
+    exceeds the target is in lockstep. This also breaks the downgrade loop:
+    if the plugin ref is pinned back below the installed CLI, `uv tool
+    upgrade` cannot reach the older target, so a strict-equality confirm
+    would never write the marker and the nudge would fire forever. With a
+    >= check the action records lockstep and goes quiet.
+    """
+    if installed is None:
+        return False
+    inst, tgt = _version_core(installed), _version_core(target)
+    if inst is None or tgt is None:
+        return installed == target  # conservative fallback
+    return inst >= tgt
+
+
 def run_cmd(cmd: list[str], timeout: int = 300) -> bool:
     """Run a command; return True on exit 0, False otherwise. Never raises."""
     try:
@@ -153,9 +200,11 @@ def main(argv: list[str]) -> None:
             debug("no uv-tool receipt (dev/editable tree or no uv); skipping")
             return
 
-        # 2. No-op fast path: already at target -> just record it.
-        if installed_nx_version() == target:
-            debug(f"nx already at target {target}; writing marker")
+        # 2. No-op fast path: CLI already at or above target -> record
+        #    lockstep and stop (also handles the plugin-downgrade case where
+        #    the installed CLI is ahead of the pinned plugin version).
+        if satisfies(installed_nx_version(), target):
+            debug(f"nx already satisfies target {target}; writing marker")
             write_marker(target)
             return
 
@@ -168,11 +217,11 @@ def main(argv: list[str]) -> None:
             debug("nx upgrade failed; leaving marker stale for retry")
             return
 
-        # 4. Marker only on confirmed match.
-        if installed_nx_version() == target:
+        # 4. Marker only on confirmed lockstep (installed >= target).
+        if satisfies(installed_nx_version(), target):
             write_marker(target)
         else:
-            debug("version still mismatched after upgrade; leaving marker stale")
+            debug("version still below target after upgrade; leaving marker stale")
     except Exception as exc:  # noqa: BLE001 - detached action must never raise
         debug(f"swallowed unexpected error: {exc}")
 

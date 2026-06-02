@@ -128,6 +128,42 @@ class TestNoOpFastPath:
         assert marker.read_text().strip() == "9.9.9"
 
 
+class TestDowngradeLoopBroken:
+    def test_installed_ahead_of_target_writes_marker_no_upgrade(
+        self, mod, marker, monkeypatch
+    ) -> None:
+        """Plugin ref pinned back below the installed CLI: `uv tool upgrade`
+        could never reach the older target, so a strict-equality confirm would
+        nudge forever. The >= semantics records lockstep and goes quiet."""
+        calls = _wire(
+            mod, monkeypatch, receipt=True,
+            installed_versions=["5.8.0"], run_results={},
+        )
+        mod.main(["action", "5.7.0"])
+        assert calls == [], "no upgrade attempt when CLI is already ahead"
+        assert marker.read_text().strip() == "5.7.0", (
+            "marker must record the plugin target so the hook goes silent"
+        )
+
+
+class TestSatisfies:
+    def test_equal_satisfies(self, mod) -> None:
+        assert mod.satisfies("5.7.0", "5.7.0") is True
+
+    def test_newer_satisfies(self, mod) -> None:
+        assert mod.satisfies("5.8.0", "5.7.0") is True
+
+    def test_older_does_not_satisfy(self, mod) -> None:
+        assert mod.satisfies("5.6.2", "5.7.0") is False
+
+    def test_none_does_not_satisfy(self, mod) -> None:
+        assert mod.satisfies(None, "5.7.0") is False
+
+    def test_unparseable_falls_back_to_equality(self, mod) -> None:
+        assert mod.satisfies("garbage", "garbage") is True
+        assert mod.satisfies("garbage", "5.7.0") is False
+
+
 class TestTwoCommandOrdering:
     def test_upgrade_then_nx_upgrade_in_order(self, mod, marker, monkeypatch) -> None:
         # stale before, target after

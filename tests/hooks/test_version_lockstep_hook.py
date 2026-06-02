@@ -217,6 +217,9 @@ class TestDispatchIsNonBlocking:
             def __init__(self, *a, **k):
                 calls["args"] = a[0] if a else k.get("args")
                 calls["started"] = True
+                calls["start_new_session"] = k.get("start_new_session")
+                calls["stdout"] = k.get("stdout")
+                calls["stderr"] = k.get("stderr")
 
             def wait(self, *a, **k):  # pragma: no cover - must not be called
                 calls["waited"] = True
@@ -230,6 +233,11 @@ class TestDispatchIsNonBlocking:
         assert calls.get("started") is True
         assert "waited" not in calls
         assert "communicated" not in calls
+        # Detach contract: own session (so a SIGTERM to the parent group does
+        # not kill the in-flight upgrade) and no inherited stdio.
+        assert calls.get("start_new_session") is True
+        assert calls.get("stdout") is mod.subprocess.DEVNULL
+        assert calls.get("stderr") is mod.subprocess.DEVNULL
         # The detached command must carry the target version as an argv token.
         flat = " ".join(map(str, calls["args"])) if isinstance(calls["args"], (list, tuple)) else str(calls["args"])
         assert "9.9.9" in flat
