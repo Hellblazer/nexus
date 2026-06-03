@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections import deque  # kept for any external importers; unused here after nexus-5p2ci.17
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -894,7 +893,15 @@ class _LinkOps:
         - Seed always in node set.
         - Depth cap applied before ``_MAX_GRAPH_NODES`` LIMIT so
           lowest-depth nodes survive truncation (ORDER BY min_depth,
-          tumbler makes truncation deterministic).
+          tumbler makes truncation deterministic). NOTE two
+          differences from the old BFS under the node cap: (1) the
+          ``LIMIT`` is a STRICT hard cap, whereas the BFS checked the
+          cap before processing each node and so could overshoot by a
+          hub node's full out-degree; (2) within a depth band the
+          surviving set is now ordered by tumbler string (the BFS used
+          undefined set-insertion order). Both make the cap behaviour
+          deterministic; callers must not depend on which specific
+          nodes survive truncation.
         - ``link_types`` / ``link_type`` / ``include_heuristic``
           resolved via ``_filter_link_types`` (unchanged).
         - Edges from leaf nodes (BFS depth == requested depth) are

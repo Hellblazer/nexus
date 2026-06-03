@@ -546,16 +546,46 @@ class TestGraphCTENodeCap:
         assert len(r["nodes"]) == 1
         assert r["edges"] == []
 
-    def test_cap_warning_fires(self, chain_cat, capsys):
+    def test_cap_warning_fires(self, chain_cat):
         """Warning 'graph_node_limit' is logged when cap fires.
 
-        structlog emits to stdout by default in tests; capsys captures it.
+        Patches the module logger directly rather than capturing stdout —
+        capsys does not reliably intercept structlog's module-bound stdout
+        reference (code-review finding, 2026-06-03).
         """
+        import nexus.catalog.catalog_links as cl_mod
+
         c, a, b, cc = chain_cat
-        with patch.object(type(c), "_MAX_GRAPH_NODES", 1):
+        with patch.object(type(c), "_MAX_GRAPH_NODES", 1), \
+                patch.object(cl_mod, "_log") as mock_log:
             c.graph(a, depth=2)
-        captured = capsys.readouterr()
-        assert "graph_node_limit" in captured.out
+        assert mock_log.warning.call_count == 1
+        assert mock_log.warning.call_args.args[0] == "graph_node_limit"
+
+    def test_cap_strict_on_wide_fan(self, tmp_path):
+        """STRICT cap on a high-degree hub: A→{B,C,D,E}, cap=2 returns
+        exactly 2 nodes. The old BFS checked the cap before processing each
+        node and so would overshoot by the hub's full out-degree (returning
+        up to 5); the CTE's SQL LIMIT is a hard cap. This fixture (wide fan)
+        is what distinguishes strict-cap from overshoot — a linear chain
+        cannot (code-review finding, 2026-06-03)."""
+        d = tmp_path / "fan"
+        d.mkdir()
+        c = Catalog(d, d / ".catalog.db")
+        o = c.register_owner("nexus", "repo", repo_hash="fan00001")
+        a = c.register(o, "a.py", content_type="code", file_path="a.py")
+        for name in ("b", "c", "d", "e"):
+            nbr = c.register(o, f"{name}.py", content_type="code",
+                             file_path=f"{name}.py")
+            c.link(a, nbr, "relates", created_by="user")
+        with patch.object(type(c), "_MAX_GRAPH_NODES", 2):
+            r = c.graph(a, depth=1)
+        assert len(r["nodes"]) == 2  # seed + 1, strict — NOT 1 + full fan
+        # No dangling edges under the strict cap, even on a wide fan.
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        for edge in r["edges"]:
+            assert str(edge.from_tumbler) in node_tumblers
+            assert str(edge.to_tumbler) in node_tumblers
 
     def test_no_dangling_edges_after_cap(self, chain_cat):
         """No edge references a node not in the returned node set."""
@@ -673,22 +703,42 @@ class TestGraphCTECycleTermination:
         assert (str(a), str(b), "relates") in edge_keys
         assert (str(b), str(a), "relates") in edge_keys
 
-    def test_self_loop_terminates(self, tmp_path):
-        """A→A self-loop (allow_dangling) terminates, returns just A."""
-        d = tmp_path / "selfloop"
+    def test_two_cycle_terminates_at_max_depth(self, tmp_path):
+        """A↔B two-cycle at depth=10 (max) terminates, returns exactly
+        {A, B} and 2 edges — the UNION (tumbler, depth) dedup keeps the
+        working table bounded across the full depth range."""
+        d = tmp_path / "twocycle"
         d.mkdir()
         c = Catalog(d, d / ".catalog.db")
         o = c.register_owner("nexus", "repo", repo_hash="a1b2c3d4")
         a = c.register(o, "a.py", content_type="code", file_path="a.py")
-        # Self-links require allow_dangling=True (same tumbler, but allow_dangling lets it through)
-        # Actually a links to itself — let's use a two-node cycle instead
         b = c.register(o, "b.py", content_type="code", file_path="b.py")
         c.link(a, b, "relates", created_by="user")
         c.link(b, a, "relates", created_by="user")
-        # The important thing: terminates
         r = c.graph(a, depth=10)
         assert len(r["nodes"]) == 2  # exactly {a, b}
         assert len(r["edges"]) == 2  # exactly 2 edges, not duplicated
+
+    def test_true_self_loop_terminates(self, tmp_path):
+        """A genuine A→A self-link (the most degenerate cycle) terminates
+        and returns just A with its single self-edge. UNION dedup on
+        (tumbler, depth) prevents (A,0) re-expansion. Distinct code path
+        from the two-cycle case — the prior test misnamed a two-cycle as a
+        self-loop (review finding, 2026-06-03)."""
+        d = tmp_path / "trueselfloop"
+        d.mkdir()
+        c = Catalog(d, d / ".catalog.db")
+        o = c.register_owner("nexus", "repo", repo_hash="5e1f100b")
+        a = c.register(o, "a.py", content_type="code", file_path="a.py")
+        # A true self-link: same tumbler both ends, allowed via allow_dangling.
+        c.link(a, a, "relates", created_by="user", allow_dangling=True)
+        r = c.graph(a, depth=10)
+        assert len(r["nodes"]) == 1  # exactly {a}
+        # Self-edge appears once (a is non-leaf at depth 0 < 10).
+        assert len(r["edges"]) == 1
+        e = r["edges"][0]
+        assert str(e.from_tumbler) == str(a)
+        assert str(e.to_tumbler) == str(a)
 
 
 class TestGraphCTEDepth:
