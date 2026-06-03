@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.9.1] - 2026-06-02
+
+Plugin version aligned with conexus 5.9.1. The first-run banner delivery fix
+(RDR-126 §3 / nexus-vlo2b) is server-side (`nx-mcp`); no plugin-side changes.
+
 ## [5.9.0] - 2026-06-02
 
 ### Changed

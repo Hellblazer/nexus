@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.9.1] - 2026-06-02
+
+### Fixed
+
+- **First-run banner now delivered via the MCP server `instructions` field
+  (RDR-126 §3 amendment, nexus-vlo2b).** Live Claude Desktop testing (P6-B)
+  found the 5.9.0 banner was delivered into the tool result but the Desktop
+  model paraphrased it away, so the user never saw it. The banner is now
+  injected into `instructions` at the `initialize` handshake (standing session
+  context, framed as a relay instruction), with the content-prepend retained
+  only as an injection-failure recovery path. This is a delivery-mechanism
+  change; user-visibility on Desktop is being re-verified.
+
 ## [5.9.0] - 2026-06-02
 
 Claude Desktop deployment completion (RDR-126): the `.mcpb` Desktop Extension
