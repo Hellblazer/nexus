@@ -4315,6 +4315,7 @@ def main():
     from nexus.logging_setup import configure_logging
     from nexus.mcp._first_run import (
         apply_embedder_notice,
+        apply_first_run_banner_instructions,
         ensure_installed_and_running,
         install_banner_dispatch_hook,
     )
@@ -4336,9 +4337,19 @@ def main():
     # every memory_put / search call fails opaquely. Best-effort:
     # logs warnings on failure, never blocks startup.
     ensure_installed_and_running()
-    # RDR-126 §3: deliver the one-shot first-run banner queued by
-    # ensure_installed_and_running on the first tool response. Wrapping
-    # the CallToolRequest handler is best-effort; never blocks boot.
+    # RDR-126 §3 amendment (nexus-vlo2b): PRIMARY banner channel — deliver the
+    # one-shot first-run banner via the server `instructions` field at the
+    # initialize handshake. P6-B (2026-06-02) found Claude Desktop paraphrases
+    # away the content-prepend in tool results; instructions is standing
+    # context framed as a relay instruction and is not dropped. On success it
+    # marks the one-shot + clears the queue.
+    apply_first_run_banner_instructions(mcp)
+    # RDR-126 §3: FALLBACK banner channel — content-prepend on the first tool
+    # response. In production both surfaces run this same FastMCP binary, so the
+    # instructions injection above normally succeeds and clears the pending
+    # banner; this hook then no-ops. It only delivers if that injection raised
+    # (e.g. a FastMCP-internals change) — an injection-failure recovery path,
+    # not a per-surface channel. Best-effort; never blocks boot.
     install_banner_dispatch_hook(mcp)
     # RDR-144 P5b: surface the embedder advisory to plugin/Desktop/Cowork-first
     # users who never run the Claude Code SessionStart hook. The MCP server
