@@ -386,6 +386,64 @@ def test_pdf_collection_flag_normalization(runner, fake_pdf, flag_val, expected)
     assert kw["collection_name"] == expected
 
 
+# ── nx index md --collection flag (GH #981) ──────────────────────────────────
+
+@pytest.mark.parametrize("flag_val,expected", [
+    # Bare name: auto-normalized to knowledge__<name>__voyage-context-3__v1
+    ("x", "knowledge__x__voyage-context-3__v1"),
+    # 2-segment legacy: auto-promoted to conformant 4-segment
+    ("knowledge__mydocs", "knowledge__mydocs__voyage-context-3__v1"),
+    # Already-conformant 4-segment: passed through unchanged
+    ("knowledge__mydocs__voyage-context-3__v1", "knowledge__mydocs__voyage-context-3__v1"),
+])
+def test_md_collection_flag_normalization(runner, fake_md, flag_val, expected):
+    """--collection on nx index md routes to knowledge__ (GH #981, fix #1)."""
+    with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT) as m:
+        result = runner.invoke(main, ["index", "md", str(fake_md), "--collection", flag_val])
+    assert result.exit_code == 0, result.output
+    _, kw = m.call_args
+    assert kw["collection_name"] == expected
+
+
+def test_md_collection_flag_absent_uses_corpus_default(runner, fake_md):
+    """Without --collection, docs__<corpus> default is preserved (no regression)."""
+    with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT) as m:
+        result = runner.invoke(main, ["index", "md", str(fake_md), "--corpus", "myproject"])
+    assert result.exit_code == 0, result.output
+    _, kw = m.call_args
+    # collection_name must be None so index_markdown derives docs__myproject itself
+    assert kw.get("collection_name") is None
+    assert kw.get("corpus") == "myproject"
+
+
+def test_md_collection_flag_produces_knowledge_prefix(runner, fake_md):
+    """Collection produced by --collection starts with knowledge__ (aspect-eligible)."""
+    with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT) as m:
+        result = runner.invoke(main, ["index", "md", str(fake_md), "--collection", "mynotes"])
+    assert result.exit_code == 0, result.output
+    _, kw = m.call_args
+    assert kw["collection_name"].startswith("knowledge__")
+
+
+def test_md_collection_knowledge_target_emits_prose_extractor_warning(runner, fake_md):
+    """--collection with knowledge__ target emits the scholarly-paper warning (GH #981)."""
+    # CliRunner (Click 8.x) mixes stdout+stderr into result.output by default.
+    with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT):
+        result = runner.invoke(main, ["index", "md", str(fake_md), "--collection", "mynotes"])
+    assert result.exit_code == 0, result.output
+    assert "scholarly-paper extractor" in result.output
+    assert "hallucinate" in result.output
+    assert "GH #981 fix #2" in result.output
+
+
+def test_md_collection_no_warning_when_corpus_default(runner, fake_md):
+    """No prose-extractor warning when --collection is absent (docs__ path)."""
+    with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT):
+        result = runner.invoke(main, ["index", "md", str(fake_md)])
+    assert result.exit_code == 0, result.output
+    assert "scholarly-paper extractor" not in result.output
+
+
 # ── --extractor flag ─────────────────────────────────────────────────────────
 
 _PDF_STUB = {"chunks": 1, "pages": [], "title": "", "author": ""}
