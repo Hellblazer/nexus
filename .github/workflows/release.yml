@@ -18,9 +18,10 @@ jobs:
     # encoder substrate; lazy ONNX-runtime imports). 20m was then too
     # tight: the v5.4.2 tag-push run passed both pytest matrices (~16m)
     # but timed out DURING the post-job cache-save upload, which counts
-    # toward this budget. Bumped to 25m — still well under the 36m
-    # genuine-hang signature, with headroom for the cache upload.
-    timeout-minutes: 25
+    # toward this budget. Bumped to 25m, then 30m (nexus-cxsbs) to absorb
+    # the HF/docling model cache save + a cold-cache fetch on the first run
+    # after a uv.lock bump — still under the 36m genuine-hang signature.
+    timeout-minutes: 30
     strategy:
       fail-fast: true
       matrix:
@@ -52,11 +53,34 @@ jobs:
           # nexus-8g79.33: same lockfile-bound key as ci.yml.
           key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
 
+      - name: Cache HuggingFace models (docling, cross-encoder, MinerU)
+        uses: actions/cache@v4
+        with:
+          # nexus-cxsbs: see ci.yml. Cache the whole HF hub dir so docling's
+          # layout + TableFormer models persist across runs instead of being
+          # re-fetched at test time (the LocalEntryNotFoundError "docling
+          # flake"). One cache covers docling, the cross-encoder reranker, and
+          # MinerU's weights (the latter only under -m slow).
+          path: ~/.cache/huggingface
+          key: huggingface-models-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            huggingface-models-${{ runner.os }}-
+
       - name: Install ripgrep
         run: sudo apt-get install -y ripgrep
 
       - name: Install project + dev deps
         run: uv sync --group dev
+
+      - name: Pre-fetch docling models (deterministic, retryable)
+        # nexus-cxsbs: see ci.yml. Warm the docling models before pytest so the
+        # flaky mid-test HF download becomes a deterministic, retryable
+        # up-front fetch. No-op on a cache hit.
+        run: |
+          for i in 1 2 3; do
+            uv run python -c "from nexus.pdf_extractor import PDFExtractor; e=PDFExtractor(); e._get_converter(enriched=False); e._get_converter(enriched=True); print('docling models warm')" && break
+            echo "docling pre-fetch attempt $i failed; retrying in 10s"; sleep 10
+          done
 
       - name: Run tests
         run: uv run pytest tests/ -q --durations=25
