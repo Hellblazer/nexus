@@ -1111,7 +1111,11 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         "T3 collection name. Bare names (e.g. 'mynotes') are auto-normalized "
         "to knowledge__<name>; qualified names (e.g. knowledge__mydocs) pass through. "
         "Overrides --corpus when set. Use to route Markdown into a knowledge__ "
-        "collection so 'nx enrich aspects' can process it (GH #981)."
+        "collection so 'nx enrich aspects' can process it (GH #981). "
+        "NOTE: the aspect extractor for knowledge__ targets the scholarly-paper schema; "
+        "it works well for paper-shaped content but will fabricate fields on general "
+        "prose / design notes. A prose extractor is tracked as a follow-on (fix #2 "
+        "from GH #981)."
     ),
 )
 @click.option(
@@ -1135,6 +1139,20 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
     # collection_name=None so index_markdown derives docs__<corpus> as before.
     if collection is not None:
         collection = t3_collection_name(collection)
+        # Warn when routing into knowledge__*: the registered aspect extractor
+        # uses the scholarly-paper-v1 schema (title, abstract, methods, venue).
+        # For paper-shaped Markdown this is correct. For general prose / design
+        # notes it will hallucinate paper fields. A general-prose extractor is
+        # tracked as GH #981 fix #2 (deferred). Reverted attempt: nexus-z70w / #377.
+        if collection.startswith("knowledge__"):
+            click.echo(
+                "Note: 'nx enrich aspects' on knowledge__ collections applies the "
+                "scholarly-paper extractor (title, abstract, methods, venue). "
+                "This is appropriate for paper-shaped content; it will hallucinate "
+                "structure on general prose or design notes. "
+                "A prose extractor is tracked as a follow-on (GH #981 fix #2).",
+                err=True,
+            )
 
     path = path.resolve()
     label = "Force re-indexing" if force else "Indexing"
