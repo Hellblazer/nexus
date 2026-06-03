@@ -2,12 +2,13 @@
 title: "Claude Desktop Deployment: Unified Chat and Cowork Surface"
 id: RDR-126
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-23
 accepted_date: 2026-06-02
+closed_date: 2026-06-02
 related_issues:
   - nexus-bsjro
   - nexus-lbie5
