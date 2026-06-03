@@ -16,10 +16,12 @@ jobs:
   test:
     name: pytest (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    # 25m: the suite runs ~16m on the runners and the post-job cache-save
+    # 30m: the suite runs ~16m on the runners and the post-job cache-save
     # step counts toward this budget. At 20m a v5.4.2 release run timed
-    # out DURING the cache upload (tests had already passed). See release.yml.
-    timeout-minutes: 25
+    # out DURING the cache upload (tests had already passed). Raised 25->30
+    # (nexus-cxsbs) to absorb the HF/docling model cache save (~hundreds of
+    # MB) and a cold-cache model fetch on the first run after a uv.lock bump.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -61,11 +63,42 @@ jobs:
           # bare runner-OS key reused stale models across upgrades.
           key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
 
+      - name: Cache HuggingFace models (docling, cross-encoder, MinerU)
+        uses: actions/cache@v4
+        with:
+          # nexus-cxsbs: the docling PDF extractor downloads its layout +
+          # TableFormer models from HuggingFace at test time; an unreliable
+          # fetch raised LocalEntryNotFoundError -> silent PyMuPDF fallback ->
+          # ~21 test_pdf_extractor_integration failures (the recurring
+          # "docling flake"). Cache the whole HF hub dir so the models persist
+          # across runs. A cache written on develop/main is restorable by every
+          # PR via the base-branch fallback, so this is shared across branches.
+          # Same dir also holds the cross-encoder reranker and (under -m slow)
+          # MinerU's weights, so one cache covers all HF-backed models.
+          path: ~/.cache/huggingface
+          # Key on uv.lock so a docling/transformers bump (new model) busts it;
+          # restore-keys seeds from the last cache so unchanged models persist.
+          key: huggingface-models-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            huggingface-models-${{ runner.os }}-
+
       - name: Install ripgrep
         run: sudo apt-get install -y ripgrep
 
       - name: Install project + dev deps
         run: uv sync --group dev
+
+      - name: Pre-fetch docling models (deterministic, retryable)
+        # nexus-cxsbs: warm the docling models BEFORE pytest so the flaky
+        # mid-test HF download becomes a deterministic up-front fetch that is
+        # allowed to retry. No-op on a cache hit; on a cold cache it downloads
+        # once (then the post-job cache-save persists it). Both converter modes
+        # (plain + enriched) cover every model the integration tests exercise.
+        run: |
+          for i in 1 2 3; do
+            uv run python -c "from nexus.pdf_extractor import PDFExtractor; e=PDFExtractor(); e._get_converter(enriched=False); e._get_converter(enriched=True); print('docling models warm')" && break
+            echo "docling pre-fetch attempt $i failed; retrying in 10s"; sleep 10
+          done
 
       - name: Run tests
         run: uv run pytest tests/ -q --durations=25
