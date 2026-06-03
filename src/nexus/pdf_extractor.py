@@ -204,6 +204,110 @@ def _normalize_whitespace_edge_cases(text: str) -> str:
     return text.strip()
 
 
+# Known operator names that MinerU/UniMERNet may emit as spaced single chars
+# inside \operatorname{...} or \operatorname*{...} -- e.g. ``{ m a x }`` -> max.
+# The rejoin is scoped to this allowlist so genuinely separate tokens are not
+# silently merged via the explicit rejoin path.  Unknown content still has its
+# surrounding whitespace collapsed by Rule 3 (all-whitespace strip within formula
+# context).
+_KNOWN_OPERATOR_NAMES: frozenset[str] = frozenset({
+    "arg", "argmax", "argmin", "cos", "deg", "det", "diag",
+    "exp", "inf", "lim", "ln", "log",
+    "max", "min", "rank", "sign", "sin", "softmax", "sup", "tan", "tr",
+})
+
+
+def normalize_latex_spacing(s: str) -> str:
+    """Normalize MinerU/UniMERNet spaced-token LaTeX formula string.
+
+    MinerU/UniMERNet emits formula LaTeX with spurious whitespace between
+    commands and their tokens -- e.g. ``\\operatorname* { m a x }``,
+    ``\\mathbf { s }``, ``Q _ { \\phi }``.  This normalizer collapses those
+    spaces so stored chunks render correctly.
+
+    Conservative rules (closes #1049):
+    - ``{ \\bf X }`` -> ``\\mathbf{X}``
+    - ``\\operatorname*{ m a x }`` / ``\\operatorname{ m i n }`` -- rejoin
+      spaced single-char tokens when the joined result is in
+      ``_KNOWN_OPERATOR_NAMES`` (e.g. ``max``, ``min``, ``argmax``).
+      Unknown operatorname content is left to the whitespace-collapse step.
+    - Collapse all remaining whitespace within the formula.
+    - ``\\text{...}`` groups are protected: internal spaces are preserved.
+
+    Idempotent: running twice produces the same result as running once.
+
+    Designed for formula strings, not prose.  At the wiring level
+    (``_normalize_mineru_latex``) this is called only within ``$...$`` and
+    ``$$...$$`` delimiters so prose chunks are never touched.
+    """
+    # Rule 1: { \\bf token } -> \\mathbf{token}
+    # Handles MinerU's {\\bf X} legacy-font group notation.
+    s = re.sub(r"\{\s*\\bf\s+(\S+)\s*\}", r"\\mathbf{\1}", s)
+
+    # Rule 2: \\operatorname*{ m a x } -> \\operatorname*{max}
+    # Rejoin scoped to \\operatorname / \\operatorname* with an allowlist so that
+    # genuinely separate single-char tokens are not silently merged.
+    def _rejoin_opname(m: re.Match) -> str:
+        cmd = m.group(1)
+        content = m.group(2).strip()
+        parts = content.split()
+        if parts and all(len(p) == 1 for p in parts):
+            joined = "".join(parts)
+            if joined in _KNOWN_OPERATOR_NAMES:
+                return f"{cmd}{{{joined}}}"
+        return m.group(0)
+
+    s = re.sub(r"(\\operatorname\*?)\s*\{([^}]+)\}", _rejoin_opname, s)
+
+    # Protect \text{...} groups: save them as placeholders so whitespace
+    # stripping below does not collapse spaces inside \text{some words}.
+    _placeholders: list[str] = []
+
+    def _save_text(m: re.Match) -> str:
+        _placeholders.append(m.group(0))
+        return f"\x00T{len(_placeholders) - 1}\x00"
+
+    s = re.sub(r"\\text\{[^}]*\}", _save_text, s)
+
+    # Rule 3: collapse all whitespace in the formula string.
+    # Safe because this function is only called on formula content, not prose.
+    s = re.sub(r"\s+", "", s)
+
+    # Restore \text{...} groups with their original internal spacing.
+    for i, t in enumerate(_placeholders):
+        s = s.replace(f"\x00T{i}\x00", t)
+
+    return s
+
+
+def _normalize_mineru_latex(md: str) -> str:
+    """Apply ``normalize_latex_spacing`` within LaTeX formula blocks in markdown.
+
+    Scopes the normalizer to ``$$...$$`` (display math) and ``$...$`` (inline
+    math) delimiters so that prose text is never modified.  Idempotent.
+
+    Called from ``PDFExtractor._extract_with_mineru`` on each per-page
+    markdown fragment (batch loop and OOM-retry path) before the length
+    is measured for ``per_page_lengths``/``page_boundaries``, so the
+    stored offsets are consistent with the normalized text.  Existing
+    indexed chunks need a re-index to pick up clean LaTeX.
+    """
+    # Display math first (greedy match would eat $...$).
+    md = re.sub(
+        r"\$\$(.*?)\$\$",
+        lambda m: f"$${normalize_latex_spacing(m.group(1))}$$",
+        md,
+        flags=re.DOTALL,
+    )
+    # Inline math \u2014 [^$] avoids matching across $$ boundaries.
+    md = re.sub(
+        r"\$([^$]+?)\$",
+        lambda m: f"${normalize_latex_spacing(m.group(1))}$",
+        md,
+    )
+    return md
+
+
 @dataclass
 class ExtractionResult:
     """Result of PDF text extraction."""
@@ -569,6 +673,9 @@ class PDFExtractor:
                     md, content_list, pdf_info = self._mineru_run_isolated(
                         pdf_path, page, page + 1,
                     )
+                    # Normalize before measuring length so per_page_lengths
+                    # is consistent with the stored normalized text.
+                    md = _normalize_mineru_latex(md)
                     if on_page is not None:
                         on_page(page, md, {"page_number": page + 1, "text_length": len(md)})
                     md_parts.append(md)
@@ -576,6 +683,9 @@ class PDFExtractor:
                     all_pdf_info.extend(pdf_info)
                     per_page_lengths.append((page, len(md)))
                 continue
+            # Normalize before measuring length so per_page_lengths
+            # is consistent with the stored normalized text.
+            md = _normalize_mineru_latex(md)
             if on_page is not None:
                 # Note: for batch_size > 1, fires once per batch with the batch's
                 # combined markdown and start page index. Page-number metadata is
@@ -971,6 +1081,10 @@ class PDFExtractor:
 
         formula_count = max(display_count + inline_count, formula_count_floor)
         page_count = len(pdf_info)
+
+        # md_text is already normalized: _extract_with_mineru applies
+        # _normalize_mineru_latex per-page so per_page_lengths and
+        # page_boundaries are consistent with the stored text.
         total_len = len(md_text)
 
         page_boundaries: list[dict] = []
