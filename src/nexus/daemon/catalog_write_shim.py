@@ -32,11 +32,22 @@ from typing import Any, Callable
 
 from nexus.catalog.tumbler import Tumbler
 
-#: The 16 mutating ops the daemon hosts on behalf of the rich Catalog.
+#: The mutating ops the daemon hosts on behalf of the rich Catalog.
 #: This is a closed whitelist, not a denylist: adding a method to the
 #: rich Catalog does NOT auto-expose it. Every entry must be a method on
 #: :class:`nexus.catalog.catalog.Catalog`; the
 #: ``test_every_write_op_exists_on_rich_catalog`` regression locks that.
+#:
+#: RDR-146 P1.0 served the first 16 (the hot indexer/MCP write path).
+#: P1.2 (nexus-5p2ci.21) added the last 6 after an AST inventory of all
+#: 49 cutover sites found admin/maintenance writes outside the original
+#: 16 (the ``nx catalog`` surface + ``collection_rename``):
+#:   - rename_collection / bulk_unlink / update_documents_collection_batch
+#:     are per-document mutations that round-trip framed JSON cleanly.
+#:   - sync / pull / compact are git + whole-JSONL maintenance the daemon
+#:     (the single writer) must run; routing them keeps the single-writer
+#:     invariant intact (no direct .catalog.db writer survives the
+#:     cutover).
 CATALOG_WRITE_OPS: tuple[str, ...] = (
     "register_owner",
     "ensure_owner_for_repo",
@@ -54,16 +65,40 @@ CATALOG_WRITE_OPS: tuple[str, ...] = (
     "append_manifest_chunks",
     "atomic_manifest_replace",
     "resync_chunk_count_cache",
+    # P1.2 admin/maintenance additions:
+    "rename_collection",
+    "bulk_unlink",
+    "update_documents_collection_batch",
+    "sync",
+    "pull",
+    "compact",
 )
 
-#: Parameter names across the 16 ops whose value is a Tumbler. The
-#: daemon-side shim coerces an inbound ``str`` for any of these back to
-#: Tumbler before invoking the hosted method; the client-side encoder
-#: serialises any Tumbler argument to ``str`` regardless of position.
-#: ``set_owner_head_hash`` declares ``owner: Tumbler | str`` and accepts
-#: either, so coercing its str form to Tumbler is safe.
-TUMBLER_PARAM_NAMES: frozenset[str] = frozenset(
-    {"owner", "tumbler", "from_t", "to_t"}
+#: Per-op parameter names whose inbound value is a Tumbler and must be
+#: coerced ``str`` -> Tumbler daemon-side. PER OP, not a global set: the
+#: same parameter name means different things across ops. ``bulk_unlink``
+#: declares ``from_t`` / ``to_t`` as PLAIN STR filters (often ``""``), so
+#: coercing them via ``Tumbler.parse`` would raise on the empty string —
+#: it is deliberately absent here. ``set_owner_head_hash`` accepts
+#: ``Tumbler | str`` so parsing its str form is safe. Ops not listed take
+#: no Tumbler arguments (``ensure_owner_for_repo``'s ``repo`` is a Path,
+#: which round-trips natively via the ``_TAG_PATH`` encoder).
+TUMBLER_PARAMS_BY_OP: dict[str, frozenset[str]] = {
+    "register": frozenset({"owner"}),
+    "update": frozenset({"tumbler"}),
+    "delete_document": frozenset({"tumbler"}),
+    "set_owner_head_hash": frozenset({"owner"}),
+    "link": frozenset({"from_t", "to_t"}),
+    "link_if_absent": frozenset({"from_t", "to_t"}),
+    "unlink": frozenset({"from_t", "to_t"}),
+}
+
+#: Union of every parameter name that is a Tumbler in at least one op.
+#: Documentation/back-compat aggregate; the coercion uses the per-op map
+#: above. NB: ``bulk_unlink``'s str ``from_t`` / ``to_t`` are NOT coerced
+#: despite the name appearing here, because the per-op map omits them.
+TUMBLER_PARAM_NAMES: frozenset[str] = frozenset().union(
+    *TUMBLER_PARAMS_BY_OP.values()
 )
 
 #: Ops whose return value is a Tumbler. Their daemon-side result is
@@ -117,6 +152,7 @@ def make_write_shim(method: Callable[..., Any], op: str) -> Callable[..., Any]:
     never Tumblers).
     """
     sig = inspect.signature(method)
+    tumbler_params = TUMBLER_PARAMS_BY_OP.get(op, frozenset())
 
     def _shim(*args: Any, **kwargs: Any) -> Any:
         bound = sig.bind(*args, **kwargs)
@@ -124,7 +160,7 @@ def make_write_shim(method: Callable[..., Any], op: str) -> Callable[..., Any]:
             param = sig.parameters[pname]
             if param.kind is inspect.Parameter.VAR_KEYWORD:
                 continue
-            if pname in TUMBLER_PARAM_NAMES and isinstance(pval, str):
+            if pname in tumbler_params and isinstance(pval, str):
                 bound.arguments[pname] = Tumbler.parse(pval)
         result = method(*bound.args, **bound.kwargs)
         if op in TUMBLER_RETURN_OPS and isinstance(result, Tumbler):

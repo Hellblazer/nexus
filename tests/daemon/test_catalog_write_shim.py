@@ -56,12 +56,13 @@ def db_path(tmp_path: Path) -> Path:
 
 
 class TestWhitelistContract:
-    def test_exactly_sixteen_ops(self) -> None:
-        assert len(CATALOG_WRITE_OPS) == 16
+    def test_exactly_twentytwo_ops(self) -> None:
+        # 16 hot-path (P1.0) + 6 admin/maintenance (P1.2).
+        assert len(CATALOG_WRITE_OPS) == 22
         # No duplicates.
-        assert len(set(CATALOG_WRITE_OPS)) == 16
+        assert len(set(CATALOG_WRITE_OPS)) == 22
 
-    def test_op_set_is_the_locked_16(self) -> None:
+    def test_op_set_is_the_locked_22(self) -> None:
         assert set(CATALOG_WRITE_OPS) == {
             "register_owner",
             "ensure_owner_for_repo",
@@ -79,6 +80,12 @@ class TestWhitelistContract:
             "append_manifest_chunks",
             "atomic_manifest_replace",
             "resync_chunk_count_cache",
+            "rename_collection",
+            "bulk_unlink",
+            "update_documents_collection_batch",
+            "sync",
+            "pull",
+            "compact",
         }
 
     def test_every_write_op_exists_on_rich_catalog(self) -> None:
@@ -171,12 +178,31 @@ class TestDaemonShim:
         assert isinstance(captured["to_t"], Tumbler)
         assert captured["meta"] == {"weight": 3}
 
-    def test_build_dispatch_has_namespaced_sixteen(self) -> None:
+    def test_build_dispatch_has_namespaced_whitelist(self) -> None:
         cat = _make_local_catalog()
         table = build_catalog_write_dispatch(cat)
-        assert len(table) == 16
+        assert len(table) == 22
         assert all(k.startswith(CATALOG_WRITE_PREFIX) for k in table)
         assert set(table) == {f"{CATALOG_WRITE_PREFIX}{op}" for op in CATALOG_WRITE_OPS}
+
+    def test_bulk_unlink_str_filters_not_coerced_to_tumbler(self) -> None:
+        """bulk_unlink's from_t/to_t are PLAIN STR filters (often ""),
+        so the per-op shim must NOT Tumbler.parse them (parse("") raises)."""
+        captured: dict[str, object] = {}
+
+        def fake_bulk_unlink(
+            from_t: str = "", to_t: str = "", link_type: str = "", created_by: str = "",
+            created_at_before: str = "", dry_run: bool = False,
+        ) -> int:
+            captured["from_t"] = from_t
+            captured["to_t"] = to_t
+            return 5
+
+        shim = make_write_shim(fake_bulk_unlink, "bulk_unlink")
+        n = shim(from_t="", to_t="", link_type="cites")
+        assert n == 5
+        assert captured["from_t"] == "" and captured["to_t"] == ""
+        assert isinstance(captured["from_t"], str)
 
     def test_dispatch_excludes_dataclass_reads(self) -> None:
         cat = _make_local_catalog()

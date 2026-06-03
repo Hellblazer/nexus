@@ -104,6 +104,14 @@ def _run_write_scenario(writer: Any) -> dict[str, Any]:
     out["d3"] = str(d3)
 
     out["unlink"] = writer.unlink(d1, d2, "cites")
+
+    # P1.2 admin/maintenance ops routed through the daemon (parity must
+    # hold for these too). All return JSON-native scalars.
+    out["rename_collection"] = writer.rename_collection(_COLL, _COLL + "-renamed")
+    out["batch"] = writer.update_documents_collection_batch(
+        [(str(d1), _COLL + "-renamed")]
+    )
+    out["bulk_unlink_dry"] = writer.bulk_unlink(link_type="cites", dry_run=True)
     return out
 
 
