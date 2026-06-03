@@ -374,6 +374,11 @@ class PlanLibrary:
                 candidate = _normalize_scope_string(project.strip())
                 if candidate and candidate not in _SCOPE_AGNOSTIC_SENTINELS:
                     stored_scope_tags = candidate
+            # Residual: a grown corpus:all plan whose plans.project is also
+            # empty still saves with scope_tags=''.  The three remaining
+            # attractor layers from #1069 (grown-plan floor at 0.55, verb-
+            # synonym fold, empty-project residual) are tracked in the
+            # follow-on bead and are out of scope for this fix.
         else:
             # Caller explicitly passed scope_tags="" to force scope-agnostic.
             stored_scope_tags = ""

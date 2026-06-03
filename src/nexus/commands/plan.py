@@ -567,10 +567,15 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
     """Set or override the scope_tags for *plan_id*.
 
     \b
-    Writes explicit scope_tags, applying the same normalization as
-    ``save_plan``: each comma-separated entry is stripped of hash suffixes
-    and glob tails, scope-agnostic sentinels (``all``) are dropped, and
-    the result is stored sorted-unique.  Idempotent.
+    This is an explicit admin override: it can widen or narrow scope.
+    Use deliberately — the matcher reads scope_tags fresh on every call,
+    so changes take effect immediately without a cache rebuild.
+
+    \b
+    Applies the same normalization as ``save_plan``: each comma-separated
+    entry is stripped of hash suffixes and glob tails, scope-agnostic
+    sentinels (``all``) are dropped, and the result is stored sorted-unique.
+    Idempotent.
 
     \b
     With --from-project, stamps scope_tags from the plan's own
@@ -632,13 +637,17 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
         raise click.exceptions.Exit(1)
 
     label = row.get("name") or row.get("query") or "(unnamed)"
-    # Re-read the stored value for the confirmation message.
-    lib2 = PlanLibrary(path=db_path)
-    try:
-        updated_row = lib2.get_plan(plan_id)
-        stored = (updated_row or {}).get("scope_tags") or ""
-    finally:
-        lib2.close()
+    # Derive the echo value from resolved_tags using the same normalization
+    # that set_scope_tags applied.  No second connection needed — the
+    # normalization is deterministic so this matches what was stored.
+    from nexus.db.t2.plan_library import _normalize_scope_string as _nss  # noqa: PLC0415, N812
+    from nexus.plans.scope import _SCOPE_AGNOSTIC_SENTINELS as _SAS  # noqa: PLC0415, N812
+    parts = [
+        _nss(p.strip())
+        for p in resolved_tags.split(",")
+        if p.strip() and p.strip() not in _SAS
+    ]
+    stored = ",".join(sorted({p for p in parts if p}))
     click.echo(
         f"Plan id={plan_id} name={label!r} scope_tags set to {stored!r}."
     )
