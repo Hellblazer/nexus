@@ -6,6 +6,54 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.9.1] - 2026-06-02
+
+### Fixed
+
+- **First-run banner now delivered via the MCP server `instructions` field
+  (RDR-126 §3 amendment, nexus-vlo2b).** Live Claude Desktop testing (P6-B)
+  found the 5.9.0 banner was delivered into the tool result but the Desktop
+  model paraphrased it away, so the user never saw it. The banner is now
+  injected into `instructions` at the `initialize` handshake (standing session
+  context, framed as a relay instruction), with the content-prepend retained
+  only as an injection-failure recovery path. This is a delivery-mechanism
+  change; user-visibility on Desktop is being re-verified.
+
+## [5.9.0] - 2026-06-02
+
+Claude Desktop deployment completion (RDR-126): the `.mcpb` Desktop Extension
+substrate already shipped; this release adds the remaining first-run and
+lifecycle surface so a Desktop-only user gets a working, removable daemon
+without touching a terminal.
+
+### Added
+
+- **First-run banner (RDR-126 §3).** On the first MCP startup the server
+  announces that the background T2 daemon was installed (or was already
+  configured) and how to remove it in-chat, delivered by prepending to the
+  first tool response. One-shot, gated by a marker that is written only after
+  the banner is actually delivered (a failed delivery retries on the next tool
+  call rather than burning the one-shot).
+- **`daemon_uninstall` MCP tool (RDR-126 §4), on `nx-mcp`.** In-chat removal of
+  the first-run daemon. `confirm=false` (default) is a dry run that describes
+  what would be removed; `confirm=true` removes the OS autostart unit, stops
+  the daemon, and clears the first-run marker; `remove_data=true` additionally
+  wipes the nexus config directory (guarded against shallow/unsafe paths).
+
+### Changed
+
+- **T2 autostart install/uninstall lifted into `nexus.daemon.installer`
+  (RDR-126 §2).** The OS-unit logic moved out of the Click command bodies into
+  pure library functions returning structured results; `nx daemon t2
+  install/uninstall` and the MCP first-run path now call it in-process. No
+  user-facing CLI behavior change.
+
+### CI/release
+
+- **mcpb version-sync guard (RDR-126 §7).** `release.yml` now fails the publish
+  if `mcpb/manifest.json`'s version does not match the release tag, closing the
+  third version-drift surface (the Desktop Extension) at publish time.
+
 ## [5.8.0] - 2026-06-02
 
 Plugin to CLI version lockstep (RDR-143): the conexus plugin and the `nx` CLI
