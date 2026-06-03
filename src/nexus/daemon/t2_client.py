@@ -250,6 +250,11 @@ class T2Client:
             "document_aspects", "aspect_queue", "catalog", "database",
         ):
             setattr(self, store_name, _StoreProxy(self, store_name))
+        # RDR-146 P1 (nexus-5p2ci.20): write-only proxy to the daemon-
+        # hosted rich Catalog. Distinct from the ``catalog`` read proxy
+        # above (low-level CatalogStore reads); ``catalog_write`` exposes
+        # exactly the 16 mutating ops with the Tumbler<->str shim.
+        self.catalog_write = _CatalogWriterProxy(self)
 
     # ── context manager ─────────────────────────────────────────────────
 
@@ -459,6 +464,51 @@ class _StoreProxy:
 
         _call.__name__ = method_name
         _call.__qualname__ = f"T2Client.{store}.{method_name}"
+        return _call
+
+
+class _CatalogWriterProxy:
+    """RDR-146 P1 (nexus-5p2ci.20): write-only proxy to the daemon-hosted
+    rich Catalog.
+
+    Exposes exactly the 16 whitelisted mutating ops (see
+    :data:`nexus.daemon.catalog_write_shim.CATALOG_WRITE_OPS`). Tumbler
+    arguments are serialised to ``str`` on the wire and the three
+    Tumbler-returning ops (``register_owner`` / ``ensure_owner_for_repo``
+    / ``register``) are parsed back to Tumbler on receipt. Any name
+    outside the whitelist raises ``AttributeError`` locally so a typo or
+    an attempt to reach a read method never round-trips.
+    """
+
+    __slots__ = ("_client",)
+
+    def __init__(self, client: "T2Client") -> None:
+        self._client = client
+
+    def __getattr__(self, method_name: str) -> Any:
+        from nexus.daemon.catalog_write_shim import (
+            CATALOG_WRITE_OPS,
+            CATALOG_WRITE_PREFIX,
+            decode_return,
+            encode_tumbler_args,
+        )
+
+        if method_name not in CATALOG_WRITE_OPS:
+            raise AttributeError(
+                f"{method_name!r} is not a catalog write op; the 16-op "
+                f"whitelist is {CATALOG_WRITE_OPS!r}"
+            )
+        client = self._client
+
+        def _call(*args: Any, **kwargs: Any) -> Any:
+            enc_args, enc_kwargs = encode_tumbler_args(args, kwargs)
+            result = client.call(
+                f"{CATALOG_WRITE_PREFIX}{method_name}", *enc_args, **enc_kwargs
+            )
+            return decode_return(method_name, result)
+
+        _call.__name__ = method_name
+        _call.__qualname__ = f"T2Client.catalog_write.{method_name}"
         return _call
 
 

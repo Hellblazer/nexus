@@ -513,6 +513,13 @@ _RPC_DENY_OPS: frozenset[str] = frozenset({
 })
 
 
+#: RDR-146 P1 (nexus-5p2ci.20): op-prefix for the daemon-hosted rich
+#: Catalog write whitelist. Ops under this prefix are serialised via
+#: ``_catalog_write_lock`` (see ``T2Daemon._dispatch``). Mirrors
+#: ``catalog_write_shim.CATALOG_WRITE_PREFIX``.
+_CATALOG_WRITE_PREFIX = "catalog_write."
+
+
 def _build_dispatch_table(t2db: Any) -> dict[str, Any]:
     """Build the ``{op: bound_callable}`` dispatch table from *t2db*.
 
@@ -689,6 +696,17 @@ class T2Daemon:
         self._config_dir = config_dir
         self._db_path = db_path
         self._t2db: Any = None
+        # RDR-146 P1 (nexus-5p2ci.20): the daemon hosts exactly one rich
+        # Catalog (sole owner of the .catalog.db write handle + JSONL
+        # append path). Constructed at start(); the 16-op write whitelist
+        # is merged into the dispatch table. ``_catalog_write_lock``
+        # serialises every catalog write so the hosted Catalog's multi-
+        # step JSONL+SQLite mutations stay atomic against the dispatch
+        # thread pool (the per-instance _owner_register_lock at
+        # catalog.py:533 only covers the owner check-then-register window,
+        # and the directory flock does not serialise sibling threads).
+        self._catalog: Any = None
+        self._catalog_write_lock: asyncio.Lock | None = None
         self._dispatch_table: dict[str, Any] = {}
         self._uds_server: asyncio.AbstractServer | None = None
         self._tcp_server: asyncio.AbstractServer | None = None
@@ -746,6 +764,17 @@ class T2Daemon:
         from nexus.db.t2 import T2Database
         self._t2db = T2Database(self._db_path, run_migrations=True)
         self._dispatch_table = _build_dispatch_table(self._t2db)
+
+        # RDR-146 P1 (nexus-5p2ci.20): host the rich Catalog and merge its
+        # write-only 16-op whitelist into the dispatch table. Construction
+        # WRITES (events.jsonl backfill + mtime-gated _ensure_consistent
+        # rebuild) — that is correct here: the daemon is the designated
+        # single writer. The asyncio.Lock is created now that we are
+        # inside the running loop.
+        self._catalog_write_lock = asyncio.Lock()
+        self._catalog = self._build_hosted_catalog()
+        from nexus.daemon.catalog_write_shim import build_catalog_write_dispatch
+        self._dispatch_table.update(build_catalog_write_dispatch(self._catalog))
 
         uds_sock = self._bind_uds()
         tcp_sock = self._bind_tcp()
@@ -904,8 +933,34 @@ class T2Daemon:
             except Exception as exc:  # noqa: BLE001
                 _log.warning("t2_daemon_t2db_close_failed", error=str(exc))
             self._t2db = None
+        # RDR-146 P1: close the hosted Catalog's SQLite handle. Catalog
+        # exposes no close(); the writer lives on its private CatalogDB
+        # (_db). Guard defensively — a missing/closed handle must not
+        # wedge stop().
+        if self._catalog is not None:
+            try:
+                self._catalog._db.close()
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("t2_daemon_catalog_close_failed", error=str(exc))
+            self._catalog = None
+            self._catalog_write_lock = None
         # NB: spawn lock intentionally NOT released here — see docstring.
         _log.info("t2_daemon_stopped")
+
+    def _build_hosted_catalog(self) -> Any:
+        """Construct the single rich Catalog the daemon hosts.
+
+        Resolves the catalog directory through ``nexus.config.catalog_path``
+        (the same resolution every CLI verb and the MCP server use), so the
+        daemon writes to the canonical ``.catalog.db`` + JSONL set. Tests
+        redirect it via the autouse ``_isolate_catalog`` fixture
+        (``NEXUS_CATALOG_PATH``), so daemon startup never touches the real
+        user catalog.
+        """
+        from nexus.catalog import Catalog
+        from nexus.config import catalog_path
+        path = catalog_path()
+        return Catalog(path, path / ".catalog.db")
 
     # ── socket binding ──────────────────────────────────────────────────
 
@@ -1014,6 +1069,22 @@ class T2Daemon:
         if not isinstance(args, list) or not isinstance(kwargs, dict):
             raise ProtocolError("frame 'args' must be list, 'kwargs' must be dict")
         callable_ = self._dispatch_table[op]
+        # RDR-146 P1 (nexus-5p2ci.20): catalog writes are serialised. The
+        # hosted rich Catalog performs multi-step JSONL+SQLite mutations
+        # that are not atomic across the dispatch thread pool (the
+        # directory flock does not block sibling threads, and the per-
+        # instance _owner_register_lock only covers owner registration).
+        # Holding an asyncio.Lock across the threaded invocation makes
+        # catalog write dispatch single-threaded / serial regardless of
+        # how many client connections fan in concurrently.
+        if op.startswith(_CATALOG_WRITE_PREFIX) and self._catalog_write_lock is not None:
+            async with self._catalog_write_lock:
+                return await self._invoke_with_lock_retry(callable_, op, args, kwargs)
+        return await self._invoke_with_lock_retry(callable_, op, args, kwargs)
+
+    async def _invoke_with_lock_retry(
+        self, callable_: Any, op: str, args: list[Any], kwargs: dict[str, Any],
+    ) -> Any:
         # All current dispatch methods are sync; offload to a thread so
         # the event loop doesn't block on SQLite writes.
         #
