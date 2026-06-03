@@ -316,6 +316,70 @@ def mark_shown() -> None:
     marker.touch(exist_ok=True)
 
 
+# RDR-126 §3 amendment (nexus-vlo2b): framing prefix so the model relays the
+# banner to the user rather than treating it as passive server documentation.
+_BANNER_RELAY_PREFIX = (
+    "FIRST-RUN NOTICE (surface this to the user once, verbatim, at the start "
+    "of your first reply): "
+)
+
+
+def apply_first_run_banner_instructions(server: object) -> bool:
+    """Deliver the pending first-run banner via the MCP server ``instructions``
+    field (RDR-126 §3 amendment / nexus-vlo2b). This is the PRIMARY channel.
+
+    ``instructions`` rides the ``initialize`` handshake as standing server
+    context, so unlike the content-prepend it is not buried in a tool result.
+    P6-B (2026-06-02) found Claude Desktop paraphrases away the tool-result
+    prepend; instructions is *less likely* to be dropped because it is framed
+    as a relay instruction rather than transient tool output. NOTE: this is
+    still model-mediated — there is no direct user-facing MCP channel — so it
+    remains UNVERIFIED on Desktop until a live re-test (the same caveat the
+    spike records). It reuses the low-level surface of
+    :func:`apply_embedder_notice` (RDR-144 P5b).
+
+    On success: marks the one-shot shown and clears the pending queue so the
+    content-prepend dispatch hook does not double-fire. On any failure (e.g. a
+    FastMCP-internals change so ``server._mcp_server`` is absent): leaves the
+    banner pending and returns False so the content-prepend dispatch hook still
+    delivers it. Best-effort; never raises.
+
+    One-shot semantics (differs from the content-prepend path): the banner is
+    marked at startup once injected, because ``instructions`` is delivered
+    unconditionally at ``initialize`` — there is no in-session retry. If
+    ``mark_shown()`` itself fails (e.g. read-only config dir), the pending
+    queue is still cleared and True is returned; the next process startup finds
+    the marker absent and re-queues (at-most-double show across sessions, never
+    a burn).
+
+    Production note: both Claude Desktop and Claude Code run the same FastMCP
+    binary, so ``server._mcp_server`` is present on both and this injection
+    normally succeeds on both — the content-prepend dispatch hook is therefore
+    effectively an injection-failure recovery path, NOT a per-surface channel.
+    """
+    global _PENDING_BANNER
+    spec = _PENDING_BANNER
+    if spec is None:
+        return False
+    try:
+        low = server._mcp_server  # type: ignore[attr-defined]
+        notice = _BANNER_RELAY_PREFIX + spec.text
+        existing = getattr(low, "instructions", None)
+        low.instructions = f"{existing}\n\n{notice}" if existing else notice
+    except Exception as exc:  # noqa: BLE001 — fall back to content-prepend
+        _log.debug(
+            "first_run_banner_instructions_failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return False
+    try:
+        mark_shown()
+    except Exception as exc:  # noqa: BLE001 — marker write must not break boot
+        _log.debug("first_run_marker_write_failed", error=f"{type(exc).__name__}: {exc}")
+    _PENDING_BANNER = None
+    return True
+
+
 def queue_banner(spec: BannerSpec) -> None:
     """Queue ``spec`` for delivery on the first tool response."""
     global _PENDING_BANNER
@@ -381,10 +445,12 @@ def install_banner_dispatch_hook(server: object) -> bool:
     content blocks; once delivered (marker written) it is a no-op for the
     rest of the process's life. Best-effort: any failure to install the
     hook is logged at debug and returns ``False`` so MCP boot is never
-    blocked. The notification channel is intentionally not used here
-    (RDR-126 A2: ``notifications/message`` rendering is unverified; the
-    tool-response content prepend is the primary, load-bearing channel —
-    see the §3 deferral note in the RDR).
+    blocked. As of the nexus-vlo2b amendment the content-prepend is the
+    FALLBACK channel: it fires only when the primary
+    :func:`apply_first_run_banner_instructions` left the banner pending
+    (i.e. the instructions injection raised). The notification channel is
+    intentionally not used here (RDR-126 A2: ``notifications/message``
+    rendering is unverified) — see the §3 amendment in the RDR.
 
     FRAGILE COUPLING (review): this reaches into ``server._mcp_server``
     and patches ``request_handlers[CallToolRequest]`` — both private
