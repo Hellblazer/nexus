@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.9.2] - 2026-06-03
+
+Plugin version aligned with conexus 5.9.2. The bug-fix batch (#1068 mcpb local
+embedder, #1069/#1073 plan scope_tags, #981 `nx index md --collection`, #1049
+LaTeX) is server-side / CLI; no plugin-side changes.
+
 ## [5.9.1] - 2026-06-02
 
 Plugin version aligned with conexus 5.9.1. The first-run banner delivery fix

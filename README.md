@@ -19,7 +19,7 @@ Three surfaces share one host substrate. Pick the one that matches how you use C
 
 ### Claude Desktop chat
 
-Download `conexus.mcpb` from the [latest release](https://github.com/Hellblazer/nexus/releases/latest) and double-click. Claude Desktop registers it under Settings → Connectors. Requires [uv](https://docs.astral.sh/uv/) on the host PATH; deps resolve on first launch (~20s).
+Download `conexus.mcpb` from the [latest release](https://github.com/Hellblazer/nexus/releases/latest) and double-click. Claude Desktop registers it under Settings → Connectors. Requires [uv](https://docs.astral.sh/uv/) installed on the host (the standard installer or Homebrew puts it where Claude Desktop resolves it — no PATH setup needed); deps resolve on first launch (~20s).
 
 ### Claude Code (terminal)
 

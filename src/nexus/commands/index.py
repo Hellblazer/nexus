@@ -1105,6 +1105,20 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--corpus", default="default", show_default=True, help="Corpus name for docs__ collection.")
 @click.option(
+    "--collection",
+    default=None,
+    help=(
+        "T3 collection name. Bare names (e.g. 'mynotes') are auto-normalized "
+        "to knowledge__<name>; qualified names (e.g. knowledge__mydocs) pass through. "
+        "Overrides --corpus when set. Use to route Markdown into a knowledge__ "
+        "collection so 'nx enrich aspects' can process it (GH #981). "
+        "NOTE: the aspect extractor for knowledge__ targets the scholarly-paper schema; "
+        "it works well for paper-shaped content but will fabricate fields on general "
+        "prose / design notes. A prose extractor is tracked as a follow-on (fix #2 "
+        "from GH #981)."
+    ),
+)
+@click.option(
     "--force",
     is_flag=True,
     default=False,
@@ -1112,10 +1126,33 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 )
 @click.option("--monitor", is_flag=True, default=False,
               help="Print chunking metadata after indexing. Auto-enabled when stdout is not a TTY.")
-def index_md_cmd(path: Path, corpus: str, force: bool, monitor: bool) -> None:
-    """Extract and index a Markdown file into T3 docs__CORPUS."""
+def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, monitor: bool) -> None:
+    """Extract and index a Markdown file into T3 docs__CORPUS (or --collection)."""
+    from nexus.corpus import t3_collection_name
     from nexus.doc_indexer import index_markdown
     from nexus.errors import CredentialsMissingError
+
+    # Normalize --collection through t3_collection_name() so bare names like
+    # "mynotes" become "knowledge__mynotes__voyage-context-3__v1", matching
+    # the behavior of nx index pdf --collection. Without this, chunks end up
+    # in unsearchable bare collections. When --collection is absent, pass
+    # collection_name=None so index_markdown derives docs__<corpus> as before.
+    if collection is not None:
+        collection = t3_collection_name(collection)
+        # Warn when routing into knowledge__*: the registered aspect extractor
+        # uses the scholarly-paper-v1 schema (title, abstract, methods, venue).
+        # For paper-shaped Markdown this is correct. For general prose / design
+        # notes it will hallucinate paper fields. A general-prose extractor is
+        # tracked as GH #981 fix #2 (deferred). Reverted attempt: nexus-z70w / #377.
+        if collection.startswith("knowledge__"):
+            click.echo(
+                "Note: 'nx enrich aspects' on knowledge__ collections applies the "
+                "scholarly-paper extractor (title, abstract, methods, venue). "
+                "This is appropriate for paper-shaped content; it will hallucinate "
+                "structure on general prose or design notes. "
+                "A prose extractor is tracked as a follow-on (GH #981 fix #2).",
+                err=True,
+            )
 
     path = path.resolve()
     label = "Force re-indexing" if force else "Indexing"
@@ -1129,14 +1166,14 @@ def index_md_cmd(path: Path, corpus: str, force: bool, monitor: bool) -> None:
                 chunk_bar.n = current
                 chunk_bar.refresh()
 
-            meta = index_markdown(path, corpus=corpus, force=force, return_metadata=True,
-                                  on_progress=on_chunk_progress)
+            meta = index_markdown(path, corpus=corpus, collection_name=collection, force=force,
+                                  return_metadata=True, on_progress=on_chunk_progress)
             chunk_bar.close()
             n = meta["chunks"]  # type: ignore[index]
             sections = meta.get("sections", 0)  # type: ignore[union-attr]
             click.echo(f"\n  Chunks: {n}  Sections: {sections}")
         else:
-            n = index_markdown(path, corpus=corpus, force=force)
+            n = index_markdown(path, corpus=corpus, collection_name=collection, force=force)
     except CredentialsMissingError as exc:
         # GH #336: surface the silent failure visibly. Click maps
         # ClickException to stderr + non-zero exit.

@@ -749,10 +749,38 @@ class TestMarketplaceVersion:
             f"!= pyproject.toml {pv!r}"
         )
         with mcpb_pyproject.open("rb") as f:
-            mcpb_pv = tomllib.load(f)["project"]["version"]
+            mcpb_proj = tomllib.load(f)["project"]
+        mcpb_pv = mcpb_proj["version"]
         assert mcpb_pv == pv, (
             f"mcpb/pyproject.toml version {mcpb_pv!r} "
             f"!= pyproject.toml {pv!r}"
+        )
+
+    def test_mcpb_pins_conexus_local_extra(self) -> None:
+        """#1068: the .mcpb bundle MUST depend on ``conexus[local]`` (not bare
+        ``conexus``) so its venv resolves fastembed → the Tier-1 bge-768 local
+        embedder. With bare ``conexus`` the embedder silently falls back to the
+        384-dim ONNX MiniLM while collections are indexed at 768/1024-dim, so
+        every Desktop T3 search hits a dimension mismatch and returns zero
+        results. The .mcpb cannot run the interactive ``nx init`` choice, so the
+        extra must be pinned. Also assert the pin version tracks the mcpb
+        version, so a release bump can't silently drop or stale it."""
+        mcpb_pyproject = REPO_ROOT / "mcpb" / "pyproject.toml"
+        assert mcpb_pyproject.exists()
+        with mcpb_pyproject.open("rb") as f:
+            mcpb_proj = tomllib.load(f)["project"]
+        deps = mcpb_proj["dependencies"]
+        conexus_dep = next((d for d in deps if d.startswith("conexus")), None)
+        assert conexus_dep is not None, "mcpb/pyproject.toml has no conexus dependency"
+        assert "conexus[local]" in conexus_dep, (
+            f"mcpb/pyproject.toml must pin conexus[local] (the fastembed extra), "
+            f"got {conexus_dep!r} — #1068: bare conexus breaks Desktop T3 search."
+        )
+        # The pin version must equal the mcpb version (release bump must update
+        # both the [project].version AND this dependency pin in lock-step).
+        assert f">={mcpb_proj['version']}" in conexus_dep, (
+            f"mcpb conexus pin {conexus_dep!r} must pin >={mcpb_proj['version']} "
+            "(the mcpb version) — a release bump left the dependency pin stale."
         )
 
     def test_release_workflow_verifies_mcpb_version(self) -> None:

@@ -1,10 +1,16 @@
 [project]
 name = "conexus-mcpb"
-version = "5.9.1"
+version = "5.9.2"
 description = "Conexus packaged as Claude Desktop .mcpb (Desktop Extension)"
 requires-python = ">=3.12"
 dependencies = [
-    "conexus>=5.9.1",
+    # #1068: the [local] extra (fastembed) MUST be present so the Desktop
+    # extension's venv resolves the Tier-1 bge-768 local embedder. Without it,
+    # LocalEmbeddingFunction silently falls back to the 384-dim ONNX MiniLM
+    # while collections are indexed at 768/1024-dim, so every T3 search hits a
+    # dimension mismatch and returns zero results. The .mcpb cannot run the
+    # interactive `nx init` embedder choice, so it must pin [local] explicitly.
+    "conexus[local]>=5.9.2",
 ]
 
 [tool.uv]

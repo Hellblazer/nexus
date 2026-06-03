@@ -554,6 +554,105 @@ def enable_cmd(plan_id: int) -> None:
     click.echo(f"Enabled plan id={plan_id} name={label!r}.")
 
 
+@plan.command("set-scope")
+@click.argument("plan_id", type=int)
+@click.argument("tags", required=False, default="")
+@click.option(
+    "--from-project",
+    is_flag=True,
+    help="Stamp scope_tags from the plan's own ``project`` column.  "
+    "Mutually exclusive with the TAGS positional argument.",
+)
+def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
+    """Set or override the scope_tags for *plan_id*.
+
+    \b
+    This is an explicit admin override: it can widen or narrow scope.
+    Use deliberately — the matcher reads scope_tags fresh on every call,
+    so changes take effect immediately without a cache rebuild.
+
+    \b
+    Applies the same normalization as ``save_plan``: each comma-separated
+    entry is stripped of hash suffixes and glob tails, scope-agnostic
+    sentinels (``all``) are dropped, and the result is stored sorted-unique.
+    Idempotent.
+
+    \b
+    With --from-project, stamps scope_tags from the plan's own
+    ``project`` column — the same recovery source as the automatic
+    #1069 fallback in ``save_plan`` / ``nx plan repair scope-tags``.
+
+    \b
+    Examples::
+
+      nx plan set-scope 22 canon-conductor-compose
+      nx plan set-scope 21 --from-project
+      nx plan set-scope 43 rdr__arcaneum,knowledge__delos
+    """
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
+    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415
+
+    if from_project and tags:
+        raise click.UsageError(
+            "--from-project and explicit TAGS are mutually exclusive."
+        )
+    if not from_project and not tags:
+        raise click.UsageError(
+            "Provide either TAGS or --from-project."
+        )
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        click.echo(f"T2 database not found at {db_path}.")
+        return
+
+    lib = PlanLibrary(path=db_path)
+    try:
+        row = lib.get_plan(plan_id)
+        if row is None:
+            click.echo(f"No plan with id {plan_id}.")
+            raise click.exceptions.Exit(1)
+
+        if from_project:
+            project = row.get("project") or ""
+            from nexus.plans.scope import (  # noqa: PLC0415
+                _SCOPE_AGNOSTIC_SENTINELS,
+                _normalize_scope_string,
+            )
+            candidate = _normalize_scope_string(project.strip())
+            resolved_tags = (
+                candidate
+                if candidate and candidate not in _SCOPE_AGNOSTIC_SENTINELS
+                else ""
+            )
+        else:
+            resolved_tags = tags
+
+        ok = lib.set_scope_tags(plan_id, resolved_tags)
+    finally:
+        lib.close()
+
+    if not ok:
+        click.echo(f"Failed to update plan {plan_id}.")
+        raise click.exceptions.Exit(1)
+
+    label = row.get("name") or row.get("query") or "(unnamed)"
+    # Derive the echo value from resolved_tags using the same normalization
+    # that set_scope_tags applied.  No second connection needed — the
+    # normalization is deterministic so this matches what was stored.
+    from nexus.db.t2.plan_library import _normalize_scope_string as _nss  # noqa: PLC0415, N812
+    from nexus.plans.scope import _SCOPE_AGNOSTIC_SENTINELS as _SAS  # noqa: PLC0415, N812
+    parts = [
+        _nss(p.strip())
+        for p in resolved_tags.split(",")
+        if p.strip() and p.strip() not in _SAS
+    ]
+    stored = ",".join(sorted({p for p in parts if p}))
+    click.echo(
+        f"Plan id={plan_id} name={label!r} scope_tags set to {stored!r}."
+    )
+
+
 @plan.command("reseed")
 @click.option(
     "--force",

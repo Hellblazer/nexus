@@ -332,9 +332,12 @@ class PlanLibrary:
             name, verb, scope, dimensions, default_bindings, parent_dims:
                 RDR-078 dimensional-identity / currying fields. All optional.
             scope_tags: RDR-091 Phase 2a scope-tag string (comma-separated,
-                sorted, normalized). When ``None`` or ``""``, the value is
-                inferred from ``plan_json`` via :func:`_infer_scope_tags`.
-                An explicit value is normalized via
+                sorted, normalized). When ``None`` (default), the value is
+                inferred from ``plan_json`` via :func:`_infer_scope_tags`,
+                with a fallback to the ``project`` column for corpus:all
+                plans (#1069). When ``""`` (explicit empty), the plan is
+                stored as scope-agnostic without any project fallback.
+                A non-empty value is normalized via
                 :func:`_normalize_scope_string` before storage.
         """
         created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -359,8 +362,26 @@ class PlanLibrary:
                 if p.strip() and p.strip() not in _SCOPE_AGNOSTIC_SENTINELS
             ]
             stored_scope_tags = ",".join(sorted({p for p in parts if p}))
-        else:
+        elif scope_tags is None:
+            # Truly unset: infer from plan_json retrieval steps.
             stored_scope_tags = _infer_scope_tags(plan_json)
+            # #1069 project-column fallback: when inference yields '' (e.g.
+            # corpus:all plans have no specific retrieval scope to infer from)
+            # AND the caller supplied a non-agnostic project, derive scope_tags
+            # from the project value instead.  Apply the same normalization /
+            # sentinel-drop path so project='all' and project='' never leak.
+            if not stored_scope_tags and project:
+                candidate = _normalize_scope_string(project.strip())
+                if candidate and candidate not in _SCOPE_AGNOSTIC_SENTINELS:
+                    stored_scope_tags = candidate
+            # Residual: a grown corpus:all plan whose plans.project is also
+            # empty still saves with scope_tags=''.  The three remaining
+            # attractor layers from #1069 (grown-plan floor at 0.55, verb-
+            # synonym fold, empty-project residual) are tracked in the
+            # follow-on bead and are out of scope for this fix.
+        else:
+            # Caller explicitly passed scope_tags="" to force scope-agnostic.
+            stored_scope_tags = ""
         with self._lock:
             cursor = self.conn.execute(
                 """
@@ -476,6 +497,31 @@ class PlanLibrary:
             cursor = self.conn.execute(
                 "UPDATE plans SET disabled_at = NULL WHERE id = ?",
                 (plan_id,),
+            )
+            self.conn.commit()
+            return cursor.rowcount > 0
+
+    def set_scope_tags(self, plan_id: int, scope_tags: str) -> bool:
+        """Write explicit *scope_tags* for the plan with *plan_id*.
+
+        Applies the same normalization as :meth:`save_plan`: each
+        comma-separated entry is passed through
+        :func:`_normalize_scope_string`, agnostic sentinels (``"all"``)
+        are dropped, and the result is sorted-unique joined.  Idempotent:
+        calling twice with the same input is a no-op. Returns ``True``
+        when the row was updated, ``False`` when *plan_id* does not exist.
+        (#1073)
+        """
+        parts = [
+            _normalize_scope_string(p.strip())
+            for p in scope_tags.split(",")
+            if p.strip() and p.strip() not in _SCOPE_AGNOSTIC_SENTINELS
+        ]
+        stored = ",".join(sorted({p for p in parts if p}))
+        with self._lock:
+            cursor = self.conn.execute(
+                "UPDATE plans SET scope_tags = ? WHERE id = ?",
+                (stored, plan_id),
             )
             self.conn.commit()
             return cursor.rowcount > 0

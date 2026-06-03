@@ -2,12 +2,13 @@
 title: "Claude Desktop Deployment: Unified Chat and Cowork Surface"
 id: RDR-126
 type: Architecture
-status: accepted
+status: closed
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-23
 accepted_date: 2026-06-02
+closed_date: 2026-06-02
 related_issues:
   - nexus-bsjro
   - nexus-lbie5
@@ -169,6 +170,14 @@ The work decomposes into nine specification items, numbered for phase-review-gat
 > **Implementation note (deferral, 2026-06-02).** The shipped implementation delivers the banner via the tool-response content prepend only; the `notifications/message` channel is **deliberately deferred**. Per Assumption A2 (likely-false: Claude Desktop does not render `notifications/message`), the second channel carries no verified user-visible value today, and emitting it from the low-level `CallToolRequest` wrapper has no clean session handle. The content-prepend is the primary, load-bearing channel (delivered + marker-gated as specified). If a future spike confirms A2 (a Desktop version that renders notifications), adding the secondary emit is a localized follow-up; tracked under the staleness/drift follow-up bead family, not a silent scope reduction.
 >
 > **Amendment (2026-06-02, nexus-vlo2b — channel reversal after P6-B).** The P6-B live Desktop run (conexus 5.9.0 `.mcpb`) found the content-prepend banner is *delivered* (marker written) but the Claude Desktop model paraphrases the tool result and **drops it — the user never sees it.** A spike (`scripts/spikes/spike_rdr126_instructions_banner.py`) confirmed the banner survives into `InitializeResult.instructions` (the `initialize` handshake, the same channel `apply_embedder_notice` ships on, RDR-144 P5b). The banner's **primary channel is now the server `instructions` field**, framed as an explicit relay instruction; the content-prepend is retained only as an **injection-failure recovery path** (it fires solely when the instructions injection raises — e.g. a FastMCP-internals change — since both Desktop and Claude Code run the same FastMCP binary and the injection normally succeeds on both). `apply_first_run_banner_instructions` runs at startup in `nexus.mcp.core:main` before the dispatch hook; on success it marks the one-shot and clears the pending queue so the two channels never double-fire. The instructions channel marks at startup (delivered unconditionally at `initialize`) rather than deliver-then-mark — there is no in-session retry. **This reroute is a mechanism fix, not a verified user-visibility fix:** `instructions` is still model-mediated context, so true Desktop user-visibility (specifically that the model relays the `daemon_uninstall` instruction in its first reply) is **a gate, not a follow-up** — the nexus-vlo2b bead stays open until a live Desktop re-test on the release carrying this change confirms it.
+>
+> **Final verdict (2026-06-02, nexus-vlo2b — conclusive, docs-validated). The proactive first-run banner is NOT user-visible on Claude Desktop chat, and this is an externally-imposed client limitation, not a Nexus defect.** The 5.9.1 live re-test (conexus `5.9.1` `.mcpb` on an isolated Desktop profile) **proved** the banner is delivered into the `initialize` handshake — `~/Library/Logs/Claude/mcp-server-Conexus.log` captured the full banner verbatim in the `instructions` field — yet the model still did not relay it to the user. The MCP specification and Anthropic's own issue tracker explain why every server-emittable channel is unavailable for a proactive user-facing message:
+>
+> - **`instructions` is tool-usage guidance, not a user-message channel.** The MCP spec (2025-11-25, lifecycle/schema) defines it as *"guidance on how to use the server and its features … to help clients improve the language model's understanding of available tools and resources, potentially by being added to the system prompt"*; the Claude Code MCP docs describe server instructions as loaded at session start to help the model find tools, *"similar to how skills work."* The model absorbs it as background tool-guidance and correctly does not echo it verbatim — no relay framing overrides how the client categorises the field.
+> - **`notifications/message` is received but not displayed.** `anthropics/claude-code#3174` ("Claude Code Receives But Doesn't Display Messages") was **closed as "not planned,"** and explicitly lists *"server introduction/welcome messages"* as a missing capability. The spec's "Clients MAY present log messages in the UI" is not exercised by Claude.
+> - **MCP Apps inline UI does not render in Claude Desktop** (`anthropics/claude-ai-mcp#165`), so the richest channel (RDR-126 §8 out-of-scope LB2) is also unavailable.
+>
+> **Resolution (accept).** The 5.9.1 `instructions`-channel implementation is retained — it is correct, harmless, and the right primary channel for any client that surfaces instructions. No further channel work is warranted (two empirical negatives plus the spec plus Anthropic's "not planned" close). The banner's actionable purpose — *how to remove the daemon* — is served without a banner: `daemon_uninstall` is a discoverable, auto-approved `nx-mcp` tool and `docs/desktop-deployment.md` carries the uninstall recipe. Only the proactive "daemon installed" announcement is unachievable on the Desktop chat surface, and only there. `nexus-vlo2b` is closed with this verdict (docs-only; no 5.9.2). Full evidence + sources: T2 `nexus/rdr-126-banner-desktop-verdict`.
 
 4. **`daemon_uninstall` MCP tool.** Exposed by `nx-mcp`. Parameters: `confirm: bool = false`, `remove_data: bool = false`. Default `confirm=false` returns a description of what would be removed and asks the model to call again with `confirm=true`. With `confirm=true`: removes the LaunchAgent / systemd unit, stops the daemon, removes the first-run marker. With `remove_data=true`: also wipes `~/.config/nexus/`. The tool is exposed in `nx-mcp` only (not `nx-mcp-catalog`) to avoid duplication.
 

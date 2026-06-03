@@ -58,16 +58,27 @@ def repair_scope_tags(conn: sqlite3.Connection) -> dict[str, Any]:
     if "scope_tags" not in _plan_columns(conn):
         return {"skipped": "scope_tags column missing"}
 
-    from nexus.plans.scope import _infer_scope_tags
+    from nexus.plans.scope import (  # noqa: PLC0415
+        _SCOPE_AGNOSTIC_SENTINELS,
+        _infer_scope_tags,
+        _normalize_scope_string,
+    )
 
     backfilled = 0
     rewashed = 0
 
     rows = conn.execute(
-        "SELECT id, plan_json FROM plans WHERE scope_tags = ''"
+        "SELECT id, plan_json, project FROM plans WHERE scope_tags = ''"
     ).fetchall()
-    for row_id, plan_json in rows:
+    for row_id, plan_json, project in rows:
         inferred = _infer_scope_tags(plan_json or "")
+        if not inferred and project:
+            # #1069 project-column fallback: corpus:all plans infer '' from
+            # their plan_json; recover from the populated project column using
+            # the same normalization / sentinel-drop as save_plan.
+            candidate = _normalize_scope_string((project or "").strip())
+            if candidate and candidate not in _SCOPE_AGNOSTIC_SENTINELS:
+                inferred = candidate
         if inferred:
             conn.execute(
                 "UPDATE plans SET scope_tags = ? WHERE id = ? AND scope_tags = ''",

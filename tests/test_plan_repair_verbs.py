@@ -45,8 +45,17 @@ def _seed_plans_schema(db_path: Path) -> sqlite3.Connection:
             scope TEXT DEFAULT 'global',
             name TEXT DEFAULT '',
             dimensions TEXT,
+            default_bindings TEXT DEFAULT '',
+            parent_dims TEXT DEFAULT '',
+            use_count INTEGER NOT NULL DEFAULT 0,
+            last_used TEXT,
+            match_count INTEGER NOT NULL DEFAULT 0,
+            match_conf_sum REAL NOT NULL DEFAULT 0.0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            failure_count INTEGER NOT NULL DEFAULT 0,
             scope_tags TEXT NOT NULL DEFAULT '',
-            match_text TEXT NOT NULL DEFAULT ''
+            match_text TEXT NOT NULL DEFAULT '',
+            disabled_at TEXT
         );
         """
     )
@@ -243,3 +252,333 @@ class TestNoDbFile:
                 result = runner.invoke(plan_cmd, ["repair", sub])
                 assert result.exit_code == 0, (sub, result.output)
                 assert "not found" in result.output, (sub, result.output)
+
+
+# ── #1069: repair scope-tags project-column fallback ───────────────────────
+
+
+class TestRepairScopeTagsProjectFallback:
+    """repair_scope_tags recovers empty-scope corpus:all rows from their
+    project column when _infer_scope_tags yields '' (#1069).
+    """
+
+    def test_repair_recovers_empty_scope_from_project_column(
+        self, runner: CliRunner, db_path: Path,
+    ) -> None:
+        """A corpus:all plan with scope_tags='' and a populated project
+        column must have scope_tags set to the project value after repair.
+        """
+        conn = _seed_plans_schema(db_path)
+        conn.execute(
+            "INSERT INTO plans (project, query, plan_json, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                "canon-conductor-compose",
+                "resolve t3 collection name",
+                '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}',
+                "2026-05-21T00:00:00Z",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch(
+            "nexus.commands._helpers.default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(plan_cmd, ["repair", "scope-tags"])
+        assert result.exit_code == 0, result.output
+        assert "backfilled: 1" in result.output
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT scope_tags FROM plans WHERE query='resolve t3 collection name'"
+        ).fetchone()
+        conn.close()
+        assert row[0] == "canon-conductor-compose"
+
+    def test_repair_leaves_empty_when_project_also_empty(
+        self, runner: CliRunner, db_path: Path,
+    ) -> None:
+        """When both scope_tags='' and project='', repair must not invent a tag."""
+        conn = _seed_plans_schema(db_path)
+        conn.execute(
+            "INSERT INTO plans (project, query, plan_json, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                "",
+                "generic search everything",
+                '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}',
+                "2026-05-21T00:00:00Z",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch(
+            "nexus.commands._helpers.default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(plan_cmd, ["repair", "scope-tags"])
+        assert result.exit_code == 0, result.output
+        assert "backfilled: 0" in result.output
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT scope_tags FROM plans WHERE query='generic search everything'"
+        ).fetchone()
+        conn.close()
+        assert row[0] == ""
+
+    def test_repair_project_fallback_idempotent(
+        self, runner: CliRunner, db_path: Path,
+    ) -> None:
+        """Running repair twice on the same corpus:all + project row must not
+        change the scope_tags after the first pass.
+        """
+        conn = _seed_plans_schema(db_path)
+        conn.execute(
+            "INSERT INTO plans (project, query, plan_json, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                "my-project",
+                "corpus all with project",
+                '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}',
+                "2026-05-21T00:00:00Z",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        patch_target = "nexus.commands._helpers.default_db_path"
+        with patch(patch_target, return_value=db_path):
+            runner.invoke(plan_cmd, ["repair", "scope-tags"])
+        with patch(patch_target, return_value=db_path):
+            runner.invoke(plan_cmd, ["repair", "scope-tags"])
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT scope_tags FROM plans WHERE query='corpus all with project'"
+        ).fetchone()
+        conn.close()
+        assert row[0] == "my-project"
+
+    def test_repair_drops_agnostic_project_sentinel(
+        self, runner: CliRunner, db_path: Path,
+    ) -> None:
+        """A project value of 'all' must be dropped as a sentinel, not stored."""
+        conn = _seed_plans_schema(db_path)
+        conn.execute(
+            "INSERT INTO plans (project, query, plan_json, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                "all",
+                "agnostic project plan",
+                '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}',
+                "2026-05-21T00:00:00Z",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch(
+            "nexus.commands._helpers.default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(plan_cmd, ["repair", "scope-tags"])
+        assert result.exit_code == 0, result.output
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT scope_tags FROM plans WHERE query='agnostic project plan'"
+        ).fetchone()
+        conn.close()
+        assert row[0] == ""
+
+
+# ── #1073: nx plan set-scope command ───────────────────────────────────────
+
+
+class TestSetScopeCommand:
+    """Tests for the ``nx plan set-scope <plan_id> <tags>`` command (#1073)."""
+
+    def _seed_with_plan(
+        self, db_path: Path, *, project: str = "", scope_tags: str = "",
+    ) -> int:
+        """Insert a minimal plan via PlanLibrary (so FTS/triggers are set up)
+        and return its id.  Uses scope_tags=None to bypass save_plan's
+        own normalization (we want to seed a specific raw value for testing
+        set-scope against).
+        """
+        from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415
+
+        lib = PlanLibrary(path=db_path)
+        try:
+            row_id = lib.save_plan(
+                query="test plan query",
+                plan_json='{"steps":[{"tool":"search","args":{"corpus":"all"}}]}',
+                project=project,
+            )
+            # Override scope_tags to the requested raw value so tests can
+            # start from a known state (e.g. empty string even when project
+            # would be inferred).
+            if scope_tags != "":
+                lib.set_scope_tags(row_id, scope_tags)
+            else:
+                # Force-clear scope_tags in case save_plan set it from project.
+                with lib._lock:
+                    lib.conn.execute(
+                        "UPDATE plans SET scope_tags = '' WHERE id = ?", (row_id,)
+                    )
+                    lib.conn.commit()
+        finally:
+            lib.close()
+        return row_id
+
+    def test_set_scope_is_registered(self) -> None:
+        assert "set-scope" in plan_cmd.commands, (
+            "nx plan set-scope command must be registered"
+        )
+
+    def test_set_scope_writes_normalized_tags(
+        self, runner: CliRunner, db_path: Path,
+    ) -> None:
+        """set-scope <id> <tag> stores the normalized tag (#1073)."""
+        plan_id = self._seed_with_plan(db_path)
+        with patch(
+            "nexus.commands._helpers.default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                plan_cmd, ["set-scope", str(plan_id), "canon-chat"]
+            )
+        assert result.exit_code == 0, result.output
+        assert "canon-chat" in result.output
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT scope_tags FROM plans WHERE id = ?", (plan_id,)
+        ).fetchone()
+        conn.close()
+        assert row[0] == "canon-chat"
+
+    def test_set_scope_normalizes_hash_suffix(
+        self, runner: CliRunner, db_path: Path,
+    ) -> None:
+        """set-scope applies _normalize_scope_string to each entry (#1073)."""
+        plan_id = self._seed_with_plan(db_path)
+        with patch(
+            "nexus.commands._helpers.default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                plan_cmd,
+                ["set-scope", str(plan_id), "rdr__arcaneum-2ad2825c,knowledge__delos-deadbeef"],
+            )
+        assert result.exit_code == 0, result.output
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT scope_tags FROM plans WHERE id = ?", (plan_id,)
+        ).fetchone()
+        conn.close()
+        assert row[0] == "knowledge__delos,rdr__arcaneum"
+
+    def test_set_scope_drops_all_sentinel(
+        self, runner: CliRunner, db_path: Path,
+    ) -> None:
+        """set-scope drops the 'all' sentinel (#1073)."""
+        plan_id = self._seed_with_plan(db_path)
+        with patch(
+            "nexus.commands._helpers.default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                plan_cmd, ["set-scope", str(plan_id), "all,rdr__arcaneum"]
+            )
+        assert result.exit_code == 0, result.output
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT scope_tags FROM plans WHERE id = ?", (plan_id,)
+        ).fetchone()
+        conn.close()
+        assert row[0] == "rdr__arcaneum"
+
+    def test_set_scope_idempotent(
+        self, runner: CliRunner, db_path: Path,
+    ) -> None:
+        """Running set-scope twice with the same value leaves scope_tags unchanged (#1073)."""
+        plan_id = self._seed_with_plan(db_path)
+        with patch(
+            "nexus.commands._helpers.default_db_path", return_value=db_path,
+        ):
+            runner.invoke(plan_cmd, ["set-scope", str(plan_id), "canon-chat"])
+            result = runner.invoke(
+                plan_cmd, ["set-scope", str(plan_id), "canon-chat"]
+            )
+        assert result.exit_code == 0, result.output
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT scope_tags FROM plans WHERE id = ?", (plan_id,)
+        ).fetchone()
+        conn.close()
+        assert row[0] == "canon-chat"
+
+    def test_set_scope_from_project_stamps_project_column(
+        self, runner: CliRunner, db_path: Path,
+    ) -> None:
+        """set-scope --from-project stamps scope_tags from the plans.project column (#1073)."""
+        plan_id = self._seed_with_plan(db_path, project="canon-conductor-compose")
+        with patch(
+            "nexus.commands._helpers.default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                plan_cmd, ["set-scope", str(plan_id), "--from-project"]
+            )
+        assert result.exit_code == 0, result.output
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT scope_tags FROM plans WHERE id = ?", (plan_id,)
+        ).fetchone()
+        conn.close()
+        assert row[0] == "canon-conductor-compose"
+
+    def test_set_scope_from_project_drops_all_sentinel(
+        self, runner: CliRunner, db_path: Path,
+    ) -> None:
+        """--from-project drops 'all' when the project column equals that sentinel (#1073)."""
+        plan_id = self._seed_with_plan(db_path, project="all")
+        with patch(
+            "nexus.commands._helpers.default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(
+                plan_cmd, ["set-scope", str(plan_id), "--from-project"]
+            )
+        assert result.exit_code == 0, result.output
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT scope_tags FROM plans WHERE id = ?", (plan_id,)
+        ).fetchone()
+        conn.close()
+        assert row[0] == ""
+
+    def test_set_scope_missing_plan_exits_nonzero(
+        self, runner: CliRunner, db_path: Path,
+    ) -> None:
+        """set-scope on a non-existent id exits with code 1."""
+        _seed_plans_schema(db_path).close()
+        with patch(
+            "nexus.commands._helpers.default_db_path", return_value=db_path,
+        ):
+            result = runner.invoke(plan_cmd, ["set-scope", "99999", "canon-chat"])
+        assert result.exit_code == 1
+
+    def test_set_scope_no_db_exits_cleanly(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """set-scope exits 0 with a 'not found' message when the DB file is absent."""
+        missing = tmp_path / "nope.db"
+        with patch(
+            "nexus.commands._helpers.default_db_path", return_value=missing,
+        ):
+            result = runner.invoke(plan_cmd, ["set-scope", "1", "canon-chat"])
+        assert result.exit_code == 0
+        assert "not found" in result.output
