@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.9.0] - 2026-06-02
+
+### Changed
+
+- **`daemon_uninstall` added to the auto-approve allow-list (RDR-126 §4).**
+  `hooks/scripts/auto-approve-nx-mcp.sh` now auto-approves the new
+  `mcp__plugin_conexus_nexus__daemon_uninstall` tool (its own `confirm=false`
+  default + dry run remains the destructive-op safety gate).
+
+Plugin version aligned with conexus 5.9.0. The first-run banner and
+`daemon_uninstall` tool are server-side (`nx-mcp`); no other plugin-side changes.
+
 ## [5.8.0] - 2026-06-02
 
 ### Added
