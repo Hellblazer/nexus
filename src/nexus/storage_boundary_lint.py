@@ -92,6 +92,44 @@ T2DATABASE_CONSTRUCTION_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 )
 
 
+#: RDR-146 P0.1 (nexus-5p2ci.1): the catalog client-cutover boundary.
+#: ``Catalog(...)`` constructed in consumer code opens a direct
+#: ``.catalog.db`` write handle that bypasses the T2 daemon, the
+#: GH #1046 starvation root cause (the catalog is already the 8th T2
+#: domain store served over RPC; consumers must route writes through
+#: ``T2Client.catalog`` instead of holding a local ``Catalog``).
+#:
+#: Unlike ``BANNED_CONSTRUCTORS``, this is a COUNTED BASELINE at P0.1,
+#: NOT an enforced hard violation: ~49 consumer sites still construct
+#: ``Catalog`` directly and are cut over in RDR-146 Phase 1. The metric
+#: ratchets down as sites migrate (monotonic non-increase, mirroring the
+#: RDR-128 P0c ``t2database_constructions`` baseline before its P3
+#: enforce-flip). The end-of-P1 enforce-flip is a separate change.
+CATALOG_BANNED_CONSTRUCTORS: tuple[str, ...] = ("Catalog",)
+
+
+#: Prefixes allowed to construct ``Catalog`` directly: the module that
+#: defines it (``catalog/``) and the substrate/daemon that run it
+#: (``db/``, ``daemon/``). Every other site is a consumer that must
+#: route catalog writes through the daemon client — those are the
+#: cutover surface counted by ``catalog_constructions``.
+CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES: tuple[str, ...] = (
+    "src/nexus/db/",
+    "src/nexus/daemon/",
+    "src/nexus/catalog/",
+)
+
+
+#: RDR-146 P0.1 baseline: the number of ``Catalog(...)`` construction
+#: sites in consumer code (outside :data:`CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES`)
+#: at the start of the Phase-1 cutover. The acceptance criterion is
+#: ``scan_repo(...).catalog_constructions <= CATALOG_CONSTRUCTION_BASELINE``;
+#: lower this constant as each cutover wave lands so it can never rise.
+#: Seeded empirically from the AST scan (RF-4 grep-counted ~49; the AST
+#: figure below is authoritative).
+CATALOG_CONSTRUCTION_BASELINE: int = 49
+
+
 #: Banned call sites. Each entry is ``(module, attribute)`` matched
 #: against AST ``Attribute(value=Name(id=module), attr=attribute)``
 #: nodes inside ``Call`` nodes. Alias resolution maps the alias back
@@ -147,6 +185,12 @@ class LintResult:
     #: connect-allowlist that carry a valid ``# epsilon-allow:`` override.
     #: The deliberate raw-connect exceptions to the substrate boundary.
     epsilon_allow_connects: int = 0
+    #: RDR-146 P0.1: ``Catalog(...)`` construction sites in consumer code
+    #: (outside :data:`CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES`). A COUNTED
+    #: baseline at P0.1 — these are the cutover surface for the catalog
+    #: client-cutover, NOT yet promoted to hard violations. Ratchets down
+    #: as Phase-1 waves migrate sites onto ``T2Client.catalog``.
+    catalog_constructions: int = 0
 
     @property
     def total_violations(self) -> int:
@@ -159,6 +203,7 @@ class LintResult:
             "catalog_allowlist_count": self.catalog_allowlist_count,
             "t2database_constructions": self.t2database_constructions,
             "epsilon_allow_connects": self.epsilon_allow_connects,
+            "catalog_constructions": self.catalog_constructions,
         }
 
 
@@ -176,6 +221,10 @@ class FileScan:
     t2database_constructions_undocumented: list[Violation] = field(default_factory=list)
     #: Count of epsilon-allow'd ``sqlite3.connect`` sites in this file.
     epsilon_allow_connects: int = 0
+    #: RDR-146 P0.1: ``Catalog(...)`` construction sites in this file
+    #: (the catalog client-cutover surface). Scoped by the catalog
+    #: construction-allowlist in :func:`scan_repo`.
+    catalog_constructions: list[Violation] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -202,19 +251,22 @@ def _collect_module_aliases(tree: ast.AST) -> dict[str, str]:
     return aliases
 
 
-def _collect_constructor_aliases(tree: ast.AST) -> dict[str, str]:
+def _collect_constructor_aliases(
+    tree: ast.AST, names: Iterable[str] = BANNED_CONSTRUCTORS
+) -> dict[str, str]:
     """Return ``{bound_name: canonical_class}`` for ``from`` imports of a
-    banned constructor.
+    tracked constructor.
 
     ``from nexus.db.t2 import T2Database`` -> ``{"T2Database": "T2Database"}``.
     ``from nexus.db.t2 import T2Database as DB`` -> ``{"DB": "T2Database"}``.
+    ``from nexus.catalog import Catalog as _Catalog`` -> ``{"_Catalog": "Catalog"}``.
     """
     aliases: dict[str, str] = {}
-    banned = set(BANNED_CONSTRUCTORS)
+    tracked = set(names)
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
-                if alias.name in banned:
+                if alias.name in tracked:
                     aliases[alias.asname or alias.name] = alias.name
     return aliases
 
@@ -253,6 +305,7 @@ def _scan_file_full(
     source_lines = source.splitlines()
     aliases = _collect_module_aliases(tree)
     constructor_aliases = _collect_constructor_aliases(tree)
+    catalog_aliases = _collect_constructor_aliases(tree, CATALOG_BANNED_CONSTRUCTORS)
 
     banlist_map = {module: {attr for _, attr in BANLIST if _ == module}
                    for module, _ in BANLIST}
@@ -307,6 +360,18 @@ def _scan_file_full(
                 scan.t2database_constructions_documented.append(v)
             else:
                 scan.t2database_constructions_undocumented.append(v)
+            continue
+
+        # ── Catalog(...) construction: RDR-146 P0.1 baseline ──
+        cat_ctor: str | None = None
+        if isinstance(func, ast.Name):
+            cat_ctor = catalog_aliases.get(func.id)
+        elif isinstance(func, ast.Attribute) and func.attr in CATALOG_BANNED_CONSTRUCTORS:
+            cat_ctor = func.attr
+        if cat_ctor is not None:
+            scan.catalog_constructions.append(
+                Violation(file=_rel(), line=line, symbol=cat_ctor)
+            )
 
     return scan
 
@@ -345,6 +410,7 @@ def scan_repo(
     allowlist_prefixes: Iterable[str] | None = None,
     extra_files: Iterable[pathlib.Path] | None = None,
     construction_allowlist_prefixes: Iterable[str] | None = None,
+    catalog_construction_allowlist_prefixes: Iterable[str] | None = None,
 ) -> LintResult:
     """Scan the repo for banned call sites and the RDR-128 baseline
     populations.
@@ -374,6 +440,14 @@ def scan_repo(
         construction_allowlist_prefixes = T2DATABASE_CONSTRUCTION_ALLOWLIST_PREFIXES
     else:
         construction_allowlist_prefixes = tuple(construction_allowlist_prefixes)
+    if catalog_construction_allowlist_prefixes is None:
+        catalog_construction_allowlist_prefixes = (
+            CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES
+        )
+    else:
+        catalog_construction_allowlist_prefixes = tuple(
+            catalog_construction_allowlist_prefixes
+        )
 
     result = LintResult()
 
@@ -400,6 +474,12 @@ def scan_repo(
             )
             result.violations.extend(scan.t2database_constructions_undocumented)
 
+        # RDR-146 P0.1 (catalog constructions): counted baseline outside
+        # the catalog construction-allowlist (catalog/ + db/ + daemon/).
+        # NOT promoted to hard violations at P0.1 — the cutover surface.
+        if not _is_allowlisted(rel, catalog_construction_allowlist_prefixes):
+            result.catalog_constructions += len(scan.catalog_constructions)
+
     # Extra files: always scanned, never allowlisted by path prefix.
     if extra_files:
         for extra in extra_files:
@@ -410,5 +490,6 @@ def scan_repo(
                 scan.t2database_constructions_documented
             )
             result.violations.extend(scan.t2database_constructions_undocumented)
+            result.catalog_constructions += len(scan.catalog_constructions)
 
     return result

@@ -500,3 +500,103 @@ def test_dual_population_baseline_locked():
     assert result.t2database_constructions == 31, (
         f"T2Database documented-construction baseline moved: {result.t2database_constructions}"
     )
+
+
+# ---------------------------------------------------------------------------
+# RDR-146 P0.1 (nexus-5p2ci.1): catalog construction baseline
+# ---------------------------------------------------------------------------
+#
+# The catalog is already the 8th T2 domain store served over RPC; the
+# GH #1046 starvation persists because ~49 consumer sites construct
+# ``Catalog(...)`` directly and bypass the daemon. P0.1 establishes a
+# COUNTED baseline (not yet an enforced hard violation — the cutover
+# happens in Phase 1). Acceptance: monotonic non-increase as sites migrate
+# onto ``T2Client.catalog``.
+
+
+def _catalog_check(extra_files=None, catalog_construction_allowlist_prefixes=None):
+    from nexus.storage_boundary_lint import scan_repo
+
+    return scan_repo(
+        repo_root=REPO_ROOT,
+        extra_files=extra_files,
+        catalog_construction_allowlist_prefixes=catalog_construction_allowlist_prefixes,
+    )
+
+
+def test_catalog_construction_baseline_matches_constant():
+    """RDR-146 P0.1: the consumer-side ``Catalog(...)`` construction count
+    equals the seeded baseline. Locked as ``== CATALOG_CONSTRUCTION_BASELINE``
+    (exact, not ``<=``) so an *increase* fails loudly and a *decrease* from a
+    cutover wave forces the constant down in lock-step — the monotonic-ratchet
+    forcing function. AST-authoritative (RF-4 grep counted ~49)."""
+    from nexus.storage_boundary_lint import CATALOG_CONSTRUCTION_BASELINE
+
+    result = _catalog_check()
+    assert result.catalog_constructions == CATALOG_CONSTRUCTION_BASELINE
+
+
+def test_catalog_construction_never_exceeds_baseline():
+    """The acceptance criterion in one assertion: the live count must never
+    rise above the recorded baseline. This is the gate ``nx doctor
+    --fail-on-violation`` enforces in CI."""
+    from nexus.storage_boundary_lint import CATALOG_CONSTRUCTION_BASELINE
+
+    assert _catalog_check().catalog_constructions <= CATALOG_CONSTRUCTION_BASELINE
+
+
+def test_catalog_construction_in_consumer_is_counted(tmp_path):
+    """A direct ``Catalog(...)`` in consumer code (outside catalog/ db/
+    daemon/) is counted into the baseline population."""
+    base = _catalog_check().catalog_constructions
+    target = tmp_path / "consumer.py"
+    target.write_text(
+        "from nexus.catalog import Catalog\n"
+        "def bad(p):\n"
+        "    return Catalog(p, p / '.catalog.db')\n"
+    )
+    result = _catalog_check(extra_files=[target])
+    assert result.catalog_constructions == base + 1
+
+
+def test_catalog_construction_aliased_import_is_counted(tmp_path):
+    """``from nexus.catalog.catalog import Catalog as _Catalog; _Catalog(...)``
+    resolves through alias tracking (indexer.py uses this form)."""
+    base = _catalog_check().catalog_constructions
+    target = tmp_path / "consumer_aliased.py"
+    target.write_text(
+        "from nexus.catalog.catalog import Catalog as _Catalog\n"
+        "def bad(p):\n"
+        "    return _Catalog(p, p / '.catalog.db')\n"
+    )
+    result = _catalog_check(extra_files=[target])
+    assert result.catalog_constructions == base + 1
+
+
+def test_catalog_sibling_classes_are_not_matched(tmp_path):
+    """``CatalogStore`` / ``CatalogTaxonomy`` / ``CatalogDB`` are distinct
+    symbols and must NOT be miscounted as ``Catalog`` constructions."""
+    base = _catalog_check().catalog_constructions
+    target = tmp_path / "siblings.py"
+    target.write_text(
+        "from nexus.db.t2.catalog import CatalogStore\n"
+        "def ok(p):\n"
+        "    return CatalogStore(p)\n"
+    )
+    result = _catalog_check(extra_files=[target])
+    assert result.catalog_constructions == base
+
+
+def test_catalog_construction_allowlist_includes_catalog_module():
+    """The catalog construction-allowlist holds the substrate (catalog/ db/
+    daemon/) that legitimately constructs ``Catalog``. Widening the allowlist
+    to empty must count strictly MORE sites than the consumer-only baseline,
+    proving substrate sites are being excluded from the cutover surface."""
+    from nexus.storage_boundary_lint import (
+        CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES,
+    )
+
+    wide = _catalog_check(catalog_construction_allowlist_prefixes=())
+    narrow = _catalog_check()
+    assert wide.catalog_constructions > narrow.catalog_constructions
+    assert "src/nexus/catalog/" in CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES

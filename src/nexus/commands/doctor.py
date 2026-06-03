@@ -854,12 +854,20 @@ def _run_check_storage_boundary(
 
     result = scan_repo(repo_root=repo_root)
 
+    from nexus.storage_boundary_lint import CATALOG_CONSTRUCTION_BASELINE
+
+    catalog_over_baseline = (
+        result.catalog_constructions > CATALOG_CONSTRUCTION_BASELINE
+    )
     click.echo(
-        f"Storage-boundary lint (RDR-120 P0.A / RDR-128 P0c):\n"
+        f"Storage-boundary lint (RDR-120 P0.A / RDR-128 P0c / RDR-146 P0.1):\n"
         f"  violations:                {result.total_violations}\n"
         f"  catalog-allowlist count:   {result.catalog_allowlist_count}\n"
         f"  epsilon-allow connects:    {result.epsilon_allow_connects}\n"
-        f"  T2Database constructions:  {result.t2database_constructions}"
+        f"  T2Database constructions:  {result.t2database_constructions}\n"
+        f"  catalog constructions:     {result.catalog_constructions}"
+        f" (RDR-146 baseline {CATALOG_CONSTRUCTION_BASELINE},"
+        f" cutover surface)"
     )
 
     if result.violations:
@@ -873,8 +881,19 @@ def _run_check_storage_boundary(
         catalog_allowlist_count=result.catalog_allowlist_count,
         epsilon_allow_connects=result.epsilon_allow_connects,
         t2database_constructions=result.t2database_constructions,
+        catalog_constructions=result.catalog_constructions,
+        catalog_construction_baseline=CATALOG_CONSTRUCTION_BASELINE,
         phase=phase or "unset",
     )
+
+    if catalog_over_baseline:
+        click.echo(
+            f"\nRDR-146: catalog constructions ({result.catalog_constructions}) "
+            f"exceed the baseline ({CATALOG_CONSTRUCTION_BASELINE}). A new direct "
+            f"Catalog(...) site was added in consumer code — route catalog writes "
+            f"through T2Client.catalog instead.",
+            err=True,
+        )
 
     if phase:
         try:
@@ -899,11 +918,18 @@ def _run_check_storage_boundary(
                 phase=phase,
             )
 
-    if fail_on_violation and result.violations:
-        click.echo(
-            f"\nFAIL: {result.total_violations} violation(s) found.",
-            err=True,
-        )
+    if fail_on_violation and (result.violations or catalog_over_baseline):
+        if result.violations:
+            click.echo(
+                f"\nFAIL: {result.total_violations} violation(s) found.",
+                err=True,
+            )
+        if catalog_over_baseline:
+            click.echo(
+                f"FAIL: catalog constructions ({result.catalog_constructions}) "
+                f"exceed the RDR-146 baseline ({CATALOG_CONSTRUCTION_BASELINE}).",
+                err=True,
+            )
         _sys.exit(1)
 
 
