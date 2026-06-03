@@ -347,3 +347,394 @@ class TestGraph:
         assert str(b) in out and str(x) in out
         inv = {str(e.tumbler) for e in c.graph(a, depth=1, direction="in")["nodes"]}
         assert str(x) in inv and str(b) not in inv
+
+
+# ---------------------------------------------------------------------------
+# TestGraphCTESemantics — nexus-5p2ci.17
+# Parity + semantic contract tests for the WITH RECURSIVE CTE replacement of
+# the Python BFS in _LinkOps.graph().  Tests are named by the contract they
+# lock.  Fixtures use Catalog directly (integration, no mocks except for cap
+# patching via patch.object).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def chain_cat(tmp_path):
+    """Linear chain: A→B→C (three nodes, two directed edges)."""
+    d = tmp_path / "chain"
+    d.mkdir()
+    c = Catalog(d, d / ".catalog.db")
+    o = c.register_owner("nexus", "repo", repo_hash="aabbccdd")
+    a = c.register(o, "a.py", content_type="code", file_path="a.py")
+    b = c.register(o, "b.py", content_type="code", file_path="b.py")
+    cc = c.register(o, "c.py", content_type="code", file_path="c.py")
+    c.link(a, b, "cites", created_by="user")
+    c.link(b, cc, "cites", created_by="user")
+    return c, a, b, cc
+
+
+@pytest.fixture
+def fan_cat(tmp_path):
+    """Fan: A→B, A→C, A→D (one hub with three outbound edges)."""
+    d = tmp_path / "fan"
+    d.mkdir()
+    c = Catalog(d, d / ".catalog.db")
+    o = c.register_owner("nexus", "repo", repo_hash="11223344")
+    a = c.register(o, "hub.py", content_type="code", file_path="hub.py")
+    b = c.register(o, "spoke1.py", content_type="code", file_path="spoke1.py")
+    cc = c.register(o, "spoke2.py", content_type="code", file_path="spoke2.py")
+    dd = c.register(o, "spoke3.py", content_type="code", file_path="spoke3.py")
+    c.link(a, b, "cites", created_by="user")
+    c.link(a, cc, "relates", created_by="user")
+    c.link(a, dd, "implements", created_by="user")
+    return c, a, b, cc, dd
+
+
+class TestGraphCTEParity:
+    """Parity: CTE result == explicit expected set (under-cap graphs)."""
+
+    def test_chain_depth1_exact_nodes(self, chain_cat):
+        """A→B→C at depth=1 from A: exact nodes {A, B}."""
+        c, a, b, cc = chain_cat
+        r = c.graph(a, depth=1)
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert node_tumblers == {str(a), str(b)}
+        assert len(r["nodes"]) == 2
+
+    def test_chain_depth1_exact_edges(self, chain_cat):
+        """A→B→C at depth=1 from A: exactly 1 edge (A→B), not B→C (B is leaf)."""
+        c, a, b, cc = chain_cat
+        r = c.graph(a, depth=1)
+        assert len(r["edges"]) == 1
+        e = r["edges"][0]
+        assert str(e.from_tumbler) == str(a)
+        assert str(e.to_tumbler) == str(b)
+        assert e.link_type == "cites"
+
+    def test_chain_depth2_exact_nodes(self, chain_cat):
+        """A→B→C at depth=2 from A: exact nodes {A, B, C}."""
+        c, a, b, cc = chain_cat
+        r = c.graph(a, depth=2)
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert node_tumblers == {str(a), str(b), str(cc)}
+        assert len(r["nodes"]) == 3
+
+    def test_chain_depth2_exact_edges(self, chain_cat):
+        """A→B→C at depth=2 from A: exactly 2 edges (A→B and B→C)."""
+        c, a, b, cc = chain_cat
+        r = c.graph(a, depth=2)
+        assert len(r["edges"]) == 2
+        edge_keys = {(str(e.from_tumbler), str(e.to_tumbler), e.link_type) for e in r["edges"]}
+        assert (str(a), str(b), "cites") in edge_keys
+        assert (str(b), str(cc), "cites") in edge_keys
+
+    def test_fan_depth1_exact_nodes(self, fan_cat):
+        """Fan A→{B,C,D} at depth=1: exact nodes {A, B, C, D}."""
+        c, a, b, cc, dd = fan_cat
+        r = c.graph(a, depth=1)
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert node_tumblers == {str(a), str(b), str(cc), str(dd)}
+        assert len(r["nodes"]) == 4
+
+    def test_fan_depth1_exact_edge_count(self, fan_cat):
+        """Fan A→{B,C,D} at depth=1: exactly 3 edges."""
+        c, a, b, cc, dd = fan_cat
+        r = c.graph(a, depth=1)
+        assert len(r["edges"]) == 3
+
+    def test_seed_always_in_nodes(self, chain_cat):
+        """Seed tumbler is always in the returned node set."""
+        c, a, b, cc = chain_cat
+        r = c.graph(cc, depth=1)  # start from the tail
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert str(cc) in node_tumblers
+
+    def test_isolated_seed_no_edges(self, tmp_path):
+        """An isolated node with no links returns just itself and empty edges."""
+        d = tmp_path / "iso"
+        d.mkdir()
+        c = Catalog(d, d / ".catalog.db")
+        o = c.register_owner("nexus", "repo", repo_hash="deadbeef")
+        a = c.register(o, "lonely.py", content_type="code", file_path="lonely.py")
+        r = c.graph(a, depth=1)
+        assert len(r["nodes"]) == 1
+        assert str(r["nodes"][0].tumbler) == str(a)
+        assert r["edges"] == []
+
+
+class TestGraphCTEDirection:
+    """Direction filter: out/in/both exact node and edge membership."""
+
+    @pytest.fixture
+    def directed_cat(self, tmp_path):
+        """A→B (outbound), C→A (inbound), A→C (outbound)."""
+        d = tmp_path / "dir"
+        d.mkdir()
+        c = Catalog(d, d / ".catalog.db")
+        o = c.register_owner("nexus", "repo", repo_hash="cafebabe")
+        a = c.register(o, "center.py", content_type="code", file_path="center.py")
+        b = c.register(o, "out_only.py", content_type="code", file_path="out_only.py")
+        cc = c.register(o, "in_only.py", content_type="code", file_path="in_only.py")
+        # a→b (A has outbound to B), c→a (A has inbound from C), a→c (A has outbound to C)
+        c.link(a, b, "cites", created_by="user")      # outbound from A
+        c.link(cc, a, "relates", created_by="user")   # inbound to A
+        c.link(a, cc, "implements", created_by="user")  # outbound from A to C too
+        return c, a, b, cc
+
+    def test_direction_out_nodes_exact(self, directed_cat):
+        """direction='out' from A at depth=1: A, B, C (A has outbound to both)."""
+        c, a, b, cc = directed_cat
+        r = c.graph(a, depth=1, direction="out")
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert str(a) in node_tumblers
+        assert str(b) in node_tumblers
+        assert str(cc) in node_tumblers
+        assert len(r["nodes"]) == 3
+
+    def test_direction_in_nodes_exact(self, directed_cat):
+        """direction='in' from A at depth=1: A and C (C→A is the inbound edge)."""
+        c, a, b, cc = directed_cat
+        r = c.graph(a, depth=1, direction="in")
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert str(a) in node_tumblers
+        assert str(cc) in node_tumblers
+        assert str(b) not in node_tumblers
+        assert len(r["nodes"]) == 2
+
+    def test_direction_out_edges_exact(self, directed_cat):
+        """direction='out': edges must have from_tumbler=A (outbound from A only)."""
+        c, a, b, cc = directed_cat
+        r = c.graph(a, depth=1, direction="out")
+        assert len(r["edges"]) == 2
+        for e in r["edges"]:
+            assert str(e.from_tumbler) == str(a)
+
+    def test_direction_in_edges_exact(self, directed_cat):
+        """direction='in': only the C→A inbound edge at depth=1."""
+        c, a, b, cc = directed_cat
+        r = c.graph(a, depth=1, direction="in")
+        assert len(r["edges"]) == 1
+        e = r["edges"][0]
+        assert str(e.from_tumbler) == str(cc)
+        assert str(e.to_tumbler) == str(a)
+
+    def test_direction_both_includes_all(self, directed_cat):
+        """direction='both' at depth=1 from A includes A, B, C; all 3 edges."""
+        c, a, b, cc = directed_cat
+        r = c.graph(a, depth=1, direction="both")
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert {str(a), str(b), str(cc)} == node_tumblers
+        # 3 edges: A→B (cites), C→A (relates), A→C (implements)
+        assert len(r["edges"]) == 3
+
+
+class TestGraphCTENodeCap:
+    """Node cap: len(nodes)==cap exactly, warning fires, no dangling edges."""
+
+    def test_cap_truncates_to_limit(self, chain_cat):
+        """Chain A→B→C with cap=2: exactly 2 nodes returned."""
+        c, a, b, cc = chain_cat
+        with patch.object(type(c), "_MAX_GRAPH_NODES", 2):
+            r = c.graph(a, depth=2)
+        assert len(r["nodes"]) == 2
+
+    def test_cap_1_returns_seed_only(self, chain_cat):
+        """Cap=1: only the seed node, no edges."""
+        c, a, b, cc = chain_cat
+        with patch.object(type(c), "_MAX_GRAPH_NODES", 1):
+            r = c.graph(a, depth=2)
+        assert len(r["nodes"]) == 1
+        assert r["edges"] == []
+
+    def test_cap_warning_fires(self, chain_cat, capsys):
+        """Warning 'graph_node_limit' is logged when cap fires.
+
+        structlog emits to stdout by default in tests; capsys captures it.
+        """
+        c, a, b, cc = chain_cat
+        with patch.object(type(c), "_MAX_GRAPH_NODES", 1):
+            c.graph(a, depth=2)
+        captured = capsys.readouterr()
+        assert "graph_node_limit" in captured.out
+
+    def test_no_dangling_edges_after_cap(self, chain_cat):
+        """No edge references a node not in the returned node set."""
+        c, a, b, cc = chain_cat
+        with patch.object(type(c), "_MAX_GRAPH_NODES", 2):
+            r = c.graph(a, depth=2)
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        for edge in r["edges"]:
+            assert str(edge.from_tumbler) in node_tumblers
+            assert str(edge.to_tumbler) in node_tumblers
+
+    def test_cap_keeps_lowest_depth_nodes(self, chain_cat):
+        """With cap=2, seed (depth 0) and immediate neighbor (depth 1) survive."""
+        c, a, b, cc = chain_cat
+        with patch.object(type(c), "_MAX_GRAPH_NODES", 2):
+            r = c.graph(a, depth=2)
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert str(a) in node_tumblers  # depth 0, always survives
+        assert str(b) in node_tumblers  # depth 1, closer than C
+        assert str(cc) not in node_tumblers  # depth 2, cut by cap
+
+
+class TestGraphCTELinkTypeFilter:
+    """link_types list vs link_type single vs heuristic exclusion."""
+
+    @pytest.fixture
+    def mixed_type_cat(self, tmp_path):
+        """A→B (cites), A→C (implements-heuristic), A→D (relates)."""
+        d = tmp_path / "mixed"
+        d.mkdir()
+        c = Catalog(d, d / ".catalog.db")
+        o = c.register_owner("nexus", "repo", repo_hash="feedcafe")
+        a = c.register(o, "a.py", content_type="code", file_path="a.py")
+        b = c.register(o, "b.py", content_type="code", file_path="b.py")
+        cc = c.register(o, "c.py", content_type="code", file_path="c.py")
+        dd = c.register(o, "d.py", content_type="code", file_path="d.py")
+        c.link(a, b, "cites", created_by="user")
+        c.link(a, cc, "implements-heuristic", created_by="index_hook")
+        c.link(a, dd, "relates", created_by="user")
+        return c, a, b, cc, dd
+
+    def test_default_excludes_heuristic(self, mixed_type_cat):
+        """Default (no link_type* args) excludes implements-heuristic."""
+        c, a, b, cc, dd = mixed_type_cat
+        r = c.graph(a, depth=1)
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert str(b) in node_tumblers
+        assert str(dd) in node_tumblers
+        assert str(cc) not in node_tumblers  # heuristic excluded by default
+
+    def test_include_heuristic_true_includes_all(self, mixed_type_cat):
+        """include_heuristic=True includes implements-heuristic nodes."""
+        c, a, b, cc, dd = mixed_type_cat
+        r = c.graph(a, depth=1, include_heuristic=True)
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert str(cc) in node_tumblers
+
+    def test_link_type_single_filters(self, mixed_type_cat):
+        """link_type='cites' returns only B (ignores relates and heuristic)."""
+        c, a, b, cc, dd = mixed_type_cat
+        r = c.graph(a, depth=1, link_type="cites")
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert str(b) in node_tumblers
+        assert str(cc) not in node_tumblers
+        assert str(dd) not in node_tumblers
+
+    def test_link_types_list_overrides_link_type(self, mixed_type_cat):
+        """link_types=['cites', 'relates'] takes precedence over link_type single."""
+        c, a, b, cc, dd = mixed_type_cat
+        r = c.graph(a, depth=1, link_type="cites", link_types=["cites", "relates"])
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert str(b) in node_tumblers   # via cites
+        assert str(dd) in node_tumblers  # via relates
+        assert str(cc) not in node_tumblers  # heuristic excluded
+
+    def test_link_types_list_heuristic_excluded_by_default(self, mixed_type_cat):
+        """Explicit link_types list that omits implements-heuristic excludes it."""
+        c, a, b, cc, dd = mixed_type_cat
+        r = c.graph(a, depth=1, link_types=["cites"])
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert str(cc) not in node_tumblers
+
+
+class TestGraphCTECycleTermination:
+    """Cyclic graphs terminate and return correct deduplicated results."""
+
+    def test_cycle_terminates(self, tmp_path):
+        """A→B→A cycle with depth=3 terminates without infinite loop."""
+        d = tmp_path / "cycle"
+        d.mkdir()
+        c = Catalog(d, d / ".catalog.db")
+        o = c.register_owner("nexus", "repo", repo_hash="c0ffee11")
+        a = c.register(o, "a.py", content_type="code", file_path="a.py")
+        b = c.register(o, "b.py", content_type="code", file_path="b.py")
+        c.link(a, b, "relates", created_by="user")
+        c.link(b, a, "relates", created_by="user")
+        r = c.graph(a, depth=3)
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert node_tumblers == {str(a), str(b)}
+        assert len(r["nodes"]) == 2
+
+    def test_cycle_edges_deduplicated(self, tmp_path):
+        """A↔B cycle: exactly 2 distinct edges (A→B and B→A), not 4."""
+        d = tmp_path / "cycle2"
+        d.mkdir()
+        c = Catalog(d, d / ".catalog.db")
+        o = c.register_owner("nexus", "repo", repo_hash="beefdead")
+        a = c.register(o, "a.py", content_type="code", file_path="a.py")
+        b = c.register(o, "b.py", content_type="code", file_path="b.py")
+        c.link(a, b, "relates", created_by="user")
+        c.link(b, a, "relates", created_by="user")
+        r = c.graph(a, depth=3)
+        assert len(r["edges"]) == 2
+        edge_keys = {(str(e.from_tumbler), str(e.to_tumbler), e.link_type) for e in r["edges"]}
+        assert (str(a), str(b), "relates") in edge_keys
+        assert (str(b), str(a), "relates") in edge_keys
+
+    def test_self_loop_terminates(self, tmp_path):
+        """A→A self-loop (allow_dangling) terminates, returns just A."""
+        d = tmp_path / "selfloop"
+        d.mkdir()
+        c = Catalog(d, d / ".catalog.db")
+        o = c.register_owner("nexus", "repo", repo_hash="a1b2c3d4")
+        a = c.register(o, "a.py", content_type="code", file_path="a.py")
+        # Self-links require allow_dangling=True (same tumbler, but allow_dangling lets it through)
+        # Actually a links to itself — let's use a two-node cycle instead
+        b = c.register(o, "b.py", content_type="code", file_path="b.py")
+        c.link(a, b, "relates", created_by="user")
+        c.link(b, a, "relates", created_by="user")
+        # The important thing: terminates
+        r = c.graph(a, depth=10)
+        assert len(r["nodes"]) == 2  # exactly {a, b}
+        assert len(r["edges"]) == 2  # exactly 2 edges, not duplicated
+
+
+class TestGraphCTEDepth:
+    """Depth semantics: leaf nodes included in node set, edges from non-leaves only."""
+
+    def test_depth1_leaf_nodes_no_edges_from_leaf(self, chain_cat):
+        """B is at depth=1 (leaf at depth=1). B→C edge is NOT included."""
+        c, a, b, cc = chain_cat
+        r = c.graph(a, depth=1)
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert str(b) in node_tumblers  # B is included as node
+        # B→C edge not present (B is leaf at depth=1, its neighbors not fetched)
+        edge_keys = {(str(e.from_tumbler), str(e.to_tumbler)) for e in r["edges"]}
+        assert (str(b), str(cc)) not in edge_keys
+        assert str(cc) not in node_tumblers  # C not reachable at depth=1
+
+    def test_depth2_mid_node_edges_included(self, chain_cat):
+        """B at depth=1 is non-leaf at depth=2; B→C edge IS included."""
+        c, a, b, cc = chain_cat
+        r = c.graph(a, depth=2)
+        edge_keys = {(str(e.from_tumbler), str(e.to_tumbler)) for e in r["edges"]}
+        assert (str(b), str(cc)) in edge_keys
+
+
+class TestGraphCTEGraphMany:
+    """graph_many() still dedupes across seeds; contract intact."""
+
+    def test_graph_many_dedupes_nodes(self, chain_cat):
+        """Calling graph_many with seeds [A, B] on A→B→C returns {A,B,C} at depth=2."""
+        c, a, b, cc = chain_cat
+        r = c.graph_many([a, b], depth=2)
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        assert {str(a), str(b), str(cc)} == node_tumblers
+
+    def test_graph_many_dedupes_edges(self, chain_cat):
+        """graph_many([A, B], depth=1) returns each edge at most once."""
+        c, a, b, cc = chain_cat
+        r = c.graph_many([a, b], depth=1)
+        edge_keys = [(str(e.from_tumbler), str(e.to_tumbler), e.link_type) for e in r["edges"]]
+        assert len(edge_keys) == len(set(edge_keys))  # no duplicates
+
+    def test_graph_many_no_dangling_edges(self, chain_cat):
+        """No edge in graph_many result references a node not in the node set."""
+        c, a, b, cc = chain_cat
+        r = c.graph_many([a, b], depth=1)
+        node_tumblers = {str(n.tumbler) for n in r["nodes"]}
+        for edge in r["edges"]:
+            assert str(edge.from_tumbler) in node_tumblers
+            assert str(edge.to_tumbler) in node_tumblers
