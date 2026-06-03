@@ -204,18 +204,33 @@ def _normalize_whitespace_edge_cases(text: str) -> str:
     return text.strip()
 
 
+# Known operator names that MinerU/UniMERNet may emit as spaced single chars
+# inside \operatorname{...} or \operatorname*{...} -- e.g. ``{ m a x }`` -> max.
+# The rejoin is scoped to this allowlist so genuinely separate tokens are not
+# silently merged via the explicit rejoin path.  Unknown content still has its
+# surrounding whitespace collapsed by Rule 3 (all-whitespace strip within formula
+# context).
+_KNOWN_OPERATOR_NAMES: frozenset[str] = frozenset({
+    "arg", "argmax", "argmin", "cos", "deg", "det", "diag",
+    "exp", "inf", "lim", "ln", "log",
+    "max", "min", "rank", "sign", "sin", "softmax", "sup", "tan", "tr",
+})
+
+
 def normalize_latex_spacing(s: str) -> str:
     """Normalize MinerU/UniMERNet spaced-token LaTeX formula string.
 
     MinerU/UniMERNet emits formula LaTeX with spurious whitespace between
-    commands and their tokens \u2014 e.g. ``\\operatorname* { m a x }``,
+    commands and their tokens -- e.g. ``\\operatorname* { m a x }``,
     ``\\mathbf { s }``, ``Q _ { \\phi }``.  This normalizer collapses those
     spaces so stored chunks render correctly.
 
     Conservative rules (closes #1049):
-    - ``{ \\bf X }`` \u2192 ``\\mathbf{X}``
-    - ``\\operatorname*{ m a x }`` / ``\\operatorname{ m i n }`` \u2014 rejoin
-      spaced single-char tokens (scoped to known operator-name contexts only).
+    - ``{ \\bf X }`` -> ``\\mathbf{X}``
+    - ``\\operatorname*{ m a x }`` / ``\\operatorname{ m i n }`` -- rejoin
+      spaced single-char tokens when the joined result is in
+      ``_KNOWN_OPERATOR_NAMES`` (e.g. ``max``, ``min``, ``argmax``).
+      Unknown operatorname content is left to the whitespace-collapse step.
     - Collapse all remaining whitespace within the formula.
     - ``\\text{...}`` groups are protected: internal spaces are preserved.
 
@@ -225,19 +240,21 @@ def normalize_latex_spacing(s: str) -> str:
     (``_normalize_mineru_latex``) this is called only within ``$...$`` and
     ``$$...$$`` delimiters so prose chunks are never touched.
     """
-    # Rule 1: { \bf token } \u2192 \mathbf{token}
-    # Handles MinerU's {\bf X} legacy-font group notation.
+    # Rule 1: { \\bf token } -> \\mathbf{token}
+    # Handles MinerU's {\\bf X} legacy-font group notation.
     s = re.sub(r"\{\s*\\bf\s+(\S+)\s*\}", r"\\mathbf{\1}", s)
 
-    # Rule 2: \operatorname*{ m a x } \u2192 \operatorname*{max}
-    # Aggressive single-char rejoin scoped ONLY to \operatorname / \operatorname*
-    # contexts.  Multi-char tokens (e.g. "softmax") are left untouched.
+    # Rule 2: \\operatorname*{ m a x } -> \\operatorname*{max}
+    # Rejoin scoped to \\operatorname / \\operatorname* with an allowlist so that
+    # genuinely separate single-char tokens are not silently merged.
     def _rejoin_opname(m: re.Match) -> str:
         cmd = m.group(1)
         content = m.group(2).strip()
         parts = content.split()
         if parts and all(len(p) == 1 for p in parts):
-            return f'{cmd}{{{"".join(parts)}}}'
+            joined = "".join(parts)
+            if joined in _KNOWN_OPERATOR_NAMES:
+                return f"{cmd}{{{joined}}}"
         return m.group(0)
 
     s = re.sub(r"(\\operatorname\*?)\s*\{([^}]+)\}", _rejoin_opname, s)
@@ -269,8 +286,11 @@ def _normalize_mineru_latex(md: str) -> str:
     Scopes the normalizer to ``$$...$$`` (display math) and ``$...$`` (inline
     math) delimiters so that prose text is never modified.  Idempotent.
 
-    Called from ``PDFExtractor._mineru_build_result`` on the assembled
-    MinerU markdown before building the ``ExtractionResult``.
+    Called from ``PDFExtractor._extract_with_mineru`` on each per-page
+    markdown fragment (batch loop and OOM-retry path) before the length
+    is measured for ``per_page_lengths``/``page_boundaries``, so the
+    stored offsets are consistent with the normalized text.  Existing
+    indexed chunks need a re-index to pick up clean LaTeX.
     """
     # Display math first (greedy match would eat $...$).
     md = re.sub(
@@ -653,6 +673,9 @@ class PDFExtractor:
                     md, content_list, pdf_info = self._mineru_run_isolated(
                         pdf_path, page, page + 1,
                     )
+                    # Normalize before measuring length so per_page_lengths
+                    # is consistent with the stored normalized text.
+                    md = _normalize_mineru_latex(md)
                     if on_page is not None:
                         on_page(page, md, {"page_number": page + 1, "text_length": len(md)})
                     md_parts.append(md)
@@ -660,6 +683,9 @@ class PDFExtractor:
                     all_pdf_info.extend(pdf_info)
                     per_page_lengths.append((page, len(md)))
                 continue
+            # Normalize before measuring length so per_page_lengths
+            # is consistent with the stored normalized text.
+            md = _normalize_mineru_latex(md)
             if on_page is not None:
                 # Note: for batch_size > 1, fires once per batch with the batch's
                 # combined markdown and start page index. Page-number metadata is
@@ -1056,12 +1082,9 @@ class PDFExtractor:
         formula_count = max(display_count + inline_count, formula_count_floor)
         page_count = len(pdf_info)
 
-        # Normalize MinerU/UniMERNet spaced-token LaTeX (closes #1049).
-        # Applied here so every code path that calls _mineru_build_result
-        # (server mode, subprocess mode, per-page retry) gets clean output.
-        # Re-indexing is required to backfill existing chunks.
-        md_text = _normalize_mineru_latex(md_text)
-
+        # md_text is already normalized: _extract_with_mineru applies
+        # _normalize_mineru_latex per-page so per_page_lengths and
+        # page_boundaries are consistent with the stored text.
         total_len = len(md_text)
 
         page_boundaries: list[dict] = []
