@@ -97,40 +97,62 @@ This RDR is the recommended path from that decision: close #1046 **in-arch**.
 
 ## Approach
 
-**There is no new daemon (RF-7, PC-4 resolved).** The catalog is *already* the
-8th T2 domain store (`t2_daemon.py:463-472`) and the existing T2 daemon already
-serves its high-level mutating methods — `catalog.register`, `catalog.update`,
-`catalog.create_link` round-trip framed JSON and are registered by
-`_build_dispatch_table`. The only denylisted catalog ops (`t2_daemon.py:496-513`)
-are `execute` (live `sqlite3.Cursor`), `transaction` / `bulk_load_documents`
-(`@contextmanager` generators), and `rebuild` (event-replay, process-local) — none
-of which is on the #1046 hot path (RF-3: both contenders use per-record
-`register`/`update`; `bulk_load_documents` is rebuild-only). **The serving path
-exists; the writers bypass it** via 56 direct `Catalog(...)` constructions (RF-4).
-So this RDR is a **client-cutover**, not a daemon build. The daemon stays
-**WRITE-ONLY** (RF-1/RF-2): reads stay direct WAL. Numbered items are the
-close-time cross-walk surface; bracketed sizing is post-PC-4.
+**No NEW daemon, but the existing daemon must be taught to serve the rich catalog
+write API (RF-7 CORRECTED → RF-8).** The catalog *is* the 8th T2 domain store, but
+the daemon serves `T2Database.catalog` = the low-level **`CatalogStore`**
+(execute/commit/transaction/search/…), **not** the rich `nexus.catalog.catalog.Catalog`
+write API (`register`/`update`/`link`/`register_owner`) that the 49 consumer sites
+actually use. RF-7's "register/update/create_link already served" was wrong (see
+RF-8). The fix therefore has two parts: (a) host a rich `Catalog` *inside* the
+existing T2 daemon and expose a curated 16-op JSON-serializable write subset over
+RPC; (b) cut the 49 consumer write sites over to that RPC surface. It reuses the
+existing T2 daemon (no second daemon, no second election — PC-1 still dissolves),
+but it is **not** the mechanical "point sites at an already-served op" that RF-7
+implied. Reads stay direct WAL (RF-1/RF-2/RF-8 Q5). Numbered items are the
+close-time cross-walk surface.
 
-1. **Route catalog writes through the existing T2 daemon [SMALL-MEDIUM — was
-   MEDIUM].** Point the catalog write sites at `T2Client.catalog.<method>` (the
-   already-served `register`/`update`/`create_link` ops) instead of a local
-   `Catalog(...)`. No `CatalogDaemon`, no second election, no separate
-   supervisor/orphan-reaper — the single T2 daemon already owns the one write
-   handle to `.catalog.db`, so the single-writer guarantee comes for free. **PC-1
-   dissolves** (no second daemon to share-or-copy RDR-140 machinery). Residual
-   sub-problem: the indexer paths that use the denylisted `transaction()` /
-   `bulk_load_documents()` context managers cannot route those over RPC; confirm
-   at planning whether the hot path needs only per-record ops (RF-3 says yes) or a
-   new JSON-shaped coarse batch op (e.g. `catalog.register_many` doing the
-   transaction server-side) is warranted for throughput.
-2. **D3-style boundary invariant [MEDIUM — now the core of the RDR].** With no new
-   daemon (item 1), this 56-site cutover *is* the fix: no direct catalog `sqlite3`
-   **write** construction outside the daemon boundary, enforced by extending
-   `storage_boundary_lint.py` with a `CATALOG_BANNED_CONSTRUCTORS` list. Surface
-   is 56 `Catalog(...)` sites across 28 files (RF-4) — write sites route through
-   `T2Client.catalog`; read sites keep epsilon-allow annotations. Reuse the
-   RDR-128 epsilon-allow protocol (baseline count + `nx doctor` + monotonic
-   acceptance — PC-3).
+1. **Host the rich `Catalog` in the T2 daemon + expose a write-only WHITELIST of
+   16 ops [MEDIUM].** Construct one `nexus.catalog.catalog.Catalog` inside the
+   daemon (owns the single `.catalog.db` write handle *and* the JSONL append path)
+   and register a **whitelist** of write ops on the dispatch table — NOT the
+   default "all public methods minus a denylist." The default auto-exposes
+   dataclass-returning reads (`links_from`/`links_to`/`resolve` →
+   `CatalogLink`/`CatalogEntry`, which do not round-trip JSON) and is unsafe here
+   (re-gate audit finding). The whitelist is exactly: `register_owner`,
+   `ensure_owner_for_repo`, `register`, `update`, `link`, `link_if_absent`,
+   `unlink`, `delete_document`, `register_collection`, `delete_collection_projection`,
+   `supersede_collection`, `set_owner_head_hash`, `write_manifest`,
+   `append_manifest_chunks`, `atomic_manifest_replace`, `resync_chunk_count_cache`
+   (RF-8 Q6). Each needs only a `Tumbler↔str` shim (~3 lines); no rich objects
+   cross the boundary. Write dispatch is **single-threaded / serially dispatched**
+   in the daemon (the per-instance `_owner_register_lock` at `catalog.py:533`
+   stays correct; if a future phase adds threaded write dispatch the lock becomes
+   load-bearing — document the contract in the bead, re-gate Significant). No new
+   heavy deps; daemon construction is mtime-gated (RF-8 Q4).
+2. **Atomic cutover via a typed reader/writer split [MEDIUM — the core; NOT
+   incremental].** Route the 49 `Catalog(...)` write sites (RF-4) through the
+   daemon. **The cutover must be ATOMIC** (RF-8 Q3): the rich `Catalog` bumps the
+   `owners.jsonl` `next_seq` high-water mark, so any in-process writer coexisting
+   with the daemon double-allocates → duplicate tumblers + flock contention. The
+   read-vs-write distinction is the enforcement crux (re-gate Critical): the lint
+   `CATALOG_BANNED_CONSTRUCTORS=("Catalog",)` cannot tell a read-only instance
+   from a write-capable one. Resolve with **two typed factories**:
+   - `make_catalog_writer()` → a daemon-routed write proxy exposing *only* the 16
+     whitelisted ops (no read methods, so a consumer cannot accidentally read-
+     after-write through a stale local handle).
+   - `make_catalog_reader()` → read-only access. Reads stay local (RF-8 Q5: WAL
+     read-committed sees daemon-committed writes). **Confirm at implementation
+     whether `_ensure_consistent` (`catalog.py:622-624`) issues a SQLite rebuild
+     (a write); if so the reader MUST avoid triggering it** (read via the
+     `CatalogStore` subset, or a reader that skips `_ensure_consistent`) so a
+     read-local construction never re-acquires the WAL writer lock against a
+     daemon that is actively writing (re-gate Significant).
+
+   Bare `Catalog(...)` in consumer code is then banned by the lint and every site
+   goes through one factory or the other — making the read/write split *tooling-
+   enforced*, not convention. Flip the `CATALOG_BANNED_CONSTRUCTORS` lint (baseline
+   49 from P0.1) to enforce once the floor is reached; reuse the RDR-128
+   epsilon-allow protocol for the documented-irreducible substrate sites (PC-3).
 3. **Interactive-vs-batch fairness [SMALL-MEDIUM].** A foreground `nx dt index` /
    `nx dt capture` / catalog register/link must not be starved by background
    `nx index repo`. With writes serialized through the single T2 daemon (item 1),
@@ -216,24 +238,56 @@ accumulate across a batch. Lives in `pipeline_buffer.py`/`pipeline_stages.py`,
 not the catalog module; different root cause (resource lifecycle, not lock
 contention). **Split** to its own bead (filed: see References).
 
-**RF-7 (PC-4 RESOLVED): the catalog is ALREADY the 8th T2 daemon store; no new
-daemon needed.** `T2Database` composes 8 domain stores
-(`db/t2/__init__.py:326`); the 8th, `catalog`, uniquely opens its own
-`.catalog.db` under `catalog_path()` (`config.py:445`) rather than sharing
-`memory.db` — "collapsing the files is explicitly out of scope" (RDR-120 P5.A.1,
-Hal-approved thin shim). The T2 daemon already lists `catalog` in
-`_T2_STORE_ATTRS` (`t2_daemon.py:463-472`) and `T2Client` already exposes it
-(`t2_client.py:250`). `_build_dispatch_table` registers every public JSON-round-
-trippable method, so `catalog.register` / `catalog.update` / `catalog.create_link`
-are **already served over RPC today**. The `_RPC_DENY_OPS` denylist
-(`t2_daemon.py:496-513`) excludes only `catalog.execute` (live cursor),
-`catalog.transaction` + `catalog.bulk_load_documents` (`@contextmanager`), and
-`catalog.rebuild` (process-local event replay) — none on the #1046 hot path
-(RF-3). The starvation persists because the 56 write sites (RF-4) construct local
-`Catalog(...)` instances and bypass the daemon. **Consequence:** item 1 is a
-client-cutover, not a daemon build; the fourth-daemon election risk the gate
-checked **does not exist** (there is no fourth daemon); PC-1 (share-vs-copy
-RDR-140 machinery) dissolves. Verified 2026-06-03.
+**RF-7 (PARTIALLY CORRECT — its load-bearing claim is WRONG, superseded by
+RF-8).** Correct parts: `T2Database` composes 8 domain stores
+(`db/t2/__init__.py:326`); the 8th, `catalog`, opens its own `.catalog.db` under
+`catalog_path()` (`config.py:445`); the daemon lists `catalog` in
+`_T2_STORE_ATTRS` (`t2_daemon.py:463-472`); there is no fourth daemon and PC-1
+dissolves. **WRONG part:** RF-7 claimed `catalog.register`/`update`/`create_link`
+are "already served over RPC today." They are NOT — see RF-8. This error (shared
+by the `nx_plan_audit` "framing verified") came from assuming the dispatch table's
+enumerated catalog methods *included* register/link without checking the served
+class. They are not on it.
+
+**RF-8 (CORRECTION + bounded re-plan, 2026-06-03): the daemon serves
+`CatalogStore`, not the rich `Catalog`; hosting the rich `Catalog` in the daemon
+is BOUNDED.** `T2Database.catalog` returns a **`CatalogStore`**
+(`db/t2/__init__.py:457-475`) whose entire public surface is
+`rebuild / next_document_number / search / descendants / execute / commit /
+transaction / bulk_load_documents / close` (Serena symbol overview of
+`db/t2/catalog.py`). It has **no** `register`/`update`/`link`/`register_owner`/
+`resolve`. Those live only on `nexus.catalog.catalog.Catalog`
+(`catalog/catalog.py:495`), a rich wrapper that holds a `CatalogStore` as
+`self._db` plus `_Projector`/`_WriteOps` and runs entirely in consumer processes.
+So `_build_dispatch_table` serves only `CatalogStore`'s methods; a client calling
+`catalog.register` hits an unknown-op error. Sub-findings from the bounded-ness
+investigation:
+- **Q1/Q6:** a 16-op served write subset covers all 49 sites (`register_owner`,
+  `ensure_owner_for_repo`, `register`, `update`, `link`, `link_if_absent`,
+  `unlink`, `delete_document`, `register_collection`, `delete_collection_projection`,
+  `supersede_collection`, `set_owner_head_hash`, `write_manifest`,
+  `append_manifest_chunks`, `atomic_manifest_replace`, `resync_chunk_count_cache`).
+  Link *generators* are module functions calling `link`/`link_if_absent` — serve
+  the primitives.
+- **Q2:** the ONLY serialization boundary is `Tumbler↔str` (`str(t)` / `Tumbler.parse`);
+  no `CatalogEntry`/`CatalogLink`/`Owner` appear as write args/returns. ~3 lines
+  per op.
+- **Q3 (load-bearing constraint):** every write touches `.catalog.db` **and** the
+  JSONL append path (`owners.jsonl`/`documents.jsonl`/`links.jsonl`/`events.jsonl`)
+  including the `owners.jsonl` `next_seq` high-water mark. Mixed-mode (some sites
+  via RPC, some in-process) double-allocates `next_seq` → duplicate tumblers +
+  flock contention. **Cutover must be ATOMIC**, not the originally-planned two
+  incremental waves. No cross-store writes (only `.catalog.db` + JSONL).
+- **Q4:** the rich `Catalog` adds NO heavy deps (sklearn/numpy live in
+  `catalog_taxonomy`, already imported by the daemon); `_ensure_consistent` at
+  construction is mtime-gated, sub-ms in steady state.
+- **Q5:** reads stay local — SQLite WAL read-committed makes a local reader see
+  daemon-committed writes on the next statement; the only staleness risk is the
+  JSONL `read_owners()` inside `register()`, eliminated by full cutover.
+- **New denies:** `resolve_span`, `resolve_chash`, `link_audit` take a live T3
+  `ClientAPI` → add to `_RPC_DENY_OPS`.
+- **Verdict: BOUNDED.** Reuses the T2 daemon; mechanical shim surface; the real
+  discipline is the atomic-cutover constraint (Q3).
 
 ## Open Questions
 
