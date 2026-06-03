@@ -920,3 +920,154 @@ def test_search_plans_still_matches_raw_description(
     results = plan_db.search_plans("semantic")
     assert results, "description tokens still FTS-hit via match_text"
     assert "semantic" in results[0]["query"]
+
+
+# ── #1069: project-column fallback for corpus:all plans (save_plan) ────────
+
+
+def test_save_plan_corpus_all_with_project_derives_scope_from_project(
+    plan_db: T2Database,
+) -> None:
+    """save_plan with corpus:all plan_json + a populated project arg must
+    derive scope_tags from the project column, not store '' (#1069).
+    """
+    corpus_all_json = (
+        '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}'
+    )
+    row_id = plan_db.save_plan(
+        query="What does the canon-chat headless test verify",
+        plan_json=corpus_all_json,
+        project="canon-chat",
+    )
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == "canon-chat", (
+        "corpus:all plan with project='canon-chat' must store 'canon-chat' "
+        "as scope_tags, not empty string"
+    )
+
+
+def test_save_plan_corpus_all_without_project_stays_empty(
+    plan_db: T2Database,
+) -> None:
+    """save_plan with corpus:all plan_json and NO project must still store ''
+    — the project-column fallback only fires when project is populated (#1069).
+    """
+    corpus_all_json = (
+        '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}'
+    )
+    row_id = plan_db.save_plan(
+        query="search across all corpora",
+        plan_json=corpus_all_json,
+        project="",
+    )
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == ""
+
+
+def test_save_plan_corpus_all_project_normalized(
+    plan_db: T2Database,
+) -> None:
+    """Project-column fallback applies _normalize_scope_string and drops
+    agnostic sentinels. A project named 'all' must not leak the sentinel (#1069).
+    """
+    corpus_all_json = (
+        '{"steps":[{"tool":"search","args":{"corpus":"all"}}]}'
+    )
+    row_id = plan_db.save_plan(
+        query="global agnostic plan",
+        plan_json=corpus_all_json,
+        project="all",
+    )
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == "", (
+        "project='all' is an agnostic sentinel and must NOT contribute to scope_tags"
+    )
+
+
+def test_save_plan_specific_corpus_unaffected_by_project(
+    plan_db: T2Database,
+) -> None:
+    """Plans with specific corpus retrieval steps still infer from those steps;
+    the project fallback must not override inference (#1069 non-regression).
+    """
+    row_id = plan_db.save_plan(
+        query="search rdr corpus",
+        plan_json='{"steps":[{"tool":"search","args":{"corpus":"rdr__arcaneum"}}]}',
+        project="some-project",
+    )
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == "rdr__arcaneum", (
+        "specific-corpus plan must infer from retrieval steps, not fall back to project"
+    )
+
+
+# ── #1073: set_scope_tags() method in PlanLibrary ──────────────────────────
+
+
+def test_set_scope_tags_writes_normalized_value(plan_db: T2Database) -> None:
+    """set_scope_tags writes normalized, sentinel-dropped scope_tags (#1073)."""
+    row_id = plan_db.save_plan(
+        query="corpus:all grown plan",
+        plan_json='{"steps":[{"tool":"search","args":{"corpus":"all"}}]}',
+        project="",
+    )
+    before = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert before[0] == ""
+
+    updated = plan_db.plans.set_scope_tags(row_id, "canon-chat")
+    assert updated is True
+
+    after = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert after[0] == "canon-chat"
+
+
+def test_set_scope_tags_normalizes_hash_suffix(plan_db: T2Database) -> None:
+    """set_scope_tags applies _normalize_scope_string to each entry (#1073)."""
+    row_id = plan_db.save_plan(
+        query="q", plan_json='{"steps":[]}', project="",
+    )
+    plan_db.plans.set_scope_tags(row_id, "rdr__arcaneum-2ad2825c,knowledge__delos-deadbeef")
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == "knowledge__delos,rdr__arcaneum"
+
+
+def test_set_scope_tags_drops_all_sentinel(plan_db: T2Database) -> None:
+    """set_scope_tags drops the 'all' sentinel (#1073)."""
+    row_id = plan_db.save_plan(query="q", plan_json='{"steps":[]}', project="")
+    updated = plan_db.plans.set_scope_tags(row_id, "all,rdr__arcaneum")
+    assert updated is True
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == "rdr__arcaneum"
+
+
+def test_set_scope_tags_idempotent(plan_db: T2Database) -> None:
+    """Calling set_scope_tags twice with the same value is a no-op (#1073)."""
+    row_id = plan_db.save_plan(query="q", plan_json='{"steps":[]}', project="")
+    plan_db.plans.set_scope_tags(row_id, "canon-chat")
+    plan_db.plans.set_scope_tags(row_id, "canon-chat")
+    row = plan_db.plans.conn.execute(
+        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == "canon-chat"
+
+
+def test_set_scope_tags_missing_plan_returns_false(plan_db: T2Database) -> None:
+    """set_scope_tags returns False for a non-existent plan_id (#1073)."""
+    result = plan_db.plans.set_scope_tags(99999, "canon-chat")
+    assert result is False
