@@ -81,7 +81,7 @@ nx index repo ./my-project
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
 | `--force-stale` | Re-index only if collection pipeline version is outdated (smart force — skips current collections) |
-| `--on-locked {skip,wait}` | Behavior when another process holds the repo lock: `skip` exits immediately, `wait` blocks (default: `wait`) |
+| `--on-locked {skip,wait}` | Behavior under contention (default: `wait`). Per-repo advisory lock (two `nx index repo` on the same repo): `skip` exits immediately, `wait` blocks. Catalog-write fairness (RDR-146): when a foreground interactive catalog write is pending, `skip` defers this run's catalog writes to the next idempotent pass, `wait` proceeds after a bounded yield. `NX_WRITE_PRIORITY=interactive|batch` overrides the tty-based priority of a run's catalog writes. |
 | `--no-taxonomy` | Skip automatic topic discovery after indexing |
 | `--debug-timing` | Emit an end-of-run per-stage breakdown to stderr (chunking / embed / upload / retry seconds per file, aggregated with percentages). Instruments code, prose, and PDF per-file paths — silent without the flag. Use when investigating "why did indexing take N minutes?" (introduced 4.9.0, nexus-7niu) |
 

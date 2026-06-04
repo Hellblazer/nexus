@@ -501,6 +501,23 @@ is locked` daemon incidents):
   surfaces a `restarts_in_window` count in `nx daemon t2 status`. The
   non-daemon direct-writer fallbacks (the `t2_index_write`
   schema-mismatch arm) remain the RDR-128 A1 boundary, unchanged.
+- **Catalog behind the daemon (RDR-146).** `.catalog.db` (the 8th T2
+  domain store, on its own file) was the last shared-state store still on
+  the direct-`sqlite3` model; GH #1046 was its starvation symptom (an
+  interactive `nx dt index` starved ~30 min by a hook-spawned `nx index
+  repo` on the shared catalog writer). The T2 daemon now hosts the one rich
+  `Catalog` (sole `.catalog.db` writer + JSONL append path) behind a
+  write-only op whitelist; consumers reach it through typed
+  `make_catalog_reader` (read-only, local) / `make_catalog_writer`
+  (daemon-routed, direct fallback when no daemon) factories, enforced by
+  the same boundary lint (`CATALOG_CONSTRUCTION_BASELINE = 0`). Within the
+  single daemon, fairness is producer back-pressure: an interactive write
+  tags its RPC frame (`NX_WRITE_PRIORITY` / `isatty` / per-command intent),
+  opening a short in-memory window the background indexer polls
+  (`catalog.is_interactive_write_pending`) and yields to over a bounded
+  budget. `nx index --on-locked=skip` defers a yielded catalog write to the
+  next idempotent pass; the per-repo advisory lock keeps its orthogonal
+  two-same-repo job.
 
 **Migration Registry** (RDR-076): All T2 schema migrations are centralised in
 `src/nexus/db/migrations.py`. The `MIGRATIONS` list contains version-tagged
