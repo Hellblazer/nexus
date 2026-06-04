@@ -95,4 +95,8 @@ def await_fair_window(
         if not probe():
             return "proceed"
         sleep_fn(delay)
+    # Final probe after the last sleep: the window may have cleared during it,
+    # in which case proceed rather than defer a write for no live reason.
+    if not probe():
+        return "proceed"
     return "skip" if on_locked == "skip" else "proceed"

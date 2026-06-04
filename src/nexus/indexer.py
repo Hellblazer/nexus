@@ -766,7 +766,13 @@ def _catalog_hook(
                 if await_fair_window(
                     writer.is_interactive_write_pending, on_locked,
                 ) == "skip":
-                    fairness_yielded = len(indexed_files) - len(new_tumblers) - len(skipped_files)
+                    # Deferred = total minus successes (new + updated, tracked
+                    # in file_to_doc_id) minus per-file failures. ``new_tumblers``
+                    # counts new-only, so an updated-then-deferred batch would
+                    # overcount; ``file_to_doc_id`` is the right success set.
+                    fairness_yielded = (
+                        len(indexed_files) - len(file_to_doc_id) - len(skipped_files)
+                    )
                     _log.info(
                         "catalog_write_yielded_skipped",
                         repo=repo_name, deferred=fairness_yielded,

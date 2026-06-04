@@ -71,7 +71,11 @@ def catalog_store_hook(
             "SELECT tumbler_prefix FROM owners WHERE name = 'knowledge' "
             "AND owner_type = 'curator'"
         ).fetchone()
-        writer = make_catalog_writer()
+        # RDR-146 P2 (nexus-5p2ci.12): store_put / memory promote are
+        # user-initiated and latency-sensitive. The MCP server is non-tty, so
+        # the isatty() fallback would misclassify these as batch; tag
+        # interactive so they take fairness priority over a background index.
+        writer = make_catalog_writer(priority="interactive")
         if rows:
             from nexus.catalog.tumbler import Tumbler
             owner = Tumbler.parse(rows[0])
