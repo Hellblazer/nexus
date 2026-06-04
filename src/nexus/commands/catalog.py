@@ -153,14 +153,37 @@ def _seed_plan_templates() -> int:
 
 
 def _get_catalog() -> Catalog:
-    from nexus.config import catalog_path
+    """Read-only catalog reader for the admin CLI (RDR-146 P1.2).
 
-    path = catalog_path()
-    if not Catalog.is_initialized(path):
+    The ``nx catalog`` read commands (list / show / links / search / ...)
+    use this; write commands additionally open :func:`_get_catalog_writer`
+    and route their mutations through the daemon.
+    """
+    from nexus.catalog.factory import make_catalog_reader
+
+    cat = make_catalog_reader()
+    if cat is None:
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' to create and populate it."
         )
-    return Catalog(path, path / ".catalog.db")
+    return cat
+
+
+def _get_catalog_writer():
+    """Write-only catalog proxy for the admin CLI (RDR-146 P1.2).
+
+    Routes the whitelisted write ops through the T2 daemon (the single
+    .catalog.db writer) when reachable, else a direct in-process Catalog.
+    Callers ``.close()`` it when done.
+    """
+    from nexus.catalog.factory import make_catalog_writer
+    from nexus.config import catalog_path
+
+    if not Catalog.is_initialized(catalog_path()):
+        raise click.ClickException(
+            "Catalog not initialized. Run 'nx catalog setup' to create and populate it."
+        )
+    return make_catalog_writer()
 
 
 def _resolve_tumbler(cat: Catalog, value: str) -> Tumbler:
@@ -233,7 +256,9 @@ def setup_cmd(remote: str) -> None:
     else:
         click.echo(f"Catalog already initialized at {path}")
 
-    cat = Catalog(path, path / ".catalog.db")
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+    cat = make_catalog_reader()
+    writer = make_catalog_writer()
 
     try:
         registry = _make_registry()
@@ -247,7 +272,7 @@ def setup_cmd(remote: str) -> None:
         repo_count = paper_count = knowledge_count = 0
 
         click.echo("Populating from repos...")
-        repo_count, repo_collections = _backfill_repos(cat, registry, dry_run=False)
+        repo_count, repo_collections = _backfill_repos(cat, registry, dry_run=False, writer=writer)
         click.echo(f"  {repo_count} repo entries")
 
         # Paper and knowledge backfill query T3 cloud — timeout after 60s each
@@ -255,19 +280,19 @@ def setup_cmd(remote: str) -> None:
         try:
             click.echo("Populating from paper collections...")
             signal.alarm(60)
-            paper_count = _backfill_papers(cat, t3, dry_run=False, repo_collections=repo_collections)
+            paper_count = _backfill_papers(cat, t3, dry_run=False, repo_collections=repo_collections, writer=writer)
             signal.alarm(0)
             click.echo(f"  {paper_count} paper entries")
 
             click.echo("Populating from knowledge collections...")
             signal.alarm(30)
-            knowledge_count = _backfill_knowledge(cat, t3, dry_run=False)
+            knowledge_count = _backfill_knowledge(cat, t3, dry_run=False, writer=writer)
             signal.alarm(0)
             click.echo(f"  {knowledge_count} knowledge entries")
 
             click.echo("Populating from RDR collections...")
             signal.alarm(30)
-            rdr_count = _backfill_rdrs(cat, t3, dry_run=False)
+            rdr_count = _backfill_rdrs(cat, t3, dry_run=False, writer=writer)
             signal.alarm(0)
             click.echo(f"  {rdr_count} RDR entries")
         except TimeoutError as exc:
@@ -292,8 +317,9 @@ def setup_cmd(remote: str) -> None:
 
     click.echo("Generating links...")
     from nexus.catalog.link_generator import generate_citation_links
-    cites = generate_citation_links(cat)
+    cites = generate_citation_links(writer)
     click.echo(f"  Citations: {cites}")
+    writer.close()
 
     click.echo("Seeding plan templates...")
     seeded = _seed_plan_templates()
@@ -346,6 +372,7 @@ def backfill_collections_cmd(dry_run: bool) -> None:
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415
 
     cat = _get_catalog()
+    writer = _get_catalog_writer()
 
     try:
         t3_db = make_t3()
@@ -413,7 +440,7 @@ def backfill_collections_cmd(dry_run: bool) -> None:
         if is_conformant_collection_name(name):
             try:
                 parsed = parse_conformant_collection_name(name)
-                cat.register_collection(
+                writer.register_collection(
                     name,
                     content_type=parsed["content_type"],
                     owner_id=parsed["owner_id"],
@@ -427,7 +454,7 @@ def backfill_collections_cmd(dry_run: bool) -> None:
                     name=name, error=str(exc),
                 )
         # Non-conformant fallback (legacy 2-segment names).
-        cat.register_collection(name)
+        writer.register_collection(name)
 
     click.echo(
         f"\nDone: {len(to_register)} new, "
@@ -576,6 +603,7 @@ def migrate_fallback_cmd(
     )
 
     cat = _get_catalog()
+    writer = _get_catalog_writer()
 
     src_row = cat.get_collection(source)
     if src_row is None:
@@ -659,7 +687,7 @@ def migrate_fallback_cmd(
             continue
         from nexus.corpus import parse_conformant_collection_name  # noqa: PLC0415
         segments = parse_conformant_collection_name(target)
-        cat.register_collection(
+        writer.register_collection(
             target,
             content_type=segments["content_type"],
             owner_id=segments["owner_id"],
@@ -674,11 +702,11 @@ def migrate_fallback_cmd(
     # SQLite commit overhead 1000 times. Batch keeps the operation
     # deterministic and order-preserving (proposals is already
     # sorted by tumbler).
-    cat.update_documents_collection_batch(proposals)
+    writer.update_documents_collection_batch(proposals)
 
     if len(targets_seen) == 1:
         only_target = next(iter(targets_seen))
-        cat.supersede_collection(
+        writer.supersede_collection(
             source, only_target, reason="migrate-fallback",
         )
         click.echo(
@@ -813,6 +841,7 @@ def rename_collection_cmd(
     from nexus.db import make_t3  # noqa: PLC0415
 
     cat = _get_catalog()
+    writer = _get_catalog_writer()
     t3_db = make_t3()
 
     if not is_conformant_collection_name(new) and not allow_legacy:
@@ -876,7 +905,7 @@ def rename_collection_cmd(
     try:
         if is_conformant_collection_name(new):
             segments = parse_conformant_collection_name(new)
-            cat.register_collection(
+            writer.register_collection(
                 new,
                 content_type=segments["content_type"],
                 owner_id=segments["owner_id"],
@@ -884,8 +913,8 @@ def rename_collection_cmd(
                 model_version=segments["model_version"],
             )
         else:
-            cat.register_collection(new)
-        cat.supersede_collection(old, new, reason="rename-collection")
+            writer.register_collection(new)
+        writer.supersede_collection(old, new, reason="rename-collection")
     except Exception as exc:
         click.echo(
             f"WARN: T3 was renamed {old!r} -> {new!r} but the projection "
@@ -1091,6 +1120,7 @@ def register_cmd(
     from nexus.catalog.catalog import make_relative
 
     cat = _get_catalog()
+    writer = _get_catalog_writer()
     # Relativize absolute file_path if under a known repo (RDR-060).
     # RDR-137 Phase 3.3 (nexus-tts0d.8): catalog-backed enumeration.
     fp = file_path
@@ -1108,7 +1138,7 @@ def register_cmd(
                 break
 
     try:
-        tumbler = cat.register(
+        tumbler = writer.register(
             Tumbler.parse(owner), title,
             content_type=content_type, file_path=fp,
             corpus=corpus, author=author, year=year,
@@ -1118,6 +1148,8 @@ def register_cmd(
         # P3.1 register-boundary validation surfaced a malformed URI.
         # Hard error rather than silent persistence.
         raise click.ClickException(str(exc)) from exc
+    finally:
+        writer.close()
     click.echo(f"Registered: {tumbler}")
 
 
@@ -1154,6 +1186,7 @@ def update_cmd(
     as register-time.
     """
     cat = _get_catalog()
+    writer = _get_catalog_writer()
     fields: dict = {}
     if title:
         fields["title"] = title
@@ -1181,7 +1214,7 @@ def update_cmd(
             raise click.ClickException("No entries matched")
         try:
             for entry in entries:
-                cat.update(entry.tumbler, **fields)
+                writer.update(entry.tumbler, **fields)
         except ValueError as exc:
             # nexus-fb6x: source_uri / file_path validation can raise
             # ValueError (unknown scheme, malformed URI, owner-root
@@ -1196,7 +1229,7 @@ def update_cmd(
         raise click.ClickException("Provide a tumbler/title or use --owner/--search for batch")
     t = _resolve_tumbler(cat, tumbler)
     try:
-        cat.update(t, **fields)
+        writer.update(t, **fields)
     except ValueError as exc:
         # nexus-fb6x: same UX-cleanup as the batch path.
         raise click.ClickException(str(exc)) from exc
@@ -1214,6 +1247,7 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     links remain — use 'nx catalog links --type ...' to find orphaned links.
     """
     cat = _get_catalog()
+    writer = _get_catalog_writer()
     t = _resolve_tumbler(cat, tumbler_or_title)
     entry = cat.resolve(t)
     if entry is None:
@@ -1236,7 +1270,7 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
             f"  (restore: nx catalog undelete {backup_path.name})"
         )
 
-    deleted = cat.delete_document(t)
+    deleted = writer.delete_document(t)
     if deleted:
         click.echo(f"Deleted: {t} ({entry.title}). Links preserved.")
     else:
@@ -1272,9 +1306,10 @@ def link_cmd(
     Content-hash spans survive re-indexing. Use 'nx catalog show' to see resolved span text.
     """
     cat = _get_catalog()
+    writer = _get_catalog_writer()
     ft = _resolve_tumbler(cat, from_tumbler)
     tt = _resolve_tumbler(cat, to_tumbler)
-    cat.link(ft, tt, link_type, created_by="user", from_span=from_span, to_span=to_span)
+    writer.link(ft, tt, link_type, created_by="user", from_span=from_span, to_span=to_span)
     click.echo(f"Linked: {ft} → {tt} ({link_type})")
 
 
@@ -1289,9 +1324,10 @@ def unlink_cmd(from_tumbler: str, to_tumbler: str, link_type: str) -> None:
     link types between the pair.
     """
     cat = _get_catalog()
+    writer = _get_catalog_writer()
     ft = _resolve_tumbler(cat, from_tumbler)
     tt = _resolve_tumbler(cat, to_tumbler)
-    removed = cat.unlink(ft, tt, link_type)
+    removed = writer.unlink(ft, tt, link_type)
     click.echo(f"Removed {removed} link(s)")
 
 
@@ -1475,6 +1511,7 @@ def link_bulk_delete_cmd(
         )
 
     cat = _get_catalog()
+    writer = _get_catalog_writer()
     resolved_from = str(_resolve_tumbler(cat, from_t)) if from_t else ""
     resolved_to = str(_resolve_tumbler(cat, to_t)) if to_t else ""
 
@@ -1524,7 +1561,7 @@ def link_bulk_delete_cmd(
             f"  Restore with: nx catalog undelete {backup_path.name}"
         )
 
-    actual = cat.bulk_unlink(
+    actual = writer.bulk_unlink(
         from_t=resolved_from, to_t=resolved_to,
         link_type=link_type, created_by=created_by,
         created_at_before=created_at_before, dry_run=False,
@@ -1581,8 +1618,11 @@ def owners_cmd(as_json: bool) -> None:
 @click.option("--message", "-m", default="catalog update")
 def sync_cmd(message: str) -> None:
     """Commit and push catalog changes."""
-    cat = _get_catalog()
-    cat.sync(message)
+    cat = _get_catalog_writer()
+    try:
+        cat.sync(message)
+    finally:
+        cat.close()
     click.echo("Catalog synced.")
 
 
@@ -1672,8 +1712,11 @@ def dedupe_owners_cmd(apply: bool, as_json: bool) -> None:
 @catalog.command("pull")
 def pull_cmd() -> None:
     """Pull catalog from remote and rebuild SQLite."""
-    cat = _get_catalog()
-    cat.pull()
+    cat = _get_catalog_writer()
+    try:
+        cat.pull()
+    finally:
+        cat.close()
     click.echo("Catalog pulled and rebuilt.")
 
 
@@ -1794,8 +1837,11 @@ def stats_cmd(as_json: bool) -> None:
 @catalog.command("compact", hidden=True)
 def compact_cmd() -> None:
     """Rewrite JSONL files to remove tombstones and duplicate overwrites."""
-    cat = _get_catalog()
-    removed = cat.compact()
+    cat = _get_catalog_writer()
+    try:
+        removed = cat.compact()
+    finally:
+        cat.close()
     total = 0
     for filename, count in removed.items():
         click.echo(f"  {filename}: {count} lines removed")
@@ -2002,6 +2048,7 @@ def audit_membership_cmd(
             abort=True,
         )
 
+    writer = _get_catalog_writer()
     deleted = 0
     for t_str in purge_targets:
         try:
@@ -2009,7 +2056,7 @@ def audit_membership_cmd(
         except Exception as e:
             click.echo(f"  skip {t_str}: parse error {e}")
             continue
-        if cat.delete_document(t):
+        if writer.delete_document(t):
             deleted += 1
     click.echo(f"\nDeleted {deleted} of {len(purge_targets)} non-canonical entries.")
 
@@ -2365,12 +2412,18 @@ def verify_cmd(heal: bool, collection: str, json_out: bool) -> None:
         click.echo("Run with --heal for remediation options.")
         return
 
-    _heal_ghosts(cat, ghosts_by_collection)
+    writer = _get_catalog_writer()
+    try:
+        _heal_ghosts(cat, ghosts_by_collection, writer=writer)
+    finally:
+        writer.close()
 
 
 def _heal_ghosts(
     cat: Catalog,
     ghosts_by_collection: dict[str, list[dict]],
+    *,
+    writer: object = None,
 ) -> None:
     """Interactive heal loop for `nx catalog verify --heal`.
 
@@ -2380,6 +2433,7 @@ def _heal_ghosts(
       s  skip
       q  quit the heal loop
     """
+    w = writer if writer is not None else cat
     dropped = 0
     for coll, ghosts in sorted(ghosts_by_collection.items()):
         click.echo(f"\nHealing {coll}:")
@@ -2394,7 +2448,7 @@ def _heal_ghosts(
                 click.echo(f"\nHealed: {dropped} tumbler(s) dropped.")
                 return
             if choice == "d":
-                if cat.delete_document(Tumbler.parse(g["tumbler"])):
+                if w.delete_document(Tumbler.parse(g["tumbler"])):
                     dropped += 1
                     click.echo("    dropped.")
                 else:
@@ -2552,6 +2606,7 @@ def gc_cmd(dry_run: bool, confirm: bool) -> None:
         )
 
     cat = _get_catalog()
+    writer = _get_catalog_writer()
 
     rows = cat._db.execute(
         "SELECT tumbler, title, file_path, metadata FROM documents"
@@ -2600,7 +2655,7 @@ def gc_cmd(dry_run: bool, confirm: bool) -> None:
 
     n_deleted = 0
     for tumbler_str, title, file_path in orphans:
-        if cat.delete_document(Tumbler.parse(tumbler_str)):
+        if writer.delete_document(Tumbler.parse(tumbler_str)):
             n_deleted += 1
 
     click.echo(
@@ -2899,16 +2954,16 @@ def _owner_by_name(cat: Catalog, name: str) -> Tumbler | None:
     return Tumbler.parse(row[0]) if row else None
 
 
-def _get_or_create_curator(cat: Catalog, name: str) -> Tumbler:
-    """Get or create a curator owner by name."""
+def _get_or_create_curator(cat: Catalog, name: str, *, writer: object = None) -> Tumbler:
+    """Get or create a curator owner by name (reads via cat, writes via writer)."""
     owner = _owner_by_name(cat, name)
     if owner is None:
-        owner = cat.register_owner(name, "curator")
+        owner = (writer if writer is not None else cat).register_owner(name, "curator")
     return owner
 
 
 def _backfill_repos(
-    cat: Catalog, registry: object, dry_run: bool
+    cat: Catalog, registry: object, dry_run: bool, *, writer: object = None
 ) -> tuple[int, set[str]]:
     """Create owner per repo from registry.
 
@@ -2918,6 +2973,7 @@ def _backfill_repos(
     from hashlib import sha256
     from pathlib import Path
 
+    w = writer if writer is not None else cat
     count = 0
     claimed: set[str] = set()
     skipped = 0
@@ -2960,7 +3016,7 @@ def _backfill_repos(
 
         owner = cat.owner_for_repo(path_hash)
         if owner is None:
-            owner = cat.register_owner(
+            owner = w.register_owner(
                 repo_name, "repo", repo_hash=path_hash,
                 repo_root=str(repo_path),
                 description=f"Git repository: {repo_name}",
@@ -2973,7 +3029,7 @@ def _backfill_repos(
                 e for e in cat.by_owner(owner) if e.physical_collection == col_name
             ]
             if not existing:
-                cat.register(
+                w.register(
                     owner=owner, title=f"{repo_name} ({content_type})",
                     content_type=content_type,
                     physical_collection=col_name,
@@ -2986,8 +3042,9 @@ def _backfill_repos(
     return count, claimed
 
 
-def _backfill_knowledge(cat: Catalog, t3: object, dry_run: bool) -> int:
+def _backfill_knowledge(cat: Catalog, t3: object, dry_run: bool, *, writer: object = None) -> int:
     """Register knowledge__* collections in catalog."""
+    w = writer if writer is not None else cat
     collections = t3.list_collections()
     knowledge_cols = [c for c in collections if c["name"].startswith("knowledge__")]
     count = 0
@@ -3003,11 +3060,11 @@ def _backfill_knowledge(cat: Catalog, t3: object, dry_run: bool) -> int:
             count += 1
             continue
 
-        curator = _get_or_create_curator(cat, "knowledge")
+        curator = _get_or_create_curator(cat, "knowledge", writer=w)
         # Idempotent: check by physical_collection
         existing = [e for e in cat.by_owner(curator) if e.physical_collection == col_name]
         if not existing:
-            cat.register(
+            w.register(
                 owner=curator, title=title, content_type="knowledge",
                 physical_collection=col_name,
             )
@@ -3016,8 +3073,9 @@ def _backfill_knowledge(cat: Catalog, t3: object, dry_run: bool) -> int:
     return count
 
 
-def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
+def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool, *, writer: object = None) -> int:
     """Register rdr__* collections in catalog with per-document titles from T3 metadata."""
+    w = writer if writer is not None else cat
     collections = t3.list_collections()
     rdr_cols = [c for c in collections if c["name"].startswith("rdr__") and c["count"] > 0]
     count = 0
@@ -3112,7 +3170,7 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
                 # but the registry may have stale entries). Curator is
                 # the legitimate fallback for orphan rdr__* collections.
                 owner = _get_or_create_curator(
-                    cat, col_name.replace("rdr__", ""),
+                    cat, col_name.replace("rdr__", ""), writer=w,
                 )
 
             for path, title in seen_paths.items():
@@ -3126,7 +3184,7 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
                     if e.file_path in (path, fp)
                 ]
                 if not existing:
-                    cat.register(
+                    w.register(
                         owner=owner, title=title, content_type="rdr",
                         file_path=fp, physical_collection=col_name,
                     )
@@ -3140,8 +3198,10 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool) -> int:
 
 def _backfill_papers(
     cat: Catalog, t3: object, dry_run: bool, repo_collections: set[str] | None = None,
+    *, writer: object = None,
 ) -> int:
     """Register docs__* paper collections, excluding repo-owned collections."""
+    w = writer if writer is not None else cat
     collections = t3.list_collections()
     repo_cols = repo_collections or set()
     paper_cols = [
@@ -3176,10 +3236,10 @@ def _backfill_papers(
             count += 1
             continue
 
-        curator = _get_or_create_curator(cat, "papers")
+        curator = _get_or_create_curator(cat, "papers", writer=w)
         existing = [e for e in cat.by_owner(curator) if e.physical_collection == col_name]
         if not existing:
-            cat.register(
+            w.register(
                 owner=curator, title=title, content_type="paper",
                 author=author, year=year,
                 physical_collection=col_name,
@@ -3321,6 +3381,7 @@ def _backfill_per_file_from_t3(
     collection: str,
     *,
     dry_run: bool,
+    writer: object = None,
 ) -> int:
     """nexus-p03z Issue 2: per-file recovery from T3 chunk metadata.
 
@@ -3341,6 +3402,7 @@ def _backfill_per_file_from_t3(
     writes and returns the count that *would* register (subject to the
     same dedup logic against existing rows).
     """
+    w = writer if writer is not None else cat
     # Parse the trailing -<8hex> as the repo hash. ``rsplit`` keeps
     # repo names containing dashes intact (e.g. ``code__nexus-mini0-4ada4577``).
     # Splitting on `__` first removes the prefix, then `-` splits name
@@ -3450,7 +3512,7 @@ def _backfill_per_file_from_t3(
         if existing is not None:
             continue
         try:
-            cat.register(
+            w.register(
                 owner=owner,
                 title=Path(rel).name or rel,
                 content_type=content_type,
@@ -3513,6 +3575,7 @@ def backfill_cmd(
 ) -> None:
     """Populate catalog from existing T3 collections and registry."""
     cat = _get_catalog()
+    writer = _get_catalog_writer()
 
     if from_t3:
         if from_t3_collection and from_t3_all:
@@ -3537,7 +3600,7 @@ def backfill_cmd(
         for target in targets:
             try:
                 count = _backfill_per_file_from_t3(
-                    cat, t3, target, dry_run=dry_run,
+                    cat, t3, target, dry_run=dry_run, writer=writer,
                 )
                 mode = "would register" if dry_run else "registered"
                 click.echo(f"  {target}: {mode} {count} row(s)")
@@ -3556,13 +3619,13 @@ def backfill_cmd(
     t3 = _make_t3()
 
     click.echo("Pass 1: Repos...")
-    repo_count, repo_collections = _backfill_repos(cat, registry, dry_run)
+    repo_count, repo_collections = _backfill_repos(cat, registry, dry_run, writer=writer)
 
     click.echo("Pass 2: Paper collections (docs__*)...")
-    paper_count = _backfill_papers(cat, t3, dry_run, repo_collections=repo_collections)
+    paper_count = _backfill_papers(cat, t3, dry_run, repo_collections=repo_collections, writer=writer)
 
     click.echo("Pass 3: Knowledge collections...")
-    knowledge_count = _backfill_knowledge(cat, t3, dry_run)
+    knowledge_count = _backfill_knowledge(cat, t3, dry_run, writer=writer)
 
     hash_updated = 0
     if not dry_run:
@@ -3835,6 +3898,7 @@ def remediate_paths_cmd(
         ext_filter = _REMEDIATE_DEFAULT_EXTENSIONS
 
     cat = _get_catalog()
+    writer = _get_catalog_writer()
 
     click.echo(f"Scanning {source_dir.resolve()}…")
     index = _build_basename_index(source_dir, ext_filter)
@@ -3954,10 +4018,10 @@ def remediate_paths_cmd(
     n_marked = 0
     for entry, _why, _note, chosen, _basename in transitions:
         if chosen is not None:
-            cat.update(entry.tumbler, file_path=str(chosen))
+            writer.update(entry.tumbler, file_path=str(chosen))
             n_updated += 1
         elif mark_missing:
-            cat.update(entry.tumbler, meta={"status": "missing"})
+            writer.update(entry.tumbler, meta={"status": "missing"})
             n_marked += 1
 
     click.echo(
@@ -4044,6 +4108,7 @@ def prune_stale_cmd(
         will_delete = False
 
     cat = _get_catalog()
+    writer = _get_catalog_writer()
 
     # Build the RDR-prefix index lazily — only when both --source-dir is
     # set and --rdr-prefix-skip is on. Skipping the walk on the no-source
@@ -4164,7 +4229,7 @@ def prune_stale_cmd(
 
     n_deleted = 0
     for entry in stale:
-        if cat.delete_document(entry.tumbler):
+        if writer.delete_document(entry.tumbler):
             n_deleted += 1
 
     click.echo(f"\nDone: deleted {n_deleted} catalog entr"
@@ -5748,7 +5813,8 @@ def _run_t3_doc_id_coverage(
     # returns "" for every Phase-3 chunk. Without manifest
     # resolution the audit unconditionally reports near-100%
     # ``missing_doc_id``, masking real coverage problems.
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+    from nexus.catalog.factory import make_catalog_reader
+    cat = make_catalog_reader()
 
     # nexus-yrka: collections renamed via ``nx catalog rename-collection``
     # leave their old name in events.jsonl (events are append-only) but

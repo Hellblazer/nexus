@@ -97,7 +97,7 @@ def test_rename_rejects_non_conformant_new(t3_db, catalog, runner):
     _seed_t3_collection(t3_db, "knowledge__delos")
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",
@@ -115,7 +115,7 @@ def test_rename_rejects_old_not_in_projection(t3_db, catalog, runner):
     # Note: old name not registered in the collections projection.
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",
@@ -139,7 +139,7 @@ def test_rename_rejects_already_superseded(t3_db, catalog, runner):
     _seed_t3_collection(t3_db, "knowledge__delos")
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",
@@ -156,7 +156,7 @@ def test_rename_rejects_new_already_exists_in_t3(t3_db, catalog, runner):
     _seed_t3_collection(t3_db, "knowledge__1-1__voyage-context-3__v1")
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",
@@ -179,7 +179,7 @@ def test_rename_conformant_new_succeeds(t3_db, catalog, runner):
     _seed_catalog_doc(catalog, tumbler="1.1.1", collection="knowledge__delos")
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",
@@ -228,7 +228,7 @@ def test_rename_dry_run_no_writes(t3_db, catalog, runner):
     _seed_t3_collection(t3_db, "knowledge__delos")
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",
@@ -251,7 +251,7 @@ def test_rename_no_yes_falls_back_to_report_only(t3_db, catalog, runner):
     _seed_t3_collection(t3_db, "knowledge__delos")
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",
@@ -276,7 +276,7 @@ def test_rename_to_self_rejected(t3_db, catalog, runner):
     _seed_t3_collection(t3_db, "knowledge__1-1__voyage-context-3__v1")
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",
@@ -296,7 +296,7 @@ def test_rename_allow_legacy_lets_non_conformant_through(t3_db, catalog, runner)
     _seed_t3_collection(t3_db, "docs__nexus-571b8edd")
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",

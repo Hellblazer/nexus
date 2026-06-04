@@ -120,14 +120,18 @@ CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 )
 
 
-#: RDR-146 P0.1 baseline: the number of ``Catalog(...)`` construction
-#: sites in consumer code (outside :data:`CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES`)
-#: at the start of the Phase-1 cutover. The acceptance criterion is
-#: ``scan_repo(...).catalog_constructions <= CATALOG_CONSTRUCTION_BASELINE``;
-#: lower this constant as each cutover wave lands so it can never rise.
-#: Seeded empirically from the AST scan (RF-4 grep-counted ~49; the AST
-#: figure below is authoritative).
-CATALOG_CONSTRUCTION_BASELINE: int = 49
+#: RDR-146 catalog-construction floor. P0.1 seeded this at 49 (the AST
+#: count of bare ``Catalog(...)`` construction sites in consumer code at
+#: the start of the Phase-1 cutover). P1.2 (nexus-5p2ci.21) completed the
+#: atomic cutover: every consumer site now routes catalog reads through
+#: :func:`nexus.catalog.factory.make_catalog_reader` and writes through
+#: :func:`make_catalog_writer` (the daemon-hosted single writer), so the
+#: floor is now 0 and ENFORCED. The acceptance criterion
+#: ``scan_repo(...).catalog_constructions <= CATALOG_CONSTRUCTION_BASELINE``
+#: now means "no bare ``Catalog(...)`` survives outside the substrate
+#: allowlist (db/, daemon/, catalog/)". Any new consumer-side bare
+#: construction is a hard violation; route it through the factory instead.
+CATALOG_CONSTRUCTION_BASELINE: int = 0
 
 
 #: Banned call sites. Each entry is ``(module, attribute)`` matched

@@ -503,15 +503,16 @@ def test_dual_population_baseline_locked():
 
 
 # ---------------------------------------------------------------------------
-# RDR-146 P0.1 (nexus-5p2ci.1): catalog construction baseline
+# RDR-146 catalog construction floor (P0.1 baseline -> P1.2 enforced 0)
 # ---------------------------------------------------------------------------
 #
-# The catalog is already the 8th T2 domain store served over RPC; the
-# GH #1046 starvation persists because ~49 consumer sites construct
-# ``Catalog(...)`` directly and bypass the daemon. P0.1 establishes a
-# COUNTED baseline (not yet an enforced hard violation — the cutover
-# happens in Phase 1). Acceptance: monotonic non-increase as sites migrate
-# onto ``T2Client.catalog``.
+# P0.1 (nexus-5p2ci.1) seeded a COUNTED baseline of 49 bare ``Catalog(...)``
+# construction sites in consumer code (the GH #1046 starvation surface).
+# P1.2 (nexus-5p2ci.21) completed the atomic cutover: every consumer site
+# now routes reads through ``make_catalog_reader`` and writes through the
+# daemon-hosted ``make_catalog_writer``, so the floor is 0 and ENFORCED.
+# Acceptance: no bare ``Catalog(...)`` survives outside the substrate
+# allowlist (catalog/ db/ daemon/).
 
 
 def _catalog_check(extra_files=None, catalog_construction_allowlist_prefixes=None):
@@ -525,11 +526,10 @@ def _catalog_check(extra_files=None, catalog_construction_allowlist_prefixes=Non
 
 
 def test_catalog_construction_baseline_matches_constant():
-    """RDR-146 P0.1: the consumer-side ``Catalog(...)`` construction count
-    equals the seeded baseline. Locked as ``== CATALOG_CONSTRUCTION_BASELINE``
-    (exact, not ``<=``) so an *increase* fails loudly and a *decrease* from a
-    cutover wave forces the constant down in lock-step — the monotonic-ratchet
-    forcing function. AST-authoritative (RF-4 grep counted ~49)."""
+    """RDR-146 P1.2: the consumer-side ``Catalog(...)`` construction count
+    equals the enforced floor (now 0). Locked as ``== CATALOG_CONSTRUCTION_BASELINE``
+    (exact, not ``<=``) so any *new* bare construction fails loudly. The
+    cutover routed all 49 original sites through the reader/writer factories."""
     from nexus.storage_boundary_lint import CATALOG_CONSTRUCTION_BASELINE
 
     result = _catalog_check()
