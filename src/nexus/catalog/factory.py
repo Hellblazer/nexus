@@ -140,11 +140,23 @@ class CatalogWriter:
     :func:`make_catalog_reader` instance.
     """
 
-    def __init__(self, *, config_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        *,
+        config_dir: Optional[Path] = None,
+        priority: Optional[str] = None,
+    ) -> None:
         self._config_dir = config_dir
         self._client: Any = None
         self._direct: Optional[Catalog] = None
         self._routed = False
+        # RDR-146 P2 (nexus-5p2ci.12): resolve once at construction (a writer
+        # is long-lived; one resolve per batch). Interactive writers tag every
+        # routed write so the daemon opens its fairness window; batch writers
+        # send no priority field (daemon defaults batch). Resolution honours
+        # NX_WRITE_PRIORITY, then the explicit ``priority`` arg, then isatty.
+        from nexus.catalog.write_priority import resolve_write_priority
+        self._priority = resolve_write_priority(priority)
         self._connect()
 
     def _connect(self) -> None:
@@ -184,6 +196,28 @@ class CatalogWriter:
         """True when writes route through the daemon; False on direct fallback."""
         return self._routed
 
+    @property
+    def priority(self) -> str:
+        """Resolved write priority (``"interactive"`` | ``"batch"``)."""
+        return self._priority
+
+    def is_interactive_write_pending(self) -> bool:
+        """RDR-146 P2: True when the daemon reports an interactive catalog
+        write window is open, so a background (batch) producer should yield.
+
+        Routed through the same daemon connection as this writer's writes.
+        Returns False on the direct fallback (no daemon => no cross-process
+        catalog-write contention to mediate; the per-repo advisory lock
+        handles two same-repo indexers) and on any probe transport error
+        (fail-open: never block a write on a probe failure)."""
+        if self._client is None:
+            return False
+        try:
+            return bool(self._client.catalog.is_interactive_write_pending())
+        except Exception:  # noqa: BLE001 — probe must never break a write
+            _log.debug("catalog_interactive_probe_failed", exc_info=True)
+            return False
+
     def __getattr__(self, name: str) -> Any:
         # __getattr__ only fires for names not found normally, so the
         # instance attributes set in __init__ are never shadowed.
@@ -194,7 +228,15 @@ class CatalogWriter:
                 f"For reads use make_catalog_reader()."
             )
         if self._client is not None:
-            return getattr(self._client.catalog_write, name)
+            inner = getattr(self._client.catalog_write, name)
+            if self._priority == "interactive":
+                # Tag every routed write so the daemon opens / refreshes its
+                # fairness window. Batch stays untagged (byte-identical wire).
+                def _routed(*args: Any, **kwargs: Any) -> Any:
+                    return inner(*args, _priority="interactive", **kwargs)
+
+                return _routed
+            return inner
         return getattr(self._direct, name)
 
     def close(self) -> None:
@@ -215,6 +257,14 @@ class CatalogWriter:
         self.close()
 
 
-def make_catalog_writer(*, config_dir: Optional[Path] = None) -> CatalogWriter:
-    """Return a write-only catalog proxy (daemon-routed or direct fallback)."""
-    return CatalogWriter(config_dir=config_dir)
+def make_catalog_writer(
+    *, config_dir: Optional[Path] = None, priority: Optional[str] = None,
+) -> CatalogWriter:
+    """Return a write-only catalog proxy (daemon-routed or direct fallback).
+
+    *priority* (RDR-146 P2) sets the interactive-vs-batch fairness intent:
+    ``"interactive"`` tags writes so the daemon prioritises them over a
+    background batch indexer; ``"batch"`` is the yielding background default.
+    ``None`` resolves via ``NX_WRITE_PRIORITY`` env then ``isatty()``.
+    """
+    return CatalogWriter(config_dir=config_dir, priority=priority)

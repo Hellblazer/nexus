@@ -155,7 +155,10 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
         return False
 
     reader = make_catalog_reader()
-    writer = make_catalog_writer()
+    # RDR-146 P2 (nexus-5p2ci.12): foreground, user-initiated dt write —
+    # the latency-sensitive op #1046 showed starved by background indexing.
+    # Tag interactive so the daemon prioritises it over a batch index burst.
+    writer = make_catalog_writer(priority="interactive")
     try:
         # Globally find the entry by file_path — no owner constraint
         # because we don't know it from here. ``documents`` is keyed
@@ -221,7 +224,8 @@ def _link_semantic_record(uuid: str) -> bool:
     if not Catalog.is_initialized(cat_path):
         return False
     reader = make_catalog_reader()
-    writer = make_catalog_writer()
+    # RDR-146 P2: foreground dt write — interactive priority (see above).
+    writer = make_catalog_writer(priority="interactive")
     try:
         entry = reader.by_source_uri(dt_uri)
         if entry is None:

@@ -94,7 +94,10 @@ def _incorporate_sync(uuid: str) -> dict[str, Any]:
         tumbler = entry.tumbler
         # RDR-146 P1.2: generate_dt_links reads via the reader, writes
         # (link_if_absent) via the write-only daemon proxy.
-        writer = make_catalog_writer()
+        # RDR-146 P2 (nexus-5p2ci.12): foreground, user-initiated dt
+        # incorporate — interactive priority so the daemon prioritises it
+        # over a background ``nx index repo`` burst (the #1046 starvation).
+        writer = make_catalog_writer(priority="interactive")
         links = generate_dt_links(cat, tumbler, uuid, writer=writer)
         writeback = writeback_record(uuid, str(tumbler))
         return {"tumbler": str(tumbler), "links": links, "writeback": writeback}

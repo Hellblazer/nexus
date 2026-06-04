@@ -663,6 +663,7 @@ def _catalog_hook(
     repo_hash: str,
     head_hash: str,
     indexed_files: list[tuple[Path, str, str]],
+    on_locked: str = "wait",
 ) -> dict[Path, str]:
     """Register/update indexed files in catalog. Silently skipped if catalog absent.
 
@@ -672,7 +673,20 @@ def _catalog_hook(
     before per-file indexing runs (RDR-101 Phase 3 PR δ Stage B). The
     return type is additive — existing test call sites that ignore the
     return value continue to work unchanged.
+
+    RDR-146 P2 (nexus-5p2ci.12): this is the background batch producer that
+    GH #1046 showed starving a foreground ``nx dt index``. The writer is
+    constructed with the resolved write priority (the hook-spawned indexer
+    is non-tty -> batch); a batch writer polls the daemon's interactive
+    window before each file's catalog write and yields. ``on_locked``
+    retargets (PC-5 collapse) from the per-repo advisory file lock to the
+    catalog-contention signal: ``"skip"`` defers the remaining catalog
+    writes to the next idempotent index pass once the bounded yield budget
+    is exhausted; ``"wait"`` proceeds after the budget (never permanently
+    starve the batch). The per-repo advisory lock keeps its orthogonal job
+    (two ``nx index repo`` on the same repo) up in ``index_repository``.
     """
+    from nexus.catalog.write_priority import await_fair_window
     file_to_doc_id: dict[Path, str] = {}
     reader = None
     writer = None
@@ -692,8 +706,12 @@ def _catalog_hook(
             make_catalog_writer,
         )
         reader = make_catalog_reader()
+        # RDR-146 P2: resolve priority (non-tty hook spawn -> batch). Only a
+        # batch writer yields to interactive writes; an interactive/foreground
+        # ``nx index repo`` is itself latency-sensitive and does not throttle.
         writer = make_catalog_writer()
         cat = reader
+        _batch_producer = writer.priority == "batch"
 
         # ``_catalog_hook`` accepts an explicit ``repo_hash`` (and
         # ``repo_name``) so callers and tests can override the
@@ -735,7 +753,26 @@ def _catalog_hook(
         # for every subsequent file in this run. Found via Hal's
         # ghost-chunk class on 2026-05-02.
         skipped_files: list[tuple[Path, str]] = []
+        fairness_yielded = 0  # RDR-146 P2: files deferred to the next pass.
         for abs_path, content_type, collection_name in indexed_files:
+            # RDR-146 P2 (nexus-5p2ci.12): yield to a pending interactive
+            # catalog write so a foreground ``nx dt index`` is not starved by
+            # this background burst. Only batch producers yield; the probe is
+            # an in-memory daemon read (cheap) and returns False with no
+            # daemon. ``skip`` terminal defers the rest of the batch to the
+            # next idempotent pass (break, not abort: already-registered files
+            # and housekeeping below still run on the full indexed set).
+            if _batch_producer:
+                if await_fair_window(
+                    writer.is_interactive_write_pending, on_locked,
+                ) == "skip":
+                    fairness_yielded = len(indexed_files) - len(new_tumblers) - len(skipped_files)
+                    _log.info(
+                        "catalog_write_yielded_skipped",
+                        repo=repo_name, deferred=fairness_yielded,
+                        reason="interactive_write_pending",
+                    )
+                    break
             try:
                 rel_path = str(abs_path.relative_to(repo))
             except ValueError:
@@ -1051,7 +1088,7 @@ def index_repository(
             _run_index_frecency_only(repo, registry)
             stats: dict[str, int] = {}
         else:
-            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_start=on_start, on_file=on_file, on_phase=on_phase, on_stage_timers=on_stage_timers, hooks=hooks)
+            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_stage_timers=on_stage_timers, hooks=hooks)
             _set_owner_head_hash(repo, _current_head(repo))
         return stats
     finally:
@@ -2003,6 +2040,7 @@ def _run_index(
     *,
     force: bool = False,
     force_stale: bool = False,
+    on_locked: str = "wait",
     on_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
@@ -2401,6 +2439,7 @@ def _run_index(
         repo_hash=_repo_hash,
         head_hash=_current_head(repo),
         indexed_files=indexed_for_catalog,
+        on_locked=on_locked,
     )
     if on_phase is not None:
         on_phase(
