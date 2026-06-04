@@ -122,26 +122,70 @@ is the cautionary precedent).
 
 ## Research Findings
 
-To be populated during `/conexus:rdr-research`. Open verification targets:
+Investigated 2026-06-04 against the codebase (file:line evidence).
 
-- **RF-1: lease/heartbeat cost.** Confirm a heartbeat interval + TTL that
-  self-heals fast enough for a sibling shell (sub-second discovery) without
-  meaningful overhead; reconcile with the T2 `_REASSERT_INTERVAL` /
-  `_LOSER_POLL_TIMEOUT` invariant already in `t2_daemon.py`.
-- **RF-2: T1 session-id keying.** Confirm `resolve_active_session_id()` is
-  reliably non-`None` at MCP-server spawn time across launch paths (tty, `claude
-  -p`, Desktop `.mcpb`), and define the fallback when it is `"unknown"` (the
-  one case that must not collapse N sessions into one record).
-- **RF-3: generation source.** Pick a monotonic generation that survives across
-  process restarts without a clock dependency (the scripts ban
-  `Date.now`-style nondeterminism in tests); candidate: a per-scope counter
-  persisted in the record, incremented under the election flock.
-- **RF-4: T3 `chroma run` constraints.** Confirm the managed-subprocess T3 can
-  carry a lease record the same way (it is a wrapped external process, not
-  nexus code holding the loop), or define the supervisor-side heartbeat proxy.
-- **RF-5: migration safety.** Confirm each tier migration is independently
-  shippable (T2 → T3 → T1) with the conformance suite green at every step, so a
-  partial rollout never strands a tier.
+**RF-1 (RESOLVED): the re-assert pattern already exists in T2 and is cheap;
+generalize it.** `T2Daemon._reassert_discovery_loop` (`t2_daemon.py:842`) runs
+every `_REASSERT_INTERVAL = 1.0s` (`:124`) and, when the record is intact, is a
+**stat + read with no write** — it rewrites only when the file is missing or
+names a different pid. The locked invariant `_LOSER_POLL_TIMEOUT (3.0) >=
+_REASSERT_INTERVAL (1.0) + write latency` (`:120-125`) gives sub-second
+self-heal with a discoverer's poll window that cannot straddle a mid-re-assert
+gap. The loop is cancelled at the *start* of `stop()` so it can never resurrect
+a file the shutdown unlink just removed. This is exactly the primitive's
+heartbeat; lift it verbatim, parameterized by scope. **Constraint for the
+substrate:** keep TTL ≥ heartbeat + worst-case write latency; reuse these two
+constants as the substrate defaults.
+
+**RF-2 (RESOLVED, with a constraint): session-id is the right T1 key but is
+written by the SessionStart hook, not the MCP lifespan, so the lease must be
+published/re-keyed lazily.** `current_session` is written by
+`hooks.py:session_start` → `write_claude_session_id` (`hooks.py:57+`); nested
+subprocesses inherit `NX_SESSION_ID` and deliberately leave the parent pointer
+alone. The MCP lifespan owns chroma but **not** the session pointer (RDR-105
+P4). `resolve_active_session_id` precedence is `NX_SESSION_ID` env →
+`current_session` file → `None` (`session.py:82+`). So at lifespan
+`__aenter__` the session-id may not yet be resolvable on a cold top-level
+session (hook race), while `claude -p` subprocesses have it immediately via the
+inherited env. **Design constraint:** the substrate must (a) publish the lease
+lazily / re-key it in the heartbeat loop once the session resolves, not eagerly
+at spawn, and (b) when the key is still `unknown`, **refuse to publish a
+session-scoped record** (or fall back to a guaranteed-unique key) so N unknown
+sessions never collapse into one record. This is the one correctness subtlety
+of the T1 migration (Approach item 5).
+
+**RF-3 (RESOLVED): no generation primitive exists today; add a per-scope
+counter incremented under the existing election flock.** T2 elects via a
+`.spawn_lock` `fcntl.flock` (`_acquire_spawn_lock`, `t2_daemon.py:1335`;
+`_spawn_lock_path_for_db`, `:279`) but persists **no** monotonic
+generation/epoch. The fencing token is therefore new work: persist a counter
+*inside the lease record*, read-increment-write it while holding the
+per-scope election flock at publish time. Flock provides the mutual exclusion;
+the counter survives restarts because it lives in the record, not in process
+memory or a clock (satisfies the scripts' no-`Date.now` determinism rule).
+
+**RF-4 (RESOLVED): T3's chroma is an external subprocess, so its heartbeat must
+be a supervisor-side proxy.** T3 is a managed `chroma run` (`t3_daemon.py:4`,
+`start_t3_daemon` at `:226`); nexus writes the discovery file atomically
+(`_write_discovery_atomic`, `:101`) but there is **no re-assert loop**
+(self-heal mentions = 0). chroma cannot heartbeat a nexus lease itself, so the
+nexus supervisor that manages the subprocess heartbeats on its behalf, with
+liveness = (lease fresh) ∧ (chroma port reachable). T3 already routes its
+discovery path through the shared `daemon.discovery.discovery_path(tier='t3')`
+(`t3_daemon.py:79`), so the discovery *record* is already half-shared; the
+missing half is the heartbeat/lease semantics.
+
+**RF-5 (RESOLVED): the tiers are already code-isolated, so per-tier migration is
+naturally independent.** T1 discovery lives in `session.py` (pid-keyed); T2/T3
+in `daemon/discovery.py` (uid-keyed); they import none of each other's
+lifecycle code (verified: `t1.py`/`session.py` do not import
+`daemon.discovery`, and `daemon/` does not import the `t1_addr` helpers). The
+substrate can be introduced and adopted one tier at a time (T2 → T3 → T1) with
+the conformance suite (Approach item 1) green at each step; a partial rollout
+cannot strand a tier because each tier's consumers resolve through their own
+(old or new) path until cut over. This validates the behaviour-preserving,
+incremental sequencing and rules out a big-bang rewrite (the RDR-110→113
+failure mode).
 
 ## Open Questions
 
