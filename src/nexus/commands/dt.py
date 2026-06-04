@@ -141,6 +141,7 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
     """
     from nexus.catalog import resolve_tumbler  # noqa: PLC0415
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415
     from nexus.config import catalog_path  # noqa: PLC0415
 
     dt_uri = f"x-devonthink-item://{uuid}"
@@ -153,13 +154,14 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
         )
         return False
 
-    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    reader = make_catalog_reader()
+    writer = make_catalog_writer()
     try:
         # Globally find the entry by file_path — no owner constraint
         # because we don't know it from here. ``documents`` is keyed
         # by tumbler primary key plus a unique (file_path) row per
         # indexed file, so this returns one row.
-        row = cat._db.execute(
+        row = reader._db.execute(
             "SELECT tumbler FROM documents WHERE file_path = ? LIMIT 1",
             (str(file_path),),
         ).fetchone()
@@ -174,7 +176,7 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
 
         tumbler = Tumbler.parse(row[0])
-        cat.update(
+        writer.update(
             tumbler,
             source_uri=dt_uri,
             meta={"devonthink_uri": dt_uri},
@@ -195,7 +197,9 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
         )
         return False
     finally:
-        cat._db.close()
+        writer.close()
+        if reader is not None:
+            reader._db.close()
 
 
 def _link_semantic_record(uuid: str) -> bool:
@@ -209,25 +213,29 @@ def _link_semantic_record(uuid: str) -> bool:
     """
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415
     from nexus.catalog.dt_link_generator import generate_dt_links  # noqa: PLC0415
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415
     from nexus.config import catalog_path  # noqa: PLC0415
 
     dt_uri = f"x-devonthink-item://{uuid}"
     cat_path = catalog_path()
     if not Catalog.is_initialized(cat_path):
         return False
-    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    reader = make_catalog_reader()
+    writer = make_catalog_writer()
     try:
-        entry = cat.by_source_uri(dt_uri)
+        entry = reader.by_source_uri(dt_uri)
         if entry is None:
             _log.warning("dt_link_no_entry", uuid=uuid)
             return False
-        counts = generate_dt_links(cat, entry.tumbler, uuid)
+        counts = generate_dt_links(reader, entry.tumbler, uuid, writer=writer)
         return (counts["similar"] + counts["link"]) > 0
     except Exception as e:
         _log.warning("dt_link_failed", uuid=uuid, error=str(e))
         return False
     finally:
-        cat._db.close()
+        writer.close()
+        if reader is not None:
+            reader._db.close()
 
 
 def _writeback_record(uuid: str) -> bool:
@@ -245,6 +253,7 @@ def _writeback_record(uuid: str) -> bool:
     follow-on re-stamp pass (tracked) rather than stamped empty.
     """
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
     from nexus.config import catalog_path  # noqa: PLC0415
     from nexus.dt_writeback import writeback_record  # noqa: PLC0415
 
@@ -252,7 +261,7 @@ def _writeback_record(uuid: str) -> bool:
     cat_path = catalog_path()
     if not Catalog.is_initialized(cat_path):
         return False
-    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    cat = make_catalog_reader()
     try:
         entry = cat.by_source_uri(dt_uri)
         if entry is None:
@@ -280,6 +289,7 @@ def _ingest_highlights_record(uuid: str) -> bool:
     ``False``; highlight ingest never aborts the index batch.
     """
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
     from nexus.config import catalog_path  # noqa: PLC0415
     from nexus.db.t2.document_highlights import (  # noqa: PLC0415
         DocumentHighlights,
@@ -291,7 +301,7 @@ def _ingest_highlights_record(uuid: str) -> bool:
     cat_path = catalog_path()
     if not Catalog.is_initialized(cat_path):
         return False
-    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    cat = make_catalog_reader()
     try:
         entry = cat.by_source_uri(dt_uri)
         if entry is None:
@@ -860,6 +870,7 @@ def _resolve_dt_uri_from_tumbler(tumbler: str) -> str | None:
     """
     from nexus.catalog import resolve_tumbler  # noqa: PLC0415
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
     from nexus.config import catalog_path  # noqa: PLC0415
 
     path = catalog_path()
@@ -867,7 +878,7 @@ def _resolve_dt_uri_from_tumbler(tumbler: str) -> str | None:
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' first.",
         )
-    cat = Catalog(path, path / ".catalog.db")
+    cat = make_catalog_reader()
     try:
         t, err = resolve_tumbler(cat, tumbler)
         if err:

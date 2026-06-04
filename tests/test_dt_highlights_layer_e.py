@@ -80,6 +80,14 @@ def _patch_catalog(monkeypatch, tmp_path, tumbler="1.2.3", collection="c"):
     CatalogMock.is_initialized = staticmethod(lambda p: True)
     monkeypatch.setattr("nexus.catalog.catalog.Catalog", CatalogMock)
     monkeypatch.setattr("nexus.config.catalog_path", lambda: tmp_path)
+    # RDR-146 P1.2: dt helpers reach the catalog via the factory; route
+    # both reader and writer to the same mock.
+    monkeypatch.setattr(
+        "nexus.catalog.factory.make_catalog_reader", lambda **kw: cat
+    )
+    monkeypatch.setattr(
+        "nexus.catalog.factory.make_catalog_writer", lambda **kw: cat
+    )
     return cat
 
 
