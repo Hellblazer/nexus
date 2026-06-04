@@ -164,9 +164,15 @@ def _register_or_lookup_doc_id(
     R1 + the ``test_preflight_registration_idempotent_on_staleness_skip``
     test pin this invariant.
     """
+    reader = None
+    writer = None
     try:
         from nexus.catalog import Catalog  # noqa: PLC0415
         from nexus.catalog.catalog import make_relative  # noqa: PLC0415
+        from nexus.catalog.factory import (  # noqa: PLC0415
+            make_catalog_reader,
+            make_catalog_writer,
+        )
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415
         from nexus.config import catalog_path  # noqa: PLC0415
 
@@ -177,7 +183,10 @@ def _register_or_lookup_doc_id(
             # dropped source_path field) finds stale chunks via the
             # doc_id-keyed where filter on re-index. Idempotent.
             Catalog.init(cat_path)
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        # RDR-146 P1.2 strict split: reads via reader, writes via the
+        # write-only daemon proxy.
+        reader = make_catalog_reader()
+        writer = make_catalog_writer()
 
         # Owner resolution mirrors _catalog_pdf_hook / _catalog_markdown_hook
         # so a re-index after the post-hook ran for the same file lands on
@@ -205,7 +214,7 @@ def _register_or_lookup_doc_id(
         # owner_type='curator' keeps the namespaces separate; repo
         # owners are reachable only via owner_for_repo(repo_hash)
         # from the repo indexer, never via a corpus-name lookup here.
-        row = cat._db.execute(
+        row = reader._db.execute(
             "SELECT tumbler_prefix FROM owners WHERE name = ? "
             "AND owner_type = 'curator'",
             (owner_name,),
@@ -213,10 +222,10 @@ def _register_or_lookup_doc_id(
         if row:
             owner = Tumbler.parse(row[0])
         else:
-            owner = cat.register_owner(owner_name, "curator")
+            owner = writer.register_owner(owner_name, "curator")
 
         fp = make_relative(file_path, base_path) if base_path else str(file_path)
-        existing = cat.by_file_path(owner, fp)
+        existing = reader.by_file_path(owner, fp)
         if existing is not None:
             return str(existing.tumbler)
 
@@ -224,7 +233,7 @@ def _register_or_lookup_doc_id(
             source_mtime = file_path.stat().st_mtime
         except OSError:
             source_mtime = 0.0
-        tumbler = cat.register(
+        tumbler = writer.register(
             owner=owner,
             title=title or file_path.stem,
             content_type=content_type,
@@ -240,6 +249,11 @@ def _register_or_lookup_doc_id(
     except Exception:
         _log.debug("preflight_register_failed", exc_info=True)
         return ""
+    finally:
+        if writer is not None:
+            writer.close()
+        if reader is not None:
+            reader._db.close()
 
 
 def _missing_credentials() -> list[str]:
@@ -1307,14 +1321,8 @@ def index_pdf(
         # content-sourcing contract.
         # nexus-tdgc: forward the catalog doc_id (lookup is post-register
         # so the entry exists by this point in the incremental path).
-        from nexus.catalog import Catalog  # noqa: PLC0415
-        from nexus.config import catalog_path  # noqa: PLC0415
-        _cat_path = catalog_path()
-        _cat = (
-            Catalog(_cat_path, _cat_path / ".catalog.db")
-            if Catalog.is_initialized(_cat_path)
-            else None
-        )
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
+        _cat = make_catalog_reader()
         hooks.fire_document(
             str(pdf_path), col_name, "",
             doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
@@ -1417,16 +1425,20 @@ def _catalog_markdown_hook(
     *, base_path: Path | None = None,
 ) -> None:
     """Register markdown document in catalog after indexing. Silently skipped if absent."""
+    reader = None
+    writer = None
     try:
         from nexus.catalog import Catalog
         from nexus.catalog.catalog import make_relative
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
         from nexus.config import catalog_path
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return
 
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        reader = make_catalog_reader()
+        writer = make_catalog_writer()
 
         # Derive title and year from frontmatter or filename
         title = md_path.stem
@@ -1460,7 +1472,7 @@ def _catalog_markdown_hook(
         owner_name = corpus if corpus else "standalone-docs"
         # Curator-only lookup — see _register_or_lookup_doc_id for
         # rationale.
-        rows = cat._db.execute(
+        rows = reader._db.execute(
             "SELECT tumbler_prefix FROM owners WHERE name = ? "
             "AND owner_type = 'curator'",
             (owner_name,),
@@ -1469,7 +1481,7 @@ def _catalog_markdown_hook(
             from nexus.catalog.tumbler import Tumbler
             owner = Tumbler.parse(rows[0])
         else:
-            owner = cat.register_owner(owner_name, "curator")
+            owner = writer.register_owner(owner_name, "curator")
 
         fp = make_relative(md_path, base_path) if base_path else str(md_path)
         # Known TOCTOU window (Reviewer B/I-3): this stat happens AFTER the
@@ -1494,9 +1506,9 @@ def _catalog_markdown_hook(
         # cat.register() only when no row exists yet (no-pre-flight
         # branch — preserves the no-catalog ingest contract for callers
         # that bypass the public entry points).
-        existing = cat.by_file_path(owner, fp)
+        existing = reader.by_file_path(owner, fp)
         if existing is not None:
-            cat.update(
+            writer.update(
                 existing.tumbler,
                 physical_collection=collection_name,
                 chunk_count=chunk_count,
@@ -1504,7 +1516,7 @@ def _catalog_markdown_hook(
                 source_mtime=source_mtime,
             )
         else:
-            cat.register(
+            writer.register(
                 owner=owner, title=title, content_type=content_type,
                 file_path=fp, physical_collection=collection_name,
                 chunk_count=chunk_count, year=year,
@@ -1512,6 +1524,11 @@ def _catalog_markdown_hook(
             )
     except Exception:
         _log.debug("catalog_markdown_hook_failed", exc_info=True)
+    finally:
+        if writer is not None:
+            writer.close()
+        if reader is not None:
+            reader._db.close()
 
 
 def index_markdown(
