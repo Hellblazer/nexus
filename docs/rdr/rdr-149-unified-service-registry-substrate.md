@@ -2,11 +2,12 @@
 title: "Unified Leased Service-Registry Substrate for T1/T2/T3 Daemon Lifecycle: End the Recurring Discovery / Single-Writer / Self-Heal Bug Class"
 id: RDR-149
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-04
+accepted_date: 2026-06-04
 related_issues: [nexus-4fw0z, gh-1112, gh-1114, gh-956, nexus-9eaz]
 related_rdrs: [RDR-010, RDR-041, RDR-063, RDR-094, RDR-105, RDR-128, RDR-129, RDR-140, RDR-141, RDR-146]
 ---
