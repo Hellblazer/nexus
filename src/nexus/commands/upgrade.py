@@ -214,11 +214,16 @@ def _quiesce_daemon() -> None:
         from nexus.config import nexus_config_dir
         from nexus.daemon.t2_daemon import t2_discovery_path
 
+        from nexus.commands.daemon import _discovery_record_pid
+
         disc = t2_discovery_path(nexus_config_dir())
         pid: int | None = None
         if disc.exists():
             try:
-                pid = json.loads(disc.read_text()).get("pid")
+                # RDR-149 P2: the lease record carries the owner pid under
+                # ``endpoint``; the helper reads both shapes so the
+                # post-stop exit-wait below still fires.
+                pid = _discovery_record_pid(json.loads(disc.read_text()))
             except (OSError, json.JSONDecodeError):
                 pid = None
 

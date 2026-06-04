@@ -558,6 +558,24 @@ def t2_start_cmd(config_dir_str: str | None, db_path_str: str | None) -> None:
         sys.exit(2)
 
 
+def _discovery_record_pid(data: dict) -> int | None:
+    """Extract the owner pid from a T2 discovery record.
+
+    RDR-149 P2: a lease record carries the pid under ``endpoint``; a
+    legacy payload carries it at the top level. Read both so ``stop`` /
+    ``status`` keep working across an in-flight upgrade window.
+    """
+    pid = data.get("pid")
+    if isinstance(pid, int):
+        return pid
+    endpoint = data.get("endpoint")
+    if isinstance(endpoint, dict):
+        ep_pid = endpoint.get("pid")
+        if isinstance(ep_pid, int):
+            return ep_pid
+    return None
+
+
 @t2_group.command("stop")
 @click.option(
     "--config-dir",
@@ -593,7 +611,7 @@ def t2_stop_cmd(config_dir_str: str | None) -> None:
         )
         disc.unlink(missing_ok=True)
         return
-    pid = payload.get("pid")
+    pid = _discovery_record_pid(payload)
     if not isinstance(pid, int) or pid <= 0:
         click.echo(f"Invalid pid in discovery file: {pid!r}", err=True)
         disc.unlink(missing_ok=True)
@@ -642,7 +660,7 @@ def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # its daemon (e.g. an interrupted graceful stop left the file while
     # the process died, or a crash). Reporting such a file as "running"
     # masks a dead daemon (nexus-n8sbw).
-    pid = data.get("pid")
+    pid = _discovery_record_pid(data)
     alive = False
     if isinstance(pid, int) and pid > 0:
         try:
@@ -947,32 +965,31 @@ def _t2_ensure_running_inner(
     enum to CLI exit codes.
     """
     import time as _time
-    from nexus.daemon.t2_daemon import t2_discovery_path
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
-    disc = t2_discovery_path(config_dir)
 
     def _running_daemon() -> tuple[int, str] | None:
         """Return (pid, daemon_version) of the live daemon, or None.
 
-        Probes the recorded PID via ``os.kill(pid, 0)``; stale discovery
-        files outlive crashed daemons, so a readable file is not proof of
-        life.
+        RDR-149 P2: liveness is now lease freshness, resolved through
+        ``find_t2_daemon`` (which TTL-checks the lease and falls back to
+        pid-liveness for a legacy payload mid-upgrade). The external
+        contract is unchanged: callers still receive ``(pid, version)`` of
+        a live daemon, with the pid (lifted from the lease endpoint) used
+        for the SIGTERM in the version-skew cycle below.
         """
-        if not disc.exists():
+        from nexus.daemon.discovery import find_t2_daemon
+
+        payload = find_t2_daemon(config_dir)
+        if payload is None:
             return None
-        try:
-            data = json.loads(disc.read_text())
-        except (OSError, json.JSONDecodeError):
-            return None
-        pid = data.get("pid")
+        pid = payload.get("pid")
         if not isinstance(pid, int):
             return None
-        try:
-            os.kill(pid, 0)
-        except (ProcessLookupError, PermissionError):
-            return None
-        return pid, str(data.get("daemon_version") or "")
+        # New lease records carry ``version``; a legacy payload carries
+        # ``daemon_version`` (upgrade-window compatibility).
+        version = payload.get("version") or payload.get("daemon_version") or ""
+        return pid, str(version)
 
     def _daemon_is_alive() -> bool:
         return _running_daemon() is not None

@@ -31,6 +31,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -162,16 +163,65 @@ def _read_payload(path: Path, *, tier: Tier) -> Optional[Any]:
         return None
 
 
+def _resolve_t2_lease(
+    raw: dict[str, Any], path: Path
+) -> Optional[dict[str, Any]]:
+    """Resolve a RDR-149 T2 lease record to a connection dict, or ``None``.
+
+    Liveness is lease freshness (``now - heartbeat_epoch < ttl``), not pid:
+    a dead owner's lease simply ages out, giving pid-reuse immunity. A
+    stale or shutdown-marked lease is best-effort unlinked so the next
+    lookup is fast. The endpoint fields (``uds_path`` / ``tcp_host`` /
+    ``tcp_port``) are lifted to the top level so the existing client
+    contract (``discovery_resolve`` -> connect) is unchanged; the lease
+    metadata (``generation`` / ``owner_token``) rides alongside.
+    """
+    if raw.get("status", "live") != "live":
+        _log.info("t2_discovery_shutdown_marker_seen", path=str(path))
+        return None
+    endpoint = raw.get("endpoint")
+    heartbeat_epoch = raw.get("heartbeat_epoch")
+    ttl = raw.get("ttl")
+    if (
+        not isinstance(endpoint, dict)
+        or not isinstance(heartbeat_epoch, (int, float))
+        or not isinstance(ttl, (int, float))
+    ):
+        _log.warning("t2_discovery_lease_malformed", path=str(path))
+        return None
+    if (time.time() - heartbeat_epoch) >= ttl:
+        _log.warning("t2_discovery_lease_expired", path=str(path))
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            _log.warning("t2_discovery_unlink_failed", path=str(path), error=str(exc))
+        return None
+    result = dict(endpoint)
+    result["generation"] = raw.get("generation")
+    result["owner_token"] = raw.get("owner_token")
+    # The daemon version rides the lease ``version`` field; surface it so
+    # the RDR-141 version-skew arm can read the running daemon's version.
+    result["version"] = raw.get("version")
+    return result
+
+
 def find_t2_daemon(config_dir: Optional[Path] = None) -> Optional[dict[str, Any]]:
     """Return the T2 daemon's discovery payload, or ``None`` if absent /
-    unreadable / stale. The T2 daemon ships in RDR-120 P3a; this helper
-    is in place so the T3 paths and the eventual T2 paths share a
-    validator.
+    unreadable / stale.
+
+    RDR-149 P2: the T2 record is now a leased registry record
+    (``generation`` + ``owner_token`` + ``endpoint`` + TTL-stamped
+    ``heartbeat_epoch``). A record carrying those keys is resolved by lease
+    freshness; a legacy payload (top-level pid, no ``endpoint``) falls back
+    to the shared pid-liveness validator so an in-flight upgrade window is
+    still readable.
     """
     path = discovery_path(config_dir, tier="t2")
     raw = _read_payload(path, tier="t2")
     if raw is None:
         return None
+    if isinstance(raw, dict) and "endpoint" in raw and "generation" in raw:
+        return _resolve_t2_lease(raw, path)
     return _validate_discovery_payload(raw, path, tier="t2")
 
 
