@@ -47,8 +47,16 @@ class _CatalogBackedRegistry:
     the bead-acceptance grep returns zero matches.
     """
 
-    def __init__(self, *, cat: Any, registry_path: Path) -> None:
+    def __init__(
+        self, *, cat: Any, registry_path: Path, writer: Any = None
+    ) -> None:
+        # RDR-146 P1.2 strict split: ``cat`` is the READER (read_dual /
+        # from_registry reads); ``writer`` is the write-only daemon proxy
+        # for add/update mutations. ``writer`` defaults to ``cat`` so a
+        # caller passing a single full Catalog (tests, legacy) keeps the
+        # old read+write-through-one-object behaviour.
         self._cat = cat
+        self._writer = writer if writer is not None else cat
         self._registry_path = registry_path
 
     def get(self, repo: Path) -> dict | None:
@@ -74,8 +82,8 @@ class _CatalogBackedRegistry:
     def add(self, repo: Path, *, cat: Any | None = None) -> None:
         # The catalog hook registers collections on first index; this
         # call just ensures the owner row exists (idempotent).
-        if self._cat is not None:
-            self._cat.ensure_owner_for_repo(repo)
+        if self._writer is not None:
+            self._writer.ensure_owner_for_repo(repo)
 
     def update(self, repo: Path, **fields: Any) -> bool:
         """Apply field updates. Returns True on success (or no-op),
@@ -88,14 +96,14 @@ class _CatalogBackedRegistry:
         gate user-visible messages on actual catalog state.
         """
         success = True
-        if "docs_collection" in fields and self._cat is not None:
+        if "docs_collection" in fields and self._writer is not None:
             new_name = fields["docs_collection"]
             if new_name:
-                owner = self._cat.ensure_owner_for_repo(repo)
+                owner = self._writer.ensure_owner_for_repo(repo)
                 owner_id = str(owner).replace(".", "-")
                 ct = new_name.split("__", 1)[0]
                 try:
-                    self._cat.register_collection(
+                    self._writer.register_collection(
                         new_name,
                         content_type=ct,
                         owner_id=owner_id,
@@ -138,8 +146,16 @@ def _registry() -> "_CatalogBackedRegistry":
     ``nexus.repos.read_dual``). The legacy ``the legacy registry`` is no
     longer imported in this module.
     """
-    cat = _open_catalog_or_none()
-    return _CatalogBackedRegistry(cat=cat, registry_path=_registry_path())
+    # RDR-146 P1.2 strict split: reader for read_dual lookups, write-only
+    # daemon proxy for owner/collection mutations. The writer is created
+    # only when the catalog is initialised (reader non-None), matching the
+    # prior gate where an uninitialised catalog meant no writes at all.
+    from nexus.catalog.factory import make_catalog_writer
+    reader = _open_catalog_or_none()
+    writer = make_catalog_writer() if reader is not None else None
+    return _CatalogBackedRegistry(
+        cat=reader, writer=writer, registry_path=_registry_path(),
+    )
 
 
 def _open_catalog_or_none() -> Any:
@@ -149,16 +165,12 @@ def _open_catalog_or_none() -> Any:
     conformant collection names but tolerate its absence (e.g. fresh
     operator workstation, pytest temp dirs) use this helper.
     """
-    from nexus.catalog import Catalog
-    from nexus.config import catalog_path
+    from nexus.catalog.factory import make_catalog_reader
 
     try:
-        cat_path = catalog_path()
-        if Catalog.is_initialized(cat_path):
-            return Catalog(cat_path, cat_path / ".catalog.db")
+        return make_catalog_reader()
     except Exception:
         return None
-    return None
 
 
 @click.group()

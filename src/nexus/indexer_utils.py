@@ -330,11 +330,9 @@ def build_staleness_cache(col: object) -> StalenessCache:
     ]
     if needed_chashes:
         try:
-            from nexus.catalog import Catalog
-            from nexus.config import catalog_path
-            _cp = catalog_path()
-            if Catalog.is_initialized(_cp):
-                _cat = Catalog(_cp, _cp / ".catalog.db")
+            from nexus.catalog.factory import make_catalog_reader
+            _cat = make_catalog_reader()
+            if _cat is not None:
                 by_chash = _cat.docs_for_chashes(list(set(needed_chashes)))
                 for c, doc_ids in by_chash.items():
                     if doc_ids:

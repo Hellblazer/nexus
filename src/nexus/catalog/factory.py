@@ -54,7 +54,20 @@ def make_catalog_reader(*, config_dir: Optional[Path] = None) -> Optional[Catalo
     path = catalog_path()
     if not Catalog.is_initialized(path):
         return None
-    return Catalog(path, path / ".catalog.db", read_only=True)
+    db_path = path / ".catalog.db"
+    if not db_path.exists():
+        # Cold cache: the JSONL exists (is_initialized) but the SQLite
+        # projection has never been built, so a ``mode=ro`` open would
+        # raise "unable to open database file". Materialise the cache
+        # once via a normal (read-write) construction, then return a
+        # read-only handle over the now-existing file. In the daemon
+        # world this never fires — the daemon builds the cache when it
+        # constructs the hosted Catalog at startup, so ``.catalog.db``
+        # already exists by the time any reader runs. It only fires in
+        # no-daemon contexts (one-shot CLI, tests) where this process is
+        # the sole actor and the one-time build is safe.
+        Catalog(path, db_path)._db.close()
+    return Catalog(path, db_path, read_only=True)
 
 
 class CatalogWriter:

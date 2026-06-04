@@ -69,6 +69,7 @@ def _incorporate_sync(uuid: str) -> dict[str, Any]:
     identity back onto the DT record (Layer F). Returns a structured summary.
     """
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
     from nexus.catalog.dt_link_generator import generate_dt_links  # noqa: PLC0415
     from nexus.config import catalog_path  # noqa: PLC0415
     from nexus.dt_writeback import writeback_record  # noqa: PLC0415
@@ -78,7 +79,7 @@ def _incorporate_sync(uuid: str) -> dict[str, Any]:
         return {"error": "nexus catalog is not initialized"}
     cat = None
     try:
-        cat = Catalog(cp, cp / ".catalog.db")
+        cat = make_catalog_reader()
         entry = cat.by_source_uri(f"x-devonthink-item://{uuid}")
         if entry is None:
             return {

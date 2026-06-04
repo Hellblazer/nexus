@@ -271,14 +271,13 @@ def _iter_managed_repo_roots() -> list[Path]:
     (``nx upgrade``) treats hook refresh as best-effort.
     """
     try:
-        from nexus.catalog.catalog import Catalog  # noqa: PLC0415
-        from nexus.config import catalog_path, nexus_config_dir  # noqa: PLC0415
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
+        from nexus.config import nexus_config_dir  # noqa: PLC0415
         from nexus.repos import list_repos_dual  # noqa: PLC0415
 
-        cat_dir = catalog_path()
-        if not (cat_dir / ".catalog.db").exists():
+        cat = make_catalog_reader()
+        if cat is None:
             return []
-        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
         registry_path = nexus_config_dir() / "repos.json"
         repo_strs = list_repos_dual(cat=cat, registry_path=registry_path)
     except Exception:  # noqa: BLE001 — best-effort enumeration
