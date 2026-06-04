@@ -487,12 +487,22 @@ def get_catalog():
     ``_isolate_catalog`` fixture in ``tests/conftest.py`` provides
     a per-test default.
     """
-    from nexus.catalog import Catalog
-    from nexus.config import catalog_path
-    path = catalog_path()
-    if not Catalog.is_initialized(path):
-        return None
-    return Catalog(path, path / ".catalog.db")
+    # RDR-146 P1.2: get_catalog() is the READ funnel — it returns a
+    # read-only local Catalog (or None when uninitialised). Writers must
+    # use get_catalog_writer(); the boundary lint bans bare Catalog(...).
+    from nexus.catalog.factory import make_catalog_reader
+    return make_catalog_reader()
+
+
+def get_catalog_writer():
+    """Return a write-only catalog proxy (RDR-146 P1.2).
+
+    Routes the whitelisted write ops through the T2 daemon (the single
+    .catalog.db writer) when reachable, else a direct in-process Catalog.
+    Always returns a CatalogWriter; callers ``.close()`` it when done.
+    """
+    from nexus.catalog.factory import make_catalog_writer
+    return make_catalog_writer()
 
 
 def require_catalog():
@@ -533,7 +543,13 @@ def catalog_auto_link(doc_id: str) -> int:
         return 0
     from nexus.catalog.auto_linker import auto_link, read_link_contexts
     contexts = read_link_contexts(link_entries)
-    result = auto_link(cat, entry.tumbler, contexts)
+    # RDR-146 P1.2: auto_link writes (link_if_absent) — route through the
+    # write-only daemon proxy, not the read-only get_catalog() handle.
+    writer = get_catalog_writer()
+    try:
+        result = auto_link(writer, entry.tumbler, contexts)
+    finally:
+        writer.close()
 
     # nexus-a414: surface non-zero outcomes so operators see what's happening.
     # The all-zero case (no contexts) is already gated above. The interesting
@@ -830,14 +846,18 @@ def manifest_write_batch_hook(
             by_doc[doc_id].append((i, meta))
     if not by_doc:
         return
+    # RDR-146 P1.2: gate on the read handle (None when the catalog is
+    # uninitialised — the old skip), then route the manifest WRITES through
+    # the write-only daemon proxy. Handles are GC-released on return, as in
+    # the pre-cutover code (which likewise did not close get_catalog()).
     try:
-        cat = get_catalog()
+        if get_catalog() is None:
+            return
     except Exception:
         import structlog
         structlog.get_logger().debug("manifest_write_hook_no_catalog", exc_info=True)
         return
-    if cat is None:
-        return
+    cat = get_catalog_writer()
     for doc_id, indexed_metas in by_doc.items():
         chunks = [
             {

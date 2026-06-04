@@ -753,7 +753,8 @@ class TestManifestWriteBatchHook:
             }
         ]
 
-        with patch("nexus.mcp_infra.get_catalog", return_value=cat):
+        with patch("nexus.mcp_infra.get_catalog", return_value=cat), \
+             patch("nexus.mcp_infra.get_catalog_writer", return_value=cat):
             manifest_write_batch_hook(
                 doc_ids=["chunk-id-0"],
                 collection="code__test",
@@ -813,7 +814,8 @@ class TestManifestWriteBatchHook:
             },
         ]
 
-        with patch("nexus.mcp_infra.get_catalog", return_value=cat):
+        with patch("nexus.mcp_infra.get_catalog", return_value=cat), \
+             patch("nexus.mcp_infra.get_catalog_writer", return_value=cat):
             manifest_write_batch_hook(
                 doc_ids=["chunk-0", "chunk-1"],
                 collection="code__test",
@@ -865,6 +867,7 @@ class TestManifestWriteBatchHook:
             type(cat), "atomic_manifest_replace",
             side_effect=RuntimeError("induced manifest failure"),
         ), patch("nexus.mcp_infra.get_catalog", return_value=cat), \
+             patch("nexus.mcp_infra.get_catalog_writer", return_value=cat), \
                 capture_logs() as cap:
             # MUST NOT raise — contract is best-effort.
             manifest_write_batch_hook(
@@ -936,7 +939,8 @@ class TestManifestWriteBatchHook:
         # Batch 2: positions 3, 4.
         batch_2 = [_meta(3, "d" * 32), _meta(4, "e" * 32)]
 
-        with patch("nexus.mcp_infra.get_catalog", return_value=cat):
+        with patch("nexus.mcp_infra.get_catalog", return_value=cat), \
+             patch("nexus.mcp_infra.get_catalog_writer", return_value=cat):
             manifest_write_batch_hook(
                 doc_ids=["chunk-0", "chunk-1", "chunk-2"],
                 collection="code__test",
@@ -991,7 +995,8 @@ class TestManifestWriteBatchHook:
             {"chunk_index": 1, "chunk_text_hash": "b" * 32},
             {"chunk_index": 2, "chunk_text_hash": "c" * 32},
         ]
-        with patch("nexus.mcp_infra.get_catalog", return_value=cat):
+        with patch("nexus.mcp_infra.get_catalog", return_value=cat), \
+             patch("nexus.mcp_infra.get_catalog_writer", return_value=cat):
             manifest_write_batch_hook(
                 doc_ids=["c-0", "c-1", "c-2"],
                 collection="code__test",
@@ -1028,7 +1033,8 @@ class TestManifestWriteBatchHook:
             {"chunk_index": i, "chunk_text_hash": chr(ord("a") + i) * 64}
             for i in range(5)
         ]
-        with patch("nexus.mcp_infra.get_catalog", return_value=cat):
+        with patch("nexus.mcp_infra.get_catalog", return_value=cat), \
+             patch("nexus.mcp_infra.get_catalog_writer", return_value=cat):
             manifest_write_batch_hook(
                 doc_ids=[f"c-{i}" for i in range(5)],
                 collection="code__test",
@@ -1044,7 +1050,8 @@ class TestManifestWriteBatchHook:
             {"chunk_index": i, "chunk_text_hash": chr(ord("p") + i) * 64}
             for i in range(3)
         ]
-        with patch("nexus.mcp_infra.get_catalog", return_value=cat):
+        with patch("nexus.mcp_infra.get_catalog", return_value=cat), \
+             patch("nexus.mcp_infra.get_catalog_writer", return_value=cat):
             manifest_write_batch_hook(
                 doc_ids=[f"d-{i}" for i in range(3)],
                 collection="code__test",
