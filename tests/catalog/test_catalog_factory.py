@@ -229,3 +229,26 @@ class TestMakeCatalogAdmin:
         )
         with pytest.raises(CatalogAdminDaemonLiveError):
             make_catalog_admin()
+
+
+class TestReaderColdCache:
+    """RDR-146 P1.2 (test-validator GAP-1): make_catalog_reader materialises a
+    missing .catalog.db once before the mode=ro open (mode=ro cannot open a
+    nonexistent file), then returns a working read-only handle."""
+
+    def test_cold_cache_materialises_then_reads(self) -> None:
+        from nexus.config import catalog_path
+
+        p = catalog_path()
+        _seed_catalog(p)  # creates .git + JSONL + .catalog.db
+        (p / ".catalog.db").unlink()  # drop the SQLite cache -> cold path
+        assert not (p / ".catalog.db").exists()
+
+        reader = make_catalog_reader()
+        try:
+            assert reader is not None
+            assert (p / ".catalog.db").exists()  # materialised on the cold path
+            assert reader._read_only is True
+            assert any(reader.all_documents())  # rebuilt-from-JSONL reads work
+        finally:
+            reader._db.close()
