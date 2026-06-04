@@ -2,12 +2,14 @@
 title: "Catalog Store Behind the Existing T2 Daemon: Close the catalog.db Starvation by Routing Catalog Writes Through the Daemon That Already Serves It"
 id: RDR-146
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-03
 accepted_date: 2026-06-03
+closed_date: 2026-06-04
+post_mortem: docs/rdr/post-mortem/146-catalog-store-behind-daemon.md
 related_issues: [nexus-41otf]
 related_rdrs: [RDR-120, RDR-128, RDR-129, RDR-140]
 ---
