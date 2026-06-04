@@ -163,21 +163,76 @@ def _read_payload(path: Path, *, tier: Tier) -> Optional[Any]:
         return None
 
 
-def _resolve_t2_lease(
-    raw: dict[str, Any], path: Path
+#: The leased-registry record format version this client understands
+#: (mirrors ``service_registry._FORMAT_VERSION``; kept local to avoid a
+#: lower-level module importing the substrate).
+_LEASE_FORMAT_VERSION: int = 1
+
+
+def is_lease_record(raw: Any) -> bool:
+    """True if *raw* is a RDR-149 leased-registry record (vs a legacy
+    pid-payload). A lease record carries both ``endpoint`` and
+    ``generation``; a legacy payload carries neither."""
+    return (
+        isinstance(raw, dict)
+        and isinstance(raw.get("endpoint"), dict)
+        and "generation" in raw
+    )
+
+
+def normalize_discovery_view(raw: Any) -> dict[str, Any]:
+    """Flatten a discovery record (lease OR legacy) to a uniform view with
+    top-level ``pid`` / ``uds_path`` / ``tcp_host`` / ``tcp_port`` /
+    ``daemon_version``, applying NO liveness or freshness filter.
+
+    Reap paths must inspect even a stale / unreachable predecessor's
+    record (that is precisely what they reap), so they cannot go through
+    the freshness-filtering ``find_t*_daemon``. This pure normalizer gives
+    them the legacy-shaped view they expect from either format.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    if not is_lease_record(raw):
+        return raw  # legacy payload is already top-level
+    endpoint = raw["endpoint"]
+    return {
+        "pid": endpoint.get("pid"),
+        "uds_path": endpoint.get("uds_path"),
+        "tcp_host": endpoint.get("tcp_host"),
+        "tcp_port": endpoint.get("tcp_port"),
+        "daemon_version": raw.get("version"),
+        "generation": raw.get("generation"),
+        "owner_token": raw.get("owner_token"),
+        "status": raw.get("status", "live"),
+    }
+
+
+def _resolve_lease_record(
+    raw: dict[str, Any], path: Path, *, tier: str
 ) -> Optional[dict[str, Any]]:
-    """Resolve a RDR-149 T2 lease record to a connection dict, or ``None``.
+    """Resolve a RDR-149 lease record to a connection dict, or ``None``.
 
     Liveness is lease freshness (``now - heartbeat_epoch < ttl``), not pid:
     a dead owner's lease simply ages out, giving pid-reuse immunity. A
-    stale or shutdown-marked lease is best-effort unlinked so the next
-    lookup is fast. The endpoint fields (``uds_path`` / ``tcp_host`` /
-    ``tcp_port``) are lifted to the top level so the existing client
-    contract (``discovery_resolve`` -> connect) is unchanged; the lease
-    metadata (``generation`` / ``owner_token``) rides alongside.
+    stale, shutdown-marked, or forward-incompatible lease is rejected; an
+    expired one is best-effort unlinked so the next lookup is fast. The
+    endpoint fields (``uds_path`` / ``tcp_host`` / ``tcp_port``) are lifted
+    to the top level so the existing client contract
+    (``discovery_resolve`` -> connect) is unchanged; the lease metadata
+    (``generation`` / ``owner_token`` / ``version``) rides alongside.
+
+    Tier-parameterized so the T3 migration (RDR-149 P3) reuses it verbatim.
     """
+    fmt = raw.get("format_version", _LEASE_FORMAT_VERSION)
+    if isinstance(fmt, int) and fmt > _LEASE_FORMAT_VERSION:
+        _log.warning(
+            f"{tier}_discovery_lease_format_too_new",
+            path=str(path),
+            format_version=fmt,
+        )
+        return None
     if raw.get("status", "live") != "live":
-        _log.info("t2_discovery_shutdown_marker_seen", path=str(path))
+        _log.info(f"{tier}_discovery_shutdown_marker_seen", path=str(path))
         return None
     endpoint = raw.get("endpoint")
     heartbeat_epoch = raw.get("heartbeat_epoch")
@@ -187,20 +242,23 @@ def _resolve_t2_lease(
         or not isinstance(heartbeat_epoch, (int, float))
         or not isinstance(ttl, (int, float))
     ):
-        _log.warning("t2_discovery_lease_malformed", path=str(path))
+        _log.warning(f"{tier}_discovery_lease_malformed", path=str(path))
         return None
-    if (time.time() - heartbeat_epoch) >= ttl:
-        _log.warning("t2_discovery_lease_expired", path=str(path))
+    # Guard a backward clock step (NTP correction): a suspiciously large
+    # negative age is treated as stale rather than perpetually fresh.
+    age = time.time() - heartbeat_epoch
+    if age >= ttl or age <= -ttl:
+        _log.warning(f"{tier}_discovery_lease_expired", path=str(path), age=age)
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
-            _log.warning("t2_discovery_unlink_failed", path=str(path), error=str(exc))
+            _log.warning(
+                f"{tier}_discovery_unlink_failed", path=str(path), error=str(exc)
+            )
         return None
     result = dict(endpoint)
     result["generation"] = raw.get("generation")
     result["owner_token"] = raw.get("owner_token")
-    # The daemon version rides the lease ``version`` field; surface it so
-    # the RDR-141 version-skew arm can read the running daemon's version.
     result["version"] = raw.get("version")
     return result
 
@@ -220,8 +278,8 @@ def find_t2_daemon(config_dir: Optional[Path] = None) -> Optional[dict[str, Any]
     raw = _read_payload(path, tier="t2")
     if raw is None:
         return None
-    if isinstance(raw, dict) and "endpoint" in raw and "generation" in raw:
-        return _resolve_t2_lease(raw, path)
+    if is_lease_record(raw):
+        return _resolve_lease_record(raw, path, tier="t2")
     return _validate_discovery_payload(raw, path, tier="t2")
 
 

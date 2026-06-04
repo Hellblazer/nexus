@@ -61,9 +61,8 @@ from nexus.daemon.t3_daemon import (
     _write_discovery_atomic as _t3_write_atomic,
 )
 from nexus.daemon.service_registry import (
-    LeaseRecord,
     ServiceRegistry,
-    StaleOwnerError,
+    ServiceSupervisor,
 )
 from nexus import session as _sess
 
@@ -302,16 +301,22 @@ class T2RecordHarness(RecordHarness):
             dir=config_dir, tier="t2", clock=clock, ttl=3.0, heartbeat_interval=1.0
         )
         self._scope = str(os.getuid())
-        self._records: dict[int, LeaseRecord] = {}
+        # One ServiceSupervisor per owner, exactly as the migrated daemon
+        # uses it (publish_once + heartbeat_tick) — so the unit battery
+        # exercises the real daemon dispatch path, including the fenced-flag
+        # guard, not just ServiceRegistry in isolation.
+        self._supervisors: dict[int, ServiceSupervisor] = {}
 
     def publish(self, owner: int = _OWNER_PID) -> None:
-        rec = self._registry.publish(
+        sup = ServiceSupervisor(
+            self._registry,
             self._scope,
-            endpoint={"pid": owner, "host": "127.0.0.1", "port": 0},
             version="1.0.0",
+            endpoint_provider=lambda o=owner: {"pid": o, "host": "127.0.0.1", "port": 0},
             owner_token=f"tok-{owner}",
         )
-        self._records[owner] = rec
+        sup.publish_once()
+        self._supervisors[owner] = sup
 
     def discover(self, owner: int = _OWNER_PID) -> Optional[dict[str, Any]]:
         rec = self._registry.discover(self._scope)
@@ -327,7 +332,7 @@ class T2RecordHarness(RecordHarness):
     def simulate_ungraceful_death(self, owner: int = _OWNER_PID) -> None:
         # The owner stops heartbeating; nothing else changes. The lease ages
         # out on its own (advance_to_reap). No pid is consulted.
-        self._records.pop(owner, None)
+        self._supervisors.pop(owner, None)
 
     def advance_to_reap(self) -> None:
         self._clock.advance(3.1)  # past TTL
@@ -339,22 +344,14 @@ class T2RecordHarness(RecordHarness):
         self._registry._record_path(self._scope).unlink(missing_ok=True)
 
     def self_heal_tick(self, owner: int = _OWNER_PID) -> None:
-        rec = self._records.get(owner)
-        if rec is None:
-            return
-        try:
-            self._records[owner] = self._registry.heartbeat(rec)
-        except StaleOwnerError:
-            pass
+        sup = self._supervisors.get(owner)
+        if sup is not None:
+            sup.heartbeat_tick()  # re-stamps; self-heals a lost record
 
     def stale_reassert(self, owner: int) -> None:
-        rec = self._records.get(owner)
-        if rec is None:
-            return
-        try:
-            self._registry.heartbeat(rec)  # fenced: raises, writes nothing
-        except StaleOwnerError:
-            pass
+        sup = self._supervisors.get(owner)
+        if sup is not None:
+            sup.heartbeat_tick()  # fenced: sets sup.fenced, writes nothing
 
     def owners_in_scope(self, session_id: str) -> int:
         return 1 if self.discover() is not None else 0
@@ -545,7 +542,13 @@ class TestLifecycleConformance:
 
     def test_restart_race_fencing(self, harness: RecordHarness, tier: str) -> None:
         # A slow predecessor's delayed re-assert must NOT clobber a newer,
-        # higher-generation owner's record (CA-4).
+        # higher-generation owner's record (CA-4). For the leased tier this
+        # proves the heartbeat-fencing arm: a stale owner re-stamping its
+        # lease is rejected (StaleOwnerError) and writes nothing. The
+        # complementary guarantee — that publish can only ever INCREMENT the
+        # generation, so a stale owner cannot re-publish a lower one — is a
+        # structural property proven at the file level in
+        # test_service_registry.py (P1). Together they are CA-4.
         _maybe_xfail("restart_race_fencing", tier)
         harness.publish(_OWNER_PID)  # predecessor
         harness.publish(_SIBLING_PID)  # successor takes over (higher generation)

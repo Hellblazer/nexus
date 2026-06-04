@@ -661,13 +661,13 @@ def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # the process died, or a crash). Reporting such a file as "running"
     # masks a dead daemon (nexus-n8sbw).
     pid = _discovery_record_pid(data)
-    alive = False
-    if isinstance(pid, int) and pid > 0:
-        try:
-            os.kill(pid, 0)
-            alive = True
-        except (ProcessLookupError, PermissionError):
-            alive = False
+    # RDR-149 P2: liveness is what a CLIENT would resolve. For a lease
+    # record that is freshness (a daemon whose heartbeat loop wedged reads
+    # as down even though its pid is alive); for a legacy payload it is
+    # pid-liveness. ``find_t2_daemon`` applies the right rule per format.
+    from nexus.daemon.discovery import find_t2_daemon
+
+    alive = find_t2_daemon(config_dir) is not None
 
     # RDR-140 P4.2 (Gap 5): surface how many restarts the crash-loop guard has
     # recorded in the current window — a rising count is the crash-loop signal.

@@ -840,6 +840,14 @@ class T2Daemon:
             "tcp_port": self._tcp_port,
             "pid": os.getpid(),
         }
+        # Two flocks, two concerns (do NOT conflate when migrating T3/T1):
+        # the spawn-lock acquired above is the RDR-128 single-writer
+        # guarantee and IS T2's election (exactly one daemon opens the WAL).
+        # The primitive's per-scope election flock (t2_elect.<uid>.lock,
+        # taken briefly inside publish/heartbeat) does NOT replace it; it
+        # only serializes the generation read-increment-write so the fencing
+        # token is monotonic. Both are required. For T1 (no spawn-lock,
+        # session-scoped) the primitive's flock IS the whole election.
         self._registry = ServiceRegistry(
             dir=self._config_dir, tier="t2", clock=self._lease_clock
         )
@@ -1259,8 +1267,16 @@ class T2Daemon:
         except (OSError, ValueError):
             payload = None
         if isinstance(payload, dict):
-            addr_payload = payload
-            pid = payload.get("pid")
+            # RDR-149 P2: the addr token may be a lease record (pid +
+            # connection fields under ``endpoint``, version under
+            # ``version``). Normalize to the legacy-shaped flat view WITHOUT
+            # a freshness filter (reap must inspect even a stale predecessor)
+            # so the pid-extraction, version-aware spare, and health-ping
+            # below all keep working across the upgrade window.
+            from nexus.daemon.discovery import normalize_discovery_view
+
+            addr_payload = normalize_discovery_view(payload)
+            pid = addr_payload.get("pid")
             if isinstance(pid, int):
                 addr_pid = pid
 
