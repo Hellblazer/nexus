@@ -111,8 +111,8 @@ but it is **not** the mechanical "point sites at an already-served op" that RF-7
 implied. Reads stay direct WAL (RF-1/RF-2/RF-8 Q5). Numbered items are the
 close-time cross-walk surface.
 
-1. **Host the rich `Catalog` in the T2 daemon + expose a write-only WHITELIST of
-   16 ops [MEDIUM].** Construct one `nexus.catalog.catalog.Catalog` inside the
+1. **Host the rich `Catalog` in the T2 daemon + expose a write-only op whitelist [MEDIUM].**
+   Construct one `nexus.catalog.catalog.Catalog` inside the
    daemon (owns the single `.catalog.db` write handle *and* the JSONL append path)
    and register a **whitelist** of write ops on the dispatch table — NOT the
    default "all public methods minus a denylist." The default auto-exposes
@@ -129,8 +129,8 @@ close-time cross-walk surface.
    stays correct; if a future phase adds threaded write dispatch the lock becomes
    load-bearing — document the contract in the bead, re-gate Significant). No new
    heavy deps; daemon construction is mtime-gated (RF-8 Q4).
-2. **Atomic cutover via a typed reader/writer split [MEDIUM — the core; NOT
-   incremental].** Route the 49 `Catalog(...)` write sites (RF-4) through the
+2. **Atomic cutover via a typed reader/writer split [MEDIUM].**
+   The core, NOT incremental. Route the 49 `Catalog(...)` write sites (RF-4) through the
    daemon. **The cutover must be ATOMIC** (RF-8 Q3): the rich `Catalog` bumps the
    `owners.jsonl` `next_seq` high-water mark, so any in-process writer coexisting
    with the daemon double-allocates → duplicate tumblers + flock contention. The
