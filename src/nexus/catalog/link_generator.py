@@ -94,7 +94,7 @@ _PROSE_PATH_RE = re.compile(
 )
 
 
-def generate_rdr_filepath_links(cat: Catalog, *, new_tumblers: list[Tumbler] | None = None) -> int:
+def generate_rdr_filepath_links(cat: Catalog, *, writer: object = None, new_tumblers: list[Tumbler] | None = None) -> int:
     """Extract file paths from RDR content and link to matching code entries.
 
     Scans each RDR's file on disk for source file paths (e.g.,
@@ -142,7 +142,7 @@ def generate_rdr_filepath_links(cat: Catalog, *, new_tumblers: list[Tumbler] | N
             if code_tumbler is None:
                 continue
             try:
-                created = cat.link_if_absent(
+                created = (writer if writer is not None else cat).link_if_absent(
                     rdr.tumbler, code_tumbler, "implements",
                     created_by="filepath_extractor",
                 )
@@ -160,7 +160,7 @@ def generate_rdr_filepath_links(cat: Catalog, *, new_tumblers: list[Tumbler] | N
 
 
 def generate_prose_filepath_links(
-    cat: Catalog, *, new_tumblers: list[Tumbler] | None = None,
+    cat: Catalog, *, writer: object = None, new_tumblers: list[Tumbler] | None = None,
 ) -> int:
     """nexus-sob9: extract file paths from prose / markdown content
     and link to matching code entries.
@@ -229,7 +229,7 @@ def generate_prose_filepath_links(
             if code_tumbler is None:
                 continue
             try:
-                created = cat.link_if_absent(
+                created = (writer if writer is not None else cat).link_if_absent(
                     prose.tumbler, code_tumbler, "implements",
                     created_by="filepath_extractor",
                 )
@@ -248,7 +248,7 @@ def generate_prose_filepath_links(
 
 
 def generate_pdf_corpus_links(
-    cat: Catalog, *, new_tumblers: list[Tumbler] | None = None,
+    cat: Catalog, *, writer: object = None, new_tumblers: list[Tumbler] | None = None,
 ) -> int:
     """nexus-sob9: link PDFs that share a content_hash via ``same-as``.
 
@@ -306,7 +306,7 @@ def generate_pdf_corpus_links(
             if new_set is not None and str(member.tumbler) not in new_set:
                 continue
             try:
-                created = cat.link_if_absent(
+                created = (writer if writer is not None else cat).link_if_absent(
                     member.tumbler, anchor.tumbler, "same-as",
                     created_by="content_hash_dedup",
                 )

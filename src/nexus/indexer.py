@@ -190,21 +190,24 @@ def _set_owner_head_hash(repo: Path, head_hash: str, *, cat=None) -> None:
     migration probes + the RDR-108 D2 backfill scan). The default-
     None path preserves standalone-helper semantics.
     """
+    writer = None
     try:
-        from nexus.catalog.catalog import Catalog
-        from nexus.config import catalog_path
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
         from nexus.repo_identity import _repo_identity
 
-        if cat is None:
-            cat_dir = catalog_path()
-            if not (cat_dir / ".catalog.db").exists():
-                return
-            cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        # RDR-146 P1.2 strict split: read the owner via the reader (an
+        # explicit ``cat`` is reused as the reader), write via the
+        # write-only daemon proxy. None reader == uninitialised catalog,
+        # the prior silent-degrade path.
+        reader = cat if cat is not None else make_catalog_reader()
+        if reader is None:
+            return
+        writer = make_catalog_writer()
         _, repo_hash = _repo_identity(repo)
-        owner = cat.owner_for_repo(repo_hash)
+        owner = reader.owner_for_repo(repo_hash)
         if owner is None:
             return
-        rowcount = cat.set_owner_head_hash(owner, head_hash)
+        rowcount = writer.set_owner_head_hash(owner, head_hash)
         # RDR-137 followup SIG-9 (nexus-43qgm.9): owner_for_repo returned
         # a non-None tumbler but the UPDATE matched zero rows — the only
         # plausible cause is a concurrent owner deletion between the
@@ -223,6 +226,9 @@ def _set_owner_head_hash(repo: Path, head_hash: str, *, cat=None) -> None:
             "set_owner_head_hash_failed",
             repo=str(repo), error=str(exc),
         )
+    finally:
+        if writer is not None:
+            writer.close()
 
 
 def _repo_lock_path(repo: Path) -> Path:
@@ -305,12 +311,13 @@ def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
     repo) continues to satisfy ``T3Database``'s strict-naming guard.
     """
     from nexus.catalog import Catalog  # noqa: PLC0415
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
     from nexus.config import catalog_path  # noqa: PLC0415
 
     try:
         cat_path = catalog_path()
         if Catalog.is_initialized(cat_path):
-            cat = Catalog(cat_path, cat_path / ".catalog.db")
+            cat = make_catalog_reader()
             try:
                 return cat.collection_for_repo(repo, content_type).render()
             except LookupError:
@@ -444,6 +451,7 @@ def _migrate_legacy_collections(
     t3_db: object,
     registry: object,
     on_message: "Callable[[str], None] | None" = None,
+    writer: object = None,
 ) -> dict[str, str]:
     """RDR-103 Phase 4: rename legacy T3 collections to conformant
     names atomically on the first index after the catalog upgrade.
@@ -501,6 +509,9 @@ def _migrate_legacy_collections(
         return result
 
     cat_obj = cast(Catalog, cat)
+    # RDR-146 P1.2 strict split: reads via cat_obj, writes via w
+    # (write-only proxy; defaults to cat_obj for single-object callers).
+    w = writer if writer is not None else cat_obj
 
     # Owner-unregistered: nothing to migrate yet. The _catalog_hook
     # registers the owner later in this run; the migration happens on
@@ -557,7 +568,7 @@ def _migrate_legacy_collections(
             data_plane_succeeded = False
             try:
                 rename_collection_data_plane(
-                    legacy, conformant, t3_db=t3_db, catalog=cat_obj,
+                    legacy, conformant, t3_db=t3_db, catalog=w,
                     on_warn=lambda msg: _log.warning(
                         "phase4_migration_cascade_warn", message=msg,
                     ),
@@ -584,7 +595,7 @@ def _migrate_legacy_collections(
                 )
                 if is_conformant_collection_name(conformant):
                     segments = parse_conformant_collection_name(conformant)
-                    cat_obj.register_collection(
+                    w.register_collection(
                         conformant,
                         content_type=segments["content_type"],
                         owner_id=segments["owner_id"],
@@ -592,14 +603,14 @@ def _migrate_legacy_collections(
                         model_version=segments["model_version"],
                     )
                 else:
-                    cat_obj.register_collection(conformant)
+                    w.register_collection(conformant)
             except Exception:
                 _log.warning(
                     "phase4_register_collection_failed_after_rename",
                     old=legacy, new=conformant, exc_info=True,
                 )
             try:
-                cat_obj.supersede_collection(
+                w.supersede_collection(
                     legacy, conformant, reason="rdr-103-phase4-migration",
                 )
             except Exception:
@@ -663,6 +674,8 @@ def _catalog_hook(
     return value continue to work unchanged.
     """
     file_to_doc_id: dict[Path, str] = {}
+    reader = None
+    writer = None
     try:
         from nexus.catalog import Catalog
         from nexus.config import catalog_path
@@ -672,7 +685,15 @@ def _catalog_hook(
             _log.debug("catalog_hook_skipped", reason="catalog not initialized")
             return file_to_doc_id
 
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        # RDR-146 P1.2 strict split: reads via ``cat`` (read-only reader),
+        # writes via ``writer`` (write-only daemon proxy).
+        from nexus.catalog.factory import (  # noqa: PLC0415
+            make_catalog_reader,
+            make_catalog_writer,
+        )
+        reader = make_catalog_reader()
+        writer = make_catalog_writer()
+        cat = reader
 
         # ``_catalog_hook`` accepts an explicit ``repo_hash`` (and
         # ``repo_name``) so callers and tests can override the
@@ -693,7 +714,7 @@ def _catalog_hook(
             # uses ``git rev-parse --git-common-dir`` to resolve.
             from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415
             _name, _hash, main_repo = _repo_identity_with_main(repo)
-            owner = cat.register_owner(
+            owner = writer.register_owner(
                 name=repo_name,
                 owner_type="repo",
                 repo_hash=repo_hash,
@@ -748,7 +769,7 @@ def _catalog_hook(
             try:
                 existing = cat.by_file_path(owner, rel_path)
                 if existing is None:
-                    tumbler = cat.register(
+                    tumbler = writer.register(
                         owner=owner,
                         title=abs_path.name,
                         content_type=content_type,
@@ -761,7 +782,7 @@ def _catalog_hook(
                     new_tumblers.append(tumbler)
                     file_to_doc_id[abs_path] = str(tumbler)
                 else:
-                    cat.update(
+                    writer.update(
                         existing.tumbler,
                         head_hash=head_hash,
                         physical_collection=collection_name,
@@ -804,15 +825,15 @@ def _catalog_hook(
                 generate_prose_filepath_links,
                 generate_rdr_filepath_links,
             )
-            fp_count = generate_rdr_filepath_links(cat, new_tumblers=new_tumblers)
+            fp_count = generate_rdr_filepath_links(cat, writer=writer, new_tumblers=new_tumblers)
             # nexus-sob9: prose + pdf coverage. Run with the same
             # incremental scope so a single bulk-index pass closes
             # the prose/pdf 0% gap from the 2026-05-08 prod shakeout.
             prose_count = generate_prose_filepath_links(
-                cat, new_tumblers=new_tumblers,
+                cat, writer=writer, new_tumblers=new_tumblers,
             )
             pdf_count = generate_pdf_corpus_links(
-                cat, new_tumblers=new_tumblers,
+                cat, writer=writer, new_tumblers=new_tumblers,
             )
             links_created = fp_count + prose_count + pdf_count
             if links_created:
@@ -827,10 +848,15 @@ def _catalog_hook(
         # Housekeeping: detect and evict orphaned catalog entries
         _progress(f"  Catalog: housekeeping…\r")
         indexed_set = _indexed_relpaths(indexed_files, repo)
-        _run_housekeeping(cat, owner, indexed_set)
+        _run_housekeeping(cat, owner, indexed_set, writer=writer)
         _progress(f"  Catalog: done ({len(new_tumblers)} new, {links_created} links)\n")
     except Exception:
         _log.debug("catalog_hook_failed", exc_info=True)
+    finally:
+        if writer is not None:
+            writer.close()
+        if reader is not None:
+            reader._db.close()
     return file_to_doc_id
 
 
@@ -866,6 +892,8 @@ def _run_housekeeping(
     cat: "Catalog",
     owner: "Tumbler",
     indexed_set: set[str],
+    *,
+    writer: object = None,
 ) -> None:
     """Orphan detection with miss_count tracking and rename detection.
 
@@ -875,6 +903,9 @@ def _run_housekeeping(
       transfer links to the new entry and delete the old one.
     - If absent with no rename match, increment miss_count. Delete at threshold >= 2.
     """
+    # RDR-146 P1.2 strict split: reads via ``cat``, writes via ``w``
+    # (the write-only proxy; defaults to ``cat`` for single-object callers).
+    w = writer if writer is not None else cat
     owner_entries = cat.by_owner(owner)
 
     # Build content_hash → entry map for rename detection
@@ -890,7 +921,7 @@ def _run_housekeeping(
             if int(meta.get("miss_count", 0)) > 0:
                 meta = dict(meta)
                 meta["miss_count"] = 0
-                cat.update(entry.tumbler, meta=meta)
+                w.update(entry.tumbler, meta=meta)
             continue
 
         # Check for rename: orphan's content_hash matches a newly-indexed entry
@@ -900,18 +931,18 @@ def _run_housekeeping(
             # Transfer links from old entry to new entry
             old_links = cat.links_from(entry.tumbler)
             for lnk in old_links:
-                cat.link_if_absent(
+                w.link_if_absent(
                     new_entry.tumbler, lnk.to_tumbler, lnk.link_type,
                     created_by=lnk.created_by,
                 )
             # Also transfer incoming links
             incoming = cat.links_to(entry.tumbler)
             for lnk in incoming:
-                cat.link_if_absent(
+                w.link_if_absent(
                     lnk.from_tumbler, new_entry.tumbler, lnk.link_type,
                     created_by=lnk.created_by,
                 )
-            cat.delete_document(entry.tumbler)
+            w.delete_document(entry.tumbler)
             _log.info(
                 "housekeeping_rename_detected",
                 old_path=entry.file_path,
@@ -926,7 +957,7 @@ def _run_housekeeping(
         miss_count = int(meta.get("miss_count", 0)) + 1
 
         if miss_count >= 2:
-            cat.delete_document(entry.tumbler)
+            w.delete_document(entry.tumbler)
             _log.info(
                 "housekeeping_orphan_deleted",
                 tumbler=str(entry.tumbler),
@@ -934,7 +965,7 @@ def _run_housekeeping(
             )
         else:
             meta["miss_count"] = miss_count
-            cat.update(entry.tumbler, meta=meta)
+            w.update(entry.tumbler, meta=meta)
             _log.debug(
                 "housekeeping_miss_count_incremented",
                 tumbler=str(entry.tumbler),
@@ -1049,13 +1080,14 @@ def _build_frecency_doc_id_map(
     file_to_doc_id: dict[Path, str] = {}
     try:
         from nexus.catalog import Catalog
+        from nexus.catalog.factory import make_catalog_reader
         from nexus.config import catalog_path
         from nexus.repo_identity import _repo_identity
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return file_to_doc_id
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        cat = make_catalog_reader()
         _, repo_hash = _repo_identity(repo)
         owner = cat.owner_for_repo(repo_hash)
         if owner is None:
@@ -1131,11 +1163,8 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     # chunks).
     _cat = None
     try:
-        from nexus.catalog import Catalog
-        from nexus.config import catalog_path
-        _cp = catalog_path()
-        if Catalog.is_initialized(_cp):
-            _cat = Catalog(_cp, _cp / ".catalog.db")
+        from nexus.catalog.factory import make_catalog_reader
+        _cat = make_catalog_reader()
     except Exception:
         _log.debug("frecency_only_catalog_lookup_failed", exc_info=True)
 
@@ -2239,13 +2268,13 @@ def _run_index(
     # conformant name. Idempotent: subsequent runs are a no-op (legacy
     # absent from T3). Catalog-absent is a safe no-op (returns legacy).
     _cat: object | None = None
+    _migrate_writer = None
     try:
-        from nexus.catalog.catalog import Catalog as _Catalog
-        from nexus.config import catalog_path as _catalog_path
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 
-        _cat_path = _catalog_path()
-        if _Catalog.is_initialized(_cat_path):
-            _cat = _Catalog(_cat_path, _cat_path / ".catalog.db")
+        _cat = make_catalog_reader()
+        if _cat is not None:
+            _migrate_writer = make_catalog_writer()
 
         def _emit_migration_msg(msg: str) -> None:
             _log.info("phase4_migration", message=msg)
@@ -2254,7 +2283,7 @@ def _run_index(
 
         _migrated_names = _migrate_legacy_collections(
             repo, cat=_cat, t3_db=db, registry=registry,
-            on_message=_emit_migration_msg,
+            on_message=_emit_migration_msg, writer=_migrate_writer,
         )
         # Migration may have promoted legacy names to conformant. Pick
         # up the new names so the rest of the pipeline (collection
@@ -2272,6 +2301,12 @@ def _run_index(
         # so the operator can act, but proceed with pre-migration
         # collection names so the indexing run still completes.
         _log.warning("phase4_migration_failed", exc_info=True)
+    finally:
+        # NB: _cat (read-only) is reused by the post-index GC / prune
+        # passes later in index_repository — do NOT close it here. Only
+        # the migration writer is scoped to this block.
+        if _migrate_writer is not None:
+            _migrate_writer.close()
 
     # nexus-27u7: defer T3 collection creation to the per-content-type
     # branches that actually have files. Pre-fix the indexer
