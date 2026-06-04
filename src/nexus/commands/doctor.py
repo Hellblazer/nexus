@@ -1354,6 +1354,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     if fix_paths:
         from nexus.catalog import Catalog
         from nexus.catalog.catalog import make_relative
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
         from nexus.catalog.tumbler import Tumbler, read_owners
         from nexus.config import catalog_path
         from nexus.db import make_t3
@@ -1363,10 +1364,11 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             click.echo("Catalog not initialized — run: nx catalog setup")
             return
 
-        cat = Catalog(cat_p, cat_p / ".catalog.db")
+        reader = make_catalog_reader()
+        writer = make_catalog_writer()
 
         # Find all entries with absolute file_path
-        rows = cat._db.execute(
+        rows = reader._db.execute(
             "SELECT tumbler, file_path, physical_collection FROM documents WHERE file_path LIKE '/%'"
         ).fetchall()
 
@@ -1377,7 +1379,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         click.echo(f"Found {len(rows)} entries with absolute paths.")
 
         # Load owners for repo_root lookup
-        owners_path = cat._owners_path
+        owners_path = reader._owners_path
         # RDR-137 followup IMP-18 (nexus-43qgm.18): early exit when
         # owners.jsonl is absent. Pre-fix code degraded to owners={},
         # skipped every row in the loop, and reported "Fixed 0
@@ -1438,10 +1440,14 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                     n = t3_db.update_source_path(physical_collection, file_path, new_rel)
                 chunks_updated += n
                 # Update catalog entry
-                cat.update(tumbler, file_path=new_rel)
+                writer.update(tumbler, file_path=new_rel)
                 click.echo(f"  fixed: {tumbler_str}: {file_path} -> {new_rel} ({n} chunks)")
 
             fixed += 1
+
+        writer.close()
+        if reader is not None:
+            reader._db.close()
 
         if dry_run:
             click.echo(f"\n{fixed} entries would be fixed. Use --fix-paths without --dry-run to apply.")
