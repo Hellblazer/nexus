@@ -857,11 +857,21 @@ def manifest_write_batch_hook(
         return
     # RDR-146 P1.2: gate on the read handle (None when the catalog is
     # uninitialised — the old skip), then route the manifest WRITES through
-    # the write-only daemon proxy. Handles are GC-released on return, as in
-    # the pre-cutover code (which likewise did not close get_catalog()).
+    # the write-only daemon proxy. The read-guard handle is closed
+    # immediately: get_catalog() now opens a fresh read-only SQLite
+    # connection (a WAL read lock) on every call, and this hook fires per
+    # T3 batch in the long-lived MCP server — leaking them would accumulate
+    # read locks and contribute to the very write starvation this RDR closes.
     try:
-        if get_catalog() is None:
+        _gate = get_catalog()
+        if _gate is None:
             return
+        _gclose = getattr(_gate, "_db", None)
+        if _gclose is not None:
+            try:
+                _gclose.close()
+            except Exception:  # noqa: BLE001
+                pass
     except Exception:
         import structlog
         structlog.get_logger().debug("manifest_write_hook_no_catalog", exc_info=True)
