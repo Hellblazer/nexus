@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.9.3] - 2026-06-04
+
+Plugin version aligned with conexus 5.9.3. No plugin-side changes; the release
+is the RDR-146 catalog-behind-daemon work (#1046 starvation fix) on the nexus
+package side.
+
 ## [5.9.2] - 2026-06-03
 
 Plugin version aligned with conexus 5.9.2. The bug-fix batch (#1068 mcpb local
