@@ -372,14 +372,18 @@ def list_repos_dual(
     does not exist (post-Phase-5 install), returns the catalog set
     alone; the DEBUG event is suppressed so the steady state is silent.
     """
+    # RDR-146 P1.2: ``cat`` may be None when the catalog is uninitialised
+    # (the reader factory returns None). Fall back to the registry-only set
+    # rather than dereferencing a missing handle.
     cat_paths: set[str] = set()
-    rows = cat._db.execute(
-        "SELECT repo_root FROM owners "
-        "WHERE owner_type = 'repo' AND repo_root != ''"
-    ).fetchall()
-    for (rr,) in rows:
-        if rr:
-            cat_paths.add(rr)
+    if cat is not None:
+        rows = cat._db.execute(
+            "SELECT repo_root FROM owners "
+            "WHERE owner_type = 'repo' AND repo_root != ''"
+        ).fetchall()
+        for (rr,) in rows:
+            if rr:
+                cat_paths.add(rr)
 
     reg_paths: set[str] = set(_read_repos_json(registry_path).keys())
 

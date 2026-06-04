@@ -293,13 +293,15 @@ class TestStalenessCache:
             }],
         }
 
-        # Stub Catalog so the resolution finds the doc_id.
+        # Stub the catalog reader so the resolution finds the doc_id.
+        # RDR-146 P1.2: indexer_utils now reaches the catalog via
+        # make_catalog_reader(); patch that seam.
         fake_cat = MagicMock()
         fake_cat.docs_for_chashes.return_value = {chash: ["1.1.42"]}
-        import nexus.catalog as _cat_mod
+        import nexus.catalog.factory as _factory_mod
         with patch.object(
-            _cat_mod.Catalog, "is_initialized", return_value=True,
-        ), patch.object(_cat_mod, "Catalog", return_value=fake_cat):
+            _factory_mod, "make_catalog_reader", return_value=fake_cat,
+        ):
             cache = build_staleness_cache(col)
 
         # by_doc_id resolved from the manifest, NOT from absent metadata.

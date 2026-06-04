@@ -6,6 +6,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.9.3] - 2026-06-04
+
+Catalog moved behind the T2 daemon (RDR-146), closing the GH #1046 starvation.
+
+### Fixed
+
+- **Interactive `nx dt index` no longer starved by background indexing
+  (#1046).** `.catalog.db` was the last shared-state store still on the
+  direct-`sqlite3` model, so a foreground catalog write could wait ~30 min
+  behind a hook-spawned `nx index repo` contending on the one SQLite writer
+  lock. The T2 daemon now hosts the single rich `Catalog` (sole `.catalog.db`
+  writer) behind a write-only op whitelist; every consumer write routes
+  through it via typed `make_catalog_reader` / `make_catalog_writer` factories
+  (reads stay local), enforced by the storage-boundary lint.
+
+### Changed
+
+- **Interactive-vs-batch catalog-write fairness (RDR-146).** Inside the single
+  daemon, an interactive write (foreground `nx dt index` / `capture` /
+  `incorporate`, MCP `store_put`) opens a short priority window; the background
+  indexer polls it and yields over a bounded budget so interactive writes are
+  never starved. `nx index --on-locked=skip` now also defers a yielded catalog
+  write to the next idempotent pass; the per-repo advisory lock keeps its
+  separate two-same-repo job. New `NX_WRITE_PRIORITY=interactive|batch`
+  overrides the tty-based default.
+- **Bounded catalog graph traversal.** `_LinkOps.graph()` BFS replaced with a
+  single `WITH RECURSIVE` SQL query (depth cap, cycle detection).
+
 ## [5.9.2] - 2026-06-03
 
 Bug-fix batch from a GitHub-issue triage sweep.

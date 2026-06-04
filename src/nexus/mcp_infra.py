@@ -487,12 +487,29 @@ def get_catalog():
     ``_isolate_catalog`` fixture in ``tests/conftest.py`` provides
     a per-test default.
     """
-    from nexus.catalog import Catalog
-    from nexus.config import catalog_path
-    path = catalog_path()
-    if not Catalog.is_initialized(path):
-        return None
-    return Catalog(path, path / ".catalog.db")
+    # RDR-146 P1.2: get_catalog() is the READ funnel — it returns a
+    # read-only local Catalog (or None when uninitialised). Writers must
+    # use get_catalog_writer(); the boundary lint bans bare Catalog(...).
+    from nexus.catalog.factory import make_catalog_reader
+    return make_catalog_reader()
+
+
+def get_catalog_writer():
+    """Return a write-only catalog proxy (RDR-146 P1.2).
+
+    Routes the whitelisted write ops through the T2 daemon (the single
+    .catalog.db writer) when reachable, else a direct in-process Catalog.
+    Always returns a CatalogWriter; callers ``.close()`` it when done.
+
+    RDR-146 P2 (nexus-5p2ci.12): MCP tool invocations are user-initiated and
+    latency-sensitive (``store_put`` / ``memory promote`` register through
+    ``catalog/store_hook.py``). The MCP server process is non-tty, so the
+    ``isatty()`` fallback would misclassify these as batch and make them yield
+    to (or be deferred behind) a background index burst. Tag interactive so
+    they take fairness priority, same as the foreground ``nx dt`` writes.
+    """
+    from nexus.catalog.factory import make_catalog_writer
+    return make_catalog_writer(priority="interactive")
 
 
 def require_catalog():
@@ -516,24 +533,39 @@ def catalog_auto_link(doc_id: str) -> int:
     import structlog
     _log = structlog.get_logger()
 
+    # RDR-146 P1.2: fires on every store_put with T1 link-context entries in
+    # the long-lived MCP server. Close the read handle on every exit path so
+    # SQLite connections do not accumulate across a session.
     cat = get_catalog()
     if cat is None:
         return 0
-    t1, _ = get_t1()
-    entries = t1.list_entries()
-    link_entries = [
-        e for e in entries
-        if "link-context" in {t.strip() for t in (e.get("tags") or "").split(",")}
-    ]
-    if not link_entries:
-        return 0
-    entry = cat.by_doc_id(doc_id)
-    if entry is None:
-        _log.debug("auto_link_skip_doc_not_in_catalog", doc_id=doc_id)
-        return 0
+    try:
+        t1, _ = get_t1()
+        entries = t1.list_entries()
+        link_entries = [
+            e for e in entries
+            if "link-context" in {t.strip() for t in (e.get("tags") or "").split(",")}
+        ]
+        if not link_entries:
+            return 0
+        entry = cat.by_doc_id(doc_id)
+        if entry is None:
+            _log.debug("auto_link_skip_doc_not_in_catalog", doc_id=doc_id)
+            return 0
+    finally:
+        try:
+            cat._db.close()
+        except Exception:  # noqa: BLE001
+            pass
     from nexus.catalog.auto_linker import auto_link, read_link_contexts
     contexts = read_link_contexts(link_entries)
-    result = auto_link(cat, entry.tumbler, contexts)
+    # RDR-146 P1.2: auto_link writes (link_if_absent) — route through the
+    # write-only daemon proxy, not the read-only get_catalog() handle.
+    writer = get_catalog_writer()
+    try:
+        result = auto_link(writer, entry.tumbler, contexts)
+    finally:
+        writer.close()
 
     # nexus-a414: surface non-zero outcomes so operators see what's happening.
     # The all-zero case (no contexts) is already gated above. The interesting
@@ -830,14 +862,43 @@ def manifest_write_batch_hook(
             by_doc[doc_id].append((i, meta))
     if not by_doc:
         return
+    # RDR-146 P1.2: gate on the read handle (None when the catalog is
+    # uninitialised — the old skip), then route the manifest WRITES through
+    # the write-only daemon proxy. The read-guard handle is closed
+    # immediately: get_catalog() now opens a fresh read-only SQLite
+    # connection (a WAL read lock) on every call, and this hook fires per
+    # T3 batch in the long-lived MCP server — leaking them would accumulate
+    # read locks and contribute to the very write starvation this RDR closes.
     try:
-        cat = get_catalog()
+        _gate = get_catalog()
+        if _gate is None:
+            return
+        _gclose = getattr(_gate, "_db", None)
+        if _gclose is not None:
+            try:
+                _gclose.close()
+            except Exception:  # noqa: BLE001
+                pass
     except Exception:
         import structlog
         structlog.get_logger().debug("manifest_write_hook_no_catalog", exc_info=True)
         return
-    if cat is None:
-        return
+    # RDR-146 P1.2: this hook fires per T3 batch in the long-lived MCP
+    # server — close the writer in finally so socket / SQLite handles do
+    # not accumulate across a session.
+    cat = get_catalog_writer()
+    try:
+        _manifest_write_loop(cat, by_doc)
+    finally:
+        # Production get_catalog_writer() returns a CatalogWriter (has close);
+        # tests may patch it to a raw Catalog (no close). Guard so the hot
+        # path closes the proxy without assuming the type.
+        _close = getattr(cat, "close", None)
+        if callable(_close):
+            _close()
+
+
+def _manifest_write_loop(cat, by_doc) -> None:
     for doc_id, indexed_metas in by_doc.items():
         chunks = [
             {

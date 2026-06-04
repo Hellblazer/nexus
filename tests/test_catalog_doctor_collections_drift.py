@@ -87,7 +87,7 @@ def test_doctor_collections_drift_passes_when_aligned(t3_db, catalog, runner):
     _seed_doc(catalog, tumbler="1.1.1", collection="knowledge__delos")
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift"],
         )
@@ -102,7 +102,7 @@ def test_doctor_collections_drift_fails_on_t3_not_in_projection(
     _seed_t3(t3_db, "knowledge__delos")  # no register_collection call
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift"],
         )
@@ -118,7 +118,7 @@ def test_doctor_collections_drift_fails_on_doc_collection_not_in_projection(
     _seed_doc(catalog, tumbler="1.1.1", collection="docs__nexus-571b8edd")
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift"],
         )
@@ -147,7 +147,7 @@ def test_doctor_collections_drift_orphan_warning_with_superseded_skip(
     # superseded_by, so should NOT count as drift.
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift"],
         )
@@ -165,7 +165,7 @@ def test_doctor_collections_drift_orphan_without_supersede_fails(
     # knowledge__delos in projection but NOT in T3 and NOT superseded.
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift"],
         )
@@ -184,7 +184,7 @@ def test_doctor_collections_drift_handles_t3_failure(catalog, runner):
             raise RuntimeError("t3 unreachable")
 
     with patch("nexus.db.make_t3", return_value=_BrokenT3()), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift"],
         )
@@ -197,7 +197,7 @@ def test_doctor_collections_drift_json_payload(t3_db, catalog, runner):
     _seed_t3(t3_db, "knowledge__delos")
 
     with patch("nexus.db.make_t3", return_value=t3_db), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main, ["catalog", "doctor", "--collections-drift", "--json"],
         )

@@ -21,7 +21,7 @@ def _all_entries(cat: Catalog) -> list[CatalogEntry]:
     return cat.all_documents()
 
 
-def generate_citation_links(cat: Catalog) -> int:
+def generate_citation_links(cat: Catalog, *, writer: object = None) -> int:
     """Auto-create 'cites' links via bib ID cross-matching.
 
     Uses metadata already on catalog entries — no API calls.
@@ -37,6 +37,10 @@ def generate_citation_links(cat: Catalog) -> int:
     the correct conservative behavior, since the two ID spaces are
     distinct and we don't have a DOI bridge yet.
     """
+    # RDR-146 P1.2: reads (_all_entries -> cat.all_documents) via cat,
+    # writes (link_if_absent) via writer (defaults to cat for callers that
+    # pass a single full Catalog).
+    w = writer if writer is not None else cat
     entries = _all_entries(cat)
 
     # Build index: bib ID -> tumbler. Both backends' IDs share one map
@@ -62,7 +66,7 @@ def generate_citation_links(cat: Catalog) -> int:
         for ref_id in ref_ids:
             to_tumbler = id_to_tumbler.get(ref_id)
             if to_tumbler and to_tumbler != from_tumbler:
-                if cat.link_if_absent(from_tumbler, to_tumbler, "cites", created_by="bib_enricher"):
+                if w.link_if_absent(from_tumbler, to_tumbler, "cites", created_by="bib_enricher"):
                     count += 1
                     _log.debug("citation_link_created", from_t=str(from_tumbler), to_t=str(to_tumbler))
 
@@ -94,7 +98,7 @@ _PROSE_PATH_RE = re.compile(
 )
 
 
-def generate_rdr_filepath_links(cat: Catalog, *, new_tumblers: list[Tumbler] | None = None) -> int:
+def generate_rdr_filepath_links(cat: Catalog, *, writer: object = None, new_tumblers: list[Tumbler] | None = None) -> int:
     """Extract file paths from RDR content and link to matching code entries.
 
     Scans each RDR's file on disk for source file paths (e.g.,
@@ -142,7 +146,7 @@ def generate_rdr_filepath_links(cat: Catalog, *, new_tumblers: list[Tumbler] | N
             if code_tumbler is None:
                 continue
             try:
-                created = cat.link_if_absent(
+                created = (writer if writer is not None else cat).link_if_absent(
                     rdr.tumbler, code_tumbler, "implements",
                     created_by="filepath_extractor",
                 )
@@ -160,7 +164,7 @@ def generate_rdr_filepath_links(cat: Catalog, *, new_tumblers: list[Tumbler] | N
 
 
 def generate_prose_filepath_links(
-    cat: Catalog, *, new_tumblers: list[Tumbler] | None = None,
+    cat: Catalog, *, writer: object = None, new_tumblers: list[Tumbler] | None = None,
 ) -> int:
     """nexus-sob9: extract file paths from prose / markdown content
     and link to matching code entries.
@@ -229,7 +233,7 @@ def generate_prose_filepath_links(
             if code_tumbler is None:
                 continue
             try:
-                created = cat.link_if_absent(
+                created = (writer if writer is not None else cat).link_if_absent(
                     prose.tumbler, code_tumbler, "implements",
                     created_by="filepath_extractor",
                 )
@@ -248,7 +252,7 @@ def generate_prose_filepath_links(
 
 
 def generate_pdf_corpus_links(
-    cat: Catalog, *, new_tumblers: list[Tumbler] | None = None,
+    cat: Catalog, *, writer: object = None, new_tumblers: list[Tumbler] | None = None,
 ) -> int:
     """nexus-sob9: link PDFs that share a content_hash via ``same-as``.
 
@@ -306,7 +310,7 @@ def generate_pdf_corpus_links(
             if new_set is not None and str(member.tumbler) not in new_set:
                 continue
             try:
-                created = cat.link_if_absent(
+                created = (writer if writer is not None else cat).link_if_absent(
                     member.tumbler, anchor.tumbler, "same-as",
                     created_by="content_hash_dedup",
                 )

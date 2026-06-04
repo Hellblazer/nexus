@@ -854,12 +854,20 @@ def _run_check_storage_boundary(
 
     result = scan_repo(repo_root=repo_root)
 
+    from nexus.storage_boundary_lint import CATALOG_CONSTRUCTION_BASELINE
+
+    catalog_over_baseline = (
+        result.catalog_constructions > CATALOG_CONSTRUCTION_BASELINE
+    )
     click.echo(
-        f"Storage-boundary lint (RDR-120 P0.A / RDR-128 P0c):\n"
+        f"Storage-boundary lint (RDR-120 P0.A / RDR-128 P0c / RDR-146 P0.1):\n"
         f"  violations:                {result.total_violations}\n"
         f"  catalog-allowlist count:   {result.catalog_allowlist_count}\n"
         f"  epsilon-allow connects:    {result.epsilon_allow_connects}\n"
-        f"  T2Database constructions:  {result.t2database_constructions}"
+        f"  T2Database constructions:  {result.t2database_constructions}\n"
+        f"  catalog constructions:     {result.catalog_constructions}"
+        f" (RDR-146 baseline {CATALOG_CONSTRUCTION_BASELINE},"
+        f" cutover surface)"
     )
 
     if result.violations:
@@ -873,8 +881,19 @@ def _run_check_storage_boundary(
         catalog_allowlist_count=result.catalog_allowlist_count,
         epsilon_allow_connects=result.epsilon_allow_connects,
         t2database_constructions=result.t2database_constructions,
+        catalog_constructions=result.catalog_constructions,
+        catalog_construction_baseline=CATALOG_CONSTRUCTION_BASELINE,
         phase=phase or "unset",
     )
+
+    if catalog_over_baseline:
+        click.echo(
+            f"\nRDR-146: catalog constructions ({result.catalog_constructions}) "
+            f"exceed the baseline ({CATALOG_CONSTRUCTION_BASELINE}). A new direct "
+            f"Catalog(...) site was added in consumer code — route catalog writes "
+            f"through T2Client.catalog instead.",
+            err=True,
+        )
 
     if phase:
         try:
@@ -899,11 +918,18 @@ def _run_check_storage_boundary(
                 phase=phase,
             )
 
-    if fail_on_violation and result.violations:
-        click.echo(
-            f"\nFAIL: {result.total_violations} violation(s) found.",
-            err=True,
-        )
+    if fail_on_violation and (result.violations or catalog_over_baseline):
+        if result.violations:
+            click.echo(
+                f"\nFAIL: {result.total_violations} violation(s) found.",
+                err=True,
+            )
+        if catalog_over_baseline:
+            click.echo(
+                f"FAIL: catalog constructions ({result.catalog_constructions}) "
+                f"exceed the RDR-146 baseline ({CATALOG_CONSTRUCTION_BASELINE}).",
+                err=True,
+            )
         _sys.exit(1)
 
 
@@ -1328,6 +1354,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     if fix_paths:
         from nexus.catalog import Catalog
         from nexus.catalog.catalog import make_relative
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
         from nexus.catalog.tumbler import Tumbler, read_owners
         from nexus.config import catalog_path
         from nexus.db import make_t3
@@ -1337,10 +1364,11 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             click.echo("Catalog not initialized — run: nx catalog setup")
             return
 
-        cat = Catalog(cat_p, cat_p / ".catalog.db")
+        reader = make_catalog_reader()
+        writer = make_catalog_writer()
 
         # Find all entries with absolute file_path
-        rows = cat._db.execute(
+        rows = reader._db.execute(
             "SELECT tumbler, file_path, physical_collection FROM documents WHERE file_path LIKE '/%'"
         ).fetchall()
 
@@ -1351,7 +1379,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         click.echo(f"Found {len(rows)} entries with absolute paths.")
 
         # Load owners for repo_root lookup
-        owners_path = cat._owners_path
+        owners_path = reader._owners_path
         # RDR-137 followup IMP-18 (nexus-43qgm.18): early exit when
         # owners.jsonl is absent. Pre-fix code degraded to owners={},
         # skipped every row in the loop, and reported "Fixed 0
@@ -1412,10 +1440,14 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                     n = t3_db.update_source_path(physical_collection, file_path, new_rel)
                 chunks_updated += n
                 # Update catalog entry
-                cat.update(tumbler, file_path=new_rel)
+                writer.update(tumbler, file_path=new_rel)
                 click.echo(f"  fixed: {tumbler_str}: {file_path} -> {new_rel} ({n} chunks)")
 
             fixed += 1
+
+        writer.close()
+        if reader is not None:
+            reader._db.close()
 
         if dry_run:
             click.echo(f"\n{fixed} entries would be fixed. Use --fix-paths without --dry-run to apply.")

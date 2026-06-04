@@ -301,19 +301,28 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str]) -> None:
     Skipped silently when the catalog is uninitialised.
     """
     from nexus.catalog import Catalog
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
     from nexus.config import catalog_path
 
     cat_path = catalog_path()
     if not Catalog.is_initialized(cat_path):
         return
+    reader = None
+    writer = None
     try:
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        reader = make_catalog_reader()
+        writer = make_catalog_writer()
         for doc_id in doc_ids:
-            entry = cat.by_doc_id(doc_id)
+            entry = reader.by_doc_id(doc_id)
             if entry is not None:
-                cat.delete_document(entry.tumbler)
+                writer.delete_document(entry.tumbler)
     except Exception:
         _log.debug("catalog_reap_failed", exc_info=True, doc_ids=doc_ids)
+    finally:
+        if writer is not None:
+            writer.close()
+        if reader is not None:
+            reader._db.close()
 
 
 @store.command("delete")

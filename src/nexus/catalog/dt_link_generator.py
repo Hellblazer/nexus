@@ -45,6 +45,7 @@ def generate_dt_links(
     this: Tumbler,
     dt_uuid: str,
     *,
+    writer: object = None,
     floor: float = DEFAULT_SIMILARITY_FLOOR,
     limit: int = DEFAULT_LIMIT,
     classify: bool = False,
@@ -59,6 +60,11 @@ def generate_dt_links(
     ``dt_client`` is injectable for testing; it defaults to the real
     :mod:`nexus.mcp_client.devonthink` module.
     """
+    # RDR-146 P1.2 strict split: reads via ``cat`` (read-only reader is
+    # fine), writes via ``writer`` (write-only daemon proxy). ``writer``
+    # defaults to ``cat`` so a caller passing a single full Catalog keeps
+    # the old read+write-through-one-object behaviour.
+    w = writer if writer is not None else cat
     counts = {"similar": 0, "link": 0}
     if not dt_uuid:
         return counts
@@ -73,7 +79,7 @@ def generate_dt_links(
         entry = cat.by_source_uri(_dt_uri(n["uuid"]))
         if entry is None or entry.tumbler == this or entry.tumbler in linked:
             continue
-        if cat.link_if_absent(this, entry.tumbler, "relates", created_by="dt_similar"):
+        if w.link_if_absent(this, entry.tumbler, "relates", created_by="dt_similar"):
             counts["similar"] += 1
         linked.add(entry.tumbler)
 
@@ -82,7 +88,7 @@ def generate_dt_links(
         entry = cat.by_source_uri(_dt_uri(n["uuid"]))
         if entry is None or entry.tumbler == this or entry.tumbler in linked:
             continue
-        if cat.link_if_absent(this, entry.tumbler, "relates", created_by="dt_link"):
+        if w.link_if_absent(this, entry.tumbler, "relates", created_by="dt_link"):
             counts["link"] += 1
         linked.add(entry.tumbler)
 

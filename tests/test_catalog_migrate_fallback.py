@@ -73,7 +73,7 @@ def test_dry_run_reports_per_doc_target(catalog, runner):
     _seed_doc(catalog, tumbler="1.5.1", collection="knowledge__knowledge")
     _seed_doc(catalog, tumbler="1.7.3", collection="knowledge__knowledge")
 
-    with patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+    with patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "migrate-fallback",
@@ -100,7 +100,7 @@ def test_apply_repoints_per_doc_and_registers_targets(catalog, runner):
     _seed_doc(catalog, tumbler="1.5.1", collection="knowledge__knowledge")
     _seed_doc(catalog, tumbler="1.7.3", collection="knowledge__knowledge")
 
-    with patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+    with patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "migrate-fallback",
@@ -136,7 +136,7 @@ def test_apply_supersedes_source_when_emptied(catalog, runner):
     _seed_doc(catalog, tumbler="1.5.2", collection="knowledge__knowledge")
     # Two docs, both same owner -> single target -> source can supersede
 
-    with patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+    with patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         runner.invoke(
             main,
             ["catalog", "migrate-fallback",
@@ -157,7 +157,7 @@ def test_apply_does_not_supersede_when_multiple_targets(catalog, runner):
     _seed_doc(catalog, tumbler="1.5.1", collection="knowledge__knowledge")
     _seed_doc(catalog, tumbler="1.7.1", collection="knowledge__knowledge")
 
-    with patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+    with patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         runner.invoke(
             main,
             ["catalog", "migrate-fallback",
@@ -176,7 +176,7 @@ def test_already_conformant_collection_rejected(catalog, runner):
         embedding_model="voyage-context-3", model_version="v1",
     )
 
-    with patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+    with patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "migrate-fallback",
@@ -189,7 +189,7 @@ def test_already_conformant_collection_rejected(catalog, runner):
 
 def test_unknown_source_rejected(catalog, runner):
     """Source name not in the projection is an error (run backfill first)."""
-    with patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+    with patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "migrate-fallback",
@@ -203,7 +203,7 @@ def test_empty_source_clean_summary(catalog, runner):
     """Source with zero docs prints a clean zero summary and does nothing."""
     catalog.register_collection("knowledge__knowledge")
 
-    with patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+    with patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "migrate-fallback",
@@ -217,7 +217,7 @@ def test_no_yes_falls_back_to_report_only(catalog, runner):
     catalog.register_collection("knowledge__knowledge")
     _seed_doc(catalog, tumbler="1.5.1", collection="knowledge__knowledge")
 
-    with patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+    with patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "migrate-fallback", "knowledge__knowledge"],
@@ -245,7 +245,7 @@ def test_dry_run_aggregates_targets_in_summary_header(catalog, runner):
     _seed_doc(catalog, tumbler="1.5.2", collection="knowledge__knowledge")
     _seed_doc(catalog, tumbler="1.7.1", collection="knowledge__knowledge")
 
-    with patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+    with patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "migrate-fallback",
@@ -293,7 +293,7 @@ def test_apply_uses_batch_update_single_lock(catalog, runner):
     catalog.update_document_collection = spy_single
     catalog.update_documents_collection_batch = spy_batch
 
-    with patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+    with patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main,
             ["catalog", "migrate-fallback",
@@ -333,7 +333,7 @@ def test_owner_with_dot_replaced_by_hyphen_in_target(catalog, runner):
     catalog.register_collection("knowledge__knowledge")
     _seed_doc(catalog, tumbler="1.5.42", collection="knowledge__knowledge")
 
-    with patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+    with patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         runner.invoke(
             main,
             ["catalog", "migrate-fallback",

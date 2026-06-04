@@ -83,7 +83,7 @@ def test_backfill_registers_t3_and_catalog_collections(catalog, runner):
     _seed_document(catalog, tumbler="1.1.1", collection="docs__nexus-571b8edd")
 
     with patch("nexus.db.make_t3", return_value=fake_t3), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0, result.output
@@ -109,7 +109,7 @@ def test_backfill_marks_legacy_via_projector(catalog, runner):
     )
 
     with patch("nexus.db.make_t3", return_value=fake_t3), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0, result.output
@@ -124,7 +124,7 @@ def test_backfill_idempotent(catalog, runner):
     fake_t3 = _FakeT3(names=["knowledge__delos"])
 
     with patch("nexus.db.make_t3", return_value=fake_t3), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
         result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
@@ -141,7 +141,7 @@ def test_backfill_dry_run_no_writes(catalog, runner):
     fake_t3 = _FakeT3(names=["knowledge__delos", "docs__nexus-571b8edd"])
 
     with patch("nexus.db.make_t3", return_value=fake_t3), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main, ["catalog", "backfill-collections", "--dry-run"],
         )
@@ -159,7 +159,7 @@ def test_backfill_empty_t3_and_catalog(catalog, runner):
     fake_t3 = _FakeT3(names=[])
 
     with patch("nexus.db.make_t3", return_value=fake_t3), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0
@@ -173,7 +173,7 @@ def test_backfill_skips_already_registered(catalog, runner):
     fake_t3 = _FakeT3(names=["knowledge__delos", "docs__nexus-571b8edd"])
 
     with patch("nexus.db.make_t3", return_value=fake_t3), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0, result.output
@@ -199,7 +199,7 @@ def test_backfill_aborts_on_t3_failure(catalog, runner):
     _seed_document(catalog, tumbler="1.1.1", collection="docs__nexus-571b8edd")
 
     with patch("nexus.db.make_t3", return_value=_BrokenT3()), \
-         patch("nexus.commands.catalog._get_catalog", return_value=catalog):
+         patch("nexus.commands.catalog._get_catalog", return_value=catalog), patch("nexus.commands.catalog._get_catalog_writer", return_value=catalog):
         result = runner.invoke(
             main, ["catalog", "backfill-collections", "--no-dry-run"],
         )

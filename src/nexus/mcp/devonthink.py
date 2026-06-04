@@ -69,6 +69,10 @@ def _incorporate_sync(uuid: str) -> dict[str, Any]:
     identity back onto the DT record (Layer F). Returns a structured summary.
     """
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415
+    from nexus.catalog.factory import (  # noqa: PLC0415
+        make_catalog_reader,
+        make_catalog_writer,
+    )
     from nexus.catalog.dt_link_generator import generate_dt_links  # noqa: PLC0415
     from nexus.config import catalog_path  # noqa: PLC0415
     from nexus.dt_writeback import writeback_record  # noqa: PLC0415
@@ -77,8 +81,9 @@ def _incorporate_sync(uuid: str) -> dict[str, Any]:
     if not Catalog.is_initialized(cp):
         return {"error": "nexus catalog is not initialized"}
     cat = None
+    writer = None
     try:
-        cat = Catalog(cp, cp / ".catalog.db")
+        cat = make_catalog_reader()
         entry = cat.by_source_uri(f"x-devonthink-item://{uuid}")
         if entry is None:
             return {
@@ -87,10 +92,18 @@ def _incorporate_sync(uuid: str) -> dict[str, Any]:
                 "uuid": uuid,
             }
         tumbler = entry.tumbler
-        links = generate_dt_links(cat, tumbler, uuid)
+        # RDR-146 P1.2: generate_dt_links reads via the reader, writes
+        # (link_if_absent) via the write-only daemon proxy.
+        # RDR-146 P2 (nexus-5p2ci.12): foreground, user-initiated dt
+        # incorporate — interactive priority so the daemon prioritises it
+        # over a background ``nx index repo`` burst (the #1046 starvation).
+        writer = make_catalog_writer(priority="interactive")
+        links = generate_dt_links(cat, tumbler, uuid, writer=writer)
         writeback = writeback_record(uuid, str(tumbler))
         return {"tumbler": str(tumbler), "links": links, "writeback": writeback}
     finally:
+        if writer is not None:
+            writer.close()
         if cat is not None:
             cat._db.close()
 

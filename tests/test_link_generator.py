@@ -457,3 +457,58 @@ class TestPdfCorpusLinks:
             )
         count = generate_pdf_corpus_links(cat)
         assert count == 2
+
+
+# ── RDR-146 P1.2 review remediation (code-review C-1): generate_citation_links
+#    is mixed read+write — reads all_documents via cat, writes link_if_absent
+#    via writer. Lock the split so it can't regress to a single-object call.
+class TestCitationLinksReaderWriterSplit:
+    def _seed_citing_pair(self, tmp_path: Path) -> Path:
+        import sqlite3 as _sqlite  # noqa: F401
+        cat_dir = tmp_path / "catalog"
+        cat = Catalog.init(cat_dir)
+        owner = cat.register_owner("papers", "curator")
+        # Two papers; paper A's references include paper B's S2 id.
+        cat.register(
+            owner, "Paper B", content_type="paper", file_path="b.pdf",
+            meta={"bib_semantic_scholar_id": "S2_B"},
+        )
+        cat.register(
+            owner, "Paper A", content_type="paper", file_path="a.pdf",
+            meta={"bib_semantic_scholar_id": "S2_A", "references": ["S2_B"]},
+        )
+        cat._db.close()
+        return cat_dir
+
+    def test_reads_via_cat_writes_via_writer(self, tmp_path: Path) -> None:
+        """The read-only reader supplies all_documents; the writer takes the
+        link_if_absent. A 'cites' edge is created."""
+        cat_dir = self._seed_citing_pair(tmp_path)
+        reader = Catalog(cat_dir, cat_dir / ".catalog.db", read_only=True)
+        writer = Catalog(cat_dir, cat_dir / ".catalog.db")  # full, write-capable
+        try:
+            count = generate_citation_links(reader, writer=writer)
+            assert count == 1
+        finally:
+            reader._db.close()
+            writer._db.close()
+        # Edge is durable: a fresh read sees it.
+        check = Catalog(cat_dir, cat_dir / ".catalog.db", read_only=True)
+        try:
+            from nexus.catalog.tumbler import Tumbler
+            a = [e for e in check.all_documents() if e.title == "Paper A"][0]
+            assert any(l.link_type == "cites" for l in check.links_from(a.tumbler))
+        finally:
+            check._db.close()
+
+    def test_write_on_reader_without_writer_fails_loud(self, tmp_path: Path) -> None:
+        """Passing only a read-only reader (no writer) must fail at the write,
+        not silently no-op — the regression that the split prevents."""
+        import sqlite3
+        cat_dir = self._seed_citing_pair(tmp_path)
+        reader = Catalog(cat_dir, cat_dir / ".catalog.db", read_only=True)
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                generate_citation_links(reader)  # writer defaults to reader
+        finally:
+            reader._db.close()
