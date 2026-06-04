@@ -107,6 +107,11 @@ _DISPATCH_RETRY_SLEEPS: tuple[float, ...] = (0.1, 0.25)
 from nexus.catalog.write_priority import (  # noqa: E402
     INTERACTIVE_WINDOW_S as _INTERACTIVE_WINDOW_S,
 )
+from nexus.daemon.service_registry import (  # noqa: E402
+    LeaseRecord,
+    ServiceRegistry,
+    ServiceSupervisor,
+)
 
 #: RPC op name (under the ``catalog.*`` read namespace) the background
 #: indexer polls. In-memory only (reads the deadline flag, touches no SQLite).
@@ -736,8 +741,16 @@ class T2Daemon:
         self._spawn_lock_fd: int | None = None
         self._spawn_lock_fd_path: int | None = None
         self._stop_event: asyncio.Event | None = None
+        # RDR-149 P2 (nexus-fx77g): discovery identity now rides the leased
+        # service-registry substrate. The wall-clock used for the lease
+        # heartbeat stamp is injectable (tests pin it), distinct from the
+        # monotonic fairness clock above. The supervisor owns the lease +
+        # heartbeat; the spawn-lock above still owns single-writer (RDR-128).
+        self._lease_clock: Any = time.time
+        self._registry: ServiceRegistry | None = None
+        self._supervisor: ServiceSupervisor | None = None
+        self._lease_record: LeaseRecord | None = None
         # RDR-140 P1.3: self-healing discovery re-assert (holder only).
-        self._discovery_payload: dict[str, Any] | None = None
         self._reassert_task: asyncio.Task[None] | None = None
 
     # ── public properties ───────────────────────────────────────────────
@@ -812,16 +825,39 @@ class T2Daemon:
             self._make_handler(is_uds=False), sock=tcp_sock,
         )
 
+        # RDR-149 P2: publish the discovery identity as a lease record via
+        # the shared registry. Scope key is the uid, so the record path is
+        # the same ``t2_addr.<uid>`` the legacy payload used; only the
+        # on-disk shape (lease + generation + endpoint) and the liveness
+        # mechanism (TTL freshness, not pid) change. The endpoint carries
+        # the uds/tcp connection fields clients resolve, plus the pid for
+        # the loser-poll breadcrumb and legacy-reader compatibility.
         self._discovery_path = t2_discovery_path(self._config_dir)
-        payload = _build_discovery_payload(
-            uds_path=self._uds_path,
-            tcp_host=_T2_HOST,
-            tcp_port=self._tcp_port,
-            pid=os.getpid(),
-            daemon_version=_daemon_version(),
+        scope_key = str(os.getuid())
+        endpoint = {
+            "uds_path": str(self._uds_path),
+            "tcp_host": _T2_HOST,
+            "tcp_port": self._tcp_port,
+            "pid": os.getpid(),
+        }
+        # Two flocks, two concerns (do NOT conflate when migrating T3/T1):
+        # the spawn-lock acquired above is the RDR-128 single-writer
+        # guarantee and IS T2's election (exactly one daemon opens the WAL).
+        # The primitive's per-scope election flock (t2_elect.<uid>.lock,
+        # taken briefly inside publish/heartbeat) does NOT replace it; it
+        # only serializes the generation read-increment-write so the fencing
+        # token is monotonic. Both are required. For T1 (no spawn-lock,
+        # session-scoped) the primitive's flock IS the whole election.
+        self._registry = ServiceRegistry(
+            dir=self._config_dir, tier="t2", clock=self._lease_clock
         )
-        _write_discovery_atomic(self._discovery_path, payload)
-        self._discovery_payload = payload
+        self._supervisor = ServiceSupervisor(
+            self._registry,
+            scope_key,
+            version=_daemon_version(),
+            endpoint_provider=lambda: endpoint,
+        )
+        self._lease_record = self._supervisor.publish_once()
 
         # RDR-140 P1.3: start the self-healing re-assert task now that the
         # discovery file is written. It re-creates the file if it ever goes
@@ -852,21 +888,24 @@ class T2Daemon:
         """
         while True:
             await asyncio.sleep(_REASSERT_INTERVAL)
-            path = self._discovery_path
-            payload = self._discovery_payload
-            if path is None or payload is None:
+            supervisor = self._supervisor
+            if supervisor is None:
                 continue
             try:
-                needs_write = True
-                if path.exists():
-                    try:
-                        current = json.loads(path.read_text())
-                        needs_write = current.get("pid") != payload["pid"]
-                    except (OSError, json.JSONDecodeError):
-                        needs_write = True
-                if needs_write:
-                    _write_discovery_atomic(path, payload)
-                    _log.info("t2_daemon_discovery_reasserted", pid=payload["pid"])
+                # RDR-149 P2: one supervisor tick re-stamps the lease,
+                # which self-heals a transiently lost record at the same
+                # generation (the RDR-140 re-assert) and learns if a newer
+                # owner fenced us (cannot happen while we hold the spawn
+                # lock, but the loser-quiet-exit is logged if it ever does).
+                supervisor.heartbeat_tick()
+                if supervisor.fenced:
+                    _log.warning(
+                        "t2_daemon_discovery_fenced",
+                        pid=os.getpid(),
+                        scope=str(os.getuid()),
+                    )
+                else:
+                    self._lease_record = supervisor.record
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -929,9 +968,16 @@ class T2Daemon:
             self._tcp_server.close()
             await self._tcp_server.wait_closed()
             self._tcp_server = None
-        if self._discovery_path is not None:
-            self._discovery_path.unlink(missing_ok=True)
-            self._discovery_path = None
+        if self._registry is not None and self._lease_record is not None:
+            # RDR-149 P2: relinquish is own-record-only, so a fenced
+            # predecessor's delayed stop cannot unlink a successor's record
+            # (CA-4) — the same invariant the early-unlink ordering above
+            # protects (reassert cancelled BEFORE this).
+            self._registry.relinquish(self._lease_record)
+            self._lease_record = None
+            self._supervisor = None
+            self._registry = None
+        self._discovery_path = None
         if self._uds_path is not None and self._uds_path.exists():
             self._uds_path.unlink(missing_ok=True)
         if self._t2db is not None:
@@ -1221,8 +1267,16 @@ class T2Daemon:
         except (OSError, ValueError):
             payload = None
         if isinstance(payload, dict):
-            addr_payload = payload
-            pid = payload.get("pid")
+            # RDR-149 P2: the addr token may be a lease record (pid +
+            # connection fields under ``endpoint``, version under
+            # ``version``). Normalize to the legacy-shaped flat view WITHOUT
+            # a freshness filter (reap must inspect even a stale predecessor)
+            # so the pid-extraction, version-aware spare, and health-ping
+            # below all keep working across the upgrade window.
+            from nexus.daemon.discovery import normalize_discovery_view
+
+            addr_payload = normalize_discovery_view(payload)
+            pid = addr_payload.get("pid")
             if isinstance(pid, int):
                 addr_pid = pid
 
@@ -1414,21 +1468,26 @@ def _poll_for_winner(config_dir: Path, timeout: float) -> bool:
 
     RDR-140 P1.3 (nexus-h2oko): a spawn-lock loser calls this purely for
     observability before exiting 0. Returns True once the winner's t2_addr
-    file names a live pid AND its UDS is connectable; False if the timeout
-    elapses first. A discovered-but-unreachable target (set file, socket not
-    yet accepting) or a stale addr (dead pid) is NOT treated as a live
-    attach — we keep polling and report False at timeout rather than claim a
-    stale attach. Never raises.
+    lease resolves to a fresh owner AND its UDS is connectable; False if the
+    timeout elapses first. A discovered-but-unreachable target (set file,
+    socket not yet accepting) or a stale lease (aged past TTL) is NOT
+    treated as a live attach — we keep polling and report False at timeout
+    rather than claim a stale attach. Never raises.
+
+    RDR-149 P2: liveness is now lease freshness, not pid; resolution goes
+    through ``find_t2_daemon`` so the loser sees the winner exactly as a
+    real client would (the lease-aware reader handles both the new lease
+    record and a legacy payload mid-upgrade).
     """
+    from nexus.daemon.discovery import find_t2_daemon
+
     deadline = time.monotonic() + timeout
-    disc_path = t2_discovery_path(config_dir)
     while time.monotonic() < deadline:
         try:
-            if disc_path.exists():
-                payload = json.loads(disc_path.read_text())
-                pid = payload.get("pid")
+            payload = find_t2_daemon(config_dir)
+            if payload is not None:
                 uds = payload.get("uds_path")
-                if isinstance(pid, int) and _pid_is_alive(pid) and uds:
+                if uds:
                     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                     try:
                         sock.settimeout(0.5)
@@ -1438,7 +1497,7 @@ def _poll_for_winner(config_dir: Path, timeout: float) -> bool:
                         pass  # set-but-unreachable — keep polling.
                     finally:
                         sock.close()
-        except (OSError, json.JSONDecodeError):
+        except OSError:
             pass
         time.sleep(0.05)
     return False

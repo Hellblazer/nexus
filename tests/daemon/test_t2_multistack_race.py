@@ -130,23 +130,15 @@ def _count_daemon_events(config_dir: Path) -> dict[str, int]:
 
 
 def _live_daemon_count(config_dir: Path) -> int:
-    """0 or 1: whether the recorded discovery pid is a live process."""
-    from nexus.daemon.t2_daemon import t2_discovery_path
+    """0 or 1: whether the discovery lease resolves to a live owner.
 
-    disc = t2_discovery_path(config_dir)
-    if not disc.exists():
-        return 0
-    try:
-        pid = json.loads(disc.read_text()).get("pid")
-    except (OSError, json.JSONDecodeError):
-        return 0
-    if not isinstance(pid, int):
-        return 0
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return 0
-    return 1
+    RDR-149 P2: T2 liveness is now lease freshness, not pid. Resolve
+    through ``find_t2_daemon`` so this counts a live daemon exactly as a
+    real client would (lease TTL, with the legacy pid-payload fallback
+    intact for an in-flight upgrade)."""
+    from nexus.daemon.discovery import find_t2_daemon
+
+    return 1 if find_t2_daemon(config_dir) is not None else 0
 
 
 def _wait_for_convergence(config_dir: Path) -> None:
