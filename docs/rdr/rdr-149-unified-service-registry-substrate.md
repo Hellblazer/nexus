@@ -61,24 +61,47 @@ bugs reappearing in the tiers that never received the fix**:
 
 Three implementations means every production incident teaches exactly one tier a
 lesson the other two never receive. We do not keep finding new bugs; we keep
-rediscovering the same bug in a copy that was not patched.
+rediscovering the same bug in a copy that was not patched. The specific gaps:
 
-### Two compounding design errors underneath
+#### Gap 1: Three duplicated lifecycle implementations, no shared code
 
-1. **PID is the wrong identity / liveness primitive.** Addr files are keyed by
-   and reaped on PID. PIDs are reused; "process alive" ≠ "endpoint healthy"; and
-   the writer (MCP server) and reader (sibling shell) can resolve different PIDs
-   via the `find_immediate_claude_pid` walk. T1 specifically can key on
-   **session-id** — both the writer and reader already compute
-   `resolve_active_session_id()` identically from
-   `~/.config/nexus/current_session` (verified live: both return `c76c1995`).
-   Session-id keying deletes the pid-reuse class, the writer/reader divergence,
-   and the entire PPID-walk machinery.
-2. **No cross-tier invariant test.** Each tier's tests assert only its own
-   behaviour, so a property proven for T2 (survive restart with a discoverable
-   endpoint; survive concurrent siblings; survive version skew) is never
-   asserted for T1/T3. Missing features and regressions in T1/T3 stay invisible
-   until a human hits them in production.
+The same concern (spawn / publish / discover / liveness / reap / restart /
+self-heal / election / version-skew) is implemented three times — T1 in
+`session.py`, T2 and T3 in `daemon/`, with no cross-imports (verified). A fix in
+one tier cannot reach the others, so every hard-won correctness lesson must be
+re-learned per tier via a production incident.
+
+#### Gap 2: PID is the wrong identity / liveness primitive
+
+Addr files are keyed by and reaped on PID (`t1_addr.<claude_pid>`;
+`_is_pid_alive`). PIDs are reused; "process alive" ≠ "endpoint healthy"; and the
+writer (MCP server) and reader (sibling shell) can resolve different PIDs via the
+`find_immediate_claude_pid` walk. T1 can instead key on **session-id** — both
+sides already compute `resolve_active_session_id()` identically from
+`~/.config/nexus/current_session` (verified live: both return `c76c1995`).
+
+#### Gap 3: No self-heal re-assert in T1/T3 (only T2 has it)
+
+RDR-140's self-healing re-assert exists only in T2 (mentions: T2=17, T3=0,
+T1=0). A transient loss of a discovery/addr record therefore strands clients
+permanently in T1/T3. **#1114** is exactly this: the T1 chroma runs but its
+`t1_addr` was lost across a restart with nothing to re-assert it.
+
+#### Gap 4: No version-skew upgrade-cycle for T3 (only T2 has it)
+
+RDR-141's upgrade-time daemon cycle (`_cycle_daemon_to_current` →
+`nx daemon t2 stop`) covers only T2; T3 is never cycled. **#1112** is exactly
+this: after `nx upgrade`, the T3 daemon keeps running the stale binary until a
+manual restart.
+
+#### Gap 5: No cross-tier invariant test
+
+Each tier's tests assert only its own behaviour, so a property proven for T2
+(survive restart with a discoverable endpoint; survive concurrent siblings;
+survive version skew) is never asserted for T1/T3. Missing features and
+regressions in T1/T3 stay invisible until a human hits them in production; the
+standing `nexus-9eaz` flaky-test family is the symptom of per-tier bespoke
+concurrency harnesses rather than one model.
 
 ## Decision
 
@@ -93,10 +116,12 @@ Core primitive semantics:
 - **Lease, not PID.** The owner heartbeats (re-writes / touches the record)
   every interval; a record is live iff `lease_age < TTL`. Reaping is
   lease-expiry, not pid-death. Heartbeat *is* the RDR-140 self-heal.
-- **Fencing token.** A monotonic generation per scope; a stale restart cannot
-  clobber a newer owner's record (compare-and-set on generation). This makes
-  restart-republish atomic and immune to the "old server's shutdown unlinks the
-  new server's file" race (#1114).
+- **Fencing token.** A **flock-serialized monotonic generation** per scope (read
+  -increment-write while holding the election flock — NOT an optimistic
+  lock-free CAS; the flock is the mutex). A stale restart with a lower
+  generation cannot clobber a newer owner's record. This makes restart-republish
+  atomic and immune to the "old server's shutdown unlinks the new server's file"
+  race (#1114).
 - **Atomic publish.** Write-temp + rename, always; the record is never absent
   while a live owner exists (re-assert covers transient gaps).
 - **Scope-keyed election.** Exactly-one-owner-per-scope via a per-scope flock —
@@ -110,11 +135,26 @@ lifecycle plumbing, not a rebuild (the RDR-146 lesson; and the anti-pattern of
 the scrapped RDR-110→113 big-bang substrate chain, 9 RDRs / 67 stranded beads,
 is the cautionary precedent).
 
+Two prior open questions are resolved and locked here:
+
+- **The version-skew upgrade-cycle moves to the supervisor**, not per-tier
+  `upgrade.py` code. Reason: keeping it per-tier is exactly how #1112 happened
+  (T2 got cycled, T3 did not). A supervisor-owned `cycle_to_current(scope)`
+  means a future fourth service inherits the behaviour for free. The primitive's
+  API therefore includes a cycle entry point.
+- **T1 stays MCP-lifespan-owned and merely *consumes* the primitive** (it does
+  not become a supervised daemon). Reason: T1 is session-scoped working memory
+  whose lifecycle is already bound to the MCP server's lifespan (RDR-105 P4);
+  adding a supervised T1 daemon would be the "build a fourth thing" anti-pattern
+  RDR-146 warns against. The primitive slots into the existing four-branch
+  lifespan dispatch (`mcp/core.py:109-345`) at the publish branch only; the
+  env-inherited / isolated branches are untouched.
+
 ## Approach
 
 1. **Conformance suite first, against the current three implementations [MEDIUM].** Write one parameterized lifecycle property battery (publish→discover roundtrip; survive ungraceful kill→reap; survive restart→republish-with-new-generation; concurrent siblings converge to one owner; version-skew cycle; pid-reuse immunity) and run it against T1, T2, T3 as they exist now. The red cells are the exact, evidence-based scope; #1112 and #1114 appear here as failing tests, not speculative scope.
 2. **Extract the leased/fenced/atomic registry + supervisor primitive [LARGE].** A single module (lease record schema, atomic publish via rename, heartbeat/TTL liveness, monotonic generation fencing, scope-keyed flock election, self-heal re-assert loop). Pure, deterministic, fixed-clock-testable; no tier-specific code.
-3. **Migrate T2 onto the primitive first (the reference) [MEDIUM].** T2 has the most complete behaviour, so its migration is behaviour-preserving and the conformance suite proves no regression. Replaces the bespoke `daemon/discovery.py` + election + RDR-140 re-assert with calls into the primitive.
+3. **Migrate T2 onto the primitive first (the reference) [MEDIUM].** T2 has the most complete behaviour, so its migration is behaviour-preserving and the conformance suite proves no regression. Replaces the bespoke `daemon/discovery.py` + election + RDR-140 re-assert with calls into the primitive. **Preserve the `_t2_ensure_running_inner` interface** consumed by `mcp_infra._reassert_t2_daemon()` (`mcp_infra.py:214`, the RDR-141 version-skew arm); the migration refactors its internals to delegate to the primitive but must not change its external contract. Regression gate: the RDR-140/129/141 suites stay green (see §Test Plan).
 4. **Migrate T3 onto the primitive [MEDIUM].** T3's previously-red conformance tests (self-heal, version-skew cycle) go green = #1112 fixed structurally. Wire the upgrade-cycle to the shared supervisor so it covers T3, not just T2.
 5. **Migrate T1 onto the primitive, re-keyed on session-id [MEDIUM].** Replace `t1_addr.<claude_pid>` + `find_immediate_claude_pid` PPID-walk with a session-id-scoped lease record; T1's red conformance tests (self-heal, atomic restart-republish) go green = #1114 fixed structurally. Preserve session-scoped N-per-user semantics.
 6. **Delete the dead bespoke lifecycle code and prove zero copies remain [SMALL].** Remove the per-tier pid-sweep, PPID-walk, and per-tier election once all three route through the primitive; an inverse-grep / lint audit to zero confirms no bespoke copy survives (the RDR-146 boundary-lint-to-0 discipline).
@@ -147,12 +187,30 @@ P4). `resolve_active_session_id` precedence is `NX_SESSION_ID` env →
 `current_session` file → `None` (`session.py:82+`). So at lifespan
 `__aenter__` the session-id may not yet be resolvable on a cold top-level
 session (hook race), while `claude -p` subprocesses have it immediately via the
-inherited env. **Design constraint:** the substrate must (a) publish the lease
-lazily / re-key it in the heartbeat loop once the session resolves, not eagerly
-at spawn, and (b) when the key is still `unknown`, **refuse to publish a
-session-scoped record** (or fall back to a guaranteed-unique key) so N unknown
-sessions never collapse into one record. This is the one correctness subtlety
-of the T1 migration (Approach item 5).
+inherited env.
+
+**LOCKED re-key design (resolves the gate's RF-2 ambiguity).** A single
+protocol, not "(a) or (b)":
+
+1. At lifespan publish, the owner writes a lease record under a **transient
+   server-unique key** = the chroma `server_pid` (guaranteed unique among live
+   owners; never `unknown`; never collides across sessions). The record carries
+   the resolved-or-`None` session-id as a *field*.
+2. The heartbeat loop calls `resolve_active_session_id()` each tick. The instant
+   it resolves non-`None` and the record is still transient-keyed, the loop
+   **atomically re-keys**: under the scope election flock, write the
+   session-id-keyed record (with the incremented generation), then unlink the
+   transient record, then update the in-process discovery pointer.
+3. Readers resolve by session-id; until the re-key completes, a sibling that
+   needs T1 falls back to the transient `server_pid` key advertised via
+   `_t1_state` / env (the existing env-passdown path, RDR-105 Path A), so there
+   is no undiscoverable window.
+
+This eliminates the N-unknown-sessions collapse (no record is ever keyed
+`unknown`) and the undiscoverable window (transient key covers the gap), and the
+flock + generation make the re-key safe against a concurrent sibling. This is
+the one load-bearing correctness subtlety of the T1 migration (Approach item 5),
+tracked as **CA-3**.
 
 **RF-3 (RESOLVED): no generation primitive exists today; add a per-scope
 counter incremented under the existing election flock.** T2 elects via a
@@ -189,15 +247,16 @@ failure mode).
 
 ## Open Questions
 
-- Should T1 become a supervised process under the same supervisor as T2/T3
-  (session-scoped), or stay an MCP-lifespan-owned chroma that merely *consumes*
-  the registry primitive? (Lean: consume the primitive, do not add a daemon —
-  RDR-146 cutover-not-rebuild.)
-- Does the version-skew cycle belong in the supervisor (so upgrade cycles all
-  tiers uniformly) or remain in `upgrade.py` per tier? (Lean: supervisor, so
-  #1112's class cannot recur in a future fourth service.)
-- Is there a fourth lifecycle instance already (e.g. the aspect-worker poll, or
-  a future service) that should be in scope now to avoid a fourth copy?
+- The two prior open questions (T1-as-daemon vs consumer; version-cycle location)
+  are now **resolved and folded into §Decision**.
+- **MinerU is a confirmed fourth lifecycle instance** (`mineru.pid`,
+  `config.py:197-249`, with its own broken endpoint discovery — see RDR-148,
+  filed one day before this RDR). It is **fenced out of RDR-149** (see §Out of
+  Scope) to hold scope, with the convergence question deferred to a tracked
+  follow-on rather than left implicit.
+- Residual: should the substrate, once proven on T1/T2/T3, absorb MinerU and the
+  aspect-worker poll in a follow-on RDR? (Lean: yes, but only after the
+  three-tier conformance suite is green — adopt-by-evidence, not speculatively.)
 
 ## Out of Scope
 
@@ -210,6 +269,129 @@ failure mode).
 - The #956 stacked-review hook itself: it stays on a discovery-free
   `current_session`-keyed marker file and is unblocked by this RDR
   (`nexus-4fw0z`); it is listed as related, not a child.
+- **MinerU server lifecycle** (`mineru.pid` / `_restart_mineru_server` /
+  `get_mineru_server_url`, `config.py:197-249`): a real fourth instance of this
+  pattern, but its immediate fix is **RDR-148** (endpoint discovery +
+  subprocess-fallback resilience). Bringing it into RDR-149 now would re-create
+  the over-scope that sank RDR-110→113. It is explicitly out of scope here;
+  whether it converges onto this substrate is a deferred follow-on (see §Open
+  Questions). Decoupling it keeps RDR-149 to the three tiers whose conformance
+  failures are already evidenced (#1112, #1114).
+
+## Alternatives Considered
+
+1. **Patch each tier independently (the status quo).** Add self-heal to T1, a
+   version-cycle to T3, etc. Rejected: this *is* the recurring pattern — it has
+   produced ~10 RDRs and is what generated #1112/#1114. It does not stop the
+   class; it adds the next copy to maintain.
+2. **Make all three tiers full daemons under one supervisor.** Rejected for T1:
+   T1 is intentionally session-scoped (N per user); promoting it to a supervised
+   daemon is the "build a fourth thing" anti-pattern (RDR-146) and changes user-
+   visible semantics. The chosen design keeps T1 lifespan-owned and only shares
+   the *registry primitive*.
+3. **Big-bang rewrite of the storage/coordination substrate.** Rejected
+   explicitly: this is the scrapped RDR-110→113 chain (9 RDRs, 67 stranded
+   beads). The chosen design is a behaviour-preserving, tier-by-tier cutover
+   gated by a conformance suite.
+4. **A real service-discovery dependency (consul/etcd/zeroconf).** Rejected:
+   massive operational and packaging weight for a single-user, single-host,
+   localhost-only problem. A leased file record under `~/.config/nexus/` with
+   flock election is sufficient and matches the existing model.
+
+## Trade-offs
+
+- **Up-front cost vs. recurring cost.** One substrate + conformance suite is more
+  work than patching #1112/#1114 directly, but it amortizes against a class that
+  has cost ~10 RDRs and counting. Accepted.
+- **A shared primitive is a shared blast radius.** A bug in the primitive can
+  affect all three tiers at once, where today a bug is contained to one. Mitigated
+  by: the conformance suite (one bug surfaces as a uniform red across tiers,
+  caught pre-merge) and behaviour-preserving migration proven tier-by-tier. Net
+  positive because the *current* containment is illusory — the same bug already
+  recurs across tiers, just discovered serially in production.
+- **Lease/heartbeat adds a periodic tick** (~1 stat+read/s/owner when healthy).
+  Negligible; already paid by T2 today (RF-1).
+- **Generation fencing adds a counter to every publish.** One extra
+  read-increment-write under a flock already held for election; negligible.
+
+## Critical Assumptions
+
+- **CA-1: the conformance suite exercises the right failure modes for all three
+  tiers.** Verifiable red-first: run the suite against the current
+  implementations and confirm it reproduces #1112 (T3 stale-after-upgrade) and
+  #1114 (T1 lost-addr-no-self-heal) as failures, and that T2 passes the
+  properties T1/T3 fail. If the suite goes green against today's code, it is
+  vacuous. (Approach item 1.)
+- **CA-2: T2 migration is behaviour-preserving.** Verifiable by code inspection
+  + the existing RDR-140/129/141 suites staying green, specifically: exactly-one
+  -daemon, never-zero-daemon, loser-quiet-attach, wait-then-force reap, the
+  `stop()`-cancels-reassert-before-unlink ordering (`t2_daemon.py:917` before
+  `:935`), and the preserved `_t2_ensure_running_inner` interface consumed by
+  `mcp_infra._reassert_t2_daemon()`. (Approach item 3.)
+- **CA-3: the RF-2 transient-key → session-id re-key protocol has no
+  undiscoverable window and no N-unknown collapse.** Verifiable by a spike
+  harness against the cold-start lifespan race: assert (i) no record is ever keyed
+  `unknown`; (ii) a sibling started during the transient window discovers T1 via
+  the `server_pid`/env path; (iii) the re-key is atomic under flock with a
+  concurrent sibling racing. (Approach item 5.)
+- **CA-4: the flock-serialized generation prevents stale-restart clobber without
+  cross-process synchronization beyond the election flock.** Verifiable by a
+  restart-race harness: an old owner's delayed shutdown must not unlink or
+  overwrite a newer (higher-generation) owner's record. (Approach item 2.)
+
+Every CA above is **Verifiable** (none "Assumed"); each names its verification
+method and the Approach item that discharges it.
+
+## Test Plan
+
+- **Cross-tier conformance suite (the load-bearing artifact, Approach item 1).**
+  One parameterized property battery run against T1, T2, T3: publish→discover
+  roundtrip; survive ungraceful kill→reap; survive restart→republish with a
+  higher generation; concurrent siblings converge to exactly one owner;
+  version-skew cycle replaces the running owner; pid-reuse immunity; (T1)
+  transient-key→session-id re-key has no undiscoverable window.
+  - **Acceptance:** 100% of properties pass for a tier before that tier's
+    migration bead closes. Red-first against current code is required (CA-1).
+  - **Flakiness control:** the multi-process harness uses the RDR-140
+    convention (in-process / monkeypatched stack, shrunk interval+timeout
+    constants, `port=0`, fixed clocks) so it does not join the `nexus-9eaz`
+    flake family. Live-process variants run only under the integration marker.
+- **Regression scope (must stay green at every migration step):**
+  `tests/daemon/test_t2_*`, the RDR-140 supervisor suite, the RDR-129
+  contention suite, the RDR-141 version-skew suite, `tests/daemon/test_rdr146_
+  fairness.py`, and the T1 scratch suite.
+- **Determinism:** seeded randomness, fixed/injected clocks, `port=0`; no
+  wall-clock sleeps in unit tests (the substrate clock is injectable, mirroring
+  `T2Daemon._monotonic`).
+
+## Validation
+
+- #1112 and #1114 are validated as **fixed structurally** when their first-red
+  conformance properties (T3 version-cycle; T1 self-heal + atomic re-key) flip
+  green after the respective tier migration — not by a tier-local patch.
+- Post-migration, an inverse-grep audit shows **zero** surviving bespoke copies:
+  no `find_immediate_claude_pid` publish path, no per-tier orphan sweep, no
+  per-tier election outside the primitive (Approach item 6), mirroring the
+  RDR-146 boundary-lint-to-0 discipline.
+- A live multi-session shakeout: in a real session, a sibling shell `nx scratch
+  list` succeeds whenever the MCP T1 server is up (the #1114 reproducer), and a
+  `nx upgrade` cycles T3 as well as T2 (the #1112 reproducer).
+
+## Finalization Gate
+
+- **Pre-accept:** CA-1..CA-4 each have a named verification method and Approach
+  owner (above); Layer-1 gap structure present; research RF-1..RF-5 resolved.
+- **Phase ordering gate:** CA-1 (conformance suite red-first) and CA-4
+  (generation fencing) must be verified **before** Approach item 2 (primitive
+  extraction) begins; CA-2 before Approach item 3 closes; CA-3 before Approach
+  item 5 closes. Approach item 6 (delete bespoke code) cannot close until the
+  inverse-grep audit is zero.
+- **Per-phase review:** each migration phase (items 3/4/5) runs
+  `/conexus:phase-review-gate 149 --phase N` cross-walking these Approach items,
+  plus the stacked code-review-expert + substantive-critic pass.
+- **Close condition:** all seven Approach items implemented/traceable, the
+  conformance suite green for all three tiers, #1112/#1114 validated fixed, and
+  the bespoke-code inverse-grep at zero.
 
 ## References
 
