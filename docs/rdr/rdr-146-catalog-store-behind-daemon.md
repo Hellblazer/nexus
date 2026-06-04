@@ -153,6 +153,48 @@ close-time cross-walk surface.
    enforced*, not convention. Flip the `CATALOG_BANNED_CONSTRUCTORS` lint (baseline
    49 from P0.1) to enforce once the floor is reached; reuse the RDR-128
    epsilon-allow protocol for the documented-irreducible substrate sites (PC-3).
+
+**Implementation outcome — Phase 1 (beads `.20` host, `.5` parity, `.21` atomic
+cutover; shipped 2026-06-03/04, full suite green, lint floor 0 enforced).** The
+locked design above shipped with four recorded deviations, each forced by a
+discovery during implementation (not silent scope drift; all cross-walked at the
+phase gate):
+
+- **Whitelist 16 → 22 ops (item 1).** An AST inventory of all 49 cutover sites at
+  P1.2 start found six write ops outside the original 16, on the `nx catalog`
+  admin surface + `collection_rename`: `rename_collection`, `bulk_unlink`,
+  `update_documents_collection_batch`, `sync`, `pull`, `compact`. Per the
+  "expand + route all, no surviving direct writer" decision, all six were added to
+  the whitelist so the daemon (the single writer) runs them. Tumbler coercion is
+  **per-op** (`TUMBLER_PARAMS_BY_OP`) because `bulk_unlink`'s `from_t`/`to_t` are
+  plain-string filters that must NOT be `Tumbler.parse`d.
+- **Write dispatch serialized by an `asyncio.Lock` (item 1).** `_dispatch` holds a
+  catalog-write lock across the threaded invocation, because the dispatch thread
+  pool would otherwise let the hosted Catalog's multi-step JSONL+SQLite mutations
+  interleave (the directory flock does not serialise sibling threads). The
+  `_owner_register_lock` contract is documented but is not, by itself, sufficient.
+- **`read_only` Catalog mode (item 2).** `_ensure_consistent` (and
+  `_emit_backfilled_collection_events`) DO write at construction — confirmed. The
+  reader factory constructs `Catalog(..., read_only=True)`, which opens `mode=ro`
+  and skips both construction-time writes, so a read-local handle never re-acquires
+  the WAL writer lock against the daemon.
+- **Strict reader/writer split + `make_catalog_admin` escape hatch (item 2).** The
+  writer stays write-only and the reader read-only; mixed-use helpers
+  (`generate_*_links`, `auto_link`, `_CatalogBackedRegistry`, the `catalog.py`
+  backfills, etc.) take a `writer=` parameter (defaulting to the read `cat` for
+  single-object callers). Two deep-maintenance commands — `dedupe-owners` and
+  `undelete` — operate through low-level catalog internals (raw `_db` transactions,
+  `_append_jsonl`, the event log) that are not expressible as the 22 RPC ops; they
+  use `make_catalog_admin()`, a full local rich Catalog gated by a live-daemon
+  probe that refuses to open a second writer (run with the daemon quiesced).
+
+  A stacked code-review + substantive-critic pass caught two Criticals the green
+  suite did not prove: `generate_citation_links` was a missed mixed read+write
+  helper, and `catalog/store_hook.py` was a direct `.catalog.db` writer **invisible
+  to the lint** (it lives under the allowlisted `catalog/` prefix) firing on every
+  `store_put`. Both fixed; the lint's `catalog/`-allowlist blind spot is logged as
+  a follow-up (tighten the lint to catch write-method calls in consumer-hot-path
+  files even inside `catalog/`, or relocate `store_hook`).
 3. **Interactive-vs-batch fairness [SMALL-MEDIUM].** A foreground `nx dt index` /
    `nx dt capture` / catalog register/link must not be starved by background
    `nx index repo`. With writes serialized through the single T2 daemon (item 1),
