@@ -1650,7 +1650,16 @@ def dedupe_owners_cmd(apply: bool, as_json: bool) -> None:
     Dry-run by default. Use ``--apply`` to commit, then ``nx catalog
     sync`` to push the audit trail.
     """
-    cat = _get_catalog()
+    # Deep-maintenance: _dedupe.apply_plan mutates through the catalog's
+    # low-level event log / _db transactions, not the 22 daemon write ops
+    # (RDR-146). Use the full admin Catalog for both the plan read and the
+    # apply write.
+    from nexus.catalog.factory import make_catalog_admin
+    cat = make_catalog_admin()
+    if cat is None:
+        raise click.ClickException(
+            "Catalog not initialized. Run 'nx catalog setup' first."
+        )
     from nexus.catalog import dedupe as _dedupe
 
     plan = _dedupe.plan_dedupe(cat)
@@ -6199,7 +6208,14 @@ def undelete_cmd(backup: str) -> None:
     idempotent via INSERT OR REPLACE).
     """
     from nexus.catalog.catalog_backup import restore_documents
-    cat = _get_catalog()
+    from nexus.catalog.factory import make_catalog_admin
+    # Deep-maintenance: restore_documents re-emits events through the
+    # catalog's low-level event log, not the 22 daemon write ops (RDR-146).
+    cat = make_catalog_admin()
+    if cat is None:
+        raise click.ClickException(
+            "Catalog not initialized. Run 'nx catalog setup' first."
+        )
     if backup.startswith("/"):
         backup_path = Path(backup)
     else:

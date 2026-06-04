@@ -70,6 +70,35 @@ def make_catalog_reader(*, config_dir: Optional[Path] = None) -> Optional[Catalo
     return Catalog(path, db_path, read_only=True)
 
 
+def make_catalog_admin(*, config_dir: Optional[Path] = None) -> Optional[Catalog]:
+    """Return a FULL read+write rich Catalog for deep-maintenance commands.
+
+    RDR-146 P1.2 escape hatch. A small set of ``nx catalog`` maintenance
+    commands (``dedupe-owners``, ``undelete``) operate through low-level
+    catalog internals — raw ``_db`` transactions, ``_append_jsonl``, the
+    event log, ``_projector`` — via free functions (``dedupe.apply_plan``,
+    ``catalog_backup.restore_documents``). Those operations are NOT
+    expressible as the 22 whitelisted daemon write ops, so they cannot
+    route through :class:`CatalogWriter`, and the read-only reader rejects
+    their writes.
+
+    This factory hands back a full local rich Catalog so those commands
+    work. It is the deep-maintenance analogue of routing ``sync`` / ``pull``
+    / ``compact`` through the daemon: a rare, interactive, whole-catalog
+    operation that needs exclusive low-level access. Like those, it should
+    be run with the daemon quiesced to respect the single-writer invariant
+    (the commands warn / are interactive). Returns ``None`` when the catalog
+    is uninitialised. Constructed here (the ``catalog/`` allowlist) so the
+    boundary lint stays satisfied; callers must NOT bare-construct Catalog.
+    """
+    from nexus.config import catalog_path
+
+    path = catalog_path()
+    if not Catalog.is_initialized(path):
+        return None
+    return Catalog(path, path / ".catalog.db")
+
+
 class CatalogWriter:
     """Write-only catalog proxy exposing exactly the whitelisted ops.
 
