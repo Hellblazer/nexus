@@ -519,9 +519,23 @@ class Catalog:
         detectable via ``link_audit()``.
     """
 
-    def __init__(self, catalog_dir: Path, db_path: Path) -> None:
+    def __init__(
+        self, catalog_dir: Path, db_path: Path, *, read_only: bool = False
+    ) -> None:
+        # RDR-146 P1.2 (nexus-5p2ci.21): read-only mode for the
+        # make_catalog_reader() factory. A read-only Catalog opens its
+        # CatalogDB with ``mode=ro`` and SKIPS the two construction-time
+        # WRITES (``_emit_backfilled_collection_events`` appends to
+        # events.jsonl; ``_ensure_consistent`` may DELETE+replay-rebuild
+        # the SQLite cache). Without this, every "reader" is secretly a
+        # writer and would re-acquire the WAL writer lock against the
+        # daemon (the single writer), reintroducing the contention the
+        # cutover removes. Reads stay correct because the daemon-writer
+        # keeps the SQLite projection current on every committed write
+        # (WAL read-committed; RF-8 Q5).
+        self._read_only = read_only
         self._dir = catalog_dir
-        self._db = CatalogDB(db_path)
+        self._db = CatalogDB(db_path, read_only=read_only)
         # RDR-137 followup CRITICAL-5 (nexus-43qgm.5): within-process
         # serialization for the owner check-then-register critical
         # section. The directory flock (_acquire_lock) only serializes
@@ -613,15 +627,21 @@ class Catalog:
 
         self._last_consistency_mtime: float = self._read_consistency_marker()
 
-        # nexus-572g K7: emit CollectionCreated events for collections that
-        # were direct-INSERT backfilled by CatalogDB.__init__. Without backing
-        # events in events.jsonl, rebuild() (DELETE FROM collections + event
-        # replay) silently removes the rows. This must run AFTER _events_path
-        # is set and the lock helpers are available.
-        self._emit_backfilled_collection_events()
+        # RDR-146 P1.2: a read-only Catalog performs NO construction-time
+        # writes. Both steps below mutate (events.jsonl append; SQLite
+        # DELETE+replay rebuild), so they are skipped for readers. The
+        # daemon-hosted writer runs them; readers see the projected state.
+        if not self._read_only:
+            # nexus-572g K7: emit CollectionCreated events for collections
+            # that were direct-INSERT backfilled by CatalogDB.__init__.
+            # Without backing events in events.jsonl, rebuild() (DELETE FROM
+            # collections + event replay) silently removes the rows. This
+            # must run AFTER _events_path is set and the lock helpers are
+            # available.
+            self._emit_backfilled_collection_events()
 
-        if self._documents_path.exists():
-            self._ensure_consistent()
+            if self._documents_path.exists():
+                self._ensure_consistent()
 
     def _emit_backfilled_collection_events(self) -> None:
         """Emit CollectionCreated events for CatalogDB-backfilled collections.
