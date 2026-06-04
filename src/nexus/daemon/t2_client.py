@@ -366,12 +366,22 @@ class T2Client:
             )
         self._handshake_done = True
 
-    def call(self, op: str, *args: Any, **kwargs: Any) -> Any:
+    def call(
+        self, op: str, *args: Any, _priority: str | None = None, **kwargs: Any
+    ) -> Any:
         """Invoke *op* with positional + keyword args; return the
         decoded result. Raises ``T2ClientError`` on daemon-side
         failure, ``T2DaemonNotReachableError`` on transport failure,
         ``T2SchemaVersionMismatchError`` if the lazy handshake detects
         a client/daemon schema-version skew on first connect.
+
+        *_priority* (RDR-146 P2) is a keyword-only out-of-band frame field
+        (``"interactive"`` | ``"batch"``), NOT an op argument: when set it is
+        added to the frame as ``priority`` so the daemon's catalog-write
+        fairness window keys off it. ``None`` omits the field entirely
+        (the daemon defaults absent -> batch), keeping batch frames byte-
+        identical to the pre-P2 wire shape. The leading underscore keeps it
+        from colliding with an op's ``**fields`` / ``**meta`` keyword args.
         """
         with self._lock:
             sock = self._ensure_sock()
@@ -403,6 +413,8 @@ class T2Client:
                 "kwargs": dict(kwargs),
                 "request_id": request_id,
             }
+            if _priority is not None:
+                frame["priority"] = _priority
             try:
                 _send_frame_sync(sock, frame)
                 response = _recv_frame_sync(sock)
@@ -500,10 +512,11 @@ class _CatalogWriterProxy:
             )
         client = self._client
 
-        def _call(*args: Any, **kwargs: Any) -> Any:
+        def _call(*args: Any, _priority: str | None = None, **kwargs: Any) -> Any:
             enc_args, enc_kwargs = encode_tumbler_args(args, kwargs)
             result = client.call(
-                f"{CATALOG_WRITE_PREFIX}{method_name}", *enc_args, **enc_kwargs
+                f"{CATALOG_WRITE_PREFIX}{method_name}", *enc_args,
+                _priority=_priority, **enc_kwargs,
             )
             return decode_return(method_name, result)
 

@@ -500,9 +500,16 @@ def get_catalog_writer():
     Routes the whitelisted write ops through the T2 daemon (the single
     .catalog.db writer) when reachable, else a direct in-process Catalog.
     Always returns a CatalogWriter; callers ``.close()`` it when done.
+
+    RDR-146 P2 (nexus-5p2ci.12): MCP tool invocations are user-initiated and
+    latency-sensitive (``store_put`` / ``memory promote`` register through
+    ``catalog/store_hook.py``). The MCP server process is non-tty, so the
+    ``isatty()`` fallback would misclassify these as batch and make them yield
+    to (or be deferred behind) a background index burst. Tag interactive so
+    they take fairness priority, same as the foreground ``nx dt`` writes.
     """
     from nexus.catalog.factory import make_catalog_writer
-    return make_catalog_writer()
+    return make_catalog_writer(priority="interactive")
 
 
 def require_catalog():
