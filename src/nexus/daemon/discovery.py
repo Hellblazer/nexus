@@ -287,11 +287,20 @@ def find_t3_daemon(config_dir: Optional[Path] = None) -> Optional[dict[str, Any]
     """Return the T3 daemon's discovery payload, or ``None`` if absent /
     unreadable / stale. T3 payloads carry ``tcp_host`` + ``tcp_port`` —
     chromadb's bundled HTTP server is TCP-only.
+
+    RDR-149 P3: T3 now rides the leased registry, heartbeated by the
+    long-lived T3 supervisor (which only re-stamps the lease while its
+    chroma subprocess is alive, so a fresh lease implies a live chroma).
+    A lease record is resolved by freshness; a legacy payload (top-level
+    pid, no ``endpoint``) falls back to the pid-liveness validator for the
+    in-flight upgrade window.
     """
     path = discovery_path(config_dir, tier="t3")
     raw = _read_payload(path, tier="t3")
     if raw is None:
         return None
+    if is_lease_record(raw):
+        return _resolve_lease_record(raw, path, tier="t3")
     return _validate_discovery_payload(raw, path, tier="t3")
 
 

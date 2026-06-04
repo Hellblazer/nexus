@@ -192,6 +192,12 @@ def upgrade(dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool) -> None:
         # graceful cycle on a stale one. Best-effort, non-dry-run only.
         if not dry_run:
             _cycle_daemon_to_current()
+            # RDR-149 P3 (#1112): T3 was previously left stale across an
+            # upgrade because only T2 was cycled. The supervised T3 daemon
+            # is now cycled the same way, so an upgrade brings chroma's
+            # supervisor to the installed version too.
+            if not skip_t3:
+                _cycle_t3_daemon_to_current()
 
 
 def _quiesce_daemon() -> None:
@@ -269,6 +275,41 @@ def _cycle_daemon_to_current() -> None:
         )
     except Exception as exc:  # noqa: BLE001
         _log.warning("upgrade_daemon_cycle_failed", error=str(exc))
+
+
+def _cycle_t3_daemon_to_current() -> None:
+    """Bring a stale supervised T3 daemon to the just-installed version
+    (best-effort). RDR-149 P3 (#1112): the supervised T3 daemon froze its
+    code at start; cycle it so chroma's nexus supervisor runs current
+    code, mirroring the T2 cycle above.
+
+    Only acts on a running daemon (no auto-spawn during upgrade): a
+    ``stop`` followed by ``start`` restarts the supervisor at the new
+    version. Local mode only; a no-op when no T3 daemon is running or in
+    cloud mode. Never raises.
+    """
+    import subprocess
+
+    try:
+        from nexus.config import is_local_mode
+        from nexus.daemon.discovery import find_t3_daemon
+
+        if not is_local_mode() or find_t3_daemon() is None:
+            return  # nothing running to cycle (or cloud mode)
+
+        from nexus.commands.daemon import _resolve_nx_bin
+
+        nx = _resolve_nx_bin()
+        for verb in ("stop", "start"):
+            subprocess.run(
+                [*nx, "daemon", "t3", verb],
+                timeout=30,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("upgrade_t3_daemon_cycle_failed", error=str(exc))
 
 
 def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool = False) -> None:
