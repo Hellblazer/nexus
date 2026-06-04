@@ -65,6 +65,7 @@ def db_path(tmp_path: Path) -> Path:
 _OWNER = ("acme", "project")
 _OWNER_KW = {"repo_hash": "h1", "repo_root": "/tmp/acme", "description": "ACME"}
 _COLL = "code__acme__voyage-code-3__v1"
+_COLL2 = "code__acme__voyage-code-3__v2"
 
 
 def _run_write_scenario(writer: Any) -> dict[str, Any]:
@@ -112,6 +113,27 @@ def _run_write_scenario(writer: Any) -> dict[str, Any]:
         [(str(d1), _COLL + "-renamed")]
     )
     out["bulk_unlink_dry"] = writer.bulk_unlink(link_type="cites", dry_run=True)
+
+    # Review remediation (substantive-critic SIG-2): cover the previously
+    # untested hot/serialisation-risky ops. ensure_owner_for_repo exercises
+    # the Path-arg wire round-trip (returns a Tumbler); the manifest ops
+    # exercise list[dict] args; delete_document a Tumbler-arg + bool return;
+    # supersede_collection a no-arg-Tumbler write.
+    import pathlib as _pl
+    repo_owner = writer.ensure_owner_for_repo(
+        _pl.Path("/tmp/acme-repo"), repo_name="acme-repo"
+    )
+    out["repo_owner"] = str(repo_owner)
+
+    manifest_chunks = [
+        {"chash": "a" * 64, "position": 0, "chunk_index": 0},
+        {"chash": "b" * 64, "position": 1, "chunk_index": 1},
+    ]
+    writer.write_manifest(str(d2), manifest_chunks)
+    writer.append_manifest_chunks(str(d2), [{"chash": "c" * 64, "position": 2, "chunk_index": 2}])
+    writer.resync_chunk_count_cache(str(d2))
+
+    out["delete_document"] = writer.delete_document(d3)
     return out
 
 
@@ -142,22 +164,37 @@ def _read_state(catalog_dir: Path, results: dict[str, Any]) -> dict[str, Any]:
     try:
         e1 = cat.resolve(Tumbler.parse(results["d1"]))
         e2 = cat.resolve(Tumbler.parse(results["d2"]))
+        # d3 is deleted at the end of the scenario (delete_document); a deleted
+        # doc resolves to None, which is itself part of the parity check.
         e3 = cat.resolve(Tumbler.parse(results["d3"]))
+        # d2's manifest (write_manifest + append_manifest_chunks) is read back
+        # so the list[dict]-arg wire round-trip is parity-checked.
+        manifest = sorted(
+            (m.chash, m.position) for m in cat.get_manifest(results["d2"])
+        )
         return {
             "e1": _normalise_entry(e1),
             "e2": _normalise_entry(e2),
-            "e3": _normalise_entry(e3),
-            "high_water": _high_water(catalog_dir),
+            "e3_deleted": e3 is None,
+            "d2_manifest": manifest,
+            "high_water_owner1": _high_water_for_owner(catalog_dir, "1.1"),
         }
     finally:
         cat._db.close()
 
 
-def _high_water(catalog_dir: Path) -> int:
-    """Return the owner's current next_seq from owners.jsonl (last line wins)."""
-    lines = (catalog_dir / "owners.jsonl").read_text().splitlines()
-    last = json.loads(lines[-1])
-    return last["next_seq"]
+def _high_water_for_owner(catalog_dir: Path, owner_prefix: str) -> int:
+    """Return *owner_prefix*'s current next_seq (max across its owners.jsonl rows).
+
+    Owner-scoped (not last-line) because ensure_owner_for_repo appends a
+    SECOND owner's rows; the last line would otherwise be that owner's seq.
+    """
+    seqs = []
+    for line in (catalog_dir / "owners.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        if row.get("owner") == owner_prefix:
+            seqs.append(row["next_seq"])
+    return max(seqs)
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +270,17 @@ class TestCatalogWriteParity:
         assert proxy_results["link_if_absent_dup"] is False
         assert direct_results["link_if_absent_dup"] is False
         assert proxy_results["unlink"] == direct_results["unlink"] == 1
-        assert proxy_state["high_water"] == direct_state["high_water"] == 4
+        # owner 1.1 minted 4 docs (d1..d4 path: d1,d2,d3 + the high-water never
+        # decreases on delete), so next_seq == 4.
+        assert proxy_state["high_water_owner1"] == direct_state["high_water_owner1"] == 4
         # update() landed identically on both sides.
         assert proxy_state["e1"]["title"] == direct_state["e1"]["title"] == "Doc One Edited"
         assert proxy_state["e1"]["year"] == direct_state["e1"]["year"] == 2024
+        # P1.2 SIG-2 coverage: Path-arg op returns a Tumbler; manifest list[dict]
+        # round-tripped; delete_document removed d3 on both sides.
+        assert proxy_results["repo_owner"] == direct_results["repo_owner"] == "1.2"
+        assert proxy_results["delete_document"] is True
+        assert direct_results["delete_document"] is True
+        assert proxy_state["e3_deleted"] is True and direct_state["e3_deleted"] is True
+        assert proxy_state["d2_manifest"] == direct_state["d2_manifest"]
+        assert len(proxy_state["d2_manifest"]) == 3  # write(2) + append(1)

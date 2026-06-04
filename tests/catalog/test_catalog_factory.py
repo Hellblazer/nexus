@@ -14,7 +14,9 @@ import pytest
 
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.factory import (
+    CatalogAdminDaemonLiveError,
     CatalogWriter,
+    make_catalog_admin,
     make_catalog_reader,
     make_catalog_writer,
 )
@@ -189,3 +191,41 @@ class TestWriterDaemonRouted:
                 th.join(timeout=10)
         finally:
             shutil.rmtree(cd, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# make_catalog_admin — deep-maintenance escape hatch + single-writer guard
+# (RDR-146 P1.2 review remediation: substantive-critic SIG-1, code-review H-1)
+# ---------------------------------------------------------------------------
+
+
+class TestMakeCatalogAdmin:
+    def test_none_when_uninitialised(self) -> None:
+        assert make_catalog_admin() is None
+
+    def test_returns_full_writable_catalog_when_no_daemon(self) -> None:
+        from nexus.config import catalog_path
+
+        _seed_catalog(catalog_path())
+        # No daemon registered in the isolated config dir -> probe finds none.
+        cat = make_catalog_admin()
+        try:
+            assert cat is not None
+            assert cat._read_only is False
+            # Full write capability (low-level ops the daemon proxy can't serve).
+            owner = cat.register_owner("beta", "project", repo_hash="h2", repo_root="/tmp/beta")
+            assert isinstance(owner, Tumbler)
+        finally:
+            cat._db.close()
+
+    def test_refuses_when_daemon_live(self, monkeypatch) -> None:
+        """Single-writer guard: a live daemon must block the second writer."""
+        from nexus.config import catalog_path
+
+        _seed_catalog(catalog_path())
+        monkeypatch.setattr(
+            "nexus.daemon.discovery.find_t2_daemon",
+            lambda *a, **k: {"pid": 4242, "uds_path": "/tmp/fake.sock"},
+        )
+        with pytest.raises(CatalogAdminDaemonLiveError):
+            make_catalog_admin()

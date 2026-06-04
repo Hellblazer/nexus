@@ -21,7 +21,7 @@ def _all_entries(cat: Catalog) -> list[CatalogEntry]:
     return cat.all_documents()
 
 
-def generate_citation_links(cat: Catalog) -> int:
+def generate_citation_links(cat: Catalog, *, writer: object = None) -> int:
     """Auto-create 'cites' links via bib ID cross-matching.
 
     Uses metadata already on catalog entries — no API calls.
@@ -37,6 +37,10 @@ def generate_citation_links(cat: Catalog) -> int:
     the correct conservative behavior, since the two ID spaces are
     distinct and we don't have a DOI bridge yet.
     """
+    # RDR-146 P1.2: reads (_all_entries -> cat.all_documents) via cat,
+    # writes (link_if_absent) via writer (defaults to cat for callers that
+    # pass a single full Catalog).
+    w = writer if writer is not None else cat
     entries = _all_entries(cat)
 
     # Build index: bib ID -> tumbler. Both backends' IDs share one map
@@ -62,7 +66,7 @@ def generate_citation_links(cat: Catalog) -> int:
         for ref_id in ref_ids:
             to_tumbler = id_to_tumbler.get(ref_id)
             if to_tumbler and to_tumbler != from_tumbler:
-                if cat.link_if_absent(from_tumbler, to_tumbler, "cites", created_by="bib_enricher"):
+                if w.link_if_absent(from_tumbler, to_tumbler, "cites", created_by="bib_enricher"):
                     count += 1
                     _log.debug("citation_link_created", from_t=str(from_tumbler), to_t=str(to_tumbler))
 

@@ -317,7 +317,7 @@ def setup_cmd(remote: str) -> None:
 
     click.echo("Generating links...")
     from nexus.catalog.link_generator import generate_citation_links
-    cites = generate_citation_links(writer)
+    cites = generate_citation_links(cat, writer=writer)
     click.echo(f"  Citations: {cites}")
     writer.close()
 
@@ -1654,8 +1654,14 @@ def dedupe_owners_cmd(apply: bool, as_json: bool) -> None:
     # low-level event log / _db transactions, not the 22 daemon write ops
     # (RDR-146). Use the full admin Catalog for both the plan read and the
     # apply write.
-    from nexus.catalog.factory import make_catalog_admin
-    cat = make_catalog_admin()
+    from nexus.catalog.factory import (
+        CatalogAdminDaemonLiveError,
+        make_catalog_admin,
+    )
+    try:
+        cat = make_catalog_admin()
+    except CatalogAdminDaemonLiveError as exc:
+        raise click.ClickException(str(exc)) from exc
     if cat is None:
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' first."
@@ -3309,25 +3315,30 @@ def generate_links_cmd(citations: bool, filepath: bool, dry_run: bool) -> None:
         generate_rdr_filepath_links,
     )
 
-    total = 0
-    if citations:
-        if dry_run:
-            click.echo("Would generate citation links (dry-run mode not yet supported for link preview)")
-        else:
-            count = generate_citation_links(cat)
-            click.echo(f"Citation links created: {count}")
-            total += count
+    writer = _get_catalog_writer() if not dry_run else None
+    try:
+        total = 0
+        if citations:
+            if dry_run:
+                click.echo("Would generate citation links (dry-run mode not yet supported for link preview)")
+            else:
+                count = generate_citation_links(cat, writer=writer)
+                click.echo(f"Citation links created: {count}")
+                total += count
 
-    if filepath:
-        if dry_run:
-            click.echo("Would generate RDR filepath links (dry-run mode not yet supported for link preview)")
-        else:
-            count = generate_rdr_filepath_links(cat)
-            click.echo(f"RDR filepath links created: {count}")
-            total += count
+        if filepath:
+            if dry_run:
+                click.echo("Would generate RDR filepath links (dry-run mode not yet supported for link preview)")
+            else:
+                count = generate_rdr_filepath_links(cat, writer=writer)
+                click.echo(f"RDR filepath links created: {count}")
+                total += count
 
-    if not dry_run:
-        click.echo(f"Total links generated: {total}")
+        if not dry_run:
+            click.echo(f"Total links generated: {total}")
+    finally:
+        if writer is not None:
+            writer.close()
 
 
 @catalog.command("link-generate", hidden=True)
@@ -6208,10 +6219,16 @@ def undelete_cmd(backup: str) -> None:
     idempotent via INSERT OR REPLACE).
     """
     from nexus.catalog.catalog_backup import restore_documents
-    from nexus.catalog.factory import make_catalog_admin
+    from nexus.catalog.factory import (
+        CatalogAdminDaemonLiveError,
+        make_catalog_admin,
+    )
     # Deep-maintenance: restore_documents re-emits events through the
     # catalog's low-level event log, not the 22 daemon write ops (RDR-146).
-    cat = make_catalog_admin()
+    try:
+        cat = make_catalog_admin()
+    except CatalogAdminDaemonLiveError as exc:
+        raise click.ClickException(str(exc)) from exc
     if cat is None:
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' first."

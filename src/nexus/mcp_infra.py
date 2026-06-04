@@ -526,21 +526,30 @@ def catalog_auto_link(doc_id: str) -> int:
     import structlog
     _log = structlog.get_logger()
 
+    # RDR-146 P1.2: fires on every store_put with T1 link-context entries in
+    # the long-lived MCP server. Close the read handle on every exit path so
+    # SQLite connections do not accumulate across a session.
     cat = get_catalog()
     if cat is None:
         return 0
-    t1, _ = get_t1()
-    entries = t1.list_entries()
-    link_entries = [
-        e for e in entries
-        if "link-context" in {t.strip() for t in (e.get("tags") or "").split(",")}
-    ]
-    if not link_entries:
-        return 0
-    entry = cat.by_doc_id(doc_id)
-    if entry is None:
-        _log.debug("auto_link_skip_doc_not_in_catalog", doc_id=doc_id)
-        return 0
+    try:
+        t1, _ = get_t1()
+        entries = t1.list_entries()
+        link_entries = [
+            e for e in entries
+            if "link-context" in {t.strip() for t in (e.get("tags") or "").split(",")}
+        ]
+        if not link_entries:
+            return 0
+        entry = cat.by_doc_id(doc_id)
+        if entry is None:
+            _log.debug("auto_link_skip_doc_not_in_catalog", doc_id=doc_id)
+            return 0
+    finally:
+        try:
+            cat._db.close()
+        except Exception:  # noqa: BLE001
+            pass
     from nexus.catalog.auto_linker import auto_link, read_link_contexts
     contexts = read_link_contexts(link_entries)
     # RDR-146 P1.2: auto_link writes (link_if_absent) — route through the
@@ -857,7 +866,22 @@ def manifest_write_batch_hook(
         import structlog
         structlog.get_logger().debug("manifest_write_hook_no_catalog", exc_info=True)
         return
+    # RDR-146 P1.2: this hook fires per T3 batch in the long-lived MCP
+    # server — close the writer in finally so socket / SQLite handles do
+    # not accumulate across a session.
     cat = get_catalog_writer()
+    try:
+        _manifest_write_loop(cat, by_doc)
+    finally:
+        # Production get_catalog_writer() returns a CatalogWriter (has close);
+        # tests may patch it to a raw Catalog (no close). Guard so the hot
+        # path closes the proxy without assuming the type.
+        _close = getattr(cat, "close", None)
+        if callable(_close):
+            _close()
+
+
+def _manifest_write_loop(cat, by_doc) -> None:
     for doc_id, indexed_metas in by_doc.items():
         chunks = [
             {

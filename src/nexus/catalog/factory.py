@@ -41,6 +41,15 @@ from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
 _log = structlog.get_logger(__name__)
 
 
+class CatalogAdminDaemonLiveError(Exception):
+    """Raised by :func:`make_catalog_admin` when a T2 daemon is live.
+
+    Deep-maintenance commands need exclusive ``.catalog.db`` access; opening
+    a second full writer against a running daemon is the two-writer hazard
+    RDR-146 closes. CLI callers render the message and exit non-zero.
+    """
+
+
 def make_catalog_reader(*, config_dir: Optional[Path] = None) -> Optional[Catalog]:
     """Return a read-only local Catalog, or ``None`` when uninitialised.
 
@@ -96,6 +105,24 @@ def make_catalog_admin(*, config_dir: Optional[Path] = None) -> Optional[Catalog
     path = catalog_path()
     if not Catalog.is_initialized(path):
         return None
+    # RDR-146 P1.2 single-writer guard: a live daemon is the sole legitimate
+    # .catalog.db writer. Opening a second full writer here while the daemon
+    # is up is the two-writer contention this RDR exists to prevent. Refuse
+    # loudly with the recovery action rather than silently racing. The probe
+    # is read-only discovery (no spawn/reap).
+    try:
+        from nexus.daemon.discovery import find_t2_daemon
+        if find_t2_daemon() is not None:
+            raise CatalogAdminDaemonLiveError(
+                "A T2 daemon is running; deep-maintenance catalog commands "
+                "(dedupe-owners --apply, undelete) need exclusive .catalog.db "
+                "access. Stop it first: `nx daemon t2 stop`, run the command, "
+                "then restart with `nx daemon t2 start`."
+            )
+    except CatalogAdminDaemonLiveError:
+        raise
+    except Exception:  # noqa: BLE001 — discovery import/probe must not block
+        _log.debug("catalog_admin_daemon_probe_failed", exc_info=True)
     return Catalog(path, path / ".catalog.db")
 
 

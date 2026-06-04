@@ -385,15 +385,21 @@ def run_bib_enrichment(
             cat_path = catalog_path()
             if Catalog.is_initialized(cat_path):
                 from nexus.catalog.link_generator import generate_citation_links
-                from nexus.catalog.factory import make_catalog_writer
+                from nexus.catalog.factory import (
+                    make_catalog_reader,
+                    make_catalog_writer,
+                )
 
-                # generate_citation_links only writes (link_if_absent) through
-                # the catalog; route it through the write-only daemon proxy.
-                cat = make_catalog_writer()
+                # generate_citation_links reads (all_documents) via the reader
+                # and writes (link_if_absent) via the write-only daemon proxy.
+                reader = make_catalog_reader()
+                writer = make_catalog_writer()
                 try:
-                    link_count = generate_citation_links(cat)
+                    link_count = generate_citation_links(reader, writer=writer)
                 finally:
-                    cat.close()
+                    writer.close()
+                    if reader is not None:
+                        reader._db.close()
                 if link_count > 0:
                     click.echo(f"Auto-generated {link_count} citation links in catalog.")
         except Exception:
