@@ -9,6 +9,7 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from nexus.mcp_infra import (
+    get_catalog_writer as _get_catalog_writer,
     get_recent_search_traces as _get_recent_search_traces,
     get_t1 as _get_t1,
     get_t3 as _get_t3,
@@ -263,6 +264,7 @@ def catalog_register(
     cat, err = _require_catalog()
     if err:
         return {"error": err}
+    writer = _get_catalog_writer()
     try:
         import json as _json
         from pathlib import Path as _Path
@@ -294,7 +296,7 @@ def catalog_register(
                 best = max(candidates, key=len)
                 fp = make_relative(fp, _Path(best))
 
-        tumbler = cat.register(
+        tumbler = writer.register(
             Tumbler.parse(owner), title,
             content_type=content_type, file_path=fp,
             corpus=corpus, author=author, year=year,
@@ -305,6 +307,8 @@ def catalog_register(
         return {"tumbler": str(tumbler), "title": title}
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        writer.close()
 
 
 @mcp.tool(
@@ -325,6 +329,7 @@ def catalog_update(
     cat, err = _require_catalog()
     if err:
         return {"error": err}
+    writer = _get_catalog_writer()
     try:
         import json as _json
 
@@ -345,10 +350,12 @@ def catalog_update(
             fields["meta"] = _json.loads(meta)
         if not fields:
             return {"error": "No fields to update"}
-        cat.update(Tumbler.parse(tumbler), **fields)
+        writer.update(Tumbler.parse(tumbler), **fields)
         return {"tumbler": tumbler, "updated": list(fields.keys())}
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        writer.close()
 
 
 @mcp.tool(
@@ -374,6 +381,7 @@ def catalog_link(
     cat, err = _require_catalog()
     if err:
         return {"error": err}
+    writer = _get_catalog_writer()
     try:
         ft, err = _resolve_tumbler_mcp(cat, from_tumbler)
         if err:
@@ -381,7 +389,7 @@ def catalog_link(
         tt, err = _resolve_tumbler_mcp(cat, to_tumbler)
         if err:
             return {"error": err}
-        created = cat.link(ft, tt, link_type, created_by, from_span=from_span, to_span=to_span)
+        created = writer.link(ft, tt, link_type, created_by, from_span=from_span, to_span=to_span)
         # RDR-061 E2: log relevance correlation for the most recent search.
         # Filter chunks by collection match to the link target — a coarse
         # but cheap signal that the search likely led to this link.
@@ -408,6 +416,8 @@ def catalog_link(
         return {"from": str(ft), "to": str(tt), "type": link_type, "created": created}
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        writer.close()
 
 
 @mcp.tool(
@@ -590,6 +600,7 @@ def catalog_unlink(
     cat, err = _require_catalog()
     if err:
         return {"error": err}
+    writer = _get_catalog_writer()
     try:
         ft, err = _resolve_tumbler_mcp(cat, from_tumbler)
         if err:
@@ -597,10 +608,12 @@ def catalog_unlink(
         tt, err = _resolve_tumbler_mcp(cat, to_tumbler)
         if err:
             return {"error": err}
-        removed = cat.unlink(ft, tt, link_type)
+        removed = writer.unlink(ft, tt, link_type)
         return {"removed": removed, "from": str(ft), "to": str(tt)}
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        writer.close()
 
 
 def catalog_link_audit() -> dict:
@@ -641,9 +654,10 @@ def catalog_link_bulk(
     cat, err = _require_catalog()
     if err:
         return {"error": err}
+    writer = _get_catalog_writer()
     try:
         # Always preview first
-        preview = cat.bulk_unlink(
+        preview = writer.bulk_unlink(
             from_t=from_tumbler, to_t=to_tumbler, link_type=link_type,
             created_by=created_by, created_at_before=created_at_before,
             dry_run=True,
@@ -655,13 +669,15 @@ def catalog_link_bulk(
                 "error": f"Would remove {preview} links — set confirm_destructive=True to proceed",
                 "would_remove": preview,
             }
-        count = cat.bulk_unlink(
+        count = writer.bulk_unlink(
             from_t=from_tumbler, to_t=to_tumbler, link_type=link_type,
             created_by=created_by, created_at_before=created_at_before,
         )
         return {"removed": count}
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        writer.close()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

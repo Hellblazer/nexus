@@ -658,8 +658,8 @@ def _check_git_hooks() -> list[HealthResult]:
     # paths come from ``owners WHERE owner_type='repo'``; the registry
     # provides legacy installs that have not yet been re-indexed.
     try:
-        cat_dir = catalog_path()
-        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+        from nexus.catalog.factory import make_catalog_reader
+        cat = make_catalog_reader()
         repos = list_repos_dual(cat=cat, registry_path=registry_path)
     except Exception as exc:
         # RDR-137 followup IMP-20 (nexus-43qgm.20): exc_info=True so
@@ -1348,14 +1348,10 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
                     detail="skipped (client unavailable)",
                 ))
 
-    from nexus.catalog import Catalog
+    from nexus.catalog.factory import make_catalog_reader
     from nexus.config import catalog_path
     _cat_path = catalog_path()
-    _cat = (
-        Catalog(_cat_path, _cat_path / ".catalog.db")
-        if Catalog.is_initialized(_cat_path)
-        else None
-    )
+    _cat = make_catalog_reader()
     results.extend(_check_catalog(_cat, _cat_path))
 
     return results, _local

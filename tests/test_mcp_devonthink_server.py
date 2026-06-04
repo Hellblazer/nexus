@@ -119,6 +119,9 @@ def test_incorporate_sync_unindexed_returns_error(tmp_path, monkeypatch) -> None
     CatalogMock.is_initialized = staticmethod(lambda p: True)
     monkeypatch.setattr("nexus.catalog.catalog.Catalog", CatalogMock)
     monkeypatch.setattr("nexus.config.catalog_path", lambda: tmp_path)
+    # RDR-146 P1.2: _incorporate_sync reaches the catalog via the factory.
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda **kw: cat)
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda **kw: cat)
     called = {"links": False, "wb": False}
     monkeypatch.setattr("nexus.catalog.dt_link_generator.generate_dt_links",
                         lambda *a, **k: called.__setitem__("links", True))

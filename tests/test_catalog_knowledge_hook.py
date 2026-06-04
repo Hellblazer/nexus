@@ -136,6 +136,53 @@ class TestStorePutHook:
         rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
         assert rows[0] == 1
 
+    def test_writes_route_through_factory_writer_not_direct_catalog(
+        self, tmp_path, monkeypatch
+    ):
+        """RDR-146 P1.2 regression (test-validator GAP-2): the hook fires on
+        every store_put / memory promote in the long-lived MCP server, so it
+        must NOT open a direct .catalog.db writer (the two-writer hazard).
+        It lives under catalog/ so the boundary lint cannot catch a bare
+        Catalog() reversion; this test is the lock. Writes must route through
+        make_catalog_writer; reads through make_catalog_reader; the writer
+        handle must be closed.
+        """
+        from unittest.mock import MagicMock
+
+        from nexus.catalog.tumbler import Tumbler
+        from nexus.commands.store import _catalog_store_hook
+
+        catalog_dir, _cat = _make_catalog(tmp_path)  # real init -> is_initialized True
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        # Reader: dedup miss + no existing curator owner -> the hook takes the
+        # register_owner + register write path.
+        reader = MagicMock()
+        reader.by_doc_id.return_value = None
+        reader._db.execute.return_value.fetchone.return_value = None
+
+        writer = MagicMock()
+        writer.register_owner.return_value = Tumbler.parse("1.1")
+        writer.register.return_value = Tumbler.parse("1.1.1")
+
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_reader", lambda *a, **k: reader
+        )
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_writer", lambda *a, **k: writer
+        )
+
+        result = _catalog_store_hook(
+            title="T", doc_id="d1", collection_name="knowledge__test"
+        )
+
+        # Writes went through the factory writer, NOT a bare Catalog. A
+        # reversion to `cat = Catalog(...)` would leave these mocks uncalled.
+        writer.register_owner.assert_called_once_with("knowledge", "curator")
+        writer.register.assert_called_once()
+        assert result == "1.1.1"
+        writer.close.assert_called_once()  # hot-path handle closed in finally
+
 
 class TestEnrichHook:
     def test_updates_catalog_metadata(self, tmp_path, monkeypatch):

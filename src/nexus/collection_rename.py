@@ -115,10 +115,11 @@ def rename_collection_data_plane(
     # ── Catalog cascade (fail-open) ───────────────────────────────────────────
     try:
         if catalog is None:
-            from nexus.catalog.catalog import Catalog  # noqa: PLC0415
-            from nexus.config import catalog_path  # noqa: PLC0415
-            cat_path = catalog_path()
-            catalog = Catalog(cat_path, cat_path / ".catalog.db")
+            # RDR-146 P1.2: rename_collection is a write; route through the
+            # write-only daemon proxy. A caller-supplied ``catalog`` is used
+            # as-is (it is expected to be write-capable).
+            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415
+            catalog = make_catalog_writer()
         counts["catalog_docs"] = catalog.rename_collection(old, new)
     except Exception as exc:
         on_warn(f"warn: T2+T3 rename succeeded but catalog cascade failed: {exc}")

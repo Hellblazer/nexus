@@ -540,7 +540,7 @@ def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:
         return  # idempotent — no-op when already absent
 
     try:
-        from nexus.catalog.catalog import Catalog
+        from nexus.catalog.factory import make_catalog_reader
         from nexus.config import catalog_path
         from nexus.repo_identity import _repo_identity
         from nexus.repos import _read_repos_json, _repos_json_is_parseable
@@ -565,15 +565,14 @@ def _migrate_repos_json_to_catalog(*, dry_run: bool) -> None:
             )
             return
 
-        cat_dir = catalog_path()
-        if not (cat_dir / ".catalog.db").exists():
+        cat = make_catalog_reader()
+        if cat is None:
             click.echo(
                 f"Note: {reg_path} present but catalog not initialised; "
                 f"skipping migration (run 'nx catalog setup' first)."
             )
             return
 
-        cat = Catalog(cat_dir, cat_dir / ".catalog.db")
         disagreements: list[str] = []
         for repo_str in _read_repos_json(reg_path).keys():
             repo = Path(repo_str)
