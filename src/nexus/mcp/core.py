@@ -273,6 +273,7 @@ async def _t1_chroma_lifespan(_app: Any):
         from nexus.daemon.t1_lease import T1LeasePublisher
         from nexus.session import (
             _nexus_config_dir_at_import,
+            find_immediate_claude_pid,
             resolve_active_session_id,
         )
 
@@ -289,12 +290,17 @@ async def _t1_chroma_lifespan(_app: Any):
         registry = ServiceRegistry(
             dir=_nexus_config_dir_at_import(), tier="t1"
         )
+        # nexus-0x16i: stamp the owner's immediate Claude ancestor pid into
+        # the transient record's payload so a bare Bash sibling in the
+        # cold-start window can target this owner by the same pid it resolves
+        # for itself (RF-6). Read-path window hint only; not a scope key.
         publisher = T1LeasePublisher(
             registry=registry,
             server_pid=server_pid,
             host=host,
             port=port,
             session_resolver=resolve_active_session_id,
+            claude_pid=find_immediate_claude_pid(),
         )
         # Invariant: ``_t1_state.T1_ADDR`` (in-process readers) and
         # ``_OWNED_CHROMA["t1_lease_publisher"]`` (the shutdown relinquish

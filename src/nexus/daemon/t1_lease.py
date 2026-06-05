@@ -25,17 +25,16 @@ of the T1 migration, tracked as CA-3):
    relinquishes the transient record (which only ever unlinks the
    publisher's own ``server_pid`` key).
 3. Readers resolve by session-id (:func:`discover_t1_lease`). The transient
-   window covers the two reader classes RF-2's mechanism names: the owning
-   MCP process (via the in-process ``_t1_state`` pointer) and an
-   MCP-dispatched ``claude -p`` subprocess (via the inherited
-   ``NX_T1_HOST``/``NX_T1_PORT`` env, RDR-105 Path A). It does NOT cover a
-   Claude-Code-spawned Bash sibling that has neither the env nor a resolvable
-   session-id yet (the cold-start sliver before the SessionStart hook writes
-   ``current_session``): such a sibling gets a loud, retryable
-   ``T1ServerNotFoundError`` and succeeds once the session-id resolves. That
-   sliver is the accepted tradeoff of keying on session-id instead of the
-   unreliable ``find_immediate_claude_pid`` PPID-walk (RDR §Gap 2); it is
-   tracked, not a silent failure. No record is ever keyed ``"unknown"``.
+   window covers all three reader classes: the owning MCP process (via the
+   in-process ``_t1_state`` pointer), an MCP-dispatched ``claude -p``
+   subprocess (via the inherited ``NX_T1_HOST``/``NX_T1_PORT`` env, RDR-105
+   Path A), and a Claude-Code-spawned Bash sibling in the cold-start sliver
+   before ``current_session`` is written. The sibling has no env and no
+   resolvable session-id, so it matches the owner's transient record by the
+   owner's immediate Claude ancestor pid (stamped in the payload, resolved
+   identically on both sides via RF-6) -- session-targeted and TTL-bounded,
+   so no cross-session mis-bind (:func:`discover_t1_transient_for_claude`,
+   nexus-0x16i). No record is ever keyed ``"unknown"``.
 
 Session-scoped N-per-user semantics are preserved: the session-id IS the
 scope key (intentionally N owners per uid, one T1 server per session), so
@@ -100,6 +99,7 @@ class T1LeasePublisher:
         version: Optional[str] = None,
         session_resolver: SessionResolver,
         owner_token: Optional[str] = None,
+        claude_pid: Optional[int] = None,
     ) -> None:
         self._registry = registry
         self._server_pid = server_pid
@@ -111,6 +111,13 @@ class T1LeasePublisher:
         }
         self._version = version or _t1_version()
         self._resolver = session_resolver
+        # The owner's immediate Claude ancestor pid (RF-6). Carried in the
+        # transient record's payload ONLY so a bare Bash sibling in the
+        # cold-start window can target this owner's transient lease by the
+        # same pid it resolves for itself (nexus-0x16i). Never a scope KEY
+        # (keys stay server_pid/session-id); never a liveness probe (liveness
+        # is lease freshness). Dropped once the lease re-keys to the session.
+        self._claude_pid = claude_pid
         self._owner_token = owner_token or mint_owner_token()
         self._record: Optional[LeaseRecord] = None
         self._session_key: Optional[str] = None
@@ -145,7 +152,16 @@ class T1LeasePublisher:
         return self._fenced
 
     def _payload(self, session_id: Optional[str]) -> dict[str, Any]:
-        return {"session_id": session_id, "server_pid": self._server_pid}
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "server_pid": self._server_pid,
+        }
+        # The claude_pid window-target is only meaningful while transient
+        # (no session-id resolves yet); once session-keyed, readers resolve
+        # by session-id and the hint is dead weight.
+        if session_id is None and self._claude_pid is not None:
+            payload["claude_pid"] = self._claude_pid
+        return payload
 
     def publish(self) -> LeaseRecord:
         """Claim the scope, keying on the session-id if it already resolves,
@@ -292,3 +308,52 @@ def discover_t1_lease(
     if not isinstance(host, str) or not isinstance(port, (int, float)):
         return None
     return host, int(port)
+
+
+def discover_t1_transient_for_claude(
+    claude_pid: int,
+    *,
+    config_dir: Path,
+    clock: Clock = time.time,
+) -> Optional[tuple[str, int]]:
+    """Cold-start transient-window fallback for a bare Bash sibling (nexus-0x16i).
+
+    During the sliver before the SessionStart hook writes ``current_session``,
+    a sibling resolves no session-id, so :func:`discover_t1_lease` cannot find
+    the owner. The owner's TRANSIENT record (still server_pid-keyed, no
+    session-id) carries the owner's immediate Claude ancestor pid in its
+    payload; both sides compute that pid identically (RF-6). This matches the
+    fresh transient lease whose ``payload.claude_pid`` equals the sibling's own
+    ``claude_pid`` and returns its endpoint.
+
+    Session-targeted (a concurrent cold-starting session has a different
+    immediate Claude ancestor, so its transient lease never matches) and
+    TTL-bounded (only fresh leases are considered), so there is no
+    cross-session mis-bind. Returns ``None`` if no matching fresh transient
+    lease exists; the caller then fails loud (Path D). Once the owner re-keys
+    to the session-id the transient record is gone and this returns ``None`` —
+    by then the session-id path resolves.
+    """
+    if claude_pid <= 0:
+        return None
+    cfg = Path(config_dir)
+    if not cfg.exists():
+        return None
+    now = clock()
+    for path in cfg.glob("t1_addr.*"):
+        try:
+            record = LeaseRecord.from_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, KeyError):
+            continue
+        if record.payload.get("session_id") is not None:
+            continue  # session-keyed: resolved via discover_t1_lease, not here
+        if record.payload.get("claude_pid") != claude_pid:
+            continue
+        if not record.is_fresh(now):
+            continue
+        host = record.endpoint.get("host")
+        port = record.endpoint.get("port")
+        if not isinstance(host, str) or not isinstance(port, (int, float)):
+            continue
+        return host, int(port)
+    return None

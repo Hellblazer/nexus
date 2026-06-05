@@ -49,9 +49,12 @@ def _discover_t1_endpoint(config_dir, scope_key) -> tuple[str, int] | None:
     return host, port
 
 
-def _publish_t1_session_lease(config_dir, session_id, host, port, *, server_pid=4242):
-    """RDR-149 P4 test helper: publish a session-id-keyed T1 lease so a
-    discovery path that resolves ``session_id`` finds ``(host, port)``."""
+def _publish_t1_session_lease(
+    config_dir, session_id, host, port, *, server_pid=4242, claude_pid=None
+):
+    """RDR-149 P4 test helper: publish a T1 lease. With ``session_id`` it is
+    session-keyed; with ``session_id=None`` it is a transient record (and
+    ``claude_pid`` is stamped into its payload for the cold-start fallback)."""
     from nexus.daemon.service_registry import ServiceRegistry
     from nexus.daemon.t1_lease import T1LeasePublisher
 
@@ -63,6 +66,7 @@ def _publish_t1_session_lease(config_dir, session_id, host, port, *, server_pid=
         port=port,
         version="1.0.0",
         session_resolver=lambda: session_id,
+        claude_pid=claude_pid,
     )
     publisher.publish()
     return publisher
@@ -250,20 +254,47 @@ class TestT1DatabaseFlagOnFilePath:
 
 
 class TestT1ColdStartTransientWindow:
-    """RDR-149 P4 / CA-3: the honest production read-path behavior during the
+    """RDR-149 nexus-0x16i: the production read-path behavior during the
     cold-start transient window (the writer published a transient
     ``server_pid`` lease but no session-id resolves yet).
 
-    The owner (via ``_t1_state``) and MCP-dispatched subprocesses (via the
-    ``NX_T1_HOST``/``NX_T1_PORT`` env breadcrumb, Path A) are covered. A bare
-    Claude-Code Bash sibling -- no env, no resolvable session-id -- is NOT:
-    it gets a loud, retryable ``T1ServerNotFoundError`` (Path D), succeeding
-    once the session-id resolves. This is the accepted tradeoff of keying on
-    session-id rather than the unreliable PPID-walk (RDR §Gap 2), tracked as
-    a known limitation, and is the property the conformance suite's
-    registry-layer ``TestT1SessionRekey`` does NOT by itself assert."""
+    The owner (via ``_t1_state``), MCP-dispatched subprocesses (via the
+    ``NX_T1_HOST``/``NX_T1_PORT`` env breadcrumb, Path A), AND a bare
+    Claude-Code Bash sibling are all covered: the sibling matches the owner's
+    transient lease by its own immediate Claude ancestor pid (RF-6), which is
+    stamped in the transient record's payload. A sibling of a DIFFERENT
+    session (different immediate Claude pid) does not match and fails loud --
+    no cross-session mis-bind."""
 
-    def test_bare_sibling_in_transient_window_raises_not_found(
+    def test_bare_sibling_connects_via_matching_claude_pid(
+        self, tmp_path, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        fake_chromadb.HttpClient.return_value = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED",
+                    "NEXUS_SKIP_T1", "NX_SESSION_ID"):
+            monkeypatch.delenv(var, raising=False)
+
+        # The writer published a TRANSIENT lease stamped with its immediate
+        # Claude pid (8080). No current_session, no NX_SESSION_ID.
+        _publish_t1_session_lease(
+            tmp_path, None, "127.0.0.1", 9999, server_pid=70707, claude_pid=8080
+        )
+        # The sibling resolves the SAME immediate Claude ancestor (RF-6).
+        monkeypatch.setattr(
+            "nexus.session.find_immediate_claude_pid", lambda start_pid=None: 8080
+        )
+
+        from nexus.db.t1 import T1Database
+        T1Database()
+        fake_chromadb.HttpClient.assert_called_once_with(host="127.0.0.1", port=9999)
+
+    def test_sibling_of_different_session_does_not_mis_bind(
         self, tmp_path, monkeypatch
     ):
         from unittest.mock import MagicMock
@@ -276,14 +307,17 @@ class TestT1ColdStartTransientWindow:
                     "NEXUS_SKIP_T1", "NX_SESSION_ID"):
             monkeypatch.delenv(var, raising=False)
 
-        # The writer published a TRANSIENT server_pid lease (session-id
-        # unresolved). No current_session file, no NX_SESSION_ID.
-        _publish_t1_session_lease(tmp_path, None, "127.0.0.1", 9999, server_pid=70707)
+        # A different session's transient lease (its Claude pid is 8080).
+        _publish_t1_session_lease(
+            tmp_path, None, "127.0.0.1", 9999, server_pid=70707, claude_pid=8080
+        )
+        # This sibling belongs to a different session (Claude pid 9090); it
+        # must NOT grab the other session's transient lease.
+        monkeypatch.setattr(
+            "nexus.session.find_immediate_claude_pid", lambda start_pid=None: 9090
+        )
 
         from nexus.db.t1 import T1Database, T1ServerNotFoundError
-        # The bare sibling cannot resolve a session-id, so Path B is skipped
-        # and it fails loud -- it does NOT silently bind to the transient
-        # server_pid lease (no cross-session mis-binding hazard).
         with pytest.raises(T1ServerNotFoundError):
             T1Database()
         fake_chromadb.HttpClient.assert_not_called()
