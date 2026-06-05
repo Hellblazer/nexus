@@ -127,7 +127,40 @@ _INTERACTIVE_PROBE_OP = "catalog.is_interactive_write_pending"
 # winner's file never times out inside a window where the holder is mid-
 # re-assert. Module-level so tests can shrink them.
 _REASSERT_INTERVAL: float = 1.0
+
+# nexus-we61e: cadence + staleness window for the daemon-owned aspect-queue
+# reclaim loop. The interval preserves the worker's prior ~30s effective
+# cadence (poll_interval=2s × _RECLAIM_EVERY_N_POLLS=15); the staleness
+# window matches the worker's old ``stale_timeout_seconds`` default so a
+# crashed worker's claimed row is recovered on the same timescale as before.
+_ASPECT_RECLAIM_INTERVAL: float = 30.0
+_ASPECT_RECLAIM_STALE_TIMEOUT_S: int = 60
 _LOSER_POLL_TIMEOUT: float = 3.0
+
+# nexus-64w50: a spawn-lock loser that polls and finds NO reachable winner
+# (``attached=False``) may have collided with an incumbent that is mid-exit
+# inside the RDR-129 defer-release-to-exit drain window: the incumbent
+# early-unlinks its discovery file but holds the spawn lock until the
+# process actually exits. A one-shot loser that quit here left ZERO daemons
+# (the incumbent finishes exiting; nothing replaced it — the live-2026-06-05
+# orphan). So on ``attached=False`` we retry the spawn a bounded number of
+# times; once the incumbent's process exits the OS frees the lock and our
+# retry wins it. Single-writer is preserved because ``_acquire_spawn_lock``
+# is non-blocking (LOCK_NB): a retry can only win when the lock is genuinely
+# free, and otherwise loses again and is counted toward the bound. The
+# window (≈ MAX × (poll + backoff) ≈ 6 × (3 + 2) = 30 s) covers the
+# incumbent's normal drain: the only HARD-bounded leg is the DB close
+# (_DB_CLOSE_TIMEOUT 10 s, enforced via asyncio.wait_for in stop()); socket
+# teardown (server.close + wait_closed) is best-effort and not wrapped in a
+# timeout, so a connection draining a long in-flight RPC at SIGTERM can push
+# the real drain past 10 s. 30 s leaves margin for that in practice; it is
+# NOT a correctness bound (if every retry is exhausted the loser exits 0 and
+# launchd / ensure-running re-spawns). An ``attached=True`` poll exits
+# immediately — a real serving winner is never disturbed, and the in-process
+# retry is invisible to the ensure-running crash-loop guard (which counts
+# cold spawns, not these LOCK_NB losses).
+_SPAWN_LOST_RETRY_MAX: int = 6
+_SPAWN_LOST_RETRY_BACKOFF: float = 2.0
 
 
 def _is_locked_error(exc: BaseException) -> bool:
@@ -752,6 +785,13 @@ class T2Daemon:
         self._lease_record: LeaseRecord | None = None
         # RDR-140 P1.3: self-healing discovery re-assert (holder only).
         self._reassert_task: asyncio.Task[None] | None = None
+        # nexus-we61e: the daemon owns aspect-queue stale-row reclamation.
+        # Reclaim was previously run from every per-process aspect worker,
+        # so N workers RPC'd N redundant reclaim UPDATEs into this one
+        # daemon — the WAL contention that pegged a core on `database is
+        # locked` after a restart with a stale-row backlog. Running it on
+        # the daemon's own loop makes it singular by construction.
+        self._reclaim_task: asyncio.Task[None] | None = None
 
     # ── public properties ───────────────────────────────────────────────
 
@@ -866,6 +906,9 @@ class T2Daemon:
         # mid-shutdown daemon's addr (RDR-129 early-unlink ordering).
         self._reassert_task = asyncio.create_task(self._reassert_discovery_loop())
 
+        # nexus-we61e: the daemon owns aspect-queue stale-row reclaim.
+        self._reclaim_task = asyncio.create_task(self._reclaim_stale_loop())
+
         self._stop_event = asyncio.Event()
         _log.info(
             "t2_daemon_started",
@@ -911,6 +954,45 @@ class T2Daemon:
             except Exception as exc:  # noqa: BLE001
                 # Self-heal is best-effort; never let it crash the daemon.
                 _log.warning("t2_daemon_discovery_reassert_failed", exc=str(exc))
+
+    async def _reclaim_stale_loop(self) -> None:
+        """Periodically reclaim stale ``in_progress`` aspect-queue rows.
+
+        nexus-we61e: this is the SOLE caller of ``reclaim_stale`` in
+        production. It previously ran inside every per-process aspect
+        worker's poll loop; with N nx-mcp processes that meant N
+        redundant reclaim UPDATEs RPC'd into this one daemon, the
+        WAL-lock contention that pegged a core after a restart with a
+        stale-row backlog. The daemon is singular by construction
+        (spawn lock + lease), so running reclaim here runs it exactly
+        once per interval regardless of how many workers are polling.
+
+        Calls ``reclaim_stale`` directly on the hosted T2Database — no
+        RPC, no cross-process contention; it serialises only against the
+        daemon's own dispatch writes through the store's internal lock.
+        Best-effort: a transient ``database is locked`` (already retried
+        with backoff inside ``reclaim_stale``) is logged and the loop
+        continues. Cancelled in :meth:`stop`.
+        """
+        while True:
+            await asyncio.sleep(_ASPECT_RECLAIM_INTERVAL)
+            t2db = self._t2db
+            if t2db is None:
+                continue
+            try:
+                reclaimed = await asyncio.to_thread(
+                    t2db.aspect_queue.reclaim_stale,
+                    _ASPECT_RECLAIM_STALE_TIMEOUT_S,
+                )
+                if reclaimed:
+                    _log.info(
+                        "t2_daemon_aspect_reclaim", reclaimed=reclaimed
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                # Best-effort janitor; never let it crash the daemon.
+                _log.warning("t2_daemon_aspect_reclaim_failed", exc=str(exc))
 
     async def run_until_signal(self) -> None:
         """Block until SIGTERM/SIGINT arrives."""
@@ -959,6 +1041,18 @@ class T2Daemon:
             except BaseException:  # noqa: BLE001
                 pass
             self._reassert_task = None
+
+        # nexus-we61e: stop the daemon-owned reclaim loop. Order is not
+        # load-bearing (it touches only the aspect queue, not discovery),
+        # but cancel before the T2Database close below so an in-flight
+        # reclaim cannot race the handle teardown.
+        if self._reclaim_task is not None:
+            self._reclaim_task.cancel()
+            try:
+                await self._reclaim_task
+            except BaseException:  # noqa: BLE001
+                pass
+            self._reclaim_task = None
 
         if self._uds_server is not None:
             self._uds_server.close()
@@ -1540,22 +1634,42 @@ def run_t2_daemon(
         finally:
             await daemon.stop()
 
-    try:
-        asyncio.run(_main())
-    except T2SpawnLockLost:
-        # RDR-140 P1.3 (nexus-h2oko): losing the spawn lock is a benign
-        # quiet-attach, NOT a crash. A live winner already owns the data
-        # file; poll briefly for its discovery file/socket (best-effort
-        # observability — a discovered-but-unreachable or stale addr just
-        # keeps polling until the timeout), then exit 0 with an info-level
-        # breadcrumb and no traceback. A1-verified: T2Database was never
-        # constructed, so there is nothing to tear down.
-        attached = _poll_for_winner(config_dir, _LOSER_POLL_TIMEOUT)
-        _log.info("t2_daemon_spawn_lost", attached=attached)
-        return
-    except Exception:
-        # Last-resort: an exception escaping the loop (e.g. start()
-        # raising before the handler is installed) must hit the log
-        # file, not a DEVNULL'd stderr.
-        _log.exception("t2_daemon_crashed")
-        raise
+    for attempt in range(1, _SPAWN_LOST_RETRY_MAX + 1):
+        try:
+            asyncio.run(_main())
+            return
+        except T2SpawnLockLost:
+            # RDR-140 P1.3 (nexus-h2oko): losing the spawn lock is a benign
+            # quiet-attach, NOT a crash. A live winner already owns the data
+            # file; poll briefly for its discovery file/socket (best-effort
+            # observability — a discovered-but-unreachable or stale addr just
+            # keeps polling until the timeout). A1-verified: T2Database was
+            # never constructed, so there is nothing to tear down.
+            attached = _poll_for_winner(config_dir, _LOSER_POLL_TIMEOUT)
+            if attached:
+                # A real winner is serving — never disturb it. Exit 0.
+                _log.info("t2_daemon_spawn_lost", attached=True)
+                return
+            # nexus-64w50: no reachable winner. The incumbent is likely
+            # mid-exit in the defer-release-to-exit drain window (lock still
+            # held, discovery file already unlinked). Retry so the freed
+            # lock is re-acquired by us, rather than quit and leave zero
+            # daemons. _acquire_spawn_lock is LOCK_NB, so a retry that still
+            # collides simply loses again and counts toward the bound.
+            if attempt < _SPAWN_LOST_RETRY_MAX:
+                _log.info(
+                    "t2_daemon_spawn_lost_retry",
+                    attempt=attempt,
+                    max_attempts=_SPAWN_LOST_RETRY_MAX,
+                )
+                time.sleep(_SPAWN_LOST_RETRY_BACKOFF)
+                continue
+            # Exhausted the bound without acquiring or finding a winner.
+            _log.info("t2_daemon_spawn_lost", attached=False)
+            return
+        except Exception:
+            # Last-resort: an exception escaping the loop (e.g. start()
+            # raising before the handler is installed) must hit the log
+            # file, not a DEVNULL'd stderr.
+            _log.exception("t2_daemon_crashed")
+            raise
