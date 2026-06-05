@@ -821,3 +821,65 @@ class TestLiveT2SelfHeal:
         finally:
             loop.close()
             shutil.rmtree(cd, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Live-process behavioral proof (integration marker only): a REAL T3 supervisor
+# spawning REAL chroma self-heals a deleted discovery file via its heartbeat.
+# The symmetric counterpart to TestLiveT2SelfHeal (nexus-2nt0z). Unlike the
+# unit coverage in test_t3_supervisor.py (fake chroma + fake clock), this uses
+# a real chroma subprocess, a real wall clock, and the real TCP reachability
+# probe, so the self-heal is proven end to end.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestLiveT3SelfHeal:
+    def test_real_supervisor_reasserts_deleted_discovery_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import shutil
+        import tempfile
+        import time as _time
+
+        from nexus.daemon.t3_daemon import T3Supervisor, t3_discovery_path
+
+        # The T3 daemon is local-mode only; pin it so the test does not depend
+        # on ambient credentials (cloud mode has no daemon to self-heal).
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+
+        cd = Path(tempfile.mkdtemp(prefix="nx149-t3-", dir="/tmp"))
+        sup = T3Supervisor(
+            config_dir=cd, local_path=cd / "chroma", supervised=True
+        )
+        disc = t3_discovery_path(cd)
+        try:
+            sup.start()  # spawns REAL chroma, publishes the lease
+            assert disc.exists()
+            payload = json.loads(disc.read_text())
+            assert payload["generation"] == 1
+            assert payload["endpoint"]["pid"] > 0
+
+            disc.unlink()
+            assert not disc.exists()
+
+            # The supervisor heartbeat re-stamps the lost record (self-heal),
+            # preserving the generation (a re-assert, not a restart). Retry to
+            # absorb chroma-readiness jitter on the TCP reachability probe.
+            healed = False
+            for _ in range(40):
+                if sup.heartbeat_once() and disc.exists():
+                    healed = True
+                    break
+                _time.sleep(0.05)
+            assert healed and disc.exists(), (
+                "live T3 supervisor failed to self-heal the discovery file"
+            )
+            healed_payload = json.loads(disc.read_text())
+            assert healed_payload["generation"] == 1
+            assert healed_payload["endpoint"]["pid"] == payload["endpoint"]["pid"]
+        finally:
+            sup.stop()
+            shutil.rmtree(cd, ignore_errors=True)
+        # stop() relinquished the lease.
+        assert not disc.exists()
