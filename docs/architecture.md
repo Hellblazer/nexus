@@ -116,6 +116,29 @@ table) see [`docs/container-integration.md`](container-integration.md).
 
 Data flows upward (T1 → T2 → T3).
 
+**Unified daemon-lifecycle substrate (RDR-149).** The three tiers
+differ in storage engine and scope (T1 session-scoped chroma, T2 uid-scoped
+SQLite+FTS5, T3 uid-scoped chroma/cloud) but share **one** lifecycle
+substrate: the leased / fenced / atomic service registry in
+[`src/nexus/daemon/service_registry.py`](../src/nexus/daemon/service_registry.py)
+(`ServiceRegistry` + `ServiceSupervisor`). Owner discovery, single-writer
+election, ungraceful-death reap, restart fencing, self-heal re-assert, and
+version-skew cycling all live in that one primitive, parameterized by tier
+and scope. Each tier is a thin consumer: T1 via `daemon/t1_lease.py`
+(MCP-lifespan-owned, re-keyed transient `server_pid` → session-id), T2 via
+`daemon/t2_daemon.py`, T3 via `daemon/t3_daemon.py`. Liveness is **lease
+freshness (TTL), not pid** — a dead owner's lease ages out, giving pid-reuse
+immunity.
+
+This collapsed a recurring bug class (the same discovery/single-writer/
+self-heal/version-skew defect kept reappearing in whichever tier had not yet
+received a per-tier fix). **The standing gate:** any future lifecycle fix
+lands in the shared primitive plus the cross-tier conformance suite
+([`tests/daemon/test_rdr149_lifecycle_conformance.py`](../tests/daemon/test_rdr149_lifecycle_conformance.py)),
+never in a single tier's copy. See
+[`src/nexus/daemon/AGENTS.md`](../src/nexus/daemon/AGENTS.md) for the full
+rule and the lifecycle-change checklist.
+
 ## Catalog & Link Graph
 
 The catalog is a document registry that sits alongside T3. While T3 stores document
@@ -609,7 +632,7 @@ Grouped by verb:
 2. **No ORM** -- Direct `sqlite3` for T2. Schema is simple; WAL + FTS5 are stdlib.
 3. **Constructor injection** -- Dependencies via constructor, no global singletons.
 4. **Ported, not imported** -- SeaGOAT and Arcaneum patterns rewritten in Nexus module structure.
-5. **PPID-chain session propagation** -- The `SessionStart` hook starts a per-session ChromaDB HTTP server (using the `chroma` entry-point co-installed with the package) and writes its address to `~/.config/nexus/sessions/{ppid}.session`, keyed by the Claude Code process PID. Child agents walk the OS PPID chain to find the nearest ancestor session file and connect to the same server, sharing T1 scratch across the entire agent tree. Concurrent independent windows stay isolated via disjoint process trees. Falls back to `EphemeralClient` when the server cannot start or the PPID chain yields no record.
+5. **Session-id leased T1 discovery** -- The MCP server's chroma lifespan starts a per-session ChromaDB HTTP server (the `chroma` entry-point co-installed with the package) and publishes a leased registry record at `~/.config/nexus/t1_addr.<session_id>` (RDR-149 P4, `daemon/t1_lease.py`), keyed on the Claude session-id. Child agents and Bash-tool siblings resolve the same session-id from `current_session` and discover the live lease, sharing T1 scratch across the agent tree. Liveness is lease freshness (TTL), not pid. Concurrent independent windows stay isolated via distinct session-ids. Falls back to `EphemeralClient` only under `NX_T1_ISOLATED=1`; otherwise an unresolvable session raises `T1ServerNotFoundError`.
 6. **MCP tools over agent-spawns for utility operations** (RDR-080) -- Operations that formerly required spawning a named agent are now MCP tools that execute in-process. Agent files are retained as stubs that redirect to the MCP tool.
 
    **Boundary rule**: If an operation can be expressed as a deterministic function of its inputs and completes in under one API call, it is an MCP tool. If it requires multi-turn reasoning, tool selection, or context accumulation across turns, it is an agent.

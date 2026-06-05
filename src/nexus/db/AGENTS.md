@@ -6,7 +6,7 @@ T1, T2, and T3 implementations. The interesting policy lives in T2's migration r
 
 | File | Purpose |
 |---|---|
-| `t1.py` | `T1Database` — ephemeral or per-session HTTP `chromadb` client. PPID-chain session discovery in `nexus/session.py`. |
+| `t1.py` | `T1Database` — ephemeral or per-session HTTP `chromadb` client. Session-id lease discovery via `daemon/t1_lease.py` (RDR-149 P4); the MCP lifespan publishes the lease. |
 | `t2/` | Package: seven domain stores + `T2Database` facade. See **T2 domain stores** below. |
 | `t3.py` | `T3Database` — persistent local (`PersistentClient` + ONNX) or cloud (`CloudClient` + Voyage) routing keyed on `is_local_mode()`. |
 | `local_ef.py` | `LocalEmbeddingFunction` — bundled ONNX MiniLM. Used by T1 always and by T3 in local mode. |
