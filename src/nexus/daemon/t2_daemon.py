@@ -149,13 +149,13 @@ _LOSER_POLL_TIMEOUT: float = 3.0
 # is non-blocking (LOCK_NB): a retry can only win when the lock is genuinely
 # free, and otherwise loses again and is counted toward the bound. The
 # window (≈ MAX × (poll + backoff) ≈ 6 × (3 + 2) = 30 s) covers the
-# incumbent's normal drain: the only HARD-bounded leg is the DB close
-# (_DB_CLOSE_TIMEOUT 10 s, enforced via asyncio.wait_for in stop()); socket
-# teardown (server.close + wait_closed) is best-effort and not wrapped in a
-# timeout, so a connection draining a long in-flight RPC at SIGTERM can push
-# the real drain past 10 s. 30 s leaves margin for that in practice; it is
-# NOT a correctness bound (if every retry is exhausted the loser exits 0 and
-# launchd / ensure-running re-spawns). An ``attached=True`` poll exits
+# incumbent's worst-case drain. The two principal legs are HARD-bounded in
+# stop(): socket teardown (_GRACEFUL_STOP_TIMEOUT 5 s, nexus-saigj) + DB
+# close (_DB_CLOSE_TIMEOUT 10 s) ≈ 15 s, leaving comfortable margin. (The
+# catalog handle close is a plain conn.close() with no WAL checkpoint —
+# negligible, not separately timeout-wrapped.) Even if a
+# retry budget is exhausted it is not a correctness failure: the loser exits
+# 0 and launchd / ensure-running re-spawns. An ``attached=True`` poll exits
 # immediately — a real serving winner is never disturbed, and the in-process
 # retry is invisible to the ensure-running crash-loop guard (which counts
 # cold spawns, not these LOCK_NB losses).
@@ -973,26 +973,42 @@ class T2Daemon:
         Best-effort: a transient ``database is locked`` (already retried
         with backoff inside ``reclaim_stale``) is logged and the loop
         continues. Cancelled in :meth:`stop`.
+
+        nexus-nhqll: reclaim runs FIRST, then sleeps — so a freshly
+        (re)started daemon clears any stale-row backlog left by a prior
+        worker death at once, rather than waiting a full interval. This
+        is the recovery path for the post-restart backlog case.
+
+        Residual gap (accepted): while a daemon is crash-loop-suppressed,
+        workers still run and claim/complete rows via the direct-write
+        fallback, so a worker crash there can strand an ``in_progress``
+        row with no reclaimer (reclaim is daemon-only). We do NOT add a
+        worker-side reclaim for it: that would reintroduce the N-fold WAL
+        contention RDR-128 was filed to close, to cover a transient
+        degraded state the crash-loop guard or an operator resolves — and
+        the moment any daemon comes back up, this loop's reclaim-first
+        entry clears the backlog immediately.
         """
         while True:
-            await asyncio.sleep(_ASPECT_RECLAIM_INTERVAL)
             t2db = self._t2db
-            if t2db is None:
-                continue
-            try:
-                reclaimed = await asyncio.to_thread(
-                    t2db.aspect_queue.reclaim_stale,
-                    _ASPECT_RECLAIM_STALE_TIMEOUT_S,
-                )
-                if reclaimed:
-                    _log.info(
-                        "t2_daemon_aspect_reclaim", reclaimed=reclaimed
+            if t2db is not None:
+                try:
+                    reclaimed = await asyncio.to_thread(
+                        t2db.aspect_queue.reclaim_stale,
+                        _ASPECT_RECLAIM_STALE_TIMEOUT_S,
                     )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                # Best-effort janitor; never let it crash the daemon.
-                _log.warning("t2_daemon_aspect_reclaim_failed", exc=str(exc))
+                    if reclaimed:
+                        _log.info(
+                            "t2_daemon_aspect_reclaim", reclaimed=reclaimed
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    # Best-effort janitor; never let it crash the daemon.
+                    _log.warning(
+                        "t2_daemon_aspect_reclaim_failed", exc=str(exc)
+                    )
+            await asyncio.sleep(_ASPECT_RECLAIM_INTERVAL)
 
     async def run_until_signal(self) -> None:
         """Block until SIGTERM/SIGINT arrives."""
@@ -1054,14 +1070,32 @@ class T2Daemon:
                 pass
             self._reclaim_task = None
 
-        if self._uds_server is not None:
-            self._uds_server.close()
-            await self._uds_server.wait_closed()
-            self._uds_server = None
-        if self._tcp_server is not None:
-            self._tcp_server.close()
-            await self._tcp_server.wait_closed()
-            self._tcp_server = None
+        # nexus-saigj: bound socket teardown. ``wait_closed()`` blocks until
+        # every open connection drains; a connection holding a long in-flight
+        # RPC at SIGTERM could otherwise extend the drain (and thus the
+        # spawn-lock hold) without limit. Cap each with _GRACEFUL_STOP_TIMEOUT
+        # (the same defense-in-depth pattern as the _DB_CLOSE_TIMEOUT'd close
+        # below); on timeout the server is already closed to new connections,
+        # so we log and proceed — the OS reaps the rest at process exit.
+        for name, server in (
+            ("uds", self._uds_server),
+            ("tcp", self._tcp_server),
+        ):
+            if server is None:
+                continue
+            server.close()
+            try:
+                await asyncio.wait_for(
+                    server.wait_closed(), timeout=_GRACEFUL_STOP_TIMEOUT
+                )
+            except TimeoutError:
+                _log.warning(
+                    "t2_daemon_socket_close_timeout",
+                    server=name,
+                    timeout_s=_GRACEFUL_STOP_TIMEOUT,
+                )
+        self._uds_server = None
+        self._tcp_server = None
         if self._registry is not None and self._lease_record is not None:
             # RDR-149 P2: relinquish is own-record-only, so a fenced
             # predecessor's delayed stop cannot unlink a successor's record

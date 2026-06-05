@@ -91,6 +91,36 @@ def test_daemon_reclaim_loop_calls_reclaim_stale(
     assert reclaim.call_args[0][0] == t2_daemon._ASPECT_RECLAIM_STALE_TIMEOUT_S
 
 
+def test_daemon_reclaim_runs_before_first_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-nhqll: reclaim fires immediately on loop entry, BEFORE the
+    first interval sleep, so a freshly (re)started daemon clears a
+    stale-row backlog at once rather than waiting a full interval."""
+    # A long interval: a sleep-first loop would NOT have reclaimed yet
+    # within the short drive window below; a reclaim-first loop will have.
+    monkeypatch.setattr(t2_daemon, "_ASPECT_RECLAIM_INTERVAL", 999.0)
+
+    reclaim = MagicMock(name="reclaim_stale", return_value=5)
+    daemon = T2Daemon(config_dir=None, db_path=None)  # type: ignore[arg-type]
+    daemon._t2db = SimpleNamespace(
+        aspect_queue=SimpleNamespace(reclaim_stale=reclaim)
+    )
+
+    async def _drive() -> None:
+        task = asyncio.create_task(daemon._reclaim_stale_loop())
+        await asyncio.sleep(0.05)  # << one interval if it slept first
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_drive())
+
+    assert reclaim.call_count == 1  # reclaimed once on entry, then long sleep
+
+
 def test_daemon_reclaim_loop_survives_reclaim_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -115,6 +145,53 @@ def test_daemon_reclaim_loop_survives_reclaim_error(
     # Must not raise out of the loop.
     asyncio.run(_drive())
     assert reclaim.call_count >= 1
+
+
+# ── nexus-saigj: stop() socket teardown is timeout-bounded ────────────────────
+
+
+def test_stop_bounds_hung_socket_wait_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection whose ``wait_closed()`` never returns must not wedge
+    ``stop()`` open: it is capped at _GRACEFUL_STOP_TIMEOUT and proceeds."""
+    monkeypatch.setattr(t2_daemon, "_GRACEFUL_STOP_TIMEOUT", 0.05)
+
+    closed: set[str] = set()
+
+    class _HungServer:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def close(self) -> None:
+            closed.add(self._name)
+
+        async def wait_closed(self) -> None:
+            await asyncio.Event().wait()  # never set → blocks forever
+
+    daemon = T2Daemon(config_dir=None, db_path=None)  # type: ignore[arg-type]
+    # Both legs hung: a bug that bounded only one would leave the other
+    # to trip the outer guard or drop a timeout log.
+    daemon._uds_server = _HungServer("uds")  # type: ignore[assignment]
+    daemon._tcp_server = _HungServer("tcp")  # type: ignore[assignment]
+
+    async def _drive() -> None:
+        # Bound the whole stop() generously; the internal cap should fire
+        # well before this, so a regression (unbounded wait) trips it.
+        await asyncio.wait_for(daemon.stop(), timeout=5.0)
+
+    with capture_logs() as logs:
+        asyncio.run(_drive())
+
+    assert closed == {"uds", "tcp"}
+    timeouts = sorted(
+        e.get("server")
+        for e in logs
+        if e.get("event") == "t2_daemon_socket_close_timeout"
+    )
+    assert timeouts == ["tcp", "uds"]
+    assert daemon._uds_server is None
+    assert daemon._tcp_server is None
 
 
 # ── nexus-64w50: spawn-loser retries instead of orphaning the service ─────────
