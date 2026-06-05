@@ -106,9 +106,14 @@ def _decision(proc: subprocess.CompletedProcess) -> dict:
 
 
 def _make_session_addr(config_dir: pathlib.Path, claude_pid: int) -> pathlib.Path:
-    """Create a t1_addr file representing a live Claude session."""
-    p = config_dir / f"t1_addr.{claude_pid}"
-    p.write_text(f"127.0.0.1:8000\n{claude_pid}")
+    """Create the ``current_session`` pointer representing a live session.
+
+    RDR-149 P4: the session-start anchor moved from ``t1_addr.<pid>`` to the
+    ``current_session`` pointer (the gate hook reads its mtime). ``claude_pid``
+    is written as the session-id content for determinism.
+    """
+    p = config_dir / "current_session"
+    p.write_text(str(claude_pid))
     return p
 
 
@@ -332,13 +337,13 @@ def test_sentinel_stale_denies(tmp_env):
         title="RDR-112 Phase 1 review gate",
     )
     addr = _make_session_addr(tmp_env["config_dir"], pid)
-    # Force session ctime to NOW; sentinel mtime in the past.
-    addr_ctime = addr.stat().st_ctime
+    # Session anchor is the current_session mtime (now); sentinel in the past.
+    addr_mtime = addr.stat().st_mtime
     _make_sentinel(
         tmp_env["sentinel_dir"],
         claude_pid=pid, rdr_id="112", phase="1",
         outcome="PASSED",
-        mtime=addr_ctime - 3600,  # one hour before session start
+        mtime=addr_mtime - 3600,  # one hour before session start
     )
     proc = _run_hook(
         {"tool_name": "Bash", "tool_input": {"command": "bd close nexus-abc"}},

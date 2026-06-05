@@ -755,18 +755,18 @@ def _check_index_log() -> list[HealthResult]:
 
 
 def _check_orphan_t1() -> list[HealthResult]:
-    """Report on T1 address files left by previous Claude Code sessions.
+    """Report on T1 lease records on disk (RDR-149 P4 leased registry).
 
-    RDR-105 P4 replaced the per-session JSON record files with a
-    single-writer ``~/.config/nexus/t1_addr.<claude_pid>`` flat file
-    per live Claude. An orphan here is an addr file whose
-    ``<claude_pid>`` is no longer a running process (typically left
-    behind when Claude Code exits ungracefully so the lifespan
-    finally never ran). The MCP startup sweep
-    (``sweep_orphan_t1_addr_files``) reaps them automatically; this
-    check just surfaces what is currently on disk.
+    T1 publishes a leased registry record at
+    ``~/.config/nexus/t1_addr.<session_id>`` (re-keyed from a transient
+    ``server_pid`` key at cold start). Liveness is lease freshness (TTL),
+    not pid: a dead owner's lease ages out on its own, so there is no
+    bespoke orphan sweep (RDR-149 P5 removed it). This check surfaces any
+    stale (expired) lease record still on disk; such records are inert
+    (readers reap them on discovery), so removal is cosmetic.
     """
     from nexus.config import nexus_config_dir
+    from nexus.daemon.service_registry import LeaseRecord
 
     config_dir = nexus_config_dir()
     if not config_dir.exists():
@@ -777,38 +777,51 @@ def _check_orphan_t1() -> list[HealthResult]:
         return [HealthResult(label="T1 sessions", ok=True, detail="no live T1 sessions")]
 
     now = time.time()
-    orphans: list[str] = []
-    live_descriptors: list[str] = []
+    fresh: list[str] = []
+    stale: list[str] = []
+    legacy: list[str] = []
     for path in addr_files:
-        suffix = path.suffix.lstrip(".")
         try:
-            claude_pid = int(suffix)
-        except ValueError:
-            _log.debug("orphan_t1_addr_unparseable_suffix", path=str(path), suffix=suffix)
+            record = LeaseRecord.from_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, KeyError):
+            # Not a lease record: a pre-P4 ``host:port`` addr file left on
+            # disk by an older version (RDR-149 P4 changed the format). Inert
+            # -- nothing reads it -- but surfaced so it is not silently
+            # invisible after a "no bespoke copies" audit.
+            _log.debug("t1_lease_unparseable", path=str(path))
+            legacy.append(path.name)
             continue
-        age_s = max(0, int(now - path.stat().st_mtime))
-        age_str = f"{age_s // 60}m" if age_s < 3600 else f"{age_s // 3600}h"
-        try:
-            os.kill(claude_pid, 0)
-            live_descriptors.append(f"{path.name} (claude_pid {claude_pid} alive, age {age_str})")
-        except OSError:
-            orphans.append(path.name)
+        if record.is_fresh(now):
+            age_s = max(0, int(now - record.heartbeat_epoch))
+            fresh.append(f"{path.name} (fresh, last heartbeat {age_s}s ago)")
+        else:
+            stale.append(path.name)
 
-    if orphans:
+    if stale:
         return [HealthResult(
             label="T1 sessions",
             ok=False,
-            detail=f"{len(orphans)} orphan addr file(s) (claude_pid dead): {', '.join(orphans)}",
+            detail=f"{len(stale)} stale T1 lease(s) (expired past TTL): {', '.join(stale)}",
             fix_suggestions=[
-                "Remove stale files: rm ~/.config/nexus/t1_addr.*",
-                "Or run nx doctor (the next MCP startup sweeps these automatically).",
+                "Stale leases are inert (readers reap on discovery); removal is cosmetic.",
+                "Remove them anyway: rm ~/.config/nexus/t1_addr.*",
             ],
         )]
 
-    return [HealthResult(
-        label="T1 sessions", ok=True,
-        detail=f"{len(addr_files)} addr file(s), all owning Claudes alive: {', '.join(live_descriptors)}",
-    )]
+    if legacy and not fresh:
+        return [HealthResult(
+            label="T1 sessions", ok=True,
+            detail=f"no live T1 sessions ({len(legacy)} inert pre-P4 addr file(s) on disk)",
+            fix_suggestions=["Remove inert legacy files: rm ~/.config/nexus/t1_addr.*"],
+        )]
+
+    if not fresh:
+        return [HealthResult(label="T1 sessions", ok=True, detail="no live T1 sessions")]
+
+    detail = f"{len(fresh)} live T1 lease(s): {', '.join(fresh)}"
+    if legacy:
+        detail += f" (+{len(legacy)} inert pre-P4 addr file(s))"
+    return [HealthResult(label="T1 sessions", ok=True, detail=detail)]
 
 
 def _check_orphan_checkpoints() -> list[HealthResult]:

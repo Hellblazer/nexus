@@ -96,11 +96,12 @@ def session_end_flush() -> str:
     Known race window
         On stdio transport the SessionEnd hook fires when stdin EOFs,
         which is the same event that drives the MCP server's lifespan
-        ``async finally`` to unlink ``~/.config/nexus/t1_addr.<pid>``
-        and stop chroma. The launcher daemonizes ``session_end_flush``
+        ``async finally`` to relinquish its T1 lease record
+        (``~/.config/nexus/t1_addr.<session_id>``) and stop chroma
+        (RDR-149 P4). The launcher daemonizes ``session_end_flush``
         in a grandchild, but if the lifespan finally wins the race the
-        grandchild's ``T1Database()`` walks the PPID chain, finds no
-        addr file, and raises ``T1ServerNotFoundError``. The
+        grandchild's ``T1Database()`` resolves the session-id, finds no
+        live lease, and raises ``T1ServerNotFoundError``. The
         ``except`` below catches the raise and logs
         ``session_end_flush_t1_unavailable``; flagged entries are then
         silently dropped. Best-effort flush is the documented contract;

@@ -44,23 +44,42 @@ def test_scan_sessions_no_dir():
     assert results == []
 
 
+def _write_t1_lease(config_dir: Path, session_id: str, host: str, port: int,
+                    *, heartbeat_epoch: float, ttl: float = 30.0,
+                    server_pid: int = 4242) -> None:
+    """Write a RDR-149 T1 lease record at ``t1_addr.<session_id>``."""
+    from nexus.daemon.service_registry import LeaseRecord
+
+    record = LeaseRecord(
+        scope_key=session_id,
+        generation=1,
+        owner_token="tok",
+        heartbeat_epoch=heartbeat_epoch,
+        ttl=ttl,
+        endpoint={"host": host, "port": port, "server_pid": server_pid},
+        version="1.0.0",
+        payload={"session_id": session_id, "server_pid": server_pid},
+    )
+    (config_dir / f"t1_addr.{session_id}").write_text(record.to_json())
+
+
 def test_scan_sessions_live_session(tmp_path):
-    """Addr file keyed by our own PID, should be detected as alive."""
-    import os
-    own_pid = os.getpid()
-    (tmp_path / f"t1_addr.{own_pid}").write_text("127.0.0.1:0\n")
+    """A fresh lease (recent heartbeat) is detected as alive (RDR-149 P4)."""
+    import time
+    _write_t1_lease(tmp_path, "sess-A", "127.0.0.1", 0, heartbeat_epoch=time.time())
     results = scan_sessions_sync(tmp_path)
     assert len(results) == 1
-    assert results[0].session_id == str(own_pid)
+    assert results[0].session_id == "sess-A"
     assert results[0].pid_alive is True
 
 
 def test_scan_sessions_dead_pid(tmp_path):
-    """Addr file keyed by a dead PID."""
-    import subprocess
-    proc = subprocess.Popen(["true"])
-    proc.wait()
-    (tmp_path / f"t1_addr.{proc.pid}").write_text("127.0.0.1:12345\n")
+    """An expired lease (heartbeat older than TTL) is not alive (RDR-149 P4)."""
+    import time
+    _write_t1_lease(
+        tmp_path, "sess-stale", "127.0.0.1", 12345,
+        heartbeat_epoch=time.time() - 1000.0, ttl=30.0,
+    )
     results = scan_sessions_sync(tmp_path)
     assert len(results) == 1
     assert results[0].pid_alive is False
