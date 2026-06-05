@@ -59,6 +59,7 @@ from nexus.daemon.service_registry import (
     ServiceRegistry,
     ServiceSupervisor,
 )
+from nexus.daemon.t1_lease import T1LeasePublisher
 from nexus import session as _sess
 
 
@@ -193,45 +194,79 @@ class RecordHarness:
 
 
 class T1RecordHarness(RecordHarness):
+    """RDR-149 P4: T1 rides the leased registry, MCP-lifespan-owned and
+    scoped on the **session-id** (intentionally N owners per uid, one T1
+    server per session). Each sibling drives a real ``T1LeasePublisher``
+    keyed on one shared session-id, so the unit battery exercises the
+    production publish / heartbeat-self-heal / re-key / fence path, not a
+    bespoke copy. The transient ``server_pid`` -> session-id re-key (CA-3)
+    is covered separately by ``TestT1SessionRekey``; here the publishers
+    resolve the session-id at publish time so they key on it directly."""
+
     tier = "t1"
     scope = "session"
-    has_self_heal = False  # #1114: ZERO self-heal in session.py
-    has_version_cycle = False
+    has_self_heal = True  # RDR-149 P4: publisher heartbeat self-heals (#1114)
+    has_version_cycle = False  # T1 is MCP-lifespan-owned, not upgrade-cycled
+    _SESSION = "sess-A"
+
+    def __init__(self, config_dir: Path, alive: _AliveSet, clock: _FakeClock) -> None:
+        super().__init__(config_dir, alive, clock)
+        self._registry = ServiceRegistry(
+            dir=config_dir, tier="t1", clock=clock, ttl=3.0, heartbeat_interval=1.0
+        )
+        self._pubs: dict[int, T1LeasePublisher] = {}
 
     def publish(self, owner: int = _OWNER_PID) -> None:
-        self._alive.mark_alive(owner)
-        _sess.write_t1_addr(owner, "127.0.0.1", 0)
+        pub = T1LeasePublisher(
+            registry=self._registry,
+            server_pid=owner,
+            host="127.0.0.1",
+            port=0,
+            version="1.0.0",
+            session_resolver=lambda: self._SESSION,
+            owner_token=f"tok-{owner}",
+        )
+        pub.publish()
+        self._pubs[owner] = pub
 
     def discover(self, owner: int = _OWNER_PID) -> Optional[dict[str, Any]]:
-        hp = _sess.read_t1_addr_for(owner)
-        if hp is None:
+        rec = self._registry.discover(self._SESSION)
+        if rec is None:
             return None
-        return {"pid": owner, "owner": owner, "host": hp[0], "port": hp[1]}
+        return {
+            "pid": rec.endpoint.get("server_pid"),
+            "owner": rec.endpoint.get("server_pid"),
+            "generation": rec.generation,
+            "owner_token": rec.owner_token,
+        }
 
     def simulate_ungraceful_death(self, owner: int = _OWNER_PID) -> None:
-        self._alive.mark_dead(owner)
+        # The owner stops heartbeating; the lease ages out on its own. No pid
+        # is consulted (lease freshness is the liveness primitive).
+        self._pubs.pop(owner, None)
 
     def advance_to_reap(self) -> None:
-        return  # pid death is observable immediately
+        self._clock.advance(3.1)  # past TTL
 
     def reap(self) -> None:
-        _sess.sweep_orphan_t1_addr_files()
+        self._registry.discover(self._SESSION)  # discovery reaps an expired lease
 
     def external_delete(self, owner: int = _OWNER_PID) -> None:
-        _sess.unlink_t1_addr(owner)
+        self._registry._record_path(self._SESSION).unlink(missing_ok=True)
 
     def self_heal_tick(self, owner: int = _OWNER_PID) -> None:
-        return  # session.py runs no re-assert loop (#1114)
+        pub = self._pubs.get(owner)
+        if pub is not None:
+            pub.tick()  # re-stamps; self-heals a lost record
 
     def stale_reassert(self, owner: int) -> None:
-        # No fencing: the stale owner simply rewrites its own pid-keyed file.
-        _sess.write_t1_addr(owner, "127.0.0.1", 0)
+        pub = self._pubs.get(owner)
+        if pub is not None:
+            pub.tick()  # fenced: sets pub.fenced, writes nothing
 
     def owners_in_scope(self, session_id: str) -> int:
-        # T1 keys on claude_pid, not session-id, so every sibling owns its
-        # own record; one logical session with two MCP siblings shows two.
-        cfg = _sess._nexus_config_dir_at_import()
-        return len(list(cfg.glob("t1_addr.*")))
+        # Session-scoped: two siblings of ONE session converge to one record.
+        return 1 if self.discover() is not None else 0
 
 
 class _LeaseHarness(RecordHarness):
@@ -343,33 +378,38 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
     "roundtrip": {"t1": "pass", "t2": "pass", "t3": "pass"},
     "reap_ungraceful": {"t1": "pass", "t2": "pass", "t3": "pass"},
     "self_heal": {
-        "t1": (GAP, "#1114: session.py has no self-heal re-assert; RDR-149 P5"),
+        "t1": "pass",  # RDR-149 P4: publisher heartbeat self-heals (#1114)
         "t2": "pass",
         "t3": "pass",  # RDR-149 P3: supervisor heartbeat self-heals
     },
     "concurrent_one_owner": {
-        "t1": (GAP, "T1 keys on claude_pid not session-id; RDR-149 P5/CA-3"),
+        "t1": "pass",  # RDR-149 P4: session-id scope converges to one owner
         "t2": "pass",
         "t3": "pass",
     },
     "version_cycle": {
-        "t1": (GAP, "T1 not covered by any upgrade-cycle; RDR-149 P5"),
+        # T1 is MCP-lifespan-owned, not covered by any upgrade-cycle: an
+        # upgrade republishes by restarting the MCP server, not by an
+        # in-process cycle. This is a documented N/A, not a #1114 blocker
+        # (RDR-149 P4, CA / Approach item 5).
+        "t1": (GAP, "T1 is MCP-lifespan-owned, not upgrade-cycled; RDR-149 P4 N/A"),
         "t2": "pass",
         "t3": "pass",  # RDR-149 P3: supervisor owns cycle_to_current (#1112)
     },
-    # RDR-149 P2/P3: T2 and T3 ride the primitive, so their lease properties pass.
+    # RDR-149 P2/P3/P4: all three tiers ride the primitive, so their lease
+    # properties pass.
     "pid_reuse_immunity": {
-        "t1": (SPEC, "lease/generation kills pid-reuse; RDR-149 P5"),
+        "t1": "pass",  # RDR-149 P4: lease/generation kills pid-reuse
         "t2": "pass",
         "t3": "pass",
     },
     "restart_higher_generation": {
-        "t1": (SPEC, "RF-3: no generation primitive; RDR-149 P5"),
+        "t1": "pass",  # RDR-149 P4: generation fencing token
         "t2": "pass",
         "t3": "pass",
     },
     "restart_race_fencing": {
-        "t1": (SPEC, "CA-4: no fencing token; RDR-149 P5"),
+        "t1": "pass",  # RDR-149 P4: CA-4 heartbeat-fencing arm
         "t2": "pass",
         "t3": "pass",
     },
@@ -527,20 +567,110 @@ class TestLifecycleConformance:
 
 
 # ---------------------------------------------------------------------------
-# T1-only property (CA-3): the transient-key -> session-id re-key. T1 today
-# has no session-id keying, so the property is unsatisfiable until P5.
+# T1-only property (CA-3): the locked RF-2 transient-key -> session-id re-key.
+# The cold-start lifespan race: the SessionStart hook writes current_session
+# independently of the MCP lifespan, so session-id may be None at publish. The
+# publisher keys transiently on the chroma server_pid and re-keys the instant
+# the session-id resolves. RDR-149 P4 makes this real (was xfail through P3).
 # ---------------------------------------------------------------------------
 
 
+_SERVER_PID = 90001
+_SIBLING_SERVER_PID = 90002
+
+
+def _t1_publisher(
+    registry: ServiceRegistry,
+    *,
+    server_pid: int,
+    session_resolver,
+) -> T1LeasePublisher:
+    return T1LeasePublisher(
+        registry=registry,
+        server_pid=server_pid,
+        host="127.0.0.1",
+        port=0,
+        version="1.0.0",
+        session_resolver=session_resolver,
+        owner_token=f"tok-{server_pid}",
+    )
+
+
 class TestT1SessionRekey:
-    def test_record_keyed_on_session_id_not_pid(
-        self, config_dir: Path, alive: _AliveSet, clock: _FakeClock
+    """CA-3: the transient-key -> session-id re-key has no undiscoverable
+    window and no ``"unknown"`` collapse."""
+
+    def _registry(self, config_dir: Path, clock: _FakeClock) -> ServiceRegistry:
+        return ServiceRegistry(
+            dir=config_dir, tier="t1", clock=clock, ttl=3.0, heartbeat_interval=1.0
+        )
+
+    def test_no_record_is_ever_keyed_unknown(
+        self, config_dir: Path, clock: _FakeClock
     ) -> None:
-        pytest.xfail("CA-3: T1 has no session-id-keyed record yet; RDR-149 P5")
-        h = T1RecordHarness(config_dir, alive, clock)
-        h.publish(_OWNER_PID)
-        sess_path = config_dir / "t1_addr.sess-A"
-        assert sess_path.exists(), "no session-id-keyed T1 record"
+        # CA-3 (i): a cold publish with an unresolved session-id keys on the
+        # server_pid, never the legacy "unknown" string.
+        reg = self._registry(config_dir, clock)
+        _t1_publisher(reg, server_pid=_SERVER_PID, session_resolver=lambda: None).publish()
+        assert not (config_dir / "t1_addr.unknown").exists()
+        assert [p.name for p in config_dir.glob("t1_addr.*")] == [
+            f"t1_addr.{_SERVER_PID}"
+        ]
+
+    def test_sibling_discovers_via_server_pid_during_transient_window(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        # CA-3 (ii): during the transient window (session-id not yet
+        # resolvable), the record is discoverable under the server_pid key
+        # (the env-passdown Path A breadcrumb), so there is no undiscoverable
+        # window. A sibling resolving by session-id finds nothing yet.
+        reg = self._registry(config_dir, clock)
+        pub = _t1_publisher(reg, server_pid=_SERVER_PID, session_resolver=lambda: None)
+        pub.publish()
+        assert reg.discover(str(_SERVER_PID)) is not None
+        assert reg.discover("sess-A") is None
+
+    def test_rekey_moves_record_to_session_id_atomically(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        # The core re-key: transient server_pid record -> session-id record,
+        # transient unlinked, exactly one record at every observable step.
+        reg = self._registry(config_dir, clock)
+        sid: dict[str, str | None] = {"v": None}
+        pub = _t1_publisher(reg, server_pid=_SERVER_PID, session_resolver=lambda: sid["v"])
+        pub.publish()
+        assert (config_dir / f"t1_addr.{_SERVER_PID}").exists()
+
+        sid["v"] = "sess-A"
+        pub.tick()
+
+        assert (config_dir / "t1_addr.sess-A").exists(), "no session-id-keyed record"
+        assert not (config_dir / f"t1_addr.{_SERVER_PID}").exists(), "transient leaked"
+        assert pub.session_keyed
+
+    def test_rekey_atomic_under_concurrent_sibling_flock(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        # CA-3 (iii): two siblings of one session re-key concurrently. The
+        # session-key publish is flock-serialized (monotonic generation) and
+        # each unlinks only its own server_pid record. End state: exactly one
+        # session record at generation 2, both transient records gone.
+        reg = self._registry(config_dir, clock)
+        sid: dict[str, str | None] = {"v": None}
+        a = _t1_publisher(reg, server_pid=_SERVER_PID, session_resolver=lambda: sid["v"])
+        b = _t1_publisher(
+            reg, server_pid=_SIBLING_SERVER_PID, session_resolver=lambda: sid["v"]
+        )
+        a.publish()
+        b.publish()
+
+        sid["v"] = "sess-A"
+        a.tick()
+        b.tick()
+
+        assert [p.name for p in config_dir.glob("t1_addr.*")] == ["t1_addr.sess-A"]
+        rec = reg.discover("sess-A")
+        assert rec is not None and rec.generation == 2
 
 
 # ---------------------------------------------------------------------------
@@ -549,10 +679,13 @@ class TestT1SessionRekey:
 
 
 class TestMatrixIsNotVacuous:
-    def test_1114_t1_self_heal_is_red(self) -> None:
-        cell = EXPECTATIONS["self_heal"]["t1"]
-        assert cell != "pass" and cell[0] == GAP
-        assert "#1114" in cell[1]
+    def test_1114_t1_self_heal_fixed_structurally(self) -> None:
+        # #1114 (T1 chroma runs with a lost addr file, no self-heal) was the
+        # red-first GAP cell through P0-P3; RDR-149 P4 fixed it structurally
+        # by migrating T1 onto the leased registry so its publisher heartbeat
+        # self-heals a lost record, exactly as T2/T3 do. This guards against a
+        # regression silently re-opening it.
+        assert EXPECTATIONS["self_heal"]["t1"] == "pass"
 
     def test_1112_t3_version_cycle_fixed_structurally(self) -> None:
         # #1112 (T3 stale after upgrade) was the red-first GAP cell through
@@ -600,6 +733,26 @@ class TestMatrixIsNotVacuous:
             assert EXPECTATIONS[prop]["t3"] == "pass", (
                 f"T3 lease property {prop!r} regressed to non-pass after P3"
             )
+
+    def test_t1_migration_flipped_its_cells(self) -> None:
+        # RDR-149 P4 ratchet: T1 now rides the primitive, so self_heal goes
+        # green (#1114), session-scope converges to one owner, and the lease
+        # SPEC properties pass. version_cycle stays a documented N/A (T1 is
+        # MCP-lifespan-owned, not upgrade-cycled). A regression surfaces here.
+        for prop in (
+            "self_heal",
+            "concurrent_one_owner",
+            "pid_reuse_immunity",
+            "restart_higher_generation",
+            "restart_race_fencing",
+        ):
+            assert EXPECTATIONS[prop]["t1"] == "pass", (
+                f"T1 lease property {prop!r} regressed to non-pass after P4"
+            )
+        cell = EXPECTATIONS["version_cycle"]["t1"]
+        assert isinstance(cell, tuple) and cell[0] == GAP, (
+            "version_cycle[t1] must stay a documented N/A (MCP-lifespan-owned)"
+        )
 
     def test_every_cell_covers_all_tiers(self) -> None:
         for prop, cells in EXPECTATIONS.items():

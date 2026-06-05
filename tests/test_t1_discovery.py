@@ -23,9 +23,49 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+
+def _discover_t1_endpoint(config_dir, scope_key) -> tuple[str, int] | None:
+    """RDR-149 P4 test helper: read the live T1 lease for ``scope_key``
+    (a session-id or a transient server_pid) and return ``(host, port)``.
+
+    Replaces the legacy ``read_t1_addr_for(claude_pid)`` probe now that T1
+    rides the leased registry instead of the ``host:port`` addr file.
+    """
+    from nexus.daemon.service_registry import ServiceRegistry
+
+    registry = ServiceRegistry(dir=Path(config_dir), tier="t1")
+    record = registry.discover(str(scope_key))
+    if record is None:
+        return None
+    host = record.endpoint.get("host")
+    port = record.endpoint.get("port")
+    if host is None or port is None:
+        return None
+    return host, port
+
+
+def _publish_t1_session_lease(config_dir, session_id, host, port, *, server_pid=4242):
+    """RDR-149 P4 test helper: publish a session-id-keyed T1 lease so a
+    discovery path that resolves ``session_id`` finds ``(host, port)``."""
+    from nexus.daemon.service_registry import ServiceRegistry
+    from nexus.daemon.t1_lease import T1LeasePublisher
+
+    registry = ServiceRegistry(dir=Path(config_dir), tier="t1")
+    publisher = T1LeasePublisher(
+        registry=registry,
+        server_pid=server_pid,
+        host=host,
+        port=port,
+        version="1.0.0",
+        session_resolver=lambda: session_id,
+    )
+    publisher.publish()
+    return publisher
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -353,7 +393,8 @@ class TestT1DatabaseFlagOnEnvPath:
 
 
 class TestT1DatabaseFlagOnFilePath:
-    """Path B: subprocess sibling reads addr file via PPID walk."""
+    """Path B (RDR-149 P4): sibling resolves a session-id and reads the
+    live session-id-keyed lease."""
 
     def test_file_path_uses_http_client(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
@@ -367,13 +408,14 @@ class TestT1DatabaseFlagOnFilePath:
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        # The writer (MCP lifespan) published a session-id lease; the reader
+        # resolves the same session-id from NX_SESSION_ID.
+        _publish_t1_session_lease(tmp_path, "sess-A", "127.0.0.1", 9999)
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
 
-        from nexus.session import write_t1_addr
-        write_t1_addr(11111, "127.0.0.1", 9999)
-
-        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=11111):
-            from nexus.db.t1 import T1Database
-            T1Database()
+        from nexus.db.t1 import T1Database
+        T1Database()
         fake_chromadb.HttpClient.assert_called_once_with(host="127.0.0.1", port=9999)
 
 
@@ -414,9 +456,8 @@ class TestT1DatabaseFlagOnIsolationPath:
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
-        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=99999):
-            from nexus.db.t1 import T1Database
-            db = T1Database()
+        from nexus.db.t1 import T1Database
+        db = T1Database()
 
         fake_chromadb.HttpClient.assert_not_called()
         fake_chromadb.EphemeralClient.assert_called_once()
@@ -439,9 +480,8 @@ class TestT1DatabaseFlagOnIsolationPath:
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.setenv("NEXUS_SKIP_T1", "1")
 
-        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=99999):
-            from nexus.db.t1 import T1Database
-            T1Database()
+        from nexus.db.t1 import T1Database
+        T1Database()
 
         fake_chromadb.EphemeralClient.assert_called_once()
 
@@ -463,11 +503,13 @@ class TestT1DatabaseFlagOnRaisesOnMisconfiguration:
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        # No session-id resolves, so the session-id lease path (Path B) is
+        # skipped and the constructor fails loud (RDR-149 P4).
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
-        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=99999):
-            from nexus.db.t1 import T1Database, T1ServerNotFoundError
-            with pytest.raises(T1ServerNotFoundError, match="NX_T1"):
-                T1Database()
+        from nexus.db.t1 import T1Database, T1ServerNotFoundError
+        with pytest.raises(T1ServerNotFoundError, match="NX_T1"):
+            T1Database()
 
         fake_chromadb.HttpClient.assert_not_called()
         fake_chromadb.EphemeralClient.assert_not_called()
@@ -534,13 +576,14 @@ class TestT1DatabaseFlagOnPrecedence:
         monkeypatch.setenv("NX_T1_PORT", "1111")
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
 
-        from nexus.session import write_t1_addr
-        write_t1_addr(22222, "10.0.0.2", 2222)
+        # A session-id lease also exists, but env (Path A) outranks the
+        # session-id lease path (Path B) (RF-5 precedence).
+        _publish_t1_session_lease(tmp_path, "sess-A", "10.0.0.2", 2222)
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
 
-        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=22222):
-            from nexus.db.t1 import T1Database
-            T1Database()
-        # Should have used env-supplied 10.0.0.1:1111, not file-supplied 10.0.0.2:2222.
+        from nexus.db.t1 import T1Database
+        T1Database()
+        # Should have used env-supplied 10.0.0.1:1111, not lease-supplied 10.0.0.2:2222.
         fake_chromadb.HttpClient.assert_called_once_with(host="10.0.0.1", port=1111)
 
 
@@ -586,12 +629,12 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
             monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
-        from nexus.session import write_t1_addr
-        write_t1_addr(44444, "10.0.0.2", 2222)
+        # A session-id lease exists, but isolation (Path C) outranks it.
+        _publish_t1_session_lease(tmp_path, "sess-A", "10.0.0.2", 2222)
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
 
-        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=44444):
-            from nexus.db.t1 import T1Database
-            T1Database()
+        from nexus.db.t1 import T1Database
+        T1Database()
 
         fake_chromadb.EphemeralClient.assert_called_once()
         fake_chromadb.HttpClient.assert_not_called()
@@ -610,12 +653,12 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
 
-        from nexus.session import write_t1_addr
-        write_t1_addr(55555, "10.0.0.3", 3333)
+        # Both an env pair and a session-id lease exist; isolation outranks both.
+        _publish_t1_session_lease(tmp_path, "sess-A", "10.0.0.3", 3333)
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
 
-        with patch("nexus.db.t1.find_immediate_claude_pid", return_value=55555):
-            from nexus.db.t1 import T1Database
-            T1Database()
+        from nexus.db.t1 import T1Database
+        T1Database()
 
         fake_chromadb.EphemeralClient.assert_called_once()
         fake_chromadb.HttpClient.assert_not_called()
@@ -691,19 +734,18 @@ def _setup_path(path_id: str, tmp_path, monkeypatch, fake_chromadb):
         monkeypatch.setenv("NX_T1_PORT", "5555")
         return {}, "HttpClient"
     if path_id == "addr_file":
-        from nexus.session import write_t1_addr
-        write_t1_addr(33333, "127.0.0.1", 6666)
+        # RDR-149 P4: Path B resolves a session-id, then reads the live
+        # session-id-keyed lease. The session-id is whatever the test's
+        # resolution chain produces; the lease reader is stubbed to return a
+        # live endpoint so this path exercises session_id resolution without
+        # coupling to a specific session string.
         monkeypatch.setattr(
-            "nexus.db.t1.find_immediate_claude_pid",
-            lambda start_pid=None: 33333,
+            "nexus.daemon.t1_lease.discover_t1_lease",
+            lambda session_id, **kw: ("127.0.0.1", 6666),
         )
         return {}, "HttpClient"
     if path_id == "isolation":
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
-        monkeypatch.setattr(
-            "nexus.db.t1.find_immediate_claude_pid",
-            lambda start_pid=None: 0,
-        )
         return {}, "EphemeralClient"
     if path_id == "client_injection":
         return {"client": fake_chromadb.EphemeralClient.return_value}, None
@@ -781,7 +823,11 @@ class TestT1DatabaseSessionIdResolution:
         db = T1Database(**kwargs)
         assert db.session_id == "canonical-claude-uuid"
 
-    @pytest.mark.parametrize("path_id", _PATH_IDS)
+    # RDR-149 P4: the ``addr_file`` (session-id lease) path is excluded here.
+    # With no session-id resolving, Path B cannot discover a lease, so only
+    # the env / isolation / client-injection paths can reach the session_id
+    # assignment under test.
+    @pytest.mark.parametrize("path_id", ["env", "isolation", "client_injection"])
     def test_unknown_fallback_when_nothing_set(
         self, path_id, tmp_path, monkeypatch, fake_chromadb
     ):
@@ -833,13 +879,10 @@ class TestE2ESessionIdSharedAcrossProcesses:
 
         from nexus.session import (
             stop_t1_server,
-            unlink_t1_addr,
             write_claude_session_id,
-            write_t1_addr,
         )
 
         host, port, server_pid, chroma_tmpdir = _start_real_chroma()
-        own_pid = os.getpid()
         canonical = "11111111-2222-3333-4444-555555555555"
         try:
             # Populate NEXUS_CONFIG_DIR with: current_session pointer +
@@ -865,18 +908,19 @@ class TestE2ESessionIdSharedAcrossProcesses:
                     lambda: tmp_path
                 )
                 write_claude_session_id(canonical)
-                write_t1_addr(own_pid, host, port)
             finally:
                 _sess._nexus_config_dir_at_import = real_dir_at_import
+
+            # RDR-149 P4: publish the session-id-keyed lease the children
+            # resolve from the current_session pointer.
+            publisher = _publish_t1_session_lease(
+                tmp_path, canonical, host, port, server_pid=server_pid
+            )
 
             try:
                 child_code = (
                     "import os, sys, json\n"
                     "from nexus.db.t1 import T1Database\n"
-                    "import nexus.session as _sess\n"
-                    "import nexus.db.t1 as _t1\n"
-                    f"_sess.find_immediate_claude_pid = lambda start_pid=None: {own_pid}\n"
-                    f"_t1.find_immediate_claude_pid = lambda start_pid=None: {own_pid}\n"
                     "action = sys.argv[1]\n"
                     "db = T1Database()\n"
                     "if action == 'put':\n"
@@ -913,7 +957,7 @@ class TestE2ESessionIdSharedAcrossProcesses:
                 # (b) put-from-A is visible from list-in-B.
                 assert "hello-from-A" in b_result["items"], b_result
             finally:
-                unlink_t1_addr(own_pid)
+                publisher.relinquish()
         finally:
             stop_t1_server(server_pid)
             shutil.rmtree(chroma_tmpdir, ignore_errors=True)
@@ -1072,19 +1116,20 @@ class TestLifespanNewDiscoveryGenerator:
         assert called["write"] == 0
 
     def test_branch3_top_level_spawns_and_publishes(self, tmp_path, monkeypatch):
-        """No env, no isolation -> spawn chroma + write addr file +
-        populate ``_t1_state.T1_ADDR``. Cleanup unlinks file + resets
-        the variable."""
+        """RDR-149 P4: no env, no isolation, no resolvable session -> spawn
+        chroma + publish a transient ``server_pid``-keyed lease + populate
+        ``_t1_state.T1_ADDR``. Cleanup relinquishes the lease + resets the
+        variable."""
         import asyncio
 
         from nexus.mcp import _t1_state, core as mcp_core
-        from nexus.session import read_t1_addr_for
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
         prev_addr = _t1_state.T1_ADDR
         _t1_state.T1_ADDR = None
@@ -1096,27 +1141,28 @@ class TestLifespanNewDiscoveryGenerator:
 
             with patch("nexus.session.start_t1_server",
                        return_value=("127.0.0.1", 33333, 99999, str(tmp_path / "chroma_tmpdir"))), \
-                 patch("nexus.session.stop_t1_server", side_effect=fake_stop), \
-                 patch("nexus.session.find_immediate_claude_pid", return_value=44444):
+                 patch("nexus.session.stop_t1_server", side_effect=fake_stop):
                 async def _run():
                     async with mcp_core._t1_chroma_lifespan(None):
-                        # During the body: addr file present + state set
-                        assert read_t1_addr_for(44444) == ("127.0.0.1", 33333)
+                        # During the body: transient server_pid lease present
+                        # (session-id unresolved) + state set.
+                        assert _discover_t1_endpoint(tmp_path, 99999) == ("127.0.0.1", 33333)
                         assert _t1_state.T1_ADDR == ("127.0.0.1", 33333)
                 asyncio.run(_run())
 
-            # After body: cleanup.
-            assert read_t1_addr_for(44444) is None
+            # After body: cleanup relinquished the lease.
+            assert _discover_t1_endpoint(tmp_path, 99999) is None
             assert _t1_state.T1_ADDR is None
             assert calls["stop"] == 1
         finally:
             _t1_state.T1_ADDR = prev_addr
 
     def test_branch3_emits_t1_chroma_init_owned_log(self, tmp_path, monkeypatch):
-        """nexus-7m8i: happy-path spawn emits exactly one
+        """nexus-7m8i / RDR-149 P4: happy-path spawn emits exactly one
         ``t1_chroma_init_owned`` info log with host/port/server_pid/
-        claude_pid/tmpdir. The no-claude-pid path emits the warning
-        instead (covered indirectly by the absence of the info)."""
+        scope_key/session_keyed/tmpdir. With no resolvable session-id the
+        lease is keyed transiently on the server_pid (``session_keyed``
+        False)."""
         import asyncio
         import logging
 
@@ -1130,6 +1176,7 @@ class TestLifespanNewDiscoveryGenerator:
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
         # The default structlog wrapper filters at WARNING in test
         # context; lower to INFO so capture_logs sees the happy-path
@@ -1144,9 +1191,7 @@ class TestLifespanNewDiscoveryGenerator:
             with patch("nexus.session.start_t1_server",
                        return_value=("127.0.0.1", 51515, 88888,
                                      str(tmp_path / "chroma_tmpdir"))), \
-                 patch("nexus.session.stop_t1_server"), \
-                 patch("nexus.session.find_immediate_claude_pid",
-                       return_value=12321):
+                 patch("nexus.session.stop_t1_server"):
                 with capture_logs() as cap:
                     async def _run():
                         async with mcp_core._t1_chroma_lifespan(None):
@@ -1165,27 +1210,19 @@ class TestLifespanNewDiscoveryGenerator:
             assert ev["host"] == "127.0.0.1"
             assert ev["port"] == 51515
             assert ev["server_pid"] == 88888
-            assert ev["claude_pid"] == 12321
+            assert ev["scope_key"] == "88888"  # transient server_pid key
+            assert ev["session_keyed"] is False
             assert ev["tmpdir"] == str(tmp_path / "chroma_tmpdir")
-
-            # The warning path must NOT fire on the happy branch.
-            warnings = [
-                e for e in cap
-                if e.get("event") == "t1_addr_publish_skipped_no_claude_pid"
-            ]
-            assert warnings == []
         finally:
             _t1_state.T1_ADDR = prev_addr
             if prev_wrapper is not None:
                 structlog.configure(wrapper_class=prev_wrapper)
 
-    def test_branch3_no_claude_pid_emits_warning_not_info(
-        self, tmp_path, monkeypatch,
-    ):
-        """When ``find_immediate_claude_pid`` returns 0, the warning
-        fires and the happy-path info does NOT (nexus-7m8i symmetry)."""
+    def test_branch3_warm_session_keys_on_session_id(self, tmp_path, monkeypatch):
+        """RDR-149 P4: when the session-id resolves at publish time (warm
+        session / inherited ``NX_SESSION_ID``), the lease is keyed on the
+        session-id directly with no transient window."""
         import asyncio
-        from structlog.testing import capture_logs
 
         from nexus.mcp import _t1_state, core as mcp_core
 
@@ -1194,82 +1231,31 @@ class TestLifespanNewDiscoveryGenerator:
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.setenv("NX_SESSION_ID", "sess-warm")
 
         prev_addr = _t1_state.T1_ADDR
         _t1_state.T1_ADDR = None
         try:
             with patch("nexus.session.start_t1_server",
-                       return_value=("127.0.0.1", 51515, 88888,
-                                     str(tmp_path / "chroma_tmpdir"))), \
-                 patch("nexus.session.stop_t1_server"), \
-                 patch("nexus.session.find_immediate_claude_pid",
-                       return_value=0):
-                with capture_logs() as cap:
-                    async def _run():
-                        async with mcp_core._t1_chroma_lifespan(None):
-                            pass
-                    asyncio.run(_run())
-
-            owned = [e for e in cap if e.get("event") == "t1_chroma_init_owned"]
-            warned = [
-                e for e in cap
-                if e.get("event") == "t1_addr_publish_skipped_no_claude_pid"
-            ]
-            assert owned == []
-            assert len(warned) == 1
-            assert warned[0]["log_level"] == "warning"
-        finally:
-            _t1_state.T1_ADDR = prev_addr
-
-    def test_branch3_no_claude_pid_skips_publish_but_keeps_chroma(
-        self, tmp_path, monkeypatch
-    ):
-        """When ``find_immediate_claude_pid`` returns 0, the lifespan
-        emits a warning, skips the addr-file write, leaves
-        ``_t1_state.T1_ADDR`` unset, and still tears chroma down on
-        exit. Documents the unusual-process-parentage edge."""
-        import asyncio
-
-        from nexus.mcp import _t1_state, core as mcp_core
-        from nexus.session import read_t1_addr_for
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        monkeypatch.delenv("NX_T1_HOST", raising=False)
-        monkeypatch.delenv("NX_T1_PORT", raising=False)
-        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
-
-        prev_addr = _t1_state.T1_ADDR
-        _t1_state.T1_ADDR = None
-        calls = {"stop": 0}
-        try:
-            with patch("nexus.session.start_t1_server",
-                       return_value=("127.0.0.1", 33333, 99999, str(tmp_path / "chroma_tmpdir"))), \
-                 patch("nexus.session.stop_t1_server",
-                       side_effect=lambda _p: calls.update(stop=calls["stop"] + 1)), \
-                 patch("nexus.session.find_immediate_claude_pid", return_value=0):
+                       return_value=("127.0.0.1", 41414, 77777, str(tmp_path / "chroma_tmpdir"))), \
+                 patch("nexus.session.stop_t1_server"):
                 async def _run():
                     async with mcp_core._t1_chroma_lifespan(None):
-                        # No addr file, no T1_ADDR, but chroma is running.
-                        assert _t1_state.T1_ADDR is None
-                        # No file at any pid (we mocked walker to 0).
-                        for pid in (0, 1, 100, 99999):
-                            assert read_t1_addr_for(pid) is None
+                        # Keyed on the session-id, not the server_pid.
+                        assert _discover_t1_endpoint(tmp_path, "sess-warm") == ("127.0.0.1", 41414)
+                        assert _discover_t1_endpoint(tmp_path, 77777) is None
                 asyncio.run(_run())
 
-            assert calls["stop"] == 1
-            assert _t1_state.T1_ADDR is None
+            assert _discover_t1_endpoint(tmp_path, "sess-warm") is None  # relinquished
         finally:
             _t1_state.T1_ADDR = prev_addr
 
     def test_sigterm_path_cleans_up_via_owned_chroma(self, tmp_path, monkeypatch):
         """Stdio SIGTERM scenario: lifespan body has populated
-        ``_OWNED_CHROMA``; ``_t1_chroma_shutdown`` runs (signal
-        handler / atexit) and dispatches to the new-discovery impl
-        instead of the legacy one. Idempotent with the lifespan's
-        own finally."""
+        ``_OWNED_CHROMA`` with the lease publisher; ``_t1_chroma_shutdown``
+        runs (signal handler / atexit), relinquishes the lease, and stops
+        chroma. Idempotent with the lifespan's own finally (RDR-149 P4)."""
         from nexus.mcp import _t1_state, core as mcp_core
-        from nexus.session import read_t1_addr_for, write_t1_addr
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
@@ -1277,14 +1263,17 @@ class TestLifespanNewDiscoveryGenerator:
         prev_addr = _t1_state.T1_ADDR
         prev_inflight = mcp_core._SHUTDOWN_IN_FLIGHT
         try:
-            # Simulate a populated lifespan-body state.
-            write_t1_addr(88888, "127.0.0.1", 7777)
+            # Simulate a populated lifespan-body state: a published lease.
+            publisher = _publish_t1_session_lease(
+                tmp_path, "sess-A", "127.0.0.1", 7777, server_pid=12345
+            )
+            assert _discover_t1_endpoint(tmp_path, "sess-A") == ("127.0.0.1", 7777)
             _t1_state.T1_ADDR = ("127.0.0.1", 7777)
             mcp_core._OWNED_CHROMA.clear()
             mcp_core._OWNED_CHROMA.update({
                 "server_pid": 12345,
                 "tmpdir": str(tmp_path / "chroma_tmpdir"),
-                "t1_addr_claude_pid": 88888,
+                "t1_lease_publisher": publisher,
             })
             mcp_core._SHUTDOWN_IN_FLIGHT = False
 
@@ -1294,8 +1283,8 @@ class TestLifespanNewDiscoveryGenerator:
                 # SIGTERM-equivalent: atexit / signal handler entry.
                 mcp_core._t1_chroma_shutdown()
 
-            # Cleanup ran: addr file gone, state reset, chroma stopped.
-            assert read_t1_addr_for(88888) is None
+            # Cleanup ran: lease relinquished, state reset, chroma stopped.
+            assert _discover_t1_endpoint(tmp_path, "sess-A") is None
             assert _t1_state.T1_ADDR is None
             assert calls["stop"] == 1
             assert not mcp_core._OWNED_CHROMA
@@ -1314,9 +1303,9 @@ class TestLifespanNewDiscoveryGenerator:
             mcp_core._SHUTDOWN_IN_FLIGHT = prev_inflight
 
     def test_branch3_chroma_reaped_when_publish_raises(self, tmp_path, monkeypatch):
-        """If ``write_t1_addr`` raises, the lifespan's finally still
+        """If the lease ``publish`` raises, the lifespan's finally still
         reaps chroma (no orphan process). Validates the spawn-then-
-        try/finally layout."""
+        try/finally layout (RDR-149 P4)."""
         import asyncio
 
         from nexus.mcp import _t1_state, core as mcp_core
@@ -1332,15 +1321,14 @@ class TestLifespanNewDiscoveryGenerator:
         try:
             calls = {"stop": 0}
 
-            def boom(*args, **kwargs):
-                raise OSError("simulated disk-full at addr-file write")
+            def boom(self):
+                raise OSError("simulated disk-full at lease publish")
 
             with patch("nexus.session.start_t1_server",
                        return_value=("127.0.0.1", 4242, 1234, str(tmp_path / "chroma_tmpdir"))), \
                  patch("nexus.session.stop_t1_server",
                        side_effect=lambda _p: calls.update(stop=calls["stop"] + 1)), \
-                 patch("nexus.session.find_immediate_claude_pid", return_value=11), \
-                 patch("nexus.session.write_t1_addr", side_effect=boom):
+                 patch("nexus.daemon.t1_lease.T1LeasePublisher.publish", side_effect=boom, autospec=True):
                 async def _run():
                     async with mcp_core._t1_chroma_lifespan(None):
                         pass
@@ -1358,62 +1346,53 @@ class TestLifespanNewDiscoveryGenerator:
             mcp_core._OWNED_CHROMA.update(prev_owned)
             _t1_state.T1_ADDR = prev_addr
 
-    def test_owned_respawn_does_not_clobber_parent_file(self, tmp_path, monkeypatch):
-        """RDR-105 RF-6 owned-mode invariant at the lifespan layer.
+    def test_owned_respawn_keys_on_own_server_pid_not_a_sibling(self, tmp_path, monkeypatch):
+        """RDR-149 P4: the owned-mode isolation invariant under the lease
+        model. An owned MCP's lifespan keys its lease on ITS OWN chroma
+        ``server_pid`` (unique per process), so it can never clobber a
+        sibling/parent's record. This supersedes the RDR-105 RF-6
+        claude_pid PPID-walk clobber concern, which P4 eliminates by
+        dropping claude_pid keying entirely.
 
-        Scenario: a top-level Claude (claude_pid=100) is running; its
-        MCP wrote ``t1_addr.100``. An owned ``claude -p`` subprocess
-        starts (its own claude_pid=200). The owned MCP's lifespan
-        spawns its own chroma and writes ``t1_addr.200``.
-
-        Invariant: the owned MCP MUST NOT touch ``t1_addr.100``. If
-        ``find_immediate_claude_pid`` accidentally returned 100 (the
-        topmost-walk bug RF-6 closes), the owned MCP would clobber
-        the parent's file with its own chroma's address.
-
-        This test simulates the scenario and locks the contract at the
-        lifespan layer; companion to the unit test on
-        ``find_immediate_claude_pid`` itself.
+        Scenario: a sibling's transient lease at ``t1_addr.<100>`` already
+        exists; the owned MCP spawns its own chroma (server_pid=22222) and
+        publishes ``t1_addr.<22222>`` without touching the sibling's record.
         """
         import asyncio
 
         from nexus.mcp import _t1_state, core as mcp_core
-        from nexus.session import read_t1_addr_for, write_t1_addr
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
-        # Pre-existing parent's addr file.
-        write_t1_addr(100, "127.0.0.1", 11111)
-        parent_before = read_t1_addr_for(100)
-        assert parent_before == ("127.0.0.1", 11111)
+        # A sibling's transient lease (keyed on its own server_pid=100).
+        _publish_t1_session_lease(tmp_path, None, "127.0.0.1", 11111, server_pid=100)
+        assert _discover_t1_endpoint(tmp_path, 100) == ("127.0.0.1", 11111)
 
         prev_addr = _t1_state.T1_ADDR
         _t1_state.T1_ADDR = None
         try:
             with patch("nexus.session.start_t1_server",
-                       return_value=("127.0.0.1", 22222, 99999, str(tmp_path / "owned_chroma_tmpdir"))), \
+                       return_value=("127.0.0.1", 22222, 22222, str(tmp_path / "owned_chroma_tmpdir"))), \
                  patch("nexus.session.stop_t1_server", side_effect=lambda _p: None), \
-                 patch("nexus.session.find_immediate_claude_pid", return_value=200), \
                  patch("nexus.session.sweep_orphan_t1_addr_files", return_value=0):
-                # The orphan-reaper sweep on lifespan entry would
-                # reap the test's fake parent file (pid 100 is not
-                # a live process). Patch it off so the RF-6
-                # invariant under test is exercised cleanly.
+                # Patch the orphan-reaper sweep off so it does not reap the
+                # sibling's transient lease (server_pid=100 is not a live pid).
                 async def _run():
                     async with mcp_core._t1_chroma_lifespan(None):
-                        # Owned MCP wrote its OWN file at claude_pid=200.
-                        assert read_t1_addr_for(200) == ("127.0.0.1", 22222)
-                        # Parent's file at claude_pid=100 is UNCHANGED.
-                        assert read_t1_addr_for(100) == ("127.0.0.1", 11111)
+                        # Owned MCP keyed on its OWN server_pid.
+                        assert _discover_t1_endpoint(tmp_path, 22222) == ("127.0.0.1", 22222)
+                        # The sibling's record is UNTOUCHED.
+                        assert _discover_t1_endpoint(tmp_path, 100) == ("127.0.0.1", 11111)
                 asyncio.run(_run())
 
-            # After cleanup: owned's file unlinked, parent's still intact.
-            assert read_t1_addr_for(200) is None
-            assert read_t1_addr_for(100) == ("127.0.0.1", 11111)
+            # After cleanup: owned's lease relinquished, sibling's intact.
+            assert _discover_t1_endpoint(tmp_path, 22222) is None
+            assert _discover_t1_endpoint(tmp_path, 100) == ("127.0.0.1", 11111)
         finally:
             _t1_state.T1_ADDR = prev_addr
 
@@ -1423,21 +1402,20 @@ class TestLifespanNewDiscoveryGenerator:
         import asyncio
 
         from nexus.mcp import _t1_state, core as mcp_core
-        from nexus.session import read_t1_addr_for
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
         prev_addr = _t1_state.T1_ADDR
         _t1_state.T1_ADDR = None
         try:
             with patch("nexus.session.start_t1_server",
-                       return_value=("127.0.0.1", 33333, 99999, str(tmp_path / "chroma_tmpdir"))), \
-                 patch("nexus.session.stop_t1_server", side_effect=lambda _p: None), \
-                 patch("nexus.session.find_immediate_claude_pid", return_value=55555):
+                       return_value=("127.0.0.1", 33333, 55555, str(tmp_path / "chroma_tmpdir"))), \
+                 patch("nexus.session.stop_t1_server", side_effect=lambda _p: None):
                 async def _run():
                     async with mcp_core._t1_chroma_lifespan(None):
                         raise RuntimeError("body error")
@@ -1445,7 +1423,7 @@ class TestLifespanNewDiscoveryGenerator:
                 with pytest.raises(RuntimeError, match="body error"):
                     asyncio.run(_run())
 
-            assert read_t1_addr_for(55555) is None
+            assert _discover_t1_endpoint(tmp_path, 55555) is None
             assert _t1_state.T1_ADDR is None
         finally:
             _t1_state.T1_ADDR = prev_addr
@@ -1486,38 +1464,33 @@ class TestE2EFileDiscovery:
     default unit suite. Run via ``uv run pytest -m integration``.
     """
 
-    def test_sibling_subprocess_connects_via_addr_file(
+    def test_sibling_subprocess_connects_via_session_lease(
         self, tmp_path, monkeypatch
     ):
         import shutil
 
-        from nexus.session import (
-            stop_t1_server,
-            unlink_t1_addr,
-            write_t1_addr,
-        )
+        from nexus.session import stop_t1_server
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
         host, port, server_pid, chroma_tmpdir = _start_real_chroma()
-        own_pid = os.getpid()
+        session_id = "spike-session"
         try:
-            write_t1_addr(own_pid, host, port)
+            # The writer (MCP lifespan) published a session-id-keyed lease.
+            publisher = _publish_t1_session_lease(
+                tmp_path, session_id, host, port, server_pid=server_pid
+            )
             try:
-                # Spawn a "sibling" subprocess that simulates a Bash-tool
-                # invocation. find_immediate_claude_pid is monkey-pinned to
-                # our PID so the test's own process plays the role of the
-                # subprocess's owning Claude ancestor.
+                # A "sibling" subprocess (Bash-tool invocation) resolves the
+                # same session-id from NX_SESSION_ID and reads the lease.
                 code = (
                     "import os\n"
                     f"os.environ['NEXUS_CONFIG_DIR'] = {str(tmp_path)!r}\n"
+                    f"os.environ['NX_SESSION_ID'] = {session_id!r}\n"
                     "os.environ.pop('NX_T1_HOST', None)\n"
                     "os.environ.pop('NX_T1_PORT', None)\n"
                     "os.environ.pop('NEXUS_SKIP_T1', None)\n"
-                    "import nexus.session as session\n"
-                    f"session.find_immediate_claude_pid = lambda start_pid=None: {own_pid}\n"
-                    "import nexus.db.t1 as t1\n"
-                    f"t1.find_immediate_claude_pid = lambda start_pid=None: {own_pid}\n"
+                    "os.environ.pop('NX_T1_ISOLATED', None)\n"
                     "from nexus.db.t1 import T1Database\n"
                     "db = T1Database()\n"
                     "doc_id = db.put('hello from sibling', tags='spike')\n"
@@ -1535,7 +1508,7 @@ class TestE2EFileDiscovery:
                 )
                 assert proc.stdout.startswith("OK"), proc.stdout
             finally:
-                unlink_t1_addr(own_pid)
+                publisher.relinquish()
         finally:
             stop_t1_server(server_pid)
             shutil.rmtree(chroma_tmpdir, ignore_errors=True)
