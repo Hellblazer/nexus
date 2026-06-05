@@ -14,11 +14,12 @@ The chroma subprocess is spawned with ``start_new_session=True`` so a
 SIGTERM at shutdown reaches the whole process group — chroma's
 multiprocessing workers and resource_tracker child included.
 
-T1/T3 non-collision invariant: T1 uses ephemeral tempdirs +
-``t1_addr.<claude_pid>``; T3 uses ``nexus.config._default_local_path()``
-+ ``t3_addr.<uid>``. Both pick free ports via the OS allocator. Distinct
-addr-file naming and distinct chroma --path roots mean two coexisting
-chroma subprocesses on the same host do not collide.
+T1/T3 non-collision invariant: T1 uses ephemeral tempdirs + a leased
+registry record at ``t1_addr.<session_id>`` (RDR-149 P4); T3 uses
+``nexus.config._default_local_path()`` + ``t3_addr.<uid>``. Both pick free
+ports via the OS allocator. Distinct addr-file naming and distinct chroma
+--path roots mean two coexisting chroma subprocesses on the same host do
+not collide.
 """
 from __future__ import annotations
 

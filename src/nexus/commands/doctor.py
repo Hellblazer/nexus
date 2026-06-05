@@ -1206,11 +1206,10 @@ def _run_check_mineru() -> None:
     "check_t1",
     is_flag=True,
     default=False,
-    help="Diagnose T1 addr-file presence + reachability. Detects "
-         "the 'no t1_addr.<claude_pid> when Claude Code is parent' "
-         "case and the exec -a / wrapper-rename residual. RDR-105 "
-         "P5 / nexus-ssdg. Exits 1 when Claude is in the chain "
-         "but the addr file is missing or unreachable.",
+    help="Diagnose T1 session-id lease presence + reachability "
+         "(RDR-149 P4). Resolves the active session-id and probes its "
+         "lease at ~/.config/nexus/t1_addr.<session_id>. Exits 1 when a "
+         "session-id resolves but the lease is missing or unreachable.",
 )
 @click.option(
     "--days",

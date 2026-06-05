@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-105 hybrid T1 discovery tests.
+"""RDR-105 hybrid T1 discovery tests (RDR-149 P4 lease model).
 
-The single hybrid-discovery code path (RDR-105 P4) is the only T1
-resolution surface. Verifies:
+The single hybrid-discovery code path is the only T1 resolution surface.
+Verifies:
 
 * ``find_immediate_claude_pid`` returns the FIRST ``claude*`` ancestor
-  walking up, NOT the topmost (RF-6, the load-bearing fix that prevents
-  owned-mode isolation breakage).
-* Address-file primitives (``write_t1_addr`` / ``read_t1_addr_for`` /
-  ``unlink_t1_addr``) round-trip atomically.
-* ``T1Database.__init__`` flag-gated paths: env (Path A), addr file
-  (Path B), legacy fall-through.
-* MCP lifespan augmentation publishes the addr file + populates
-  ``_t1_state.T1_ADDR`` when flag-on; cleanup unlinks + resets.
+  walking up, NOT the topmost (RF-6). Retained for its non-T1 consumer
+  (``phase_review_sentinel``); RDR-149 P4 moved T1 off pid keying.
+* ``T1Database.__init__`` flag-gated paths: env (Path A), session-id
+  lease (Path B), isolation (Path C), fail-loud (Path D).
+* MCP lifespan Branch 3 publishes a leased registry record + populates
+  ``_t1_state.T1_ADDR``; cleanup relinquishes + resets.
+* The cold-start transient-window behavior (CA-3): owner + env-inheritors
+  covered; a bare Bash sibling fails loud and retries.
 * Dispatcher env builder honours ``share_t1`` + flag.
-* End-to-end: subprocess sibling discovers a live chroma via the addr
-  file (Path B) and via env (Path A).
+* End-to-end: subprocess sibling discovers a live chroma via the
+  session-id lease (Path B) and via env (Path A).
 """
 from __future__ import annotations
 
@@ -164,176 +164,6 @@ class TestFindImmediateClaudePid:
              patch("nexus.session._command_name_of",
                    side_effect=lambda pid: comm_map.get(pid, "")):
             assert find_immediate_claude_pid(start_pid=500) == 600
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Address-file primitives
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestT1AddrFile:
-    """Single-writer ``~/.config/nexus/t1_addr.<claude_pid>``.
-
-    File contents: ``host:port\\n``. Atomic write via temp-then-replace.
-    """
-
-    def test_t1_addr_path_under_nexus_config(self, tmp_path, monkeypatch):
-        from nexus.session import t1_addr_path
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        path = t1_addr_path(12345)
-        assert path.name == "t1_addr.12345"
-        assert path.parent == tmp_path
-
-    def test_write_read_roundtrip(self, tmp_path, monkeypatch):
-        from nexus.session import read_t1_addr_for, write_t1_addr
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        write_t1_addr(12345, "127.0.0.1", 54321)
-        assert read_t1_addr_for(12345) == ("127.0.0.1", 54321)
-
-    def test_read_missing_returns_none(self, tmp_path, monkeypatch):
-        from nexus.session import read_t1_addr_for
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        assert read_t1_addr_for(99999) is None
-
-    def test_unlink_idempotent(self, tmp_path, monkeypatch):
-        from nexus.session import read_t1_addr_for, unlink_t1_addr, write_t1_addr
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        write_t1_addr(54321, "127.0.0.1", 11111)
-        unlink_t1_addr(54321)
-        assert read_t1_addr_for(54321) is None
-        # Second unlink: no-op (file already gone), no exception.
-        unlink_t1_addr(54321)
-        assert read_t1_addr_for(54321) is None
-
-    def test_atomic_write_replaces_existing(self, tmp_path, monkeypatch):
-        from nexus.session import read_t1_addr_for, write_t1_addr
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        write_t1_addr(7, "127.0.0.1", 1000)
-        write_t1_addr(7, "127.0.0.1", 2000)
-        assert read_t1_addr_for(7) == ("127.0.0.1", 2000)
-
-    def test_read_corrupt_file_returns_none(self, tmp_path, monkeypatch):
-        from nexus.session import read_t1_addr_for, t1_addr_path
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        path = t1_addr_path(13)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("garbage no colon\n")
-        assert read_t1_addr_for(13) is None
-
-    def test_addr_file_permissions(self, tmp_path, monkeypatch):
-        """Per the rest of the module, dir is 0o700 and file is 0o600."""
-        from nexus.session import t1_addr_path, write_t1_addr
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        write_t1_addr(11, "127.0.0.1", 22)
-        path = t1_addr_path(11)
-        assert path.exists()
-        # Permissions check (best-effort: the platform may strip group/other bits).
-        mode = path.stat().st_mode & 0o777
-        assert mode & 0o077 == 0, f"world/group readable: {oct(mode)}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Periodic orphan reaper (sweep_orphan_t1_addr_files)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestSweepOrphanT1AddrFiles:
-    """RDR-105 P4 (nexus-sp84): top-level MCP startup runs this sweep
-    to reap addr files left by sessions that exited ungracefully.
-    Best-effort cleanup; not load-bearing.
-    """
-
-    def test_reaps_dead_pid(self, tmp_path, monkeypatch):
-        import subprocess as _sub
-
-        from nexus.session import (
-            sweep_orphan_t1_addr_files,
-            t1_addr_path,
-            write_t1_addr,
-        )
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-
-        proc = _sub.Popen(["true"])
-        proc.wait()
-        write_t1_addr(proc.pid, "127.0.0.1", 1234)
-        assert t1_addr_path(proc.pid).exists()
-
-        reaped = sweep_orphan_t1_addr_files()
-        assert reaped == 1
-        assert not t1_addr_path(proc.pid).exists()
-
-    def test_keeps_live_pid(self, tmp_path, monkeypatch):
-        import os as _os
-
-        from nexus.session import (
-            sweep_orphan_t1_addr_files,
-            t1_addr_path,
-            write_t1_addr,
-        )
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-
-        own_pid = _os.getpid()
-        write_t1_addr(own_pid, "127.0.0.1", 9999)
-
-        reaped = sweep_orphan_t1_addr_files()
-        assert reaped == 0
-        assert t1_addr_path(own_pid).exists()
-
-    def test_skips_malformed_suffix(self, tmp_path, monkeypatch):
-        from nexus.session import sweep_orphan_t1_addr_files
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        # Files whose suffix is not an integer must be skipped (not
-        # reaped, not crashed). Belt-and-braces against an operator
-        # leaving stray ``t1_addr.something-weird`` lying around.
-        weird = tmp_path / "t1_addr.not-a-number"
-        tmp_path.mkdir(parents=True, exist_ok=True)
-        weird.write_text("127.0.0.1:5555\n")
-
-        reaped = sweep_orphan_t1_addr_files()
-        assert reaped == 0
-        assert weird.exists()
-
-    def test_no_op_when_config_dir_missing(self, tmp_path, monkeypatch):
-        from nexus.session import sweep_orphan_t1_addr_files
-
-        # Point NEXUS_CONFIG_DIR at a path that does not exist; sweep
-        # must return 0 cleanly.
-        missing = tmp_path / "does-not-exist"
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(missing))
-        assert sweep_orphan_t1_addr_files() == 0
-
-    def test_mixed_dead_and_live(self, tmp_path, monkeypatch):
-        import os as _os
-        import subprocess as _sub
-
-        from nexus.session import (
-            sweep_orphan_t1_addr_files,
-            t1_addr_path,
-            write_t1_addr,
-        )
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-
-        own_pid = _os.getpid()
-        proc = _sub.Popen(["true"])
-        proc.wait()
-        write_t1_addr(own_pid, "127.0.0.1", 1)
-        write_t1_addr(proc.pid, "127.0.0.1", 2)
-
-        reaped = sweep_orphan_t1_addr_files()
-        assert reaped == 1
-        assert t1_addr_path(own_pid).exists()
-        assert not t1_addr_path(proc.pid).exists()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1134,24 +964,21 @@ class TestLifespanNewDiscoveryGenerator:
         monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "5555")
 
-        called = {"start": 0, "write": 0}
+        called = {"start": 0}
 
         def fake_start():
             called["start"] += 1
             return ("127.0.0.1", 1, 1, "/tmp/x")
 
-        def fake_write(*args, **kwargs):
-            called["write"] += 1
-
-        with patch("nexus.session.start_t1_server", side_effect=fake_start), \
-             patch("nexus.session.write_t1_addr", side_effect=fake_write):
+        with patch("nexus.session.start_t1_server", side_effect=fake_start):
             async def _run():
                 async with mcp_core._t1_chroma_lifespan(None):
                     pass
             asyncio.run(_run())
 
+        # No spawn means no lease publish (the publisher is only built in
+        # Branch 3, after start_t1_server).
         assert called["start"] == 0
-        assert called["write"] == 0
 
     def test_branch2_isolated_does_not_spawn(self, monkeypatch):
         """``NX_T1_ISOLATED=1`` -> no spawn, no file."""
@@ -1163,19 +990,16 @@ class TestLifespanNewDiscoveryGenerator:
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
-        called = {"start": 0, "write": 0}
+        called = {"start": 0}
 
         with patch("nexus.session.start_t1_server",
-                   side_effect=lambda: called.update(start=called["start"] + 1) or ("h", 1, 1, "/t")), \
-             patch("nexus.session.write_t1_addr",
-                   side_effect=lambda *a, **k: called.update(write=called["write"] + 1)):
+                   side_effect=lambda: called.update(start=called["start"] + 1) or ("h", 1, 1, "/t")):
             async def _run():
                 async with mcp_core._t1_chroma_lifespan(None):
                     pass
             asyncio.run(_run())
 
         assert called["start"] == 0
-        assert called["write"] == 0
 
     def test_branch3_top_level_spawns_and_publishes(self, tmp_path, monkeypatch):
         """RDR-149 P4: no env, no isolation, no resolvable session -> spawn
@@ -1440,10 +1264,10 @@ class TestLifespanNewDiscoveryGenerator:
         try:
             with patch("nexus.session.start_t1_server",
                        return_value=("127.0.0.1", 22222, 22222, str(tmp_path / "owned_chroma_tmpdir"))), \
-                 patch("nexus.session.stop_t1_server", side_effect=lambda _p: None), \
-                 patch("nexus.session.sweep_orphan_t1_addr_files", return_value=0):
-                # Patch the orphan-reaper sweep off so it does not reap the
-                # sibling's transient lease (server_pid=100 is not a live pid).
+                 patch("nexus.session.stop_t1_server", side_effect=lambda _p: None):
+                # RDR-149 P5: the bespoke addr-file orphan sweep is gone, so
+                # nothing reaps the sibling's transient lease on entry; lease
+                # liveness is TTL freshness via the registry.
                 async def _run():
                     async with mcp_core._t1_chroma_lifespan(None):
                         # Owned MCP keyed on its OWN server_pid.

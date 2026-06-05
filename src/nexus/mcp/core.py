@@ -200,30 +200,26 @@ async def _t1_chroma_lifespan(_app: Any):
     from nexus.session import (
         start_t1_server,
         sweep_orphan_resource_trackers,
-        sweep_orphan_t1_addr_files,
         sweep_orphan_t1_chromadbs,
         sweep_orphan_tmpdirs,
     )
 
-    # Best-effort orphan cleanup before we spawn. Three surfaces:
-    # (a) addr files from sessions that exited ungracefully (SIGKILL),
-    # (b) tmpdirs from chromas reaped before their cleanup completed,
-    # (c) multiprocessing resource_tracker processes re-parented to
-    #     init (PPID=1) holding POSIX named semaphores. (c) is
+    # Best-effort orphan cleanup before we spawn. Two surfaces:
+    # (a) tmpdirs from chromas reaped before their cleanup completed,
+    # (b) multiprocessing resource_tracker processes re-parented to
+    #     init (PPID=1) holding POSIX named semaphores. (b) is
     #     critical because the namespace is bounded
     #     (kern.posix.sem.max=10000 on macOS); chronic accumulation
     #     produces Errno 28 system-wide. Bead nexus-9h1s; live
     #     shakeout 2026-05-08 cleared 3,314 trackers / 8,359
-    #     semaphores. (a) and (b) are bounded; failures are logged
-    #     at debug and never block startup. The sweep functions log
-    #     per-file outcomes themselves; this outer guard catches
-    #     unexpected sweep-level failures.
+    #     semaphores. (a) is bounded; failures are logged at debug and
+    #     never block startup. The sweep functions log per-file
+    #     outcomes themselves; this outer guard catches unexpected
+    #     sweep-level failures. RDR-149 P5: the bespoke T1 addr-file
+    #     orphan sweep is gone -- the leased registry ages stale lease
+    #     records out via their TTL, no pid-keyed sweep needed.
     import structlog
     _sweep_log = structlog.get_logger(__name__)
-    try:
-        sweep_orphan_t1_addr_files()
-    except Exception as exc:
-        _sweep_log.debug("sweep_orphan_t1_addr_files_failed", error=str(exc))
     try:
         sweep_orphan_tmpdirs()
     except Exception as exc:

@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import socket
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
@@ -110,43 +111,41 @@ def _tcp_probe(host: str, port: int, timeout: float = 0.5) -> bool:
 
 
 def scan_sessions_sync(config_dir: Path) -> list[SessionInfo]:
-    """Scan ``t1_addr.<claude_pid>`` files and probe each for liveness.
+    """Scan ``t1_addr.<session_id>`` lease records and probe each for liveness.
 
-    Post-RDR-105 P4 the address surface is one flat file per live
-    Claude Code session. Each file contains ``host:port\\n``; the
-    file's stem suffix encodes the owning Claude's PID (used as the
-    session identifier here for human-readable display).
+    RDR-149 P4: T1 publishes a leased registry record per live session
+    (``~/.config/nexus/t1_addr.<session_id>``, re-keyed from a transient
+    ``server_pid`` key at cold start). Liveness is lease freshness (TTL),
+    not pid; the endpoint is additionally TCP-probed. ``session_id`` is the
+    lease scope key; ``pid`` carries the chroma ``server_pid`` for display.
     """
     if not config_dir.exists():
         return []
 
+    from nexus.daemon.service_registry import LeaseRecord
+
+    now = time.time()
     results: list[SessionInfo] = []
     for path in config_dir.glob("t1_addr.*"):
         try:
-            text = path.read_text().strip()
-        except OSError:
-            continue
-        if ":" not in text:
-            continue
-        host, _, port_str = text.partition(":")
-        try:
-            port = int(port_str)
-        except ValueError:
-            continue
-        try:
-            claude_pid = int(path.suffix.lstrip("."))
-        except ValueError:
+            record = LeaseRecord.from_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, KeyError):
+            continue  # not a lease record (malformed / legacy / partial write)
+        host = record.endpoint.get("host")
+        port = record.endpoint.get("port")
+        if not isinstance(host, str) or not isinstance(port, int):
             continue
 
-        pid_alive = _is_pid_alive(claude_pid) if claude_pid else False
-        tcp_ok = _tcp_probe(host, port) if pid_alive else False
+        fresh = record.is_fresh(now)
+        tcp_ok = _tcp_probe(host, port) if fresh else False
+        server_pid = record.endpoint.get("server_pid")
 
         results.append(SessionInfo(
-            session_id=str(claude_pid),
+            session_id=record.scope_key,
             host=host,
             port=port,
-            pid=claude_pid,
-            pid_alive=pid_alive,
+            pid=server_pid if isinstance(server_pid, int) else 0,
+            pid_alive=fresh,
             tcp_reachable=tcp_ok,
             created_at="",
         ))
