@@ -254,12 +254,20 @@ class T3Supervisor:
     Mirrors the T2 daemon's role for chroma: it spawns the managed
     ``chroma run`` subprocess, publishes a lease via the shared
     ``ServiceRegistry`` (scope = uid), and re-stamps that lease every
-    heartbeat interval — but ONLY while its chroma child is alive, so a
-    fresh lease implies a live chroma (RF-4: chroma cannot heartbeat a
-    nexus lease itself). The lease endpoint carries chroma's connection
-    fields + pid; the lease ``payload`` carries the supervisor's own pid
-    (the process ``stop`` signals). The version-skew cycle is owned here
-    via ``cycle_to_current`` (the mechanism #1112 lacked for T3).
+    heartbeat interval — but ONLY while its chroma child is alive AND
+    serving (RF-4: liveness = chroma pid alive ∧ port reachable; chroma
+    cannot heartbeat a nexus lease itself). The lease endpoint carries
+    chroma's connection fields + pid; the lease ``payload`` carries the
+    supervisor's own pid (the process ``stop`` signals).
+
+    Version-skew cycle (the #1112 fix): for a long-lived Python supervisor,
+    "cycle to the current version" means RESTARTING THE SUPERVISOR PROCESS
+    — respawning chroma alone cannot refresh the supervisor's own (now
+    stale) bytecode. So the cycle is a process restart, orchestrated
+    uniformly across all supervised tiers by the upgrade
+    (``upgrade._cycle_supervised_daemons_to_current``), not an in-process
+    method here. ``ServiceSupervisor.cycle_to_current`` remains the generic
+    in-process primitive for services whose code is not process-bound.
     """
 
     def __init__(
@@ -319,6 +327,7 @@ class T3Supervisor:
             "pid": self._proc.pid,
             "local_path": str(self._local_path),
         }
+        self._endpoint_port = port
         self._registry = ServiceRegistry(
             dir=self._config_dir, tier="t3", clock=self._lease_clock
         )
@@ -385,31 +394,37 @@ class T3Supervisor:
             except OSError:
                 pass
 
+    def _chroma_reachable(self) -> bool:
+        """RF-4: liveness is (chroma pid alive) AND (chroma port reachable).
+        A wedged chroma (pid alive, not accepting connections) must NOT keep
+        the lease fresh, or clients resolve a dead-but-not-exited endpoint —
+        exactly the stale-but-live-pid class the substrate exists to kill."""
+        port = getattr(self, "_endpoint_port", None)
+        if port is None:
+            return False
+        try:
+            with socket.create_connection((_T3_HOST, port), timeout=0.5):
+                return True
+        except OSError:
+            return False
+
     def heartbeat_once(self) -> bool:
-        """Re-stamp the lease iff the chroma child is still alive. Returns
-        False when chroma has exited (the caller should stop / let the
-        process supervisor restart us), True otherwise."""
+        """Re-stamp the lease iff chroma is alive AND serving (RF-4). Returns
+        False only when chroma has EXITED (the caller stops; the process
+        supervisor restarts us). A transiently-unreachable-but-alive chroma
+        returns True but does NOT re-stamp, so the lease ages out and clients
+        see 'down' until chroma serves again."""
         if self._proc is None or self._supervisor is None:
             return False
         if self._proc.poll() is not None:
             return False  # chroma exited; stop heartbeating so the lease ages out
+        if not self._chroma_reachable():
+            _log.warning("t3_daemon_chroma_unreachable", port=self._endpoint_port)
+            return True  # keep supervising; skip the heartbeat so the lease expires
         self._supervisor.heartbeat_tick()
         if self._supervisor.fenced:
             _log.warning("t3_daemon_lease_fenced", scope=self._scope)
         return True
-
-    def cycle_to_current(self) -> bool:
-        """If a newer conexus version is installed than the running chroma
-        supervisor's, cycle chroma to the current version (RDR-149: the
-        supervisor owns the version-skew cycle so it covers T3, fixing
-        #1112). Returns True if a cycle was performed."""
-        if self._supervisor is None:
-            return False
-        return self._supervisor.cycle_to_current(
-            _daemon_version(),
-            stop_owner=self._stop_chroma,
-            start_owner=self._restart_chroma,
-        )
 
     def _stop_chroma(self) -> None:
         if self._proc is None:
@@ -425,11 +440,6 @@ class T3Supervisor:
             if _pid_is_alive(pid):
                 safe_killpg(pid, signal.SIGKILL)
         self._proc = None
-
-    def _restart_chroma(self) -> None:
-        proc, port = self._spawn_chroma()
-        self._proc = proc
-        self._publish(port)
 
     def stop(self) -> None:
         """Relinquish the lease (own-record-only) and stop chroma."""
@@ -475,11 +485,10 @@ def run_t3_supervisor(*, config_dir: Path, local_path: Path) -> int:
     the process supervisor (launchd KeepAlive / systemd Restart) respawns.
     Returns the intended process exit code.
     """
-    sup = T3Supervisor(
-        config_dir=config_dir, local_path=local_path, supervised=True
-    )
-    sup.start()
-
+    # P3 review H-3: register signal handlers BEFORE start(), so a SIGTERM
+    # arriving during chroma startup (up to _READY_TIMEOUT) is captured and
+    # leads to a clean stop() rather than the default handler killing us and
+    # orphaning chroma / leaking the lease.
     stop_requested = threading.Event()
 
     def _on_signal(_signum: int, _frame: Any) -> None:
@@ -488,7 +497,14 @@ def run_t3_supervisor(*, config_dir: Path, local_path: Path) -> int:
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
 
+    sup = T3Supervisor(
+        config_dir=config_dir, local_path=local_path, supervised=True
+    )
+    sup.start()
+
     exit_code = 0
+    # A signal during start() -> stop immediately (start already published;
+    # stop() relinquishes + tears down chroma).
     while not stop_requested.is_set():
         if not sup.heartbeat_once():
             _log.warning("t3_supervisor_chroma_exited", msg="chroma child gone")
@@ -509,7 +525,11 @@ def stop_t3_daemon(*, config_dir: Path) -> int | None:
     """
     from nexus.util.process_group import safe_killpg
 
-    from nexus.daemon.discovery import is_lease_record, normalize_discovery_view
+    from nexus.daemon.discovery import (
+        find_t3_daemon,
+        is_lease_record,
+        normalize_discovery_view,
+    )
 
     disc_path = t3_discovery_path(config_dir)
     payload = _read_discovery(disc_path)
@@ -521,8 +541,14 @@ def stop_t3_daemon(*, config_dir: Path) -> int | None:
     # relinquishes the lease and tears down chroma's process group itself.
     # The supervisor pid rides the lease ``payload.supervisor_pid``; the
     # chroma pid is the endpoint pid (the bare-start / legacy fallback).
+    #
+    # CRITICAL (P3 review C-1): only trust ``supervisor_pid`` from a FRESH
+    # lease. A stale lease left by a SIGKILL'd supervisor names a pid that
+    # the kernel may have recycled to an unrelated same-uid process; the
+    # freshness gate prevents SIGTERM-ing it. A stale lease falls through to
+    # the chroma-pid path (also dead by then -> a clean unlink).
     supervisor_pid = None
-    if is_lease_record(payload):
+    if is_lease_record(payload) and find_t3_daemon(config_dir) is not None:
         supervisor_pid = (payload.get("payload") or {}).get("supervisor_pid")
     if (
         isinstance(supervisor_pid, int)

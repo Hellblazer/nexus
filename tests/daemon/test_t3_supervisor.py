@@ -88,6 +88,9 @@ def fake_spawn(monkeypatch: pytest.MonkeyPatch) -> list[_FakeProc]:
         return proc, port
 
     monkeypatch.setattr(T3Supervisor, "_spawn_chroma", _spawn)
+    # No real chroma is listening on the fake port; by default treat it as
+    # reachable. The wedged-chroma test overrides this to False.
+    monkeypatch.setattr(T3Supervisor, "_chroma_reachable", lambda self: True)
     return spawned
 
 
@@ -158,32 +161,19 @@ class TestT3SupervisorHeartbeat:
         assert sup.heartbeat_once() is False  # supervisor stops heartbeating
         sup.stop()
 
-
-class TestT3SupervisorVersionCycle:
-    def test_cycle_to_current_respawns_chroma_on_skew(
+    def test_wedged_chroma_lets_lease_expire(
         self, config_dir: Path, fake_spawn: list[_FakeProc], clock: _FakeClock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(t3_daemon, "_daemon_version", lambda: "0.9.0")
+        # RF-4: a chroma whose pid is alive but is NOT serving (wedged) must
+        # NOT keep the lease fresh — heartbeat_once keeps supervising (True)
+        # but skips the re-stamp, so the lease ages out and clients see down.
         sup = _make(config_dir, clock)
         sup.start()
-        assert len(fake_spawn) == 1
-        monkeypatch.setattr(t3_daemon, "_daemon_version", lambda: "1.0.0")
-        assert sup.cycle_to_current() is True
-        assert len(fake_spawn) == 2  # chroma respawned at the new version
-        resolved = find_t3_daemon(config_dir)
-        assert resolved is not None and resolved["version"] == "1.0.0"
-        sup.stop()
-
-    def test_cycle_to_current_noop_when_version_matches(
-        self, config_dir: Path, fake_spawn: list[_FakeProc], clock: _FakeClock,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(t3_daemon, "_daemon_version", lambda: "1.0.0")
-        sup = _make(config_dir, clock)
-        sup.start()
-        assert sup.cycle_to_current() is False
-        assert len(fake_spawn) == 1  # no respawn
+        monkeypatch.setattr(T3Supervisor, "_chroma_reachable", lambda self: False)
+        assert sup.heartbeat_once() is True  # still supervising
+        clock.advance(3.1)  # past TTL with no re-stamp
+        assert find_t3_daemon(config_dir) is None  # lease expired
         sup.stop()
 
 

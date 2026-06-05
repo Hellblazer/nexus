@@ -191,13 +191,7 @@ def upgrade(dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool) -> None:
         # ensure-running is version-aware: no-op on a current daemon,
         # graceful cycle on a stale one. Best-effort, non-dry-run only.
         if not dry_run:
-            _cycle_daemon_to_current()
-            # RDR-149 P3 (#1112): T3 was previously left stale across an
-            # upgrade because only T2 was cycled. The supervised T3 daemon
-            # is now cycled the same way, so an upgrade brings chroma's
-            # supervisor to the installed version too.
-            if not skip_t3:
-                _cycle_t3_daemon_to_current()
+            _cycle_supervised_daemons_to_current(skip_t3=skip_t3)
 
 
 def _quiesce_daemon() -> None:
@@ -280,13 +274,12 @@ def _cycle_daemon_to_current() -> None:
 def _cycle_t3_daemon_to_current() -> None:
     """Bring a stale supervised T3 daemon to the just-installed version
     (best-effort). RDR-149 P3 (#1112): the supervised T3 daemon froze its
-    code at start; cycle it so chroma's nexus supervisor runs current
-    code, mirroring the T2 cycle above.
+    Python bytecode at start; only a process RESTART (not an in-process
+    chroma respawn) refreshes it, so this stops then starts the supervisor.
 
-    Only acts on a running daemon (no auto-spawn during upgrade): a
-    ``stop`` followed by ``start`` restarts the supervisor at the new
-    version. Local mode only; a no-op when no T3 daemon is running or in
-    cloud mode. Never raises.
+    Only acts on a running daemon (no auto-spawn during upgrade). Local
+    mode only; a no-op when no T3 daemon is running or in cloud mode.
+    Never raises.
     """
     import subprocess
 
@@ -310,6 +303,27 @@ def _cycle_t3_daemon_to_current() -> None:
             )
     except Exception as exc:  # noqa: BLE001
         _log.warning("upgrade_t3_daemon_cycle_failed", error=str(exc))
+
+
+def _cycle_supervised_daemons_to_current(*, skip_t3: bool = False) -> None:
+    """Cycle every supervised storage daemon to the just-installed version.
+
+    RDR-149 P3 (#1112 root cause): the bug class arose because version-skew
+    cycling was scattered per-tier and one tier (T3) was forgotten. This is
+    now the SINGLE place an upgrade refreshes supervised daemons, so a new
+    supervised tier is added here once rather than risk being missed.
+
+    The §Decision's "supervisor-owned cycle" is realised as the
+    ``ServiceSupervisor.cycle_to_current`` primitive (P1), but a long-lived
+    Python daemon cannot refresh its own bytecode in-process — code refresh
+    requires a process restart, which only a separate upgrade process can
+    perform. So the per-tier idioms differ (T2 uses version-aware
+    ``ensure-running``; T3 has no ensure-running yet, so stop+start), but
+    they are invoked from this one orchestrator. Best-effort; never raises.
+    """
+    _cycle_daemon_to_current()  # T2
+    if not skip_t3:
+        _cycle_t3_daemon_to_current()  # T3
 
 
 def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool = False) -> None:
