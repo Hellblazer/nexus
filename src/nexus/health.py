@@ -824,6 +824,56 @@ def _check_orphan_t1() -> list[HealthResult]:
     return [HealthResult(label="T1 sessions", ok=True, detail=detail)]
 
 
+def _check_t3_daemon_version() -> list[HealthResult]:
+    """Flag a CLI-vs-T3-daemon version mismatch (RDR-149, nexus-ymn76).
+
+    The supervised T3 daemon stamps its conexus version in its lease record
+    (RDR-149 P3). After a CLI upgrade the version-skew cycle restarts it (the
+    #1112 fix), but until that fires — or if it failed — the daemon keeps
+    serving the old binary. This is the operator-visible counterpart to that
+    structural fix: it surfaces the mismatch as a soft warning (the daemon
+    still works, it is merely stale). Local mode only; cloud T3 has no daemon.
+    """
+    from importlib.metadata import version as _pkg_version
+
+    from nexus.daemon.discovery import find_t3_daemon
+
+    try:
+        cli_version = _pkg_version("conexus")
+    except Exception:
+        return []  # installed version unknown — nothing to compare against
+
+    daemon = find_t3_daemon()
+    if daemon is None:
+        return [HealthResult(
+            label="T3 daemon version", ok=True, detail="no T3 daemon running"
+        )]
+    daemon_version = daemon.get("version")
+    if not daemon_version:
+        return [HealthResult(
+            label="T3 daemon version", ok=True,
+            detail="T3 daemon lease carries no version (pre-RDR-149 daemon?)",
+        )]
+    if daemon_version == cli_version:
+        return [HealthResult(
+            label="T3 daemon version", ok=True,
+            detail=f"{daemon_version} (matches CLI)",
+        )]
+    return [HealthResult(
+        label="T3 daemon version", ok=False, warn=True,
+        detail=(
+            f"T3 daemon is running {daemon_version} but the CLI is "
+            f"{cli_version} (stale daemon — serving the old binary)"
+        ),
+        fix_suggestions=[
+            "Restart the T3 daemon to pick up the new version: "
+            "nx daemon t3 stop && nx daemon t3 start",
+            "nx upgrade cycles supervised daemons automatically; a mismatch "
+            "here means the version-skew cycle has not run yet or failed.",
+        ],
+    )]
+
+
 def _check_orphan_checkpoints() -> list[HealthResult]:
     from nexus.checkpoint import CHECKPOINT_DIR, scan_orphaned_checkpoints
 
@@ -1325,6 +1375,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     _local = is_local_mode()
     if _local:
         results.extend(_check_t3_local())
+        results.extend(_check_t3_daemon_version())
     else:
         results.extend(_check_t3_cloud())
 

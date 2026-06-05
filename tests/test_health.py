@@ -214,3 +214,50 @@ def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> N
     assert advisory.warn is True and advisory.fatal is False
     joined = advisory.detail + " " + " ".join(advisory.fix_suggestions)
     assert "bge-768" in joined and "384" in joined
+
+
+# ── _check_t3_daemon_version (RDR-149 nexus-ymn76) ───────────────────────────
+
+
+def test_check_t3_daemon_version_no_daemon(monkeypatch) -> None:
+    from nexus import health
+
+    monkeypatch.setattr(health, "find_t3_daemon", lambda: None, raising=False)
+    monkeypatch.setattr(
+        "nexus.daemon.discovery.find_t3_daemon", lambda config_dir=None: None
+    )
+    results = health._check_t3_daemon_version()
+    assert len(results) == 1
+    assert results[0].ok is True
+    assert "no t3 daemon" in results[0].detail.lower()
+
+
+def test_check_t3_daemon_version_match(monkeypatch) -> None:
+    from importlib.metadata import version as _pkg_version
+
+    from nexus import health
+
+    cli = _pkg_version("conexus")
+    monkeypatch.setattr(
+        "nexus.daemon.discovery.find_t3_daemon",
+        lambda config_dir=None: {"version": cli, "tcp_host": "127.0.0.1", "tcp_port": 1},
+    )
+    results = health._check_t3_daemon_version()
+    assert len(results) == 1
+    assert results[0].ok is True
+    assert cli in results[0].detail
+
+
+def test_check_t3_daemon_version_mismatch_warns(monkeypatch) -> None:
+    from nexus import health
+
+    monkeypatch.setattr(
+        "nexus.daemon.discovery.find_t3_daemon",
+        lambda config_dir=None: {"version": "0.0.1-stale", "tcp_host": "127.0.0.1", "tcp_port": 1},
+    )
+    results = health._check_t3_daemon_version()
+    assert len(results) == 1
+    r = results[0]
+    assert r.ok is False and r.warn is True and r.fatal is False
+    assert "0.0.1-stale" in r.detail
+    assert any("daemon t3" in s for s in r.fix_suggestions)
