@@ -227,62 +227,75 @@ def t3_start_cmd(
     long-running foreground process and can react to crashes via
     ``KeepAlive.Crashed`` / ``Restart=on-failure``.
     """
-    from nexus.config import _default_local_path
+    import subprocess
+
+    from nexus.config import _default_local_path, is_local_mode
+    from nexus.daemon.discovery import find_t3_daemon
     from nexus.daemon.t3_daemon import (
         T3CloudModeError,
         T3StartError,
-        _pid_is_alive,
-        start_t3_daemon,
-        stop_t3_daemon,
+        run_t3_supervisor,
     )
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     local_path = Path(local_path_str) if local_path_str else _default_local_path()
-    try:
-        payload = start_t3_daemon(config_dir=config_dir, local_path=local_path)
-    except T3CloudModeError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-    except T3StartError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(2)
 
-    if announce_stdout:
-        click.echo(json.dumps(payload))
-    else:
+    if foreground:
+        # RDR-149 P3: the blocking long-lived supervisor — spawns chroma,
+        # publishes the lease, and HEARTBEATS it every interval while chroma
+        # is alive. This is the path the launchd/systemd templates run.
+        try:
+            code = run_t3_supervisor(config_dir=config_dir, local_path=local_path)
+        except T3CloudModeError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(1)
+        except T3StartError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(2)
+        sys.exit(code)
+
+    # Non-foreground: ensure a detached supervisor is running so the lease
+    # is continuously heartbeated, then return. Idempotent on a live lease.
+    if not is_local_mode():
         click.echo(
-            f"T3 daemon running on {payload['tcp_host']}:{payload['tcp_port']} "
-            f"(pid={payload['pid']}, local_path={payload['local_path']})."
+            "Error: T3 daemon is a no-op in cloud mode. Set NX_LOCAL=1 to "
+            "opt into local mode.",
+            err=True,
         )
+        sys.exit(1)
 
-    if not foreground:
-        return
-
-    # --foreground: supervisor-friendly blocking loop. The chroma
-    # subprocess is in its own session (start_new_session=True), so
-    # SIGTERM to this CLI does not propagate automatically — the signal
-    # handler below explicitly calls stop_t3_daemon to clean up.
-    stop_requested = threading.Event()
-
-    def _on_signal(_signum, _frame) -> None:
-        stop_requested.set()
-
-    signal.signal(signal.SIGTERM, _on_signal)
-    signal.signal(signal.SIGINT, _on_signal)
-
-    pid = payload["pid"]
-    while not stop_requested.is_set():
-        if not _pid_is_alive(pid):
+    existing = find_t3_daemon(config_dir)
+    if existing is None:
+        argv = [
+            *_resolve_nx_bin(), "daemon", "t3", "start", "--foreground",
+            "--config-dir", str(config_dir), "--local-path", str(local_path),
+        ]
+        subprocess.Popen(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            existing = find_t3_daemon(config_dir)
+            if existing is not None:
+                break
+            time.sleep(0.2)
+        if existing is None:
             click.echo(
-                f"T3 chroma subprocess (pid={pid}) exited unexpectedly; "
-                "the supervisor will restart it.",
+                "Error: T3 supervisor did not become ready within 15s.",
                 err=True,
             )
-            sys.exit(3)
-        time.sleep(0.5)
+            sys.exit(2)
 
-    stop_t3_daemon(config_dir=config_dir)
-    sys.exit(0)
+    if announce_stdout:
+        click.echo(json.dumps(existing))
+    else:
+        click.echo(
+            f"T3 daemon running on {existing['tcp_host']}:{existing['tcp_port']} "
+            f"(pid={existing['pid']}, local_path={existing.get('local_path')})."
+        )
 
 
 @t3_group.command("stop")
@@ -558,6 +571,24 @@ def t2_start_cmd(config_dir_str: str | None, db_path_str: str | None) -> None:
         sys.exit(2)
 
 
+def _discovery_record_pid(data: dict) -> int | None:
+    """Extract the owner pid from a T2 discovery record.
+
+    RDR-149 P2: a lease record carries the pid under ``endpoint``; a
+    legacy payload carries it at the top level. Read both so ``stop`` /
+    ``status`` keep working across an in-flight upgrade window.
+    """
+    pid = data.get("pid")
+    if isinstance(pid, int):
+        return pid
+    endpoint = data.get("endpoint")
+    if isinstance(endpoint, dict):
+        ep_pid = endpoint.get("pid")
+        if isinstance(ep_pid, int):
+            return ep_pid
+    return None
+
+
 @t2_group.command("stop")
 @click.option(
     "--config-dir",
@@ -593,7 +624,7 @@ def t2_stop_cmd(config_dir_str: str | None) -> None:
         )
         disc.unlink(missing_ok=True)
         return
-    pid = payload.get("pid")
+    pid = _discovery_record_pid(payload)
     if not isinstance(pid, int) or pid <= 0:
         click.echo(f"Invalid pid in discovery file: {pid!r}", err=True)
         disc.unlink(missing_ok=True)
@@ -642,14 +673,14 @@ def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # its daemon (e.g. an interrupted graceful stop left the file while
     # the process died, or a crash). Reporting such a file as "running"
     # masks a dead daemon (nexus-n8sbw).
-    pid = data.get("pid")
-    alive = False
-    if isinstance(pid, int) and pid > 0:
-        try:
-            os.kill(pid, 0)
-            alive = True
-        except (ProcessLookupError, PermissionError):
-            alive = False
+    pid = _discovery_record_pid(data)
+    # RDR-149 P2: liveness is what a CLIENT would resolve. For a lease
+    # record that is freshness (a daemon whose heartbeat loop wedged reads
+    # as down even though its pid is alive); for a legacy payload it is
+    # pid-liveness. ``find_t2_daemon`` applies the right rule per format.
+    from nexus.daemon.discovery import find_t2_daemon
+
+    alive = find_t2_daemon(config_dir) is not None
 
     # RDR-140 P4.2 (Gap 5): surface how many restarts the crash-loop guard has
     # recorded in the current window — a rising count is the crash-loop signal.
@@ -947,32 +978,31 @@ def _t2_ensure_running_inner(
     enum to CLI exit codes.
     """
     import time as _time
-    from nexus.daemon.t2_daemon import t2_discovery_path
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
-    disc = t2_discovery_path(config_dir)
 
     def _running_daemon() -> tuple[int, str] | None:
         """Return (pid, daemon_version) of the live daemon, or None.
 
-        Probes the recorded PID via ``os.kill(pid, 0)``; stale discovery
-        files outlive crashed daemons, so a readable file is not proof of
-        life.
+        RDR-149 P2: liveness is now lease freshness, resolved through
+        ``find_t2_daemon`` (which TTL-checks the lease and falls back to
+        pid-liveness for a legacy payload mid-upgrade). The external
+        contract is unchanged: callers still receive ``(pid, version)`` of
+        a live daemon, with the pid (lifted from the lease endpoint) used
+        for the SIGTERM in the version-skew cycle below.
         """
-        if not disc.exists():
+        from nexus.daemon.discovery import find_t2_daemon
+
+        payload = find_t2_daemon(config_dir)
+        if payload is None:
             return None
-        try:
-            data = json.loads(disc.read_text())
-        except (OSError, json.JSONDecodeError):
-            return None
-        pid = data.get("pid")
+        pid = payload.get("pid")
         if not isinstance(pid, int):
             return None
-        try:
-            os.kill(pid, 0)
-        except (ProcessLookupError, PermissionError):
-            return None
-        return pid, str(data.get("daemon_version") or "")
+        # New lease records carry ``version``; a legacy payload carries
+        # ``daemon_version`` (upgrade-window compatibility).
+        version = payload.get("version") or payload.get("daemon_version") or ""
+        return pid, str(version)
 
     def _daemon_is_alive() -> bool:
         return _running_daemon() is not None

@@ -755,18 +755,18 @@ def _check_index_log() -> list[HealthResult]:
 
 
 def _check_orphan_t1() -> list[HealthResult]:
-    """Report on T1 address files left by previous Claude Code sessions.
+    """Report on T1 lease records on disk (RDR-149 P4 leased registry).
 
-    RDR-105 P4 replaced the per-session JSON record files with a
-    single-writer ``~/.config/nexus/t1_addr.<claude_pid>`` flat file
-    per live Claude. An orphan here is an addr file whose
-    ``<claude_pid>`` is no longer a running process (typically left
-    behind when Claude Code exits ungracefully so the lifespan
-    finally never ran). The MCP startup sweep
-    (``sweep_orphan_t1_addr_files``) reaps them automatically; this
-    check just surfaces what is currently on disk.
+    T1 publishes a leased registry record at
+    ``~/.config/nexus/t1_addr.<session_id>`` (re-keyed from a transient
+    ``server_pid`` key at cold start). Liveness is lease freshness (TTL),
+    not pid: a dead owner's lease ages out on its own, so there is no
+    bespoke orphan sweep (RDR-149 P5 removed it). This check surfaces any
+    stale (expired) lease record still on disk; such records are inert
+    (readers reap them on discovery), so removal is cosmetic.
     """
     from nexus.config import nexus_config_dir
+    from nexus.daemon.service_registry import LeaseRecord
 
     config_dir = nexus_config_dir()
     if not config_dir.exists():
@@ -777,37 +777,100 @@ def _check_orphan_t1() -> list[HealthResult]:
         return [HealthResult(label="T1 sessions", ok=True, detail="no live T1 sessions")]
 
     now = time.time()
-    orphans: list[str] = []
-    live_descriptors: list[str] = []
+    fresh: list[str] = []
+    stale: list[str] = []
+    legacy: list[str] = []
     for path in addr_files:
-        suffix = path.suffix.lstrip(".")
         try:
-            claude_pid = int(suffix)
-        except ValueError:
-            _log.debug("orphan_t1_addr_unparseable_suffix", path=str(path), suffix=suffix)
+            record = LeaseRecord.from_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, KeyError):
+            # Not a lease record: a pre-P4 ``host:port`` addr file left on
+            # disk by an older version (RDR-149 P4 changed the format). Inert
+            # -- nothing reads it -- but surfaced so it is not silently
+            # invisible after a "no bespoke copies" audit.
+            _log.debug("t1_lease_unparseable", path=str(path))
+            legacy.append(path.name)
             continue
-        age_s = max(0, int(now - path.stat().st_mtime))
-        age_str = f"{age_s // 60}m" if age_s < 3600 else f"{age_s // 3600}h"
-        try:
-            os.kill(claude_pid, 0)
-            live_descriptors.append(f"{path.name} (claude_pid {claude_pid} alive, age {age_str})")
-        except OSError:
-            orphans.append(path.name)
+        if record.is_fresh(now):
+            age_s = max(0, int(now - record.heartbeat_epoch))
+            fresh.append(f"{path.name} (fresh, last heartbeat {age_s}s ago)")
+        else:
+            stale.append(path.name)
 
-    if orphans:
+    if stale:
         return [HealthResult(
             label="T1 sessions",
             ok=False,
-            detail=f"{len(orphans)} orphan addr file(s) (claude_pid dead): {', '.join(orphans)}",
+            detail=f"{len(stale)} stale T1 lease(s) (expired past TTL): {', '.join(stale)}",
             fix_suggestions=[
-                "Remove stale files: rm ~/.config/nexus/t1_addr.*",
-                "Or run nx doctor (the next MCP startup sweeps these automatically).",
+                "Stale leases are inert (readers reap on discovery); removal is cosmetic.",
+                "Remove them anyway: rm ~/.config/nexus/t1_addr.*",
             ],
         )]
 
+    if legacy and not fresh:
+        return [HealthResult(
+            label="T1 sessions", ok=True,
+            detail=f"no live T1 sessions ({len(legacy)} inert pre-P4 addr file(s) on disk)",
+            fix_suggestions=["Remove inert legacy files: rm ~/.config/nexus/t1_addr.*"],
+        )]
+
+    if not fresh:
+        return [HealthResult(label="T1 sessions", ok=True, detail="no live T1 sessions")]
+
+    detail = f"{len(fresh)} live T1 lease(s): {', '.join(fresh)}"
+    if legacy:
+        detail += f" (+{len(legacy)} inert pre-P4 addr file(s))"
+    return [HealthResult(label="T1 sessions", ok=True, detail=detail)]
+
+
+def _check_t3_daemon_version() -> list[HealthResult]:
+    """Flag a CLI-vs-T3-daemon version mismatch (RDR-149, nexus-ymn76).
+
+    The supervised T3 daemon stamps its conexus version in its lease record
+    (RDR-149 P3). After a CLI upgrade the version-skew cycle restarts it (the
+    #1112 fix), but until that fires — or if it failed — the daemon keeps
+    serving the old binary. This is the operator-visible counterpart to that
+    structural fix: it surfaces the mismatch as a soft warning (the daemon
+    still works, it is merely stale). Local mode only; cloud T3 has no daemon.
+    """
+    from importlib.metadata import version as _pkg_version
+
+    from nexus.daemon.discovery import find_t3_daemon
+
+    try:
+        cli_version = _pkg_version("conexus")
+    except Exception:
+        return []  # installed version unknown — nothing to compare against
+
+    daemon = find_t3_daemon()
+    if daemon is None:
+        return [HealthResult(
+            label="T3 daemon version", ok=True, detail="no T3 daemon running"
+        )]
+    daemon_version = daemon.get("version")
+    if not daemon_version:
+        return [HealthResult(
+            label="T3 daemon version", ok=True,
+            detail="T3 daemon lease carries no version (pre-RDR-149 daemon?)",
+        )]
+    if daemon_version == cli_version:
+        return [HealthResult(
+            label="T3 daemon version", ok=True,
+            detail=f"{daemon_version} (matches CLI)",
+        )]
     return [HealthResult(
-        label="T1 sessions", ok=True,
-        detail=f"{len(addr_files)} addr file(s), all owning Claudes alive: {', '.join(live_descriptors)}",
+        label="T3 daemon version", ok=False, warn=True,
+        detail=(
+            f"T3 daemon is running {daemon_version} but the CLI is "
+            f"{cli_version} (stale daemon — serving the old binary)"
+        ),
+        fix_suggestions=[
+            "Restart the T3 daemon to pick up the new version: "
+            "nx daemon t3 stop && nx daemon t3 start",
+            "nx upgrade cycles supervised daemons automatically; a mismatch "
+            "here means the version-skew cycle has not run yet or failed.",
+        ],
     )]
 
 
@@ -1312,6 +1375,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     _local = is_local_mode()
     if _local:
         results.extend(_check_t3_local())
+        results.extend(_check_t3_daemon_version())
     else:
         results.extend(_check_t3_cloud())
 

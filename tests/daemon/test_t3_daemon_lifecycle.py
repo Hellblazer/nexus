@@ -134,9 +134,13 @@ class TestStartStopHappyPath:
             assert isinstance(payload["tcp_port"], int)
             assert payload["tcp_port"] > 0
             assert payload["format_version"] == 1
+            # RDR-149 P3: the on-disk record is now a lease; chroma's pid +
+            # port live under ``endpoint``. The flat ``payload`` keeps the
+            # legacy top-level shape for callers.
             on_disk = json.loads(disc_path.read_text())
-            assert on_disk["pid"] == payload["pid"]
-            assert on_disk["tcp_port"] == payload["tcp_port"]
+            assert on_disk["endpoint"]["pid"] == payload["pid"]
+            assert on_disk["endpoint"]["tcp_port"] == payload["tcp_port"]
+            assert on_disk["generation"] == 1
             assert _is_listening(payload["tcp_host"], payload["tcp_port"])
             os.kill(payload["pid"], 0)
         finally:
@@ -214,7 +218,7 @@ class TestStaleDiscoveryRecovery:
         try:
             assert payload["pid"] != stale_pid
             on_disk = json.loads(disc_path.read_text())
-            assert on_disk["pid"] == payload["pid"]
+            assert on_disk["endpoint"]["pid"] == payload["pid"]
         finally:
             stop_t3_daemon(config_dir=config_dir)
 
@@ -354,7 +358,7 @@ class TestStopEdgeCases:
         payload = start_t3_daemon(config_dir=config_dir, local_path=local_path)
         try:
             on_disk = json.loads(path.read_text())
-            assert on_disk["pid"] == payload["pid"]
+            assert on_disk["endpoint"]["pid"] == payload["pid"]
         finally:
             stop_t3_daemon(config_dir=config_dir)
 
@@ -448,11 +452,14 @@ class TestCliSurface:
                 ["t3", "status", "--config-dir", str(config_dir), "--json"],
             )
             assert status.exit_code == 0
+            # RDR-149 P3: status dumps the raw lease record; chroma's pid +
+            # address live under ``endpoint``.
             payload = json.loads(status.output)
-            assert payload["pid"] > 0
             assert payload["format_version"] == 1
-            assert payload["tcp_host"] == "127.0.0.1"
-            assert isinstance(payload["tcp_port"], int)
+            assert payload["generation"] == 1
+            assert payload["endpoint"]["pid"] > 0
+            assert payload["endpoint"]["tcp_host"] == "127.0.0.1"
+            assert isinstance(payload["endpoint"]["tcp_port"], int)
         finally:
             stop = runner.invoke(
                 daemon_group, ["t3", "stop", "--config-dir", str(config_dir)]

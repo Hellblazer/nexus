@@ -6,6 +6,48 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.0] - 2026-06-05
+
+Unified daemon-lifecycle substrate (RDR-149): T1, T2, and T3 now ride one
+leased/fenced/atomic service registry, ending the recurring discovery /
+single-writer / self-heal / version-skew bug class.
+
+### Fixed
+
+- **T3 daemon no longer keeps serving the old binary after a CLI upgrade
+  (#1112).** The T3 daemon now rides the shared supervisor, which owns the
+  version-skew upgrade-cycle uniformly across tiers — the same mechanism T2
+  already had. After an upgrade the stale daemon is cycled automatically
+  instead of persisting until a manual `nx daemon t3 stop && start`.
+- **T1 scratch no longer strands sibling shells when the discovery record is
+  lost (#1114).** T1 now self-heals: the MCP server's lease heartbeat
+  re-asserts a transiently-lost discovery record, so a sibling `nx scratch`
+  succeeds whenever the T1 server is up (previously it raised
+  `T1ServerNotFoundError` until the session restarted).
+- **T1 discovery is immune to PID reuse.** Liveness is now lease freshness
+  (TTL), not a PID-liveness probe, so a recycled PID can no longer keep a dead
+  owner's record alive.
+
+### Added
+
+- **`nx doctor` flags a CLI-vs-T3-daemon version mismatch.** The
+  operator-visible counterpart to the #1112 fix: a soft warning (the daemon
+  still works, it is merely stale) with a restart suggestion when the running
+  T3 daemon's version diverges from the installed CLI. Local mode only.
+
+### Changed
+
+- **T1/T2/T3 daemon lifecycle unified onto one leased `ServiceRegistry`
+  primitive (RDR-149).** Owner discovery, single-writer election,
+  ungraceful-death reap, restart fencing, self-heal re-assert, and version-skew
+  cycling now live in one place (`src/nexus/daemon/service_registry.py`),
+  consumed by each tier. T1 keys its lease on the Claude session-id (re-keyed
+  from a transient server-pid at cold start) rather than the parent PID; the
+  change is transparent to users. A standing process gate (mechanically
+  enforced by `tests/daemon/test_lifecycle_gate.py`) keeps future lifecycle
+  fixes in the shared primitive instead of per-tier copies.
+  `nx doctor --check-t1` reports the session-id lease model.
+
 ## [5.9.3] - 2026-06-04
 
 Catalog moved behind the T2 daemon (RDR-146), closing the GH #1046 starvation.

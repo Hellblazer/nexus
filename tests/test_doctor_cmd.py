@@ -896,58 +896,50 @@ class TestCheckTmpdirs:
 
 
 class TestCheckT1:
-    """Diagnostic: T1 addr-file presence + reachability."""
+    """Diagnostic: T1 session-id lease presence + reachability (RDR-149 P4)."""
 
-    def test_no_claude_ancestor_is_informational(
-        self, runner: CliRunner, tmp_path: Path,
+    @staticmethod
+    def _publish_lease(config_dir, session_id, host, port):
+        from nexus.daemon.service_registry import ServiceRegistry
+        from nexus.daemon.t1_lease import T1LeasePublisher
+
+        registry = ServiceRegistry(dir=Path(config_dir), tier="t1")
+        T1LeasePublisher(
+            registry=registry,
+            server_pid=4242,
+            host=host,
+            port=port,
+            version="1.0.0",
+            session_resolver=lambda: session_id,
+        ).publish()
+
+    def test_no_session_id_is_informational(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
-        from unittest.mock import patch
-        with patch("nexus.session.find_immediate_claude_pid", return_value=0):
-            result = runner.invoke(main, ["doctor", "--check-t1"])
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        result = runner.invoke(main, ["doctor", "--check-t1"])
         assert result.exit_code == 0, result.output
-        assert "no claude ancestor" in result.output.lower()
+        assert "no session-id resolves" in result.output.lower()
 
-    def test_exec_a_wrapper_rename_warns(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """find_immediate_claude_pid returns the immediate-PPID
-        fallback when no ancestor's comm starts with 'claude'."""
-        from unittest.mock import patch
-        with (
-            patch("nexus.session.find_immediate_claude_pid", return_value=4242),
-            patch("nexus.session._command_name_of", return_value="bash"),
-        ):
-            result = runner.invoke(main, ["doctor", "--check-t1"])
-        assert result.exit_code == 1, result.output
-        assert "exec -a" in result.output
-
-    def test_addr_file_missing_under_live_claude(
+    def test_lease_missing_under_resolved_session(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
-        from unittest.mock import patch
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        with (
-            patch("nexus.session.find_immediate_claude_pid", return_value=4242),
-            patch("nexus.session._command_name_of", return_value="claude"),
-        ):
-            result = runner.invoke(main, ["doctor", "--check-t1"])
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
+        result = runner.invoke(main, ["doctor", "--check-t1"])
         assert result.exit_code == 1, result.output
-        assert "missing or unreadable" in result.output
+        assert "no live lease" in result.output
 
-    def test_addr_file_present_but_unreachable(
+    def test_lease_present_but_unreachable(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
         from unittest.mock import patch
 
-        from nexus.session import write_t1_addr
-
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        write_t1_addr(4242, "127.0.0.1", 1)
-        with (
-            patch("nexus.session.find_immediate_claude_pid", return_value=4242),
-            patch("nexus.session._command_name_of", return_value="claude"),
-            patch("nexus.mcp.core._tcp_probe_alive", return_value=False),
-        ):
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
+        self._publish_lease(tmp_path, "sess-A", "127.0.0.1", 1)
+        with patch("nexus.mcp.core._tcp_probe_alive", return_value=False):
             result = runner.invoke(main, ["doctor", "--check-t1"])
         assert result.exit_code == 1, result.output
         assert "TCP probe failed" in result.output
@@ -957,15 +949,10 @@ class TestCheckT1:
     ) -> None:
         from unittest.mock import patch
 
-        from nexus.session import write_t1_addr
-
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        write_t1_addr(4242, "127.0.0.1", 12345)
-        with (
-            patch("nexus.session.find_immediate_claude_pid", return_value=4242),
-            patch("nexus.session._command_name_of", return_value="claude"),
-            patch("nexus.mcp.core._tcp_probe_alive", return_value=True),
-        ):
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
+        self._publish_lease(tmp_path, "sess-A", "127.0.0.1", 12345)
+        with patch("nexus.mcp.core._tcp_probe_alive", return_value=True):
             result = runner.invoke(main, ["doctor", "--check-t1"])
         assert result.exit_code == 0, result.output
         assert "chroma reachable" in result.output

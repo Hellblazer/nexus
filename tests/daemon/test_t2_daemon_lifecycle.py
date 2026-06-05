@@ -266,19 +266,25 @@ class TestStartStopLifecycle:
 
             disc_path = t2_discovery_path(config_dir)
             assert disc_path.exists()
+            # RDR-149 P2: the discovery file is now a lease record; the
+            # connection fields live under ``endpoint`` and liveness is the
+            # lease (generation + heartbeat TTL), not a top-level pid.
             payload = json.loads(disc_path.read_text())
-            assert payload["pid"] == os.getpid()
-            assert payload["tcp_host"] == "127.0.0.1"
-            assert isinstance(payload["tcp_port"], int) and payload["tcp_port"] > 0
-            assert payload["uds_path"].endswith("t2.sock")
             assert payload["format_version"] == 1
+            assert payload["generation"] == 1
+            assert payload["owner_token"]
+            endpoint = payload["endpoint"]
+            assert endpoint["pid"] == os.getpid()
+            assert endpoint["tcp_host"] == "127.0.0.1"
+            assert isinstance(endpoint["tcp_port"], int) and endpoint["tcp_port"] > 0
+            assert endpoint["uds_path"].endswith("t2.sock")
 
             # UDS and TCP both reachable.
             uds = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            uds.connect(payload["uds_path"])
+            uds.connect(endpoint["uds_path"])
             uds.close()
             tcp = socket.create_connection(
-                (payload["tcp_host"], payload["tcp_port"]), timeout=2.0,
+                (endpoint["tcp_host"], endpoint["tcp_port"]), timeout=2.0,
             )
             tcp.close()
         finally:

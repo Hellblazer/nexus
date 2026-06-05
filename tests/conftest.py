@@ -261,7 +261,7 @@ def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     ``read_claude_session_id`` resolves to via ``NEXUS_CONFIG_DIR``.
 
     The directory itself is *not* pre-created — write helpers
-    (``write_claude_session_id``, ``write_t1_addr``, etc.) all do
+    (``write_claude_session_id``, the T1 lease registry, etc.) all do
     ``parents=True, exist_ok=True`` themselves, and tests that
     explicitly call ``mkdir(parents=True)`` without ``exist_ok``
     on the same path would otherwise hit ``FileExistsError``.
