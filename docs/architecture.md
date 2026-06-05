@@ -116,6 +116,29 @@ table) see [`docs/container-integration.md`](container-integration.md).
 
 Data flows upward (T1 → T2 → T3).
 
+**Unified daemon-lifecycle substrate (RDR-149).** The three tiers
+differ in storage engine and scope (T1 session-scoped chroma, T2 uid-scoped
+SQLite+FTS5, T3 uid-scoped chroma/cloud) but share **one** lifecycle
+substrate: the leased / fenced / atomic service registry in
+[`src/nexus/daemon/service_registry.py`](../src/nexus/daemon/service_registry.py)
+(`ServiceRegistry` + `ServiceSupervisor`). Owner discovery, single-writer
+election, ungraceful-death reap, restart fencing, self-heal re-assert, and
+version-skew cycling all live in that one primitive, parameterized by tier
+and scope. Each tier is a thin consumer: T1 via `daemon/t1_lease.py`
+(MCP-lifespan-owned, re-keyed transient `server_pid` → session-id), T2 via
+`daemon/t2_daemon.py`, T3 via `daemon/t3_daemon.py`. Liveness is **lease
+freshness (TTL), not pid** — a dead owner's lease ages out, giving pid-reuse
+immunity.
+
+This collapsed a recurring bug class (the same discovery/single-writer/
+self-heal/version-skew defect kept reappearing in whichever tier had not yet
+received a per-tier fix). **The standing gate:** any future lifecycle fix
+lands in the shared primitive plus the cross-tier conformance suite
+([`tests/daemon/test_rdr149_lifecycle_conformance.py`](../tests/daemon/test_rdr149_lifecycle_conformance.py)),
+never in a single tier's copy. See
+[`src/nexus/daemon/AGENTS.md`](../src/nexus/daemon/AGENTS.md) for the full
+rule and the lifecycle-change checklist.
+
 ## Catalog & Link Graph
 
 The catalog is a document registry that sits alongside T3. While T3 stores document
