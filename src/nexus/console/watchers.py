@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import socket
 import time
 from dataclasses import dataclass
@@ -90,14 +89,6 @@ class SessionInfo:
     pid_alive: bool
     tcp_reachable: bool
     created_at: str
-
-
-def _is_pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
 
 
 def _tcp_probe(host: str, port: int, timeout: float = 0.5) -> bool:

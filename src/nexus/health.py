@@ -779,11 +779,17 @@ def _check_orphan_t1() -> list[HealthResult]:
     now = time.time()
     fresh: list[str] = []
     stale: list[str] = []
+    legacy: list[str] = []
     for path in addr_files:
         try:
             record = LeaseRecord.from_json(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, KeyError):
+            # Not a lease record: a pre-P4 ``host:port`` addr file left on
+            # disk by an older version (RDR-149 P4 changed the format). Inert
+            # -- nothing reads it -- but surfaced so it is not silently
+            # invisible after a "no bespoke copies" audit.
             _log.debug("t1_lease_unparseable", path=str(path))
+            legacy.append(path.name)
             continue
         if record.is_fresh(now):
             age_s = max(0, int(now - record.heartbeat_epoch))
@@ -802,13 +808,20 @@ def _check_orphan_t1() -> list[HealthResult]:
             ],
         )]
 
+    if legacy and not fresh:
+        return [HealthResult(
+            label="T1 sessions", ok=True,
+            detail=f"no live T1 sessions ({len(legacy)} inert pre-P4 addr file(s) on disk)",
+            fix_suggestions=["Remove inert legacy files: rm ~/.config/nexus/t1_addr.*"],
+        )]
+
     if not fresh:
         return [HealthResult(label="T1 sessions", ok=True, detail="no live T1 sessions")]
 
-    return [HealthResult(
-        label="T1 sessions", ok=True,
-        detail=f"{len(fresh)} live T1 lease(s): {', '.join(fresh)}",
-    )]
+    detail = f"{len(fresh)} live T1 lease(s): {', '.join(fresh)}"
+    if legacy:
+        detail += f" (+{len(legacy)} inert pre-P4 addr file(s))"
+    return [HealthResult(label="T1 sessions", ok=True, detail=detail)]
 
 
 def _check_orphan_checkpoints() -> list[HealthResult]:
