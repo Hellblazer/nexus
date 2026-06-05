@@ -4,7 +4,7 @@ from typing import Any
 
 import click
 
-from nexus.db.t1 import T1Database
+from nexus.db.t1 import T1Database, T1ServerNotFoundError
 
 
 def _t1() -> T1Database:
@@ -14,8 +14,23 @@ def _t1() -> T1Database:
     leased T1 record, falling back to a local EphemeralClient under
     ``NX_T1_ISOLATED=1`` or raising ``T1ServerNotFoundError`` if no live
     lease is found.
+
+    On that raise, surface a clean actionable message via
+    ``click.ClickException`` (exit 1, no traceback) instead of letting the
+    exception propagate as an unhandled stack dump (nexus-gff3g): a CLI user
+    whose session-id diverges from the MCP's lease key got a wall of traceback
+    where a one-line hint belongs.
     """
-    return T1Database()
+    try:
+        return T1Database()
+    except T1ServerNotFoundError as exc:
+        raise click.ClickException(
+            f"{exc}\n\n"
+            "Quick fix: prefix the command with NX_T1_ISOLATED=1 for an "
+            "in-process ephemeral scratch (not shared with the MCP server), or "
+            "reconnect the conexus MCP/extension so a session-id lease is "
+            "published for this session."
+        ) from exc
 
 
 @click.group()

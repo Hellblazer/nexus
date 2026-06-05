@@ -6,6 +6,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.2] - 2026-06-05
+
+T1 scratch reliability fix from the 5.10.1 shakeout.
+
+### Fixed
+
+- **`nx scratch` (CLI + MCP) no longer hard-fails when the shell's session-id
+  diverges from the MCP server's T1 lease key (nexus-gff3g).** The MCP keys its
+  T1 lease on `NX_SESSION_ID` while the SessionStart hook writes
+  `current_session`, and the two Claude-provided ids diverge on session resume,
+  with multiple concurrent frontends (Claude Code + Desktop), and under version
+  skew. `discover_t1_lease` then found no lease for the shell's id, and the
+  Claude-ancestor-pid fallback could not recover because (a) a warm publish
+  (`NX_SESSION_ID` set at MCP startup, the common case) dropped `claude_pid`
+  from the lease payload, and (b) the fallback skipped session-keyed leases
+  entirely. The fallback now stamps `claude_pid` on every record and matches
+  session-keyed leases by ancestor pid (renamed `discover_t1_by_claude_ancestor`),
+  with a deterministic newest-heartbeat tie-break. Ancestor-pid targeting +
+  TTL + `status==live` preserve the no-cross-session-mis-bind invariant.
+- **`nx scratch` surfaces a clean hint instead of a raw traceback** when no T1
+  lease resolves, and the SessionStart hook no longer falsely claims "T1
+  scratch initialized" (it only records the session-id; the MCP lifespan owns
+  T1).
+
+The underlying `NX_SESSION_ID` vs `current_session` divergence (session-scoped
+attribution) is tracked separately for a follow-up.
+
 ## [5.10.1] - 2026-06-05
 
 T2 daemon reliability fixes from the 5.10.0 shakeout.

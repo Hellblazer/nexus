@@ -163,3 +163,29 @@ def test_scratch_delete_not_found(runner: CliRunner, fake_home: Path) -> None:
 
 
 
+
+
+# ── friendly error when T1 is unresolvable (nexus-gff3g) ─────────────────────
+
+def test_scratch_list_friendly_error_when_t1_unresolvable(
+    runner: CliRunner,
+) -> None:
+    """nx scratch must print a clean hint, not a raw traceback, when the
+    session-id diverges from the MCP's lease key and no T1 lease resolves.
+
+    Pre-fix the T1ServerNotFoundError propagated unhandled and click dumped
+    the full Python stack; the user got a wall of traceback where a one-line
+    fix belongs.
+    """
+    from nexus.db.t1 import T1ServerNotFoundError
+
+    with patch(
+        "nexus.commands.scratch.T1Database",
+        side_effect=T1ServerNotFoundError("T1 not configured for this process."),
+    ):
+        result = runner.invoke(main, ["scratch", "list"])
+
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    assert "NX_T1_ISOLATED=1" in result.output
+    assert "T1 not configured" in result.output

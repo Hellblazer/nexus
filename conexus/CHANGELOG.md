@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.2] - 2026-06-05
+
+Plugin version aligned with conexus 5.10.2 (T1 scratch session-id-divergence
+fix: the MCP's `NX_SESSION_ID` lease key vs the SessionStart hook's
+`current_session` could diverge on resume / multi-frontend / version skew,
+hard-failing `nx scratch`; the Claude-ancestor-pid fallback now recovers it —
+nexus-gff3g). No plugin-side changes.
+
 ## [5.10.1] - 2026-06-05
 
 Plugin version aligned with conexus 5.10.1 (T2 daemon reliability fixes:

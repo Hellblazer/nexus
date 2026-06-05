@@ -198,7 +198,7 @@ class T1Database:
             ``current_session`` (and with no ``NX_SESSION_ID`` in env), a
             bare Bash sibling resolves no session-id and falls back to
             matching the owner's transient lease by its own immediate Claude
-            ancestor pid (``discover_t1_transient_for_claude``, nexus-0x16i);
+            ancestor pid (``discover_t1_by_claude_ancestor``, nexus-0x16i);
             a sibling of a different session does not match and fails loud
             (Path D). MCP-dispatched subprocesses are unaffected (Path A).
         Path D (failure)
@@ -241,17 +241,20 @@ class T1Database:
                 self._session_id = self._resolve_session_id(session_id)
                 return
 
-        # Cold-start transient-window fallback (nexus-0x16i): before the
-        # SessionStart hook writes current_session, a bare Bash sibling
-        # resolves no session-id. Target the owner's transient lease by the
-        # sibling's own immediate Claude ancestor pid (RF-6: both sides
-        # resolve it identically). Session-targeted + TTL-bounded, so no
-        # cross-session mis-bind; once the owner re-keys to the session-id
-        # this returns None and the session-id path above takes over.
-        from nexus.daemon.t1_lease import discover_t1_transient_for_claude
+        # Ancestor-pid fallback when the session-id path missed. Two cases
+        # (nexus-0x16i cold start AND nexus-gff3g session-id divergence): the
+        # sibling may resolve no session-id (before SessionStart writes
+        # current_session) OR a session-id that simply has no live lease
+        # (because the owner's MCP keyed on a divergent NX_SESSION_ID). Either
+        # way, target the owner's own lease — transient or session-keyed — by
+        # the sibling's immediate Claude ancestor pid (RF-6: both sides resolve
+        # it identically). Ancestor-pid-targeted + TTL-bounded, so no
+        # cross-session mis-bind. ``resolved_session`` being non-empty does NOT
+        # mean this path is unreachable: a non-empty-but-unleased id falls here.
+        from nexus.daemon.t1_lease import discover_t1_by_claude_ancestor
         from nexus.session import find_immediate_claude_pid
 
-        addr = discover_t1_transient_for_claude(
+        addr = discover_t1_by_claude_ancestor(
             find_immediate_claude_pid(), config_dir=config_dir
         )
         if addr is not None:
