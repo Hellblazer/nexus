@@ -53,8 +53,10 @@ def _publish_t1_session_lease(
     config_dir, session_id, host, port, *, server_pid=4242, claude_pid=None
 ):
     """RDR-149 P4 test helper: publish a T1 lease. With ``session_id`` it is
-    session-keyed; with ``session_id=None`` it is a transient record (and
-    ``claude_pid`` is stamped into its payload for the cold-start fallback)."""
+    session-keyed; with ``session_id=None`` it is a transient record.
+    ``claude_pid`` is stamped into the payload of EITHER kind (nexus-gff3g) for
+    the ancestor-pid fallback, which serves both the cold-start window and the
+    common session-id-divergence case (NX_SESSION_ID != current_session)."""
     from nexus.daemon.service_registry import ServiceRegistry
     from nexus.daemon.t1_lease import T1LeasePublisher
 

@@ -33,7 +33,7 @@ of the T1 migration, tracked as CA-3):
    resolvable session-id, so it matches the owner's transient record by the
    owner's immediate Claude ancestor pid (stamped in the payload, resolved
    identically on both sides via RF-6) -- session-targeted and TTL-bounded,
-   so no cross-session mis-bind (:func:`discover_t1_transient_for_claude`,
+   so no cross-session mis-bind (:func:`discover_t1_by_claude_ancestor`,
    nexus-0x16i). No record is ever keyed ``"unknown"``.
 
 Session-scoped N-per-user semantics are preserved: the session-id IS the
@@ -320,29 +320,44 @@ def discover_t1_lease(
     return host, int(port)
 
 
-def discover_t1_transient_for_claude(
+def discover_t1_by_claude_ancestor(
     claude_pid: int,
     *,
     config_dir: Path,
     clock: Clock = time.time,
 ) -> Optional[tuple[str, int]]:
-    """Cold-start transient-window fallback for a bare Bash sibling (nexus-0x16i).
+    """Discover a live T1 endpoint by the sibling's immediate Claude ancestor pid.
 
-    During the sliver before the SessionStart hook writes ``current_session``,
-    a sibling resolves no session-id, so :func:`discover_t1_lease` cannot find
-    the owner. The owner's TRANSIENT record (still server_pid-keyed, no
-    session-id) carries the owner's immediate Claude ancestor pid in its
-    payload; both sides compute that pid identically (RF-6). This matches the
-    fresh transient lease whose ``payload.claude_pid`` equals the sibling's own
-    ``claude_pid`` and returns its endpoint.
+    The fallback that fires when the session-id lookup
+    (:func:`discover_t1_lease`) misses. It is LOAD-BEARING, not a narrow edge
+    case: it covers two situations that both leave a Bash sibling unable to
+    find its own T1 by session-id.
 
-    Session-targeted (a concurrent cold-starting session has a different
-    immediate Claude ancestor, so its transient lease never matches) and
-    TTL-bounded (only fresh leases are considered), so there is no
-    cross-session mis-bind. Returns ``None`` if no matching fresh transient
-    lease exists; the caller then fails loud (Path D). Once the owner re-keys
-    to the session-id the transient record is gone and this returns ``None`` —
-    by then the session-id path resolves.
+    * **Cold start** (nexus-0x16i): before the SessionStart hook writes
+      ``current_session`` the sibling resolves no session-id at all, so the
+      owner's still-transient (server_pid-keyed) lease is unfindable by
+      session-id.
+    * **Session-id divergence** (nexus-gff3g — the COMMON production case): the
+      owner's MCP keyed its lease on its ``NX_SESSION_ID`` while the sibling
+      resolves ``current_session`` (written by the SessionStart hook), and the
+      two Claude-provided ids differ (resume, multiple concurrent frontends,
+      version skew). ``discover_t1_lease`` then returns ``None`` for the
+      sibling's id even though the owner's *session-keyed* lease is live.
+
+    In both cases the owner's lease carries the owner's immediate Claude
+    ancestor pid in its payload, and the sibling computes the same pid
+    identically (RF-6). This matches the fresh (``status == "live"``, within
+    TTL) lease — transient OR session-keyed — whose ``payload.claude_pid``
+    equals ``claude_pid`` and returns its endpoint.
+
+    Safety: ancestor-pid-targeted (a different session descends from a
+    different immediate Claude process, so its lease never matches) and
+    TTL-bounded (only fresh leases), so there is no cross-session mis-bind.
+    When more than one fresh lease shares the pid (a brief re-key overlap, or
+    one Claude process owning multiple MCP servers), the record with the
+    newest ``heartbeat_epoch`` wins, so the choice is deterministic rather than
+    dependent on ``glob`` ordering. Returns ``None`` if nothing matches; the
+    caller then fails loud (Path D).
     """
     if claude_pid <= 0:
         return None
@@ -350,22 +365,18 @@ def discover_t1_transient_for_claude(
     if not cfg.exists():
         return None
     now = clock()
+    best: Optional[tuple[float, str, int]] = None
     for path in cfg.glob("t1_addr.*"):
         try:
             record = LeaseRecord.from_json(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, KeyError):
             continue
-        # nexus-gff3g: match transient AND session-keyed leases by claude_pid.
-        # By the time control reaches here the session-id path
-        # (discover_t1_lease) has already missed. A session-keyed lease whose
-        # owner shares this sibling's immediate Claude ancestor pid is still the
-        # sibling's own T1 — even though the owner's session-id label diverges
-        # from what this process resolves (NX_SESSION_ID given to the MCP vs
-        # current_session written by the SessionStart hook). The match stays
-        # ancestor-pid-targeted (a different session has a different immediate
-        # Claude ancestor) and TTL-bounded (only fresh leases), so there is no
-        # cross-session mis-bind. The prior `session_id is not None: continue`
-        # skip made this fallback inert for every warm/re-keyed lease.
+        # Match transient AND session-keyed leases (nexus-gff3g): control only
+        # reaches here after the session-id path missed, and a lease whose
+        # owner shares this sibling's immediate Claude ancestor is the
+        # sibling's own T1 regardless of how its session-id is labeled. The
+        # prior ``session_id is not None: continue`` skip made this inert for
+        # every warm/re-keyed lease.
         if record.payload.get("claude_pid") != claude_pid:
             continue
         if not record.is_fresh(now):
@@ -374,5 +385,9 @@ def discover_t1_transient_for_claude(
         port = record.endpoint.get("port")
         if not isinstance(host, str) or not isinstance(port, (int, float)):
             continue
-        return host, int(port)
-    return None
+        # Deterministic tie-break: newest heartbeat wins (M1/O1).
+        if best is None or record.heartbeat_epoch > best[0]:
+            best = (record.heartbeat_epoch, host, int(port))
+    if best is None:
+        return None
+    return best[1], best[2]
