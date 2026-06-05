@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.3] - 2026-06-05
+
+Plugin version aligned with conexus 5.10.3 (T2 daemon reliability fix: a
+client `reclaim_stale` RPC flood from version-skewed <=5.10.0 workers pegged
+the daemon and caused `nx memory put` to fail with `database is locked`; the
+RPC is now a daemon-owned no-op — nexus-xmohw). No plugin-side changes.
+
 ## [5.10.2] - 2026-06-05
 
 Plugin version aligned with conexus 5.10.2 (T1 scratch session-id-divergence

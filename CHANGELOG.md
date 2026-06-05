@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.3] - 2026-06-05
+
+T2 daemon reliability fix.
+
+### Fixed
+
+- **T2 daemon no longer pegged to ~100% CPU (and T2 writes no longer fail
+  with `database is locked`) by a client `reclaim_stale` RPC flood
+  (nexus-xmohw).** Aspect-queue stale-row reclaim is daemon-owned since
+  nexus-we61e — the daemon's own loop calls it directly once per interval.
+  But version-skewed workers from before we61e (conexus <=5.10.0) still RPC
+  `aspect_queue.reclaim_stale` on every poll, and the daemon honoured each as
+  a real full-table UPDATE+commit. With several stale workers that floods the
+  SQLite write lock, pegs a core, makes the daemon slow to answer `hello()`,
+  and triggers ensure-running to spawn a replacement — a takeover churn that
+  leaves two daemons contending on `memory.db`, at which point `nx memory
+  put` fails outright. The client-facing dispatch entry for
+  `aspect_queue.reclaim_stale` is now a cheap no-op returning 0 that never
+  touches the DB; the daemon's own reclaim loop is unaffected. A one-shot
+  WARNING per daemon surfaces that stale workers are still present so an
+  operator can restart them.
+
 ## [5.10.2] - 2026-06-05
 
 T1 scratch reliability fix from the 5.10.1 shakeout.
