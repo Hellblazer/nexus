@@ -250,11 +250,21 @@ class TestDispatchTable:
             table = _build_dispatch_table(db)
             rpc_entry = table["aspect_queue.reclaim_stale"]
             result = rpc_entry(60)  # what a stale worker sends (timeout_seconds)
+            # The override is table-SCOPED: it must NOT mutate the store's
+            # real method, which the daemon's own _reclaim_stale_loop calls
+            # directly (t2db.aspect_queue.reclaim_stale) to do legitimate
+            # reclaim. If the override leaked onto the store, the daemon would
+            # silently stop reclaiming.
+            store_method_unchanged = db.aspect_queue.reclaim_stale is real
         finally:
             db.close()
 
         assert result == 0, "RPC reclaim_stale must return 0 (daemon-owned no-op)"
         real.assert_not_called()  # must not touch the DB / real reclaim
+        assert store_method_unchanged, (
+            "override leaked onto the store method; the daemon's own reclaim "
+            "loop would stop reclaiming"
+        )
 
 
 # ---------------------------------------------------------------------------
