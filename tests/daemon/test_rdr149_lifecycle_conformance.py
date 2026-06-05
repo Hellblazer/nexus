@@ -2,43 +2,44 @@
 """RDR-149: cross-tier lifecycle conformance suite.
 
 The load-bearing artifact for the whole RDR-149 arc. ONE parameterized
-lifecycle property battery run against the THREE service-lifecycle
-implementations (T1 session.py, T2 daemon, T3 daemon). Each tier's
-harness drives that tier's REAL publish / discover / reap path, so the
-battery is a living spec: as a tier migrates onto the leased registry
-(P2-P5) its harness points at the migrated path and its red cells flip
-green.
+lifecycle property battery run against all THREE tiers. Each tier's harness
+drives that tier's REAL publish / discover / reap path. The battery was a
+living spec across the migration: as each tier moved onto the leased
+registry (T2 P2, T3 P3, T1 P4) its harness repointed at the migrated path
+and its red cells flipped green. Post-migration (P5/P6) all three tiers ride
+the one primitive (``daemon/service_registry.py``); this suite is the
+standing conformance guard that keeps them there.
 
-Liveness models differ across tiers and the battery is agnostic to which
-one a tier uses:
-
-- T1 / T3 (un-migrated): identity + liveness are pid-based. Ungraceful
-  death = the owner pid dies; reap = the orphan sweep / discovery-time
-  pid validation removes the dead record.
-- T2 (migrated, RDR-149 P2): identity is a server-unique owner token and
-  liveness is lease freshness (TTL on a wall-clock heartbeat). Ungraceful
-  death = the owner stops heartbeating and the lease ages out.
+Identity is a server-unique owner token and liveness is lease freshness
+(TTL on a wall-clock heartbeat) for every tier now: ungraceful death = the
+owner stops heartbeating and the lease ages out (no pid is consulted, giving
+pid-reuse immunity). The harness vocabulary historically abstracted a
+pid-based model for the then-un-migrated tiers; that model is gone from
+production, retained here only as the conformance contract every tier meets.
 
 The harness vocabulary (``simulate_ungraceful_death`` / ``advance_to_reap``
-/ ``self_heal_tick`` / ``stale_reassert``) abstracts those models so one
-test body asserts the same property for every tier.
+/ ``self_heal_tick`` / ``stale_reassert``) abstracts the lifecycle events so
+one test body asserts the same property for every tier.
 
-Red-first contract (CA-1). The matrix MUST reproduce the two filed
-defects as failures against un-migrated code:
+Red-first contract (CA-1), now discharged. The matrix originally reproduced
+the two filed defects as strict-xfail failures against the un-migrated code:
 
-- GH #1114 (T1 lost-addr, no self-heal)  -> ``test_self_heal`` xfails for T1.
-- GH #1112 (T3 stale after upgrade)      -> ``test_version_cycle`` xfails for T3.
+- GH #1114 (T1 lost-addr, no self-heal)  -> ``self_heal`` was a T1 GAP.
+- GH #1112 (T3 stale after upgrade)      -> ``version_cycle`` was a T3 GAP.
 
-and T2 MUST pass every property T1/T3 fail. The non-vacuity guard
-(``TestMatrixIsNotVacuous``) enforces that directly against the
-expectation table.
+Both are now fixed structurally (the cells are ``pass``); the non-vacuity
+guard (``TestMatrixIsNotVacuous``) flipped from "reproduces the bug" to
+"asserts the fix landed" (``test_1114_t1_self_heal_fixed_structurally`` /
+``test_1112_t3_version_cycle_fixed_structurally``). The one remaining
+documented non-pass is ``version_cycle[t1]`` (N/A: T1 is MCP-lifespan-owned,
+cycled by an MCP restart, not an in-process cycle).
 
-Encoding: each broken cell is ``xfail(strict=True)`` so an unexpected
-pass turns the suite RED and forces the migrating phase to delete the
-stale cell (the red-first -> green ratchet). GAP cells name an issue + the
-phase that closes them; SPEC cells are forward properties of the leased
-primitive. RDR-149 P2 flips T2's SPEC cells (generation / fencing /
-pid-reuse) to ``pass`` now that T2 rides the primitive.
+Encoding: broken cells were ``xfail(strict=True)`` so an unexpected pass
+turned the suite RED and forced the migrating phase to flip the stale cell
+(the red-first -> green ratchet). GAP cells name an issue + the phase that
+closed them; SPEC cells are forward properties of the leased primitive. All
+three tiers now ride the primitive, so every lease property passes for every
+tier (the ratchet is complete).
 
 Flakiness control (RDR-140 convention): the unit battery is in-process,
 record-level, with injected liveness + a fixed clock; ``port=0`` and a

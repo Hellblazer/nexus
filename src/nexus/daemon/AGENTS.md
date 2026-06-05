@@ -26,6 +26,7 @@ A reviewer seeing a lifecycle change that edits one tier's file without a corres
 | `t2_daemon.py` | T2 daemon. Owns the SQLite+FTS5 WAL writer; consumes `ServiceRegistry(tier="t2")` + a spawn-lock (RDR-128 single-writer). uid-scoped. |
 | `t2_client.py` | T2 client transport (UDS + loopback TCP). |
 | `t3_daemon.py` | T3 supervisor + daemon. `T3Supervisor` consumes `ServiceRegistry(tier="t3")`; long-lived, version-cycled via `cycle_to_current`. uid-scoped. |
+| `t3_client.py` | T3 client factory (RDR-120). Returns a `T3Database` backed by an HTTP client pointed at the running T3 daemon; local mode only. |
 | `catalog_write_shim.py` | Catalog write dispatch hosted in the T2 daemon (RDR-146). |
 | `installer.py` | Daemon install / autostart wiring. |
 
@@ -48,7 +49,7 @@ Both are required for T2/T3. For T1 (no spawn-lock, MCP-lifespan-owned, session-
 
 ## Hot rules
 
-- **No per-tier lifecycle copy.** Discovery, liveness, reap, election, self-heal, version-skew all live in the primitive. If you find yourself writing a pid-keyed sweep or a bespoke discovery walk in a tier file, stop — it belongs in the substrate.
-- **Liveness is lease freshness, not pid.** A dead owner's lease ages out via TTL; never reintroduce `os.kill(pid, 0)` orphan sweeps (pid reuse is the bug they cause).
+- **No per-tier lifecycle copy.** Discovery, liveness, reap, election, self-heal, version-skew all live in the primitive. If you find yourself writing a pid-keyed sweep or a bespoke discovery walk in a tier file, stop — it belongs in the substrate. This is mechanically enforced by `tests/daemon/test_lifecycle_gate.py` (the deleted bespoke addr-file functions stay deleted; `LeaseRecord` + the election flock live only in the primitive). Reintroducing one fails CI.
+- **Liveness is lease freshness, not pid.** A dead owner's lease ages out via TTL; never add a new `os.kill(pid, 0)` **orphan sweep** in a tier-consumer file (pid reuse is the bug that causes). This bans the orphan-sweep *shape*, not all pid use: the retained probes in `discovery.py` (legacy-format upgrade-window interop), `t2_daemon.py` (spawn-lock guard against killing a recycled pid), and `t3_daemon.py` (SIGTERM/SIGKILL shutdown signaling) are documented exceptions and must not be expanded into liveness sweeps.
 - **Generation is the fencing token.** `publish` only ever increments; `heartbeat` raises `StaleOwnerError` when superseded. A delayed predecessor must never clobber a higher-generation successor (CA-4).
 - **Stop before relinquish.** Cancel a tier's heartbeat/reassert task BEFORE relinquishing its lease so it cannot resurrect a mid-shutdown record (RDR-129 early-stop ordering).
