@@ -77,7 +77,12 @@ def session_start(claude_session_id: str | None = None) -> str:
     if not inherited:
         write_claude_session_id(session_id)
 
-    return f"Nexus ready. T1 scratch initialized (session: {session_id})."
+    # nexus-gff3g: do NOT claim "T1 scratch initialized" here. This hook only
+    # records the session-id; T1 chroma is owned by the MCP server's FastMCP
+    # lifespan (RDR-105 P4), which may key its lease on a DIFFERENT session-id
+    # (its NX_SESSION_ID) than the one written above. Claiming initialization
+    # masked exactly that divergence during the 5.10.x T1-scratch failure.
+    return f"Nexus ready (session: {session_id})."
 
 
 # -- SessionEnd ---------------------------------------------------------------

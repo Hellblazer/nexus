@@ -382,18 +382,38 @@ class TestTransientClaudeFallback:
             is None
         )
 
-    def test_no_match_for_session_keyed_lease(
+    def test_matches_session_keyed_lease_by_claude_pid(
         self, config_dir: Path, clock: _FakeClock
     ) -> None:
-        # Once re-keyed to a session-id the record is no longer transient;
-        # the fallback ignores it (the session-id path handles it).
+        # nexus-gff3g: a session-keyed lease whose owner shares this sibling's
+        # immediate Claude ancestor pid IS the sibling's own T1 and must match.
+        # The fallback only fires after the session-id path (discover_t1_lease)
+        # has already missed, which happens whenever the owner's session-id
+        # label diverges from what the sibling resolves (NX_SESSION_ID given to
+        # the MCP vs current_session written by the SessionStart hook). The old
+        # `session_id is not None: continue` skip made this fallback inert for
+        # every warm/re-keyed lease, the 5.10.x T1-scratch hard-fail.
+        reg = _registry(config_dir, clock)
+        _publisher(
+            reg, session_resolver=lambda: "sess-A", claude_pid=self._CLAUDE_PID
+        ).publish()
+        assert discover_t1_transient_for_claude(
+            self._CLAUDE_PID, config_dir=config_dir, clock=clock
+        ) == (_HOST, _PORT)
+
+    def test_no_match_for_session_keyed_lease_with_different_claude_pid(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        # Extending the fallback to session-keyed leases preserves the
+        # no-cross-session-mis-bind property: a different immediate Claude
+        # ancestor pid must NOT match, even for a session-keyed lease.
         reg = _registry(config_dir, clock)
         _publisher(
             reg, session_resolver=lambda: "sess-A", claude_pid=self._CLAUDE_PID
         ).publish()
         assert (
             discover_t1_transient_for_claude(
-                self._CLAUDE_PID, config_dir=config_dir, clock=clock
+                self._CLAUDE_PID + 1, config_dir=config_dir, clock=clock
             )
             is None
         )
@@ -413,10 +433,13 @@ class TestTransientClaudeFallback:
             is None
         )
 
-    def test_rekey_drops_claude_pid_hint(
+    def test_rekey_retains_claude_pid_hint(
         self, config_dir: Path, clock: _FakeClock
     ) -> None:
-        # After re-key the session record carries no claude_pid (dead weight).
+        # nexus-gff3g: after re-key the session record RETAINS claude_pid so a
+        # sibling whose session-id diverges from the owner's can still reach its
+        # own T1 via the claude-ancestor-pid fallback. Dropping it (the prior
+        # behavior) silently killed that fallback for every re-keyed lease.
         reg = _registry(config_dir, clock)
         sid: dict[str, str | None] = {"v": None}
         pub = _publisher(
@@ -426,4 +449,5 @@ class TestTransientClaudeFallback:
         sid["v"] = "sess-A"
         pub.tick()  # re-keys to sess-A
         rec = reg.discover("sess-A")
-        assert rec is not None and "claude_pid" not in rec.payload
+        assert rec is not None
+        assert rec.payload.get("claude_pid") == self._CLAUDE_PID

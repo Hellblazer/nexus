@@ -322,6 +322,99 @@ class TestT1ColdStartTransientWindow:
             T1Database()
         fake_chromadb.HttpClient.assert_not_called()
 
+    # ── nexus-gff3g: session-id divergence (NX_SESSION_ID != current_session)
+    # The owner's MCP keys its lease on its own resolved session-id (warm
+    # publish), but a sibling shell resolves a DIFFERENT session-id, so the
+    # session-id lease path misses. The claude-ancestor-pid fallback MUST still
+    # find the owner's own T1 — which requires (a) the warm/session-keyed lease
+    # to RETAIN claude_pid in its payload and (b) the fallback to consider
+    # session-keyed leases, not just transient ones.
+
+    def test_warm_session_keyed_lease_retains_claude_pid(self, tmp_path):
+        """A session-keyed (warm) publish must keep claude_pid in the payload.
+
+        Pre-fix, ``_payload`` dropped claude_pid whenever a session-id
+        resolved, so every MCP launched with NX_SESSION_ID set published a
+        lease with no claude_pid hint — killing the cold-start fallback in
+        the common configuration (nexus-gff3g).
+        """
+        pub = _publish_t1_session_lease(
+            tmp_path, "owner-sess", "127.0.0.1", 9999,
+            server_pid=70707, claude_pid=8080,
+        )
+        assert pub.record.payload.get("session_id") == "owner-sess"
+        assert pub.record.payload.get("claude_pid") == 8080
+
+    def test_sibling_connects_to_session_keyed_lease_when_session_diverges(
+        self, tmp_path, monkeypatch
+    ):
+        """Divergent session-id + matching Claude ancestor pid -> connect.
+
+        The owner published a SESSION-KEYED lease under ``owner-sess`` stamped
+        with claude_pid 8080. The sibling resolves a DIFFERENT session-id
+        (``divergent-sess`` via NX_SESSION_ID), so ``discover_t1_lease`` misses;
+        it must fall back to the owner's own lease by the shared immediate
+        Claude ancestor pid. This is the exact 5.10.x production failure.
+        """
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        fake_chromadb.HttpClient.return_value = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED",
+                    "NEXUS_SKIP_T1"):
+            monkeypatch.delenv(var, raising=False)
+        # Sibling resolves a session-id that does NOT match the lease key.
+        monkeypatch.setenv("NX_SESSION_ID", "divergent-sess")
+
+        _publish_t1_session_lease(
+            tmp_path, "owner-sess", "127.0.0.1", 9999,
+            server_pid=70707, claude_pid=8080,
+        )
+        monkeypatch.setattr(
+            "nexus.session.find_immediate_claude_pid", lambda start_pid=None: 8080
+        )
+
+        from nexus.db.t1 import T1Database
+        T1Database()
+        fake_chromadb.HttpClient.assert_called_once_with(host="127.0.0.1", port=9999)
+
+    def test_session_keyed_fallback_preserves_no_mis_bind(
+        self, tmp_path, monkeypatch
+    ):
+        """Extending the fallback to session-keyed leases must NOT mis-bind.
+
+        A sibling whose Claude ancestor pid (9090) differs from the lease's
+        (8080) must still fail loud even with a divergent session-id — the
+        ancestor-pid targeting that prevents cross-session mis-bind for
+        transient leases must hold for session-keyed leases too.
+        """
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED",
+                    "NEXUS_SKIP_T1"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("NX_SESSION_ID", "divergent-sess")
+
+        _publish_t1_session_lease(
+            tmp_path, "owner-sess", "127.0.0.1", 9999,
+            server_pid=70707, claude_pid=8080,
+        )
+        monkeypatch.setattr(
+            "nexus.session.find_immediate_claude_pid", lambda start_pid=None: 9090
+        )
+
+        from nexus.db.t1 import T1Database, T1ServerNotFoundError
+        with pytest.raises(T1ServerNotFoundError):
+            T1Database()
+        fake_chromadb.HttpClient.assert_not_called()
+
     def test_unresolvable_claude_pid_falls_through_to_raise(
         self, tmp_path, monkeypatch
     ):
