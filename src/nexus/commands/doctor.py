@@ -1589,7 +1589,7 @@ def _run_check_resources() -> None:
 
 
 def _run_check_t1() -> None:
-    """Diagnostic: T1 addr-file presence + reachability.
+    """Diagnostic: T1 session-id lease presence + reachability (RDR-149 P4).
 
     .. note::
        Imports ``_tcp_probe_alive`` lazily from ``nexus.mcp.core`` to
@@ -1598,98 +1598,77 @@ def _run_check_t1() -> None:
 
     Three outcomes:
 
-    * **Healthy.** A live ``claude*`` ancestor is reachable via the
-      PPID walk and ``~/.config/nexus/t1_addr.<claude_pid>`` exists
-      AND its host:port responds to a TCP probe.
-    * **Missing addr file under live Claude.** A ``claude*`` ancestor
-      is reachable but the addr file is absent. Two common causes:
-      (a) the MCP server crashed before the lifespan wrote the file,
-      (b) the operator launched Claude Code via ``exec -a`` or a
-      custom wrapper whose process name does not start with
-      ``claude``, defeating the PPID walk's match.
-    * **No Claude in chain.** The current process has no ``claude*``
-      ancestor; ``nx scratch`` from this shell will fail-loud unless
-      the operator opts in via ``NX_T1_ISOLATED=1``.
+    * **Healthy.** A session-id resolves and its live lease at
+      ``~/.config/nexus/t1_addr.<session_id>`` yields a host:port that
+      responds to a TCP probe.
+    * **Missing lease under a resolved session.** A session-id resolves
+      but no live lease is discoverable. Common causes: (a) the MCP
+      server crashed before the lifespan published the lease, (b) the
+      lease aged out (the MCP server died ungracefully and its heartbeat
+      stopped), (c) the MCP server is still booting.
+    * **No session-id resolves.** Neither ``NX_SESSION_ID`` nor
+      ``~/.config/nexus/current_session`` is set; ``nx scratch`` from
+      this shell will fail-loud unless the operator opts in via
+      ``NX_T1_ISOLATED=1``.
 
     Exit code:
-      * 0: healthy or "no Claude in chain" (informational).
-      * 1: Claude in chain but addr file absent or unreachable.
+      * 0: healthy or "no session-id resolves" (informational).
+      * 1: session-id resolves but the lease is absent or unreachable.
     """
-    import os as _os
-
+    from nexus.daemon.t1_lease import discover_t1_lease
     from nexus.mcp.core import _tcp_probe_alive
     from nexus.session import (
-        _command_name_of,
-        find_immediate_claude_pid,
-        read_t1_addr_for,
-        t1_addr_path,
+        _nexus_config_dir_at_import,
+        resolve_active_session_id,
     )
 
-    own_pid = _os.getpid()
-    claude_pid = find_immediate_claude_pid(start_pid=own_pid)
+    session_id = resolve_active_session_id()
 
-    if claude_pid <= 0:
-        click.echo("[ ] T1: no claude ancestor in PPID chain")
+    if not session_id:
+        click.echo("[ ] T1: no session-id resolves for this process")
         click.echo(
             "    This is informational. ``nx scratch`` from this shell "
             "will fail-loud unless you opt into per-process ephemeral "
-            "T1 via ``NX_T1_ISOLATED=1``."
+            "T1 via ``NX_T1_ISOLATED=1``, or the SessionStart hook has "
+            "written ~/.config/nexus/current_session."
         )
         return
 
-    comm = _command_name_of(claude_pid)
-    is_claude = comm.lower().startswith("claude")
-    if not is_claude:
-        # find_immediate_claude_pid returned the immediate-PPID
-        # fallback because no ancestor's comm starts with "claude".
-        # Likely an exec -a / wrapper rename.
-        click.echo(
-            f"[!] T1: ancestor PID {claude_pid} (comm={comm!r}) is not "
-            "named 'claude*'; likely launched via exec -a or a "
-            "wrapper. Falling back to the immediate-PPID."
-        )
-        click.echo(
-            "    If you launched Claude Code via ``exec -a`` or a "
-            "custom wrapper, ensure the process name starts with "
-            "``claude`` so the PPID walk can find it."
-        )
-        raise click.exceptions.Exit(1)
-
-    addr_path = t1_addr_path(claude_pid)
-    addr = read_t1_addr_for(claude_pid)
+    config_dir = _nexus_config_dir_at_import()
+    addr = discover_t1_lease(session_id, config_dir=config_dir)
+    record_name = f"t1_addr.{session_id}"
     if addr is None:
         click.echo(
-            f"[✗] T1: claude ancestor PID {claude_pid} ({comm!r}) "
-            f"is alive but {addr_path} is missing or unreadable."
+            f"[✗] T1: session {session_id!r} resolves but no live lease "
+            f"at {config_dir / record_name}."
         )
         click.echo(
-            "    The MCP server's lifespan should have written this "
-            "file at session start. Causes:\n"
+            "    The MCP server's lifespan publishes this lease at "
+            "session start and heartbeats it. Causes:\n"
             "      - The MCP server crashed before the lifespan "
-            "completed (check ~/.config/nexus/logs/mcp.log).\n"
-            "      - The MCP server is still booting; retry shortly.\n"
-            "      - The Claude Code binary was launched via "
-            "``exec -a`` with a different process name (the PPID walk "
-            "found the right PID but the comm-prefix check missed)."
+            "published it (check ~/.config/nexus/logs/mcp.log).\n"
+            "      - The MCP server died ungracefully and its lease "
+            "aged out (TTL).\n"
+            "      - The MCP server is still booting; retry shortly."
         )
         raise click.exceptions.Exit(1)
 
     host, port = addr
     if _tcp_probe_alive(host, port, timeout=1.0):
         click.echo(
-            f"[✓] T1: addr file {addr_path.name} -> "
+            f"[✓] T1: lease {record_name} -> "
             f"{host}:{port} (chroma reachable)"
         )
         return
 
     click.echo(
-        f"[✗] T1: addr file {addr_path.name} -> {host}:{port} "
+        f"[✗] T1: lease {record_name} -> {host}:{port} "
         "but TCP probe failed."
     )
     click.echo(
-        "    The addr file points at a chroma that is not listening. "
+        "    The lease points at a chroma that is not listening. "
         "The MCP server may have died ungracefully. Restart Claude "
-        "Code; the next MCP startup will sweep this stale addr file "
+        "Code; the next MCP startup will publish a fresh lease "
         "and spawn a fresh chroma."
     )
     raise click.exceptions.Exit(1)

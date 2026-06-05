@@ -76,52 +76,52 @@ def isolated_home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def scratch_session(isolated_home, monkeypatch):
-    """Boot a real chroma + write the addr file so CLI invocations
-    share state (RDR-105 P4: the legacy session-record discovery is
-    gone; CLI scratch commands resolve via Path B addr file).
+    """Boot a real chroma + publish a session-id lease so CLI invocations
+    share state (RDR-149 P4: T1 rides the leased registry, keyed on the
+    session-id; CLI scratch commands resolve the lease via Path B).
     """
-    import os as _os
     import shutil as _shutil
+    from pathlib import Path as _Path
 
+    from nexus.daemon.service_registry import ServiceRegistry
+    from nexus.daemon.t1_lease import T1LeasePublisher
     from nexus.session import (
-        find_immediate_claude_pid,
         start_t1_server,
         stop_t1_server,
-        unlink_t1_addr,
         write_claude_session_id,
-        write_t1_addr,
     )
 
+    config_dir = isolated_home / ".config" / "nexus"
     # ``HOME`` is already isolated by ``isolated_home``;
-    # ``NEXUS_CONFIG_DIR`` makes that explicit for the addr file path.
-    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(isolated_home / ".config" / "nexus"))
+    # ``NEXUS_CONFIG_DIR`` makes that explicit for the lease path.
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
     monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
     monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
     # Pin the session_id across CLI invocations so all writes/reads
-    # see the same metadata filter scope. Each ``runner.invoke``
-    # constructs a fresh ``T1Database``; without a stable session_id
-    # the T1 metadata filter excludes prior-invocation writes.
-    monkeypatch.setenv("NX_SESSION_ID", "integration-test-session")
+    # see the same metadata filter scope AND resolve the same lease.
+    # Each ``runner.invoke`` constructs a fresh ``T1Database``; without a
+    # stable session_id the T1 metadata filter excludes prior writes.
+    session_id = "integration-test-session"
+    monkeypatch.setenv("NX_SESSION_ID", session_id)
 
-    write_claude_session_id("integration-test-session")
+    write_claude_session_id(session_id)
     host, port, server_pid, tmpdir = start_t1_server()
 
-    # Pin the addr file at THIS test's PID so CLI invocations
-    # (whose PPID walk lands on this pytest process) discover it.
-    own_pid = _os.getpid()
-    monkeypatch.setattr(
-        "nexus.session.find_immediate_claude_pid",
-        lambda start_pid=None: own_pid,
+    # Publish the session-id-keyed lease the CLI invocations will resolve.
+    registry = ServiceRegistry(dir=_Path(config_dir), tier="t1")
+    publisher = T1LeasePublisher(
+        registry=registry,
+        server_pid=server_pid,
+        host=host,
+        port=port,
+        version="1.0.0",
+        session_resolver=lambda: session_id,
     )
-    monkeypatch.setattr(
-        "nexus.db.t1.find_immediate_claude_pid",
-        lambda start_pid=None: own_pid,
-    )
-    write_t1_addr(own_pid, host, port)
+    publisher.publish()
 
     yield
 
-    unlink_t1_addr(own_pid)
+    publisher.relinquish()
     stop_t1_server(server_pid)
     _shutil.rmtree(tmpdir, ignore_errors=True)
 

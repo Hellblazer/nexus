@@ -23,8 +23,6 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 from nexus.session import (
     _t1_isolated_env,
-    find_immediate_claude_pid,
-    read_t1_addr_for,
     resolve_active_session_id,
 )
 
@@ -187,10 +185,21 @@ class T1Database:
         Path A (env-pair discovery)
             ``NX_T1_HOST`` + ``NX_T1_PORT`` in env -> ``HttpClient``.
             Used by MCP-dispatched subprocesses (``claude -p`` shared).
-        Path B (addr-file discovery)
-            ``find_immediate_claude_pid`` resolves to a live addr file
-            at ``~/.config/nexus/t1_addr.<pid>`` -> ``HttpClient``.
-            Used by Claude-Code-spawned siblings (Bash tool, hooks).
+        Path B (session-id lease discovery)
+            ``resolve_active_session_id`` resolves a session-id whose
+            live lease at ``~/.config/nexus/t1_addr.<session_id>``
+            yields ``(host, port)`` -> ``HttpClient`` (RDR-149 P4).
+            Both the writer (MCP lifespan) and the reader compute the
+            session-id identically from ``current_session``; liveness is
+            lease freshness (TTL), not pid, so a dead owner's lease ages
+            out (pid-reuse immunity). Used by Claude-Code-spawned
+            siblings (Bash tool, hooks) once a session-id resolves. In the
+            cold-start sliver before the SessionStart hook writes
+            ``current_session`` (and with no ``NX_SESSION_ID`` in env), a
+            bare Bash sibling resolves no session-id and falls through to
+            Path D (a loud, retryable ``T1ServerNotFoundError``); it
+            succeeds on retry once the session-id resolves. MCP-dispatched
+            subprocesses are unaffected (Path A env breadcrumb).
         Path D (failure)
             None of the above -> raise :class:`T1ServerNotFoundError`.
 
@@ -217,9 +226,14 @@ class T1Database:
             self._session_id = self._resolve_session_id(session_id)
             return
 
-        claude_pid = find_immediate_claude_pid()
-        if claude_pid > 0:
-            addr = read_t1_addr_for(claude_pid)
+        resolved_session = resolve_active_session_id(session_id)
+        if resolved_session:
+            from nexus.daemon.t1_lease import discover_t1_lease
+            from nexus.session import _nexus_config_dir_at_import
+
+            addr = discover_t1_lease(
+                resolved_session, config_dir=_nexus_config_dir_at_import()
+            )
             if addr is not None:
                 host, port = addr
                 self._client = chromadb.HttpClient(host=host, port=port)
@@ -230,13 +244,14 @@ class T1Database:
             "T1 not configured for this process. Either inherit "
             "NX_T1_HOST and NX_T1_PORT from a parent MCP server "
             "(MCP-dispatched subprocess), run as a sibling of a "
-            "top-level MCP server so the address file is "
-            "discoverable via the PPID walk to the immediate "
-            "claude ancestor, or set NX_T1_ISOLATED=1 to opt in "
-            "to an in-process ephemeral T1.\n"
+            "top-level MCP server so a live session-id lease "
+            "(~/.config/nexus/t1_addr.<session_id>) is discoverable, "
+            "or set NX_T1_ISOLATED=1 to opt in to an in-process "
+            "ephemeral T1.\n"
             "\n"
-            "If you launched Claude Code via 'exec -a' or a custom "
-            "wrapper, ensure the process name starts with 'claude'."
+            "If no session-id resolves, ensure the SessionStart hook "
+            "has written ~/.config/nexus/current_session, or pass "
+            "NX_SESSION_ID explicitly."
         )
 
     def __init__(self, session_id: str | None = None, client=None) -> None:
