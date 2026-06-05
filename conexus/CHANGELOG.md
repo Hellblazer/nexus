@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.0] - 2026-06-05
+
+Plugin version aligned with conexus 5.10.0 (RDR-149 unified daemon-lifecycle
+substrate on the nexus package side).
+
+### Fixed
+
+- **phase-review-gate close hook: sentinel-staleness check restored (RDR-149
+  P4/P5).** The hook anchored its "sentinel must postdate session start" check
+  on the `t1_addr.<claude_pid>` file, which RDR-149 P4 stopped writing (T1 now
+  keys its lease on the session-id). The check silently no-opped, accepting
+  stale PASSED sentinels from prior sessions. It now anchors on the
+  `current_session` pointer, restoring the fail-closed staleness guard.
+
 ## [5.9.3] - 2026-06-04
 
 Plugin version aligned with conexus 5.9.3. No plugin-side changes; the release
