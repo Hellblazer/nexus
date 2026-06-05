@@ -224,6 +224,38 @@ class TestDispatchTable:
         for op in _RPC_DENY_OPS:
             assert op not in table, f"denied op {op!r} leaked into dispatch table"
 
+    def test_reclaim_stale_rpc_is_noop(self, db_path: Path) -> None:
+        """nexus-xmohw: ``aspect_queue.reclaim_stale`` over RPC must be a
+        cheap no-op returning 0 that NEVER touches the DB.
+
+        Reclaim is daemon-owned (nexus-we61e: ``_reclaim_stale_loop``
+        calls it directly on ``t2db``). No current worker RPCs it, but
+        version-skewed workers (<=5.10.0, pre-we61e) still do every poll.
+        Honouring each as a real full-table UPDATE+commit floods the
+        write lock and pegs the daemon at 100% CPU -> slow ``hello()`` ->
+        takeover churn -> multi-daemon -> T2 write failures (nexus-x47yx).
+        The client-facing dispatch entry must therefore bypass the DB
+        entirely.
+        """
+        from unittest.mock import MagicMock
+
+        from nexus.daemon.t2_daemon import _build_dispatch_table
+        from nexus.db.t2 import T2Database
+
+        db = T2Database(db_path)
+        try:
+            # Spy on the real reclaim_stale: the RPC entry must NOT call it.
+            real = MagicMock(return_value=99)
+            db.aspect_queue.reclaim_stale = real  # type: ignore[method-assign]
+            table = _build_dispatch_table(db)
+            rpc_entry = table["aspect_queue.reclaim_stale"]
+            result = rpc_entry(60)  # what a stale worker sends (timeout_seconds)
+        finally:
+            db.close()
+
+        assert result == 0, "RPC reclaim_stale must return 0 (daemon-owned no-op)"
+        real.assert_not_called()  # must not touch the DB / real reclaim
+
 
 # ---------------------------------------------------------------------------
 # Daemon lifecycle (real sockets, in-process)

@@ -601,6 +601,30 @@ def _build_dispatch_table(t2db: Any) -> dict[str, Any]:
         candidate = getattr(t2db, method_name, None)
         if callable(candidate):
             table[f"database.{method_name}"] = candidate
+    # nexus-xmohw: ``aspect_queue.reclaim_stale`` is daemon-owned since
+    # nexus-we61e — ``T2Daemon._reclaim_stale_loop`` calls it DIRECTLY on
+    # ``t2db`` (not through this table), exactly once per interval. No
+    # current worker RPCs it (aspect_worker.py deliberately stopped after
+    # we61e), but version-skewed workers from before we61e (<=5.10.0) still
+    # do on every poll. Honouring each as a real full-table UPDATE+commit
+    # floods the SQLite write lock and pegs the daemon at ~100% CPU, which
+    # makes it slow to answer ``hello()`` -> ensure-running declares it
+    # stale and spawns a replacement -> takeover churn -> 2+ daemons
+    # contend on memory.db -> ``nx memory put`` hard-fails with
+    # ``database is locked``. Neutralise the flood at the RPC boundary:
+    # the client-facing entry is a cheap no-op returning 0 that never
+    # touches the DB. The daemon's own loop is unaffected (it bypasses
+    # this table), so legitimate reclaim still happens.
+    if "aspect_queue.reclaim_stale" in table:
+        def _reclaim_stale_rpc_noop(*_args: Any, **_kwargs: Any) -> int:
+            # DEBUG (not WARNING): a stale-worker flood would spam at higher
+            # levels. Operators chasing the cause enable debug to confirm
+            # version-skewed workers are still RPC'ing reclaim, then restart
+            # the offending nx-mcp processes.
+            _log.debug("t2_daemon_reclaim_stale_rpc_noop")
+            return 0
+
+        table["aspect_queue.reclaim_stale"] = _reclaim_stale_rpc_noop
     return table
 
 
