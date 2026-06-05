@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.1] - 2026-06-05
+
+Plugin version aligned with conexus 5.10.1 (T2 daemon reliability fixes:
+reclaim-contention, lease-takeover zero-daemon gap, bounded socket teardown,
+reclaim-on-restart — nexus-we61e/64w50/saigj/nhqll).
+
 ## [5.10.0] - 2026-06-05
 
 Plugin version aligned with conexus 5.10.0 (RDR-149 unified daemon-lifecycle

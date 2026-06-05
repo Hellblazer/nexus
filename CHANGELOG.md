@@ -6,6 +6,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.1] - 2026-06-05
+
+T2 daemon reliability fixes from the 5.10.0 shakeout.
+
+### Fixed
+
+- **T2 daemon no longer pegs a core on `database is locked` after a restart
+  (nexus-we61e).** `aspect_queue.reclaim_stale` is a global janitor op but ran
+  inside every per-process aspect worker's poll loop, so N nx-mcp processes
+  RPC'd N redundant reclaim `UPDATE`s into the single daemon — WAL-lock
+  contention that pegged a core after a restart with a stale-row backlog.
+  Reclaim now runs once, on a daemon-owned periodic loop (singular by
+  construction); workers only claim.
+- **Lease takeover no longer leaves zero daemons (nexus-64w50).** A spawn-lock
+  loser that found no reachable winner used to quit, orphaning the service when
+  the incumbent was mid-exit in the defer-release-to-exit drain window (lock
+  held, discovery file already unlinked). `run_t2_daemon` now retries the spawn
+  so the freed lock is re-acquired. Single-writer is preserved — the spawn lock
+  is non-blocking, so a retry wins only when the lock is genuinely free.
+- **`stop()` socket teardown is now timeout-bounded (nexus-saigj).** The
+  `wait_closed()` calls are capped with `_GRACEFUL_STOP_TIMEOUT`, so a
+  connection draining a long in-flight RPC at SIGTERM can no longer extend the
+  spawn-lock hold without bound.
+- **A restarted daemon clears the stale-row backlog immediately
+  (nexus-nhqll).** The reclaim loop now reclaims before its first sleep instead
+  of waiting a full interval.
+
 ## [5.10.0] - 2026-06-05
 
 Unified daemon-lifecycle substrate (RDR-149): T1, T2, and T3 now ride one
