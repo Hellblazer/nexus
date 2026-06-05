@@ -54,10 +54,10 @@ _install_default_hooks(_hooks)
 #       owns chroma. Yield without spawning.
 #   Branch 2 (isolation): NX_T1_ISOLATED=1 (or its deprecated
 #       NEXUS_SKIP_T1=1 alias). Stateless one-shot. Yield without spawning.
-#   Branch 3 (top-level / owned): spawn chroma, write
-#       ~/.config/nexus/t1_addr.<claude_pid>, populate
-#       _t1_state.T1_ADDR, yield, then unlink + stop chroma + rmtree
-#       tmpdir + reset _t1_state.T1_ADDR on cleanup.
+#   Branch 3 (top-level / owned): spawn chroma, publish a leased
+#       registry record (~/.config/nexus/t1_addr.<session_id>, RDR-149
+#       P4), populate _t1_state.T1_ADDR, yield, then relinquish the lease
+#       + stop chroma + rmtree tmpdir + reset _t1_state.T1_ADDR on cleanup.
 #
 # Cleanup is idempotent across three sites: the lifespan async finally
 # (HTTP/SSE clean exit + clean stdin EOF on stdio), _sigterm_handler
@@ -84,6 +84,47 @@ _OWNED_CHROMA: dict[str, Any] = {}
 #: the in-flight teardown. Once set, never cleared: shutdown is
 #: one-shot per process.
 _SHUTDOWN_IN_FLIGHT: bool = False
+
+#: RDR-149 P4: the running T1 heartbeat + lazy re-key task, created in the
+#: lifespan Branch 3 after the lease is published and cancelled on cleanup
+#: BEFORE the lease is relinquished (RDR-129 early-stop ordering, mirroring
+#: the T2 ``_reassert_task`` discipline). ``None`` when no owned T1 is live.
+_T1_HEARTBEAT_TASK: Any = None
+
+
+async def _t1_heartbeat_loop(publisher: Any, interval: float) -> None:
+    """Re-stamp the T1 lease every ``interval`` seconds and lazily re-key the
+    transient ``server_pid`` record to the session-id once it resolves.
+
+    RDR-149 P4: this is T1's self-heal re-assert (the #1114 fix) and its
+    RF-2/CA-3 re-key driver. A tick that raises is logged at debug and the
+    loop continues; only cancellation (clean shutdown) stops it.
+    """
+    import asyncio
+
+    import structlog
+    _hb_log = structlog.get_logger("nexus.mcp.core")
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            publisher.tick()
+        except Exception as exc:  # never let a transient tick failure kill the loop
+            _hb_log.debug("t1_heartbeat_tick_failed", error=str(exc))
+
+
+async def _cancel_t1_heartbeat_task() -> None:
+    """Cancel and await the T1 heartbeat task if one is running. Idempotent."""
+    import asyncio
+    import contextlib
+
+    global _T1_HEARTBEAT_TASK
+    task = _T1_HEARTBEAT_TASK
+    _T1_HEARTBEAT_TASK = None
+    if task is None:
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
 
 
 def _tcp_probe_alive(host: str, port: int, timeout: float = 0.5) -> bool:
@@ -122,12 +163,14 @@ async def _t1_chroma_lifespan(_app: Any):
         spawning.
 
     Branch 3 (top-level / owned)
-        Spawn a fresh chroma; write
-        ``~/.config/nexus/t1_addr.<claude_pid>`` keyed by
-        :func:`find_immediate_claude_pid` (the FIRST claude ancestor
-        per RF-6, NOT the topmost); populate ``_t1_state.T1_ADDR``;
-        yield. Cleanup unlinks the file, stops chroma, rmtrees the
-        chroma tmpdir, and resets ``_t1_state.T1_ADDR``.
+        Spawn a fresh chroma; publish a leased registry record via
+        :class:`nexus.daemon.t1_lease.T1LeasePublisher` (RDR-149 P4) —
+        keyed transiently on the chroma ``server_pid`` and re-keyed to
+        the session-id once it resolves (RF-2/CA-3); populate
+        ``_t1_state.T1_ADDR``; start the heartbeat + re-key loop; yield.
+        Cleanup cancels the heartbeat task, relinquishes the lease,
+        stops chroma, rmtrees the chroma tmpdir, and resets
+        ``_t1_state.T1_ADDR``.
 
     Also runs a best-effort orphan-reaper sweep on entry to clean
     up any addr files left by a prior session that exited without
@@ -157,30 +200,26 @@ async def _t1_chroma_lifespan(_app: Any):
     from nexus.session import (
         start_t1_server,
         sweep_orphan_resource_trackers,
-        sweep_orphan_t1_addr_files,
         sweep_orphan_t1_chromadbs,
         sweep_orphan_tmpdirs,
     )
 
-    # Best-effort orphan cleanup before we spawn. Three surfaces:
-    # (a) addr files from sessions that exited ungracefully (SIGKILL),
-    # (b) tmpdirs from chromas reaped before their cleanup completed,
-    # (c) multiprocessing resource_tracker processes re-parented to
-    #     init (PPID=1) holding POSIX named semaphores. (c) is
+    # Best-effort orphan cleanup before we spawn. Two surfaces:
+    # (a) tmpdirs from chromas reaped before their cleanup completed,
+    # (b) multiprocessing resource_tracker processes re-parented to
+    #     init (PPID=1) holding POSIX named semaphores. (b) is
     #     critical because the namespace is bounded
     #     (kern.posix.sem.max=10000 on macOS); chronic accumulation
     #     produces Errno 28 system-wide. Bead nexus-9h1s; live
     #     shakeout 2026-05-08 cleared 3,314 trackers / 8,359
-    #     semaphores. (a) and (b) are bounded; failures are logged
-    #     at debug and never block startup. The sweep functions log
-    #     per-file outcomes themselves; this outer guard catches
-    #     unexpected sweep-level failures.
+    #     semaphores. (a) is bounded; failures are logged at debug and
+    #     never block startup. The sweep functions log per-file
+    #     outcomes themselves; this outer guard catches unexpected
+    #     sweep-level failures. RDR-149 P5: the bespoke T1 addr-file
+    #     orphan sweep is gone -- the leased registry ages stale lease
+    #     records out via their TTL, no pid-keyed sweep needed.
     import structlog
     _sweep_log = structlog.get_logger(__name__)
-    try:
-        sweep_orphan_t1_addr_files()
-    except Exception as exc:
-        _sweep_log.debug("sweep_orphan_t1_addr_files_failed", error=str(exc))
     try:
         sweep_orphan_tmpdirs()
     except Exception as exc:
@@ -227,46 +266,73 @@ async def _t1_chroma_lifespan(_app: Any):
         "tmpdir": str(tmpdir),
     })
     try:
+        import asyncio
+
         from nexus.mcp import _t1_state
-        from nexus.session import find_immediate_claude_pid, write_t1_addr
+        from nexus.daemon.service_registry import ServiceRegistry
+        from nexus.daemon.t1_lease import T1LeasePublisher
+        from nexus.session import (
+            _nexus_config_dir_at_import,
+            find_immediate_claude_pid,
+            resolve_active_session_id,
+        )
 
         import structlog
         _spawn_log = structlog.get_logger()
 
-        claude_pid = find_immediate_claude_pid()
-        if claude_pid > 0:
-            # Invariant: ``_t1_state.T1_ADDR`` and
-            # ``_OWNED_CHROMA["t1_addr_claude_pid"]`` are written
-            # together. The shutdown impl gates on the dict key so
-            # ``T1_ADDR`` cannot leak past a clean shutdown.
-            write_t1_addr(claude_pid, host, port)
-            _t1_state.T1_ADDR = (host, port)
-            _OWNED_CHROMA["t1_addr_claude_pid"] = claude_pid
-            # nexus-7m8i: happy-path observability. Pre-RDR-105 the
-            # equivalent code emitted only on the exception branches
-            # (minted, reconciled), leaving operators unable to
-            # distinguish "MCP started cleanly" from "MCP never reached
-            # the spawn step" by reading the log alone. One ``info``
-            # per owner spawn closes the gap.
-            _spawn_log.info(
-                "t1_chroma_init_owned",
-                host=host,
-                port=port,
-                server_pid=server_pid,
-                claude_pid=claude_pid,
-                tmpdir=str(tmpdir),
-            )
-        else:
-            _spawn_log.warning(
-                "t1_addr_publish_skipped_no_claude_pid",
-                host=host,
-                port=port,
-            )
+        # RDR-149 P4: T1 rides the leased registry. Publish under a transient
+        # ``server_pid`` key (never ``unknown``) carrying the resolved-or-None
+        # session-id; the heartbeat loop re-keys to the session-id the instant
+        # it resolves (RF-2/CA-3) and self-heals a lost record (#1114). T1 is
+        # session-scoped (N owners per uid, one T1 server per session), so the
+        # primitive's per-scope election flock IS the whole election (no
+        # spawn-lock daemon, unlike T2/T3).
+        registry = ServiceRegistry(
+            dir=_nexus_config_dir_at_import(), tier="t1"
+        )
+        # nexus-0x16i: stamp the owner's immediate Claude ancestor pid into
+        # the transient record's payload so a bare Bash sibling in the
+        # cold-start window can target this owner by the same pid it resolves
+        # for itself (RF-6). Read-path window hint only; not a scope key.
+        publisher = T1LeasePublisher(
+            registry=registry,
+            server_pid=server_pid,
+            host=host,
+            port=port,
+            session_resolver=resolve_active_session_id,
+            claude_pid=find_immediate_claude_pid(),
+        )
+        # Invariant: ``_t1_state.T1_ADDR`` (in-process readers) and
+        # ``_OWNED_CHROMA["t1_lease_publisher"]`` (the shutdown relinquish
+        # gate) are written together. The shutdown impl gates on the dict key
+        # so ``T1_ADDR`` cannot leak past a clean shutdown.
+        publisher.publish()
+        _t1_state.T1_ADDR = (host, port)
+        _OWNED_CHROMA["t1_lease_publisher"] = publisher
+        # nexus-7m8i: happy-path observability. One ``info`` per owner spawn
+        # so operators can distinguish "MCP started cleanly" from "MCP never
+        # reached the spawn step" by reading the log alone.
+        _spawn_log.info(
+            "t1_chroma_init_owned",
+            host=host,
+            port=port,
+            server_pid=server_pid,
+            scope_key=publisher.active_scope_key,
+            session_keyed=publisher.session_keyed,
+            tmpdir=str(tmpdir),
+        )
+        global _T1_HEARTBEAT_TASK
+        _T1_HEARTBEAT_TASK = asyncio.create_task(
+            _t1_heartbeat_loop(publisher, registry.heartbeat_interval)
+        )
         yield
     finally:
-        # Idempotent. If the SIGTERM / atexit path already ran via
-        # ``_t1_chroma_shutdown``, ``_OWNED_CHROMA`` is empty and
-        # the cleanup short-circuits.
+        # Cancel the heartbeat task BEFORE relinquishing the lease so it
+        # cannot re-stamp or re-key a record we are tearing down (RDR-129
+        # early-stop ordering). Idempotent: if the SIGTERM / atexit path
+        # already ran via ``_t1_chroma_shutdown``, ``_OWNED_CHROMA`` is empty
+        # and the cleanup short-circuits.
+        await _cancel_t1_heartbeat_task()
         _t1_chroma_shutdown()
 
 
@@ -293,12 +359,22 @@ def _t1_chroma_shutdown() -> None:
     import shutil
 
     from nexus.mcp import _t1_state
-    from nexus.session import stop_t1_server, unlink_t1_addr
+    from nexus.session import stop_t1_server
 
     server_pid = _OWNED_CHROMA.get("server_pid")
     tmpdir = _OWNED_CHROMA.get("tmpdir")
-    claude_pid = _OWNED_CHROMA.get("t1_addr_claude_pid")
+    publisher = _OWNED_CHROMA.get("t1_lease_publisher")
 
+    # RDR-149 P4: relinquish the lease (mark shutting-down, then unlink only
+    # if we still own it) BEFORE stopping chroma so discoverers stop resolving
+    # us immediately. ``relinquish`` is sync file I/O, safe from the SIGTERM /
+    # atexit path where no event loop is available to await the heartbeat
+    # task's cancellation.
+    if publisher is not None:
+        try:
+            publisher.relinquish()
+        except Exception:
+            pass
     if server_pid:
         try:
             stop_t1_server(int(server_pid))
@@ -309,8 +385,6 @@ def _t1_chroma_shutdown() -> None:
             shutil.rmtree(tmpdir, ignore_errors=True)
         except OSError:
             pass
-    if claude_pid:
-        unlink_t1_addr(int(claude_pid))
 
     _t1_state.T1_ADDR = None
     _OWNED_CHROMA.clear()

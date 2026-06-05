@@ -123,15 +123,14 @@ def _make_catalog():
 
     Patched in tests for isolation.
     """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415
-    from nexus.config import catalog_path  # noqa: PLC0415
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
 
-    path = catalog_path()
-    if not Catalog.is_initialized(path):
+    cat = make_catalog_reader()
+    if cat is None:
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' before 'nx t3 gc'."
         )
-    return Catalog(path, path / ".catalog.db")
+    return cat
 
 
 def _make_t3_for_backfill():
@@ -219,14 +218,14 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
     # nexus-6ims: relative source_paths must resolve against the
     # owning catalog document's owner.repo_root, not against the
     # running process's cwd. Open the catalog so we can join.
-    from nexus.catalog.catalog import Catalog
+    from nexus.catalog.factory import make_catalog_reader
     from nexus.config import catalog_path as _catalog_path
     cat_dir = _catalog_path()
-    cat: Catalog | None = None
+    cat: Any = None
     owner_roots: dict[str, str] = {}
     if (cat_dir / "documents.jsonl").exists():
         try:
-            cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+            cat = make_catalog_reader()
             owner_roots = dict(cat._db.execute(
                 "SELECT tumbler_prefix, repo_root FROM owners "
                 "WHERE repo_root != ''"

@@ -22,13 +22,11 @@ def _doc_id_to_file_path(doc_id: str) -> str:
     returns "" and the caller treats the chunk as sourceless.
     """
     try:
-        from nexus.catalog import Catalog
-        from nexus.config import catalog_path
+        from nexus.catalog.factory import make_catalog_reader
 
-        cat_path = catalog_path()
-        if not Catalog.is_initialized(cat_path):
+        cat = make_catalog_reader()
+        if cat is None:
             return ""
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
         entry = cat.by_doc_id(doc_id)
         if entry is None:
             return ""
@@ -274,11 +272,8 @@ def reindex_cmd(name: str, force: bool) -> None:
     # Build a one-shot catalog handle for the manifest fallback.
     _cat = None
     try:
-        from nexus.catalog import Catalog
-        from nexus.config import catalog_path
-        _cp = catalog_path()
-        if Catalog.is_initialized(_cp):
-            _cat = Catalog(_cp, _cp / ".catalog.db")
+        from nexus.catalog.factory import make_catalog_reader
+        _cat = make_catalog_reader()
     except Exception:
         pass
     while True:
@@ -467,23 +462,23 @@ def reindex_cmd(name: str, force: bool) -> None:
             # has no row for this collection (pre-Phase-1.5a installs).
             repo_path: Path | None = None
             try:
-                from nexus.catalog.catalog import Catalog
-                from nexus.config import catalog_path, nexus_config_dir
-                cat_dir = catalog_path()
-                cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-                row = cat._db.execute(
-                    "SELECT owner_id FROM collections WHERE name = ?",
-                    (name,),
-                ).fetchone()
-                if row and row[0]:
-                    owner_tumbler = row[0].replace("-", ".")
-                    o_row = cat._db.execute(
-                        "SELECT repo_root FROM owners "
-                        "WHERE tumbler_prefix = ?",
-                        (owner_tumbler,),
+                from nexus.catalog.factory import make_catalog_reader
+                from nexus.config import nexus_config_dir
+                cat = make_catalog_reader()
+                if cat is not None:
+                    row = cat._db.execute(
+                        "SELECT owner_id FROM collections WHERE name = ?",
+                        (name,),
                     ).fetchone()
-                    if o_row and o_row[0]:
-                        repo_path = Path(o_row[0])
+                    if row and row[0]:
+                        owner_tumbler = row[0].replace("-", ".")
+                        o_row = cat._db.execute(
+                            "SELECT repo_root FROM owners "
+                            "WHERE tumbler_prefix = ?",
+                            (owner_tumbler,),
+                        ).fetchone()
+                        if o_row and o_row[0]:
+                            repo_path = Path(o_row[0])
                 if repo_path is None:
                     # Fallback: legacy registry walk for pre-Phase-1.5a
                     # installs where collections.owner_id is empty.

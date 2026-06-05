@@ -508,8 +508,11 @@ def _catalog_pdf_hook(
     chunk_count: int = 0,
 ) -> None:
     """Register PDF document in catalog after successful indexing. Silently skipped if absent."""
+    reader = None
+    writer = None
     try:
         from nexus.catalog import Catalog
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
         from nexus.config import catalog_path
 
         cat_path = catalog_path()
@@ -517,13 +520,14 @@ def _catalog_pdf_hook(
             _log.debug("catalog_pdf_hook_skipped", reason="catalog not initialized")
             return
 
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        reader = make_catalog_reader()
+        writer = make_catalog_writer()
         effective_title = title or pdf_path.stem
         owner_name = corpus if corpus else "standalone-pdfs"
 
         # Get or create curator owner
         owner = None
-        rows = cat._db.execute(
+        rows = reader._db.execute(
             "SELECT tumbler_prefix FROM owners WHERE name = ? "
             "AND owner_type = 'curator'",
             (owner_name,),
@@ -532,7 +536,7 @@ def _catalog_pdf_hook(
             from nexus.catalog.tumbler import Tumbler
             owner = Tumbler.parse(rows[0])
         else:
-            owner = cat.register_owner(owner_name, "curator")
+            owner = writer.register_owner(owner_name, "curator")
 
         # Dedup by file_path (stable identifier for PDFs). Resolve to an
         # absolute path so downstream consumers (aspect_extractor's disk
@@ -542,7 +546,7 @@ def _catalog_pdf_hook(
         # + content_hash story — both already populated.
         from datetime import UTC, datetime
         file_path_str = str(pdf_path.resolve())
-        existing = cat.by_file_path(owner, file_path_str)
+        existing = reader.by_file_path(owner, file_path_str)
 
         # Known TOCTOU window (Reviewer B/I-3): this stat happens AFTER
         # the PDF was extracted + chunked earlier in the pipeline. A
@@ -556,7 +560,7 @@ def _catalog_pdf_hook(
         except OSError:
             source_mtime = 0.0
         if existing:
-            cat.update(
+            writer.update(
                 existing.tumbler,
                 physical_collection=collection_name,
                 chunk_count=chunk_count,
@@ -564,7 +568,7 @@ def _catalog_pdf_hook(
                 source_mtime=source_mtime,
             )
         else:
-            cat.register(
+            writer.register(
                 owner=owner, title=effective_title, content_type="paper",
                 author=author, year=year, corpus=corpus,
                 physical_collection=collection_name,
@@ -574,6 +578,11 @@ def _catalog_pdf_hook(
             )
     except Exception:
         _log.debug("catalog_pdf_hook_failed", exc_info=True)
+    finally:
+        if writer is not None:
+            writer.close()
+        if reader is not None:
+            reader._db.close()
 
 
 def pipeline_index_pdf(
@@ -814,15 +823,9 @@ def pipeline_index_pdf(
     # reads source_path itself per the P0.1 content-sourcing contract.
     # nexus-tdgc: _catalog_pdf_hook ran above so the catalog entry now
     # exists; resolve the doc_id and forward it to the document chain.
-    from nexus.catalog import Catalog
-    from nexus.config import catalog_path
+    from nexus.catalog.factory import make_catalog_reader
     from nexus.doc_indexer import _lookup_existing_doc_id
-    _cat_path = catalog_path()
-    _cat = (
-        Catalog(_cat_path, _cat_path / ".catalog.db")
-        if Catalog.is_initialized(_cat_path)
-        else None
-    )
+    _cat = make_catalog_reader()
     hooks.fire_document(
         str(pdf_path), collection, "",
         doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),

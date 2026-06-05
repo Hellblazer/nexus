@@ -38,10 +38,11 @@ def _build_catalog_manifest_lookup() -> Callable[[str], list[Any]] | None:
         from nexus.catalog import Catalog
         from nexus.config import catalog_path
 
+        from nexus.catalog.factory import make_catalog_reader
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return None
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        cat = make_catalog_reader()
     except Exception:
         return None
 
@@ -72,10 +73,11 @@ def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
         from nexus.catalog import Catalog
         from nexus.config import catalog_path
 
+        from nexus.catalog.factory import make_catalog_reader
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return None
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        cat = make_catalog_reader()
     except Exception:
         return None
 
@@ -383,9 +385,21 @@ def run_bib_enrichment(
             cat_path = catalog_path()
             if Catalog.is_initialized(cat_path):
                 from nexus.catalog.link_generator import generate_citation_links
+                from nexus.catalog.factory import (
+                    make_catalog_reader,
+                    make_catalog_writer,
+                )
 
-                cat = Catalog(cat_path, cat_path / ".catalog.db")
-                link_count = generate_citation_links(cat)
+                # generate_citation_links reads (all_documents) via the reader
+                # and writes (link_if_absent) via the write-only daemon proxy.
+                reader = make_catalog_reader()
+                writer = make_catalog_writer()
+                try:
+                    link_count = generate_citation_links(reader, writer=writer)
+                finally:
+                    writer.close()
+                    if reader is not None:
+                        reader._db.close()
                 if link_count > 0:
                     click.echo(f"Auto-generated {link_count} citation links in catalog.")
         except Exception:
@@ -632,93 +646,110 @@ def _catalog_enrich_hook(
         if not Catalog.is_initialized(cat_path):
             return
 
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
-
-        target_tumblers: list[Tumbler] = []
-
-        # nexus-tv22: prefer source_path match (unique per document).
-        # Catalog rows store either absolute or relative file_path
-        # (relative is canonical post-RDR-060; absolute lingers from
-        # legacy ingests). Try both forms so the lookup works either
-        # way.
-        if source_paths:
-            for sp in source_paths:
-                if not sp:
-                    continue
-                rows = cat._db.execute(
-                    "SELECT tumbler FROM documents "
-                    "WHERE (physical_collection = ? OR ? = '') "
-                    "AND (file_path = ? OR file_path = ? "
-                    "OR ? LIKE '%/' || file_path)",
-                    (
-                        collection_name, collection_name,
-                        sp, sp.lstrip("/"), sp,
-                    ),
-                ).fetchall()
-                for (t_str,) in rows:
-                    target_tumblers.append(Tumbler.parse(t_str))
-
-        # Title match as fallback when source_paths are not provided
-        # (preserves backward compatibility with callers that haven't
-        # been updated yet — e.g. third-party scripts).
-        if not target_tumblers and collection_name:
-            row = cat._db.execute(
-                "SELECT tumbler FROM documents "
-                "WHERE physical_collection = ? AND title = ? LIMIT 1",
-                (collection_name, title),
-            ).fetchone()
-            if row:
-                target_tumblers.append(Tumbler.parse(row[0]))
-
-        # Last-resort FTS title search across the whole catalog
-        # (legacy path; only fires when the caller passed neither
-        # source_paths nor a title that matches inside the collection).
-        if not target_tumblers:
-            entries = cat.find(title, content_type="paper")
-            if entries:
-                target_tumblers.append(entries[0].tumbler)
-
-        if not target_tumblers:
-            _log.debug(
-                "catalog_enrich_hook_no_match",
-                title=title,
-                collection=collection_name,
-                source_paths=source_paths or [],
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+        reader = make_catalog_reader()
+        writer = make_catalog_writer()
+        try:
+            return _enrich_apply(
+                reader, writer, collection_name, title, source_paths,
+                bib_meta, backend, Tumbler,
             )
-            return
-
-        # Build the update payload once, apply to every matched row.
-        meta_update: dict = {
-            "venue": bib_meta.get("venue", ""),
-            "citation_count": bib_meta.get("citation_count", 0),
-        }
-        if backend == "openalex":
-            meta_update["bib_openalex_id"] = bib_meta.get("openalex_id", "")
-            if bib_meta.get("doi"):
-                meta_update["bib_doi"] = bib_meta.get("doi", "")
-        else:
-            meta_update["bib_semantic_scholar_id"] = bib_meta.get(
-                "semantic_scholar_id", "",
-            )
-        refs = bib_meta.get("references", [])
-        if refs:
-            meta_update["references"] = refs
-
-        # Dedupe in case multiple source_paths matched the same row.
-        seen: set[str] = set()
-        for tumbler in target_tumblers:
-            key = str(tumbler)
-            if key in seen:
-                continue
-            seen.add(key)
-            cat.update(
-                tumbler,
-                author=bib_meta.get("authors", ""),
-                year=bib_meta.get("year", 0),
-                meta=meta_update,
-            )
+        finally:
+            writer.close()
+            if reader is not None:
+                reader._db.close()
     except Exception:
         _log.debug("catalog_enrich_hook_failed", exc_info=True)
+
+
+def _enrich_apply(
+    reader, writer, collection_name, title, source_paths, bib_meta, backend, Tumbler,
+):
+    # RDR-146 P1.2: reads via the read-only reader, writes via the
+    # write-only daemon proxy. Exceptions propagate to the caller's
+    # catalog_enrich_hook_failed handler.
+    target_tumblers: list[Tumbler] = []
+
+    # nexus-tv22: prefer source_path match (unique per document).
+    # Catalog rows store either absolute or relative file_path
+    # (relative is canonical post-RDR-060; absolute lingers from
+    # legacy ingests). Try both forms so the lookup works either way.
+    if source_paths:
+        for sp in source_paths:
+            if not sp:
+                continue
+            rows = reader._db.execute(
+                "SELECT tumbler FROM documents "
+                "WHERE (physical_collection = ? OR ? = '') "
+                "AND (file_path = ? OR file_path = ? "
+                "OR ? LIKE '%/' || file_path)",
+                (
+                    collection_name, collection_name,
+                    sp, sp.lstrip("/"), sp,
+                ),
+            ).fetchall()
+            for (t_str,) in rows:
+                target_tumblers.append(Tumbler.parse(t_str))
+
+    # Title match as fallback when source_paths are not provided
+    # (preserves backward compatibility with callers that haven't
+    # been updated yet — e.g. third-party scripts).
+    if not target_tumblers and collection_name:
+        row = reader._db.execute(
+            "SELECT tumbler FROM documents "
+            "WHERE physical_collection = ? AND title = ? LIMIT 1",
+            (collection_name, title),
+        ).fetchone()
+        if row:
+            target_tumblers.append(Tumbler.parse(row[0]))
+
+    # Last-resort FTS title search across the whole catalog
+    # (legacy path; only fires when the caller passed neither
+    # source_paths nor a title that matches inside the collection).
+    if not target_tumblers:
+        entries = reader.find(title, content_type="paper")
+        if entries:
+            target_tumblers.append(entries[0].tumbler)
+
+    if not target_tumblers:
+        _log.debug(
+            "catalog_enrich_hook_no_match",
+            title=title,
+            collection=collection_name,
+            source_paths=source_paths or [],
+        )
+        return
+
+    # Build the update payload once, apply to every matched row.
+    meta_update: dict = {
+        "venue": bib_meta.get("venue", ""),
+        "citation_count": bib_meta.get("citation_count", 0),
+    }
+    if backend == "openalex":
+        meta_update["bib_openalex_id"] = bib_meta.get("openalex_id", "")
+        if bib_meta.get("doi"):
+            meta_update["bib_doi"] = bib_meta.get("doi", "")
+    else:
+        meta_update["bib_semantic_scholar_id"] = bib_meta.get(
+            "semantic_scholar_id", "",
+        )
+    refs = bib_meta.get("references", [])
+    if refs:
+        meta_update["references"] = refs
+
+    # Dedupe in case multiple source_paths matched the same row.
+    seen: set[str] = set()
+    for tumbler in target_tumblers:
+        key = str(tumbler)
+        if key in seen:
+            continue
+        seen.add(key)
+        writer.update(
+            tumbler,
+            author=bib_meta.get("authors", ""),
+            year=bib_meta.get("year", 0),
+            meta=meta_update,
+        )
 
 
 # ── nx enrich aspects (RDR-089 P2.2) ────────────────────────────────────────
@@ -876,7 +907,8 @@ def _select_entries(
     if not Catalog.is_initialized(cat_path):
         click.echo("Catalog not initialized — run 'nx catalog setup' first.")
         return None
-    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    from nexus.catalog.factory import make_catalog_reader
+    cat = make_catalog_reader()
     entries = cat.list_by_collection(collection)
 
     if re_extract:
@@ -1634,7 +1666,8 @@ def _resolve_catalog_entry(tumbler_or_title: str):
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' first."
         )
-    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    from nexus.catalog.factory import make_catalog_reader
+    cat = make_catalog_reader()
     t, err = resolve_tumbler(cat, tumbler_or_title)
     if err:
         raise click.ClickException(err)
@@ -1808,7 +1841,8 @@ def aspects_list_cmd(
             raise click.ClickException(
                 "Catalog not initialized. Run 'nx catalog setup' first."
             )
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        from nexus.catalog.factory import make_catalog_reader
+        cat = make_catalog_reader()
         entries = cat.list_by_collection(collection)
         with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             existing = {

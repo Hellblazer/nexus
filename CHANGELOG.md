@@ -6,6 +6,66 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.9.3] - 2026-06-04
+
+Catalog moved behind the T2 daemon (RDR-146), closing the GH #1046 starvation.
+
+### Fixed
+
+- **Interactive `nx dt index` no longer starved by background indexing
+  (#1046).** `.catalog.db` was the last shared-state store still on the
+  direct-`sqlite3` model, so a foreground catalog write could wait ~30 min
+  behind a hook-spawned `nx index repo` contending on the one SQLite writer
+  lock. The T2 daemon now hosts the single rich `Catalog` (sole `.catalog.db`
+  writer) behind a write-only op whitelist; every consumer write routes
+  through it via typed `make_catalog_reader` / `make_catalog_writer` factories
+  (reads stay local), enforced by the storage-boundary lint.
+
+### Changed
+
+- **Interactive-vs-batch catalog-write fairness (RDR-146).** Inside the single
+  daemon, an interactive write (foreground `nx dt index` / `capture` /
+  `incorporate`, MCP `store_put`) opens a short priority window; the background
+  indexer polls it and yields over a bounded budget so interactive writes are
+  never starved. `nx index --on-locked=skip` now also defers a yielded catalog
+  write to the next idempotent pass; the per-repo advisory lock keeps its
+  separate two-same-repo job. New `NX_WRITE_PRIORITY=interactive|batch`
+  overrides the tty-based default.
+- **Bounded catalog graph traversal.** `_LinkOps.graph()` BFS replaced with a
+  single `WITH RECURSIVE` SQL query (depth cap, cycle detection).
+
+## [5.9.2] - 2026-06-03
+
+Bug-fix batch from a GitHub-issue triage sweep.
+
+### Fixed
+
+- **Claude Desktop T3 search returned zero results (#1068).** The `.mcpb`
+  bundle pinned bare `conexus`, so its venv had no `fastembed` (only in the
+  `[local]` extra) and the embedder silently fell back from bge-768 to the
+  384-dim MiniLM while collections are indexed at 768/1024-dim — every search
+  hit a dimension mismatch. The bundle now pins `conexus[local]`; reinstall the
+  5.9.2 `.mcpb` to restore search. A regression test locks the `[local]` pin.
+- **Cross-project plan-match false positives (#1069).** A grown `corpus:all`
+  plan with no caller scope was saved with empty `scope_tags` and became a
+  cross-project attractor in `nx_answer`'s plan-match gate. `save_plan` and
+  `nx plan repair scope-tags` now fall back to the plan's `project` column when
+  retrieval-step inference yields nothing.
+- **MinerU spaced-token LaTeX (#1049).** Formula output like `{ m a x }` /
+  `\mathbf { s }` is now normalized at extraction time (re-index to backfill
+  existing content). Conservative: token-rejoin is scoped to a known-operator
+  allowlist; prose is never touched.
+
+### Added
+
+- **`nx plan set-scope <id> <tags> [--from-project]` (#1073).** Operator-facing
+  verb to set/correct a plan's `scope_tags` (explicit admin override).
+- **`nx index md --collection` (#981).** Route Markdown into a `knowledge__*`
+  collection (parity with `nx index pdf`) so it becomes aspect-eligible without
+  a PDF round-trip. Emits a warning that the scholarly-paper aspect extractor is
+  applied to `knowledge__` targets (a general-prose extractor is tracked
+  separately).
+
 ## [5.9.1] - 2026-06-02
 
 ### Fixed

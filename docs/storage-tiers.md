@@ -58,9 +58,9 @@ coexisting.
 
 Backed by a per-session `chromadb.HttpClient` connecting to a ChromaDB server process started by the `SessionStart` hook. Uses `DefaultEmbeddingFunction` (MiniLM-L6-v2, local ONNX). No API keys required.
 
-When a parent Claude Code session starts, the `SessionStart` hook allocates a free localhost port, launches a ChromaDB server, and writes the server address and session ID to `~/.config/nexus/sessions/{ppid}.session`. Child agents spawned via the Agent tool walk the OS PPID chain to find the nearest ancestor session file and connect to the same server — they share scratch space and see each other's entries. Concurrent independent Claude Code windows stay isolated because they have disjoint OS process trees.
+When a parent Claude Code session starts, the MCP server's chroma lifespan launches a ChromaDB server on a free localhost port and publishes a **leased registry record** at `~/.config/nexus/t1_addr.<session_id>` (RDR-149 P4, via `daemon/t1_lease.py`). The record is keyed on the Claude session-id; both the publisher and any sibling resolve the same session-id from `~/.config/nexus/current_session`, so child agents and Bash-tool siblings discover and connect to the same server — they share scratch space and see each other's entries. Liveness is lease freshness (TTL), not pid, giving pid-reuse immunity. Concurrent independent Claude Code windows stay isolated because each has its own session-id (the scope key is intentionally N-per-user).
 
-Falls back to a local `EphemeralClient` (with a warning) when no server record is found — T1 functions locally for that process but subagents get isolated sessions. This activates in restricted container environments where the server process cannot start, or when `ps` is unavailable.
+Falls back to a local `EphemeralClient` only under an explicit `NX_T1_ISOLATED=1` opt-in; otherwise a process that resolves no session-id (or finds no live lease) raises `T1ServerNotFoundError`. MCP-dispatched subprocesses inherit the endpoint via `NX_T1_HOST`/`NX_T1_PORT` (env passdown).
 
 Everything is wiped at session end: the `SessionEnd` hook stops the ChromaDB server and deletes the backing tmpdir. Use `nx scratch flag` to mark items for auto-promotion to T2 when the session closes.
 

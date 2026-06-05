@@ -854,12 +854,20 @@ def _run_check_storage_boundary(
 
     result = scan_repo(repo_root=repo_root)
 
+    from nexus.storage_boundary_lint import CATALOG_CONSTRUCTION_BASELINE
+
+    catalog_over_baseline = (
+        result.catalog_constructions > CATALOG_CONSTRUCTION_BASELINE
+    )
     click.echo(
-        f"Storage-boundary lint (RDR-120 P0.A / RDR-128 P0c):\n"
+        f"Storage-boundary lint (RDR-120 P0.A / RDR-128 P0c / RDR-146 P0.1):\n"
         f"  violations:                {result.total_violations}\n"
         f"  catalog-allowlist count:   {result.catalog_allowlist_count}\n"
         f"  epsilon-allow connects:    {result.epsilon_allow_connects}\n"
-        f"  T2Database constructions:  {result.t2database_constructions}"
+        f"  T2Database constructions:  {result.t2database_constructions}\n"
+        f"  catalog constructions:     {result.catalog_constructions}"
+        f" (RDR-146 baseline {CATALOG_CONSTRUCTION_BASELINE},"
+        f" cutover surface)"
     )
 
     if result.violations:
@@ -873,8 +881,19 @@ def _run_check_storage_boundary(
         catalog_allowlist_count=result.catalog_allowlist_count,
         epsilon_allow_connects=result.epsilon_allow_connects,
         t2database_constructions=result.t2database_constructions,
+        catalog_constructions=result.catalog_constructions,
+        catalog_construction_baseline=CATALOG_CONSTRUCTION_BASELINE,
         phase=phase or "unset",
     )
+
+    if catalog_over_baseline:
+        click.echo(
+            f"\nRDR-146: catalog constructions ({result.catalog_constructions}) "
+            f"exceed the baseline ({CATALOG_CONSTRUCTION_BASELINE}). A new direct "
+            f"Catalog(...) site was added in consumer code — route catalog writes "
+            f"through T2Client.catalog instead.",
+            err=True,
+        )
 
     if phase:
         try:
@@ -899,11 +918,18 @@ def _run_check_storage_boundary(
                 phase=phase,
             )
 
-    if fail_on_violation and result.violations:
-        click.echo(
-            f"\nFAIL: {result.total_violations} violation(s) found.",
-            err=True,
-        )
+    if fail_on_violation and (result.violations or catalog_over_baseline):
+        if result.violations:
+            click.echo(
+                f"\nFAIL: {result.total_violations} violation(s) found.",
+                err=True,
+            )
+        if catalog_over_baseline:
+            click.echo(
+                f"FAIL: catalog constructions ({result.catalog_constructions}) "
+                f"exceed the RDR-146 baseline ({CATALOG_CONSTRUCTION_BASELINE}).",
+                err=True,
+            )
         _sys.exit(1)
 
 
@@ -1180,11 +1206,10 @@ def _run_check_mineru() -> None:
     "check_t1",
     is_flag=True,
     default=False,
-    help="Diagnose T1 addr-file presence + reachability. Detects "
-         "the 'no t1_addr.<claude_pid> when Claude Code is parent' "
-         "case and the exec -a / wrapper-rename residual. RDR-105 "
-         "P5 / nexus-ssdg. Exits 1 when Claude is in the chain "
-         "but the addr file is missing or unreachable.",
+    help="Diagnose T1 session-id lease presence + reachability "
+         "(RDR-149 P4). Resolves the active session-id and probes its "
+         "lease at ~/.config/nexus/t1_addr.<session_id>. Exits 1 when a "
+         "session-id resolves but the lease is missing or unreachable.",
 )
 @click.option(
     "--days",
@@ -1328,6 +1353,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     if fix_paths:
         from nexus.catalog import Catalog
         from nexus.catalog.catalog import make_relative
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
         from nexus.catalog.tumbler import Tumbler, read_owners
         from nexus.config import catalog_path
         from nexus.db import make_t3
@@ -1337,10 +1363,11 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             click.echo("Catalog not initialized — run: nx catalog setup")
             return
 
-        cat = Catalog(cat_p, cat_p / ".catalog.db")
+        reader = make_catalog_reader()
+        writer = make_catalog_writer()
 
         # Find all entries with absolute file_path
-        rows = cat._db.execute(
+        rows = reader._db.execute(
             "SELECT tumbler, file_path, physical_collection FROM documents WHERE file_path LIKE '/%'"
         ).fetchall()
 
@@ -1351,7 +1378,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         click.echo(f"Found {len(rows)} entries with absolute paths.")
 
         # Load owners for repo_root lookup
-        owners_path = cat._owners_path
+        owners_path = reader._owners_path
         # RDR-137 followup IMP-18 (nexus-43qgm.18): early exit when
         # owners.jsonl is absent. Pre-fix code degraded to owners={},
         # skipped every row in the loop, and reported "Fixed 0
@@ -1412,10 +1439,14 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                     n = t3_db.update_source_path(physical_collection, file_path, new_rel)
                 chunks_updated += n
                 # Update catalog entry
-                cat.update(tumbler, file_path=new_rel)
+                writer.update(tumbler, file_path=new_rel)
                 click.echo(f"  fixed: {tumbler_str}: {file_path} -> {new_rel} ({n} chunks)")
 
             fixed += 1
+
+        writer.close()
+        if reader is not None:
+            reader._db.close()
 
         if dry_run:
             click.echo(f"\n{fixed} entries would be fixed. Use --fix-paths without --dry-run to apply.")
@@ -1557,7 +1588,7 @@ def _run_check_resources() -> None:
 
 
 def _run_check_t1() -> None:
-    """Diagnostic: T1 addr-file presence + reachability.
+    """Diagnostic: T1 session-id lease presence + reachability (RDR-149 P4).
 
     .. note::
        Imports ``_tcp_probe_alive`` lazily from ``nexus.mcp.core`` to
@@ -1566,98 +1597,77 @@ def _run_check_t1() -> None:
 
     Three outcomes:
 
-    * **Healthy.** A live ``claude*`` ancestor is reachable via the
-      PPID walk and ``~/.config/nexus/t1_addr.<claude_pid>`` exists
-      AND its host:port responds to a TCP probe.
-    * **Missing addr file under live Claude.** A ``claude*`` ancestor
-      is reachable but the addr file is absent. Two common causes:
-      (a) the MCP server crashed before the lifespan wrote the file,
-      (b) the operator launched Claude Code via ``exec -a`` or a
-      custom wrapper whose process name does not start with
-      ``claude``, defeating the PPID walk's match.
-    * **No Claude in chain.** The current process has no ``claude*``
-      ancestor; ``nx scratch`` from this shell will fail-loud unless
-      the operator opts in via ``NX_T1_ISOLATED=1``.
+    * **Healthy.** A session-id resolves and its live lease at
+      ``~/.config/nexus/t1_addr.<session_id>`` yields a host:port that
+      responds to a TCP probe.
+    * **Missing lease under a resolved session.** A session-id resolves
+      but no live lease is discoverable. Common causes: (a) the MCP
+      server crashed before the lifespan published the lease, (b) the
+      lease aged out (the MCP server died ungracefully and its heartbeat
+      stopped), (c) the MCP server is still booting.
+    * **No session-id resolves.** Neither ``NX_SESSION_ID`` nor
+      ``~/.config/nexus/current_session`` is set; ``nx scratch`` from
+      this shell will fail-loud unless the operator opts in via
+      ``NX_T1_ISOLATED=1``.
 
     Exit code:
-      * 0: healthy or "no Claude in chain" (informational).
-      * 1: Claude in chain but addr file absent or unreachable.
+      * 0: healthy or "no session-id resolves" (informational).
+      * 1: session-id resolves but the lease is absent or unreachable.
     """
-    import os as _os
-
+    from nexus.daemon.t1_lease import discover_t1_lease
     from nexus.mcp.core import _tcp_probe_alive
     from nexus.session import (
-        _command_name_of,
-        find_immediate_claude_pid,
-        read_t1_addr_for,
-        t1_addr_path,
+        _nexus_config_dir_at_import,
+        resolve_active_session_id,
     )
 
-    own_pid = _os.getpid()
-    claude_pid = find_immediate_claude_pid(start_pid=own_pid)
+    session_id = resolve_active_session_id()
 
-    if claude_pid <= 0:
-        click.echo("[ ] T1: no claude ancestor in PPID chain")
+    if not session_id:
+        click.echo("[ ] T1: no session-id resolves for this process")
         click.echo(
             "    This is informational. ``nx scratch`` from this shell "
             "will fail-loud unless you opt into per-process ephemeral "
-            "T1 via ``NX_T1_ISOLATED=1``."
+            "T1 via ``NX_T1_ISOLATED=1``, or the SessionStart hook has "
+            "written ~/.config/nexus/current_session."
         )
         return
 
-    comm = _command_name_of(claude_pid)
-    is_claude = comm.lower().startswith("claude")
-    if not is_claude:
-        # find_immediate_claude_pid returned the immediate-PPID
-        # fallback because no ancestor's comm starts with "claude".
-        # Likely an exec -a / wrapper rename.
-        click.echo(
-            f"[!] T1: ancestor PID {claude_pid} (comm={comm!r}) is not "
-            "named 'claude*'; likely launched via exec -a or a "
-            "wrapper. Falling back to the immediate-PPID."
-        )
-        click.echo(
-            "    If you launched Claude Code via ``exec -a`` or a "
-            "custom wrapper, ensure the process name starts with "
-            "``claude`` so the PPID walk can find it."
-        )
-        raise click.exceptions.Exit(1)
-
-    addr_path = t1_addr_path(claude_pid)
-    addr = read_t1_addr_for(claude_pid)
+    config_dir = _nexus_config_dir_at_import()
+    addr = discover_t1_lease(session_id, config_dir=config_dir)
+    record_name = f"t1_addr.{session_id}"
     if addr is None:
         click.echo(
-            f"[✗] T1: claude ancestor PID {claude_pid} ({comm!r}) "
-            f"is alive but {addr_path} is missing or unreadable."
+            f"[✗] T1: session {session_id!r} resolves but no live lease "
+            f"at {config_dir / record_name}."
         )
         click.echo(
-            "    The MCP server's lifespan should have written this "
-            "file at session start. Causes:\n"
+            "    The MCP server's lifespan publishes this lease at "
+            "session start and heartbeats it. Causes:\n"
             "      - The MCP server crashed before the lifespan "
-            "completed (check ~/.config/nexus/logs/mcp.log).\n"
-            "      - The MCP server is still booting; retry shortly.\n"
-            "      - The Claude Code binary was launched via "
-            "``exec -a`` with a different process name (the PPID walk "
-            "found the right PID but the comm-prefix check missed)."
+            "published it (check ~/.config/nexus/logs/mcp.log).\n"
+            "      - The MCP server died ungracefully and its lease "
+            "aged out (TTL).\n"
+            "      - The MCP server is still booting; retry shortly."
         )
         raise click.exceptions.Exit(1)
 
     host, port = addr
     if _tcp_probe_alive(host, port, timeout=1.0):
         click.echo(
-            f"[✓] T1: addr file {addr_path.name} -> "
+            f"[✓] T1: lease {record_name} -> "
             f"{host}:{port} (chroma reachable)"
         )
         return
 
     click.echo(
-        f"[✗] T1: addr file {addr_path.name} -> {host}:{port} "
+        f"[✗] T1: lease {record_name} -> {host}:{port} "
         "but TCP probe failed."
     )
     click.echo(
-        "    The addr file points at a chroma that is not listening. "
+        "    The lease points at a chroma that is not listening. "
         "The MCP server may have died ungracefully. Restart Claude "
-        "Code; the next MCP startup will sweep this stale addr file "
+        "Code; the next MCP startup will publish a fresh lease "
         "and spawn a fresh chroma."
     )
     raise click.exceptions.Exit(1)

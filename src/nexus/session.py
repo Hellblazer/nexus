@@ -626,8 +626,9 @@ def start_t1_server() -> tuple[str, int, int, str]:
             # process; cleanup is the SessionEnd hook's job. Ungraceful
             # exits (Claude Code SIGKILL/OOM) leak the server until the
             # next top-level MCP startup, which runs
-            # ``sweep_orphan_t1_addr_files`` + ``sweep_orphan_tmpdirs``
-            # to reap any leftovers.
+            # ``sweep_orphan_t1_chromadbs`` + ``sweep_orphan_tmpdirs``
+            # to reap any leftovers (RDR-149 P5: the bespoke addr-file
+            # sweep is gone; the leased registry self-expires via TTL).
             return _T1_SERVER_HOST, port, proc.pid, tmpdir
         except OSError:
             time.sleep(0.2)  # intentional: server not yet listening, retry loop
@@ -736,23 +737,20 @@ def _command_name_of(pid: int) -> str:
 def find_immediate_claude_pid(start_pid: int | None = None) -> int:
     """Return the FIRST ``claude*`` ancestor walking up from *start_pid*.
 
-    RDR-105 RF-6 (CRITICAL): topmost-walk silently breaks owned-mode
-    isolation. An owned ``claude -p`` subprocess MCP's process tree
-    contains two ``claude*`` ancestors (the immediate parent
-    ``claude -p`` and the user's top-level Claude). Topmost-walk
-    returns the user's Claude → the owned MCP would (a) write its
-    addr file at the parent's claude_pid, clobbering the parent's
-    file, and (b) read its own discovery from the parent's file,
-    silently sharing instead of isolating.
+    RDR-105 RF-6: returns the immediate (not topmost) ``claude*``
+    ancestor so nested owned ``claude -p`` subprocesses resolve their own
+    immediate Claude rather than the user's top-level one.
 
-    Returning the FIRST match keys the addr file at the immediate
-    Claude ancestor, sealing the owned subprocess from the parent.
-    Verified across all four nesting cases per RF-6.
+    RDR-149 P4 retired the T1 addr-file publish/discovery that originally
+    motivated this (T1 now keys its leased registry record on the
+    session-id, not the claude_pid). This function is retained for its
+    remaining non-T1 consumer, ``nexus.phase_review_sentinel``, which keys
+    its phase-gate sentinel files by the immediate Claude pid.
 
     Falls back to the immediate PPID when no ``claude*`` ancestor is
-    found (matches the no-claude-in-chain semantics of the legacy
-    function so consumers behave identically in that case). Returns
-    0 only when the PPID chain cannot be walked at all.
+    found (matches the no-claude-in-chain semantics so consumers behave
+    identically in that case). Returns 0 only when the PPID chain cannot
+    be walked at all.
     """
     pid = start_pid if start_pid is not None else os.getpid()
     seen: set[int] = set()
@@ -793,128 +791,6 @@ def _t1_isolated_env() -> bool:
             message="NEXUS_SKIP_T1 is deprecated; use NX_T1_ISOLATED=1 instead. Will be removed in 5.0.",
         )
     return isolated or legacy
-
-
-def t1_addr_path(claude_pid: int) -> Path:
-    """Return the path to the address file for *claude_pid*.
-
-    Resolved against ``NEXUS_CONFIG_DIR`` at call time so tests that
-    set the env var see the redirect without monkeypatching module
-    constants. Default location: ``~/.config/nexus/t1_addr.<pid>``.
-    """
-    return _nexus_config_dir_at_import() / f"t1_addr.{claude_pid}"
-
-
-def write_t1_addr(claude_pid: int, host: str, port: int) -> Path:
-    """Atomically write the address file for *claude_pid*.
-
-    Single-writer contract: only the top-level (or owned subprocess)
-    MCP at lifespan start writes this file. The atomic rename keeps a
-    concurrent reader either on the prior contents or the new
-    contents, never torn.
-    """
-    target = t1_addr_path(claude_pid)
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = target.with_suffix(target.suffix + f".{os.getpid()}.tmp")
-    fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    try:
-        try:
-            os.write(fd, f"{host}:{port}\n".encode())
-        finally:
-            os.close(fd)
-        tmp.replace(target)
-    except BaseException:
-        # Disk-full / permissions / interrupt: don't leave the tmp
-        # file behind for the next sweep to clean up.
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
-        raise
-    return target
-
-
-def read_t1_addr_for(claude_pid: int) -> tuple[str, int] | None:
-    """Read the addr file for *claude_pid*. Returns ``(host, port)`` or None.
-
-    None on missing file, malformed contents, or unreadable file;
-    callers fail loud at the next layer (``T1Database`` constructor's
-    raise) rather than constructing an EphemeralClient.
-    """
-    path = t1_addr_path(claude_pid)
-    try:
-        text = path.read_text().strip()
-    except OSError:
-        return None  # intentional: missing/unreadable, callers handle
-    if ":" not in text:
-        return None
-    host, _, port_str = text.partition(":")
-    try:
-        return host, int(port_str)
-    except ValueError:
-        return None
-
-
-def unlink_t1_addr(claude_pid: int) -> None:
-    """Best-effort delete of the addr file. No-op if already gone."""
-    path = t1_addr_path(claude_pid)
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return  # intentional: idempotent
-    except OSError as exc:
-        _log.debug("t1_addr_unlink_failed", path=str(path), error=str(exc))
-
-
-def sweep_orphan_t1_addr_files() -> int:
-    """Reap ``t1_addr.<claude_pid>`` files whose ``<claude_pid>`` is dead.
-
-    Best-effort orphan cleanup runs at top-level MCP startup. A
-    Claude Code session that exits ungracefully (SIGKILL, OOM, hard
-    crash) leaves its addr file behind; the lifespan finally never
-    runs. The next MCP boot's sweep reaps any stale files so a
-    sibling subprocess does not connect to a dead chroma.
-
-    Returns the count of files reaped. Failures are logged but
-    never propagate; this is not load-bearing.
-
-    PID reuse: if a live unrelated process happens to have the same
-    PID as the dead Claude (PIDs wrap on Linux), the sweep skips the
-    file (false-negative). Worst outcome: the file lingers until the
-    next sweep, at which point either the PID is still reused (still
-    skipped, still no harm) or it has exited (now reaped). No
-    incorrect destructive action is possible. A ``comm`` cross-check
-    would close the false-negative but adds two subprocess calls per
-    file with portability concerns; not justified for a best-effort
-    path.
-    """
-    config_dir = _nexus_config_dir_at_import()
-    if not config_dir.exists():
-        return 0
-    reaped = 0
-    for path in config_dir.glob("t1_addr.*"):
-        suffix = path.suffix.lstrip(".")
-        try:
-            claude_pid = int(suffix)
-        except ValueError:
-            continue
-        if claude_pid > 0 and _is_pid_alive(claude_pid):
-            continue
-        try:
-            path.unlink()
-            reaped += 1
-            _log.info("sweep_reaped_orphan_t1_addr", path=str(path), pid=claude_pid)
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            _log.debug("sweep_t1_addr_unlink_failed", path=str(path), error=str(exc))
-    return reaped
-
-
-
-
-
-
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────

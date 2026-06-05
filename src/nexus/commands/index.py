@@ -47,8 +47,16 @@ class _CatalogBackedRegistry:
     the bead-acceptance grep returns zero matches.
     """
 
-    def __init__(self, *, cat: Any, registry_path: Path) -> None:
+    def __init__(
+        self, *, cat: Any, registry_path: Path, writer: Any = None
+    ) -> None:
+        # RDR-146 P1.2 strict split: ``cat`` is the READER (read_dual /
+        # from_registry reads); ``writer`` is the write-only daemon proxy
+        # for add/update mutations. ``writer`` defaults to ``cat`` so a
+        # caller passing a single full Catalog (tests, legacy) keeps the
+        # old read+write-through-one-object behaviour.
         self._cat = cat
+        self._writer = writer if writer is not None else cat
         self._registry_path = registry_path
 
     def get(self, repo: Path) -> dict | None:
@@ -74,8 +82,8 @@ class _CatalogBackedRegistry:
     def add(self, repo: Path, *, cat: Any | None = None) -> None:
         # The catalog hook registers collections on first index; this
         # call just ensures the owner row exists (idempotent).
-        if self._cat is not None:
-            self._cat.ensure_owner_for_repo(repo)
+        if self._writer is not None:
+            self._writer.ensure_owner_for_repo(repo)
 
     def update(self, repo: Path, **fields: Any) -> bool:
         """Apply field updates. Returns True on success (or no-op),
@@ -88,14 +96,14 @@ class _CatalogBackedRegistry:
         gate user-visible messages on actual catalog state.
         """
         success = True
-        if "docs_collection" in fields and self._cat is not None:
+        if "docs_collection" in fields and self._writer is not None:
             new_name = fields["docs_collection"]
             if new_name:
-                owner = self._cat.ensure_owner_for_repo(repo)
+                owner = self._writer.ensure_owner_for_repo(repo)
                 owner_id = str(owner).replace(".", "-")
                 ct = new_name.split("__", 1)[0]
                 try:
-                    self._cat.register_collection(
+                    self._writer.register_collection(
                         new_name,
                         content_type=ct,
                         owner_id=owner_id,
@@ -138,8 +146,16 @@ def _registry() -> "_CatalogBackedRegistry":
     ``nexus.repos.read_dual``). The legacy ``the legacy registry`` is no
     longer imported in this module.
     """
-    cat = _open_catalog_or_none()
-    return _CatalogBackedRegistry(cat=cat, registry_path=_registry_path())
+    # RDR-146 P1.2 strict split: reader for read_dual lookups, write-only
+    # daemon proxy for owner/collection mutations. The writer is created
+    # only when the catalog is initialised (reader non-None), matching the
+    # prior gate where an uninitialised catalog meant no writes at all.
+    from nexus.catalog.factory import make_catalog_writer
+    reader = _open_catalog_or_none()
+    writer = make_catalog_writer() if reader is not None else None
+    return _CatalogBackedRegistry(
+        cat=reader, writer=writer, registry_path=_registry_path(),
+    )
 
 
 def _open_catalog_or_none() -> Any:
@@ -149,16 +165,12 @@ def _open_catalog_or_none() -> Any:
     conformant collection names but tolerate its absence (e.g. fresh
     operator workstation, pytest temp dirs) use this helper.
     """
-    from nexus.catalog import Catalog
-    from nexus.config import catalog_path
+    from nexus.catalog.factory import make_catalog_reader
 
     try:
-        cat_path = catalog_path()
-        if Catalog.is_initialized(cat_path):
-            return Catalog(cat_path, cat_path / ".catalog.db")
+        return make_catalog_reader()
     except Exception:
         return None
-    return None
 
 
 @click.group()
@@ -1105,6 +1117,20 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 @click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--corpus", default="default", show_default=True, help="Corpus name for docs__ collection.")
 @click.option(
+    "--collection",
+    default=None,
+    help=(
+        "T3 collection name. Bare names (e.g. 'mynotes') are auto-normalized "
+        "to knowledge__<name>; qualified names (e.g. knowledge__mydocs) pass through. "
+        "Overrides --corpus when set. Use to route Markdown into a knowledge__ "
+        "collection so 'nx enrich aspects' can process it (GH #981). "
+        "NOTE: the aspect extractor for knowledge__ targets the scholarly-paper schema; "
+        "it works well for paper-shaped content but will fabricate fields on general "
+        "prose / design notes. A prose extractor is tracked as a follow-on (fix #2 "
+        "from GH #981)."
+    ),
+)
+@click.option(
     "--force",
     is_flag=True,
     default=False,
@@ -1112,10 +1138,33 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 )
 @click.option("--monitor", is_flag=True, default=False,
               help="Print chunking metadata after indexing. Auto-enabled when stdout is not a TTY.")
-def index_md_cmd(path: Path, corpus: str, force: bool, monitor: bool) -> None:
-    """Extract and index a Markdown file into T3 docs__CORPUS."""
+def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, monitor: bool) -> None:
+    """Extract and index a Markdown file into T3 docs__CORPUS (or --collection)."""
+    from nexus.corpus import t3_collection_name
     from nexus.doc_indexer import index_markdown
     from nexus.errors import CredentialsMissingError
+
+    # Normalize --collection through t3_collection_name() so bare names like
+    # "mynotes" become "knowledge__mynotes__voyage-context-3__v1", matching
+    # the behavior of nx index pdf --collection. Without this, chunks end up
+    # in unsearchable bare collections. When --collection is absent, pass
+    # collection_name=None so index_markdown derives docs__<corpus> as before.
+    if collection is not None:
+        collection = t3_collection_name(collection)
+        # Warn when routing into knowledge__*: the registered aspect extractor
+        # uses the scholarly-paper-v1 schema (title, abstract, methods, venue).
+        # For paper-shaped Markdown this is correct. For general prose / design
+        # notes it will hallucinate paper fields. A general-prose extractor is
+        # tracked as GH #981 fix #2 (deferred). Reverted attempt: nexus-z70w / #377.
+        if collection.startswith("knowledge__"):
+            click.echo(
+                "Note: 'nx enrich aspects' on knowledge__ collections applies the "
+                "scholarly-paper extractor (title, abstract, methods, venue). "
+                "This is appropriate for paper-shaped content; it will hallucinate "
+                "structure on general prose or design notes. "
+                "A prose extractor is tracked as a follow-on (GH #981 fix #2).",
+                err=True,
+            )
 
     path = path.resolve()
     label = "Force re-indexing" if force else "Indexing"
@@ -1129,14 +1178,14 @@ def index_md_cmd(path: Path, corpus: str, force: bool, monitor: bool) -> None:
                 chunk_bar.n = current
                 chunk_bar.refresh()
 
-            meta = index_markdown(path, corpus=corpus, force=force, return_metadata=True,
-                                  on_progress=on_chunk_progress)
+            meta = index_markdown(path, corpus=corpus, collection_name=collection, force=force,
+                                  return_metadata=True, on_progress=on_chunk_progress)
             chunk_bar.close()
             n = meta["chunks"]  # type: ignore[index]
             sections = meta.get("sections", 0)  # type: ignore[union-attr]
             click.echo(f"\n  Chunks: {n}  Sections: {sections}")
         else:
-            n = index_markdown(path, corpus=corpus, force=force)
+            n = index_markdown(path, corpus=corpus, collection_name=collection, force=force)
     except CredentialsMissingError as exc:
         # GH #336: surface the silent failure visibly. Click maps
         # ClickException to stderr + non-zero exit.

@@ -171,5 +171,16 @@ The first-run banner + `daemon_uninstall` lifecycle is validated in two halves.
 ## Failure modes
 
 - **uv not on PATH (Claude Desktop chat install)**: `.mcpb` install fails with a cryptic error. Mitigation: README documents `brew install uv` / `pipx install uv` as pre-requisite.
-- **GUI-spawned subprocess can't see shell-env credentials**: `is_local_mode()` flips to True; T3 dispatch fails. Mitigation: `nx doctor` surfaces the credential-persistence warning; persist via `nx config set chroma_api_key "$CHROMA_API_KEY"` etc.
+- **The `.mcpb` reads `config.yml`, NOT your shell env — cloud creds must be persisted, or the extension silently runs local mode** (the single most likely Desktop footgun). Claude Desktop spawns the `.mcpb` as a GUI subprocess that does **not** inherit your interactive shell's environment. `is_local_mode()` resolves creds via `get_credential()`, which checks the process env first and then `~/.config/nexus/config.yml` — it never sees `~/.zshrc`/`~/.bashrc` exports. So a machine where `CHROMA_API_KEY` / `VOYAGE_API_KEY` live only in the shell will run the extension in **local mode** (bge-768 local embedder), even though your CLI in a terminal resolves cloud mode fine. Symptoms: searches return "no results" or feel thin, and `~/Library/Logs/Claude/mcp-server-Conexus.log` shows `collection_dimension_mismatch_skipped` / `search_all_collections_dimension_skipped` — typically `got 768` (local bge query) against collections that expect `1024` (voyage). The bge-768 local query simply cannot match cloud voyage-1024 collections.
+
+  **Fix — persist the creds into `config.yml` with `nx config set` (not just shell exports):**
+  ```bash
+  nx config set chroma_api_key "ck-…"
+  nx config set chroma_tenant   "<tenant-uuid>"
+  nx config set chroma_database "conexus"
+  nx config set voyage_api_key  "pa-…"
+  ```
+  Then fully quit + relaunch Claude Desktop so the extension re-spawns and re-reads `config.yml`. **Verify** it took: search for something specific and ask for the top `file:line` results with scores; confirm the cited locations are real (a great-sounding answer is not proof — the model can reconstruct from `store_get`/FTS even when vector search is skipping), and confirm the Conexus log shows no `dimension_mismatch_skipped`. On a fresh machine with no CLI, you only get local mode (bge-768) — fine for content you index locally at 768d, but it will not reach pre-existing cloud-1024 collections until the creds are in `config.yml`.
+
+  Related: a single name/dim-mismatched collection (e.g. a stale collection named `…minilm-l6-v2-384…` that actually stores 1024-dim vectors) produces the same `dimension_mismatch_skipped` line on every search and should be deleted (`nx collection delete <name>`); an `nx doctor` drift check for this class is tracked separately.
 - **Cowork SDK bridge dropped a tool call**: rare; the sentinel test in `tests/test_cowork_sdk_bridge.py` catches structural regressions. Diagnostic recipe: `nx daemon t2 status` then `nx memory list -p _cowork_test`.

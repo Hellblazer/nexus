@@ -472,7 +472,11 @@ class TestRenameCascadeFailureModes:
             raise RuntimeError("simulated catalog lock contention")
 
         runner = CliRunner()
+        # RDR-146 P1.2: the catalog cascade routes the rename through
+        # make_catalog_writer(); bomb that seam (patching in-process Catalog
+        # would be bypassed by daemon routing).
         with patch("nexus.commands.collection._t3", return_value=fake), \
+             patch("nexus.catalog.factory.make_catalog_writer", side_effect=_catalog_bomb), \
              patch("nexus.catalog.catalog.Catalog", side_effect=_catalog_bomb), \
              patch("nexus.config.default_db_path", return_value=db_path), \
              patch("nexus.config.catalog_path", return_value=cat_dir):

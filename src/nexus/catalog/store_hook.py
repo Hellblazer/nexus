@@ -40,35 +40,49 @@ def catalog_store_hook(
     GC pass consolidates duplicates once all callers have been
     updated.
     """
+    # RDR-146 P1.2: this hook fires on every store_put / memory promote,
+    # including the long-lived MCP server process. It MUST NOT open a
+    # direct .catalog.db writer (the two-writer hazard RDR-146 closes).
+    # Reads go through the read-only reader; writes route through the
+    # write-only daemon proxy (the single writer). Handles closed in
+    # finally so the hot path does not leak.
+    reader = None
+    writer = None
     try:
         from nexus.catalog import Catalog
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
         from nexus.config import catalog_path
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
             return ""
 
-        cat = Catalog(cat_path, cat_path / ".catalog.db")
+        reader = make_catalog_reader()
 
         # Dedup by chunk_chroma_id stored in legacy meta.doc_id.
-        existing = cat.by_doc_id(doc_id)
+        existing = reader.by_doc_id(doc_id)
         if existing is not None:
             return str(existing.tumbler)
 
         # Get or create "knowledge" curator owner. Filter on owner_type
         # so a same-named REPO owner cannot shadow the intended curator
         # (same bug shape as the doc_indexer family fix).
-        rows = cat._db.execute(
+        rows = reader._db.execute(
             "SELECT tumbler_prefix FROM owners WHERE name = 'knowledge' "
             "AND owner_type = 'curator'"
         ).fetchone()
+        # RDR-146 P2 (nexus-5p2ci.12): store_put / memory promote are
+        # user-initiated and latency-sensitive. The MCP server is non-tty, so
+        # the isatty() fallback would misclassify these as batch; tag
+        # interactive so they take fairness priority over a background index.
+        writer = make_catalog_writer(priority="interactive")
         if rows:
             from nexus.catalog.tumbler import Tumbler
             owner = Tumbler.parse(rows[0])
         else:
-            owner = cat.register_owner("knowledge", "curator")
+            owner = writer.register_owner("knowledge", "curator")
 
-        tumbler = cat.register(
+        tumbler = writer.register(
             owner=owner, title=title, content_type="knowledge",
             physical_collection=collection_name,
             meta={"doc_id": doc_id},
@@ -77,3 +91,11 @@ def catalog_store_hook(
     except Exception:
         _log.debug("catalog_store_hook_failed", exc_info=True)
         return ""
+    finally:
+        if writer is not None:
+            writer.close()
+        if reader is not None:
+            try:
+                reader._db.close()
+            except Exception:  # noqa: BLE001
+                pass

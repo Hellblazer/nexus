@@ -359,14 +359,8 @@ def search_cmd(
     # Pre-Phase-3 chunks that still carry chunk_count fall back to
     # the metadata read so the legacy contract still works.
     if max_file_chunks is not None:
-        from nexus.catalog import Catalog
-        from nexus.config import catalog_path
-        _cp = catalog_path()
-        _cat = (
-            Catalog(_cp, _cp / ".catalog.db")
-            if Catalog.is_initialized(_cp)
-            else None
-        )
+        from nexus.catalog.factory import make_catalog_reader
+        _cat = make_catalog_reader()
         chunk_count_cache: dict[str, int] = {}
 
         def _doc_chunk_count(r: SearchResult) -> int | None:
@@ -411,13 +405,10 @@ def search_cmd(
     # nexus-dxly: pass catalog so the code__ file-size penalty can
     # resolve chunk_count via documents.chunk_count for Phase-3 chunks
     # (RDR-108 dropped chunk_count from chunk metadata).
-    from nexus.catalog import Catalog as _Catalog
-    from nexus.config import catalog_path as _catalog_path
+    from nexus.catalog.factory import make_catalog_reader
     _scoring_cat = None
     try:
-        _scoring_cp = _catalog_path()
-        if _Catalog.is_initialized(_scoring_cp):
-            _scoring_cat = _Catalog(_scoring_cp, _scoring_cp / ".catalog.db")
+        _scoring_cat = make_catalog_reader()
     except Exception:
         _scoring_cat = None
     results = apply_hybrid_scoring(

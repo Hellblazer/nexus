@@ -357,14 +357,13 @@ def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
     fake_cat = MagicMock()
     fake_cat.docs_for_chashes.return_value = {chash: ["ART-PHASE3"]}
 
-    import nexus.catalog as _cat_mod
+    # RDR-146 P1.2: reindex reaches the catalog via make_catalog_reader().
     with patch(
         "nexus.commands.collection._doc_id_to_file_path",
         return_value=str(doc_file),
     ), \
          patch("nexus.commands.collection._t3", return_value=mock_db), \
-         patch.object(_cat_mod.Catalog, "is_initialized", return_value=True), \
-         patch.object(_cat_mod, "Catalog", return_value=fake_cat), \
+         patch("nexus.catalog.factory.make_catalog_reader", return_value=fake_cat), \
          patch("nexus.doc_indexer.index_markdown", return_value=1), \
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
         result = runner.invoke(

@@ -10,8 +10,10 @@ from nexus.db.t1 import T1Database
 def _t1() -> T1Database:
     """Return a T1Database connected to the current session's server.
 
-    T1Database resolves the session automatically via the PPID chain, falling
-    back to a local EphemeralClient if no server record is found.
+    T1Database resolves the session-id (RDR-149 P4) and discovers the live
+    leased T1 record, falling back to a local EphemeralClient under
+    ``NX_T1_ISOLATED=1`` or raising ``T1ServerNotFoundError`` if no live
+    lease is found.
     """
     return T1Database()
 

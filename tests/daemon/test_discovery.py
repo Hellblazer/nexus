@@ -162,3 +162,141 @@ class TestDiscoveryResolveT3:
         monkeypatch.setenv("NX_T3_ADDR", "host:not-a-port")
         with pytest.raises(ValueError):
             discovery_resolve("t3", config_dir=config_dir)
+
+
+# ---------------------------------------------------------------------------
+# RDR-149 P2: T2 lease-record resolution + reap-path normalization
+# ---------------------------------------------------------------------------
+
+
+def _t2_lease(pid: int, *, generation: int = 1, version: str = "1.2.3") -> dict:
+    """A RDR-149 T2 lease record as ServiceRegistry writes it."""
+    import time as _time
+
+    return {
+        "scope_key": str(os.getuid()),
+        "generation": generation,
+        "owner_token": "tok-xyz",
+        "heartbeat_epoch": _time.time(),
+        "ttl": 3.0,
+        "endpoint": {
+            "uds_path": "/tmp/t2.sock",
+            "tcp_host": "127.0.0.1",
+            "tcp_port": 5555,
+            "pid": pid,
+        },
+        "version": version,
+        "payload": {},
+        "status": "live",
+        "format_version": 1,
+    }
+
+
+class TestLeaseRecordResolution:
+    def test_is_lease_record_detects_both_shapes(self) -> None:
+        from nexus.daemon.discovery import is_lease_record
+
+        assert is_lease_record(_t2_lease(os.getpid())) is True
+        assert is_lease_record(_live_payload()) is False  # legacy
+        assert is_lease_record({"endpoint": {}}) is False  # no generation
+        assert is_lease_record("nope") is False
+
+    def test_find_t2_resolves_fresh_lease_with_flat_endpoint(
+        self, config_dir: Path
+    ) -> None:
+        from nexus.daemon.discovery import discovery_path, find_t2_daemon
+
+        path = discovery_path(config_dir, tier="t2")
+        path.write_text(json.dumps(_t2_lease(os.getpid())))
+        resolved = find_t2_daemon(config_dir)
+        assert resolved is not None
+        # Endpoint fields lifted to the top level (client contract).
+        assert resolved["uds_path"] == "/tmp/t2.sock"
+        assert resolved["tcp_port"] == 5555
+        assert resolved["pid"] == os.getpid()
+        assert resolved["generation"] == 1
+        assert resolved["version"] == "1.2.3"
+
+    def test_find_t2_rejects_and_unlinks_expired_lease(
+        self, config_dir: Path
+    ) -> None:
+        from nexus.daemon.discovery import discovery_path, find_t2_daemon
+
+        path = discovery_path(config_dir, tier="t2")
+        lease = _t2_lease(os.getpid())
+        lease["heartbeat_epoch"] = 0.0  # ancient -> aged past TTL
+        path.write_text(json.dumps(lease))
+        assert find_t2_daemon(config_dir) is None
+        assert path.exists() is False  # reaped
+
+    def test_find_t2_rejects_shutdown_marker(self, config_dir: Path) -> None:
+        from nexus.daemon.discovery import discovery_path, find_t2_daemon
+
+        path = discovery_path(config_dir, tier="t2")
+        lease = _t2_lease(os.getpid())
+        lease["status"] = "shutting_down"
+        path.write_text(json.dumps(lease))
+        assert find_t2_daemon(config_dir) is None
+
+    def test_find_t2_rejects_forward_incompatible_format(
+        self, config_dir: Path
+    ) -> None:
+        from nexus.daemon.discovery import discovery_path, find_t2_daemon
+
+        path = discovery_path(config_dir, tier="t2")
+        lease = _t2_lease(os.getpid())
+        lease["format_version"] = 2  # a newer client wrote this
+        path.write_text(json.dumps(lease))
+        assert find_t2_daemon(config_dir) is None
+
+    def test_find_t2_legacy_payload_still_resolves(self, config_dir: Path) -> None:
+        # Upgrade window: a still-running old daemon's legacy payload must
+        # remain readable via the pid-liveness fallback.
+        from nexus.daemon.discovery import discovery_path, find_t2_daemon
+
+        path = discovery_path(config_dir, tier="t2")
+        legacy = _live_payload()
+        legacy["uds_path"] = "/tmp/legacy.sock"
+        path.write_text(json.dumps(legacy))
+        resolved = find_t2_daemon(config_dir)
+        assert resolved is not None
+        assert resolved["pid"] == os.getpid()
+
+
+class TestNormalizeDiscoveryView:
+    """The reap path (``_reap_predecessor_daemon``) inspects even a stale /
+    unreachable predecessor, so it normalizes WITHOUT a freshness filter.
+    These guard the pid / version / socket extraction that the version-aware
+    graceful-drain + health-ping depend on (the P2 review Critical)."""
+
+    def test_lease_view_lifts_pid_version_and_socket(self) -> None:
+        from nexus.daemon.discovery import normalize_discovery_view
+
+        view = normalize_discovery_view(_t2_lease(4242, version="9.9.9"))
+        assert view["pid"] == 4242
+        assert view["daemon_version"] == "9.9.9"  # lease ``version`` -> daemon_version
+        assert view["uds_path"] == "/tmp/t2.sock"
+        assert view["tcp_host"] == "127.0.0.1"
+        assert view["tcp_port"] == 5555
+
+    def test_legacy_payload_passes_through(self) -> None:
+        from nexus.daemon.discovery import normalize_discovery_view
+
+        legacy = _live_payload()
+        assert normalize_discovery_view(legacy) == legacy
+
+    def test_non_dict_yields_empty(self) -> None:
+        from nexus.daemon.discovery import normalize_discovery_view
+
+        assert normalize_discovery_view("garbage") == {}
+
+    def test_health_ping_and_handshake_read_normalized_lease(self) -> None:
+        # The reap discrimination helpers must work off the normalized view:
+        # _peer_handshake reads daemon_version, _health_ping reads the socket
+        # fields — both absent at the top level of a raw lease record.
+        from nexus.daemon.discovery import normalize_discovery_view
+        from nexus.daemon.t2_daemon import _peer_handshake
+
+        view = normalize_discovery_view(_t2_lease(os.getpid(), version="7.0.0"))
+        version, _reachable = _peer_handshake(os.getpid(), view)
+        assert version == "7.0.0"  # would be None if it read raw lease["version"] wrongly

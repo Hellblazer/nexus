@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections import deque
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -874,25 +873,53 @@ class _LinkOps:
         link_types: list[str] | None = None,
         include_heuristic: bool = False,
     ) -> dict:
-        """BFS traversal to *depth*. Capped at ``_MAX_GRAPH_DEPTH``
-        (10) and ``_MAX_GRAPH_NODES`` (500). Returns
-        ``{"nodes": [...], "edges": [...]}``. ``link_types`` (list)
-        takes precedence over ``link_type`` (single).
+        """WITH RECURSIVE traversal to *depth*. Capped at
+        ``_MAX_GRAPH_DEPTH`` (10) and ``_MAX_GRAPH_NODES`` (500).
+        Returns ``{"nodes": [...], "edges": [...]}``.
+        ``link_types`` (list) takes precedence over ``link_type``
+        (single).
 
         Caps are read from the ``Catalog`` class attribute
         (``cat._MAX_GRAPH_DEPTH`` / ``_MAX_GRAPH_NODES``) so tests
         that ``patch.object(type(cat), "_MAX_GRAPH_NODES", N)``
         intercept the value used here.
 
-        nexus-6ppk: when ``link_types`` and ``link_type`` are both
-        unspecified, the BFS defaults to "everything except
-        ``implements-heuristic``" so the auto-emitted heuristic
-        edges (66% of the 2026-05-08 prod link graph) don't drown
-        out hand-curated edges. Pass ``include_heuristic=True`` to
-        opt back in (auditing, debugging, or the rare consumer that
-        actively wants the heuristic flood).
+        nexus-6ppk / nexus-5p2ci.17: replaced the Python ``deque``
+        BFS (O(N) round-trips — 2 SQL queries per node) with a
+        single bounded SQLite ``WITH RECURSIVE`` query that emits
+        both node rows and edge rows in one round-trip.  Semantics
+        preserved verbatim:
+
+        - Seed always in node set.
+        - Depth cap applied before ``_MAX_GRAPH_NODES`` LIMIT so
+          lowest-depth nodes survive truncation (ORDER BY min_depth,
+          tumbler makes truncation deterministic). NOTE two
+          differences from the old BFS under the node cap: (1) the
+          ``LIMIT`` is a STRICT hard cap, whereas the BFS checked the
+          cap before processing each node and so could overshoot by a
+          hub node's full out-degree; (2) within a depth band the
+          surviving set is now ordered by tumbler string (the BFS used
+          undefined set-insertion order). Both make the cap behaviour
+          deterministic; callers must not depend on which specific
+          nodes survive truncation.
+        - ``link_types`` / ``link_type`` / ``include_heuristic``
+          resolved via ``_filter_link_types`` (unchanged).
+        - Edges from leaf nodes (BFS depth == requested depth) are
+          NOT returned; only edges whose "processing" side
+          (from_tumbler for out/both, to_tumbler for in/both) is a
+          non-leaf are included — matching the original BFS contract.
+        - No dangling edges: edge endpoints are always in the
+          surviving node set.
+        - ``graph_node_limit`` warning fires when len(nodes) >=
+          max_nodes (same condition as the former BFS).
+
+        Cycle-safety: SQLite UNION (not UNION ALL) deduplicates
+        (tumbler, depth) pairs.  Because depth strictly increases
+        each recursive step, cycles generate rows at increasing
+        depths until ``r.depth < ?`` (the depth cap) is false for
+        every row in the working table.  The outer GROUP BY +
+        MIN(depth) collapses to the BFS-minimum depth per tumbler.
         """
-        from nexus.catalog.catalog import CatalogLink  # noqa: F401
         from nexus.catalog.tumbler import Tumbler
         cat = self._cat
         max_depth = getattr(cat, "_MAX_GRAPH_DEPTH", _MAX_GRAPH_DEPTH)
@@ -903,55 +930,153 @@ class _LinkOps:
             link_types, link_type,
             include_heuristic=include_heuristic,
         ) or []
-        visited: set[str] = {str(tumbler)}
-        seen_edges: set[tuple[str, str, str]] = set()
-        all_edges: list = []
-        queue: deque = deque([(tumbler, 0)])
+        seed_str = str(tumbler)
 
-        while queue:
-            if len(visited) >= max_nodes:
-                _log.warning(
-                    "graph_node_limit",
-                    tumbler=str(tumbler), visited=len(visited),
-                )
-                break
-            current, d = queue.popleft()
-            if d >= depth:
-                continue
+        # ── Link-type filter fragment (shared by recursive arms + edge query) ──
+        if effective_types:
+            lt_ph = ",".join("?" * len(effective_types))
+            lt_filter = f" AND l.link_type IN ({lt_ph})"
+        else:
+            lt_filter = ""
 
-            neighbors: list = []
-            if direction in ("out", "both"):
-                neighbors.extend(
-                    self.links_from(
-                        current, link_types=effective_types or None,
-                    ),
-                )
-            if direction in ("in", "both"):
-                neighbors.extend(
-                    self.links_to(
-                        current, link_types=effective_types or None,
-                    ),
-                )
+        # ── Recursive arms: expand outbound / inbound / both ─────────────────
+        # Each arm: SELECT neighbor_tumbler, r.depth + 1
+        #           FROM reachable r JOIN links l ON <direction condition>
+        #           WHERE r.depth < ? <link_type_filter>
+        #
+        # UNION (not UNION ALL) deduplicates (tumbler, depth) pairs so the
+        # same (tumbler, depth) combination is never re-expanded, bounding the
+        # working table to O(max_depth * |V|) rows even in cyclic graphs.
+        arms_sql: list[str] = []
+        if direction in ("out", "both"):
+            arms_sql.append(
+                "SELECT l.to_tumbler, r.depth + 1"
+                " FROM reachable r JOIN links l ON l.from_tumbler = r.tumbler"
+                f" WHERE r.depth < ?{lt_filter}"
+            )
+        if direction in ("in", "both"):
+            arms_sql.append(
+                "SELECT l.from_tumbler, r.depth + 1"
+                " FROM reachable r JOIN links l ON l.to_tumbler = r.tumbler"
+                f" WHERE r.depth < ?{lt_filter}"
+            )
 
-            for edge in neighbors:
-                edge_key = (
-                    str(edge.from_tumbler),
-                    str(edge.to_tumbler),
-                    edge.link_type,
-                )
-                if edge_key not in seen_edges:
-                    seen_edges.add(edge_key)
-                    all_edges.append(edge)
-                other = (
-                    edge.to_tumbler if edge.from_tumbler == current
-                    else edge.from_tumbler
-                )
-                if str(other) not in visited:
-                    visited.add(str(other))
-                    queue.append((other, d + 1))
+        if not arms_sql:
+            # Unrecognised direction: return seed node only, no edges.
+            node = cat.resolve(Tumbler.parse(seed_str))
+            return {"nodes": [node] if node is not None else [], "edges": []}
 
-        nodes = [cat.resolve(Tumbler.parse(t)) for t in visited]
+        recursive_body = " UNION ".join(arms_sql)
+
+        # ── Direction condition for the edge query ────────────────────────────
+        # An edge A→B appears in the BFS result when the "processing" side
+        # is a non-leaf (min_depth < requested depth):
+        #   direction="out"  → from_tumbler (sf) must be non-leaf
+        #   direction="in"   → to_tumbler   (st) must be non-leaf
+        #   direction="both" → either end non-leaf (fetched from either side)
+        if direction == "out":
+            dir_cond = "sf.min_depth < ?"
+            dir_params: list = [depth]
+        elif direction == "in":
+            dir_cond = "st.min_depth < ?"
+            dir_params = [depth]
+        else:  # both
+            dir_cond = "(sf.min_depth < ? OR st.min_depth < ?)"
+            dir_params = [depth, depth]
+
+        # Edge link-type filter (same effective_types, applied to the
+        # links join in the edge sub-query).
+        if effective_types:
+            lt_ph2 = ",".join("?" * len(effective_types))
+            edge_lt_filter = f" AND l.link_type IN ({lt_ph2})"
+        else:
+            edge_lt_filter = ""
+
+        # ── Combined query: node rows (rtype='N') + edge rows (rtype='E') ─────
+        #
+        # Both result sets share the same ``surviving`` CTE (the capped,
+        # ordered node set) so we need only one SQL round-trip.
+        #
+        # Node rows:  9 columns — ('N', tumbler, min_depth_str, 6×NULL)
+        # Edge rows:  9 columns — ('E', from, to, type, from_span,
+        #                           to_span, created_by, created_at, metadata)
+        #
+        # Edge deduplication: GROUP BY (from_tumbler, to_tumbler, link_type).
+        # The links table has a unique (from, to, type) constraint enforced at
+        # upsert time, so GROUP BY collapses the "direction=both fetches same
+        # edge twice" case without affecting per-column values.
+        sql = f"""
+WITH RECURSIVE reachable(tumbler, depth) AS (
+    SELECT ?, 0
+    UNION
+    {recursive_body}
+),
+surviving AS (
+    SELECT tumbler, MIN(depth) AS min_depth
+    FROM   reachable
+    GROUP  BY tumbler
+    ORDER  BY min_depth, tumbler
+    LIMIT  ?
+)
+SELECT 'N' AS rtype,
+       tumbler        AS c1,
+       CAST(min_depth AS TEXT) AS c2,
+       NULL AS c3, NULL AS c4, NULL AS c5, NULL AS c6, NULL AS c7, NULL AS c8
+FROM   surviving
+UNION ALL
+SELECT 'E',
+       l.from_tumbler, l.to_tumbler, l.link_type,
+       l.from_span, l.to_span,
+       l.created_by, l.created_at, l.metadata
+FROM   links l
+JOIN   surviving sf ON l.from_tumbler = sf.tumbler
+JOIN   surviving st ON l.to_tumbler   = st.tumbler
+WHERE  {dir_cond}{edge_lt_filter}
+GROUP  BY l.from_tumbler, l.to_tumbler, l.link_type
+"""
+
+        # ── Parameter list ────────────────────────────────────────────────────
+        # Order: seed | (depth, *lt_params) × len(arms) | max_nodes |
+        #        *dir_params | *lt_params_for_edge_filter
+        params: list = [seed_str]
+        for _ in arms_sql:
+            params.append(depth)           # WHERE r.depth < ?
+            params.extend(effective_types)  # link_type IN (...)
+        params.append(max_nodes)           # LIMIT ?
+        params.extend(dir_params)          # direction condition
+        params.extend(effective_types)     # edge link-type filter
+
+        rows = cat._db.execute(sql, params).fetchall()
+
+        # ── Split node rows / edge rows ───────────────────────────────────────
+        node_rows: list[tuple[str, int]] = []
+        edge_rows: list[tuple] = []
+        for r in rows:
+            if r[0] == "N":
+                node_rows.append((r[1], int(r[2])))
+            else:
+                edge_rows.append(r)
+
+        # ── Node cap warning (mirrors original BFS check) ─────────────────────
+        if len(node_rows) >= max_nodes:
+            _log.warning(
+                "graph_node_limit",
+                tumbler=str(tumbler), visited=len(node_rows),
+            )
+
+        # ── Resolve nodes (filter deleted / dangling) ─────────────────────────
+        nodes = [cat.resolve(Tumbler.parse(t)) for t, _ in node_rows]
         nodes = [n for n in nodes if n is not None]
+
+        # ── Build edges via _row_to_link ──────────────────────────────────────
+        # Edge row layout (indices 1-8 of the query row):
+        #   [1] from_tumbler  [2] to_tumbler  [3] link_type
+        #   [4] from_span     [5] to_span
+        #   [6] created_by    [7] created_at  [8] metadata
+        # _row_to_link expects a tuple (from, to, type, from_span, to_span,
+        #   created_by, created_at, metadata) — exactly r[1:9].
+        all_edges = [self._row_to_link(r[1:9]) for r in edge_rows]
+
         return {"nodes": nodes, "edges": all_edges}
 
     def graph_many(

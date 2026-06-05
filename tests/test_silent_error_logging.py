@@ -350,8 +350,9 @@ def test_repos_json_migration_failed_logs_warning(tmp_path, monkeypatch):
     # Force the catalog db marker present so the absent-short-circuit
     # doesn't fire; raise from Catalog.__init__.
     (cat_dir / ".catalog.db").write_bytes(b"")
+    # RDR-146 P1.2: the migration opens the catalog via make_catalog_reader().
     with patch(
-        "nexus.catalog.catalog.Catalog",
+        "nexus.catalog.factory.make_catalog_reader",
         side_effect=RuntimeError("simulated catalog init failure"),
     ):
         with capture_logs() as cap:
@@ -395,8 +396,10 @@ def test_set_owner_head_hash_failed_logs_warning(tmp_path, monkeypatch):
     cat_dir.mkdir()
     (cat_dir / ".catalog.db").write_bytes(b"")
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
+    # RDR-146 P1.2: _set_owner_head_hash reaches the catalog via the
+    # factory; bomb the reader seam to drive the failure path.
     with patch(
-        "nexus.catalog.catalog.Catalog",
+        "nexus.catalog.factory.make_catalog_reader",
         side_effect=RuntimeError("simulated catalog open failure"),
     ):
         with capture_logs() as cap:

@@ -13,8 +13,9 @@ Sentinel path: ``${TMPDIR:-/tmp}/nx-phase-gate-sentinel/<claude_pid>-<rdr-id>-<p
 
 Three checks (all must hold for ``allow``):
   (a) sentinel file exists
-  (b) sentinel mtime is newer than the session-start time (ctime of
-      ``~/.config/nexus/t1_addr.<claude_pid>``)
+  (b) sentinel mtime is newer than the session-start time (mtime of
+      ``~/.config/nexus/current_session``; RDR-149 P4 retired the
+      ``t1_addr.<claude_pid>`` anchor)
   (c) sentinel content reports ``outcome: PASSED``
 
 Escape token ``# routing-allow: <reason>=8 chars>`` allows the close to
@@ -90,16 +91,25 @@ def _claude_pid() -> int:
 
 
 def _session_start_time(claude_pid: int) -> float | None:
-    """Return ctime of the t1_addr.<pid> file, or None if unavailable."""
+    """Return the session-start anchor time, or None if unavailable.
+
+    RDR-149 P4 retired the ``t1_addr.<claude_pid>`` addr file (T1 now keys
+    its leased registry record on the session-id, not the claude_pid), so
+    this anchors on the ``current_session`` pointer instead: the
+    SessionStart hook (re)writes it once per session, so its mtime is the
+    session-start proxy. A sentinel older than this is a stale carry-over
+    from a previous session. ``claude_pid`` is accepted for caller
+    signature stability but no longer selects the file.
+    """
     base = os.environ.get("NEXUS_CONFIG_DIR")
     if base:
-        addr = pathlib.Path(base) / f"t1_addr.{claude_pid}"
+        marker = pathlib.Path(base) / "current_session"
     else:
-        addr = pathlib.Path.home() / ".config" / "nexus" / f"t1_addr.{claude_pid}"
-    if not addr.exists():
+        marker = pathlib.Path.home() / ".config" / "nexus" / "current_session"
+    if not marker.exists():
         return None
     try:
-        return addr.stat().st_ctime
+        return marker.stat().st_mtime
     except OSError:
         return None
 
