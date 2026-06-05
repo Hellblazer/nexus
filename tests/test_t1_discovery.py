@@ -419,6 +419,68 @@ class TestT1DatabaseFlagOnFilePath:
         fake_chromadb.HttpClient.assert_called_once_with(host="127.0.0.1", port=9999)
 
 
+class TestT1ColdStartTransientWindow:
+    """RDR-149 P4 / CA-3: the honest production read-path behavior during the
+    cold-start transient window (the writer published a transient
+    ``server_pid`` lease but no session-id resolves yet).
+
+    The owner (via ``_t1_state``) and MCP-dispatched subprocesses (via the
+    ``NX_T1_HOST``/``NX_T1_PORT`` env breadcrumb, Path A) are covered. A bare
+    Claude-Code Bash sibling -- no env, no resolvable session-id -- is NOT:
+    it gets a loud, retryable ``T1ServerNotFoundError`` (Path D), succeeding
+    once the session-id resolves. This is the accepted tradeoff of keying on
+    session-id rather than the unreliable PPID-walk (RDR §Gap 2), tracked as
+    a known limitation, and is the property the conformance suite's
+    registry-layer ``TestT1SessionRekey`` does NOT by itself assert."""
+
+    def test_bare_sibling_in_transient_window_raises_not_found(
+        self, tmp_path, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED",
+                    "NEXUS_SKIP_T1", "NX_SESSION_ID"):
+            monkeypatch.delenv(var, raising=False)
+
+        # The writer published a TRANSIENT server_pid lease (session-id
+        # unresolved). No current_session file, no NX_SESSION_ID.
+        _publish_t1_session_lease(tmp_path, None, "127.0.0.1", 9999, server_pid=70707)
+
+        from nexus.db.t1 import T1Database, T1ServerNotFoundError
+        # The bare sibling cannot resolve a session-id, so Path B is skipped
+        # and it fails loud -- it does NOT silently bind to the transient
+        # server_pid lease (no cross-session mis-binding hazard).
+        with pytest.raises(T1ServerNotFoundError):
+            T1Database()
+        fake_chromadb.HttpClient.assert_not_called()
+
+    def test_mcp_dispatched_subprocess_in_transient_window_uses_env(
+        self, tmp_path, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        fake_chromadb.HttpClient.return_value = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        # MCP-dispatched subprocess: it inherited the env breadcrumb (Path A),
+        # so it connects even though no session-id resolves yet.
+        monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_T1_PORT", "9999")
+
+        from nexus.db.t1 import T1Database
+        T1Database()
+        fake_chromadb.HttpClient.assert_called_once_with(host="127.0.0.1", port=9999)
+
+
 class TestT1DatabaseFlagOffPreservesLegacyBehaviour:
     """Flag-off: legacy resolver chain runs unchanged."""
 

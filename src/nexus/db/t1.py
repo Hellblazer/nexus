@@ -193,9 +193,13 @@ class T1Database:
             session-id identically from ``current_session``; liveness is
             lease freshness (TTL), not pid, so a dead owner's lease ages
             out (pid-reuse immunity). Used by Claude-Code-spawned
-            siblings (Bash tool, hooks). During the cold-start transient
-            window before the SessionStart hook writes ``current_session``,
-            a sibling falls back to Path A's env-passdown breadcrumb.
+            siblings (Bash tool, hooks) once a session-id resolves. In the
+            cold-start sliver before the SessionStart hook writes
+            ``current_session`` (and with no ``NX_SESSION_ID`` in env), a
+            bare Bash sibling resolves no session-id and falls through to
+            Path D (a loud, retryable ``T1ServerNotFoundError``); it
+            succeeds on retry once the session-id resolves. MCP-dispatched
+            subprocesses are unaffected (Path A env breadcrumb).
         Path D (failure)
             None of the above -> raise :class:`T1ServerNotFoundError`.
 

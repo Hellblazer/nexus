@@ -24,10 +24,18 @@ of the T1 migration, tracked as CA-3):
    serializes the generation bump against any concurrent sibling), then
    relinquishes the transient record (which only ever unlinks the
    publisher's own ``server_pid`` key).
-3. Readers resolve by session-id (:func:`discover_t1_lease`); during the
-   transient window a sibling that needs T1 falls back to the env-passdown
-   path (RDR-105 Path A), so there is no undiscoverable window and no
-   ``"unknown"`` collapse.
+3. Readers resolve by session-id (:func:`discover_t1_lease`). The transient
+   window covers the two reader classes RF-2's mechanism names: the owning
+   MCP process (via the in-process ``_t1_state`` pointer) and an
+   MCP-dispatched ``claude -p`` subprocess (via the inherited
+   ``NX_T1_HOST``/``NX_T1_PORT`` env, RDR-105 Path A). It does NOT cover a
+   Claude-Code-spawned Bash sibling that has neither the env nor a resolvable
+   session-id yet (the cold-start sliver before the SessionStart hook writes
+   ``current_session``): such a sibling gets a loud, retryable
+   ``T1ServerNotFoundError`` and succeeds once the session-id resolves. That
+   sliver is the accepted tradeoff of keying on session-id instead of the
+   unreliable ``find_immediate_claude_pid`` PPID-walk (RDR §Gap 2); it is
+   tracked, not a silent failure. No record is ever keyed ``"unknown"``.
 
 Session-scoped N-per-user semantics are preserved: the session-id IS the
 scope key (intentionally N owners per uid, one T1 server per session), so
@@ -206,10 +214,22 @@ class T1LeasePublisher:
             owner_token=self._owner_token,
             payload=self._payload(session_id),
         )
-        if transient_record is not None:
-            self._registry.relinquish(transient_record)
+        # Commit the in-process pointer to the session record BEFORE
+        # relinquishing the transient one: if the relinquish raises, the next
+        # tick must heartbeat the session record (not re-enter _rekey and
+        # inflate the generation / re-publish). The transient record then ages
+        # out via TTL. A relinquish failure is best-effort; never re-key-loop.
         self._record = new_record
         self._session_key = session_id
+        if transient_record is not None:
+            try:
+                self._registry.relinquish(transient_record)
+            except Exception as exc:
+                _log.debug(
+                    "t1_lease_transient_relinquish_failed",
+                    scope=self._transient_key,
+                    error=str(exc),
+                )
         _log.info(
             "t1_lease_rekeyed",
             from_scope=self._transient_key,

@@ -597,8 +597,14 @@ def _t1_publisher(
 
 
 class TestT1SessionRekey:
-    """CA-3: the transient-key -> session-id re-key has no undiscoverable
-    window and no ``"unknown"`` collapse."""
+    """CA-3: the transient-key -> session-id re-key has no ``"unknown"``
+    collapse and no window where the OWNER or an env-inheriting subprocess
+    is stranded. NOTE: the transient lease is registry-discoverable under
+    the ``server_pid`` key (proving the re-key carry-forward and the owner's
+    ``_t1_state`` breadcrumb), but a bare Claude-Code Bash sibling does NOT
+    read that key in production -- the cold-start Bash-sibling sliver is a
+    documented, tracked limitation (see ``test_t1_discovery`` for the honest
+    production-path behavior), not a discoverability guarantee."""
 
     def _registry(self, config_dir: Path, clock: _FakeClock) -> ServiceRegistry:
         return ServiceRegistry(
@@ -617,13 +623,16 @@ class TestT1SessionRekey:
             f"t1_addr.{_SERVER_PID}"
         ]
 
-    def test_sibling_discovers_via_server_pid_during_transient_window(
+    def test_transient_lease_is_registry_discoverable_under_server_pid(
         self, config_dir: Path, clock: _FakeClock
     ) -> None:
-        # CA-3 (ii): during the transient window (session-id not yet
-        # resolvable), the record is discoverable under the server_pid key
-        # (the env-passdown Path A breadcrumb), so there is no undiscoverable
-        # window. A sibling resolving by session-id finds nothing yet.
+        # CA-3 carry-forward: during the transient window the record exists
+        # under the server_pid key (so the re-key can read-and-carry its
+        # generation, and the owner's _t1_state breadcrumb is backed by a
+        # real record) while NOT yet discoverable under the session-id. This
+        # asserts the registry-layer invariant only; it is NOT a claim that a
+        # bare Bash sibling reads the server_pid key (it does not -- see
+        # tests/test_t1_discovery.py for the honest production read path).
         reg = self._registry(config_dir, clock)
         pub = _t1_publisher(reg, server_pid=_SERVER_PID, session_resolver=lambda: None)
         pub.publish()

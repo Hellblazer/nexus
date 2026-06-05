@@ -103,7 +103,7 @@ async def _t1_heartbeat_loop(publisher: Any, interval: float) -> None:
     import asyncio
 
     import structlog
-    _hb_log = structlog.get_logger()
+    _hb_log = structlog.get_logger("nexus.mcp.core")
     while True:
         await asyncio.sleep(interval)
         try:

@@ -255,6 +255,56 @@ class TestFencing:
         assert not (config_dir / "t1_addr.sess-A").exists()
         assert pub.record is None
 
+    def test_tick_is_noop_after_relinquish(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        # The SIGTERM-path guard: relinquish() sets _record None; a heartbeat
+        # tick that interleaves (loop already past the cancel point) must not
+        # re-create the record via the self-heal path.
+        reg = _registry(config_dir, clock)
+        pub = _publisher(reg, session_resolver=lambda: "sess-A")
+        pub.publish()
+        pub.relinquish()
+
+        pub.tick()  # must not raise, must not write
+
+        assert reg.discover("sess-A") is None
+        assert not (config_dir / "t1_addr.sess-A").exists()
+
+    def test_rekey_state_advances_even_if_transient_relinquish_fails(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        # IMPORTANT-1: if relinquishing the transient record raises after the
+        # session record is published, the publisher must still commit to the
+        # session key (no re-key loop, no generation inflation). The transient
+        # record then ages out via TTL.
+        reg = _registry(config_dir, clock)
+        sid: dict[str, str | None] = {"v": None}
+        pub = _publisher(reg, session_resolver=lambda: sid["v"])
+        pub.publish()
+
+        real_relinquish = reg.relinquish
+
+        def boom(record):
+            raise OSError("simulated unlink failure")
+
+        sid["v"] = "sess-A"
+        monkeypatch.setattr(reg, "relinquish", boom)
+        pub.tick()  # re-key; transient relinquish raises but is swallowed
+
+        assert pub.session_keyed
+        assert pub.active_scope_key == "sess-A"
+        session_rec = reg.discover("sess-A")
+        assert session_rec is not None and session_rec.generation == 1
+
+        # A subsequent tick heartbeats the SESSION record (no re-key loop):
+        # the generation does not inflate.
+        monkeypatch.setattr(reg, "relinquish", real_relinquish)
+        clock.advance(1.0)
+        pub.tick()
+        again = reg.discover("sess-A")
+        assert again is not None and again.generation == 1
+
 
 class TestDiscoverReader:
     def test_discover_resolves_session_keyed_endpoint(
