@@ -196,10 +196,11 @@ class T1Database:
             siblings (Bash tool, hooks) once a session-id resolves. In the
             cold-start sliver before the SessionStart hook writes
             ``current_session`` (and with no ``NX_SESSION_ID`` in env), a
-            bare Bash sibling resolves no session-id and falls through to
-            Path D (a loud, retryable ``T1ServerNotFoundError``); it
-            succeeds on retry once the session-id resolves. MCP-dispatched
-            subprocesses are unaffected (Path A env breadcrumb).
+            bare Bash sibling resolves no session-id and falls back to
+            matching the owner's transient lease by its own immediate Claude
+            ancestor pid (``discover_t1_transient_for_claude``, nexus-0x16i);
+            a sibling of a different session does not match and fails loud
+            (Path D). MCP-dispatched subprocesses are unaffected (Path A).
         Path D (failure)
             None of the above -> raise :class:`T1ServerNotFoundError`.
 
@@ -226,19 +227,38 @@ class T1Database:
             self._session_id = self._resolve_session_id(session_id)
             return
 
+        from nexus.session import _nexus_config_dir_at_import
+
+        config_dir = _nexus_config_dir_at_import()
         resolved_session = resolve_active_session_id(session_id)
         if resolved_session:
             from nexus.daemon.t1_lease import discover_t1_lease
-            from nexus.session import _nexus_config_dir_at_import
 
-            addr = discover_t1_lease(
-                resolved_session, config_dir=_nexus_config_dir_at_import()
-            )
+            addr = discover_t1_lease(resolved_session, config_dir=config_dir)
             if addr is not None:
                 host, port = addr
                 self._client = chromadb.HttpClient(host=host, port=port)
                 self._session_id = self._resolve_session_id(session_id)
                 return
+
+        # Cold-start transient-window fallback (nexus-0x16i): before the
+        # SessionStart hook writes current_session, a bare Bash sibling
+        # resolves no session-id. Target the owner's transient lease by the
+        # sibling's own immediate Claude ancestor pid (RF-6: both sides
+        # resolve it identically). Session-targeted + TTL-bounded, so no
+        # cross-session mis-bind; once the owner re-keys to the session-id
+        # this returns None and the session-id path above takes over.
+        from nexus.daemon.t1_lease import discover_t1_transient_for_claude
+        from nexus.session import find_immediate_claude_pid
+
+        addr = discover_t1_transient_for_claude(
+            find_immediate_claude_pid(), config_dir=config_dir
+        )
+        if addr is not None:
+            host, port = addr
+            self._client = chromadb.HttpClient(host=host, port=port)
+            self._session_id = self._resolve_session_id(session_id)
+            return
 
         raise T1ServerNotFoundError(
             "T1 not configured for this process. Either inherit "

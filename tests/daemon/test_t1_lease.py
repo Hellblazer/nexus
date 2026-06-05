@@ -25,7 +25,11 @@ from pathlib import Path
 import pytest
 
 from nexus.daemon.service_registry import ServiceRegistry, mint_owner_token
-from nexus.daemon.t1_lease import T1LeasePublisher, discover_t1_lease
+from nexus.daemon.t1_lease import (
+    T1LeasePublisher,
+    discover_t1_lease,
+    discover_t1_transient_for_claude,
+)
 
 _SERVER_PID = 4242
 _SIBLING_SERVER_PID = 4343
@@ -56,6 +60,7 @@ def _publisher(
     server_pid: int = _SERVER_PID,
     session_resolver=lambda: None,
     owner_token: str | None = None,
+    claude_pid: int | None = None,
 ) -> T1LeasePublisher:
     return T1LeasePublisher(
         registry=registry,
@@ -65,6 +70,7 @@ def _publisher(
         version="1.0.0",
         session_resolver=session_resolver,
         owner_token=owner_token or mint_owner_token(),
+        claude_pid=claude_pid,
     )
 
 
@@ -339,3 +345,85 @@ class TestDiscoverReader:
     ) -> None:
         assert discover_t1_lease(None, config_dir=config_dir, clock=clock) is None
         assert discover_t1_lease("", config_dir=config_dir, clock=clock) is None
+
+
+class TestTransientClaudeFallback:
+    """nexus-0x16i: the cold-start transient-window fallback. A bare Bash
+    sibling with no resolvable session-id finds the owner's transient lease
+    by matching its own immediate Claude ancestor pid (RF-6)."""
+
+    _CLAUDE_PID = 5150
+
+    def test_matches_fresh_transient_lease_by_claude_pid(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        reg = _registry(config_dir, clock)
+        _publisher(
+            reg, session_resolver=lambda: None, claude_pid=self._CLAUDE_PID
+        ).publish()
+        addr = discover_t1_transient_for_claude(
+            self._CLAUDE_PID, config_dir=config_dir, clock=clock
+        )
+        assert addr == (_HOST, _PORT)
+
+    def test_no_match_for_different_claude_pid(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        # A concurrent cold-starting session has a different immediate Claude
+        # ancestor; its transient lease must NOT be grabbed (no mis-bind).
+        reg = _registry(config_dir, clock)
+        _publisher(
+            reg, session_resolver=lambda: None, claude_pid=self._CLAUDE_PID
+        ).publish()
+        assert (
+            discover_t1_transient_for_claude(
+                9999, config_dir=config_dir, clock=clock
+            )
+            is None
+        )
+
+    def test_no_match_for_session_keyed_lease(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        # Once re-keyed to a session-id the record is no longer transient;
+        # the fallback ignores it (the session-id path handles it).
+        reg = _registry(config_dir, clock)
+        _publisher(
+            reg, session_resolver=lambda: "sess-A", claude_pid=self._CLAUDE_PID
+        ).publish()
+        assert (
+            discover_t1_transient_for_claude(
+                self._CLAUDE_PID, config_dir=config_dir, clock=clock
+            )
+            is None
+        )
+
+    def test_no_match_for_expired_transient_lease(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        reg = _registry(config_dir, clock)
+        _publisher(
+            reg, session_resolver=lambda: None, claude_pid=self._CLAUDE_PID
+        ).publish()
+        clock.advance(3.1)  # past TTL
+        assert (
+            discover_t1_transient_for_claude(
+                self._CLAUDE_PID, config_dir=config_dir, clock=clock
+            )
+            is None
+        )
+
+    def test_rekey_drops_claude_pid_hint(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        # After re-key the session record carries no claude_pid (dead weight).
+        reg = _registry(config_dir, clock)
+        sid: dict[str, str | None] = {"v": None}
+        pub = _publisher(
+            reg, session_resolver=lambda: sid["v"], claude_pid=self._CLAUDE_PID
+        )
+        pub.publish()
+        sid["v"] = "sess-A"
+        pub.tick()  # re-keys to sess-A
+        rec = reg.discover("sess-A")
+        assert rec is not None and "claude_pid" not in rec.payload

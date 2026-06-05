@@ -600,12 +600,12 @@ def _t1_publisher(
 class TestT1SessionRekey:
     """CA-3: the transient-key -> session-id re-key has no ``"unknown"``
     collapse and no window where the OWNER or an env-inheriting subprocess
-    is stranded. NOTE: the transient lease is registry-discoverable under
-    the ``server_pid`` key (proving the re-key carry-forward and the owner's
-    ``_t1_state`` breadcrumb), but a bare Claude-Code Bash sibling does NOT
-    read that key in production -- the cold-start Bash-sibling sliver is a
-    documented, tracked limitation (see ``test_t1_discovery`` for the honest
-    production-path behavior), not a discoverability guarantee."""
+    is stranded. This asserts the registry-layer invariant: the transient
+    lease is discoverable under the ``server_pid`` key (the re-key
+    carry-forward + owner ``_t1_state`` breadcrumb). The bare Bash sibling's
+    production read path (matching the transient lease by claude_pid,
+    nexus-0x16i) is covered in ``test_t1_discovery`` /
+    ``test_t1_lease.TestTransientClaudeFallback``."""
 
     def _registry(self, config_dir: Path, clock: _FakeClock) -> ServiceRegistry:
         return ServiceRegistry(
