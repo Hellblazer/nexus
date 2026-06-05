@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
@@ -35,18 +36,44 @@ __all__ = ["PURPOSES_YML", "resolve_purpose"]
 
 _log = logging.getLogger(__name__)
 
+
+def _resolve_purposes_yml() -> Path:
+    """Locate the shipped purposes registry across install layouts.
+
+    The build force-includes ``conexus/plans`` into the wheel at
+    ``nexus/_resources/plans`` (see ``pyproject.toml``
+    ``[tool.hatch.build.targets.wheel.force-include]``), so the
+    canonical lookup is ``importlib.resources.files("nexus")`` — the
+    same idiom as ``repair.py``. The prior
+    ``Path(__file__).parent.parent.parent.parent / "conexus" / "plans"``
+    only resolved in the source tree; in every installed artifact
+    (uv-tool, ``.mcpb``) it pointed at a path that does not exist, so
+    ``_load_registry`` returned ``{}`` and *every* purpose alias
+    resolved to "unknown" (nexus-eesvy). A repo-tree fallback keeps an
+    editable/source checkout working when the resource is unavailable.
+    """
+    try:
+        resource = files("nexus") / "_resources" / "plans" / "purposes.yml"
+        with as_file(resource) as resolved:
+            if Path(resolved).is_file():
+                return Path(resolved)
+    except (ModuleNotFoundError, FileNotFoundError, TypeError):
+        pass
+    return (
+        Path(__file__).resolve().parents[3]
+        / "conexus" / "plans" / "purposes.yml"
+    )
+
+
 #: Path to the shipped purposes registry. Resolved once at import time.
-PURPOSES_YML: Path = (
-    Path(__file__).resolve().parent.parent.parent.parent
-    / "conexus" / "plans" / "purposes.yml"
-)
+PURPOSES_YML: Path = _resolve_purposes_yml()
 
 #: Known catalog link types. Source: ``catalog/tumbler.py:166`` —
 #: ``cites, supersedes, quotes, relates, comments, implements,
 #: implements-heuristic``. Hard-coded here to avoid importing the
 #: catalog (which would create a load-time dependency cycle), and
-#: changes infrequently. Kept in sync via
-#: ``test_purpose_resolve_hits_known_catalog_link_types``.
+#: changes infrequently. Exercised against the real registry by
+#: ``tests/test_purposes_registry.py``.
 _KNOWN_LINK_TYPES: frozenset[str] = frozenset({
     "cites", "supersedes", "quotes", "relates", "comments",
     "implements", "implements-heuristic",

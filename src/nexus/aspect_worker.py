@@ -139,14 +139,10 @@ class AspectExtractionWorker:
 
     Constructor injection: caller may pass ``poll_interval`` and
     ``stale_timeout`` for tests; defaults are tuned for production.
-    """
 
-    # Reclaim runs every N polls rather than every poll: at the
-    # default poll_interval=2s and reclaim_every=15, stale-row
-    # reclamation fires every ~30s. Suppresses the O(N) UPDATE
-    # storm a large stuck queue would otherwise see, while still
-    # recovering crashed-worker rows within one reclaim cycle.
-    _RECLAIM_EVERY_N_POLLS = 15
+    Stale-row reclamation is owned by the T2 daemon, not this worker
+    (nexus-we61e) — see ``_run_loop``.
+    """
 
     # Batch-extraction threshold (RDR-089 Phase D). When the queue
     # has at least this many pending rows, drain them in a single
@@ -168,7 +164,6 @@ class AspectExtractionWorker:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._poll_count = 0
 
     def start(self) -> None:
         """Spawn the daemon thread. Idempotent — calling twice does
@@ -241,17 +236,23 @@ class AspectExtractionWorker:
         """Drain loop. Runs until ``_stop_event`` is set.
 
         Each iteration:
-          1. Reclaim stale ``in_progress`` rows (every
-             ``_RECLAIM_EVERY_N_POLLS`` iterations — frequency guard
-             on the O(N) UPDATE for large stuck queues).
-          2. Claim a batch of up to ``batch_size`` pending rows.
-          3. If empty: sleep ``poll_interval``.
-          4. If batch_size >= 2: invoke extract_aspects_batch (one
+          1. Claim a batch of up to ``batch_size`` pending rows.
+          2. If empty: sleep ``poll_interval``.
+          3. If batch_size >= 2: invoke extract_aspects_batch (one
              Claude call extracts all rows). RDR-089 Phase D path —
              cost-amortises across rows.
-          5. If batch_size == 1: invoke single-paper extract_aspects
+          4. If batch_size == 1: invoke single-paper extract_aspects
              (existing path). Small-queue case where batch overhead
              is not worth it.
+
+        Stale-row reclamation is NOT done here (nexus-we61e). It is a
+        GLOBAL janitor op, but this worker runs inside every nx-mcp
+        process, so N workers each RPC'd a redundant ``reclaim_stale``
+        UPDATE into the single T2 daemon — N-fold WAL contention that
+        pegged a core on ``database is locked`` after a restart with a
+        stale-row backlog. Reclaim now runs exactly once, on the
+        daemon's own periodic loop (``T2Daemon._reclaim_stale_loop``),
+        which is singular by construction.
 
         All exceptions inside the loop are caught and recorded; the
         worker thread itself never dies from a row's failure.
@@ -259,16 +260,9 @@ class AspectExtractionWorker:
         from nexus.db.t2.aspect_extraction_queue import QueueRow
         from nexus.mcp_infra import t2_index_write
         while not self._stop_event.is_set():
-            # Increment unconditionally so a sustained T2 unavailability
-            # does not pin _poll_count at a multiple of
-            # _RECLAIM_EVERY_N_POLLS and amplify the reclaim UPDATE
-            # against an already-stressed database.
-            self._poll_count += 1
-            do_reclaim = self._poll_count % self._RECLAIM_EVERY_N_POLLS == 0
             try:
-                # RDR-128 P3 (nexus-sbxbe.3): route the hot poll block
-                # (reclaim + claim, every ~poll_interval seconds) through
-                # the T2 daemon so this worker — which runs inside every
+                # RDR-128 P3 (nexus-sbxbe.3): route the claim through the
+                # T2 daemon so this worker — which runs inside every
                 # nx-mcp process — stops opening memory.db directly and
                 # contending on its single WAL writer lock. This is the
                 # every-2s contention behind the recurring
@@ -279,11 +273,13 @@ class AspectExtractionWorker:
                 # `complete_aspect` method (AspectRecord travels as an
                 # asdict() field dict). The worker no longer opens
                 # memory.db on ANY path.
+                #
+                # nexus-we61e: ``reclaim_stale`` is deliberately NOT
+                # called here. It is a global janitor op and running it
+                # from every per-process worker meant N redundant reclaim
+                # UPDATEs RPC'd into the one daemon. The daemon now owns
+                # reclaim on its own periodic loop.
                 def _poll(t2):
-                    if do_reclaim:
-                        t2.aspect_queue.reclaim_stale(
-                            timeout_seconds=self._stale_timeout_seconds,
-                        )
                     return t2.aspect_queue.claim_batch(self._batch_size)
 
                 rows = t2_index_write(_poll)
