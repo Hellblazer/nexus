@@ -222,7 +222,6 @@ def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> N
 def test_check_t3_daemon_version_no_daemon(monkeypatch) -> None:
     from nexus import health
 
-    monkeypatch.setattr(health, "find_t3_daemon", lambda: None, raising=False)
     monkeypatch.setattr(
         "nexus.daemon.discovery.find_t3_daemon", lambda config_dir=None: None
     )
@@ -230,6 +229,20 @@ def test_check_t3_daemon_version_no_daemon(monkeypatch) -> None:
     assert len(results) == 1
     assert results[0].ok is True
     assert "no t3 daemon" in results[0].detail.lower()
+
+
+def test_check_t3_daemon_version_lease_without_version(monkeypatch) -> None:
+    # A pre-RDR-149 daemon lease carries no version field — informational, ok.
+    from nexus import health
+
+    monkeypatch.setattr(
+        "nexus.daemon.discovery.find_t3_daemon",
+        lambda config_dir=None: {"tcp_host": "127.0.0.1", "tcp_port": 1},
+    )
+    results = health._check_t3_daemon_version()
+    assert len(results) == 1
+    assert results[0].ok is True
+    assert "no version" in results[0].detail.lower()
 
 
 def test_check_t3_daemon_version_match(monkeypatch) -> None:

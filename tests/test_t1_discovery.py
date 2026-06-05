@@ -322,6 +322,33 @@ class TestT1ColdStartTransientWindow:
             T1Database()
         fake_chromadb.HttpClient.assert_not_called()
 
+    def test_unresolvable_claude_pid_falls_through_to_raise(
+        self, tmp_path, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+
+        fake_chromadb = MagicMock()
+        monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED",
+                    "NEXUS_SKIP_T1", "NX_SESSION_ID"):
+            monkeypatch.delenv(var, raising=False)
+
+        _publish_t1_session_lease(
+            tmp_path, None, "127.0.0.1", 9999, server_pid=70707, claude_pid=8080
+        )
+        # No claude ancestor resolvable (PPID chain yields 0): the fallback
+        # cannot target anything and the constructor fails loud.
+        monkeypatch.setattr(
+            "nexus.session.find_immediate_claude_pid", lambda start_pid=None: 0
+        )
+
+        from nexus.db.t1 import T1Database, T1ServerNotFoundError
+        with pytest.raises(T1ServerNotFoundError):
+            T1Database()
+        fake_chromadb.HttpClient.assert_not_called()
+
     def test_mcp_dispatched_subprocess_in_transient_window_uses_env(
         self, tmp_path, monkeypatch
     ):

@@ -373,7 +373,16 @@ method and the Approach item that discharges it.
 - Post-migration, an inverse-grep audit shows **zero** surviving bespoke copies:
   no `find_immediate_claude_pid` publish path, no per-tier orphan sweep, no
   per-tier election outside the primitive (Approach item 6), mirroring the
-  RDR-146 boundary-lint-to-0 discipline.
+  RDR-146 boundary-lint-to-0 discipline. "No `find_immediate_claude_pid`
+  publish path" means specifically: it is never a T1 scope **key** (no
+  `t1_addr.<claude_pid>` record, no claude-pid-keyed discovery). The
+  nexus-0x16i cold-start fallback (`discover_t1_transient_for_claude`)
+  reintroduces `find_immediate_claude_pid` as a *transient-record payload
+  hint* — a read-path window-target dropped on re-key, never a scope key — and
+  is a permitted, tracked exception. The mechanical gate
+  (`tests/daemon/test_lifecycle_gate.py`) enforces the scope-key invariant
+  (`LeaseRecord` + the election flock live only in the primitive); it does not
+  ban the payload-hint use.
 - A live multi-session shakeout: in a real session, a sibling shell `nx scratch
   list` succeeds whenever the MCP T1 server is up (the #1114 reproducer), and a
   `nx upgrade` cycles T3 as well as T2 (the #1112 reproducer).
