@@ -156,10 +156,20 @@ class T1LeasePublisher:
             "session_id": session_id,
             "server_pid": self._server_pid,
         }
-        # The claude_pid window-target is only meaningful while transient
-        # (no session-id resolves yet); once session-keyed, readers resolve
-        # by session-id and the hint is dead weight.
-        if session_id is None and self._claude_pid is not None:
+        # Stamp the owner's immediate Claude ancestor pid into EVERY record,
+        # transient and session-keyed alike (nexus-gff3g). A sibling shell whose
+        # resolved session-id diverges from the owner's lease key cannot find the
+        # lease by session-id, and the claude-ancestor-pid fallback is its only
+        # path to its own T1. Divergence is the common case, not an edge case:
+        # the MCP keys on NX_SESSION_ID while the SessionStart hook writes
+        # current_session, and the two Claude-provided ids differ on resume,
+        # with multiple concurrent frontends, and under version skew. The prior
+        # behavior dropped the hint the instant a session-id resolved, so a warm
+        # publish (NX_SESSION_ID set at MCP startup, the common config) never
+        # recorded it and silently killed the fallback. Readers only ever use
+        # claude_pid as a fallback AFTER the session-id path misses, so carrying
+        # it on session-keyed records is free.
+        if self._claude_pid is not None:
             payload["claude_pid"] = self._claude_pid
         return payload
 
@@ -345,8 +355,17 @@ def discover_t1_transient_for_claude(
             record = LeaseRecord.from_json(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, KeyError):
             continue
-        if record.payload.get("session_id") is not None:
-            continue  # session-keyed: resolved via discover_t1_lease, not here
+        # nexus-gff3g: match transient AND session-keyed leases by claude_pid.
+        # By the time control reaches here the session-id path
+        # (discover_t1_lease) has already missed. A session-keyed lease whose
+        # owner shares this sibling's immediate Claude ancestor pid is still the
+        # sibling's own T1 — even though the owner's session-id label diverges
+        # from what this process resolves (NX_SESSION_ID given to the MCP vs
+        # current_session written by the SessionStart hook). The match stays
+        # ancestor-pid-targeted (a different session has a different immediate
+        # Claude ancestor) and TTL-bounded (only fresh leases), so there is no
+        # cross-session mis-bind. The prior `session_id is not None: continue`
+        # skip made this fallback inert for every warm/re-keyed lease.
         if record.payload.get("claude_pid") != claude_pid:
             continue
         if not record.is_fresh(now):
