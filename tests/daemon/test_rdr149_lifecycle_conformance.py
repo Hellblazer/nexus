@@ -55,11 +55,6 @@ from typing import Any, Optional
 
 import pytest
 
-from nexus.daemon import discovery as _disc
-from nexus.daemon.t3_daemon import (
-    _build_payload as _t3_build_payload,
-    _write_discovery_atomic as _t3_write_atomic,
-)
 from nexus.daemon.service_registry import (
     ServiceRegistry,
     ServiceSupervisor,
@@ -239,66 +234,23 @@ class T1RecordHarness(RecordHarness):
         return len(list(cfg.glob("t1_addr.*")))
 
 
-class T3RecordHarness(RecordHarness):
-    tier = "t3"
-    scope = "uid"
-    has_self_heal = False  # RF-4: T3 has no re-assert loop
-    has_version_cycle = False  # #1112: upgrade-cycle does not cover T3
+class _LeaseHarness(RecordHarness):
+    """Shared harness for tiers migrated onto the leased registry (T2 in P2,
+    T3 in P3). Drives the SAME ``ServiceRegistry`` + ``ServiceSupervisor``
+    the migrated daemon uses, with the injected clock, so the lease
+    semantics (generation, fencing, TTL liveness, pid-reuse immunity,
+    supervisor self-heal) are exercised exactly as in production."""
 
-    def _path(self) -> Path:
-        return _disc.discovery_path(self._cd, tier="t3")
-
-    def publish(self, owner: int = _OWNER_PID) -> None:
-        self._alive.mark_alive(owner)
-        payload = _t3_build_payload(
-            tcp_port=0, pid=owner, local_path=self._cd / "chroma",
-            daemon_version="1.0.0",
-        )
-        _t3_write_atomic(self._path(), payload)
-
-    def discover(self, owner: int = _OWNER_PID) -> Optional[dict[str, Any]]:
-        rec = _disc.find_t3_daemon(self._cd)
-        if rec is None:
-            return None
-        return {"pid": rec.get("pid"), "owner": rec.get("pid"), "generation": None}
-
-    def simulate_ungraceful_death(self, owner: int = _OWNER_PID) -> None:
-        self._alive.mark_dead(owner)
-
-    def advance_to_reap(self) -> None:
-        return
-
-    def reap(self) -> None:
-        _disc.find_t3_daemon(self._cd)  # validator unlinks a dead-pid record
-
-    def external_delete(self, owner: int = _OWNER_PID) -> None:
-        self._path().unlink(missing_ok=True)
-
-    def self_heal_tick(self, owner: int = _OWNER_PID) -> None:
-        return  # T3 has no re-assert loop (RF-4)
-
-    def stale_reassert(self, owner: int) -> None:
-        self.publish(owner)  # no fencing: the stale owner rewrites the record
-
-    def owners_in_scope(self, session_id: str) -> int:
-        return 1 if self.discover() is not None else 0
-
-
-class T2RecordHarness(RecordHarness):
-    """RDR-149 P2: T2 now rides the leased registry. This harness drives the
-    SAME ``ServiceRegistry`` the migrated daemon uses, with the injected
-    clock, so the lease semantics (generation, fencing, TTL liveness,
-    pid-reuse immunity) are exercised exactly as in production."""
-
-    tier = "t2"
     scope = "uid"
     has_self_heal = True
     has_version_cycle = True
+    _REGISTRY_TIER: str = ""
 
     def __init__(self, config_dir: Path, alive: _AliveSet, clock: _FakeClock) -> None:
         super().__init__(config_dir, alive, clock)
         self._registry = ServiceRegistry(
-            dir=config_dir, tier="t2", clock=clock, ttl=3.0, heartbeat_interval=1.0
+            dir=config_dir, tier=self._REGISTRY_TIER, clock=clock,
+            ttl=3.0, heartbeat_interval=1.0,
         )
         self._scope = str(os.getuid())
         # One ServiceSupervisor per owner, exactly as the migrated daemon
@@ -357,6 +309,22 @@ class T2RecordHarness(RecordHarness):
         return 1 if self.discover() is not None else 0
 
 
+class T2RecordHarness(_LeaseHarness):
+    """RDR-149 P2: T2 rides the leased registry."""
+
+    tier = "t2"
+    _REGISTRY_TIER = "t2"
+
+
+class T3RecordHarness(_LeaseHarness):
+    """RDR-149 P3: T3 rides the same leased registry, heartbeated by the
+    long-lived T3 supervisor. Identical lease semantics to T2 (one problem,
+    two uid-scoped tiers)."""
+
+    tier = "t3"
+    _REGISTRY_TIER = "t3"
+
+
 _HARNESS_CLASSES: dict[str, type[RecordHarness]] = {
     "t1": T1RecordHarness,
     "t2": T2RecordHarness,
@@ -377,7 +345,7 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
     "self_heal": {
         "t1": (GAP, "#1114: session.py has no self-heal re-assert; RDR-149 P5"),
         "t2": "pass",
-        "t3": (GAP, "RF-4: T3 daemon has no re-assert loop; RDR-149 P3"),
+        "t3": "pass",  # RDR-149 P3: supervisor heartbeat self-heals
     },
     "concurrent_one_owner": {
         "t1": (GAP, "T1 keys on claude_pid not session-id; RDR-149 P5/CA-3"),
@@ -387,23 +355,23 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
     "version_cycle": {
         "t1": (GAP, "T1 not covered by any upgrade-cycle; RDR-149 P5"),
         "t2": "pass",
-        "t3": (GAP, "#1112: upgrade-cycle does not cover T3; RDR-149 P3"),
+        "t3": "pass",  # RDR-149 P3: supervisor owns cycle_to_current (#1112)
     },
-    # RDR-149 P2: T2 rides the primitive now, so its lease properties pass.
+    # RDR-149 P2/P3: T2 and T3 ride the primitive, so their lease properties pass.
     "pid_reuse_immunity": {
         "t1": (SPEC, "lease/generation kills pid-reuse; RDR-149 P5"),
         "t2": "pass",
-        "t3": (SPEC, "validator trusts a reused live pid; RDR-149 P3"),
+        "t3": "pass",
     },
     "restart_higher_generation": {
         "t1": (SPEC, "RF-3: no generation primitive; RDR-149 P5"),
         "t2": "pass",
-        "t3": (SPEC, "RF-3: no generation primitive; RDR-149 P3"),
+        "t3": "pass",
     },
     "restart_race_fencing": {
         "t1": (SPEC, "CA-4: no fencing token; RDR-149 P5"),
         "t2": "pass",
-        "t3": (SPEC, "CA-4: no fencing token; RDR-149 P3"),
+        "t3": "pass",
     },
 }
 
@@ -586,10 +554,12 @@ class TestMatrixIsNotVacuous:
         assert cell != "pass" and cell[0] == GAP
         assert "#1114" in cell[1]
 
-    def test_1112_t3_version_cycle_is_red(self) -> None:
-        cell = EXPECTATIONS["version_cycle"]["t3"]
-        assert cell != "pass" and cell[0] == GAP
-        assert "#1112" in cell[1]
+    def test_1112_t3_version_cycle_fixed_structurally(self) -> None:
+        # #1112 (T3 stale after upgrade) was the red-first GAP cell through
+        # P0-P2; RDR-149 P3 fixed it structurally by moving the version-skew
+        # cycle onto the shared supervisor (cycle_to_current), so the cell is
+        # now green. This guards against a regression silently re-opening it.
+        assert EXPECTATIONS["version_cycle"]["t3"] == "pass"
 
     def test_t2_passes_every_gap_t1_or_t3_fails(self) -> None:
         # For any property where T1 or T3 has a GAP, T2 must pass it; a GAP
@@ -614,6 +584,21 @@ class TestMatrixIsNotVacuous:
         ):
             assert EXPECTATIONS[prop]["t2"] == "pass", (
                 f"T2 lease property {prop!r} regressed to non-pass after P2"
+            )
+
+    def test_t3_migration_flipped_its_cells(self) -> None:
+        # RDR-149 P3 ratchet: T3 now rides the primitive + the supervisor
+        # heartbeat/cycle, so #1112 (version_cycle) and self_heal go green
+        # and the lease SPEC properties pass. A regression surfaces here.
+        for prop in (
+            "self_heal",
+            "version_cycle",
+            "pid_reuse_immunity",
+            "restart_higher_generation",
+            "restart_race_fencing",
+        ):
+            assert EXPECTATIONS[prop]["t3"] == "pass", (
+                f"T3 lease property {prop!r} regressed to non-pass after P3"
             )
 
     def test_every_cell_covers_all_tiers(self) -> None:

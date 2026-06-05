@@ -227,62 +227,75 @@ def t3_start_cmd(
     long-running foreground process and can react to crashes via
     ``KeepAlive.Crashed`` / ``Restart=on-failure``.
     """
-    from nexus.config import _default_local_path
+    import subprocess
+
+    from nexus.config import _default_local_path, is_local_mode
+    from nexus.daemon.discovery import find_t3_daemon
     from nexus.daemon.t3_daemon import (
         T3CloudModeError,
         T3StartError,
-        _pid_is_alive,
-        start_t3_daemon,
-        stop_t3_daemon,
+        run_t3_supervisor,
     )
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     local_path = Path(local_path_str) if local_path_str else _default_local_path()
-    try:
-        payload = start_t3_daemon(config_dir=config_dir, local_path=local_path)
-    except T3CloudModeError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-    except T3StartError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(2)
 
-    if announce_stdout:
-        click.echo(json.dumps(payload))
-    else:
+    if foreground:
+        # RDR-149 P3: the blocking long-lived supervisor — spawns chroma,
+        # publishes the lease, and HEARTBEATS it every interval while chroma
+        # is alive. This is the path the launchd/systemd templates run.
+        try:
+            code = run_t3_supervisor(config_dir=config_dir, local_path=local_path)
+        except T3CloudModeError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(1)
+        except T3StartError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(2)
+        sys.exit(code)
+
+    # Non-foreground: ensure a detached supervisor is running so the lease
+    # is continuously heartbeated, then return. Idempotent on a live lease.
+    if not is_local_mode():
         click.echo(
-            f"T3 daemon running on {payload['tcp_host']}:{payload['tcp_port']} "
-            f"(pid={payload['pid']}, local_path={payload['local_path']})."
+            "Error: T3 daemon is a no-op in cloud mode. Set NX_LOCAL=1 to "
+            "opt into local mode.",
+            err=True,
         )
+        sys.exit(1)
 
-    if not foreground:
-        return
-
-    # --foreground: supervisor-friendly blocking loop. The chroma
-    # subprocess is in its own session (start_new_session=True), so
-    # SIGTERM to this CLI does not propagate automatically — the signal
-    # handler below explicitly calls stop_t3_daemon to clean up.
-    stop_requested = threading.Event()
-
-    def _on_signal(_signum, _frame) -> None:
-        stop_requested.set()
-
-    signal.signal(signal.SIGTERM, _on_signal)
-    signal.signal(signal.SIGINT, _on_signal)
-
-    pid = payload["pid"]
-    while not stop_requested.is_set():
-        if not _pid_is_alive(pid):
+    existing = find_t3_daemon(config_dir)
+    if existing is None:
+        argv = [
+            *_resolve_nx_bin(), "daemon", "t3", "start", "--foreground",
+            "--config-dir", str(config_dir), "--local-path", str(local_path),
+        ]
+        subprocess.Popen(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            existing = find_t3_daemon(config_dir)
+            if existing is not None:
+                break
+            time.sleep(0.2)
+        if existing is None:
             click.echo(
-                f"T3 chroma subprocess (pid={pid}) exited unexpectedly; "
-                "the supervisor will restart it.",
+                "Error: T3 supervisor did not become ready within 15s.",
                 err=True,
             )
-            sys.exit(3)
-        time.sleep(0.5)
+            sys.exit(2)
 
-    stop_t3_daemon(config_dir=config_dir)
-    sys.exit(0)
+    if announce_stdout:
+        click.echo(json.dumps(existing))
+    else:
+        click.echo(
+            f"T3 daemon running on {existing['tcp_host']}:{existing['tcp_port']} "
+            f"(pid={existing['pid']}, local_path={existing.get('local_path')})."
+        )
 
 
 @t3_group.command("stop")

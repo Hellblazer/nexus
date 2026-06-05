@@ -29,12 +29,19 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import structlog
+
+from nexus.daemon.service_registry import (
+    DEFAULT_HEARTBEAT_INTERVAL,
+    ServiceRegistry,
+    ServiceSupervisor,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -223,109 +230,289 @@ def _wait_for_ready(
 _T3_SPAWN_LOCK_FILE: str = "t3_spawn.lock"
 
 
-def start_t3_daemon(*, config_dir: Path, local_path: Path) -> dict[str, Any]:
-    """Start the T3 chroma daemon (local mode only). Returns the
-    discovery payload that was written to
-    ``t3_discovery_path(config_dir)``.
+def _flatten_lease_payload(record: Any) -> dict[str, Any]:
+    """Flatten a ``LeaseRecord`` to the legacy-shaped dict that
+    ``start_t3_daemon`` callers expect (top-level tcp_host / tcp_port /
+    pid / local_path) plus the lease metadata."""
+    ep = dict(record.endpoint)
+    return {
+        "format_version": 1,
+        "tcp_host": ep.get("tcp_host"),
+        "tcp_port": ep.get("tcp_port"),
+        "pid": ep.get("pid"),  # the chroma subprocess pid
+        "local_path": ep.get("local_path"),
+        "daemon_version": record.version,
+        "generation": record.generation,
+        "owner_token": record.owner_token,
+        "supervisor_pid": record.payload.get("supervisor_pid"),
+    }
 
-    Idempotent on a live daemon: if a discovery file exists and its PID
-    is still alive, returns the existing payload without spawning a
-    duplicate. Parallel callers are serialised via an fcntl exclusive
-    lock on ``~/.config/nexus/t3_spawn.lock`` so two threads / processes
-    racing into a fresh-spawn branch do not both spawn separate chroma
-    subprocesses.
+
+class T3Supervisor:
+    """RDR-149 P3: the long-lived T3 supervisor (the user-chosen model).
+
+    Mirrors the T2 daemon's role for chroma: it spawns the managed
+    ``chroma run`` subprocess, publishes a lease via the shared
+    ``ServiceRegistry`` (scope = uid), and re-stamps that lease every
+    heartbeat interval — but ONLY while its chroma child is alive AND
+    serving (RF-4: liveness = chroma pid alive ∧ port reachable; chroma
+    cannot heartbeat a nexus lease itself). The lease endpoint carries
+    chroma's connection fields + pid; the lease ``payload`` carries the
+    supervisor's own pid (the process ``stop`` signals).
+
+    Version-skew cycle (the #1112 fix): for a long-lived Python supervisor,
+    "cycle to the current version" means RESTARTING THE SUPERVISOR PROCESS
+    — respawning chroma alone cannot refresh the supervisor's own (now
+    stale) bytecode. So the cycle is a process restart, orchestrated
+    uniformly across all supervised tiers by the upgrade
+    (``upgrade._cycle_supervised_daemons_to_current``), not an in-process
+    method here. ``ServiceSupervisor.cycle_to_current`` remains the generic
+    in-process primitive for services whose code is not process-bound.
+    """
+
+    def __init__(
+        self,
+        *,
+        config_dir: Path,
+        local_path: Path,
+        lease_clock: Any = time.time,
+        supervised: bool = False,
+    ) -> None:
+        self._config_dir = config_dir
+        self._local_path = local_path
+        self._lease_clock = lease_clock
+        # Only the long-lived runner (run_t3_supervisor) records its pid as
+        # the lease's supervisor_pid — that is the process ``stop`` signals.
+        # A bare start_t3_daemon (no persistent heartbeater) must NOT record
+        # the caller's pid, or ``stop`` would signal an unrelated process
+        # (e.g. the test runner) instead of chroma.
+        self._supervised = supervised
+        self._scope = str(os.getuid())
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._registry: ServiceRegistry | None = None
+        self._supervisor: ServiceSupervisor | None = None
+        self._payload: dict[str, Any] | None = None
+
+    @property
+    def chroma_pid(self) -> int | None:
+        return self._proc.pid if self._proc is not None else None
+
+    @property
+    def fenced(self) -> bool:
+        return self._supervisor is not None and self._supervisor.fenced
+
+    def _spawn_chroma(self) -> tuple[subprocess.Popen[bytes], int]:
+        self._local_path.mkdir(parents=True, exist_ok=True)
+        chroma = _find_chroma()
+        port = _allocate_free_port()
+        proc = subprocess.Popen(
+            [chroma, "run", "--host", _T3_HOST, "--port", str(port),
+             "--path", str(self._local_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            _wait_for_ready(_T3_HOST, port, proc, _READY_TIMEOUT)
+        except T3StartError:
+            t3_discovery_path(self._config_dir).unlink(missing_ok=True)
+            raise
+        return proc, port
+
+    def _publish(self, port: int) -> None:
+        assert self._proc is not None
+        endpoint = {
+            "tcp_host": _T3_HOST,
+            "tcp_port": port,
+            "pid": self._proc.pid,
+            "local_path": str(self._local_path),
+        }
+        self._endpoint_port = port
+        self._registry = ServiceRegistry(
+            dir=self._config_dir, tier="t3", clock=self._lease_clock
+        )
+        self._supervisor = ServiceSupervisor(
+            self._registry,
+            self._scope,
+            version=_daemon_version(),
+            endpoint_provider=lambda: endpoint,
+            payload={"supervisor_pid": os.getpid()} if self._supervised else {},
+        )
+        record = self._supervisor.publish_once()
+        self._payload = _flatten_lease_payload(record)
+
+    def start(self) -> dict[str, Any]:
+        """Acquire the spawn lock, spawn chroma, publish the lease. Returns
+        the flat discovery payload. Idempotent: a live lease short-circuits
+        to the existing payload without a duplicate spawn."""
+        import fcntl
+
+        from nexus.config import is_local_mode
+
+        if not is_local_mode():
+            raise T3CloudModeError(
+                "T3 daemon is a no-op in cloud mode. chromadb's CloudClient "
+                "is already HTTP-served; there is no local daemon to run. "
+                "Set NX_LOCAL=1 to opt into local mode."
+            )
+
+        from nexus.daemon.discovery import find_t3_daemon
+
+        self._config_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self._config_dir / _T3_SPAWN_LOCK_FILE
+        lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            existing = find_t3_daemon(self._config_dir)
+            if existing is not None:
+                _log.info(
+                    "t3_daemon_already_running",
+                    pid=existing.get("pid"),
+                    tcp_port=existing.get("tcp_port"),
+                )
+                self._payload = existing
+                return existing
+
+            proc, port = self._spawn_chroma()
+            self._proc = proc
+            self._publish(port)
+            _log.info(
+                "t3_daemon_started",
+                pid=proc.pid,
+                tcp_port=port,
+                local_path=str(self._local_path),
+            )
+            assert self._payload is not None
+            return self._payload
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+
+    def _chroma_reachable(self) -> bool:
+        """RF-4: liveness is (chroma pid alive) AND (chroma port reachable).
+        A wedged chroma (pid alive, not accepting connections) must NOT keep
+        the lease fresh, or clients resolve a dead-but-not-exited endpoint —
+        exactly the stale-but-live-pid class the substrate exists to kill."""
+        port = getattr(self, "_endpoint_port", None)
+        if port is None:
+            return False
+        try:
+            with socket.create_connection((_T3_HOST, port), timeout=0.5):
+                return True
+        except OSError:
+            return False
+
+    def heartbeat_once(self) -> bool:
+        """Re-stamp the lease iff chroma is alive AND serving (RF-4). Returns
+        False only when chroma has EXITED (the caller stops; the process
+        supervisor restarts us). A transiently-unreachable-but-alive chroma
+        returns True but does NOT re-stamp, so the lease ages out and clients
+        see 'down' until chroma serves again."""
+        if self._proc is None or self._supervisor is None:
+            return False
+        if self._proc.poll() is not None:
+            return False  # chroma exited; stop heartbeating so the lease ages out
+        if not self._chroma_reachable():
+            _log.warning("t3_daemon_chroma_unreachable", port=self._endpoint_port)
+            return True  # keep supervising; skip the heartbeat so the lease expires
+        self._supervisor.heartbeat_tick()
+        if self._supervisor.fenced:
+            _log.warning("t3_daemon_lease_fenced", scope=self._scope)
+        return True
+
+    def _stop_chroma(self) -> None:
+        if self._proc is None:
+            return
+        from nexus.util.process_group import safe_killpg
+
+        pid = self._proc.pid
+        if _pid_is_alive(pid):
+            safe_killpg(pid, signal.SIGTERM)
+            deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
+            while time.monotonic() < deadline and _pid_is_alive(pid):
+                time.sleep(0.1)
+            if _pid_is_alive(pid):
+                safe_killpg(pid, signal.SIGKILL)
+        self._proc = None
+
+    def stop(self) -> None:
+        """Relinquish the lease (own-record-only) and stop chroma."""
+        if self._registry is not None and self._supervisor is not None:
+            rec = self._supervisor.record
+            if rec is not None:
+                self._registry.relinquish(rec)
+        self._stop_chroma()
+        self._supervisor = None
+        self._registry = None
+        self._payload = None
+
+
+def start_t3_daemon(*, config_dir: Path, local_path: Path) -> dict[str, Any]:
+    """Spawn the managed chroma subprocess and publish its lease, returning
+    the flat discovery payload.
+
+    RDR-149 P3: the on-disk record is now a leased registry record; the
+    returned dict keeps the legacy flat shape (top-level tcp_host /
+    tcp_port / pid / local_path) for back-compat. Continuous lease
+    heartbeating is provided by the long-lived supervisor
+    (``run_t3_supervisor``, the ``--foreground`` path the service
+    templates run); a bare ``start_t3_daemon`` publishes a lease that the
+    next supervisor tick (or the TTL grace window) covers.
+
+    Idempotent on a live lease; parallel callers serialise on the
+    ``t3_spawn.lock`` fcntl lock (inside ``T3Supervisor.start``).
 
     Raises:
         T3CloudModeError: when ``is_local_mode()`` is False.
         T3StartError: when chroma cannot be located or fails to become
             ready within ``_READY_TIMEOUT``.
     """
-    import fcntl
+    return T3Supervisor(config_dir=config_dir, local_path=local_path).start()
 
-    from nexus.config import is_local_mode
 
-    if not is_local_mode():
-        raise T3CloudModeError(
-            "T3 daemon is a no-op in cloud mode. chromadb's CloudClient "
-            "is already HTTP-served; there is no local daemon to run. "
-            "Set NX_LOCAL=1 to opt into local mode."
-        )
+def run_t3_supervisor(*, config_dir: Path, local_path: Path) -> int:
+    """Blocking long-lived T3 supervisor (the ``--foreground`` path).
 
-    disc_path = t3_discovery_path(config_dir)
-    # Acquire the spawn lock before BOTH the discovery-check and the
-    # subprocess spawn so two parallel callers either both find the
-    # discovery file (the second after the first wrote it) or both go
-    # through the spawn path serialised.
-    config_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = config_dir / _T3_SPAWN_LOCK_FILE
-    lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        existing = _read_discovery(disc_path)
-        if existing is not None:
-            existing_pid = existing.get("pid")
-            if isinstance(existing_pid, int) and _pid_is_alive(existing_pid):
-                _log.info(
-                    "t3_daemon_already_running",
-                    pid=existing_pid,
-                    tcp_port=existing.get("tcp_port"),
-                )
-                return existing
-            _log.info(
-                "t3_daemon_stale_discovery",
-                pid=existing_pid,
-                path=str(disc_path),
-            )
+    Spawns chroma, publishes the lease, then heartbeats it every interval
+    while chroma is alive. On SIGTERM/SIGINT it relinquishes the lease and
+    stops chroma; if chroma exits on its own it returns a non-zero code so
+    the process supervisor (launchd KeepAlive / systemd Restart) respawns.
+    Returns the intended process exit code.
+    """
+    # P3 review H-3: register signal handlers BEFORE start(), so a SIGTERM
+    # arriving during chroma startup (up to _READY_TIMEOUT) is captured and
+    # leads to a clean stop() rather than the default handler killing us and
+    # orphaning chroma / leaking the lease.
+    stop_requested = threading.Event()
 
-        local_path.mkdir(parents=True, exist_ok=True)
-        chroma = _find_chroma()
-        port = _allocate_free_port()
+    def _on_signal(_signum: int, _frame: Any) -> None:
+        stop_requested.set()
 
-        proc = subprocess.Popen(
-            [
-                chroma, "run",
-                "--host", _T3_HOST,
-                "--port", str(port),
-                "--path", str(local_path),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
 
-        try:
-            _wait_for_ready(_T3_HOST, port, proc, _READY_TIMEOUT)
-        except T3StartError:
-            # Either timeout (proc.kill called inside _wait_for_ready) or
-            # exit-before-ready (proc already terminated). Clean up the
-            # possibly-half-written discovery file so a follow-up start
-            # does not trip stale-detection with a confusing payload.
-            disc_path.unlink(missing_ok=True)
-            raise
+    sup = T3Supervisor(
+        config_dir=config_dir, local_path=local_path, supervised=True
+    )
+    sup.start()
 
-        payload = _build_payload(
-            tcp_port=port,
-            pid=proc.pid,
-            local_path=local_path,
-            daemon_version=_daemon_version(),
-        )
-        _write_discovery_atomic(disc_path, payload)
-        _log.info(
-            "t3_daemon_started",
-            pid=proc.pid,
-            tcp_port=port,
-            local_path=str(local_path),
-        )
-        return payload
-    finally:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        try:
-            os.close(lock_fd)
-        except OSError:
-            pass
+    exit_code = 0
+    # A signal during start() -> stop immediately (start already published;
+    # stop() relinquishes + tears down chroma).
+    while not stop_requested.is_set():
+        if not sup.heartbeat_once():
+            _log.warning("t3_supervisor_chroma_exited", msg="chroma child gone")
+            exit_code = 3
+            break
+        time.sleep(DEFAULT_HEARTBEAT_INTERVAL)
+    sup.stop()
+    return exit_code
 
 
 def stop_t3_daemon(*, config_dir: Path) -> int | None:
@@ -338,13 +525,56 @@ def stop_t3_daemon(*, config_dir: Path) -> int | None:
     """
     from nexus.util.process_group import safe_killpg
 
+    from nexus.daemon.discovery import (
+        find_t3_daemon,
+        is_lease_record,
+        normalize_discovery_view,
+    )
+
     disc_path = t3_discovery_path(config_dir)
     payload = _read_discovery(disc_path)
     if payload is None:
         _log.info("t3_daemon_stop_noop", reason="no_discovery_file")
         return None
 
-    pid = payload.get("pid")
+    # RDR-149 P3: prefer signalling the long-lived supervisor — it
+    # relinquishes the lease and tears down chroma's process group itself.
+    # The supervisor pid rides the lease ``payload.supervisor_pid``; the
+    # chroma pid is the endpoint pid (the bare-start / legacy fallback).
+    #
+    # CRITICAL (P3 review C-1): only trust ``supervisor_pid`` from a FRESH
+    # lease. A stale lease left by a SIGKILL'd supervisor names a pid that
+    # the kernel may have recycled to an unrelated same-uid process; the
+    # freshness gate prevents SIGTERM-ing it. A stale lease falls through to
+    # the chroma-pid path (also dead by then -> a clean unlink).
+    supervisor_pid = None
+    if is_lease_record(payload) and find_t3_daemon(config_dir) is not None:
+        supervisor_pid = (payload.get("payload") or {}).get("supervisor_pid")
+    if (
+        isinstance(supervisor_pid, int)
+        and supervisor_pid > 0
+        and _pid_is_alive(supervisor_pid)
+    ):
+        try:
+            os.kill(supervisor_pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
+        while time.monotonic() < deadline:
+            if not _pid_is_alive(supervisor_pid) or not disc_path.exists():
+                break
+            time.sleep(0.1)
+        if _pid_is_alive(supervisor_pid):
+            try:
+                os.kill(supervisor_pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        disc_path.unlink(missing_ok=True)
+        _log.info("t3_daemon_stopped", supervisor_pid=supervisor_pid)
+        return supervisor_pid
+
+    # No live supervisor: signal the chroma process group directly.
+    pid = normalize_discovery_view(payload).get("pid")
     if not isinstance(pid, int) or pid <= 0:
         _log.warning("t3_daemon_stop_invalid_pid", payload=payload)
         disc_path.unlink(missing_ok=True)
