@@ -1,6 +1,6 @@
 ---
 title: "Qwen-MCP Figure Augmentation Hook — Single-Path VL via MCP-Client Integration"
-id: RDR-126
+id: RDR-150
 type: Feature
 status: draft
 priority: medium
@@ -16,7 +16,7 @@ reactivates_beads: [nexus-6h0e]
 related_tests: []
 ---
 
-# RDR-126: Qwen-MCP Figure Augmentation Hook
+# RDR-150: Qwen-MCP Figure Augmentation Hook
 
 > Supersedes the multi-path proposal in
 > `docs/proposals/m3docrag-application.md` (spike branch

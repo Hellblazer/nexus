@@ -23,6 +23,7 @@ not collide.
 """
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import os
@@ -447,6 +448,13 @@ class T3Supervisor:
         if self._registry is not None and self._supervisor is not None:
             rec = self._supervisor.record
             if rec is not None:
+                # RDR-151 P1.3 (nexus-6o4uj, T3 analog of nexus-yd6fy): publish
+                # the shutdown marker BEFORE tearing chroma down, so discoverers
+                # stop resolving us immediately rather than during the chroma
+                # process-group kill window. mark_shutting_down lives in the
+                # shared registry primitive; stop() only orchestrates the call.
+                with contextlib.suppress(Exception):
+                    self._registry.mark_shutting_down(rec)
                 self._registry.relinquish(rec)
         self._stop_chroma()
         self._supervisor = None

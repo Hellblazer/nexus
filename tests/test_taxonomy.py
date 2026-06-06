@@ -205,6 +205,140 @@ def test_compute_assignments_empty_when_no_centroids(
     assert out == []
 
 
+# ── RDR-151 Phase 3 (uzay8): discover_topics compute/persist split ───────────
+#
+# Mirrors the RDR-128 P1 assign_batch split above. The discovery COMPUTE half
+# (clustering + c-TF-IDF) is pure and chroma-free; the PERSIST half (INSERT
+# topics + assignments, return generated topic_ids) is daemon-routable; the
+# caller writes the chroma centroids locally from the returned ids. This is what
+# lets ``nx index`` stop opening a direct T2 write connection (the live peg's
+# external contender).
+
+
+def _discovery_inputs(seed: int = 11) -> tuple[list[str], np.ndarray, list[str]]:
+    """Two well-separated 384d clusters — same shape the discover test uses."""
+    rng = np.random.default_rng(seed)
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"dd-{i}" for i in range(60)]
+    texts = (
+        [f"machine learning neural network gradient {i}" for i in range(30)]
+        + [f"database query indexing sql schema {i}" for i in range(30)]
+    )
+    return doc_ids, embeddings, texts
+
+
+def test_compute_discovered_topics_returns_serializable_specs() -> None:
+    """The COMPUTE half returns plain JSON-round-trippable spec dicts and
+    touches neither T2 nor chroma (so it can run client-side and the result
+    can cross the daemon RPC)."""
+    import json
+
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    doc_ids, embeddings, texts = _discovery_inputs()
+    specs = CatalogTaxonomy.compute_discovered_topics(
+        "split__disc", doc_ids, embeddings, texts,
+    )
+    assert len(specs) >= 2, "expected >=2 clusters from two separated blobs"
+    json.dumps(specs)  # must not raise — serializable across the RPC
+    for s in specs:
+        assert set(s) == {
+            "label", "terms", "doc_count", "doc_ids", "centroid", "assigned_by",
+        }
+        assert isinstance(s["label"], str) and s["label"]
+        assert isinstance(s["doc_count"], int) and s["doc_count"] > 0
+        assert isinstance(s["doc_ids"], list) and s["doc_ids"]
+        assert len(s["doc_ids"]) == s["doc_count"]
+        assert isinstance(s["centroid"], list) and len(s["centroid"]) == 384
+        assert all(isinstance(x, float) for x in s["centroid"])
+        assert s["assigned_by"] == "hdbscan"
+
+
+def test_compute_discovered_topics_empty_short_circuits() -> None:
+    """<5 docs returns [] (the old discover_topics no-op-returns-0 case)."""
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    out = CatalogTaxonomy.compute_discovered_topics(
+        "tiny__disc", ["a", "b"], np.zeros((2, 384), dtype=np.float32), ["x", "y"],
+    )
+    assert out == []
+
+
+def test_persist_discovered_topics_writes_and_returns_ids(db: T2Database) -> None:
+    """The PERSIST half writes topic rows + assignments and returns the
+    generated topic_ids aligned to the input spec order — no chroma needed."""
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    doc_ids, embeddings, texts = _discovery_inputs()
+    specs = CatalogTaxonomy.compute_discovered_topics(
+        "persist__disc", doc_ids, embeddings, texts,
+    )
+    topic_ids = db.taxonomy.persist_discovered_topics("persist__disc", specs)
+    assert isinstance(topic_ids, list)
+    assert len(topic_ids) == len(specs)
+    assert all(isinstance(t, int) for t in topic_ids)
+
+    # Topic rows exist, one per spec, with the spec's label + doc_count.
+    rows = db.taxonomy.conn.execute(
+        "SELECT id, label, doc_count FROM topics WHERE collection='persist__disc' "
+        "ORDER BY id"
+    ).fetchall()
+    assert len(rows) == len(specs)
+    assert {r[0] for r in rows} == set(topic_ids)
+    # Assignments written for every doc in every spec.
+    total_assigned = db.taxonomy.conn.execute(
+        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id IN "
+        "(SELECT id FROM topics WHERE collection='persist__disc')"
+    ).fetchone()[0]
+    assert total_assigned == sum(s["doc_count"] for s in specs)
+
+
+def test_persist_discovered_topics_skips_existing(db: T2Database) -> None:
+    """Existing-topics guard preserved: a second persist for the same
+    collection is a no-op returning [] (matches discover_topics' guard)."""
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    doc_ids, embeddings, texts = _discovery_inputs()
+    specs = CatalogTaxonomy.compute_discovered_topics(
+        "guard__disc", doc_ids, embeddings, texts,
+    )
+    first = db.taxonomy.persist_discovered_topics("guard__disc", specs)
+    assert len(first) == len(specs)
+    second = db.taxonomy.persist_discovered_topics("guard__disc", specs)
+    assert second == []
+
+
+def test_discover_topics_still_composes(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """Back-compat: discover_topics == compute + persist + centroid upsert.
+    Same end state (topic rows in T2 AND centroids in chroma) so direct
+    callers and the CLI path are unchanged by the split."""
+    doc_ids, embeddings, texts = _discovery_inputs(seed=13)
+    count = db.taxonomy.discover_topics(
+        "compose__disc", doc_ids, embeddings, texts, chroma_client,
+    )
+    assert count >= 2
+
+    t2_topics = db.taxonomy.conn.execute(
+        "SELECT id FROM topics WHERE collection='compose__disc'"
+    ).fetchall()
+    assert len(t2_topics) == count
+
+    centroid_coll = chroma_client.get_collection(
+        "taxonomy__centroids", embedding_function=None,
+    )
+    centroids = centroid_coll.get(
+        where={"collection": "compose__disc"}, include=["metadatas"],
+    )
+    assert len(centroids["ids"]) == count
+    # Every persisted centroid id maps to a real T2 topic id.
+    t2_ids = {r[0] for r in t2_topics}
+    assert {int(m["topic_id"]) for m in centroids["metadatas"]} == t2_ids
+
+
 def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> None:
     """The rerouted taxonomy_assign_batch_hook must compute client-side and
     persist via t2_index_write (the daemon path), NOT a direct t2_ctx open.
@@ -461,6 +595,70 @@ def test_rebuild_taxonomy_clears_and_rediscovers(
         "(SELECT id FROM topics WHERE collection = 'test__coll')"
     ).fetchone()[0]
     assert total_assignments <= 60, "rebuild should replace, not accumulate"
+
+
+def test_rebuild_taxonomy_preserves_manual_assignment(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """RDR-151 Phase 3 regression: rebuild must carry a manually-assigned doc
+    onto the rebuilt topic (Route 1 — old topic matched to new via _merge_labels).
+    This is the transfer logic the compute/persist split must preserve exactly."""
+    doc_ids, embeddings, texts = _discovery_inputs(seed=21)
+    db.taxonomy.discover_topics(
+        "manual__coll", doc_ids, embeddings, texts, chroma_client,
+    )
+    # Operator manually assigns the first doc to an existing topic.
+    first_topic = db.taxonomy.conn.execute(
+        "SELECT id FROM topics WHERE collection='manual__coll' ORDER BY id LIMIT 1"
+    ).fetchone()[0]
+    db.taxonomy.conn.execute(
+        "INSERT OR REPLACE INTO topic_assignments (doc_id, topic_id, assigned_by) "
+        "VALUES (?, ?, 'manual')",
+        (doc_ids[0], first_topic),
+    )
+    db.taxonomy.conn.commit()
+
+    db.taxonomy.rebuild_taxonomy(
+        "manual__coll", doc_ids, embeddings, texts, chroma_client,
+    )
+
+    # The manual doc still carries exactly one 'manual' assignment to a live topic.
+    rows = db.taxonomy.conn.execute(
+        "SELECT ta.assigned_by FROM topic_assignments ta "
+        "JOIN topics t ON t.id = ta.topic_id "
+        "WHERE ta.doc_id = ? AND t.collection = 'manual__coll' "
+        "AND ta.assigned_by = 'manual'",
+        (doc_ids[0],),
+    ).fetchall()
+    assert len(rows) == 1, "manual assignment must survive rebuild (Route 1/2)"
+
+
+def test_compute_rebuild_plan_is_pure_and_serializable(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """The rebuild COMPUTE half returns a JSON-serializable plan (specs +
+    manual-transfer decisions keyed to spec index) and touches no T2 write."""
+    import json
+
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    doc_ids, embeddings, texts = _discovery_inputs(seed=23)
+    plan = CatalogTaxonomy.compute_rebuild_plan(
+        "rb__coll", doc_ids, embeddings, texts,
+        old_centroids=np.empty((0, 0), dtype=np.float32),
+        old_labels=[], old_review_statuses=[], old_centroid_topic_ids=[],
+        manual_assignments={},
+    )
+    json.dumps(plan)
+    assert "specs" in plan and "manual_transfers" in plan
+    assert len(plan["specs"]) >= 2
+    for s in plan["specs"]:
+        assert set(s) >= {
+            "label", "terms", "doc_count", "doc_ids", "centroid",
+            "assigned_by", "review_status",
+        }
+    # No manual assignments in -> none out.
+    assert plan["manual_transfers"] == {}
 
 
 def test_get_topics_filtered_by_parent(db: T2Database) -> None:
@@ -1525,11 +1723,28 @@ def test_cli_taxonomy_list_shows_collection_at_root(tmp_path: Path) -> None:
 
 
 def test_discover_for_collection(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: chromadb.ClientAPI, monkeypatch,
 ) -> None:
-    """discover_for_collection fetches texts, embeds with MiniLM, runs discover_topics."""
+    """discover_for_collection fetches texts, embeds with MiniLM, runs discover_topics.
+
+    RDR-151 Phase 3 routing proof: the SPY asserts t2_index_write is called at
+    least twice (persist_discovered_topics + record_discover_count), proving the
+    wiring rather than just confirming rows land.
+    """
     from nexus.commands.taxonomy_cmd import discover_for_collection
     from nexus.db.local_ef import LocalEmbeddingFunction
+
+    # RDR-151 Phase 3: spy on t2_index_write to count routed calls.
+    # Pin to the test fixture db (no-daemon fallback opens default_db_path).
+    import nexus.mcp_infra as _mi
+    t2_write_call_count = 0
+
+    def _spy(fn):
+        nonlocal t2_write_call_count
+        t2_write_call_count += 1
+        return fn(db)
+
+    monkeypatch.setattr(_mi, "t2_index_write", _spy)
 
     # Seed a ChromaDB collection with documents
     ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
@@ -1551,13 +1766,23 @@ def test_discover_for_collection(
     topics = db.taxonomy.get_topics()
     assert len(topics) >= 2
 
+    # Routing proof: at minimum persist_discovered_topics + record_discover_count
+    # (+ persist_cross_links if cross-links are computed = 3+). Must be >= 2.
+    assert t2_write_call_count >= 2, (
+        f"expected >= 2 t2_index_write calls (persist_discovered_topics + "
+        f"record_discover_count), got {t2_write_call_count}"
+    )
+
 
 def test_discover_for_collection_force(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: chromadb.ClientAPI, monkeypatch,
 ) -> None:
     """force=True clears existing topics before re-discovering fresh ones."""
     from nexus.commands.taxonomy_cmd import discover_for_collection
     from nexus.db.local_ef import LocalEmbeddingFunction
+
+    import nexus.mcp_infra as _mi
+    monkeypatch.setattr(_mi, "t2_index_write", lambda fn: fn(db))
 
     ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
     texts = (
@@ -2235,8 +2460,22 @@ class TestReviewCLI:
             db.taxonomy.conn.commit()
         return topic_id
 
+    @staticmethod
+    def _t2_router(db_path: Path):
+        """Return a t2_index_write stub that routes through db_path.
+
+        RDR-151 Phase 3: CLI tests that exercise routed write paths must
+        patch nexus.mcp_infra.t2_index_write so the daemon stub uses the
+        test's tmp_path db rather than the autouse-isolated default path.
+        """
+        def _router(fn):
+            with T2Database(db_path) as db:
+                return fn(db)
+        return _router
+
     def test_review_accept(self, tmp_path: Path) -> None:
         """Accept action marks topic as accepted."""
+        import nexus.mcp_infra as _mi
         from unittest.mock import patch
 
         from click.testing import CliRunner
@@ -2247,8 +2486,9 @@ class TestReviewCLI:
         self._seed_topics(db_path)
 
         runner = CliRunner()
-        with patch(
-            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", self._t2_router(db_path)),
         ):
             result = runner.invoke(
                 taxonomy, ["review", "--collection", "proj"], input="a\n",
@@ -2289,6 +2529,7 @@ class TestReviewCLI:
 
     def test_review_rename(self, tmp_path: Path) -> None:
         """Rename action updates the topic label."""
+        import nexus.mcp_infra as _mi
         from unittest.mock import patch
 
         from click.testing import CliRunner
@@ -2299,8 +2540,9 @@ class TestReviewCLI:
         self._seed_topics(db_path)
 
         runner = CliRunner()
-        with patch(
-            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", self._t2_router(db_path)),
         ):
             result = runner.invoke(
                 taxonomy,
@@ -2318,6 +2560,7 @@ class TestReviewCLI:
 
     def test_review_delete(self, tmp_path: Path) -> None:
         """Delete action removes topic and assignments."""
+        import nexus.mcp_infra as _mi
         from unittest.mock import patch
 
         from click.testing import CliRunner
@@ -2328,8 +2571,9 @@ class TestReviewCLI:
         self._seed_topics(db_path)
 
         runner = CliRunner()
-        with patch(
-            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", self._t2_router(db_path)),
         ):
             result = runner.invoke(
                 taxonomy, ["review", "--collection", "proj"], input="d\n",
@@ -2369,6 +2613,7 @@ class TestReviewCLI:
     def test_review_merge(self, tmp_path: Path) -> None:
         """Merge action moves docs to target topic."""
         import json
+        import nexus.mcp_infra as _mi
         from unittest.mock import patch
 
         from click.testing import CliRunner
@@ -2418,8 +2663,9 @@ class TestReviewCLI:
             db.taxonomy.conn.commit()
 
         runner = CliRunner()
-        with patch(
-            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", self._t2_router(db_path)),
         ):
             # m = merge, then enter target topic ID
             result = runner.invoke(
@@ -2822,12 +3068,182 @@ class TestSplitTopic:
         )
         assert result == 0
 
+    def test_compute_split_returns_child_specs(
+        self, db: T2Database, chroma: chromadb.ClientAPI,
+    ) -> None:
+        """compute_split returns serializable child specs (no T2 writes)."""
+        import numpy as _np
+        from nexus.db.local_ef import LocalEmbeddingFunction
+        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        texts_a = [f"machine learning neural {i}" for i in range(15)]
+        texts_b = [f"database sql query {i}" for i in range(15)]
+        texts = texts_a + texts_b
+        doc_ids = [f"doc-{i}" for i in range(30)]
+        embeddings = _np.array(ef(texts), dtype=_np.float32)
+
+        result = CatalogTaxonomy.compute_split(
+            topic_id=99,
+            doc_ids=doc_ids,
+            texts=texts,
+            fetched_ids=doc_ids,
+            embeddings=embeddings,
+            collection_name="test__compute_split",
+            k=2,
+        )
+
+        assert result["topic_id"] == 99
+        assert result["collection_name"] == "test__compute_split"
+        child_specs = result["child_specs"]
+        assert len(child_specs) == 2
+        for spec in child_specs:
+            assert "label" in spec
+            assert "terms_json" in spec
+            assert "doc_count" in spec
+            assert "doc_ids" in spec
+            assert "centroid" in spec
+            assert spec["doc_count"] > 0
+        # Total docs across children == 30 (all docs assigned)
+        total = sum(s["doc_count"] for s in child_specs)
+        assert total == 30
+
+    def test_persist_split_writes_children(
+        self, db: T2Database,
+    ) -> None:
+        """persist_split writes children to T2 and returns child IDs (no chroma)."""
+        import json as _json
+        from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+        # Seed parent with assignments
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES ('parent', 'test__persist_split', 4, '2026-01-01T00:00:00Z')",
+        )
+        parent_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for i in range(4):
+            db.taxonomy.conn.execute(
+                "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
+                "VALUES (?, ?, 'hdbscan')",
+                (f"doc-{i}", parent_id),
+            )
+        db.taxonomy.conn.commit()
+
+        split_result = {
+            "topic_id": parent_id,
+            "collection_name": "test__persist_split",
+            "child_specs": [
+                {
+                    "label": "child-a",
+                    "terms_json": _json.dumps(["alpha", "beta"]),
+                    "doc_count": 2,
+                    "doc_ids": ["doc-0", "doc-1"],
+                    "centroid": [0.1] * 10,
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "label": "child-b",
+                    "terms_json": _json.dumps(["gamma", "delta"]),
+                    "doc_count": 2,
+                    "doc_ids": ["doc-2", "doc-3"],
+                    "centroid": [0.9] * 10,
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            ],
+        }
+
+        child_ids = db.taxonomy.persist_split(split_result)
+        assert len(child_ids) == 2
+        # Parent assignments gone
+        assert db.taxonomy.conn.execute(
+            "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (parent_id,),
+        ).fetchone()[0] == 0
+        # Each child has its docs
+        for cid in child_ids:
+            assert db.taxonomy.conn.execute(
+                "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (cid,),
+            ).fetchone()[0] == 2
+        # Parent doc_count is 0
+        parent = db.taxonomy.get_topic_by_id(parent_id)
+        assert parent["doc_count"] == 0
+
+    def test_split_cmd_routes_persist_via_t2_index_write(
+        self, db: T2Database, chroma: chromadb.ClientAPI, monkeypatch,
+    ) -> None:
+        """split_cmd (Phase C) must route the T2 persist through t2_index_write.
+
+        RDR-151 Phase 3 (nexus-uzay8): the taxonomy CLI 'split' command
+        calls compute_split (local, chroma-coupled) then routes persist_split
+        through t2_index_write (daemon path).  This test is a RED test until
+        the routing is in place.
+        """
+        import nexus.mcp_infra as _mi
+        from nexus.commands.taxonomy_cmd import taxonomy as taxonomy_grp
+        from nexus.db.local_ef import LocalEmbeddingFunction
+        from click.testing import CliRunner
+        from unittest.mock import patch
+
+        routed = {"calls": 0}
+
+        def _spy_t2_index_write(fn):
+            routed["calls"] += 1
+            return fn(db)
+
+        monkeypatch.setattr(_mi, "t2_index_write", _spy_t2_index_write)
+
+        db_path = db._path
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        texts_a = [f"machine learning {i}" for i in range(15)]
+        texts_b = [f"database query {i}" for i in range(15)]
+        texts = texts_a + texts_b
+        doc_ids = [f"doc-{i}" for i in range(30)]
+
+        db.taxonomy.conn.execute(
+            "INSERT INTO topics (label, collection, doc_count, created_at) "
+            "VALUES ('to-split', 'test__split_route', 30, '2026-01-01T00:00:00Z')",
+        )
+        parent_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for did in doc_ids:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                (did, parent_id),
+            )
+        db.taxonomy.conn.commit()
+
+        # Seed T3 collection
+        embs = ef(texts)
+        coll = chroma.get_or_create_collection("test__split_route", embedding_function=None)
+        coll.add(ids=doc_ids, documents=texts, embeddings=embs)
+
+        with patch(
+            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        ), patch("nexus.db.make_t3") as mock_t3:
+            mock_t3.return_value._client = chroma
+            result = CliRunner().invoke(
+                taxonomy_grp,
+                ["split", "to-split", "--k", "2", "--collection", "test__split_route"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert routed["calls"] >= 1, (
+            "split_cmd must call t2_index_write at least once (persist_split routed)"
+        )
+
 
 class TestManualOpsCLI:
     """CLI tests for nx taxonomy assign/merge/split/rename commands."""
 
+    @staticmethod
+    def _t2_router(db_path: Path):
+        """Route t2_index_write through db_path for CLI tests."""
+        def _router(fn):
+            with T2Database(db_path) as db:
+                return fn(db)
+        return _router
+
     def test_assign_cli(self, tmp_path: Path) -> None:
         """nx taxonomy assign sets assigned_by='manual'."""
+        import nexus.mcp_infra as _mi
         from unittest.mock import patch
 
         from click.testing import CliRunner
@@ -2844,8 +3260,9 @@ class TestManualOpsCLI:
             db.taxonomy.conn.commit()
 
         runner = CliRunner()
-        with patch(
-            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", self._t2_router(db_path)),
         ):
             result = runner.invoke(
                 taxonomy,
@@ -2885,6 +3302,7 @@ class TestManualOpsCLI:
 
     def test_rename_cli(self, tmp_path: Path) -> None:
         """nx taxonomy rename updates the label."""
+        import nexus.mcp_infra as _mi
         from unittest.mock import patch
 
         from click.testing import CliRunner
@@ -2901,8 +3319,9 @@ class TestManualOpsCLI:
             db.taxonomy.conn.commit()
 
         runner = CliRunner()
-        with patch(
-            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", self._t2_router(db_path)),
         ):
             result = runner.invoke(
                 taxonomy,
@@ -2927,6 +3346,7 @@ class TestManualOpsCLI:
         explicit opt-out path for users fixing a typo on a still-pending
         topic.
         """
+        import nexus.mcp_infra as _mi
         from unittest.mock import patch
 
         from click.testing import CliRunner
@@ -2943,8 +3363,9 @@ class TestManualOpsCLI:
             db.taxonomy.conn.commit()
 
         runner = CliRunner()
-        with patch(
-            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", self._t2_router(db_path)),
         ):
             result = runner.invoke(
                 taxonomy,
@@ -2961,6 +3382,7 @@ class TestManualOpsCLI:
 
     def test_merge_cli(self, tmp_path: Path) -> None:
         """nx taxonomy merge moves docs and deletes source."""
+        import nexus.mcp_infra as _mi
         from unittest.mock import patch
 
         from click.testing import CliRunner
@@ -2989,8 +3411,9 @@ class TestManualOpsCLI:
             db.taxonomy.conn.commit()
 
         runner = CliRunner()
-        with patch(
-            "nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path,
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch.object(_mi, "t2_index_write", self._t2_router(db_path)),
         ):
             result = runner.invoke(
                 taxonomy,
@@ -3017,7 +3440,8 @@ class TestManualOpsCLI:
             assert {r[0] for r in docs} == {"doc-a", "doc-b"}
 
     def test_split_cli(self, tmp_path: Path) -> None:
-        """nx taxonomy split invokes split_topic with correct args."""
+        """nx taxonomy split invokes compute_split+persist_split via t2_index_write."""
+        import nexus.mcp_infra as _mi
         from unittest.mock import MagicMock, patch
 
         from click.testing import CliRunner
@@ -3041,22 +3465,56 @@ class TestManualOpsCLI:
                 )
             db.taxonomy.conn.commit()
 
+        # Stub compute_split to return 2 child specs (no numpy/KMeans needed)
+        fake_split_result = {
+            "topic_id": parent_id,
+            "collection_name": "test__split_cli",
+            "child_specs": [
+                {
+                    "label": "child-0",
+                    "terms_json": "[]",
+                    "doc_count": 15,
+                    "doc_ids": [f"doc-{i}" for i in range(15)],
+                    "centroid": [0.1] * 384,
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "label": "child-1",
+                    "terms_json": "[]",
+                    "doc_count": 15,
+                    "doc_ids": [f"doc-{i}" for i in range(15, 30)],
+                    "centroid": [0.9] * 384,
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            ],
+        }
+
         mock_t3 = MagicMock()
-        mock_split = MagicMock(return_value=2)
+        mock_coll = MagicMock()
+        mock_coll.get.return_value = {
+            "ids": [f"doc-{i}" for i in range(30)],
+            "documents": [f"text {i}" for i in range(30)],
+        }
+        mock_t3._client.get_collection.return_value = mock_coll
+        mock_t3._client.get_or_create_collection.return_value = MagicMock()
+
+        # persist_split returns list of 2 new child IDs
+        fake_persist = MagicMock(return_value=[101, 102])
+        import numpy as _np
+
         runner = CliRunner()
         with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch("nexus.db.make_t3", return_value=mock_t3),
             patch(
-                "nexus.commands.taxonomy_cmd._default_db_path",
-                return_value=db_path,
+                "nexus.db.local_ef.LocalEmbeddingFunction.__call__",
+                return_value=_np.zeros((30, 384), dtype=_np.float32).tolist(),
             ),
             patch(
-                "nexus.db.make_t3",
-                return_value=mock_t3,
+                "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.compute_split",
+                return_value=fake_split_result,
             ),
-            patch(
-                "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.split_topic",
-                mock_split,
-            ),
+            patch.object(_mi, "t2_index_write", lambda fn: fake_persist(fn)),
         ):
             result = runner.invoke(
                 taxonomy,
@@ -3069,10 +3527,6 @@ class TestManualOpsCLI:
         assert "Action:" in result.output
         assert "nx taxonomy label" in result.output
         assert "-c test__split_cli" in result.output
-        # Verify split_topic was called with correct topic_id and k
-        mock_split.assert_called_once()
-        call_args = mock_split.call_args
-        assert call_args[1]["k"] == 2 or call_args[0][1] == 2
 
     def test_split_cli_action_hint_without_collection_flag(self, tmp_path: Path) -> None:
         """GH #250: split without --collection still emits a scoped hint.
@@ -3081,6 +3535,7 @@ class TestManualOpsCLI:
         reads `nx taxonomy label -c <parent-collection>` even when the
         user did not pass --collection.
         """
+        import nexus.mcp_infra as _mi
         from unittest.mock import MagicMock, patch
 
         from click.testing import CliRunner
@@ -3094,20 +3549,70 @@ class TestManualOpsCLI:
                 "VALUES (?, ?, ?, ?)",
                 ("lonely-topic", "test__parent_scope", 10, "2026-01-01T00:00:00Z"),
             )
+            parent_id = db.taxonomy.conn.execute(
+                "SELECT last_insert_rowid()"
+            ).fetchone()[0]
+            for i in range(10):
+                db.taxonomy.conn.execute(
+                    "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                    (f"doc-{i}", parent_id),
+                )
             db.taxonomy.conn.commit()
 
+        fake_split_result = {
+            "topic_id": parent_id,
+            "collection_name": "test__parent_scope",
+            "child_specs": [
+                {
+                    "label": "c0",
+                    "terms_json": "[]",
+                    "doc_count": 5,
+                    "doc_ids": [f"doc-{i}" for i in range(5)],
+                    "centroid": [0.1] * 384,
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "label": "c1",
+                    "terms_json": "[]",
+                    "doc_count": 5,
+                    "doc_ids": [f"doc-{i}" for i in range(5, 10)],
+                    "centroid": [0.9] * 384,
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "label": "c2",
+                    "terms_json": "[]",
+                    "doc_count": 0,
+                    "doc_ids": [],
+                    "centroid": [0.5] * 384,
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            ],
+        }
         mock_t3 = MagicMock()
+        mock_coll = MagicMock()
+        mock_coll.get.return_value = {
+            "ids": [f"doc-{i}" for i in range(10)],
+            "documents": [f"text {i}" for i in range(10)],
+        }
+        mock_t3._client.get_collection.return_value = mock_coll
+        mock_t3._client.get_or_create_collection.return_value = MagicMock()
+        fake_persist = MagicMock(return_value=[201, 202, 203])
+        import numpy as _np
+
         runner = CliRunner()
         with (
-            patch(
-                "nexus.commands.taxonomy_cmd._default_db_path",
-                return_value=db_path,
-            ),
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
             patch("nexus.db.make_t3", return_value=mock_t3),
             patch(
-                "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.split_topic",
-                MagicMock(return_value=3),
+                "nexus.db.local_ef.LocalEmbeddingFunction.__call__",
+                return_value=_np.zeros((10, 384), dtype=_np.float32).tolist(),
             ),
+            patch(
+                "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.compute_split",
+                return_value=fake_split_result,
+            ),
+            patch.object(_mi, "t2_index_write", lambda fn: fake_persist(fn)),
         ):
             result = runner.invoke(taxonomy, ["split", "lonely-topic", "--k", "3"])
 
@@ -3130,18 +3635,42 @@ class TestManualOpsCLI:
                 "VALUES (?, ?, ?, ?)",
                 ("noop-topic", "test__noop", 5, "2026-01-01T00:00:00Z"),
             )
+            parent_id = db.taxonomy.conn.execute(
+                "SELECT last_insert_rowid()"
+            ).fetchone()[0]
+            for i in range(5):
+                db.taxonomy.conn.execute(
+                    "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                    (f"doc-{i}", parent_id),
+                )
             db.taxonomy.conn.commit()
+
+        # compute_split returns no child specs -> early return, no Action hint
+        fake_split_result = {
+            "topic_id": parent_id,
+            "collection_name": "test__noop",
+            "child_specs": [],
+        }
+        mock_t3 = MagicMock()
+        mock_coll = MagicMock()
+        mock_coll.get.return_value = {
+            "ids": [f"doc-{i}" for i in range(5)],
+            "documents": [f"text {i}" for i in range(5)],
+        }
+        mock_t3._client.get_collection.return_value = mock_coll
+        import numpy as _np
 
         runner = CliRunner()
         with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch("nexus.db.make_t3", return_value=mock_t3),
             patch(
-                "nexus.commands.taxonomy_cmd._default_db_path",
-                return_value=db_path,
+                "nexus.db.local_ef.LocalEmbeddingFunction.__call__",
+                return_value=_np.zeros((5, 384), dtype=_np.float32).tolist(),
             ),
-            patch("nexus.db.make_t3", return_value=MagicMock()),
             patch(
-                "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.split_topic",
-                MagicMock(return_value=0),
+                "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.compute_split",
+                return_value=fake_split_result,
             ),
         ):
             result = runner.invoke(taxonomy, ["split", "noop-topic"])

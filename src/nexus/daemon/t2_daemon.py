@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import dataclasses
 import errno
 import json
@@ -352,6 +353,17 @@ _GRACEFUL_STOP_TIMEOUT: float = 5.0
 #: reaps the offloaded thread and releases the lock.
 _DB_CLOSE_TIMEOUT: float = 10.0
 
+#: RDR-151 P1.2 (nexus-5haam): idle deadline on an accepted connection between
+#: frames. A peer that connects and then goes silent (or half-closes without an
+#: RST the OS surfaces) otherwise holds the accepted socket — and its fd — open
+#: indefinitely. This is a candidate-independent backstop to the P1.1 peg fix:
+#: even if some future code path re-introduces a registered idle fd, a silent
+#: connection is reaped within the deadline rather than lingering. Generous
+#: enough that a normal client's inter-request think time never trips it (the
+#: RPC client connects, calls, and closes promptly); finite so a dead-but-not-
+#: RST peer cannot pin the connection forever.
+_IDLE_READ_TIMEOUT: float = 300.0
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -488,6 +500,53 @@ def write_frame(writer: asyncio.StreamWriter, obj: dict[str, Any]) -> None:
     writer.write(header + payload + b"\n")
 
 
+def _pause_reading(transport: asyncio.BaseTransport | None) -> bool:
+    """Remove the accepted connection's read fd from the event-loop selector for
+    the duration of a dispatch. Returns True iff reading was actually paused (so
+    the caller knows to resume). RDR-151 P1.1 (nexus-th4dh).
+
+    ``pause_reading`` raises ``RuntimeError`` if the transport is already paused
+    or closing, and may be absent on non-selector transports; both are benign
+    here and mean "nothing to pause".
+    """
+    try:
+        transport.pause_reading()  # type: ignore[union-attr]
+        return True
+    except (AttributeError, RuntimeError, NotImplementedError):
+        return False
+
+
+def _resume_reading(transport: asyncio.BaseTransport | None) -> None:
+    """Re-register the accepted connection's read fd after a dispatch. The
+    inverse of :func:`_pause_reading`; tolerant of a transport that has since
+    started closing. RDR-151 P1.1 (nexus-th4dh)."""
+    try:
+        transport.resume_reading()  # type: ignore[union-attr]
+    except (AttributeError, RuntimeError, NotImplementedError):
+        pass
+
+
+def _abort_transport(transport: asyncio.BaseTransport | None) -> None:
+    """Synchronously and immediately tear a connection down, guaranteeing its
+    read fd is removed from the event-loop selector. RDR-151 P1.1 (nexus-th4dh).
+
+    The graceful ``writer.close()`` + ``await writer.wait_closed()`` path can
+    stall or error on a half-dead peer (observed live: ``BrokenPipeError`` from
+    ``wait_closed``'s final ``sendmsg``), and a swallowed error there leaves the
+    transport half-torn-down with the accepted socket's READ fd still registered
+    and — because the peer is gone — perpetually reported-ready. That stuck fd is
+    the sustained 100% CPU selector spin. ``transport.abort()`` drops both
+    directions at once (no flush, no await) and calls ``_remove_reader``
+    immediately, so the fd cannot linger in the selector. The response has
+    already been drained in the dispatch loop before we reach teardown, so
+    abandoning any residual buffer here loses nothing.
+    """
+    try:
+        transport.abort()  # type: ignore[union-attr]
+    except (AttributeError, RuntimeError, NotImplementedError, OSError):
+        pass
+
+
 async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
     """Read one length-prefixed JSON frame from *reader*."""
     length_bytes = await reader.readexactly(4)
@@ -569,6 +628,14 @@ _RPC_DENY_OPS: frozenset[str] = frozenset({
 #: ``_catalog_write_lock`` (see ``T2Daemon._dispatch``). Mirrors
 #: ``catalog_write_shim.CATALOG_WRITE_PREFIX``.
 _CATALOG_WRITE_PREFIX = "catalog_write."
+
+#: RDR-151 P2.1a (nexus-gcu07): op-prefixes whose dispatch is serialised through
+#: ``_catalog_write_lock``. ``catalog_write.*`` (RDR-146) plus ``taxonomy.*`` —
+#: the latter's writes (``persist_assignments`` / ``assign_topic`` / ...) were the
+#: live-captured peg site, racing N threads at the SQLite write lock. The whole
+#: ``taxonomy.`` prefix is included (safe-by-default) so a future taxonomy writer
+#: cannot silently bypass serialisation. ``str.startswith`` accepts this tuple.
+_WRITE_SERIALIZED_PREFIXES: tuple[str, ...] = (_CATALOG_WRITE_PREFIX, "taxonomy.")
 
 
 def _build_dispatch_table(t2db: Any) -> dict[str, Any]:
@@ -987,7 +1054,15 @@ class T2Daemon:
                 # generation (the RDR-140 re-assert) and learns if a newer
                 # owner fenced us (cannot happen while we hold the spawn
                 # lock, but the loser-quiet-exit is logged if it ever does).
-                supervisor.heartbeat_tick()
+                #
+                # RDR-151 P1.4 (nexus-tjgl2): offload to a thread. heartbeat_tick
+                # takes a blocking ``fcntl.flock(LOCK_EX)`` on the per-scope
+                # election lock (service_registry.py); running it inline on the
+                # event-loop thread stalls the whole loop for the duration of any
+                # lock contention (Gap 4). A stall that exceeds the lease TTL can
+                # even get a live primary falsely fenced (RF-2). to_thread keeps
+                # the loop serving while the blocking lock is acquired.
+                await asyncio.to_thread(supervisor.heartbeat_tick)
                 if supervisor.fenced:
                     _log.warning(
                         "t2_daemon_discovery_fenced",
@@ -1104,6 +1179,23 @@ class T2Daemon:
             except BaseException:  # noqa: BLE001
                 pass
             self._reassert_task = None
+
+        # RDR-151 P1.3 (nexus-yd6fy): publish the shutdown marker FIRST, before
+        # the (potentially slow) server drain and DB close below, so discoverers
+        # stop resolving us the instant stop() begins rather than during the
+        # whole teardown window. A clean shutdown thus hands off immediately
+        # instead of leaving a healthy-looking record that resolves to a daemon
+        # that is already draining (the TTL-expiry wait is for crashes only).
+        # The reassert task is cancelled above first; a heartbeat thread it had
+        # already dispatched to the pool (RDR-151 P1.4) may still complete after
+        # this mark, but ServiceRegistry.heartbeat preserves a non-"live" status,
+        # so a late tick cannot resurrect the record back to healthy.
+        # mark_shutting_down lives in the shared registry primitive
+        # (service_registry.py) per the RDR-149 lifecycle invariant; stop() only
+        # orchestrates the call.
+        if self._registry is not None and self._lease_record is not None:
+            with contextlib.suppress(Exception):
+                self._registry.mark_shutting_down(self._lease_record)
 
         # nexus-we61e: stop the daemon-owned reclaim loop. Order is not
         # load-bearing (it touches only the aspect queue, not discovery),
@@ -1267,41 +1359,83 @@ class T2Daemon:
         *,
         is_uds: bool,
     ) -> None:
+        transport = writer.transport
         try:
             while True:
                 try:
-                    frame = await read_frame(reader)
-                except asyncio.IncompleteReadError:
-                    break  # client closed
+                    # RDR-151 P1.2 (nexus-5haam): bound the idle wait between
+                    # frames so a silent peer cannot hold the accepted socket
+                    # (and its fd) open indefinitely. On timeout, treat it as a
+                    # closed client and tear the connection down.
+                    frame = await asyncio.wait_for(
+                        read_frame(reader), timeout=_IDLE_READ_TIMEOUT
+                    )
+                except (asyncio.IncompleteReadError, TimeoutError):
+                    break  # client closed or went idle past the deadline
                 except (ProtocolError, json.JSONDecodeError) as exc:
                     self._send_error(writer, None, "protocol", str(exc))
                     await writer.drain()
                     break
 
                 request_id = frame.get("request_id")
+                # RDR-151 P1.1 (nexus-th4dh): connection-teardown hardening.
+                # Pause reading on the accepted connection for the dispatch
+                # window so its read fd is not left registered in the selector
+                # while the handler is parked in ``to_thread``. The RPC protocol
+                # is strictly synchronous (the client blocks on the response
+                # before sending its next frame), so declining to read here
+                # drops nothing.
+                #
+                # NOTE (RF-1 REFUTED, 2026-06-05): this was originally believed
+                # to be the fix for the 100% CPU peg. A live capture
+                # (T2 memory nexus/rdr151-LIVE-MECHANISM-CAPTURED-2026-06-05)
+                # proved the peg is NOT a leaked accepted fd — zero accepted fds
+                # are registered during the peg — but a select-spin while an
+                # executor thread is wedged on a contended catalog write. Kept as
+                # defensible teardown hygiene, NOT the peg fix.
+                paused = _pause_reading(transport)
                 try:
-                    result = await self._dispatch(frame, is_uds=is_uds)
-                    write_frame(writer, {
-                        "request_id": request_id,
-                        "ok": True,
-                        "result": result,
-                    })
-                except Exception as exc:  # noqa: BLE001
-                    _log.warning(
-                        "t2_daemon_dispatch_failed",
-                        op=frame.get("op"),
-                        error=str(exc),
-                    )
-                    self._send_error(
-                        writer, request_id, type(exc).__name__, str(exc),
-                    )
-                await writer.drain()
+                    try:
+                        result = await self._dispatch(frame, is_uds=is_uds)
+                        write_frame(writer, {
+                            "request_id": request_id,
+                            "ok": True,
+                            "result": result,
+                        })
+                    except Exception as exc:  # noqa: BLE001
+                        _log.warning(
+                            "t2_daemon_dispatch_failed",
+                            op=frame.get("op"),
+                            error=str(exc),
+                        )
+                        self._send_error(
+                            writer, request_id, type(exc).__name__, str(exc),
+                        )
+                    try:
+                        await writer.drain()
+                    except (ConnectionError, OSError) as exc:
+                        # RDR-151 Gap 2 (nexus-th4dh): the peer died during
+                        # dispatch and is gone by the time we flush the
+                        # response. Necessary hygiene to suppress the
+                        # uncaught-ConnectionResetError traceback flood (RC-6,
+                        # 404k observed live); it is NOT the peg fix (the pause
+                        # above is). Close the connection cleanly and stop.
+                        _log.debug(
+                            "t2_daemon_peer_gone_on_response",
+                            op=frame.get("op"),
+                            error=str(exc),
+                        )
+                        break
+                finally:
+                    if paused:
+                        _resume_reading(transport)
         finally:
-            try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:  # noqa: BLE001
-                pass
+            # RDR-151 P1.1 (nexus-th4dh): abort rather than graceful-close. A
+            # graceful ``wait_closed()`` on a half-dead peer can stall or raise
+            # (BrokenPipeError) and leave the read fd registered + perpetually
+            # ready — the sustained selector spin. abort() removes the fd from
+            # the selector synchronously. The response was already drained above.
+            _abort_transport(transport)
 
     async def _dispatch(
         self, frame: dict[str, Any], *, is_uds: bool,
@@ -1335,7 +1469,23 @@ class T2Daemon:
         # Holding an asyncio.Lock across the threaded invocation makes
         # catalog write dispatch single-threaded / serial regardless of
         # how many client connections fan in concurrently.
-        if op.startswith(_CATALOG_WRITE_PREFIX) and self._catalog_write_lock is not None:
+        #
+        # RDR-151 P2.1a (nexus-gcu07): the same serialisation MUST cover the
+        # ``taxonomy.*`` ops. The 100% CPU peg (captured live 2026-06-05) was N
+        # concurrent ``taxonomy.persist_assignments`` RPCs each launching a
+        # parallel ``to_thread`` writer, all racing for the single SQLite write
+        # lock; one wedged on the contended lock spun the event loop. Serialising
+        # the taxonomy prefix here makes those writers cooperative (one at a time,
+        # yielding the loop between them) instead of a thread pile-up. The whole
+        # prefix is serialised (not an enumerated write-op set) so a future
+        # taxonomy writer is covered by default — a missed writer is exactly the
+        # silent-recurrence class this fix closes. Taxonomy reads serialising
+        # behind a write is acceptable: they are not a hot daemon read path, and
+        # P2.1b/P2.1c keep write hold-time short.
+        if (
+            op.startswith(_WRITE_SERIALIZED_PREFIXES)
+            and self._catalog_write_lock is not None
+        ):
             async with self._catalog_write_lock:
                 return await self._invoke_with_lock_retry(callable_, op, args, kwargs)
         return await self._invoke_with_lock_retry(callable_, op, args, kwargs)
