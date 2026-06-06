@@ -2,7 +2,9 @@
 """StopFailure hook — log API failure context to beads memory for observability.
 
 Output and exit codes are ignored by Claude Code. This script exists purely
-for side effects: bd remember (all failures) and bd create (rate_limit only).
+for one side effect: bd remember (all failures), a crash/abnormal-termination
+log for observability. It does NOT file issues — transient API failures are
+infra events, not actionable bugs, and filing them pollutes the ready queue.
 """
 from __future__ import annotations
 
@@ -84,21 +86,15 @@ def main() -> None:
         _debug("bd not on PATH, skipping")
         return
 
-    # Log failure to beads memory
+    # Log failure to beads memory for observability. This is the only side
+    # effect: a crash/abnormal-termination record. We intentionally do NOT
+    # create an issue (`bd create`) here — transient API failures (rate limit,
+    # server error, auth) are infra events, not actionable bugs, and filing
+    # them as P1 issues pollutes `bd ready` with non-work that masquerades as
+    # the next thing to do. The remember-log is sufficient for tracking.
     summary = f"stop-failure-{error_type}: {error_details[:200]} at {timestamp}"
     _run(["bd", "remember", summary])
     _debug(f"logged: {summary}")
-
-    # Rate limit: create a blocker bead so next session sees it
-    if error_type == "rate_limit":
-        _run([
-            "bd", "create",
-            f"--title=Rate limit hit at {timestamp}",
-            "--type=bug",
-            "--priority=1",
-            f"--description=API rate limit triggered. Details: {error_details[:200]}",
-        ])
-        _debug("created rate-limit blocker bead")
 
 
 if __name__ == "__main__":

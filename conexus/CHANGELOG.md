@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **StopFailure hook no longer files issues for transient API failures.** The
+  hook previously ran `bd create --type=bug --priority=1` on every `rate_limit`
+  stop, dropping P1 bugs into the `bd ready` queue as if they were actionable
+  work (32 such beads had accumulated). Rate limits, server errors, and auth
+  failures are infra events, not bugs. The hook now records the crash via
+  `bd remember` only (unchanged observability log); it never files an issue.
+
 ## [5.10.3] - 2026-06-05
 
 Plugin version aligned with conexus 5.10.3 (T2 daemon reliability fix: a
