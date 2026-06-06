@@ -1121,8 +1121,17 @@ class CatalogTaxonomy:
             )
             self.conn.commit()
 
-    def delete_topic(self, topic_id: int, *, chroma_client: Any = None) -> None:
-        """Delete a topic, its assignments, and its centroid."""
+    def delete_topic(self, topic_id: int, *, chroma_client: Any = None) -> str | None:
+        """Delete a topic, its assignments, and its centroid.
+
+        Returns the collection name (needed by routed callers for chroma
+        centroid cleanup when ``chroma_client`` is not passed in).  When
+        ``chroma_client`` is provided the cleanup happens internally as
+        before (backward-compatible).  RDR-151 Phase 3 (nexus-uzay8):
+        the T2 DELETE part can now be routed through the daemon; the
+        caller performs the local chroma centroid delete using the
+        returned collection name.
+        """
         # Read collection before deleting the row
         with self._lock:
             row = self.conn.execute(
@@ -1143,18 +1152,23 @@ class CatalogTaxonomy:
                 coll.delete(ids=[f"{collection}:{topic_id}"])
             except Exception:
                 pass
+        return collection
 
     def merge_topics(
         self, source_id: int, target_id: int, *, chroma_client: Any = None,
-    ) -> None:
+    ) -> str | None:
         """Move all assignments from source to target, delete source.
 
         Uses INSERT OR IGNORE to handle docs assigned to both topics
         (dedup). Updates target's doc_count to the actual assignment count.
         Cleans up source centroid from ChromaDB when chroma_client provided.
+
+        Returns the source topic's collection name (needed by routed callers
+        for chroma centroid cleanup).  RDR-151 Phase 3 (nexus-uzay8): the
+        T2 writes route through the daemon; caller does local centroid delete.
         """
         if source_id == target_id:
-            return  # Self-merge is a no-op
+            return None  # Self-merge is a no-op
         with self._lock:
             # Read collection before deleting
             row = self.conn.execute(
@@ -1212,6 +1226,7 @@ class CatalogTaxonomy:
                 coll.delete(ids=[f"{collection}:{source_id}"])
             except Exception:
                 pass
+        return collection
 
     def get_topic_by_id(self, topic_id: int) -> dict[str, Any] | None:
         """Return a single topic dict by ID, or None."""
@@ -1571,6 +1586,129 @@ class CatalogTaxonomy:
             self._batched_upsert(centroid_coll, c_ids, c_embs, c_metas)
 
         return child_count
+
+    # ── Split compute/persist split (RDR-151 Phase 3, nexus-uzay8) ─────────
+
+    @staticmethod
+    def compute_split(
+        topic_id: int,
+        doc_ids: list[str],
+        texts: list[str],
+        fetched_ids: list[str],
+        embeddings: np.ndarray,
+        collection_name: str,
+        k: int,
+    ) -> dict[str, Any]:
+        """Compute the KMeans split (pure CPU + numpy — no T2 writes).
+
+        Returns a serializable dict with child specs and centroid records
+        so the caller can route :meth:`persist_split` through the daemon
+        and then do the local chroma centroid update.
+
+        ``fetched_ids`` is the subset of ``doc_ids`` for which texts were
+        actually retrieved (may differ from ``doc_ids`` when the T3 get
+        returned partial results).
+
+        Returns a dict with keys:
+        - ``child_specs``: list of dicts ``{label, terms_json, doc_count,
+          doc_ids, centroid}`` (one per KMeans cluster that is non-empty)
+        - ``collection_name``: passed through for the caller
+        - ``topic_id``: passed through for the caller
+        """
+        from sklearn.cluster import KMeans
+
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        km = KMeans(n_clusters=k, n_init=10, random_state=42)
+        labels = km.fit_predict(embeddings)
+
+        vectorizer = CountVectorizer(stop_words="english")
+        tfidf_matrix = TfidfTransformer().fit_transform(
+            vectorizer.fit_transform(texts),
+        )
+        feature_names = vectorizer.get_feature_names_out()
+
+        child_specs: list[dict[str, Any]] = []
+        for cid in range(k):
+            mask = labels == cid
+            if not mask.any():
+                continue
+            cluster_tfidf = tfidf_matrix[mask].mean(axis=0).A1
+            top_idx = cluster_tfidf.argsort()[-10:][::-1]
+            top_terms = [str(feature_names[i]) for i in top_idx]
+            label = " ".join(top_terms[:3])
+            terms_json = json.dumps(top_terms)
+            doc_count = int(mask.sum())
+            child_doc_ids = [fetched_ids[i] for i in range(len(fetched_ids)) if mask[i]]
+            child_centroid = embeddings[mask].mean(axis=0).tolist()
+            child_specs.append({
+                "label": label,
+                "terms_json": terms_json,
+                "doc_count": doc_count,
+                "doc_ids": child_doc_ids,
+                "centroid": child_centroid,
+                "created_at": now,
+            })
+
+        return {
+            "topic_id": topic_id,
+            "collection_name": collection_name,
+            "child_specs": child_specs,
+        }
+
+    def persist_split(
+        self,
+        split_result: dict[str, Any],
+    ) -> list[int]:
+        """Persist the split: DELETE parent assignments, INSERT children.
+
+        Pure T2 writes — no chroma.  Returns the list of new child
+        ``topic_id`` values so the caller can build centroid records and
+        upsert them locally.  RDR-151 Phase 3 (nexus-uzay8): this method
+        is the routable PERSIST half of :meth:`compute_split`.
+        """
+        topic_id: int = split_result["topic_id"]
+        collection_name: str = split_result["collection_name"]
+        child_specs: list[dict[str, Any]] = split_result["child_specs"]
+
+        child_ids: list[int] = []
+        with self._lock:
+            # Remove parent assignments (docs move to children)
+            self.conn.execute(
+                "DELETE FROM topic_assignments WHERE topic_id = ?",
+                (topic_id,),
+            )
+            for spec in child_specs:
+                self.conn.execute(
+                    "INSERT INTO topics "
+                    "(label, parent_id, collection, doc_count, created_at, terms) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        spec["label"],
+                        topic_id,
+                        collection_name,
+                        spec["doc_count"],
+                        spec["created_at"],
+                        spec["terms_json"],
+                    ),
+                )
+                child_id = self.conn.execute(
+                    "SELECT last_insert_rowid()"
+                ).fetchone()[0]
+                child_ids.append(child_id)
+                for did in spec["doc_ids"]:
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO topic_assignments "
+                        "(doc_id, topic_id, assigned_by) VALUES (?, ?, 'split')",
+                        (did, child_id),
+                    )
+
+            # Update parent doc_count to 0 (all docs moved to children)
+            self.conn.execute(
+                "UPDATE topics SET doc_count = 0 WHERE id = ?", (topic_id,),
+            )
+            self.conn.commit()
+        return child_ids
 
     # ── Rebalance trigger (RDR-070, nexus-1im) ──────────────────────────
 
@@ -2065,63 +2203,76 @@ class CatalogTaxonomy:
         new_metas: list[dict[str, Any]],
         centroid_coll: Any,
     ) -> None:
-        """Find topic links between new centroids and other collections'.
+        """Find + persist topic links between new centroids and other
+        collections' (composes the compute/persist split — back-compat for
+        direct callers like :meth:`discover_topics`)."""
+        pairs = self.compute_cross_links(
+            collection_name, new_centroids, new_metas, centroid_coll,
+        )
+        n = self.persist_cross_links(pairs)
+        if n:
+            _log.info("discover_cross_links", collection=collection_name, links=n)
 
-        After discover creates centroids for *collection_name*, query
-        existing centroids from all OTHER collections. Store matches
-        above ``_PROJECTION_THRESHOLD`` as ``topic_links`` entries.
+    @classmethod
+    def compute_cross_links(
+        cls,
+        collection_name: str,
+        new_centroids: list[list[float]],
+        new_metas: list[dict[str, Any]],
+        centroid_coll: Any,
+    ) -> list[tuple[int, int]]:
+        """Cross-collection centroid matching — the chroma+numpy COMPUTE half
+        of :meth:`_discover_cross_links` (RDR-151 Phase 3). Returns
+        ``(new_topic_id, other_topic_id)`` pairs above ``_PROJECTION_THRESHOLD``;
+        no T2 write. Empty on any no-op (no foreign centroids, dim mismatch).
         """
-        # Fetch all centroids NOT in this collection (paginated, ChromaDB cap = 300)
         try:
-            other = self._paginated_get(
+            other = cls._paginated_get(
                 centroid_coll,
                 where={"collection": {"$ne": collection_name}},
                 include=["embeddings", "metadatas"],
             )
         except Exception:
-            return
+            return []
 
         other_embs_raw = other.get("embeddings")
         other_metas = other.get("metadatas", [])
         if other_embs_raw is None or len(other_embs_raw) == 0:
-            return
+            return []
 
         other_embs = np.array(other_embs_raw, dtype=np.float32)
         new_embs = np.array(new_centroids, dtype=np.float32)
+        if new_embs.size == 0 or new_embs.shape[1] != other_embs.shape[1]:
+            return []
 
-        if new_embs.shape[1] != other_embs.shape[1]:
-            return
-
-        # Cosine similarity: new centroids × other centroids
         n_norms = np.linalg.norm(new_embs, axis=1, keepdims=True)
         n_norms[n_norms == 0] = 1.0
         o_norms = np.linalg.norm(other_embs, axis=1, keepdims=True)
         o_norms[o_norms == 0] = 1.0
         sim = (new_embs / n_norms) @ (other_embs / o_norms).T
 
-        # Collect pairs outside the lock (numpy work, no DB access)
         pairs: list[tuple[int, int]] = []
         for i, meta in enumerate(new_metas):
             new_tid = int(meta["topic_id"])
             for j in range(sim.shape[1]):
-                if float(sim[i, j]) >= self._PROJECTION_THRESHOLD:
-                    other_tid = int(other_metas[j]["topic_id"])
-                    pairs.append((new_tid, other_tid))
+                if float(sim[i, j]) >= cls._PROJECTION_THRESHOLD:
+                    pairs.append((new_tid, int(other_metas[j]["topic_id"])))
+        return pairs
 
-        if pairs:
-            with self._lock:
-                self.conn.executemany(
-                    "INSERT OR REPLACE INTO topic_links "
-                    "(from_topic_id, to_topic_id, link_count, link_types) "
-                    "VALUES (?, ?, 1, ?)",
-                    [(a, b, '["projection"]') for a, b in pairs],
-                )
-                self.conn.commit()
-            _log.info(
-                "discover_cross_links",
-                collection=collection_name,
-                links=len(pairs),
+    def persist_cross_links(self, pairs: list[tuple[int, int]]) -> int:
+        """Persist projection ``topic_links`` pairs — the pure-T2,
+        daemon-routable PERSIST half of :meth:`_discover_cross_links`."""
+        if not pairs:
+            return 0
+        with self._lock:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO topic_links "
+                "(from_topic_id, to_topic_id, link_count, link_types) "
+                "VALUES (?, ?, 1, ?)",
+                [(a, b, '["projection"]') for a, b in pairs],
             )
+            self.conn.commit()
+        return len(pairs)
 
     # ── Centroid dimension guard (RDR-075 SC-10) ─────────────────────
 
@@ -2766,16 +2917,66 @@ class CatalogTaxonomy:
         action, not a hot path.
         6. Record doc count for rebalance tracking
         """
-        # ── Step 1: read old state ────────────────────────────────────
+        # ── Step 1: read old state (chroma + T2 reads — read-only) ─────
+        centroid_coll = self._create_centroid_collection(chroma_client)
+        old = self.read_rebuild_old_state(collection_name, centroid_coll)
+
+        # ── Step 2: clear old centroids from ChromaDB (local). The old T2
+        # rows are cleared inside persist_rebuild_topics (one txn with the
+        # INSERT), so no separate direct T2 DELETE here (RDR-151 Phase 3).
+        for i in range(0, len(old["old_centroid_ids"]), 300):
+            centroid_coll.delete(ids=old["old_centroid_ids"][i:i + 300])
+
+        # ── Steps 3-4: compute the rebuild plan (cluster + merge + manual
+        # transfer decisions) — chroma-free, T2-write-free (RDR-151 Phase 3).
+        n = len(doc_ids)
+        plan = self.compute_rebuild_plan(
+            collection_name, doc_ids, embeddings, texts,
+            old_centroids=old["old_centroids"],
+            old_labels=old["old_labels"],
+            old_review_statuses=old["old_review_statuses"],
+            old_centroid_topic_ids=old["old_centroid_topic_ids"],
+            manual_assignments=old["manual_assignments"],
+        )
+
+        # ── Step 5: persist (pure T2, daemon-routable). REPLACE semantics —
+        # clears old rows even when there are no new specs (< 5 docs /
+        # all-noise), so the old topics never survive a rebuild.
+        topic_ids = self.persist_rebuild_topics(collection_name, plan)
+
+        # Upsert new centroids locally from the returned topic_ids.
+        if topic_ids:
+            c_ids, c_embs, c_metas = self._centroid_records_for(
+                collection_name, plan["specs"], topic_ids,
+            )
+            if c_ids:
+                self._batched_upsert(centroid_coll, c_ids, c_embs, c_metas)
+
+        # Record doc count for rebalance tracking
+        self.record_discover_count(collection_name, n)
+
+        return len(topic_ids)
+
+    def read_rebuild_old_state(
+        self,
+        collection_name: str,
+        centroid_coll: Any,
+    ) -> dict[str, Any]:
+        """Read the pre-rebuild state (READ-ONLY) for :meth:`rebuild_taxonomy`
+        / the routed rebuild path (RDR-151 Phase 3).
+
+        Reads old T2 topic labels + manual assignments and old ChromaDB
+        centroids, resolving each centroid's label/review-status from T2.
+        Pure reads (no WAL writer contention), so callers may run this on a
+        read-only handle while routing the WRITE half through the daemon.
+        Returns the keyword inputs ``compute_rebuild_plan`` expects plus
+        ``old_centroid_ids`` for the local chroma cleanup.
+        """
         old_centroids = np.empty((0, 0), dtype=np.float32)
         old_labels: list[str] = []
         old_review_statuses: list[str] = []
+        old_centroid_topic_ids: list[int] = []
 
-        centroid_coll = self._create_centroid_collection(chroma_client)
-
-        # Read old T2 topics (id -> label, review_status) — authoritative
-        # for operator renames. ChromaDB metadata may still have the
-        # original c-TF-IDF label.
         with self._lock:
             old_topic_rows = self.conn.execute(
                 "SELECT id, label, review_status FROM topics WHERE collection = ?",
@@ -2785,9 +2986,6 @@ class CatalogTaxonomy:
             r[0]: (r[1], r[2]) for r in old_topic_rows
         }
 
-        # Read old centroids from ChromaDB, resolve labels from T2
-        # (paginated, ChromaDB cap = 300)
-        old_centroid_topic_ids: list[int] = []  # old topic_id per centroid index
         try:
             old_data = self._paginated_get(
                 centroid_coll,
@@ -2808,7 +3006,6 @@ class CatalogTaxonomy:
         except Exception:
             pass
 
-        # Read manual assignments (doc_id -> old_topic_id)
         with self._lock:
             manual_rows = self.conn.execute(
                 "SELECT ta.doc_id, ta.topic_id FROM topic_assignments ta "
@@ -2818,57 +3015,18 @@ class CatalogTaxonomy:
             ).fetchall()
         manual_assignments: dict[str, int] = {r[0]: r[1] for r in manual_rows}
 
-        # ── Step 2: clear old data ────────────────────────────────────
-        with self._lock:
-            self.conn.execute(
-                "DELETE FROM topic_assignments WHERE topic_id IN "
-                "(SELECT id FROM topics WHERE collection = ?)",
-                (collection_name,),
-            )
-            self.conn.execute(
-                "DELETE FROM topics WHERE collection = ?", (collection_name,),
-            )
-            self.conn.commit()
-
-        # Clear old centroids from ChromaDB.  Paginated GET (cap 300) +
-        # batched DELETE (MAX_RECORDS_PER_WRITE = 300).
         old_centroid_ids = self._paginated_get(
-            centroid_coll,
-            where={"collection": collection_name},
+            centroid_coll, where={"collection": collection_name},
         ).get("ids", [])
-        for i in range(0, len(old_centroid_ids), 300):
-            centroid_coll.delete(ids=old_centroid_ids[i:i + 300])
 
-        # ── Steps 3-4: compute the rebuild plan (cluster + merge + manual
-        # transfer decisions) — chroma-free, T2-write-free (RDR-151 Phase 3).
-        n = len(doc_ids)
-        plan = self.compute_rebuild_plan(
-            collection_name, doc_ids, embeddings, texts,
-            old_centroids=old_centroids,
-            old_labels=old_labels,
-            old_review_statuses=old_review_statuses,
-            old_centroid_topic_ids=old_centroid_topic_ids,
-            manual_assignments=manual_assignments,
-        )
-        if not plan["specs"]:
-            self.record_discover_count(collection_name, n)
-            return 0
-
-        # ── Step 5: persist (pure T2, daemon-routable): DELETE old +
-        # INSERT new + apply manual transfers, one transaction.
-        topic_ids = self.persist_rebuild_topics(collection_name, plan)
-
-        # Upsert new centroids locally from the returned topic_ids.
-        c_ids, c_embs, c_metas = self._centroid_records_for(
-            collection_name, plan["specs"], topic_ids,
-        )
-        if c_ids:
-            self._batched_upsert(centroid_coll, c_ids, c_embs, c_metas)
-
-        # Record doc count for rebalance tracking
-        self.record_discover_count(collection_name, n)
-
-        return len(topic_ids)
+        return {
+            "old_centroids": old_centroids,
+            "old_labels": old_labels,
+            "old_review_statuses": old_review_statuses,
+            "old_centroid_topic_ids": old_centroid_topic_ids,
+            "manual_assignments": manual_assignments,
+            "old_centroid_ids": old_centroid_ids,
+        }
 
     @staticmethod
     def compute_rebuild_plan(
@@ -2991,10 +3149,12 @@ class CatalogTaxonomy:
         INSERT the new topic rows + their chunk assignments, then apply the
         manual transfers (``{doc_id: spec_index}`` -> the generated topic_id).
         Returns the new topic_ids aligned to ``plan["specs"]`` order.
+
+        Rebuild is REPLACE semantics: the old rows are cleared even when
+        ``specs`` is empty (the ``< 5`` docs / all-noise case), matching the
+        monolithic ``rebuild_taxonomy``'s unconditional Step-2 clear.
         """
         specs = plan["specs"]
-        if not specs:
-            return []
         manual_transfers: dict[str, int] = plan.get("manual_transfers", {})
 
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -18,6 +18,7 @@ Allowed prefixes:
 """
 from __future__ import annotations
 
+import ast
 import pathlib
 
 import pytest
@@ -600,3 +601,268 @@ def test_catalog_construction_allowlist_includes_catalog_module():
     narrow = _catalog_check()
     assert wide.catalog_constructions > narrow.catalog_constructions
     assert "src/nexus/catalog/" in CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES
+
+
+# ---------------------------------------------------------------------------
+# RDR-151 Phase 3 (nexus-uzay8): taxonomy write boundary lint.
+#
+# All taxonomy WRITE methods must flow through t2_index_write (the daemon
+# RPC boundary). A direct call like ``db.taxonomy.assign_topic(...)`` or
+# ``taxonomy.delete_topic(...)`` outside src/nexus/db or src/nexus/daemon
+# bypasses the single-writer invariant (RDR-128).
+#
+# This lint does NOT require inferring which variable holds a
+# CatalogTaxonomy instance (that would need dataflow analysis). Instead
+# it detects attribute-call AST nodes whose method name is in the banned
+# set AND whose call site is NOT inside a lambda body. The lambda check
+# handles the canonical routing pattern:
+#     t2_index_write(lambda db: db.taxonomy.assign_topic(...))
+# where the banned method name is present but correctly routed.
+#
+# Allowlist:
+#   src/nexus/db/     — the taxonomy implementation itself
+#   src/nexus/daemon/ — the daemon-side write host
+#   # epsilon-allow: <reason>  — per-line override (>= 8 char reason)
+#
+# ---------------------------------------------------------------------------
+
+_TAXONOMY_WRITE_METHODS: frozenset[str] = frozenset({
+    "assign_topic",
+    "persist_assignments",
+    "persist_discovered_topics",
+    "persist_rebuild_topics",
+    "persist_cross_links",
+    "persist_split",
+    "split_topic",
+    "generate_cooccurrence_links",
+    "refresh_projection_links",
+    "update_topic_label",
+    "mark_topic_reviewed",
+    "rename_topic",
+    "merge_topics",
+    "delete_topic",
+    "upsert_topic_links",
+    "record_discover_count",
+})
+
+_TAXONOMY_WRITE_ALLOWLIST_PREFIXES: tuple[str, ...] = (
+    "src/nexus/db/",
+    "src/nexus/daemon/",
+)
+
+_TAXONOMY_EPSILON_TOKEN = "# epsilon-allow:"
+_TAXONOMY_EPSILON_MIN_REASON = 8
+
+
+def _is_inside_t2_index_write_lambda(node: ast.AST, tree: ast.AST) -> bool:
+    """True if *node* is inside a lambda that is a DIRECT positional or
+    keyword argument of a ``t2_index_write(...)`` call.
+
+    This is intentionally narrow: it only exempts the canonical routing
+    pattern::
+
+        t2_index_write(lambda db: db.taxonomy.assign_topic(...))
+
+    A lambda passed to ANY other dispatcher (``bad_dispatcher``, a variable,
+    etc.) does NOT get the exemption — the lint flags those as unrouted.
+
+    Algorithm:
+    1. Build a child -> parent map for the whole tree.
+    2. Walk upward from *node*.
+    3. If we encounter a ``Lambda`` node, check whether ITS parent is a
+       ``Call`` node whose function name resolves to ``t2_index_write``.
+    4. If so, return True; otherwise keep walking (the node may be inside a
+       nested lambda that is not itself a t2_index_write argument).
+    """
+    parent_map: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parent_map[id(child)] = parent
+
+    cur = node
+    while id(cur) in parent_map:
+        par = parent_map[id(cur)]
+        if isinstance(par, ast.Lambda):
+            # Check whether this lambda's immediate parent is a t2_index_write call.
+            lambda_parent = parent_map.get(id(par))
+            if lambda_parent is not None and isinstance(lambda_parent, ast.Call):
+                func = lambda_parent.func
+                # Direct name: t2_index_write(lambda ...)
+                if isinstance(func, ast.Name) and func.id == "t2_index_write":
+                    return True
+                # Attribute form: module.t2_index_write(lambda ...)
+                if isinstance(func, ast.Attribute) and func.attr == "t2_index_write":
+                    return True
+            # Lambda parent is NOT a t2_index_write call; keep walking upward.
+        cur = par
+    return False
+
+
+def _taxonomy_write_violations(path: pathlib.Path) -> list[tuple[int, str]]:
+    """Return (lineno, method_name) pairs for unrouted taxonomy write calls.
+
+    Skips calls that are:
+    - Inside a lambda body (correctly routed via t2_index_write)
+    - On a line tagged ``# epsilon-allow: <reason>`` (>= 8 char reason)
+    """
+    try:
+        source = path.read_text()
+    except (UnicodeDecodeError, OSError):
+        return []
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError:
+        return []
+
+    source_lines = source.splitlines()
+    violations: list[tuple[int, str]] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            continue
+        method = func.attr
+        if method not in _TAXONOMY_WRITE_METHODS:
+            continue
+
+        # Inside a t2_index_write lambda -> correctly routed, skip
+        if _is_inside_t2_index_write_lambda(node, tree):
+            continue
+
+        # Check epsilon-allow on the call's line
+        lineno = node.lineno
+        if 1 <= lineno <= len(source_lines):
+            line = source_lines[lineno - 1]
+            tok_pos = line.find(_TAXONOMY_EPSILON_TOKEN)
+            if tok_pos >= 0:
+                reason = line[tok_pos + len(_TAXONOMY_EPSILON_TOKEN):].strip()
+                if len(reason) >= _TAXONOMY_EPSILON_MIN_REASON:
+                    continue
+
+        violations.append((lineno, method))
+
+    return violations
+
+
+def _taxonomy_allowed(rel_posix: str) -> bool:
+    return any(
+        rel_posix.startswith(prefix)
+        for prefix in _TAXONOMY_WRITE_ALLOWLIST_PREFIXES
+    )
+
+
+def test_no_direct_taxonomy_writes_in_src() -> None:
+    """RDR-151 Phase 3 (nexus-uzay8): no source file outside src/nexus/db/
+    or src/nexus/daemon/ may call a taxonomy WRITE method on a direct handle
+    (not inside a t2_index_write lambda).
+
+    All taxonomy writes must flow through:
+        t2_index_write(lambda db: db.taxonomy.<write_method>(...))
+
+    A direct call bypasses the single-writer invariant (RDR-128) and
+    causes WAL contention under the daemon.
+    """
+    offenders: dict[str, list[tuple[int, str]]] = {}
+
+    for py in SRC_ROOT.rglob("*.py"):
+        rel = py.relative_to(REPO_ROOT).as_posix()
+        if _taxonomy_allowed(rel):
+            continue
+        hits = _taxonomy_write_violations(py)
+        if hits:
+            offenders[rel] = hits
+
+    if offenders:
+        formatted = "\n".join(
+            f"  {path}:\n    " + "\n    ".join(
+                f"line {ln}: {meth}()" for ln, meth in hits
+            )
+            for path, hits in sorted(offenders.items())
+        )
+        raise AssertionError(
+            "RDR-151 Phase 3: direct taxonomy WRITE outside db/ or daemon/ "
+            "bypasses the single-writer invariant. Route via "
+            "t2_index_write(lambda db: db.taxonomy.<method>(...)) or add "
+            f"# epsilon-allow: <reason> (>= {_TAXONOMY_EPSILON_MIN_REASON} chars). "
+            f"Violations:\n{formatted}"
+        )
+
+
+def test_taxonomy_write_lint_detects_synthetic_violation(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Self-test: a direct un-routed taxonomy write call must be flagged."""
+    fake = tmp_path / "fake_taxonomy_writer.py"
+    fake.write_text(
+        "def bad(db):\n"
+        "    db.taxonomy.assign_topic('doc-1', 42)\n"
+    )
+    hits = _taxonomy_write_violations(fake)
+    assert hits, "lint gate did not detect direct assign_topic call"
+    assert hits[0][1] == "assign_topic"
+
+
+def test_taxonomy_write_lint_allows_lambda_routed_call(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Self-test: a call inside a t2_index_write lambda must NOT be flagged."""
+    fake = tmp_path / "fake_taxonomy_routed.py"
+    fake.write_text(
+        "from nexus.mcp_infra import t2_index_write\n"
+        "def ok(_did, _tid):\n"
+        "    t2_index_write(lambda db: db.taxonomy.assign_topic(_did, _tid))\n"
+    )
+    hits = _taxonomy_write_violations(fake)
+    assert hits == [], f"routed call inside t2_index_write lambda was flagged: {hits}"
+
+
+def test_taxonomy_write_lint_flags_lambda_inside_other_dispatcher(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Self-test (tightened gate): a taxonomy write inside a lambda passed to
+    ANY dispatcher OTHER than ``t2_index_write`` must be FLAGGED.
+
+    The exemption is t2_index_write-specific: routing through an arbitrary
+    ``bad_dispatcher`` does not satisfy the daemon-write-boundary invariant.
+    This test proves the exemption is narrow, not a blanket all-lambda allow.
+    """
+    fake = tmp_path / "fake_taxonomy_wrong_dispatcher.py"
+    fake.write_text(
+        "def bad_dispatcher(fn): fn(None)\n"
+        "def bad():\n"
+        "    bad_dispatcher(lambda db: db.taxonomy.assign_topic('x', 1))\n"
+    )
+    hits = _taxonomy_write_violations(fake)
+    assert hits, (
+        "lambda inside non-t2_index_write dispatcher must be flagged; "
+        "the exemption must be t2_index_write-specific"
+    )
+    assert any(meth == "assign_topic" for _, meth in hits)
+
+
+def test_taxonomy_write_lint_allows_epsilon_allow(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Self-test: a line tagged epsilon-allow with >= 8 char reason is skipped."""
+    fake = tmp_path / "fake_taxonomy_epsilon.py"
+    fake.write_text(
+        "def ok(db):\n"
+        "    db.taxonomy.delete_topic(1)  # epsilon-allow: taxonomy CLI factory read-only\n"
+    )
+    hits = _taxonomy_write_violations(fake)
+    assert hits == [], f"epsilon-allow'd call was flagged: {hits}"
+
+
+def test_taxonomy_write_lint_rejects_short_epsilon_reason(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Self-test: epsilon-allow with < 8 char reason does NOT suppress."""
+    fake = tmp_path / "fake_taxonomy_short_eps.py"
+    fake.write_text(
+        "def bad(db):\n"
+        "    db.taxonomy.delete_topic(1)  # epsilon-allow: ok\n"
+    )
+    hits = _taxonomy_write_violations(fake)
+    assert hits, "short epsilon-allow reason must NOT suppress"

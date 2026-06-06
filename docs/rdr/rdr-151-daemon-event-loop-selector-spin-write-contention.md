@@ -317,9 +317,21 @@ on the `topic_id` the INSERT returned. RDR-128 P3 conflated "topic_id generated 
 INSERT" with "must be one transaction"; the centroid write is a separate post-commit
 step that only *needs* the returned id, which the daemon can return. So Option B is
 an extension of the established compute/persist pattern, **not** RDR-063 read/write-split
-territory. Eliminates the direct `T2Database` at `index.py:735` (lint count for that
-site → 0; enforce-flip becomes possible). Full contract + risks: T2
-`nexus/rdr151-phase3-design-2026-06-06`.
+territory. Full contract + risks: T2 `nexus/rdr151-phase3-design-2026-06-06`.
+
+**Scope as implemented (2026-06-06, corrects the first memo's overclaim):** the
+enforce-flip is on taxonomy *write methods*, not on `T2Database` *construction*.
+Every direct T2 taxonomy WRITE on the `nx index` path and the `nx taxonomy` CLI
+is routed through the daemon via `t2_index_write`; a `storage_boundary_lint` AST
+test (`test_no_direct_taxonomy_writes_in_src`) fails on any taxonomy write method
+called on a directly-constructed handle outside `db/`+`daemon/`. A **read-only**
+`T2Database` remains on the index/CLI paths (`get_unreviewed_topics`,
+`get_topics`, `generate_context_l1`, rebuild old-state reads) — WAL readers run
+concurrently and never take the writer lock, so they cannot drive the peg. The
+`t2database_constructions` count is therefore *not* reduced to zero; the first
+design memo's "eliminate the direct `T2Database` / lint → 0" was an overclaim.
+The peg (live-captured as the external *write* contender) is fixed because the
+WRITERS are gone, not because the construction is.
 
 **Option A (not taken):** route only the post-compute persists; keep the direct
 handle for topic/centroid creation, narrowed epsilon-allow. Shrinks rather than
