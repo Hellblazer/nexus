@@ -318,6 +318,26 @@ asserting no executor thread is wedged in the SQLite busy handler.
 > within ~5 s. T2-only by construction (the T3 daemon is a synchronous subprocess
 > supervisor with no asyncio loop). Tests: `tests/daemon/test_spin_guard.py`.
 
+> **ROOT-CAUSE FIX (2026-06-06, `nexus-xmohw`, GH #1137).** The spin guard is the
+> backstop; this is the cause. GH #1137 reproduced the peg under a `memory.delete`
+> write burst and identified two co-occurring mechanisms: a selector spin (guard
+> handles) and **intra-daemon WAL write contention** — un-serialised `memory.*`
+> writes plus the daemon's own 30 s reclaim loop each launched parallel
+> `to_thread` writers racing the one SQLite writer lock → `SQLITE_BUSY` → tight
+> retry → spin. 2.1a serialised only `catalog_write.*`/`taxonomy.*`; this makes the
+> daemon a genuine **single serialised writer** (RDR-129 B3 / Datasette
+> write-queue): `_WRITE_OPS` + the reclaim loop all serialise through one write
+> lock, so there is never a second intra-daemon writer → no `SQLITE_BUSY` from
+> self-contention. Reads stay concurrent (esp. `database.hello`, to avoid the
+> slow-hello → ensure-running-stale → takeover-churn cascade). Lock-hold is bounded
+> to one write attempt (backoff happens outside the lock). A coverage forcing-test
+> (`test_rdr151_xmohw_write_serialization.py::test_write_op_coverage`) fails if any
+> mutating dispatch op is left un-serialised — closing the silent-recurrence gap.
+> **Deferred (coupled, tracked):** 2.1b `BEGIN IMMEDIATE` + 2.1c fast-fail
+> `busy_timeout` for the cross-process/version-skew double-writer case — they must
+> land together (BEGIN IMMEDIATE alone, with the 30 s busy_timeout, would create a
+> long head-of-line lock-hold; 2.1c bounds it).
+
 ### Phase 3 design (2026-06-06, nexus-uzay8)
 
 Full design: T2 `nexus/rdr151-phase3-design-2026-06-06`.

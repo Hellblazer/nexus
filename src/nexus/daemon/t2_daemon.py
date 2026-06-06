@@ -100,7 +100,7 @@ _GRACEFUL_PEER_EXIT_WAIT: float = 3.0
 # contention, so this only fires when a window exceeds the timeout; it turns a
 # >30s contention spike into a wait rather than a dropped best-effort write.
 # Module constant so tests can shrink the sleeps.
-_DISPATCH_RETRY_SLEEPS: tuple[float, ...] = (0.1, 0.25)
+_DISPATCH_RETRY_SLEEPS: tuple[float, ...] = (0.05, 0.1, 0.2, 0.4, 0.8)
 
 # RDR-146 P2 (nexus-5p2ci.12): interactive-vs-batch catalog-write fairness.
 # An interactive-priority catalog write opens an in-memory deadline window;
@@ -667,6 +667,56 @@ _CATALOG_WRITE_PREFIX = "catalog_write."
 #: cannot silently bypass serialisation. ``str.startswith`` accepts this tuple.
 _WRITE_SERIALIZED_PREFIXES: tuple[str, ...] = (_CATALOG_WRITE_PREFIX, "taxonomy.")
 
+#: RDR-151 nexus-xmohw: every mutating dispatch op must serialise through the
+#: daemon's single write lock. The peg root cause (issue #1137) is intra-daemon
+#: WAL write contention: a burst of un-serialised ``memory.*`` writes plus the
+#: internal reclaim loop each launch parallel ``to_thread`` writers racing the
+#: one SQLite writer lock → SQLITE_BUSY → tight retry → selector spin / 100% CPU.
+#: 2.1a serialised only ``catalog_write.*`` + ``taxonomy.*``; this extends it to
+#: ALL writers so the daemon is a genuine single serialised writer (RDR-129 B3 /
+#: Datasette write-queue model): one write at a time, no intra-daemon contention,
+#: no busy-spin. READS are intentionally NOT here — WAL allows concurrent readers,
+#: and serialising reads (esp. ``database.hello``) behind writes would re-create
+#: the slow-hello → ensure-running-declares-stale → takeover-churn cascade.
+#:
+#: ``tests/daemon/test_rdr151_xmohw_write_serialization.py::test_write_op_coverage``
+#: is the forcing function: it verb-matches every dispatchable store method and
+#: fails if a mutating op is not serialised here — closing the silent-recurrence
+#: gap (a future writer added without serialisation).
+_WRITE_OPS: frozenset[str] = frozenset({
+    # memory store
+    "memory.put", "memory.delete", "memory.expire", "memory.merge_memories",
+    "memory.put_or_merge", "memory.flag_stale_memories",
+    # plan library
+    "plans.save_plan", "plans.delete_plan", "plans.set_plan_disabled",
+    "plans.set_plan_enabled", "plans.set_scope_tags",
+    "plans.increment_match_metrics", "plans.increment_run_started",
+    "plans.increment_run_outcome",
+    # chash index
+    "chash_index.upsert", "chash_index.upsert_many",
+    "chash_index.delete_collection", "chash_index.delete_stale",
+    "chash_index.rename_collection",
+    # telemetry
+    "telemetry.log_relevance", "telemetry.log_relevance_batch",
+    "telemetry.expire_relevance_log", "telemetry.log_search_batch",
+    "telemetry.trim_search_telemetry", "telemetry.rename_collection",
+    # document aspects (upsert/get are RPC-denied; these are the dispatchable writes)
+    "document_aspects.set_salient_sentences",
+    "document_aspects.set_salient_sentences_by_key",
+    "document_aspects.delete", "document_aspects.delete_orphans",
+    "document_aspects.rename_collection",
+    # aspect extraction queue
+    "aspect_queue.enqueue", "aspect_queue.claim_next", "aspect_queue.claim_batch",
+    "aspect_queue.mark_done", "aspect_queue.mark_failed", "aspect_queue.mark_retry",
+    "aspect_queue.reclaim_stale", "aspect_queue.rename_collection",
+    # T2Database top-level write methods (dispatched as ``database.*``)
+    "database.rename_collection_cascade", "database.expire",
+    "database.complete_aspect",
+    # catalog read-store commit (flushes pending writes); catalog mutations
+    # proper go through the catalog_write.* prefix.
+    "catalog.commit",
+})
+
 
 def _build_dispatch_table(t2db: Any) -> dict[str, Any]:
     """Build the ``{op: bound_callable}`` dispatch table from *t2db*.
@@ -1145,10 +1195,7 @@ class T2Daemon:
             t2db = self._t2db
             if t2db is not None:
                 try:
-                    reclaimed = await asyncio.to_thread(
-                        t2db.aspect_queue.reclaim_stale,
-                        _ASPECT_RECLAIM_STALE_TIMEOUT_S,
-                    )
+                    reclaimed = await self._reclaim_stale_once(t2db)
                     if reclaimed:
                         _log.info(
                             "t2_daemon_aspect_reclaim", reclaimed=reclaimed
@@ -1161,6 +1208,24 @@ class T2Daemon:
                         "t2_daemon_aspect_reclaim_failed", exc=str(exc)
                     )
             await asyncio.sleep(_ASPECT_RECLAIM_INTERVAL)
+
+    async def _reclaim_stale_once(self, t2db: Any) -> int:
+        """Run one aspect-queue stale-reclaim pass — RDR-151 nexus-xmohw: the
+        daemon's OWN reclaim writer serialises through the SAME write lock as
+        serve-path writes (issue #1137 mechanism 2: the 30s reclaim loop raced a
+        ``memory.delete`` burst on the WAL writer lock → SQLITE_BUSY → retry
+        spin). Under the lock there is one writer at a time, so no contention.
+        The lock is created in ``start()``; the pre-start window falls back to a
+        direct write (no other writer exists yet)."""
+        lock = self._catalog_write_lock
+        if lock is not None:
+            async with lock:
+                return await asyncio.to_thread(
+                    t2db.aspect_queue.reclaim_stale, _ASPECT_RECLAIM_STALE_TIMEOUT_S
+                )
+        return await asyncio.to_thread(
+            t2db.aspect_queue.reclaim_stale, _ASPECT_RECLAIM_STALE_TIMEOUT_S
+        )
 
     async def run_until_signal(self) -> None:
         """Block until SIGTERM/SIGINT arrives."""
@@ -1510,15 +1575,43 @@ class T2Daemon:
         # prefix is serialised (not an enumerated write-op set) so a future
         # taxonomy writer is covered by default — a missed writer is exactly the
         # silent-recurrence class this fix closes. Taxonomy reads serialising
-        # behind a write is acceptable: they are not a hot daemon read path, and
-        # P2.1b/P2.1c keep write hold-time short.
+        # behind a write is acceptable: they are not a hot daemon read path.
+        # Lock hold-time is bounded to one write attempt (backoff happens outside
+        # the lock in _invoke_serialized_with_retry).
         if (
-            op.startswith(_WRITE_SERIALIZED_PREFIXES)
+            (op in _WRITE_OPS or op.startswith(_WRITE_SERIALIZED_PREFIXES))
             and self._catalog_write_lock is not None
         ):
-            async with self._catalog_write_lock:
-                return await self._invoke_with_lock_retry(callable_, op, args, kwargs)
+            return await self._invoke_serialized_with_retry(
+                callable_, op, args, kwargs
+            )
         return await self._invoke_with_lock_retry(callable_, op, args, kwargs)
+
+    async def _invoke_serialized_with_retry(
+        self, callable_: Any, op: str, args: list[Any], kwargs: dict[str, Any],
+    ) -> Any:
+        """Serialised write path (RDR-151 nexus-xmohw): hold the daemon write
+        lock for ONE write attempt, then release it BEFORE the backoff sleep, so
+        a write waiting on a cross-process writer never blocks the daemon's other
+        writes for the whole retry budget (critic C2 head-of-line bound). Intra-
+        daemon contention is gone by construction (one writer at a time); the
+        retry only fires against an out-of-daemon writer."""
+        lock = self._catalog_write_lock
+        assert lock is not None  # caller checked
+        sleeps = _DISPATCH_RETRY_SLEEPS
+        max_attempts = len(sleeps) + 1
+        for attempt in range(1, max_attempts + 1):
+            async with lock:
+                try:
+                    return await asyncio.to_thread(callable_, *args, **kwargs)
+                except sqlite3.OperationalError as exc:
+                    if not _is_locked_error(exc) or attempt == max_attempts:
+                        raise
+                    _log.warning(
+                        "t2_daemon_dispatch_lock_retry",
+                        op=op, attempt=attempt, exc=str(exc),
+                    )
+            await asyncio.sleep(sleeps[attempt - 1])  # backoff OUTSIDE the lock
 
     async def _invoke_with_lock_retry(
         self, callable_: Any, op: str, args: list[Any], kwargs: dict[str, Any],
