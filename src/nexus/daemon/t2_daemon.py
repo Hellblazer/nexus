@@ -62,7 +62,9 @@ import sqlite3
 import struct
 import subprocess
 import sys
+import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -98,7 +100,7 @@ _GRACEFUL_PEER_EXIT_WAIT: float = 3.0
 # contention, so this only fires when a window exceeds the timeout; it turns a
 # >30s contention spike into a wait rather than a dropped best-effort write.
 # Module constant so tests can shrink the sleeps.
-_DISPATCH_RETRY_SLEEPS: tuple[float, ...] = (0.1, 0.25)
+_DISPATCH_RETRY_SLEEPS: tuple[float, ...] = (0.05, 0.1, 0.2, 0.4, 0.8)
 
 # RDR-146 P2 (nexus-5p2ci.12): interactive-vs-batch catalog-write fairness.
 # An interactive-priority catalog write opens an in-memory deadline window;
@@ -363,6 +365,34 @@ _DB_CLOSE_TIMEOUT: float = 10.0
 #: RPC client connects, calls, and closes promptly); finite so a dead-but-not-
 #: RST peer cannot pin the connection forever.
 _IDLE_READ_TIMEOUT: float = 300.0
+
+#: RDR-151 nexus-u2vmv: cause-agnostic event-loop spin guard. If the loop polls
+#: the selector for an immediate ready-return at a sustained rate above the
+#: threshold, the daemon is spinning (~100% CPU) — capture and self-heal rather
+#: than peg a core forever. Threshold default 10000/s with headroom above the
+#: *measured* peaks of legitimate churn (~5110/s graceful memory.put, ~6872/s
+#: abrupt-RST churn per the RDR-151 P2.1 synthesis — those are throughput, not a
+#: peg); the historical peg sustained far higher. Env-tunable.
+#:
+#: NOTE: this guard is T2-specific by construction — it instruments the T2
+#: daemon's asyncio SelectorEventLoop. The T3 daemon (run_t3_supervisor) is a
+#: SYNCHRONOUS subprocess supervisor with no asyncio loop/selector, so the
+#: shared-primitive lifecycle rule's selector-spin concern does not apply there
+#: (verified 2026-06-06: t3_daemon.py has no asyncio.run / event loop).
+_SPIN_THRESHOLD_PER_S: float = float(os.environ.get("NX_T2_SPIN_THRESHOLD", "10000"))
+_SPIN_WINDOW_S: float = 1.0
+_SPIN_CONSECUTIVE: int = 5  # ~5s sustained before declaring a spin
+_SPIN_HARD_EXIT_TIMEOUT: float = 10.0  # graceful SIGTERM grace before os._exit
+_SPIN_EXIT_CODE: int = 99
+#: Bound self-heal restarts so a PERSISTENT trigger (e.g. a skewed client that
+#: re-induces the spin on every fresh daemon) can never drive the supervisor's
+#: crash-loop guard to permanent suppression (a suppressed daemon serves
+#: nothing — strictly worse than a pegged-but-serving one). After this many
+#: spin-heals within the window, the daemon DISARMS self-heal and stays up
+#: pegged-but-serving (== the pre-guard baseline; never worse) while logging a
+#: loud, actionable ERROR. nexus-u2vmv critic C2.
+_SPIN_HEAL_MAX: int = 2
+_SPIN_HEAL_WINDOW_S: float = 600.0
 
 
 # ---------------------------------------------------------------------------
@@ -636,6 +666,56 @@ _CATALOG_WRITE_PREFIX = "catalog_write."
 #: ``taxonomy.`` prefix is included (safe-by-default) so a future taxonomy writer
 #: cannot silently bypass serialisation. ``str.startswith`` accepts this tuple.
 _WRITE_SERIALIZED_PREFIXES: tuple[str, ...] = (_CATALOG_WRITE_PREFIX, "taxonomy.")
+
+#: RDR-151 nexus-xmohw: every mutating dispatch op must serialise through the
+#: daemon's single write lock. The peg root cause (issue #1137) is intra-daemon
+#: WAL write contention: a burst of un-serialised ``memory.*`` writes plus the
+#: internal reclaim loop each launch parallel ``to_thread`` writers racing the
+#: one SQLite writer lock → SQLITE_BUSY → tight retry → selector spin / 100% CPU.
+#: 2.1a serialised only ``catalog_write.*`` + ``taxonomy.*``; this extends it to
+#: ALL writers so the daemon is a genuine single serialised writer (RDR-129 B3 /
+#: Datasette write-queue model): one write at a time, no intra-daemon contention,
+#: no busy-spin. READS are intentionally NOT here — WAL allows concurrent readers,
+#: and serialising reads (esp. ``database.hello``) behind writes would re-create
+#: the slow-hello → ensure-running-declares-stale → takeover-churn cascade.
+#:
+#: ``tests/daemon/test_rdr151_xmohw_write_serialization.py::test_write_op_coverage``
+#: is the forcing function: it verb-matches every dispatchable store method and
+#: fails if a mutating op is not serialised here — closing the silent-recurrence
+#: gap (a future writer added without serialisation).
+_WRITE_OPS: frozenset[str] = frozenset({
+    # memory store
+    "memory.put", "memory.delete", "memory.expire", "memory.merge_memories",
+    "memory.put_or_merge", "memory.flag_stale_memories",
+    # plan library
+    "plans.save_plan", "plans.delete_plan", "plans.set_plan_disabled",
+    "plans.set_plan_enabled", "plans.set_scope_tags",
+    "plans.increment_match_metrics", "plans.increment_run_started",
+    "plans.increment_run_outcome",
+    # chash index
+    "chash_index.upsert", "chash_index.upsert_many",
+    "chash_index.delete_collection", "chash_index.delete_stale",
+    "chash_index.rename_collection",
+    # telemetry
+    "telemetry.log_relevance", "telemetry.log_relevance_batch",
+    "telemetry.expire_relevance_log", "telemetry.log_search_batch",
+    "telemetry.trim_search_telemetry", "telemetry.rename_collection",
+    # document aspects (upsert/get are RPC-denied; these are the dispatchable writes)
+    "document_aspects.set_salient_sentences",
+    "document_aspects.set_salient_sentences_by_key",
+    "document_aspects.delete", "document_aspects.delete_orphans",
+    "document_aspects.rename_collection",
+    # aspect extraction queue
+    "aspect_queue.enqueue", "aspect_queue.claim_next", "aspect_queue.claim_batch",
+    "aspect_queue.mark_done", "aspect_queue.mark_failed", "aspect_queue.mark_retry",
+    "aspect_queue.reclaim_stale", "aspect_queue.rename_collection",
+    # T2Database top-level write methods (dispatched as ``database.*``)
+    "database.rename_collection_cascade", "database.expire",
+    "database.complete_aspect",
+    # catalog read-store commit (flushes pending writes); catalog mutations
+    # proper go through the catalog_write.* prefix.
+    "catalog.commit",
+})
 
 
 def _build_dispatch_table(t2db: Any) -> dict[str, Any]:
@@ -1115,10 +1195,7 @@ class T2Daemon:
             t2db = self._t2db
             if t2db is not None:
                 try:
-                    reclaimed = await asyncio.to_thread(
-                        t2db.aspect_queue.reclaim_stale,
-                        _ASPECT_RECLAIM_STALE_TIMEOUT_S,
-                    )
+                    reclaimed = await self._reclaim_stale_once(t2db)
                     if reclaimed:
                         _log.info(
                             "t2_daemon_aspect_reclaim", reclaimed=reclaimed
@@ -1131,6 +1208,24 @@ class T2Daemon:
                         "t2_daemon_aspect_reclaim_failed", exc=str(exc)
                     )
             await asyncio.sleep(_ASPECT_RECLAIM_INTERVAL)
+
+    async def _reclaim_stale_once(self, t2db: Any) -> int:
+        """Run one aspect-queue stale-reclaim pass — RDR-151 nexus-xmohw: the
+        daemon's OWN reclaim writer serialises through the SAME write lock as
+        serve-path writes (issue #1137 mechanism 2: the 30s reclaim loop raced a
+        ``memory.delete`` burst on the WAL writer lock → SQLITE_BUSY → retry
+        spin). Under the lock there is one writer at a time, so no contention.
+        The lock is created in ``start()``; the pre-start window falls back to a
+        direct write (no other writer exists yet)."""
+        lock = self._catalog_write_lock
+        if lock is not None:
+            async with lock:
+                return await asyncio.to_thread(
+                    t2db.aspect_queue.reclaim_stale, _ASPECT_RECLAIM_STALE_TIMEOUT_S
+                )
+        return await asyncio.to_thread(
+            t2db.aspect_queue.reclaim_stale, _ASPECT_RECLAIM_STALE_TIMEOUT_S
+        )
 
     async def run_until_signal(self) -> None:
         """Block until SIGTERM/SIGINT arrives."""
@@ -1480,15 +1575,43 @@ class T2Daemon:
         # prefix is serialised (not an enumerated write-op set) so a future
         # taxonomy writer is covered by default — a missed writer is exactly the
         # silent-recurrence class this fix closes. Taxonomy reads serialising
-        # behind a write is acceptable: they are not a hot daemon read path, and
-        # P2.1b/P2.1c keep write hold-time short.
+        # behind a write is acceptable: they are not a hot daemon read path.
+        # Lock hold-time is bounded to one write attempt (backoff happens outside
+        # the lock in _invoke_serialized_with_retry).
         if (
-            op.startswith(_WRITE_SERIALIZED_PREFIXES)
+            (op in _WRITE_OPS or op.startswith(_WRITE_SERIALIZED_PREFIXES))
             and self._catalog_write_lock is not None
         ):
-            async with self._catalog_write_lock:
-                return await self._invoke_with_lock_retry(callable_, op, args, kwargs)
+            return await self._invoke_serialized_with_retry(
+                callable_, op, args, kwargs
+            )
         return await self._invoke_with_lock_retry(callable_, op, args, kwargs)
+
+    async def _invoke_serialized_with_retry(
+        self, callable_: Any, op: str, args: list[Any], kwargs: dict[str, Any],
+    ) -> Any:
+        """Serialised write path (RDR-151 nexus-xmohw): hold the daemon write
+        lock for ONE write attempt, then release it BEFORE the backoff sleep, so
+        a write waiting on a cross-process writer never blocks the daemon's other
+        writes for the whole retry budget (critic C2 head-of-line bound). Intra-
+        daemon contention is gone by construction (one writer at a time); the
+        retry only fires against an out-of-daemon writer."""
+        lock = self._catalog_write_lock
+        assert lock is not None  # caller checked
+        sleeps = _DISPATCH_RETRY_SLEEPS
+        max_attempts = len(sleeps) + 1
+        for attempt in range(1, max_attempts + 1):
+            async with lock:
+                try:
+                    return await asyncio.to_thread(callable_, *args, **kwargs)
+                except sqlite3.OperationalError as exc:
+                    if not _is_locked_error(exc) or attempt == max_attempts:
+                        raise
+                    _log.warning(
+                        "t2_daemon_dispatch_lock_retry",
+                        op=op, attempt=attempt, exc=str(exc),
+                    )
+            await asyncio.sleep(sleeps[attempt - 1])  # backoff OUTSIDE the lock
 
     async def _invoke_with_lock_retry(
         self, callable_: Any, op: str, args: list[Any], kwargs: dict[str, Any],
@@ -1828,6 +1951,157 @@ def _poll_for_winner(config_dir: Path, timeout: float) -> bool:
     return False
 
 
+def _spin_heal_count_in_window(config_dir: Path, now: float) -> int:
+    """Append *now* to the persistent spin-heal log and return the number of
+    heals within ``_SPIN_HEAL_WINDOW_S`` (including this one). Best-effort: on
+    any IO error returns 1 (treat as first heal — self-heal allowed)."""
+    path = config_dir / ".t2_spin_heals"
+    cutoff = now - _SPIN_HEAL_WINDOW_S
+    stamps: list[float] = []
+    try:
+        if path.exists():
+            for line in path.read_text().splitlines():
+                try:
+                    ts = float(line.strip())
+                except ValueError:
+                    continue
+                if ts >= cutoff:
+                    stamps.append(ts)
+        stamps.append(now)
+        path.write_text("\n".join(f"{ts:.3f}" for ts in stamps) + "\n")
+    except Exception:  # noqa: BLE001
+        return 1
+    return len(stamps)
+
+
+def _t2_spin_capture_and_heal(
+    config_dir: Path, loop: Any, info: dict[str, Any]
+) -> None:
+    """RDR-151 nexus-u2vmv: on a detected event-loop spin, capture ground-truth
+    diagnostics (the missing-until-now selector + stack + loop._ready dump) and
+    self-heal — UNLESS self-heal has fired too often, in which case stay up
+    pegged-but-serving (never worse than the pre-guard baseline; critic C2).
+
+    Runs on the watchdog thread (scheduled even under a spinning loop — CPython
+    releases the GIL on the switch interval). Self-heal is SIGTERM → graceful
+    stop (the spinning loop still iterates, so the signal self-pipe callback
+    fires promptly); a hard ``os._exit`` DAEMON timer guarantees the process
+    dies even if graceful stop wedges, so the supervisor respawns a clean
+    daemon (a fresh daemon does not spin)."""
+    pid = os.getpid()
+    frames = [
+        f"--- thread {tid} ---\n" + "".join(traceback.format_stack(fr))
+        for tid, fr in sys._current_frames().items()
+    ]
+    # loop._ready distinguishes a perpetually-ready-fd spin (empty ready queue)
+    # from a self-rescheduling call_soon spin (ready queue full) — the diagnostic
+    # dimension sys._current_frames() alone cannot show (critic C4).
+    ready = getattr(loop, "_ready", None)
+    ready_len = len(ready) if ready is not None else None
+    ready_sample = [repr(h) for h in list(ready or [])[:20]]
+
+    heals = _spin_heal_count_in_window(config_dir, time.time())
+    disarm = heals > _SPIN_HEAL_MAX
+
+    _log.error(
+        "t2_daemon_spin_detected",
+        pid=pid,
+        hot_fd=info.get("hot_fd"),
+        rate_per_s=info.get("rate_per_s"),
+        ready_fd_hits=info.get("ready_fd_hits"),
+        threshold_per_s=info.get("threshold_per_s"),
+        loop_ready_len=ready_len,
+        heals_in_window=heals,
+        action="serve_degraded" if disarm else "self_heal",
+        hint=(
+            "event loop spinning ~100% CPU; "
+            + (
+                "self-heal disarmed (persistent trigger — a stale/skewed client "
+                "is likely present); staying up pegged-but-serving. Restart "
+                "stale nx-mcp/desktop clients."
+                if disarm
+                else "capturing + self-healing (RDR-151 u2vmv)"
+            )
+        ),
+    )
+    try:
+        logs = config_dir / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        path = logs / f"t2_spin_{pid}_{int(time.time())}.txt"
+        path.write_text(
+            f"hot_fd={info.get('hot_fd')} rate_per_s={info.get('rate_per_s')} "
+            f"threshold_per_s={info.get('threshold_per_s')} "
+            f"loop_ready_len={ready_len} heals_in_window={heals} disarm={disarm}\n"
+            f"ready_fd_hits={info.get('ready_fd_hits')}\n"
+            f"loop._ready sample:\n  " + "\n  ".join(ready_sample) + "\n\n"
+            + "\n".join(frames)
+        )
+        _log.error("t2_daemon_spin_capture_written", path=str(path))
+    except Exception:  # noqa: BLE001 — capture is best-effort; heal regardless
+        pass
+
+    if disarm:
+        # Never make it worse than baseline: a persistent trigger would otherwise
+        # drive 5 spin-restarts into the supervisor crash-loop guard and leave
+        # the daemon permanently suppressed (serving nothing). Stay up.
+        return
+
+    # Hard-exit fallback first, so a wedged graceful stop cannot leave the daemon
+    # pegged. DAEMON thread so a normal (sub-timeout) graceful stop exits cleanly
+    # with code 0 and the timer is reaped silently — without daemon=True the
+    # interpreter would join it and force exit 99 on every fire (critic CRITICAL).
+    timer = threading.Timer(_SPIN_HARD_EXIT_TIMEOUT, lambda: os._exit(_SPIN_EXIT_CODE))
+    timer.daemon = True
+    timer.start()
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except Exception:  # noqa: BLE001
+        os._exit(_SPIN_EXIT_CODE)
+
+
+def _run_main_spin_guarded(
+    main_factory: "Callable[[], Any]", config_dir: Path
+) -> None:
+    """Run *main_factory()* on a loop whose selector is spin-instrumented, with a
+    watchdog that captures + self-heals on a sustained spin (RDR-151 u2vmv).
+    Mirrors ``asyncio.run`` (set loop, run, cancel pending, shutdown asyncgens,
+    close)."""
+    from nexus.daemon.spin_guard import SpinGuardSelector, SpinWatchdog
+
+    sel = SpinGuardSelector()
+    loop = asyncio.SelectorEventLoop(sel)
+    watchdog = SpinWatchdog(
+        sel,
+        threshold_per_s=_SPIN_THRESHOLD_PER_S,
+        window_s=_SPIN_WINDOW_S,
+        consecutive=_SPIN_CONSECUTIVE,
+        on_spin=lambda spin_info: _t2_spin_capture_and_heal(
+            config_dir, loop, spin_info
+        ),
+    )
+    try:
+        asyncio.set_event_loop(loop)
+        watchdog.start(loop)
+        loop.run_until_complete(main_factory())
+    finally:
+        watchdog.stop()
+        try:
+            # Safety net matching asyncio.run: cancel any task _main did not
+            # await, then drain, so nothing leaks / warns.
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:  # noqa: BLE001
+            pass
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
 def run_t2_daemon(
     *,
     config_dir: Path,
@@ -1867,7 +2141,7 @@ def run_t2_daemon(
 
     for attempt in range(1, _SPAWN_LOST_RETRY_MAX + 1):
         try:
-            asyncio.run(_main())
+            _run_main_spin_guarded(_main, config_dir)
             return
         except T2SpawnLockLost:
             # RDR-140 P1.3 (nexus-h2oko): losing the spawn lock is a benign

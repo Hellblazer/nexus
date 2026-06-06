@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.5] - 2026-06-06
+
+Plugin version aligned with conexus 5.10.5 (RDR-151 daemon CPU-peg hardening:
+cause-agnostic spin backstop + write-serialization root-cause fix).
+
+### Changed
+
+- **StopFailure hook no longer files issues for transient API failures.** The
+  hook previously ran `bd create --type=bug --priority=1` on every `rate_limit`
+  stop, dropping P1 bugs into the `bd ready` queue as if they were actionable
+  work (32 such beads had accumulated). Rate limits, server errors, and auth
+  failures are infra events, not bugs. The hook now records the crash via
+  `bd remember` only (unchanged observability log); it never files an issue.
+
 ## [5.10.4] - 2026-06-06
 
 Plugin version aligned with conexus 5.10.4. No plugin-side changes; the release

@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.5] - 2026-06-06
+
+RDR-151 daemon CPU-peg hardening: a cause-agnostic spin backstop plus the
+write-contention root-cause fix.
+
+### Fixed
+
+- **T2 daemon can no longer spin at ~100% CPU (RDR-151, nexus-u2vmv) — backstop.**
+  A cause-agnostic event-loop spin guard (`spin_guard.py`): a `SpinGuardSelector`
+  counts immediate ready-returns by wall-time and a `SpinWatchdog` daemon thread,
+  on a sustained spin, auto-captures the selector map + `loop._ready` + thread
+  stacks and self-heals (SIGTERM → graceful stop; `os._exit` fallback → clean
+  respawn), bounded so a persistent trigger disarms to pegged-but-serving (never
+  worse than baseline). Validated against the live postmortem signature.
+- **T2 daemon write-burst CPU peg root-caused (RDR-151, nexus-xmohw, GH #1137).**
+  The daemon is now a single serialised writer: every mutating dispatch op AND the
+  internal aspect-reclaim loop serialise through one write lock, so a `memory.*`
+  write burst plus the reclaim loop can no longer race the SQLite writer lock into
+  a `SQLITE_BUSY` retry spin. Reads stay concurrent (`database.hello` is never
+  serialised — avoids the slow-hello → ensure-running-stale → takeover cascade);
+  lock-hold is bounded to one write attempt (backoff happens outside the lock). A
+  coverage forcing-test fails CI if any mutating op is left un-serialised.
+- **Stop hook no longer files P1 bug beads for transient API failures (#1136).**
+
 ## [5.10.4] - 2026-06-06
 
 RDR-151 root-cause fix for the recurring T2 daemon 100% CPU peg, plus a T1 scratch
