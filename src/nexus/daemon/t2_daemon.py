@@ -62,7 +62,9 @@ import sqlite3
 import struct
 import subprocess
 import sys
+import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -363,6 +365,34 @@ _DB_CLOSE_TIMEOUT: float = 10.0
 #: RPC client connects, calls, and closes promptly); finite so a dead-but-not-
 #: RST peer cannot pin the connection forever.
 _IDLE_READ_TIMEOUT: float = 300.0
+
+#: RDR-151 nexus-u2vmv: cause-agnostic event-loop spin guard. If the loop polls
+#: the selector for an immediate ready-return at a sustained rate above the
+#: threshold, the daemon is spinning (~100% CPU) — capture and self-heal rather
+#: than peg a core forever. Threshold default 10000/s with headroom above the
+#: *measured* peaks of legitimate churn (~5110/s graceful memory.put, ~6872/s
+#: abrupt-RST churn per the RDR-151 P2.1 synthesis — those are throughput, not a
+#: peg); the historical peg sustained far higher. Env-tunable.
+#:
+#: NOTE: this guard is T2-specific by construction — it instruments the T2
+#: daemon's asyncio SelectorEventLoop. The T3 daemon (run_t3_supervisor) is a
+#: SYNCHRONOUS subprocess supervisor with no asyncio loop/selector, so the
+#: shared-primitive lifecycle rule's selector-spin concern does not apply there
+#: (verified 2026-06-06: t3_daemon.py has no asyncio.run / event loop).
+_SPIN_THRESHOLD_PER_S: float = float(os.environ.get("NX_T2_SPIN_THRESHOLD", "10000"))
+_SPIN_WINDOW_S: float = 1.0
+_SPIN_CONSECUTIVE: int = 5  # ~5s sustained before declaring a spin
+_SPIN_HARD_EXIT_TIMEOUT: float = 10.0  # graceful SIGTERM grace before os._exit
+_SPIN_EXIT_CODE: int = 99
+#: Bound self-heal restarts so a PERSISTENT trigger (e.g. a skewed client that
+#: re-induces the spin on every fresh daemon) can never drive the supervisor's
+#: crash-loop guard to permanent suppression (a suppressed daemon serves
+#: nothing — strictly worse than a pegged-but-serving one). After this many
+#: spin-heals within the window, the daemon DISARMS self-heal and stays up
+#: pegged-but-serving (== the pre-guard baseline; never worse) while logging a
+#: loud, actionable ERROR. nexus-u2vmv critic C2.
+_SPIN_HEAL_MAX: int = 2
+_SPIN_HEAL_WINDOW_S: float = 600.0
 
 
 # ---------------------------------------------------------------------------
@@ -1828,6 +1858,157 @@ def _poll_for_winner(config_dir: Path, timeout: float) -> bool:
     return False
 
 
+def _spin_heal_count_in_window(config_dir: Path, now: float) -> int:
+    """Append *now* to the persistent spin-heal log and return the number of
+    heals within ``_SPIN_HEAL_WINDOW_S`` (including this one). Best-effort: on
+    any IO error returns 1 (treat as first heal — self-heal allowed)."""
+    path = config_dir / ".t2_spin_heals"
+    cutoff = now - _SPIN_HEAL_WINDOW_S
+    stamps: list[float] = []
+    try:
+        if path.exists():
+            for line in path.read_text().splitlines():
+                try:
+                    ts = float(line.strip())
+                except ValueError:
+                    continue
+                if ts >= cutoff:
+                    stamps.append(ts)
+        stamps.append(now)
+        path.write_text("\n".join(f"{ts:.3f}" for ts in stamps) + "\n")
+    except Exception:  # noqa: BLE001
+        return 1
+    return len(stamps)
+
+
+def _t2_spin_capture_and_heal(
+    config_dir: Path, loop: Any, info: dict[str, Any]
+) -> None:
+    """RDR-151 nexus-u2vmv: on a detected event-loop spin, capture ground-truth
+    diagnostics (the missing-until-now selector + stack + loop._ready dump) and
+    self-heal — UNLESS self-heal has fired too often, in which case stay up
+    pegged-but-serving (never worse than the pre-guard baseline; critic C2).
+
+    Runs on the watchdog thread (scheduled even under a spinning loop — CPython
+    releases the GIL on the switch interval). Self-heal is SIGTERM → graceful
+    stop (the spinning loop still iterates, so the signal self-pipe callback
+    fires promptly); a hard ``os._exit`` DAEMON timer guarantees the process
+    dies even if graceful stop wedges, so the supervisor respawns a clean
+    daemon (a fresh daemon does not spin)."""
+    pid = os.getpid()
+    frames = [
+        f"--- thread {tid} ---\n" + "".join(traceback.format_stack(fr))
+        for tid, fr in sys._current_frames().items()
+    ]
+    # loop._ready distinguishes a perpetually-ready-fd spin (empty ready queue)
+    # from a self-rescheduling call_soon spin (ready queue full) — the diagnostic
+    # dimension sys._current_frames() alone cannot show (critic C4).
+    ready = getattr(loop, "_ready", None)
+    ready_len = len(ready) if ready is not None else None
+    ready_sample = [repr(h) for h in list(ready or [])[:20]]
+
+    heals = _spin_heal_count_in_window(config_dir, time.time())
+    disarm = heals > _SPIN_HEAL_MAX
+
+    _log.error(
+        "t2_daemon_spin_detected",
+        pid=pid,
+        hot_fd=info.get("hot_fd"),
+        rate_per_s=info.get("rate_per_s"),
+        ready_fd_hits=info.get("ready_fd_hits"),
+        threshold_per_s=info.get("threshold_per_s"),
+        loop_ready_len=ready_len,
+        heals_in_window=heals,
+        action="serve_degraded" if disarm else "self_heal",
+        hint=(
+            "event loop spinning ~100% CPU; "
+            + (
+                "self-heal disarmed (persistent trigger — a stale/skewed client "
+                "is likely present); staying up pegged-but-serving. Restart "
+                "stale nx-mcp/desktop clients."
+                if disarm
+                else "capturing + self-healing (RDR-151 u2vmv)"
+            )
+        ),
+    )
+    try:
+        logs = config_dir / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        path = logs / f"t2_spin_{pid}_{int(time.time())}.txt"
+        path.write_text(
+            f"hot_fd={info.get('hot_fd')} rate_per_s={info.get('rate_per_s')} "
+            f"threshold_per_s={info.get('threshold_per_s')} "
+            f"loop_ready_len={ready_len} heals_in_window={heals} disarm={disarm}\n"
+            f"ready_fd_hits={info.get('ready_fd_hits')}\n"
+            f"loop._ready sample:\n  " + "\n  ".join(ready_sample) + "\n\n"
+            + "\n".join(frames)
+        )
+        _log.error("t2_daemon_spin_capture_written", path=str(path))
+    except Exception:  # noqa: BLE001 — capture is best-effort; heal regardless
+        pass
+
+    if disarm:
+        # Never make it worse than baseline: a persistent trigger would otherwise
+        # drive 5 spin-restarts into the supervisor crash-loop guard and leave
+        # the daemon permanently suppressed (serving nothing). Stay up.
+        return
+
+    # Hard-exit fallback first, so a wedged graceful stop cannot leave the daemon
+    # pegged. DAEMON thread so a normal (sub-timeout) graceful stop exits cleanly
+    # with code 0 and the timer is reaped silently — without daemon=True the
+    # interpreter would join it and force exit 99 on every fire (critic CRITICAL).
+    timer = threading.Timer(_SPIN_HARD_EXIT_TIMEOUT, lambda: os._exit(_SPIN_EXIT_CODE))
+    timer.daemon = True
+    timer.start()
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except Exception:  # noqa: BLE001
+        os._exit(_SPIN_EXIT_CODE)
+
+
+def _run_main_spin_guarded(
+    main_factory: "Callable[[], Any]", config_dir: Path
+) -> None:
+    """Run *main_factory()* on a loop whose selector is spin-instrumented, with a
+    watchdog that captures + self-heals on a sustained spin (RDR-151 u2vmv).
+    Mirrors ``asyncio.run`` (set loop, run, cancel pending, shutdown asyncgens,
+    close)."""
+    from nexus.daemon.spin_guard import SpinGuardSelector, SpinWatchdog
+
+    sel = SpinGuardSelector()
+    loop = asyncio.SelectorEventLoop(sel)
+    watchdog = SpinWatchdog(
+        sel,
+        threshold_per_s=_SPIN_THRESHOLD_PER_S,
+        window_s=_SPIN_WINDOW_S,
+        consecutive=_SPIN_CONSECUTIVE,
+        on_spin=lambda spin_info: _t2_spin_capture_and_heal(
+            config_dir, loop, spin_info
+        ),
+    )
+    try:
+        asyncio.set_event_loop(loop)
+        watchdog.start(loop)
+        loop.run_until_complete(main_factory())
+    finally:
+        watchdog.stop()
+        try:
+            # Safety net matching asyncio.run: cancel any task _main did not
+            # await, then drain, so nothing leaks / warns.
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:  # noqa: BLE001
+            pass
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
 def run_t2_daemon(
     *,
     config_dir: Path,
@@ -1867,7 +2048,7 @@ def run_t2_daemon(
 
     for attempt in range(1, _SPAWN_LOST_RETRY_MAX + 1):
         try:
-            asyncio.run(_main())
+            _run_main_spin_guarded(_main, config_dir)
             return
         except T2SpawnLockLost:
             # RDR-140 P1.3 (nexus-h2oko): losing the spawn lock is a benign

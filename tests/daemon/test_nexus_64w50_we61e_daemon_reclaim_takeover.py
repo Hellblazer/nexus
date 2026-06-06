@@ -212,13 +212,13 @@ def _info_logs(monkeypatch: pytest.MonkeyPatch):
 
 
 def _stub_asyncio_run(monkeypatch: pytest.MonkeyPatch, outcomes: list):
-    """Replace ``asyncio.run`` with a scripted sequence. Each outcome is
-    either an exception instance (raised) or a sentinel for clean return.
-    The passed coroutine is closed to avoid 'never awaited' warnings."""
+    """Replace the daemon's spin-guarded runner with a scripted sequence
+    (RDR-151 u2vmv: run_t2_daemon now calls ``_run_main_spin_guarded`` instead
+    of ``asyncio.run`` directly). Each outcome is either an exception instance
+    (raised) or a sentinel for clean return; the _main factory is not invoked."""
     calls: list[int] = []
 
-    def _fake_run(coro):  # noqa: ANN001
-        coro.close()
+    def _fake_run(main_factory, config_dir):  # noqa: ANN001
         idx = len(calls)
         calls.append(1)
         outcome = outcomes[idx]
@@ -226,7 +226,7 @@ def _stub_asyncio_run(monkeypatch: pytest.MonkeyPatch, outcomes: list):
             raise outcome
         return outcome
 
-    monkeypatch.setattr(asyncio, "run", _fake_run)
+    monkeypatch.setattr(t2_daemon, "_run_main_spin_guarded", _fake_run)
     return calls
 
 
