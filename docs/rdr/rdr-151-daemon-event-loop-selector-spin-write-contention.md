@@ -285,6 +285,39 @@ Aggregate `select/s` is throughput-polluted and must NOT be the oracle. Use
 returns to single-digit `select/s` within ~10 s. Plus a `sample`-based soak
 asserting no executor thread is wedged in the SQLite busy handler.
 
+> **LIVE ORACLE RESULT (2026-06-06): FAILED.** Phase 3 shipped in conexus 5.10.4
+> (PR #1134, tag `v5.10.4`). On deploy, a *fresh* 5.10.4 daemon pegs ~97–100% CPU
+> at **idle** — no clients, no contenders — within ~60 s. `sample` shows the main
+> asyncio thread spinning in the `_PyEval` event loop (pure Python eval, not blocked
+> in `kevent`) with an occasional `context_run → pysqlite execute` callback: a
+> selector busy-spin. This is the **RF-1-shaped idle/teardown spin**, *distinct* from
+> the write-contention peg Phase 3 fixed. RF-1 was refuted only as the cause of the
+> *contention* peg; the idle spin is real and unaddressed. Tracked as **`nexus-u2vmv`**
+> (P1); evidence `docs/postmortem/2026-06-06-daemon-5104-idle-peg-sample.txt`.
+> Pre-existing (5.10.3 and earlier pegged too) — 5.10.4 is an incomplete fix, not a
+> regression. RDR-151 is **not closeable**; `nexus-uzay8` must not be closed as
+> peg-fixed.
+
+> **SPIN-GUARD RESOLUTION (2026-06-06, `nexus-u2vmv`).** The specific trigger
+> could not be reproduced synthetically (the current daemon is robust to idle,
+> abrupt-RST, connect storms, and 16 concurrent real clients; the peg needs an
+> actual old-version client / takeover race, and the version-skew client zoo was
+> the live driver). Rather than chase one path, the loop is made
+> **constitutionally spin-proof**: `src/nexus/daemon/spin_guard.py` adds a
+> `SpinGuardSelector` (counts immediate ready-returns by *wall-time* — catches
+> both `select(0)` polls and a blocking `select(None)` that returns instantly on
+> a perpetually-ready fd) and a `SpinWatchdog` daemon thread that, on a sustained
+> over-threshold rate, (1) **auto-captures** the selector map + `loop._ready` +
+> thread stacks (the ground-truth the manual capture kept missing — the next
+> wild peg self-documents) and (2) **self-heals** (SIGTERM → graceful stop;
+> `os._exit` daemon-timer fallback → supervisor respawns a clean daemon), bounded
+> so a persistent trigger disarms self-heal and the daemon stays up
+> pegged-but-serving (never worse than the pre-guard baseline). Validated against
+> the postmortem sample: 3822/3847 frames in `kevent` = exactly the immediate
+> ready-return shape the guard measures, so it would have fired on the 5.10.4 peg
+> within ~5 s. T2-only by construction (the T3 daemon is a synchronous subprocess
+> supervisor with no asyncio loop). Tests: `tests/daemon/test_spin_guard.py`.
+
 ### Phase 3 design (2026-06-06, nexus-uzay8)
 
 Full design: T2 `nexus/rdr151-phase3-design-2026-06-06`.
