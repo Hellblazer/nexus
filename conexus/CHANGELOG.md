@@ -6,6 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.5] - 2026-06-06
+
+Plugin version aligned with conexus 5.10.5 (RDR-151 daemon CPU-peg hardening:
+cause-agnostic spin backstop + write-serialization root-cause fix).
+
 ### Changed
 
 - **StopFailure hook no longer files issues for transient API failures.** The
@@ -14,6 +19,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   work (32 such beads had accumulated). Rate limits, server errors, and auth
   failures are infra events, not bugs. The hook now records the crash via
   `bd remember` only (unchanged observability log); it never files an issue.
+
+## [5.10.4] - 2026-06-06
+
+Plugin version aligned with conexus 5.10.4. No plugin-side changes; the release
+is the RDR-151 root-cause fix for the T2 daemon CPU peg (taxonomy writes now route
+through the daemon) plus a T1 scratch recovery fix (nexus-gff3g).
 
 ## [5.10.3] - 2026-06-05
 
