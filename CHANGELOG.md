@@ -6,6 +6,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.4] - 2026-06-06
+
+RDR-151 root-cause fix for the recurring T2 daemon 100% CPU peg, plus a T1 scratch
+recovery fix.
+
+### Fixed
+
+- **T2 daemon CPU peg root-caused and fixed (RDR-151, nexus-uzay8 / nexus-xmohw).**
+  The peg was contention-driven write starvation: `taxonomy.*` write RPCs bypassed
+  the daemon's `_catalog_write_lock`, and `nx index` opened its own direct T2 write
+  connection, so multiple writers raced the single SQLite WAL writer lock while the
+  daemon's executor thread wedged on it. Two fixes: (1) `taxonomy.*` writes now
+  serialize through the daemon's catalog write lock; (2) every direct T2 taxonomy
+  write on the `nx index` path and the `nx taxonomy` CLI now routes through the
+  daemon (compute client-side where ChromaDB is needed, persist daemon-routed),
+  leaving only read-only direct connections (WAL readers don't take the writer
+  lock). A `storage_boundary_lint` enforce-flip fails CI on any taxonomy write
+  method called on a directly-constructed handle outside `db/`+`daemon/`.
+- **T1 scratch restored when the session id diverges from the MCP lease key
+  (nexus-gff3g).** T1 working memory is now matched by Claude-ancestor pid with a
+  deterministic tie-break, so sibling agents recover the correct scratch when the
+  session id and lease key differ.
+- Daemon lifecycle/teardown hardening: idle read deadline on accepted connections,
+  `mark_shutting_down()` first in `stop()` (T2 + T3), `to_thread(heartbeat_tick)`
+  so the flock never blocks the event loop, and reaper `endpoint.pid` fallback.
+
+### Changed
+
+- RDR-147 (multi-hop entity-resolution retrieval) accepted.
+
 ## [5.10.3] - 2026-06-05
 
 T2 daemon reliability fix.
