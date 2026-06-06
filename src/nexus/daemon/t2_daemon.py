@@ -601,6 +601,53 @@ def _build_dispatch_table(t2db: Any) -> dict[str, Any]:
         candidate = getattr(t2db, method_name, None)
         if callable(candidate):
             table[f"database.{method_name}"] = candidate
+    # nexus-xmohw: ``aspect_queue.reclaim_stale`` is daemon-owned since
+    # nexus-we61e — ``T2Daemon._reclaim_stale_loop`` calls it DIRECTLY on
+    # ``t2db`` (not through this table), exactly once per interval. No
+    # current worker RPCs it (aspect_worker.py deliberately stopped after
+    # we61e), but version-skewed workers from before we61e (<=5.10.0) still
+    # do on every poll. Honouring each as a real full-table UPDATE+commit
+    # floods the SQLite write lock and pegs the daemon at ~100% CPU, which
+    # makes it slow to answer ``hello()`` -> ensure-running declares it
+    # stale and spawns a replacement -> takeover churn -> 2+ daemons
+    # contend on memory.db -> ``nx memory put`` hard-fails with
+    # ``database is locked``. Neutralise the flood at the RPC boundary:
+    # the client-facing entry is a cheap no-op returning 0 that never
+    # touches the DB. The daemon's own loop is unaffected (it bypasses
+    # this table), so legitimate reclaim still happens.
+    # The override must run AFTER the store-enumeration loop above (which
+    # registers the real bound method); the membership check is the guard
+    # for that ordering. If reclaim_stale is ever legitimately removed from
+    # the client table (e.g. added to _RPC_DENY_OPS), absence is also safe —
+    # a denied op raises unknown-op, which is likewise a cheap no-DB path, so
+    # the flood still cannot peg the daemon. The dispatch-table test asserts
+    # the entry is present and is the no-op, so a silent skip fails CI.
+    if "aspect_queue.reclaim_stale" in table:
+        # warn-once-per-daemon-instance: the no-op silences the T2-write-
+        # failure symptom, so an operator would otherwise have NO signal that
+        # version-skewed workers are still present and need restarting. Emit
+        # one WARNING (visible at INFO-level production logging) the first
+        # time a stale client RPCs reclaim; stay at DEBUG thereafter so a
+        # 1800/hr-per-worker flood does not spam the log (reviewer: critic S1).
+        _warned = [False]
+
+        def _reclaim_stale_rpc_noop(*_args: Any, **_kwargs: Any) -> int:
+            if not _warned[0]:
+                _warned[0] = True
+                _log.warning(
+                    "t2_daemon_reclaim_stale_rpc_ignored",
+                    hint=(
+                        "a version-skewed (<=5.10.0) nx-mcp worker is RPC'ing "
+                        "aspect_queue.reclaim_stale; reclaim is daemon-owned "
+                        "since we61e and this RPC is a no-op — restart stale "
+                        "nx-mcp processes to clear the source (nexus-xmohw)"
+                    ),
+                )
+            else:
+                _log.debug("t2_daemon_reclaim_stale_rpc_noop")
+            return 0
+
+        table["aspect_queue.reclaim_stale"] = _reclaim_stale_rpc_noop
     return table
 
 

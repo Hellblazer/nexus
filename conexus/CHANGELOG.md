@@ -6,6 +6,41 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.3] - 2026-06-05
+
+Plugin version aligned with conexus 5.10.3 (T2 daemon reliability fix: a
+client `reclaim_stale` RPC flood from version-skewed <=5.10.0 workers pegged
+the daemon and caused `nx memory put` to fail with `database is locked`; the
+RPC is now a daemon-owned no-op — nexus-xmohw). No plugin-side changes.
+
+## [5.10.2] - 2026-06-05
+
+Plugin version aligned with conexus 5.10.2 (T1 scratch session-id-divergence
+fix: the MCP's `NX_SESSION_ID` lease key vs the SessionStart hook's
+`current_session` could diverge on resume / multi-frontend / version skew,
+hard-failing `nx scratch`; the Claude-ancestor-pid fallback now recovers it —
+nexus-gff3g). No plugin-side changes.
+
+## [5.10.1] - 2026-06-05
+
+Plugin version aligned with conexus 5.10.1 (T2 daemon reliability fixes:
+reclaim-contention, lease-takeover zero-daemon gap, bounded socket teardown,
+reclaim-on-restart — nexus-we61e/64w50/saigj/nhqll).
+
+## [5.10.0] - 2026-06-05
+
+Plugin version aligned with conexus 5.10.0 (RDR-149 unified daemon-lifecycle
+substrate on the nexus package side).
+
+### Fixed
+
+- **phase-review-gate close hook: sentinel-staleness check restored (RDR-149
+  P4/P5).** The hook anchored its "sentinel must postdate session start" check
+  on the `t1_addr.<claude_pid>` file, which RDR-149 P4 stopped writing (T1 now
+  keys its lease on the session-id). The check silently no-opped, accepting
+  stale PASSED sentinels from prior sessions. It now anchors on the
+  `current_session` pointer, restoring the fail-closed staleness guard.
+
 ## [5.9.3] - 2026-06-04
 
 Plugin version aligned with conexus 5.9.3. No plugin-side changes; the release

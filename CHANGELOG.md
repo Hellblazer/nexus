@@ -6,6 +6,124 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.3] - 2026-06-05
+
+T2 daemon reliability fix.
+
+### Fixed
+
+- **T2 daemon no longer pegged to ~100% CPU (and T2 writes no longer fail
+  with `database is locked`) by a client `reclaim_stale` RPC flood
+  (nexus-xmohw).** Aspect-queue stale-row reclaim is daemon-owned since
+  nexus-we61e — the daemon's own loop calls it directly once per interval.
+  But version-skewed workers from before we61e (conexus <=5.10.0) still RPC
+  `aspect_queue.reclaim_stale` on every poll, and the daemon honoured each as
+  a real full-table UPDATE+commit. With several stale workers that floods the
+  SQLite write lock, pegs a core, makes the daemon slow to answer `hello()`,
+  and triggers ensure-running to spawn a replacement — a takeover churn that
+  leaves two daemons contending on `memory.db`, at which point `nx memory
+  put` fails outright. The client-facing dispatch entry for
+  `aspect_queue.reclaim_stale` is now a cheap no-op returning 0 that never
+  touches the DB; the daemon's own reclaim loop is unaffected. A one-shot
+  WARNING per daemon surfaces that stale workers are still present so an
+  operator can restart them.
+
+## [5.10.2] - 2026-06-05
+
+T1 scratch reliability fix from the 5.10.1 shakeout.
+
+### Fixed
+
+- **`nx scratch` (CLI + MCP) no longer hard-fails when the shell's session-id
+  diverges from the MCP server's T1 lease key (nexus-gff3g).** The MCP keys its
+  T1 lease on `NX_SESSION_ID` while the SessionStart hook writes
+  `current_session`, and the two Claude-provided ids diverge on session resume,
+  with multiple concurrent frontends (Claude Code + Desktop), and under version
+  skew. `discover_t1_lease` then found no lease for the shell's id, and the
+  Claude-ancestor-pid fallback could not recover because (a) a warm publish
+  (`NX_SESSION_ID` set at MCP startup, the common case) dropped `claude_pid`
+  from the lease payload, and (b) the fallback skipped session-keyed leases
+  entirely. The fallback now stamps `claude_pid` on every record and matches
+  session-keyed leases by ancestor pid (renamed `discover_t1_by_claude_ancestor`),
+  with a deterministic newest-heartbeat tie-break. Ancestor-pid targeting +
+  TTL + `status==live` preserve the no-cross-session-mis-bind invariant.
+- **`nx scratch` surfaces a clean hint instead of a raw traceback** when no T1
+  lease resolves, and the SessionStart hook no longer falsely claims "T1
+  scratch initialized" (it only records the session-id; the MCP lifespan owns
+  T1).
+
+The underlying `NX_SESSION_ID` vs `current_session` divergence (session-scoped
+attribution) is tracked separately for a follow-up.
+
+## [5.10.1] - 2026-06-05
+
+T2 daemon reliability fixes from the 5.10.0 shakeout.
+
+### Fixed
+
+- **T2 daemon no longer pegs a core on `database is locked` after a restart
+  (nexus-we61e).** `aspect_queue.reclaim_stale` is a global janitor op but ran
+  inside every per-process aspect worker's poll loop, so N nx-mcp processes
+  RPC'd N redundant reclaim `UPDATE`s into the single daemon — WAL-lock
+  contention that pegged a core after a restart with a stale-row backlog.
+  Reclaim now runs once, on a daemon-owned periodic loop (singular by
+  construction); workers only claim.
+- **Lease takeover no longer leaves zero daemons (nexus-64w50).** A spawn-lock
+  loser that found no reachable winner used to quit, orphaning the service when
+  the incumbent was mid-exit in the defer-release-to-exit drain window (lock
+  held, discovery file already unlinked). `run_t2_daemon` now retries the spawn
+  so the freed lock is re-acquired. Single-writer is preserved — the spawn lock
+  is non-blocking, so a retry wins only when the lock is genuinely free.
+- **`stop()` socket teardown is now timeout-bounded (nexus-saigj).** The
+  `wait_closed()` calls are capped with `_GRACEFUL_STOP_TIMEOUT`, so a
+  connection draining a long in-flight RPC at SIGTERM can no longer extend the
+  spawn-lock hold without bound.
+- **A restarted daemon clears the stale-row backlog immediately
+  (nexus-nhqll).** The reclaim loop now reclaims before its first sleep instead
+  of waiting a full interval.
+
+## [5.10.0] - 2026-06-05
+
+Unified daemon-lifecycle substrate (RDR-149): T1, T2, and T3 now ride one
+leased/fenced/atomic service registry, ending the recurring discovery /
+single-writer / self-heal / version-skew bug class.
+
+### Fixed
+
+- **T3 daemon no longer keeps serving the old binary after a CLI upgrade
+  (#1112).** The T3 daemon now rides the shared supervisor, which owns the
+  version-skew upgrade-cycle uniformly across tiers — the same mechanism T2
+  already had. After an upgrade the stale daemon is cycled automatically
+  instead of persisting until a manual `nx daemon t3 stop && start`.
+- **T1 scratch no longer strands sibling shells when the discovery record is
+  lost (#1114).** T1 now self-heals: the MCP server's lease heartbeat
+  re-asserts a transiently-lost discovery record, so a sibling `nx scratch`
+  succeeds whenever the T1 server is up (previously it raised
+  `T1ServerNotFoundError` until the session restarted).
+- **T1 discovery is immune to PID reuse.** Liveness is now lease freshness
+  (TTL), not a PID-liveness probe, so a recycled PID can no longer keep a dead
+  owner's record alive.
+
+### Added
+
+- **`nx doctor` flags a CLI-vs-T3-daemon version mismatch.** The
+  operator-visible counterpart to the #1112 fix: a soft warning (the daemon
+  still works, it is merely stale) with a restart suggestion when the running
+  T3 daemon's version diverges from the installed CLI. Local mode only.
+
+### Changed
+
+- **T1/T2/T3 daemon lifecycle unified onto one leased `ServiceRegistry`
+  primitive (RDR-149).** Owner discovery, single-writer election,
+  ungraceful-death reap, restart fencing, self-heal re-assert, and version-skew
+  cycling now live in one place (`src/nexus/daemon/service_registry.py`),
+  consumed by each tier. T1 keys its lease on the Claude session-id (re-keyed
+  from a transient server-pid at cold start) rather than the parent PID; the
+  change is transparent to users. A standing process gate (mechanically
+  enforced by `tests/daemon/test_lifecycle_gate.py`) keeps future lifecycle
+  fixes in the shared primitive instead of per-tier copies.
+  `nx doctor --check-t1` reports the session-id lease model.
+
 ## [5.9.3] - 2026-06-04
 
 Catalog moved behind the T2 daemon (RDR-146), closing the GH #1046 starvation.
