@@ -162,7 +162,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-144](rdr-144-guided-onboarding-embedder-provisioning.md) | Guided Install / Onboarding & Local-Embedder Provisioning (nx init): Make the 384-vs-768 Embedder an Explicit Guided Choice | Architecture | Closed | 2026-06-01 |
 | [RDR-145](rdr-145-note-backed-document-identity-aspect-pipeline.md) | Note-Backed Document Identity in the Aspect Pipeline: Stop Unmappable Aspect Orphans from MCP-Stored Knowledge Notes | Architecture | Draft | 2026-06-02 |
 | [RDR-146](rdr-146-catalog-store-behind-daemon.md) | Catalog Store Behind the Existing T2 Daemon: Close the catalog.db Starvation by Routing Catalog Writes Through the Daemon That Already Serves It | Architecture | Closed | 2026-06-03 |
-| [RDR-147](rdr-147-multihop-entity-resolution-retrieval.md) | Multi-Hop Entity-Resolution Retrieval: Ingest-Time Entity-Linker + Traverse Resolution Hop, Gated by a Query-Time Type-Mismatch Trigger | Architecture | Draft | 2026-06-03 |
+| [RDR-147](rdr-147-multihop-entity-resolution-retrieval.md) | Multi-Hop Entity-Resolution Retrieval: Ingest-Time Entity-Linker + Traverse Resolution Hop, Gated by a Query-Time Type-Mismatch Trigger | Architecture | Accepted | 2026-06-03 |
 | [RDR-148](rdr-148-mineru-endpoint-discovery-and-subprocess-resilience.md) | MinerU Endpoint Discovery + Subprocess-Fallback Resilience: Stop Formula-PDF Extraction from Silently Degrading onto a Broken In-Process Path | Bug Fix | Draft | 2026-06-03 |
 | [RDR-149](rdr-149-unified-service-registry-substrate.md) | Unified Leased Service-Registry Substrate for T1/T2/T3 Daemon Lifecycle: End the Recurring Discovery / Single-Writer / Self-Heal Bug Class | Architecture | Accepted | 2026-06-04 |
 
