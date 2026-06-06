@@ -205,6 +205,140 @@ def test_compute_assignments_empty_when_no_centroids(
     assert out == []
 
 
+# ── RDR-151 Phase 3 (uzay8): discover_topics compute/persist split ───────────
+#
+# Mirrors the RDR-128 P1 assign_batch split above. The discovery COMPUTE half
+# (clustering + c-TF-IDF) is pure and chroma-free; the PERSIST half (INSERT
+# topics + assignments, return generated topic_ids) is daemon-routable; the
+# caller writes the chroma centroids locally from the returned ids. This is what
+# lets ``nx index`` stop opening a direct T2 write connection (the live peg's
+# external contender).
+
+
+def _discovery_inputs(seed: int = 11) -> tuple[list[str], np.ndarray, list[str]]:
+    """Two well-separated 384d clusters — same shape the discover test uses."""
+    rng = np.random.default_rng(seed)
+    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings[:30, 0] += 3.0
+    embeddings[30:, 1] += 3.0
+    doc_ids = [f"dd-{i}" for i in range(60)]
+    texts = (
+        [f"machine learning neural network gradient {i}" for i in range(30)]
+        + [f"database query indexing sql schema {i}" for i in range(30)]
+    )
+    return doc_ids, embeddings, texts
+
+
+def test_compute_discovered_topics_returns_serializable_specs() -> None:
+    """The COMPUTE half returns plain JSON-round-trippable spec dicts and
+    touches neither T2 nor chroma (so it can run client-side and the result
+    can cross the daemon RPC)."""
+    import json
+
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    doc_ids, embeddings, texts = _discovery_inputs()
+    specs = CatalogTaxonomy.compute_discovered_topics(
+        "split__disc", doc_ids, embeddings, texts,
+    )
+    assert len(specs) >= 2, "expected >=2 clusters from two separated blobs"
+    json.dumps(specs)  # must not raise — serializable across the RPC
+    for s in specs:
+        assert set(s) == {
+            "label", "terms", "doc_count", "doc_ids", "centroid", "assigned_by",
+        }
+        assert isinstance(s["label"], str) and s["label"]
+        assert isinstance(s["doc_count"], int) and s["doc_count"] > 0
+        assert isinstance(s["doc_ids"], list) and s["doc_ids"]
+        assert len(s["doc_ids"]) == s["doc_count"]
+        assert isinstance(s["centroid"], list) and len(s["centroid"]) == 384
+        assert all(isinstance(x, float) for x in s["centroid"])
+        assert s["assigned_by"] == "hdbscan"
+
+
+def test_compute_discovered_topics_empty_short_circuits() -> None:
+    """<5 docs returns [] (the old discover_topics no-op-returns-0 case)."""
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    out = CatalogTaxonomy.compute_discovered_topics(
+        "tiny__disc", ["a", "b"], np.zeros((2, 384), dtype=np.float32), ["x", "y"],
+    )
+    assert out == []
+
+
+def test_persist_discovered_topics_writes_and_returns_ids(db: T2Database) -> None:
+    """The PERSIST half writes topic rows + assignments and returns the
+    generated topic_ids aligned to the input spec order — no chroma needed."""
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    doc_ids, embeddings, texts = _discovery_inputs()
+    specs = CatalogTaxonomy.compute_discovered_topics(
+        "persist__disc", doc_ids, embeddings, texts,
+    )
+    topic_ids = db.taxonomy.persist_discovered_topics("persist__disc", specs)
+    assert isinstance(topic_ids, list)
+    assert len(topic_ids) == len(specs)
+    assert all(isinstance(t, int) for t in topic_ids)
+
+    # Topic rows exist, one per spec, with the spec's label + doc_count.
+    rows = db.taxonomy.conn.execute(
+        "SELECT id, label, doc_count FROM topics WHERE collection='persist__disc' "
+        "ORDER BY id"
+    ).fetchall()
+    assert len(rows) == len(specs)
+    assert {r[0] for r in rows} == set(topic_ids)
+    # Assignments written for every doc in every spec.
+    total_assigned = db.taxonomy.conn.execute(
+        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id IN "
+        "(SELECT id FROM topics WHERE collection='persist__disc')"
+    ).fetchone()[0]
+    assert total_assigned == sum(s["doc_count"] for s in specs)
+
+
+def test_persist_discovered_topics_skips_existing(db: T2Database) -> None:
+    """Existing-topics guard preserved: a second persist for the same
+    collection is a no-op returning [] (matches discover_topics' guard)."""
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    doc_ids, embeddings, texts = _discovery_inputs()
+    specs = CatalogTaxonomy.compute_discovered_topics(
+        "guard__disc", doc_ids, embeddings, texts,
+    )
+    first = db.taxonomy.persist_discovered_topics("guard__disc", specs)
+    assert len(first) == len(specs)
+    second = db.taxonomy.persist_discovered_topics("guard__disc", specs)
+    assert second == []
+
+
+def test_discover_topics_still_composes(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """Back-compat: discover_topics == compute + persist + centroid upsert.
+    Same end state (topic rows in T2 AND centroids in chroma) so direct
+    callers and the CLI path are unchanged by the split."""
+    doc_ids, embeddings, texts = _discovery_inputs(seed=13)
+    count = db.taxonomy.discover_topics(
+        "compose__disc", doc_ids, embeddings, texts, chroma_client,
+    )
+    assert count >= 2
+
+    t2_topics = db.taxonomy.conn.execute(
+        "SELECT id FROM topics WHERE collection='compose__disc'"
+    ).fetchall()
+    assert len(t2_topics) == count
+
+    centroid_coll = chroma_client.get_collection(
+        "taxonomy__centroids", embedding_function=None,
+    )
+    centroids = centroid_coll.get(
+        where={"collection": "compose__disc"}, include=["metadatas"],
+    )
+    assert len(centroids["ids"]) == count
+    # Every persisted centroid id maps to a real T2 topic id.
+    t2_ids = {r[0] for r in t2_topics}
+    assert {int(m["topic_id"]) for m in centroids["metadatas"]} == t2_ids
+
+
 def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> None:
     """The rerouted taxonomy_assign_batch_hook must compute client-side and
     persist via t2_index_write (the daemon path), NOT a direct t2_ctx open.
@@ -461,6 +595,70 @@ def test_rebuild_taxonomy_clears_and_rediscovers(
         "(SELECT id FROM topics WHERE collection = 'test__coll')"
     ).fetchone()[0]
     assert total_assignments <= 60, "rebuild should replace, not accumulate"
+
+
+def test_rebuild_taxonomy_preserves_manual_assignment(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """RDR-151 Phase 3 regression: rebuild must carry a manually-assigned doc
+    onto the rebuilt topic (Route 1 — old topic matched to new via _merge_labels).
+    This is the transfer logic the compute/persist split must preserve exactly."""
+    doc_ids, embeddings, texts = _discovery_inputs(seed=21)
+    db.taxonomy.discover_topics(
+        "manual__coll", doc_ids, embeddings, texts, chroma_client,
+    )
+    # Operator manually assigns the first doc to an existing topic.
+    first_topic = db.taxonomy.conn.execute(
+        "SELECT id FROM topics WHERE collection='manual__coll' ORDER BY id LIMIT 1"
+    ).fetchone()[0]
+    db.taxonomy.conn.execute(
+        "INSERT OR REPLACE INTO topic_assignments (doc_id, topic_id, assigned_by) "
+        "VALUES (?, ?, 'manual')",
+        (doc_ids[0], first_topic),
+    )
+    db.taxonomy.conn.commit()
+
+    db.taxonomy.rebuild_taxonomy(
+        "manual__coll", doc_ids, embeddings, texts, chroma_client,
+    )
+
+    # The manual doc still carries exactly one 'manual' assignment to a live topic.
+    rows = db.taxonomy.conn.execute(
+        "SELECT ta.assigned_by FROM topic_assignments ta "
+        "JOIN topics t ON t.id = ta.topic_id "
+        "WHERE ta.doc_id = ? AND t.collection = 'manual__coll' "
+        "AND ta.assigned_by = 'manual'",
+        (doc_ids[0],),
+    ).fetchall()
+    assert len(rows) == 1, "manual assignment must survive rebuild (Route 1/2)"
+
+
+def test_compute_rebuild_plan_is_pure_and_serializable(
+    db: T2Database, chroma_client: chromadb.ClientAPI,
+) -> None:
+    """The rebuild COMPUTE half returns a JSON-serializable plan (specs +
+    manual-transfer decisions keyed to spec index) and touches no T2 write."""
+    import json
+
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+
+    doc_ids, embeddings, texts = _discovery_inputs(seed=23)
+    plan = CatalogTaxonomy.compute_rebuild_plan(
+        "rb__coll", doc_ids, embeddings, texts,
+        old_centroids=np.empty((0, 0), dtype=np.float32),
+        old_labels=[], old_review_statuses=[], old_centroid_topic_ids=[],
+        manual_assignments={},
+    )
+    json.dumps(plan)
+    assert "specs" in plan and "manual_transfers" in plan
+    assert len(plan["specs"]) >= 2
+    for s in plan["specs"]:
+        assert set(s) >= {
+            "label", "terms", "doc_count", "doc_ids", "centroid",
+            "assigned_by", "review_status",
+        }
+    # No manual assignments in -> none out.
+    assert plan["manual_transfers"] == {}
 
 
 def test_get_topics_filtered_by_parent(db: T2Database) -> None:

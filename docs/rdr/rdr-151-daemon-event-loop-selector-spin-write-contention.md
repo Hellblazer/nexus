@@ -285,6 +285,53 @@ Aggregate `select/s` is throughput-polluted and must NOT be the oracle. Use
 returns to single-digit `select/s` within ~10 s. Plus a `sample`-based soak
 asserting no executor thread is wedged in the SQLite busy handler.
 
+### Phase 3 design (2026-06-06, nexus-uzay8)
+
+Full design: T2 `nexus/rdr151-phase3-design-2026-06-06`.
+
+`run_collection_postprocessing` (`index.py:730-803`) opens one direct
+`T2Database` (`index.py:735`, the counted epsilon-allow) and runs both halves on
+it:
+
+- **Compute half (irreducibly direct, RDR-128 P3):** `discover_for_collection`
+  (returns a count, persists topics+centroids internally, atomic with T2-id
+  generation) and `project_against` (returns `chunk_assignments`).
+- **Persist half (pure-T2, routable):** the cross-collection
+  `_persist_assignments` -> `assign_topic` burst (the live wedge site),
+  `generate_cooccurrence_links`, `compute_topic_links(persist=True)`, relabel
+  writes.
+
+**Option B (CHOSEN, 2026-06-06) — eliminate the direct writer entirely.** Split
+`discover_topics` and `rebuild_taxonomy` into a local compute half and a
+daemon-routed pure-T2 persist half, mirroring the `compute_assignments` /
+`persist_assignments` / `assign_batch` split already shipped for the assignment
+path (RDR-128 P1, `nexus-fkq5q`). The persist RPC INSERTs the topic rows + chunk
+assignments and **returns the generated `topic_id`s**; the caller then writes the
+chroma centroids (keyed on `{collection}:{topic_id}`) locally.
+
+**Key finding refuting the RDR-128 P3 "irreducible" framing:** the chroma centroid
+write is *already* decoupled from the topic INSERT — in both `discover_topics`
+(`catalog_taxonomy.py:1842-1844`) and `rebuild_taxonomy` (`2902-2904`) the
+`_batched_upsert` of centroids runs **outside the lock, after `commit()`**, keyed
+on the `topic_id` the INSERT returned. RDR-128 P3 conflated "topic_id generated at
+INSERT" with "must be one transaction"; the centroid write is a separate post-commit
+step that only *needs* the returned id, which the daemon can return. So Option B is
+an extension of the established compute/persist pattern, **not** RDR-063 read/write-split
+territory. Eliminates the direct `T2Database` at `index.py:735` (lint count for that
+site → 0; enforce-flip becomes possible). Full contract + risks: T2
+`nexus/rdr151-phase3-design-2026-06-06`.
+
+**Option A (not taken):** route only the post-compute persists; keep the direct
+handle for topic/centroid creation, narrowed epsilon-allow. Shrinks rather than
+eliminates the last direct writer (lint stays non-zero). Rejected in favour of B
+once the post-commit centroid decoupling showed full elimination was tractable.
+
+**Lint:** keep one narrowed epsilon-allow at `index.py:735`; add a focused
+AST/grep test (mirroring `tests/test_no_direct_catalog_writes_outside_projector.py`)
+banning the taxonomy WRITE method names (`assign_topic`, `persist_assignments`,
+`generate_cooccurrence_links`, `refresh_projection_links`) on a directly-constructed
+handle outside `db/`+`daemon/`, baselined at the post-split count.
+
 ## Approach
 
 **Phase 0 — Reproduce and pin (gates everything; resolves RF-1/RF-3).**

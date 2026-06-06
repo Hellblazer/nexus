@@ -1693,8 +1693,8 @@ class CatalogTaxonomy:
     # takes minutes. MiniBatchKMeans is O(n) and produces good clusters.
     _LARGE_COLLECTION_THRESHOLD = 5000
 
+    @staticmethod
     def _cluster(
-        self,
         embeddings: np.ndarray,
         n: int,
         collection_name: str,
@@ -1703,8 +1703,12 @@ class CatalogTaxonomy:
 
         Uses HDBSCAN for small collections (density-based, automatic k).
         Switches to MiniBatchKMeans for large collections (O(n) speed).
+
+        Pure (no instance state) so the daemon-routable COMPUTE half
+        (:meth:`compute_discovered_topics`, RDR-151 Phase 3) can call it
+        without a ``CatalogTaxonomy`` instance.
         """
-        if n <= self._LARGE_COLLECTION_THRESHOLD:
+        if n <= CatalogTaxonomy._LARGE_COLLECTION_THRESHOLD:
             _log.info("clustering_hdbscan", n=n, collection=collection_name)
             clusterer = SklearnHDBSCAN(
                 min_cluster_size=5,
@@ -1753,93 +1757,31 @@ class CatalogTaxonomy:
 
         Returns number of topics created, or 0 if topics already exist
         for this collection (use ``rebuild_taxonomy`` to re-discover).
+
+        RDR-151 Phase 3 (nexus-uzay8): this now COMPOSES the daemon-routable
+        split — :meth:`compute_discovered_topics` (pure: cluster + c-TF-IDF)
+        and :meth:`persist_discovered_topics` (pure T2: INSERT topics +
+        assignments, returns the generated ids) — then writes the chroma
+        centroids locally from the returned ids. Direct callers keep the
+        one-shot behaviour; the indexer path drives the two halves separately
+        so persistence routes through the daemon (mirrors the assign_batch
+        split, RDR-128 P1).
         """
-        n = len(doc_ids)
-        if n < 5:
-            return 0
-
-        # Guard: skip if topics already exist for this collection.
-        with self._lock:
-            existing = self.conn.execute(
-                "SELECT COUNT(*) FROM topics WHERE collection = ?",
-                (collection_name,),
-            ).fetchone()[0]
-        if existing > 0:
-            _log.info(
-                "discover_skip_existing",
-                collection=collection_name,
-                existing_topics=existing,
-            )
-            return 0
-
-        labels, centroids = self._cluster(embeddings, n, collection_name)
-
-        real_labels = sorted(set(int(lbl) for lbl in labels if lbl >= 0))
-        if not real_labels:
-            _log.warning(
-                "cluster_all_noise",
-                n_docs=n,
-                collection=collection_name,
-            )
-            return 0
-
-        # c-TF-IDF topic labels
-        vectorizer = CountVectorizer(stop_words="english")
-        tfidf_matrix = TfidfTransformer().fit_transform(
-            vectorizer.fit_transform(texts),
+        specs = self.compute_discovered_topics(
+            collection_name, doc_ids, embeddings, texts,
         )
-        feature_names = vectorizer.get_feature_names_out()
+        if not specs:
+            return 0
 
+        topic_ids = self.persist_discovered_topics(collection_name, specs)
+        if not topic_ids:
+            return 0
+
+        # Write the chroma centroids locally from the returned topic_ids.
         centroid_coll = self._create_centroid_collection(chroma_client)
-
-        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        count = 0
-        c_ids_out: list[str] = []
-        c_embs: list[list[float]] = []
-        c_metas: list[dict[str, Any]] = []
-
-        with self._lock:
-            for cid in real_labels:
-                mask = labels == cid
-
-                # Top c-TF-IDF terms: top-3 as label, top-10 stored for review
-                cluster_tfidf = tfidf_matrix[mask].mean(axis=0).A1
-                top_idx = cluster_tfidf.argsort()[-10:][::-1]
-                top_terms = [str(feature_names[i]) for i in top_idx]
-                label = " ".join(top_terms[:3])
-                terms_json = json.dumps(top_terms)
-
-                doc_count = int(mask.sum())
-                self.conn.execute(
-                    "INSERT INTO topics (label, collection, doc_count, created_at, terms) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (label, collection_name, doc_count, now, terms_json),
-                )
-                topic_id = self.conn.execute(
-                    "SELECT last_insert_rowid()"
-                ).fetchone()[0]
-
-                for i in range(n):
-                    if mask[i]:
-                        self.conn.execute(
-                            "INSERT OR IGNORE INTO topic_assignments "
-                            "(doc_id, topic_id, assigned_by) VALUES (?, ?, 'hdbscan')",
-                            (doc_ids[i], topic_id),
-                        )
-
-                c_ids_out.append(f"{collection_name}:{topic_id}")
-                c_embs.append(centroids[cid].tolist())
-                c_metas.append({
-                    "topic_id": topic_id,
-                    "label": label,
-                    "collection": collection_name,
-                    "doc_count": doc_count,
-                })
-                count += 1
-
-            self.conn.commit()
-
-        # Upsert centroids outside the lock (batched at 300 per write)
+        c_ids_out, c_embs, c_metas = self._centroid_records_for(
+            collection_name, specs, topic_ids,
+        )
         if c_ids_out:
             self._batched_upsert(centroid_coll, c_ids_out, c_embs, c_metas)
 
@@ -1855,9 +1797,146 @@ class CatalogTaxonomy:
                 _log.debug("discover_cross_links_failed", exc_info=True)
 
         # Record doc count for rebalance tracking
-        self.record_discover_count(collection_name, n)
+        self.record_discover_count(collection_name, len(doc_ids))
 
-        return count
+        return len(topic_ids)
+
+    @staticmethod
+    def compute_discovered_topics(
+        collection_name: str,
+        doc_ids: list[str],
+        embeddings: np.ndarray,
+        texts: list[str],
+    ) -> list[dict[str, Any]]:
+        """Cluster + c-TF-IDF — the chroma-free, T2-free COMPUTE half of
+        :meth:`discover_topics` (RDR-151 Phase 3, nexus-uzay8).
+
+        Returns a list of serializable topic-spec dicts, one per real
+        (non-noise) cluster, in stable cluster order::
+
+            {"label", "terms", "doc_count", "doc_ids", "centroid", "assigned_by"}
+
+        ``terms`` is a JSON string (top-10 c-TF-IDF terms); ``centroid`` is a
+        plain ``list[float]`` so the spec survives the daemon RPC. Empty list
+        on any no-op condition (``< 5`` docs, all-noise clustering) — the same
+        short-circuits the monolithic ``discover_topics`` returned 0 for.
+        """
+        n = len(doc_ids)
+        if n < 5:
+            return []
+
+        labels, centroids = CatalogTaxonomy._cluster(
+            embeddings, n, collection_name,
+        )
+        real_labels = sorted(set(int(lbl) for lbl in labels if lbl >= 0))
+        if not real_labels:
+            _log.warning("cluster_all_noise", n_docs=n, collection=collection_name)
+            return []
+
+        vectorizer = CountVectorizer(stop_words="english")
+        tfidf_matrix = TfidfTransformer().fit_transform(
+            vectorizer.fit_transform(texts),
+        )
+        feature_names = vectorizer.get_feature_names_out()
+
+        specs: list[dict[str, Any]] = []
+        for cid in real_labels:
+            mask = labels == cid
+            cluster_tfidf = tfidf_matrix[mask].mean(axis=0).A1
+            top_idx = cluster_tfidf.argsort()[-10:][::-1]
+            top_terms = [str(feature_names[i]) for i in top_idx]
+            specs.append({
+                "label": " ".join(top_terms[:3]),
+                "terms": json.dumps(top_terms),
+                "doc_count": int(mask.sum()),
+                "doc_ids": [doc_ids[i] for i in range(n) if mask[i]],
+                "centroid": [float(x) for x in centroids[cid].tolist()],
+                "assigned_by": "hdbscan",
+            })
+        return specs
+
+    def persist_discovered_topics(
+        self,
+        collection_name: str,
+        specs: list[dict[str, Any]],
+    ) -> list[int]:
+        """Persist topic specs from :meth:`compute_discovered_topics` — the
+        pure-T2, daemon-routable PERSIST half (RDR-151 Phase 3, nexus-uzay8).
+
+        INSERTs one topic row per spec and its chunk assignments, then returns
+        the generated ``topic_id``s aligned to ``specs`` order (so the caller
+        can build the chroma centroid records keyed on
+        ``{collection}:{topic_id}``).
+
+        Preserves the existing-topics guard: returns ``[]`` (no-op) if topics
+        already exist for *collection_name*, matching the monolithic
+        ``discover_topics`` skip behaviour.
+        """
+        if not specs:
+            return []
+
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        topic_ids: list[int] = []
+        with self._lock:
+            existing = self.conn.execute(
+                "SELECT COUNT(*) FROM topics WHERE collection = ?",
+                (collection_name,),
+            ).fetchone()[0]
+            if existing > 0:
+                _log.info(
+                    "discover_skip_existing",
+                    collection=collection_name,
+                    existing_topics=existing,
+                )
+                return []
+
+            for spec in specs:
+                self.conn.execute(
+                    "INSERT INTO topics (label, collection, doc_count, created_at, terms) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        spec["label"], collection_name, spec["doc_count"],
+                        now, spec["terms"],
+                    ),
+                )
+                topic_id = self.conn.execute(
+                    "SELECT last_insert_rowid()"
+                ).fetchone()[0]
+                topic_ids.append(topic_id)
+
+                assigned_by = spec.get("assigned_by", "hdbscan")
+                for did in spec["doc_ids"]:
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO topic_assignments "
+                        "(doc_id, topic_id, assigned_by) VALUES (?, ?, ?)",
+                        (did, topic_id, assigned_by),
+                    )
+            self.conn.commit()
+
+        return topic_ids
+
+    @staticmethod
+    def _centroid_records_for(
+        collection_name: str,
+        specs: list[dict[str, Any]],
+        topic_ids: list[int],
+    ) -> tuple[list[str], list[list[float]], list[dict[str, Any]]]:
+        """Build the (ids, embeddings, metadatas) for the chroma centroid
+        upsert from compute specs + the persisted topic_ids (RDR-151 Phase 3).
+        """
+        c_ids: list[str] = []
+        c_embs: list[list[float]] = []
+        c_metas: list[dict[str, Any]] = []
+        for spec, topic_id in zip(specs, topic_ids):
+            c_ids.append(f"{collection_name}:{topic_id}")
+            c_embs.append(spec["centroid"])
+            c_metas.append({
+                "topic_id": topic_id,
+                "label": spec["label"],
+                "collection": collection_name,
+                "doc_count": spec["doc_count"],
+            })
+        return c_ids, c_embs, c_metas
 
     # ── Cross-collection co-occurrence links (RDR-075 Phase 4, SC-5) ─
 
@@ -2760,150 +2839,207 @@ class CatalogTaxonomy:
         for i in range(0, len(old_centroid_ids), 300):
             centroid_coll.delete(ids=old_centroid_ids[i:i + 300])
 
-        # ── Step 3: HDBSCAN ──────────────────────────────────────────
+        # ── Steps 3-4: compute the rebuild plan (cluster + merge + manual
+        # transfer decisions) — chroma-free, T2-write-free (RDR-151 Phase 3).
         n = len(doc_ids)
-        if n < 5:
+        plan = self.compute_rebuild_plan(
+            collection_name, doc_ids, embeddings, texts,
+            old_centroids=old_centroids,
+            old_labels=old_labels,
+            old_review_statuses=old_review_statuses,
+            old_centroid_topic_ids=old_centroid_topic_ids,
+            manual_assignments=manual_assignments,
+        )
+        if not plan["specs"]:
             self.record_discover_count(collection_name, n)
             return 0
 
-        labels, centroids_arr = self._cluster(embeddings, n, collection_name)
+        # ── Step 5: persist (pure T2, daemon-routable): DELETE old +
+        # INSERT new + apply manual transfers, one transaction.
+        topic_ids = self.persist_rebuild_topics(collection_name, plan)
 
-        real_labels = sorted(set(int(lbl) for lbl in labels if lbl >= 0))
-        if not real_labels:
-            _log.warning(
-                "rebuild_all_noise",
-                collection=collection_name,
-                n_docs=n,
-            )
-            self.record_discover_count(collection_name, n)
-            return 0
-
-        # c-TF-IDF
-        vectorizer = CountVectorizer(stop_words="english")
-        tfidf_matrix = TfidfTransformer().fit_transform(
-            vectorizer.fit_transform(texts),
+        # Upsert new centroids locally from the returned topic_ids.
+        c_ids, c_embs, c_metas = self._centroid_records_for(
+            collection_name, plan["specs"], topic_ids,
         )
-        feature_names = vectorizer.get_feature_names_out()
-
-        # ── Step 4: merge labels ──────────────────────────────────────
-        new_centroids_arr = np.array(
-            [centroids_arr[cid] for cid in real_labels], dtype=np.float32,
-        )
-        merged = self._merge_labels(
-            old_centroids, old_labels, old_review_statuses, new_centroids_arr,
-        )
-
-        # ── Step 5: persist ───────────────────────────────────────────
-        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        count = 0
-        c_ids: list[str] = []
-        c_embs: list[list[float]] = []
-        c_metas: list[dict[str, Any]] = []
-
-        # Map new cluster index -> topic_id for manual assignment transfer
-        new_topic_ids: list[int] = []
-
-        with self._lock:
-            for idx, cid in enumerate(real_labels):
-                mask = labels == cid
-
-                cluster_tfidf = tfidf_matrix[mask].mean(axis=0).A1
-                top_idx = cluster_tfidf.argsort()[-10:][::-1]
-                top_terms = [str(feature_names[i]) for i in top_idx]
-                tfidf_label = " ".join(top_terms[:3])
-                terms_json = json.dumps(top_terms)
-
-                # Use merged label if available, else c-TF-IDF
-                merged_info = merged[idx]
-                label = merged_info["label"] or tfidf_label
-                review_status = merged_info["review_status"]
-
-                doc_count = int(mask.sum())
-                self.conn.execute(
-                    "INSERT INTO topics "
-                    "(label, collection, doc_count, created_at, terms, review_status) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (label, collection_name, doc_count, now, terms_json, review_status),
-                )
-                topic_id = self.conn.execute(
-                    "SELECT last_insert_rowid()"
-                ).fetchone()[0]
-                new_topic_ids.append(topic_id)
-
-                for i in range(n):
-                    if mask[i]:
-                        self.conn.execute(
-                            "INSERT OR IGNORE INTO topic_assignments "
-                            "(doc_id, topic_id, assigned_by) VALUES (?, ?, ?)",
-                            (
-                                doc_ids[i],
-                                topic_id,
-                                "auto-matched" if merged_info["label"] else "hdbscan",
-                            ),
-                        )
-
-                c_ids.append(f"{collection_name}:{topic_id}")
-                c_embs.append(centroids_arr[cid].tolist())
-                c_metas.append({
-                    "topic_id": topic_id,
-                    "label": label,
-                    "collection": collection_name,
-                    "doc_count": doc_count,
-                })
-                count += 1
-
-            # Transfer manual assignments.
-            # Build old_topic_id -> new_topic_id map from _merge_labels output
-            old_to_new_topic: dict[int, int] = {}
-            if old_centroid_topic_ids and new_topic_ids:
-                for new_idx, merge_info in enumerate(merged):
-                    old_idx = merge_info.get("old_centroid_idx", -1)
-                    if merge_info["label"] is not None and 0 <= old_idx < len(old_centroid_topic_ids):
-                        old_tid = old_centroid_topic_ids[old_idx]
-                        old_to_new_topic[old_tid] = new_topic_ids[new_idx]
-
-            if manual_assignments:
-                doc_id_to_idx = {did: i for i, did in enumerate(doc_ids)}
-                for manual_doc, old_topic_id in manual_assignments.items():
-                    # Route 1: old topic was matched to a new topic
-                    if old_topic_id in old_to_new_topic:
-                        target = old_to_new_topic[old_topic_id]
-                        self.conn.execute(
-                            "INSERT OR REPLACE INTO topic_assignments "
-                            "(doc_id, topic_id, assigned_by) VALUES (?, ?, 'manual')",
-                            (manual_doc, target),
-                        )
-                        continue
-
-                    # Route 2: doc is in the current corpus — use embedding
-                    if manual_doc in doc_id_to_idx:
-                        from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
-                        doc_emb = embeddings[doc_id_to_idx[manual_doc] : doc_id_to_idx[manual_doc] + 1]
-                        sims = _cos_sim(doc_emb, new_centroids_arr)[0]
-                        best_idx = int(sims.argmax())
-                        if float(sims[best_idx]) > 0.5:
-                            self.conn.execute(
-                                "INSERT OR REPLACE INTO topic_assignments "
-                                "(doc_id, topic_id, assigned_by) VALUES (?, ?, 'manual')",
-                                (manual_doc, new_topic_ids[best_idx]),
-                            )
-                            continue
-
-                    # Route 3: manual assignment could not be placed
-                    _log.warning(
-                        "manual_assignment_lost",
-                        doc_id=manual_doc,
-                        old_topic_id=old_topic_id,
-                        collection=collection_name,
-                    )
-
-            self.conn.commit()
-
-        # Upsert new centroids (batched at 300 per write)
         if c_ids:
             self._batched_upsert(centroid_coll, c_ids, c_embs, c_metas)
 
         # Record doc count for rebalance tracking
         self.record_discover_count(collection_name, n)
 
-        return count
+        return len(topic_ids)
+
+    @staticmethod
+    def compute_rebuild_plan(
+        collection_name: str,
+        doc_ids: list[str],
+        embeddings: np.ndarray,
+        texts: list[str],
+        *,
+        old_centroids: np.ndarray,
+        old_labels: list[str],
+        old_review_statuses: list[str],
+        old_centroid_topic_ids: list[int],
+        manual_assignments: dict[str, int],
+    ) -> dict[str, Any]:
+        """Cluster + merge-labels + manual-transfer resolution — the
+        chroma-free, T2-write-free COMPUTE half of :meth:`rebuild_taxonomy`
+        (RDR-151 Phase 3, nexus-uzay8).
+
+        ``old_*`` state and ``manual_assignments`` are read by the caller
+        (chroma for old centroids, T2 for old labels / manual rows) and passed
+        in, so this stays pure. Returns a serializable plan::
+
+            {"specs": [{label, terms, doc_count, doc_ids, centroid,
+                        assigned_by, review_status}, ...],
+             "manual_transfers": {doc_id: spec_index}}
+
+        ``manual_transfers`` resolves Route 1 (old topic matched to a new one
+        via ``_merge_labels``) and Route 2 (doc in the current corpus, cosine
+        to a new centroid > 0.5) to a SPEC INDEX; the persist half maps that to
+        the freshly-generated topic_id. Route 3 (unplaceable) is dropped with a
+        warning. Empty ``specs`` on ``< 5`` docs / all-noise.
+        """
+        n = len(doc_ids)
+        if n < 5:
+            return {"specs": [], "manual_transfers": {}}
+
+        labels, centroids_arr = CatalogTaxonomy._cluster(
+            embeddings, n, collection_name,
+        )
+        real_labels = sorted(set(int(lbl) for lbl in labels if lbl >= 0))
+        if not real_labels:
+            _log.warning("rebuild_all_noise", collection=collection_name, n_docs=n)
+            return {"specs": [], "manual_transfers": {}}
+
+        vectorizer = CountVectorizer(stop_words="english")
+        tfidf_matrix = TfidfTransformer().fit_transform(
+            vectorizer.fit_transform(texts),
+        )
+        feature_names = vectorizer.get_feature_names_out()
+
+        new_centroids_arr = np.array(
+            [centroids_arr[cid] for cid in real_labels], dtype=np.float32,
+        )
+        merged = CatalogTaxonomy._merge_labels(
+            old_centroids, old_labels, old_review_statuses, new_centroids_arr,
+        )
+
+        specs: list[dict[str, Any]] = []
+        for idx, cid in enumerate(real_labels):
+            mask = labels == cid
+            cluster_tfidf = tfidf_matrix[mask].mean(axis=0).A1
+            top_idx = cluster_tfidf.argsort()[-10:][::-1]
+            top_terms = [str(feature_names[i]) for i in top_idx]
+            tfidf_label = " ".join(top_terms[:3])
+            merged_info = merged[idx]
+            specs.append({
+                "label": merged_info["label"] or tfidf_label,
+                "terms": json.dumps(top_terms),
+                "doc_count": int(mask.sum()),
+                "doc_ids": [doc_ids[i] for i in range(n) if mask[i]],
+                "centroid": [float(x) for x in new_centroids_arr[idx].tolist()],
+                "assigned_by": "auto-matched" if merged_info["label"] else "hdbscan",
+                "review_status": merged_info["review_status"],
+            })
+
+        # Resolve manual-assignment transfers to spec indices.
+        old_to_new_spec: dict[int, int] = {}
+        if old_centroid_topic_ids:
+            for new_idx, merge_info in enumerate(merged):
+                old_idx = merge_info.get("old_centroid_idx", -1)
+                if merge_info["label"] is not None and 0 <= old_idx < len(old_centroid_topic_ids):
+                    old_to_new_spec[old_centroid_topic_ids[old_idx]] = new_idx
+
+        manual_transfers: dict[str, int] = {}
+        if manual_assignments:
+            doc_id_to_idx = {did: i for i, did in enumerate(doc_ids)}
+            for manual_doc, old_topic_id in manual_assignments.items():
+                # Route 1: old topic matched to a new topic.
+                if old_topic_id in old_to_new_spec:
+                    manual_transfers[manual_doc] = old_to_new_spec[old_topic_id]
+                    continue
+                # Route 2: doc in the current corpus — cosine to new centroids.
+                if manual_doc in doc_id_to_idx:
+                    from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
+                    j = doc_id_to_idx[manual_doc]
+                    sims = _cos_sim(embeddings[j : j + 1], new_centroids_arr)[0]
+                    best_idx = int(sims.argmax())
+                    if float(sims[best_idx]) > 0.5:
+                        manual_transfers[manual_doc] = best_idx
+                        continue
+                # Route 3: unplaceable.
+                _log.warning(
+                    "manual_assignment_lost",
+                    doc_id=manual_doc,
+                    old_topic_id=old_topic_id,
+                    collection=collection_name,
+                )
+
+        return {"specs": specs, "manual_transfers": manual_transfers}
+
+    def persist_rebuild_topics(
+        self,
+        collection_name: str,
+        plan: dict[str, Any],
+    ) -> list[int]:
+        """Apply a rebuild plan from :meth:`compute_rebuild_plan` — the pure-T2,
+        daemon-routable PERSIST half (RDR-151 Phase 3, nexus-uzay8).
+
+        One transaction: DELETE old topics + assignments for *collection_name*,
+        INSERT the new topic rows + their chunk assignments, then apply the
+        manual transfers (``{doc_id: spec_index}`` -> the generated topic_id).
+        Returns the new topic_ids aligned to ``plan["specs"]`` order.
+        """
+        specs = plan["specs"]
+        if not specs:
+            return []
+        manual_transfers: dict[str, int] = plan.get("manual_transfers", {})
+
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        topic_ids: list[int] = []
+        with self._lock:
+            # Clear old T2 data for this collection.
+            self.conn.execute(
+                "DELETE FROM topic_assignments WHERE topic_id IN "
+                "(SELECT id FROM topics WHERE collection = ?)",
+                (collection_name,),
+            )
+            self.conn.execute(
+                "DELETE FROM topics WHERE collection = ?", (collection_name,),
+            )
+
+            for spec in specs:
+                self.conn.execute(
+                    "INSERT INTO topics "
+                    "(label, collection, doc_count, created_at, terms, review_status) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        spec["label"], collection_name, spec["doc_count"], now,
+                        spec["terms"], spec["review_status"],
+                    ),
+                )
+                topic_id = self.conn.execute(
+                    "SELECT last_insert_rowid()"
+                ).fetchone()[0]
+                topic_ids.append(topic_id)
+
+                for did in spec["doc_ids"]:
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO topic_assignments "
+                        "(doc_id, topic_id, assigned_by) VALUES (?, ?, ?)",
+                        (did, topic_id, spec["assigned_by"]),
+                    )
+
+            for manual_doc, spec_index in manual_transfers.items():
+                if 0 <= spec_index < len(topic_ids):
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO topic_assignments "
+                        "(doc_id, topic_id, assigned_by) VALUES (?, ?, 'manual')",
+                        (manual_doc, topic_ids[spec_index]),
+                    )
+
+            self.conn.commit()
+
+        return topic_ids
