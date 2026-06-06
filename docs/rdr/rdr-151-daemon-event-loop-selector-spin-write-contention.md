@@ -380,6 +380,14 @@ writer); dedicated crash-loop `flock`. Add the transient op-label dispatch log
 to answer RF-4 (which write stalls), then remove it. Exact-count regression
 tests for each.
 
+**Phase 3: close incomplete daemon-fronting (nexus-uzay8)**
+- Compute/persist split for `discover_topics` + `rebuild_taxonomy` (compute client-side, persist daemon-routable)
+- Compute/persist split for `split_topic` + `_discover_cross_links`; `delete_topic`/`merge_topics` return the collection for local chroma centroid cleanup
+- Route every direct T2 taxonomy write on the `nx index` path (`run_collection_postprocessing`) through `t2_index_write`
+- Route every `nx taxonomy` CLI write subcommand (assign / review / rename / merge / split / cooccurrence) through `t2_index_write`
+- `storage_boundary_lint` enforce-flip: fail on any taxonomy write method called on a directly-constructed handle outside `db/`+`daemon/` (exemption is `t2_index_write`-specific)
+- Live idle-after-contention oracle: daemon returns to single-digit `select/s` within ~10s after an `nx index` contender stops, plus a `sample` soak (no `btreeInvokeBusyHandler`)
+
 Out of this RDR's scope, tracked as beads:
 - **nexus-hcw0g** — test reaper format-blindness; a one-line `endpoint.pid`
   fallback in `tests/_daemon_leak_guard.py:39`. Leaked 66 daemons + 252 `/tmp`
