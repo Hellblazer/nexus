@@ -126,3 +126,33 @@ class TestStopFailureHook:
         )
         assert result.returncode == 0
         assert "skipping side effects" in result.stderr.lower()
+
+    def test_rate_limit_remembers_but_never_creates_bead(self, tmp_path: Path) -> None:
+        """Side-effect contract: log via `bd remember`, but never `bd create`.
+
+        Transient API failures are infra events, not actionable bugs. Filing
+        them as P1 issues pollutes `bd ready`. This pins that we record the
+        crash (remember) without ever filing an issue (create).
+        """
+        # Fake `bd` on PATH that appends its subcommand to a log file.
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        log = tmp_path / "bd_calls.log"
+        bd = fake_bin / "bd"
+        bd.write_text(
+            "#!/bin/sh\n"
+            f'echo "$1" >> "{log}"\n'
+            "exit 0\n"
+        )
+        bd.chmod(0o755)
+        result = _run_hook(
+            _make_payload("rate_limit"),
+            env_overrides={
+                "CLAUDECODE": "1",
+                "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+            },
+        )
+        assert result.returncode == 0
+        calls = log.read_text().split() if log.exists() else []
+        assert "remember" in calls, f"expected a bd remember call, got {calls}"
+        assert "create" not in calls, f"hook must not file issues, got {calls}"
