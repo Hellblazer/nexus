@@ -155,14 +155,64 @@ def discover_for_collection(
     _progress(f"    clustering {len(all_ids):,} x {embeddings.shape[1]}d...")
     t0 = time.monotonic()
 
+    # RDR-151 Phase 3 (nexus-uzay8): compute the topic clusters/centroids
+    # client-side (chroma + numpy), route the pure-T2 PERSIST through the
+    # daemon (t2_index_write), then write the chroma centroids locally from
+    # the daemon-returned topic_ids. ``taxonomy`` is used only for the
+    # force-path READ of old state (read-only; no WAL writer contention) and
+    # the static centroid helpers — no direct T2 write happens here.
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.mcp_infra import t2_index_write
+
+    centroid_coll = CatalogTaxonomy._create_centroid_collection(chroma_client)
     if force:
-        result = taxonomy.rebuild_taxonomy(
-            collection_name, all_ids, embeddings, all_texts, chroma_client,
+        old = taxonomy.read_rebuild_old_state(collection_name, centroid_coll)
+        for i in range(0, len(old["old_centroid_ids"]), 300):
+            centroid_coll.delete(ids=old["old_centroid_ids"][i:i + 300])
+        plan = CatalogTaxonomy.compute_rebuild_plan(
+            collection_name, all_ids, embeddings, all_texts,
+            old_centroids=old["old_centroids"],
+            old_labels=old["old_labels"],
+            old_review_statuses=old["old_review_statuses"],
+            old_centroid_topic_ids=old["old_centroid_topic_ids"],
+            manual_assignments=old["manual_assignments"],
+        )
+        specs = plan["specs"]
+        topic_ids = t2_index_write(
+            lambda db: db.taxonomy.persist_rebuild_topics(collection_name, plan)
         )
     else:
-        result = taxonomy.discover_topics(
-            collection_name, all_ids, embeddings, all_texts, chroma_client,
+        specs = CatalogTaxonomy.compute_discovered_topics(
+            collection_name, all_ids, embeddings, all_texts,
         )
+        topic_ids = (
+            t2_index_write(
+                lambda db: db.taxonomy.persist_discovered_topics(collection_name, specs)
+            )
+            if specs else []
+        )
+
+    result = len(topic_ids)
+    if topic_ids:
+        c_ids, c_embs, c_metas = CatalogTaxonomy._centroid_records_for(
+            collection_name, specs, topic_ids,
+        )
+        if c_ids:
+            CatalogTaxonomy._batched_upsert(centroid_coll, c_ids, c_embs, c_metas)
+        # Cross-collection links: compute (chroma) local, persist routed.
+        try:
+            pairs = CatalogTaxonomy.compute_cross_links(
+                collection_name, c_embs, c_metas, centroid_coll,
+            )
+            if pairs:
+                t2_index_write(lambda db: db.taxonomy.persist_cross_links(pairs))
+        except Exception:
+            _log.debug("discover_cross_links_failed", exc_info=True)
+
+    # Record doc count for rebalance tracking (routed).
+    t2_index_write(
+        lambda db: db.taxonomy.record_discover_count(collection_name, len(all_ids))
+    )
 
     elapsed = time.monotonic() - t0
     _progress(f"    clustered in {elapsed:.1f}s")
@@ -504,13 +554,15 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                         assignments = result.get("chunk_assignments", [])
                         if assignments:
                             _persist_assignments(
-                                db.taxonomy, assignments, col_name, quiet=True,
+                                assignments, col_name, quiet=True,
                             )
                             proj_count += len(assignments)
                 if proj_count:
                     click.echo(f"  Projection: {proj_count} cross-collection assignments")
                     # Co-occurrence topic links (SC-5, SC-7)
-                    cooc = db.taxonomy.generate_cooccurrence_links()
+                    # RDR-151 Phase 3: route via daemon.
+                    from nexus.mcp_infra import t2_index_write
+                    cooc = t2_index_write(lambda db: db.taxonomy.generate_cooccurrence_links())
                     if cooc:
                         click.echo(f"  Links:      {cooc} co-occurrence topic links")
             except Exception:
@@ -642,6 +694,9 @@ def review_cmd(collection: str, limit: int) -> None:
         click.echo(f"Reviewing {len(topics)} topic(s)")
         click.echo("Actions: [a]ccept  [r]ename  [m]erge  [d]elete  [S]kip")
 
+        # RDR-151 Phase 3 (nexus-uzay8): all T2 writes routed via daemon.
+        from nexus.mcp_infra import t2_index_write
+
         for i, topic in enumerate(topics, 1):
             _display_topic(topic, i, len(topics), db.taxonomy)
 
@@ -656,12 +711,15 @@ def review_cmd(collection: str, limit: int) -> None:
                 break
 
             if action == "a":
-                db.taxonomy.mark_topic_reviewed(topic["id"], "accepted")
+                _tid = topic["id"]
+                t2_index_write(lambda db, _t=_tid: db.taxonomy.mark_topic_reviewed(_t, "accepted"))
                 click.echo(f"  Accepted: {topic['label']}")
 
             elif action == "r":
                 new_label = click.prompt("  New label")
-                db.taxonomy.rename_topic(topic["id"], new_label)
+                _tid = topic["id"]
+                _lbl = new_label
+                t2_index_write(lambda db, _t=_tid, _l=_lbl: db.taxonomy.rename_topic(_t, _l))
                 click.echo(f"  Renamed: {topic['label']} -> {new_label}")
 
             elif action == "m":
@@ -671,11 +729,14 @@ def review_cmd(collection: str, limit: int) -> None:
                 if target is None:
                     click.echo(f"  Topic {target_id} not found, skipping.")
                     continue
-                db.taxonomy.merge_topics(topic["id"], target_id)
+                _src = topic["id"]
+                _tgt = target_id
+                t2_index_write(lambda db, _s=_src, _t=_tgt: db.taxonomy.merge_topics(_s, _t))
                 click.echo(f"  Merged into: {target['label']}")
 
             elif action == "d":
-                db.taxonomy.delete_topic(topic["id"])
+                _tid = topic["id"]
+                t2_index_write(lambda db, _t=_tid: db.taxonomy.delete_topic(_t))
                 click.echo(f"  Deleted: {topic['label']}")
 
             elif action == "S":
@@ -693,12 +754,16 @@ def review_cmd(collection: str, limit: int) -> None:
 @click.option("--collection", "-c", default="", help="Collection scope for label lookup")
 def assign_cmd(doc_id: str, topic_label: str, collection: str) -> None:
     """Assign a document to a topic by label."""
+    from nexus.mcp_infra import t2_index_write
     with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
             return
-        db.taxonomy.assign_topic(doc_id, topic_id, assigned_by="manual")
+        # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
+        _did = doc_id
+        _tid = topic_id
+        t2_index_write(lambda db, _d=_did, _t=_tid: db.taxonomy.assign_topic(_d, _t, assigned_by="manual"))
         click.echo(f"Assigned '{doc_id}' to topic '{topic_label}' (id={topic_id}).")
 
 
@@ -727,18 +792,22 @@ def rename_cmd(
     (the user typing a new label is an acknowledgement); ``--no-accept``
     lets you fix a typo without forcing the topic through review.
     """
+    from nexus.mcp_infra import t2_index_write
     with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
             return
+        # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
+        _tid = topic_id
+        _lbl = new_label
         if no_accept:
-            db.taxonomy.update_topic_label(topic_id, new_label)
+            t2_index_write(lambda db, _t=_tid, _l=_lbl: db.taxonomy.update_topic_label(_t, _l))
             click.echo(
                 f"Renamed '{topic_label}' -> '{new_label}' (review_status preserved)."
             )
         else:
-            db.taxonomy.rename_topic(topic_id, new_label)
+            t2_index_write(lambda db, _t=_tid, _l=_lbl: db.taxonomy.rename_topic(_t, _l))
             click.echo(f"Renamed '{topic_label}' -> '{new_label}'.")
 
 
@@ -748,6 +817,7 @@ def rename_cmd(
 @click.option("--collection", "-c", default="", help="Collection scope for label lookup")
 def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
     """Merge source topic into target topic."""
+    from nexus.mcp_infra import t2_index_write
     with _T2Database(_default_db_path()) as db:
         source_id = db.taxonomy.resolve_label(source_label, collection=collection)
         if source_id is None:
@@ -757,7 +827,10 @@ def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
         if target_id is None:
             click.echo(f"Target topic '{target_label}' not found.")
             return
-        db.taxonomy.merge_topics(source_id, target_id)
+        # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
+        _src = source_id
+        _tgt = target_id
+        t2_index_write(lambda db, _s=_src, _t=_tgt: db.taxonomy.merge_topics(_s, _t))
         click.echo(f"Merged '{source_label}' into '{target_label}'.")
 
 
@@ -766,21 +839,109 @@ def merge_cmd(source_label: str, target_label: str, collection: str) -> None:
 @click.option("--k", "-k", default=2, type=int, help="Number of sub-topics", show_default=True)
 @click.option("--collection", "-c", default="", help="Collection scope for label lookup")
 def split_cmd(topic_label: str, k: int, collection: str) -> None:
-    """Split a topic into k sub-topics via KMeans clustering."""
+    """Split a topic into k sub-topics via KMeans clustering.
+
+    RDR-151 Phase 3 (nexus-uzay8): the T3 fetch + MiniLM reembed + KMeans
+    clustering happens locally (compute phase), then the pure-T2 persist
+    (DELETE parent assignments + INSERT children) is routed through the
+    daemon via t2_index_write.  Chroma centroid operations happen locally
+    before and after the routed persist using the returned child IDs.
+    """
+    import numpy as _np
     from nexus.db import make_t3
+    from nexus.db.local_ef import LocalEmbeddingFunction
+    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.mcp_infra import t2_index_write
 
     with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
         if topic_id is None:
             click.echo(f"Topic '{topic_label}' not found.")
             return
+
+        topic = db.taxonomy.get_topic_by_id(topic_id)
+        if topic is None:
+            click.echo(f"Topic '{topic_label}' not found.")
+            return
+
+        doc_ids = db.taxonomy.get_all_topic_doc_ids(topic_id)
+        if len(doc_ids) < k:
+            click.echo(f"Split '{topic_label}' into 0 sub-topics.")
+            return
+
+        collection_name = topic["collection"]
         t3 = make_t3()
-        child_count = db.taxonomy.split_topic(topic_id, k=k, chroma_client=t3._client)
+        chroma_client = t3._client
+
+        # Fetch texts from T3 collection
+        try:
+            coll = chroma_client.get_collection(collection_name, embedding_function=None)
+        except Exception:
+            click.echo(f"Collection '{collection_name}' not found in T3.")
+            return
+
+        _PAGE = 250
+        fetched_ids: list[str] = []
+        texts: list[str] = []
+        for i in range(0, len(doc_ids), _PAGE):
+            batch = doc_ids[i : i + _PAGE]
+            result = coll.get(ids=batch, include=["documents"])
+            for fid, fdoc in zip(result.get("ids") or [], result.get("documents") or []):
+                if fdoc:
+                    fetched_ids.append(fid)
+                    texts.append(fdoc)
+
+        if len(texts) < k:
+            click.echo(f"Split '{topic_label}' into 0 sub-topics.")
+            return
+
+        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        embeddings = _np.array(ef(texts), dtype=_np.float32)
+
+        # COMPUTE: KMeans + c-TF-IDF (pure CPU, no T2 writes)
+        split_result = CatalogTaxonomy.compute_split(
+            topic_id=topic_id,
+            doc_ids=doc_ids,
+            texts=texts,
+            fetched_ids=fetched_ids,
+            embeddings=embeddings,
+            collection_name=collection_name,
+            k=k,
+        )
+        child_specs = split_result["child_specs"]
+        if not child_specs:
+            click.echo(f"Split '{topic_label}' into 0 sub-topics.")
+            return
+
+        # PERSIST: route T2 writes through daemon
+        child_ids = t2_index_write(lambda db: db.taxonomy.persist_split(split_result))
+        child_count = len(child_ids)
+
+        # LOCAL: chroma centroid cleanup (remove parent, add children)
+        if child_count:
+            centroid_coll = CatalogTaxonomy._create_centroid_collection(chroma_client)
+            parent_centroid_id = f"{collection_name}:{topic_id}"
+            try:
+                centroid_coll.delete(ids=[parent_centroid_id])
+            except Exception:
+                pass
+            c_ids = [f"{collection_name}:{cid}" for cid in child_ids]
+            c_embs = [spec["centroid"] for spec in child_specs]
+            c_metas = [
+                {
+                    "topic_id": cid,
+                    "label": spec["label"],
+                    "collection": collection_name,
+                    "doc_count": spec["doc_count"],
+                }
+                for cid, spec in zip(child_ids, child_specs)
+            ]
+            CatalogTaxonomy._batched_upsert(centroid_coll, c_ids, c_embs, c_metas)
+
         click.echo(f"Split '{topic_label}' into {child_count} sub-topics.")
         if child_count:
-            parent = db.taxonomy.get_topic_by_id(topic_id)
-            coll = (parent or {}).get("collection") or collection
-            scope = f" -c {coll}" if coll else ""
+            coll_scope = collection_name or collection
+            scope = f" -c {coll_scope}" if coll_scope else ""
             click.echo(
                 f"Action: {child_count} new sub-topics have n-gram labels. "
                 f"Run `nx taxonomy label{scope}` to get human-readable labels."
@@ -905,7 +1066,7 @@ def compute_topic_links(
         for k, v in pair_counts.most_common()
     ]
 
-    # Persist to T2 for search-time topic boost
+    # Persist to T2 for search-time topic boost (routed via daemon)
     if persist and id_pair_counts:
         persist_data = [
             {
@@ -916,7 +1077,8 @@ def compute_topic_links(
             }
             for k, v in id_pair_counts.most_common()
         ]
-        taxonomy.upsert_topic_links(persist_data)
+        from nexus.mcp_infra import t2_index_write
+        t2_index_write(lambda db: db.taxonomy.upsert_topic_links(persist_data))
 
     return result
 
@@ -1170,6 +1332,8 @@ def relabel_topics(
         labels = asyncio.run(_generate_labels_batch(items, glossary_text=glossary_text))
         return [(w[0], lbl) for w, lbl in zip(batch, labels)]
 
+    from nexus.mcp_infra import t2_index_write
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_label_batch, b): b for b in batches}
         for future in as_completed(futures):
@@ -1181,7 +1345,10 @@ def relabel_topics(
                     # human-driven ``nx taxonomy review`` is where topics
                     # transition pending → accepted; batch LLM labeling
                     # should not short-circuit that step.
-                    taxonomy.update_topic_label(tid, label)
+                    # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
+                    _tid = tid  # capture for lambda
+                    _lbl = label
+                    t2_index_write(lambda db, _t=_tid, _l=_lbl: db.taxonomy.update_topic_label(_t, _l))
                     count += 1
             _progress(f"    batch {batches_done}/{len(batches)} done ({count} renamed)")
 
@@ -1364,7 +1531,7 @@ def project_cmd(
 
         if persist and result.get("chunk_assignments"):
             _persist_assignments(
-                db.taxonomy, result["chunk_assignments"], source_collection,
+                result["chunk_assignments"], source_collection,
             )
         elif matched and not persist:
             click.echo("\nRun with --persist to write assignments to topic_assignments.")
@@ -1376,7 +1543,6 @@ def project_cmd(
 
 
 def _persist_assignments(
-    taxonomy: "CatalogTaxonomy",
     chunk_assignments: list[tuple[str, int, float]],
     source_collection: str,
     *,
@@ -1390,21 +1556,32 @@ def _persist_assignments(
 
     Returns the number of assignments written. Set *quiet* to suppress CLI
     output (used when called from pipeline context).
+
+    RDR-151 Phase 3 (nexus-uzay8): all T2 writes routed via t2_index_write.
+    The assign_topic calls are batched as a single persist_assignments call
+    so the daemon takes one write lock, not N individual locks.
     """
-    for doc_id, topic_id, similarity in chunk_assignments:
-        taxonomy.assign_topic(
-            doc_id,
-            topic_id,
-            assigned_by="projection",
-            similarity=similarity,
-            source_collection=source_collection,
-        )
+    from nexus.mcp_infra import t2_index_write
+    # Build the serializable assignment dicts for the daemon-routable
+    # persist_assignments method (avoids N individual daemon RPCs).
+    assignment_dicts = [
+        {
+            "doc_id": doc_id,
+            "topic_id": topic_id,
+            "assigned_by": "projection",
+            "similarity": similarity,
+            "source_collection": source_collection,
+        }
+        for doc_id, topic_id, similarity in chunk_assignments
+    ]
+    if assignment_dicts:
+        t2_index_write(lambda db: db.taxonomy.persist_assignments(assignment_dicts))
     # GitHub #240 + bead nexus-gwhy: rebuild projection entries in
     # topic_links so ``nx taxonomy links`` reflects the new assignments.
     # Without this refresh, ``links`` stayed at the centroid-similarity
     # pairs written at discover time while ``hubs`` (live query) moved
     # ahead. Cost is one aggregate + upsert per persist call.
-    taxonomy.refresh_projection_links()
+    t2_index_write(lambda db: db.taxonomy.refresh_projection_links())
     if not quiet:
         click.echo(f"Persisted {len(chunk_assignments)} projection assignment(s).")
     return len(chunk_assignments)
@@ -1469,7 +1646,7 @@ def _run_backfill(
             total_novel += novel
 
             if persist and result.get("chunk_assignments"):
-                _persist_assignments(taxonomy, result["chunk_assignments"], src)
+                _persist_assignments(result["chunk_assignments"], src)
                 total_assigned += len(result["chunk_assignments"])
         except Exception as e:
             click.echo(f"    Skipped: {e}")

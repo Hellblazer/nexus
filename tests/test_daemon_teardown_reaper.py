@@ -33,6 +33,60 @@ def _write_discovery(config_dir: Path, tier: str, pid: int) -> None:
     disc.write_text(json.dumps({"format_version": 1, "pid": pid}))
 
 
+def _write_discovery_lease(config_dir: Path, tier: str, pid: int) -> None:
+    """Write the RDR-149 P2 lease shape, where the pid lives under
+    ``endpoint`` (not top level). This is the production format since 5.10;
+    the legacy-only ``_write_discovery`` above is why nexus-hcw0g went
+    undetected (the reaper read top-level ``pid`` and silently no-opped)."""
+    disc = discovery_path(config_dir, tier=tier)
+    disc.parent.mkdir(parents=True, exist_ok=True)
+    disc.write_text(json.dumps({
+        "format_version": 1,
+        "generation": 1,
+        "owner_token": "tok",
+        "ttl": 3.0,
+        "status": "live",
+        "endpoint": {"pid": pid, "uds_path": "/tmp/x.sock", "tcp_port": 0},
+    }))
+
+
+def test_read_daemon_pid_handles_lease_and_legacy_shapes(tmp_path: Path) -> None:
+    """nexus-hcw0g regression: the pid resolver must read both the RDR-149 P2
+    ``endpoint.pid`` lease shape AND the legacy top-level ``pid``. Pure
+    dict/file unit (no subprocess)."""
+    from tests._daemon_leak_guard import _read_daemon_pid
+
+    cfg = tmp_path / ".config" / "nexus"
+    # RDR-149 P2 lease shape (the one the buggy reader missed -> None)
+    _write_discovery_lease(cfg, "t2", 4242)
+    assert _read_daemon_pid(cfg, "t2") == 4242
+    # legacy top-level pid still works
+    _write_discovery(cfg, "t3", 5151)
+    assert _read_daemon_pid(cfg, "t3") == 5151
+    # garbage / no endpoint pid -> None
+    disc = discovery_path(cfg, tier="t2")
+    disc.write_text(json.dumps({"format_version": 1, "endpoint": {}}))
+    assert _read_daemon_pid(cfg, "t2") is None
+
+
+def test_reaps_live_daemon_recorded_in_lease_format(
+    tmp_path: Path, _reap_residue: list[subprocess.Popen],
+) -> None:
+    """nexus-hcw0g end-to-end: the reaper must signal a daemon recorded in the
+    RDR-149 P2 ``endpoint.pid`` lease shape. Fails against the pre-fix reader."""
+    config_dir = tmp_path / ".config" / "nexus"
+    proc = _spawn_daemon_like("nx daemon t2 start")
+    _reap_residue.append(proc)
+    time.sleep(0.3)
+    _write_discovery_lease(config_dir, "t2", proc.pid)
+
+    reaped = reap_tmp_daemons(config_dir)
+
+    assert reaped == [proc.pid]
+    ret = proc.wait(timeout=3)
+    assert ret != 0, f"expected signal-termination, got returncode {ret}"
+
+
 def _spawn_daemon_like(argv0: str) -> subprocess.Popen:
     """Spawn a long-lived process whose argv0 mimics an nx daemon, so the
     reaper's cmdline PID-reuse guard recognises it. ``exec -a`` rewrites

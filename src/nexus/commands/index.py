@@ -688,7 +688,7 @@ def _project_cross_collections(
         )
         assignments = result.get("chunk_assignments", [])
         if assignments:
-            _persist_assignments(taxonomy, assignments, col_name, quiet=True)
+            _persist_assignments(assignments, col_name, quiet=True)
             total += len(assignments)
     return total
 
@@ -722,6 +722,7 @@ def run_collection_postprocessing(
     from nexus.config import load_config as _load_cfg
     from nexus.db import make_t3
     from nexus.db.t2 import T2Database
+    from nexus.mcp_infra import t2_index_write
     from nexus.commands._helpers import default_db_path
 
     def _say(msg: str) -> None:
@@ -732,7 +733,7 @@ def run_collection_postprocessing(
     try:
         t3 = make_t3()
         total_topics = 0
-        with T2Database(default_db_path()) as db:  # epsilon-allow: auto-discover runs discover_topics/project_against, which interleave ChromaDB centroid writes keyed on T2-generated topic_ids and need a live chroma client; cannot cross the daemon RPC (RDR-128 P3 documented-irreducible)
+        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
             for col_name in collections:
                 try:
                     n = _discover_taxonomy(col_name, db.taxonomy, t3._client)
@@ -775,14 +776,16 @@ def run_collection_postprocessing(
                     _log.debug("taxonomy_projection_failed", exc_info=True)
 
                 # Co-occurrence topic links from projections (RDR-075 SC-5)
+                # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
                 try:
-                    cooc = db.taxonomy.generate_cooccurrence_links()
+                    cooc = t2_index_write(lambda db: db.taxonomy.generate_cooccurrence_links())
                     if cooc:
                         _log.info("cooccurrence_links_generated", count=cooc)
                 except Exception:
                     _log.debug("cooccurrence_links_failed", exc_info=True)
 
                 # Auto-populate topic links if catalog available
+                # compute_topic_links routes upsert_topic_links internally.
                 try:
                     from nexus.commands.taxonomy_cmd import _try_load_catalog, compute_topic_links
                     cat = _try_load_catalog()

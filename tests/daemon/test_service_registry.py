@@ -128,6 +128,30 @@ class TestPublish:
         registry.publish("42", endpoint=_endpoint(), version="1", owner_token="A")
         assert list(tmp_path.glob("*.tmp")) == []
 
+    def test_heartbeat_preserves_shutting_down_marker(
+        self, registry: ServiceRegistry
+    ) -> None:
+        """RDR-151 P1.3/P1.4 (nexus-yd6fy): a heartbeat must NOT resurrect a
+        shutting-down record back to live. P1.4 made heartbeat_tick run in a
+        thread that ``stop()`` cannot cancel, so a late tick can land after the
+        shutdown marker is published; without status preservation it would
+        re-expose a daemon that is already tearing down (the code-review MEDIUM-1
+        race). Here: publish, mark shutting_down, then heartbeat the same record
+        — the marker must survive and discover() must still hide it."""
+        rec = registry.publish(
+            "42", endpoint=_endpoint(), version="1", owner_token="A"
+        )
+        registry.mark_shutting_down(rec)
+
+        # The late heartbeat thread acquires the election flock right after
+        # mark_shutting_down released it and re-stamps the record. It must read
+        # the shutting_down marker and preserve it, NOT default back to "live".
+        # (discover() is intentionally not called first: a non-fresh record is
+        # reaped on read, which would mask the resurrection path under test.)
+        refreshed = registry.heartbeat(rec)
+        assert refreshed.status == "shutting_down"
+        assert registry.discover("42") is None  # stays hidden, not resurrected
+
     def test_distinct_scopes_are_independent(self, registry: ServiceRegistry) -> None:
         a = registry.publish("uidA", endpoint=_endpoint(), version="1", owner_token="A")
         b = registry.publish("uidB", endpoint=_endpoint(), version="1", owner_token="B")

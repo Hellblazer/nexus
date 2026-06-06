@@ -295,6 +295,18 @@ class ServiceRegistry:
                         f"scope {record.scope_key!r} owned by a different "
                         f"token at generation {current.generation}"
                     )
+            # RDR-151 P1.3/P1.4 (nexus-yd6fy): preserve a non-"live" status (e.g.
+            # ``shutting_down``) already published for this scope. A heartbeat
+            # defaults a fresh record to ``status="live"``; without this, a late
+            # heartbeat — notably the now-threaded ``to_thread(heartbeat_tick)``
+            # that may still be blocked on the election flock when ``stop()``
+            # cancels its driver and publishes the shutdown marker — would
+            # resurrect a shutting-down record back to live and re-expose a
+            # daemon that is already tearing down. We only re-stamp the
+            # heartbeat freshness; we never upgrade status back to live here.
+            status = current.status if (
+                current is not None and current.status != "live"
+            ) else "live"
             refreshed = LeaseRecord(
                 scope_key=record.scope_key,
                 generation=record.generation,
@@ -304,6 +316,7 @@ class ServiceRegistry:
                 endpoint=dict(record.endpoint),
                 version=record.version,
                 payload=dict(record.payload),
+                status=status,
             )
             self._write_record_atomic(refreshed)
             return refreshed

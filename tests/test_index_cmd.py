@@ -625,11 +625,16 @@ def test_debug_timing_absent_emits_no_breakdown(runner, repo_dir, mock_reg):
     assert "per-stage totals" not in result.output
 
 
-def test_project_cross_collections_passes_source_collection() -> None:
+def test_project_cross_collections_passes_source_collection(monkeypatch) -> None:
     """nexus-g25dk: the auto-discover cross-collection projection persist must
     pass source_collection. The old inline call omitted it, so
     _persist_assignments raised TypeError (swallowed by the caller's except)
-    and the projection silently persisted nothing."""
+    and the projection silently persisted nothing.
+
+    RDR-151 Phase 3: the persist now routes through ``t2_index_write``; patch it
+    to the fake taxonomy (its no-daemon fallback would otherwise open a real
+    T2Database) and assert source_collection survives the routed
+    ``persist_assignments`` path."""
     from nexus.commands.index import _project_cross_collections
 
     recorded: list[tuple] = []
@@ -639,15 +644,26 @@ def test_project_cross_collections_passes_source_collection() -> None:
             # One assignment per projection call.
             return {"chunk_assignments": [("doc-1", 7, 0.9)]}
 
-        def assign_topic(self, doc_id, topic_id, *, assigned_by,
-                         similarity, source_collection):
-            recorded.append((doc_id, topic_id, source_collection))
+        def persist_assignments(self, assignments):
+            for a in assignments:
+                recorded.append(
+                    (a["doc_id"], a["topic_id"], a["source_collection"])
+                )
+            return len(assignments)
 
         def refresh_projection_links(self):
             pass
 
+    fake = _FakeTaxonomy()
+
+    class _FakeDb:
+        taxonomy = fake
+
+    import nexus.mcp_infra as _mi
+    monkeypatch.setattr(_mi, "t2_index_write", lambda fn: fn(_FakeDb()))
+
     total = _project_cross_collections(
-        _FakeTaxonomy(), ["code__a", "code__b"], chroma_client=None,
+        fake, ["code__a", "code__b"], chroma_client=None,
     )
     # a-vs-b and b-vs-a each persist one assignment.
     assert total == 2

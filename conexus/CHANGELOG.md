@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.4] - 2026-06-06
+
+Plugin version aligned with conexus 5.10.4. No plugin-side changes; the release
+is the RDR-151 root-cause fix for the T2 daemon CPU peg (taxonomy writes now route
+through the daemon) plus a T1 scratch recovery fix (nexus-gff3g).
+
 ## [5.10.3] - 2026-06-05
 
 Plugin version aligned with conexus 5.10.3 (T2 daemon reliability fix: a

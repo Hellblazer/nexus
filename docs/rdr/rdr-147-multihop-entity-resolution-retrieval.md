@@ -2,12 +2,12 @@
 title: "Multi-hop entity-resolution retrieval: ingest-time entity-linker + traverse resolution hop, gated by a query-time type-mismatch trigger"
 id: RDR-147
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-03
-accepted_date:
+accepted_date: 2026-06-05
 related_issues: []
 ---
 
@@ -153,17 +153,70 @@ Surveyed the 2024–2025 multi-hop / GraphRAG literature (6 papers indexed in T3
 
 ### Critical Assumptions
 
-- [ ] Entity records are identifiable at ingest by a stable key that appears as a
+- [x] Entity records are identifiable at ingest by a stable key that appears as a
   token in referencing artifacts (title == key for store_put'd entities) —
-  **Status**: Verified (HERB) / Unverified (general corpora) — **Method**: Spike
-- [ ] Catalog `link_if_absent` can be called from within a post-store batch hook
-  without deadlocking the catalog-behind-daemon path — **Status**: Unverified —
-  **Method**: Spike
-- [ ] `traverse` can be used as a plan step with `seeds=$stepN.tumblers` and a
-  link-type filter, returning the resolution-target records — **Status**:
-  Unverified — **Method**: Source Search + Spike
+  **Status**: Verified (HERB) / Refuted (general corpora) — **Method**: Spike +
+  Source Search (2026-06-05). Codebase mechanism confirmed: `store_put` stores
+  `title` verbatim in T3 chunk metadata (`metadata_schema.normalize()` applies no
+  transformation; title is in `ALLOWED_TOP_LEVEL`), and `where=title=<key>`
+  exact-matches via ChromaDB equality (`filters._OP_MAP`, `t3.find_ids_by_title`).
+  BUT title==key holds **only** on the MCP/CLI `store_put(title=<token>)` path,
+  where the caller explicitly chose the token. Every batch-index path mangles or
+  reshapes the key: `indexer_utils.derive_title()` title-cases filename tokens
+  (`cust-0035.md` → "Cust 0035"); code chunks title is `rel_path:Lstart-Lend`
+  (never a key); PDF/markdown titles are human-readable. For general corpora
+  there is **no stable entity-key field at all** — the assumption is structurally
+  inapplicable, not merely untested, unless the corpus was purpose-built with the
+  `store_put(title=<token>)` pattern (as HERB's 120 CUST records were). Additional
+  preconditions baked in: entity records must be single-chunk (multi-chunk →
+  ambiguous `find_ids_by_title`), and the target collection must be known a priori
+  (resolution is per-collection).
+- [x] Catalog `link_if_absent` can be called from within a post-store batch hook
+  without deadlocking the catalog-behind-daemon path — **Status**: Verified —
+  **Method**: Source Search (2026-06-05). `fire_batch` fires LAST in `store_put`
+  (`mcp/core.py`), after `catalog_store_hook`, `t3.put` (ChromaDB-only, no catalog
+  lock), and `_catalog_auto_link` have all unwound and closed their `CatalogWriter`
+  s in `finally`. The hook gets a fresh `CatalogWriter`/socket. Daemon serializes
+  catalog writes with a cooperative `asyncio.Lock` (`daemon/t2_daemon._dispatch`),
+  not an OS mutex — no blocking across RPCs. The directory `fcntl.flock`
+  (`catalog_links.link_if_absent → _acquire_lock`) is acquired/released atomically
+  INSIDE the daemon process per op. **Live precedent**: `manifest_write_batch_hook`
+  (`mcp_infra.py`) already calls `get_catalog_writer()` → daemon RPC (multi-step
+  manifest writes) from inside `fire_batch` on every store_put in production
+  without deadlock. Residual: throughput/latency at high concurrent ingest (one
+  more RPC in the serialization queue), not a correctness concern.
+- [x] `traverse` can be used as a plan step with `seeds=$stepN.tumblers` and a
+  link-type filter, returning the resolution-target records — **Status**: Verified
+  (with precondition) — **Method**: Source Search + Spike (2026-06-05). `traverse`
+  is a first-class non-embedding plan-runner step (`runner._NON_EMBEDDING_TOOLS`,
+  isolated-step path via `bundle.py`), returns the standard
+  `{tumblers, ids, collections}` retrieval contract. `$stepN.tumblers` resolves via
+  `runner._resolve_value` (`_STEPREF_RE`, list-flatten); `search`/`query` emit
+  `tumblers` in structured mode. Three production builtin plans already chain this
+  (`citation-traversal.yml`, `hybrid-factual-lookup.yml`, `traverse-then-generate.yml`)
+  plus dedicated coverage in `tests/test_traverse_step.py`. **Precondition**: the
+  seed step's `tumblers` are populated from chunk metadata field `tumbler`, which is
+  non-empty only for catalog-registered documents; unparseable seeds are silently
+  dropped (`Tumbler.parse` try/except). For RDR-147's ingest-of-entity-records
+  scenario this is the intended baseline, but it COMPOUNDS assumption #1's boundary:
+  resolution needs entity records both store_put-titled AND catalog-registered with
+  a tumbler.
 - [ ] A `where=`-backed exact-filter retrieval can be expressed as a plan operator
-  fed by an extract step's output list — **Status**: Unverified — **Method**: Spike
+  fed by an extract step's output list — **Status**: REFUTED — **Method**: Source
+  Search + Spike (2026-06-05). Not expressible with today's runner; needs new
+  infrastructure. Three independent gaps, each sufficient to block: (A) **No
+  `resolve` operator** — `_OPERATOR_TOOL_MAP` (`runner.py`) has no `resolve`/exact-
+  key entry; the RDR's own §Technical Design already describes `resolve(ids,
+  by="title")` as new code. (B) **No fan-out primitive** — `plan_run` iterates over
+  STEPS, not items within a step output; no `foreach`/`map_over_items`; `_STEPREF_RE`
+  has no indexing syntax, so resolving N extracted tokens (each needing one
+  `where=title=<token>` call) is not wireable. (C) **No `$in` in the MCP `where=`
+  surface** — `filters.parse_where_str` accepts only `KEY{>=,<=,!=,>,<,=}VALUE`;
+  `$in` exists internally (`search_engine` catalog prefilter on `doc_id`) but is
+  unreachable from a plan step's `where=` string. `operator_filter` is NL post-
+  retrieval filtering, NOT key-resolution retrieval. Closing #4 requires at minimum
+  a new `resolve` operator that internally loops over its input id-list (collapses
+  Gaps A+B), or adding `$in` support to `where=` (collapses to one search step).
 
 ## Proposed Solution
 
@@ -178,11 +231,14 @@ Three coordinated changes, each mapping to a discovery mechanism, each gated:
    reverse for artifacts indexed later). This materializes the join graph at
    ingest, discovered from the corpus alone.
 
-2. **Deterministic resolution hop (Gap 2).** A plan step that resolves a set of
-   identifiers to their entity records *without fuzzy retrieval* — preferred via
-   `traverse` over the Mechanism-A links; fallback via a new `resolve(ids, by=title)`
-   operator backed by `search --where title=<id>` per id. Dense retrieval is never
-   used for exact-key resolution.
+2. **Deterministic resolution hop (Gap 2).** Two complementary stages, both
+   required: a new `resolve(ids, by="title")` operator turns extracted entity
+   *tokens* into records via `search --where title=<id>` per id (the `mentions`
+   graph cannot — it is artifact→entity, not token→entity); then `traverse` over
+   the Mechanism-A links optionally expands resolved records to related artifacts.
+   An `operator_filter` precision step precedes resolution to narrow hop-1 seeds —
+   the benchmark proved resolution alone leaves recall at 0 without it. Dense
+   retrieval is never used for exact-key resolution.
 
 3. **Mechanism B — type-mismatch trigger, gated (Gaps 3, 4).** The planner types
    the requested `answer_shape`; after hop 1 it types `evidence_shape`; if
@@ -218,14 +274,45 @@ configured key regex per collection. Prefer (a) for generality; (b) as a
 zero-config default. Key→artifact matching MUST be exact token match (FTS or a
 key-token index), never semantic.
 
-**Deterministic resolution hop.** Preferred: a plan sub-DAG
-`search(question) [s1] → traverse(seeds=$s1.tumblers, link_types=["mentions"],
-direction="out", depth=1) [s2] → extract(inputs=$s2.contents, fields=answer_field)`.
-This reuses existing `traverse` + `extract` operators; the only new wiring is
-allowing `traverse` as a runner step with `$ref` seeds. Fallback operator
-`resolve(ids, by="title")`: for each id, issue a `where=title=<id>` exact-filter
-retrieval; return the records. Error contract: ids that resolve to zero records
-are reported, not silently dropped (mirror `store_get_many`'s `missing` field).
+**Deterministic resolution hop — two complementary stages, not primary/backup.**
+The resolution hop has two distinct sub-problems that operate at different
+pipeline positions and are BOTH required:
+
+- **Stage R1 — token→record resolution (`resolve` operator, always required).**
+  Hop-1 evidence yields entity *tokens* as text (e.g. `extract` pulls
+  `CUST-0035`, `CUST-0018` from issue bodies). Turning a token string into an
+  entity record requires exact-key lookup: the new `resolve(ids, by="title")`
+  operator issues a `where=title=<id>` exact-filter retrieval per id (collapsing
+  the three Assumption-#4 gaps: no operator / no fan-out / no `$in`). The
+  `mentions` graph does NOT cover this case — `mentions` is artifact→entity, not
+  token→entity, so `traverse` cannot turn a free-floating extracted token into a
+  record. Error contract: ids that resolve to zero records are reported in a
+  `missing` field, never silently dropped (mirror `store_get_many`).
+- **Stage R2 — graph expansion (`traverse`, optional depth-extension).** Given
+  resolved entity-record tumblers, `traverse(seeds=$ref.tumblers,
+  link_types=["mentions"], direction="in/out", depth=1)` walks the Mechanism-A
+  links to reach related artifacts (e.g. entity-record → the company record it
+  belongs to). Reuses the existing `traverse` step (Assumption #3 VERIFIED).
+
+**Hop-1 precision is load-bearing, not deferred.** The benchmark proved that
+resolution alone leaves company recall at 0 because hop-1 surfaces the *wrong*
+seeds. An `operator_filter` step (existing operator, NL predicate over hop-1
+results) sits BEFORE resolution and narrows the candidate set to entities the
+question actually constrains (PRISM Selector pattern; T3 synthesis
+`research-rdr147-multihop-synthesis-2026-06-05`). The canonical end-to-end plan
+template is therefore:
+
+```text
+[decompose] → search(question) [s1]
+  → operator_filter(inputs=$s1, criterion="<entity the question constrains>") [s2]
+  → extract(inputs=$s2.contents, fields=entity_token) [s3]
+  → resolve(ids=$s3.extractions, by="title") [s4]     # token → entity record
+  → traverse(seeds=$s4.tumblers, link_types=["mentions"], depth=1) [s5]  # optional R2
+  → extract/generate(answer_field)
+```
+
+`operator_filter` between hop-1 and resolution is the difference between
+real-HERB company recall > 0 and recall ≈ 0; it is in scope, not a later concern.
 
 **Mechanism B — type-mismatch trigger.** Extend the inline-planner decomposition
 contract (the `claude -p` planner prompt in the `nx_answer` flow) to: (1) name
@@ -243,8 +330,9 @@ emitted plan via `plan_save` with dimensions
 | --- | --- | --- |
 | Entity-linker hook | `nexus.hook_registry` (`register_batch`, `install_default_hooks`) | Extend: add one batch hook; no new framework. |
 | `mentions` links | `nexus.catalog.catalog_links.link_if_absent` | Reuse: existing typed-edge API. |
-| Resolution-hop traversal | `traverse` MCP tool / catalog BFS | Reuse for the hop; Extend runner to accept `traverse` as a `$ref`-seeded plan step. |
-| `resolve(ids, by=title)` operator (fallback) | `nexus.plans.runner` `_OPERATOR_TOOL_MAP` + `search --where` | Add: thin operator over the existing where-filter primitive. |
+| Resolution R2 (graph expansion) | `traverse` MCP tool / catalog BFS | Reuse for the hop; Extend runner to accept `traverse` as a `$ref`-seeded plan step. |
+| Resolution R1 `resolve(ids, by=title)` (token→record, always required) | `nexus.plans.runner` `_OPERATOR_TOOL_MAP` + `search --where` | Add: thin operator over the existing where-filter primitive, internal fan-out. |
+| Hop-1 precision filter | `operator_filter` (existing runner operator) | Reuse: insert as plan-template step before resolution; no new code. |
 | Type-mismatch trigger | `nx_answer` inline planner contract | Extend: decomposition-prompt discipline + plan template. |
 | Key→artifact token match | FTS / catalog | Reuse FTS; do NOT use embedding search. |
 
@@ -296,7 +384,14 @@ records. Also incurs the error-propagation Beyond-Static documents.
 ### Consequences
 
 - (+) Generalizes to any entity-resolution join (company, person-by-role,
-  PR-by-author) in any corpus, from one discovery rule.
+  PR-by-author) across corpora **where entity records carry a stable extractable
+  key** — i.e. `store_put(title=<token>)` records, or corpora where Step 1's
+  `entity_key` extraction pipeline is configured (regex for structured IDs, NLP
+  for natural entities). This is NOT unconditional: per Assumption #1, batch-index
+  paths have no stable key by default — code chunks (titled `rel_path:Lstart`) are
+  explicitly out of scope for entity-key resolution; PDF/markdown require the
+  Step-1 extractor. The "one discovery rule" is the linker hook; the precondition
+  is that an entity key exists for it to match.
 - (+) Deterministic resolution — immune to embedding collision; auditable graph paths.
 - (−) Ingest cost: an extra token-match + link-write pass per entity record.
 - (−) Link-graph maintenance: re-index / deletion must keep `mentions` links consistent.
@@ -311,8 +406,14 @@ records. Also incurs the error-propagation Beyond-Static documents.
   catalog-behind-daemon path. **Mitigation**: Spike first; if blocking, enqueue
   links to an async post-commit pass.
 - **Risk**: The recursion finding — even perfect resolution doesn't close
-  `question→affected-customer`. **Mitigation**: Scope MVV to the resolution hop
-  only; treat the outer hop as a separate, later concern; don't over-claim.
+  `question→affected-customer` because hop-1 surfaces wrong seeds.
+  **Mitigation**: the hop-1 precision step (`operator_filter`, existing operator)
+  is IN SCOPE in the plan template (Step 4), not deferred — it is the load-bearing
+  difference between real-HERB recall > 0 and recall ≈ 0. Residual risk: for join
+  conditions requiring cross-artifact reasoning, the filter criterion depends on
+  the `mentions` typed link existing from ingest (Step 2); corpora without that
+  link seeded will still surface imprecise seeds. That residual is the honest
+  boundary, not the whole outer hop.
 
 ### Failure Modes
 
@@ -326,37 +427,96 @@ records. Also incurs the error-propagation Beyond-Static documents.
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified (link-from-hook safety; traverse-as-plan-step;
-  resolve operator).
+- [x] All Critical Assumptions resolved (2026-06-05): #2 link-from-hook safety and
+  #3 traverse-as-plan-step VERIFIED; #1 boundary documented (title==key only on the
+  `store_put` path); #4 REFUTED → `resolve` operator must be IMPLEMENTED (not
+  verified — it does not exist today).
 - [ ] HERB SearchFlow sandbox available as the regression fixture (exists in `assetops-kg`).
 
 ### Minimum Viable Validation
 
-On HERB SearchFlow, with the entity-linker enabled and the resolution hop wired,
-a company question whose affected customers ARE correctly retrieved in hop 1
-resolves their CUST-ids to company names via `traverse` (not fuzzy search),
-yielding company recall > 0 on at least that controlled subset — proving the
-deterministic join executes end-to-end. (Full company recall is out of scope; it
-is gated by the separate hop-1 recursion finding.)
+On HERB SearchFlow, with the entity-linker enabled and the FULL plan template
+wired (`search → operator_filter → extract → resolve → traverse`), **real HERB
+company questions yield company recall > 0** — measured against the same
+benchmark harness that produced the 0.000 baseline. This is the observable
+success criterion: the headline metric the Problem Statement declared broken must
+move. The `operator_filter` precision step is the load-bearing addition — without
+it, hop-1 surfaces wrong seeds and recall stays ≈ 0 even with a perfect resolution
+hop (the benchmark already proved this). MVV is NOT scoped to a synthetic
+hop-1-correct fixture; that would pass while company recall stayed 0, which is the
+exact silent-scope-reduction this RDR must avoid. A secondary diagnostic assertion
+(resolution executes deterministically on a hop-1-correct subset) may be used to
+isolate the resolve operator during development, but it does not satisfy the MVV.
+
+### Benchmark Ladder — per-phase observable metrics
+
+The single end-to-end metric (company recall) only moves when all three phases
+land, so it gives no intermediate signal. To make the HERB SearchFlow benchmark
+an *iterative* driver, decompose it into a ladder of isolated sub-metrics — each
+phase turns its own metric off zero even while company recall is still 0. The
+benchmark harness (`assetops-kg`) emits a four-line `herb-scorecard.json`; a copy
+is checked into nexus as the regression baseline and updated per phase PR. Each
+metric is asserted as an EXACT value (`== N`, never `>= N`) so a silent-corruption
+regression cannot pass (see `feedback_exact_assertions_for_fixture_regression`).
+
+| Phase | Isolated metric | Graded against | Independent of | Baseline → target |
+| --- | --- | --- | --- | --- |
+| P1 (Step 2 linker) | `mentions`-link precision + recall | gold CUST→company edge truth | retrieval entirely | 0 → link-recall 1.0, precision ≥ threshold |
+| P2 (Step 3 resolve) | resolution accuracy: gold CUST-id → correct record | fed GOLD ids | hop-1 quality | 0 → 1.0 |
+| P3 (Step 4 filter) | hop-1 precision: surfaced customers actually affected / surfaced | gold question→affected-customer truth | resolve/linker | the recursing-bottleneck number; moves as the filter tightens |
+| E2E (MVV) | company recall on real HERB questions | benchmark harness | nothing | 0.000 → > 0 |
+
+**TDD contract.** Write all four assertions FIRST (RED). Each phase flips exactly
+one to GREEN; the downstream assertions stay RED with their recorded number, so a
+phase cannot close as "progress" while its successors are unverified. The
+phase-review-gate for each phase asserts (a) this phase's metric moved to its
+exact target AND (b) the E2E number is honestly reported, not faked. This
+operationalizes the load-bearing-jointness: shipping P2 alone flips only
+resolution-accuracy; company recall stays RED and visible in every subsequent
+review.
+
+**Gold-truth fixtures** (built once, Step 0 of Phase 1): `cust_to_company.json`
+(120 CUST→company pairs) and `question_to_affected_customers.json` (the company
+questions with their ground-truth affected-customer sets). Both derive
+deterministically from the HERB SearchFlow source; seeded, no API.
 
 ### Phase 1: Code Implementation
 
+#### Step 0: Benchmark ladder fixtures + RED assertions
+Build the gold-truth fixtures (`cust_to_company.json`, `question_to_affected_customers.json`) from HERB SearchFlow and the four scorecard assertions (P1/P2/P3/E2E), all RED. This is the regression oracle every subsequent step is graded against — see §Benchmark Ladder.
+
 #### Step 1: Entity-record classification + `entity_key` stamping
-Add an `entity_key` metadata path through store_put/index; default heuristic per collection.
+Add an `entity_key` metadata path through store_put/index. Per-indexer behavior
+(closes Assumption #1's general-corpus gap explicitly):
+- `store_put`: caller-set `entity_key` (explicit), else title if it matches the
+  collection's key regex.
+- `nx index` (markdown/RDR): regex extraction of structured IDs from frontmatter /
+  H1 / body (e.g. `CUST-\d+`, `TICKET-\d+`); optional NLP pass for natural entities.
+- `nx index pdf`: regex over extracted text; entity records here are uncommon —
+  config-gated per collection.
+- `nx index repo` (code): **explicitly excluded** — `rel_path:Lstart` titles are
+  not entity keys; no extraction attempted.
+Mechanism for matching keys in referencing artifacts MUST be exact token match
+(FTS / key-token index), never semantic.
 
 #### Step 2: Entity-linker batch hook
 Register in `install_default_hooks`; exact token-match → `link_if_absent(..., link_type="mentions")`. Feature-flagged.
 
-#### Step 3: Resolution hop
-Enable `traverse` as a `$ref`-seeded plan step; add `resolve(ids, by=title)` fallback operator over `where=title`.
+#### Step 3: Resolution hop (both stages)
+Add the `resolve(ids, by="title")` operator to `_OPERATOR_TOOL_MAP` (R1, token→record exact-filter, internal fan-out over `where=title`); enable `traverse` as a `$ref`-seeded plan step (R2, graph expansion). Resolve is always-required, not a fallback to traverse — see §Technical Design.
 
-#### Step 4: Type-mismatch trigger + plan template
-Extend the inline-planner contract; `plan_save` the emitted plan keyed on the dimensional signature; gate to fire only on referenced-but-not-present.
+#### Step 4: Type-mismatch trigger + plan template (incl. `operator_filter`)
+Extend the inline-planner contract to type `answer_shape`/`evidence_shape` and gate on referenced-but-not-present. `plan_save` the FULL template keyed on the dimensional signature: `search → operator_filter(hop-1 precision) → extract → resolve → traverse → synthesize`. The `operator_filter` step is mandatory and load-bearing — omitting it reproduces the hop-1 precision failure and leaves company recall ≈ 0 (the MVV will fail). `operator_filter` already exists in the runner; this step is plan-template YAML, not new code.
+
+#### Step 5: Deletion-cascade for `mentions` links
+Wire `mentions`-link removal into the entity-record deletion path so a deleted entity record cascades to its inbound/outbound `mentions` edges (closes the silent stale-link failure mode in §Failure Modes). Without this, resolution silently returns dead records.
 
 ### Phase 2: Operational Activation
 
-Feature flags default off; enable on HERB sandbox first; measure link precision
-and resolution recall before any default-on.
+Feature flags default off; enable on HERB sandbox first. Gate default-on on the
+`herb-scorecard.json` ladder: P1 link precision/recall and P2 resolution accuracy
+at their exact targets, P3 hop-1 precision above its threshold, and E2E company
+recall > 0 — all GREEN before any default-on.
 
 ### Day 2 Operations
 
@@ -365,9 +525,21 @@ and resolution recall before any default-on.
 | `mentions` catalog links | `link_query` | `links_from`/`links_to` | deletion-cascade (new) | `link_audit` | catalog backup (existing) |
 | `lookup` plan template | `plan list` | `plan show` | `plan` delete | `plan_match` probe | T2 backup (existing) |
 
-Deletion-cascade for `mentions` links is in scope (silent-failure mode above
-depends on it).
+Deletion-cascade for `mentions` links is implemented in Phase 1 Step 5 (the
+silent-failure mode above depends on it).
 
 ### New Dependencies
 
-None — reuses catalog, plans runner, hook registry, and the `where` filter.
+No new *external* packages. New *components* built in this RDR (Assumption #4
+confirmed new infrastructure is required):
+
+- `resolve(ids, by="title")` operator — new `_OPERATOR_TOOL_MAP` entry, ~50 lines,
+  internal fan-out over the existing `where=title` filter.
+- Entity-linker batch hook — new logic in `install_default_hooks` (FTS token scan
+  + `link_if_absent` writes), ~100–200 lines.
+- `entity_key` extraction path through the indexer for non-`store_put` paths
+  (Step 1) — regex/NLP extractor + metadata stamp.
+- Deletion-cascade for `mentions` links (Step 5).
+
+Reused unchanged: catalog typed-link API, `traverse`, `operator_filter`, the plan
+runner, hook registry, and the `where=` exact-filter primitive.

@@ -36,9 +36,17 @@ def _read_daemon_pid(config_dir: Path, tier: str) -> int | None:
     if not disc.exists():
         return None
     try:
-        pid = json.loads(disc.read_text()).get("pid")
+        data = json.loads(disc.read_text())
     except (OSError, json.JSONDecodeError, ValueError):
         return None
+    # nexus-hcw0g: RDR-149 P2 moved the pid under ``endpoint``; a legacy
+    # payload still carries it at the top level. Read both, or the reaper
+    # silently no-ops (get("pid") -> None) and every multistack-race run
+    # leaks a daemon + its /tmp config dir.
+    pid = data.get("pid")
+    if not isinstance(pid, int):
+        endpoint = data.get("endpoint")
+        pid = endpoint.get("pid") if isinstance(endpoint, dict) else None
     return pid if isinstance(pid, int) and pid > 0 else None
 
 
