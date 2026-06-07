@@ -12,7 +12,11 @@ import dev.nexus.service.jooq.nexus.tables.NxAnswerRuns;
 import dev.nexus.service.jooq.nexus.tables.Plans;
 import dev.nexus.service.jooq.nexus.tables.RelevanceLog;
 import dev.nexus.service.jooq.nexus.tables.SearchTelemetry;
+import dev.nexus.service.jooq.nexus.tables.TaxonomyMeta;
 import dev.nexus.service.jooq.nexus.tables.TierWrites;
+import dev.nexus.service.jooq.nexus.tables.TopicAssignments;
+import dev.nexus.service.jooq.nexus.tables.TopicLinks;
+import dev.nexus.service.jooq.nexus.tables.Topics;
 
 import java.util.Arrays;
 import java.util.List;
@@ -72,9 +76,29 @@ public class Nexus extends SchemaImpl {
     public final SearchTelemetry SEARCH_TELEMETRY = SearchTelemetry.SEARCH_TELEMETRY;
 
     /**
+     * The table <code>nexus.taxonomy_meta</code>.
+     */
+    public final TaxonomyMeta TAXONOMY_META = TaxonomyMeta.TAXONOMY_META;
+
+    /**
      * The table <code>nexus.tier_writes</code>.
      */
     public final TierWrites TIER_WRITES = TierWrites.TIER_WRITES;
+
+    /**
+     * The table <code>nexus.topic_assignments</code>.
+     */
+    public final TopicAssignments TOPIC_ASSIGNMENTS = TopicAssignments.TOPIC_ASSIGNMENTS;
+
+    /**
+     * The table <code>nexus.topic_links</code>.
+     */
+    public final TopicLinks TOPIC_LINKS = TopicLinks.TOPIC_LINKS;
+
+    /**
+     * The table <code>nexus.topics</code>.
+     */
+    public final Topics TOPICS = Topics.TOPICS;
 
     /**
      * No further instances allowed
@@ -99,7 +123,11 @@ public class Nexus extends SchemaImpl {
             Plans.PLANS,
             RelevanceLog.RELEVANCE_LOG,
             SearchTelemetry.SEARCH_TELEMETRY,
-            TierWrites.TIER_WRITES
+            TaxonomyMeta.TAXONOMY_META,
+            TierWrites.TIER_WRITES,
+            TopicAssignments.TOPIC_ASSIGNMENTS,
+            TopicLinks.TOPIC_LINKS,
+            Topics.TOPICS
         );
     }
 }
