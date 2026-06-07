@@ -22,11 +22,47 @@
         <junit.version>5.11.4</junit.version>
         <assertj.version>3.27.3</assertj.version>
         <zonky.version>2.1.0</zonky.version>
+        <liquibase.version>4.29.2</liquibase.version>
 
         <mainClass>dev.nexus.service.Main</mainClass>
 
         <!-- jlink image output directory -->
         <jlink.output>${project.build.directory}/jlink-image</jlink.output>
+
+        <!--
+            jOOQ generated sources:
+            - Default build: src/main/generated/jooq (committed to git, always available)
+            - -Pcodegen: regenerates into the same directory via JooqCodegenBootstrap
+              (boots io.zonky EmbeddedPostgres, applies Liquibase, runs GenerationTool)
+
+            WHY COMMITTED SOURCES (OPTION 3 RATIONALE):
+            Option 1 (LiquibaseDatabase/H2): REJECTED. The changelog uses Postgres-only DDL
+            (TSVECTOR GENERATED ALWAYS AS STORED, ENABLE/FORCE ROW LEVEL SECURITY,
+            CREATE POLICY, PL/pgSQL DO blocks) that H2 cannot simulate. Contorting the
+            changelog is explicitly forbidden — the PG features are load-bearing.
+
+            Option 2 (throwaway PG at build time, output to target/): ATTEMPTED AND EVALUATED.
+            The two most viable mechanisms are:
+              a) GMaven Plus (gmavenplus-plugin): REJECTED. Version 1.13.1 (cached locally) uses
+                 Groovy 4.0.21 which does not support Java 25 class file format (major version 69).
+                 Downloading a newer version requires network access not guaranteed in all CI
+                 environments. Not viable without an explicit Groovy-Java25 compatible version.
+              b) exec-maven-plugin + manual javac + hardcoded classpath: REJECTED. Requires
+                 enumerating ALL transitive dependencies of io.zonky:embedded-postgres by hand.
+                 This is brittle (version drift breaks the codegen classpath silently) and
+                 couples the pom to the local Maven repo structure.
+
+            Option 3 (committed generated sources + -Pcodegen regeneration profile): CHOSEN.
+            The generated sources are idempotent (same schema = same jOOQ output), schema
+            changes are infrequent (bead-gated), and committing them provides:
+              - IDE support without running codegen first
+              - Fast incremental builds (no PG startup on every mvn compile)
+              - Full CI reproducibility (no external process needed for standard builds)
+              - A clear "schema changed => regenerate => commit" workflow enforced by -Pcodegen
+            This pattern is used by jHipster, Spring, and many production Maven projects with jOOQ.
+        -->
+        <jooq.generated.dir>${project.basedir}/src/main/generated/jooq</jooq.generated.dir>
+        <jooq.generated.pkg>dev.nexus.service.jooq</jooq.generated.pkg>
     </properties>
 
     <dependencies>
@@ -44,7 +80,7 @@
             <version>${hikari.version}</version>
         </dependency>
 
-        <!-- jOOQ runtime (no codegen in skeleton — added at .6) -->
+        <!-- jOOQ runtime -->
         <dependency>
             <groupId>org.jooq</groupId>
             <artifactId>jooq</artifactId>
@@ -70,6 +106,13 @@
             <version>${logback.version}</version>
         </dependency>
 
+        <!-- Liquibase: programmatic changelog apply in tests and codegen bootstrap -->
+        <dependency>
+            <groupId>org.liquibase</groupId>
+            <artifactId>liquibase-core</artifactId>
+            <version>${liquibase.version}</version>
+        </dependency>
+
         <!-- Test: JUnit 5 -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -84,13 +127,6 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- Liquibase: programmatic changelog apply in tests (bead nexus-gmiaf.5) -->
-        <dependency>
-            <groupId>org.liquibase</groupId>
-            <artifactId>liquibase-core</artifactId>
-            <version>4.29.2</version>
-        </dependency>
-
         <!-- Test: embedded-postgres (real PG in-process, no Docker) -->
         <dependency>
             <groupId>io.zonky.test</groupId>
@@ -103,6 +139,24 @@
             <groupId>io.zonky.test.postgres</groupId>
             <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
             <version>16.4.0</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+            Codegen: jooq-codegen + jooq-meta in test scope so JooqCodegenBootstrap
+            (in src/test/java) can be compiled and run via -Pcodegen.
+            Not in main compile scope — generated classes only need jooq runtime.
+        -->
+        <dependency>
+            <groupId>org.jooq</groupId>
+            <artifactId>jooq-codegen</artifactId>
+            <version>${jooq.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jooq</groupId>
+            <artifactId>jooq-meta</artifactId>
+            <version>${jooq.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -130,6 +184,31 @@
                 <configuration>
                     <argLine>--enable-preview</argLine>
                 </configuration>
+            </plugin>
+
+            <!--
+                Add committed jOOQ generated sources to main compilation.
+                src/main/generated/jooq is checked in and always available.
+                Schema changes trigger -Pcodegen to regenerate + commit.
+            -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <id>add-jooq-sources</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>add-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>${jooq.generated.dir}</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
 
             <!-- Fat/uber jar for standalone run and jlink input -->
@@ -170,7 +249,6 @@
                 jlink: trimmed JRE image (live fallback, S0.4 C1).
                 Produces ${jlink.output}/bin/java — run the fat jar via:
                   ${jlink.output}/bin/java -jar nexus-service-*.jar
-                The exec-maven-plugin step below writes a launcher script.
             -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -206,8 +284,62 @@
         </plugins>
     </build>
 
-    <!-- -Pnative: opt-in native-image build (S0.4 C2 — CI must add Linux job) -->
     <profiles>
+        <!--
+            -Pcodegen: regenerate jOOQ sources when the schema changes.
+
+            Workflow (schema change):
+              1. Update the Liquibase changelog in src/main/resources/db/changelog/
+              2. Run: mvn -Pcodegen process-test-classes
+              3. The generated sources in src/main/generated/jooq are updated
+              4. Commit both the changelog + the regenerated jOOQ sources
+              5. Normal builds pick up the committed sources automatically
+
+            Implementation: JooqCodegenBootstrap (in src/test/java) is compiled at
+            test-compile phase (picks up test scope deps: embedded-postgres, jooq-codegen,
+            jooq-meta).  exec:java runs it in process-test-classes phase using the test
+            classpath, which includes the compiled bootstrap class.  The bootstrap:
+              - Boots io.zonky EmbeddedPostgres (no Docker needed)
+              - Applies the Liquibase changelog via programmatic API
+              - Runs org.jooq.codegen.GenerationTool (PostgresDatabase)
+              - Stops embedded PG
+
+            The output goes to src/main/generated/jooq (NOT target/) so it is committed
+            and available without running -Pcodegen.
+        -->
+        <profile>
+            <id>codegen</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.3.0</version>
+                        <executions>
+                            <execution>
+                                <id>run-jooq-codegen</id>
+                                <phase>process-test-classes</phase>
+                                <goals>
+                                    <goal>java</goal>
+                                </goals>
+                                <configuration>
+                                    <!-- Use test classpath: includes embedded-postgres, jooq-codegen,
+                                         jooq-meta, liquibase-core, and the compiled bootstrap class -->
+                                    <classpathScope>test</classpathScope>
+                                    <mainClass>dev.nexus.service.codegen.JooqCodegenBootstrap</mainClass>
+                                    <arguments>
+                                        <argument>${jooq.generated.dir}</argument>
+                                        <argument>${project.basedir}/src/main/resources</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- -Pnative: opt-in native-image build (S0.4 C2 — CI must add Linux job) -->
         <profile>
             <id>native</id>
             <build>
@@ -238,11 +370,18 @@
                                         <buildArg>--enable-https</buildArg>
                                         <!-- Logback/SLF4J: initialize at build time -->
                                         <buildArg>--initialize-at-build-time=org.slf4j,ch.qos.logback</buildArg>
-                                        <!-- jOOQ GraalVM 25 init: jOOQ 3.20.11 requires re-tracing
-                                             with native-image-agent against the real schema (bead .6).
-                                             Community metadata version mismatch (3.18.2 vs 3.20.11) causes
-                                             DefaultDataType ConcurrentHashMap NPE at run-time.
-                                             jlink path is the live fallback per S0.4 C1. -->
+                                        <!-- jOOQ 3.20.11 + GraalVM 25 native-image initialization.
+                                             Two approaches tried in nexus-gmiaf.6:
+                                             (a) run-time: binary builds, but DSL.using() at runtime
+                                                 throws ExceptionInInitializerError (ConcurrentHashMap
+                                                 NPE in DefaultDataType) because community metadata
+                                                 3.18.2 uses typeReachable guards that initialize
+                                                 SQLDataType at build time, conflicting with run-time.
+                                             (b) build-time: native-image fails at build time with
+                                                 UnsupportedFeatureException: LocatorImpl in heap.
+                                             Resolution requires either jOOQ-provided GraalVM 25
+                                             metadata or a substitution. Deferred to nexus-gmiaf.9.
+                                             jlink is the live fallback per S0.4 C1. -->
                                         <buildArg>--initialize-at-run-time=org.jooq</buildArg>
                                         <!-- Reachability config from traced metadata -->
                                         <buildArg>-H:ConfigurationFileDirectories=src/main/resources/META-INF/native-image</buildArg>
@@ -251,9 +390,6 @@
                                         <!-- Diagnostics during bring-up -->
                                         <buildArg>--emit=build-report</buildArg>
                                         <buildArg>--enable-monitoring</buildArg>
-                                        <!-- exact-reachability-metadata deferred to bead .6
-                                             after JOOQ codegen + full schema retracing.
-                                             Community metadataRepository handles logback/HikariCP/jackson. -->
                                     </buildArgs>
                                     <metadataRepository>
                                         <enabled>true</enabled>

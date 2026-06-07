@@ -1,0 +1,71 @@
+name: Service CI
+
+# Triggers only when the Java service module changes.
+# Kept separate from ci.yml (Python suite) so neither blocks the other.
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'service/**'
+      - '.github/workflows/service-ci.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'service/**'
+      - '.github/workflows/service-ci.yml'
+
+concurrency:
+  group: service-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  java-test-and-drift-guard:
+    name: Java tests + jOOQ codegen drift guard
+    runs-on: ubuntu-latest
+    # Embedded Postgres (io.zonky) downloads a PG binary on first run;
+    # subsequent runs use the Maven local-repo cache.  25m is generous:
+    # the test suite itself runs in ~8s locally; the first runner run
+    # (cold Maven cache + PG binary download) takes ~3-5m.
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up GraalVM JDK 25
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+          # Cache Maven local repo across runs; bust when pom.xml changes.
+          cache: 'maven'
+
+      - name: Cache embedded-postgres binaries
+        # io.zonky EmbeddedPostgres downloads a platform-specific PG binary
+        # (~60 MB) on first use and caches it under /tmp/embedded-pg/.
+        # Caching here avoids re-downloading it on every CI run.
+        uses: actions/cache@v4
+        with:
+          path: /tmp/embedded-pg
+          key: embedded-pg-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Run Java test suite
+        working-directory: service
+        run: mvn -q test
+
+      # Drift guard: regenerate jOOQ sources from the changelog and
+      # fail if the committed sources in src/main/generated/jooq/ differ.
+      # This catches schema changes that were not followed by a regen+commit.
+      # Mechanism: -Pcodegen runs JooqCodegenBootstrap (boots embedded PG,
+      # applies Liquibase, generates to the committed output dir), then
+      # `git diff --exit-code` fails CI on any unstaged diff.
+      - name: jOOQ codegen drift guard
+        working-directory: service
+        run: |
+          mvn -Pcodegen process-test-classes -q
+          git diff --exit-code service/src/main/generated/ || {
+            echo "DRIFT DETECTED: committed jOOQ sources are stale vs. the current changelog."
+            echo "Re-run: mvn -Pcodegen process-test-classes && git add service/src/main/generated/ && git commit"
+            echo ""
+            git diff --stat service/src/main/generated/
+            exit 1
+          }
