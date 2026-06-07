@@ -98,6 +98,7 @@ public final class MemoryHandler implements HttpHandler {
                 case "/expire"         -> handleExpire(exchange, tenant, method);
                 case "/merge"          -> handleMerge(exchange, tenant, method);
                 case "/flag_stale"     -> handleFlagStale(exchange, tenant, method);
+                case "/import"         -> handleImport(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -378,6 +379,82 @@ public final class MemoryHandler implements HttpHandler {
 
         var rows = repo.flagStaleMemories(tenant, project, idleDays);
         HttpUtil.send(ex, 200, json(rows.stream().map(this::recordToMap).toList()));
+    }
+
+    /**
+     * POST /v1/memory/import
+     *
+     * <p>Fidelity-preserving ETL import endpoint (bead nexus-gmiaf.8, RDR-152 P1.8).
+     * Accepts the source row's {@code timestamp}, {@code access_count}, and
+     * {@code last_accessed} and writes them verbatim via
+     * {@link MemoryRepository#importRow}, so migration does NOT reset these to
+     * {@code now()} / {@code 0} / {@code null} as the normal {@code /put} path does.
+     *
+     * <p>ON CONFLICT (tenant_id, project, title) DO UPDATE propagates EXCLUDED.*
+     * for ALL fields, so re-running the ETL is idempotent and content changes in
+     * the source are applied on the next run.
+     *
+     * <p>Fields:
+     * <pre>
+     *   project      String (required)
+     *   title        String (required)
+     *   content      String (required)
+     *   timestamp    String ISO-8601 UTC (required, e.g. "2026-05-15T08:30:00Z")
+     *   tags         String (optional, default "")
+     *   session      String (optional)
+     *   agent        String (optional)
+     *   ttl          Integer (optional)
+     *   access_count Integer (optional, default 0)
+     *   last_accessed String ISO-8601 UTC or null/absent (optional, null means never accessed)
+     * </pre>
+     *
+     * <p>Response 200: {"id": <long>}
+     */
+    private void handleImport(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        String project  = requireString(body, "project");
+        String title    = requireString(body, "title");
+        String content  = requireString(body, "content");
+        String tags     = optStringOrEmpty(body, "tags");
+        String session  = optStringOrNull(body, "session");
+        String agent    = optStringOrNull(body, "agent");
+        Integer ttl     = optInt(body, "ttl");
+
+        // Required fidelity fields
+        String tsRaw = requireString(body, "timestamp");
+        OffsetDateTime timestamp;
+        try {
+            timestamp = OffsetDateTime.parse(tsRaw).withOffsetSameInstant(ZoneOffset.UTC);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("field 'timestamp' must be ISO-8601 UTC, got: " + tsRaw);
+        }
+
+        int accessCount = 0;
+        Object acVal = body.get("access_count");
+        if (acVal instanceof Number n) {
+            accessCount = n.intValue();
+        } else if (acVal != null) {
+            try { accessCount = Integer.parseInt(acVal.toString()); }
+            catch (NumberFormatException e) {
+                throw new IllegalArgumentException("field 'access_count' must be an integer");
+            }
+        }
+
+        // last_accessed: null/absent -> NULL (was '' in SQLite); non-null -> parse as ISO-8601
+        OffsetDateTime lastAccessed = null;
+        String laRaw = optStringOrNull(body, "last_accessed");
+        if (laRaw != null && !laRaw.isBlank()) {
+            try {
+                lastAccessed = OffsetDateTime.parse(laRaw).withOffsetSameInstant(ZoneOffset.UTC);
+            } catch (Exception e) {
+                throw new IllegalArgumentException("field 'last_accessed' must be ISO-8601 UTC or null, got: " + laRaw);
+            }
+        }
+
+        long id = repo.importRow(tenant, project, title, content, tags, session, agent, ttl,
+                                 timestamp, accessCount, lastAccessed);
+        HttpUtil.send(ex, 200, json(Map.of("id", id)));
     }
 
     // ── Serialization helpers ─────────────────────────────────────────────────

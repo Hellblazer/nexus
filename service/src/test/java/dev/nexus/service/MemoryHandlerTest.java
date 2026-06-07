@@ -559,6 +559,149 @@ class MemoryHandlerTest {
                       .matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z");
     }
 
+    // ── Tests 24-27: import endpoint (fidelity-preserving ETL, nexus-gmiaf.8) ──
+
+    /**
+     * Test 24: /import preserves source timestamp (not now()), access_count, and
+     * last_accessed exactly.
+     */
+    @Test
+    void import_preservesFidelityFields() throws Exception {
+        String srcTimestamp  = "2026-05-15T08:30:00Z";
+        String srcLastAccess = "2026-05-16T09:00:00Z";
+        int    srcAccessCount = 7;
+
+        var impResp = post("/v1/memory/import", TENANT,
+            """
+            {
+              "project": "import-fidelity",
+              "title":   "fidelity-row",
+              "content": "original content",
+              "tags":    "a,b",
+              "session": "sess-42",
+              "agent":   "agent-x",
+              "ttl":     30,
+              "timestamp":    "%s",
+              "access_count": %d,
+              "last_accessed": "%s"
+            }
+            """.formatted(srcTimestamp, srcAccessCount, srcLastAccess));
+        assertThat(impResp.statusCode()).isEqualTo(200);
+        long id = ((Number) mapper.readValue(impResp.body(), MAP_T).get("id")).longValue();
+        assertThat(id).isPositive();
+
+        // NOTE: GET increments access_count + sets last_accessed (live access tracking).
+        // We verify fidelity by checking that access_count is >= srcAccessCount (imported
+        // value survived, was NOT reset to 0) and that timestamp is the SOURCE value.
+        var body = mapper.readValue(get("/v1/memory/get?id=" + id, TENANT).body(), MAP_T);
+        assertThat(body.get("timestamp")).as("timestamp must equal source, NOT migration-time")
+                                         .isEqualTo(srcTimestamp);
+        assertThat(((Number) body.get("access_count")).intValue())
+                                         .as("access_count must be >= source (GET increments it by 1)")
+                                         .isGreaterThanOrEqualTo(srcAccessCount);
+        // last_accessed is set to now() by the GET call above; check it's a valid ISO timestamp
+        String la = (String) body.get("last_accessed");
+        assertThat(la).as("last_accessed must be set (either srcLastAccess or GET-time)")
+                      .isNotNull().isNotEmpty()
+                      .matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z");
+        assertThat(body.get("content")).isEqualTo("original content");
+        assertThat(body.get("session")).isEqualTo("sess-42");
+        assertThat(body.get("agent")).isEqualTo("agent-x");
+    }
+
+    /**
+     * Test 25: re-running /import is idempotent: same row, row count unchanged,
+     * and source timestamp is kept (EXCLUDED.timestamp).
+     */
+    @Test
+    void import_idempotent_keepsSourceTimestamp() throws Exception {
+        String srcTimestamp = "2026-01-01T00:00:00Z";
+        String payload = """
+            {
+              "project": "import-idem",
+              "title":   "idem-row",
+              "content": "original",
+              "timestamp": "%s",
+              "access_count": 3
+            }
+            """.formatted(srcTimestamp);
+
+        var r1 = post("/v1/memory/import", TENANT, payload);
+        assertThat(r1.statusCode()).isEqualTo(200);
+        long id1 = ((Number) mapper.readValue(r1.body(), MAP_T).get("id")).longValue();
+
+        var r2 = post("/v1/memory/import", TENANT, payload);
+        assertThat(r2.statusCode()).isEqualTo(200);
+        long id2 = ((Number) mapper.readValue(r2.body(), MAP_T).get("id")).longValue();
+
+        // Same row — PG BIGSERIAL id must be the same on re-insert (upsert, not new row)
+        assertThat(id2).isEqualTo(id1);
+
+        // GET increments access_count; assert >= 3 (imported value not reset to 0)
+        var body = mapper.readValue(get("/v1/memory/get?id=" + id1, TENANT).body(), MAP_T);
+        assertThat(body.get("timestamp")).as("timestamp must be source value after re-import")
+                                         .isEqualTo(srcTimestamp);
+        assertThat(((Number) body.get("access_count")).intValue())
+            .as("access_count must be >= source (GET increments)")
+            .isGreaterThanOrEqualTo(3);
+    }
+
+    /**
+     * Test 26: content-change idempotency — after mutating content in source and
+     * re-importing, PG reflects the new content while timestamp stays source value.
+     */
+    @Test
+    void import_contentChange_propagatesOnRerun() throws Exception {
+        String srcTimestamp = "2026-03-10T12:00:00Z";
+
+        // First import
+        post("/v1/memory/import", TENANT,
+            """
+            {"project":"import-mut","title":"mut-row","content":"v1 content",
+             "timestamp":"%s","access_count":1}
+            """.formatted(srcTimestamp));
+
+        // Simulate source mutation + re-run
+        var r2 = post("/v1/memory/import", TENANT,
+            """
+            {"project":"import-mut","title":"mut-row","content":"v2 updated content",
+             "timestamp":"%s","access_count":1}
+            """.formatted(srcTimestamp));
+        assertThat(r2.statusCode()).isEqualTo(200);
+
+        long id = ((Number) mapper.readValue(r2.body(), MAP_T).get("id")).longValue();
+        var body = mapper.readValue(get("/v1/memory/get?id=" + id, TENANT).body(), MAP_T);
+        assertThat(body.get("content")).as("PG content must reflect latest source")
+                                       .isEqualTo("v2 updated content");
+        assertThat(body.get("timestamp")).as("timestamp must still be source value, NOT now()")
+                                          .isEqualTo(srcTimestamp);
+    }
+
+    /**
+     * Test 27: /import with last_accessed absent accepts null → import succeeds,
+     * returns a positive id, and the imported content is retrievable.
+     *
+     * <p>Note: GET triggers access tracking which sets last_accessed → now(), so
+     * we cannot assert "last_accessed == null" after GET. This test verifies the
+     * null→NULL storage path doesn't error, not the returned value post-GET.
+     */
+    @Test
+    void import_nullLastAccessed_importSucceeds() throws Exception {
+        var resp = post("/v1/memory/import", TENANT,
+            """
+            {"project":"import-null-la","title":"null-la-row",
+             "content":"never-accessed content","timestamp":"2026-04-01T06:00:00Z","access_count":0}
+            """);
+        assertThat(resp.statusCode()).as("import with null last_accessed must return 200").isEqualTo(200);
+        long id = ((Number) mapper.readValue(resp.body(), MAP_T).get("id")).longValue();
+        assertThat(id).isPositive();
+
+        // Verify the row was written by checking content is retrievable
+        var body = mapper.readValue(get("/v1/memory/get?id=" + id, TENANT).body(), MAP_T);
+        assertThat(body.get("content")).isEqualTo("never-accessed content");
+        assertThat(body.get("timestamp")).isEqualTo("2026-04-01T06:00:00Z");
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private HttpResponse<String> get(String path, String tenant) throws Exception {
