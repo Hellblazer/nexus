@@ -1,9 +1,11 @@
 package dev.nexus.service;
 
 import com.sun.net.httpserver.HttpServer;
+import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.HealthHandler;
+import dev.nexus.service.http.MemoryHandler;
 import dev.nexus.service.http.WhoamiHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,6 +46,7 @@ public final class NexusService {
      */
     public NexusService(int port, String token, DataSource dataSource) throws IOException {
         this.tenantScope = new TenantScope(dataSource);
+        var memoryRepo = new MemoryRepository(tenantScope);
 
         this.server = HttpServer.create(
             new InetSocketAddress("127.0.0.1", port), /* backlog */ 10);
@@ -52,8 +55,14 @@ public final class NexusService {
         server.createContext("/health", new HealthHandler(dataSource));
 
         // /v1/* — auth filter applied
-        var whoamiCtx = server.createContext("/v1/", new WhoamiHandler(tenantScope));
-        whoamiCtx.getFilters().addAll(List.of(new AuthFilter(token)));
+        var authFilter = List.of(new AuthFilter(token));
+
+        var whoamiCtx = server.createContext("/v1/_whoami", new WhoamiHandler(tenantScope));
+        whoamiCtx.getFilters().addAll(authFilter);
+
+        // /v1/memory/* — memory endpoints
+        var memCtx = server.createContext("/v1/memory", new MemoryHandler(memoryRepo));
+        memCtx.getFilters().addAll(authFilter);
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
     }
