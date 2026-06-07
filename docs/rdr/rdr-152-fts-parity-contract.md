@@ -13,8 +13,8 @@ This document is the locked parity contract for the FTS5-to-tsvector migration
 in RDR-152 (Postgres Java Storage Service). It defines: (1) what parity means
 per store, (2) the per-store inventory, and (3) the parity harness specification
 each store's migration gate must satisfy. It is referenced by beads nexus-gmiaf.5
-(Liquibase baseline FTS5 to tsvector), .11/.14/.18 (plans/taxonomy/catalog migrations),
-and all phase gates.
+(Liquibase baseline FTS migration), .11 (plans), .14 (taxonomy -- see Store 4
+note), .18 (catalog), and all phase gates.
 
 ## Locked Parity Definition
 
@@ -32,7 +32,8 @@ Parity is defined per store as both of the following:
 - **Rank correlation**: where the store's callers rely on ordering, the
   Spearman rank correlation coefficient rho must be >= 0.90 between the SQLite
   BM25 order and the Postgres ts_rank order, measured over the labeled fixture
-  battery.
+  battery. Spearman is computed ONLY when set equality holds first; mismatched
+  sets fail before reaching the rho assertion.
 
 A store that CANNOT meet the Spearman floor must ESCALATE to substantive-critic
 sign-off at its migration gate. The threshold is NEVER silently lowered by the
@@ -48,6 +49,38 @@ assertions RELAXED to this parity definition as an EXPLICIT, REVIEWED migration
 step. The relaxation must appear as a named diff in the store's gate PR (not
 squashed into the migration commit) so that a reviewer can see precisely which
 assertions changed and why.
+
+## Tokenization Configuration Rule
+
+FTS5 uses the `unicode61` tokenizer (no stemming for most token shapes;
+underscore is word-internal). The Postgres tsvector configuration to use depends
+on column content:
+
+- **Prose columns** (title, content, match_text, author, corpus): use
+  `to_tsvector('english', ...)`. English stemming is acceptable; the fixture
+  queries in the parity battery are not expected to produce set-equality
+  failures from stemming on prose terms.
+- **Identifier / tag / path columns** (tags, project, file_path): use
+  `to_tsvector('simple', ...)`. Simple config disables stemming and stopwords.
+  This is REQUIRED because:
+  - `tags` values are CSV identifiers like `rdr`, `review,critical`,
+    `rdr-152,fts,contract`. FTS5 `unicode61` keeps underscores and hyphens
+    word-internal; `'english'` would stem or drop them. `'simple'` tokenizes
+    consistently with `unicode61` behavior on these inputs.
+  - `project` values are identifiers like `nexus_active`, `nexus_rdr`.
+    `'english'` splits on `_` and may stem tokens; `'simple'` preserves them.
+  - `file_path` values contain path separators (`/`) and underscore-separated
+    tokens like `memory_store`. Both FTS5 `unicode61` and Postgres `'simple'`
+    split on `/` and keep underscore-separated tokens intact. Using `'english'`
+    risks stemming `store` to `store` (harmless) but also treating `src` as
+    a stopword or splitting `memory_store` unpredictably on some PG versions.
+    Use `'simple'` unconditionally for `file_path`. This is a COMMITTED
+    decision, not an empirical question.
+
+The `plainto_tsquery` input sanitizer uses `'english'` for prose query strings
+and `'simple'` for tag/identifier queries. The Postgres migration layer must
+select the correct tsquery config to match the indexed column's config; mixing
+configs between index and query produces zero matches.
 
 ## Per-Store Inventory
 
@@ -71,20 +104,35 @@ after `len(results) == 1`. The `results[0]["project"] == "proj_a"` assertion
 at line 118 of `tests/test_memory.py` is guarded by `len(results) == 1`.
 No tests assert the relative order of two or more memory search results.
 
+**Scope of FTS-parity contract for this store:** Only the `search(query,
+project)` method is in scope. `search_glob` and `search_by_tag` append
+SQL-level `GLOB` / `LIKE` constraints that are NOT FTS constructs; their
+correctness is governed by schema parity, not by this FTS-parity contract.
+
+**Fixture coverage note:** The existing fixture battery for memory_fts has
+effectively one Spearman-eligible query: `test_memory_search_fts5` produces
+K=2 results ("quick fox" matching two entries). `test_memory_search_scoped_to_project`
+produces K=1 (Spearman undefined, skipped). This is an acknowledged coverage
+gap. The gate PR body for this store's migration MUST note the near-vacuous
+rho evidence. The LOW escalation risk classification stands because no caller
+asserts ordering.
+
 **Postgres tsvector mapping:**
 ```sql
--- Column: tsvector pre-computed, updated by trigger
+-- tsvector computed, auto-updated by Postgres on every row write (STORED generated column)
 ALTER TABLE memory ADD COLUMN fts_vec tsvector
     GENERATED ALWAYS AS (
-        setweight(to_tsvector('english', coalesce(title,'')), 'A') ||
-        setweight(to_tsvector('english', coalesce(tags,'')), 'B')  ||
+        setweight(to_tsvector('english', coalesce(title,'')),  'A') ||
+        setweight(to_tsvector('simple',  coalesce(tags,'')),   'B') ||
         setweight(to_tsvector('english', coalesce(content,'')), 'C')
     ) STORED;
 CREATE INDEX idx_memory_fts_vec ON memory USING GIN(fts_vec);
--- Query: ORDER BY ts_rank(fts_vec, plainto_tsquery('english', ?)) DESC
+-- Query (prose): ORDER BY ts_rank(fts_vec, plainto_tsquery('english', ?)) DESC
 ```
 
-**Escalation risk:** LOW. No caller asserts ordering; set-equality alone suffices.
+**Escalation risk:** LOW. No caller asserts ordering; set-equality alone
+suffices. Acknowledged coverage gap: near-vacuous Spearman evidence (K=2
+max); must be noted in the gate PR body.
 
 ---
 
@@ -114,8 +162,7 @@ CREATE INDEX idx_memory_fts_vec ON memory USING GIN(fts_vec);
 - `tests/test_plan_library.py::test_search_plans_includes_ttl` (line 164):
   single result, `results[0]["ttl"]` -- guarded by `len == 1`, safe.
 - `tests/test_plan_library.py::test_search_plans_hits_on_dimensional_suffix`
-  (line 886): single result, `results[0]["name"]` -- guarded implicitly,
-  safe.
+  (line 886): single result, `results[0]["name"]` -- guarded implicitly, safe.
 - `tests/test_plan_library.py::test_search_plans_still_matches_raw_description`
   (line 906): single result, `results[0]["query"]` -- guarded, safe.
 - `tests/test_plan_match.py::TestMatchTextRankRegression::test_specific_probe_hits_matching_verb`
@@ -124,16 +171,17 @@ CREATE INDEX idx_memory_fts_vec ON memory USING GIN(fts_vec);
   ranking placing the matching plan at rank 1 over a dissimilar plan. **This
   is a genuine rank-order assertion that must be relaxed.** The relaxation
   should assert that the matching plan appears in the result set AND (if
-  Spearman >= 0.90) appears in the top-2, or else convert to a set-membership
-  assertion if rank-1 cannot be guaranteed after Spearman verification.
+  Spearman >= 0.90 is verified empirically) appears in the top-2, or else
+  convert to a set-membership assertion if rank-1 cannot be guaranteed.
 
 **Postgres tsvector mapping:**
 ```sql
+-- tsvector computed, auto-updated by Postgres on every row write (STORED generated column)
 ALTER TABLE plans ADD COLUMN fts_vec tsvector
     GENERATED ALWAYS AS (
         setweight(to_tsvector('english', coalesce(match_text,'')), 'A') ||
-        setweight(to_tsvector('english', coalesce(tags,'')), 'B')       ||
-        setweight(to_tsvector('english', coalesce(project,'')), 'C')
+        setweight(to_tsvector('simple',  coalesce(tags,'')),       'B') ||
+        setweight(to_tsvector('simple',  coalesce(project,'')),    'C')
     ) STORED;
 CREATE INDEX idx_plans_fts_vec ON plans USING GIN(fts_vec);
 -- Query: ORDER BY ts_rank(fts_vec, plainto_tsquery('english', ?)) DESC
@@ -172,24 +220,47 @@ line 947). All catalog search tests assert `{r["tumbler"] for r in result}` or
 
 **Postgres tsvector mapping:**
 ```sql
+-- tsvector computed, auto-updated by Postgres on every row write (STORED generated column)
+-- file_path and corpus use 'simple' (no stemming) per the tokenization config rule above.
+-- author uses 'simple' (author names are identifiers, not prose).
 ALTER TABLE documents ADD COLUMN fts_vec tsvector
     GENERATED ALWAYS AS (
-        setweight(to_tsvector('english', coalesce(title,'')), 'A') ||
-        setweight(to_tsvector('english', coalesce(author,'')), 'B') ||
-        setweight(to_tsvector('english', coalesce(corpus,'')), 'C') ||
-        setweight(to_tsvector('english', coalesce(file_path,'')), 'D')
+        setweight(to_tsvector('english', coalesce(title,'')),     'A') ||
+        setweight(to_tsvector('simple',  coalesce(author,'')),    'B') ||
+        setweight(to_tsvector('simple',  coalesce(corpus,'')),    'C') ||
+        setweight(to_tsvector('simple',  coalesce(file_path,'')), 'D')
     ) STORED;
 CREATE INDEX idx_documents_fts_vec ON documents USING GIN(fts_vec);
 -- Query (no ORDER BY, preserving current behaviour):
 -- WHERE fts_vec @@ plainto_tsquery('english', ?)
+-- Note: if the query targets a path or identifier token, use plainto_tsquery('simple', ?)
 ```
 
 **Escalation risk:** LOW. No caller relies on ordering. Set-equality alone
-suffices. Note that `file_path` contains path separators (`/`) which the
-English dictionary tokenizer does not split on; paths must be indexed with
-`simple` config or a custom parser to match the current FTS5 whitespace
-tokenization. Flag as a correctness risk at the implementation gate -- not a
-ranking risk.
+suffices. The `file_path` tokenization decision is COMMITTED to `'simple'`
+(see Tokenization Configuration Rule above); no empirical verification gate
+is needed for this choice.
+
+---
+
+### Store 4: CatalogTaxonomy (no FTS -- bead .14 clarification)
+
+| Field | Value |
+|-------|-------|
+| Virtual table | NONE |
+| Owner module | `src/nexus/db/t2/catalog_taxonomy.py` |
+| FTS5 usage | Zero FTS5 virtual tables. Topics are queried by exact label/collection equality and `doc_count` sort order only. |
+
+**There is no FTS parity work for the taxonomy store.** Bead nexus-gmiaf.14
+appears in the reference list because the parent RDR's FTS note named taxonomy
+at a higher abstraction level. At the implementation level, `catalog_taxonomy.py`
+has no `USING fts5` table and no `MATCH` clause; no tsvector column or GIN
+index is needed.
+
+The bead .14 migration gate MUST NOT create an FTS column for taxonomy. Its
+parity contract is: exact preservation of column-equality query semantics and
+`doc_count` sort order. The sort is a plain `ORDER BY doc_count DESC` on a
+numeric column -- deterministic across both backends.
 
 ---
 
@@ -197,9 +268,10 @@ ranking risk.
 
 | Store | Virtual table | Owner | Indexed columns | Ranking | Order-asserting tests | Escalation risk |
 |-------|--------------|-------|-----------------|---------|----------------------|-----------------|
-| MemoryStore | `memory_fts` | `memory_store.py` | title, content, tags | BM25 `ORDER BY rank` | None | LOW |
-| PlanLibrary | `plans_fts` | `plan_library.py` | match_text, tags, project | BM25 `ORDER BY rank` | `test_specific_probe_hits_matching_verb` (rank-1 pin, FTS5 path) | MEDIUM |
-| CatalogDB | `documents_fts` | `catalog.py` | title, author, corpus, file_path | None (insertion order) | None | LOW (correctness: file_path tokenization) |
+| MemoryStore | `memory_fts` | `memory_store.py` | title (english), content (english), tags (simple) | BM25 `ORDER BY rank` | None | LOW (coverage gap: K=2 max Spearman) |
+| PlanLibrary | `plans_fts` | `plan_library.py` | match_text (english), tags (simple), project (simple) | BM25 `ORDER BY rank` | `test_specific_probe_hits_matching_verb` (rank-1 pin, FTS5 path) | MEDIUM |
+| CatalogDB | `documents_fts` | `catalog.py` | title (english), author (simple), corpus (simple), file_path (simple) | None (insertion order) | None | LOW |
+| CatalogTaxonomy | NONE | `catalog_taxonomy.py` | N/A | N/A | N/A | N/A -- no FTS migration |
 
 ---
 
@@ -207,12 +279,13 @@ ranking risk.
 
 ### Overview
 
-For each store, the parity harness runs the store's existing fixture queries
-against both the live SQLite FTS5 path and the Postgres tsvector path, then
-asserts:
+For each FTS store (Stores 1-3), the parity harness runs the store's existing
+fixture queries against both the live SQLite FTS5 path and the Postgres tsvector
+path, then asserts:
 
 1. Top-K set equality (exact): the set of result identifiers is identical.
-2. Spearman rho >= 0.90 where ordering is asserted or relied upon.
+2. Spearman rho >= 0.90 where ordering is asserted or relied upon, and ONLY
+   when set equality holds.
 
 The harness is NOT the unit tests themselves. It is a separate
 `tests/db/test_fts_parity_<store>.py` file that the migration gate CI step
@@ -232,43 +305,76 @@ ranking comparison.
 
 ### Spearman Computation
 
-- Rank ties in either backend are broken by identity field (stable sort by id
-  or tumbler string) before computing Spearman. This ensures deterministic
-  rho computation even when multiple results have equal rank scores.
-- Spearman is computed only when two or more results are returned. Single-result
-  queries contribute to set-equality but not to rho (rho is undefined for K=1).
-- If the Postgres result set contains results not present in the SQLite set (or
-  vice versa), set equality FAILS before Spearman is computed. Do not attempt
-  Spearman on mismatched sets.
+Set equality MUST pass first. Do not compute Spearman on mismatched sets.
+
+When set equality holds and K >= 2, compute Spearman as follows:
+
+```python
+from scipy.stats import spearmanr
+
+# sqlite_results and pg_results are each ordered lists of result dicts.
+# Both contain the same identity values (set equality verified above).
+
+universe = [r[identity_field] for r in sqlite_results]   # canonical sqlite order
+sqlite_ranks = list(range(1, len(universe) + 1))          # [1, 2, ..., K]
+
+# Map each pg result to its position in the sqlite universe (1-based).
+# Ties in either backend: break by identity_field stable sort BEFORE this
+# computation, so each result has a unique deterministic position.
+pg_ranks = [universe.index(r[identity_field]) + 1 for r in pg_results]
+
+rho, _ = spearmanr(sqlite_ranks, pg_ranks)
+assert rho >= 0.90, f"Spearman {rho:.3f} < 0.90 for query {query!r}"
+```
+
+Additional rules:
+
+- Ties in either backend's output are broken by stable sort on the identity
+  field (string or integer) BEFORE building the rank vectors. This ensures
+  the rank vectors are unique permutations and Spearman is well-defined.
+- K < 2: skip Spearman (rho is undefined). The test calls `pytest.skip`.
+- The `universe.index(...)` lookup is safe because set equality is pre-verified;
+  every `pg_results` identity value is present in `universe`.
 
 ### Test Structure (per store)
 
 ```python
 # tests/db/test_fts_parity_<store>.py
+from scipy.stats import spearmanr
+
 @pytest.mark.parametrize("query,expected_ids", FIXTURE_BATTERY)
 def test_set_equality(sqlite_store, pg_store, query, expected_ids):
     sqlite_ids = {r[identity_field] for r in sqlite_store.search(query)}
     pg_ids = {r[identity_field] for r in pg_store.search(query)}
     assert sqlite_ids == pg_ids == set(expected_ids)
 
+
 @pytest.mark.parametrize("query,expected_ids", ORDERED_FIXTURE_BATTERY)
 def test_spearman_floor(sqlite_store, pg_store, query, expected_ids):
-    sqlite_results = sqlite_store.search(query)
-    pg_results = pg_store.search(query)
+    sqlite_results = sorted(sqlite_store.search(query), key=lambda r: r[identity_field])
+    # Re-sort by FTS rank after tie-breaking; FTS5 returns in rank order already,
+    # so stable sort on identity_field for ties only.
+    sqlite_results = sqlite_store.search(query)   # rank order
+    pg_results = pg_store.search(query)           # rank order
+
+    # Set equality pre-check (must pass before Spearman).
+    assert {r[identity_field] for r in sqlite_results} == {r[identity_field] for r in pg_results}
+
     if len(sqlite_results) < 2:
         pytest.skip("single result, Spearman undefined")
-    sqlite_order = [r[identity_field] for r in sqlite_results]
-    pg_order = [r[identity_field] for r in pg_results]
-    # Align pg_order to sqlite universe (identical by set equality).
-    rho = spearman_rho(sqlite_order, pg_order)
+
+    universe = [r[identity_field] for r in sqlite_results]
+    sqlite_ranks = list(range(1, len(universe) + 1))
+    pg_ranks = [universe.index(r[identity_field]) + 1 for r in pg_results]
+
+    rho, _ = spearmanr(sqlite_ranks, pg_ranks)
     assert rho >= 0.90, f"Spearman {rho:.3f} < 0.90 for query {query!r}"
 ```
 
-The `spearman_rho` helper uses the standard formula over positional ranks; scipy
-is available in the test environment. Fixture battery construction: each test
-populates a fresh SQLite temp DB and a fresh Postgres schema (using the same
-Liquibase changelog as production) via pytest fixtures, inserts the canonical
-fixture corpus (copy of the store's unit-test corpus), then queries both.
+Fixture battery construction: each test populates a fresh SQLite temp DB and
+a fresh Postgres schema (using the same Liquibase changelog as production)
+via pytest fixtures, inserts the canonical fixture corpus (copy of the store's
+unit-test corpus), then queries both.
 
 ### Escalation Path
 
@@ -294,24 +400,15 @@ artifact in the gate PR.
 
 ## Notes on `_sanitize_fts5`
 
-All three stores use `_sanitize_fts5` (defined in `memory_store.py`, re-exported
-from `nexus.db.t2`) to escape FTS5 special characters before passing queries to
-`MATCH`. The Postgres migration must provide an equivalent sanitizer that escapes
-`plainto_tsquery` / `phraseto_tsquery` / `websearch_to_tsquery` input. The
-`plainto_tsquery` function ignores most special characters by design and is the
-safest drop-in. Any query that raises a `ValueError` on the SQLite path
+All three FTS stores use `_sanitize_fts5` (defined in `memory_store.py`,
+re-exported from `nexus.db.t2`) to escape FTS5 special characters before
+passing queries to `MATCH`. The Postgres migration must provide an equivalent
+sanitizer. `plainto_tsquery` ignores most special characters by design and is
+the safest drop-in. Any query that raises a `ValueError` on the SQLite path
 (via the `OperationalError` catch in each search method) must also be handled
 gracefully on the Postgres path.
 
----
-
-## File Path Tokenization Note (CatalogDB)
-
-The `documents_fts` table indexes `file_path` (e.g.
-`src/nexus/db/t2/memory_store.py`). SQLite FTS5 with its default `unicode61`
-tokenizer treats `/` as a separator, producing tokens `src`, `nexus`, `db`,
-`t2`, `memory_store`. Postgres `to_tsvector('english', ...)` also splits on
-`/` (it is not an alphabetic character). Behavior should be equivalent, but
-must be verified empirically in the harness against path-substring queries.
-If a discrepancy is found, replace `'english'` config with `'simple'` for the
-`file_path` component to avoid stemming artifacts on path tokens.
+Note: the query passed to `plainto_tsquery` must use the same `'english'` or
+`'simple'` config as the indexed column being searched. Mixing configs (e.g.
+`plainto_tsquery('english', ...)` against a `'simple'`-indexed column) produces
+zero matches.
