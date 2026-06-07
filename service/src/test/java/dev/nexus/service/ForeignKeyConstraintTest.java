@@ -152,7 +152,8 @@ class ForeignKeyConstraintTest {
                 "fk_ta_catalog_doc",
                 "fk_doc_aspects_catalog_doc",
                 "fk_doc_highlights_catalog_doc",
-                "fk_aspect_queue_catalog_doc"
+                "fk_aspect_queue_catalog_doc",
+                "fk_catalog_chunks_catalog_doc"
             );
             for (String fkName : expectedFks) {
                 ResultSet rs = su.createStatement().executeQuery(
@@ -585,6 +586,94 @@ class ForeignKeyConstraintTest {
             );
             assertThat(ex.getMessage())
                 .as("FK must reject cross-tenant queue reference")
+                .containsIgnoringCase("foreign key");
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // REFERENTIAL INTEGRITY — catalog_document_chunks (RDR-108 manifest)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(70)
+    void chunkManifest_validDocId_succeeds() throws Exception {
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            su.setAutoCommit(true);
+            insertCatalogDocument(su, TENANT_A, "chunk-doc-1");
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_document_chunks " +
+                "(tenant_id, doc_id, position, chash) VALUES " +
+                "('" + TENANT_A + "', 'chunk-doc-1', 0, 'abc123')");
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
+                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='chunk-doc-1'");
+            rs.next();
+            assertThat(rs.getInt(1)).as("Chunk manifest row must be inserted").isEqualTo(1);
+        }
+    }
+
+    @Test @Order(71)
+    void chunkManifest_orphanDocId_rejectsWithFKViolation() throws Exception {
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            su.setAutoCommit(true);
+            Exception ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_document_chunks " +
+                    "(tenant_id, doc_id, position, chash) VALUES " +
+                    "('" + TENANT_A + "', 'nonexistent-chunk-doc', 0, 'deadbeef')")
+            );
+            assertThat(ex.getMessage())
+                .as("FK must reject chunk row with no matching catalog_documents entry")
+                .containsIgnoringCase("foreign key");
+        }
+    }
+
+    @Test @Order(72)
+    void deleteCatalogDoc_cascadesToChunkManifest() throws Exception {
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            su.setAutoCommit(true);
+            insertCatalogDocument(su, TENANT_A, "chunk-cascade-doc");
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_document_chunks " +
+                "(tenant_id, doc_id, position, chash) VALUES " +
+                "('" + TENANT_A + "', 'chunk-cascade-doc', 0, 'hash0'), " +
+                "('" + TENANT_A + "', 'chunk-cascade-doc', 1, 'hash1')");
+
+            ResultSet before = su.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
+                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='chunk-cascade-doc'");
+            before.next();
+            assertThat(before.getInt(1)).isEqualTo(2);
+
+            su.createStatement().execute(
+                "DELETE FROM nexus.catalog_documents " +
+                "WHERE tenant_id='" + TENANT_A + "' AND tumbler='chunk-cascade-doc'");
+
+            ResultSet after = su.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
+                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='chunk-cascade-doc'");
+            after.next();
+            assertThat(after.getInt(1))
+                .as("ON DELETE CASCADE must remove chunk manifest rows")
+                .isZero();
+        }
+    }
+
+    @Test @Order(73)
+    void crossTenantChunkManifest_isRejectedByCompositeFk() throws Exception {
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            su.setAutoCommit(true);
+            // Seed catalog_documents for TENANT_A only
+            insertCatalogDocument(su, TENANT_A, TUMBLER_A);
+            // Insert chunk row for TENANT_B referencing TENANT_A's tumbler — must be rejected
+            // (FK checks as table owner; without composite key this would silently succeed)
+            Exception ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_document_chunks " +
+                    "(tenant_id, doc_id, position, chash) VALUES " +
+                    "('" + TENANT_B + "', '" + TUMBLER_A + "', 0, 'crosshash')")
+            );
+            assertThat(ex.getMessage())
+                .as("Composite FK must reject cross-tenant chunk manifest reference")
                 .containsIgnoringCase("foreign key");
         }
     }

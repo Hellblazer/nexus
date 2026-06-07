@@ -256,4 +256,40 @@ ALTER TABLE nexus.aspect_extraction_queue
         </rollback>
     </changeSet>
 
+
+    <!-- ── Changeset 5: catalog_document_chunks — orphan cleanup + FK ── -->
+    <changeSet id="fk-001-5" author="nexus-b7v6i">
+        <comment>
+            catalog_document_chunks.doc_id (RDR-108 manifest): composite FK (tenant_id, doc_id) →
+            catalog_documents(tenant_id, tumbler) ON DELETE CASCADE.
+            Deleting a catalog document removes its chunk manifest — correct and consistent with
+            the other 4 FKs.  doc_id is NOT NULL and part of the PK, so orphan rows are DELETEd
+            (not nulled) before the constraint is added.
+            Supporting index idx_catalog_chunks_doc_id (tenant_id, doc_id) already exists from
+            catalog-001-baseline.xml — no new index needed.
+            Non-atomicity note: the DELETE→ADD CONSTRAINT sequence is non-atomic; this is
+            acceptable in the migration context (Liquibase holds databasechangeloglock and the
+            migration runs in single-writer mode with no concurrent ETL inserts).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+-- Step 1: delete orphan chunk rows (doc_id NOT NULL + part of PK; no path to NULL them)
+DELETE FROM nexus.catalog_document_chunks cdc
+WHERE NOT EXISTS (
+    SELECT 1 FROM nexus.catalog_documents cd
+    WHERE cd.tenant_id = cdc.tenant_id
+      AND cd.tumbler   = cdc.doc_id
+);
+
+-- Step 2: add composite FK — reuses existing idx_catalog_chunks_doc_id index
+ALTER TABLE nexus.catalog_document_chunks
+    ADD CONSTRAINT fk_catalog_chunks_catalog_doc
+    FOREIGN KEY (tenant_id, doc_id)
+    REFERENCES nexus.catalog_documents (tenant_id, tumbler)
+    ON DELETE CASCADE;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_catalog_doc;
+        </rollback>
+    </changeSet>
+
 </databaseChangeLog>
