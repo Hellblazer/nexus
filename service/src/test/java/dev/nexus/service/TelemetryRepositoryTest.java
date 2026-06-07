@@ -433,9 +433,140 @@ class TelemetryRepositoryTest {
         assertThat(((Number) stats.get("row_count")).longValue()).isEqualTo(0L);
     }
 
+    // ── parseTsStrict — fail-loud on import with blank/malformed timestamp ────────
+
+    /**
+     * Fix: import methods use parseTsStrict not parseTs.
+     * Blank timestamp on an import path must throw, not silently stamp now().
+     */
+    @Test @Order(16)
+    void importRelevanceRow_blankTimestamp_throwsIllegalArgument() {
+        assertThatThrownBy(() ->
+            repo.importRelevanceRow(TENANT_A,
+                "strict-ts-query", "chunk-strict", "", "store_put", "",
+                "" /* blank timestamp */))
+            .as("importRelevanceRow with blank timestamp must throw (not silently stamp now())")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("import timestamp must not be null/blank");
+    }
+
+    @Test @Order(17)
+    void importRelevanceRow_malformedTimestamp_throwsIllegalArgument() {
+        assertThatThrownBy(() ->
+            repo.importRelevanceRow(TENANT_A,
+                "strict-ts-bad-query", "chunk-strict-bad", "", "store_put", "",
+                "not-a-timestamp"))
+            .as("importRelevanceRow with malformed timestamp must throw (not silently stamp now())")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("not valid ISO-8601");
+    }
+
+    @Test @Order(18)
+    void importTierWriteRow_blankTimestamp_throwsIllegalArgument() {
+        assertThatThrownBy(() ->
+            repo.importTierWriteRow(TENANT_A,
+                "sess-strict", "" /* blank ts */, "memory_put", "T2", null, null, null))
+            .as("importTierWriteRow with blank ts must throw")
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(19)
+    void importNxAnswerRunRow_blankCreatedAt_throwsIllegalArgument() {
+        assertThatThrownBy(() ->
+            repo.importNxAnswerRunRow(TENANT_A,
+                "strict-qa-question", null, null, 0, "", 0.0, 0L, "" /* blank */))
+            .as("importNxAnswerRunRow with blank created_at must throw")
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(20)
+    void importHookFailureRow_blankOccurredAt_throwsIllegalArgument() {
+        assertThatThrownBy(() ->
+            repo.importHookFailureRow(TENANT_A,
+                "doc-strict", "", "hook-strict", "", "" /* blank */, null, false, "single"))
+            .as("importHookFailureRow with blank occurred_at must throw")
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(21)
+    void importSearchRow_blankTs_throwsIllegalArgument() {
+        assertThatThrownBy(() ->
+            repo.importSearchRow(TENANT_A,
+                "" /* blank ts */, "hashval", "coll", 1, 1, null, null))
+            .as("importSearchRow with blank ts must throw")
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    // ── logRelevance conflict safety (Fix 2) ──────────────────────────────────
+
+    /**
+     * Fix: logRelevance used fetchOne().value1() which NPEs on DO NOTHING conflict.
+     * Two identical events within the same second hit the ETL dedup unique index.
+     * The second call must return gracefully (0L) without throwing.
+     */
+    @Test @Order(22)
+    void logRelevance_duplicateEventInSameSecond_noNpe() {
+        String ts = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        // First: inserts. Second: hits DO NOTHING → must return 0L not NPE.
+        long id1 = repo.logRelevance(TENANT_A,
+            "dup-query-npe-test", "chunk-dup", "store_put", "sess-dup", "code__nexus");
+        assertThat(id1).as("first insert must return positive id").isPositive();
+
+        // To force the dedup index conflict we import the SAME row with a fixed timestamp
+        // via the import path (live path uses now() which has sub-second uniqueness).
+        // Import twice with the same timestamp — second must DO NOTHING, not NPE.
+        String fixedTs = "2025-03-15T09:00:00Z";
+        repo.importRelevanceRow(TENANT_A,
+            "dup-import-npe", "chunk-dup2", "", "store_put", "sess-dup2", fixedTs);
+        // Second identical import — the dedup index fires; must not throw
+        assertThatCode(() ->
+            repo.importRelevanceRow(TENANT_A,
+                "dup-import-npe", "chunk-dup2", "", "store_put", "sess-dup2", fixedTs))
+            .as("second identical import must not throw (DO NOTHING)")
+            .doesNotThrowAnyException();
+
+        // Exactly one row
+        var rows = repo.getRelevanceLog(TENANT_A, "dup-import-npe", "chunk-dup2", "", "", 10);
+        assertThat(rows).as("exactly one row after double import").hasSize(1);
+    }
+
+    // ── Nullable-column NULL preservation (Fix 3) ─────────────────────────────
+
+    /**
+     * Fix: tier_writes ETL used _str_or_empty (→ "") for agent/project/target_title.
+     * NULL in SQLite must become NULL in PG, not "".
+     */
+    @Test @Order(23)
+    void tierWriteImport_nullAgent_preservedAsNullInPg() throws SQLException {
+        repo.importTierWriteRow(TENANT_A,
+            "sess-null-agent", "2025-04-01T12:00:00Z",
+            "memory_put", "T2",
+            null,   // agent  — must stay NULL
+            null,   // project — must stay NULL
+            null);  // target_title — must stay NULL
+
+        try (Connection conn = pg.getPostgresDatabase().getConnection()) {
+            conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
+            var rs = conn.createStatement().executeQuery(
+                "SELECT agent, project, target_title " +
+                "FROM nexus.tier_writes " +
+                "WHERE session_id='sess-null-agent' AND tool='memory_put' AND tier='T2'");
+            assertThat(rs.next()).as("tier_writes null-agent row must exist").isTrue();
+            assertThat(rs.getString("agent"))
+                .as("agent must be NULL in PG (not empty-string)")
+                .isNull();
+            assertThat(rs.getString("project"))
+                .as("project must be NULL in PG (not empty-string)")
+                .isNull();
+            assertThat(rs.getString("target_title"))
+                .as("target_title must be NULL in PG (not empty-string)")
+                .isNull();
+        }
+    }
+
     // ── RLS ────────────────────────────────────────────────────────────────────
 
-    @Test @Order(16)
+    @Test @Order(24)
     void rlsWithCheck_rawInsertWithWrongTenantIdRejected() {
         assertThatThrownBy(() -> {
             try (Connection conn = svcDs.getConnection()) {

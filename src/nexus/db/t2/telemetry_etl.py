@@ -298,9 +298,12 @@ def _migrate_tier_writes(
                 ts=row.get("ts", ""),
                 tool=_str_or_empty(row.get("tool")),
                 tier=_str_or_empty(row.get("tier")),
-                agent=_str_or_empty(row.get("agent")),
-                project=_str_or_empty(row.get("project")),
-                target_title=_str_or_empty(row.get("target_title")),
+                # agent/project/target_title are nullable in SQLite — preserve NULL so PG
+                # aggregations (GROUP BY agent, WHERE agent IS NOT NULL) are not corrupted
+                # by empty-string coercion.  Use _nullable_str (returns None for None/"").
+                agent=_nullable_str(row.get("agent")),
+                project=_nullable_str(row.get("project")),
+                target_title=_nullable_str(row.get("target_title")),
             )
             written_n += 1
         except Exception as exc:

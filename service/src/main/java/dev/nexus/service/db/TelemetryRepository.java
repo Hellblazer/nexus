@@ -58,9 +58,14 @@ public final class TelemetryRepository {
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     /**
-     * Parse an ISO-8601 text timestamp (from SQLite) into {@link OffsetDateTime}.
-     * Accepts both "...Z" and "...+00:00" forms.  Returns now() on parse failure
-     * so callers never receive null for a required timestamp field.
+     * Parse an ISO-8601 text timestamp (live-write lenient path).
+     * Accepts both "...Z" and "...+00:00" forms.
+     * Returns {@code now()} on null/blank/malformed — safe for live-write callers
+     * where the event time is "right now" and a timestamp field must not be null.
+     *
+     * <p><strong>DO NOT use for import paths</strong> — use {@link #parseTsStrict}
+     * there so corrupt source data fails loudly instead of silently stamping
+     * migration-time.
      */
     static OffsetDateTime parseTs(String s) {
         if (s == null || s.isBlank()) return OffsetDateTime.now(ZoneOffset.UTC);
@@ -70,6 +75,30 @@ public final class TelemetryRepository {
         } catch (DateTimeParseException e) {
             log.warn("event=telemetry_parse_ts_failed raw=\"{}\"", s);
             return OffsetDateTime.now(ZoneOffset.UTC);
+        }
+    }
+
+    /**
+     * Parse an ISO-8601 text timestamp (ETL import strict path).
+     * Accepts both "...Z" and "...+00:00" forms.
+     * <strong>Throws {@link IllegalArgumentException}</strong> on null/blank/malformed
+     * input so callers fail loudly (no silent now()-substitution on the import path).
+     *
+     * <p>Event-time IS the data on import — substituting migration-time on a parse
+     * failure would corrupt the historical audit trail.  The ETL layer must surface
+     * the bad row rather than silently misdating it.
+     */
+    static OffsetDateTime parseTsStrict(String s) {
+        if (s == null || s.isBlank()) {
+            throw new IllegalArgumentException(
+                "import timestamp must not be null/blank (event-time is the data)");
+        }
+        try {
+            return OffsetDateTime.parse(s.endsWith("Z")
+                ? s.replace("Z", "+00:00") : s);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException(
+                "import timestamp is not valid ISO-8601: \"" + s + "\"", e);
         }
     }
 
@@ -91,6 +120,9 @@ public final class TelemetryRepository {
                              String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+            // fetchOptional() guards against the DO NOTHING path: when the unique index
+            // idx_relevance_log_etl_dedup fires a conflict, jOOQ returns an empty result
+            // (no row inserted, no id generated).  fetchOne() would NPE there.
             return ctx.insertInto(RELEVANCE_LOG)
                 .set(RELEVANCE_LOG.TENANT_ID, tenant)
                 .set(RELEVANCE_LOG.QUERY, query)
@@ -101,8 +133,9 @@ public final class TelemetryRepository {
                 .set(RELEVANCE_LOG.TIMESTAMP, now)
                 .onConflictDoNothing()
                 .returningResult(RELEVANCE_LOG.ID)
-                .fetchOne()
-                .value1();
+                .fetchOptional()
+                .map(r -> r.value1())
+                .orElse(0L);
         });
     }
 
@@ -190,6 +223,10 @@ public final class TelemetryRepository {
     /**
      * Fidelity-preserving import of a relevance_log row (ETL path).
      * Uses DO NOTHING on conflict — event timestamps are the data.
+     *
+     * <p>Uses {@link #parseTsStrict} — null/blank/malformed {@code timestampIso}
+     * throws {@link IllegalArgumentException} so the ETL layer surfaces corrupt
+     * source rows rather than silently stamping migration-time.
      */
     public void importRelevanceRow(String tenant,
                                    String query,
@@ -198,6 +235,7 @@ public final class TelemetryRepository {
                                    String action,
                                    String sessionId,
                                    String timestampIso) {
+        OffsetDateTime ts = parseTsStrict(timestampIso);  // STRICT: throws on blank/malformed
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(RELEVANCE_LOG)
                 .set(RELEVANCE_LOG.TENANT_ID, tenant)
@@ -206,7 +244,7 @@ public final class TelemetryRepository {
                 .set(RELEVANCE_LOG.COLLECTION, str(collection))
                 .set(RELEVANCE_LOG.ACTION, action)
                 .set(RELEVANCE_LOG.SESSION_ID, str(sessionId))
-                .set(RELEVANCE_LOG.TIMESTAMP, parseTs(timestampIso))
+                .set(RELEVANCE_LOG.TIMESTAMP, ts)
                 .onConflictDoNothing()
                 .execute();
             return null;
@@ -329,6 +367,7 @@ public final class TelemetryRepository {
 
     /**
      * Fidelity-preserving import for search_telemetry (ETL path).
+     * Uses {@link #parseTsStrict} — throws on null/blank/malformed {@code tsIso}.
      */
     public void importSearchRow(String tenant,
                                 String tsIso,
@@ -338,10 +377,11 @@ public final class TelemetryRepository {
                                 int keptCount,
                                 Double topDistance,
                                 Double threshold) {
+        OffsetDateTime ts = parseTsStrict(tsIso);  // STRICT: throws on blank/malformed
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(SEARCH_TELEMETRY)
                 .set(SEARCH_TELEMETRY.TENANT_ID, tenant)
-                .set(SEARCH_TELEMETRY.TS, parseTs(tsIso))
+                .set(SEARCH_TELEMETRY.TS, ts)
                 .set(SEARCH_TELEMETRY.QUERY_HASH, queryHash)
                 .set(SEARCH_TELEMETRY.COLLECTION, collection)
                 .set(SEARCH_TELEMETRY.RAW_COUNT, rawCount)
@@ -385,6 +425,10 @@ public final class TelemetryRepository {
 
     /**
      * Fidelity-preserving import for tier_writes (ETL path).
+     * Uses {@link #parseTsStrict} — throws on null/blank/malformed {@code tsIso}.
+     * Does NOT delegate to {@code recordTierWrite} because that method uses the
+     * lenient {@link #parseTs} which would silently stamp migration-time on a
+     * blank ts, violating the no-silent-fallback-for-correctness rule.
      */
     public void importTierWriteRow(String tenant,
                                    String sessionId,
@@ -394,7 +438,21 @@ public final class TelemetryRepository {
                                    String agent,
                                    String project,
                                    String targetTitle) {
-        recordTierWrite(tenant, sessionId, tsIso, tool, tier, agent, project, targetTitle);
+        OffsetDateTime ts = parseTsStrict(tsIso);  // STRICT: throws on blank/malformed
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(TIER_WRITES)
+                .set(TIER_WRITES.TENANT_ID, tenant)
+                .set(TIER_WRITES.SESSION_ID, str(sessionId))
+                .set(TIER_WRITES.TS, ts)
+                .set(TIER_WRITES.TOOL, tool)
+                .set(TIER_WRITES.TIER, tier)
+                .set(TIER_WRITES.AGENT, agent)
+                .set(TIER_WRITES.PROJECT, project)
+                .set(TIER_WRITES.TARGET_TITLE, targetTitle)
+                .onConflictDoNothing()
+                .execute();
+            return null;
+        });
     }
 
     // ── nx_answer_runs ─────────────────────────────────────────────────────────
@@ -432,6 +490,9 @@ public final class TelemetryRepository {
     /**
      * Fidelity-preserving import for nx_answer_runs (ETL path).
      * {@code createdAtIso} MUST be the source row's created_at verbatim — never now().
+     * Uses {@link #parseTsStrict} — throws on null/blank/malformed {@code createdAtIso}.
+     * Does NOT delegate to {@code recordNxAnswerRun} because that method uses the
+     * lenient {@link #parseTs} which would silently stamp migration-time on blank input.
      */
     public void importNxAnswerRunRow(String tenant,
                                      String question,
@@ -442,8 +503,22 @@ public final class TelemetryRepository {
                                      double costUsd,
                                      long durationMs,
                                      String createdAtIso) {
-        recordNxAnswerRun(tenant, question, planId, matchedConfidence, stepCount,
-            finalText, costUsd, durationMs, createdAtIso);
+        OffsetDateTime createdAt = parseTsStrict(createdAtIso);  // STRICT: throws on blank/malformed
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(NX_ANSWER_RUNS)
+                .set(NX_ANSWER_RUNS.TENANT_ID, tenant)
+                .set(NX_ANSWER_RUNS.QUESTION, question)
+                .set(NX_ANSWER_RUNS.PLAN_ID, planId)
+                .set(NX_ANSWER_RUNS.MATCHED_CONFIDENCE, matchedConfidence)
+                .set(NX_ANSWER_RUNS.STEP_COUNT, stepCount)
+                .set(NX_ANSWER_RUNS.FINAL_TEXT, str(finalText))
+                .set(NX_ANSWER_RUNS.COST_USD, costUsd)
+                .set(NX_ANSWER_RUNS.DURATION_MS, durationMs)
+                .set(NX_ANSWER_RUNS.CREATED_AT, createdAt)
+                .onConflictDoNothing()
+                .execute();
+            return null;
+        });
     }
 
     // ── hook_failures ──────────────────────────────────────────────────────────
@@ -482,6 +557,9 @@ public final class TelemetryRepository {
     /**
      * Fidelity-preserving import for hook_failures (ETL path).
      * {@code occurredAtIso} MUST be the source row's occurred_at verbatim — never now().
+     * Uses {@link #parseTsStrict} — throws on null/blank/malformed {@code occurredAtIso}.
+     * Does NOT delegate to {@code recordHookFailure} because that method uses the
+     * lenient {@link #parseTs} which would silently stamp migration-time on blank input.
      */
     public void importHookFailureRow(String tenant,
                                      String docId,
@@ -492,8 +570,22 @@ public final class TelemetryRepository {
                                      String batchDocIds,
                                      boolean isBatch,
                                      String chain) {
-        recordHookFailure(tenant, docId, collection, hookName, error, occurredAtIso,
-            batchDocIds, isBatch, chain);
+        OffsetDateTime occurredAt = parseTsStrict(occurredAtIso);  // STRICT: throws on blank/malformed
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(HOOK_FAILURES)
+                .set(HOOK_FAILURES.TENANT_ID, tenant)
+                .set(HOOK_FAILURES.DOC_ID, str(docId))
+                .set(HOOK_FAILURES.COLLECTION, str(collection))
+                .set(HOOK_FAILURES.HOOK_NAME, hookName)
+                .set(HOOK_FAILURES.ERROR, str(error))
+                .set(HOOK_FAILURES.OCCURRED_AT, occurredAt)
+                .set(HOOK_FAILURES.BATCH_DOC_IDS, batchDocIds)
+                .set(HOOK_FAILURES.IS_BATCH, isBatch ? 1 : 0)
+                .set(HOOK_FAILURES.CHAIN, str(chain).isBlank() ? "single" : str(chain))
+                .onConflictDoNothing()
+                .execute();
+            return null;
+        });
     }
 
     // ── frecency ───────────────────────────────────────────────────────────────
