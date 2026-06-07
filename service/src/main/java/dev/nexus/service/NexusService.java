@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.db.AspectRepository;
+import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.PlanRepository;
@@ -11,6 +12,7 @@ import dev.nexus.service.db.TelemetryRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.http.AspectHandler;
 import dev.nexus.service.http.AuthFilter;
+import dev.nexus.service.http.CatalogHandler;
 import dev.nexus.service.http.ChashHandler;
 import dev.nexus.service.http.HealthHandler;
 import dev.nexus.service.http.MemoryHandler;
@@ -80,6 +82,7 @@ public final class NexusService {
         var taxonomyRepo  = new TaxonomyRepository(tenantScope);
         var aspectRepo    = new AspectRepository(tenantScope);
         var chashRepo     = new ChashRepository(tenantScope);
+        var catalogRepo   = new CatalogRepository(tenantScope);
 
         this.server = HttpServer.create(
             new InetSocketAddress("127.0.0.1", port), /* backlog */ 10);
@@ -120,6 +123,10 @@ public final class NexusService {
         // /v1/chash/* — chash_index endpoints (bead nexus-gmiaf.16)
         var chashCtx = server.createContext("/v1/chash", new ChashHandler(chashRepo));
         chashCtx.getFilters().addAll(authFilter);
+
+        // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18)
+        var catalogCtx = server.createContext("/v1/catalog", new CatalogHandler(catalogRepo));
+        catalogCtx.getFilters().addAll(authFilter);
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
 

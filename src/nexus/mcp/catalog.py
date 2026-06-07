@@ -73,43 +73,50 @@ def catalog_search(
         if not query.strip() and (
             owner or corpus or file_path or content_type or author
         ):
-            conditions = ["1=1"]
-            params: list = []
+            # Route through catalog API — no direct ._db access (service-mode compatible).
+            # The /list endpoint dispatches on a single filter; fetch via the most specific
+            # one available and Python-filter the rest.
             if owner:
-                depth = len(owner.split("."))
-                conditions.append("tumbler LIKE ?")
-                params.append(owner + ".%")
-                conditions.append("(length(tumbler) - length(replace(tumbler, '.', ''))) = ?")
-                params.append(depth)
-            if corpus:
-                conditions.append("corpus = ?")
-                params.append(corpus)
-            if file_path:
-                conditions.append("file_path = ?")
-                params.append(file_path)
-            if author:
-                conditions.append("author LIKE ?")
-                params.append(f"%{author}%")
-            if content_type:
-                conditions.append("content_type = ?")
-                params.append(content_type)
-            sql = (
-                "SELECT tumbler, title, author, year, content_type, file_path, "
-                "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
-                f"FROM documents WHERE {' AND '.join(conditions)} LIMIT ? OFFSET ?"
-            )
-            params.extend([limit + 1, offset])
-            rows = cat._db.execute(sql, params).fetchall()
-            from nexus.catalog.catalog import CatalogEntry
-            entries = [
-                CatalogEntry(
-                    tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                    content_type=r[4], file_path=r[5], corpus=r[6],
-                    physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                    indexed_at=r[10], meta=_json.loads(r[11]) if r[11] else {},
-                )
-                for r in rows
-            ]
+                candidates = cat.by_owner(Tumbler.parse(owner))
+                if corpus:
+                    candidates = [e for e in candidates if e.corpus == corpus]
+                if file_path:
+                    candidates = [e for e in candidates if e.file_path == file_path]
+                if author:
+                    candidates = [e for e in candidates if author.lower() in (e.author or "").lower()]
+                if content_type:
+                    candidates = [e for e in candidates if e.content_type == content_type]
+                entries = candidates[offset:offset + limit + 1]
+            elif corpus:
+                candidates = cat.by_corpus(corpus)
+                if file_path:
+                    candidates = [e for e in candidates if e.file_path == file_path]
+                if author:
+                    candidates = [e for e in candidates if author.lower() in (e.author or "").lower()]
+                if content_type:
+                    candidates = [e for e in candidates if e.content_type == content_type]
+                entries = candidates[offset:offset + limit + 1]
+            elif content_type:
+                candidates = cat.by_content_type(content_type)
+                if file_path:
+                    candidates = [e for e in candidates if e.file_path == file_path]
+                if author:
+                    candidates = [e for e in candidates if author.lower() in (e.author or "").lower()]
+                entries = candidates[offset:offset + limit + 1]
+            else:
+                # No major filter — fetch paged chunk and apply remaining Python filters.
+                # HttpCatalogClient.all_documents() supports offset; SQLite Catalog does not.
+                import inspect as _inspect
+                sig = _inspect.signature(cat.all_documents)
+                if "offset" in sig.parameters:
+                    batch = cat.all_documents(limit=limit + offset + 1, offset=0)
+                else:
+                    batch = cat.all_documents(limit + offset + 1)
+                if file_path:
+                    batch = [e for e in batch if e.file_path == file_path]
+                if author:
+                    batch = [e for e in batch if author.lower() in (e.author or "").lower()]
+                entries = batch[offset:offset + limit + 1]
             has_more = len(entries) > limit
             entries = entries[:limit]
             result = [e.to_dict() for e in entries]
@@ -164,8 +171,9 @@ def catalog_show(
             return {"error": f"Not found: {tumbler or title}"}
 
         d = entry.to_dict()
-        d["links_from"] = [l.to_dict() for l in cat.links_from(entry.tumbler)]
-        d["links_to"] = [l.to_dict() for l in cat.links_to(entry.tumbler)]
+        # links_from/links_to return list[CatalogLink] (SQLite) or list[dict] (service mode).
+        d["links_from"] = [l if isinstance(l, dict) else l.to_dict() for l in cat.links_from(entry.tumbler)]
+        d["links_to"] = [l if isinstance(l, dict) else l.to_dict() for l in cat.links_to(entry.tumbler)]
         return d
     except Exception as e:
         return {"error": str(e)}
@@ -198,35 +206,22 @@ def catalog_list(
                 entries = [e for e in entries if e.content_type == content_type]
             entries = entries[offset:offset + limit + 1]
         else:
-            import json as _json
-
-            # Push content_type into the SQL WHERE so pagination is correct.
-            # nexus-blk2 Part 1: previously filtered in Python AFTER LIMIT,
-            # so list(content_type='rdr', limit=5) returned [] when the first
-            # 5 rows happened not to be rdr.
-            sql = (
-                "SELECT tumbler, title, author, year, content_type, file_path, "
-                "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata "
-                "FROM documents"
-            )
-            params: list = []
+            # Route through catalog API — no direct ._db access (service-mode compatible).
+            # nexus-blk2 Part 1: content_type filter must be server-side so pagination is correct.
             if content_type:
-                sql += " WHERE content_type = ?"
-                params.append(content_type)
-            sql += " LIMIT ? OFFSET ?"
-            params.extend([limit + 1, offset])
-            rows = cat._db.execute(sql, params).fetchall()
-            from nexus.catalog.catalog import CatalogEntry
-
-            entries = [
-                CatalogEntry(
-                    tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                    content_type=r[4], file_path=r[5], corpus=r[6],
-                    physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                    indexed_at=r[10], meta=_json.loads(r[11]) if r[11] else {},
-                )
-                for r in rows
-            ]
+                candidates = cat.by_content_type(content_type)
+                entries = candidates[offset:offset + limit + 1]
+            else:
+                # HttpCatalogClient.all_documents() supports offset; SQLite Catalog does not.
+                # Detect by signature to stay backward-compatible.
+                import inspect as _inspect
+                sig = _inspect.signature(cat.all_documents)
+                if "offset" in sig.parameters:
+                    entries = cat.all_documents(limit=limit + 1, offset=offset)
+                else:
+                    # SQLite: fetch limit+offset+1, slice in Python
+                    all_docs = cat.all_documents(limit + offset + 1)
+                    entries = all_docs[offset:offset + limit + 1]
         has_more = len(entries) > limit
         page = entries[:limit]
         result = [e.to_dict() for e in page]
@@ -492,7 +487,8 @@ def catalog_link_query(
         )
         has_more = len(links) > limit
         links = links[:limit]
-        result = [l.to_dict() for l in links]
+        # link_query returns list[CatalogLink] (SQLite) or list[dict] (service mode).
+        result = [l if isinstance(l, dict) else l.to_dict() for l in links]
         if has_more:
             result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
         return result
@@ -546,13 +542,10 @@ def catalog_resolve(
                 if e.physical_collection:
                     collections.add(e.physical_collection)
         if corpus:
-            rows = cat._db.execute(
-                "SELECT DISTINCT physical_collection FROM documents WHERE corpus = ?",
-                (corpus,),
-            ).fetchall()
-            for r in rows:
-                if r[0]:
-                    collections.add(r[0])
+            # Route through catalog API — no direct ._db access (service-mode compatible).
+            for e in cat.by_corpus(corpus):
+                if e.physical_collection:
+                    collections.add(e.physical_collection)
         return sorted(collections)
     except Exception as e:
         return [f"Error: {e}"]
@@ -569,12 +562,25 @@ def catalog_stats() -> dict:
     if err:
         return {"error": err}
     try:
+        # Service mode: cat.stats() calls GET /stats (HttpCatalogClient).
+        # SQLite mode: fall back to direct _db queries (Catalog has no stats()).
+        if hasattr(cat, "stats") and callable(cat.stats):
+            s = cat.stats()
+            # Normalise field names: Java returns doc_count/link_count/owner_count/links_by_type.
+            return {
+                "owners":       s.get("owner_count",      s.get("owners",    0)),
+                "documents":    s.get("doc_count",        s.get("documents", 0)),
+                "links":        s.get("link_count",       s.get("links",     0)),
+                "collections":  s.get("collection_count", s.get("collections", 0)),
+                "by_link_type": s.get("links_by_type",    s.get("by_link_type", {})),
+            }
+        # SQLite fallback (Catalog._db is always present in local mode)
         db = cat._db
         return {
-            "owners": db.execute("SELECT count(*) FROM owners").fetchone()[0],
-            "documents": db.execute("SELECT count(*) FROM documents").fetchone()[0],
-            "links": db.execute("SELECT count(*) FROM links").fetchone()[0],
-            "by_type": dict(db.execute(
+            "owners":       db.execute("SELECT count(*) FROM owners").fetchone()[0],
+            "documents":    db.execute("SELECT count(*) FROM documents").fetchone()[0],
+            "links":        db.execute("SELECT count(*) FROM links").fetchone()[0],
+            "by_type":      dict(db.execute(
                 "SELECT content_type, count(*) FROM documents GROUP BY content_type"
             ).fetchall()),
             "by_link_type": dict(db.execute(

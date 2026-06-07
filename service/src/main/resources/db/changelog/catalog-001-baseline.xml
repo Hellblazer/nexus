@@ -1,0 +1,342 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-152 bead nexus-gmiaf.18 — catalog store baseline changelog.
+
+    Creates nexus.{owners, documents, links, document_chunks, collections, catalog_meta}
+    mirroring CatalogStore (CatalogDB) SQLite schema 1:1 with tenant_id for RLS.
+
+    Per RDR-152 catalog_git DECISION (2026-06-07): Postgres is the SOLE authority.
+    No JSONL/git writes on the catalog write path.
+
+    FTS contract (152-FTS-tokenizer-DECISION OPTION B - intentional upgrade):
+      documents_fts is a generated tsvector column:
+        to_tsvector('english', coalesce(title,''))       prose: stemmed
+        || to_tsvector('simple',  coalesce(author,''))   identifier: exact
+        || to_tsvector('simple',  coalesce(corpus,''))   identifier: exact
+        || to_tsvector('simple',  coalesce(file_path,'')) path: exact
+      Query pattern: fts_vector @@ plainto_tsquery('english',q)
+                  OR fts_vector @@ plainto_tsquery('simple',q)
+      PG >= FTS5 (superset): prose matches with stemming + tag/path exact.
+      GIN index on documents.fts_vector for sub-millisecond queries.
+
+    RLS: ENABLE + FORCE on all tables; tenant_isolation policy USING/WITH CHECK
+    (tenant_id = current_setting('nexus.tenant', true)).
+
+    Grants: to nexus_svc (idempotent DO block).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: owners table ─────────────────────────────────────── -->
+    <changeSet id="catalog-001-1" author="nexus-gmiaf.18">
+        <comment>owners: tumbler-prefix tree, one row per owner namespace</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.catalog_owners (
+    tenant_id      TEXT NOT NULL,
+    tumbler_prefix TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    owner_type     TEXT NOT NULL,
+    repo_hash      TEXT,
+    description    TEXT,
+    repo_root      TEXT NOT NULL DEFAULT '',
+    head_hash      TEXT,
+    CONSTRAINT catalog_owners_pk PRIMARY KEY (tenant_id, tumbler_prefix),
+    CONSTRAINT catalog_owners_unique_name_type UNIQUE (tenant_id, name, owner_type)
+);
+
+-- partial unique: same repo_hash cannot appear twice per tenant (TOCTOU guard)
+CREATE UNIQUE INDEX idx_catalog_owners_repo_hash
+    ON nexus.catalog_owners (tenant_id, repo_hash)
+    WHERE repo_hash IS NOT NULL AND repo_hash != '';
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.catalog_owners CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: documents table + FTS tsvector column + GIN ──────── -->
+    <changeSet id="catalog-001-2" author="nexus-gmiaf.18">
+        <comment>documents: tumbler-keyed catalog entries with FTS tsvector</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.catalog_documents (
+    tenant_id           TEXT        NOT NULL,
+    tumbler             TEXT        NOT NULL,
+    title               TEXT        NOT NULL,
+    author              TEXT,
+    year                INTEGER,
+    content_type        TEXT,
+    file_path           TEXT,
+    corpus              TEXT,
+    physical_collection TEXT,
+    chunk_count         INTEGER,
+    head_hash           TEXT,
+    indexed_at          TEXT,
+    metadata            JSONB,
+    source_mtime        DOUBLE PRECISION NOT NULL DEFAULT 0,
+    alias_of            TEXT NOT NULL DEFAULT '',
+    source_uri          TEXT NOT NULL DEFAULT '',
+    -- bibliographic enrichment (RDR-101 Phase 1)
+    bib_year                  INTEGER NOT NULL DEFAULT 0,
+    bib_authors               TEXT    NOT NULL DEFAULT '',
+    bib_venue                 TEXT    NOT NULL DEFAULT '',
+    bib_citation_count        INTEGER NOT NULL DEFAULT 0,
+    bib_semantic_scholar_id   TEXT    NOT NULL DEFAULT '',
+    bib_openalex_id           TEXT    NOT NULL DEFAULT '',
+    bib_doi                   TEXT    NOT NULL DEFAULT '',
+    bib_enriched_at           TEXT    NOT NULL DEFAULT '',
+    -- FTS tsvector: title=english (stemmed prose), author/corpus/file_path=simple (exact)
+    -- OR'd query: plainto_tsquery('english',q) OR plainto_tsquery('simple',q) catches both
+    fts_vector tsvector GENERATED ALWAYS AS (
+        to_tsvector('english', coalesce(title, ''))
+        || to_tsvector('simple',  coalesce(author, ''))
+        || to_tsvector('simple',  coalesce(corpus, ''))
+        || to_tsvector('simple',  coalesce(file_path, ''))
+    ) STORED,
+    CONSTRAINT catalog_documents_pk PRIMARY KEY (tenant_id, tumbler)
+);
+
+-- GIN on fts_vector for sub-millisecond FTS queries
+CREATE INDEX idx_catalog_documents_fts ON nexus.catalog_documents USING GIN (fts_vector);
+
+-- physical_collection lookup (list_by_collection, chashes_for_collection)
+CREATE INDEX idx_catalog_documents_collection
+    ON nexus.catalog_documents (tenant_id, physical_collection);
+
+-- source_uri lookup (by_source_uri, DT inverse join) - partial for non-empty URIs
+CREATE INDEX idx_catalog_documents_source_uri
+    ON nexus.catalog_documents (tenant_id, source_uri)
+    WHERE source_uri != '';
+
+-- bib backend IDs (skip-check in nx enrich bib)
+CREATE INDEX idx_catalog_documents_bib_s2_id
+    ON nexus.catalog_documents (tenant_id, bib_semantic_scholar_id)
+    WHERE bib_semantic_scholar_id != '';
+
+CREATE INDEX idx_catalog_documents_bib_oa_id
+    ON nexus.catalog_documents (tenant_id, bib_openalex_id)
+    WHERE bib_openalex_id != '';
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.catalog_documents CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: links table ──────────────────────────────────────── -->
+    <changeSet id="catalog-001-3" author="nexus-gmiaf.18">
+        <comment>links: typed directed graph edges between catalog entries</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.catalog_links (
+    tenant_id    TEXT    NOT NULL,
+    id           BIGSERIAL,
+    from_tumbler TEXT    NOT NULL,
+    to_tumbler   TEXT    NOT NULL,
+    link_type    TEXT    NOT NULL,
+    from_span    TEXT,
+    to_span      TEXT,
+    created_by   TEXT    NOT NULL,
+    created_at   TEXT,
+    metadata     JSONB,
+    CONSTRAINT catalog_links_pk PRIMARY KEY (tenant_id, id),
+    -- uniqueness: one typed edge per (from, to) pair per tenant
+    CONSTRAINT catalog_links_unique UNIQUE (tenant_id, from_tumbler, to_tumbler, link_type)
+);
+
+CREATE INDEX idx_catalog_links_from
+    ON nexus.catalog_links (tenant_id, from_tumbler);
+
+CREATE INDEX idx_catalog_links_to
+    ON nexus.catalog_links (tenant_id, to_tumbler);
+
+CREATE INDEX idx_catalog_links_type
+    ON nexus.catalog_links (tenant_id, link_type);
+
+CREATE INDEX idx_catalog_links_created_by
+    ON nexus.catalog_links (tenant_id, created_by);
+
+CREATE INDEX idx_catalog_links_from_type
+    ON nexus.catalog_links (tenant_id, from_tumbler, link_type);
+
+CREATE INDEX idx_catalog_links_to_type
+    ON nexus.catalog_links (tenant_id, to_tumbler, link_type);
+
+CREATE INDEX idx_catalog_links_created_by_type
+    ON nexus.catalog_links (tenant_id, created_by, link_type);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.catalog_links CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: document_chunks manifest ─────────────────────────── -->
+    <changeSet id="catalog-001-4" author="nexus-gmiaf.18">
+        <comment>document_chunks: ordered (doc_id, position) -> chash manifest (RDR-108 D2)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.catalog_document_chunks (
+    tenant_id   TEXT    NOT NULL,
+    doc_id      TEXT    NOT NULL,
+    position    INTEGER NOT NULL,
+    chash       TEXT    NOT NULL,
+    chunk_index INTEGER,
+    line_start  INTEGER,
+    line_end    INTEGER,
+    char_start  INTEGER,
+    char_end    INTEGER,
+    CONSTRAINT catalog_document_chunks_pk PRIMARY KEY (tenant_id, doc_id, position)
+);
+
+-- chash lookup for reverse manifest traversal
+CREATE INDEX idx_catalog_chunks_chash
+    ON nexus.catalog_document_chunks (tenant_id, chash);
+
+-- doc_id lookup for purge/replace operations
+CREATE INDEX idx_catalog_chunks_doc_id
+    ON nexus.catalog_document_chunks (tenant_id, doc_id);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.catalog_document_chunks CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 5: collections projection ───────────────────────────── -->
+    <changeSet id="catalog-001-5" author="nexus-gmiaf.18">
+        <comment>collections: RDR-101 Phase 6 first-class collections projection</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.catalog_collections (
+    tenant_id           TEXT NOT NULL,
+    name                TEXT NOT NULL,
+    content_type        TEXT NOT NULL DEFAULT '',
+    owner_id            TEXT NOT NULL DEFAULT '',
+    embedding_model     TEXT NOT NULL DEFAULT '',
+    model_version       TEXT NOT NULL DEFAULT '',
+    display_name        TEXT NOT NULL DEFAULT '',
+    legacy_grandfathered INTEGER NOT NULL DEFAULT 0,
+    superseded_by       TEXT NOT NULL DEFAULT '',
+    superseded_at       TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL DEFAULT '',
+    CONSTRAINT catalog_collections_pk PRIMARY KEY (tenant_id, name)
+);
+
+CREATE INDEX idx_catalog_collections_legacy
+    ON nexus.catalog_collections (tenant_id, legacy_grandfathered);
+
+CREATE INDEX idx_catalog_collections_owner
+    ON nexus.catalog_collections (tenant_id, owner_id);
+
+-- collection_for tuple lookup (RDR-103)
+CREATE INDEX idx_catalog_collections_tuple
+    ON nexus.catalog_collections (tenant_id, content_type, owner_id, embedding_model);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.catalog_collections CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 6: catalog_meta table ──────────────────────────────── -->
+    <changeSet id="catalog-001-6" author="nexus-gmiaf.18">
+        <comment>catalog_meta: key-value store for consistency markers, offsets, etc.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.catalog_meta (
+    tenant_id TEXT NOT NULL,
+    key       TEXT NOT NULL,
+    value     TEXT,
+    CONSTRAINT catalog_meta_pk PRIMARY KEY (tenant_id, key)
+);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.catalog_meta CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 7: RLS on all catalog tables ─────────────────────────── -->
+    <changeSet id="catalog-001-7" author="nexus-gmiaf.18">
+        <comment>Enable and FORCE RLS; create tenant_isolation policy on all catalog tables</comment>
+        <sql splitStatements="true" stripComments="false">
+-- catalog_owners
+ALTER TABLE nexus.catalog_owners ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_owners FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.catalog_owners
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+-- catalog_documents
+ALTER TABLE nexus.catalog_documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.catalog_documents
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+-- catalog_links
+ALTER TABLE nexus.catalog_links ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_links FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.catalog_links
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+-- catalog_document_chunks
+ALTER TABLE nexus.catalog_document_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.catalog_document_chunks
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+-- catalog_collections
+ALTER TABLE nexus.catalog_collections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_collections FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.catalog_collections
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+-- catalog_meta
+ALTER TABLE nexus.catalog_meta ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_meta FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.catalog_meta
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.catalog_meta;
+            ALTER TABLE nexus.catalog_meta NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.catalog_meta DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.catalog_collections;
+            ALTER TABLE nexus.catalog_collections NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.catalog_collections DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.catalog_document_chunks;
+            ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.catalog_document_chunks DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.catalog_links;
+            ALTER TABLE nexus.catalog_links NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.catalog_links DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.catalog_documents;
+            ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.catalog_documents DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.catalog_owners;
+            ALTER TABLE nexus.catalog_owners NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.catalog_owners DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 9: next_seq on owners for server-side tumbler assignment ── -->
+    <changeSet id="catalog-001-9" author="nexus-gmiaf.18">
+        <comment>Add next_seq to catalog_owners for atomic server-side tumbler assignment</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_owners ADD COLUMN IF NOT EXISTS next_seq BIGINT NOT NULL DEFAULT 0;
+        </sql>
+        <rollback>ALTER TABLE nexus.catalog_owners DROP COLUMN IF EXISTS next_seq</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 8: grants to nexus_svc ──────────────────────────────── -->
+    <changeSet id="catalog-001-8" author="nexus-gmiaf.18">
+        <comment>Grant table privileges to nexus_svc role (idempotent)</comment>
+        <sql splitStatements="false">
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_owners TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_documents TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_links TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_document_chunks TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_collections TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_meta TO nexus_svc';
+        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.catalog_links_id_seq TO nexus_svc';
+        RAISE NOTICE 'Granted catalog table privileges to nexus_svc';
+    ELSE
+        RAISE NOTICE 'nexus_svc role not found; skipping grants';
+    END IF;
+END
+$$;
+        </sql>
+        <rollback><!-- Grants not rolled back --></rollback>
+    </changeSet>
+
+</databaseChangeLog>

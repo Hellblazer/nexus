@@ -41,6 +41,13 @@ from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
 _log = structlog.get_logger(__name__)
 
 
+def _is_catalog_service_mode() -> bool:
+    """Return True when NX_STORAGE_BACKEND_CATALOG=service (or global NX_STORAGE_BACKEND=service)."""
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+
+    return storage_backend_for("catalog") == StorageBackend.SERVICE
+
+
 class CatalogAdminDaemonLiveError(Exception):
     """Raised by :func:`make_catalog_admin` when a T2 daemon is live.
 
@@ -50,14 +57,27 @@ class CatalogAdminDaemonLiveError(Exception):
     """
 
 
-def make_catalog_reader(*, config_dir: Optional[Path] = None) -> Optional[Catalog]:
-    """Return a read-only local Catalog, or ``None`` when uninitialised.
+def make_catalog_reader(*, config_dir: Optional[Path] = None) -> Optional[Any]:
+    """Return a read-only catalog, or ``None`` when uninitialised.
 
-    Mirrors the historical ``get_catalog()`` contract (None when the
-    catalog dir is not initialised) so call sites keep their existing
-    None-guards. The returned Catalog performs no construction-time
-    writes and opens its SQLite handle read-only.
+    In service mode (``NX_STORAGE_BACKEND_CATALOG=service`` or global
+    ``NX_STORAGE_BACKEND=service``) returns an :class:`HttpCatalogClient`
+    that forwards reads to the Java Postgres service.  The client is always
+    considered "initialised" — if the service is unreachable, the first
+    HTTP call will raise.
+
+    In SQLite mode (default) returns a read-only local Catalog.  Mirrors the
+    historical ``get_catalog()`` contract (None when the catalog dir is not
+    initialised) so call sites keep their existing None-guards.  The returned
+    Catalog performs no construction-time writes and opens its SQLite handle
+    read-only.
     """
+    if _is_catalog_service_mode():
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        _log.debug("catalog_reader_service_mode")
+        return HttpCatalogClient()
+
     from nexus.config import catalog_path
 
     path = catalog_path()
@@ -259,12 +279,67 @@ class CatalogWriter:
 
 def make_catalog_writer(
     *, config_dir: Optional[Path] = None, priority: Optional[str] = None,
-) -> CatalogWriter:
+) -> Any:
     """Return a write-only catalog proxy (daemon-routed or direct fallback).
+
+    In service mode (``NX_STORAGE_BACKEND_CATALOG=service`` or global
+    ``NX_STORAGE_BACKEND=service``) returns a
+    :class:`_ServiceCatalogWriter` that enforces the same
+    :data:`CATALOG_WRITE_OPS` whitelist but forwards writes to the Java
+    Postgres service via HTTP.  *priority* is ignored in service mode
+    (the service enforces its own fairness).
+
+    In SQLite mode (default) returns a :class:`CatalogWriter` that routes
+    through the T2 daemon or falls back to a direct local Catalog.
 
     *priority* (RDR-146 P2) sets the interactive-vs-batch fairness intent:
     ``"interactive"`` tags writes so the daemon prioritises them over a
     background batch indexer; ``"batch"`` is the yielding background default.
     ``None`` resolves via ``NX_WRITE_PRIORITY`` env then ``isatty()``.
     """
+    if _is_catalog_service_mode():
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        _log.debug("catalog_writer_service_mode")
+        return _ServiceCatalogWriter(HttpCatalogClient())
     return CatalogWriter(config_dir=config_dir, priority=priority)
+
+
+class _ServiceCatalogWriter:
+    """Write-only proxy backed by :class:`HttpCatalogClient` in service mode.
+
+    Enforces the same :data:`CATALOG_WRITE_OPS` whitelist as
+    :class:`CatalogWriter`.  Reads are blocked.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def __getattr__(self, name: str) -> Any:
+        if name not in CATALOG_WRITE_OPS:
+            raise AttributeError(
+                f"{name!r} is not a catalog write op; _ServiceCatalogWriter "
+                f"exposes only the {len(CATALOG_WRITE_OPS)}-op whitelist. "
+                f"For reads use make_catalog_reader()."
+            )
+        return getattr(self._client, name)
+
+    @property
+    def routed(self) -> bool:
+        return True
+
+    @property
+    def priority(self) -> str:
+        return "batch"
+
+    def is_interactive_write_pending(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> "_ServiceCatalogWriter":
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.close()

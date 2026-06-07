@@ -32,9 +32,7 @@
     <!-- Store 7: chash_index (bead nexus-gmiaf.16) — content-addressed routing table, no FTS -->
     <include file="db/changelog/chash-001-baseline.xml"/>
 
-    <!--
-        Future includes (beads .17-.18):
-        <include file="db/changelog/catalog-001-baseline.xml"/>
-    -->
+    <!-- Store 8: catalog (bead nexus-gmiaf.18) — owners/documents/links/chunks/collections + FTS + RLS -->
+    <include file="db/changelog/catalog-001-baseline.xml"/>
 
 </databaseChangeLog>

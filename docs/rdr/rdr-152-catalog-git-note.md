@@ -1,311 +1,254 @@
-# RDR-152 Design Note: Catalog git-backing after the Postgres migration
+# RDR-152 Decision Record: Catalog git-backing is DROPPED (PG-only)
 
 > Companion to RDR-152 (Postgres + Java Storage Service). Resolves the
 > `catalog_git` open question flagged at RDR-152 §Implementation Plan
 > Phase 2 step 7 (lines 689–695) BEFORE the `.18` catalog migration bead.
-> Bead: `nexus-gmiaf.17` (P2.7a). No implementation — analysis, options,
-> recommendation, and `.18` implications.
+> Bead: `nexus-gmiaf.17` (P2.7a). No implementation — decision record,
+> dependency/removal map, capabilities-lost ledger, and `.18`/`.24`
+> implications.
 
-## TL;DR
+## 1. DECISION
 
-**Recommendation: Option B — Postgres becomes the catalog authority; git is
-demoted to a downstream, read-only EXPORT artifact (versioned history +
-optional remote backup/portability).** This is the only option that both
-honors RDR-152's "service owns all storage / client holds zero storage libs /
-one enforceable boundary" thesis AND preserves the genuinely-valuable
-git features. Option A (keep git as authority) re-admits the exact
-two-storage-owner bug class RDR-152 exists to dissolve. Option C (drop git)
-deletes a real-if-lightly-used feature at the hardest store's migration.
+**The catalog's git-backed JSONL authority is DROPPED. Postgres becomes the
+sole authority for the catalog.** (Option C from the planning prompt — decided
+by the user; full decision in T2 `152-catalog-git-DECISION`.)
 
-**Reversibility:** the *authority direction* (PG-authoritative, git-as-export)
-is a **load-bearing lock** — it determines the catalog write path and whether a
-second storage owner is re-introduced, so it must be settled before `.18`. The
-*export mechanism details* (jgit vs git-shell-out, manual-only vs timer trigger,
-which JSONL files to emit, whether the import/`pull` half ships in `.18` or
-Phase 5) are **reversible** and can be adjusted during `.18` planning.
+After RDR-152 there is no JSONL authority, no SQLite projection-cache, and no
+git layer for the catalog. `register` / `update` / `link` / `unlink` /
+`set_alias` / `dedupe` write directly to the Postgres `catalog` schema (owned by
+the Java storage service); reads query Postgres. The on-disk git repo, the
+JSONL files, the projection-rebuild machinery, and the clone/pull/push remote
+plumbing are all removed.
 
----
+This matches RDR-152's core thesis: the service owns all storage; clients carry
+zero storage libraries. Keeping git would have forced either the Python client
+to keep shelling out to `git` (a storage responsibility the migration is
+removing from clients) or the Java service to embed a git library and maintain
+an on-disk JSONL mirror in parallel with Postgres (the dual-authority bug class
+RDR-152 exists to dissolve).
 
-## 1. What actually depends on the current git-backing
-
-The single most important finding reframes the whole question: **git is NOT the
-catalog's authority today, and it is NOT a live-on-write dependency.** The
-RDR-049 framing ("git-backed JSONL is authority, SQLite is the cache") has been
-overtaken by two later RDRs.
-
-### 1.1 Authority already moved to the event log, projected to a relational store
-
-- **RDR-101** made `events.jsonl` the **canonical** state. Per
-  `src/nexus/catalog/AGENTS.md` (Key invariants) and `event_log.py`: every
-  mutation flows through `Catalog.register/update/link/unlink/set_alias/dedupe`,
-  which emits an event into `events.jsonl` first and then **projects** to the
-  relational store. The legacy per-class files (`owners.jsonl`,
-  `documents.jsonl`, `links.jsonl`) "are still written for the cutover window
-  but are **no longer canonical**."
-- **RDR-120 P5.A.2** (nexus-2t7o5) moved the catalog SQLite layer into T2 as the
-  eighth domain store. `src/nexus/catalog/catalog_db.py` is now just a
-  re-export shim: `CatalogDB = nexus.db.t2.catalog.CatalogStore`. The relational
-  side is already a T2 projection, not an independent store.
-
-So the authority chain today is: **`events.jsonl` (canonical append-only log) →
-projector → relational projection.** Git wraps the `events.jsonl` file; it is
-*not* the authority itself. This is decisive for costing Options B/C: removing
-git-as-authority removes nothing that is currently authoritative, because the
-authority is the event stream, which RDR-152 moves into PG regardless.
-
-### 1.2 Git-backing is a manual, batch operation — never live-on-write
-
-Grounded in the code:
-
-- **Mutations do not commit.** `catalog_writes.py` (`register`, `update`,
-  `link`, …) append to `events.jsonl` + project under a directory flock. None of
-  them call `commit_and_push`. Verified: no `commit_and_push` / `.sync(` call
-  sites exist in `catalog_writes.py` or anywhere outside the two CLI verbs below.
-- **The only git-commit entry points are two CLI verbs:**
-  - `nx catalog sync` → `Catalog.sync()` → `_git.commit_and_push()`
-    (`commands/catalog.py:1623`, `catalog.py:827–842`).
-  - `nx catalog pull` → `Catalog.pull()` → `_git.pull_origin_if_remote()` +
-    `rebuild()` (`commands/catalog.py:1732`, `catalog.py:844–847`).
-- **No automatic trigger.** No daemon timer, no MCP lifespan hook, no
-  scheduled sync, no auto-commit anywhere. `sync`/`pull`/`compact` are in the
-  daemon `CATALOG_WRITE_OPS` whitelist only so that *when a user runs the verb*,
-  the git+whole-JSONL maintenance routes through the single writer
-  (`daemon/catalog_write_shim.py:47–74`) — not because anything fires them
-  automatically.
-
-### 1.3 Remote sync / multi-machine is optional and unconfigured by default
-
-- `nx catalog setup` explicitly tells the user: *"Catalog is local-only — add a
-  git remote for durability"* (`commands/catalog.py:333–338`). The default
-  catalog has **no remote**.
-- `clone_catalog` runs only on `Catalog.init(remote=...)` (new-machine
-  bootstrap). `pull_origin_if_remote` is a no-op when no remote is configured
-  (`catalog_git.py:173–181`).
-- RDR-152's own v1 deployment is **nx-managed local Postgres, single workspace,
-  one tenant in practice** (RDR-152 §Technical Design, v1-tenancy honest
-  framing). Cross-machine catalog sync via git exists but is **not exercised by
-  the v1 target**.
-
-### 1.4 Disaster recovery does not depend on git
-
-- **Accidental-delete DR** is `catalog_backup.py` (RDR-106 Option A): every
-  destructive verb snapshots rows to `.deleted-backups/*.jsonl` (gitignored,
-  per-machine) before deleting; `nx catalog undelete` restores via the event log.
-  This is **independent of git** and stays the real delete-recovery path.
-- **Corrupt-projection DR** today is `rebuild()` replaying JSONL → SQLite. Under
-  RDR-152 the projection rebuilds by replaying the event stream from PG; git is
-  not in that loop.
-
-### 1.5 Net assessment of what git delivers (and its load-bearing-ness)
-
-| Capability | Provided by git today? | Load-bearing? | Survives without live git? |
-|---|---|---|---|
-| Authority / source of truth | No — authority is `events.jsonl` | **No** | Yes (authority moves to PG) |
-| Live-on-write durability | No — commit is manual | No | Yes |
-| Audit / mutation history | Partially — git wraps the event log; the **event log itself** is the audit log | The audit *capability* is the event stream, not git | Yes (event rows in PG; export reproduces `git log`/`diff`) |
-| Human-facing `git log`/`diff`/`blame` ergonomics | Yes | Low (nice-to-have) | Only via export (Option B) |
-| Remote backup | Only if user configures a remote + runs `sync` | Low (opt-in, off by default) | Only via export (Option B) |
-| Portability (clone on new machine) | Yes (`init --remote`) | Low (opt-in) | Via export + import/`pull` restore (Option B) |
-| Delete recovery | No — that's `catalog_backup.py` | n/a | Yes (unchanged) |
-
-**Conclusion:** git-as-authority is **not load-bearing** — authority already
-sits in the event stream, which RDR-152 relocates to PG. Git's residual real
-value is (1) diffable/auditable history ergonomics and (2) optional
-remote backup/portability. Both are **preservable as a downstream export**
-without keeping git as a live storage authority. This makes Option C's loss
-bounded and Option B's preservation cheap — and makes Option A's cost
-(re-introducing a second live storage owner) clearly unjustified.
+**Why the loss is bounded — the key finding:** git is NOT the catalog's
+authority today, and it is NOT a live-on-write dependency (§2). RDR-101 already
+moved canonical state to the `events.jsonl` event stream (SQLite is a
+projection); RDR-120 P5.A.2 moved the relational side into T2 as a projection.
+Git merely wraps the event-log file and commits on a manual/hook trigger.
+Dropping git removes nothing currently authoritative — authority is the event
+stream, which RDR-152 relocates into PG regardless.
 
 ---
 
-## 2. The three options — mechanism, projection consistency, failure modes, RDR-152 alignment
+## 2. Why git is already vestigial (the basis for cheap removal)
 
-### Option A — JSONL-in-git stays AUTHORITY; PG is the projection
+The RDR-049 framing ("git-backed JSONL is authority, SQLite is the cache") has
+been overtaken by two later RDRs, and the git commit is not on the write path.
 
-- **Mechanism / where git runs.** Catalog writes append `events.jsonl` + `git
-  commit` (authority); PG is rebuilt by replaying `events.jsonl`. Git ops run
-  either in the Python client (shell-out — but the client must then own a git
-  working tree + filesystem write authority, i.e. become a **second storage
-  owner**, directly violating RDR-152 Gap 2 and "client holds zero storage
-  libs") or in the Java service (shell-out / jgit against a working tree it owns).
-- **Projection consistency.** PG must be re-projected from `events.jsonl` on
-  every change; the catalog now has two write paths (file + PG) that must be kept
-  convergent. Concurrency is still serialized by the **directory flock +
-  git-subprocess**, i.e. the exact hand-rolled-serializer class RDR-152 dissolves.
-- **Failure modes.** File/PG divergence; flock contention; git-subprocess
-  latency/timeout on the hot path; two-substrate consistency bugs.
-- **RDR-152 alignment.** **Direct contradiction.** RDR-152 §Decision Rationale
-  (lines 461–463): "a half-migration (two storage owners) keeps the boundary
-  porous and re-admits the bug class." Option A makes the catalog's true write
-  serializer the filesystem+git while every *other* store uses PG MVCC. It keeps
-  the catalog outside the single-authority boundary the whole RDR is built to
-  establish. **Reject.**
+### 2.1 Authority already moved to the event stream → relational projection
+- **RDR-101** made `events.jsonl` **canonical**. Per `catalog/AGENTS.md` (Key
+  invariants) and `event_log.py`: every mutation flows through
+  `Catalog.register/update/link/unlink/set_alias/dedupe`, which emits an event
+  into `events.jsonl` first, then **projects** to the relational store. The
+  legacy per-class files (`owners/documents/links.jsonl`) "are still written for
+  the cutover window but are **no longer canonical**."
+- **RDR-120 P5.A.2** moved the catalog SQLite layer into T2; `catalog_db.py` is a
+  re-export shim (`CatalogDB = nexus.db.t2.catalog.CatalogStore`). The relational
+  side is already a projection, not an independent store.
 
-### Option B — PG becomes AUTHORITY; git demoted to downstream EXPORT *(RECOMMENDED)*
+Authority chain today: **`events.jsonl` (canonical) → projector → relational
+projection.** Git wraps `events.jsonl`; it is not the authority.
 
-- **Mechanism / where git runs.** Catalog writes go to PG like every other store
-  (MVCC, RLS, single authority). The canonical mutation history lives as an
-  append-only **`catalog.events`** table in PG (the `events.jsonl` event stream,
-  relocated). A **service-side export** reads `catalog.events`, writes JSONL to
-  the on-disk catalog dir, and runs `git add/commit/(push)`. The export runs in
-  the **Java service** (the only component allowed to read canonical rows);
-  git plumbing is **jgit** (cleanest under a native-image binary — no subprocess
-  dependency) or shell-out to system git (reversible detail — see §4).
-  **Trigger** = the existing manual `nx catalog sync` verb, now a thin service
-  RPC ("export + commit + push now"). UX is unchanged because sync is *already*
-  manual today. An optional service-internal timer can be added later.
-- **Projection consistency.** PG is the single authority; the document/link/span
-  tables are projected from `catalog.events` **inside PG** (same projector logic,
-  reading PG instead of a file). Git is strictly **downstream and read-only with
-  respect to authority** — a failed or lagging export never corrupts or blocks a
-  PG write.
-- **Failure modes.** Export lag (the git mirror trails PG between syncs — same
-  staleness as today, where the mirror trails until someone runs `sync`); a push
-  failure is non-fatal (already true today, `catalog_git.commit_and_push` logs
-  and does not raise). None of these touch authority.
-- **RDR-152 alignment.** **Full alignment.** PG is the sole authority and sole
-  concurrency substrate; the client holds zero storage libs (sync is an RPC, not
-  a client-side git shell-out); git is an export artifact, not a storage owner,
-  so the two-owner bug class is not re-admitted. Preserves diffable history,
-  optional remote backup, and clone-based portability.
+### 2.2 Git-backing is manual/batch, never live-on-write
+- **Mutations do not commit.** `catalog_writes.py` / `catalog_links.py`
+  (`register`, `update`, `link`, …) append to the event log + project under a
+  directory flock. None call `commit_and_push`.
+- **Only two git entry points, both manual verbs:** `nx catalog sync` →
+  `Catalog.sync()` → `_git.commit_and_push()` (`commands/catalog.py:1623`,
+  `catalog.py:827`); `nx catalog pull` → `Catalog.pull()` →
+  `_git.pull_origin_if_remote()` + `rebuild()` (`commands/catalog.py:1732`,
+  `catalog.py:844`).
+- **One automatic trigger:** the session-close Stop hook
+  (`conexus/hooks/scripts/stop_verification_hook.sh:59`) runs
+  `nx catalog sync -m "auto-sync at session close"` best-effort. No daemon timer,
+  no MCP-lifespan commit, no per-write commit.
 
-### Option C — PG AUTHORITY; DROP git-backing entirely
+### 2.3 Remote sync / multi-machine is optional and OFF by default
+- `nx catalog setup` tells the user *"Catalog is local-only — add a git remote
+  for durability"* (`commands/catalog.py:333`). The default catalog has **no
+  remote**.
+- `clone_catalog` runs only on `Catalog.init(remote=...)`;
+  `pull_origin_if_remote` is a no-op without a remote (`catalog_git.py:173`).
 
-- **Mechanism.** PG `pg_dump` / logical export for durability; no git layer.
-- **Projection consistency.** Identical to B on the authority/projection side
-  (PG-authoritative); simply omits the export.
-- **Failure modes.** None new — but a **feature deletion**.
-- **RDR-152 alignment.** Aligned with the thesis (single authority), and the
-  simplest. **But** it deletes `git log`/`diff` history ergonomics and
-  clone-based cross-machine portability. The `catalog.events` PG table still
-  provides a queryable, timestamped audit log, so *audit capability* survives —
-  what is lost is the human-facing git ergonomics and the opt-in remote-sync
-  path. Doing this irreversibly at the **hardest** store's migration, for a user
-  who may have a remote configured, risks a silent regression
-  (`feedback_unused_not_useless`: dormant ≠ dead).
-
-### Comparison table
-
-| Dimension | A (git authority) | B (PG authority, git export) | C (PG authority, no git) |
-|---|---|---|---|
-| Single storage authority | No (file + PG) | **Yes (PG)** | **Yes (PG)** |
-| Client holds zero storage libs | No (git tree in client/service) | **Yes (sync = RPC)** | **Yes** |
-| Concurrency substrate | flock + git (the bug class) | **PG MVCC** | **PG MVCC** |
-| Re-admits two-owner bug class | **Yes** | No | No |
-| Diffable history (`git log`/`diff`) | Yes | **Yes (via export)** | No |
-| Audit log | Yes | Yes (PG `catalog.events` + export) | Yes (PG `catalog.events`) |
-| Remote backup / portability | Yes | **Yes (service push / clone-restore)** | No |
-| Implementation cost in `.18` | High + wrong | Medium | Low |
-| RDR-152 thesis fit | Contradicts | **Best** | Good-but-lossy |
+### 2.4 Disaster recovery does not depend on git
+- **Accidental-delete DR** is `catalog_backup.py` (RDR-106): destructive verbs
+  snapshot rows to `.deleted-backups/*.jsonl` (gitignored, per-machine) before
+  deleting; `nx catalog undelete` restores via the event-sourced API.
+  **Independent of git.**
+- **Corrupt-projection DR** is `rebuild()` replaying the event log → SQLite. Git
+  is not in that loop.
 
 ---
 
-## 3. Recommendation
+## 3. Dependency / removal map
 
-**Adopt Option B.** Rationale:
+Two facts drive the map: git commit/push is **off the write path** (so removing
+it is a no-op for write correctness), and the JSONL/event-log files **are** the
+authority-and-projection-source today (so PG must replace BOTH the authority AND
+the projection — there is no source/projection split left after migration).
 
-1. **It removes the actual root cause for the catalog too.** RDR-152 exists to
-   replace the flock/single-writer concurrency simulation with PG MVCC. Option A
-   keeps the catalog on flock+git as its real serializer — it would leave the
-   single most contended store (RDR-146 catalog-starvation forensics) outside the
-   fix. B puts the catalog on the same MVCC substrate as everything else.
-2. **It keeps the boundary non-porous.** The RDR's central architectural bet is
-   "one storage owner, or the bug class comes back." B keeps git strictly
-   downstream of authority; A makes git a co-authority (the exact anti-pattern);
-   C is non-porous but lossy.
-3. **The feature loss of C is real but avoidable for near-zero cost.** Because
-   authority already lives in the event stream, exporting `catalog.events` →
-   JSONL → git reproduces every git-specific capability that is used today
-   (history/diff, remote backup, clone-portability) as a read-only artifact.
-   There is no reason to delete a working feature when preserving it is a
-   downstream export off a table the migration is creating anyway.
-4. **UX is preserved unchanged.** `nx catalog sync` / `nx catalog pull` keep
-   their meaning and signatures; they become thin RPCs. Today's users see no
-   behavioral change. This also matches the RDR's "thin clients keep surfaces
-   stable so MCP/CLI behavior is unchanged per store" incremental-adoption note.
+### 3.1 DELETED at Phase 4 (`.24/.25`, daemon/SQLite decommission)
 
-This confirms the direction the RDR itself leaned (line 692–693: "git-backing is
-reframed as a Postgres-native export/audit log and the on-disk git mirror becomes
-optional"), now with code-grounded justification and the strengthening finding
-that **git-as-authority is already vestigial** (RDR-101 + RDR-120 moved authority
-to the event stream and the relational side to a projection).
+| Artifact | Why it goes |
+|---|---|
+| `catalog/catalog_git.py` (entire module) | `run_git`, `ensure_git_identity`, `clone_catalog`, `init_repo`, `add_remote_origin_if_missing`, `commit_and_push`, `pull_origin_if_remote`. No caller once `sync`/`pull` go. |
+| `Catalog.sync()` / `Catalog.pull()` (`catalog.py:827`, `:844`) | Sole callers of the git plumbing. |
+| `nx catalog sync` / `nx catalog pull` verbs (`commands/catalog.py:1617`, `:1727`) | Their bodies are git commit-push / clone-rebuild. |
+| `--remote` on `nx catalog init`/`setup` (`commands/catalog.py:231`, `:242`) + the `Catalog.init(remote=...)` clone branch (`catalog.py:786`) | Git-remote onboarding/restore; no PG client equivalent. |
+| Session-close auto-sync line (`stop_verification_hook.sh:59`) | No git to commit. |
+| JSONL **write** machinery: `_append_jsonl` + the legacy dual-write branches in `catalog_writes.py` / `catalog_links.py` (`cat._append_jsonl(cat._documents_path/_links_path, …)`) | PG is authority; nothing appends JSONL. |
+| `event_log.py` JSONL writer + `_write_to_event_log` + the `events.jsonl` on-disk format | The event log becomes a PG `catalog` table (§3.3). The on-disk JSONL log is removed. |
+| `catalog_sync.py` rebuild machinery: `_ensure_consistent` five-way dispatch, offset/header-hash checkpoint, `read_documents/read_links/read_owners` replay, the `.gitignore`d `.catalog.db` regeneration, `defrag`/`compact`, `_should_compact`/`_defrag_unlocked` | No JSONL to project from, no SQLite cache to rebuild. Reads hit PG. |
+| Catalog directory flock (`_acquire_lock`/`_release_lock`) **as a git/JSONL-append guard** | Concurrency moves to PG (MVCC + RLS). Verify no non-git caller remains before deletion. |
+| Docs: `docs/catalog.md` §"Storage layout"/§"Durability and remote sync" (l.276–349), `getting-started.md:201-208`, `cli-reference.md:519-572` | Document removed verbs/workflows. |
 
----
+### 3.2 `catalog_backup.py` — KEEP, REPOINT to PG (not a git/JSONL export)
 
-## 4. Implications for the `.18` catalog migration
+`catalog_backup.py` is **independent of git and of JSONL authority**. It is the
+RDR-106 backup-before-delete safety net: destructive verbs snapshot
+about-to-be-deleted rows to out-of-tree `.deleted-backups/*.jsonl` (per-machine,
+gitignored); `nx catalog undelete` re-registers them.
 
-Under Option B, `.18` MUST implement:
+- It is **NOT** the git/JSONL export → do **NOT** delete it.
+- **Repoint at `.18`:** `snapshot_documents`/`snapshot_links` read via
+  `catalog._db.execute(SELECT …)` → must read from PG.
+  `restore_documents` writes via `_write_to_event_log` + `_projector.apply` under
+  the directory flock → must re-route to the PG write path (emit-event-to-PG; no
+  flock, no JSONL). The backup *files* can remain local JSONL artifacts (a
+  convenient portable dump format); only the read-source and restore-sink change.
+- Net: keep the capability, swap the two storage seams.
 
-1. **Catalog relational tables in the PG `catalog` schema** — `documents`
-   (tumbler tree), `links` graph, `spans`, the `document_chunks` manifest
-   (RDR-108) — each with `tenant_id` + RLS policy from its first changeset, like
-   every other store's migration unit. Tighten the soft FKs from the taxonomy
-   (step 4) and aspects (step 5) migrations into real cross-schema FKs once
-   catalog lands (already in the RDR's ladder).
-2. **`catalog.events` as the canonical, append-only event table in PG.** PG is
-   authority; the document/link/span tables are **projected from
-   `catalog.events`** inside the service (port the existing projector to read PG
-   rows instead of `events.jsonl`). This preserves RDR-101's event-sourced
-   invariant inside Postgres.
-3. **A service-side git export** (the `sync` op, already whitelisted): read
-   `catalog.events` (and, for back-compat consumers, optionally re-emit the
-   legacy `owners/documents/links.jsonl` + `events.jsonl`), write to the on-disk
-   catalog dir, `git add/commit/(push if remote)`. Runs **in the Java service**.
-   Sub-decision (reversible — pick during `.18`): **jgit** (preferred; no
-   subprocess, native-image-clean) vs shell-out to system git (requires the
-   native-image build to permit subprocess; weigh against S0.4).
-4. **Client surface unchanged:** `nx catalog sync` and `nx catalog pull` become
-   thin RPCs with identical signatures. `pull`/import (clone-or-pull the git repo
-   → load JSONL → `catalog.events` → project) is the **new-machine bootstrap +
-   DR-from-remote** path. The export-out half is the MVP; the import-back half
-   MAY defer to Phase 5 since v1 is single-machine/single-tenant (reversible).
-5. **Idempotent ETL** `events.jsonl` → `catalog.events` PG rows (RDR-076
-   idempotent-upgrade heritage), stamped under the default tenant. Keep the
-   on-disk git working tree (it is now the export target, not deleted) and apply
-   the per-store **write-quiesce/cutover** discipline the RDR mandates for
-   catalog (a bounded write-quiesce window, not silent loss).
-6. **Decommission alignment:** the Python `catalog_git.py` shell-out is removed
-   from the client tree per Gap 2 (no storage/git libs in the Python tree); its
-   logic moves into the service (jgit or service-owned git). `catalog_backup.py`
-   delete-recovery is **unchanged** and stays the accidental-delete DR path
-   (it operates over the public event-sourced API and is orthogonal to the
-   substrate move).
+### 3.3 What `.18` (catalog → PG) MUST do
 
-`.18` MUST NOT keep flock + git-subprocess as the catalog write serializer
-(that is Option A and re-admits the bug class RDR-152 dissolves).
+1. **PG is authority from line one of `.18`.** No JSONL-authority/PG-projection
+   split, no transitional dual-write to JSONL, no `catalog_git` on the write
+   path. Migration target: `documents` (tumbler tree), `links` graph, `spans`,
+   `document_chunks` manifest (RDR-108) — in the PG `catalog` schema,
+   tenant-scoped via RDR-152's `owner_id` sub-scope + RLS from the first
+   changeset.
+2. **One-shot seed, not ongoing sync.** Read the current event log (or the live
+   SQLite projection — equivalent under RDR-101 replay-equality) **once** to seed
+   PG. After seed, the JSONL/git repo is dead state; no further reads. Apply the
+   per-store **write-quiesce → import → flip** cutover (bounded quiesce window,
+   not silent loss).
+3. **Event log → PG `catalog` event table.** Preserve RDR-101's event-sourced
+   invariant *in form*: an append-only PG event table is canonical, the
+   document/link/span tables are projected from it inside the service (port the
+   projector to read PG rows instead of `events.jsonl`). Keeps mutation history +
+   replay without git.
+4. **Tighten soft FKs.** `topic_links` (taxonomy) → catalog and other soft refs
+   become real cross-schema FKs once catalog lands (RDR-152 step 7).
+5. **Catalog FTS:** the SQLite-FTS5 → Postgres `tsvector`/GIN contract applies;
+   the §Phase-2 FTS parity gate (top-K set equality + Spearman ≥ 0.90) covers
+   catalog title/text search at the `.18` gate.
 
-**FTS reminder:** catalog FTS (document title/text search) is on the RDR's
-SQLite-FTS5 → Postgres `tsvector`/GIN list; the §Phase-2 FTS parity contract
-(top-K set equality + Spearman ≥ 0.90) applies to catalog search queries at the
-`.18` gate.
+### 3.4 What `.24/.25` (Phase 4 decommission) MUST do
+Physically delete every artifact in §3.1 once the flag is removed and rollback
+is no longer offered, and update the three doc files.
 
 ---
 
-## 5. Reversibility verdict
+## 4. Capabilities LOST (on record; user has accepted)
 
-- **Load-bearing lock (decide before `.18`):** *PG is the catalog authority; git
-  is a downstream read-only export, not a live write dependency.* This sets the
-  catalog write path and prevents a second storage owner; reversing it after
-  `.18` ships would require re-architecting the catalog write path. **Surface
-  this to the user before `.18` starts** (the orchestrator's stated step).
-- **Reversible details (`.18` planning may adjust freely):** jgit vs
-  git-shell-out; export trigger (manual-only RPC now vs add a service timer
-  later); whether to emit only `events.jsonl` or also the legacy per-class JSONL;
-  whether the `pull`/import restore half ships in `.18` or defers to Phase 5.
+| Capability (RDR-049) | Status under PG-only | Replacement |
+|---|---|---|
+| Git-versioned **history / diff / revert** of the catalog (`git log`/`diff`, "roll back a bad change with git tools" — `docs/catalog.md:290`) | LOST as git | PARTIAL — the RDR-101 event log moves to a PG append-only `catalog` event table → full mutation history + replay survives. Lost: the **git UX** (`git log`/`git diff`/`git revert`, human-diffable JSONL). History becomes a SQL query over the event table, not a git command. |
+| **Disaster recovery via git remote** ("survives disk loss" — `getting-started.md:201`, `docs/catalog.md:323`) | LOST as git-remote DR | REPLACED — PG backups / `pg_dump` logical export. RDR-152 already owns PG durability for all eleven T2 stores; catalog folds into the same regime. Arguably better (one backup story, not git-per-store). |
+| Catalog **audit / provenance archaeology** | PRESERVED | PG `catalog` event table (canonical, append-only) + `link_query` (all-links-incl-orphans) view. |
+| **Accidental-delete recovery** | PRESERVED | `catalog_backup.py` repointed to PG (§3.2). |
+| **Multi-machine / new-machine sync via `git clone`** (`nx catalog setup --remote <url>` clones the full registry "instantly" — `docs/catalog.md:347`, `cli-reference.md:524`) | LOST | **SEE LOAD-BEARING FLAG (§4.1).** No like-for-like client-side replacement under a *local* PG model. |
+
+### 4.1 Genuinely load-bearing lost capability — FLAGGED for user
+
+**Multi-machine catalog sharing / new-machine restore via `git clone`.** The
+docs actively instruct cloud-mode users to add a git remote and document
+`nx catalog setup --remote <url>` as the new-machine restore path that "restores
+your tumblers, links, and full document registry instantly"
+(`docs/catalog.md:347`, `getting-started.md:208`, `cli-reference.md:524`). This
+is the one removed capability with **no automatic equivalent** under a *local*
+PG-only model.
+
+- **Likely fine (and probably superseded):** RDR-152 centralizes storage in one
+  Java service backed by one Postgres. If that Postgres is a **shared / networked
+  endpoint** (the natural deployment for "service owns storage, thin clients"),
+  every machine that connects sees the same catalog automatically — strictly
+  better than the git-clone-snapshot model. "New-machine restore" reduces to
+  "point the client at the service." Under that deployment the git-clone loss is
+  **not** load-bearing; it is superseded.
+- **The risk window:** if RDR-152's PG is deployed **per-machine / local-only**
+  (each machine its own Postgres — and RDR-152 §Technical Design's honest v1
+  framing is "nx-managed local Postgres, single workspace"), then there is
+  genuinely no cross-machine catalog sharing or restore anymore — a real
+  regression for the documented cloud-mode multi-machine workflow.
+
+**The one thing for the user to confirm:** does RDR-152's Postgres deployment
+give multiple machines a shared DB endpoint? If yes → replaced-and-improved,
+drop git freely. If local-only → the user is knowingly accepting the loss of
+cross-machine catalog sync/restore (acceptable if no current workflow has two
+machines sharing one catalog, but it should be a conscious "yes"). The prior T2
+decision `152-cloud-locality-scope` (cloud-move locality, 2026-06-06/07) is the
+governing context; if it already pins the deployment-locality answer, this flag
+is resolved there.
+
+---
+
+## 5. Reversibility
+
+This note is a **reversible record, not a load-bearing lock — with one caveat.**
+
+- The **direction** (PG-only, git dropped) is a firm user decision.
+- **Mechanism details are advisory** and `.18`/`.24` may adjust them: the exact
+  shape of the PG event table, whether backup files stay JSONL or move to
+  `COPY`, deletion vs. repoint ordering of verbs.
+- **The one item NOT freely reversible later:** the multi-machine-sync loss in
+  the local-PG deployment case. Re-adding a git mirror *after* the JSONL write
+  path is deleted is a non-trivial rebuild, not a flag flip — so the §4.1
+  deployment-locality question should be settled **before `.18` quiesces the
+  catalog**, per the orchestrator's stated "surface to user before `.18`" step.
+
+---
+
+## 6. Actionable output (the deliverable)
+
+- **`.18`:** PG authority from line one; one-shot seed from the current event log
+  /projection; event log → PG `catalog` event table; NO JSONL write, NO
+  `catalog_git`, NO projection-rebuild machinery; repoint `catalog_backup.py`
+  read-source + restore-sink to PG (keep the verb); tighten soft FKs; catalog FTS
+  under the Phase-2 parity gate.
+- **`.24/.25`:** physically delete `catalog_git.py`, `Catalog.sync`/`pull`,
+  `nx catalog sync`/`pull`, `--remote` onboarding, `event_log.py` JSONL writer +
+  `_append_jsonl` dual-write, `catalog_sync.py` rebuild/defrag/compact, the
+  directory flock (verify no non-git callers), the session-close auto-sync hook
+  line; update `docs/catalog.md` / `getting-started.md` / `cli-reference.md`.
+- **One user confirmation outstanding:** multi-machine catalog sharing/restore is
+  the sole load-bearing lost capability; its fate hinges on whether RDR-152's
+  Postgres is a shared endpoint (replaced-and-improved) or local-only
+  (knowingly-accepted regression).
 
 ---
 
 ## References
 
-- RDR-152 §Implementation Plan Phase 2 step 7 (the open question, lines 689–695)
-  and §Decision Rationale (two-owner porosity, lines 461–463).
+- RDR-152 §Implementation Plan Phase 2 step 7 (the open question, l.689–695);
+  §Technical Design v1-tenancy/local-Postgres framing.
 - RDR-049 (`docs/rdr/rdr-049-git-backed-catalog.md`) — original git-backing
-  rationale (now partially superseded on the authority claim).
-- RDR-101 — event log canonical, SQLite as projection
-  (`src/nexus/catalog/AGENTS.md` Key invariants; `catalog/event_log.py`).
+  rationale (superseded on the authority claim by RDR-101/120).
+- RDR-101 — event log canonical, SQLite as projection (`catalog/AGENTS.md`;
+  `catalog/event_log.py`).
 - RDR-120 P5.A.2 — catalog SQLite moved to T2 (`catalog/catalog_db.py` shim).
 - RDR-106 Option A — `catalog/catalog_backup.py` delete-recovery (git-independent).
-- Code: `catalog/catalog_git.py`, `catalog/catalog.py:775–847` (init/sync/pull),
-  `commands/catalog.py:231–340,1617–1735` (setup/sync/pull verbs),
-  `daemon/catalog_write_shim.py:40–74` (sync/pull/compact whitelist rationale),
-  `catalog/factory.py` (reader/writer/admin routing).
+- Code: `catalog/catalog_git.py`; `catalog/catalog.py:775–847` (init/sync/pull);
+  `commands/catalog.py:231–340,1617–1735` (setup/sync/pull verbs);
+  `conexus/hooks/scripts/stop_verification_hook.sh:59` (session-close auto-sync);
+  `catalog/catalog_writes.py` + `catalog/catalog_links.py` (`_append_jsonl`
+  dual-write); `catalog/catalog_sync.py` (rebuild/defrag/compact);
+  `catalog/catalog_backup.py` (RDR-106 delete-recovery).
+- Docs documenting the lost workflows: `docs/catalog.md:276–349`,
+  `getting-started.md:201–208`, `cli-reference.md:519–572`.
