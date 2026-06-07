@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-152 nexus service — master Liquibase changelog.
+
+    Includes all store-specific changelogs in dependency order.
+    Add new <include> entries here as beads .11-.18 land.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- Store 1: memory (bead nexus-gmiaf.5) -->
+    <include file="db/changelog/memory-001-baseline.xml"/>
+
+    <!--
+        Future includes (beads .11-.18):
+        <include file="db/changelog/plans-001-baseline.xml"/>
+        <include file="db/changelog/catalog-001-baseline.xml"/>
+    -->
+
+</databaseChangeLog>
