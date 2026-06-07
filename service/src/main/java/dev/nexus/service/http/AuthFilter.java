@@ -13,6 +13,13 @@ import java.util.Objects;
  * HTTP filter: validates {@code Authorization: Bearer <token>} and extracts
  * {@code X-Nexus-Tenant} on all routes that pass through it.
  *
+ * <p><b>Bootstrap posture (Phase 1–4):</b> a single shared {@code NX_SERVICE_TOKEN}
+ * authenticates ALL clients. Any token holder can claim ANY tenant by setting
+ * {@code X-Nexus-Tenant}. DB-layer RLS is enforced but trusts the client to name
+ * the correct tenant. Per-tenant/session credentials and token lifecycle management
+ * land in Phase 5 (bead nexus-gmiaf.32). <b>Do NOT deploy in shared or
+ * multi-principal environments before bead .32 ships.</b>
+ *
  * <p>Auth model (Phase 1–4 bootstrap): single fixed bearer token loaded from
  * {@code NX_SERVICE_TOKEN} env var or service config. Full lifecycle (rotation,
  * per-tenant tokens) is Phase 5 (bead .32).

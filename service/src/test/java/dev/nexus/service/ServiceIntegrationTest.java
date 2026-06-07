@@ -42,6 +42,7 @@ class ServiceIntegrationTest {
     NexusService service;
     HttpClient http;
     TenantScope tenantScope;
+    com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -55,7 +56,7 @@ class ServiceIntegrationTest {
 
         // Build the DataSource for service using the svc_user role
         // (service scope, subject to RLS)
-        var svcDs = buildSvcDataSource(pg);
+        svcDs = buildSvcDataSource(pg);
 
         tenantScope = new TenantScope(svcDs);
 
@@ -70,6 +71,9 @@ class ServiceIntegrationTest {
     void stopAll() throws Exception {
         if (service != null) {
             service.stop();
+        }
+        if (svcDs != null) {
+            svcDs.close();
         }
         if (pg != null) {
             pg.close();
@@ -141,17 +145,19 @@ class ServiceIntegrationTest {
             su.commit();
         }
 
-        // tenant-A sees exactly its 3 rows
+        // tenant-A sees exactly its 3 rows; must NOT see B's row
         List<String> aKeys = tenantScope.withTenant("tenant-A", ctx ->
             ctx.fetch("SELECT key FROM nexus_test.rls_probe ORDER BY key")
                .getValues("key", String.class));
         assertThat(aKeys).containsExactlyInAnyOrder("key-a1", "key-a2", "key-a3");
+        assertThat(aKeys).doesNotContain("key-b1");  // cross-tenant negative
 
-        // tenant-B sees exactly its 1 row
+        // tenant-B sees exactly its 1 row; must NOT see any of A's rows
         List<String> bKeys = tenantScope.withTenant("tenant-B", ctx ->
             ctx.fetch("SELECT key FROM nexus_test.rls_probe ORDER BY key")
                .getValues("key", String.class));
         assertThat(bKeys).containsExactly("key-b1");
+        assertThat(bKeys).doesNotContain("key-a1", "key-a2", "key-a3");  // cross-tenant negatives
 
         // Fail-closed: API design prevents unstamped DSLContext (compile-time)
         // Runtime proof: no-tenant path is impossible via public API
@@ -171,11 +177,16 @@ class ServiceIntegrationTest {
             })
         ).hasMessageContaining("deliberate failure");
 
-        // Verify no row was committed
-        List<String> xKeys = tenantScope.withTenant("tenant-X", ctx ->
-            ctx.fetch("SELECT key FROM nexus_test.rls_probe ORDER BY key")
-               .getValues("key", String.class));
-        assertThat(xKeys).isEmpty();
+        // Verify via SUPERUSER (bypasses RLS) — an RLS-subject connection would
+        // see empty due to RLS even if the row was committed; superuser proves rollback.
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            su.setAutoCommit(true);
+            var rs = su.createStatement().executeQuery(
+                "SELECT key FROM nexus_test.rls_probe WHERE tenant_id = 'tenant-X'");
+            assertThat(rs.next())
+                .as("no tenant-X row should exist after rollback (verified via superuser, bypassing RLS)")
+                .isFalse();
+        }
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -254,17 +265,16 @@ class ServiceIntegrationTest {
 
     /**
      * Build a DataSource connecting as svc_test (the RLS-subject role).
+     * autoCommit=true matches the production pool default in Main.java;
+     * TenantScope toggles to false per borrow.
      */
-    private javax.sql.DataSource buildSvcDataSource(EmbeddedPostgres epg) {
-        // zonky embedded-postgres runs as current OS user (postgres superuser)
-        // We connect as svc_test via JDBC URL with embedded-postgres's local socket
-        // EmbeddedPostgres exposes a DataSource; for svc_test we use HikariCP directly
+    private com.zaxxer.hikari.HikariDataSource buildSvcDataSource(EmbeddedPostgres epg) {
         var config = new com.zaxxer.hikari.HikariConfig();
         config.setJdbcUrl("jdbc:postgresql://localhost:" + epg.getPort() + "/postgres");
         config.setUsername("svc_test");
         config.setPassword("svc_test_pass");
         config.setMaximumPoolSize(5);
-        config.setAutoCommit(false);
+        config.setAutoCommit(true);  // pool default; TenantScope toggles per borrow
         return new com.zaxxer.hikari.HikariDataSource(config);
     }
 

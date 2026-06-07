@@ -38,7 +38,7 @@ public final class Main {
         hikari.setUsername(dbUser);
         hikari.setPassword(dbPass);
         hikari.setMaximumPoolSize(poolSize);
-        hikari.setAutoCommit(false);  // TenantScope manages txn boundaries
+        hikari.setAutoCommit(true);   // pool default; TenantScope toggles to false per borrow
         var ds = new HikariDataSource(hikari);
 
         var service = new NexusService(port, token, ds);

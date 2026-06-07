@@ -49,6 +49,15 @@ public final class TenantScope {
     /**
      * Execute {@code work} within a transaction stamped with {@code tenant}.
      *
+     * <p>EAGER COMPLETION: the transaction is committed and the connection returned to the
+     * pool before this method returns. Callers that need to stream results across the txn
+     * boundary (e.g. a jOOQ {@code Cursor} held open while writing an HTTP response body)
+     * must do so entirely inside the {@code work} lambda — the connection is NOT available
+     * after {@code work.apply()} returns. A streaming-cursor variant (taking a
+     * {@code Consumer<DSLContext>}) will be added if needed in beads .7/.9; it does NOT
+     * reopen the unstamped-context hole because the GUC stamp happens before the context
+     * is handed to the caller.
+     *
      * @param tenant the tenant principal to stamp (must not be null or blank)
      * @param work   function receiving a stamped {@link DSLContext}; its return value
      *               is returned from this method
@@ -64,10 +73,10 @@ public final class TenantScope {
         }
 
         Connection conn = null;
-        boolean committed = false;
         try {
             conn = dataSource.getConnection();
-            // Mandatory: SET LOCAL is a no-op outside a transaction
+            // Mandatory: SET LOCAL is a no-op outside a transaction.
+            // Pool default is autoCommit=true; we toggle to false for the txn.
             conn.setAutoCommit(false);
 
             // Stamp the GUC — bind-safe parameterized call (S0.1 pattern verbatim)
@@ -81,7 +90,6 @@ public final class TenantScope {
             T result = work.apply(ctx);
 
             conn.commit();
-            committed = true;
             return result;
 
         } catch (SQLException e) {
@@ -94,14 +102,17 @@ public final class TenantScope {
             throw e;  // propagate caller exception unchanged
         } finally {
             if (conn != null) {
+                // Two independent try-catch blocks so conn.close() is ALWAYS attempted
+                // even if setAutoCommit throws (e.g. dead PG connection).
                 try {
-                    if (!committed) {
-                        // rollback() already attempted above; belt-and-suspenders
-                    }
-                    conn.setAutoCommit(true);
-                    conn.close();  // returns to pool
-                } catch (SQLException ignored) {
-                    log.warn("event=tenant_scope_close_failed tenant={}", tenant);
+                    conn.setAutoCommit(true);  // restore pool default before return
+                } catch (SQLException e) {
+                    log.warn("event=restore_autocommit_failed tenant={}", tenant);
+                }
+                try {
+                    conn.close();  // returns connection to HikariCP pool
+                } catch (SQLException e) {
+                    log.warn("event=connection_close_failed tenant={}", tenant);
                 }
             }
         }
