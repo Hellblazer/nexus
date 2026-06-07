@@ -427,6 +427,138 @@ class MemoryHandlerTest {
         assertThat(resp2.statusCode()).isEqualTo(401);
     }
 
+    // ── Test 18: tags="" roundtrip — untagged entry must have tags key present ──
+
+    @Test
+    void put_untaggedEntry_tagsFieldAlwaysPresent() throws Exception {
+        // PUT with NO tags field in the request body
+        var putResp = post("/v1/memory/put", TENANT,
+            "{\"project\":\"tags-proj\",\"title\":\"untagged\",\"content\":\"no tags here\",\"ttl\":30}");
+        assertThat(putResp.statusCode()).isEqualTo(200);
+
+        var getResp = get("/v1/memory/get?project=tags-proj&title=untagged", TENANT);
+        assertThat(getResp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(getResp.body(), MAP_T);
+        // Critical #2: tags key must be present as "" (never null/missing)
+        assertThat(body).containsKey("tags");
+        assertThat(body.get("tags")).isEqualTo("");
+    }
+
+    // ── Test 19: access_count increments on GET ───────────────────────────────
+
+    @Test
+    void get_accessCount_incrementsOnRead() throws Exception {
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"ac-proj\",\"title\":\"ac-entry\",\"content\":\"access tracking test\",\"ttl\":30}");
+
+        // First GET
+        var resp1 = get("/v1/memory/get?project=ac-proj&title=ac-entry", TENANT);
+        var b1 = mapper.readValue(resp1.body(), MAP_T);
+        int count1 = ((Number) b1.get("access_count")).intValue();
+
+        // Second GET
+        var resp2 = get("/v1/memory/get?project=ac-proj&title=ac-entry", TENANT);
+        var b2 = mapper.readValue(resp2.body(), MAP_T);
+        int count2 = ((Number) b2.get("access_count")).intValue();
+
+        assertThat(count2).as("access_count must increment on each GET").isGreaterThan(count1);
+    }
+
+    // ── Test 20: merge refreshes timestamp ───────────────────────────────────
+
+    @Test
+    void merge_refreshesTimestamp() throws Exception {
+        var r1 = mapper.readValue(
+            post("/v1/memory/put", TENANT,
+                "{\"project\":\"ts-merge-proj\",\"title\":\"keep-ts\",\"content\":\"original content\",\"ttl\":30}").body(), MAP_T);
+        long keepId = ((Number) r1.get("id")).longValue();
+        String originalTimestamp = (String) r1.get("timestamp");
+
+        // Small sleep to ensure timestamp difference
+        Thread.sleep(1100);
+
+        post("/v1/memory/merge", TENANT,
+            "{\"keep_id\":" + keepId + ",\"delete_ids\":[],\"merged_content\":\"merged content\"}");
+
+        var updated = mapper.readValue(get("/v1/memory/get?id=" + keepId, TENANT).body(), MAP_T);
+        String newTimestamp = (String) updated.get("timestamp");
+
+        assertThat(newTimestamp).as("merge must refresh timestamp").isNotEqualTo(originalTimestamp);
+    }
+
+    // ── Test 21: PUT_OR_MERGE inserts new + merges similar ───────────────────
+
+    @Test
+    void putOrMerge_insertsNew() throws Exception {
+        var resp = post("/v1/memory/put_or_merge", TENANT,
+            "{\"project\":\"pom-proj\",\"title\":\"fresh-entry\",\"content\":\"completely unique xyz987 content\",\"ttl\":30}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body.get("action")).isEqualTo("inserted");
+        assertThat(((Number) body.get("id")).longValue()).isPositive();
+    }
+
+    @Test
+    void putOrMerge_mergesSimilarContent() throws Exception {
+        String common = "distributed system architecture design patterns microservices components";
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"pom-merge-proj\",\"title\":\"existing\",\"content\":\"" + common + " first entry data\",\"ttl\":30}");
+
+        var resp = post("/v1/memory/put_or_merge", TENANT,
+            "{\"project\":\"pom-merge-proj\",\"title\":\"new-similar\",\"content\":\"" + common + " second entry data\",\"ttl\":30,\"min_similarity\":0.3}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body.get("action")).isEqualTo("merged");
+    }
+
+    // ── Test 22: RLS isolation — cross-tenant WRITE and DELETE ───────────────
+
+    @Test
+    void rlsIsolation_crossTenantDeleteNoop() throws Exception {
+        // Insert as TENANT
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"rls-del-proj\",\"title\":\"rls-del-entry\",\"content\":\"secret\",\"ttl\":30}");
+
+        // Try to DELETE as OTHER_TENANT — RLS prevents it, deleted=false
+        var resp = delete("/v1/memory/delete?project=rls-del-proj&title=rls-del-entry", OTHER_TENANT);
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body.get("deleted")).isEqualTo(false);
+
+        // Entry still visible to TENANT
+        var check = get("/v1/memory/get?project=rls-del-proj&title=rls-del-entry", TENANT);
+        assertThat(check.statusCode()).isEqualTo(200);
+    }
+
+    @Test
+    void rlsIsolation_crossTenantMergeNoOp() throws Exception {
+        // Insert as TENANT
+        var r1 = mapper.readValue(
+            post("/v1/memory/put", TENANT,
+                "{\"project\":\"rls-merge-proj\",\"title\":\"rls-merge\",\"content\":\"secret\",\"ttl\":30}").body(), MAP_T);
+        long keepId = ((Number) r1.get("id")).longValue();
+
+        // Try to MERGE as OTHER_TENANT — RLS: keepId not visible → 409
+        var resp = post("/v1/memory/merge", OTHER_TENANT,
+            "{\"keep_id\":" + keepId + ",\"delete_ids\":[],\"merged_content\":\"hacked\"}");
+        // Should be 409 (keepId not found for OTHER_TENANT due to RLS)
+        assertThat(resp.statusCode()).isEqualTo(409);
+    }
+
+    // ── Test 23: timestamp format — UTC second-precision ISO with Z ───────────
+
+    @Test
+    void put_timestampFormat_utcSecondPrecision() throws Exception {
+        var putResp = post("/v1/memory/put", TENANT,
+            "{\"project\":\"ts-fmt-proj\",\"title\":\"ts-fmt\",\"content\":\"ts format test\",\"ttl\":30}");
+        var id = ((Number) mapper.readValue(putResp.body(), MAP_T).get("id")).longValue();
+
+        var body = mapper.readValue(get("/v1/memory/get?id=" + id, TENANT).body(), MAP_T);
+        String ts = (String) body.get("timestamp");
+        assertThat(ts).as("timestamp must match yyyy-MM-dd'T'HH:mm:ss'Z'")
+                      .matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z");
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private HttpResponse<String> get(String path, String tenant) throws Exception {

@@ -17,24 +17,26 @@ All methods send ``Authorization: Bearer <token>`` and
 Server-side vs client-composed methods:
 
 Server-side (all storage/SQL logic runs on the Java service):
-    put, get, resolve_title, search, list_entries,
+    put, put_or_merge, get, resolve_title, search, list_entries,
     get_projects_with_prefix, search_glob, search_by_tag, get_all,
     delete, expire, merge_memories, flag_stale_memories
 
-Client-composed (Jaccard/Python logic over server-side get_all results):
+    put_or_merge is server-side (POST /v1/memory/put_or_merge):
+    the Jaccard scan + conditional merge-or-upsert runs atomically
+    in a single Java transaction.  Moving it server-side eliminates
+    the TOCTOU window of the former client-composed path and ensures
+    that Phase-2 stores inherit the correct pattern.
+
+Client-composed (pure-Python logic over server-side data):
     find_overlapping_memories — Jaccard computation is Python;
         the underlying data is fetched via get_all (server-side).
-    put_or_merge — Jaccard scan over get_all + conditional put.
-
-Both client-composed methods call server-side endpoints for data;
-they do NOT contain any SQL or storage logic themselves.
+        Kept client-composed because it is a pure read; no atomicity
+        requirement.
 """
 
 from __future__ import annotations
 
-import math
 import os
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -213,10 +215,18 @@ class HttpMemoryStore:
         self,
         query: str,
         project: str | None = None,
-        access: str = "track",  # noqa: ARG002 — access tracking is server-managed
+        access: str = "track",
     ) -> list[dict[str, Any]]:
-        """FTS search. Returns rows ordered by relevance."""
-        payload: dict[str, Any] = {"query": query}
+        """FTS search. Returns rows ordered by relevance.
+
+        Args:
+            query:   Search query (sanitized server-side by plainto_tsquery).
+            project: Optional project filter.
+            access:  Access tracking policy: ``"track"`` (default) increments
+                     access_count on returned rows; ``"silent"`` skips it
+                     (for internal consolidation scans).
+        """
+        payload: dict[str, Any] = {"query": query, "access": access}
         if project:
             payload["project"] = project
         resp = self._post("/v1/memory/search", payload)
@@ -392,14 +402,6 @@ class HttpMemoryStore:
             )
         self._raise_for_status(resp, "merge_memories")
 
-    def _content_words(self, text: str) -> set[str]:
-        """Lowercased word set for Jaccard overlap."""
-        return {
-            w.lower()
-            for w in text.split()
-            if len(w) > 2 and w.lower() not in _STOPWORDS
-        }
-
     def put_or_merge(
         self,
         project: str,
@@ -411,45 +413,30 @@ class HttpMemoryStore:
         session: str | None = None,
         min_similarity: float = 0.5,
     ) -> tuple[int, str]:
-        """CLIENT-COMPOSED: Jaccard scan over server-side get_all + conditional put.
+        """SERVER-SIDE: Jaccard scan + conditional merge or insert in one transaction.
+
+        Delegates to ``POST /v1/memory/put_or_merge``.  The Jaccard overlap
+        computation and the conditional UPDATE/INSERT run atomically on the
+        Java service, eliminating the TOCTOU window of the former client-composed
+        path (get_all → merge_memories).
 
         Returns ``(row_id, action)`` where ``action`` is ``"inserted"`` or
         ``"merged"``.
-
-        The Jaccard similarity check runs client-side on data fetched via
-        get_all. The merge write (UPDATE) goes to the server via merge_memories
-        (server-side atomic). Pure inserts use put (server-side upsert).
         """
-        new_words = self._content_words(content)
-        if new_words:
-            best_id: int | None = None
-            best_jaccard = 0.0
-            best_content = ""
-            for entry in self.get_all(project):
-                if entry.get("title") == title:
-                    continue
-                existing_words = self._content_words(entry.get("content", ""))
-                if not existing_words:
-                    continue
-                jaccard = len(new_words & existing_words) / len(new_words | existing_words)
-                if jaccard > best_jaccard:
-                    best_jaccard = jaccard
-                    best_id = entry["id"]
-                    best_content = entry.get("content", "")
-            if best_id is not None and best_jaccard >= min_similarity:
-                timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-                merged = (
-                    f"{best_content}\n\n"
-                    f"<!-- merged from {title!r} @ {timestamp} "
-                    f"(jaccard={best_jaccard:.2f}) -->\n{content}"
-                )
-                self.merge_memories(best_id, [], merged)
-                return best_id, "merged"
-        row_id = self.put(
-            project, title, content,
-            tags=tags, ttl=ttl, agent=agent, session=session,
-        )
-        return row_id, "inserted"
+        payload: dict[str, Any] = {
+            "project": project,
+            "title": title,
+            "content": content,
+            "tags": tags or "",
+            "ttl": ttl,
+            "min_similarity": min_similarity,
+        }
+        if agent is not None:
+            payload["agent"] = agent
+        if session is not None:
+            payload["session"] = session
+        resp = self._post("/v1/memory/put_or_merge", payload)
+        return int(resp["id"]), str(resp["action"])
 
     def flag_stale_memories(
         self,
@@ -492,21 +479,29 @@ class HttpMemoryStore:
 def _normalize(row: dict[str, Any] | None) -> dict[str, Any] | None:
     """Convert a service response row to MemoryStore-compatible dict.
 
-    The service returns ``null`` for missing optional fields;
-    Python callers expect ``None`` for nullable columns and ``""`` for
-    ``last_accessed`` (legacy SQLite convention — but we keep it as ``None``
-    here since Python callers should handle both via the ``or ""`` pattern).
+    Normalization rules that match ``dict(zip(_COLUMNS, row))`` from SQLite MemoryStore:
+
+    - ``id``, ``access_count``, ``ttl``: cast to ``int`` (JSON may send as float)
+    - ``tags``: guaranteed to be a string by the Java service (``""`` if no tags);
+      fallback to ``""`` here for defence-in-depth
+    - ``last_accessed``: Java service sends ``""`` when NULL (matching SQLite
+      ``DEFAULT ''``); ensure it's always a string (never ``None`` in the dict)
+    - ``timestamp``: Java service sends UTC second-precision ISO string
+      (``"YYYY-MM-DDTHH:MM:SSZ"``); pass through as-is
     """
     if row is None:
         return None
-    # Normalise: ensure numeric id is an int
+    # Numeric fields
     if "id" in row and row["id"] is not None:
         row["id"] = int(row["id"])
     if "access_count" in row and row["access_count"] is not None:
         row["access_count"] = int(row["access_count"])
     if "ttl" in row and row["ttl"] is not None:
         row["ttl"] = int(row["ttl"])
-    # last_accessed: service returns ISO string or null; MemoryStore returns "" on null.
+    # tags: always a string (Java service guarantees ""; defence-in-depth)
+    if row.get("tags") is None:
+        row["tags"] = ""
+    # last_accessed: always a string; Java sends "" for NULL rows
     if row.get("last_accessed") is None:
         row["last_accessed"] = ""
     return row

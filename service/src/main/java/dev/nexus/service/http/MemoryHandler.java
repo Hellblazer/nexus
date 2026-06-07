@@ -18,6 +18,7 @@ import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.*;
 
 /**
@@ -26,9 +27,10 @@ import java.util.*;
  * <p>Routes (all under {@code /v1/memory/}):
  * <pre>
  *   POST   /v1/memory/put               upsert entry
+ *   POST   /v1/memory/put_or_merge      server-side Jaccard scan + conditional merge or insert
  *   GET    /v1/memory/get               fetch by (project+title) or id=
  *   GET    /v1/memory/resolve           exact-then-prefix title resolution
- *   POST   /v1/memory/search            FTS search
+ *   POST   /v1/memory/search            FTS search (access=track|silent)
  *   GET    /v1/memory/list              list entries (summary, optional project/agent filter)
  *   GET    /v1/memory/projects          distinct projects with prefix
  *   POST   /v1/memory/search_glob       FTS scoped to project glob
@@ -83,6 +85,7 @@ public final class MemoryHandler implements HttpHandler {
         try {
             switch (op) {
                 case "/put"            -> handlePut(exchange, tenant, method);
+                case "/put_or_merge"   -> handlePutOrMerge(exchange, tenant, method);
                 case "/get"            -> handleGet(exchange, tenant, method);
                 case "/resolve"        -> handleResolve(exchange, tenant, method);
                 case "/search"         -> handleSearch(exchange, tenant, method);
@@ -123,13 +126,40 @@ public final class MemoryHandler implements HttpHandler {
         String project = requireString(body, "project");
         String title   = requireString(body, "title");
         String content = requireString(body, "content");
-        String tags    = optString(body, "tags");
-        String session = optString(body, "session");
-        String agent   = optString(body, "agent");
+        // tags must be "" when absent/null — never null in DB (Critical #2)
+        String tags    = optStringOrEmpty(body, "tags");
+        String session = optStringOrNull(body, "session");
+        String agent   = optStringOrNull(body, "agent");
         Integer ttl    = optInt(body, "ttl");
 
         long id = repo.upsert(tenant, project, title, content, tags, session, agent, ttl);
         HttpUtil.send(ex, 200, json(Map.of("id", id)));
+    }
+
+    /**
+     * POST /v1/memory/put_or_merge
+     * Request: {"project","title","content","tags","ttl","agent","session","min_similarity"}
+     * Response 200: {"id":<long>,"action":"inserted"|"merged"}
+     *
+     * <p>Server-side Jaccard scan + conditional merge or upsert in a single transaction.
+     * Eliminates the TOCTOU window of the client-composed path
+     * (get_all → merge_memories). See {@link MemoryRepository#putOrMerge}.
+     */
+    private void handlePutOrMerge(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        String project = requireString(body, "project");
+        String title   = requireString(body, "title");
+        String content = requireString(body, "content");
+        String tags    = optStringOrEmpty(body, "tags");
+        String session = optStringOrNull(body, "session");
+        String agent   = optStringOrNull(body, "agent");
+        Integer ttl    = optInt(body, "ttl");
+        double minSim  = optDouble(body, "min_similarity", 0.5);
+
+        long[] result = repo.putOrMerge(tenant, project, title, content, tags, session, agent, ttl, minSim);
+        String action = result[1] == 1L ? "merged" : "inserted";
+        HttpUtil.send(ex, 200, json(Map.of("id", result[0], "action", action)));
     }
 
     /**
@@ -176,16 +206,22 @@ public final class MemoryHandler implements HttpHandler {
 
     /**
      * POST /v1/memory/search
-     * Request: {"query","project"}  (project optional)
+     * Request: {"query","project"(opt),"access"(opt,"track"|"silent")}
      * Response 200: [entries]
+     *
+     * <p>The {@code access} field mirrors Python's {@code search(access="track"|"silent")}:
+     * {@code "track"} (default) increments access_count on returned rows;
+     * {@code "silent"} skips it (for internal consolidation scans).
      */
     private void handleSearch(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
         String query   = requireString(body, "query");
-        String project = optString(body, "project");
+        String project = optStringOrNull(body, "project");
+        String access  = optStringOrNull(body, "access");
+        boolean trackAccess = !"silent".equals(access);
 
-        var rows = repo.search(tenant, query, project);
+        var rows = repo.search(tenant, query, project, trackAccess);
         HttpUtil.send(ex, 200, json(rows.stream().map(this::recordToMap).toList()));
     }
 
@@ -207,7 +243,10 @@ public final class MemoryHandler implements HttpHandler {
             m.put("project", r.getProject());
             m.put("title", r.getTitle());
             m.put("agent", r.getAgent());
-            m.put("timestamp", r.getTimestamp() != null ? r.getTimestamp().toString() : null);
+            // Use same UTC second-precision format as recordToMap
+            m.put("timestamp", r.getTimestamp() != null
+                ? MemoryRepository.UTC_SECOND.format(r.getTimestamp().withOffsetSameInstant(ZoneOffset.UTC))
+                : null);
             return m;
         }).toList();
         HttpUtil.send(ex, 200, json(summaries));
@@ -223,10 +262,13 @@ public final class MemoryHandler implements HttpHandler {
         String prefix = params.getOrDefault("prefix", "");
 
         var rows = repo.getProjectsWithPrefix(tenant, prefix);
-        var result = rows.stream().map(pair -> Map.of(
-            "project", pair[0] != null ? pair[0] : "",
-            "last_updated", pair[1] != null ? pair[1] : ""
-        )).toList();
+        var result = rows.stream().map(pair -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("project", pair[0] != null ? pair[0] : "");
+            // pair[1] is already formatted by getProjectsWithPrefix via UTC_SECOND
+            m.put("last_updated", pair[1] != null ? pair[1] : "");
+            return m;
+        }).toList();
         HttpUtil.send(ex, 200, json(result));
     }
 
@@ -340,7 +382,24 @@ public final class MemoryHandler implements HttpHandler {
 
     // ── Serialization helpers ─────────────────────────────────────────────────
 
-    /** Convert a MemoryRecord to a Map for JSON serialization. */
+    /**
+     * Convert a MemoryRecord to a Map for JSON serialization.
+     *
+     * <p>Invariants matching Python MemoryStore (dict(zip(_COLUMNS, row))):
+     * <ul>
+     *   <li>{@code tags} is ALWAYS a non-null string (empty string when the DB column
+     *       is NULL). Python callers do {@code entry["tags"]} without a default —
+     *       a missing key would cause KeyError.</li>
+     *   <li>{@code timestamp} and {@code last_accessed} are emitted in
+     *       UTC second-precision format {@code yyyy-MM-dd'T'HH:mm:ss'Z'} to match
+     *       Python's {@code datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")}.
+     *       String compares and the .9 parity harness rely on this format being
+     *       identical on both sides of the seam.</li>
+     *   <li>{@code last_accessed} is serialized as an empty string (not null/omitted)
+     *       when the column is NULL, matching SQLite MemoryStore's
+     *       {@code last_accessed TEXT DEFAULT ''} column default.</li>
+     * </ul>
+     */
     private Map<String, Object> recordToMap(MemoryRecord r) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", r.getId());
@@ -349,12 +408,18 @@ public final class MemoryHandler implements HttpHandler {
         m.put("session", r.getSession());
         m.put("agent", r.getAgent());
         m.put("content", r.getContent());
-        m.put("tags", r.getTags());
-        // Serialize timestamp as ISO-8601 string (matches Python format)
-        m.put("timestamp", r.getTimestamp() != null ? r.getTimestamp().toString() : null);
+        // tags MUST be present as "" when the DB column is NULL (Critical #2)
+        m.put("tags", r.getTags() != null ? r.getTags() : "");
+        // Timestamp: UTC second-precision format matching Python strftime("%Y-%m-%dT%H:%M:%SZ")
+        m.put("timestamp", r.getTimestamp() != null
+            ? MemoryRepository.UTC_SECOND.format(r.getTimestamp().withOffsetSameInstant(ZoneOffset.UTC))
+            : null);
         m.put("ttl", r.getTtl());
         m.put("access_count", r.getAccessCount());
-        m.put("last_accessed", r.getLastAccessed() != null ? r.getLastAccessed().toString() : null);
+        // last_accessed: empty string when null (SQLite default is '' not NULL)
+        m.put("last_accessed", r.getLastAccessed() != null
+            ? MemoryRepository.UTC_SECOND.format(r.getLastAccessed().withOffsetSameInstant(ZoneOffset.UTC))
+            : "");
         return m;
     }
 
@@ -387,11 +452,33 @@ public final class MemoryHandler implements HttpHandler {
         return val.toString();
     }
 
-    private String optString(Map<String, Object> body, String key) {
+    /**
+     * Returns the string value for {@code key}, or {@code null} if absent/blank.
+     * Used for optional nullable fields (agent, session, project filter).
+     */
+    private String optStringOrNull(Map<String, Object> body, String key) {
         Object val = body.get(key);
         if (val == null) return null;
         String s = val.toString();
         return s.isBlank() ? null : s;
+    }
+
+    /**
+     * Returns the string value for {@code key}, or {@code ""} if absent/null/blank.
+     * Used for {@code tags}: Python MemoryStore always stores tags as "" (never null)
+     * and callers do {@code entry["tags"]} without a default.
+     */
+    private String optStringOrEmpty(Map<String, Object> body, String key) {
+        Object val = body.get(key);
+        if (val == null) return "";
+        String s = val.toString();
+        return s;  // preserve empty string as-is; caller decides if blank is meaningful
+    }
+
+    /** @deprecated use {@link #optStringOrNull} or {@link #optStringOrEmpty} */
+    @Deprecated
+    private String optString(Map<String, Object> body, String key) {
+        return optStringOrNull(body, key);
     }
 
     private Integer optInt(Map<String, Object> body, String key) {
@@ -401,6 +488,16 @@ public final class MemoryHandler implements HttpHandler {
         try { return Integer.parseInt(val.toString()); }
         catch (NumberFormatException e) {
             throw new IllegalArgumentException("field '" + key + "' must be an integer");
+        }
+    }
+
+    private double optDouble(Map<String, Object> body, String key, double defaultValue) {
+        Object val = body.get(key);
+        if (val == null) return defaultValue;
+        if (val instanceof Number n) return n.doubleValue();
+        try { return Double.parseDouble(val.toString()); }
+        catch (NumberFormatException e) {
+            throw new IllegalArgumentException("field '" + key + "' must be a number");
         }
     }
 

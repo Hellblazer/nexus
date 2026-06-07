@@ -2,14 +2,25 @@
 """Contract tests for HttpMemoryStore.
 
 Test approach: faithful in-process fake HTTP server implementing the
-/v1/memory/* contract. This verifies:
+/v1/memory/* contract. The fake server mirrors the REAL Java MemoryHandler
+shape faithfully — including:
+  - tags: always "" (never null/missing) — Java stores "" when PUT omits tags
+  - timestamp: UTC second-precision ISO-8601 with trailing Z ("YYYY-MM-DDTHH:MM:SSZ")
+  - last_accessed: "" (not null) when the entry has never been accessed
+  - access_count: incremented by GET/resolve endpoints (server-side tracking)
+
+By being faithful, the fake server can EXPOSE shape divergences in HttpMemoryStore
+rather than hiding them. If a new Java MemoryHandler change produces a different
+shape, the corresponding fake-server update forces a deliberate test review.
+
+This verifies:
   - HttpMemoryStore makes correct HTTP calls (right paths, headers, payloads)
   - Response → Python dict mapping is correct (types, None/empty normalisation)
   - HTTP error codes map to the expected Python exceptions
   - Auth header and X-Nexus-Tenant header are sent on every request
 
 Full cross-language end-to-end (HttpMemoryStore ↔ live Java service ↔ PG)
-is deferred to the .9 MVV bead, per the relay spec.
+is in tests/db/test_http_memory_store_integration.py (marked integration).
 
 The fake server:
   - Runs on a random free port (OS port 0 via socket bind)
@@ -25,11 +36,9 @@ import json
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-import httpx
 import pytest
 
 from nexus.db.t2.http_memory_store import DEFAULT_TENANT, HttpMemoryStore
@@ -48,6 +57,13 @@ def _next_id() -> int:
     return _ID_SEQ[0]
 
 def _make_entry(project: str, title: str, content: str, **kwargs: Any) -> dict[str, Any]:
+    """
+    Create a faithful replica of Java MemoryHandler's recordToMap output:
+    - tags: always "" (never null) — Java stores "" when PUT omits tags field
+    - last_accessed: "" (not null) — matches SQLite DEFAULT '' and Java's
+      empty-string sentinel for never-accessed rows
+    - timestamp: UTC second-precision ISO-8601 ("2026-06-06T20:00:00Z")
+    """
     return {
         "id": _next_id(),
         "project": project,
@@ -55,11 +71,14 @@ def _make_entry(project: str, title: str, content: str, **kwargs: Any) -> dict[s
         "session": kwargs.get("session"),
         "agent": kwargs.get("agent"),
         "content": content,
+        # Java guarantees tags is "" not null/omitted (Critical #2 fix)
         "tags": kwargs.get("tags", ""),
+        # UTC second-precision format matching Python strftime("%Y-%m-%dT%H:%M:%SZ")
         "timestamp": "2026-06-06T20:00:00Z",
         "ttl": kwargs.get("ttl", 30),
         "access_count": 0,
-        "last_accessed": None,
+        # Java sends "" for never-accessed rows (not null) — matches SQLite DEFAULT ''
+        "last_accessed": "",
     }
 
 
@@ -135,6 +154,65 @@ class _FakeMemoryHandler(BaseHTTPRequestHandler):
                     _STORE[project][title] = entry
                     self._send(200, {"id": entry["id"]})
 
+        elif op == "/put_or_merge":
+            # Server-side Jaccard + conditional merge or insert
+            project = body["project"]
+            title = body["title"]
+            content = body["content"]
+            tags = body.get("tags", "")
+            min_sim = float(body.get("min_similarity", 0.5))
+            stopwords = {"the","a","an","in","of","for","to","and","or","is","are","was",
+                         "it","that","this","with","on","at","by","from","as","be","not"}
+
+            def _words(text: str) -> set:
+                return {w.lower() for w in text.split() if len(w) > 2 and w.lower() not in stopwords}
+
+            new_words = _words(content)
+            with _STORE_LOCK:
+                best_id = None
+                best_jaccard = 0.0
+                best_content = ""
+                if new_words and project in _STORE:
+                    for t, entry in _STORE[project].items():
+                        if t == title:
+                            continue
+                        ew = _words(entry.get("content", ""))
+                        if not ew:
+                            continue
+                        j = len(new_words & ew) / len(new_words | ew)
+                        if j > best_jaccard:
+                            best_jaccard = j
+                            best_id = entry["id"]
+                            best_content = entry.get("content", "")
+
+                if best_id is not None and best_jaccard >= min_sim:
+                    # Merge: update the best entry
+                    for t, entry in _STORE[project].items():
+                        if entry["id"] == best_id:
+                            merged = (f"{best_content}\n\n<!-- merged from {title!r} @ 2026-06-06T20:00:00Z "
+                                      f"(jaccard={best_jaccard:.2f}) -->\n{content}")
+                            entry["content"] = merged
+                            entry["timestamp"] = "2026-06-06T20:00:01Z"
+                            break
+                    self._send(200, {"id": best_id, "action": "merged"})
+                else:
+                    # Insert/upsert
+                    if project not in _STORE:
+                        _STORE[project] = {}
+                    existing = _STORE[project].get(title)
+                    if existing:
+                        existing["content"] = content
+                        existing["tags"] = tags
+                        self._send(200, {"id": existing["id"], "action": "inserted"})
+                    else:
+                        entry = _make_entry(project, title, content,
+                                           tags=tags,
+                                           ttl=body.get("ttl"),
+                                           agent=body.get("agent"),
+                                           session=body.get("session"))
+                        _STORE[project][title] = entry
+                        self._send(200, {"id": entry["id"], "action": "inserted"})
+
         elif op == "/search":
             query = body.get("query", "").lower()
             project_filter = body.get("project")
@@ -145,7 +223,7 @@ class _FakeMemoryHandler(BaseHTTPRequestHandler):
                         continue
                     for entry in entries.values():
                         if query in entry["content"].lower() or query in entry["title"].lower():
-                            results.append(entry)
+                            results.append(dict(entry))
             self._send(200, results)
 
         elif op == "/search_glob":
@@ -158,7 +236,7 @@ class _FakeMemoryHandler(BaseHTTPRequestHandler):
                         continue
                     for entry in entries.values():
                         if query in entry["content"].lower():
-                            results.append(entry)
+                            results.append(dict(entry))
             self._send(200, results)
 
         elif op == "/search_by_tag":
@@ -171,7 +249,7 @@ class _FakeMemoryHandler(BaseHTTPRequestHandler):
                         tags = entry.get("tags", "")
                         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
                         if query in entry["content"].lower() and tag in tag_list:
-                            results.append(entry)
+                            results.append(dict(entry))
             self._send(200, results)
 
         elif op == "/expire":
@@ -212,7 +290,9 @@ class _FakeMemoryHandler(BaseHTTPRequestHandler):
                     for proj, entries in _STORE.items():
                         for entry in entries.values():
                             if entry["id"] == search_id:
-                                self._send(200, entry)
+                                # Access tracking: increment on GET (mirrors Java MemoryRepository.findById)
+                                entry["access_count"] += 1
+                                self._send(200, dict(entry))
                                 return
                 self._send(404, {"error": "not found"})
             else:
@@ -220,10 +300,12 @@ class _FakeMemoryHandler(BaseHTTPRequestHandler):
                 title = params.get("title", "")
                 with _STORE_LOCK:
                     entry = _STORE.get(project, {}).get(title)
-                if entry:
-                    self._send(200, entry)
-                else:
-                    self._send(404, {"error": "not found"})
+                    if entry:
+                        # Access tracking: increment on GET (mirrors Java MemoryRepository.findByTitle)
+                        entry["access_count"] += 1
+                        self._send(200, dict(entry))
+                    else:
+                        self._send(404, {"error": "not found"})
 
         elif op == "/resolve":
             project = params.get("project", "")
@@ -232,16 +314,20 @@ class _FakeMemoryHandler(BaseHTTPRequestHandler):
                 proj_entries = _STORE.get(project, {})
                 exact = proj_entries.get(title)
                 if exact:
-                    self._send(200, {"entry": exact, "candidates": []})
+                    # Access tracking for exact match (mirrors Java resolveTitle)
+                    exact["access_count"] += 1
+                    self._send(200, {"entry": dict(exact), "candidates": []})
                     return
                 # Prefix match
                 candidates = [
                     e for t, e in proj_entries.items() if t.startswith(title)
                 ]
                 if len(candidates) == 1:
-                    self._send(200, {"entry": candidates[0], "candidates": []})
+                    # Access tracking for unique prefix match
+                    candidates[0]["access_count"] += 1
+                    self._send(200, {"entry": dict(candidates[0]), "candidates": []})
                 else:
-                    self._send(200, {"entry": None, "candidates": candidates})
+                    self._send(200, {"entry": None, "candidates": [dict(c) for c in candidates]})
 
         elif op == "/list":
             project = params.get("project")
@@ -278,13 +364,13 @@ class _FakeMemoryHandler(BaseHTTPRequestHandler):
         elif op == "/all":
             project = params.get("project", "")
             with _STORE_LOCK:
-                entries = list(_STORE.get(project, {}).values())
+                entries = [dict(e) for e in _STORE.get(project, {}).values()]
             self._send(200, entries)
 
         elif op == "/flag_stale":
             project = params.get("project", "")
             with _STORE_LOCK:
-                entries = list(_STORE.get(project, {}).values())
+                entries = [dict(e) for e in _STORE.get(project, {}).values()]
             # Stub: return all entries (idle_days=0 means everything stale)
             self._send(200, entries)
 
@@ -555,18 +641,50 @@ class TestPutOrMerge:
 
 
 class TestNormalization:
-    def test_last_accessed_none_normalised_to_empty_string(self, store: HttpMemoryStore) -> None:
+    def test_last_accessed_empty_string_when_never_accessed_before_get(self, store: HttpMemoryStore) -> None:
+        """Before first GET, last_accessed is "" (Java server sends "" for NULL rows)."""
+        # Directly check via get_all which doesn't track access
         store.put("norm", "n1", "content", ttl=30)
-        entry = store.get(project="norm", title="n1")
-        assert entry is not None
-        # last_accessed should be "" (normalised from None)
-        assert entry["last_accessed"] == ""
+        entries = store.get_all("norm")
+        assert len(entries) == 1
+        # last_accessed should be "" (never accessed via get/resolve, just inserted)
+        assert entries[0]["last_accessed"] == ""
 
     def test_id_is_int(self, store: HttpMemoryStore) -> None:
         row_id = store.put("norm", "n2", "content", ttl=30)
         entry = store.get(id=row_id)
         assert entry is not None
         assert isinstance(entry["id"], int)
+
+    def test_tags_always_present_when_not_specified(self, store: HttpMemoryStore) -> None:
+        """Critical #2: tags must always be present as '' when not specified at insert time."""
+        store.put("norm", "n3", "content with no tags", ttl=30)
+        entry = store.get(project="norm", title="n3")
+        assert entry is not None
+        # tags key must be present and be an empty string (never None or missing)
+        assert "tags" in entry, "tags key must always be present in entry dict"
+        assert entry["tags"] == ""
+
+    def test_access_count_increments_on_get(self, store: HttpMemoryStore) -> None:
+        """Significant #5: access_count must increment on each GET call."""
+        store.put("norm", "n4", "access tracking content", ttl=30)
+        e1 = store.get(project="norm", title="n4")
+        e2 = store.get(project="norm", title="n4")
+        assert e1 is not None and e2 is not None
+        assert e2["access_count"] > e1["access_count"], (
+            "access_count must increment on each GET"
+        )
+
+    def test_timestamp_format_utc_second_precision(self, store: HttpMemoryStore) -> None:
+        """Significant #4: timestamp must be UTC second-precision ISO with trailing Z."""
+        import re
+        store.put("norm", "n5", "timestamp format test", ttl=30)
+        entry = store.get(project="norm", title="n5")
+        assert entry is not None
+        ts = entry["timestamp"]
+        assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts), (
+            f"timestamp must match yyyy-MM-dd'T'HH:mm:ss'Z', got: {ts!r}"
+        )
 
 
 class TestAuthAndConfig:
