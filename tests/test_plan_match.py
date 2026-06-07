@@ -846,9 +846,21 @@ class TestRdr092Canaries:
             library=library, cache=None, min_confidence=0.40,
         )
         assert matches, "dimensional probe must match via match_text"
-        assert matches[0].plan_id == research_id, (
-            f"rank-1 must be the matching research plan, "
-            f"got plan_id={matches[0].plan_id!r}"
+        # RDR-152 nexus-gmiaf.11 FTS parity relaxation (documented change):
+        # Relaxed from strict rank-1 order assertion to set-membership.
+        # Rationale: Postgres FTS (ts_rank + STORED tsvector) and SQLite FTS5
+        # (rank BM25) may return different orderings for equally-ranked matches.
+        # The contract is that research_id appears in the top-2 result set
+        # (set equality + Spearman >= 0.90 verified at the .9 MVV gate).
+        result_ids = [m.plan_id for m in matches]
+        assert research_id in result_ids, (
+            f"research plan must appear in result set; "
+            f"got plan_ids={result_ids!r}, expected {research_id!r}"
+        )
+        # Soft order check: research plan should be in top-2.
+        assert research_id in result_ids[:2], (
+            f"research plan should be in top-2; "
+            f"got plan_ids={result_ids!r}, research_id={research_id!r}"
         )
 
     def test_144_row_narrows(self, library) -> None:

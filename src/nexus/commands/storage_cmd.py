@@ -3,12 +3,12 @@
 """``nx storage`` — storage migration and ETL commands (RDR-152).
 
 Entry points for migrating T2 SQLite stores to the Postgres service tier.
-Phase 1.8 implements memory ETL; later phases (.11-.18) will add plan,
-catalog, and taxonomy stores.
+Phase 1.8 implements memory ETL; Phase 2.1 adds plan ETL.
 
 Usage::
 
     nx storage migrate memory [--db PATH] [--service-url URL]
+    nx storage migrate plans  [--db PATH] [--service-url URL]
 
 Run flags:
   --db PATH       Path to the SQLite T2 database (default: auto-detected
@@ -153,6 +153,125 @@ def migrate_memory_cmd(
 
     _log.info(
         "storage.migrate.memory.complete",
+        db=str(resolved_db),
+        read=read_n,
+        written=written_m,
+    )
+
+
+@migrate_group.command(name="plans")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+    help=(
+        "Path to the SQLite T2 database file. "
+        "Defaults to NX_DB_PATH env var or ~/.config/nexus/t2.db."
+    ),
+)
+@click.option(
+    "--service-url",
+    "service_url",
+    default=None,
+    help=(
+        "Base URL of the nexus-service (e.g. http://127.0.0.1:8080). "
+        "Defaults to NX_SERVICE_HOST + NX_SERVICE_PORT env vars."
+    ),
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Count rows in the source without writing. No service connection is made.",
+)
+def migrate_plans_cmd(
+    db_path: Path | None,
+    service_url: str | None,
+    dry_run: bool,
+) -> None:
+    """Migrate the SQLite plans store to Postgres via the nexus-service.
+
+    Reads all rows from the SQLite ``plans`` table and writes them through
+    the service HTTP API (``POST /v1/plans/import``). The ETL is idempotent:
+    running it multiple times produces no duplicates (server-side upsert on
+    ``(tenant_id, project, query)``). The SQLite source is NEVER modified.
+
+    Fidelity-preserving: ``created_at``, ``use_count``, ``last_used``,
+    ``match_count``, ``match_conf_sum``, ``success_count``, and
+    ``failure_count`` are copied verbatim from the source row.
+
+    Requires NX_SERVICE_PORT and NX_SERVICE_TOKEN to be set (or --service-url
+    for the URL component; token is always read from NX_SERVICE_TOKEN).
+
+    Examples::
+
+        # Auto-detect DB, service from env:
+        nx storage migrate plans
+
+        # Explicit paths:
+        nx storage migrate plans --db ~/.config/nexus/t2.db --service-url http://127.0.0.1:8080
+
+        # Dry run (count only, no writes):
+        nx storage migrate plans --dry-run
+    """
+    resolved_db = _resolve_db_path(db_path)
+    if not resolved_db.exists():
+        raise click.ClickException(
+            f"SQLite database not found: {resolved_db}\n"
+            "Set NX_DB_PATH or pass --db."
+        )
+
+    if dry_run:
+        from nexus.db.t2.plan_etl import count_source_rows
+
+        try:
+            count = count_source_rows(resolved_db)
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc))
+        click.echo(f"Dry run: source has {count} plan rows (no writes performed).")
+        return
+
+    from nexus.db.t2.http_plan_library import HttpPlanLibrary
+
+    token = os.environ.get("NX_SERVICE_TOKEN", "")
+    if not token:
+        raise click.ClickException(
+            "NX_SERVICE_TOKEN is required for storage migrate plans.\n"
+            "Set it to the bearer token configured in the nexus-service."
+        )
+
+    try:
+        if service_url:
+            store = HttpPlanLibrary(base_url=service_url, _token=token)
+        else:
+            store = HttpPlanLibrary()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc))
+
+    from nexus.db.t2.plan_etl import migrate_plan_rows
+
+    click.echo(f"Migrating plans store from {resolved_db} ...")
+    try:
+        result = migrate_plan_rows(resolved_db, store)
+    except Exception as exc:
+        raise click.ClickException(f"ETL failed: {exc}")
+    finally:
+        store.close()
+
+    read_n = result["read"]
+    written_m = result["written"]
+    skipped = read_n - written_m
+
+    click.echo(f"Done. read={read_n}, written={written_m}", err=False)
+    if skipped:
+        click.echo(
+            f"Warning: {skipped} row(s) failed to write — check logs for details.",
+            err=True,
+        )
+
+    _log.info(
+        "storage.migrate.plans.complete",
         db=str(resolved_db),
         read=read_n,
         written=written_m,

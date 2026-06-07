@@ -5,7 +5,9 @@ package dev.nexus.service.jooq;
 
 
 import dev.nexus.service.jooq.tables.Memory;
+import dev.nexus.service.jooq.tables.Plans;
 import dev.nexus.service.jooq.tables.records.MemoryRecord;
+import dev.nexus.service.jooq.tables.records.PlansRecord;
 
 import org.jooq.TableField;
 import org.jooq.UniqueKey;
@@ -26,4 +28,6 @@ public class Keys {
 
     public static final UniqueKey<MemoryRecord> MEMORY_PK = Internal.createUniqueKey(Memory.MEMORY, DSL.name("memory_pk"), new TableField[] { Memory.MEMORY.ID }, true);
     public static final UniqueKey<MemoryRecord> MEMORY_TENANT_PROJECT_TITLE_UQ = Internal.createUniqueKey(Memory.MEMORY, DSL.name("memory_tenant_project_title_uq"), new TableField[] { Memory.MEMORY.TENANT_ID, Memory.MEMORY.PROJECT, Memory.MEMORY.TITLE }, true);
+    public static final UniqueKey<PlansRecord> PLANS_PK = Internal.createUniqueKey(Plans.PLANS, DSL.name("plans_pk"), new TableField[] { Plans.PLANS.ID }, true);
+    public static final UniqueKey<PlansRecord> PLANS_TENANT_PROJECT_QUERY_UQ = Internal.createUniqueKey(Plans.PLANS, DSL.name("plans_tenant_project_query_uq"), new TableField[] { Plans.PLANS.TENANT_ID, Plans.PLANS.PROJECT, Plans.PLANS.QUERY }, true);
 }

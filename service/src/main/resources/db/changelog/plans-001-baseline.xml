@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-152 bead nexus-gmiaf.11 — plans store baseline changelog.
+
+    Creates the nexus.plans table that mirrors the SQLite plan_library.py schema
+    1:1, adds tenant_id for RLS, and defines:
+      - ENABLE + FORCE ROW LEVEL SECURITY
+      - policy: USING/WITH CHECK (tenant_id = current_setting('nexus.tenant', true))
+      - generated STORED tsvector column per FTS parity contract rev 2 (nexus-gmiaf.2):
+          match_text 'english' (prose — stemmed, stopwords)
+          tags       'simple'  (CSV identifier — no stemming, no stopwords)
+          project    'simple'  (identifier — no stemming, no stopwords)
+      - GIN index on the tsvector column
+
+    Column mapping (SQLite plans -> Postgres):
+      id              INTEGER PRIMARY KEY  -> BIGSERIAL  (auto-increment bigint)
+      project         TEXT NOT NULL        -> TEXT NOT NULL DEFAULT ''
+      query           TEXT NOT NULL        -> TEXT NOT NULL
+      plan_json       TEXT NOT NULL        -> TEXT NOT NULL
+      outcome         TEXT DEFAULT 'success' -> TEXT DEFAULT 'success'
+      tags            TEXT DEFAULT ''      -> TEXT NOT NULL DEFAULT ''
+      created_at      TEXT NOT NULL        -> TIMESTAMPTZ NOT NULL
+      ttl             INTEGER              -> INTEGER (nullable; days)
+      name            TEXT                 -> TEXT (nullable)
+      verb            TEXT                 -> TEXT (nullable)
+      scope           TEXT                 -> TEXT (nullable)
+      dimensions      TEXT                 -> TEXT (nullable; JSON string)
+      default_bindings TEXT                -> TEXT (nullable; JSON string)
+      parent_dims     TEXT                 -> TEXT (nullable; JSON string)
+      use_count       INTEGER NOT NULL DEFAULT 0 -> INTEGER NOT NULL DEFAULT 0
+      last_used       TEXT                 -> TIMESTAMPTZ (nullable)
+      match_count     INTEGER NOT NULL DEFAULT 0 -> INTEGER NOT NULL DEFAULT 0
+      match_conf_sum  REAL NOT NULL DEFAULT 0.0 -> DOUBLE PRECISION NOT NULL DEFAULT 0.0
+      success_count   INTEGER NOT NULL DEFAULT 0 -> INTEGER NOT NULL DEFAULT 0
+      failure_count   INTEGER NOT NULL DEFAULT 0 -> INTEGER NOT NULL DEFAULT 0
+      scope_tags      TEXT NOT NULL DEFAULT ''  -> TEXT NOT NULL DEFAULT ''
+      match_text      TEXT NOT NULL DEFAULT ''  -> TEXT NOT NULL DEFAULT ''
+      disabled_at     TEXT (nullable)      -> TIMESTAMPTZ (nullable; NULL = active)
+
+    Plus:
+      tenant_id       TEXT NOT NULL        -> RLS discriminator (no SQLite equivalent)
+
+    Uniqueness: (project, dimensions) in SQLite becomes (tenant_id, project, dimensions)
+      so the same (project, dimensions) key can exist per tenant.  The BIGSERIAL id
+      is still an independent surrogate PK so foreign keys from future tables remain stable.
+      NULL dimensions are excluded from the unique partial index (mirroring SQLite behaviour).
+
+    Natural key for general upsert: (tenant_id, project, query) — mirroring memory's
+      (tenant_id, project, title). Plans with the same query in a project are deduplicated.
+
+    ON CONFLICT key for service / ETL upserts:
+      ALWAYS use ON CONFLICT (tenant_id, project, query) — NOT (project, query) alone.
+      Using the two-column form bypasses tenant_id and would allow cross-tenant collisions.
+
+    FTS parity contract (docs/rdr/rdr-152-fts-parity-contract.md Store 2):
+      match_text -> to_tsvector('english', ...) — prose column, stemmed
+      tags       -> to_tsvector('simple',  ...) — CSV identifier, no stemming
+      project    -> to_tsvector('simple',  ...) — identifier, no stemming
+      plainto_tsquery config MUST match the indexed column config.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: plans table + constraints + indexes ──────────────────── -->
+    <changeSet id="plans-001-1" author="nexus-gmiaf.11">
+        <comment>Create plans table mirroring SQLite plan_library schema with tenant_id</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.plans (
+    id              BIGSERIAL        NOT NULL,
+    tenant_id       TEXT             NOT NULL,
+    project         TEXT             NOT NULL DEFAULT '',
+    query           TEXT             NOT NULL,
+    plan_json       TEXT             NOT NULL,
+    outcome         TEXT                      DEFAULT 'success',
+    tags            TEXT             NOT NULL DEFAULT '',
+    created_at      TIMESTAMPTZ      NOT NULL,
+    ttl             INTEGER,
+    name            TEXT,
+    verb            TEXT,
+    scope           TEXT,
+    dimensions      TEXT,
+    default_bindings TEXT,
+    parent_dims     TEXT,
+    use_count       INTEGER          NOT NULL DEFAULT 0,
+    last_used       TIMESTAMPTZ,
+    match_count     INTEGER          NOT NULL DEFAULT 0,
+    match_conf_sum  DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    success_count   INTEGER          NOT NULL DEFAULT 0,
+    failure_count   INTEGER          NOT NULL DEFAULT 0,
+    scope_tags      TEXT             NOT NULL DEFAULT '',
+    match_text      TEXT             NOT NULL DEFAULT '',
+    disabled_at     TIMESTAMPTZ,
+    CONSTRAINT plans_pk PRIMARY KEY (id),
+    -- General upsert key: (tenant_id, project, query) — same role as memory's (tenant_id, project, title)
+    CONSTRAINT plans_tenant_project_query_uq UNIQUE (tenant_id, project, query)
+);
+
+-- Partial unique index mirroring SQLite plan_library's UNIQUE (project, dimensions)
+-- NULL dimensions excluded (partial index WHERE dimensions IS NOT NULL) to match
+-- SQLite's NULL != NULL behaviour for partial unique checks.
+CREATE UNIQUE INDEX idx_plans_tenant_dimensions ON nexus.plans (tenant_id, project, dimensions)
+    WHERE dimensions IS NOT NULL;
+
+-- Supporting indexes for common query patterns
+CREATE INDEX idx_plans_tenant_project       ON nexus.plans (tenant_id, project);
+CREATE INDEX idx_plans_tenant_verb          ON nexus.plans (tenant_id, verb);
+CREATE INDEX idx_plans_tenant_outcome       ON nexus.plans (tenant_id, outcome);
+CREATE INDEX idx_plans_tenant_created_at    ON nexus.plans (tenant_id, created_at DESC);
+CREATE INDEX idx_plans_tenant_disabled_at   ON nexus.plans (tenant_id, disabled_at);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.plans CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: RLS enable + force + policy ──────────────────────────── -->
+    <changeSet id="plans-001-2" author="nexus-gmiaf.11">
+        <comment>Enable and force RLS; create tenant isolation policy</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.plans ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.plans FORCE ROW LEVEL SECURITY;
+
+-- cmd=ALL: covers SELECT, INSERT, UPDATE, DELETE in one policy.
+-- USING predicate: filters rows on reads (SELECT / UPDATE source / DELETE source).
+-- WITH CHECK predicate: validates rows on writes (INSERT / UPDATE target).
+-- current_setting('nexus.tenant', true): missing_ok=true so unset GUC returns NULL
+--   rather than raising an error. NULL != any tenant_id → zero rows match.
+--   This is the fail-closed default: an unstamped connection sees nothing.
+CREATE POLICY tenant_isolation ON nexus.plans
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.plans;
+            ALTER TABLE nexus.plans NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.plans DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: FTS tsvector generated column + GIN index ───────────── -->
+    <changeSet id="plans-001-3" author="nexus-gmiaf.11">
+        <comment>Add FTS generated tsvector column (parity contract rev 2) and GIN index</comment>
+        <sql splitStatements="true" stripComments="false">
+-- Generated STORED column: auto-maintained on INSERT/UPDATE, no trigger needed.
+-- Weights per parity contract (docs/rdr/rdr-152-fts-parity-contract.md rev 2, Store 2):
+--   match_text 'A'  config='english'  (prose, stemmed, stopwords — hybrid dimensional form)
+--   tags       'B'  config='simple'   (identifier/CSV, no stemming, no stopwords)
+--   project    'C'  config='simple'   (identifier, no stemming, no stopwords)
+-- COALESCE: tags/project are default '' but defensive coalesce matches memory baseline pattern.
+ALTER TABLE nexus.plans
+    ADD COLUMN fts_vector TSVECTOR GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', coalesce(match_text, '')), 'A') ||
+        setweight(to_tsvector('simple',  coalesce(tags,       '')), 'B') ||
+        setweight(to_tsvector('simple',  coalesce(project,    '')), 'C')
+    ) STORED;
+
+-- GIN index: accelerates @@ operator (plainto_tsquery).
+CREATE INDEX idx_plans_fts ON nexus.plans USING GIN (fts_vector);
+        </sql>
+        <rollback>
+            DROP INDEX IF EXISTS nexus.idx_plans_fts;
+            ALTER TABLE nexus.plans DROP COLUMN IF EXISTS fts_vector;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: service role grants ─────────────────────────────────── -->
+    <changeSet id="plans-001-4" author="nexus-gmiaf.11">
+        <comment>
+            Grant table privileges to nexus_svc role.
+            The nexus_svc LOGIN role is created outside Liquibase (DBA bootstrap
+            or test @BeforeAll) so Liquibase does not require CREATEROLE privilege.
+            This changeset is idempotent: IF EXISTS guards on the conditional
+            GRANT make it safe to run even if the role does not exist yet.
+        </comment>
+        <sql splitStatements="false">
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.plans TO nexus_svc';
+        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.plans_id_seq TO nexus_svc';
+        RAISE NOTICE 'Granted nexus.plans privileges to nexus_svc';
+    ELSE
+        RAISE NOTICE 'nexus_svc role not found; skipping grants (create role before first run)';
+    END IF;
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- Grants are not rolled back; role removal is a DBA operation. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

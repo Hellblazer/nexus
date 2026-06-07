@@ -14,9 +14,11 @@
     <!-- Store 1: memory (bead nexus-gmiaf.5) -->
     <include file="db/changelog/memory-001-baseline.xml"/>
 
+    <!-- Store 2: plans (bead nexus-gmiaf.11) -->
+    <include file="db/changelog/plans-001-baseline.xml"/>
+
     <!--
-        Future includes (beads .11-.18):
-        <include file="db/changelog/plans-001-baseline.xml"/>
+        Future includes (beads .12-.18):
         <include file="db/changelog/catalog-001-baseline.xml"/>
     -->
 

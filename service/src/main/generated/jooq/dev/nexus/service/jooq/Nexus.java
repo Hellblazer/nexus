@@ -5,6 +5,7 @@ package dev.nexus.service.jooq;
 
 
 import dev.nexus.service.jooq.tables.Memory;
+import dev.nexus.service.jooq.tables.Plans;
 
 import java.util.Arrays;
 import java.util.List;
@@ -34,6 +35,11 @@ public class Nexus extends SchemaImpl {
     public final Memory MEMORY = Memory.MEMORY;
 
     /**
+     * The table <code>nexus.plans</code>.
+     */
+    public final Plans PLANS = Plans.PLANS;
+
+    /**
      * No further instances allowed
      */
     private Nexus() {
@@ -49,7 +55,8 @@ public class Nexus extends SchemaImpl {
     @Override
     public final List<Table<?>> getTables() {
         return Arrays.asList(
-            Memory.MEMORY
+            Memory.MEMORY,
+            Plans.PLANS
         );
     }
 }
