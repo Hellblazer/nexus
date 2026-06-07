@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-152 bead nexus-gmiaf.5 — memory store baseline changelog.
+
+    Creates the nexus schema and memory table that mirrors the SQLite
+    memory_store.py schema 1:1, adds tenant_id for RLS, and defines:
+      - ENABLE + FORCE ROW LEVEL SECURITY
+      - policy: USING/WITH CHECK (tenant_id = current_setting('nexus.tenant', true))
+      - generated STORED tsvector column (title 'A' english, content 'B' english,
+        tags 'C' simple) per FTS parity contract rev 2 (nexus-gmiaf.2)
+      - GIN index on the tsvector column
+
+    Schema choice: nexus
+      All nexus service tables live in the nexus schema so the .6 jOOQ
+      codegen can target a single schema (generator/database/schema=nexus)
+      without listing individual tables.  The search_path for the service
+      role is set to "nexus, public" in the bootstrap step below.
+
+    Service role bootstrap:
+      The `nexus_svc` role must exist before Liquibase runs.  In production
+      it is created once by the DBA / infra bootstrap (not by Liquibase, so
+      that Liquibase does not need CREATEROLE privilege).  In the test suite
+      the EmbeddedPostgres @BeforeAll creates it via superuser DDL, mirroring
+      the .3 skeleton test pattern.
+
+    Column mapping (SQLite -> Postgres):
+      id            INTEGER PRIMARY KEY     -> BIGSERIAL  (auto-increment bigint)
+      project       TEXT NOT NULL           -> TEXT NOT NULL
+      title         TEXT NOT NULL           -> TEXT NOT NULL
+      session       TEXT                    -> TEXT (nullable)
+      agent         TEXT                    -> TEXT (nullable)
+      content       TEXT NOT NULL           -> TEXT NOT NULL
+      tags          TEXT                    -> TEXT (nullable; CSV comma-separated)
+      timestamp     TEXT NOT NULL           -> TIMESTAMPTZ NOT NULL
+                                              (SQLite stores ISO-8601 strings;
+                                               PG stores real timezone-aware ts)
+      ttl           INTEGER                 -> INTEGER (nullable; days)
+      access_count  INTEGER DEFAULT 0       -> INTEGER NOT NULL DEFAULT 0
+      last_accessed TEXT DEFAULT ''         -> TIMESTAMPTZ (nullable; NULL replaces empty string)
+
+    Plus:
+      tenant_id     TEXT NOT NULL           -> RLS discriminator (no SQLite equivalent)
+
+    Uniqueness: (project, title) in SQLite becomes (tenant_id, project, title)
+      so the same (project, title) key can exist per tenant.  The BIGSERIAL id
+      is still an independent surrogate PK so foreign keys from future tables
+      remain stable.
+
+    ON CONFLICT key for service / ETL upserts:
+      ALWAYS use ON CONFLICT (tenant_id, project, title) — NOT (project, title).
+      Using the two-column form bypasses tenant_id and would allow cross-tenant
+      collisions, silently overwriting another tenant's row.
+      ETL (.8): INSERT ... ON CONFLICT (tenant_id, project, title) DO UPDATE SET ...
+      Python client (.7): same form for any upsert operation.
+
+    DEFAULT_TENANT sentinel:
+      Pre-multi-tenant SQLite data migrated by bead .8 uses tenant_id = 'default'
+      (TenantConstants.DEFAULT_TENANT).  The .7 Python client MUST supply this
+      same value in X-Nexus-Tenant when reading migrated data or RLS returns
+      zero rows (fail-closed).  Revisit at Phase 5 bead .32.
+      T2 decision: nexus_rdr/152-default-tenant.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: nexus schema ─────────────────────────────────────────── -->
+    <changeSet id="memory-001-1" author="nexus-gmiaf.5">
+        <comment>Create nexus schema</comment>
+        <sql>CREATE SCHEMA IF NOT EXISTS nexus</sql>
+        <rollback>DROP SCHEMA IF EXISTS nexus CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: memory table + constraints + indexes ─────────────────── -->
+    <changeSet id="memory-001-2" author="nexus-gmiaf.5">
+        <comment>Create memory table mirroring SQLite memory_store schema with tenant_id</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.memory (
+    id            BIGSERIAL    NOT NULL,
+    tenant_id     TEXT         NOT NULL,
+    project       TEXT         NOT NULL,
+    title         TEXT         NOT NULL,
+    session       TEXT,
+    agent         TEXT,
+    content       TEXT         NOT NULL,
+    tags          TEXT,
+    timestamp     TIMESTAMPTZ  NOT NULL,
+    ttl           INTEGER,
+    access_count  INTEGER      NOT NULL DEFAULT 0,
+    last_accessed TIMESTAMPTZ,
+    CONSTRAINT memory_pk PRIMARY KEY (id),
+    -- Upsert MUST use ON CONFLICT (tenant_id, project, title) — never (project, title) alone.
+    CONSTRAINT memory_tenant_project_title_uq UNIQUE (tenant_id, project, title)
+);
+
+-- Supporting indexes (mirror SQLite idx_memory_* indexes, tenant-scoped)
+CREATE INDEX idx_memory_tenant_project       ON nexus.memory (tenant_id, project);
+CREATE INDEX idx_memory_tenant_agent         ON nexus.memory (tenant_id, agent);
+CREATE INDEX idx_memory_tenant_timestamp     ON nexus.memory (tenant_id, timestamp DESC);
+CREATE INDEX idx_memory_tenant_ttl_timestamp ON nexus.memory (tenant_id, ttl, timestamp);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.memory CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: RLS enable + force + policy ──────────────────────────── -->
+    <changeSet id="memory-001-3" author="nexus-gmiaf.5">
+        <comment>Enable and force RLS; create tenant isolation policy</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.memory ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.memory FORCE ROW LEVEL SECURITY;
+
+-- cmd=ALL: covers SELECT, INSERT, UPDATE, DELETE in one policy.
+-- USING predicate: filters rows on reads (SELECT / UPDATE source / DELETE source).
+-- WITH CHECK predicate: validates rows on writes (INSERT / UPDATE target).
+-- current_setting('nexus.tenant', true): missing_ok=true so unset GUC returns NULL
+--   rather than raising an error. NULL != any tenant_id → zero rows match.
+--   This is the fail-closed default: an unstamped connection sees nothing.
+CREATE POLICY tenant_isolation ON nexus.memory
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.memory;
+            ALTER TABLE nexus.memory NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.memory DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: FTS tsvector generated column + GIN index ───────────── -->
+    <changeSet id="memory-001-4" author="nexus-gmiaf.5">
+        <comment>Add FTS generated tsvector column (parity contract rev 2) and GIN index</comment>
+        <sql splitStatements="true" stripComments="false">
+-- Generated STORED column: auto-maintained on INSERT/UPDATE, no trigger needed.
+-- Weights per parity contract (docs/rdr/rdr-152-fts-parity-contract.md rev 2):
+--   title   'A'  config='english'  (prose, stemmed, stopwords)
+--   content 'B'  config='english'  (prose, stemmed, stopwords)
+--   tags    'C'  config='simple'   (identifier/CSV, no stemming, no stopwords)
+-- COALESCE: tags is nullable; tsvector on NULL returns NULL, disrupting the ||.
+ALTER TABLE nexus.memory
+    ADD COLUMN fts_vector TSVECTOR GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', coalesce(title,   '')), 'A') ||
+        setweight(to_tsvector('english', coalesce(content, '')), 'B') ||
+        setweight(to_tsvector('simple',  coalesce(tags,    '')), 'C')
+    ) STORED;
+
+-- GIN index: accelerates @@ operator (plainto_tsquery / websearch_to_tsquery).
+CREATE INDEX idx_memory_fts ON nexus.memory USING GIN (fts_vector);
+        </sql>
+        <rollback>
+            DROP INDEX IF EXISTS nexus.idx_memory_fts;
+            ALTER TABLE nexus.memory DROP COLUMN IF EXISTS fts_vector;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 5: service role grants ─────────────────────────────────── -->
+    <changeSet id="memory-001-5" author="nexus-gmiaf.5">
+        <comment>
+            Grant table privileges to nexus_svc role.
+            The nexus_svc LOGIN role is created outside Liquibase (DBA bootstrap
+            or test @BeforeAll) so Liquibase does not require CREATEROLE privilege.
+            This changeset is idempotent: IF EXISTS guards on the conditional
+            GRANT make it safe to run even if the role does not exist yet, in
+            which case the DO block logs a notice and skips gracefully.
+            The test overrides this with svc_memory_test for hermetic isolation.
+        </comment>
+        <sql splitStatements="false">
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
+        EXECUTE 'GRANT USAGE ON SCHEMA nexus TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.memory TO nexus_svc';
+        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.memory_id_seq TO nexus_svc';
+        EXECUTE 'ALTER ROLE nexus_svc SET search_path TO nexus, public';
+        RAISE NOTICE 'Granted nexus.memory privileges to nexus_svc';
+    ELSE
+        RAISE NOTICE 'nexus_svc role not found; skipping grants (create role before first run)';
+    END IF;
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- Grants are not rolled back; role removal is a DBA operation. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

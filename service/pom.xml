@@ -84,6 +84,13 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- Liquibase: programmatic changelog apply in tests (bead nexus-gmiaf.5) -->
+        <dependency>
+            <groupId>org.liquibase</groupId>
+            <artifactId>liquibase-core</artifactId>
+            <version>4.29.2</version>
+        </dependency>
+
         <!-- Test: embedded-postgres (real PG in-process, no Docker) -->
         <dependency>
             <groupId>io.zonky.test</groupId>
