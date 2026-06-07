@@ -482,4 +482,10 @@ def _normalize(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if row.get("outcome") is None:
         row["outcome"] = "success"
 
+    # Nullable timestamp fields: ensure key is always present (service omits null keys
+    # due to Jackson NON_NULL serialization; callers rely on dict access not .get()).
+    for nullable_field in ("disabled_at", "last_used"):
+        if nullable_field not in row:
+            row[nullable_field] = None
+
     return row

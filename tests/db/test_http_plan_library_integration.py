@@ -87,9 +87,52 @@ pytestmark = [
 # ── Bootstrap SQL (extracted from plans-001-baseline.xml) ─────────────────────
 # Run as the superuser (the initdb OS user) so CREATE ROLE succeeds.
 # The Java service uses Liquibase so for the hermetic test we bootstrap manually.
+#
+# IMPORTANT: CREATE ROLE cannot run inside a transaction block or a DO body.
+# Split into three separate psql invocations:
+#   1. _BOOTSTRAP_SQL_ROLE   — CREATE ROLE (autocommit, outside any txn)
+#   2. _BOOTSTRAP_SQL_SCHEMA — DDL: schema + tables + indexes + RLS + FTS
+#   3. _BOOTSTRAP_SQL_GRANTS — GRANT + ALTER ROLE
 
-_BOOTSTRAP_SQL = """\
+_BOOTSTRAP_SQL_ROLE = """\
+CREATE ROLE svc_plan_inttest LOGIN PASSWORD 'svc_plan_inttest_pass';
+"""
+
+_BOOTSTRAP_SQL_SCHEMA = """\
 CREATE SCHEMA IF NOT EXISTS nexus;
+
+CREATE TABLE IF NOT EXISTS nexus.memory (
+    id            BIGSERIAL    NOT NULL,
+    tenant_id     TEXT         NOT NULL,
+    project       TEXT         NOT NULL,
+    title         TEXT         NOT NULL,
+    session       TEXT,
+    agent         TEXT,
+    content       TEXT         NOT NULL,
+    tags          TEXT,
+    timestamp     TIMESTAMPTZ  NOT NULL,
+    ttl           INTEGER,
+    access_count  INTEGER      NOT NULL DEFAULT 0,
+    last_accessed TIMESTAMPTZ,
+    CONSTRAINT memory_pk PRIMARY KEY (id),
+    CONSTRAINT memory_tenant_project_title_uq UNIQUE (tenant_id, project, title)
+);
+
+ALTER TABLE IF EXISTS nexus.memory ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS nexus.memory FORCE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'nexus' AND tablename = 'memory'
+        AND policyname = 'tenant_isolation'
+    ) THEN
+        CREATE POLICY tenant_isolation ON nexus.memory
+            USING      (tenant_id = current_setting('nexus.tenant', true))
+            WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+    END IF;
+END $$;
 
 CREATE TABLE nexus.plans (
     id              BIGSERIAL NOT NULL,
@@ -141,55 +184,20 @@ ALTER TABLE nexus.plans
     ) STORED;
 
 CREATE INDEX idx_plans_fts ON nexus.plans USING GIN (fts_vector);
+"""
 
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_plan_inttest') THEN
-    CREATE ROLE svc_plan_inttest LOGIN PASSWORD 'svc_plan_inttest_pass';
-  END IF;
-END $$;
-
+_BOOTSTRAP_SQL_GRANTS = """\
 GRANT USAGE ON SCHEMA nexus TO svc_plan_inttest;
 GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.plans TO svc_plan_inttest;
 GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.memory TO svc_plan_inttest;
 GRANT USAGE ON SEQUENCE nexus.plans_id_seq TO svc_plan_inttest;
+GRANT USAGE ON SEQUENCE nexus.memory_id_seq TO svc_plan_inttest;
 ALTER ROLE svc_plan_inttest SET search_path TO nexus, public;
 """
 
-# Also need the memory table for the service to boot without errors.
+# For the memory fts_vector column (added after the base schema in
+# older migration steps; harmless IF NOT EXISTS guard handles fresh dbs).
 _MEMORY_BOOTSTRAP_SQL = """\
-CREATE TABLE IF NOT EXISTS nexus.memory (
-    id            BIGSERIAL    NOT NULL,
-    tenant_id     TEXT         NOT NULL,
-    project       TEXT         NOT NULL,
-    title         TEXT         NOT NULL,
-    session       TEXT,
-    agent         TEXT,
-    content       TEXT         NOT NULL,
-    tags          TEXT,
-    timestamp     TIMESTAMPTZ  NOT NULL,
-    ttl           INTEGER,
-    access_count  INTEGER      NOT NULL DEFAULT 0,
-    last_accessed TIMESTAMPTZ,
-    CONSTRAINT memory_pk PRIMARY KEY (id),
-    CONSTRAINT memory_tenant_project_title_uq UNIQUE (tenant_id, project, title)
-);
-
-ALTER TABLE IF EXISTS nexus.memory ENABLE ROW LEVEL SECURITY;
-ALTER TABLE IF EXISTS nexus.memory FORCE ROW LEVEL SECURITY;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_policies
-        WHERE schemaname = 'nexus' AND tablename = 'memory'
-        AND policyname = 'tenant_isolation'
-    ) THEN
-        CREATE POLICY tenant_isolation ON nexus.memory
-            USING      (tenant_id = current_setting('nexus.tenant', true))
-            WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-    END IF;
-END $$;
-
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -205,8 +213,6 @@ BEGIN
         ) STORED;
     END IF;
 END $$;
-
-GRANT USAGE ON SEQUENCE nexus.memory_id_seq TO svc_plan_inttest;
 """
 
 
@@ -259,12 +265,15 @@ def pg_instance():
             check=True, capture_output=True,
         )
 
-        # Bootstrap memory table first (service needs it), then plans
-        for sql_block in [_MEMORY_BOOTSTRAP_SQL, _BOOTSTRAP_SQL]:
+        # Bootstrap in three phases:
+        #  1. Role creation — must run outside any transaction (CREATE ROLE restriction).
+        #  2. Schema + tables + indexes + RLS + FTS tsvector columns.
+        #  3. GRANTs + fts_vector migration guard — role must exist first.
+        def _psql(sql: str) -> None:
             proc = subprocess.run(
                 [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
                  "-U", pg_user, "-d", "nexusplantest",
-                 "-v", "ON_ERROR_STOP=1", "-c", sql_block],
+                 "-v", "ON_ERROR_STOP=1", "-c", sql],
                 capture_output=True, text=True,
             )
             if proc.returncode != 0:
@@ -272,6 +281,11 @@ def pg_instance():
                     f"psql bootstrap failed (rc={proc.returncode}):\n"
                     f"stdout={proc.stdout}\nstderr={proc.stderr}"
                 )
+
+        _psql(_BOOTSTRAP_SQL_ROLE)
+        _psql(_BOOTSTRAP_SQL_SCHEMA)
+        _psql(_MEMORY_BOOTSTRAP_SQL)
+        _psql(_BOOTSTRAP_SQL_GRANTS)
 
         yield {"port": pg_port, "dbname": "nexusplantest", "user": pg_user, "pgdata": pgdata}
 
@@ -680,201 +694,259 @@ class TestPlansMVV:
             f"disable without reason must not modify tags; got {row3['tags']!r}")
 
     def test_m_fts_parity_spearman(self, plan_store):
-        """m) FTS parity: top-K set equality + Spearman rho >= 0.90.
+        """m) FTS parity per the locked parity contract (rdr-152-fts-parity-contract.md §Store 2).
 
-        Satisfies the locked parity contract from RDR-152 §FTS parity contract:
-          (1) Top-K set equality: both engines return the same document IDs for each query.
-          (2) Rank correlation floor: Spearman rho >= 0.90 over (query, rank) pairs.
+        Contract requirements:
+          (1) Top-K set equality — EXACT: set(pg_ids) == set(sqlite_ids_mapped_to_pg) per probe.
+              NO tolerance. Accumulates all failures before asserting.
+          (2) Spearman rho >= 0.90 — computed ONLY on the K-length ordered vectors
+              (universe=sqlite rank order, pg_ranks=position of each pg result in universe).
+              Per the contract pseudocode. Skipped when K<2.
+          (3) Vacuity guard: at least one probe must return NON-EMPTY results on BOTH engines.
 
-        Method:
-          - Seed N plans in BOTH a hermetic SQLite PlanLibrary and the Postgres service.
-          - Run a fixed query battery of 8 probes against both backends.
-          - Compute intersection over union (set equality) and Spearman rho over rank vectors.
+        Corpus: canonical fixture plans from tests/test_plan_library.py + test_plan_match.py
+          as specified in the parity contract §K and Fixture Sources (Store 2 row).
+          Plans are seeded via save_plan() on BOTH engines so match_text is synthesized
+          identically by PlanLibrary and HttpPlanLibrary (both call _synthesize_match_text).
 
-        The SQLite FTS5 BM25 and Postgres ts_rank do not guarantee identical numeric
-        ranking — the contract is rank-correlation, not byte-equality.
+        Escalation: if set equality fails on any probe, the test reports the full escalation
+          evidence (sqlite top-K set, PG top-K set, symmetric diff, computed rho) and fails.
+          This is the documented escalation path — the threshold is NEVER silently lowered.
         """
-        import sqlite3
         from nexus.db.t2.plan_library import PlanLibrary
 
-        # ── Seed plans ──────────────────────────────────────────────────────────
-        # 12 plans seeded from the RDR-092/078 builtin shape vocabulary.
-        # Each has a distinct match_text so FTS can discriminate.
-        _SEED_PLANS = [
-            {"verb": "research",    "name": "research-rdr",    "tags": "research,rdr",
-             "match_text": "Research RDR decision records and architectural findings"},
-            {"verb": "implement",   "name": "implement-feature", "tags": "implement,code",
-             "match_text": "Implement the feature following TDD with unit tests"},
-            {"verb": "debug",       "name": "debug-regression", "tags": "debug,regression",
-             "match_text": "Debug the regression by bisecting commits and tracing logs"},
-            {"verb": "review",      "name": "review-code",     "tags": "review,quality",
-             "match_text": "Review code for correctness bugs and missing edge cases"},
-            {"verb": "plan",        "name": "plan-phase",      "tags": "plan,architecture",
-             "match_text": "Plan the implementation phase with beads and milestones"},
-            {"verb": "index",       "name": "index-corpus",    "tags": "index,search",
-             "match_text": "Index the corpus into the semantic search collection"},
-            {"verb": "analyze",     "name": "analyze-metrics", "tags": "analyze,metrics",
-             "match_text": "Analyze metrics and telemetry to identify performance regressions"},
-            {"verb": "migrate",     "name": "migrate-store",   "tags": "migrate,storage",
-             "match_text": "Migrate the SQLite store to Postgres via the Java service"},
-            {"verb": "summarize",   "name": "summarize-findings", "tags": "summarize,report",
-             "match_text": "Summarize findings from the research session into a report"},
-            {"verb": "search",      "name": "search-knowledge", "tags": "search,knowledge",
-             "match_text": "Search the knowledge store for relevant documents and papers"},
-            {"verb": "generate",    "name": "generate-report",  "tags": "generate,synthesis",
-             "match_text": "Generate a synthesized report from multiple retrieved sources"},
-            {"verb": "validate",    "name": "validate-tests",   "tags": "validate,testing",
-             "match_text": "Validate the test suite passes all assertions after changes"},
-        ]
+        # ── Fixture corpus (canonical plans from the parity contract fixture list) ───────────
+        # Each plan is seeded via save_plan() with the SAME params on both engines,
+        # so match_text is synthesized identically.
+        #
+        # Fixture sources (per contract §K and Fixture Sources, Store 2):
+        #   test_search_plans_match: "semantic search over code repositories" (probe: "semantic")
+        #   test_search_plans_tags:  tags="indexing,code" (probe: "indexing")
+        #   test_search_plans_project_filter: "search code patterns" project="parity-nexus" (probe: "search")
+        #   test_search_plans_hits_on_dimensional_suffix: find-by-author (probe: "find-by-author")
+        #   test_search_plans_still_matches_raw_description: "semantic search …" (probe: "semantic")
+        #   test_specific_probe_hits_matching_verb: research+review plans (probe: "research find-by-author")
+        #
+        # Distractor plans: ensure non-trivial discrimination.
 
-        # Query battery — 8 distinct probes
-        _QUERIES = [
-            "researching decisions",      # research -> research
-            "implementing features",      # implement -> implement
-            "debugging regressions",      # debug -> regress
-            "reviewing correctness",      # review -> correct
-            "planning milestones",        # plan -> milestone
-            "indexing documents",         # index -> document
-            "analyzing performance",      # analyze -> perform
-            "migrating storage",          # migrate -> storag
-        ]
+        _FIXTURE_PROJECT = "parity-m"   # isolated namespace; no overlap with other tests
 
-        # Seed Postgres (the plan_store fixture)
-        pg_query_to_id: dict[str, int] = {}
-        for p in _SEED_PLANS:
-            pid = plan_store.save_plan(
-                query=f"[parity] {p['name']}",
-                plan_json="{}",
-                project="parity-test",
-                verb=p["verb"],
-                name=p["name"],
-                tags=p["tags"],
-                scope="global",
-            )
-            pg_query_to_id[p["name"]] = pid
+        def _seed_both(sq_lib, pg_lib, *, query, plan_json="{}", tags="",
+                       project=_FIXTURE_PROJECT, verb=None, scope=None, name=None):
+            """Seed same plan on both SQLite and Postgres; return (sq_id, pg_id)."""
+            sq_id = sq_lib.save_plan(query=query, plan_json=plan_json, tags=tags,
+                                     project=project, verb=verb, scope=scope, name=name)
+            pg_id = pg_lib.save_plan(query=query, plan_json=plan_json, tags=tags,
+                                     project=project, verb=verb, scope=scope, name=name)
+            return sq_id, pg_id
 
-        # Seed SQLite (hermetic temp db)
+        # Plan registry: list of (sq_id, pg_id) pairs; populated during seeding.
+        _sq_to_pg: dict[int, int] = {}
+
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
             sqlite_path = Path(tf.name)
+        sqlite_lib = PlanLibrary(sqlite_path)
         try:
-            sqlite_lib = PlanLibrary(sqlite_path)
-            sq_query_to_id: dict[str, int] = {}
-            for p in _SEED_PLANS:
-                sid = sqlite_lib.save_plan(
-                    query=f"[parity] {p['name']}",
-                    plan_json="{}",
-                    project="parity-test",
-                    verb=p["verb"],
-                    name=p["name"],
-                    tags=p["tags"],
-                    scope="global",
-                )
-                sq_query_to_id[p["name"]] = sid
+            # ── Seed canonical fixture corpus ──────────────────────────────────────────
+            # Group 1: from test_search_plans_match
+            sq, pg = _seed_both(sqlite_lib, plan_store,
+                                 query="semantic search over code repositories")
+            _sq_to_pg[sq] = pg
+            sq, pg = _seed_both(sqlite_lib, plan_store,
+                                 query="memory management in Python")
+            _sq_to_pg[sq] = pg
 
-            # ── Run query battery ────────────────────────────────────────────────
-            K = 5  # top-K
+            # Group 2: from test_search_plans_tags
+            sq, pg = _seed_both(sqlite_lib, plan_store,
+                                 query="generic query", tags="indexing,code")
+            _sq_to_pg[sq] = pg
+            sq, pg = _seed_both(sqlite_lib, plan_store,
+                                 query="another query", tags="memory,retrieval")
+            _sq_to_pg[sq] = pg
+
+            # Group 3: from test_search_plans_project_filter (use parity-m-alt as second project)
+            sq, pg = _seed_both(sqlite_lib, plan_store,
+                                 query="search code patterns", project=_FIXTURE_PROJECT)
+            _sq_to_pg[sq] = pg
+            # Distractor with identical query but different project: seed separately
+            sq, pg = _seed_both(sqlite_lib, plan_store,
+                                 query="search code patterns distractor",
+                                 project=_FIXTURE_PROJECT)
+            _sq_to_pg[sq] = pg
+
+            # Group 4: from test_search_plans_hits_on_dimensional_suffix
+            sq, pg = _seed_both(sqlite_lib, plan_store,
+                                 query="Find documents attributed to a specific author.",
+                                 tags="builtin-template",
+                                 verb="research", scope="global", name="find-by-author")
+            _sq_to_pg[sq] = pg
+
+            # Group 5: from test_search_plans_still_matches_raw_description
+            sq, pg = _seed_both(sqlite_lib, plan_store,
+                                 query="semantic search over code repositories duplicate",
+                                 verb="research", scope="global", name="research-default")
+            _sq_to_pg[sq] = pg
+
+            # Group 6: from test_specific_probe_hits_matching_verb
+            sq, pg = _seed_both(sqlite_lib, plan_store,
+                                 query="Walk from an RDR to implementing code modules",
+                                 verb="research", scope="global", name="find-by-author")
+            _sq_to_pg[sq] = pg
+            sq, pg = _seed_both(sqlite_lib, plan_store,
+                                 query="Critique a change set vs prior decisions",
+                                 verb="review", scope="global", name="default")
+            _sq_to_pg[sq] = pg
+
+            # Extra distractors to ensure FTS discriminates
+            sq, pg = _seed_both(sqlite_lib, plan_store,
+                                 query="index all code in the repository",
+                                 tags="indexing,repository", verb="index", scope="global")
+            _sq_to_pg[sq] = pg
+            sq, pg = _seed_both(sqlite_lib, plan_store,
+                                 query="review pull request for correctness",
+                                 tags="review,code", verb="review", scope="global")
+            _sq_to_pg[sq] = pg
+
+            # ── Query battery ─────────────────────────────────────────────────────────
+            # Derived from the named fixture tests in the contract.
+            _BATTERY: list[tuple[str, str]] = [
+                # (probe,            description)
+                ("semantic",         "from test_search_plans_match"),
+                ("indexing",         "from test_search_plans_tags"),
+                ("search",           "from test_search_plans_project_filter"),
+                ("find-by-author",   "from test_search_plans_hits_on_dimensional_suffix"),
+                ("research find-by-author", "from test_specific_probe_hits_matching_verb"),
+            ]
+            K = 10   # per contract: min(limit, 10) for plans_fts
             FLOOR = 0.90
 
-            def _spearman(xs: list[float], ys: list[float]) -> float:
-                """Compute Spearman rho from paired rank lists."""
-                n = len(xs)
-                if n < 2:
-                    return 1.0
-                # Rank each list (1-based, average ties)
-                def _rank(lst):
-                    sorted_idx = sorted(range(n), key=lambda i: lst[i], reverse=True)
-                    ranks = [0.0] * n
-                    i = 0
-                    while i < n:
-                        j = i
-                        while j < n - 1 and lst[sorted_idx[j]] == lst[sorted_idx[j + 1]]:
-                            j += 1
-                        avg = (i + j) / 2.0 + 1
-                        for k in range(i, j + 1):
-                            ranks[sorted_idx[k]] = avg
-                        i = j + 1
-                    return ranks
+            # ── Spearman from K-length rank vectors (contract §Spearman Computation) ────
+            def _spearman_k(universe: list[int], pg_results_ordered: list[int]) -> float:
+                """Contract-canonical K-length Spearman.
 
-                rx = _rank(xs)
-                ry = _rank(ys)
-                mean_rx = sum(rx) / n
-                mean_ry = sum(ry) / n
-                num = sum((rx[i] - mean_rx) * (ry[i] - mean_ry) for i in range(n))
-                den = math.sqrt(
-                    sum((rx[i] - mean_rx) ** 2 for i in range(n)) *
-                    sum((ry[i] - mean_ry) ** 2 for i in range(n))
-                )
+                universe = [id for id in sqlite_results_ordered]  (canonical order)
+                pg_results_ordered = [id for id in pg_results]    (PG rank order)
+                Both lists have the same identities (set equality pre-verified).
+
+                sqlite_ranks = [1, 2, ..., K] by definition.
+                pg_ranks[i] = universe.index(pg_results_ordered[i]) + 1
+                Ties: stable-sort both result lists on id before building universe/pg_ranks,
+                so each id has a unique position.
+                """
+                K_actual = len(universe)
+                if K_actual < 2:
+                    return float("nan")   # skip signal, not 1.0 — must not mask failures
+                sqlite_ranks = list(range(1, K_actual + 1))
+                pg_ranks = [universe.index(pid) + 1 for pid in pg_results_ordered]
+                # Pearson on rank vectors == Spearman
+                n = K_actual
+                mean_s = sum(sqlite_ranks) / n
+                mean_p = sum(pg_ranks) / n
+                num = sum((sqlite_ranks[i] - mean_s) * (pg_ranks[i] - mean_p) for i in range(n))
+                ss = sum((r - mean_s) ** 2 for r in sqlite_ranks)
+                sp = sum((r - mean_p) ** 2 for r in pg_ranks)
+                den = math.sqrt(ss * sp)
                 return num / den if den > 1e-12 else 1.0
 
-            set_eq_violations = []
-            rho_values = []
+            # ── Run battery ───────────────────────────────────────────────────────────
+            set_eq_failures: list[str] = []  # accumulated before final assert
+            rho_results: list[tuple[str, float]] = []
+            any_nonempty_both = False
 
-            for probe in _QUERIES:
-                pg_results  = plan_store.search_plans(probe, project="parity-test", limit=K)
-                sq_results  = sqlite_lib.search_plans(probe, project="parity-test", limit=K)
+            for probe, desc in _BATTERY:
+                sq_results = sqlite_lib.search_plans(probe, project=_FIXTURE_PROJECT, limit=K)
+                pg_results = plan_store.search_plans(probe, project=_FIXTURE_PROJECT, limit=K)
 
-                pg_ids = [r["id"] for r in pg_results]
-                sq_ids = [r["id"] for r in sq_results]
+                sq_ids_raw = [r["id"] for r in sq_results]
+                pg_ids_raw = [r["id"] for r in pg_results]
 
-                # Map SQLite ids to the plan names, then to Postgres ids for set comparison
-                # The plan names are the same; use the name->pg_id mapping
-                sq_names = [
-                    next((p["name"] for p in _SEED_PLANS
-                          if sq_query_to_id[p["name"]] == sid), None)
-                    for sid in sq_ids
-                ]
-                pg_names_from_sq = [n for n in sq_names if n is not None]
-                pg_ids_from_sq   = [pg_query_to_id[n] for n in pg_names_from_sq
-                                    if n in pg_query_to_id]
+                # Translate sqlite ids to postgres ids via the seeding map
+                sq_ids_as_pg = [_sq_to_pg[sid] for sid in sq_ids_raw if sid in _sq_to_pg]
 
-                # Set equality: intersection / union >= 0.50 (both are small-N top-K)
-                pg_set = set(pg_ids)
-                sq_pg_set = set(pg_ids_from_sq)
-                union = pg_set | sq_pg_set
-                inter = pg_set & sq_pg_set
-                iou = len(inter) / len(union) if union else 1.0
-                if iou < 0.50 and len(pg_ids) > 0 and len(pg_ids_from_sq) > 0:
-                    set_eq_violations.append(
-                        f"probe={probe!r} IoU={iou:.2f} "
-                        f"pg={pg_ids!r} sqlite_mapped={pg_ids_from_sq!r}")
+                if sq_ids_raw and pg_ids_raw:
+                    any_nonempty_both = True
 
-                # Rank correlation: build parallel score vectors over all 12 seeded plans
-                # Score = reciprocal rank (1/rank) if in results, else 0
-                all_plan_names = [p["name"] for p in _SEED_PLANS]
-                pg_scores  = [
-                    1.0 / (pg_ids.index(pg_query_to_id[n]) + 1)
-                    if n in pg_query_to_id and pg_query_to_id[n] in pg_ids else 0.0
-                    for n in all_plan_names
-                ]
-                sq_scores  = [
-                    1.0 / (sq_ids.index(sq_query_to_id[n]) + 1)
-                    if n in sq_query_to_id and sq_query_to_id[n] in sq_ids else 0.0
-                    for n in all_plan_names
-                ]
-                rho = _spearman(pg_scores, sq_scores)
-                rho_values.append((probe, rho))
+                # ── Set equality (EXACT, no tolerance) ────────────────────────────────
+                sq_set = set(sq_ids_as_pg)
+                pg_set = set(pg_ids_raw)
+                if sq_set != pg_set:
+                    sym_diff = sq_set.symmetric_difference(pg_set)
+                    set_eq_failures.append(
+                        f"\nprobe={probe!r} ({desc})\n"
+                        f"  sqlite top-K (as pg ids): {sq_ids_as_pg!r}\n"
+                        f"  pg top-K:                 {pg_ids_raw!r}\n"
+                        f"  sqlite_only (in sq not pg): {sorted(sq_set - pg_set)!r}\n"
+                        f"  pg_only (in pg not sq):    {sorted(pg_set - sq_set)!r}\n"
+                        f"  symmetric diff size={len(sym_diff)}"
+                    )
+                    # Still compute rho for escalation evidence
+                    # Use intersection for a partial rho (informational only)
+                    inter = sq_set & pg_set
+                    if len(inter) >= 2:
+                        partial_universe = [pid for pid in sq_ids_as_pg if pid in inter]
+                        partial_pg = [pid for pid in pg_ids_raw if pid in inter]
+                        rho = _spearman_k(partial_universe, partial_pg)
+                        set_eq_failures[-1] += f"\n  partial rho (intersection only)={rho:.3f}"
+                    continue  # skip Spearman on mismatched sets per contract
 
-            # ── Parity assertions ────────────────────────────────────────────────
-            assert not set_eq_violations, (
-                "FTS set equality IoU < 0.50 for queries: " + "; ".join(set_eq_violations))
+                # ── Spearman rho on K-length vectors ──────────────────────────────────
+                # Contract: universe = sqlite rank order; pg_ranks = positions in universe.
+                # Tie-break by id (secondary key) so each id has a unique, deterministic
+                # position. FTS returns distinct floats in practice, so this is a no-op
+                # on non-tied results.
+                def _tiebreak(ids: list[int]) -> list[int]:
+                    """Stable-sort ties by id; no-op when ranks are all distinct."""
+                    return ids if len(set(ids)) == len(ids) else sorted(ids)
 
-            failing_rho = [(q, r) for q, r in rho_values if r < FLOOR]
-            avg_rho = sum(r for _, r in rho_values) / len(rho_values)
-            assert not failing_rho, (
-                f"FTS parity Spearman rho < {FLOOR} for queries: {failing_rho!r}; "
-                f"avg_rho={avg_rho:.3f}")
-            assert avg_rho >= FLOOR, (
-                f"FTS parity avg Spearman rho {avg_rho:.3f} < {FLOOR}")
+                universe   = _tiebreak(sq_ids_as_pg)
+                pg_ordered = _tiebreak(pg_ids_raw)
 
-            # Document the measured rho for the T2 write-back (called at session close)
-            # Store in a class variable for test reporting
-            TestPlansMVV._fts_parity_rho = avg_rho
-            TestPlansMVV._fts_parity_details = rho_values
+                rho = _spearman_k(universe, pg_ordered)
+                if math.isnan(rho):
+                    continue  # K<2, skip per contract
+                rho_results.append((probe, rho))
+
+            # ── Vacuity guard ─────────────────────────────────────────────────────────
+            assert any_nonempty_both, (
+                "VACUITY: no probe returned results on BOTH engines — "
+                "match_text is likely empty on one or both sides. "
+                "Verify _synthesize_match_text is called on both seed paths.")
+
+            # ── Assert set equality (all failures accumulated) ────────────────────────
+            if set_eq_failures:
+                # This is the escalation evidence per the parity contract §Escalation Path.
+                # Do NOT lower the threshold. Document and fail.
+                raise AssertionError(
+                    f"FTS PARITY SET EQUALITY FAILED on {len(set_eq_failures)} probe(s).\n"
+                    f"ESCALATION EVIDENCE (rdr-152-fts-parity-contract.md §Escalation Path):\n"
+                    + "\n".join(set_eq_failures) +
+                    f"\n\nAll rho computed before failure: {rho_results!r}"
+                )
+
+            # ── Assert Spearman floor ──────────────────────────────────────────────────
+            if not rho_results:
+                pytest.skip("all probes K<2 or set equality failed — Spearman undefined")
+
+            failing_rho = [(q, r) for q, r in rho_results if r < FLOOR]
+            if failing_rho:
+                raise AssertionError(
+                    f"FTS PARITY SPEARMAN FLOOR FAILED.\n"
+                    f"Failing probes (rho < {FLOOR}): {failing_rho!r}\n"
+                    f"All results: {rho_results!r}\n"
+                    f"Escalation: document in gate PR body, obtain substantive-critic sign-off "
+                    f"before merging (rdr-152-fts-parity-contract.md §Escalation Path)."
+                )
+
+            # ── Record outcome ─────────────────────────────────────────────────────────
+            avg_rho = sum(r for _, r in rho_results) / len(rho_results)
+            # Attach to class for post-session reporting
+            TestPlansMVV._fts_parity_rho = avg_rho                 # type: ignore[attr-defined]
+            TestPlansMVV._fts_parity_details = rho_results          # type: ignore[attr-defined]
 
         finally:
-            sqlite_path.unlink(missing_ok=True)
             sqlite_lib.close()
+            sqlite_path.unlink(missing_ok=True)
 
-# Module-level attribute initializer (avoids AttributeError on class access)
-TestPlansMVV._fts_parity_rho = None      # type: ignore[attr-defined]
-TestPlansMVV._fts_parity_details = None  # type: ignore[attr-defined]
+# Module-level attribute initializer (avoids AttributeError on class access before test runs)
+TestPlansMVV._fts_parity_rho     = None   # type: ignore[attr-defined]
+TestPlansMVV._fts_parity_details = None   # type: ignore[attr-defined]
