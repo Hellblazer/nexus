@@ -555,6 +555,14 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # legacy voyage-named collection as realistic input but makes no cloud-mode
     # embedder assertion, so the cloud_mode fixture is not applicable.
     "tests/test_issue_1060_collection_name_overflow.py::test_short_known_voyage_name_passes",
+    #
+    # RDR-152 nexus-gmiaf.22 (Seam B): asserts service-mode skips the embed
+    # fallback. Voyage tokens appear only as realistic collection-NAME /
+    # prepared-chunk-metadata fixtures (real docs collections ARE
+    # voyage-context-3); the test never calls Voyage — service mode embeds
+    # server-side — so it makes no cloud-mode embedder assertion and the
+    # cloud_mode fixture is not applicable.
+    "tests/test_indexer_seam_b_cutover.py::test_index_pdf_incremental_service_mode_skips_embed_fallback",
 })
 
 
