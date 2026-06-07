@@ -330,8 +330,9 @@ public final class CatalogHandler implements HttpHandler {
             deleted = repo.deleteLink(tenant, fromT, toT, linkType);
         } else {
             // Bulk delete
-            String createdBy = (String) body.get("created_by");
-            deleted = repo.bulkDeleteLinks(tenant, fromT, toT, linkType, createdBy);
+            String createdBy       = (String) body.get("created_by");
+            String createdAtBefore = (String) body.get("created_at_before");
+            deleted = repo.bulkDeleteLinks(tenant, fromT, toT, linkType, createdBy, createdAtBefore);
         }
         HttpUtil.send(exchange, 200, "{\"deleted\":" + deleted + "}");
     }
@@ -367,6 +368,7 @@ public final class CatalogHandler implements HttpHandler {
     /**
      * GET /v1/catalog/link_query?from_tumbler=X&to_tumbler=X&link_type=X
      *                             &created_by=X&limit=N&offset=N&created_at_before=ISO
+     *                             &direction=out|in|both&tumbler=X
      */
     private void handleLinkQuery(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -375,9 +377,12 @@ public final class CatalogHandler implements HttpHandler {
         String linkType        = queryParam(exchange, "link_type");
         String createdBy       = queryParam(exchange, "created_by");
         String createdAtBefore = queryParam(exchange, "created_at_before");
+        String direction       = queryParam(exchange, "direction");
+        String tumbler         = queryParam(exchange, "tumbler");
         int limit              = intParam(exchange, "limit",  50);
         int offset             = intParam(exchange, "offset", 0);
-        var links = repo.queryLinks(tenant, fromT, toT, linkType, createdBy, createdAtBefore, limit, offset);
+        var links = repo.queryLinks(tenant, fromT, toT, linkType, createdBy, createdAtBefore, limit, offset,
+                                    direction, tumbler);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("links", links, "count", links.size())));
     }
 

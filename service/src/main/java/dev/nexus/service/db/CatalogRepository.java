@@ -340,7 +340,26 @@ public final class CatalogRepository {
                .doNothing()
                .execute();
 
-            // Atomically claim the next sequence number
+            // Idempotency check BEFORE claiming a sequence number — avoids permanent seq gaps
+            // on re-registration of existing documents.
+            String srcUri = s(fields, "source_uri", "");
+            if (!srcUri.isEmpty()) {
+                var existing = ctx.select(F_DOC_TUMBLER).from(T_DOCS)
+                                  .where(F_DOC_TENANT.eq(tenant).and(F_DOC_URI.eq(srcUri)))
+                                  .fetchOne();
+                if (existing != null) return existing.value1();
+            }
+            String filePath = s(fields, "file_path", "");
+            if (!filePath.isEmpty()) {
+                var existing = ctx.select(F_DOC_TUMBLER).from(T_DOCS)
+                                  .where(F_DOC_TENANT.eq(tenant)
+                                         .and(F_DOC_FPATH.eq(filePath))
+                                         .and(F_DOC_TUMBLER.startsWith(ownerPrefix + ".")))
+                                  .fetchOne();
+                if (existing != null) return existing.value1();
+            }
+
+            // No existing document — atomically claim the next sequence number
             long seq = ctx.select(F_OWN_SEQ).from(T_OWNERS)
                           .where(F_OWN_TENANT.eq(tenant).and(F_OWN_PREFIX.eq(ownerPrefix)))
                           .forUpdate()
@@ -352,23 +371,6 @@ public final class CatalogRepository {
                .execute();
 
             String tumbler = ownerPrefix + "." + (seq + 1);
-
-            // Check idempotency by source_uri if present
-            String srcUri = s(fields, "source_uri", "");
-            if (!srcUri.isEmpty()) {
-                var existing = ctx.select(F_DOC_TUMBLER).from(T_DOCS)
-                                  .where(F_DOC_URI.eq(srcUri))
-                                  .fetchOne();
-                if (existing != null) return existing.value1();
-            }
-            // Check by file_path within owner if present
-            String filePath = s(fields, "file_path", "");
-            if (!filePath.isEmpty()) {
-                var existing = ctx.select(F_DOC_TUMBLER).from(T_DOCS)
-                                  .where(F_DOC_FPATH.eq(filePath).and(F_DOC_TUMBLER.startsWith(ownerPrefix + ".")))
-                                  .fetchOne();
-                if (existing != null) return existing.value1();
-            }
 
             // Insert document
             String metaJson = jsonOrNull(fields.get("meta"));
@@ -650,7 +652,8 @@ public final class CatalogRepository {
     /** Query links with optional filters. */
     public List<Map<String, Object>> queryLinks(String tenant, String fromT, String toT,
                                                  String linkType, String createdBy,
-                                                 String createdAtBefore, int limit, int offset) {
+                                                 String createdAtBefore, int limit, int offset,
+                                                 String direction, String tumbler) {
         return tenantScope.withTenant(tenant, ctx -> {
             Condition cond = DSL.trueCondition();
             if (fromT != null && !fromT.isBlank())         cond = cond.and(F_LNK_FROM.eq(fromT));
@@ -659,6 +662,19 @@ public final class CatalogRepository {
             if (createdBy != null && !createdBy.isBlank()) cond = cond.and(F_LNK_CRTBY.eq(createdBy));
             if (createdAtBefore != null && !createdAtBefore.isBlank())
                 cond = cond.and(F_LNK_CRTAT.lessThan(createdAtBefore));
+            // direction + tumbler: filter by tumbler in the appropriate column(s)
+            if (tumbler != null && !tumbler.isBlank()) {
+                String dir = direction != null ? direction : "both";
+                Condition tCond;
+                if ("out".equals(dir)) {
+                    tCond = F_LNK_FROM.eq(tumbler);
+                } else if ("in".equals(dir)) {
+                    tCond = F_LNK_TO.eq(tumbler);
+                } else {
+                    tCond = F_LNK_FROM.eq(tumbler).or(F_LNK_TO.eq(tumbler));
+                }
+                cond = cond.and(tCond);
+            }
             return ctx.select(F_LNK_ID, F_LNK_FROM, F_LNK_TO, F_LNK_TYPE,
                                F_LNK_FSPAN, F_LNK_TSPAN, F_LNK_CRTBY, F_LNK_CRTAT, F_LNK_META)
                       .from(T_LINKS).where(cond).orderBy(F_LNK_ID)
@@ -670,13 +686,15 @@ public final class CatalogRepository {
 
     /** Delete links matching filters. Returns deleted count. */
     public int bulkDeleteLinks(String tenant, String fromT, String toT,
-                                String linkType, String createdBy) {
+                                String linkType, String createdBy, String createdAtBefore) {
         return tenantScope.withTenant(tenant, ctx -> {
             Condition cond = DSL.trueCondition();
             if (fromT != null && !fromT.isBlank())         cond = cond.and(F_LNK_FROM.eq(fromT));
             if (toT != null && !toT.isBlank())             cond = cond.and(F_LNK_TO.eq(toT));
             if (linkType != null && !linkType.isBlank())   cond = cond.and(F_LNK_TYPE.eq(linkType));
             if (createdBy != null && !createdBy.isBlank()) cond = cond.and(F_LNK_CRTBY.eq(createdBy));
+            if (createdAtBefore != null && !createdAtBefore.isBlank())
+                cond = cond.and(F_LNK_CRTAT.lessThan(createdAtBefore));
             return ctx.deleteFrom(T_LINKS).where(cond).execute();
         });
     }

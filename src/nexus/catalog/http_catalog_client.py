@@ -552,6 +552,8 @@ class HttpCatalogClient:
         link_type: str | None = None,
         created_by: str | None = None,
         created_at_before: str | None = None,
+        direction: str | None = None,
+        tumbler: str | None = None,
         limit: int = 200,
         offset: int = 0,
     ) -> list[dict]:
@@ -561,6 +563,8 @@ class HttpCatalogClient:
         if link_type:         params["link_type"] = link_type
         if created_by:        params["created_by"] = created_by
         if created_at_before: params["created_at_before"] = created_at_before
+        if direction:         params["direction"] = direction
+        if tumbler:           params["tumbler"] = tumbler
         result = self._get("/link_query", **params)
         return result.get("links", []) if result else []
 
@@ -571,13 +575,15 @@ class HttpCatalogClient:
         to_t: str = "",
         link_type: str = "",
         created_by: str = "",
+        created_at_before: str = "",
     ) -> int:
         """Bulk delete links — all fields are optional filters."""
         payload: dict = {}
-        if from_t:    payload["from_tumbler"] = from_t
-        if to_t:      payload["to_tumbler"] = to_t
-        if link_type: payload["link_type"] = link_type
-        if created_by: payload["created_by"] = created_by
+        if from_t:            payload["from_tumbler"] = from_t
+        if to_t:              payload["to_tumbler"] = to_t
+        if link_type:         payload["link_type"] = link_type
+        if created_by:        payload["created_by"] = created_by
+        if created_at_before: payload["created_at_before"] = created_at_before
         result = self._post("/unlink", payload)
         return int(result.get("deleted", 0) if result else 0)
 

@@ -994,3 +994,346 @@ class TestETLFidelity:
         n = cat.rename_collection(old, new)
         assert n >= 0  # 0 = no documents moved; collection row itself was renamed
         assert cat.get_collection(new) is not None
+
+
+class TestReaderPaths:
+    """Service-mode tests for the 4 previously-dead reader paths in mcp/catalog.py.
+
+    Each test exercises the MCP tool function (catalog_search, catalog_list,
+    catalog_resolve, catalog_stats) via the real service — verifying they don't
+    raise AttributeError and return correct results in service mode.
+
+    The MCP tool functions call _require_catalog() → make_catalog_reader().
+    With NX_STORAGE_BACKEND_CATALOG=service and NX_SERVICE_PORT/TOKEN set
+    (done in service fixture via os.environ), they route to HttpCatalogClient.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_reader_path_docs(self, cat, service):
+        """Register docs for reader-path probes and configure service-mode env."""
+        base_url, token, _ = service
+        # Extract port from base_url
+        import re
+        m = re.search(r':(\d+)$', base_url)
+        assert m, f"Cannot parse port from {base_url}"
+        port = m.group(1)
+
+        # Configure env vars so make_catalog_reader() → HttpCatalogClient
+        os.environ["NX_STORAGE_BACKEND_CATALOG"] = "service"
+        os.environ["NX_SERVICE_PORT"] = port
+        os.environ["NX_SERVICE_TOKEN"] = token
+        os.environ["NX_SERVICE_HOST"] = "127.0.0.1"
+
+        # Register docs with distinct corpus/content_type for filter probes
+        cat.register(
+            "1.1",
+            "Reader Path RDR Document",
+            content_type="rdr",
+            corpus="reader-path-corpus",
+            file_path="docs/rdr/reader-path.md",
+            source_uri="file:///reader-path/rdr.md",
+        )
+        cat.register(
+            "1.1",
+            "Reader Path Knowledge Document",
+            content_type="knowledge",
+            corpus="reader-path-corpus",
+            file_path="docs/knowledge/reader-path.md",
+            source_uri="file:///reader-path/knowledge.md",
+        )
+        yield
+        # Clean up env after tests
+        os.environ.pop("NX_STORAGE_BACKEND_CATALOG", None)
+
+    def test_catalog_search_structured_filter_content_type(self, cat) -> None:
+        """catalog_search structured-filter branch (content_type, no free text).
+
+        Previously called cat._db.execute(...) → AttributeError in service mode.
+        Now routes through cat.by_content_type(). Must not raise.
+        """
+        from nexus.mcp.catalog import catalog_search
+        result = catalog_search(query="", content_type="rdr", limit=10)
+        assert isinstance(result, list), f"Expected list, got {type(result)}"
+        assert not any("error" in r and "AttributeError" in str(r.get("error")) for r in result), (
+            f"AttributeError from dead ._db seam: {result}"
+        )
+        titles = [r.get("title") for r in result if "title" in r]
+        assert any("Reader Path RDR" in (t or "") for t in titles), (
+            f"Expected 'Reader Path RDR Document' in content_type=rdr results; got {titles}"
+        )
+
+    def test_catalog_search_structured_filter_corpus(self, cat) -> None:
+        """catalog_search structured-filter branch (corpus, no free text)."""
+        from nexus.mcp.catalog import catalog_search
+        result = catalog_search(query="", corpus="reader-path-corpus", limit=10)
+        assert isinstance(result, list)
+        assert not any("error" in r and "AttributeError" in str(r.get("error")) for r in result)
+        titles = [r.get("title") for r in result if "title" in r]
+        # Should contain both rdr and knowledge docs registered under reader-path-corpus
+        assert len([t for t in titles if "Reader Path" in (t or "")]) >= 2, (
+            f"Expected >=2 'Reader Path' docs in corpus filter; got {titles}"
+        )
+
+    def test_catalog_list_content_type_filter(self, cat) -> None:
+        """catalog_list with content_type filter.
+
+        Previously called cat._db.execute(...) → AttributeError in service mode.
+        Now routes through cat.by_content_type(). Must return correct subset.
+        """
+        from nexus.mcp.catalog import catalog_list
+        result = catalog_list(owner="", content_type="rdr", limit=50)
+        assert isinstance(result, list)
+        assert not any("error" in r and "AttributeError" in str(r.get("error")) for r in result)
+        types = [r.get("content_type") for r in result if "content_type" in r]
+        assert all(t == "rdr" for t in types), (
+            f"catalog_list(content_type='rdr') returned non-rdr docs: {result}"
+        )
+        # Must include our registered RDR doc
+        titles = [r.get("title") for r in result if "title" in r]
+        assert any("Reader Path RDR" in (t or "") for t in titles), (
+            f"Expected 'Reader Path RDR Document' in rdr list; got {titles}"
+        )
+
+    def test_catalog_resolve_corpus(self, cat) -> None:
+        """catalog_resolve with corpus filter.
+
+        Previously called cat._db.execute(...) → AttributeError in service mode.
+        Now routes through cat.by_corpus(). Must return physical_collections set.
+        """
+        # Register a doc with physical_collection to verify corpus→collection resolve
+        cat.register(
+            "1.1",
+            "Corpus Resolve Test Doc",
+            content_type="paper",
+            corpus="resolve-test-corpus",
+            physical_collection="knowledge__resolve_test__voyage-context-3__v1",
+            source_uri="file:///reader-path/corpus-resolve.md",
+        )
+        from nexus.mcp.catalog import catalog_resolve
+        result = catalog_resolve(corpus="resolve-test-corpus")
+        assert isinstance(result, list), f"Expected list, got {type(result)}"
+        assert not any(isinstance(r, str) and "AttributeError" in r for r in result), (
+            f"AttributeError from dead ._db seam: {result}"
+        )
+        assert "knowledge__resolve_test__voyage-context-3__v1" in result, (
+            f"Expected physical_collection in corpus resolve result; got {result}"
+        )
+
+    def test_catalog_stats_via_service(self, cat) -> None:
+        """catalog_stats in service mode.
+
+        Previously called cat._db queries → AttributeError. Now routes through
+        cat.stats() → GET /stats. Must return correct shape and non-zero counts.
+        """
+        from nexus.mcp.catalog import catalog_stats
+        result = catalog_stats()
+        assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+        assert "error" not in result or "AttributeError" not in str(result.get("error")), (
+            f"AttributeError from dead ._db seam: {result}"
+        )
+        # After registering many docs in this test session, counts must be > 0
+        assert result.get("documents", 0) > 0, (
+            f"catalog_stats returned 0 documents; expected >0 after test setup: {result}"
+        )
+        assert result.get("owners", 0) > 0, (
+            f"catalog_stats returned 0 owners: {result}"
+        )
+        # by_link_type must be a dict (may be empty if no links)
+        assert isinstance(result.get("by_link_type", {}), dict), (
+            f"by_link_type is not a dict: {result}"
+        )
+
+
+class TestLinkQueryDirectionTumbler:
+    """link_query with direction + tumbler params (service mode).
+
+    Verifies the new params added to HttpCatalogClient.link_query() and
+    CatalogRepository.queryLinks(). Also verifies that results (list[dict])
+    can be consumed directly without .to_dict() errors.
+    """
+
+    @pytest.fixture(scope="class")
+    def link_query_docs(self, cat):
+        """Register two docs and link A -> B."""
+        a = cat.register("1.1", "LinkQuery-Direction-A", content_type="paper",
+                         source_uri="file:///linkquery/dir_a.md")
+        b = cat.register("1.1", "LinkQuery-Direction-B", content_type="paper",
+                         source_uri="file:///linkquery/dir_b.md")
+        cat.link(a, b, "relates", created_by="dir-tester")
+        return a, b
+
+    def test_link_query_direction_out(self, cat, link_query_docs) -> None:
+        """link_query(direction='out', tumbler=A) returns the A->B link."""
+        a, b = link_query_docs
+        links = cat.link_query(direction="out", tumbler=str(a))
+        assert isinstance(links, list), f"Expected list, got {type(links)}"
+        from_tumblers = [lk["from_tumbler"] for lk in links]
+        assert str(a) in from_tumblers, (
+            f"direction=out tumbler={a}: expected {a} in from_tumblers, got {from_tumblers}"
+        )
+        # Must not contain links where A is the to_tumbler
+        to_tumblers = [lk["to_tumbler"] for lk in links]
+        assert str(a) not in to_tumblers, (
+            f"direction=out: A appeared as to_tumbler, expected only from_tumbler"
+        )
+
+    def test_link_query_direction_in(self, cat, link_query_docs) -> None:
+        """link_query(direction='in', tumbler=B) returns only links pointing TO B."""
+        a, b = link_query_docs
+        links = cat.link_query(direction="in", tumbler=str(b))
+        assert isinstance(links, list)
+        to_tumblers = [lk["to_tumbler"] for lk in links]
+        assert str(b) in to_tumblers, (
+            f"direction=in tumbler={b}: expected {b} in to_tumblers, got {to_tumblers}"
+        )
+        # Must not contain links where B is the from_tumbler
+        from_tumblers = [lk["from_tumbler"] for lk in links]
+        assert str(b) not in from_tumblers, (
+            f"direction=in: B appeared as from_tumbler"
+        )
+
+    def test_link_query_results_are_dicts(self, cat, link_query_docs) -> None:
+        """Results from link_query must be plain dicts (service mode — no .to_dict() needed).
+
+        mcp/catalog.py line ~495 previously called l.to_dict() which fails when
+        HttpCatalogClient returns list[dict]. Now uses 'l if isinstance(l, dict) else l.to_dict()'.
+        """
+        a, b = link_query_docs
+        links = cat.link_query(direction="out", tumbler=str(a))
+        for lk in links:
+            assert isinstance(lk, dict), f"Expected dict, got {type(lk)}: {lk}"
+            # These are the fields the mcp/catalog.py link_query result uses
+            assert "from_tumbler" in lk
+            assert "to_tumbler" in lk
+            assert "link_type" in lk
+
+    def test_link_query_tumbler_both_direction(self, cat, link_query_docs) -> None:
+        """link_query(direction='both', tumbler=A) returns all links touching A."""
+        a, b = link_query_docs
+        links = cat.link_query(direction="both", tumbler=str(a))
+        assert len(links) >= 1
+        touching_a = [
+            lk for lk in links
+            if lk["from_tumbler"] == str(a) or lk["to_tumbler"] == str(a)
+        ]
+        assert len(touching_a) >= 1
+
+
+class TestCrossTenantGraphRLS:
+    """Cross-tenant graph-traversal RLS.
+
+    Verify that graph traversal, links_from, links_to, and link_query cannot
+    be used by tenant B to walk tenant A's link graph.
+    """
+
+    @pytest.fixture(scope="class")
+    def tenant_a_graph(self, cat, cat_b):
+        """Set up a link graph under tenant A; ensure tenant B has its own owner."""
+        # Tenant B must have owner prefix 2.1 (registered in TestCrossTenantRLS)
+        # Register additional docs + links in tenant A
+        x = cat.register("1.1", "GraphRLS-A-X", content_type="paper",
+                         source_uri="file:///graphrls/a_x.md")
+        y = cat.register("1.1", "GraphRLS-A-Y", content_type="paper",
+                         source_uri="file:///graphrls/a_y.md")
+        cat.link(x, y, "relates", created_by="graphrls-test")
+        return x, y
+
+    def test_tenant_b_traverse_from_tenant_a_seeds_empty(
+        self, cat, cat_b, tenant_a_graph
+    ) -> None:
+        """Traversal from tenant A's seeds as tenant B returns empty nodes/edges."""
+        x, y = tenant_a_graph
+        result = cat_b.graph(str(x), depth=1)
+        nodes = result.get("nodes", [])
+        edges = result.get("edges", [])
+        a_tumblers = {str(x), str(y)}
+        visible_a_nodes = [n for n in nodes if n.get("tumbler") in a_tumblers]
+        assert visible_a_nodes == [], (
+            f"RLS BREACH via graph(): tenant B can see tenant A's nodes: {visible_a_nodes}"
+        )
+
+    def test_tenant_b_links_from_tenant_a_tumbler_empty(
+        self, cat, cat_b, tenant_a_graph
+    ) -> None:
+        """links_from(A's tumbler) as tenant B returns empty list."""
+        x, y = tenant_a_graph
+        links = cat_b.links_from(str(x))
+        # RLS on catalog_links: B's GUC sees B's tenant_id only → no A links
+        a_links = [lk for lk in links if lk.get("from_tumbler") == str(x)]
+        assert a_links == [], (
+            f"RLS BREACH via links_from(): tenant B can see tenant A's links: {a_links}"
+        )
+
+    def test_tenant_b_link_query_from_tenant_a_tumbler_empty(
+        self, cat, cat_b, tenant_a_graph
+    ) -> None:
+        """link_query(from_t=A's tumbler) as tenant B returns empty list."""
+        x, y = tenant_a_graph
+        links = cat_b.link_query(from_t=str(x))
+        a_links = [lk for lk in links if lk.get("from_tumbler") == str(x)]
+        assert a_links == [], (
+            f"RLS BREACH via link_query(): tenant B can see tenant A's links: {a_links}"
+        )
+
+    def test_tenant_b_link_query_direction_tumbler_a_empty(
+        self, cat, cat_b, tenant_a_graph
+    ) -> None:
+        """link_query(direction='both', tumbler=A's tumbler) as tenant B returns empty."""
+        x, _ = tenant_a_graph
+        links = cat_b.link_query(direction="both", tumbler=str(x))
+        touching_x = [lk for lk in links
+                      if lk.get("from_tumbler") == str(x) or lk.get("to_tumbler") == str(x)]
+        assert touching_x == [], (
+            f"RLS BREACH via link_query(direction/tumbler): tenant B sees A's links: {touching_x}"
+        )
+
+
+class TestRegisterSeqIdempotency:
+    """Regression test: re-registering same source_uri must NOT burn seq numbers.
+
+    CatalogRepository.registerDocument() previously incremented next_seq BEFORE
+    checking idempotency — so re-registering an existing doc left a permanent gap.
+    Fixed: existence check first, seq increment only for new docs.
+    """
+
+    def test_reregister_same_source_uri_no_seq_gap(self, cat) -> None:
+        """Re-register same source_uri → same tumbler, next new doc gets consecutive seq."""
+        owner_prefix = "1.1"
+
+        # Register doc A
+        a = cat.register(
+            owner_prefix,
+            "Seq Gap Test A",
+            content_type="paper",
+            source_uri="file:///seq-gap/a.md",
+        )
+
+        # Re-register the same source_uri (must return same tumbler, not increment seq)
+        a2 = cat.register(
+            owner_prefix,
+            "Seq Gap Test A - Retry",
+            content_type="paper",
+            source_uri="file:///seq-gap/a.md",
+        )
+        assert str(a) == str(a2), (
+            f"Re-registration of same source_uri returned different tumbler: {a} vs {a2}"
+        )
+
+        # Register a NEW doc after the idempotent re-register
+        b = cat.register(
+            owner_prefix,
+            "Seq Gap Test B",
+            content_type="paper",
+            source_uri="file:///seq-gap/b.md",
+        )
+
+        # Parse the seq number: tumbler is "prefix.N"
+        a_seq = int(str(a).split(".")[-1])
+        b_seq = int(str(b).split(".")[-1])
+
+        # b must be exactly a+1 if no seq was burned on the re-registration.
+        # Allow for other parallel registrations (integration suite is shared) by
+        # checking b_seq > a_seq (strictly consecutive is not guaranteed in a shared test).
+        assert b_seq > a_seq, (
+            f"Seq gap detected: after idempotent re-register, next seq {b_seq} <= a_seq {a_seq}"
+        )

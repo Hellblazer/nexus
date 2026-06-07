@@ -415,7 +415,7 @@ class CatalogRepositoryTest {
             "from_tumbler", "qry.1", "to_tumbler", "qry.2",
             "link_type", "relates", "created_by", "developer", "created_at", "2026-06-01T00:00:00Z"
         ));
-        var links = repo.queryLinks(TENANT_A, "qry.1", null, null, "developer", null, 50, 0);
+        var links = repo.queryLinks(TENANT_A, "qry.1", null, null, "developer", null, 50, 0, null, null);
         assertThat(links).hasSize(1);
         assertThat(links.get(0).get("from_tumbler")).isEqualTo("qry.1");
         assertThat(links.get(0).get("created_by")).isEqualTo("developer");
