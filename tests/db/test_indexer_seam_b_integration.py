@@ -34,6 +34,8 @@ from typing import Generator
 
 import pytest
 
+from tests.db._service_fixture import SERVICE_ROLES_SQL
+
 # ── Prerequisite detection ──────────────────────────────────────────────────
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -73,15 +75,18 @@ pytestmark = [
 ]
 
 # ── Bootstrap SQL ────────────────────────────────────────────────────────────
+#
+# net63: JAR runs Liquibase at startup; grants-nexus-svc.xml (runAlways=true) issues
+# GRANT ... TO nexus_svc — this role must exist BEFORE the JAR starts or the
+# migration fails and System.exit(1) fires before the HTTP port opens.
+# SERVICE_ROLES_SQL creates nexus_svc; this SQL creates the test service role.
 
 _BOOTSTRAP_SQL = """\
-CREATE SCHEMA IF NOT EXISTS nexus;
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_seam_b') THEN
     CREATE ROLE svc_seam_b LOGIN PASSWORD 'svc_seam_b_pass';
   END IF;
 END $$;
-GRANT USAGE ON SCHEMA nexus TO svc_seam_b;
 GRANT USAGE ON SCHEMA public TO svc_seam_b;
 """
 
@@ -148,18 +153,26 @@ def pg_instance() -> Generator[dict, None, None]:
              "-U", pg_user, "seambtest"],
             check=True, capture_output=True,
         )
-        proc = subprocess.run(
-            [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
-             "-U", pg_user, "-d", "seambtest",
-             "-v", "ON_ERROR_STOP=1", "-c", _BOOTSTRAP_SQL],
-            capture_output=True, text=True,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"Bootstrap SQL failed (rc={proc.returncode}):\n"
-                f"stdout={proc.stdout}\nstderr={proc.stderr}"
+        pg = {"port": pg_port, "dbname": "seambtest", "user": pg_user}
+
+        def _run_sql(sql: str) -> None:
+            proc = subprocess.run(
+                [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
+                 "-U", pg_user, "-d", "seambtest",
+                 "-v", "ON_ERROR_STOP=1", "-c", sql],
+                capture_output=True, text=True,
             )
-        yield {"port": pg_port, "dbname": "seambtest", "user": pg_user}
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"SQL failed (rc={proc.returncode}):\n"
+                    f"stdout={proc.stdout}\nstderr={proc.stderr}"
+                )
+
+        # net63: create nexus_svc BEFORE the JAR starts (grants-nexus-svc.xml pre-condition).
+        _run_sql(SERVICE_ROLES_SQL)
+        _run_sql(_BOOTSTRAP_SQL)
+
+        yield pg
     finally:
         subprocess.run(
             [str(_PG_CTL), "-D", pgdata, "stop", "-m", "immediate"],
@@ -182,16 +195,23 @@ def local_service(pg_instance: dict) -> Generator[tuple[str, str], None, None]:
     # tmp dir guarantees a clean Chroma on every run.
     chroma_data = tempfile.mkdtemp(prefix="seam-b-chroma-")
 
+    pg_jdbc = (
+        f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}/{pg_instance['dbname']}"
+    )
     env = {
         **os.environ,
         "NX_SERVICE_PORT": str(svc_port),
         "NX_SERVICE_TOKEN": token,
-        "NX_DB_URL": (
-            f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}/{pg_instance['dbname']}"
-        ),
-        "NX_DB_USER": "svc_seam_b",
-        "NX_DB_PASS": "svc_seam_b_pass",
+        # App pool: nexus_svc (NOSUPERUSER NOBYPASSRLS) — subject to FORCE RLS.
+        # DML grants are wired by grants-nexus-svc.xml (runAlways) during Liquibase run.
+        "NX_DB_URL":  pg_jdbc,
+        "NX_DB_USER": "nexus_svc",
+        "NX_DB_PASS": "nexus_svc_pass",
         "NX_POOL_SIZE": "2",
+        # Migration pool: OS superuser — has DDL rights for full Liquibase run.
+        "NX_DB_ADMIN_URL":  pg_jdbc,
+        "NX_DB_ADMIN_USER": pg_user,
+        "NX_DB_ADMIN_PASS": "",
         "NX_CHROMA_MODE": "local",
         "NX_CHROMA_PATH": chroma_data,
     }

@@ -759,6 +759,218 @@ class CatalogRepositoryTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // BATCH ENDPOINTS (nexus-qnp5s)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(100)
+    void ownersByType_returnsOnlyMatchingType() {
+        // Seed mixed-type owners under TENANT_A (prefix "bt.*" = batch-type tests)
+        repo.upsertOwner(TENANT_A, mapOf(
+            "tumbler_prefix", "bt.1",
+            "name", "bt-repo-owner",
+            "owner_type", "repo",
+            "repo_hash", "bthash1",
+            "repo_root", "/bt/repo",
+            "head_hash", "bthead1"
+        ));
+        repo.upsertOwner(TENANT_A, mapOf(
+            "tumbler_prefix", "bt.2",
+            "name", "bt-curator-owner",
+            "owner_type", "curator",
+            "repo_hash", "bthash2",
+            "head_hash", "bthead2"
+        ));
+        repo.upsertOwner(TENANT_A, mapOf(
+            "tumbler_prefix", "bt.3",
+            "name", "bt-repo-owner-2",
+            "owner_type", "repo",
+            "repo_hash", "bthash3",
+            "repo_root", "/bt/repo2",
+            "head_hash", "bthead3"
+        ));
+
+        var repos = repo.ownersByType(TENANT_A, "repo");
+        var repoNames = repos.stream().map(o -> (String) o.get("name")).toList();
+
+        // Must include the two repo-type owners we seeded
+        assertThat(repoNames).contains("bt-repo-owner", "bt-repo-owner-2");
+        // Must NOT include the curator
+        assertThat(repoNames).doesNotContain("bt-curator-owner");
+
+        var curators = repo.ownersByType(TENANT_A, "curator");
+        var curatorNames = curators.stream().map(o -> (String) o.get("name")).toList();
+        assertThat(curatorNames).contains("bt-curator-owner");
+        assertThat(curatorNames).doesNotContain("bt-repo-owner", "bt-repo-owner-2");
+    }
+
+    @Test @Order(101)
+    void ownersByType_unknownType_returnsEmpty() {
+        var none = repo.ownersByType(TENANT_A, "nonexistent-type");
+        assertThat(none).isEmpty();
+    }
+
+    @Test @Order(102)
+    void ownerByPrefix_found() {
+        // "bt.1" was seeded in Order(100)
+        var found = repo.ownerByPrefix(TENANT_A, "bt.1");
+        assertThat(found).isNotNull();
+        assertThat(found.get("name")).isEqualTo("bt-repo-owner");
+        assertThat(found.get("owner_type")).isEqualTo("repo");
+        assertThat(found.get("tumbler_prefix")).isEqualTo("bt.1");
+    }
+
+    @Test @Order(103)
+    void ownerByPrefix_notFound_returnsNull() {
+        var found = repo.ownerByPrefix(TENANT_A, "zz.9999");
+        assertThat(found).isNull();
+    }
+
+    @Test @Order(104)
+    void chunkCountsForDocs_batchCorrectness() {
+        // Seed 3 documents with known chunk_counts
+        repo.upsertDocument(TENANT_A, mapOf(
+            "tumbler", "cc.1",
+            "title", "ChunkCount Doc 1",
+            "content_type", "paper",
+            "corpus", "knowledge",
+            "chunk_count", 10
+        ));
+        repo.upsertDocument(TENANT_A, mapOf(
+            "tumbler", "cc.2",
+            "title", "ChunkCount Doc 2",
+            "content_type", "paper",
+            "corpus", "knowledge",
+            "chunk_count", 25
+        ));
+        repo.upsertDocument(TENANT_A, mapOf(
+            "tumbler", "cc.3",
+            "title", "ChunkCount Doc 3 (zero chunks)",
+            "content_type", "paper",
+            "corpus", "knowledge",
+            "chunk_count", 0
+            // chunk_count explicitly zero — upsertDocument stores 0 when field absent too (ni default)
+        ));
+
+        // Query batch: 2 present with counts + 1 with zero count + 1 absent
+        var result = repo.chunkCountsForDocs(TENANT_A,
+            List.of("cc.1", "cc.2", "cc.3", "cc.DOES-NOT-EXIST"));
+
+        // cc.1 and cc.2 must be present with exact counts
+        assertThat(result).containsKey("cc.1");
+        assertThat(result.get("cc.1")).isEqualTo(10);
+        assertThat(result).containsKey("cc.2");
+        assertThat(result.get("cc.2")).isEqualTo(25);
+
+        // cc.3 has chunk_count=0 (stored; 0 != null so it appears in results)
+        assertThat(result).containsKey("cc.3");
+        assertThat(result.get("cc.3")).isEqualTo(0);
+
+        // cc.DOES-NOT-EXIST must be absent (not in DB)
+        assertThat(result).doesNotContainKey("cc.DOES-NOT-EXIST");
+
+        // Exactly 3 entries (cc.1, cc.2, cc.3)
+        assertThat(result).hasSize(3);
+    }
+
+    @Test @Order(105)
+    void chunkCountsForDocs_emptyInput_returnsEmpty() {
+        var result = repo.chunkCountsForDocs(TENANT_A, List.of());
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(106)
+    void chunkCountsForDocs_nullInput_returnsEmpty() {
+        var result = repo.chunkCountsForDocs(TENANT_A, null);
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(107)
+    void linksFromBatch_groupedByFromTumbler() {
+        // Seed documents so FK constraints (if any) are satisfied
+        repo.upsertDocument(TENANT_A, mapOf(
+            "tumbler", "lf.1",
+            "title", "Links From Doc 1",
+            "content_type", "paper",
+            "corpus", "knowledge"
+        ));
+        repo.upsertDocument(TENANT_A, mapOf(
+            "tumbler", "lf.2",
+            "title", "Links From Doc 2",
+            "content_type", "paper",
+            "corpus", "knowledge"
+        ));
+        repo.upsertDocument(TENANT_A, mapOf(
+            "tumbler", "lf.3",
+            "title", "Links From Doc 3 (target)",
+            "content_type", "paper",
+            "corpus", "knowledge"
+        ));
+
+        // Seed links: lf.1 → lf.3 (cites), lf.1 → lf.2 (relates), lf.2 → lf.3 (implements)
+        repo.upsertLink(TENANT_A, Map.of("from_tumbler", "lf.1", "to_tumbler", "lf.3", "link_type", "cites"));
+        repo.upsertLink(TENANT_A, Map.of("from_tumbler", "lf.1", "to_tumbler", "lf.2", "link_type", "relates"));
+        repo.upsertLink(TENANT_A, Map.of("from_tumbler", "lf.2", "to_tumbler", "lf.3", "link_type", "implements"));
+
+        // Query: lf.1 (2 outbound links), lf.2 (1 outbound link), lf.3 (0 outbound)
+        var result = repo.linksFromBatch(TENANT_A, List.of("lf.1", "lf.2", "lf.3", "lf.ABSENT"));
+
+        // lf.1 should have 2 link entries
+        assertThat(result).containsKey("lf.1");
+        var lf1Links = result.get("lf.1");
+        assertThat(lf1Links).hasSize(2);
+        var lf1Types = lf1Links.stream().map(m -> (String) m.get("link_type")).toList();
+        assertThat(lf1Types).containsExactlyInAnyOrder("cites", "relates");
+        // Each entry must have from_tumbler set correctly
+        assertThat(lf1Links).allMatch(m -> "lf.1".equals(m.get("from_tumbler")));
+
+        // lf.2 should have 1 link entry
+        assertThat(result).containsKey("lf.2");
+        var lf2Links = result.get("lf.2");
+        assertThat(lf2Links).hasSize(1);
+        assertThat(lf2Links.get(0).get("link_type")).isEqualTo("implements");
+        assertThat(lf2Links.get(0).get("from_tumbler")).isEqualTo("lf.2");
+
+        // lf.3 has NO outbound links — must be absent from result (not an empty list)
+        assertThat(result).doesNotContainKey("lf.3");
+
+        // lf.ABSENT is not in DB — must be absent
+        assertThat(result).doesNotContainKey("lf.ABSENT");
+    }
+
+    @Test @Order(108)
+    void linksFromBatch_emptyInput_returnsEmpty() {
+        var result = repo.linksFromBatch(TENANT_A, List.of());
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(109)
+    void linksFromBatch_nullInput_returnsEmpty() {
+        var result = repo.linksFromBatch(TENANT_A, null);
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(110)
+    void chunkCountsForDocs_tenantIsolation() {
+        // Seed a doc under TENANT_B with a distinct chunk_count
+        repo.upsertDocument(TENANT_B, mapOf(
+            "tumbler", "cc.b1",
+            "title", "Tenant B Chunk Doc",
+            "content_type", "paper",
+            "corpus", "knowledge",
+            "chunk_count", 99
+        ));
+
+        // Query TENANT_A for TENANT_B's tumbler — must get empty (RLS isolation)
+        var resultA = repo.chunkCountsForDocs(TENANT_A, List.of("cc.b1"));
+        assertThat(resultA).isEmpty();
+
+        // Query TENANT_B for its own doc — must find it
+        var resultB = repo.chunkCountsForDocs(TENANT_B, List.of("cc.b1"));
+        assertThat(resultB).containsKey("cc.b1");
+        assertThat(resultB.get("cc.b1")).isEqualTo(99);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // TENANT B ISOLATION CHECK
     // ══════════════════════════════════════════════════════════════════════════
 

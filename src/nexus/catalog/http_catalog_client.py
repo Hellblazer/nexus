@@ -326,8 +326,14 @@ class HttpCatalogClient:
 
         Backs repos.py head_hash lookup that previously issued
         ``SELECT head_hash FROM owners WHERE tumbler_prefix=?`` directly.
+        Returns None when the server responds 404 (prefix not found).
         """
-        result = self._get("/owners/show", tumbler_prefix=tumbler_prefix)
+        try:
+            result = self._get("/owners/show", tumbler_prefix=tumbler_prefix)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
         return result if result and result.get("tumbler_prefix") else None
 
     def list_owners_by_type(self, owner_type: str) -> list[dict]:

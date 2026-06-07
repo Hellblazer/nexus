@@ -36,6 +36,8 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+from tests.db._service_fixture import SERVICE_ROLES_SQL
+
 # ── Unit tests: row transform logic ──────────────────────────────────────────
 
 class TestRowTransform:
@@ -560,6 +562,16 @@ def etl_pg_instance():
                 f"psql bootstrap failed (rc={proc.returncode}):\n"
                 f"stdout={proc.stdout}\nstderr={proc.stderr}"
             )
+
+        # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
+        # Create nexus_svc BEFORE starting the JAR (pre-condition for runAlways grant changeset).
+        subprocess.run(
+            [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
+             "-U", pg_user, "-d", "nexus_etltest",
+             "-v", "ON_ERROR_STOP=1", "-c", SERVICE_ROLES_SQL],
+            check=True, capture_output=True,
+        )
+
         yield {"port": pg_port, "dbname": "nexus_etltest", "user": pg_user, "pgdata": pgdata}
     finally:
         subprocess.run(

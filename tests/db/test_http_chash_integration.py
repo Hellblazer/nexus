@@ -44,6 +44,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.db._service_fixture import SERVICE_ROLES_SQL
+
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -196,6 +198,9 @@ def pg_instance():
                     f"psql bootstrap failed (rc={proc.returncode}):\n"
                     f"stdout={proc.stdout}\nstderr={proc.stderr}"
                 )
+
+        # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
+        _psql(SERVICE_ROLES_SQL)
 
         # Bootstrap in three phases (CREATE ROLE cannot run inside a transaction):
         #   1. Role creation (autocommit outside any txn)
