@@ -136,6 +136,81 @@ public final class VoyageEmbedder implements Embedder {
         throw new RuntimeException("Voyage embed: exhausted retries"); // unreachable
     }
 
+    /**
+     * Embed texts preserving full double (float64) precision from the JSON response.
+     *
+     * <p>Unlike {@link #embed} which converts to float32, this method returns the raw
+     * double values parsed from the Voyage API JSON response.  Used by the parity gate
+     * ({@code /v1/vectors/embed}) to avoid the float32 round-trip precision loss that
+     * causes cosine ≈ 0.9999669 instead of 1.0 exactly.
+     *
+     * <p>Root cause: Voyage API returns float32-precision values serialized as JSON doubles
+     * (e.g., {@code 0.12345679}). Java parses to double exactly, then float32 conversion
+     * produces the same float32, but serializing back via {@code Float.toString()} gives a
+     * different shortest-form string, which Python parses to a slightly different float64.
+     * Keeping the original double avoids this round-trip.
+     */
+    public List<double[]> embedDouble(List<String> texts) {
+        if (texts == null || texts.isEmpty()) return List.of();
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("model",        model);
+        body.put("input",        texts);
+        body.put("input_type",   inputType);
+        body.put("truncation",   true);
+        body.put("output_dtype", "float");
+
+        String json;
+        try {
+            json = mapper.writeValueAsString(body);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to serialize Voyage request", e);
+        }
+
+        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(VOYAGE_URL))
+                        .header("Authorization", "Bearer " + apiKey)
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(json))
+                        .timeout(Duration.ofSeconds(120))
+                        .build();
+
+                HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+                int status = resp.statusCode();
+
+                if (status == 200) {
+                    return parseResponseDouble(resp.body());
+                }
+
+                boolean retryable = (status == 429 || status >= 500);
+                if (retryable && attempt < MAX_RETRIES) {
+                    long delay = RETRY_BASE_MS * (1L << (attempt - 1));
+                    log.warn("event=voyage_retry attempt={} status={} delay_ms={}", attempt, status, delay);
+                    Thread.sleep(delay);
+                    continue;
+                }
+                throw new RuntimeException(
+                        "Voyage AI request failed: HTTP " + status + " body=" + resp.body());
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Voyage embed interrupted", e);
+            } catch (RuntimeException e) {
+                throw e;
+            } catch (Exception e) {
+                if (attempt == MAX_RETRIES) {
+                    throw new RuntimeException("Voyage embedDouble failed after " + MAX_RETRIES + " attempts", e);
+                }
+                try { Thread.sleep(RETRY_BASE_MS * (1L << (attempt - 1))); } catch (InterruptedException ix) {
+                    Thread.currentThread().interrupt(); throw new RuntimeException("interrupted", ix);
+                }
+            }
+        }
+        throw new RuntimeException("Voyage embedDouble: exhausted retries");
+    }
+
     @SuppressWarnings("unchecked")
     private List<float[]> parseResponse(String body) throws Exception {
         Map<String, Object> root = mapper.readValue(body, Map.class);
@@ -156,6 +231,31 @@ public final class VoyageEmbedder implements Embedder {
             float[] vec = new float[rawEmb.size()];
             for (int i = 0; i < rawEmb.size(); i++) {
                 vec[i] = rawEmb.get(i).floatValue();
+            }
+            result.add(vec);
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<double[]> parseResponseDouble(String body) throws Exception {
+        Map<String, Object> root = mapper.readValue(body, Map.class);
+        List<Map<String, Object>> data = (List<Map<String, Object>>) root.get("data");
+        if (data == null || data.isEmpty()) {
+            throw new RuntimeException("Voyage AI returned empty data array: " + body);
+        }
+
+        data.sort(Comparator.comparingInt(m -> ((Number) m.get("index")).intValue()));
+
+        List<double[]> result = new ArrayList<>(data.size());
+        for (Map<String, Object> item : data) {
+            List<Number> rawEmb = (List<Number>) item.get("embedding");
+            if (rawEmb == null) {
+                throw new RuntimeException("Voyage AI item missing 'embedding': " + item);
+            }
+            double[] vec = new double[rawEmb.size()];
+            for (int i = 0; i < rawEmb.size(); i++) {
+                vec[i] = rawEmb.get(i).doubleValue();  // no float32 truncation
             }
             result.add(vec);
         }

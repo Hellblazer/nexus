@@ -28,10 +28,14 @@ public final class VectorRepository {
 
     private final Embedder              docEmbedder;
     private final Embedder              queryEmbedder;
+    private final EmbedderRouter        docRouter;      // nullable; preferred over docEmbedder
+    private final EmbedderRouter        queryRouter;    // nullable; preferred over queryEmbedder
     private final ChromaRestClient      chroma;
     private final ChromaQuotaValidator  quota;
 
     /**
+     * Simple constructor: no collection-aware routing (original signature for tests).
+     *
      * @param docEmbedder   embedder for document indexing (input_type="document")
      * @param queryEmbedder embedder for query search (input_type="query"); may be same instance
      * @param chroma        configured Chroma REST client
@@ -40,6 +44,25 @@ public final class VectorRepository {
                             ChromaRestClient chroma) {
         this.docEmbedder   = docEmbedder;
         this.queryEmbedder = queryEmbedder;
+        this.docRouter     = null;
+        this.queryRouter   = null;
+        this.chroma        = chroma;
+        this.quota         = new ChromaQuotaValidator();
+    }
+
+    /**
+     * Collection-aware constructor (bead nexus-gmiaf.21): routes by collection prefix.
+     *
+     * @param docRouter     collection-aware embedder router for document indexing
+     * @param queryRouter   collection-aware embedder router for query embedding
+     * @param chroma        configured Chroma REST client
+     */
+    public VectorRepository(EmbedderRouter docRouter, EmbedderRouter queryRouter,
+                            ChromaRestClient chroma) {
+        this.docEmbedder   = docRouter;   // EmbedderRouter implements Embedder (ONNX fallback)
+        this.queryEmbedder = queryRouter;
+        this.docRouter     = docRouter;
+        this.queryRouter   = queryRouter;
         this.chroma        = chroma;
         this.quota         = new ChromaQuotaValidator();
     }
@@ -84,9 +107,11 @@ public final class VectorRepository {
                     collection, ids.size(), dedupIds.size(), collapsed);
         }
 
-        // 3. Server-side embed
+        // 3. Server-side embed (collection-aware routing if router available)
         log.debug("event=upsert_chunks_embedding collection={} count={}", collection, dedupIds.size());
-        List<float[]> embeddings = docEmbedder.embed(dedupDocs);
+        List<float[]> embeddings = (docRouter != null)
+                ? docRouter.embedForCollection(collection, dedupDocs)
+                : docEmbedder.embed(dedupDocs);
 
         // 4. Chroma upsert (paginated inside ChromaRestClient)
         chroma.upsert(collection, dedupIds, dedupDocs, embeddings, dedupMetas);
@@ -111,7 +136,14 @@ public final class VectorRepository {
                                              Map<String, Object> where) {
         quota.validateQuery(queryText, nResults, where);
 
-        float[] queryVec = queryEmbedder.embedOne(queryText);
+        // For multi-collection queries, use the first collection to drive routing.
+        // All collections in a single search call should share the same embedder
+        // (enforced by the Python client which never mixes code__ and knowledge__).
+        String routingCollection = (queryRouter != null && !collectionNames.isEmpty())
+                ? collectionNames.get(0) : null;
+        float[] queryVec = (queryRouter != null && routingCollection != null)
+                ? queryRouter.embedOneForCollection(routingCollection, queryText)
+                : queryEmbedder.embedOne(queryText);
 
         List<Map<String, Object>> results = new ArrayList<>();
         for (String colName : collectionNames) {
@@ -143,7 +175,9 @@ public final class VectorRepository {
     public String put(String collection, String docId, String content,
                       Map<String, Object> metadata) {
         quota.validateRecord(docId, content, null, metadata);
-        List<float[]> vecs = docEmbedder.embed(List.of(content));
+        List<float[]> vecs = (docRouter != null)
+                ? docRouter.embedForCollection(collection, List.of(content))
+                : docEmbedder.embed(List.of(content));
         chroma.upsert(collection, List.of(docId), List.of(content), vecs, List.of(metadata));
         return docId;
     }
