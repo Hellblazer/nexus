@@ -22,6 +22,7 @@ import dev.nexus.service.http.TaxonomyHandler;
 import dev.nexus.service.http.TelemetryHandler;
 import dev.nexus.service.http.VectorHandler;
 import dev.nexus.service.http.WhoamiHandler;
+import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.VectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -82,13 +83,28 @@ public final class NexusService {
     }
 
     /**
-     * @param port           listen port; 0 for OS-assigned ephemeral (use in tests)
-     * @param token          expected bearer token (from NX_SERVICE_TOKEN env or config)
-     * @param dataSource     pooled connection source (HikariCP in production)
+     * @param port             listen port; 0 for OS-assigned ephemeral (use in tests)
+     * @param token            expected bearer token (from NX_SERVICE_TOKEN env or config)
+     * @param dataSource       pooled connection source (HikariCP in production)
      * @param vectorRepository optional VectorRepository for Seam B vector ops (may be null)
      */
     public NexusService(int port, String token, DataSource dataSource,
                         VectorRepository vectorRepository) throws IOException {
+        this(port, token, dataSource, vectorRepository, null);
+    }
+
+    /**
+     * Full constructor with EmbedderRouter for the parity gate endpoint (nexus-gmiaf.21).
+     *
+     * @param port             listen port; 0 for OS-assigned ephemeral (use in tests)
+     * @param token            expected bearer token
+     * @param dataSource       pooled connection source
+     * @param vectorRepository optional VectorRepository (may be null)
+     * @param docEmbedderRouter optional EmbedderRouter for {@code /v1/vectors/embed} (may be null)
+     */
+    public NexusService(int port, String token, DataSource dataSource,
+                        VectorRepository vectorRepository,
+                        EmbedderRouter docEmbedderRouter) throws IOException {
         this.tenantScope = new TenantScope(dataSource);
         var memoryRepo    = new MemoryRepository(tenantScope);
         var planRepo      = new PlanRepository(tenantScope);
@@ -144,11 +160,13 @@ public final class NexusService {
         catalogCtx.getFilters().addAll(authFilter);
 
         // /v1/vectors/* — vector (Chroma) endpoints (bead nexus-gmiaf.20)
-        // Only registered when a VectorRepository is provided (NX_STORAGE_BACKEND_VECTORS=service)
-        if (vectorRepository != null) {
-            var vectorCtx = server.createContext("/v1/vectors", new VectorHandler(vectorRepository));
+        // Registered when a VectorRepository is provided OR an EmbedderRouter alone is provided
+        // (parity-gate mode: NX_CHROMA_MODE=none + NX_VOYAGE_API_KEY — only /embed is active).
+        if (vectorRepository != null || docEmbedderRouter != null) {
+            var vectorCtx = server.createContext("/v1/vectors",
+                    new VectorHandler(vectorRepository, docEmbedderRouter));
             vectorCtx.getFilters().addAll(authFilter);
-            log.info("event=vector_endpoints_registered");
+            log.info("event=vector_endpoints_registered has_storage={}", vectorRepository != null);
         }
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());

@@ -11,6 +11,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.vectors.ChromaQuotaValidator;
+import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.VectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,9 +59,20 @@ public final class VectorHandler implements HttpHandler {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
     private final VectorRepository repo;
+    private final EmbedderRouter   embedderRouter;
 
+    /**
+     * @param repo          vector repository for storage ops
+     * @param embedderRouter collection-aware embedder router (for /embed endpoint)
+     */
+    public VectorHandler(VectorRepository repo, EmbedderRouter embedderRouter) {
+        this.repo          = repo;
+        this.embedderRouter = embedderRouter;
+    }
+
+    /** Backwards-compatible constructor for tests without an embedder router. */
     public VectorHandler(VectorRepository repo) {
-        this.repo = repo;
+        this(repo, null);
     }
 
     @Override
@@ -81,6 +93,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/store-delete"  -> handleStoreDelete(exchange, method);
                 case "/collections"   -> handleCollections(exchange, method);
                 case "/count"         -> handleCount(exchange, method);
+                case "/embed"         -> handleEmbed(exchange, method);    // parity gate
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (ChromaQuotaValidator.QuotaViolation e) {
@@ -273,6 +286,56 @@ public final class VectorHandler implements HttpHandler {
         String collection = requireQueryParam(ex, "collection");
         int count = repo.count(collection);
         HttpUtil.send(ex, 200, json(Map.of("count", count)));
+    }
+
+    /**
+     * POST /v1/vectors/embed
+     *
+     * <p>Embed-only endpoint — returns raw vectors WITHOUT storing to Chroma.
+     * Used by the parity gate (bead nexus-gmiaf.21) to compare Java vs Python
+     * embedding output directly (cosine == 1.0 exactly).
+     *
+     * <p>Request:
+     * <pre>
+     * {
+     *   "collection": "knowledge__owner__voyage-context-3__v1",  // drives embedder routing
+     *   "texts":      ["text0", "text1", ...]
+     * }
+     * </pre>
+     *
+     * <p>Response 200:
+     * <pre>
+     * {
+     *   "embeddings": [[f0, f1, ...], [f0, f1, ...], ...]
+     * }
+     * </pre>
+     *
+     * <p>Returns 503 if no EmbedderRouter was configured.
+     */
+    private void handleEmbed(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        if (embedderRouter == null) {
+            HttpUtil.send(ex, 503, json(Map.of("error", "embed endpoint not configured")));
+            return;
+        }
+        Map<String, Object> body = readBody(ex);
+        String collection     = requireString(body, "collection");
+        List<String> texts    = requireStringList(body, "texts");
+
+        // Use embedDoubleForCollection to preserve full JSON double precision.
+        // embedForCollection (float32) round-trips through float32 serialization, causing
+        // cosine ≈ 0.9999669 drift vs Python. embedDoubleForCollection returns the raw
+        // double values from the Voyage API JSON, giving cosine == 1.0 exactly.
+        List<double[]> vecs = embedderRouter.embedDoubleForCollection(collection, texts);
+
+        // Convert to List<List<Double>> for JSON serialization
+        List<List<Double>> embeddings = new ArrayList<>(vecs.size());
+        for (double[] v : vecs) {
+            List<Double> row = new ArrayList<>(v.length);
+            for (double d : v) row.add(d);
+            embeddings.add(row);
+        }
+        HttpUtil.send(ex, 200, json(Map.of("embeddings", embeddings)));
     }
 
     // ── Request parsing helpers ───────────────────────────────────────────────
