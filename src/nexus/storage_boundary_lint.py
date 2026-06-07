@@ -138,11 +138,21 @@ CATALOG_CONSTRUCTION_BASELINE: int = 0
 #: against AST ``Attribute(value=Name(id=module), attr=attribute)``
 #: nodes inside ``Call`` nodes. Alias resolution maps the alias back
 #: to the canonical module name before matching.
+#:
+#: RDR-152 Seam B (nexus-gmiaf.22): ``voyageai.Client`` is added as a
+#: structural tripwire for the INDEXER surface.  After the P3.3 cutover,
+#: embedding moves to the JVM (nexus-service) — any new direct
+#: ``voyageai.Client(...)`` in the indexer / client write surface is a
+#: regression.  The allowlist (db/, catalog/ P0-P4, daemon/) covers
+#: the Phase-4 deletion targets that still hold direct Voyage calls
+#: (t3.py, daemon/, catalog/).  Any new Voyage call outside those paths
+#: must carry a valid ``# epsilon-allow: <reason>`` annotation.
 BANLIST: tuple[tuple[str, str], ...] = (
     ("sqlite3", "connect"),
     ("chromadb", "PersistentClient"),
     ("chromadb", "CloudClient"),
     ("chromadb", "EphemeralClient"),
+    ("voyageai", "Client"),
 )
 
 

@@ -422,7 +422,7 @@ def _embed_with_fallback(
             limit=_CCE_MAX_TOTAL_CHUNKS,
         )
     import voyageai
-    client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=0)
+    client = voyageai.Client(api_key=api_key, timeout=timeout, max_retries=0)  # epsilon-allow: Phase-4 deletion target — legacy non-service embed path
     if model == "voyage-context-3":
         # CCE API accepts single-element inputs — use it for all chunk counts.
         # The old >=2 requirement was our incorrect assumption; removing it ensures
@@ -680,12 +680,20 @@ def _index_document(
     if embed_fn is not None:
         embeddings, actual_model = embed_fn(documents, target_model)
     else:
-        from nexus.config import get_credential, load_config
-        voyage_key = get_credential("voyage_api_key")
-        if not voyage_key:
-            raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
-        timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        if is_vector_service_mode():
+            # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
+            # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
+            # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+            embeddings = [[]] * len(documents)
+            actual_model = target_model
+        else:
+            from nexus.config import get_credential, load_config
+            voyage_key = get_credential("voyage_api_key")
+            if not voyage_key:
+                raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
+            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+            embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
     if actual_model != target_model:
         for m in metadatas:
             m["embedding_model"] = actual_model
@@ -840,14 +848,22 @@ def _index_pdf_incremental(
         if embed_fn is not None:
             embeddings, actual_model = embed_fn(batch_docs, target_model)
         else:
-            from nexus.config import get_credential, load_config
-            voyage_key = get_credential("voyage_api_key")
-            if not voyage_key:
-                raise RuntimeError("voyage_api_key required")
-            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-            embeddings, actual_model = _embed_with_fallback(
-                batch_docs, target_model, voyage_key, timeout=timeout,
-            )
+            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+            if is_vector_service_mode():
+                # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
+                # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
+                # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+                embeddings = [[]] * len(batch_docs)
+                actual_model = target_model
+            else:
+                from nexus.config import get_credential, load_config
+                voyage_key = get_credential("voyage_api_key")
+                if not voyage_key:
+                    raise RuntimeError("voyage_api_key required")
+                timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+                embeddings, actual_model = _embed_with_fallback(
+                    batch_docs, target_model, voyage_key, timeout=timeout,
+                )
 
         if actual_model != target_model:
             for m in batch_metas:
@@ -1369,12 +1385,20 @@ def index_pdf(
     if embed_fn is not None:
         embeddings, actual_model = embed_fn(documents, target_model)
     else:
-        from nexus.config import get_credential, load_config
-        voyage_key = get_credential("voyage_api_key")
-        if not voyage_key:
-            raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
-        timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
-        embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        if is_vector_service_mode():
+            # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
+            # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
+            # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+            embeddings = [[]] * len(documents)
+            actual_model = target_model
+        else:
+            from nexus.config import get_credential, load_config
+            voyage_key = get_credential("voyage_api_key")
+            if not voyage_key:
+                raise RuntimeError("voyage_api_key must be set — unreachable if _has_credentials() passed")
+            timeout = load_config().get("voyageai", {}).get("read_timeout_seconds", 120.0)
+            embeddings, actual_model = _embed_with_fallback(documents, target_model, voyage_key, timeout=timeout, on_progress=on_progress)
     if actual_model != target_model:
         for m in metadatas_list:
             m["embedding_model"] = actual_model
