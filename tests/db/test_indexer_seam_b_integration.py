@@ -175,6 +175,13 @@ def local_service(pg_instance: dict) -> Generator[tuple[str, str], None, None]:
     svc_port = _free_port()
     pg_user = pg_instance["user"]
 
+    # Ephemeral Chroma data dir — the service defaults NX_CHROMA_PATH to
+    # ~/.config/nexus/chroma, which persists across runs and would leave a
+    # previously-indexed doc on disk, making the staleness round-trip
+    # (first index > 0, second index == 0) non-idempotent. A per-module
+    # tmp dir guarantees a clean Chroma on every run.
+    chroma_data = tempfile.mkdtemp(prefix="seam-b-chroma-")
+
     env = {
         **os.environ,
         "NX_SERVICE_PORT": str(svc_port),
@@ -186,6 +193,7 @@ def local_service(pg_instance: dict) -> Generator[tuple[str, str], None, None]:
         "NX_DB_PASS": "svc_seam_b_pass",
         "NX_POOL_SIZE": "2",
         "NX_CHROMA_MODE": "local",
+        "NX_CHROMA_PATH": chroma_data,
     }
     # Ensure no Voyage key — forces ONNX mode
     env.pop("NX_VOYAGE_API_KEY", None)
@@ -204,6 +212,7 @@ def local_service(pg_instance: dict) -> Generator[tuple[str, str], None, None]:
         yield f"http://127.0.0.1:{svc_port}", token
     finally:
         _stop_service(proc)
+        shutil.rmtree(chroma_data, ignore_errors=True)
 
 
 # ── Integration test ────────────────────────────────────────────────────────────
