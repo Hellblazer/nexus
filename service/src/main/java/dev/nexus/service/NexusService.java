@@ -1,12 +1,14 @@
 package dev.nexus.service;
 
 import com.sun.net.httpserver.HttpServer;
+import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.PlanRepository;
 import dev.nexus.service.db.ScratchRepository;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TelemetryRepository;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.http.AspectHandler;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.HealthHandler;
 import dev.nexus.service.http.MemoryHandler;
@@ -74,6 +76,7 @@ public final class NexusService {
         var telemetryRepo = new TelemetryRepository(tenantScope);
         var scratchRepo   = new ScratchRepository(tenantScope);
         var taxonomyRepo  = new TaxonomyRepository(tenantScope);
+        var aspectRepo    = new AspectRepository(tenantScope);
 
         this.server = HttpServer.create(
             new InetSocketAddress("127.0.0.1", port), /* backlog */ 10);
@@ -106,6 +109,10 @@ public final class NexusService {
         // /v1/taxonomy/* — taxonomy endpoints (bead nexus-gmiaf.14)
         var taxonomyCtx = server.createContext("/v1/taxonomy", new TaxonomyHandler(taxonomyRepo));
         taxonomyCtx.getFilters().addAll(authFilter);
+
+        // /v1/aspects/* — aspects / highlights / queue / promotion-log (bead nexus-gmiaf.15)
+        var aspectCtx = server.createContext("/v1/aspects", new AspectHandler(aspectRepo));
+        aspectCtx.getFilters().addAll(authFilter);
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
 

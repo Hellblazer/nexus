@@ -461,20 +461,37 @@ class T2Database:
         # RDR-089 Phase 1: per-document structured aspect table
         # populated by the document-grain hook chain at every CLI
         # ingest site (knowledge__* only in Phase 1).
-        self.document_aspects: DocumentAspects = DocumentAspects(path)
+        # RDR-152 nexus-gmiaf.15: document_aspects service seam.
+        if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
+            self.document_aspects: DocumentAspects = HttpDocumentAspectsStore()  # type: ignore[assignment]
+        else:
+            self.document_aspects: DocumentAspects = DocumentAspects(path)
         # RDR-089 follow-up (nexus-qeo8): durable queue feeding the
         # async aspect-extraction worker. The hook fires fast (just
         # an enqueue); the worker drains in a background thread.
         # RDR-138 T1.1: inject RENAME_LOCK so the queue shares the same
         # lock instance as the cascade. T1.2 will wrap mutator bodies.
-        self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(
-            path, rename_lock=self.RENAME_LOCK
-        )
+        # RDR-152 nexus-gmiaf.15: aspect_queue service seam.
+        if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+            self.aspect_queue: AspectExtractionQueue = HttpAspectQueue(  # type: ignore[assignment]
+                rename_lock=self.RENAME_LOCK
+            )
+        else:
+            self.aspect_queue: AspectExtractionQueue = AspectExtractionQueue(
+                path, rename_lock=self.RENAME_LOCK
+            )
         # RDR-139 Layer E: per-document DEVONthink highlight/mention notes,
         # keyed by tumbler. Dedicated table (NOT document_aspects) so
         # free-text highlights never contend with the aspect worker's
         # whole-row overwrite or its confidence gate.
-        self.document_highlights: DocumentHighlights = DocumentHighlights(path)
+        # RDR-152 nexus-gmiaf.15: document_highlights service seam.
+        if storage_backend_for("document_highlights") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore
+            self.document_highlights: DocumentHighlights = HttpDocumentHighlightsStore()  # type: ignore[assignment]
+        else:
+            self.document_highlights: DocumentHighlights = DocumentHighlights(path)
 
         # RDR-120 P5.A.1 (nexus-9zmpl): catalog is the eighth domain
         # store. Constructed lazily via the ``catalog`` property so
@@ -836,7 +853,7 @@ class T2Database:
             # raw SQL UPDATE on the shared SQLite file would diverge from
             # the service's Postgres tables, so we route through the
             # domain-store API when the seam is active.
-            from nexus.db.storage_backend import StorageBackend, storage_backend_for
+            from nexus.db.storage_mode import StorageBackend, storage_backend_for
             if storage_backend_for("taxonomy") == StorageBackend.SERVICE:
                 tax_counts = self.taxonomy.rename_collection(old, new)
                 counts["tax_topics"] = tax_counts.get("topics", 0)
