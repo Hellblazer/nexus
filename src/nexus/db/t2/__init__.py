@@ -437,9 +437,15 @@ class T2Database:
             self.plans: PlanLibrary = HttpPlanLibrary()  # type: ignore[assignment]
         else:
             self.plans: PlanLibrary = PlanLibrary(path)
+        # RDR-152 nexus-gmiaf.14: taxonomy service seam.
+        # NX_STORAGE_BACKEND_TAXONOMY=service routes to HttpTaxonomyStore.
         # CatalogTaxonomy takes a MemoryStore reference for the
         # get_topic_docs JOIN (RDR-063 §Cross-Domain Contracts).
-        self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)
+        if storage_backend_for("taxonomy") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+            self.taxonomy: CatalogTaxonomy = HttpTaxonomyStore()  # type: ignore[assignment]
+        else:
+            self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)
 
         # RDR-152 nexus-gmiaf.12: telemetry service seam.
         # NX_STORAGE_BACKEND_TELEMETRY=service routes to HttpTelemetryStore.

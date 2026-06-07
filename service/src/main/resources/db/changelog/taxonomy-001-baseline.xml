@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-152 bead nexus-gmiaf.14 — taxonomy store baseline changelog.
+
+    Creates 4 tables mirroring catalog_taxonomy.py 1:1 with tenant_id for RLS:
+      nexus.topics             — topic clusters (label, parent, collection, doc_count, review)
+      nexus.taxonomy_meta      — per-collection discover bookkeeping
+      nexus.topic_assignments  — doc-to-topic mappings (with projection quality columns)
+      nexus.topic_links        — inter-topic co-occurrence / projection edges
+
+    FTS contract (docs/rdr/rdr-152-fts-parity-contract.md, Store 4):
+      NO FTS5 virtual table, NO tsvector/GIN column.
+      Topics are queried by EXACT label/collection equality + doc_count sort.
+      This changeset MUST NOT add any tsvector or GIN index.
+
+    Soft FK note: columns referencing catalog doc tumblers (doc_id in topic_assignments)
+    are plain TEXT columns, NOT enforced PG foreign keys. FK tightening lands in
+    nexus-b7v6i (.18+ gate) after all stores are migrated.
+
+    Column strategy for ETL import (EXCLUDED.* vs GREATEST):
+      topics.doc_count          -> GREATEST(EXCLUDED.doc_count, topics.doc_count)
+                                   doc_count is a denormalized cache; live PG value
+                                   may be ahead of the SQLite snapshot — keep the max.
+      topics.review_status      -> EXCLUDED.review_status (mutable human annotation;
+                                   preserve verbatim from source)
+      topics.created_at         -> topics.created_at (keep oldest; do not overwrite)
+      topics.label              -> topics.label (keep live label; operator may have renamed)
+      topics.centroid_hash      -> EXCLUDED.centroid_hash (allow ETL to refresh)
+      topics.terms              -> EXCLUDED.terms (allow ETL to refresh c-TF-IDF terms)
+      topic_assignments.*       -> EXCLUDED.* verbatim on conflict (doc_id+topic_id PK)
+                                   but similarity uses MAX(EXCLUDED.similarity, existing.similarity)
+                                   to preserve best projection quality
+      topic_links.*             -> GREATEST for link_count; link_types merged JSON
+      taxonomy_meta.last_discover_doc_count -> GREATEST(EXCLUDED, existing)
+      taxonomy_meta.last_discover_at        -> GREATEST(EXCLUDED, existing) lexicographic ISO-8601
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: topics table ─────────────────────────────────────────── -->
+    <changeSet id="taxonomy-001-1" author="nexus-gmiaf.14">
+        <comment>Create nexus.topics table mirroring SQLite catalog_taxonomy.py schema with tenant_id</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.topics (
+    id              BIGSERIAL        NOT NULL,
+    tenant_id       TEXT             NOT NULL,
+    label           TEXT             NOT NULL,
+    parent_id       BIGINT,
+    collection      TEXT             NOT NULL,
+    centroid_hash   TEXT,
+    doc_count       INTEGER          NOT NULL DEFAULT 0,
+    created_at      TIMESTAMPTZ      NOT NULL,
+    review_status   TEXT             NOT NULL DEFAULT 'pending',
+    terms           TEXT,
+    CONSTRAINT topics_pk PRIMARY KEY (id),
+    -- Self-referential FK for parent-child hierarchy (soft, same table)
+    CONSTRAINT topics_parent_fk FOREIGN KEY (parent_id) REFERENCES nexus.topics(id)
+        ON DELETE SET NULL
+);
+
+-- Index matching query patterns: get_topics/get_all_topics/get_topics_for_collection
+-- all query by (tenant_id, collection) + ORDER BY doc_count DESC
+CREATE INDEX idx_topics_tenant_collection      ON nexus.topics (tenant_id, collection);
+CREATE INDEX idx_topics_tenant_collection_count ON nexus.topics (tenant_id, collection, doc_count DESC);
+-- Exact label lookup (resolve_label, get_doc_ids_for_topic via join)
+CREATE INDEX idx_topics_tenant_label           ON nexus.topics (tenant_id, label);
+-- Review workflow: get_unreviewed_topics
+CREATE INDEX idx_topics_tenant_review_status   ON nexus.topics (tenant_id, review_status);
+-- Parent traversal: get_topic_tree
+CREATE INDEX idx_topics_tenant_parent          ON nexus.topics (tenant_id, parent_id);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.topics CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: taxonomy_meta table ──────────────────────────────────── -->
+    <changeSet id="taxonomy-001-2" author="nexus-gmiaf.14">
+        <comment>Create nexus.taxonomy_meta table mirroring SQLite schema with tenant_id</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.taxonomy_meta (
+    tenant_id                TEXT             NOT NULL,
+    collection               TEXT             NOT NULL,
+    last_discover_doc_count  INTEGER          NOT NULL DEFAULT 0,
+    last_discover_at         TIMESTAMPTZ,
+    CONSTRAINT taxonomy_meta_pk PRIMARY KEY (tenant_id, collection)
+);
+
+CREATE INDEX idx_taxonomy_meta_tenant ON nexus.taxonomy_meta (tenant_id);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.taxonomy_meta CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: topic_assignments table ──────────────────────────────── -->
+    <changeSet id="taxonomy-001-3" author="nexus-gmiaf.14">
+        <comment>Create nexus.topic_assignments table mirroring SQLite schema with tenant_id</comment>
+        <sql splitStatements="true" stripComments="false">
+-- NOTE: doc_id is a plain TEXT column referencing catalog doc tumblers.
+-- NOT an enforced FK — soft ref until nexus-b7v6i (.18+ gate).
+CREATE TABLE nexus.topic_assignments (
+    tenant_id        TEXT             NOT NULL,
+    doc_id           TEXT             NOT NULL,
+    topic_id         BIGINT           NOT NULL REFERENCES nexus.topics(id) ON DELETE CASCADE,
+    assigned_by      TEXT             NOT NULL DEFAULT 'hdbscan',
+    similarity       DOUBLE PRECISION,
+    assigned_at      TIMESTAMPTZ,
+    source_collection TEXT,
+    CONSTRAINT topic_assignments_pk PRIMARY KEY (tenant_id, doc_id, topic_id)
+);
+
+-- Query patterns:
+-- compute_icf_map: WHERE assigned_by='projection' AND source_collection IS NOT NULL
+CREATE INDEX idx_ta_tenant_by_source ON nexus.topic_assignments
+    (tenant_id, assigned_by, source_collection);
+-- get_assignments_for_docs: doc_id IN (...)
+CREATE INDEX idx_ta_tenant_doc_id ON nexus.topic_assignments (tenant_id, doc_id);
+-- get_topic_docs / get_topic_doc_ids: WHERE topic_id = ?
+CREATE INDEX idx_ta_tenant_topic_id ON nexus.topic_assignments (tenant_id, topic_id);
+-- purge_assignments_for_doc: doc_id = ? AND topic_id IN (...)
+CREATE INDEX idx_ta_tenant_doc_topic ON nexus.topic_assignments (tenant_id, doc_id, topic_id);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.topic_assignments CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: topic_links table ────────────────────────────────────── -->
+    <changeSet id="taxonomy-001-4" author="nexus-gmiaf.14">
+        <comment>Create nexus.topic_links table mirroring SQLite schema with tenant_id</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.topic_links (
+    tenant_id     TEXT    NOT NULL,
+    from_topic_id BIGINT  NOT NULL REFERENCES nexus.topics(id) ON DELETE CASCADE,
+    to_topic_id   BIGINT  NOT NULL REFERENCES nexus.topics(id) ON DELETE CASCADE,
+    link_count    INTEGER NOT NULL DEFAULT 0,
+    link_types    TEXT    NOT NULL DEFAULT '[]',
+    CONSTRAINT topic_links_pk PRIMARY KEY (tenant_id, from_topic_id, to_topic_id)
+);
+
+-- get_topic_link_pairs: both from/to in a set
+CREATE INDEX idx_tl_tenant_from ON nexus.topic_links (tenant_id, from_topic_id);
+CREATE INDEX idx_tl_tenant_to   ON nexus.topic_links (tenant_id, to_topic_id);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.topic_links CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 5: RLS on all 4 tables ──────────────────────────────────── -->
+    <changeSet id="taxonomy-001-5" author="nexus-gmiaf.14">
+        <comment>Enable and FORCE RLS + tenant_isolation policy on all 4 taxonomy tables</comment>
+        <sql splitStatements="true" stripComments="false">
+-- topics
+ALTER TABLE nexus.topics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.topics FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.topics
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+-- taxonomy_meta
+ALTER TABLE nexus.taxonomy_meta ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.taxonomy_meta FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.taxonomy_meta
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+-- topic_assignments
+ALTER TABLE nexus.topic_assignments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.topic_assignments FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.topic_assignments
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+-- topic_links
+ALTER TABLE nexus.topic_links ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.topic_links FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.topic_links
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.topic_links;
+            ALTER TABLE nexus.topic_links NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.topic_links DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.topic_assignments;
+            ALTER TABLE nexus.topic_assignments NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.topic_assignments DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.taxonomy_meta;
+            ALTER TABLE nexus.taxonomy_meta NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.taxonomy_meta DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.topics;
+            ALTER TABLE nexus.topics NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.topics DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 6: service role grants ──────────────────────────────────── -->
+    <changeSet id="taxonomy-001-6" author="nexus-gmiaf.14">
+        <comment>Grant table privileges to nexus_svc role (idempotent)</comment>
+        <sql splitStatements="false">
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.topics TO nexus_svc';
+        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.topics_id_seq TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.taxonomy_meta TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.topic_assignments TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.topic_links TO nexus_svc';
+        RAISE NOTICE 'Granted nexus taxonomy table privileges to nexus_svc';
+    ELSE
+        RAISE NOTICE 'nexus_svc role not found; skipping grants';
+    END IF;
+END
+$$;
+        </sql>
+        <rollback></rollback>
+    </changeSet>
+
+</databaseChangeLog>

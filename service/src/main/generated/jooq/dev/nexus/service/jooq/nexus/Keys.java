@@ -11,7 +11,11 @@ import dev.nexus.service.jooq.nexus.tables.NxAnswerRuns;
 import dev.nexus.service.jooq.nexus.tables.Plans;
 import dev.nexus.service.jooq.nexus.tables.RelevanceLog;
 import dev.nexus.service.jooq.nexus.tables.SearchTelemetry;
+import dev.nexus.service.jooq.nexus.tables.TaxonomyMeta;
 import dev.nexus.service.jooq.nexus.tables.TierWrites;
+import dev.nexus.service.jooq.nexus.tables.TopicAssignments;
+import dev.nexus.service.jooq.nexus.tables.TopicLinks;
+import dev.nexus.service.jooq.nexus.tables.Topics;
 import dev.nexus.service.jooq.nexus.tables.records.FrecencyRecord;
 import dev.nexus.service.jooq.nexus.tables.records.HookFailuresRecord;
 import dev.nexus.service.jooq.nexus.tables.records.MemoryRecord;
@@ -19,12 +23,18 @@ import dev.nexus.service.jooq.nexus.tables.records.NxAnswerRunsRecord;
 import dev.nexus.service.jooq.nexus.tables.records.PlansRecord;
 import dev.nexus.service.jooq.nexus.tables.records.RelevanceLogRecord;
 import dev.nexus.service.jooq.nexus.tables.records.SearchTelemetryRecord;
+import dev.nexus.service.jooq.nexus.tables.records.TaxonomyMetaRecord;
 import dev.nexus.service.jooq.nexus.tables.records.TierWritesRecord;
+import dev.nexus.service.jooq.nexus.tables.records.TopicAssignmentsRecord;
+import dev.nexus.service.jooq.nexus.tables.records.TopicLinksRecord;
+import dev.nexus.service.jooq.nexus.tables.records.TopicsRecord;
 
+import org.jooq.ForeignKey;
 import org.jooq.TableField;
 import org.jooq.UniqueKey;
 import org.jooq.impl.DSL;
 import org.jooq.impl.Internal;
+import org.jooq.impl.QOM.ForeignKeyRule;
 
 
 /**
@@ -47,5 +57,18 @@ public class Keys {
     public static final UniqueKey<PlansRecord> PLANS_TENANT_PROJECT_QUERY_UQ = Internal.createUniqueKey(Plans.PLANS, DSL.name("plans_tenant_project_query_uq"), new TableField[] { Plans.PLANS.TENANT_ID, Plans.PLANS.PROJECT, Plans.PLANS.QUERY }, true);
     public static final UniqueKey<RelevanceLogRecord> RELEVANCE_LOG_PK = Internal.createUniqueKey(RelevanceLog.RELEVANCE_LOG, DSL.name("relevance_log_pk"), new TableField[] { RelevanceLog.RELEVANCE_LOG.ID }, true);
     public static final UniqueKey<SearchTelemetryRecord> SEARCH_TELEMETRY_PK = Internal.createUniqueKey(SearchTelemetry.SEARCH_TELEMETRY, DSL.name("search_telemetry_pk"), new TableField[] { SearchTelemetry.SEARCH_TELEMETRY.TENANT_ID, SearchTelemetry.SEARCH_TELEMETRY.TS, SearchTelemetry.SEARCH_TELEMETRY.QUERY_HASH, SearchTelemetry.SEARCH_TELEMETRY.COLLECTION }, true);
+    public static final UniqueKey<TaxonomyMetaRecord> TAXONOMY_META_PK = Internal.createUniqueKey(TaxonomyMeta.TAXONOMY_META, DSL.name("taxonomy_meta_pk"), new TableField[] { TaxonomyMeta.TAXONOMY_META.TENANT_ID, TaxonomyMeta.TAXONOMY_META.COLLECTION }, true);
     public static final UniqueKey<TierWritesRecord> TIER_WRITES_PK = Internal.createUniqueKey(TierWrites.TIER_WRITES, DSL.name("tier_writes_pk"), new TableField[] { TierWrites.TIER_WRITES.ID }, true);
+    public static final UniqueKey<TopicAssignmentsRecord> TOPIC_ASSIGNMENTS_PK = Internal.createUniqueKey(TopicAssignments.TOPIC_ASSIGNMENTS, DSL.name("topic_assignments_pk"), new TableField[] { TopicAssignments.TOPIC_ASSIGNMENTS.TENANT_ID, TopicAssignments.TOPIC_ASSIGNMENTS.DOC_ID, TopicAssignments.TOPIC_ASSIGNMENTS.TOPIC_ID }, true);
+    public static final UniqueKey<TopicLinksRecord> TOPIC_LINKS_PK = Internal.createUniqueKey(TopicLinks.TOPIC_LINKS, DSL.name("topic_links_pk"), new TableField[] { TopicLinks.TOPIC_LINKS.TENANT_ID, TopicLinks.TOPIC_LINKS.FROM_TOPIC_ID, TopicLinks.TOPIC_LINKS.TO_TOPIC_ID }, true);
+    public static final UniqueKey<TopicsRecord> TOPICS_PK = Internal.createUniqueKey(Topics.TOPICS, DSL.name("topics_pk"), new TableField[] { Topics.TOPICS.ID }, true);
+
+    // -------------------------------------------------------------------------
+    // FOREIGN KEY definitions
+    // -------------------------------------------------------------------------
+
+    public static final ForeignKey<TopicAssignmentsRecord, TopicsRecord> TOPIC_ASSIGNMENTS__TOPIC_ASSIGNMENTS_TOPIC_ID_FKEY = Internal.createForeignKey(TopicAssignments.TOPIC_ASSIGNMENTS, DSL.name("topic_assignments_topic_id_fkey"), new TableField[] { TopicAssignments.TOPIC_ASSIGNMENTS.TOPIC_ID }, Keys.TOPICS_PK, new TableField[] { Topics.TOPICS.ID }, true, ForeignKeyRule.CASCADE, ForeignKeyRule.NO_ACTION);
+    public static final ForeignKey<TopicLinksRecord, TopicsRecord> TOPIC_LINKS__TOPIC_LINKS_FROM_TOPIC_ID_FKEY = Internal.createForeignKey(TopicLinks.TOPIC_LINKS, DSL.name("topic_links_from_topic_id_fkey"), new TableField[] { TopicLinks.TOPIC_LINKS.FROM_TOPIC_ID }, Keys.TOPICS_PK, new TableField[] { Topics.TOPICS.ID }, true, ForeignKeyRule.CASCADE, ForeignKeyRule.NO_ACTION);
+    public static final ForeignKey<TopicLinksRecord, TopicsRecord> TOPIC_LINKS__TOPIC_LINKS_TO_TOPIC_ID_FKEY = Internal.createForeignKey(TopicLinks.TOPIC_LINKS, DSL.name("topic_links_to_topic_id_fkey"), new TableField[] { TopicLinks.TOPIC_LINKS.TO_TOPIC_ID }, Keys.TOPICS_PK, new TableField[] { Topics.TOPICS.ID }, true, ForeignKeyRule.CASCADE, ForeignKeyRule.NO_ACTION);
+    public static final ForeignKey<TopicsRecord, TopicsRecord> TOPICS__TOPICS_PARENT_FK = Internal.createForeignKey(Topics.TOPICS, DSL.name("topics_parent_fk"), new TableField[] { Topics.TOPICS.PARENT_ID }, Keys.TOPICS_PK, new TableField[] { Topics.TOPICS.ID }, true, ForeignKeyRule.SET_NULL, ForeignKeyRule.NO_ACTION);
 }

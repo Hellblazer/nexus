@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.PlanRepository;
 import dev.nexus.service.db.ScratchRepository;
+import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TelemetryRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.http.AuthFilter;
@@ -11,6 +12,7 @@ import dev.nexus.service.http.HealthHandler;
 import dev.nexus.service.http.MemoryHandler;
 import dev.nexus.service.http.PlanHandler;
 import dev.nexus.service.http.ScratchHandler;
+import dev.nexus.service.http.TaxonomyHandler;
 import dev.nexus.service.http.TelemetryHandler;
 import dev.nexus.service.http.WhoamiHandler;
 import org.slf4j.Logger;
@@ -71,6 +73,7 @@ public final class NexusService {
         var planRepo      = new PlanRepository(tenantScope);
         var telemetryRepo = new TelemetryRepository(tenantScope);
         var scratchRepo   = new ScratchRepository(tenantScope);
+        var taxonomyRepo  = new TaxonomyRepository(tenantScope);
 
         this.server = HttpServer.create(
             new InetSocketAddress("127.0.0.1", port), /* backlog */ 10);
@@ -99,6 +102,10 @@ public final class NexusService {
         // /v1/t1/* — T1 scratch endpoints (bead nexus-gmiaf.13)
         var t1Ctx = server.createContext("/v1/t1", new ScratchHandler(scratchRepo));
         t1Ctx.getFilters().addAll(authFilter);
+
+        // /v1/taxonomy/* — taxonomy endpoints (bead nexus-gmiaf.14)
+        var taxonomyCtx = server.createContext("/v1/taxonomy", new TaxonomyHandler(taxonomyRepo));
+        taxonomyCtx.getFilters().addAll(authFilter);
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
 

@@ -11,7 +11,11 @@ import dev.nexus.service.jooq.nexus.tables.NxAnswerRuns;
 import dev.nexus.service.jooq.nexus.tables.Plans;
 import dev.nexus.service.jooq.nexus.tables.RelevanceLog;
 import dev.nexus.service.jooq.nexus.tables.SearchTelemetry;
+import dev.nexus.service.jooq.nexus.tables.TaxonomyMeta;
 import dev.nexus.service.jooq.nexus.tables.TierWrites;
+import dev.nexus.service.jooq.nexus.tables.TopicAssignments;
+import dev.nexus.service.jooq.nexus.tables.TopicLinks;
+import dev.nexus.service.jooq.nexus.tables.Topics;
 
 
 /**
@@ -56,7 +60,27 @@ public class Tables {
     public static final SearchTelemetry SEARCH_TELEMETRY = SearchTelemetry.SEARCH_TELEMETRY;
 
     /**
+     * The table <code>nexus.taxonomy_meta</code>.
+     */
+    public static final TaxonomyMeta TAXONOMY_META = TaxonomyMeta.TAXONOMY_META;
+
+    /**
      * The table <code>nexus.tier_writes</code>.
      */
     public static final TierWrites TIER_WRITES = TierWrites.TIER_WRITES;
+
+    /**
+     * The table <code>nexus.topic_assignments</code>.
+     */
+    public static final TopicAssignments TOPIC_ASSIGNMENTS = TopicAssignments.TOPIC_ASSIGNMENTS;
+
+    /**
+     * The table <code>nexus.topic_links</code>.
+     */
+    public static final TopicLinks TOPIC_LINKS = TopicLinks.TOPIC_LINKS;
+
+    /**
+     * The table <code>nexus.topics</code>.
+     */
+    public static final Topics TOPICS = Topics.TOPICS;
 }
