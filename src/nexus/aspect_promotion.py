@@ -125,6 +125,14 @@ def promote_extras_field(
             f"got {sql_type!r}",
         )
 
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+        raise NotImplementedError(
+            "promote_extras_field not yet supported on the service backend "
+            "(document_aspects=service); schema promotion is a SQLite-specific "
+            "ALTER TABLE + backfill. Track: nexus-gmiaf.35"
+        )
+
     conn = db.document_aspects.conn
     lock = db.document_aspects._lock
     now = datetime.now(UTC).isoformat()
@@ -196,6 +204,14 @@ def list_promotions(db) -> list[dict]:
     aspects-promote-field --history`` flag and by anyone
     auditing the schema's evolution.
     """
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+        raise NotImplementedError(
+            "list_promotions not yet supported on the service backend "
+            "(document_aspects=service); promotion_log is a SQLite-specific "
+            "table. Track: nexus-gmiaf.35"
+        )
+
     conn = db.document_aspects.conn
     lock = db.document_aspects._lock
     _ensure_audit_table(conn, lock)
@@ -292,6 +308,14 @@ def _record_promotion_audit(db, result: PromotionResult) -> None:
     failure logs at debug level and is otherwise swallowed (the
     promotion already happened; losing the audit row is annoying
     but not corruption-class)."""
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+        raise NotImplementedError(
+            "_record_promotion_audit not yet supported on the service backend "
+            "(document_aspects=service); audit log is SQLite-specific. "
+            "Track: nexus-gmiaf.35"
+        )
+
     conn = db.document_aspects.conn
     lock = db.document_aspects._lock
     try:

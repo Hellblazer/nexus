@@ -552,6 +552,7 @@ public final class AspectRepository {
             result.put("source_path", sourcePath);
             result.put("content_hash", contentHash);
             result.put("content", content);
+            result.put("status", "in_progress");
             result.put("retry_count", retryCount);
             result.put("doc_id", docId);
             result.put("last_attempt_at", formatTs(now));

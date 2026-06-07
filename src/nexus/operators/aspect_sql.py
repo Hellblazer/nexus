@@ -535,6 +535,13 @@ def _query_filter(
     if ident_to_uri:
         # Batch in 300s to leave plenty of headroom under SQLite's
         # 999-param default cap.
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for
+        if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+            raise NotImplementedError(
+                "aspect_sql operator_filter fast-path not yet supported on the service backend "
+                "(document_aspects=service); raw SQL filter via conn is SQLite-specific. "
+                "Track: nexus-gmiaf.36"
+            )
         with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             conn = db.document_aspects.conn
             uri_list = list(ident_to_uri.values())
@@ -613,6 +620,13 @@ def _query_groupby(
         ident_to_uri[(c, sp)] = u
         uri_to_ident[u] = (c, sp)
 
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+        raise NotImplementedError(
+            "aspect_sql operator_groupby fast-path not yet supported on the service backend "
+            "(document_aspects=service); raw SQL groupby via conn is SQLite-specific. "
+            "Track: nexus-gmiaf.36"
+        )
     with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         conn = db.document_aspects.conn
         uri_list = list(ident_to_uri.values())
@@ -689,6 +703,13 @@ def _query_confidence_aggregate(
         if u:
             uris_for_query.append(u)
 
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+        raise NotImplementedError(
+            "aspect_sql operator_aggregate confidence fast-path not yet supported on the service backend "
+            "(document_aspects=service); raw SQL confidence aggregate via conn is SQLite-specific. "
+            "Track: nexus-gmiaf.36"
+        )
     with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         conn = db.document_aspects.conn
         for chunk_start in range(0, len(uris_for_query), 300):

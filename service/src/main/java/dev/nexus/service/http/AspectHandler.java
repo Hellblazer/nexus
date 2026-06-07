@@ -144,9 +144,33 @@ public final class AspectHandler implements HttpHandler {
 
     // ── document_aspects handlers ──────────────────────────────────────────────
 
+    /**
+     * Normalize list and map fields in an aspect body to JSON strings before
+     * passing to the repository.
+     *
+     * <p>Python clients send {@code experimental_datasets}, {@code experimental_baselines},
+     * {@code extras}, and {@code salient_sentences} as JSON arrays/objects. Jackson
+     * deserializes them as {@code ArrayList}/{@code LinkedHashMap}. The repository
+     * stores them as PostgreSQL TEXT columns, so they must be JSON-serialized strings.
+     *
+     * <p>String values are passed through unchanged (allows both pre-serialized and
+     * raw-list callers). Null values are left null.
+     */
+    private Map<String, Object> serializeAspectBody(Map<String, Object> body) throws IOException {
+        java.util.LinkedHashMap<String, Object> out = new java.util.LinkedHashMap<>(body);
+        for (String field : List.of("experimental_datasets", "experimental_baselines",
+                                     "extras", "salient_sentences")) {
+            Object v = out.get(field);
+            if (v instanceof List || v instanceof Map) {
+                out.put(field, MAPPER.writeValueAsString(v));
+            }
+        }
+        return out;
+    }
+
     private void handleUpsert(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        Map<String, Object> body = readBody(ex);
+        Map<String, Object> body = serializeAspectBody(readBody(ex));
         long id = repo.upsertAspect(tenant, body);
         if (id < 0) {
             HttpUtil.send(ex, 200, "{\"written\":false,\"reason\":\"confidence_below_threshold\"}");
@@ -216,30 +240,55 @@ public final class AspectHandler implements HttpHandler {
     private void handleSetSalient(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
         Map<String, Object> body = readBody(ex);
-        int n = repo.setSalientSentences(tenant, (String) body.get("doc_id"),
-            body.get("sentences_json") == null ? "[]" : body.get("sentences_json").toString());
+        // Accept either "sentences" (list from Python) or "sentences_json" (pre-serialized string)
+        String sentencesJson = extractSentencesJson(body);
+        int n = repo.setSalientSentences(tenant, (String) body.get("doc_id"), sentencesJson);
         HttpUtil.send(ex, 200, "{\"updated\":" + n + "}");
     }
 
     private void handleSetSalientByKey(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
         Map<String, Object> body = readBody(ex);
+        String sentencesJson = extractSentencesJson(body);
         int n = repo.setSalientSentencesByKey(tenant,
-            (String) body.get("collection"), (String) body.get("source_path"),
-            body.get("sentences_json") == null ? "[]" : body.get("sentences_json").toString());
+            (String) body.get("collection"), (String) body.get("source_path"), sentencesJson);
         HttpUtil.send(ex, 200, "{\"updated\":" + n + "}");
+    }
+
+    private String extractSentencesJson(Map<String, Object> body) throws IOException {
+        Object sentences = body.get("sentences");
+        if (sentences instanceof List) {
+            return MAPPER.writeValueAsString(sentences);
+        }
+        Object sentencesJson = body.get("sentences_json");
+        if (sentencesJson != null) {
+            return sentencesJson.toString();
+        }
+        return "[]";
     }
 
     private void handleGetSalient(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"GET required\"}"); return; }
         String docId = parseQuery(ex.getRequestURI()).get("doc_id");
         String val = repo.getSalientSentences(tenant, docId);
-        HttpUtil.send(ex, 200, "{\"sentences_json\":" + (val == null ? "null" : MAPPER.writeValueAsString(val)) + "}");
+        if (val == null) {
+            HttpUtil.send(ex, 404, "{\"sentences\":[]}");
+            return;
+        }
+        // Parse the stored JSON string into a list and return as {"sentences":[...]}
+        // so the Python client's r.get("sentences", []) works correctly.
+        Object parsed;
+        try {
+            parsed = MAPPER.readValue(val, List.class);
+        } catch (Exception e) {
+            parsed = List.of();
+        }
+        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(Map.of("sentences", parsed)));
     }
 
     private void handleImportAspect(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
-        Map<String, Object> body = readBody(ex);
+        Map<String, Object> body = serializeAspectBody(readBody(ex));
         int n = repo.importAspect(tenant, body);
         HttpUtil.send(ex, 200, "{\"imported\":" + n + "}");
     }
@@ -301,7 +350,11 @@ public final class AspectHandler implements HttpHandler {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
         Optional<Map<String, Object>> row = repo.claimNext(tenant);
         if (row.isEmpty()) { HttpUtil.send(ex, 200, "{\"claimed\":false}"); return; }
-        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(row.get()));
+        // Wrap in {"claimed":true,"row":{...}} to match Python protocol in http_aspect_queue.py
+        Map<String, Object> envelope = new java.util.LinkedHashMap<>();
+        envelope.put("claimed", true);
+        envelope.put("row", row.get());
+        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(envelope));
     }
 
     private void handleQueueClaimBatch(HttpExchange ex, String tenant, String method) throws IOException {
@@ -381,7 +434,7 @@ public final class AspectHandler implements HttpHandler {
     private void handlePromotionRecord(HttpExchange ex, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
         repo.recordPromotion(tenant, readBody(ex));
-        HttpUtil.send(ex, 200, "{\"ok\":true}");
+        HttpUtil.send(ex, 200, "{\"recorded\":true}");
     }
 
     private void handlePromotionList(HttpExchange ex, String tenant, String method) throws IOException {
