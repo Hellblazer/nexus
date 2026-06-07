@@ -17,8 +17,11 @@
     <!-- Store 2: plans (bead nexus-gmiaf.11) -->
     <include file="db/changelog/plans-001-baseline.xml"/>
 
+    <!-- Store 3: telemetry (bead nexus-gmiaf.12) -->
+    <include file="db/changelog/telemetry-001-baseline.xml"/>
+
     <!--
-        Future includes (beads .12-.18):
+        Future includes (beads .13-.18):
         <include file="db/changelog/catalog-001-baseline.xml"/>
     -->
 

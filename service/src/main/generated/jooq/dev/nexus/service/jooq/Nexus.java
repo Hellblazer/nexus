@@ -4,8 +4,14 @@
 package dev.nexus.service.jooq;
 
 
+import dev.nexus.service.jooq.tables.Frecency;
+import dev.nexus.service.jooq.tables.HookFailures;
 import dev.nexus.service.jooq.tables.Memory;
+import dev.nexus.service.jooq.tables.NxAnswerRuns;
 import dev.nexus.service.jooq.tables.Plans;
+import dev.nexus.service.jooq.tables.RelevanceLog;
+import dev.nexus.service.jooq.tables.SearchTelemetry;
+import dev.nexus.service.jooq.tables.TierWrites;
 
 import java.util.Arrays;
 import java.util.List;
@@ -30,14 +36,44 @@ public class Nexus extends SchemaImpl {
     public static final Nexus NEXUS = new Nexus();
 
     /**
+     * The table <code>nexus.frecency</code>.
+     */
+    public final Frecency FRECENCY = Frecency.FRECENCY;
+
+    /**
+     * The table <code>nexus.hook_failures</code>.
+     */
+    public final HookFailures HOOK_FAILURES = HookFailures.HOOK_FAILURES;
+
+    /**
      * The table <code>nexus.memory</code>.
      */
     public final Memory MEMORY = Memory.MEMORY;
 
     /**
+     * The table <code>nexus.nx_answer_runs</code>.
+     */
+    public final NxAnswerRuns NX_ANSWER_RUNS = NxAnswerRuns.NX_ANSWER_RUNS;
+
+    /**
      * The table <code>nexus.plans</code>.
      */
     public final Plans PLANS = Plans.PLANS;
+
+    /**
+     * The table <code>nexus.relevance_log</code>.
+     */
+    public final RelevanceLog RELEVANCE_LOG = RelevanceLog.RELEVANCE_LOG;
+
+    /**
+     * The table <code>nexus.search_telemetry</code>.
+     */
+    public final SearchTelemetry SEARCH_TELEMETRY = SearchTelemetry.SEARCH_TELEMETRY;
+
+    /**
+     * The table <code>nexus.tier_writes</code>.
+     */
+    public final TierWrites TIER_WRITES = TierWrites.TIER_WRITES;
 
     /**
      * No further instances allowed
@@ -55,8 +91,14 @@ public class Nexus extends SchemaImpl {
     @Override
     public final List<Table<?>> getTables() {
         return Arrays.asList(
+            Frecency.FRECENCY,
+            HookFailures.HOOK_FAILURES,
             Memory.MEMORY,
-            Plans.PLANS
+            NxAnswerRuns.NX_ANSWER_RUNS,
+            Plans.PLANS,
+            RelevanceLog.RELEVANCE_LOG,
+            SearchTelemetry.SEARCH_TELEMETRY,
+            TierWrites.TIER_WRITES
         );
     }
 }
