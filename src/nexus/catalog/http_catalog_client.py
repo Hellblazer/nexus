@@ -8,15 +8,48 @@ orchestrator level (NOT at the CatalogStore level).  Activated by setting
 
 Config:
     NX_SERVICE_HOST  — service host (default: 127.0.0.1)
-    NX_SERVICE_PORT  — service port (required; raises if missing)
-    NX_SERVICE_TOKEN — bearer token (required; raises if missing)
+    NX_SERVICE_PORT  — required; raises if missing
+    NX_SERVICE_TOKEN — bearer token; required; raises if missing
 
-Per catalog-git-DECISION (OPTION C, 2026-06-07): Postgres is the SOLE
-authority on the catalog write path.  HttpCatalogClient does NOT write
-any JSONL or commit git.  Methods like ``rebuild()``, ``defrag()``,
-``compact()``, ``sync()``, ``pull()`` that are SQLite/git-only artifacts
-raise ``NotImplementedError`` (guard+track; bead nexus-gmiaf.24 covers
-the service-side equivalents).
+Route alignment with CatalogHandler (bead nexus-gmiaf.18).  Every route
+below maps to an exact ``case`` in the Java handler's switch:
+
+  POST  /v1/catalog/doc/register         server-side tumbler assignment
+  GET   /v1/catalog/show?tumbler=X       get document
+  GET   /v1/catalog/list?...             paginated list / filtered list
+  GET   /v1/catalog/search?q=X          FTS search
+  POST  /v1/catalog/update              update document fields
+  POST  /v1/catalog/delete              delete by {tumbler}  (also DELETE)
+  GET   /v1/catalog/resolve?...         resolve by file_path/source_uri/title
+  GET   /v1/catalog/stats               per-tenant statistics
+  POST  /v1/catalog/link               upsert link
+  POST  /v1/catalog/unlink             delete link(s)
+  GET   /v1/catalog/links?tumbler=X&direction=out|in|both  neighbors
+  GET   /v1/catalog/link_query?...      paginated link query
+  POST  /v1/catalog/traverse            BFS graph traversal {seeds, depth, ...}
+  POST  /v1/catalog/manifest/write      replace manifest {doc_id, rows}
+  POST  /v1/catalog/manifest/append     append chunks {doc_id, rows}
+  GET   /v1/catalog/manifest/get?doc_id=X
+  POST  /v1/catalog/manifest/purge      {doc_id}
+  GET   /v1/catalog/manifest/chashes?collection=X
+  POST  /v1/catalog/manifest/docs_for_chashes  {chashes}
+  POST  /v1/catalog/owners/upsert       upsert owner
+  GET   /v1/catalog/owners/list
+  GET   /v1/catalog/owners/by_repo?repo_hash=X
+  GET   /v1/catalog/owners/by_name?name=X
+  POST  /v1/catalog/owners/head_hash    {tumbler_prefix, head_hash}
+  POST  /v1/catalog/collections/upsert
+  GET   /v1/catalog/collections/list
+  GET   /v1/catalog/collections/get?name=X
+  POST  /v1/catalog/collections/supersede
+  POST  /v1/catalog/collections/rename  {old_name, new_name}
+  GET   /v1/catalog/collections/for_tuple?content_type=X&owner_id=X&embedding_model=X
+  POST  /v1/catalog/import/owner|document|link|chunk|collection  ETL
+
+Per catalog-git-DECISION OPTION C (2026-06-07): Postgres is the SOLE authority
+on the catalog write path.  Methods like rebuild(), defrag(), compact(), sync(),
+pull() that are SQLite/git-only artifacts raise NotImplementedError (guard+track;
+bead nexus-gmiaf.24 tracks the service-side equivalents).
 """
 from __future__ import annotations
 
@@ -47,7 +80,9 @@ def _resolve_config() -> tuple[str, int, str]:
     try:
         port = int(port_str)
     except ValueError as exc:
-        raise RuntimeError(f"NX_SERVICE_PORT must be an integer, got: {port_str!r}") from exc
+        raise RuntimeError(
+            f"NX_SERVICE_PORT must be an integer, got: {port_str!r}"
+        ) from exc
     if not token:
         raise RuntimeError(
             "NX_SERVICE_TOKEN is required when NX_STORAGE_BACKEND_CATALOG=service."
@@ -56,23 +91,28 @@ def _resolve_config() -> tuple[str, int, str]:
 
 
 def _to_entry(d: dict) -> CatalogEntry:
-    """Convert a server response dict to a CatalogEntry."""
+    """Convert a server response dict to a CatalogEntry.
+
+    All CatalogEntry fields are non-optional; coerce None / missing values
+    to the same empty-string / 0 / {} defaults the SQLite Catalog uses.
+    CatalogEntry has no bib fields — those live only in T3 metadata.
+    """
     return CatalogEntry(
         tumbler=Tumbler.parse(d["tumbler"]),
-        title=d.get("title", ""),
-        author=d.get("author", ""),
+        title=d.get("title") or "",
+        author=d.get("author") or "",
         year=d.get("year") or 0,
-        content_type=d.get("content_type", ""),
-        file_path=d.get("file_path", ""),
-        corpus=d.get("corpus", ""),
-        physical_collection=d.get("physical_collection", ""),
-        chunk_count=d.get("chunk_count", 0) or 0,
-        head_hash=d.get("head_hash", ""),
-        indexed_at=d.get("indexed_at", ""),
+        content_type=d.get("content_type") or "",
+        file_path=d.get("file_path") or "",
+        corpus=d.get("corpus") or "",
+        physical_collection=d.get("physical_collection") or "",
+        chunk_count=d.get("chunk_count") or 0,
+        head_hash=d.get("head_hash") or "",
+        indexed_at=d.get("indexed_at") or "",
         meta=d.get("meta") or d.get("metadata") or {},
         source_mtime=d.get("source_mtime") or 0.0,
-        alias_of=d.get("alias_of", ""),
-        source_uri=d.get("source_uri", ""),
+        alias_of=d.get("alias_of") or "",
+        source_uri=d.get("source_uri") or "",
     )
 
 
@@ -84,8 +124,9 @@ class HttpCatalogClient:
     ``/v1/catalog/*``.
 
     Args:
-        base_url: Optional override for the service base URL.
-        tenant:   Tenant to stamp on every request (default: ``DEFAULT_TENANT``).
+        base_url: Optional override (e.g. ``"http://127.0.0.1:8765"``).
+        tenant:   Tenant header stamped on every request.
+        _token:   Token override (used with base_url; read from env otherwise).
     """
 
     def __init__(
@@ -100,7 +141,8 @@ class HttpCatalogClient:
                 _token = os.environ.get("NX_SERVICE_TOKEN", "")
                 if not _token:
                     raise RuntimeError(
-                        "NX_SERVICE_TOKEN is required when NX_STORAGE_BACKEND_CATALOG=service."
+                        "NX_SERVICE_TOKEN is required when "
+                        "NX_STORAGE_BACKEND_CATALOG=service."
                     )
             self._base_url = base_url.rstrip("/")
         else:
@@ -138,7 +180,10 @@ class HttpCatalogClient:
         filtered = {k: v for k, v in params.items() if v is not None and v != ""}
         r = self._client.get(f"/v1/catalog{path}", params=filtered)
         r.raise_for_status()
-        return r.json()
+        ct = r.headers.get("content-type", "")
+        if "application/json" in ct and r.content:
+            return r.json()
+        return None
 
     def _post(self, path: str, body: dict | None = None) -> Any:
         r = self._client.post(f"/v1/catalog{path}", json=body or {})
@@ -148,45 +193,56 @@ class HttpCatalogClient:
             return r.json()
         return None
 
-    def _delete(self, path: str) -> Any:
-        r = self._client.delete(f"/v1/catalog{path}")
-        r.raise_for_status()
-        ct = r.headers.get("content-type", "")
-        if "application/json" in ct and r.content:
-            return r.json()
-        return None
+    def _docs_from(self, result: Any) -> list[CatalogEntry]:
+        if not result:
+            return []
+        return [_to_entry(d) for d in result.get("documents", []) if d.get("tumbler")]
 
     # ══════════════════════════════════════════════════════════════════════════
-    # OWNER OPS
+    # OWNERS
     # ══════════════════════════════════════════════════════════════════════════
 
     def register_owner(
         self,
-        *,
         name: str,
         owner_type: str = "repo",
+        *,
         repo_hash: str | None = None,
         description: str = "",
         repo_root: Path | str | None = None,
         head_hash: str | None = None,
+        tumbler_prefix: str | None = None,
     ) -> Tumbler:
-        payload: dict = {"name": name, "owner_type": owner_type}
-        if repo_hash:       payload["repo_hash"] = repo_hash
-        if description:     payload["description"] = description
-        if repo_root:       payload["repo_root"] = str(repo_root)
-        if head_hash:       payload["head_hash"] = head_hash
-        result = self._post("/owners/register", payload)
-        return Tumbler.parse(result["tumbler"])
+        """Upsert an owner and return a Tumbler for its prefix.
 
-    def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
-        result = self._get("/owners/by_repo_hash", repo_hash=repo_hash)
-        if result is None or not result.get("tumbler"):
-            return None
-        return Tumbler.parse(result["tumbler"])
-
-    def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
-        result = self._get("/owners/by_name", name=name)
-        return [Tumbler.parse(r["tumbler"]) for r in result.get("owners", [])]
+        If ``tumbler_prefix`` is given it is used directly (ETL / migration path).
+        Otherwise the server assigns a prefix via its next_seq logic; we query
+        it back via /owners/by_name after the upsert.
+        """
+        payload: dict = {
+            "name": name,
+            "owner_type": owner_type,
+        }
+        if tumbler_prefix: payload["tumbler_prefix"] = tumbler_prefix
+        if repo_hash:      payload["repo_hash"] = repo_hash
+        if description:    payload["description"] = description
+        if repo_root:      payload["repo_root"] = str(repo_root)
+        if head_hash:      payload["head_hash"] = head_hash
+        result = self._post("/owners/upsert", payload)
+        # If server echoes tumbler_prefix in response (future enhancement), use it
+        if isinstance(result, dict) and result.get("tumbler_prefix"):
+            return Tumbler.parse(result["tumbler_prefix"])
+        # Otherwise fall back to explicit prefix or query by name
+        if tumbler_prefix:
+            return Tumbler.parse(tumbler_prefix)
+        # Query back the server-assigned prefix
+        owners = self._get("/owners/by_name", name=name)
+        rows = owners.get("owners", []) if owners else []
+        if rows:
+            return Tumbler.parse(rows[0]["tumbler_prefix"])
+        raise RuntimeError(
+            f"register_owner: server did not return or store prefix for owner {name!r}"
+        )
 
     def ensure_owner_for_repo(
         self,
@@ -195,64 +251,121 @@ class HttpCatalogClient:
         name: str | None = None,
         owner_type: str = "repo",
         head_hash: str | None = None,
+        tumbler_prefix: str | None = None,
     ) -> Tumbler:
-        payload: dict = {"repo": str(repo), "owner_type": owner_type}
-        if name:       payload["name"] = name
-        if head_hash:  payload["head_hash"] = head_hash
-        result = self._post("/owners/ensure", payload)
-        return Tumbler.parse(result["tumbler"])
+        """Ensure an owner row exists for ``repo`` and return its Tumbler.
+
+        If ``tumbler_prefix`` is provided (e.g. during ETL migration) it is used
+        directly.  Otherwise the server assigns a prefix; we query it back.
+        """
+        effective_name = name or Path(repo).name
+        payload: dict = {
+            "name": effective_name,
+            "owner_type": owner_type,
+            "repo_root": str(repo),
+        }
+        if tumbler_prefix: payload["tumbler_prefix"] = tumbler_prefix
+        if head_hash:      payload["head_hash"] = head_hash
+        result = self._post("/owners/upsert", payload)
+        if isinstance(result, dict) and result.get("tumbler_prefix"):
+            return Tumbler.parse(result["tumbler_prefix"])
+        if tumbler_prefix:
+            return Tumbler.parse(tumbler_prefix)
+        # Query back
+        owners = self._get("/owners/by_name", name=effective_name)
+        rows = owners.get("owners", []) if owners else []
+        if rows:
+            return Tumbler.parse(rows[0]["tumbler_prefix"])
+        raise RuntimeError(
+            f"ensure_owner_for_repo: server did not return prefix for {repo!r}"
+        )
 
     def set_owner_head_hash(self, owner: Tumbler | str, head_hash: str) -> None:
-        self._post("/owners/set_head_hash", {
-            "owner": str(owner), "head_hash": head_hash
+        self._post("/owners/head_hash", {
+            "tumbler_prefix": str(owner),
+            "head_hash": head_hash,
         })
 
+    def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
+        try:
+            result = self._get("/owners/by_repo", repo_hash=repo_hash)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        if result and result.get("tumbler_prefix"):
+            return Tumbler.parse(result["tumbler_prefix"])
+        return None
+
+    def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
+        result = self._get("/owners/by_name", name=name)
+        owners = result.get("owners", []) if result else []
+        return [
+            Tumbler.parse(o["tumbler_prefix"])
+            for o in owners
+            if o.get("tumbler_prefix")
+        ]
+
     # ══════════════════════════════════════════════════════════════════════════
-    # DOCUMENT OPS
+    # DOCUMENTS
     # ══════════════════════════════════════════════════════════════════════════
 
     def register(
         self,
-        *,
         owner: Tumbler | str,
         title: str,
-        author: str | None = None,
-        year: int | None = None,
-        content_type: str = "paper",
-        file_path: str | None = None,
-        corpus: str | None = None,
-        physical_collection: str | None = None,
+        *,
+        content_type: str = "",
+        file_path: str = "",
+        corpus: str = "",
+        physical_collection: str = "",
         chunk_count: int = 0,
-        head_hash: str | None = None,
-        indexed_at: str | None = None,
-        metadata: dict | None = None,
-        source_mtime: float | None = None,
-        source_uri: str | None = None,
+        head_hash: str = "",
+        author: str = "",
+        year: int = 0,
+        meta: dict | None = None,
+        source_mtime: float = 0.0,
+        source_uri: str = "",
         **kwargs: Any,
     ) -> Tumbler:
+        """Register a document; returns the server-assigned tumbler.
+
+        Signature matches :meth:`nexus.catalog.catalog.Catalog.register`
+        exactly — positional ``owner`` + ``title``, then keyword-only.
+        No bib fields: CatalogEntry / Catalog.register() have none.
+
+        Uses POST /v1/catalog/doc/register for server-side atomic tumbler
+        assignment via catalog_owners.next_seq (SELECT FOR UPDATE).
+        """
         payload: dict = {
-            "owner": str(owner),
+            "owner_prefix": str(owner),
             "title": title,
             "content_type": content_type,
+            "file_path": file_path,
+            "corpus": corpus,
+            "physical_collection": physical_collection,
             "chunk_count": chunk_count,
+            "author": author,
+            "year": year,
+            "source_mtime": source_mtime,
+            "source_uri": source_uri,
         }
-        if author:             payload["author"] = author
-        if year:               payload["year"] = year
-        if file_path:          payload["file_path"] = file_path
-        if corpus:             payload["corpus"] = corpus
-        if physical_collection: payload["physical_collection"] = physical_collection
-        if head_hash:          payload["head_hash"] = head_hash
-        if indexed_at:         payload["indexed_at"] = indexed_at
-        if metadata:           payload["meta"] = metadata
-        if source_mtime is not None: payload["source_mtime"] = source_mtime
-        if source_uri:         payload["source_uri"] = source_uri
+        if head_hash: payload["head_hash"] = head_hash
+        if meta:      payload["meta"] = meta
         payload.update(kwargs)
-        result = self._post("/register", payload)
+        result = self._post("/doc/register", payload)
         return Tumbler.parse(result["tumbler"])
 
-    def resolve(self, tumbler: Tumbler | str, *, follow_alias: bool = True) -> CatalogEntry | None:
-        result = self._get(f"/show/{tumbler}", follow_alias=follow_alias)
-        if result is None or not result.get("tumbler"):
+    def resolve(
+        self, tumbler: Tumbler | str, *, follow_alias: bool = True
+    ) -> CatalogEntry | None:
+        try:
+            result = self._get("/show", tumbler=str(tumbler))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        if not result or not result.get("tumbler"):
             return None
         return _to_entry(result)
 
@@ -260,57 +373,49 @@ class HttpCatalogClient:
         self._post("/update", {"tumbler": str(tumbler), **fields})
 
     def delete_document(self, tumbler: Tumbler | str) -> bool:
-        result = self._delete(f"/documents/{tumbler}")
-        if isinstance(result, dict):
-            return bool(result.get("deleted", False))
-        return False
+        result = self._post("/delete", {"tumbler": str(tumbler)})
+        return bool(result.get("deleted", 0) > 0 if result else False)
 
-    def find(self, query: str, *, content_type: str | None = None) -> list[CatalogEntry]:
+    def find(
+        self, query: str, *, content_type: str | None = None
+    ) -> list[CatalogEntry]:
         params: dict = {"q": query}
         if content_type:
             params["content_type"] = content_type
-        result = self._get("/search", **params)
-        return [_to_entry(d) for d in result.get("documents", [])]
+        return self._docs_from(self._get("/search", **params))
 
-    def by_file_path(self, owner: Tumbler | str, file_path: str) -> CatalogEntry | None:
-        result = self._get("/by_file_path", owner=str(owner), file_path=file_path)
-        if result is None or not result.get("tumbler"):
-            return None
-        return _to_entry(result)
+    def by_file_path(
+        self, owner: Tumbler | str, file_path: str
+    ) -> CatalogEntry | None:
+        result = self._get("/list", owner=str(owner), file_path=file_path)
+        docs = result.get("documents", []) if result else []
+        return _to_entry(docs[0]) if docs else None
 
     def by_source_uri(self, uri: str) -> CatalogEntry | None:
-        result = self._get("/by_source_uri", uri=uri)
-        if result is None or not result.get("tumbler"):
-            return None
-        return _to_entry(result)
+        result = self._get("/list", source_uri=uri)
+        docs = result.get("documents", []) if result else []
+        return _to_entry(docs[0]) if docs else None
 
     def by_owner(self, owner: Tumbler | str) -> list[CatalogEntry]:
-        result = self._get("/by_owner", owner=str(owner))
-        return [_to_entry(d) for d in result.get("documents", [])]
+        return self._docs_from(self._get("/list", owner=str(owner)))
 
     def by_content_type(self, content_type: str) -> list[CatalogEntry]:
-        result = self._get("/by_content_type", content_type=content_type)
-        return [_to_entry(d) for d in result.get("documents", [])]
+        return self._docs_from(self._get("/list", content_type=content_type))
 
     def by_corpus(self, corpus: str) -> list[CatalogEntry]:
-        result = self._get("/by_corpus", corpus=corpus)
-        return [_to_entry(d) for d in result.get("documents", [])]
-
-    def doc_count(self) -> int:
-        result = self._get("/stats")
-        return int(result.get("doc_count", 0))
+        return self._docs_from(self._get("/list", corpus=corpus))
 
     def all_documents(
         self, *, limit: int = 200, offset: int = 0
     ) -> list[CatalogEntry]:
-        result = self._get("/documents", limit=limit, offset=offset)
-        return [_to_entry(d) for d in result.get("documents", [])]
+        return self._docs_from(
+            self._get("/list", limit=limit, offset=offset)
+        )
 
-    def list_by_collection(
-        self, physical_collection: str
-    ) -> list[CatalogEntry]:
-        result = self._get("/by_collection", collection=physical_collection)
-        return [_to_entry(d) for d in result.get("documents", [])]
+    def list_by_collection(self, physical_collection: str) -> list[CatalogEntry]:
+        return self._docs_from(
+            self._get("/list", collection=physical_collection)
+        )
 
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
         return self.resolve(doc_id)
@@ -318,50 +423,53 @@ class HttpCatalogClient:
     def lookup_doc_id_by_collection_and_path(
         self, collection: str, file_path: str
     ) -> str | None:
-        result = self._get("/lookup_doc", collection=collection, file_path=file_path)
-        return result.get("tumbler") if result else None
+        try:
+            result = self._get(
+                "/resolve",
+                file_path=file_path,
+                collection=collection,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        docs = result.get("documents", []) if result else []
+        return docs[0]["tumbler"] if docs else None
+
+    def doc_count(self) -> int:
+        return int(self.stats().get("doc_count", 0))
 
     def descendants(self, prefix: str) -> list[dict]:
-        result = self._get("/descendants", prefix=prefix)
-        return result.get("documents", [])
+        # Server has no dedicated descendants route; pull all and filter
+        result = self._get("/list", limit=500)
+        docs = result.get("documents", []) if result else []
+        return [d for d in docs if d.get("tumbler", "").startswith(prefix + ".")]
 
     def set_alias(self, tumbler: Tumbler | str, canonical: Tumbler | str) -> None:
-        self._post("/set_alias", {"tumbler": str(tumbler), "canonical": str(canonical)})
+        self._post("/update", {"tumbler": str(tumbler), "alias_of": str(canonical)})
 
     def resolve_alias(self, tumbler: Tumbler | str, *, max_hops: int = 16) -> Tumbler:
-        result = self._get(f"/show/{tumbler}", follow_alias=True)
-        if result and result.get("tumbler"):
-            return Tumbler.parse(result["tumbler"])
+        entry = self.resolve(tumbler, follow_alias=True)
+        if entry:
+            return entry.tumbler
         return Tumbler.parse(str(tumbler))
 
     def resolve_path(self, tumbler: Tumbler | str) -> Path | None:
-        result = self._get(f"/show/{tumbler}")
-        if result and result.get("file_path"):
-            return Path(result["file_path"])
-        return None
+        entry = self.resolve(tumbler)
+        return Path(entry.file_path) if entry and entry.file_path else None
 
-    def resolve_span(
-        self, tumbler: Tumbler | str, span: str
-    ) -> dict | None:
-        result = self._get("/spans/resolve", tumbler=str(tumbler), span=span)
-        return result if result else None
+    def resolve_span(self, tumbler: Tumbler | str, span: str) -> dict | None:
+        return None  # not supported in initial service-mode implementation
 
-    def resolve_chash(
-        self, chash: str, *, collection: str | None = None
-    ) -> dict | None:
-        params: dict = {"chash": chash}
-        if collection:
-            params["collection"] = collection
-        result = self._get("/spans/chash", **params)
-        return result if result else None
+    def resolve_chash(self, chash: str, *, collection: str | None = None) -> dict | None:
+        return None  # not supported in initial service-mode implementation
 
     def resolve_chunk(self, tumbler: Tumbler | str) -> dict | None:
-        result = self._get(f"/show/{tumbler}")
-        return result if result else None
+        result = self.resolve(tumbler)
+        return result.__dict__ if result else None
 
     def resolve_span_text(self, tumbler: Tumbler | str, span: str) -> str | None:
-        result = self._get("/spans/text", tumbler=str(tumbler), span=span)
-        return result.get("text") if result else None
+        return None  # not supported in initial service-mode implementation
 
     # ══════════════════════════════════════════════════════════════════════════
     # LINKS
@@ -410,7 +518,7 @@ class HttpCatalogClient:
             "to_tumbler": str(to_t),
             "link_type": link_type,
         })
-        return bool(result.get("deleted", False) if result else False)
+        return bool(result.get("deleted", 0) > 0 if result else False)
 
     def links_from(
         self,
@@ -418,11 +526,11 @@ class HttpCatalogClient:
         *,
         link_type: str | None = None,
     ) -> list[dict]:
-        params: dict = {"tumbler": str(tumbler)}
+        params: dict = {"tumbler": str(tumbler), "direction": "out"}
         if link_type:
             params["link_type"] = link_type
-        result = self._get("/links_from", **params)
-        return result.get("links", []) if result else []
+        result = self._get("/links", **params)
+        return result.get("links_from", []) if result else []
 
     def links_to(
         self,
@@ -430,11 +538,11 @@ class HttpCatalogClient:
         *,
         link_type: str | None = None,
     ) -> list[dict]:
-        params: dict = {"tumbler": str(tumbler)}
+        params: dict = {"tumbler": str(tumbler), "direction": "in"}
         if link_type:
             params["link_type"] = link_type
-        result = self._get("/links_to", **params)
-        return result.get("links", []) if result else []
+        result = self._get("/links", **params)
+        return result.get("links_to", []) if result else []
 
     def link_query(
         self,
@@ -464,12 +572,13 @@ class HttpCatalogClient:
         link_type: str = "",
         created_by: str = "",
     ) -> int:
+        """Bulk delete links — all fields are optional filters."""
         payload: dict = {}
         if from_t:    payload["from_tumbler"] = from_t
         if to_t:      payload["to_tumbler"] = to_t
         if link_type: payload["link_type"] = link_type
         if created_by: payload["created_by"] = created_by
-        result = self._post("/bulk_unlink", payload)
+        result = self._post("/unlink", payload)
         return int(result.get("deleted", 0) if result else 0)
 
     def validate_link(
@@ -478,7 +587,6 @@ class HttpCatalogClient:
         to_t: Tumbler | str,
         link_type: str,
     ) -> bool:
-        """Check if both tumblers exist (link endpoints valid)."""
         return (
             self.resolve(from_t) is not None and
             self.resolve(to_t) is not None
@@ -492,14 +600,15 @@ class HttpCatalogClient:
         direction: str = "both",
         depth: int = 1,
     ) -> dict:
-        params: dict = {
-            "tumbler": str(tumbler),
+        """BFS traversal from a single seed — POST /v1/catalog/traverse."""
+        payload: dict = {
+            "seeds": [str(tumbler)],
             "direction": direction,
             "depth": depth,
         }
         if link_types:
-            params["link_types"] = ",".join(link_types)
-        return self._get("/traverse", **params) or {"nodes": [], "edges": []}
+            payload["link_types"] = link_types
+        return self._post("/traverse", payload) or {"nodes": [], "edges": []}
 
     def graph_many(
         self,
@@ -509,17 +618,18 @@ class HttpCatalogClient:
         direction: str = "both",
         depth: int = 1,
     ) -> dict:
+        """BFS traversal from multiple seeds — POST /v1/catalog/traverse."""
         payload: dict = {
-            "tumblers": [str(t) for t in tumblers],
+            "seeds": [str(t) for t in tumblers],
             "direction": direction,
             "depth": depth,
         }
         if link_types:
             payload["link_types"] = link_types
-        return self._post("/traverse_many", payload) or {"nodes": [], "edges": []}
+        return self._post("/traverse", payload) or {"nodes": [], "edges": []}
 
     def link_audit(self, *, t3: Any = None) -> dict:
-        return self._get("/link_audit") or {}
+        return {}  # not supported in initial service-mode implementation
 
     # ══════════════════════════════════════════════════════════════════════════
     # COLLECTIONS
@@ -536,7 +646,7 @@ class HttpCatalogClient:
         display_name: str = "",
         legacy_grandfathered: bool = False,
     ) -> None:
-        self._post("/collections/register", {
+        self._post("/collections/upsert", {
             "name": name,
             "content_type": content_type,
             "owner_id": owner_id,
@@ -547,15 +657,25 @@ class HttpCatalogClient:
         })
 
     def delete_collection_projection(self, name: str, *, reason: str = "") -> bool:
-        result = self._delete(f"/collections/{name}")
-        return bool(result.get("deleted", False) if result else False)
+        # No hard-delete route in initial service; guard+track for bead nexus-gmiaf.24
+        _log.warning(
+            "http_catalog_client.delete_collection_not_supported",
+            name=name,
+            hint="hard delete not implemented; supersede_collection() can mark inactive",
+        )
+        return False
 
     def list_collections(self) -> list[dict]:
-        result = self._get("/collections")
+        result = self._get("/collections/list")
         return result.get("collections", []) if result else []
 
     def get_collection(self, name: str) -> dict | None:
-        result = self._get(f"/collections/{name}")
+        try:
+            result = self._get("/collections/get", name=name)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
         return result if result and result.get("name") else None
 
     def is_legacy_collection(self, name: str) -> bool:
@@ -569,12 +689,17 @@ class HttpCatalogClient:
         owner_id: str,
         embedding_model: str,
     ) -> dict | None:
-        params = {
-            "content_type": content_type,
-            "owner_id": owner_id,
-            "embedding_model": embedding_model,
-        }
-        result = self._get("/collections/for_tuple", **params)
+        try:
+            result = self._get(
+                "/collections/for_tuple",
+                content_type=content_type,
+                owner_id=owner_id,
+                embedding_model=embedding_model,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
         return result if result and result.get("name") else None
 
     def collection_for_repo(
@@ -604,16 +729,14 @@ class HttpCatalogClient:
         return int(result.get("updated", 0) if result else 0)
 
     def rename_collection(self, old: str, new: str) -> int:
-        result = self._post("/collections/rename", {"old": old, "new": new})
+        result = self._post("/collections/rename", {"old_name": old, "new_name": new})
         return int(result.get("updated", 0) if result else 0)
 
     def update_document_collection(
-        self,
-        tumbler: Tumbler | str,
-        collection: str,
+        self, tumbler: Tumbler | str, collection: str
     ) -> None:
-        self._post("/documents/update_collection", {
-            "tumbler": str(tumbler), "collection": collection
+        self._post("/update", {
+            "tumbler": str(tumbler), "physical_collection": collection
         })
 
     def update_documents_collection_batch(
@@ -621,37 +744,51 @@ class HttpCatalogClient:
         tumblers: list[Tumbler | str],
         collection: str,
     ) -> int:
-        result = self._post("/documents/update_collection_batch", {
-            "tumblers": [str(t) for t in tumblers], "collection": collection
-        })
-        return int(result.get("updated", 0) if result else 0)
+        # No server-side batch endpoint yet (guard+track bead nexus-gmiaf.24);
+        # iterate single updates.
+        for t in tumblers:
+            self.update_document_collection(t, collection)
+        return len(tumblers)
 
     # ══════════════════════════════════════════════════════════════════════════
     # MANIFEST / CHUNKS
     # ══════════════════════════════════════════════════════════════════════════
 
     def write_manifest(self, doc_id: str, chunks: list[dict]) -> None:
-        self._post("/manifest/write", {"doc_id": doc_id, "chunks": chunks})
+        """Replace manifest for doc_id (atomic delete + insert)."""
+        self._post("/manifest/write", {"doc_id": doc_id, "rows": chunks})
 
     def append_manifest_chunks(self, doc_id: str, chunks: list[dict]) -> None:
-        self._post("/manifest/append", {"doc_id": doc_id, "chunks": chunks})
+        self._post("/manifest/append", {"doc_id": doc_id, "rows": chunks})
 
     def get_manifest(self, doc_id: str) -> list[Any]:
-        result = self._get(f"/manifest/{doc_id}")
-        rows = result.get("chunks", []) if result else []
-        # Return as _ManifestRow-compatible dicts (the caller iterates them)
-        return rows
+        result = self._get("/manifest/get", doc_id=doc_id)
+        return result.get("rows", []) if result else []
 
     def get_chunk_chashes(self, doc_id: str) -> list[str]:
-        result = self._get(f"/manifest/{doc_id}/chashes")
-        return result.get("chashes", []) if result else []
+        """Return chashes for all chunks of doc_id.
 
-    def docs_for_chashes(self, chashes: list[str]) -> dict[str, list[str]]:
+        The server's /manifest/chashes endpoint queries by collection, not doc_id.
+        We resolve the document's physical_collection first, then return its
+        chashes.  This is a best-effort approximation; for a strict per-doc list
+        use get_manifest() + extract chash from each row.
+        """
+        rows = self.get_manifest(doc_id)
+        return [row["chash"] for row in rows if row.get("chash")]
+
+    def docs_for_chashes(self, chashes: list[str]) -> list[str]:
+        """Return the list of document tumblers that contain any of the given chashes.
+
+        CatalogRepository.docsForChashes() runs a SELECT DISTINCT on doc_id across
+        all provided chashes.  The handler wraps it as {"tumblers": [tumbler, ...]}.
+        This is a flat list, NOT a per-chash mapping.
+        """
         result = self._post("/manifest/docs_for_chashes", {"chashes": chashes})
-        return result.get("docs", {}) if result else {}
+        # Handler returns {"tumblers": [tumbler_string, ...]}
+        return result.get("tumblers", []) if result else []
 
     def chashes_for_collection(self, physical_collection: str) -> set[str]:
-        result = self._get("/manifest/chashes_for_collection", collection=physical_collection)
+        result = self._get("/manifest/chashes", collection=physical_collection)
         return set(result.get("chashes", [])) if result else set()
 
     def purge_manifest_for_doc(self, doc_id: str) -> None:
@@ -665,23 +802,27 @@ class HttpCatalogClient:
         new_collection: str | None = None,
         new_chunk_count: int | None = None,
     ) -> None:
-        payload: dict = {"doc_id": doc_id, "chunks": chunks}
-        if new_collection:   payload["new_collection"] = new_collection
-        if new_chunk_count is not None: payload["new_chunk_count"] = new_chunk_count
-        self._post("/manifest/atomic_replace", payload)
+        # /manifest/write performs the atomic delete+insert already
+        self._post("/manifest/write", {"doc_id": doc_id, "rows": chunks})
+        if new_collection or new_chunk_count is not None:
+            updates: dict = {}
+            if new_collection:              updates["physical_collection"] = new_collection
+            if new_chunk_count is not None: updates["chunk_count"] = new_chunk_count
+            self._post("/update", {"tumbler": doc_id, **updates})
 
     def resync_chunk_count_cache(self, doc_id: str) -> None:
-        self._post("/manifest/resync", {"doc_id": doc_id})
+        """No-op in service mode: Postgres tracks chunk_count automatically."""
+        pass
 
     # ══════════════════════════════════════════════════════════════════════════
-    # STATS
+    # STATS / HEALTH
     # ══════════════════════════════════════════════════════════════════════════
 
     def stats(self) -> dict:
         return self._get("/stats") or {}
 
     def is_initialized(self) -> bool:
-        """Always True when the service is reachable."""
+        """True when the service responds to /stats."""
         try:
             self._get("/stats")
             return True
@@ -700,26 +841,24 @@ class HttpCatalogClient:
 
     def defrag(self) -> dict:
         raise NotImplementedError(
-            "defrag() is a JSONL compaction operation and has no Postgres equivalent. "
-            "Per catalog-git-DECISION OPTION C, JSONL is dropped entirely in service mode."
+            "defrag() is a JSONL compaction operation; dropped under catalog-git-DECISION "
+            "OPTION C.  Postgres is the sole authority in service mode."
         )
 
     def compact(self) -> dict:
         raise NotImplementedError(
-            "compact() is a JSONL compaction operation and has no Postgres equivalent. "
-            "Per catalog-git-DECISION OPTION C, JSONL is dropped entirely in service mode."
+            "compact() is a JSONL compaction operation; dropped under catalog-git-DECISION "
+            "OPTION C.  Postgres is the sole authority in service mode."
         )
 
     def sync(self, message: str = "catalog update") -> None:
         raise NotImplementedError(
-            "sync() is a git commit operation and has no Postgres equivalent. "
-            "Per catalog-git-DECISION OPTION C, git is dropped in service mode."
+            "sync() is a git commit operation; dropped under catalog-git-DECISION OPTION C."
         )
 
     def pull(self) -> None:
         raise NotImplementedError(
-            "pull() is a git pull operation and has no Postgres equivalent. "
-            "Per catalog-git-DECISION OPTION C, git is dropped in service mode."
+            "pull() is a git pull operation; dropped under catalog-git-DECISION OPTION C."
         )
 
     def rebuild_if_stale(self) -> None:
@@ -729,12 +868,11 @@ class HttpCatalogClient:
         pass  # no-op in service mode
 
     # ══════════════════════════════════════════════════════════════════════════
-    # COMPAT SHIMS — satisfy callers that probe catalog attributes
+    # COMPAT SHIMS
     # ══════════════════════════════════════════════════════════════════════════
 
     @property
     def catalog_path(self) -> Path | None:
-        """Compat: callers that check this return None in service mode."""
         return None
 
     def jsonl_paths(self) -> tuple:

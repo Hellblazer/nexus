@@ -306,6 +306,15 @@ CREATE POLICY tenant_isolation ON nexus.catalog_meta
         </rollback>
     </changeSet>
 
+    <!-- ── Changeset 9: next_seq on owners for server-side tumbler assignment ── -->
+    <changeSet id="catalog-001-9" author="nexus-gmiaf.18">
+        <comment>Add next_seq to catalog_owners for atomic server-side tumbler assignment</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_owners ADD COLUMN IF NOT EXISTS next_seq BIGINT NOT NULL DEFAULT 0;
+        </sql>
+        <rollback>ALTER TABLE nexus.catalog_owners DROP COLUMN IF EXISTS next_seq</rollback>
+    </changeSet>
+
     <!-- ── Changeset 8: grants to nexus_svc ──────────────────────────────── -->
     <changeSet id="catalog-001-8" author="nexus-gmiaf.18">
         <comment>Grant table privileges to nexus_svc role (idempotent)</comment>

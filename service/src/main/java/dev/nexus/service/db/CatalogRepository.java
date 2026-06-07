@@ -61,6 +61,7 @@ public final class CatalogRepository {
     static final Field<String> F_OWN_DESC   = DSL.field(DSL.name("catalog_owners","description"), String.class);
     static final Field<String> F_OWN_ROOT   = DSL.field(DSL.name("catalog_owners","repo_root"), String.class);
     static final Field<String> F_OWN_HEAD   = DSL.field(DSL.name("catalog_owners","head_hash"), String.class);
+    static final Field<Long>   F_OWN_SEQ    = DSL.field(DSL.name("catalog_owners","next_seq"), Long.class);
 
     // ── Documents fields ───────────────────────────────────────────────────────
 
@@ -313,6 +314,96 @@ public final class CatalogRepository {
                .set(F_DOC_BIAT,   EX_DOC_BIAT)
                .execute();
             return null;
+        });
+    }
+
+    /**
+     * Atomically claim the next sequence number for an owner and register a document.
+     *
+     * <p>Uses SELECT ... FOR UPDATE on catalog_owners to claim next_seq atomically,
+     * increments it, then inserts the document with tumbler = ownerPrefix + "." + seq.
+     * Returns the assigned tumbler string.
+     *
+     * <p>If the owner does not exist, one is created with next_seq=1 and tumbler derived
+     * from the owner_prefix directly (the owner should have been registered first).
+     */
+    public String registerDocument(String tenant, String ownerPrefix, Map<String, Object> fields) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // Ensure owner row exists (idempotent upsert with minimal fields)
+            ctx.insertInto(T_OWNERS, F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,
+                           F_OWN_REPO, F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD, F_OWN_SEQ)
+               .values(tenant, ownerPrefix,
+                       s(fields, "owner_name", ownerPrefix),
+                       s(fields, "owner_type", "repo"),
+                       null, null, "", null, 0L)
+               .onConflict(F_OWN_TENANT, F_OWN_PREFIX)
+               .doNothing()
+               .execute();
+
+            // Atomically claim the next sequence number
+            long seq = ctx.select(F_OWN_SEQ).from(T_OWNERS)
+                          .where(F_OWN_TENANT.eq(tenant).and(F_OWN_PREFIX.eq(ownerPrefix)))
+                          .forUpdate()
+                          .fetchOne(F_OWN_SEQ);
+
+            ctx.update(T_OWNERS)
+               .set(F_OWN_SEQ, seq + 1)
+               .where(F_OWN_TENANT.eq(tenant).and(F_OWN_PREFIX.eq(ownerPrefix)))
+               .execute();
+
+            String tumbler = ownerPrefix + "." + (seq + 1);
+
+            // Check idempotency by source_uri if present
+            String srcUri = s(fields, "source_uri", "");
+            if (!srcUri.isEmpty()) {
+                var existing = ctx.select(F_DOC_TUMBLER).from(T_DOCS)
+                                  .where(F_DOC_URI.eq(srcUri))
+                                  .fetchOne();
+                if (existing != null) return existing.value1();
+            }
+            // Check by file_path within owner if present
+            String filePath = s(fields, "file_path", "");
+            if (!filePath.isEmpty()) {
+                var existing = ctx.select(F_DOC_TUMBLER).from(T_DOCS)
+                                  .where(F_DOC_FPATH.eq(filePath).and(F_DOC_TUMBLER.startsWith(ownerPrefix + ".")))
+                                  .fetchOne();
+                if (existing != null) return existing.value1();
+            }
+
+            // Insert document
+            String metaJson = jsonOrNull(fields.get("meta"));
+            ctx.insertInto(T_DOCS,
+                    F_DOC_TENANT, F_DOC_TUMBLER, F_DOC_TITLE, F_DOC_AUTHOR, F_DOC_YEAR,
+                    F_DOC_CTYPE, F_DOC_FPATH, F_DOC_CORPUS, F_DOC_PCOLL, F_DOC_CHUNKS,
+                    F_DOC_HEAD, F_DOC_IDXAT, F_DOC_META, F_DOC_SMTIME, F_DOC_ALIAS, F_DOC_URI,
+                    F_DOC_BIBY, F_DOC_BIAU, F_DOC_BIVE, F_DOC_BICC,
+                    F_DOC_BIS2, F_DOC_BIOA, F_DOC_BIDOI, F_DOC_BIAT)
+               .values(tenant, tumbler,
+                       s(fields, "title", ""),
+                       nne(s(fields, "author", null)),
+                       ni(i(fields,"year"), 0),
+                       nne(s(fields,"content_type", "")),
+                       nne(s(fields,"file_path", "")),
+                       nne(s(fields,"corpus", "")),
+                       nne(s(fields,"physical_collection", "")),
+                       ni(i(fields,"chunk_count"), 0),
+                       nne(s(fields,"head_hash", "")),
+                       nne(s(fields,"indexed_at", "")),
+                       jsonbVal(metaJson),
+                       nd(dbl(fields,"source_mtime")),
+                       nne(s(fields,"alias_of", "")),
+                       nne(s(fields,"source_uri", "")),
+                       ni(i(fields,"bib_year"), 0),
+                       nne(s(fields,"bib_authors", "")),
+                       nne(s(fields,"bib_venue", "")),
+                       ni(i(fields,"bib_citation_count"), 0),
+                       nne(s(fields,"bib_semantic_scholar_id", "")),
+                       nne(s(fields,"bib_openalex_id", "")),
+                       nne(s(fields,"bib_doi", "")),
+                       nne(s(fields,"bib_enriched_at", "")))
+               .execute();
+
+            return tumbler;
         });
     }
 
@@ -1114,6 +1205,11 @@ public final class CatalogRepository {
     private static String s(Map<String, Object> m, String k) {
         Object v = m.get(k);
         return v instanceof String sv ? sv : null;
+    }
+
+    private static String s(Map<String, Object> m, String k, String def) {
+        String v = s(m, k);
+        return v != null ? v : def;
     }
 
     private static Integer i(Map<String, Object> m, String k) {

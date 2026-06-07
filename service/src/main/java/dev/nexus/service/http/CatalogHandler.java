@@ -146,6 +146,9 @@ public final class CatalogHandler implements HttpHandler {
                 case "/import/chunk"          -> handleImportChunk(exchange, tenant, method);
                 case "/import/collection"     -> handleImportCollection(exchange, tenant, method);
 
+                // ── Server-side tumbler assignment ────────────────────────────
+                case "/doc/register"          -> handleDocRegister(exchange, tenant, method);
+
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found: " + op + "\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -574,10 +577,11 @@ public final class CatalogHandler implements HttpHandler {
     private void handleCollectionRename(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
-        String oldName = (String) body.get("old_name");
-        String newName = (String) body.get("new_name");
+        // Accept both old_name/new_name (canonical) and old/new (HttpCatalogClient compat)
+        String oldName = body.get("old_name") instanceof String s ? s : (String) body.get("old");
+        String newName = body.get("new_name") instanceof String s ? s : (String) body.get("new");
         if (oldName == null || newName == null) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"old_name and new_name required\"}"); return;
+            HttpUtil.send(exchange, 400, "{\"error\":\"old_name/new_name (or old/new) required\"}"); return;
         }
         int updated = repo.renameCollection(tenant, oldName, newName);
         HttpUtil.send(exchange, 200, "{\"updated\":" + updated + "}");
@@ -650,6 +654,30 @@ public final class CatalogHandler implements HttpHandler {
             : List.of(body);
         for (var row : rows) repo.importCollection(tenant, row);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SERVER-SIDE TUMBLER ASSIGNMENT
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * POST /v1/catalog/doc/register — assign a new tumbler and register the document.
+     *
+     * <p>Body: {"owner_prefix": "1.1", "title": "...", "content_type": "paper", ...}
+     * Response: {"tumbler": "1.1.3"}
+     *
+     * <p>Uses SELECT ... FOR UPDATE on catalog_owners.next_seq to atomically claim
+     * the next sequence number.  Returns the assigned tumbler string.
+     */
+    private void handleDocRegister(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String ownerPrefix = (String) body.get("owner_prefix");
+        if (ownerPrefix == null || ownerPrefix.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'owner_prefix' required\"}"); return;
+        }
+        String tumbler = repo.registerDocument(tenant, ownerPrefix, body);
+        HttpUtil.send(exchange, 200, "{\"tumbler\":" + MAPPER.writeValueAsString(tumbler) + "}");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
