@@ -652,6 +652,22 @@ def taxonomy_assign_batch_hook(
     if not doc_ids:
         return
 
+    # RDR-152 Seam B: taxonomy-via-Chroma-client is not supported on the
+    # service path.  HttpVectorClient has no ._client attribute; accessing it
+    # would raise AttributeError, swallowed by the bare except below, causing
+    # silent taxonomy loss.  Log once and return cleanly.  Taxonomy-on-service
+    # is a tracked follow-on (bead nexus-gmiaf.21+).
+    from nexus.db.http_vector_client import is_vector_service_mode
+    if is_vector_service_mode():
+        import structlog
+        structlog.get_logger().info(
+            "taxonomy_assign_skipped_service_mode",
+            collection=collection,
+            doc_count=len(doc_ids),
+            note="taxonomy-via-chroma not supported on service backend; tracked in nexus-gmiaf.21+",
+        )
+        return
+
     if is_local_mode():
         exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
         if any(fnmatch(collection, pat) for pat in exclude):
@@ -707,7 +723,15 @@ def _fetch_or_embed(
     if no embeddings can be produced (callers no-op in that case).
     Used by ``taxonomy_assign_batch_hook`` when called from MCP
     ``store_put`` with ``embeddings=None``.
+
+    Returns None immediately in service mode (HttpVectorClient has no
+    ._client; taxonomy-via-chroma is not supported on the service path).
     """
+    # RDR-152 Seam B guard — see taxonomy_assign_batch_hook for rationale.
+    from nexus.db.http_vector_client import is_vector_service_mode
+    if is_vector_service_mode():
+        return None
+
     import numpy as np
 
     fetched: list[list[float] | None] = [None] * len(doc_ids)

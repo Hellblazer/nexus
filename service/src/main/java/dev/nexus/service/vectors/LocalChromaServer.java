@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * RDR-152 bead nexus-gmiaf.20 — Java-managed local Chroma HTTP server.
@@ -48,6 +49,8 @@ public final class LocalChromaServer implements AutoCloseable {
 
     private volatile Process chromaProcess;
     private volatile boolean started = false;
+    /** Guards one-time JVM shutdown hook registration (re-start / test-suite safety). */
+    private final AtomicBoolean shutdownHookRegistered = new AtomicBoolean(false);
 
     /**
      * @param chromaBinary path to the {@code chroma} CLI (e.g. from venv or PATH)
@@ -88,8 +91,11 @@ public final class LocalChromaServer implements AutoCloseable {
         started = true;
         log.info("event=local_chroma_process_spawned pid={}", chromaProcess.pid());
 
-        // Register shutdown hook so orphan kill fires even if stop() is not called
-        Runtime.getRuntime().addShutdownHook(new Thread(this::forceStop, "chroma-shutdown-hook"));
+        // Register shutdown hook ONCE per instance (guards auto-restart in Phase .30
+        // and test-suite scenarios where start() may be called more than once).
+        if (shutdownHookRegistered.compareAndSet(false, true)) {
+            Runtime.getRuntime().addShutdownHook(new Thread(this::forceStop, "chroma-shutdown-hook"));
+        }
 
         // Poll heartbeat until ready or timeout
         ChromaRestClient probe = ChromaRestClient.local("127.0.0.1", port);

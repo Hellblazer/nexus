@@ -627,7 +627,21 @@ def _index_document(
         collection_name = (
             f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
         )
-    db = t3 if t3 is not None else make_t3()
+    # RDR-152 Seam B: when t3 is None, route through get_t3() in service mode
+    # so HttpVectorClient is used instead of T3Database(daemon), preventing the
+    # split-brain where indexing writes to daemon-Chroma but search reads
+    # service-Chroma.  In non-service mode, preserve make_t3() to keep existing
+    # mocks working (tests patch 'nexus.doc_indexer.make_t3').
+    # Lazy import avoids a circular import cycle with mcp_infra.
+    if t3 is not None:
+        db = t3
+    else:
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        if is_vector_service_mode():
+            from nexus.mcp_infra import get_t3  # noqa: PLC0415
+            db = get_t3()
+        else:
+            db = make_t3()
     col = db.get_or_create_collection(collection_name)
 
     target_model = index_model_for_collection(collection_name)
@@ -1185,7 +1199,18 @@ def index_pdf(
         col_name = (
             f"docs__{owner_segment}__{effective_embedding_model_for_writes('docs')}__v1"
         )
-    db = t3 if t3 is not None else make_t3()  # T3Database instance (not PipelineDB)
+    # RDR-152 Seam B: when t3 is None, route through get_t3() in service mode —
+    # see _index_document for full rationale.  In non-service mode, use make_t3()
+    # to preserve existing test mock contracts (patch 'nexus.doc_indexer.make_t3').
+    if t3 is not None:
+        db = t3
+    else:
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        if is_vector_service_mode():
+            from nexus.mcp_infra import get_t3  # noqa: PLC0415
+            db = get_t3()
+        else:
+            db = make_t3()
     col = db.get_or_create_collection(col_name)
     target_model = index_model_for_collection(col_name)
     if local_target_model is not None:

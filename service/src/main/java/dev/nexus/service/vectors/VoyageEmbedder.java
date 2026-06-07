@@ -31,6 +31,17 @@ import java.util.Map;
  * <p>REST endpoint: {@code POST https://api.voyageai.com/v1/embeddings}
  * Headers: {@code Authorization: Bearer <key>}, {@code Content-Type: application/json}.
  *
+ * <p><strong>CCE LIMITATION (nexus-gmiaf.21 gate):</strong>
+ * This class targets the standard {@code /v1/embeddings} endpoint (correct for
+ * {@code voyage-code-3}).  The Python cloud path uses Contextualized Cross-Encoder
+ * (CCE) via {@code /v1/contextualized-embeddings} for {@code knowledge__},
+ * {@code docs__}, and {@code rdr__} collections (model {@code voyage-context-3}).
+ * CCE and standard embeddings live in a different embedding space (cross-collection
+ * cosine sim ≈ 0.05); mixing them returns semantically garbage results.
+ * Cloud-mode Seam B is DISABLED in .20 precisely to avoid this.
+ * Do NOT enable cloud mode for voyage-context-3 collections until the CCE path
+ * is implemented in {@code .21}.
+ *
  * <p>Stateless: each {@link #embed} call is independent.  Thread-safe.
  */
 public final class VoyageEmbedder implements Embedder {

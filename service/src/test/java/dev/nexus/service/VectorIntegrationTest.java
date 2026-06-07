@@ -352,7 +352,9 @@ class VectorIntegrationTest {
         assertThat(delResp.statusCode()).isEqualTo(200);
         @SuppressWarnings("unchecked")
         Map<String, Object> delJson = MAPPER.readValue(delResp.body(), MAP_TYPE);
-        assertThat(((Number) delJson.get("deleted")).intValue()).isGreaterThanOrEqualTo(0);
+        // Exactly 1 chunk was upserted above; isEqualTo(1) proves delete was not silently swallowed.
+        // Chroma v2 REST /delete returns {} (empty body); ChromaRestClient.delete() returns ids.size().
+        assertThat(((Number) delJson.get("deleted")).intValue()).isEqualTo(1);
 
         // Search should return nothing for that ID
         var countResp = http.send(

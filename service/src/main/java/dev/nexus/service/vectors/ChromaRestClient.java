@@ -296,14 +296,17 @@ public final class ChromaRestClient {
 
     /**
      * Delete chunks by ID from a collection.
+     *
+     * <p>Chroma v2 REST {@code /delete} returns {@code {}} (empty JSON object) on success;
+     * it does NOT return a count.  We return {@code ids.size()} — all requested IDs were
+     * submitted for deletion; Chroma silently no-ops unknown IDs.
      */
     public int delete(String collectionName, List<String> ids) {
         if (ids.isEmpty()) return 0;
         String colId = getOrCreateCollection(collectionName);
         Map<String, Object> body = Map.of("ids", ids);
-        Map<String, Object> resp = doPost(collectionBase(colId) + "/delete", body);
-        Object deleted = resp.get("deleted");
-        return deleted instanceof Number n ? n.intValue() : 0;
+        doPost(collectionBase(colId) + "/delete", body);  // throws on failure; returns {}
+        return ids.size();
     }
 
     // ── Read ──────────────────────────────────────────────────────────────────
