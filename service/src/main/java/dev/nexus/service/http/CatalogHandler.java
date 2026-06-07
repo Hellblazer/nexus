@@ -130,6 +130,8 @@ public final class CatalogHandler implements HttpHandler {
                 case "/owners/by_repo"        -> handleOwnerByRepo(exchange, tenant, method);
                 case "/owners/by_name"        -> handleOwnerByName(exchange, tenant, method);
                 case "/owners/head_hash"      -> handleOwnerHeadHash(exchange, tenant, method);
+                case "/owners/show"           -> handleOwnerShow(exchange, tenant, method);
+                case "/owners/by_type"        -> handleOwnerByType(exchange, tenant, method);
 
                 // ── Collections ───────────────────────────────────────────────
                 case "/collections/upsert"    -> handleCollectionUpsert(exchange, tenant, method);
@@ -145,6 +147,10 @@ public final class CatalogHandler implements HttpHandler {
                 case "/import/link"           -> handleImportLink(exchange, tenant, method);
                 case "/import/chunk"          -> handleImportChunk(exchange, tenant, method);
                 case "/import/collection"     -> handleImportCollection(exchange, tenant, method);
+
+                // ── Scoring hot-path batch endpoints (nexus-qnp5s) ───────────
+                case "/docs/chunk-counts"     -> handleDocChunkCounts(exchange, tenant, method);
+                case "/links/from-batch"      -> handleLinksFromBatch(exchange, tenant, method);
 
                 // ── Server-side tumbler assignment ────────────────────────────
                 case "/doc/register"          -> handleDocRegister(exchange, tenant, method);
@@ -683,6 +689,74 @@ public final class CatalogHandler implements HttpHandler {
         }
         String tumbler = repo.registerDocument(tenant, ownerPrefix, body);
         HttpUtil.send(exchange, 200, "{\"tumbler\":" + MAPPER.writeValueAsString(tumbler) + "}");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // OWNERS — extra endpoints (nexus-qnp5s)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /** GET /v1/catalog/owners/show?tumbler_prefix=X — get owner by tumbler_prefix. */
+    private void handleOwnerShow(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String prefix = queryParam(exchange, "tumbler_prefix");
+        if (prefix == null || prefix.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"tumbler_prefix required\"}"); return;
+        }
+        var owner = repo.ownerByPrefix(tenant, prefix);
+        if (owner == null) { HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}"); return; }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(owner));
+    }
+
+    /** POST /v1/catalog/owners/by_type — list owners filtered by owner_type. */
+    private void handleOwnerByType(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String ownerType = (String) body.get("owner_type");
+        if (ownerType == null || ownerType.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"owner_type required\"}"); return;
+        }
+        var owners = repo.ownersByType(tenant, ownerType);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("owners", owners)));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SCORING HOT-PATH BATCH ENDPOINTS (nexus-qnp5s)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * POST /v1/catalog/docs/chunk-counts — batch chunk_count for a set of doc_ids.
+     *
+     * <p>Request: {"doc_ids": ["1.1.1", "1.1.2", ...]}
+     * Response: {"1.1.1": 42, "1.1.2": 17}  (missing docs absent)
+     */
+    @SuppressWarnings("unchecked")
+    private void handleDocChunkCounts(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object rawIds = body.get("doc_ids");
+        List<String> docIds = rawIds instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        var counts = repo.chunkCountsForDocs(tenant, docIds);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(counts));
+    }
+
+    /**
+     * POST /v1/catalog/links/from-batch — batch outbound links for a set of tumblers.
+     *
+     * <p>Request: {"tumblers": ["1.1.1", "1.1.2", ...]}
+     * Response: {"1.1.1": [{"from_tumbler": "1.1.1", "link_type": "cites"}], ...}
+     */
+    @SuppressWarnings("unchecked")
+    private void handleLinksFromBatch(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object rawT = body.get("tumblers");
+        List<String> tumblers = rawT instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        var links = repo.linksFromBatch(tenant, tumblers);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(links));
     }
 
     // ══════════════════════════════════════════════════════════════════════════

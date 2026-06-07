@@ -125,11 +125,15 @@ def from_catalog(repo: Path, *, cat: Catalog) -> RepoRecord | None:
     # implementation-defined row order made the docs_collection slot
     # non-deterministic for owners with multiple collections of the
     # same content_type (post-model-upgrade state).
-    rows = cat._db.execute(
-        "SELECT name, content_type FROM collections WHERE owner_id = ? "
-        "ORDER BY name DESC",
-        (owner_id,),
-    ).fetchall()
+    # nexus-qnp5s: collections_by_owner() is implemented on both SQLite
+    # Catalog and HttpCatalogClient — no raw _db access.
+    raw_colls = cat.collections_by_owner(owner_id)
+    # Sort DESC by name to match the SQLite ORDER BY name DESC semantics.
+    rows = sorted(
+        [(c.get("name", ""), c.get("content_type", "")) for c in raw_colls],
+        key=lambda t: t[0],
+        reverse=True,
+    )
 
     code = ""
     docs = ""
@@ -149,11 +153,10 @@ def from_catalog(repo: Path, *, cat: Catalog) -> RepoRecord | None:
     docs_canonical = knowledge or docs
 
     # Fetch head_hash from owners (RDR-137 Phase 1.5b column).
-    head_row = cat._db.execute(
-        "SELECT head_hash FROM owners WHERE tumbler_prefix = ?",
-        (str(owner),),
-    ).fetchone()
-    head_hash = (head_row[0] or "") if head_row else ""
+    # nexus-qnp5s: get_owner_by_prefix() is implemented on both SQLite
+    # Catalog and HttpCatalogClient — no raw _db access.
+    owner_data = cat.get_owner_by_prefix(str(owner))
+    head_hash = (owner_data.get("head_hash") or "") if owner_data else ""
 
     return RepoRecord(
         name=name,
@@ -377,11 +380,10 @@ def list_repos_dual(
     # rather than dereferencing a missing handle.
     cat_paths: set[str] = set()
     if cat is not None:
-        rows = cat._db.execute(
-            "SELECT repo_root FROM owners "
-            "WHERE owner_type = 'repo' AND repo_root != ''"
-        ).fetchall()
-        for (rr,) in rows:
+        # nexus-qnp5s: list_owners_by_type() is implemented on both SQLite
+        # Catalog and HttpCatalogClient — no raw _db access.
+        for o in cat.list_owners_by_type("repo"):
+            rr = o.get("repo_root") or ""
             if rr:
                 cat_paths.add(rr)
 

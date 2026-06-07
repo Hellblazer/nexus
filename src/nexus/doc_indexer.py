@@ -83,14 +83,11 @@ def _lookup_existing_doc_id(
         # Curator-only lookup — see _register_or_lookup_doc_id for
         # rationale (repo and curator owners can share names; lookups
         # from the doc_indexer family must use the curator namespace).
-        row = cat._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ? "
-            "AND owner_type = 'curator'",
-            (owner_name,),
-        ).fetchone()
-        if not row:
+        # nexus-qnp5s: curator_owner_tumbler_by_name() is implemented on
+        # both SQLite Catalog and HttpCatalogClient — no raw _db access.
+        owner = cat.curator_owner_tumbler_by_name(owner_name)
+        if owner is None:
             return ""
-        owner = Tumbler.parse(row[0])
         existing = cat.by_file_path(owner, file_path)
         if existing is None:
             return ""
@@ -214,13 +211,11 @@ def _register_or_lookup_doc_id(
         # owner_type='curator' keeps the namespaces separate; repo
         # owners are reachable only via owner_for_repo(repo_hash)
         # from the repo indexer, never via a corpus-name lookup here.
-        row = reader._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ? "
-            "AND owner_type = 'curator'",
-            (owner_name,),
-        ).fetchone()
-        if row:
-            owner = Tumbler.parse(row[0])
+        # nexus-qnp5s: curator_owner_tumbler_by_name() is implemented on
+        # both SQLite Catalog and HttpCatalogClient — no raw _db access.
+        owner_t = reader.curator_owner_tumbler_by_name(owner_name)
+        if owner_t is not None:
+            owner = owner_t
         else:
             owner = writer.register_owner(owner_name, "curator")
 
@@ -253,7 +248,7 @@ def _register_or_lookup_doc_id(
         if writer is not None:
             writer.close()
         if reader is not None:
-            reader._db.close()
+            reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
 
 
 def _missing_credentials() -> list[str]:
@@ -1548,15 +1543,11 @@ def _catalog_markdown_hook(
 
         owner_name = corpus if corpus else "standalone-docs"
         # Curator-only lookup — see _register_or_lookup_doc_id for
-        # rationale.
-        rows = reader._db.execute(
-            "SELECT tumbler_prefix FROM owners WHERE name = ? "
-            "AND owner_type = 'curator'",
-            (owner_name,),
-        ).fetchone()
-        if rows:
-            from nexus.catalog.tumbler import Tumbler
-            owner = Tumbler.parse(rows[0])
+        # rationale. nexus-qnp5s: curator_owner_tumbler_by_name() is
+        # implemented on both SQLite Catalog and HttpCatalogClient.
+        owner_t = reader.curator_owner_tumbler_by_name(owner_name)
+        if owner_t is not None:
+            owner = owner_t
         else:
             owner = writer.register_owner(owner_name, "curator")
 
@@ -1605,7 +1596,7 @@ def _catalog_markdown_hook(
         if writer is not None:
             writer.close()
         if reader is not None:
-            reader._db.close()
+            reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe
 
 
 def index_markdown(

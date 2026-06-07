@@ -899,7 +899,7 @@ def _catalog_hook(
         if writer is not None:
             writer.close()
         if reader is not None:
-            reader._db.close()
+            reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
     return file_to_doc_id
 
 

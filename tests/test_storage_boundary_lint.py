@@ -868,3 +868,92 @@ def test_taxonomy_write_lint_rejects_short_epsilon_reason(
     )
     hits = _taxonomy_write_violations(fake)
     assert hits, "short epsilon-allow reason must NOT suppress"
+
+
+# ---------------------------------------------------------------------------
+# nexus-qnp5s: catalog._db access baseline
+#
+# All consumer-side ``._db`` accesses outside ``src/nexus/catalog/`` are
+# the service-mode migration surface. Baseline seeded at 46 (AST count
+# after the nexus-qnp5s 20-site migration; commands/ sites are future work).
+# The ratchet asserts ``<= CATALOG_DB_ACCESS_BASELINE`` so new sites fail CI.
+# ---------------------------------------------------------------------------
+
+
+def _db_access_check(extra_files=None, catalog_db_access_allowlist_prefixes=None):
+    from nexus.storage_boundary_lint import scan_repo
+
+    return scan_repo(
+        repo_root=REPO_ROOT,
+        extra_files=extra_files,
+        catalog_db_access_allowlist_prefixes=catalog_db_access_allowlist_prefixes,
+    )
+
+
+def test_catalog_db_access_never_exceeds_baseline():
+    """nexus-qnp5s: the ._db access count outside catalog/ must not exceed
+    the seeded baseline. Any new ._db access in consumer code causes CI to
+    fail until the baseline is explicitly bumped (monotonic non-increase)."""
+    from nexus.storage_boundary_lint import CATALOG_DB_ACCESS_BASELINE
+
+    result = _db_access_check()
+    assert result.catalog_db_accesses <= CATALOG_DB_ACCESS_BASELINE, (
+        f"catalog._db accesses ({result.catalog_db_accesses}) exceed "
+        f"baseline ({CATALOG_DB_ACCESS_BASELINE})"
+    )
+
+
+def test_catalog_db_access_in_consumer_is_counted(tmp_path):
+    """A new ``cat._db`` access in consumer code (outside catalog/) is
+    counted, pushing the metric above the current floor."""
+    base = _db_access_check().catalog_db_accesses
+    target = tmp_path / "new_consumer.py"
+    target.write_text(
+        "def bad(cat):\n"
+        "    return cat._db.execute('SELECT 1').fetchone()\n"
+    )
+    result = _db_access_check(extra_files=[target])
+    assert result.catalog_db_accesses == base + 1
+
+
+def test_catalog_db_access_epsilon_allow_suppresses(tmp_path):
+    """A ``._db`` access annotated with epsilon-allow is NOT counted
+    (mirrors the collection_health.py guarded path)."""
+    base = _db_access_check().catalog_db_accesses
+    target = tmp_path / "guarded_consumer.py"
+    target.write_text(
+        "def ok(cat):\n"
+        "    conn = cat._db._conn  # epsilon-allow: guarded SQLite-only path (service guard above)\n"
+    )
+    result = _db_access_check(extra_files=[target])
+    assert result.catalog_db_accesses == base
+
+
+def test_catalog_db_access_in_catalog_module_not_counted(tmp_path):
+    """``._db`` accesses inside ``src/nexus/catalog/`` are allowlisted
+    (they implement the Catalog class itself) and must NOT count."""
+    from nexus.storage_boundary_lint import scan_repo
+
+    cat_dir = tmp_path / "src" / "nexus" / "catalog"
+    cat_dir.mkdir(parents=True)
+    target = cat_dir / "internal.py"
+    target.write_text(
+        "def _ok(self):\n"
+        "    return self._db.execute('SELECT 1')\n"
+    )
+    # With the allowlist pointing at this tmp tree, the catalog/ file is excluded.
+    result = scan_repo(
+        repo_root=tmp_path,
+        allowlist_prefixes=(),
+        catalog_db_access_allowlist_prefixes=("src/nexus/catalog/",),
+    )
+    assert result.catalog_db_accesses == 0
+
+
+def test_catalog_db_access_metric_dict_includes_field():
+    """The ``as_metric_dict`` helper must include ``catalog_db_accesses``
+    so T2 telemetry storage receives the new metric."""
+    from nexus.storage_boundary_lint import LintResult
+
+    r = LintResult(catalog_db_accesses=7)
+    assert r.as_metric_dict()["catalog_db_accesses"] == 7

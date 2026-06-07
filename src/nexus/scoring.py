@@ -129,15 +129,11 @@ def apply_hybrid_scoring(
         code_doc_ids.discard("")
         if code_doc_ids:
             try:
-                placeholders = ",".join("?" for _ in code_doc_ids)
-                rows = catalog._db.execute(
-                    f"SELECT tumbler, chunk_count FROM documents "
-                    f"WHERE tumbler IN ({placeholders})",
-                    list(code_doc_ids),
-                ).fetchall()
-                chunk_count_by_doc_id = {
-                    t: int(cc) for t, cc in rows if cc is not None
-                }
+                # nexus-qnp5s: chunk_counts_for_docs() is implemented on
+                # both SQLite Catalog and HttpCatalogClient — no raw _db.
+                chunk_count_by_doc_id = catalog.chunk_counts_for_docs(
+                    list(code_doc_ids)
+                )
             except Exception as exc:
                 _log.warning(
                     "scoring_chunk_count_lookup_failed",
@@ -275,17 +271,17 @@ def apply_link_boost(
     # legacy code carried. Phase 3 will mint UUID7 doc_ids distinct
     # from tumblers; that change reintroduces a metadata.doc_id →
     # tumbler projection step here.
-    placeholders = ",".join("?" for _ in doc_ids)
-    link_rows = catalog._db.execute(
-        f"SELECT from_tumbler, link_type FROM links WHERE from_tumbler IN ({placeholders})",
-        list(doc_ids),
-    ).fetchall()
+    # nexus-qnp5s: links_from_batch() is implemented on both SQLite
+    # Catalog and HttpCatalogClient — no raw _db access.
+    links_by_tumbler = catalog.links_from_batch(list(doc_ids))
 
     # Aggregate: tumbler -> total weighted signal
     tumbler_signal: dict[str, float] = {}
-    for from_t, link_type in link_rows:
-        w = tw.get(link_type, 0.0)
-        tumbler_signal[from_t] = tumbler_signal.get(from_t, 0.0) + w
+    for from_t, link_list in links_by_tumbler.items():
+        for lnk in link_list:
+            link_type = lnk.get("link_type", "")
+            w = tw.get(link_type, 0.0)
+            tumbler_signal[from_t] = tumbler_signal.get(from_t, 0.0) + w
 
     # Apply boost.
     for r in results:

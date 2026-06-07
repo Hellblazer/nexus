@@ -171,24 +171,11 @@ def test_file_size_penalty_uses_catalog_chunk_count_when_provided():
     """
     from nexus.scoring import apply_hybrid_scoring
 
-    class _FakeDB:
-        def execute(self, sql: str, params):
-            assert "documents" in sql
-            assert "chunk_count" in sql
-            rows = {"ART-small": 5, "ART-large": 5000}
-            return _FakeCursor([
-                (t, rows[t]) for t in params if t in rows
-            ])
-
-    class _FakeCursor:
-        def __init__(self, rows):
-            self._rows = rows
-
-        def fetchall(self):
-            return self._rows
-
     class _FakeCatalog:
-        _db = _FakeDB()
+        """nexus-qnp5s: uses the public API (chunk_counts_for_docs) instead of _db."""
+        def chunk_counts_for_docs(self, doc_ids: list) -> dict:
+            counts = {"ART-small": 5, "ART-large": 5000}
+            return {d: counts[d] for d in doc_ids if d in counts}
 
     # Two code__ results, identical vector distance, no chunk_count
     # in metadata (Phase-3 shape).  Only doc_id differs.

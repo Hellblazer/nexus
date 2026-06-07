@@ -643,6 +643,23 @@ class Catalog:
             if self._documents_path.exists():
                 self._ensure_consistent()
 
+    def close(self) -> None:
+        """Signal that the caller is done with this catalog instance (no-op).
+
+        nexus-qnp5s: mirrors HttpCatalogClient.close() so Group A consumer
+        sites can call cat.close() on both backends without branching.
+
+        For SQLite Catalog the underlying connection is managed by the
+        process lifecycle (GC / WAL). Closing the raw sqlite3.Connection
+        prematurely breaks callers that hold a reference to the same Catalog
+        object (e.g., test fixtures that verify state after a hook fires).
+        HttpCatalogClient.close() is where the close actually matters (shuts
+        down the httpx connection pool); SQLite Catalog lets GC handle it.
+        """
+        # Intentional no-op for SQLite Catalog — do not call self._db._conn.close().
+        # See nexus-qnp5s docstring rationale above.
+        _log.debug("catalog_close_called")
+
     def _emit_backfilled_collection_events(self) -> None:
         """Emit CollectionCreated events for CatalogDB-backfilled collections.
 
@@ -1046,6 +1063,36 @@ class Catalog:
     def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
         """Delegates to ``_DocumentOps.owner_tumblers_by_name`` (nexus-mbm)."""
         return self._docs.owner_tumblers_by_name(name)
+
+    def curator_owner_tumbler_by_name(self, name: str) -> "Tumbler | None":
+        """Return the tumbler of the *curator*-type owner with this name, or None.
+
+        The ``(name, owner_type)`` UNIQUE constraint guarantees at most one
+        curator owner per name.  Returns ``None`` when no curator owner exists.
+
+        nexus-qnp5s: mirrors the same method on HttpCatalogClient so all
+        callers can use a uniform public-API call instead of raw ``_db.execute``.
+        """
+        row = self._db.execute(
+            "SELECT tumbler_prefix FROM owners WHERE name = ? AND owner_type = 'curator'",
+            (name,),
+        ).fetchone()
+        return Tumbler.parse(row[0]) if row else None
+
+    def stats(self) -> dict:
+        """Return catalog statistics: doc_count, link_count, owner_count, collection_count.
+
+        nexus-qnp5s: mirrors HttpCatalogClient.stats() so health.py can call
+        cat.stats() on both SQLite Catalog and HttpCatalogClient uniformly.
+        """
+        doc_count = self._db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        link_count = self._db.execute("SELECT COUNT(*) FROM links").fetchone()[0]
+        owner_count = self._db.execute("SELECT COUNT(*) FROM owners").fetchone()[0]
+        return {
+            "doc_count": doc_count,
+            "link_count": link_count,
+            "owner_count": owner_count,
+        }
 
     def ensure_owner_for_repo(
         self, repo: Path, *, repo_name: str = "", description: str = "",
@@ -1595,6 +1642,100 @@ class Catalog:
     def list_collections(self) -> list[dict]:
         """Delegates to ``_DocumentOps.list_collections`` (nexus-mbm)."""
         return self._docs.list_collections()
+
+    def collections_by_owner(self, owner_id: str) -> list[dict]:
+        """Return collections registered for the given owner_id.
+
+        nexus-qnp5s: mirrors HttpCatalogClient.collections_by_owner() so
+        repos.py can use a uniform call on both backends.
+        """
+        return [c for c in self.list_collections() if c.get("owner_id") == owner_id]
+
+    def get_owner_by_prefix(self, tumbler_prefix: str) -> dict | None:
+        """Return full owner dict for the given tumbler_prefix, or None.
+
+        nexus-qnp5s: mirrors HttpCatalogClient.get_owner_by_prefix() so
+        repos.py head_hash lookup can use a uniform call on both backends.
+        """
+        row = self._db.execute(
+            "SELECT tumbler_prefix, name, owner_type, repo_hash, "
+            "description, repo_root, head_hash "
+            "FROM owners WHERE tumbler_prefix = ?",
+            (tumbler_prefix,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "tumbler_prefix": row[0],
+            "name": row[1],
+            "owner_type": row[2],
+            "repo_hash": row[3],
+            "description": row[4],
+            "repo_root": row[5],
+            "head_hash": row[6],
+        }
+
+    def list_owners_by_type(self, owner_type: str) -> list[dict]:
+        """Return all owners with the given owner_type as a list of dicts.
+
+        nexus-qnp5s: mirrors HttpCatalogClient.list_owners_by_type() so
+        repos.py repo-root iteration can use a uniform call on both backends.
+        """
+        rows = self._db.execute(
+            "SELECT tumbler_prefix, name, owner_type, repo_hash, "
+            "description, repo_root, head_hash "
+            "FROM owners WHERE owner_type = ?",
+            (owner_type,),
+        ).fetchall()
+        return [
+            {
+                "tumbler_prefix": r[0],
+                "name": r[1],
+                "owner_type": r[2],
+                "repo_hash": r[3],
+                "description": r[4],
+                "repo_root": r[5],
+                "head_hash": r[6],
+            }
+            for r in rows
+        ]
+
+    def chunk_counts_for_docs(self, doc_ids: list[str]) -> dict[str, int]:
+        """Return {tumbler: chunk_count} for the given doc_ids.
+
+        nexus-qnp5s: mirrors HttpCatalogClient.chunk_counts_for_docs() so
+        scoring.py hot-path can use a uniform call on both backends.
+        """
+        if not doc_ids:
+            return {}
+        placeholders = ",".join("?" for _ in doc_ids)
+        rows = self._db.execute(
+            f"SELECT tumbler, chunk_count FROM documents "
+            f"WHERE tumbler IN ({placeholders})",
+            doc_ids,
+        ).fetchall()
+        return {t: int(cc) for t, cc in rows if cc is not None}
+
+    def links_from_batch(self, tumblers: list[str]) -> dict[str, list[dict]]:
+        """Return {from_tumbler: [{from_tumbler, link_type}, ...]} for the given tumblers.
+
+        nexus-qnp5s: mirrors HttpCatalogClient.links_from_batch() so
+        scoring.py hot-path can use a uniform call on both backends.
+        """
+        if not tumblers:
+            return {}
+        placeholders = ",".join("?" for _ in tumblers)
+        rows = self._db.execute(
+            f"SELECT from_tumbler, link_type FROM links "
+            f"WHERE from_tumbler IN ({placeholders})",
+            tumblers,
+        ).fetchall()
+        result: dict[str, list[dict]] = {}
+        for from_t, link_type in rows:
+            result.setdefault(from_t, []).append(
+                {"from_tumbler": from_t, "link_type": link_type}
+            )
+        return result
 
     def get_collection(self, name: str) -> dict | None:
         """Delegates to ``_DocumentOps.get_collection`` (nexus-mbm)."""

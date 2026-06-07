@@ -120,6 +120,26 @@ CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 )
 
 
+#: nexus-qnp5s: allowlist for ``._db`` attribute accesses.
+#: Only the catalog module itself may access ``._db`` (internal SQLite handle);
+#: all consumers must call the public API (curator_owner_tumbler_by_name,
+#: chunk_counts_for_docs, links_from_batch, etc.) which works on both
+#: SQLite Catalog and HttpCatalogClient.
+CATALOG_DB_ACCESS_ALLOWLIST_PREFIXES: tuple[str, ...] = (
+    "src/nexus/catalog/",
+)
+
+#: nexus-qnp5s: baseline for ``._db`` accesses outside the catalog module.
+#: Seeded at 46 — the AST count of remaining sites after the nexus-qnp5s
+#: 20-site migration (commands/catalog.py, commands/enrich.py, etc. are
+#: future migration work). Ratchets down as subsequent beads migrate
+#: commands/ sites onto public API. The acceptance test asserts
+#: ``scan_repo(...).catalog_db_accesses <= CATALOG_DB_ACCESS_BASELINE``;
+#: a PR that adds a new ._db access will push the count above the floor
+#: and fail CI before the floor is updated.
+CATALOG_DB_ACCESS_BASELINE: int = 46
+
+
 #: RDR-146 catalog-construction floor. P0.1 seeded this at 49 (the AST
 #: count of bare ``Catalog(...)`` construction sites in consumer code at
 #: the start of the Phase-1 cutover). P1.2 (nexus-5p2ci.21) completed the
@@ -212,6 +232,11 @@ class LintResult:
     #: client-cutover, NOT yet promoted to hard violations. Ratchets down
     #: as Phase-1 waves migrate sites onto ``T2Client.catalog``.
     catalog_constructions: int = 0
+    #: nexus-qnp5s: ``._db`` attribute accesses outside ``src/nexus/catalog/``.
+    #: Baseline is 0 — enforced as hard violations (consumers must call the
+    #: public API on both SQLite Catalog and HttpCatalogClient; any new
+    #: ``._db`` access outside catalog/ bypasses the service-mode backend).
+    catalog_db_accesses: int = 0
 
     @property
     def total_violations(self) -> int:
@@ -226,6 +251,7 @@ class LintResult:
             "epsilon_allow_connects": self.epsilon_allow_connects,
             "voyageai_epsilon_allow_count": self.voyageai_epsilon_allow_count,
             "catalog_constructions": self.catalog_constructions,
+            "catalog_db_accesses": self.catalog_db_accesses,
         }
 
 
@@ -250,6 +276,9 @@ class FileScan:
     #: (the catalog client-cutover surface). Scoped by the catalog
     #: construction-allowlist in :func:`scan_repo`.
     catalog_constructions: list[Violation] = field(default_factory=list)
+    #: nexus-qnp5s: ``._db`` attribute accesses in this file.
+    #: Enforced at baseline=0 outside ``src/nexus/catalog/``.
+    catalog_db_accesses: list[Violation] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +432,23 @@ def _scan_file_full(
                 Violation(file=_rel(), line=line, symbol=cat_ctor)
             )
 
+    # ── nexus-qnp5s: ._db attribute access scan (not Call-scoped) ──
+    # Walk all Attribute nodes (not just Call func nodes) to catch
+    # any ``something._db`` access regardless of whether it is called.
+    # Epsilon-allow on the same line suppresses the violation (for the one
+    # guarded SQLite-only path in collection_health.py).
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "_db"
+        ):
+            if _line_has_allowlist_token(source_lines, node.lineno):
+                continue
+            # Only flag outside catalog/ — the allowlist is applied by scan_repo.
+            scan.catalog_db_accesses.append(
+                Violation(file=_rel(), line=node.lineno, symbol="catalog._db")
+            )
+
     return scan
 
 
@@ -441,6 +487,7 @@ def scan_repo(
     extra_files: Iterable[pathlib.Path] | None = None,
     construction_allowlist_prefixes: Iterable[str] | None = None,
     catalog_construction_allowlist_prefixes: Iterable[str] | None = None,
+    catalog_db_access_allowlist_prefixes: Iterable[str] | None = None,
 ) -> LintResult:
     """Scan the repo for banned call sites and the RDR-128 baseline
     populations.
@@ -478,6 +525,10 @@ def scan_repo(
         catalog_construction_allowlist_prefixes = tuple(
             catalog_construction_allowlist_prefixes
         )
+    if catalog_db_access_allowlist_prefixes is None:
+        catalog_db_access_allowlist_prefixes = CATALOG_DB_ACCESS_ALLOWLIST_PREFIXES
+    else:
+        catalog_db_access_allowlist_prefixes = tuple(catalog_db_access_allowlist_prefixes)
 
     result = LintResult()
 
@@ -511,6 +562,14 @@ def scan_repo(
         if not _is_allowlisted(rel, catalog_construction_allowlist_prefixes):
             result.catalog_constructions += len(scan.catalog_constructions)
 
+        # nexus-qnp5s: catalog._db accesses — counted baseline outside
+        # catalog/. Ratchets down toward 0 as commands/ sites migrate.
+        # NOT promoted to hard violations yet (46 sites in commands/).
+        # The acceptance test uses the ``catalog_db_accesses`` metric
+        # directly (assert <= CATALOG_DB_ACCESS_BASELINE).
+        if not _is_allowlisted(rel, catalog_db_access_allowlist_prefixes):
+            result.catalog_db_accesses += len(scan.catalog_db_accesses)
+
     # Extra files: always scanned, never allowlisted by path prefix.
     if extra_files:
         for extra in extra_files:
@@ -523,5 +582,6 @@ def scan_repo(
             )
             result.violations.extend(scan.t2database_constructions_undocumented)
             result.catalog_constructions += len(scan.catalog_constructions)
+            result.catalog_db_accesses += len(scan.catalog_db_accesses)
 
     return result

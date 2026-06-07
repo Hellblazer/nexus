@@ -981,6 +981,75 @@ public final class CatalogRepository {
         });
     }
 
+    /** Return owners filtered by owner_type. Used by repos.py:list_repos_dual (nexus-qnp5s). */
+    public List<Map<String, Object>> ownersByType(String tenant, String ownerType) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE, F_OWN_REPO,
+                       F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD)
+               .from(T_OWNERS)
+               .where(F_OWN_TYPE.eq(ownerType))
+               .fetch()
+               .map(r -> ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7()))
+        );
+    }
+
+    /** Return a single owner by tumbler_prefix. Returns null if not found. */
+    public Map<String, Object> ownerByPrefix(String tenant, String tumblerPrefix) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var r = ctx.select(F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE, F_OWN_REPO,
+                               F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD)
+                       .from(T_OWNERS)
+                       .where(F_OWN_PREFIX.eq(tumblerPrefix))
+                       .fetchOne();
+            return r != null
+                ? ownerRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(), r.value7())
+                : null;
+        });
+    }
+
+    /**
+     * Batch-fetch chunk_count for a set of document tumblers.
+     * Returns map of {tumbler -> chunk_count}. Missing docs are absent from the map.
+     * Used by scoring.py hot-path (nexus-qnp5s).
+     */
+    public Map<String, Integer> chunkCountsForDocs(String tenant, List<String> docIds) {
+        if (docIds == null || docIds.isEmpty()) return Map.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.select(F_DOC_TUMBLER, F_DOC_CHUNKS)
+                          .from(T_DOCS)
+                          .where(F_DOC_TUMBLER.in(docIds))
+                          .fetch();
+            Map<String, Integer> result = new LinkedHashMap<>();
+            for (var r : rows) {
+                if (r.value2() != null) result.put(r.value1(), r.value2());
+            }
+            return result;
+        });
+    }
+
+    /**
+     * Batch-fetch outbound links for a set of tumblers.
+     * Returns map of {from_tumbler -> list of {from_tumbler, link_type}}.
+     * Used by scoring.py hot-path (nexus-qnp5s).
+     */
+    public Map<String, List<Map<String, Object>>> linksFromBatch(String tenant, List<String> tumblers) {
+        if (tumblers == null || tumblers.isEmpty()) return Map.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.select(F_LNK_FROM, F_LNK_TYPE)
+                          .from(T_LINKS)
+                          .where(F_LNK_FROM.in(tumblers))
+                          .fetch();
+            Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
+            for (var r : rows) {
+                String fromT    = r.value1();
+                String linkType = r.value2();
+                result.computeIfAbsent(fromT, k -> new ArrayList<>())
+                      .add(Map.of("from_tumbler", fromT, "link_type", linkType));
+            }
+            return result;
+        });
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // STATS
     // ══════════════════════════════════════════════════════════════════════════

@@ -306,6 +306,77 @@ class HttpCatalogClient:
             if o.get("tumbler_prefix")
         ]
 
+    def curator_owner_tumbler_by_name(self, name: str) -> "Tumbler | None":
+        """Return the tumbler of the *curator*-type owner with this name, or None.
+
+        The ``(name, owner_type)`` constraint is UNIQUE so at most one curator
+        owner per name exists.  Returns ``None`` when no curator owner is found.
+        Used by doc_indexer / pipeline_stages curator lookups that previously
+        issued ``SELECT … WHERE name=? AND owner_type='curator'`` directly.
+        """
+        result = self._get("/owners/by_name", name=name)
+        owners = result.get("owners", []) if result else []
+        for o in owners:
+            if o.get("owner_type") == "curator" and o.get("tumbler_prefix"):
+                return Tumbler.parse(o["tumbler_prefix"])
+        return None
+
+    def get_owner_by_prefix(self, tumbler_prefix: str) -> dict | None:
+        """Return full owner dict for the given tumbler_prefix, or None.
+
+        Backs repos.py head_hash lookup that previously issued
+        ``SELECT head_hash FROM owners WHERE tumbler_prefix=?`` directly.
+        """
+        result = self._get("/owners/show", tumbler_prefix=tumbler_prefix)
+        return result if result and result.get("tumbler_prefix") else None
+
+    def list_owners_by_type(self, owner_type: str) -> list[dict]:
+        """Return all owners of the given type.
+
+        Backs repos.py:list_repos_dual which previously queried
+        ``SELECT repo_root FROM owners WHERE owner_type='repo'`` directly.
+        Uses POST /v1/catalog/owners/by_type endpoint (nexus-qnp5s).
+        """
+        result = self._post("/owners/by_type", {"owner_type": owner_type})
+        return result.get("owners", []) if result else []
+
+    def chunk_counts_for_docs(self, doc_ids: list[str]) -> dict[str, int]:
+        """Batch-fetch chunk_count for a set of document tumblers.
+
+        Returns ``{tumbler: chunk_count}`` for docs that have a chunk_count.
+        Backs scoring.py hot-path which previously issued a batch
+        ``SELECT tumbler, chunk_count FROM documents WHERE tumbler IN (?)``
+        directly (nexus-qnp5s).
+        """
+        if not doc_ids:
+            return {}
+        result = self._post("/docs/chunk-counts", {"doc_ids": doc_ids})
+        return {k: int(v) for k, v in (result or {}).items() if v is not None}
+
+    def links_from_batch(self, tumblers: list[str]) -> dict[str, list[dict]]:
+        """Batch-fetch outbound links for a set of tumblers.
+
+        Returns ``{tumbler: [{"from_tumbler": ..., "link_type": ...}, ...]}``.
+        Backs scoring.py hot-path which previously issued a batch
+        ``SELECT from_tumbler, link_type FROM links WHERE from_tumbler IN (?)``
+        directly (nexus-qnp5s).
+        """
+        if not tumblers:
+            return {}
+        result = self._post("/links/from-batch", {"tumblers": tumblers})
+        return result if result else {}
+
+    def collections_by_owner(self, owner_id: str) -> list[dict]:
+        """Return collections registered for the given owner_id.
+
+        Backs repos.py which previously queried
+        ``SELECT name, content_type FROM collections WHERE owner_id=?`` directly.
+        Filters the full list_collections() result client-side (collection list
+        is small; avoids a dedicated server endpoint).
+        """
+        all_colls = self.list_collections()
+        return [c for c in all_colls if c.get("owner_id") == owner_id]
+
     # ══════════════════════════════════════════════════════════════════════════
     # DOCUMENTS
     # ══════════════════════════════════════════════════════════════════════════
