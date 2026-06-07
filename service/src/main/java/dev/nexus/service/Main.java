@@ -86,13 +86,17 @@ public final class Main {
             vectorRepo = buildCloudVectorRepo(docEmbedRouter, qryEmbedRouter);
             log.info("event=vector_backend_cloud");
         } else if (System.getenv("NX_VOYAGE_API_KEY") != null) {
-            // Parity-gate mode: no Chroma backend, but enable the /embed endpoint
+            // Parity-gate mode (cloud): no Chroma backend, but enable the /embed endpoint
             // so test_embed_parity.py can call it without a full storage stack.
             OnnxEmbedder onnx = new OnnxEmbedder();
             docEmbedRouter = new EmbedderRouter(onnx, System.getenv("NX_VOYAGE_API_KEY"), "document");
             log.info("event=embed_only_mode NX_CHROMA_MODE={}", chromaMode);
         } else {
-            log.info("event=vector_backend_disabled NX_CHROMA_MODE={}", chromaMode);
+            // Parity-gate mode (local): no Chroma backend, no Voyage key — ONNX-only /embed.
+            // Enables test_onnx_parity to call /v1/vectors/embed without any cloud credentials.
+            OnnxEmbedder onnx = new OnnxEmbedder();
+            docEmbedRouter = new EmbedderRouter(onnx, "document");
+            log.info("event=embed_only_onnx_mode NX_CHROMA_MODE={}", chromaMode);
         }
 
         final LocalChromaServer finalLocalChroma    = localChroma;
