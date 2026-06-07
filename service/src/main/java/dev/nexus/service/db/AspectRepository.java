@@ -152,7 +152,7 @@ public final class AspectRepository {
                 extractorName,
                 body.get("source_uri"),
                 body.get("salient_sentences"),
-                body.getOrDefault("doc_id", "")
+                nullIfBlank((String) body.get("doc_id"))
             );
             return result.isEmpty() ? -1L : result.get(0).get(0, Long.class);
         });
@@ -335,7 +335,7 @@ public final class AspectRepository {
                 + "  extractor_name         = EXCLUDED.extractor_name, "
                 + "  source_uri             = COALESCE(EXCLUDED.source_uri, document_aspects.source_uri), "
                 + "  salient_sentences      = COALESCE(EXCLUDED.salient_sentences, document_aspects.salient_sentences), "
-                + "  doc_id                 = CASE WHEN EXCLUDED.doc_id != '' THEN EXCLUDED.doc_id ELSE document_aspects.doc_id END",
+                + "  doc_id                 = COALESCE(EXCLUDED.doc_id, document_aspects.doc_id)",
                 tenant,
                 body.get("collection"),
                 body.get("source_path"),
@@ -351,7 +351,7 @@ public final class AspectRepository {
                 body.get("extractor_name"),
                 body.get("source_uri"),
                 body.get("salient_sentences"),
-                body.getOrDefault("doc_id", "")
+                nullIfBlank((String) body.get("doc_id"))
             ));
     }
 
@@ -504,7 +504,7 @@ public final class AspectRepository {
                 + "  last_attempt_at = NULL, "
                 + "  last_error      = NULL",
                 tenant, collection, sourcePath,
-                body.getOrDefault("doc_id", ""),
+                nullIfBlank((String) body.get("doc_id")),
                 body.getOrDefault("content_hash", ""),
                 body.getOrDefault("content", ""),
                 formatTs(enqueuedAtTs));
@@ -750,7 +750,7 @@ public final class AspectRepository {
                 + "  last_error      = CASE WHEN EXCLUDED.status = 'failed' THEN EXCLUDED.last_error "
                 + "                         ELSE nexus.aspect_extraction_queue.last_error END",
                 tenant, collection, sourcePath,
-                body.getOrDefault("doc_id", ""),
+                nullIfBlank((String) body.get("doc_id")),
                 body.getOrDefault("content_hash", ""),
                 body.getOrDefault("content", ""),
                 status, retryCount,
@@ -858,6 +858,16 @@ public final class AspectRepository {
         m.put("salient_sentences",       r.get(13));
         m.put("doc_id",                  r.get(14) == null ? "" : r.get(14).toString());
         return m;
+    }
+
+    /**
+     * Converts a doc_id string to null when blank or empty.
+     * Required after nexus-b7v6i: doc_id columns in document_aspects and
+     * aspect_extraction_queue are now nullable with a real FK to catalog_documents.
+     * An empty string '' would fail the FK (no catalog doc with tumbler='').
+     */
+    private static String nullIfBlank(String s) {
+        return (s == null || s.isBlank()) ? null : s;
     }
 
     private static Map<String, Object> highlightToMap(org.jooq.Record r) {
