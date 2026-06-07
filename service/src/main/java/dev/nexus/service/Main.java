@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.vectors.ChromaRestClient;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.LocalChromaServer;
@@ -18,9 +19,14 @@ import org.slf4j.LoggerFactory;
  *   <li>{@code NX_SERVICE_PORT} — listen port (default 8080)</li>
  *   <li>{@code NX_SERVICE_TOKEN} — bearer token for authentication</li>
  *   <li>{@code NX_DB_URL} — JDBC URL (e.g. {@code jdbc:postgresql://localhost/nexus})</li>
- *   <li>{@code NX_DB_USER} — database user</li>
+ *   <li>{@code NX_DB_USER} — database user (application / DML role)</li>
  *   <li>{@code NX_DB_PASS} — database password</li>
  *   <li>{@code NX_POOL_SIZE} — HikariCP pool size (default 10)</li>
+ *   <li>{@code NX_DB_ADMIN_URL} — optional JDBC URL for schema migration (defaults to
+ *       {@code NX_DB_URL}). Useful when the application role is {@code nexus_svc}
+ *       (NOSUPERUSER NOBYPASSRLS) and a separate schema-owner role runs DDL.</li>
+ *   <li>{@code NX_DB_ADMIN_USER} — optional migration user (defaults to {@code NX_DB_USER})</li>
+ *   <li>{@code NX_DB_ADMIN_PASS} — optional migration password (defaults to {@code NX_DB_PASS})</li>
  * </ul>
  *
  * <p>Vector backend (Seam B, bead nexus-gmiaf.20):
@@ -60,6 +66,25 @@ public final class Main {
         hikari.setMaximumPoolSize(poolSize);
         hikari.setAutoCommit(true);   // pool default; TenantScope toggles to false per borrow
         var ds = new HikariDataSource(hikari);
+
+        // ── Schema migration (RDR-152 bead nexus-net63) ───────────────────────
+        // Run Liquibase BEFORE the HTTP server binds so the service never serves
+        // requests against an unmigrated database.  Fail fast on any error so
+        // the process exits non-zero and the supervisor knows not to route traffic.
+        //
+        // When NX_DB_ADMIN_* are set, use a dedicated single-connection migration
+        // pool whose credentials have DDL rights (schema-owner or superuser).
+        // Falls back to NX_DB_* when NX_DB_ADMIN_* are absent, covering dev/test
+        // setups where the application role also owns the schema.
+        var migrationDs = buildMigrationDataSource(dbUrl, dbUser, dbPass);
+        try {
+            SchemaMigrator.migrate(migrationDs);
+        } catch (SchemaMigrator.MigrationException e) {
+            log.error("event=schema_migration_failed error=\"{}\"", e.getMessage(), e);
+            System.exit(1);
+        } finally {
+            migrationDs.close();
+        }
 
         // Vector backend setup (Seam B — optional; only when configured)
         LocalChromaServer localChroma    = null;
@@ -120,6 +145,35 @@ public final class Main {
 
         // Block main thread until shutdown
         Thread.currentThread().join();
+    }
+
+    // ── Migration datasource factory ─────────────────────────────────────────
+
+    /**
+     * Builds a single-connection HikariCP pool for schema migration.
+     *
+     * <p>Uses {@code NX_DB_ADMIN_*} when present, falling back to the supplied
+     * {@code defaultUrl/defaultUser/defaultPass} (the regular application
+     * credentials) for dev/test setups where one role owns both DDL and DML.
+     *
+     * <p>Pool size 1: Liquibase uses a single connection sequentially.
+     */
+    private static HikariDataSource buildMigrationDataSource(String defaultUrl,
+                                                              String defaultUser,
+                                                              String defaultPass) {
+        String url  = System.getenv().getOrDefault("NX_DB_ADMIN_URL",  defaultUrl);
+        String user = System.getenv().getOrDefault("NX_DB_ADMIN_USER", defaultUser);
+        String pass = System.getenv().getOrDefault("NX_DB_ADMIN_PASS", defaultPass);
+
+        var cfg = new HikariConfig();
+        cfg.setJdbcUrl(url);
+        cfg.setUsername(user);
+        cfg.setPassword(pass);
+        cfg.setMaximumPoolSize(1);
+        cfg.setMinimumIdle(1);
+        cfg.setConnectionTimeout(30_000);
+        cfg.setPoolName("nexus-migration");
+        return new HikariDataSource(cfg);
     }
 
     // ── Vector backend factories ──────────────────────────────────────────────
