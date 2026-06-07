@@ -161,6 +161,140 @@ class TestNoAuthCheck:
         assert not spawned, f"subprocess.run called on import: {spawned}"
 
 
+# ── Opt-in tool access (Fix B, nexus-mawqw) ────────────────────────────────
+
+class TestOptInToolAccess:
+    """Stateless operators stay tool-free by default. Agent-replacement
+    tools (nx_enrich_beads, nx_plan_audit) opt in to MCP + built-in tools
+    by passing ``allowed_tools`` and ``mcp_servers``. Without this, the
+    child claude -p sees the conexus MCP server as unapproved (post-CC
+    2.1.162) and every tool call is denied.
+    """
+
+    @pytest.mark.asyncio
+    async def test_default_dispatch_passes_no_tool_flags(self) -> None:
+        """The stateless default must NOT pass --allowedTools or
+        --mcp-config. Adding blanket tool access to every operator would
+        regress the stateless-tool-free invariant."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        argv = captured[0]
+        assert "--allowedTools" not in argv, "default dispatch must be tool-free"
+        assert "--mcp-config" not in argv, "default dispatch must not inject MCP servers"
+
+    @pytest.mark.asyncio
+    async def test_allowed_tools_emits_flag(self) -> None:
+        """Passing allowed_tools must emit --allowedTools with the
+        comma-joined tool names."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch(
+                "prompt", _SIMPLE_SCHEMA,
+                allowed_tools=["Read", "Grep", "mcp__nexus"],
+            )
+
+        argv = list(captured[0])
+        assert "--allowedTools" in argv
+        val = argv[argv.index("--allowedTools") + 1]
+        assert val == "Read,Grep,mcp__nexus"
+
+    @pytest.mark.asyncio
+    async def test_mcp_servers_emits_inline_config(self) -> None:
+        """Passing mcp_servers must emit --mcp-config with an inline
+        {"mcpServers": {...}} JSON payload. Servers passed via the flag
+        are explicitly provided, so they clear the post-2.1.162
+        pending-approval gate that blocks .mcp.json servers."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        servers = {"nexus": {"command": "nx-mcp", "args": []}}
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch(
+                "prompt", _SIMPLE_SCHEMA, mcp_servers=servers,
+            )
+
+        argv = list(captured[0])
+        assert "--mcp-config" in argv
+        cfg = json.loads(argv[argv.index("--mcp-config") + 1])
+        assert cfg == {"mcpServers": {"nexus": {"command": "nx-mcp", "args": []}}}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("call_operator", [
+        lambda: __import__("nexus.mcp.core", fromlist=["operator_extract"]).operator_extract(inputs="x", fields="y"),
+        lambda: __import__("nexus.mcp.core", fromlist=["operator_rank"]).operator_rank(items='["a","b"]', criterion="rel"),
+        lambda: __import__("nexus.mcp.core", fromlist=["operator_filter"]).operator_filter(items='[{"id":"a"}]', criterion="rel", source="llm"),
+    ])
+    async def test_stateless_operators_pass_no_tool_flags(self, call_operator) -> None:
+        """Load-bearing invariant guard at the CONCRETE-operator layer
+        (substantive-critic, nexus-mawqw). The dispatch-layer default test
+        alone wouldn't catch an operator that accidentally started passing
+        a tool grant. Drive the real operator through create_subprocess_exec
+        and assert the argv carries no --allowedTools / --mcp-config."""
+        proc = _make_proc(
+            stdout=b'{"extractions": [], "ranked": [], "items": [], "rationale": []}'
+        )
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await call_operator()
+
+        assert captured, "operator never reached create_subprocess_exec"
+        argv = captured[0]
+        assert "--allowedTools" not in argv, (
+            "stateless operator leaked tool access — the tool-free invariant "
+            "is broken"
+        )
+        assert "--mcp-config" not in argv, (
+            "stateless operator injected an MCP server — must stay tool-free"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tool_enabled_dispatch_still_parses_json(self) -> None:
+        """Opt-in tool flags must not change the output contract — the
+        return value is still the parsed JSON dict."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        payload = {"result": "ok"}
+        proc = _make_proc(stdout=json.dumps(payload).encode())
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            result = await claude_dispatch(
+                "prompt", _SIMPLE_SCHEMA,
+                allowed_tools=["Read"],
+                mcp_servers={"nexus": {"command": "nx-mcp", "args": []}},
+            )
+
+        assert result == payload
+
+
 # ── Subprocess invocation contract ────────────────────────────────────────
 
 class TestSubprocessContract:

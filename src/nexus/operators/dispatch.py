@@ -173,6 +173,9 @@ async def claude_dispatch(
     prompt: str,
     json_schema: dict[str, Any],
     timeout: float = 300.0,
+    *,
+    allowed_tools: list[str] | None = None,
+    mcp_servers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Dispatch a single operator call to claude -p, fully async.
 
@@ -188,6 +191,23 @@ async def claude_dispatch(
             override up (``nx_plan_audit`` / ``nx_tidy`` use 600s).
             The prior 60s default produced a lot of false timeouts
             on real workloads.
+        allowed_tools: Opt-in tool allowlist (nexus-mawqw). When set,
+            ``--allowedTools <comma-joined>`` is passed so the child
+            ``claude -p`` may call those tools (built-ins like ``Read`` /
+            ``Grep`` / ``Glob`` and/or MCP tools like ``mcp__nexus``).
+            ``None`` (default) keeps the stateless-operator contract:
+            no tool access. DO NOT pass this for stateless operators
+            (extract/filter/rank/etc.) — they take all input from the
+            prompt and must stay tool-free.
+        mcp_servers: Opt-in MCP server map (nexus-mawqw), shape
+            ``{server_key: {"command": ..., "args": [...], ...}}``. When
+            set, ``--mcp-config '{"mcpServers": {...}}'`` is passed inline.
+            Servers provided via the flag are *explicitly* supplied, so
+            they clear the post-CC-2.1.162 pending-approval gate that
+            denies tool calls to unapproved ``.mcp.json`` servers. Pair
+            with ``allowed_tools`` containing ``mcp__<server_key>`` (or a
+            specific ``mcp__<server_key>__<tool>``) to actually permit the
+            calls. ``None`` (default) injects no MCP servers.
 
     Returns:
         Parsed JSON dict from stdout.
@@ -235,11 +255,22 @@ async def claude_dispatch(
         ephemeral=True,
         parent_session_id=parent_session_id,
     )
-    proc = await asyncio.create_subprocess_exec(
+    # Base argv is the stateless, tool-free default. Opt-in tool access
+    # (nexus-mawqw) appends --mcp-config / --allowedTools only when the
+    # caller explicitly requests it, preserving the stateless-operator
+    # contract for extract/filter/rank/etc.
+    argv: list[str] = [
         "claude", "-p",
         "--output-format", "json",
         "--json-schema", schema_json,
         "--no-session-persistence",
+    ]
+    if mcp_servers:
+        argv += ["--mcp-config", json.dumps({"mcpServers": mcp_servers})]
+    if allowed_tools:
+        argv += ["--allowedTools", ",".join(allowed_tools)]
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
