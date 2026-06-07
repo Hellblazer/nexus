@@ -2254,6 +2254,7 @@ def _run_index(
 
     _local_mode = _is_local()
     _embed_fn = None
+    _service_mode: bool = False  # resolved in the cloud/service branch below; False in local mode
 
     if _local_mode:
         check_local_path_writable()
@@ -2293,16 +2294,49 @@ def _run_index(
             )
     else:
         _embed_fn_doc = None
-        voyage_key = get_credential("voyage_api_key")
-        chroma_key = get_credential("chroma_api_key")
-        check_credentials(voyage_key, chroma_key)
-        import voyageai
-        code_model = index_model_for_collection(code_collection)
-        docs_model = index_model_for_collection(docs_collection)
-        voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=0)
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+        _service_mode = is_vector_service_mode()  # captured here; reused for T3 routing below
+        if _service_mode:
+            # RDR-152 Seam B (nexus-gmiaf.22): in service mode, embedding
+            # happens server-side in the JVM.  Python must NOT create a
+            # voyageai.Client — the embed + Chroma-write pipeline runs in
+            # the Java nexus-service.  Voyage credentials are only needed
+            # for the Python Voyage path (flag unset / Phase-4 legacy).
+            voyage_key = ""
+            voyage_client = None
+            code_model = index_model_for_collection(code_collection)
+            docs_model = index_model_for_collection(docs_collection)
+            # Service-mode embed_fn shape #1 (code / prose / PDF path):
+            # returns empty embeddings as a no-op.  HttpVectorClient.
+            # upsert_chunks_with_embeddings ignores them and embeds
+            # server-side (Seam B contract).
+            _embed_fn = lambda texts: [[]] * len(texts)  # noqa: E731
+            # Service-mode embed_fn shape #2 (doc_indexer / RDR path):
+            # returns empty embeddings + the target model.  The
+            # doc_indexer calls db.upsert_chunks_with_embeddings which
+            # routes to HttpVectorClient.upsert_chunks (server-side embed).
+            _embed_fn_doc = lambda texts, model="": (  # noqa: E731
+                [[]] * len(texts), model
+            )
+        else:
+            voyage_key = get_credential("voyage_api_key")
+            chroma_key = get_credential("chroma_api_key")
+            check_credentials(voyage_key, chroma_key)
+            import voyageai  # noqa: PLC0415
+            code_model = index_model_for_collection(code_collection)
+            docs_model = index_model_for_collection(docs_collection)
+            voyage_client = voyageai.Client(api_key=voyage_key, timeout=read_timeout_seconds, max_retries=0)  # epsilon-allow: Phase-4 deletion target — legacy non-service embed path
 
     _log.debug("connecting to ChromaDB")
-    db = make_t3()
+    # RDR-152 Seam B (nexus-gmiaf.22): in service mode, route through
+    # mcp_infra.get_t3() which returns HttpVectorClient.  In legacy mode,
+    # use make_t3() to preserve the existing daemon-backed path.
+    # Reuse _service_mode computed above to avoid a second module-import round-trip.
+    if _service_mode:
+        from nexus.mcp_infra import get_t3 as _get_t3  # noqa: PLC0415
+        db = _get_t3()
+    else:
+        db = make_t3()
     _log.debug("ChromaDB connected")
     now_iso = _dt.now(UTC).isoformat()
 

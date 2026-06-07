@@ -138,11 +138,21 @@ CATALOG_CONSTRUCTION_BASELINE: int = 0
 #: against AST ``Attribute(value=Name(id=module), attr=attribute)``
 #: nodes inside ``Call`` nodes. Alias resolution maps the alias back
 #: to the canonical module name before matching.
+#:
+#: RDR-152 Seam B (nexus-gmiaf.22): ``voyageai.Client`` is added as a
+#: structural tripwire for the INDEXER surface.  After the P3.3 cutover,
+#: embedding moves to the JVM (nexus-service) — any new direct
+#: ``voyageai.Client(...)`` in the indexer / client write surface is a
+#: regression.  The allowlist (db/, catalog/ P0-P4, daemon/) covers
+#: the Phase-4 deletion targets that still hold direct Voyage calls
+#: (t3.py, daemon/, catalog/).  Any new Voyage call outside those paths
+#: must carry a valid ``# epsilon-allow: <reason>`` annotation.
 BANLIST: tuple[tuple[str, str], ...] = (
     ("sqlite3", "connect"),
     ("chromadb", "PersistentClient"),
     ("chromadb", "CloudClient"),
     ("chromadb", "EphemeralClient"),
+    ("voyageai", "Client"),
 )
 
 
@@ -189,6 +199,13 @@ class LintResult:
     #: connect-allowlist that carry a valid ``# epsilon-allow:`` override.
     #: The deliberate raw-connect exceptions to the substrate boundary.
     epsilon_allow_connects: int = 0
+    #: RDR-152 Seam B (nexus-gmiaf.22): ``voyageai.Client`` sites that carry
+    #: a valid ``# epsilon-allow:`` override on the same line.  These are the
+    #: Phase-4 deletion targets — legacy non-service embed paths that must
+    #: not grow. Baseline == 3 (indexer.py, doc_indexer.py, commands/collection.py).
+    #: A new epsilon-allow on the service write path would increment this
+    #: counter and fail the baseline assertion, surfacing the regression.
+    voyageai_epsilon_allow_count: int = 0
     #: RDR-146 P0.1: ``Catalog(...)`` construction sites in consumer code
     #: (outside :data:`CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES`). A COUNTED
     #: baseline at P0.1 — these are the cutover surface for the catalog
@@ -207,6 +224,7 @@ class LintResult:
             "catalog_allowlist_count": self.catalog_allowlist_count,
             "t2database_constructions": self.t2database_constructions,
             "epsilon_allow_connects": self.epsilon_allow_connects,
+            "voyageai_epsilon_allow_count": self.voyageai_epsilon_allow_count,
             "catalog_constructions": self.catalog_constructions,
         }
 
@@ -225,6 +243,9 @@ class FileScan:
     t2database_constructions_undocumented: list[Violation] = field(default_factory=list)
     #: Count of epsilon-allow'd ``sqlite3.connect`` sites in this file.
     epsilon_allow_connects: int = 0
+    #: Count of epsilon-allow'd ``voyageai.Client`` sites in this file
+    #: (RDR-152 Seam B Phase-4 deletion targets).
+    voyageai_epsilon_allow_count: int = 0
     #: RDR-146 P0.1: ``Catalog(...)`` construction sites in this file
     #: (the catalog client-cutover surface). Scoped by the catalog
     #: construction-allowlist in :func:`scan_repo`.
@@ -338,6 +359,11 @@ def _scan_file_full(
                     # silently skipping them.
                     if (canonical, func.attr) == ("sqlite3", "connect"):
                         scan.epsilon_allow_connects += 1
+                    elif (canonical, func.attr) == ("voyageai", "Client"):
+                        # RDR-152 Seam B: track Phase-4 deletion targets
+                        # so new service-path epsilon-allows surface as
+                        # baseline regressions (nexus-gmiaf.22).
+                        scan.voyageai_epsilon_allow_count += 1
                 else:
                     scan.violations.append(
                         Violation(
@@ -468,6 +494,7 @@ def scan_repo(
         else:
             result.violations.extend(scan.violations)
             result.epsilon_allow_connects += scan.epsilon_allow_connects
+            result.voyageai_epsilon_allow_count += scan.voyageai_epsilon_allow_count
 
         # Population 2 (T2Database constructions): scoped by the separate
         # construction-allowlist (db/ + daemon/). RDR-128 P3 enforces:
@@ -490,6 +517,7 @@ def scan_repo(
             scan = _scan_file_full(pathlib.Path(extra), repo_root)
             result.violations.extend(scan.violations)
             result.epsilon_allow_connects += scan.epsilon_allow_connects
+            result.voyageai_epsilon_allow_count += scan.voyageai_epsilon_allow_count
             result.t2database_constructions += len(
                 scan.t2database_constructions_documented
             )

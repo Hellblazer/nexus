@@ -114,6 +114,80 @@ class VectorServiceError(RuntimeError):
     """Raised when the vector service returns an error."""
 
 
+# ── Collection-handle stub ────────────────────────────────────────────────────
+
+
+class _ServiceCollectionStub:
+    """Minimal Chroma-collection-like handle for doc_indexer staleness + prune.
+
+    doc_indexer._index_document uses the collection handle for:
+      - Incremental staleness check: ``col.get(where=..., include=[...], limit=N)``
+      - Stale-chunk prune: ``col.delete(ids=[...])``
+
+    Both are forwarded to the service's HTTP API so the Python indexer
+    stays consistent with the service's Chroma view.
+
+    RDR-152 Seam B (nexus-gmiaf.22): this stub is the minimal surface
+    required to satisfy doc_indexer's incremental-sync protocol without
+    adding a full Chroma collection client to the service mode.
+    """
+
+    def __init__(self, name: str, tenant: str = "default") -> None:
+        self._name = name
+        self._tenant = tenant
+
+    def get(
+        self,
+        where: dict | None = None,
+        include: list[str] | None = None,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> dict:
+        """Query chunks from the service. Returns Chroma-style result dict."""
+        try:
+            body: dict[str, Any] = {
+                "collection": self._name,
+                "limit": limit,
+                "offset": offset,
+            }
+            if where:
+                body["where"] = where
+            if include:
+                body["include"] = include
+            result = _post("/v1/vectors/get", body, tenant=self._tenant)
+            # Normalise to Chroma shape: {ids, documents, metadatas}
+            return {
+                "ids":       result.get("ids", []),
+                "documents": result.get("documents", []),
+                "metadatas": result.get("metadatas", []),
+            }
+        except VectorServiceError as exc:
+            _log.warning(
+                "service_collection_get_failed",
+                collection=self._name,
+                error=str(exc),
+            )
+            return {"ids": [], "documents": [], "metadatas": []}
+
+    def delete(self, ids: list[str]) -> None:
+        """Delete chunks by ID from the service."""
+        if not ids:
+            return
+        try:
+            _post(
+                "/v1/vectors/store-delete",
+                {"collection": self._name, "ids": ids},
+                tenant=self._tenant,
+            )
+        except VectorServiceError as exc:
+            _log.warning(
+                "service_collection_delete_failed",
+                collection=self._name,
+                count=len(ids),
+                error=str(exc),
+            )
+
+
 # ── HttpVectorClient ─────────────────────────────────────────────────────────
 
 
@@ -299,6 +373,23 @@ class HttpVectorClient:
         except VectorServiceError as e:
             _log.warning("http_vector_list_collections_failed", error=str(e))
             return []
+
+    # ── Collection-handle stub for doc_indexer staleness + prune paths ─────────
+
+    def get_or_create_collection(self, name: str) -> "_ServiceCollectionStub":
+        """Return a stub collection handle for staleness checks.
+
+        doc_indexer._index_document / _index_pdf_incremental use the
+        returned handle for:
+          - ``col.get(where=..., ...)`` incremental staleness check
+          - ``col.delete(ids=...)`` stale-chunk pruning
+
+        The stub routes the staleness check through the service's
+        ``/v1/vectors/get`` endpoint and routes deletes through
+        ``/v1/vectors/store-delete``, making both paths work end-to-end
+        against the Java service.
+        """
+        return _ServiceCollectionStub(name=name, tenant=self._tenant)
 
     # ── Stubs for T3Database surface not used by Seam B ─────────────────────
 
