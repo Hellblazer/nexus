@@ -35,4 +35,7 @@
     <!-- Store 8: catalog (bead nexus-gmiaf.18) — owners/documents/links/chunks/collections + FTS + RLS -->
     <include file="db/changelog/catalog-001-baseline.xml"/>
 
+    <!-- Cross-store FKs (bead nexus-b7v6i) — composite (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) -->
+    <include file="db/changelog/fk-001-catalog-cross-store.xml"/>
+
 </databaseChangeLog>

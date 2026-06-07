@@ -1,0 +1,295 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-152 bead nexus-b7v6i — Cross-store composite foreign keys to catalog_documents.
+
+    Converts soft FK columns (plain TEXT) into real Postgres FOREIGN KEY constraints that
+    reference nexus.catalog_documents(tenant_id, tumbler).
+
+    TENANT-ISOLATION CORRECTNESS:
+      Postgres FK checks run as the table owner, bypassing RLS. A bare FK on (doc_id) alone
+      could cross tenant boundaries silently. Every FK here is COMPOSITE: (tenant_id, doc_id).
+      The referenced side is catalog_documents PRIMARY KEY (tenant_id, tumbler). Because the PK
+      is already a unique index, no additional UNIQUE constraint is needed on catalog_documents.
+
+      Effect: INSERT (tenant_id='A', doc_id='T') succeeds only when catalog_documents contains
+      (tenant_id='A', tumbler='T'). A cross-tenant reference (tenant_id='B', doc_id='T') fails
+      the FK even when tenant-A's document with tumbler='T' exists — the composite match requires
+      the same tenant_id. This is the headline correctness property proven by the FK tests.
+
+    NULLABLE CONVERSION:
+      document_aspects.doc_id and aspect_extraction_queue.doc_id were DEFAULT '' (empty string)
+      acting as "not yet set". An FK on a non-null empty-string column would require a catalog_documents
+      row with tumbler='', which is invalid. Both columns are converted to nullable:
+        - DROP DEFAULT (removes ''), DROP NOT NULL constraint.
+        - Pre-flight UPDATE: set doc_id = NULL where the current value is '' or orphaned.
+      FK on a nullable column: NULL satisfies the FK (no reference = no violation). Only
+      non-NULL values are checked against the parent table.
+
+    ON DELETE SEMANTICS:
+      topic_assignments → CASCADE:
+        Topic assignments are derived projections of a document onto the taxonomy. If the catalog
+        document is deleted, the assignments have no parent and should be removed. A surviving
+        orphan assignment would point to nothing meaningful.
+
+      document_aspects → CASCADE:
+        Aspects are extracted annotations on a document. They have no independent existence; their
+        lifecycle is bound to the document. Delete the document, delete its aspects.
+
+      document_highlights → CASCADE:
+        Highlights are per-document annotations (DEVONthink layer). Lifecycle is document-bound.
+        Same reasoning as aspects — CASCADE is correct.
+
+      aspect_extraction_queue → CASCADE:
+        Queue items are work-in-flight extraction requests. If a catalog document is deleted, any
+        pending extraction for it is moot — the document no longer exists and the resulting aspects
+        would have no FK-valid parent to attach to (document_aspects also cascades). Removing the
+        queue item on document deletion prevents stale in_progress claims from completing and
+        attempting to insert aspects for a non-existent document.
+
+        PG 14 note: SET NULL on a composite FK (tenant_id, doc_id) would set BOTH columns to NULL,
+        violating the NOT NULL constraint on tenant_id. Postgres 15 added column-list SET NULL syntax
+        (e.g. ON DELETE SET NULL (doc_id)), but the embedded test PG version is 14. CASCADE is
+        therefore correct both semantically (stale queue items for a deleted doc should be removed)
+        and necessary for PG14 compatibility.
+
+    TABLES AFFECTED:
+      nexus.topic_assignments      — (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) CASCADE
+      nexus.document_aspects       — (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) CASCADE
+                                     + column: doc_id TEXT DEFAULT '' → nullable (NULL when unset)
+      nexus.document_highlights    — (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) CASCADE
+      nexus.aspect_extraction_queue— (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) SET NULL
+                                     + column: doc_id TEXT DEFAULT '' → nullable (NULL when unset)
+
+    TABLES NOT AFFECTED:
+      topic_links — references nexus.topics via from_topic_id/to_topic_id (already real FKs); no
+                    direct catalog_documents reference.
+      document_aspects.source_uri — this is a URI path string, not a catalog tumbler reference.
+      aspect_extraction_queue.source_path — storage path, not a tumbler.
+
+    PRE-FLIGHT ORPHAN CLEANUP:
+      The migration neutralizes orphan references before adding each FK so the ALTER TABLE
+      ADD CONSTRAINT step cannot fail on existing data. Changesets are ordered:
+        1. Nullify/delete orphans in each referencing table (BEFORE the FK is added).
+        2. Make columns nullable (for '' columns).
+        3. ADD CONSTRAINT.
+      This sequence is safe for a fresh DB (no rows exist) and for a seeded DB where ETL has
+      run (orphan cleanup is a no-op or removes stale rows).
+
+    NOTE ON catalog_documents FK TARGET:
+      catalog_documents PRIMARY KEY is (tenant_id, tumbler). The PK IS the unique constraint;
+      no additional UNIQUE index is needed on (tenant_id, tumbler). All referencing FKs point at
+      this PK directly.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: topic_assignments — orphan cleanup + FK ─────────────── -->
+    <changeSet id="fk-001-1" author="nexus-b7v6i">
+        <comment>
+            topic_assignments.doc_id → catalog_documents (tenant_id, tumbler) ON DELETE CASCADE.
+            doc_id is NOT NULL (part of PK), so orphan rows must be deleted before the FK is added.
+            Pre-flight: remove any topic_assignment rows whose doc_id has no matching catalog_documents
+            entry for the same tenant. On a fresh DB this is a no-op.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+-- Pre-flight: delete orphan topic_assignments (doc_id not in catalog_documents for same tenant)
+DELETE FROM nexus.topic_assignments ta
+WHERE NOT EXISTS (
+    SELECT 1 FROM nexus.catalog_documents cd
+    WHERE cd.tenant_id = ta.tenant_id
+      AND cd.tumbler   = ta.doc_id
+);
+
+-- Supporting index: composite (tenant_id, doc_id) for FK lookup performance
+CREATE INDEX IF NOT EXISTS idx_ta_tenant_doc_id_fk
+    ON nexus.topic_assignments (tenant_id, doc_id);
+
+-- Add composite FK: (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler)
+ALTER TABLE nexus.topic_assignments
+    ADD CONSTRAINT fk_ta_catalog_doc
+    FOREIGN KEY (tenant_id, doc_id)
+    REFERENCES nexus.catalog_documents (tenant_id, tumbler)
+    ON DELETE CASCADE;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS fk_ta_catalog_doc;
+            DROP INDEX IF EXISTS nexus.idx_ta_tenant_doc_id_fk;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: document_aspects — nullable conversion + orphan cleanup + FK ── -->
+    <changeSet id="fk-001-2" author="nexus-b7v6i">
+        <comment>
+            document_aspects.doc_id: convert '' default to nullable, then add FK ON DELETE CASCADE.
+            Step 1: Nullify empty-string doc_ids (the old "not yet set" sentinel).
+            Step 2: Nullify orphan doc_ids (value set but catalog_documents has no matching row).
+            Step 3: Drop DEFAULT '' and NOT NULL constraint → column becomes nullable.
+            Step 4: Add composite FK (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler).
+            NULL doc_id satisfies the FK (no constraint violation); only non-NULL values are checked.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+-- Step 1: empty-string sentinel → NULL
+UPDATE nexus.document_aspects SET doc_id = NULL WHERE doc_id = '';
+
+-- Step 2: orphan non-null doc_ids → NULL (avoids FK failure on ADD CONSTRAINT)
+UPDATE nexus.document_aspects da
+SET doc_id = NULL
+WHERE da.doc_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM nexus.catalog_documents cd
+    WHERE cd.tenant_id = da.tenant_id
+      AND cd.tumbler   = da.doc_id
+  );
+
+-- Step 3: make column nullable (drop DEFAULT first, then NOT NULL)
+ALTER TABLE nexus.document_aspects ALTER COLUMN doc_id DROP DEFAULT;
+ALTER TABLE nexus.document_aspects ALTER COLUMN doc_id DROP NOT NULL;
+
+-- Step 4: drop the old partial index (it filtered WHERE doc_id != ''; rebuild as IS NOT NULL)
+DROP INDEX IF EXISTS nexus.idx_doc_aspects_doc_id;
+CREATE INDEX idx_doc_aspects_doc_id
+    ON nexus.document_aspects (tenant_id, doc_id)
+    WHERE doc_id IS NOT NULL;
+
+-- Step 5: add composite FK
+ALTER TABLE nexus.document_aspects
+    ADD CONSTRAINT fk_doc_aspects_catalog_doc
+    FOREIGN KEY (tenant_id, doc_id)
+    REFERENCES nexus.catalog_documents (tenant_id, tumbler)
+    ON DELETE CASCADE;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.document_aspects DROP CONSTRAINT IF EXISTS fk_doc_aspects_catalog_doc;
+            DROP INDEX IF EXISTS nexus.idx_doc_aspects_doc_id;
+            CREATE INDEX idx_doc_aspects_doc_id ON nexus.document_aspects (tenant_id, doc_id) WHERE doc_id IS NOT NULL;
+            ALTER TABLE nexus.document_aspects ALTER COLUMN doc_id SET DEFAULT '';
+            UPDATE nexus.document_aspects SET doc_id = '' WHERE doc_id IS NULL;
+            ALTER TABLE nexus.document_aspects ALTER COLUMN doc_id SET NOT NULL;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: document_highlights — orphan cleanup + FK ───────────── -->
+    <changeSet id="fk-001-3" author="nexus-b7v6i">
+        <comment>
+            document_highlights.doc_id → catalog_documents (tenant_id, tumbler) ON DELETE CASCADE.
+            doc_id is NOT NULL (unique key tenant_id, doc_id). Orphan rows must be deleted.
+            Pre-flight: delete highlights whose doc_id has no matching catalog_documents row.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+-- Pre-flight: delete orphan document_highlights rows
+DELETE FROM nexus.document_highlights dh
+WHERE NOT EXISTS (
+    SELECT 1 FROM nexus.catalog_documents cd
+    WHERE cd.tenant_id = dh.tenant_id
+      AND cd.tumbler   = dh.doc_id
+);
+
+-- Supporting index: (tenant_id, doc_id) for FK lookup performance
+-- (already exists via the UNIQUE constraint, but ensure a plain index for FK scans)
+CREATE INDEX IF NOT EXISTS idx_doc_highlights_doc_id_fk
+    ON nexus.document_highlights (tenant_id, doc_id);
+
+-- Add composite FK
+ALTER TABLE nexus.document_highlights
+    ADD CONSTRAINT fk_doc_highlights_catalog_doc
+    FOREIGN KEY (tenant_id, doc_id)
+    REFERENCES nexus.catalog_documents (tenant_id, tumbler)
+    ON DELETE CASCADE;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.document_highlights DROP CONSTRAINT IF EXISTS fk_doc_highlights_catalog_doc;
+            DROP INDEX IF EXISTS nexus.idx_doc_highlights_doc_id_fk;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: aspect_extraction_queue — nullable conversion + orphan cleanup + FK ── -->
+    <changeSet id="fk-001-4" author="nexus-b7v6i">
+        <comment>
+            aspect_extraction_queue.doc_id: convert '' default to nullable, FK ON DELETE CASCADE.
+            Stale queue items for a deleted catalog document should not survive — document_aspects
+            also cascades, so the resulting aspects would have no valid parent anyway.
+            CASCADE also sidesteps the PG14 limitation where SET NULL on a composite FK nullifies
+            all FK columns (including tenant_id which is NOT NULL).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+-- Step 1: empty-string sentinel → NULL
+UPDATE nexus.aspect_extraction_queue SET doc_id = NULL WHERE doc_id = '';
+
+-- Step 2: orphan non-null doc_ids → delete rows (doc_id not in catalog_documents for same tenant).
+-- DELETE rather than NULL because the FK is CASCADE: orphan rows should be treated as if their
+-- parent doc were deleted now (the FK migration matches that semantic retroactively).
+DELETE FROM nexus.aspect_extraction_queue aq
+WHERE aq.doc_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM nexus.catalog_documents cd
+    WHERE cd.tenant_id = aq.tenant_id
+      AND cd.tumbler   = aq.doc_id
+  );
+
+-- Step 3: make column nullable (doc_id=NULL means "not yet resolved"; still queue-valid)
+ALTER TABLE nexus.aspect_extraction_queue ALTER COLUMN doc_id DROP DEFAULT;
+ALTER TABLE nexus.aspect_extraction_queue ALTER COLUMN doc_id DROP NOT NULL;
+
+-- Step 4: rebuild index with IS NOT NULL filter (was WHERE doc_id != '')
+DROP INDEX IF EXISTS nexus.idx_aspect_queue_doc_id;
+CREATE INDEX idx_aspect_queue_doc_id
+    ON nexus.aspect_extraction_queue (tenant_id, doc_id)
+    WHERE doc_id IS NOT NULL;
+
+-- Step 5: add composite FK with CASCADE on delete
+ALTER TABLE nexus.aspect_extraction_queue
+    ADD CONSTRAINT fk_aspect_queue_catalog_doc
+    FOREIGN KEY (tenant_id, doc_id)
+    REFERENCES nexus.catalog_documents (tenant_id, tumbler)
+    ON DELETE CASCADE;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.aspect_extraction_queue DROP CONSTRAINT IF EXISTS fk_aspect_queue_catalog_doc;
+            DROP INDEX IF EXISTS nexus.idx_aspect_queue_doc_id;
+            CREATE INDEX idx_aspect_queue_doc_id ON nexus.aspect_extraction_queue (tenant_id, doc_id) WHERE doc_id IS NOT NULL;
+            ALTER TABLE nexus.aspect_extraction_queue ALTER COLUMN doc_id SET DEFAULT '';
+            UPDATE nexus.aspect_extraction_queue SET doc_id = '' WHERE doc_id IS NULL;
+            ALTER TABLE nexus.aspect_extraction_queue ALTER COLUMN doc_id SET NOT NULL;
+        </rollback>
+    </changeSet>
+
+
+    <!-- ── Changeset 5: catalog_document_chunks — orphan cleanup + FK ── -->
+    <changeSet id="fk-001-5" author="nexus-b7v6i">
+        <comment>
+            catalog_document_chunks.doc_id (RDR-108 manifest): composite FK (tenant_id, doc_id) →
+            catalog_documents(tenant_id, tumbler) ON DELETE CASCADE.
+            Deleting a catalog document removes its chunk manifest — correct and consistent with
+            the other 4 FKs.  doc_id is NOT NULL and part of the PK, so orphan rows are DELETEd
+            (not nulled) before the constraint is added.
+            Supporting index idx_catalog_chunks_doc_id (tenant_id, doc_id) already exists from
+            catalog-001-baseline.xml — no new index needed.
+            Non-atomicity note: the DELETE→ADD CONSTRAINT sequence is non-atomic; this is
+            acceptable in the migration context (Liquibase holds databasechangeloglock and the
+            migration runs in single-writer mode with no concurrent ETL inserts).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+-- Step 1: delete orphan chunk rows (doc_id NOT NULL + part of PK; no path to NULL them)
+DELETE FROM nexus.catalog_document_chunks cdc
+WHERE NOT EXISTS (
+    SELECT 1 FROM nexus.catalog_documents cd
+    WHERE cd.tenant_id = cdc.tenant_id
+      AND cd.tumbler   = cdc.doc_id
+);
+
+-- Step 2: add composite FK — reuses existing idx_catalog_chunks_doc_id index
+ALTER TABLE nexus.catalog_document_chunks
+    ADD CONSTRAINT fk_catalog_chunks_catalog_doc
+    FOREIGN KEY (tenant_id, doc_id)
+    REFERENCES nexus.catalog_documents (tenant_id, tumbler)
+    ON DELETE CASCADE;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_catalog_doc;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

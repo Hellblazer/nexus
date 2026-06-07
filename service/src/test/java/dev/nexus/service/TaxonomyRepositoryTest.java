@@ -109,6 +109,19 @@ class TaxonomyRepositoryTest {
             su.createStatement().execute("GRANT USAGE ON SCHEMA " + schema + " TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO " + schema + ", public");
+
+            // nexus-b7v6i: topic_assignments.doc_id now enforces a FK to catalog_documents(tenant_id, tumbler).
+            // Seed all doc_ids used as tumblers in this test class so FK checks pass.
+            // "doc-label-missing" is intentionally omitted — tests expect it to be absent.
+            for (String tumbler : List.of(
+                    "doc-del-1", "doc-merge", "doc-manual", "doc-proj",
+                    "doc-label-1", "doc-label-2", "doc-purge-only", "doc-purge-col",
+                    "icf-doc-1", "icf-doc-2", "imp-doc-1")) {
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
+                    "VALUES ('" + TENANT_A + "', '" + tumbler + "', 'Test fixture: " + tumbler + "') " +
+                    "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+            }
         }
 
         svcDs       = buildSvcDataSource();

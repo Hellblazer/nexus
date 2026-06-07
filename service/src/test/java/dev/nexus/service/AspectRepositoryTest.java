@@ -115,6 +115,26 @@ class AspectRepositoryTest {
             }
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+
+            // nexus-b7v6i: document_aspects.doc_id and document_highlights.doc_id now enforce
+            // a FK to catalog_documents(tenant_id, tumbler). Seed all tumbler values used
+            // as doc_ids in this test class so FK checks pass.
+            // document_aspects doc_ids: "1.2.3" (makeAspect default), "2.4.6", "3.1.4"
+            // document_highlights doc_ids: "highlight-1", "by-uri-doc", "list-hl-0", "list-hl-1",
+            //   "del-highlight", "import-hl-1", "rls-hl-private", "hl-rename-doc-1", "hl-rename-doc-2", "hl-rls-doc"
+            // aspect_extraction_queue doc_ids: "q-doc-1", "done-doc-id-unique", "etl-q-doc"
+            // (queue items without doc_id are doc_id=NULL — no FK entry needed)
+            for (String tumbler : List.of(
+                    "1.2.3", "2.4.6", "3.1.4",
+                    "highlight-1", "by-uri-doc", "list-hl-0", "list-hl-1",
+                    "del-highlight", "import-hl-1", "rls-hl-private",
+                    "hl-rename-doc-1", "hl-rename-doc-2", "hl-rls-doc",
+                    "q-doc-1", "done-doc-id-unique", "etl-q-doc")) {
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
+                    "VALUES ('" + TENANT_A + "', '" + tumbler + "', 'Test fixture: " + tumbler + "') " +
+                    "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+            }
         }
 
         svcDs = buildSvcDataSource();
@@ -586,11 +606,13 @@ class AspectRepositoryTest {
         String testTenant = "etl-fidelity-tenant-" + System.nanoTime();
         String uniquePath  = "etl-q.pdf";
 
-        // Seed a row then claim it (in_progress)
+        // Seed a row then claim it (in_progress).
+        // doc_id omitted (NULL) — FK to catalog_documents requires matching (tenant_id, tumbler),
+        // and this test uses a dynamic tenant; omitting doc_id is fine since we're testing
+        // status non-downgrade behavior, not doc_id handling.
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "etl-queue-coll");
         body.put("source_path", uniquePath);
-        body.put("doc_id",      "etl-q-doc");
         repo.enqueue(testTenant, body);
 
         // In this tenant's isolated namespace, claimNext MUST claim this specific row
@@ -604,7 +626,7 @@ class AspectRepositoryTest {
         var importBody = new java.util.LinkedHashMap<String, Object>();
         importBody.put("collection",    "etl-queue-coll");
         importBody.put("source_path",   uniquePath);
-        importBody.put("doc_id",        "etl-q-doc");
+        // doc_id omitted (NULL) — matches the enqueue body above (no FK issue)
         importBody.put("status",        "pending");    // stale source
         importBody.put("retry_count",   0);
         importBody.put("enqueued_at",   "2025-01-01T00:00:00.000000Z");
