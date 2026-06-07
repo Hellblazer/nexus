@@ -457,7 +457,13 @@ class T2Database:
         # RDR-086 Phase 1: global chash → (collection, doc_id) lookup
         # populated by the six indexing write sites via best-effort
         # dual-write after each T3 upsert.
-        self.chash_index: ChashIndex = ChashIndex(path)
+        # RDR-152 nexus-gmiaf.16: chash_index service seam.
+        # NX_STORAGE_BACKEND_CHASH_INDEX=service routes to HttpChashIndex.
+        if storage_backend_for("chash_index") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_chash_index import HttpChashIndex
+            self.chash_index: ChashIndex = HttpChashIndex()  # type: ignore[assignment]
+        else:
+            self.chash_index: ChashIndex = ChashIndex(path)
         # RDR-089 Phase 1: per-document structured aspect table
         # populated by the document-grain hook chain at every CLI
         # ingest site (knowledge__* only in Phase 1).

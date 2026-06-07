@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.db.AspectRepository;
+import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.PlanRepository;
 import dev.nexus.service.db.ScratchRepository;
@@ -10,6 +11,7 @@ import dev.nexus.service.db.TelemetryRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.http.AspectHandler;
 import dev.nexus.service.http.AuthFilter;
+import dev.nexus.service.http.ChashHandler;
 import dev.nexus.service.http.HealthHandler;
 import dev.nexus.service.http.MemoryHandler;
 import dev.nexus.service.http.PlanHandler;
@@ -77,6 +79,7 @@ public final class NexusService {
         var scratchRepo   = new ScratchRepository(tenantScope);
         var taxonomyRepo  = new TaxonomyRepository(tenantScope);
         var aspectRepo    = new AspectRepository(tenantScope);
+        var chashRepo     = new ChashRepository(tenantScope);
 
         this.server = HttpServer.create(
             new InetSocketAddress("127.0.0.1", port), /* backlog */ 10);
@@ -113,6 +116,10 @@ public final class NexusService {
         // /v1/aspects/* — aspects / highlights / queue / promotion-log (bead nexus-gmiaf.15)
         var aspectCtx = server.createContext("/v1/aspects", new AspectHandler(aspectRepo));
         aspectCtx.getFilters().addAll(authFilter);
+
+        // /v1/chash/* — chash_index endpoints (bead nexus-gmiaf.16)
+        var chashCtx = server.createContext("/v1/chash", new ChashHandler(chashRepo));
+        chashCtx.getFilters().addAll(authFilter);
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
 

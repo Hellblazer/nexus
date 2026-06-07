@@ -7,10 +7,11 @@ Phase 1.8 implements memory ETL; Phase 2.1 adds plan ETL.
 
 Usage::
 
-    nx storage migrate memory   [--db PATH] [--service-url URL]
-    nx storage migrate plans    [--db PATH] [--service-url URL]
+    nx storage migrate memory    [--db PATH] [--service-url URL]
+    nx storage migrate plans     [--db PATH] [--service-url URL]
     nx storage migrate telemetry [--db PATH] [--service-url URL]
-    nx storage migrate taxonomy [--db PATH] [--service-url URL]
+    nx storage migrate taxonomy  [--db PATH] [--service-url URL]
+    nx storage migrate chash     [--db PATH] [--service-url URL]
 
 Run flags:
   --db PATH       Path to the SQLite T2 database (default: auto-detected
@@ -544,6 +545,130 @@ def migrate_taxonomy_cmd(
         total_read=total_read,
         total_written=total_written,
         by_table=results,
+    )
+
+
+@migrate_group.command(name="chash")
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+    help=(
+        "Path to the SQLite T2 database file. "
+        "Defaults to NX_DB_PATH env var or ~/.config/nexus/t2.db."
+    ),
+)
+@click.option(
+    "--service-url",
+    "service_url",
+    default=None,
+    help=(
+        "Base URL of the nexus-service (e.g. http://127.0.0.1:8080). "
+        "Defaults to NX_SERVICE_HOST + NX_SERVICE_PORT env vars."
+    ),
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Count rows in the source without writing. No service connection is made.",
+)
+def migrate_chash_cmd(
+    db_path: Path | None,
+    service_url: str | None,
+    dry_run: bool,
+) -> None:
+    """Migrate the SQLite chash_index store to Postgres via the nexus-service.
+
+    Reads all rows from the SQLite ``chash_index`` table and writes them through
+    the service HTTP API (``POST /v1/chash/import``).  The ETL is idempotent:
+    running it multiple times produces no duplicates (server-side upsert on
+    ``(tenant_id, chash, physical_collection)``).  The SQLite source is NEVER
+    modified.
+
+    Chash entries are content-addressed and immutable; ``created_at`` is
+    preserved verbatim.
+
+    Requires NX_SERVICE_PORT and NX_SERVICE_TOKEN to be set (or --service-url
+    for the URL component; token is always read from NX_SERVICE_TOKEN).
+
+    Examples::
+
+        # Auto-detect DB, service from env:
+        nx storage migrate chash
+
+        # Explicit paths:
+        nx storage migrate chash --db ~/.config/nexus/t2.db --service-url http://127.0.0.1:8080
+
+        # Dry run (count only, no writes):
+        nx storage migrate chash --dry-run
+    """
+    import sqlite3
+
+    resolved_db = _resolve_db_path(db_path)
+    if not resolved_db.exists():
+        raise click.ClickException(
+            f"SQLite database not found: {resolved_db}\n"
+            "Use --db to specify the path, or set NX_DB_PATH."
+        )
+
+    # Count source rows for dry-run or progress display
+    try:
+        conn = sqlite3.connect(str(resolved_db), check_same_thread=False)
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM chash_index").fetchone()
+            source_count = int(row[0]) if row else 0
+        except Exception:
+            source_count = 0
+        finally:
+            conn.close()
+    except Exception as exc:
+        raise click.ClickException(f"Cannot open SQLite db: {exc}")
+
+    click.echo(f"Source: {resolved_db} ({source_count} row(s) in chash_index)")
+
+    if dry_run:
+        click.echo("[dry-run] No writes performed.")
+        return
+
+    token = os.environ.get("NX_SERVICE_TOKEN", "")
+    if not token:
+        raise click.ClickException(
+            "NX_SERVICE_TOKEN is required for storage migrate chash.\n"
+            "Set it to the bearer token configured in the nexus-service."
+        )
+
+    from nexus.db.t2.http_chash_index import HttpChashIndex
+
+    if service_url:
+        store = HttpChashIndex(base_url=service_url)
+    else:
+        store = HttpChashIndex()
+
+    from nexus.db.t2.chash_etl import migrate_chash_rows
+
+    try:
+        results = migrate_chash_rows(resolved_db, store)
+    except Exception as exc:
+        raise click.ClickException(f"ETL failed: {exc}")
+    finally:
+        store.close()
+
+    total    = results["total"]
+    imported = results["imported"]
+    errors   = results.get("errors", 0)
+
+    click.echo(f"Done. total={total}, imported={imported}")
+    if errors:
+        click.echo(f"Warning: {errors} row(s) failed to write — check logs.", err=True)
+
+    _log.info(
+        "storage.migrate.chash.complete",
+        db=str(resolved_db),
+        total=total,
+        imported=imported,
+        errors=errors,
     )
 
 

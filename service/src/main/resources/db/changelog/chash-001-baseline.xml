@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-152 bead nexus-gmiaf.16 — chash_index store baseline changelog.
+
+    Creates nexus.chash_index that mirrors the SQLite ChashIndex schema 1:1,
+    adds tenant_id for RLS, and defines:
+      - ENABLE + FORCE ROW LEVEL SECURITY
+      - policy: USING/WITH CHECK (tenant_id = current_setting('nexus.tenant', true))
+      - NO FTS (chash_index is a routing/lookup table, not a text-search table)
+
+    Column mapping (SQLite chash_index -> Postgres):
+      chash                TEXT NOT NULL  -> TEXT NOT NULL
+      physical_collection  TEXT NOT NULL  -> TEXT NOT NULL
+      created_at           TEXT NOT NULL  -> TIMESTAMPTZ NOT NULL
+      tenant_id            (none)         -> TEXT NOT NULL (RLS discriminator)
+
+    Natural key (SQLite PRIMARY KEY): (chash, physical_collection)
+    Postgres natural key:             (tenant_id, chash, physical_collection)
+
+    Rationale: same chunk text (same SHA-256 chash) can legitimately live in
+    multiple collections (compound PK). The Postgres form adds tenant_id so
+    the same (chash, physical_collection) pair can exist per tenant.
+
+    Indexes mirror SQLite:
+      - PRIMARY KEY (tenant_id, chash, physical_collection)
+      - idx_chash_index_chash (chash) — for lookup() queries
+      - idx_chash_index_collection (physical_collection) — for delete_collection() seek
+
+    Grants: to nexus_svc (idempotent conditional GRANT in a DO block).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: chash_index table + constraints + indexes ──────────── -->
+    <changeSet id="chash-001-1" author="nexus-gmiaf.16">
+        <comment>Create chash_index table mirroring SQLite ChashIndex schema with tenant_id</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.chash_index (
+    tenant_id           TEXT        NOT NULL,
+    chash               TEXT        NOT NULL,
+    physical_collection TEXT        NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL,
+    CONSTRAINT chash_index_pk PRIMARY KEY (tenant_id, chash, physical_collection)
+);
+
+-- idx_chash_index_chash: for lookup() queries by chash
+CREATE INDEX idx_chash_index_chash ON nexus.chash_index (tenant_id, chash);
+
+-- idx_chash_index_collection: for delete_collection() and rename_collection() seeks
+CREATE INDEX idx_chash_index_collection ON nexus.chash_index (tenant_id, physical_collection);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.chash_index CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: RLS enable + force + policy ──────────────────────── -->
+    <changeSet id="chash-001-2" author="nexus-gmiaf.16">
+        <comment>Enable and force RLS; create tenant isolation policy</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chash_index ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chash_index FORCE ROW LEVEL SECURITY;
+
+-- cmd=ALL: covers SELECT, INSERT, UPDATE, DELETE in one policy.
+-- USING predicate: filters rows on reads.
+-- WITH CHECK predicate: validates rows on writes.
+-- current_setting('nexus.tenant', true): missing_ok=true so unset GUC returns NULL
+--   rather than raising. NULL != any tenant_id -> zero rows visible = fail-closed.
+CREATE POLICY tenant_isolation ON nexus.chash_index
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.chash_index;
+            ALTER TABLE nexus.chash_index NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.chash_index DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: service role grants ─────────────────────────────── -->
+    <changeSet id="chash-001-3" author="nexus-gmiaf.16">
+        <comment>
+            Grant table privileges to nexus_svc role.
+            Idempotent: IF EXISTS guard makes it safe even if the role does not exist yet.
+        </comment>
+        <sql splitStatements="false">
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chash_index TO nexus_svc';
+        RAISE NOTICE 'Granted nexus.chash_index privileges to nexus_svc';
+    ELSE
+        RAISE NOTICE 'nexus_svc role not found; skipping grants (create role before first run)';
+    END IF;
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- Grants are not rolled back; role removal is a DBA operation. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
