@@ -271,24 +271,39 @@ def test_t2database_sqlite_seam_constructs_memory_store(
         t2_mod._DEFAULT_RUN_MIGRATIONS = orig
 
 
-def test_t2database_service_backend_raises_not_implemented(
+def test_t2database_service_backend_uses_http_memory_store(
     tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """NX_STORAGE_BACKEND_MEMORY=service -> T2Database construction raises
-    NotImplementedError (the .7 wiring point; not yet implemented).
+    """NX_STORAGE_BACKEND_MEMORY=service -> T2Database.memory is HttpMemoryStore.
+
+    nexus-gmiaf.7: the NotImplementedError seam is replaced with a real
+    HttpMemoryStore construction.  We stub NX_SERVICE_PORT and NX_SERVICE_TOKEN
+    so the constructor does not raise a missing-config RuntimeError, then verify
+    the type of the constructed store.
     """
     _clear_env(monkeypatch)
     monkeypatch.setenv("NX_STORAGE_BACKEND_MEMORY", "service")
+    monkeypatch.setenv("NX_SERVICE_PORT", "19999")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token-for-seam")
     from pathlib import Path
 
     import nexus.db.t2 as t2_mod
+    from nexus.db.t2.http_memory_store import HttpMemoryStore
 
     orig = t2_mod._DEFAULT_RUN_MIGRATIONS
     t2_mod._DEFAULT_RUN_MIGRATIONS = True
+    db = None
     try:
         from nexus.db.t2 import T2Database
 
-        with pytest.raises(NotImplementedError, match="nexus-gmiaf.7"):
-            T2Database(Path(tmp_path) / "seam_service.db")  # type: ignore[arg-type]
+        db = T2Database(Path(tmp_path) / "seam_service.db")  # type: ignore[arg-type]
+        assert isinstance(db.memory, HttpMemoryStore), (
+            f"Expected HttpMemoryStore, got {type(db.memory).__name__}"
+        )
     finally:
         t2_mod._DEFAULT_RUN_MIGRATIONS = orig
+        if db is not None:
+            try:
+                db.memory.close()
+            except Exception:
+                pass

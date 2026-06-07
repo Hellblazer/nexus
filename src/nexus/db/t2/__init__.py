@@ -423,11 +423,12 @@ class T2Database:
         from nexus.db.storage_mode import StorageBackend, storage_backend_for
 
         if storage_backend_for("memory") == StorageBackend.SERVICE:
-            raise NotImplementedError(
-                "memory 'service' backend lands in nexus-gmiaf.7; "
-                "unset NX_STORAGE_BACKEND_MEMORY / NX_STORAGE_BACKEND to use sqlite"
-            )
-        self.memory: MemoryStore = MemoryStore(path)
+            # RDR-152 nexus-gmiaf.7: thin Python HTTP client over the Java service.
+            # Reads NX_SERVICE_HOST / NX_SERVICE_PORT / NX_SERVICE_TOKEN from env.
+            from nexus.db.t2.http_memory_store import HttpMemoryStore
+            self.memory: MemoryStore = HttpMemoryStore()  # type: ignore[assignment]
+        else:
+            self.memory: MemoryStore = MemoryStore(path)
         self.plans: PlanLibrary = PlanLibrary(path)
         # CatalogTaxonomy takes a MemoryStore reference for the
         # get_topic_docs JOIN (RDR-063 §Cross-Domain Contracts).

@@ -141,7 +141,8 @@ class MemoryRepositoryTest {
         assertThat(r.getTags()).isEqualTo("tag1,tag2");
         assertThat(r.getAgent()).isEqualTo("test-agent");
         assertThat(r.getTtl()).isEqualTo(30);
-        assertThat(r.getAccessCount()).as("access_count defaults to 0").isEqualTo(0);
+        // findByTitle now tracks access: access_count is 1 after first read
+        assertThat(r.getAccessCount()).as("access_count incremented to 1 by findByTitle").isEqualTo(1);
         assertThat(r.getTimestamp()).as("timestamp must be set").isNotNull();
     }
 
