@@ -334,16 +334,17 @@ class TestNoSQLiteAccess:
             f"Expected HttpCatalogClient, got {type(cat)}"
         )
 
-    def test_client_has_no_db_attribute(self, cat) -> None:
-        """The SqliteCatalog ._db attribute must NOT exist on HttpCatalogClient.
+    def test_client_db_sentinel_raises(self, cat) -> None:
+        """Accessing HttpCatalogClient._db must raise a clear service-mode error.
 
-        If this test fails, the consumer is using the SQLite backend, not the
-        HTTP service — that would mean NX_STORAGE_BACKEND_CATALOG=service is
-        silently falling back to SQLite.
+        The sentinel property (nexus-xnz0o) converts the bare AttributeError
+        that un-migrated commands/ code would hit into an actionable message,
+        and proves the consumer is on the HTTP service backend — a real SQLite
+        ._db handle (silent fallback) would NOT raise.
         """
-        assert not hasattr(cat, "_db"), (
-            "HttpCatalogClient has a ._db attribute — the catalog is SQLite, not service mode"
-        )
+        import pytest
+        with pytest.raises(RuntimeError, match="service mode"):
+            _ = cat._db
 
 
 class TestScoringChunkCounts:
