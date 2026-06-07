@@ -97,16 +97,17 @@ public final class LocalChromaServer implements AutoCloseable {
             Runtime.getRuntime().addShutdownHook(new Thread(this::forceStop, "chroma-shutdown-hook"));
         }
 
-        // Poll heartbeat until ready or timeout
+        // Poll heartbeat until ready or timeout.
+        //
+        // NOTE: Do NOT fail on chromaProcess.isAlive() == false during the startup window.
+        // 'chroma run' can double-fork: the launcher process exits 0 after spawning the
+        // uvicorn worker. The launched worker still serves the port — checking liveness of
+        // the original PID is therefore NOT a reliable failure signal.  The heartbeat URL
+        // is the only reliable readiness probe.
         ChromaRestClient probe = ChromaRestClient.local("127.0.0.1", port);
         long deadline = System.currentTimeMillis() + STARTUP_TIMEOUT_MS;
         boolean ready = false;
         while (System.currentTimeMillis() < deadline) {
-            if (!chromaProcess.isAlive()) {
-                throw new RuntimeException(
-                        "Chroma process exited prematurely during startup (exit=" +
-                        chromaProcess.exitValue() + ")");
-            }
             if (probe.heartbeat()) {
                 ready = true;
                 break;
