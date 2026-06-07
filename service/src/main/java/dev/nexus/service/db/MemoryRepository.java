@@ -1,7 +1,7 @@
 package dev.nexus.service.db;
 
-import dev.nexus.service.jooq.tables.Memory;
-import dev.nexus.service.jooq.tables.records.MemoryRecord;
+import dev.nexus.service.jooq.nexus.tables.Memory;
+import dev.nexus.service.jooq.nexus.tables.records.MemoryRecord;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Result;
@@ -16,7 +16,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-import static dev.nexus.service.jooq.Tables.MEMORY;
+import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static org.jooq.impl.DSL.*;
 
 /**

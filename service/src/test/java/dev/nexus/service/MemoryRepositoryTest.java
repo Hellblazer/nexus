@@ -3,7 +3,7 @@ package dev.nexus.service;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.jooq.tables.records.MemoryRecord;
+import dev.nexus.service.jooq.nexus.tables.records.MemoryRecord;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import liquibase.Contexts;
 import liquibase.Liquibase;

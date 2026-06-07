@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-152 bead nexus-gmiaf.13 — T1 scratch store baseline changelog.
+
+    Creates a SEPARATE `t1` schema with one UNLOGGED table: scratch.
+    Distinct from the `nexus` schema (T2 stores) for operational separation.
+
+    UNLOGGED rationale:
+      T1 scratch is ephemeral session working memory. UNLOGGED tables are
+      ~2x faster (no WAL writes) and survive PG restart (unlike TEMP tables),
+      which is correct: scratch survives a PG bump but is cleared by the
+      session-close endpoint or TTL sweep. Crash-safety is not required —
+      T1 rows are always reconstructible by the session that wrote them.
+
+    RLS design (two-level isolation):
+      - tenant_id: Row-Level Security via GUC nexus.t1_tenant (same mechanism
+        as T2 nexus.tenant, but a DIFFERENT GUC name to avoid conflating T1 and
+        T2 tenant contexts when the two connections share a pool).
+        USING/WITH CHECK: tenant_id = current_setting('nexus.t1_tenant', true)
+        Fail-closed: unset GUC -> NULL != any tenant_id -> zero rows.
+      - session_id: NOT a GUC filter. Stored as a plain column, filtered in
+        WHERE clauses by the repository. This is intentional: session isolation
+        is enforced client-side (the Python client sends its session token as
+        X-Nexus-T1-Session; the Java handler passes it into queries). This
+        avoids a two-GUC stamp per connection while still preventing cross-
+        session read access.
+
+    Search semantics (BEHAVIOR CHANGE — flagged):
+      T1 scratch search was SEMANTIC (ChromaDB vector search over ONNX
+      embeddings). The PG backend has no pgvector; search becomes FTS.
+      FTS column: tsvector GENERATED STORED over (content 'english', tags 'simple').
+      Query: OR'd plainto_tsquery('english', q) OR plainto_tsquery('simple', q)
+      — the same OR-query pattern adopted for .11 plans and T2 memory.
+      Behavior change: ranking is BM25-style (ts_rank) not cosine similarity;
+      very short queries and exact-identifier queries still work via simple config.
+      This is within the locked decision 2 (T1->Postgres) which does not mandate
+      vector search. Flag is documented here AND in HttpScratchStore docstring.
+
+    Session lifecycle:
+      NX_T1_SESSION env var carries the session token (replaces NX_T1_HOST/PORT).
+      Python client sends X-Nexus-T1-Session header; Java ScratchHandler passes
+      session_id into all queries. Session-close: DELETE FROM t1.scratch WHERE
+      tenant_id=? AND session_id=? (called from MCP lifespan on cleanup).
+      TTL sweep: DELETE FROM t1.scratch WHERE ts < now() - interval '24 hours'
+      (service-internal; catches crashed clients that never called session-close).
+
+    Column mapping (T1Database fields -> PG):
+      id            uuid4 string       -> TEXT (natural id, no BIGSERIAL; scratch rows
+                                           have no foreign key dependents and uuid as
+                                           natural id matches the existing Python surface)
+      session_id    TEXT NOT NULL      -> TEXT NOT NULL (session scope filter)
+      tenant_id     TEXT NOT NULL      -> TEXT NOT NULL (RLS discriminator)
+      content       TEXT NOT NULL      -> TEXT NOT NULL
+      tags          TEXT               -> TEXT (nullable; CSV)
+      flagged       BOOLEAN            -> BOOLEAN NOT NULL DEFAULT FALSE
+      flush_project TEXT               -> TEXT (nullable)
+      flush_title   TEXT               -> TEXT (nullable)
+      agent         TEXT               -> TEXT (nullable)
+      access_count  INTEGER            -> INTEGER NOT NULL DEFAULT 0
+      last_accessed TEXT               -> TIMESTAMPTZ (nullable)
+      ts            TIMESTAMPTZ        -> TIMESTAMPTZ NOT NULL DEFAULT now()
+        (creation timestamp; named ts consistent with telemetry tables)
+
+    NO ETL: scratch is ephemeral. Existing ChromaDB scratch is SKIPPED on migration.
+    Sub-agents inherit NX_T1_SESSION; in-process Task dispatches share session in-process.
+
+    Bead .24 will DELETE: NX_T1_HOST/PORT handling, t1_addr file machinery,
+    ChromaDB T1 lifespan in mcp/core.py.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: t1 schema ────────────────────────────────────────────── -->
+    <changeSet id="t1-001-1" author="nexus-gmiaf.13">
+        <comment>Create t1 schema (separate from nexus schema to isolate ephemeral T1 from durable T2)</comment>
+        <sql>CREATE SCHEMA IF NOT EXISTS t1</sql>
+        <rollback>DROP SCHEMA IF EXISTS t1 CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: scratch UNLOGGED table ───────────────────────────────── -->
+    <changeSet id="t1-001-2" author="nexus-gmiaf.13">
+        <comment>Create UNLOGGED t1.scratch table — ephemeral session working memory</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE UNLOGGED TABLE t1.scratch (
+    id            TEXT         NOT NULL,
+    tenant_id     TEXT         NOT NULL,
+    session_id    TEXT         NOT NULL,
+    content       TEXT         NOT NULL,
+    tags          TEXT,
+    flagged       BOOLEAN      NOT NULL DEFAULT FALSE,
+    flush_project TEXT,
+    flush_title   TEXT,
+    agent         TEXT,
+    access_count  INTEGER      NOT NULL DEFAULT 0,
+    last_accessed TIMESTAMPTZ,
+    ts            TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT scratch_pk PRIMARY KEY (id)
+);
+
+-- Lookups by session (most common query pattern)
+CREATE INDEX idx_scratch_tenant_session ON t1.scratch (tenant_id, session_id);
+-- TTL sweep index: WHERE ts &lt; now() - interval 'X hours'
+CREATE INDEX idx_scratch_ts ON t1.scratch (ts);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS t1.scratch CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: RLS enable + force + policy (tenant_id) ─────────────── -->
+    <changeSet id="t1-001-3" author="nexus-gmiaf.13">
+        <comment>Enable and force RLS on t1.scratch; tenant isolation via nexus.t1_tenant GUC</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE t1.scratch ENABLE ROW LEVEL SECURITY;
+ALTER TABLE t1.scratch FORCE ROW LEVEL SECURITY;
+
+-- GUC name: nexus.t1_tenant (NOT nexus.tenant — avoid conflating T1 and T2 contexts).
+-- missing_ok=true: unset GUC returns NULL, which != any tenant_id -> fail-closed.
+-- cmd=ALL: covers SELECT, INSERT, UPDATE, DELETE.
+CREATE POLICY tenant_isolation ON t1.scratch
+    USING      (tenant_id = current_setting('nexus.t1_tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.t1_tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON t1.scratch;
+            ALTER TABLE t1.scratch NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE t1.scratch DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: FTS tsvector generated column + GIN index ───────────── -->
+    <changeSet id="t1-001-4" author="nexus-gmiaf.13">
+        <comment>
+            Add FTS generated tsvector column for keyword search.
+            BEHAVIOR CHANGE: T1 scratch search was vector-semantic (ChromaDB ONNX).
+            PG backend has no pgvector; search becomes FTS. See changeset comment.
+            Weights: content 'B' english (prose, stemmed); tags 'C' simple (identifiers).
+            Query: OR'd plainto_tsquery('english',q) OR plainto_tsquery('simple',q)
+            — same OR-query pattern as T2 memory/plans (152-FTS-tokenizer-DECISION).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE t1.scratch
+    ADD COLUMN fts_vector TSVECTOR GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', coalesce(content, '')), 'B') ||
+        setweight(to_tsvector('simple',  coalesce(tags,    '')), 'C')
+    ) STORED;
+
+-- GIN index: accelerates @@ operator queries
+CREATE INDEX idx_scratch_fts ON t1.scratch USING GIN (fts_vector);
+        </sql>
+        <rollback>
+            DROP INDEX IF EXISTS t1.idx_scratch_fts;
+            ALTER TABLE t1.scratch DROP COLUMN IF EXISTS fts_vector;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 5: service role grants ─────────────────────────────────── -->
+    <changeSet id="t1-001-5" author="nexus-gmiaf.13">
+        <comment>
+            Grant t1.scratch privileges to nexus_svc role.
+            Also sets search_path to include t1 so the service role can access
+            both nexus (T2) and t1 (T1) schemas without qualification.
+            Idempotent: IF EXISTS guard skips gracefully when role absent.
+        </comment>
+        <sql splitStatements="false">
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
+        EXECUTE 'GRANT USAGE ON SCHEMA t1 TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON t1.scratch TO nexus_svc';
+        EXECUTE 'ALTER ROLE nexus_svc SET search_path TO nexus, t1, public';
+        RAISE NOTICE 'Granted t1.scratch privileges to nexus_svc';
+    ELSE
+        RAISE NOTICE 'nexus_svc role not found; skipping grants (create role before first run)';
+    END IF;
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- Grants are not rolled back; role removal is a DBA operation. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

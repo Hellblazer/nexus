@@ -3,12 +3,14 @@ package dev.nexus.service;
 import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.PlanRepository;
+import dev.nexus.service.db.ScratchRepository;
 import dev.nexus.service.db.TelemetryRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.HealthHandler;
 import dev.nexus.service.http.MemoryHandler;
 import dev.nexus.service.http.PlanHandler;
+import dev.nexus.service.http.ScratchHandler;
 import dev.nexus.service.http.TelemetryHandler;
 import dev.nexus.service.http.WhoamiHandler;
 import org.slf4j.Logger;
@@ -30,6 +32,7 @@ import java.util.concurrent.Executors;
  * <ul>
  *   <li>{@code GET /health} — no auth; liveness + DB probe via SELECT 1.</li>
  *   <li>{@code GET /v1/_whoami} — auth filter + tenant extraction + GUC stamp.</li>
+ *   <li>{@code /v1/t1/*} — T1 scratch: put/get/search/list/flag/session-close (bead nexus-gmiaf.13).</li>
  * </ul>
  *
  * <p>Auth filter ({@link AuthFilter}) intercepts all {@code /v1/*} routes,
@@ -53,6 +56,7 @@ public final class NexusService {
         var memoryRepo    = new MemoryRepository(tenantScope);
         var planRepo      = new PlanRepository(tenantScope);
         var telemetryRepo = new TelemetryRepository(tenantScope);
+        var scratchRepo   = new ScratchRepository(tenantScope);
 
         this.server = HttpServer.create(
             new InetSocketAddress("127.0.0.1", port), /* backlog */ 10);
@@ -77,6 +81,10 @@ public final class NexusService {
         // /v1/telemetry/* — telemetry endpoints (bead nexus-gmiaf.12)
         var telCtx = server.createContext("/v1/telemetry", new TelemetryHandler(telemetryRepo));
         telCtx.getFilters().addAll(authFilter);
+
+        // /v1/t1/* — T1 scratch endpoints (bead nexus-gmiaf.13)
+        var t1Ctx = server.createContext("/v1/t1", new ScratchHandler(scratchRepo));
+        t1Ctx.getFilters().addAll(authFilter);
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
     }

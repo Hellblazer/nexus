@@ -1,7 +1,7 @@
 package dev.nexus.service.db;
 
-import dev.nexus.service.jooq.tables.records.FrecencyRecord;
-import dev.nexus.service.jooq.tables.records.RelevanceLogRecord;
+import dev.nexus.service.jooq.nexus.tables.records.FrecencyRecord;
+import dev.nexus.service.jooq.nexus.tables.records.RelevanceLogRecord;
 import org.jooq.DSLContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,7 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import static dev.nexus.service.jooq.Tables.*;
+import static dev.nexus.service.jooq.nexus.Tables.*;
 import static org.jooq.impl.DSL.*;
 
 /**

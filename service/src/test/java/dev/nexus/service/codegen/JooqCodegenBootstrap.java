@@ -88,8 +88,9 @@ public class JooqCodegenBootstrap {
                         .withName("org.jooq.meta.postgres.PostgresDatabase")
                         .withIncludes(".*")
                         .withExcludes("databasechangelog|databasechangeloglock")
-                        .withSchemata(new SchemaMappingType()
-                            .withInputSchema("nexus")))
+                        .withSchemata(
+                            new SchemaMappingType().withInputSchema("nexus"),
+                            new SchemaMappingType().withInputSchema("t1")))
                     .withGenerate(new Generate()
                         .withPojos(true)
                         .withDaos(false)

@@ -4,6 +4,9 @@
 package dev.nexus.service.jooq;
 
 
+import dev.nexus.service.jooq.nexus.Nexus;
+import dev.nexus.service.jooq.t1.T1;
+
 import java.util.Arrays;
 import java.util.List;
 
@@ -31,6 +34,11 @@ public class DefaultCatalog extends CatalogImpl {
     public final Nexus NEXUS = Nexus.NEXUS;
 
     /**
+     * The schema <code>t1</code>.
+     */
+    public final T1 T1 = dev.nexus.service.jooq.t1.T1.T1;
+
+    /**
      * No further instances allowed
      */
     private DefaultCatalog() {
@@ -40,7 +48,8 @@ public class DefaultCatalog extends CatalogImpl {
     @Override
     public final List<Schema> getSchemas() {
         return Arrays.asList(
-            Nexus.NEXUS
+            Nexus.NEXUS,
+            T1.T1
         );
     }
 

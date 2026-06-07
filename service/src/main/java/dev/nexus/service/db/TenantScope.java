@@ -67,9 +67,35 @@ public final class TenantScope {
      * @throws RuntimeException         if a {@link SQLException} occurs (wraps it) or
      *                                  if {@code work} throws (propagated after rollback)
      */
+    /**
+     * Execute {@code work} within a transaction stamped with {@code tenant} using the
+     * default {@code nexus.tenant} GUC.
+     *
+     * @see #withTenant(String, String, Function) for an overload with a custom GUC name
+     */
     public <T> T withTenant(String tenant, Function<DSLContext, T> work) {
+        return withTenant(tenant, "nexus.tenant", work);
+    }
+
+    /**
+     * Execute {@code work} within a transaction stamped with {@code tenant} using a
+     * custom GUC name.
+     *
+     * <p>This overload is used by {@link ScratchRepository} which stamps
+     * {@code nexus.t1_tenant} to avoid conflating T1 and T2 RLS contexts when
+     * connections to the same PG server are used for both stores.
+     *
+     * @param tenant  the tenant principal to stamp (must not be null or blank)
+     * @param gucName the GUC parameter name to set (e.g. {@code "nexus.tenant"} or
+     *                {@code "nexus.t1_tenant"})
+     * @param work    function receiving a stamped {@link DSLContext}
+     */
+    public <T> T withTenant(String tenant, String gucName, Function<DSLContext, T> work) {
         if (tenant == null || tenant.isBlank()) {
             throw new IllegalArgumentException("tenant must not be null or blank");
+        }
+        if (gucName == null || gucName.isBlank()) {
+            throw new IllegalArgumentException("gucName must not be null or blank");
         }
 
         Connection conn = null;
@@ -79,8 +105,10 @@ public final class TenantScope {
             // Pool default is autoCommit=true; we toggle to false for the txn.
             conn.setAutoCommit(false);
 
-            // Stamp the GUC — bind-safe parameterized call (S0.1 pattern verbatim)
-            try (var ps = conn.prepareStatement("SELECT set_config('nexus.tenant', ?, true)")) {
+            // Stamp the GUC — bind-safe parameterized call (S0.1 pattern verbatim).
+            // Use string concatenation only for the GUC name (a validated internal
+            // constant from code, not user input); value is always parameterized.
+            try (var ps = conn.prepareStatement("SELECT set_config('" + gucName + "', ?, true)")) {
                 ps.setString(1, tenant);
                 ps.execute();
             }
@@ -93,11 +121,11 @@ public final class TenantScope {
             return result;
 
         } catch (SQLException e) {
-            log.error("event=tenant_scope_sql_error tenant={}", tenant, e);
+            log.error("event=tenant_scope_sql_error tenant={} guc={}", tenant, gucName, e);
             rollback(conn);
             throw new RuntimeException("SQL error in tenant scope for tenant: " + tenant, e);
         } catch (RuntimeException e) {
-            log.debug("event=tenant_scope_rollback tenant={} reason={}", tenant, e.getMessage());
+            log.debug("event=tenant_scope_rollback tenant={} guc={} reason={}", tenant, gucName, e.getMessage());
             rollback(conn);
             throw e;  // propagate caller exception unchanged
         } finally {

@@ -20,8 +20,11 @@
     <!-- Store 3: telemetry (bead nexus-gmiaf.12) -->
     <include file="db/changelog/telemetry-001-baseline.xml"/>
 
+    <!-- Store 4: T1 scratch (bead nexus-gmiaf.13) — UNLOGGED, t1 schema, session+tenant scoped -->
+    <include file="db/changelog/t1-001-baseline.xml"/>
+
     <!--
-        Future includes (beads .13-.18):
+        Future includes (beads .14-.18):
         <include file="db/changelog/catalog-001-baseline.xml"/>
     -->
 

@@ -9,7 +9,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.MemoryRepository;
-import dev.nexus.service.jooq.tables.records.MemoryRecord;
+import dev.nexus.service.jooq.nexus.tables.records.MemoryRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

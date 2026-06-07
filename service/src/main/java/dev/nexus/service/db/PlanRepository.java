@@ -1,6 +1,6 @@
 package dev.nexus.service.db;
 
-import dev.nexus.service.jooq.tables.records.PlansRecord;
+import dev.nexus.service.jooq.nexus.tables.records.PlansRecord;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.slf4j.Logger;
@@ -13,7 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
-import static dev.nexus.service.jooq.Tables.PLANS;
+import static dev.nexus.service.jooq.nexus.Tables.PLANS;
 import static org.jooq.impl.DSL.*;
 
 /**
