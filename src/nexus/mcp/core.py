@@ -184,6 +184,29 @@ async def _t1_chroma_lifespan(_app: Any):
       install a SIGTERM handler).
     * :mod:`atexit` (belt-and-braces for clean SystemExit paths).
     """
+    # Branch 0 (RDR-152 bead nexus-gmiaf.13): Postgres service path.
+    # NX_STORAGE_BACKEND_T1=service (or global NX_STORAGE_BACKEND=service)
+    # routes T1 through HttpScratchStore. Chroma is NOT spawned; the session is
+    # closed on exit via HttpScratchStore.close_session() so the UNLOGGED table
+    # is reaped promptly rather than waiting for the 24-h TTL sweep backstop.
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    if storage_backend_for("t1") == StorageBackend.SERVICE:
+        import structlog as _structlog
+        _svc_log = _structlog.get_logger(__name__)
+        _svc_log.info("t1_service_path_active", backend="service")
+        yield
+        # Teardown: close the session so UNLOGGED rows are reaped promptly.
+        try:
+            from nexus.db.http_scratch_store import HttpScratchStore
+            _svc_log.info("t1_service_session_close_start")
+            store = HttpScratchStore()
+            deleted = store.close_session()
+            store.close()
+            _svc_log.info("t1_service_session_close_done", deleted=deleted)
+        except Exception as _exc:
+            _svc_log.warning("t1_service_session_close_failed", error=str(_exc))
+        return
+
     if _os.environ.get("NX_T1_HOST", "").strip() and _os.environ.get("NX_T1_PORT", "").strip():
         # Branch 1: parent MCP owns chroma; subprocess inherits via env.
         yield

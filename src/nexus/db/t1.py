@@ -782,9 +782,8 @@ def get_t1_database(
 
     Returns a ``T1Database``-shaped object: callers use ``put``, ``get``,
     ``search``, ``list_entries``, ``flagged_entries``, ``flag``, ``unflag``,
-    ``delete``, ``clear``, ``resolve_prefix_candidates``, and the
-    ``session_id`` property.  ``promote()`` raises ``NotImplementedError``
-    on the service path.
+    ``promote``, ``delete``, ``clear``, ``resolve_prefix_candidates``, and
+    the ``session_id`` property.  All methods are available on both paths.
     """
     from nexus.db.storage_mode import StorageBackend, storage_backend_for
 

@@ -19,8 +19,12 @@ import org.slf4j.LoggerFactory;
 import javax.sql.DataSource;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * RDR-152 skeleton service.
@@ -43,8 +47,18 @@ public final class NexusService {
 
     private static final Logger log = LoggerFactory.getLogger(NexusService.class);
 
+    /** How often to run the per-default-tenant TTL sweep (crash-safety backstop). */
+    private static final long SWEEP_INTERVAL_HOURS = 6L;
+
+    /** Age threshold: scratch rows older than this are eligible for TTL sweep. */
+    private static final long SWEEP_TTL_HOURS = 24L;
+
+    /** Default tenant used for the internal sweeper. Cross-tenant sweep deferred to bead .30. */
+    private static final String DEFAULT_TENANT = "default";
+
     private final HttpServer server;
     private final TenantScope tenantScope;
+    private final ScheduledExecutorService sweepScheduler;
 
     /**
      * @param port      listen port; 0 for OS-assigned ephemeral (use in tests)
@@ -87,6 +101,28 @@ public final class NexusService {
         t1Ctx.getFilters().addAll(authFilter);
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+
+        // TTL sweep: crash-safety backstop for sessions that never called session-close.
+        // Runs sweepTenant() for the default tenant every SWEEP_INTERVAL_HOURS.
+        // Cross-tenant superuser sweep (sweepExpired) deferred to bead .30.
+        this.sweepScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "t1-ttl-sweep");
+            t.setDaemon(true);
+            return t;
+        });
+        this.sweepScheduler.scheduleAtFixedRate(
+            () -> {
+                try {
+                    OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC)
+                        .minusHours(SWEEP_TTL_HOURS);
+                    int deleted = scratchRepo.sweepTenant(DEFAULT_TENANT, cutoff);
+                    log.info("event=t1_scheduled_sweep tenant={} deleted={}", DEFAULT_TENANT, deleted);
+                } catch (Exception ex) {
+                    log.warn("event=t1_scheduled_sweep_failed error={}", ex.getMessage(), ex);
+                }
+            },
+            SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
+        );
     }
 
     /** Start the HTTP server (non-blocking). */
@@ -95,8 +131,9 @@ public final class NexusService {
         log.info("event=service_started port={}", getPort());
     }
 
-    /** Stop the HTTP server immediately. */
+    /** Stop the HTTP server and TTL sweep scheduler immediately. */
     public void stop() {
+        sweepScheduler.shutdownNow();
         server.stop(0);
         log.info("event=service_stopped");
     }

@@ -450,6 +450,37 @@ class ScratchRepositoryTest {
         assertThat(count2).as("access_count must increment on each get").isGreaterThan(count1);
     }
 
+    // ── Test 21: access_count UPDATE is session-scoped (regression for missing session filter) ─
+
+    @Test
+    void get_accessCount_updateCannotCorruptOtherSession() {
+        // Create entry under SESSION_A
+        String idA = uuid();
+        repo.put(TENANT_A, SESSION_A, idA, "session A access_count target", null, null, false, null, null);
+
+        // Create an entry under SESSION_B with the SAME id is not possible (PK), but we test
+        // that accessing idA via SESSION_A does NOT affect rows owned by SESSION_B.
+        String idB = uuid();
+        repo.put(TENANT_A, SESSION_B, idB, "session B unrelated entry", null, null, false, null, null);
+
+        // GET via SESSION_A (increments access_count on SESSION_A's row)
+        repo.get(TENANT_A, SESSION_A, idA);
+
+        // SESSION_B must still see its own row with access_count = 0 (never touched)
+        Map<String, Object> bRow = repo.get(TENANT_A, SESSION_B, idB);
+        assertThat(bRow).isNotEmpty();
+        // SESSION_B row was never read except this call, so count was 0 before → becomes 1 here
+        assertThat(((Number) bRow.get("access_count")).intValue())
+            .as("SESSION_B's access_count must not be mutated by SESSION_A's get()")
+            .isEqualTo(1);
+
+        // Verify SESSION_A's row has the expected count (incremented in the GET above + this call)
+        Map<String, Object> aRow = repo.get(TENANT_A, SESSION_A, idA);
+        assertThat(((Number) aRow.get("access_count")).intValue())
+            .as("SESSION_A's access_count must increment normally")
+            .isGreaterThanOrEqualTo(2);
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDs() {

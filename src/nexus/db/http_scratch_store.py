@@ -29,12 +29,10 @@ memory ``rdr``).  Short exact-identifier queries still work via the ``simple``
 branch.  Ranking is ts_rank (BM25-like), not cosine; results are still
 ordered best-first.
 
-The ``promote()`` method is NOT implemented here.  Promote copies a T1 entry
-into T2 memory and requires a T2Database/T2Client reference.  It is kept on
-``T1Database`` (Chroma path) and will be ported to the Postgres path in a
-follow-on bead once the T2 memory store migration (nexus-gmiaf.7) is stable
-enough to pass the T2 reference through.  Callers that reach ``promote()``
-on this class get a ``NotImplementedError`` with a clear message.
+``promote()`` is implemented: it fetches the T1 entry from the service, runs
+the same Jaccard overlap detection used by the Chroma path (via the shared
+:func:`~nexus.db.t1._find_promote_overlap_candidates` helper), writes to T2,
+and returns a :class:`~nexus.types.PromotionReport`.
 """
 
 from __future__ import annotations
@@ -110,8 +108,6 @@ class HttpScratchStore:
 
     SEARCH BEHAVIOR CHANGE: ``search()`` uses FTS (Postgres tsvector) rather
     than vector/cosine (ChromaDB ONNX).  See module docstring for details.
-
-    ``promote()`` is not implemented; see module docstring.
 
     Uses a keep-alive :class:`httpx.Client` connection pool.
 
@@ -324,20 +320,42 @@ class HttpScratchStore:
 
     # ── Promote ────────────────────────────────────────────────────────────────
 
-    def promote(self, id: str, project: str, title: str, t2: object) -> object:  # noqa: ARG002
-        """NOT IMPLEMENTED for the Postgres T1 backend.
+    def promote(self, id: str, project: str, title: str, t2: object) -> object:
+        """Copy T1 entry *id* to T2 immediately. Returns a PromotionReport.
 
-        Promote copies a T1 entry into T2 memory and requires a T2Database
-        or T2Client reference with Jaccard overlap detection.  The logic is
-        kept on the ChromaDB T1Database for now and will be ported to the
-        service path once the T2 memory migration (nexus-gmiaf.7) is stable
-        enough to pass the reference through the service layer.
+        *t2* may be a direct ``T2Database`` or a daemon-backed ``T2Client``
+        (RDR-128 P3) — both expose ``.put()`` and ``.memory``.
+
+        Overlap detection mirrors :meth:`T1Database.promote`: fetches the entry
+        from the T1 service, runs :func:`~nexus.db.t1._find_promote_overlap_candidates`
+        (same Jaccard threshold), writes to T2 regardless of overlap, and returns
+        a ``PromotionReport`` with ``action="overlap_detected"`` or ``action="new"``.
+
+        This path is valid on the service backend because promote is a write-through
+        to T2 (not a T1 read-path), so there is no session-scoping concern unique to
+        the service backend.
+
+        Raises ``KeyError`` when the entry is not found in this session.
         """
-        raise NotImplementedError(
-            "HttpScratchStore.promote() is not implemented. "
-            "Use T1Database (Chroma path) for promote() calls, or wait for "
-            "the service-path port in a future bead."
-        )
+        from nexus.db.t1 import _find_promote_overlap_candidates
+        from nexus.types import PromotionReport
+
+        entry = self.get(id)
+        if entry is None:
+            raise KeyError(f"No scratch entry: {id!r}")
+
+        matches = _find_promote_overlap_candidates(entry["content"], project, t2)  # type: ignore[arg-type]
+        if matches:
+            best = matches[0]
+            report = PromotionReport(
+                action="overlap_detected",
+                existing_title=best["title"],
+                merged=False,
+            )
+        else:
+            report = PromotionReport(action="new")
+        t2.put(project=project, title=title, content=entry["content"], tags=entry.get("tags", ""))  # type: ignore[union-attr]
+        return report
 
     # ── Delete / clear ─────────────────────────────────────────────────────────
 

@@ -4,25 +4,25 @@ from typing import Any
 
 import click
 
-from nexus.db.t1 import T1Database, T1ServerNotFoundError
+from nexus.db.t1 import T1ServerNotFoundError, get_t1_database
 
 
-def _t1() -> T1Database:
-    """Return a T1Database connected to the current session's server.
+def _t1():
+    """Return the active T1 scratch store for this process.
 
-    T1Database resolves the session-id (RDR-149 P4) and discovers the live
-    leased T1 record, falling back to a local EphemeralClient under
-    ``NX_T1_ISOLATED=1`` or raising ``T1ServerNotFoundError`` if no live
-    lease is found.
+    Routes through :func:`~nexus.db.t1.get_t1_database` so the correct
+    backend is selected at runtime:
 
-    On that raise, surface a clean actionable message via
-    ``click.ClickException`` (exit 1, no traceback) instead of letting the
-    exception propagate as an unhandled stack dump (nexus-gff3g): a CLI user
-    whose session-id diverges from the MCP's lease key got a wall of traceback
-    where a one-line hint belongs.
+    * ``NX_STORAGE_BACKEND_T1=service`` → :class:`~nexus.db.http_scratch_store.HttpScratchStore`
+      (Postgres UNLOGGED, RDR-152 bead nexus-gmiaf.13).
+    * Default → :class:`~nexus.db.t1.T1Database` (ChromaDB path, unchanged).
+
+    On ``T1ServerNotFoundError`` (Chroma path only), surface a clean actionable
+    message via ``click.ClickException`` (exit 1, no traceback) rather than a
+    wall of traceback (nexus-gff3g).
     """
     try:
-        return T1Database()
+        return get_t1_database()
     except T1ServerNotFoundError as exc:
         raise click.ClickException(
             f"{exc}\n\n"

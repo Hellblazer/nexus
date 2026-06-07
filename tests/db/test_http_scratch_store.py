@@ -443,10 +443,38 @@ class TestAuthHeaders:
         assert store.session_id == SESSION
 
 
-class TestPromoteNotImplemented:
-    def test_promote_raises_not_implemented(self, store):
-        with pytest.raises(NotImplementedError, match="promote"):
-            store.promote("some-id", "project", "title", object())
+class TestPromote:
+    def test_promote_absent_id_raises_key_error(self, store):
+        """promote() raises KeyError when the entry is not found in this session."""
+        with pytest.raises(KeyError, match="some-missing-id"):
+            store.promote("some-missing-id", "project", "title", object())
+
+    def test_promote_calls_t2_put_and_returns_report(self, store):
+        """promote() fetches from T1, calls t2.put(), returns a PromotionReport."""
+        # Put an entry into the fake store
+        entry_id = store.put("promote test content", tags="promo-tag")
+
+        # Minimal T2 double that records .put() calls
+        class _FakeT2:
+            def __init__(self):
+                self.calls = []
+                self.memory = self  # promote() uses t2.memory.search in overlap detection
+
+            def put(self, **kwargs):
+                self.calls.append(kwargs)
+
+            def search(self, query, project="", access=""):
+                return []  # no overlaps
+
+        fake_t2 = _FakeT2()
+        from nexus.types import PromotionReport
+        report = store.promote(entry_id, "my-project", "my-title", fake_t2)
+        assert isinstance(report, PromotionReport)
+        assert report.action == "new"
+        assert len(fake_t2.calls) == 1
+        assert fake_t2.calls[0]["project"] == "my-project"
+        assert fake_t2.calls[0]["title"] == "my-title"
+        assert fake_t2.calls[0]["content"] == "promote test content"
 
 
 class TestGetT1DatabaseFactory:
@@ -465,3 +493,51 @@ class TestGetT1DatabaseFactory:
         monkeypatch.setenv("NX_STORAGE_BACKEND_T1", "service")
         from nexus.db.storage_mode import StorageBackend, storage_backend_for
         assert storage_backend_for("t1") == StorageBackend.SERVICE
+
+    def test_get_t1_database_returns_http_scratch_store_on_service_backend(
+        self, monkeypatch, fake_server
+    ):
+        """get_t1_database() returns HttpScratchStore when NX_STORAGE_BACKEND_T1=service.
+
+        This is the critical routing assertion: the factory MUST return HttpScratchStore,
+        not T1Database, on the service path.  This test is the production-entry-point
+        guard that the code-review critiqued as missing.
+        """
+        # fake_server is a URL string like "http://127.0.0.1:<port>"
+        port = fake_server.split(":")[-1]
+        monkeypatch.setenv("NX_STORAGE_BACKEND_T1", "service")
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_SERVICE_PORT", port)
+        monkeypatch.setenv("NX_SERVICE_TOKEN", TOKEN)
+        monkeypatch.setenv("NX_T1_SESSION", "factory-session")
+
+        from nexus.db.http_scratch_store import HttpScratchStore
+        from nexus.db.t1 import get_t1_database
+        result = get_t1_database()
+        assert isinstance(result, HttpScratchStore), (
+            f"get_t1_database() must return HttpScratchStore when "
+            f"NX_STORAGE_BACKEND_T1=service, got {type(result).__name__}"
+        )
+
+    def test_get_t1_database_does_not_return_http_when_backend_unset(self, monkeypatch):
+        """get_t1_database() does NOT return HttpScratchStore when backend unset.
+
+        Verifies the default (Chroma) path is unaffected by the service routing seam.
+        """
+        monkeypatch.delenv("NX_STORAGE_BACKEND_T1", raising=False)
+        monkeypatch.delenv("NX_STORAGE_BACKEND", raising=False)
+
+        from nexus.db.http_scratch_store import HttpScratchStore
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for
+        # Verify the route IS the sqlite/chroma path (can't construct T1Database without server)
+        assert storage_backend_for("t1") != StorageBackend.SERVICE
+        # get_t1_database() on this path will raise T1ServerNotFoundError (no live chroma);
+        # the important thing is it does NOT produce an HttpScratchStore.
+        from nexus.db.t1 import T1ServerNotFoundError, get_t1_database
+        try:
+            result = get_t1_database()
+            assert not isinstance(result, HttpScratchStore), (
+                "get_t1_database() must NOT return HttpScratchStore on the default path"
+            )
+        except T1ServerNotFoundError:
+            pass  # Expected when no Chroma server is running in the test environment

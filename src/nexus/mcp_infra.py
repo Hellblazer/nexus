@@ -167,8 +167,8 @@ def get_t1():
             if _t1_instance is None:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
-                    from nexus.db.t1 import T1Database
-                    _t1_instance = T1Database()
+                    from nexus.db.t1 import get_t1_database
+                    _t1_instance = get_t1_database()
                     _t1_isolated = any("EphemeralClient" in str(w.message) for w in caught)
     return _t1_instance, _t1_isolated
 

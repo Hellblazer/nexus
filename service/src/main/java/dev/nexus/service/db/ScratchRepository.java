@@ -122,7 +122,7 @@ public final class ScratchRepository {
             dsl.update(SCRATCH)
                .set(SCRATCH.ACCESS_COUNT, newCount)
                .set(SCRATCH.LAST_ACCESSED, now)
-               .where(SCRATCH.ID.eq(id))
+               .where(SCRATCH.ID.eq(id).and(SCRATCH.SESSION_ID.eq(sessionId)))
                .execute();
             // Return the post-increment value so the caller sees the updated access_count
             rec.setAccessCount(newCount);
@@ -159,14 +159,14 @@ public final class ScratchRepository {
                 .limit(limit)
                 .fetch();
 
-            // Batch update access_count
+            // Batch update access_count — include session_id guard for defence-in-depth
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
             List<String> ids = recs.stream().map(ScratchRecord::getId).toList();
             if (!ids.isEmpty()) {
                 dsl.update(SCRATCH)
                    .set(SCRATCH.ACCESS_COUNT, SCRATCH.ACCESS_COUNT.add(1))
                    .set(SCRATCH.LAST_ACCESSED, now)
-                   .where(SCRATCH.ID.in(ids))
+                   .where(SCRATCH.ID.in(ids).and(SCRATCH.SESSION_ID.eq(sessionId)))
                    .execute();
             }
 
