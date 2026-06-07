@@ -20,7 +20,9 @@ import dev.nexus.service.http.PlanHandler;
 import dev.nexus.service.http.ScratchHandler;
 import dev.nexus.service.http.TaxonomyHandler;
 import dev.nexus.service.http.TelemetryHandler;
+import dev.nexus.service.http.VectorHandler;
 import dev.nexus.service.http.WhoamiHandler;
+import dev.nexus.service.vectors.VectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,11 +71,24 @@ public final class NexusService {
     private final ScheduledExecutorService sweepScheduler;
 
     /**
+     * Convenience constructor: no vector backend (original signature for existing tests).
+     *
      * @param port      listen port; 0 for OS-assigned ephemeral (use in tests)
      * @param token     expected bearer token (from NX_SERVICE_TOKEN env or config)
      * @param dataSource pooled connection source (HikariCP in production)
      */
     public NexusService(int port, String token, DataSource dataSource) throws IOException {
+        this(port, token, dataSource, null);
+    }
+
+    /**
+     * @param port           listen port; 0 for OS-assigned ephemeral (use in tests)
+     * @param token          expected bearer token (from NX_SERVICE_TOKEN env or config)
+     * @param dataSource     pooled connection source (HikariCP in production)
+     * @param vectorRepository optional VectorRepository for Seam B vector ops (may be null)
+     */
+    public NexusService(int port, String token, DataSource dataSource,
+                        VectorRepository vectorRepository) throws IOException {
         this.tenantScope = new TenantScope(dataSource);
         var memoryRepo    = new MemoryRepository(tenantScope);
         var planRepo      = new PlanRepository(tenantScope);
@@ -127,6 +142,14 @@ public final class NexusService {
         // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18)
         var catalogCtx = server.createContext("/v1/catalog", new CatalogHandler(catalogRepo));
         catalogCtx.getFilters().addAll(authFilter);
+
+        // /v1/vectors/* — vector (Chroma) endpoints (bead nexus-gmiaf.20)
+        // Only registered when a VectorRepository is provided (NX_STORAGE_BACKEND_VECTORS=service)
+        if (vectorRepository != null) {
+            var vectorCtx = server.createContext("/v1/vectors", new VectorHandler(vectorRepository));
+            vectorCtx.getFilters().addAll(authFilter);
+            log.info("event=vector_endpoints_registered");
+        }
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
 

@@ -63,6 +63,14 @@
         -->
         <jooq.generated.dir>${project.basedir}/src/main/generated/jooq</jooq.generated.dir>
         <jooq.generated.pkg>dev.nexus.service.jooq</jooq.generated.pkg>
+
+        <!-- Seam B — local ONNX embedding (S0.2 proven stack) -->
+        <onnxruntime.version>1.20.0</onnxruntime.version>
+        <djl.tokenizers.version>0.30.0</djl.tokenizers.version>
+
+        <!-- Surefire tag exclusion: skip @Tag("integration") by default -->
+        <!-- Override with: mvn test -Dtest.excluded.groups="" -Dgroups=integration -->
+        <test.excluded.groups>integration</test.excluded.groups>
     </properties>
 
     <dependencies>
@@ -116,6 +124,18 @@
             <groupId>org.liquibase</groupId>
             <artifactId>liquibase-core</artifactId>
             <version>${liquibase.version}</version>
+        </dependency>
+
+        <!-- Seam B: local ONNX embedding (onnxruntime-java + DJL HF tokenizer) -->
+        <dependency>
+            <groupId>com.microsoft.onnxruntime</groupId>
+            <artifactId>onnxruntime</artifactId>
+            <version>${onnxruntime.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>ai.djl.huggingface</groupId>
+            <artifactId>tokenizers</artifactId>
+            <version>${djl.tokenizers.version}</version>
         </dependency>
 
         <!-- Test: JUnit 5 -->
@@ -182,12 +202,15 @@
             </plugin>
 
             <!-- Surefire: run JUnit 5, enable-preview, per-test JVM flags -->
+            <!-- integration tests (@Tag("integration")) are excluded by default -->
+            <!-- Run them with: mvn test -Dgroups=integration                    -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
                 <configuration>
                     <argLine>--enable-preview</argLine>
+                    <excludedGroups>${test.excluded.groups}</excludedGroups>
                 </configuration>
             </plugin>
 
