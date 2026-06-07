@@ -33,6 +33,7 @@ import java.util.Map;
  *   POST /v1/vectors/search          embed query server-side + Chroma query (multi-collection)
  *   POST /v1/vectors/query           alias for search (mirrors MCP query tool)
  *   POST /v1/vectors/store-put       single-chunk put (MCP store_put path)
+ *   POST /v1/vectors/get              get chunks by metadata where-filter (incremental-sync staleness check)
  *   POST /v1/vectors/store-get       fetch chunks by IDs (MCP store_get/store_get_many)
  *   POST /v1/vectors/store-list      list collection (MCP store_list)
  *   POST /v1/vectors/store-delete    delete by IDs (MCP store_delete)
@@ -88,6 +89,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/search"        -> handleSearch(exchange, method);
                 case "/query"         -> handleSearch(exchange, method);   // alias
                 case "/store-put"     -> handleStorePut(exchange, method);
+                case "/get"           -> handleGet(exchange, method);
                 case "/store-get"     -> handleStoreGet(exchange, method);
                 case "/store-list"    -> handleStoreList(exchange, method);
                 case "/store-delete"  -> handleStoreDelete(exchange, method);
@@ -204,6 +206,40 @@ public final class VectorHandler implements HttpHandler {
 
         String returnedId = repo.put(collection, docId, content, metadata);
         HttpUtil.send(ex, 200, json(Map.of("id", returnedId)));
+    }
+
+    /**
+     * POST /v1/vectors/get
+     *
+     * <p>Incremental-sync staleness check for the Python {@code _ServiceCollectionStub}
+     * (RDR-152 Seam B nexus-gmiaf.22). Accepts a metadata {@code where} filter
+     * so doc_indexer can query existing chunks by {@code source_key} /
+     * {@code content_hash} without fetching the full collection.
+     *
+     * <p>Request:
+     * <pre>
+     * {
+     *   "collection": "...",
+     *   "where":      {"$and": [...]},  // optional metadata filter
+     *   "include":    ["metadatas"],    // optional, ignored (always returns ids+docs+metadatas)
+     *   "limit":      10,              // optional, default 10
+     *   "offset":     0               // optional, default 0
+     * }
+     * </pre>
+     *
+     * <p>Response 200: {"ids":[...], "documents":[...], "metadatas":[...]}
+     */
+    @SuppressWarnings("unchecked")
+    private void handleGet(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        String collection              = requireString(body, "collection");
+        Map<String, Object> where      = optMap(body, "where");
+        int limit                      = optInt(body, "limit", 10);
+        int offset                     = optInt(body, "offset", 0);
+
+        var result = repo.getWhere(collection, where, limit, offset);
+        HttpUtil.send(ex, 200, json(result));
     }
 
     /**

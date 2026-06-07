@@ -142,6 +142,9 @@ def test_run_index_service_mode_uses_get_t3_not_make_t3(tmp_path, monkeypatch):
         _run_index(repo, reg)
         # get_t3 must have been called to obtain the service-backed store
         mocks["get_t3"].assert_called()
+        # make_t3 must NOT have been called — it would create a split-brain
+        # write to daemon-Chroma while search reads service-Chroma
+        mocks["make_t3"].assert_not_called()
 
 
 def test_run_index_non_service_mode_uses_make_t3(tmp_path, monkeypatch):
@@ -245,6 +248,62 @@ def test_index_document_service_mode_calls_upsert_chunks(tmp_path, monkeypatch):
         assert db.upsert_chunks_with_embeddings.called, (
             "expected upsert_chunks_with_embeddings call in service mode"
         )
+
+
+def test_index_document_service_mode_t3_none_no_credentials_error(tmp_path, monkeypatch):
+    """CLI deployment path: _index_document with t3=None in service mode must NOT
+    raise CredentialsMissingError even when no Voyage/Chroma creds are set.
+
+    This is the deployment-blocking scenario identified by the substantive critic:
+    a production service-mode node has no Voyage/Chroma creds by design (the
+    service embeds), but doc_indexer's old guard fired is_local_mode() first,
+    then the credential check, before service mode was tested. The fixed guard
+    must check is_vector_service_mode() FIRST so the credential gate is bypassed
+    entirely in service mode.
+    """
+    from nexus.doc_indexer import _index_document, _markdown_chunks
+
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
+    monkeypatch.delenv("NX_LOCAL", raising=False)
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
+
+    test_file = tmp_path / "test.md"
+    test_file.write_text("# Test\nContent here.\n")
+
+    db, col = _make_doc_indexer_db()
+    mock_get_t3 = MagicMock(return_value=db)
+    mock_make_t3 = MagicMock(return_value=db)
+    mock_hooks = MagicMock()
+
+    def fake_chunk_fn(file_path, content_hash, target_model, now_iso, corpus):
+        return [("id1", "chunk text", {"embedding_model": target_model})]
+
+    with patch("nexus.mcp_infra.get_t3", mock_get_t3), \
+         patch("nexus.doc_indexer.make_t3", mock_make_t3), \
+         patch("nexus.doc_indexer._embed_with_fallback") as embed_mock, \
+         patch("nexus.doc_indexer._make_local_embed_fn") as local_embed_mock, \
+         patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
+         patch("nexus.doc_indexer._chroma_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
+         patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
+         patch("nexus.hook_registry.install_default_hooks"):
+        # Must NOT raise CredentialsMissingError or any credential-related error
+        count = _index_document(
+            test_file,
+            corpus="test-corpus",
+            chunk_fn=fake_chunk_fn,
+            t3=None,      # CLI path: forces get_t3() routing
+            embed_fn=None,
+        )
+
+    assert count > 0, f"Expected at least 1 chunk indexed, got {count}"
+    # get_t3() must have been called (service-mode routing)
+    mock_get_t3.assert_called()
+    # make_t3() must NOT have been called (split-brain prevention)
+    mock_make_t3.assert_not_called()
+    # No Python embed must have fired
+    embed_mock.assert_not_called()
+    local_embed_mock.assert_not_called()
 
 
 def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monkeypatch):
@@ -389,4 +448,23 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     )
     assert result.t2database_constructions == 31, (
         f"t2database_constructions baseline changed: {result.t2database_constructions}"
+    )
+
+
+def test_voyageai_epsilon_allow_count_ratchet():
+    """voyageai_epsilon_allow_count must be exactly 3 after the Seam B cutover:
+    - indexer.py (cloud/non-service legacy path)
+    - doc_indexer.py (_embed_with_fallback legacy path)
+    - commands/collection.py (re-embed CLI utility)
+
+    A new epsilon-allow on the service write path would increment this counter
+    and fail this assertion, preventing silent re-introduction of Python embedding
+    in service mode. The ratchet is locked; it must not grow without intent.
+    """
+    result = _lint_check()
+    assert result.voyageai_epsilon_allow_count == 3, (
+        f"voyageai_epsilon_allow_count changed from expected 3 to "
+        f"{result.voyageai_epsilon_allow_count}. "
+        f"A new voyageai.Client epsilon-allow was added — verify it is a "
+        f"Phase-4 deletion target and update this baseline if intentional."
     )

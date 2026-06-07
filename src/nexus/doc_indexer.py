@@ -586,22 +586,40 @@ def _index_document(
     # the local ONNX/fastembed embedder rather than a hard fail. The
     # local model name overrides ``target_model`` so the staleness
     # check + chunk metadata are consistent.
+    #
+    # RDR-152 Seam B (nexus-gmiaf.22): service mode is checked FIRST —
+    # before is_local_mode() and before the credential guard — so that a
+    # production service-mode node with NO Voyage/Chroma creds (the
+    # correct configuration when the service embeds) can call
+    # ``nx index md/pdf`` without raising CredentialsMissingError.
+    # Checking is_local_mode() first was the original ordering bug: the
+    # integration test's NX_LOCAL=1 caused _make_local_embed_fn() to fire
+    # before the service-mode stub branch, making the "no Python embed"
+    # proof vacuous.
     local_target_model: str | None = None
     if embed_fn is None:
-        from nexus.config import is_local_mode  # noqa: PLC0415
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
 
-        if is_local_mode():
-            embed_fn, local_target_model = _make_local_embed_fn()
-        elif not _has_credentials():
-            from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+        if is_vector_service_mode():
+            # Service embeds server-side. embed_fn stays None here;
+            # the embed-stub branch at the upsert site (below) handles it.
+            # No Voyage/Chroma creds required; no local ONNX constructed.
+            pass
+        else:
+            from nexus.config import is_local_mode  # noqa: PLC0415
 
-            missing = _missing_credentials()
-            raise CredentialsMissingError(
-                f"cannot index in cloud mode without {', '.join(missing)}. "
-                f"Either set the missing key(s) via 'nx config set <key> "
-                f"<value>' (or env var), or unset NX_LOCAL to fall back "
-                f"to local-mode ingestion (no API keys needed)."
-            )
+            if is_local_mode():
+                embed_fn, local_target_model = _make_local_embed_fn()
+            elif not _has_credentials():
+                from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+
+                missing = _missing_credentials()
+                raise CredentialsMissingError(
+                    f"cannot index in cloud mode without {', '.join(missing)}. "
+                    f"Either set the missing key(s) via 'nx config set <key> "
+                    f"<value>' (or env var), or unset NX_LOCAL to fall back "
+                    f"to local-mode ingestion (no API keys needed)."
+                )
 
     # Normalize to absolute so staleness checks are path-form-independent.
     file_path = file_path.resolve()
@@ -1182,22 +1200,32 @@ def index_pdf(
 
     _empty_meta = {"chunks": 0, "pages": [], "title": "", "author": ""}
     # GH #336 mirror: same local-fallback semantics as ``_index_document``.
+    # RDR-152 Seam B (nexus-gmiaf.22): service mode checked FIRST (same
+    # ordering fix as _index_document — prevents CredentialsMissingError on
+    # a service-mode node with no Voyage/Chroma creds).
     local_target_model: str | None = None
     if embed_fn is None:
-        from nexus.config import is_local_mode  # noqa: PLC0415
+        from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
 
-        if is_local_mode():
-            embed_fn, local_target_model = _make_local_embed_fn()
-        elif not _has_credentials():
-            from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+        if is_vector_service_mode():
+            # Service embeds server-side. embed_fn stays None; the upsert
+            # site's stub branch handles it. No creds / no local ONNX.
+            pass
+        else:
+            from nexus.config import is_local_mode  # noqa: PLC0415
 
-            missing = _missing_credentials()
-            raise CredentialsMissingError(
-                f"cannot index in cloud mode without {', '.join(missing)}. "
-                f"Either set the missing key(s) via 'nx config set <key> "
-                f"<value>' (or env var), or unset NX_LOCAL to fall back "
-                f"to local-mode ingestion (no API keys needed)."
-            )
+            if is_local_mode():
+                embed_fn, local_target_model = _make_local_embed_fn()
+            elif not _has_credentials():
+                from nexus.errors import CredentialsMissingError  # noqa: PLC0415
+
+                missing = _missing_credentials()
+                raise CredentialsMissingError(
+                    f"cannot index in cloud mode without {', '.join(missing)}. "
+                    f"Either set the missing key(s) via 'nx config set <key> "
+                    f"<value>' (or env var), or unset NX_LOCAL to fall back "
+                    f"to local-mode ingestion (no API keys needed)."
+                )
 
     # Normalize to absolute so staleness checks are path-form-independent.
     pdf_path = pdf_path.resolve()

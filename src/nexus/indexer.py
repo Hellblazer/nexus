@@ -2254,6 +2254,7 @@ def _run_index(
 
     _local_mode = _is_local()
     _embed_fn = None
+    _service_mode: bool = False  # resolved in the cloud/service branch below; False in local mode
 
     if _local_mode:
         check_local_path_writable()
@@ -2294,7 +2295,7 @@ def _run_index(
     else:
         _embed_fn_doc = None
         from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
-        _service_mode = is_vector_service_mode()
+        _service_mode = is_vector_service_mode()  # captured here; reused for T3 routing below
         if _service_mode:
             # RDR-152 Seam B (nexus-gmiaf.22): in service mode, embedding
             # happens server-side in the JVM.  Python must NOT create a
@@ -2330,8 +2331,8 @@ def _run_index(
     # RDR-152 Seam B (nexus-gmiaf.22): in service mode, route through
     # mcp_infra.get_t3() which returns HttpVectorClient.  In legacy mode,
     # use make_t3() to preserve the existing daemon-backed path.
-    from nexus.db.http_vector_client import is_vector_service_mode as _is_svc  # noqa: PLC0415
-    if _is_svc():
+    # Reuse _service_mode computed above to avoid a second module-import round-trip.
+    if _service_mode:
         from nexus.mcp_infra import get_t3 as _get_t3  # noqa: PLC0415
         db = _get_t3()
     else:

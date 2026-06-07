@@ -230,9 +230,14 @@ def test_indexer_seam_b_index_search_round_trip(
     monkeypatch.setenv("NX_SERVICE_URL", base_url)
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
 
-    # Force local mode so is_local_mode() returns True in doc_indexer
-    # (avoids the Voyage credential check in the non-service code path).
-    monkeypatch.setenv("NX_LOCAL", "1")
+    # Do NOT set NX_LOCAL=1: the service-mode guard must activate BEFORE
+    # is_local_mode() fires.  Setting NX_LOCAL=1 here would cause
+    # _make_local_embed_fn() to run first (the pre-fix ordering bug), making
+    # the "no Python embed" proof vacuous.  The guard fix (nexus-gmiaf.22)
+    # routes service mode first so no Voyage / ONNX creds are needed.
+    monkeypatch.delenv("NX_LOCAL", raising=False)
+    monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
 
     # Reset the singleton so new env vars are picked up
     from nexus.db.http_vector_client import reset_http_vector_client_for_tests
@@ -250,20 +255,58 @@ def test_indexer_seam_b_index_search_round_trip(
 
     collection = "knowledge__seam-b-test__minilm-l6-v2-384__v1"
 
-    # Index via doc_indexer using the service (embed_fn=None, service mode)
-    from nexus.doc_indexer import _index_document, _markdown_chunks
+    # NON-VACUITY PROOF: patch _make_local_embed_fn and _embed_with_fallback
+    # to raise AssertionError.  If either fires, the service-mode guard is
+    # broken and Python embedding is running instead of the service.
+    from unittest.mock import patch
 
-    chunks_indexed = _index_document(
-        test_doc,
-        corpus="seam-b-test",
-        collection_name=collection,
-        chunk_fn=_markdown_chunks,
-        t3=None,          # forces service-mode routing via get_t3()
-        embed_fn=None,    # no Python embed — service embeds
-    )
+    def _must_not_call_local_embed(*_a, **_kw):
+        raise AssertionError(
+            "_make_local_embed_fn was called in service mode — the service-mode "
+            "guard must prevent local ONNX from firing (guard ordering bug)"
+        )
+
+    def _must_not_call_embed_fallback(*_a, **_kw):
+        raise AssertionError(
+            "_embed_with_fallback was called in service mode — the service-mode "
+            "guard or upsert-site stub is broken (Python embed must not run)"
+        )
+
+    with patch("nexus.doc_indexer._make_local_embed_fn", side_effect=_must_not_call_local_embed), \
+         patch("nexus.doc_indexer._embed_with_fallback", side_effect=_must_not_call_embed_fallback):
+        # Index via doc_indexer using the service (embed_fn=None, service mode)
+        from nexus.doc_indexer import _index_document, _markdown_chunks
+
+        chunks_indexed = _index_document(
+            test_doc,
+            corpus="seam-b-test",
+            collection_name=collection,
+            chunk_fn=_markdown_chunks,
+            t3=None,          # forces service-mode routing via get_t3()
+            embed_fn=None,    # no Python embed — service embeds server-side
+        )
 
     assert chunks_indexed > 0, (
         f"Expected at least 1 chunk indexed, got {chunks_indexed}"
+    )
+
+    # Staleness check: second index call with same content must return 0
+    # (service now has /v1/vectors/get so incremental-sync works).
+    with patch("nexus.doc_indexer._make_local_embed_fn", side_effect=_must_not_call_local_embed), \
+         patch("nexus.doc_indexer._embed_with_fallback", side_effect=_must_not_call_embed_fallback):
+        from nexus.doc_indexer import _index_document as _index_document2
+        chunks_reindexed = _index_document2(
+            test_doc,
+            corpus="seam-b-test",
+            collection_name=collection,
+            chunk_fn=_markdown_chunks,
+            t3=None,
+            embed_fn=None,
+        )
+
+    assert chunks_reindexed == 0, (
+        f"Second index of identical content must be a no-op (0 upserts), "
+        f"got {chunks_reindexed} — staleness check via /v1/vectors/get is broken"
     )
 
     # Search for the unique phrase via the service's /v1/vectors/search

@@ -193,6 +193,27 @@ public final class VectorRepository {
                 List.of("documents", "metadatas"), null);
     }
 
+    /**
+     * Get chunks matching a metadata {@code where} filter.
+     *
+     * <p>Used by the Python {@code _ServiceCollectionStub} incremental-sync
+     * protocol (RDR-152 Seam B nexus-gmiaf.22): doc_indexer checks whether
+     * a file was already indexed by querying for chunks with a matching
+     * {@code source_key} / {@code content_hash}. Returns Chroma-style
+     * {@code {ids, documents, metadatas}}.
+     *
+     * @param collection target collection name
+     * @param where      metadata filter (may be null — returns paginated results)
+     * @param limit      max records to return
+     * @param offset     skip N records
+     */
+    public Map<String, Object> getWhere(String collection,
+                                         Map<String, Object> where,
+                                         int limit, int offset) {
+        return chroma.get(collection, null, limit, offset,
+                List.of("documents", "metadatas"), where);
+    }
+
     // ── store_list ────────────────────────────────────────────────────────────
 
     /**
