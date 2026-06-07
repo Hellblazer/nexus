@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.9.xsd">
+
+    <changeSet id="001-create-schema" author="s04spike">
+        <sql>CREATE SCHEMA IF NOT EXISTS nexus_spike</sql>
+    </changeSet>
+
+    <changeSet id="002-create-embeddings-table" author="s04spike">
+        <sql>
+            CREATE TABLE IF NOT EXISTS nexus_spike.embeddings (
+                id      BIGSERIAL PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                key     TEXT NOT NULL,
+                payload TEXT NOT NULL
+            )
+        </sql>
+    </changeSet>
+
+    <changeSet id="003-enable-rls" author="s04spike">
+        <sql>ALTER TABLE nexus_spike.embeddings ENABLE ROW LEVEL SECURITY</sql>
+        <sql>ALTER TABLE nexus_spike.embeddings FORCE ROW LEVEL SECURITY</sql>
+    </changeSet>
+
+    <changeSet id="004-create-rls-policy" author="s04spike">
+        <sql>
+            CREATE POLICY tenant_isolation ON nexus_spike.embeddings
+            USING (tenant_id = current_setting('nexus.tenant', true))
+            WITH CHECK (tenant_id = current_setting('nexus.tenant', true))
+        </sql>
+    </changeSet>
+
+    <changeSet id="005-grant-to-service-role" author="s04spike">
+        <sql>GRANT USAGE ON SCHEMA nexus_spike TO s04user</sql>
+        <sql>GRANT SELECT, INSERT, UPDATE, DELETE ON nexus_spike.embeddings TO s04user</sql>
+        <sql>GRANT USAGE, SELECT ON SEQUENCE nexus_spike.embeddings_id_seq TO s04user</sql>
+    </changeSet>
+
+</databaseChangeLog>
