@@ -151,7 +151,9 @@ public final class MemoryHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String project = requireString(body, "project");
         String title   = requireString(body, "title");
-        String content = requireString(body, "content");
+        // content may be empty string (no word-set → plain insert, no Jaccard scan,
+        // no division-by-zero).  Use optStringOrEmpty so "" is accepted.
+        String content = optStringOrEmpty(body, "content");
         String tags    = optStringOrEmpty(body, "tags");
         String session = optStringOrNull(body, "session");
         String agent   = optStringOrNull(body, "agent");
