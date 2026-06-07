@@ -26,8 +26,11 @@
     <!-- Store 5: taxonomy (bead nexus-gmiaf.14) — NO FTS; exact-equality + doc_count sort -->
     <include file="db/changelog/taxonomy-001-baseline.xml"/>
 
+    <!-- Store 6: aspects / highlights / queue / promotion-log (bead nexus-gmiaf.15) -->
+    <include file="db/changelog/aspects-001-baseline.xml"/>
+
     <!--
-        Future includes (beads .15-.18):
+        Future includes (beads .16-.18):
         <include file="db/changelog/catalog-001-baseline.xml"/>
     -->
 

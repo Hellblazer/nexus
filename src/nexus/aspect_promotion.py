@@ -125,6 +125,14 @@ def promote_extras_field(
             f"got {sql_type!r}",
         )
 
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+        raise NotImplementedError(
+            "promote_extras_field not yet supported on the service backend "
+            "(document_aspects=service); schema promotion is a SQLite-specific "
+            "ALTER TABLE + backfill. Track: nexus-gmiaf.35"
+        )
+
     conn = db.document_aspects.conn
     lock = db.document_aspects._lock
     now = datetime.now(UTC).isoformat()
@@ -196,6 +204,14 @@ def list_promotions(db) -> list[dict]:
     aspects-promote-field --history`` flag and by anyone
     auditing the schema's evolution.
     """
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+        raise NotImplementedError(
+            "list_promotions not yet supported on the service backend "
+            "(document_aspects=service); promotion_log is a SQLite-specific "
+            "table. Track: nexus-gmiaf.35"
+        )
+
     conn = db.document_aspects.conn
     lock = db.document_aspects._lock
     _ensure_audit_table(conn, lock)
@@ -289,9 +305,17 @@ def _ensure_audit_table(conn, lock) -> None:
 
 def _record_promotion_audit(db, result: PromotionResult) -> None:
     """Insert a row into the audit log. Best-effort: persistence
-    failure logs at debug level and is otherwise swallowed (the
+    failure logs at warning level and is otherwise swallowed (the
     promotion already happened; losing the audit row is annoying
-    but not corruption-class)."""
+    but not corruption-class).
+
+    Note: callers guard SERVICE mode before invoking ``promote_extras_field``
+    which is the only entry-point for this function. The guard there raises
+    ``NotImplementedError`` before any mutation occurs, so this function is
+    unreachable in SERVICE mode. The swallow is raised to warning (from debug)
+    so that if the outer guard is ever removed a failing audit is visible rather
+    than silent.
+    """
     conn = db.document_aspects.conn
     lock = db.document_aspects._lock
     try:
@@ -313,4 +337,4 @@ def _record_promotion_audit(db, result: PromotionResult) -> None:
             )
             conn.commit()
     except Exception:
-        _log.debug("aspect_promotion_audit_failed", exc_info=True)
+        _log.warning("aspect_promotion_audit_failed", exc_info=True)

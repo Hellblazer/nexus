@@ -220,6 +220,15 @@ def aspects_gc_fixtures(yes: bool) -> None:
 
     verb = "deleted" if yes else "would delete"
     any_rows = False
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+        raise NotImplementedError(
+            "gc-fixtures not yet supported on the service backend "
+            "(document_aspects=service); fixture cleanup uses raw SQL DELETE "
+            "via SQLite cursors which are unavailable over HTTP. "
+            "Track: nexus-gmiaf.37"
+        )
+
     with T2Database(mem_path) as db:  # epsilon-allow: gc-fixtures issues raw multi-store DELETE via live cursors, no store method to route (RDR-128 P3 documented-irreducible)
         # Both target stores expose ``conn`` directly (matching the
         # existing module convention; their writers go through the

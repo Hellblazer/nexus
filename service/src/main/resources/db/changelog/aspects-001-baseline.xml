@@ -1,0 +1,265 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-152 bead nexus-gmiaf.15 — aspects, highlights, queue, and promotion-log baseline changelog.
+
+    Creates 4 tables mirroring the SQLite stores 1:1 with tenant_id for RLS:
+      nexus.document_aspects         — structured per-document aspects (RDR-089)
+      nexus.document_highlights      — DEVONthink highlight/mention notes (RDR-139 Layer E)
+      nexus.aspect_extraction_queue  — durable WAL queue for async aspect extraction
+      nexus.aspect_promotion_log     — audit log for extras→column promotions (RDR-089 Phase E)
+
+    FTS contract: NO FTS on any of these tables. Aspect querying is by structured fields
+    (collection, source_uri, extractor_name, confidence range, etc.), never full-text search.
+    The FTS parity contract (Store 4 taxonomy) says NO tsvector — same applies here.
+
+    Queue concurrency: claim_next uses SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1
+    (the PG atomic claim pattern that eliminates WAL contention — the key motivation
+    for migrating this store to Postgres in RDR-152).
+
+    Column strategy for ETL import:
+      document_aspects (complete-overwrite upsert — keyed by (tenant_id, collection, source_path)):
+        All columns: EXCLUDED.* verbatim. Last extraction wins. confidence preserved.
+      document_highlights (complete-overwrite upsert — keyed by (tenant_id, doc_id)):
+        All columns: EXCLUDED.* verbatim.
+      aspect_extraction_queue (live-mutable; DO NOT clobber in_progress rows):
+        status: CASE — never downgrade in_progress to pending via stale ETL import.
+                       Use EXCLUDED.status only if existing.status = 'pending' or 'failed'.
+        retry_count: GREATEST(EXCLUDED.retry_count, existing.retry_count)
+        last_attempt_at: GREATEST (ISO-8601 lexicographic max; preserve latest attempt)
+        content/content_hash/doc_id: EXCLUDED (allow ETL to refresh)
+        enqueued_at: existing (keep oldest; do not overwrite the original enqueue time)
+        last_error: EXCLUDED.last_error when EXCLUDED.status = 'failed', else existing
+      aspect_promotion_log (event log; append-only; ON CONFLICT DO NOTHING):
+        The log is an audit trail — never overwrite historical events.
+
+    Soft FK note: columns referencing catalog doc tumblers (doc_id, source_uri) are
+    plain TEXT columns, NOT enforced PG foreign keys. FK tightening in nexus-b7v6i.
+
+    Index rationale:
+      document_aspects: (collection, source_path) natural key for the get() path;
+        (extractor_name, model_version) for re-extraction triage (list_by_extractor_version);
+        source_uri for the post-drop read path.
+      aspect_extraction_queue: (status) for claim_next and pending_count;
+        (status, enqueued_at) for FIFO claim ordering.
+      document_highlights: source_uri for get_by_source_uri().
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: document_aspects table ───────────────────────────────── -->
+    <changeSet id="aspects-001-1" author="nexus-gmiaf.15">
+        <comment>Create nexus.document_aspects mirroring SQLite document_aspects.py schema</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.document_aspects (
+    id                      BIGSERIAL    NOT NULL,
+    tenant_id               TEXT         NOT NULL,
+    collection              TEXT         NOT NULL,
+    source_path             TEXT         NOT NULL,
+    problem_formulation     TEXT,
+    proposed_method         TEXT,
+    experimental_datasets   TEXT,
+    experimental_baselines  TEXT,
+    experimental_results    TEXT,
+    extras                  TEXT,
+    confidence              DOUBLE PRECISION,
+    extracted_at            TIMESTAMPTZ  NOT NULL,
+    model_version           TEXT         NOT NULL,
+    extractor_name          TEXT         NOT NULL,
+    source_uri              TEXT,
+    salient_sentences       TEXT,
+    doc_id                  TEXT         NOT NULL DEFAULT '',
+    CONSTRAINT document_aspects_pk PRIMARY KEY (id),
+    CONSTRAINT document_aspects_tenant_col_path_uq UNIQUE (tenant_id, collection, source_path)
+);
+
+-- (extractor_name, model_version) — list_by_extractor_version() triage
+CREATE INDEX idx_doc_aspects_extractor  ON nexus.document_aspects (tenant_id, extractor_name, model_version);
+-- source_uri — post-drop URI-keyed read path
+CREATE INDEX idx_doc_aspects_source_uri ON nexus.document_aspects (tenant_id, source_uri);
+-- collection — list_by_collection() scans
+CREATE INDEX idx_doc_aspects_collection ON nexus.document_aspects (tenant_id, collection);
+-- doc_id — get_by_doc_id() tumbler lookups
+CREATE INDEX idx_doc_aspects_doc_id     ON nexus.document_aspects (tenant_id, doc_id) WHERE doc_id != '';
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.document_aspects CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: document_aspects RLS ─────────────────────────────────── -->
+    <changeSet id="aspects-001-2" author="nexus-gmiaf.15">
+        <comment>RLS: ENABLE + FORCE + tenant_isolation policy on document_aspects</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.document_aspects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_aspects FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.document_aspects
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.document_aspects;
+            ALTER TABLE nexus.document_aspects NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.document_aspects DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: document_highlights table ────────────────────────────── -->
+    <changeSet id="aspects-001-3" author="nexus-gmiaf.15">
+        <comment>Create nexus.document_highlights mirroring SQLite document_highlights.py schema</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.document_highlights (
+    id            BIGSERIAL    NOT NULL,
+    tenant_id     TEXT         NOT NULL,
+    doc_id        TEXT         NOT NULL,
+    source_uri    TEXT,
+    collection    TEXT,
+    highlights_md TEXT,
+    mentions_md   TEXT,
+    ingested_at   TIMESTAMPTZ  NOT NULL,
+    CONSTRAINT document_highlights_pk PRIMARY KEY (id),
+    CONSTRAINT document_highlights_tenant_doc_uq UNIQUE (tenant_id, doc_id)
+);
+
+-- source_uri — get_by_source_uri() lookup
+CREATE INDEX idx_doc_highlights_source_uri ON nexus.document_highlights (tenant_id, source_uri);
+-- ingested_at — list() ORDER BY ingested_at DESC
+CREATE INDEX idx_doc_highlights_ingested   ON nexus.document_highlights (tenant_id, ingested_at DESC);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.document_highlights CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: document_highlights RLS ──────────────────────────────── -->
+    <changeSet id="aspects-001-4" author="nexus-gmiaf.15">
+        <comment>RLS on document_highlights</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.document_highlights ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_highlights FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.document_highlights
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.document_highlights;
+            ALTER TABLE nexus.document_highlights NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.document_highlights DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 5: aspect_extraction_queue table ────────────────────────── -->
+    <changeSet id="aspects-001-5" author="nexus-gmiaf.15">
+        <comment>Create nexus.aspect_extraction_queue with FOR UPDATE SKIP LOCKED claim support</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.aspect_extraction_queue (
+    id              BIGSERIAL    NOT NULL,
+    tenant_id       TEXT         NOT NULL,
+    collection      TEXT         NOT NULL,
+    source_path     TEXT         NOT NULL,
+    doc_id          TEXT         NOT NULL DEFAULT '',
+    content_hash    TEXT         NOT NULL DEFAULT '',
+    content         TEXT         NOT NULL DEFAULT '',
+    status          TEXT         NOT NULL DEFAULT 'pending',
+    retry_count     INTEGER      NOT NULL DEFAULT 0,
+    enqueued_at     TIMESTAMPTZ  NOT NULL,
+    last_attempt_at TIMESTAMPTZ,
+    last_error      TEXT,
+    CONSTRAINT aspect_queue_pk PRIMARY KEY (id),
+    CONSTRAINT aspect_queue_tenant_col_path_uq UNIQUE (tenant_id, collection, source_path)
+);
+
+-- status index — claim_next (WHERE status='pending') and pending_count
+CREATE INDEX idx_aspect_queue_status    ON nexus.aspect_extraction_queue (tenant_id, status);
+-- (status, enqueued_at) — FIFO claim ordering for SELECT ... FOR UPDATE SKIP LOCKED
+CREATE INDEX idx_aspect_queue_fifo      ON nexus.aspect_extraction_queue (tenant_id, status, enqueued_at ASC);
+-- doc_id — mark_done(doc_id=...) path
+CREATE INDEX idx_aspect_queue_doc_id    ON nexus.aspect_extraction_queue (tenant_id, doc_id) WHERE doc_id != '';
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.aspect_extraction_queue CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 6: aspect_extraction_queue RLS ──────────────────────────── -->
+    <changeSet id="aspects-001-6" author="nexus-gmiaf.15">
+        <comment>RLS on aspect_extraction_queue</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.aspect_extraction_queue ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.aspect_extraction_queue FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.aspect_extraction_queue
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.aspect_extraction_queue;
+            ALTER TABLE nexus.aspect_extraction_queue NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.aspect_extraction_queue DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 7: aspect_promotion_log table ───────────────────────────── -->
+    <changeSet id="aspects-001-7" author="nexus-gmiaf.15">
+        <comment>Create nexus.aspect_promotion_log (audit event log; append-only)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.aspect_promotion_log (
+    id              BIGSERIAL    NOT NULL,
+    tenant_id       TEXT         NOT NULL,
+    field_name      TEXT         NOT NULL,
+    sql_type        TEXT         NOT NULL,
+    column_added    INTEGER      NOT NULL DEFAULT 0,
+    rows_backfilled INTEGER      NOT NULL DEFAULT 0,
+    rows_pruned     INTEGER      NOT NULL DEFAULT 0,
+    pruned          INTEGER      NOT NULL DEFAULT 0,
+    promoted_at     TIMESTAMPTZ  NOT NULL,
+    CONSTRAINT aspect_promotion_log_pk PRIMARY KEY (id)
+);
+
+-- field_name — list_promotions() history queries
+CREATE INDEX idx_aspect_promo_field ON nexus.aspect_promotion_log (tenant_id, field_name);
+-- ETL dedup: same field_name + promoted_at + tenant = same promotion event
+CREATE UNIQUE INDEX idx_aspect_promo_etl_dedup
+    ON nexus.aspect_promotion_log (tenant_id, field_name, promoted_at);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.aspect_promotion_log CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 8: aspect_promotion_log RLS ─────────────────────────────── -->
+    <changeSet id="aspects-001-8" author="nexus-gmiaf.15">
+        <comment>RLS on aspect_promotion_log</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.aspect_promotion_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.aspect_promotion_log FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.aspect_promotion_log
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.aspect_promotion_log;
+            ALTER TABLE nexus.aspect_promotion_log NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.aspect_promotion_log DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 9: service role grants ──────────────────────────────────── -->
+    <changeSet id="aspects-001-9" author="nexus-gmiaf.15">
+        <comment>Grant table privileges to nexus_svc role</comment>
+        <sql splitStatements="false">
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.document_aspects        TO nexus_svc';
+        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.document_aspects_id_seq                 TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.document_highlights     TO nexus_svc';
+        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.document_highlights_id_seq              TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.aspect_extraction_queue TO nexus_svc';
+        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.aspect_extraction_queue_id_seq          TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.aspect_promotion_log    TO nexus_svc';
+        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.aspect_promotion_log_id_seq             TO nexus_svc';
+        RAISE NOTICE 'Granted aspects table privileges to nexus_svc';
+    ELSE
+        RAISE NOTICE 'nexus_svc role not found; skipping grants';
+    END IF;
+END
+$$;
+        </sql>
+        <rollback><!-- Grants not rolled back; DBA operation. --></rollback>
+    </changeSet>
+
+</databaseChangeLog>
