@@ -4,6 +4,17 @@
 package dev.nexus.service.jooq.nexus;
 
 
+import dev.nexus.service.jooq.nexus.tables.AspectExtractionQueue;
+import dev.nexus.service.jooq.nexus.tables.AspectPromotionLog;
+import dev.nexus.service.jooq.nexus.tables.CatalogCollections;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocumentChunks;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocuments;
+import dev.nexus.service.jooq.nexus.tables.CatalogLinks;
+import dev.nexus.service.jooq.nexus.tables.CatalogMeta;
+import dev.nexus.service.jooq.nexus.tables.CatalogOwners;
+import dev.nexus.service.jooq.nexus.tables.ChashIndex;
+import dev.nexus.service.jooq.nexus.tables.DocumentAspects;
+import dev.nexus.service.jooq.nexus.tables.DocumentHighlights;
 import dev.nexus.service.jooq.nexus.tables.Frecency;
 import dev.nexus.service.jooq.nexus.tables.HookFailures;
 import dev.nexus.service.jooq.nexus.tables.Memory;
@@ -16,6 +27,17 @@ import dev.nexus.service.jooq.nexus.tables.TierWrites;
 import dev.nexus.service.jooq.nexus.tables.TopicAssignments;
 import dev.nexus.service.jooq.nexus.tables.TopicLinks;
 import dev.nexus.service.jooq.nexus.tables.Topics;
+import dev.nexus.service.jooq.nexus.tables.records.AspectExtractionQueueRecord;
+import dev.nexus.service.jooq.nexus.tables.records.AspectPromotionLogRecord;
+import dev.nexus.service.jooq.nexus.tables.records.CatalogCollectionsRecord;
+import dev.nexus.service.jooq.nexus.tables.records.CatalogDocumentChunksRecord;
+import dev.nexus.service.jooq.nexus.tables.records.CatalogDocumentsRecord;
+import dev.nexus.service.jooq.nexus.tables.records.CatalogLinksRecord;
+import dev.nexus.service.jooq.nexus.tables.records.CatalogMetaRecord;
+import dev.nexus.service.jooq.nexus.tables.records.CatalogOwnersRecord;
+import dev.nexus.service.jooq.nexus.tables.records.ChashIndexRecord;
+import dev.nexus.service.jooq.nexus.tables.records.DocumentAspectsRecord;
+import dev.nexus.service.jooq.nexus.tables.records.DocumentHighlightsRecord;
 import dev.nexus.service.jooq.nexus.tables.records.FrecencyRecord;
 import dev.nexus.service.jooq.nexus.tables.records.HookFailuresRecord;
 import dev.nexus.service.jooq.nexus.tables.records.MemoryRecord;
@@ -48,6 +70,22 @@ public class Keys {
     // UNIQUE and PRIMARY KEY definitions
     // -------------------------------------------------------------------------
 
+    public static final UniqueKey<AspectExtractionQueueRecord> ASPECT_QUEUE_PK = Internal.createUniqueKey(AspectExtractionQueue.ASPECT_EXTRACTION_QUEUE, DSL.name("aspect_queue_pk"), new TableField[] { AspectExtractionQueue.ASPECT_EXTRACTION_QUEUE.ID }, true);
+    public static final UniqueKey<AspectExtractionQueueRecord> ASPECT_QUEUE_TENANT_COL_PATH_UQ = Internal.createUniqueKey(AspectExtractionQueue.ASPECT_EXTRACTION_QUEUE, DSL.name("aspect_queue_tenant_col_path_uq"), new TableField[] { AspectExtractionQueue.ASPECT_EXTRACTION_QUEUE.TENANT_ID, AspectExtractionQueue.ASPECT_EXTRACTION_QUEUE.COLLECTION, AspectExtractionQueue.ASPECT_EXTRACTION_QUEUE.SOURCE_PATH }, true);
+    public static final UniqueKey<AspectPromotionLogRecord> ASPECT_PROMOTION_LOG_PK = Internal.createUniqueKey(AspectPromotionLog.ASPECT_PROMOTION_LOG, DSL.name("aspect_promotion_log_pk"), new TableField[] { AspectPromotionLog.ASPECT_PROMOTION_LOG.ID }, true);
+    public static final UniqueKey<CatalogCollectionsRecord> CATALOG_COLLECTIONS_PK = Internal.createUniqueKey(CatalogCollections.CATALOG_COLLECTIONS, DSL.name("catalog_collections_pk"), new TableField[] { CatalogCollections.CATALOG_COLLECTIONS.TENANT_ID, CatalogCollections.CATALOG_COLLECTIONS.NAME }, true);
+    public static final UniqueKey<CatalogDocumentChunksRecord> CATALOG_DOCUMENT_CHUNKS_PK = Internal.createUniqueKey(CatalogDocumentChunks.CATALOG_DOCUMENT_CHUNKS, DSL.name("catalog_document_chunks_pk"), new TableField[] { CatalogDocumentChunks.CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CatalogDocumentChunks.CATALOG_DOCUMENT_CHUNKS.DOC_ID, CatalogDocumentChunks.CATALOG_DOCUMENT_CHUNKS.POSITION }, true);
+    public static final UniqueKey<CatalogDocumentsRecord> CATALOG_DOCUMENTS_PK = Internal.createUniqueKey(CatalogDocuments.CATALOG_DOCUMENTS, DSL.name("catalog_documents_pk"), new TableField[] { CatalogDocuments.CATALOG_DOCUMENTS.TENANT_ID, CatalogDocuments.CATALOG_DOCUMENTS.TUMBLER }, true);
+    public static final UniqueKey<CatalogLinksRecord> CATALOG_LINKS_PK = Internal.createUniqueKey(CatalogLinks.CATALOG_LINKS, DSL.name("catalog_links_pk"), new TableField[] { CatalogLinks.CATALOG_LINKS.TENANT_ID, CatalogLinks.CATALOG_LINKS.ID }, true);
+    public static final UniqueKey<CatalogLinksRecord> CATALOG_LINKS_UNIQUE = Internal.createUniqueKey(CatalogLinks.CATALOG_LINKS, DSL.name("catalog_links_unique"), new TableField[] { CatalogLinks.CATALOG_LINKS.TENANT_ID, CatalogLinks.CATALOG_LINKS.FROM_TUMBLER, CatalogLinks.CATALOG_LINKS.TO_TUMBLER, CatalogLinks.CATALOG_LINKS.LINK_TYPE }, true);
+    public static final UniqueKey<CatalogMetaRecord> CATALOG_META_PK = Internal.createUniqueKey(CatalogMeta.CATALOG_META, DSL.name("catalog_meta_pk"), new TableField[] { CatalogMeta.CATALOG_META.TENANT_ID, CatalogMeta.CATALOG_META.KEY }, true);
+    public static final UniqueKey<CatalogOwnersRecord> CATALOG_OWNERS_PK = Internal.createUniqueKey(CatalogOwners.CATALOG_OWNERS, DSL.name("catalog_owners_pk"), new TableField[] { CatalogOwners.CATALOG_OWNERS.TENANT_ID, CatalogOwners.CATALOG_OWNERS.TUMBLER_PREFIX }, true);
+    public static final UniqueKey<CatalogOwnersRecord> CATALOG_OWNERS_UNIQUE_NAME_TYPE = Internal.createUniqueKey(CatalogOwners.CATALOG_OWNERS, DSL.name("catalog_owners_unique_name_type"), new TableField[] { CatalogOwners.CATALOG_OWNERS.TENANT_ID, CatalogOwners.CATALOG_OWNERS.NAME, CatalogOwners.CATALOG_OWNERS.OWNER_TYPE }, true);
+    public static final UniqueKey<ChashIndexRecord> CHASH_INDEX_PK = Internal.createUniqueKey(ChashIndex.CHASH_INDEX, DSL.name("chash_index_pk"), new TableField[] { ChashIndex.CHASH_INDEX.TENANT_ID, ChashIndex.CHASH_INDEX.CHASH, ChashIndex.CHASH_INDEX.PHYSICAL_COLLECTION }, true);
+    public static final UniqueKey<DocumentAspectsRecord> DOCUMENT_ASPECTS_PK = Internal.createUniqueKey(DocumentAspects.DOCUMENT_ASPECTS, DSL.name("document_aspects_pk"), new TableField[] { DocumentAspects.DOCUMENT_ASPECTS.ID }, true);
+    public static final UniqueKey<DocumentAspectsRecord> DOCUMENT_ASPECTS_TENANT_COL_PATH_UQ = Internal.createUniqueKey(DocumentAspects.DOCUMENT_ASPECTS, DSL.name("document_aspects_tenant_col_path_uq"), new TableField[] { DocumentAspects.DOCUMENT_ASPECTS.TENANT_ID, DocumentAspects.DOCUMENT_ASPECTS.COLLECTION, DocumentAspects.DOCUMENT_ASPECTS.SOURCE_PATH }, true);
+    public static final UniqueKey<DocumentHighlightsRecord> DOCUMENT_HIGHLIGHTS_PK = Internal.createUniqueKey(DocumentHighlights.DOCUMENT_HIGHLIGHTS, DSL.name("document_highlights_pk"), new TableField[] { DocumentHighlights.DOCUMENT_HIGHLIGHTS.ID }, true);
+    public static final UniqueKey<DocumentHighlightsRecord> DOCUMENT_HIGHLIGHTS_TENANT_DOC_UQ = Internal.createUniqueKey(DocumentHighlights.DOCUMENT_HIGHLIGHTS, DSL.name("document_highlights_tenant_doc_uq"), new TableField[] { DocumentHighlights.DOCUMENT_HIGHLIGHTS.TENANT_ID, DocumentHighlights.DOCUMENT_HIGHLIGHTS.DOC_ID }, true);
     public static final UniqueKey<FrecencyRecord> FRECENCY_PK = Internal.createUniqueKey(Frecency.FRECENCY, DSL.name("frecency_pk"), new TableField[] { Frecency.FRECENCY.TENANT_ID, Frecency.FRECENCY.CHUNK_ID }, true);
     public static final UniqueKey<HookFailuresRecord> HOOK_FAILURES_PK = Internal.createUniqueKey(HookFailures.HOOK_FAILURES, DSL.name("hook_failures_pk"), new TableField[] { HookFailures.HOOK_FAILURES.ID }, true);
     public static final UniqueKey<MemoryRecord> MEMORY_PK = Internal.createUniqueKey(Memory.MEMORY, DSL.name("memory_pk"), new TableField[] { Memory.MEMORY.ID }, true);
@@ -67,6 +105,11 @@ public class Keys {
     // FOREIGN KEY definitions
     // -------------------------------------------------------------------------
 
+    public static final ForeignKey<AspectExtractionQueueRecord, CatalogDocumentsRecord> ASPECT_EXTRACTION_QUEUE__FK_ASPECT_QUEUE_CATALOG_DOC = Internal.createForeignKey(AspectExtractionQueue.ASPECT_EXTRACTION_QUEUE, DSL.name("fk_aspect_queue_catalog_doc"), new TableField[] { AspectExtractionQueue.ASPECT_EXTRACTION_QUEUE.TENANT_ID, AspectExtractionQueue.ASPECT_EXTRACTION_QUEUE.DOC_ID }, Keys.CATALOG_DOCUMENTS_PK, new TableField[] { CatalogDocuments.CATALOG_DOCUMENTS.TENANT_ID, CatalogDocuments.CATALOG_DOCUMENTS.TUMBLER }, true, ForeignKeyRule.CASCADE, ForeignKeyRule.NO_ACTION);
+    public static final ForeignKey<CatalogDocumentChunksRecord, CatalogDocumentsRecord> CATALOG_DOCUMENT_CHUNKS__FK_CATALOG_CHUNKS_CATALOG_DOC = Internal.createForeignKey(CatalogDocumentChunks.CATALOG_DOCUMENT_CHUNKS, DSL.name("fk_catalog_chunks_catalog_doc"), new TableField[] { CatalogDocumentChunks.CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CatalogDocumentChunks.CATALOG_DOCUMENT_CHUNKS.DOC_ID }, Keys.CATALOG_DOCUMENTS_PK, new TableField[] { CatalogDocuments.CATALOG_DOCUMENTS.TENANT_ID, CatalogDocuments.CATALOG_DOCUMENTS.TUMBLER }, true, ForeignKeyRule.CASCADE, ForeignKeyRule.NO_ACTION);
+    public static final ForeignKey<DocumentAspectsRecord, CatalogDocumentsRecord> DOCUMENT_ASPECTS__FK_DOC_ASPECTS_CATALOG_DOC = Internal.createForeignKey(DocumentAspects.DOCUMENT_ASPECTS, DSL.name("fk_doc_aspects_catalog_doc"), new TableField[] { DocumentAspects.DOCUMENT_ASPECTS.TENANT_ID, DocumentAspects.DOCUMENT_ASPECTS.DOC_ID }, Keys.CATALOG_DOCUMENTS_PK, new TableField[] { CatalogDocuments.CATALOG_DOCUMENTS.TENANT_ID, CatalogDocuments.CATALOG_DOCUMENTS.TUMBLER }, true, ForeignKeyRule.CASCADE, ForeignKeyRule.NO_ACTION);
+    public static final ForeignKey<DocumentHighlightsRecord, CatalogDocumentsRecord> DOCUMENT_HIGHLIGHTS__FK_DOC_HIGHLIGHTS_CATALOG_DOC = Internal.createForeignKey(DocumentHighlights.DOCUMENT_HIGHLIGHTS, DSL.name("fk_doc_highlights_catalog_doc"), new TableField[] { DocumentHighlights.DOCUMENT_HIGHLIGHTS.TENANT_ID, DocumentHighlights.DOCUMENT_HIGHLIGHTS.DOC_ID }, Keys.CATALOG_DOCUMENTS_PK, new TableField[] { CatalogDocuments.CATALOG_DOCUMENTS.TENANT_ID, CatalogDocuments.CATALOG_DOCUMENTS.TUMBLER }, true, ForeignKeyRule.CASCADE, ForeignKeyRule.NO_ACTION);
+    public static final ForeignKey<TopicAssignmentsRecord, CatalogDocumentsRecord> TOPIC_ASSIGNMENTS__FK_TA_CATALOG_DOC = Internal.createForeignKey(TopicAssignments.TOPIC_ASSIGNMENTS, DSL.name("fk_ta_catalog_doc"), new TableField[] { TopicAssignments.TOPIC_ASSIGNMENTS.TENANT_ID, TopicAssignments.TOPIC_ASSIGNMENTS.DOC_ID }, Keys.CATALOG_DOCUMENTS_PK, new TableField[] { CatalogDocuments.CATALOG_DOCUMENTS.TENANT_ID, CatalogDocuments.CATALOG_DOCUMENTS.TUMBLER }, true, ForeignKeyRule.CASCADE, ForeignKeyRule.NO_ACTION);
     public static final ForeignKey<TopicAssignmentsRecord, TopicsRecord> TOPIC_ASSIGNMENTS__TOPIC_ASSIGNMENTS_TOPIC_ID_FKEY = Internal.createForeignKey(TopicAssignments.TOPIC_ASSIGNMENTS, DSL.name("topic_assignments_topic_id_fkey"), new TableField[] { TopicAssignments.TOPIC_ASSIGNMENTS.TOPIC_ID }, Keys.TOPICS_PK, new TableField[] { Topics.TOPICS.ID }, true, ForeignKeyRule.CASCADE, ForeignKeyRule.NO_ACTION);
     public static final ForeignKey<TopicLinksRecord, TopicsRecord> TOPIC_LINKS__TOPIC_LINKS_FROM_TOPIC_ID_FKEY = Internal.createForeignKey(TopicLinks.TOPIC_LINKS, DSL.name("topic_links_from_topic_id_fkey"), new TableField[] { TopicLinks.TOPIC_LINKS.FROM_TOPIC_ID }, Keys.TOPICS_PK, new TableField[] { Topics.TOPICS.ID }, true, ForeignKeyRule.CASCADE, ForeignKeyRule.NO_ACTION);
     public static final ForeignKey<TopicLinksRecord, TopicsRecord> TOPIC_LINKS__TOPIC_LINKS_TO_TOPIC_ID_FKEY = Internal.createForeignKey(TopicLinks.TOPIC_LINKS, DSL.name("topic_links_to_topic_id_fkey"), new TableField[] { TopicLinks.TOPIC_LINKS.TO_TOPIC_ID }, Keys.TOPICS_PK, new TableField[] { Topics.TOPICS.ID }, true, ForeignKeyRule.CASCADE, ForeignKeyRule.NO_ACTION);

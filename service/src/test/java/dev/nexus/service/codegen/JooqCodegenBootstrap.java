@@ -63,6 +63,18 @@ public class JooqCodegenBootstrap {
             // so "db/changelog/db.changelog-master.xml" resolves from src/main/resources.
             System.out.println("[jooq-codegen] Applying Liquibase changelog...");
             try (Connection conn = pg.getPostgresDatabase().getConnection()) {
+                // The master changelog's runAlways grants-nexus-svc changeset
+                // (RDR-152 nexus-net63) is fail-loud: it GRANTs to nexus_svc and
+                // errors if the role is absent. Codegen only needs the schema,
+                // not grants, but Liquibase applies the whole master changelog —
+                // so create the role first (idempotent) to satisfy the grant.
+                try (var st = conn.createStatement()) {
+                    st.execute(
+                        "DO $$ BEGIN "
+                        + "IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='nexus_svc') THEN "
+                        + "CREATE ROLE nexus_svc NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS LOGIN; "
+                        + "END IF; END $$");
+                }
                 liquibase.database.Database lbDb = DatabaseFactory.getInstance()
                     .findCorrectDatabaseImplementation(new JdbcConnection(conn));
                 Liquibase liquibase = new Liquibase(

@@ -4,6 +4,17 @@
 package dev.nexus.service.jooq.nexus;
 
 
+import dev.nexus.service.jooq.nexus.tables.AspectExtractionQueue;
+import dev.nexus.service.jooq.nexus.tables.AspectPromotionLog;
+import dev.nexus.service.jooq.nexus.tables.CatalogCollections;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocumentChunks;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocuments;
+import dev.nexus.service.jooq.nexus.tables.CatalogLinks;
+import dev.nexus.service.jooq.nexus.tables.CatalogMeta;
+import dev.nexus.service.jooq.nexus.tables.CatalogOwners;
+import dev.nexus.service.jooq.nexus.tables.ChashIndex;
+import dev.nexus.service.jooq.nexus.tables.DocumentAspects;
+import dev.nexus.service.jooq.nexus.tables.DocumentHighlights;
 import dev.nexus.service.jooq.nexus.tables.Frecency;
 import dev.nexus.service.jooq.nexus.tables.HookFailures;
 import dev.nexus.service.jooq.nexus.tables.Memory;
@@ -23,6 +34,61 @@ import dev.nexus.service.jooq.nexus.tables.Topics;
  */
 @SuppressWarnings({ "all", "unchecked", "rawtypes", "this-escape" })
 public class Tables {
+
+    /**
+     * The table <code>nexus.aspect_extraction_queue</code>.
+     */
+    public static final AspectExtractionQueue ASPECT_EXTRACTION_QUEUE = AspectExtractionQueue.ASPECT_EXTRACTION_QUEUE;
+
+    /**
+     * The table <code>nexus.aspect_promotion_log</code>.
+     */
+    public static final AspectPromotionLog ASPECT_PROMOTION_LOG = AspectPromotionLog.ASPECT_PROMOTION_LOG;
+
+    /**
+     * The table <code>nexus.catalog_collections</code>.
+     */
+    public static final CatalogCollections CATALOG_COLLECTIONS = CatalogCollections.CATALOG_COLLECTIONS;
+
+    /**
+     * The table <code>nexus.catalog_document_chunks</code>.
+     */
+    public static final CatalogDocumentChunks CATALOG_DOCUMENT_CHUNKS = CatalogDocumentChunks.CATALOG_DOCUMENT_CHUNKS;
+
+    /**
+     * The table <code>nexus.catalog_documents</code>.
+     */
+    public static final CatalogDocuments CATALOG_DOCUMENTS = CatalogDocuments.CATALOG_DOCUMENTS;
+
+    /**
+     * The table <code>nexus.catalog_links</code>.
+     */
+    public static final CatalogLinks CATALOG_LINKS = CatalogLinks.CATALOG_LINKS;
+
+    /**
+     * The table <code>nexus.catalog_meta</code>.
+     */
+    public static final CatalogMeta CATALOG_META = CatalogMeta.CATALOG_META;
+
+    /**
+     * The table <code>nexus.catalog_owners</code>.
+     */
+    public static final CatalogOwners CATALOG_OWNERS = CatalogOwners.CATALOG_OWNERS;
+
+    /**
+     * The table <code>nexus.chash_index</code>.
+     */
+    public static final ChashIndex CHASH_INDEX = ChashIndex.CHASH_INDEX;
+
+    /**
+     * The table <code>nexus.document_aspects</code>.
+     */
+    public static final DocumentAspects DOCUMENT_ASPECTS = DocumentAspects.DOCUMENT_ASPECTS;
+
+    /**
+     * The table <code>nexus.document_highlights</code>.
+     */
+    public static final DocumentHighlights DOCUMENT_HIGHLIGHTS = DocumentHighlights.DOCUMENT_HIGHLIGHTS;
 
     /**
      * The table <code>nexus.frecency</code>.
