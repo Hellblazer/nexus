@@ -174,13 +174,28 @@ def get_t1():
 
 
 def get_t3():
-    """Return T3Database singleton — lazy init on first call."""
+    """Return T3Database singleton (or HttpVectorClient) — lazy init on first call.
+
+    RDR-152 bead nexus-gmiaf.20 (Seam B): when ``NX_STORAGE_BACKEND_VECTORS=service``
+    is set in the environment, returns an :class:`~nexus.db.http_vector_client.HttpVectorClient`
+    that routes search/query/upsert through the Java nexus-service instead of
+    hitting ChromaDB / Voyage AI directly.
+
+    Default path (flag unset or any other value) is unchanged: constructs and
+    returns a ``T3Database`` as before.
+    """
     global _t3_instance
     if _t3_instance is None:
         with _t3_lock:
             if _t3_instance is None:
-                from nexus.db import make_t3
-                _t3_instance = make_t3()
+                # RDR-152 Seam B routing gate
+                from nexus.db.http_vector_client import is_vector_service_mode
+                if is_vector_service_mode():
+                    from nexus.db.http_vector_client import get_http_vector_client
+                    _t3_instance = get_http_vector_client()
+                else:
+                    from nexus.db import make_t3
+                    _t3_instance = make_t3()
     return _t3_instance
 
 
@@ -1128,6 +1143,12 @@ def reset_singletons():
     _collections_cache = ([], 0.0)
     clear_search_traces()
     reset_plan_cache_for_tests()
+    # RDR-152 Seam B: also reset the http_vector_client singleton
+    try:
+        from nexus.db.http_vector_client import reset_http_vector_client_for_tests
+        reset_http_vector_client_for_tests()
+    except ImportError:
+        pass
 
 
 def inject_t1(t1, *, isolated: bool = False):
