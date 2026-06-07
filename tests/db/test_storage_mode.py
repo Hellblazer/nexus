@@ -2,10 +2,11 @@
 """Tests for the per-store backend-selection flag (RDR-152 bead nexus-gmiaf.4).
 
 Resolution precedence (narrowest wins):
-  1. Per-store env var  NX_STORAGE_MODE_<STORE>=service|sqlite
-  2. Global env var     NX_STORAGE_MODE=service|sqlite
-  3. Config file        nexus.storage_mode.<store> or nexus.storage_mode.default
-  4. Hard default       'sqlite'
+  1. Per-store env var  NX_STORAGE_BACKEND_<STORE>=service|sqlite
+  2. Global env var     NX_STORAGE_BACKEND=service|sqlite
+  3. Hard default       'sqlite'
+
+A config-file layer is reserved for Phase 2+ and is NOT implemented here.
 
 All invalid values raise StorageModeFlagError immediately (no silent fallback).
 """
@@ -17,7 +18,7 @@ from nexus.db.storage_mode import (
     VALID_STORE_NAMES,
     StorageBackend,
     StorageModeFlagError,
-    storage_mode_for,
+    storage_backend_for,
 )
 
 
@@ -25,10 +26,10 @@ from nexus.db.storage_mode import (
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remove all NX_STORAGE_MODE* env vars so tests start from a clean slate."""
-    monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
+    """Remove all NX_STORAGE_BACKEND* env vars so tests start from a clean slate."""
+    monkeypatch.delenv("NX_STORAGE_BACKEND", raising=False)
     for store in VALID_STORE_NAMES:
-        monkeypatch.delenv(f"NX_STORAGE_MODE_{store.upper()}", raising=False)
+        monkeypatch.delenv(f"NX_STORAGE_BACKEND_{store.upper()}", raising=False)
 
 
 # ── default: all stores resolve to 'sqlite' ──────────────────────────────────
@@ -39,12 +40,12 @@ def test_default_is_sqlite_for_every_store(
     store: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _clear_env(monkeypatch)
-    assert storage_mode_for(store) == StorageBackend.SQLITE
+    assert storage_backend_for(store) == StorageBackend.SQLITE
 
 
 def test_default_returns_sqlite_literal(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
-    result = storage_mode_for("memory")
+    result = storage_backend_for("memory")
     assert result == "sqlite"
 
 
@@ -55,30 +56,30 @@ def test_per_store_env_sets_service_for_that_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_MODE_MEMORY", "service")
-    assert storage_mode_for("memory") == StorageBackend.SERVICE
+    monkeypatch.setenv("NX_STORAGE_BACKEND_MEMORY", "service")
+    assert storage_backend_for("memory") == StorageBackend.SERVICE
 
 
 def test_per_store_env_does_not_affect_other_stores(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_MODE_MEMORY", "service")
+    monkeypatch.setenv("NX_STORAGE_BACKEND_MEMORY", "service")
     for store in VALID_STORE_NAMES:
         if store != "memory":
-            assert storage_mode_for(store) == StorageBackend.SQLITE, store
+            assert storage_backend_for(store) == StorageBackend.SQLITE, store
 
 
 def test_per_store_env_sqlite_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_MODE_PLANS", "sqlite")
-    assert storage_mode_for("plans") == StorageBackend.SQLITE
+    monkeypatch.setenv("NX_STORAGE_BACKEND_PLANS", "sqlite")
+    assert storage_backend_for("plans") == StorageBackend.SQLITE
 
 
 def test_per_store_env_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_MODE_MEMORY", "SERVICE")
-    assert storage_mode_for("memory") == StorageBackend.SERVICE
+    monkeypatch.setenv("NX_STORAGE_BACKEND_MEMORY", "SERVICE")
+    assert storage_backend_for("memory") == StorageBackend.SERVICE
 
 
 # ── global env override ───────────────────────────────────────────────────────
@@ -86,16 +87,16 @@ def test_per_store_env_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_global_env_flips_all_stores(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_MODE", "service")
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
     for store in VALID_STORE_NAMES:
-        assert storage_mode_for(store) == StorageBackend.SERVICE, store
+        assert storage_backend_for(store) == StorageBackend.SERVICE, store
 
 
 def test_global_env_sqlite_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_MODE", "sqlite")
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
     for store in VALID_STORE_NAMES:
-        assert storage_mode_for(store) == StorageBackend.SQLITE, store
+        assert storage_backend_for(store) == StorageBackend.SQLITE, store
 
 
 # ── precedence: per-store env beats global env ────────────────────────────────
@@ -104,24 +105,24 @@ def test_global_env_sqlite_is_a_noop(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_per_store_env_beats_global_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Per-store SQLite override wins even when global is service."""
     _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_MODE", "service")
-    monkeypatch.setenv("NX_STORAGE_MODE_MEMORY", "sqlite")
-    assert storage_mode_for("memory") == StorageBackend.SQLITE
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+    monkeypatch.setenv("NX_STORAGE_BACKEND_MEMORY", "sqlite")
+    assert storage_backend_for("memory") == StorageBackend.SQLITE
     # Other stores still inherit the global
     for store in VALID_STORE_NAMES:
         if store != "memory":
-            assert storage_mode_for(store) == StorageBackend.SERVICE, store
+            assert storage_backend_for(store) == StorageBackend.SERVICE, store
 
 
 def test_per_store_service_beats_global_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
     """Per-store service override wins even when global is sqlite."""
     _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_MODE", "sqlite")
-    monkeypatch.setenv("NX_STORAGE_MODE_PLANS", "service")
-    assert storage_mode_for("plans") == StorageBackend.SERVICE
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+    monkeypatch.setenv("NX_STORAGE_BACKEND_PLANS", "service")
+    assert storage_backend_for("plans") == StorageBackend.SERVICE
     for store in VALID_STORE_NAMES:
         if store != "plans":
-            assert storage_mode_for(store) == StorageBackend.SQLITE, store
+            assert storage_backend_for(store) == StorageBackend.SQLITE, store
 
 
 # ── error cases ───────────────────────────────────────────────────────────────
@@ -129,37 +130,50 @@ def test_per_store_service_beats_global_sqlite(monkeypatch: pytest.MonkeyPatch) 
 
 def test_invalid_global_env_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_MODE", "direct")
-    with pytest.raises(StorageModeFlagError, match="NX_STORAGE_MODE"):
-        storage_mode_for("memory")
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "direct")
+    with pytest.raises(StorageModeFlagError, match="NX_STORAGE_BACKEND"):
+        storage_backend_for("memory")
 
 
 def test_invalid_per_store_env_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_MODE_MEMORY", "direct")
-    with pytest.raises(StorageModeFlagError, match="NX_STORAGE_MODE_MEMORY"):
-        storage_mode_for("memory")
+    monkeypatch.setenv("NX_STORAGE_BACKEND_MEMORY", "direct")
+    with pytest.raises(StorageModeFlagError, match="NX_STORAGE_BACKEND_MEMORY"):
+        storage_backend_for("memory")
 
 
 def test_unknown_store_name_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
     with pytest.raises(StorageModeFlagError, match="unknown store"):
-        storage_mode_for("bogus_store")
+        storage_backend_for("bogus_store")
 
 
 def test_empty_global_env_is_treated_as_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Empty string env var must not be treated as invalid — it means 'unset'."""
+    """Empty string env var must not be treated as invalid -- it means 'unset'."""
     _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_MODE", "")
-    assert storage_mode_for("memory") == StorageBackend.SQLITE
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "")
+    assert storage_backend_for("memory") == StorageBackend.SQLITE
 
 
 def test_empty_per_store_env_is_treated_as_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_env(monkeypatch)
-    monkeypatch.setenv("NX_STORAGE_MODE_MEMORY", "")
-    assert storage_mode_for("memory") == StorageBackend.SQLITE
+    monkeypatch.setenv("NX_STORAGE_BACKEND_MEMORY", "")
+    assert storage_backend_for("memory") == StorageBackend.SQLITE
+
+
+def test_nx_storage_mode_daemon_does_not_collide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy NX_STORAGE_MODE=daemon (RDR-120) must NOT affect the new resolver.
+
+    An operator with NX_STORAGE_MODE=daemon set should see no change in
+    behaviour -- the new resolver reads NX_STORAGE_BACKEND only.
+    """
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("NX_STORAGE_MODE", "daemon")
+    assert storage_backend_for("memory") == StorageBackend.SQLITE
 
 
 # ── store name normalization ──────────────────────────────────────────────────
@@ -168,20 +182,74 @@ def test_empty_per_store_env_is_treated_as_default(
 def test_store_name_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
     """Callers may pass 'MEMORY' or 'Memory'; both resolve correctly."""
     _clear_env(monkeypatch)
-    assert storage_mode_for("MEMORY") == StorageBackend.SQLITE
-    assert storage_mode_for("Memory") == StorageBackend.SQLITE
+    assert storage_backend_for("MEMORY") == StorageBackend.SQLITE
+    assert storage_backend_for("Memory") == StorageBackend.SQLITE
 
 
-# ── seam: T2Database constructor still instantiates sqlite stores ─────────────
+# ── VALID_STORE_NAMES drift guard ────────────────────────────────────────────
 
 
-def test_t2database_all_sqlite_seam_unchanged(
+def test_valid_store_names_covers_t2database_attributes(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """VALID_STORE_NAMES must cover every eagerly-constructed domain-store
+    attribute on T2Database, so that adding a new store to T2Database without
+    updating VALID_STORE_NAMES causes this test to fail.
+
+    Asymmetry handled:
+    - ``catalog`` is lazily constructed via a property (not in __dict__ after
+      __init__); it IS in VALID_STORE_NAMES by explicit contract.
+    - ``t1`` is forward-declared (not a T2Database attribute); it IS in
+      VALID_STORE_NAMES by explicit contract.
+    - ``RENAME_LOCK`` and ``_path``, ``_catalog``, ``_catalog_db_path_override``
+      are not stores -- excluded by naming convention (upper-case or leading _).
+    """
+    from pathlib import Path
+
+    import nexus.db.t2 as t2_mod
+
+    # Temporarily enable auto-migrate so construction works without a running daemon.
+    orig = t2_mod._DEFAULT_RUN_MIGRATIONS
+    t2_mod._DEFAULT_RUN_MIGRATIONS = True
+    try:
+        from nexus.db.t2 import T2Database
+
+        db = T2Database(Path(tmp_path) / "drift_guard.db")  # type: ignore[arg-type]
+        try:
+            # Collect eagerly-constructed public store attributes: lower-case,
+            # not starting with '_', not ALL_CAPS (RENAME_LOCK), not a method/property.
+            import inspect
+
+            store_attrs = {
+                name
+                for name, val in vars(db).items()
+                if (
+                    not name.startswith("_")
+                    and name != name.upper()  # exclude ALL_CAPS like RENAME_LOCK
+                    and not inspect.ismethod(val)
+                    and not inspect.isfunction(val)
+                )
+            }
+            # Every eager store attribute must be in VALID_STORE_NAMES.
+            missing = store_attrs - VALID_STORE_NAMES
+            assert not missing, (
+                f"T2Database has domain-store attribute(s) not in VALID_STORE_NAMES: "
+                f"{sorted(missing)}.  Add them to nexus.db.storage_mode.VALID_STORE_NAMES."
+            )
+        finally:
+            db.close()
+    finally:
+        t2_mod._DEFAULT_RUN_MIGRATIONS = orig
+
+
+# ── seam: memory branch is live, default behavior unchanged ──────────────────
+
+
+def test_t2database_sqlite_seam_constructs_memory_store(
     tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With all stores on sqlite (the default), T2Database construction succeeds
-    and store attributes are the same concrete classes as before .4.
-
-    This is the 'seam is wired but behavior unchanged' contract test.
+    """Default (sqlite) path: T2Database construction succeeds and db.memory is
+    the concrete MemoryStore.  Confirms the seam is live and routes correctly.
     """
     _clear_env(monkeypatch)
     from pathlib import Path
@@ -191,16 +259,36 @@ def test_t2database_all_sqlite_seam_unchanged(
     orig = t2_mod._DEFAULT_RUN_MIGRATIONS
     t2_mod._DEFAULT_RUN_MIGRATIONS = True
     try:
-        db_path = tmp_path / "test_seam.db"  # type: ignore[operator]
         from nexus.db.t2 import T2Database
         from nexus.db.t2.memory_store import MemoryStore
-        from nexus.db.t2.plan_library import PlanLibrary
 
-        db = T2Database(Path(db_path))
+        db = T2Database(Path(tmp_path) / "seam_sqlite.db")  # type: ignore[arg-type]
         try:
             assert isinstance(db.memory, MemoryStore)
-            assert isinstance(db.plans, PlanLibrary)
         finally:
             db.close()
+    finally:
+        t2_mod._DEFAULT_RUN_MIGRATIONS = orig
+
+
+def test_t2database_service_backend_raises_not_implemented(
+    tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NX_STORAGE_BACKEND_MEMORY=service -> T2Database construction raises
+    NotImplementedError (the .7 wiring point; not yet implemented).
+    """
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("NX_STORAGE_BACKEND_MEMORY", "service")
+    from pathlib import Path
+
+    import nexus.db.t2 as t2_mod
+
+    orig = t2_mod._DEFAULT_RUN_MIGRATIONS
+    t2_mod._DEFAULT_RUN_MIGRATIONS = True
+    try:
+        from nexus.db.t2 import T2Database
+
+        with pytest.raises(NotImplementedError, match="nexus-gmiaf.7"):
+            T2Database(Path(tmp_path) / "seam_service.db")  # type: ignore[arg-type]
     finally:
         t2_mod._DEFAULT_RUN_MIGRATIONS = orig

@@ -416,6 +416,17 @@ class T2Database:
         self.RENAME_LOCK: threading.RLock = threading.RLock()
 
         # ── Construct domain stores ───────────────────────────────────
+        # RDR-152 nexus-gmiaf.4: routing seam.  storage_backend_for("memory")
+        # returns StorageBackend.SQLITE by default (env NX_STORAGE_BACKEND_MEMORY
+        # or NX_STORAGE_BACKEND unset).  nexus-gmiaf.7 replaces the
+        # NotImplementedError branch with HttpMemoryStore(...).
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for
+
+        if storage_backend_for("memory") == StorageBackend.SERVICE:
+            raise NotImplementedError(
+                "memory 'service' backend lands in nexus-gmiaf.7; "
+                "unset NX_STORAGE_BACKEND_MEMORY / NX_STORAGE_BACKEND to use sqlite"
+            )
         self.memory: MemoryStore = MemoryStore(path)
         self.plans: PlanLibrary = PlanLibrary(path)
         # CatalogTaxonomy takes a MemoryStore reference for the
