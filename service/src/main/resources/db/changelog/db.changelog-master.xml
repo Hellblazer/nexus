@@ -29,8 +29,11 @@
     <!-- Store 6: aspects / highlights / queue / promotion-log (bead nexus-gmiaf.15) -->
     <include file="db/changelog/aspects-001-baseline.xml"/>
 
+    <!-- Store 7: chash_index (bead nexus-gmiaf.16) — content-addressed routing table, no FTS -->
+    <include file="db/changelog/chash-001-baseline.xml"/>
+
     <!--
-        Future includes (beads .16-.18):
+        Future includes (beads .17-.18):
         <include file="db/changelog/catalog-001-baseline.xml"/>
     -->
 

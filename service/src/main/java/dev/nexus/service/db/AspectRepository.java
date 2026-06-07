@@ -699,6 +699,19 @@ public final class AspectRepository {
     }
 
     /**
+     * Rename collection denorm in document_highlights (mirrors DocumentHighlights rename_collection).
+     *
+     * <p>PK is doc_id (tumbler), so the collection column has no uniqueness constraint
+     * and no collision-defense DELETE is needed — a plain UPDATE suffices.
+     */
+    public int renameHighlightsCollection(String tenant, String oldColl, String newColl) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.execute(
+                "UPDATE nexus.document_highlights SET collection = ? WHERE collection = ?",
+                newColl, oldColl));
+    }
+
+    /**
      * ETL import of a queue row — fidelity-preserving, never downgrades in_progress.
      */
     public int importQueueRow(String tenant, Map<String, Object> body) {
