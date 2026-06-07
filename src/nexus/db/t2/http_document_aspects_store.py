@@ -169,6 +169,16 @@ class HttpDocumentAspectsStore:
         """Close the keep-alive connection pool (idempotent)."""
         self._client.close()
 
+    def _has_doc_id_pk(self) -> bool:
+        """The PG schema always has doc_id as its primary key.
+
+        The SQLite counterpart introspects ``PRAGMA table_info`` to detect
+        whether the schema has been migrated; on the service backend the PG
+        DDL always defines ``doc_id TEXT PRIMARY KEY``, so this is
+        unconditionally ``True``.
+        """
+        return True
+
     # ── Internal helpers ───────────────────────────────────────────────────────
 
     def _post(self, path: str, body: dict[str, Any]) -> Any:

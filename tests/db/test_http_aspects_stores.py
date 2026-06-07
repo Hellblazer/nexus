@@ -238,6 +238,11 @@ class TestHttpDocumentAspectsStore:
         store.close()
         store.close()  # second close should not raise
 
+    def test_has_doc_id_pk_always_true(self):
+        """PG schema always has doc_id as its primary key."""
+        store = self._store({})
+        assert store._has_doc_id_pk() is True
+
 
 # ── HttpDocumentHighlightsStore unit tests ────────────────────────────────────
 
