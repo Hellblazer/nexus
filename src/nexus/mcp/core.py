@@ -471,6 +471,119 @@ def _clamp_subagent_timeout(requested: float, tool_name: str) -> float:
     return requested
 
 
+def _subprocess_tool_grant() -> tuple[dict[str, Any], list[str]]:
+    """Build the (mcp_servers, allowed_tools) grant for tool-needing
+    operator subprocesses. nexus-mawqw / Fix B.
+
+    The agent-replacement tools (``nx_enrich_beads``, ``nx_plan_audit``)
+    do open-ended codebase exploration that cannot be pre-fetched, so
+    their ``claude -p`` child must be able to call nx MCP read tools plus
+    the built-in file tools. We pass the conexus MCP servers *inline* via
+    ``--mcp-config`` (claude_dispatch's ``mcp_servers``) so they clear the
+    post-CC-2.1.162 pending-approval gate, and allowlist them by server
+    key plus the read-only built-ins.
+
+    Server keys here become the child's tool-name prefix
+    (``mcp__nexus__search`` etc.), independent of the parent plugin's
+    ``mcp__plugin_conexus_nexus__*`` naming — the child gets its own
+    fresh, explicitly-trusted server registration.
+
+    ``CLAUDE_PLUGIN_ROOT`` is threaded through from the current env so
+    the spawned ``nx-mcp`` resolves the same plugin root as the parent;
+    omitted when unset (CLI / non-plugin contexts) so we never inject a
+    literal ``${...}`` placeholder.
+    """
+    env: dict[str, str] = {}
+    plugin_root = _os.environ.get("CLAUDE_PLUGIN_ROOT")
+    if plugin_root:
+        env["CLAUDE_PLUGIN_ROOT"] = plugin_root
+
+    server_env = {"env": env} if env else {}
+    mcp_servers: dict[str, Any] = {
+        "nexus": {"command": "nx-mcp", "args": [], **server_env},
+        "nexus_catalog": {"command": "nx-mcp-catalog", "args": [], **server_env},
+    }
+    allowed_tools = [
+        "Read", "Grep", "Glob",
+        "mcp__nexus", "mcp__nexus_catalog",
+    ]
+    return mcp_servers, allowed_tools
+
+
+# nexus-mawqw / Fix A: cap how much we pre-fetch + inline into the tidy
+# prompt. 30 entries at 2 KB each keeps the prompt well under any context
+# pressure while covering the realistic consolidation working set.
+_TIDY_MAX_ENTRIES = 30
+_TIDY_MAX_CHARS_PER_ENTRY = 2000
+
+
+def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int]:
+    """Retrieve + hydrate the entries to consolidate, server-side.
+
+    nexus-mawqw / Fix A. The MCP server holds direct T3 access, so the
+    ``tidy`` retrieval runs in-process here and the hydrated entries are
+    inlined into the prompt. The ``claude -p`` child then does LLM-only
+    dedup/summarise with NO tools, making ``nx_tidy`` immune to the
+    post-CC-2.1.162 MCP-server-approval gate that broke the old
+    subprocess-calls-MCP-tools design.
+
+    Returns ``(entries_block, n_entries)``. Degrades to ``("", 0)`` on any
+    retrieval failure or empty result so the caller still dispatches a
+    well-formed (entry-free) prompt rather than raising.
+    """
+    try:
+        hits = search(
+            query=topic,
+            corpus=collection,
+            limit=_TIDY_MAX_ENTRIES,
+            structured=True,
+        )
+    except Exception:
+        import structlog
+        structlog.get_logger().debug("tidy_prefetch_search_failed", exc_info=True)
+        return "", 0
+    if not isinstance(hits, dict):
+        # search() returns a human-readable string on no-match / error.
+        return "", 0
+    ids = hits.get("ids") or []
+    if not ids:
+        return "", 0
+    cols = hits.get("chunk_collections") or hits.get("collections") or [collection]
+
+    try:
+        hydrated = store_get_many(
+            ids,
+            cols,
+            max_chars_per_doc=_TIDY_MAX_CHARS_PER_ENTRY,
+            structured=True,
+        )
+    except Exception:
+        import structlog
+        structlog.get_logger().debug("tidy_prefetch_hydrate_failed", exc_info=True)
+        return "", 0
+    if isinstance(hydrated, dict) and hydrated.get("error"):
+        # store_get_many caught an internal error and returned it as a
+        # structured field rather than raising. Surface it at DEBUG so a
+        # T3 outage during tidy is diagnosable instead of vanishing.
+        import structlog
+        structlog.get_logger().debug(
+            "tidy_prefetch_hydrate_error", error=hydrated["error"],
+        )
+    contents = hydrated.get("contents") if isinstance(hydrated, dict) else None
+    if not contents:
+        return "", 0
+
+    blocks: list[str] = []
+    for i, (doc_id, body) in enumerate(zip(ids, contents), start=1):
+        body = (body or "").strip()
+        if not body:
+            continue
+        blocks.append(f"--- Entry {i} (id={doc_id}) ---\n{body}")
+    if not blocks:
+        return "", 0
+    return "\n\n".join(blocks), len(blocks)
+
+
 # ── Tier-discipline telemetry (Phase 1A nexus-kren) ─────────────────────────
 
 
@@ -4177,7 +4290,7 @@ async def nx_answer(
 
 @mcp.tool(
     title="Consolidate Knowledge Topic",
-    annotations={"readOnlyHint": False, "destructiveHint": True},
+    annotations={"readOnlyHint": True},
 )
 async def nx_tidy(
     topic: str,
@@ -4186,17 +4299,28 @@ async def nx_tidy(
 ) -> str:
     """Consolidate knowledge entries on *topic* via claude -p. RDR-080 P3.
 
-    Replaces the ``knowledge-tidier`` agent. Spawns a ``claude -p``
-    subprocess that searches T3 for entries matching *topic*, identifies
-    duplicates and contradictions, and returns a consolidated summary.
+    Replaces the ``knowledge-tidier`` agent. nexus-mawqw / Fix A:
+    retrieves and hydrates matching entries **server-side** (in-process,
+    a single semantic ``search`` pass), inlines them into the prompt, then
+    dispatches a **tool-free** ``claude -p`` to identify duplicates,
+    contradictions, and outdated entries. Read-only: it reports a
+    consolidated summary plus suggested actions but performs no writes
+    (the old prompt claimed ``store_put`` access the child never had).
+
+    Retrieval scope is one semantic-search pass capped at
+    ``_TIDY_MAX_ENTRIES`` chunks; it does not expand the query, chase
+    related terms, or deduplicate chunks to documents. Best suited to
+    note-shaped collections (≈one chunk per entry). When the cap is hit
+    the returned summary says so explicitly (no silent truncation).
 
     Args:
         topic: The knowledge topic to consolidate (e.g. "chromadb quotas").
         collection: T3 collection to search (default: knowledge).
         timeout: Subprocess timeout in seconds. Default 600s (10 min) —
-            consolidation on a large corpus does multi-step search +
-            cross-reference; 120s was hitting the timeout routinely on
-            real workloads. Caller can override lower for small topics.
+            consolidation on a large corpus does heavy LLM-only reasoning
+            over the inlined entries; 120s was hitting the timeout
+            routinely on real workloads. Caller can override lower for
+            small topics.
 
     Returns:
         Consolidated summary as a human-readable string.
@@ -4211,15 +4335,37 @@ async def nx_tidy(
             "actions": {"type": "array", "items": {"type": "object"}},
         },
     }
+    # nexus-mawqw / Fix A: pre-fetch the entries server-side and inline
+    # them. The child claude -p then consolidates LLM-only with NO tools,
+    # so it can never trip the post-CC-2.1.162 MCP-server-approval gate.
+    entries_block, n_entries = _tidy_prefetch(topic, collection)
+    capped = n_entries >= _TIDY_MAX_ENTRIES
+    if capped:
+        import structlog
+        structlog.get_logger().info(
+            "tidy_prefetch_capped",
+            topic=topic, collection=collection, cap=_TIDY_MAX_ENTRIES,
+        )
+    if n_entries:
+        entries_section = (
+            f"\n\nHere are the {n_entries} retrieved entries to consolidate. "
+            "Work ONLY from these entries; do NOT call any tools:\n\n"
+            f"{entries_block}"
+        )
+    else:
+        entries_section = (
+            "\n\nNo matching entries were retrieved from the collection. "
+            "Report that there is nothing to consolidate. Do NOT call any tools."
+        )
     prompt = (
-        "You are the `tidy` knowledge consolidation operator. You have "
-        "access to nx MCP tools (search, query, store_put, store_get). "
-        "Search the specified collection for entries matching the topic, "
-        "identify duplicates, contradictions, and outdated entries, then "
-        "produce a consolidated summary.\n\n"
+        "You are the `tidy` knowledge consolidation operator. You have NO "
+        "tools available — all input is provided inline below. Identify "
+        "duplicates, contradictions, and outdated entries among the provided "
+        "entries, then produce a consolidated summary plus a list of "
+        "suggested actions.\n\n"
         f"Consolidate knowledge entries about '{topic}' in collection "
-        f"'{collection}'. Search for all related entries, identify duplicates "
-        "or contradictions, and produce a consolidated summary."
+        f"'{collection}'."
+        f"{entries_section}"
     )
     payload = await claude_dispatch(prompt, schema, timeout=timeout)
 
@@ -4228,6 +4374,12 @@ async def nx_tidy(
     lines = [summary]
     if actions:
         lines.append(f"\n{len(actions)} action(s) suggested.")
+    if capped:
+        lines.append(
+            f"\nNote: retrieval was capped at {_TIDY_MAX_ENTRIES} entries; "
+            "the collection may contain additional matching content not seen "
+            "by this consolidation pass."
+        )
     return "\n".join(lines)
 
 
@@ -4264,6 +4416,7 @@ async def nx_enrich_beads(
     from nexus.operators.dispatch import claude_dispatch
 
     timeout = _clamp_subagent_timeout(timeout, "nx_enrich_beads")
+    mcp_servers, allowed_tools = _subprocess_tool_grant()
 
     schema = {
         "type": "object",
@@ -4286,7 +4439,10 @@ async def nx_enrich_beads(
     if context:
         prompt += f"\n\nAdditional context:\n{context}"
 
-    payload = await claude_dispatch(prompt, schema, timeout=timeout)
+    payload = await claude_dispatch(
+        prompt, schema, timeout=timeout,
+        mcp_servers=mcp_servers, allowed_tools=allowed_tools,
+    )
     return (
         payload.get("enriched_description", "")
         if isinstance(payload, dict) else str(payload)
@@ -4327,6 +4483,7 @@ async def nx_plan_audit(
     from nexus.operators.dispatch import claude_dispatch
 
     timeout = _clamp_subagent_timeout(timeout, "nx_plan_audit")
+    mcp_servers, allowed_tools = _subprocess_tool_grant()
 
     schema = {
         "type": "object",
@@ -4347,7 +4504,10 @@ async def nx_plan_audit(
     if context:
         prompt += f"\n\nContext:\n{context}"
 
-    payload = await claude_dispatch(prompt, schema, timeout=timeout)
+    payload = await claude_dispatch(
+        prompt, schema, timeout=timeout,
+        mcp_servers=mcp_servers, allowed_tools=allowed_tools,
+    )
     if isinstance(payload, dict):
         verdict = payload.get("verdict", "unknown")
         summary = payload.get("summary", "")

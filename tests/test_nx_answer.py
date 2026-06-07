@@ -1074,6 +1074,105 @@ class TestNxTidy:
             f"nx_tidy default timeout must be 600s; got {captured['timeout']}"
         )
 
+    @pytest.mark.asyncio
+    async def test_prefetches_entries_and_stays_tool_free(self, monkeypatch):
+        """nexus-mawqw / Fix A: nx_tidy retrieves entries server-side
+        (the MCP server holds direct T3 access), inlines them into the
+        prompt, and dispatches a TOOL-FREE claude -p. This makes nx_tidy
+        immune to CC permission posture forever — the child never calls a
+        tool, so the post-2.1.162 server-approval gate can't break it."""
+        import nexus.operators.dispatch as _mod
+        import nexus.mcp.core as _core
+        from nexus.mcp.core import nx_tidy
+
+        # Pre-fetch surface: search returns structured ids, store_get_many
+        # hydrates the bodies. Both run in-process on the server side.
+        monkeypatch.setattr(_core, "search", lambda **kw: {
+            "ids": ["id1", "id2"],
+            "chunk_collections": ["knowledge__x", "knowledge__x"],
+            "collections": ["knowledge__x"],
+        })
+        monkeypatch.setattr(_core, "store_get_many", lambda *a, **kw: {
+            "contents": [
+                "ENTRY-BODY-SENTINEL-ONE about chromadb quotas",
+                "ENTRY-BODY-SENTINEL-TWO duplicate of one",
+            ],
+            "missing": [],
+        })
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
+            captured["prompt"] = prompt
+            captured["kwargs"] = kwargs
+            return {"summary": "ok", "actions": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await nx_tidy(topic="chromadb quotas", collection="knowledge__x")
+
+        # Hydrated bodies inlined into the prompt.
+        assert "ENTRY-BODY-SENTINEL-ONE" in captured["prompt"]
+        assert "ENTRY-BODY-SENTINEL-TWO" in captured["prompt"]
+        # Tool-free: no MCP/tool grant passed to dispatch.
+        assert not captured["kwargs"].get("mcp_servers"), (
+            "nx_tidy must stay tool-free (Fix A pre-fetches in-process)"
+        )
+        assert not captured["kwargs"].get("allowed_tools")
+
+    @pytest.mark.asyncio
+    async def test_cap_saturation_is_surfaced_not_silent(self, monkeypatch):
+        """nexus-mawqw / no-silent-caps: when retrieval saturates the
+        _TIDY_MAX_ENTRIES cap, the returned summary must say so. A silent
+        cap would let a tidy 'consolidate' a 200-entry collection from 30
+        chunks and suggest deletions for entries it never saw."""
+        import nexus.operators.dispatch as _mod
+        import nexus.mcp.core as _core
+        from nexus.mcp.core import nx_tidy, _TIDY_MAX_ENTRIES
+
+        n = _TIDY_MAX_ENTRIES
+        monkeypatch.setattr(_core, "search", lambda **kw: {
+            "ids": [f"id{i}" for i in range(n)],
+            "chunk_collections": ["knowledge__x"] * n,
+            "collections": ["knowledge__x"],
+        })
+        monkeypatch.setattr(_core, "store_get_many", lambda *a, **kw: {
+            "contents": [f"body {i}" for i in range(n)],
+            "missing": [],
+        })
+
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
+            return {"summary": "done", "actions": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await nx_tidy(topic="t", collection="knowledge__x")
+        assert str(_TIDY_MAX_ENTRIES) in result
+        assert "capped" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_prefetch_failure_degrades_gracefully(self, monkeypatch):
+        """If server-side retrieval errors, nx_tidy still dispatches
+        (with no inlined entries) rather than raising — a tidy on a
+        missing collection should report 'nothing found', not crash."""
+        import nexus.operators.dispatch as _mod
+        import nexus.mcp.core as _core
+        from nexus.mcp.core import nx_tidy
+
+        def boom(**kw):
+            raise RuntimeError("t3 down")
+
+        monkeypatch.setattr(_core, "search", boom)
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
+            captured["prompt"] = prompt
+            return {"summary": "nothing to consolidate", "actions": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await nx_tidy(topic="ghost topic")
+        assert "ghost topic" in captured["prompt"]
+        assert isinstance(result, str)
+
 
 # ── nx_enrich_beads ───────────────────────────────────────────────────────────
 
@@ -1085,7 +1184,7 @@ class TestNxEnrichBeads:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import nx_enrich_beads
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
             return {"enriched_description": "## Enriched\n\nDetails here."}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
@@ -1099,7 +1198,7 @@ class TestNxEnrichBeads:
 
         captured = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
             captured.append(prompt)
             return {"enriched_description": "ok"}
 
@@ -1114,7 +1213,7 @@ class TestNxEnrichBeads:
 
         captured = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
             captured.append(prompt)
             return {"enriched_description": "ok"}
 
@@ -1134,7 +1233,7 @@ class TestNxEnrichBeads:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
             captured["timeout"] = timeout
             return {"enriched_description": "ok"}
 
@@ -1144,6 +1243,31 @@ class TestNxEnrichBeads:
             f"nx_enrich_beads default timeout must be 300s; "
             f"got {captured['timeout']}"
         )
+
+    @pytest.mark.asyncio
+    async def test_grants_mcp_and_tool_access(self, monkeypatch):
+        """nexus-mawqw / Fix B: enrich does open-ended codebase
+        exploration, so its claude -p child must be granted MCP + file
+        tools. Without the grant the child sees the conexus server as
+        unapproved (post-CC-2.1.162) and every tool call is denied."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import nx_enrich_beads
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
+            captured.update(kwargs)
+            return {"enriched_description": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await nx_enrich_beads(bead_description="task")
+        assert "nexus" in (captured.get("mcp_servers") or {}), (
+            "enrich must inject the conexus MCP server inline"
+        )
+        assert "nexus_catalog" in (captured.get("mcp_servers") or {})
+        allowed = captured.get("allowed_tools") or []
+        assert "mcp__nexus" in allowed
+        assert "Read" in allowed and "Grep" in allowed
 
 
 # ── nx_plan_audit ─────────────────────────────────────────────────────────────
@@ -1156,7 +1280,7 @@ class TestNxPlanAudit:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import nx_plan_audit
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
             return {"verdict": "pass", "findings": [], "summary": "All good."}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
@@ -1169,7 +1293,7 @@ class TestNxPlanAudit:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import nx_plan_audit
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
             return {
                 "verdict": "warn",
                 "findings": [{"severity": "important", "title": "Missing file"}],
@@ -1188,7 +1312,7 @@ class TestNxPlanAudit:
 
         captured = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
             captured.append(prompt)
             return {"verdict": "pass", "findings": [], "summary": "ok"}
 
@@ -1211,7 +1335,7 @@ class TestNxPlanAudit:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
             captured["timeout"] = timeout
             return {"verdict": "pass", "findings": [], "summary": "ok"}
 
@@ -1221,6 +1345,28 @@ class TestNxPlanAudit:
             f"nx_plan_audit default timeout must be 600s; "
             f"got {captured['timeout']}"
         )
+
+    @pytest.mark.asyncio
+    async def test_grants_mcp_and_tool_access(self, monkeypatch):
+        """nexus-mawqw / Fix B: plan audit verifies file:line pointers
+        across the codebase, so its claude -p child must be granted MCP +
+        file tools."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import nx_plan_audit
+
+        captured = {}
+
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
+            captured.update(kwargs)
+            return {"verdict": "pass", "findings": [], "summary": "ok"}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        await nx_plan_audit(plan_json='{"steps": []}')
+        assert "nexus" in (captured.get("mcp_servers") or {})
+        assert "nexus_catalog" in (captured.get("mcp_servers") or {})
+        allowed = captured.get("allowed_tools") or []
+        assert "mcp__nexus" in allowed
+        assert "Read" in allowed
 
 
 # ── Operator timeout defaults (all raised to 300s 2026-04-17) ────────────────
@@ -1771,7 +1917,7 @@ class TestSubagentTimeoutFloor:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
             captured["timeout"] = timeout
             return {"verdict": "pass", "findings": [], "summary": "ok"}
 
@@ -1789,7 +1935,7 @@ class TestSubagentTimeoutFloor:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
             captured["timeout"] = timeout
             return {"verdict": "pass", "findings": [], "summary": "ok"}
 
@@ -1806,7 +1952,7 @@ class TestSubagentTimeoutFloor:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
             captured["timeout"] = timeout
             return {"enriched_description": "ok"}
 
@@ -1824,7 +1970,7 @@ class TestSubagentTimeoutFloor:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
             captured["timeout"] = timeout
             return {"enriched_description": "ok"}
 
@@ -1837,7 +1983,7 @@ class TestSubagentTimeoutFloor:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import nx_plan_audit
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, **kwargs):
             return {"verdict": "pass", "findings": [], "summary": "ok"}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)

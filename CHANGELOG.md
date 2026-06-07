@@ -6,6 +6,84 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.6] - 2026-06-07
+
+Hotfix: the RDR-080 agent-replacement MCP tools regressed when Claude Code
+tightened MCP-server auto-approval.
+
+### Fixed
+
+- **Agent-replacement MCP tools no longer fail when the `claude -p`
+  subprocess lacks MCP approval (nexus-mawqw).** `nx_tidy`,
+  `nx_enrich_beads`, and `nx_plan_audit` reused the stateless operator
+  dispatch but their prompts instructed the child `claude -p` to call nx
+  MCP tools. Claude Code tightened MCP-server auto-approval (~2.1.162), so
+  the child saw the conexus server as unapproved and every tool call was
+  denied mid-operation. Two-part fix: (1) `nx_tidy` now pre-fetches the
+  entries to consolidate **server-side** (the MCP process holds direct T3
+  access), inlines them into the prompt, and dispatches a **tool-free**
+  `claude -p` — immune to CC permission posture, and now read-only with a
+  surfaced retrieval cap (no silent truncation); (2) `nx_enrich_beads` and
+  `nx_plan_audit`, which do open-ended codebase exploration that cannot be
+  pre-fetched, get an opt-in inline `--mcp-config` (explicitly-supplied
+  servers clear the pending-approval gate) plus `--allowedTools`. Stateless
+  operators (extract/filter/rank/etc.) stay tool-free, now guarded by a
+  concrete-operator argv-inspection test.
+
+## [5.10.5] - 2026-06-06
+
+RDR-151 daemon CPU-peg hardening: a cause-agnostic spin backstop plus the
+write-contention root-cause fix.
+
+### Fixed
+
+- **T2 daemon can no longer spin at ~100% CPU (RDR-151, nexus-u2vmv) — backstop.**
+  A cause-agnostic event-loop spin guard (`spin_guard.py`): a `SpinGuardSelector`
+  counts immediate ready-returns by wall-time and a `SpinWatchdog` daemon thread,
+  on a sustained spin, auto-captures the selector map + `loop._ready` + thread
+  stacks and self-heals (SIGTERM → graceful stop; `os._exit` fallback → clean
+  respawn), bounded so a persistent trigger disarms to pegged-but-serving (never
+  worse than baseline). Validated against the live postmortem signature.
+- **T2 daemon write-burst CPU peg root-caused (RDR-151, nexus-xmohw, GH #1137).**
+  The daemon is now a single serialised writer: every mutating dispatch op AND the
+  internal aspect-reclaim loop serialise through one write lock, so a `memory.*`
+  write burst plus the reclaim loop can no longer race the SQLite writer lock into
+  a `SQLITE_BUSY` retry spin. Reads stay concurrent (`database.hello` is never
+  serialised — avoids the slow-hello → ensure-running-stale → takeover cascade);
+  lock-hold is bounded to one write attempt (backoff happens outside the lock). A
+  coverage forcing-test fails CI if any mutating op is left un-serialised.
+- **Stop hook no longer files P1 bug beads for transient API failures (#1136).**
+
+## [5.10.4] - 2026-06-06
+
+RDR-151 root-cause fix for the recurring T2 daemon 100% CPU peg, plus a T1 scratch
+recovery fix.
+
+### Fixed
+
+- **T2 daemon CPU peg root-caused and fixed (RDR-151, nexus-uzay8 / nexus-xmohw).**
+  The peg was contention-driven write starvation: `taxonomy.*` write RPCs bypassed
+  the daemon's `_catalog_write_lock`, and `nx index` opened its own direct T2 write
+  connection, so multiple writers raced the single SQLite WAL writer lock while the
+  daemon's executor thread wedged on it. Two fixes: (1) `taxonomy.*` writes now
+  serialize through the daemon's catalog write lock; (2) every direct T2 taxonomy
+  write on the `nx index` path and the `nx taxonomy` CLI now routes through the
+  daemon (compute client-side where ChromaDB is needed, persist daemon-routed),
+  leaving only read-only direct connections (WAL readers don't take the writer
+  lock). A `storage_boundary_lint` enforce-flip fails CI on any taxonomy write
+  method called on a directly-constructed handle outside `db/`+`daemon/`.
+- **T1 scratch restored when the session id diverges from the MCP lease key
+  (nexus-gff3g).** T1 working memory is now matched by Claude-ancestor pid with a
+  deterministic tie-break, so sibling agents recover the correct scratch when the
+  session id and lease key differ.
+- Daemon lifecycle/teardown hardening: idle read deadline on accepted connections,
+  `mark_shutting_down()` first in `stop()` (T2 + T3), `to_thread(heartbeat_tick)`
+  so the flock never blocks the event loop, and reaper `endpoint.pid` fallback.
+
+### Changed
+
+- RDR-147 (multi-hop entity-resolution retrieval) accepted.
+
 ## [5.10.3] - 2026-06-05
 
 T2 daemon reliability fix.
