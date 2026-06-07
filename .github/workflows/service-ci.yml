@@ -92,10 +92,15 @@ jobs:
         working-directory: service
         run: |
           mvn -Pcodegen process-test-classes -q
-          git diff --exit-code service/src/main/generated/ || {
+          # NOTE: this step runs with working-directory: service, so the diff
+          # path is repo-relative-to-service ("src/main/generated/"), NOT
+          # "service/src/main/generated/" (which would resolve to
+          # service/service/... and fail with "ambiguous argument /
+          # unknown revision or path"). The `--` separates path from revision.
+          git diff --exit-code -- src/main/generated/ || {
             echo "DRIFT DETECTED: committed jOOQ sources are stale vs. the current changelog."
             echo "Re-run: mvn -Pcodegen process-test-classes && git add service/src/main/generated/ && git commit"
             echo ""
-            git diff --stat service/src/main/generated/
+            git diff --stat -- src/main/generated/
             exit 1
           }
