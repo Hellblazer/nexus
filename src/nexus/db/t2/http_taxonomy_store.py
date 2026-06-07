@@ -43,12 +43,20 @@ Interface parity (bead nexus-gmiaf.14, RDR-152 P2.4):
 from __future__ import annotations
 
 import json
+import math
 import os
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import structlog
+
+from nexus.db.t2.catalog_taxonomy import (
+    AuditHub,
+    AuditReport,
+    DEFAULT_HUB_STOPWORDS,
+    HubRow,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -390,29 +398,82 @@ class HttpTaxonomyStore:
     def compute_icf_map(
         self,
         *,
+        use_cache: bool = False,
         force_recompute: bool = False,
     ) -> dict[int, float]:
-        """Compute ICF map {topic_id: icf_score}. No local cache over HTTP."""
-        n_effective = self._get("/icf/source_count").get("count", 1)
+        """Compute ICF map {topic_id: icf_score} via atomic /icf/map endpoint.
+
+        No local cache over HTTP (race-free single round-trip replaces
+        the 2-call n_effective + rows pattern from the original ICF map).
+        """
+        r = self._get("/icf/map")
+        n_effective: int = r.get("n_effective", 0)
         if n_effective < 2:
             return {}
-        rows = self._get("/icf/rows", {"n_effective": n_effective})
-        import math
-        return {
-            r["topic_id"]: math.log2(r["icf_raw"]) if r["icf_raw"] > 0 else 0.0
-            for r in rows
-        }
+        rows: list[dict[str, Any]] = r.get("rows", [])
+        result: dict[int, float] = {}
+        for row in rows:
+            df = int(row.get("df", 0))
+            if df > 0:
+                icf = math.log2(n_effective / df)
+                result[int(row["topic_id"])] = icf
+        return result
 
     def detect_hubs(
         self,
         *,
-        top_n: int = 10,
-        collection: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Return top topics by projection volume for a collection."""
-        if collection is None:
-            return []
-        return self._get("/top_topics", {"collection": collection, "top_n": top_n})
+        min_collections: int = 2,
+        max_icf: float | None = None,
+        stopwords: tuple[str, ...] = DEFAULT_HUB_STOPWORDS,
+        warn_stale: bool = False,
+    ) -> list[HubRow]:
+        """Return candidate hub topics, sorted by chunks * (1 - ICF) desc.
+
+        Delegates DF/chunk aggregation to the service (/hubs); computes
+        ICF, stopword matching, and score Python-side for exact parity
+        with CatalogTaxonomy.detect_hubs.
+        """
+        rows: list[dict[str, Any]] = self._get("/hubs", {"min_collections": min_collections})
+        icf_map = self.compute_icf_map()
+        lowered_stopwords = tuple(s.lower() for s in stopwords)
+
+        hubs: list[HubRow] = []
+        for r in rows:
+            topic_id = int(r["topic_id"])
+            icf_value = float(icf_map.get(topic_id, 1.0))
+            if max_icf is not None and icf_value > max_icf:
+                continue
+
+            label = r.get("label") or ""
+            lower_label = label.lower()
+            matched = tuple(s for s in lowered_stopwords if s in lower_label)
+
+            sources = tuple(dict.fromkeys(r.get("source_collections") or []))
+            total = int(r.get("total_chunks", 0))
+            score = float(total) * (1.0 - icf_value)
+
+            last_at = r.get("last_assigned_at")
+            if last_at:
+                last_at = str(last_at)
+
+            hubs.append(HubRow(
+                topic_id=topic_id,
+                label=label,
+                collection=r.get("collection") or "",
+                distinct_source_collections=int(r.get("df", 0)),
+                total_chunks=total,
+                icf=icf_value,
+                score=score,
+                matched_stopwords=matched,
+                source_collections=sources,
+                last_assigned_at=last_at,
+                max_last_discover_at=None,   # warn_stale not implemented over HTTP
+                never_discovered_count=0,
+                is_stale=False,
+            ))
+
+        hubs.sort(key=lambda h: h.score, reverse=True)
+        return hubs
 
     def top_topics_for_collection(
         self,
@@ -546,18 +607,124 @@ class HttpTaxonomyStore:
             "last_discover_at": last_discover_at,
         })
 
-    # ── Stub methods for CatalogTaxonomy compat ────────────────────────────────
-    # These methods involve complex local computation (HDBSCAN clustering,
-    # cross-collection discovery, etc.) that is not yet migrated to the service.
-    # The seam only routes the relational query/write surface.
+    def audit_collection(
+        self,
+        collection: str,
+        *,
+        threshold: float | None = None,
+        top_n: int = 5,
+        stopwords: tuple[str, ...] = DEFAULT_HUB_STOPWORDS,
+    ) -> AuditReport:
+        """Summarise projection quality for *collection*.
 
-    def audit_collection(self, collection: str) -> dict[str, Any]:
-        """Stub: not implemented over HTTP in this phase."""
-        _log.warning("http_taxonomy_store.audit_collection_not_implemented")
-        return {}
+        Delegates raw similarity values and hub rows to the service (/audit);
+        computes quantiles and stopword matching Python-side for exact parity
+        with CatalogTaxonomy.audit_collection.
+        """
+        from nexus.corpus import default_projection_threshold
+
+        resolved_threshold = (
+            threshold if threshold is not None
+            else default_projection_threshold(collection)
+        )
+
+        r = self._get("/audit", {"collection": collection, "top_n": top_n})
+        sims: list[float] = [float(v) for v in r.get("similarities", [])]
+        hub_rows_raw: list[dict[str, Any]] = r.get("hub_rows", [])
+
+        icf_map = self.compute_icf_map()
+        lowered_stopwords = tuple(s.lower() for s in stopwords)
+
+        total = len(sims)
+        if total:
+            def _quantile(q: float) -> float:
+                idx = min(total - 1, max(0, int(round(q * (total - 1)))))
+                return sims[idx]
+            p10: float | None = _quantile(0.10)
+            p50: float | None = _quantile(0.50)
+            p90: float | None = _quantile(0.90)
+        else:
+            p10 = p50 = p90 = None
+
+        below_threshold_count = sum(1 for s in sims if s < resolved_threshold)
+
+        top_hubs: list[AuditHub] = []
+        for h in hub_rows_raw:
+            topic_id = int(h["topic_id"])
+            label = h.get("label") or ""
+            lower_label = label.lower()
+            matched = tuple(s for s in lowered_stopwords if s in lower_label)
+            top_hubs.append(AuditHub(
+                topic_id=topic_id,
+                label=label,
+                chunk_count=int(h.get("chunk_count", 0)),
+                icf=float(icf_map.get(topic_id, 1.0)),
+                matched_stopwords=matched,
+            ))
+
+        pattern_pollution = [h for h in top_hubs if h.matched_stopwords]
+
+        return AuditReport(
+            collection=collection,
+            total_assignments=total,
+            p10=p10,
+            p50=p50,
+            p90=p90,
+            below_threshold_count=below_threshold_count,
+            threshold=resolved_threshold,
+            top_receiving_hubs=top_hubs,
+            pattern_pollution=pattern_pollution,
+        )
 
     def clear_icf_cache(self) -> None:
         """No-op: ICF is computed on-demand over HTTP, no local cache."""
+
+    def generate_cooccurrence_links(self) -> int:
+        """Generate topic_links from cross-collection projection co-occurrence.
+
+        Delegates to the service (/links/generate_cooccurrence).
+        Returns count of links generated.
+        """
+        r = self._post("/links/generate_cooccurrence", {})
+        return int(r.get("count", 0))
+
+    def refresh_projection_links(self) -> int:
+        """Rebuild projection entries in topic_links from per-chunk assignments.
+
+        Delegates to the service (/links/refresh_projection).
+        Returns the number of topic-pair rows written/updated.
+        """
+        r = self._post("/links/refresh_projection", {})
+        return int(r.get("count", 0))
+
+    def persist_split(
+        self,
+        split_result: dict[str, Any],
+    ) -> list[int]:
+        """Persist the split: DELETE parent assignments, INSERT children.
+
+        Delegates to the service (/topics/persist_split).
+        Returns the list of new child topic_id values.
+        """
+        r = self._post("/topics/persist_split", {
+            "topic_id": split_result["topic_id"],
+            "collection_name": split_result["collection_name"],
+            "child_specs": split_result.get("child_specs", []),
+        })
+        return [int(i) for i in r.get("child_ids", [])]
+
+    def rename_collection(self, old: str, new: str) -> dict[str, int]:
+        """Re-point every taxonomy row from old -> new collection name.
+
+        Delegates to the service (/rename_collection).
+        Returns count dict {topics, assignments, meta}.
+        """
+        r = self._post("/rename_collection", {"old": old, "new": new})
+        return {
+            "topics": int(r.get("topics", 0)),
+            "assignments": int(r.get("assignments", 0)),
+            "meta": int(r.get("meta", 0)),
+        }
 
     def get_labels_for_ids(self, topic_ids: list[int]) -> dict[int, str]:
         """Return {topic_id: label} for given ids."""

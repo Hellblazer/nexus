@@ -457,8 +457,12 @@ public final class TaxonomyRepository {
                 INSERT INTO nexus.taxonomy_meta (tenant_id, collection, last_discover_doc_count, last_discover_at)
                 VALUES (?, ?, ?, ?::timestamptz)
                 ON CONFLICT (tenant_id, collection) DO UPDATE SET
-                    last_discover_doc_count = EXCLUDED.last_discover_doc_count,
-                    last_discover_at = EXCLUDED.last_discover_at
+                    last_discover_doc_count = GREATEST(
+                        nexus.taxonomy_meta.last_discover_doc_count,
+                        EXCLUDED.last_discover_doc_count),
+                    last_discover_at = GREATEST(
+                        nexus.taxonomy_meta.last_discover_at,
+                        EXCLUDED.last_discover_at)
                 """, tenant, collection, docCount, tsStr);
             return null;
         });
@@ -637,7 +641,13 @@ public final class TaxonomyRepository {
                     (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
                 VALUES (?, ?, ?, ?, ?, ?::timestamptz, ?)
                 ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
-                    assigned_by       = EXCLUDED.assigned_by,
+                    -- Never downgrade 'projection' to 'hdbscan' or similar:
+                    -- keep existing assigned_by unless the incoming row is 'projection'
+                    -- (the highest-provenance tag).
+                    assigned_by       = CASE
+                                            WHEN EXCLUDED.assigned_by = 'projection' THEN 'projection'
+                                            ELSE nexus.topic_assignments.assigned_by
+                                        END,
                     similarity        = GREATEST(
                         COALESCE(nexus.topic_assignments.similarity, -1.0),
                         COALESCE(EXCLUDED.similarity, -1.0)),
@@ -681,6 +691,311 @@ public final class TaxonomyRepository {
                                  EXCLUDED.last_discover_at)
                 """, tenant, collection, lastDiscoverDocCount, tsStr);
             return null;
+        });
+    }
+
+    // ── Analytical methods (nexus-gmiaf.14 drop-in completion) ────────────────
+
+    /**
+     * Compute ICF map atomically: returns [{topic_id, n_effective, df}] in one transaction.
+     * Callers compute log2(n_effective / df) in Python.
+     */
+    public Map<String, Object> computeIcfMapAtomic(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // n_effective = count of distinct source_collection values
+            var nRow = ctx.fetchOne(
+                "SELECT COUNT(DISTINCT source_collection) AS n "
+                + "FROM nexus.topic_assignments "
+                + "WHERE assigned_by = 'projection' AND source_collection IS NOT NULL");
+            int nEffective = nRow == null ? 0 : ((Number) nRow.get("n")).intValue();
+
+            List<Map<String, Object>> rows = new ArrayList<>();
+            if (nEffective >= 2) {
+                var icfRows = ctx.fetch(
+                    "SELECT topic_id, COUNT(DISTINCT source_collection) AS df "
+                    + "FROM nexus.topic_assignments "
+                    + "WHERE assigned_by = 'projection' AND source_collection IS NOT NULL "
+                    + "GROUP BY topic_id "
+                    + "HAVING COUNT(DISTINCT source_collection) > 0");
+                for (var r : icfRows) {
+                    var m = new LinkedHashMap<String, Object>();
+                    m.put("topic_id", ((Number) r.get("topic_id")).longValue());
+                    m.put("df", ((Number) r.get("df")).intValue());
+                    rows.add(m);
+                }
+            }
+            var result = new LinkedHashMap<String, Object>();
+            result.put("n_effective", nEffective);
+            result.put("rows", rows);
+            return result;
+        });
+    }
+
+    /**
+     * Hub detection data: returns per-topic DF + total_chunks + label + collection + source set.
+     * Python-side computes ICF, stopword matching, and score.
+     *
+     * @param minCollections minimum distinct source_collections (DF threshold)
+     */
+    public List<Map<String, Object>> detectHubsData(String tenant, int minCollections) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.fetch("""
+                SELECT
+                    t.id           AS topic_id,
+                    t.label,
+                    t.collection,
+                    COUNT(DISTINCT ta.source_collection) AS df,
+                    COUNT(*)                              AS total_chunks,
+                    MAX(ta.assigned_at)                   AS last_assigned_at
+                FROM nexus.topic_assignments ta
+                JOIN nexus.topics t ON t.id = ta.topic_id
+                WHERE ta.assigned_by = 'projection'
+                  AND ta.source_collection IS NOT NULL
+                GROUP BY t.id, t.label, t.collection
+                HAVING COUNT(DISTINCT ta.source_collection) >= ?
+                ORDER BY COUNT(*) DESC
+                """, minCollections);
+
+            // Per-hub source collection sets
+            var allSources = ctx.fetch(
+                "SELECT topic_id, source_collection "
+                + "FROM nexus.topic_assignments "
+                + "WHERE assigned_by = 'projection' AND source_collection IS NOT NULL "
+                + "ORDER BY topic_id, source_collection");
+
+            // Build topic_id -> [source_collection, ...] map
+            java.util.Map<Long, List<String>> sourcesMap = new java.util.HashMap<>();
+            for (var r : allSources) {
+                long tid = ((Number) r.get("topic_id")).longValue();
+                String sc = (String) r.get("source_collection");
+                sourcesMap.computeIfAbsent(tid, k -> new ArrayList<>()).add(sc);
+            }
+
+            List<Map<String, Object>> result = new ArrayList<>();
+            for (var r : rows) {
+                long tid = ((Number) r.get("topic_id")).longValue();
+                var m = new LinkedHashMap<String, Object>();
+                m.put("topic_id", tid);
+                m.put("label", r.get("label"));
+                m.put("collection", r.get("collection"));
+                m.put("df", ((Number) r.get("df")).intValue());
+                m.put("total_chunks", ((Number) r.get("total_chunks")).intValue());
+                Object lastAt = r.get("last_assigned_at");
+                m.put("last_assigned_at", lastAt != null ? lastAt.toString() : null);
+                m.put("source_collections", sourcesMap.getOrDefault(tid, List.of()));
+                result.add(m);
+            }
+            return result;
+        });
+    }
+
+    /**
+     * Audit collection: returns similarity distribution data and top receiving hub topics.
+     * Python-side computes quantiles; we return sorted similarities + hub rows.
+     */
+    public Map<String, Object> auditCollectionData(String tenant, String collection, int topN) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var simRows = ctx.fetch(
+                "SELECT similarity FROM nexus.topic_assignments "
+                + "WHERE assigned_by = 'projection' "
+                + "AND source_collection = ? AND similarity IS NOT NULL "
+                + "ORDER BY similarity ASC",
+                collection);
+
+            List<Double> sims = new ArrayList<>();
+            for (var r : simRows) {
+                sims.add(((Number) r.get("similarity")).doubleValue());
+            }
+
+            var hubRows = ctx.fetch("""
+                SELECT ta.topic_id, t.label, COUNT(*) AS chunks
+                FROM nexus.topic_assignments ta
+                JOIN nexus.topics t ON t.id = ta.topic_id
+                WHERE ta.assigned_by = 'projection'
+                  AND ta.source_collection = ?
+                GROUP BY ta.topic_id, t.label
+                ORDER BY COUNT(*) DESC
+                LIMIT ?
+                """, collection, topN);
+
+            List<Map<String, Object>> hubs = new ArrayList<>();
+            for (var r : hubRows) {
+                var m = new LinkedHashMap<String, Object>();
+                m.put("topic_id", ((Number) r.get("topic_id")).longValue());
+                m.put("label", r.get("label"));
+                m.put("chunk_count", ((Number) r.get("chunks")).intValue());
+                hubs.add(m);
+            }
+
+            var result = new LinkedHashMap<String, Object>();
+            result.put("collection", collection);
+            result.put("similarities", sims);
+            result.put("hub_rows", hubs);
+            return result;
+        });
+    }
+
+    /**
+     * Generate cooccurrence links: find topic pairs sharing docs across different collections.
+     * Returns the count of upserted link pairs.
+     */
+    public int generateCooccurrenceLinks(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var pairs = ctx.fetch("""
+                SELECT LEAST(a.topic_id, b.topic_id) AS from_id,
+                       GREATEST(a.topic_id, b.topic_id) AS to_id,
+                       COUNT(*) AS cnt
+                FROM nexus.topic_assignments a
+                JOIN nexus.topic_assignments b ON a.doc_id = b.doc_id
+                JOIN nexus.topics ta ON a.topic_id = ta.id
+                JOIN nexus.topics tb ON b.topic_id = tb.id
+                WHERE a.topic_id < b.topic_id AND ta.collection != tb.collection
+                GROUP BY LEAST(a.topic_id, b.topic_id), GREATEST(a.topic_id, b.topic_id)
+                """);
+
+            if (pairs.isEmpty()) return 0;
+
+            for (var r : pairs) {
+                long fromId = ((Number) r.get("from_id")).longValue();
+                long toId   = ((Number) r.get("to_id")).longValue();
+                int  cnt    = ((Number) r.get("cnt")).intValue();
+                ctx.execute("""
+                    INSERT INTO nexus.topic_links (tenant_id, from_topic_id, to_topic_id, link_count, link_types)
+                    VALUES (?, ?, ?, ?, '["cooccurrence"]')
+                    ON CONFLICT (tenant_id, from_topic_id, to_topic_id) DO UPDATE SET
+                        link_count = EXCLUDED.link_count,
+                        link_types = '["cooccurrence"]'
+                    """, tenant, fromId, toId, cnt);
+            }
+            log.info("cooccurrence_links generated count={}", pairs.size());
+            return pairs.size();
+        });
+    }
+
+    /**
+     * Refresh projection links: rebuild projection entries in topic_links from assignments.
+     * Returns the count of link pairs written/updated.
+     */
+    public int refreshProjectionLinks(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.fetch("""
+                SELECT src.topic_id AS src_id, tgt.topic_id AS tgt_id, COUNT(*) AS cnt
+                FROM nexus.topic_assignments tgt
+                JOIN nexus.topic_assignments src
+                  ON src.doc_id = tgt.doc_id
+                 AND src.topic_id != tgt.topic_id
+                 AND src.assigned_by != 'projection'
+                WHERE tgt.assigned_by = 'projection'
+                GROUP BY src.topic_id, tgt.topic_id
+                HAVING COUNT(*) > 0
+                """);
+
+            if (rows.isEmpty()) return 0;
+
+            // Canonicalize pair ordering
+            java.util.Map<String, Integer> aggregated = new java.util.LinkedHashMap<>();
+            for (var r : rows) {
+                long s = ((Number) r.get("src_id")).longValue();
+                long t = ((Number) r.get("tgt_id")).longValue();
+                long fromId = Math.min(s, t);
+                long toId   = Math.max(s, t);
+                String key = fromId + ":" + toId;
+                aggregated.merge(key, ((Number) r.get("cnt")).intValue(), Integer::sum);
+            }
+
+            for (var entry : aggregated.entrySet()) {
+                String[] parts = entry.getKey().split(":");
+                long fromId = Long.parseLong(parts[0]);
+                long toId   = Long.parseLong(parts[1]);
+
+                // Fetch existing link_types to merge 'projection' in
+                var existing = ctx.fetchOne(
+                    "SELECT link_types FROM nexus.topic_links "
+                    + "WHERE tenant_id = ? AND from_topic_id = ? AND to_topic_id = ?",
+                    tenant, fromId, toId);
+
+                String mergedTypes;
+                if (existing != null && existing.get("link_types") != null) {
+                    String lt = (String) existing.get("link_types");
+                    if (!lt.contains("\"projection\"")) {
+                        // Insert projection into the JSON array
+                        mergedTypes = lt.replace("]", ", \"projection\"]")
+                                        .replace("[ ", "[")
+                                        .replace("[, ", "[\"projection\"]");
+                        if (!mergedTypes.contains("projection")) {
+                            mergedTypes = "[\"projection\"]";
+                        }
+                    } else {
+                        mergedTypes = lt;
+                    }
+                } else {
+                    mergedTypes = "[\"projection\"]";
+                }
+
+                ctx.execute("""
+                    INSERT INTO nexus.topic_links (tenant_id, from_topic_id, to_topic_id, link_count, link_types)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (tenant_id, from_topic_id, to_topic_id) DO UPDATE SET
+                        link_count = EXCLUDED.link_count,
+                        link_types = EXCLUDED.link_types
+                    """, tenant, fromId, toId, entry.getValue(), mergedTypes);
+            }
+
+            log.info("projection_links refreshed count={}", aggregated.size());
+            return aggregated.size();
+        });
+    }
+
+    /**
+     * Persist a topic split: delete parent assignments, insert child topics + assignments.
+     * Returns list of new child topic IDs.
+     *
+     * @param topicId      parent topic id
+     * @param childSpecs   list of child specs; each has: label, doc_count, created_at, terms_json, doc_ids
+     * @param collectionName collection the parent topic belongs to
+     */
+    @SuppressWarnings("unchecked")
+    public List<Long> persistSplit(String tenant, long topicId,
+                                    String collectionName,
+                                    List<Map<String, Object>> childSpecs) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // Delete parent assignments
+            ctx.execute("DELETE FROM nexus.topic_assignments WHERE tenant_id = ? AND topic_id = ?",
+                        tenant, topicId);
+
+            List<Long> childIds = new ArrayList<>();
+            for (var spec : childSpecs) {
+                String label      = (String) spec.get("label");
+                int    docCount   = ((Number) spec.get("doc_count")).intValue();
+                String createdAt  = (String) spec.get("created_at");
+                String termsJson  = (String) spec.getOrDefault("terms_json", null);
+                List<String> docIds = (List<String>) spec.getOrDefault("doc_ids", List.of());
+
+                String tsStr = fmtTs(parseTsStrict(createdAt));
+                var row = ctx.fetchOne("""
+                    INSERT INTO nexus.topics
+                        (tenant_id, label, parent_id, collection, doc_count, created_at, terms)
+                    VALUES (?, ?, ?, ?, ?, ?::timestamptz, ?)
+                    RETURNING id
+                    """, tenant, label, topicId, collectionName, docCount, tsStr, termsJson);
+                long childId = row == null ? -1 : ((Number) row.get("id")).longValue();
+                childIds.add(childId);
+
+                for (String docId : docIds) {
+                    ctx.execute("""
+                        INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by)
+                        VALUES (?, ?, ?, 'split')
+                        ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+                        """, tenant, docId, childId);
+                }
+            }
+
+            // Zero out parent doc_count
+            ctx.execute("UPDATE nexus.topics SET doc_count = 0 WHERE tenant_id = ? AND id = ?",
+                        tenant, topicId);
+
+            log.info("persist_split topic_id={} children={}", topicId, childIds.size());
+            return childIds;
         });
     }
 }

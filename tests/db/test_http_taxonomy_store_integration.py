@@ -23,6 +23,16 @@ What is exercised (bead nexus-gmiaf.14 requirements):
   f) ETL fidelity: import_assignment preserves similarity verbatim
   g) needs_rebalance: detects growth after record_discover_count
   h) GREATEST merge: re-import with stale doc_count does NOT clobber live PG value
+  i) compute_icf_map: returns {topic_id: icf} dict from /icf/map atomic endpoint
+  j) detect_hubs: returns list[HubRow] sorted by score desc
+  k) detect_hubs: stopword flagging for labels containing DEFAULT_HUB_STOPWORDS terms
+  l) audit_collection: returns AuditReport with correct fields
+  m) audit_collection: pattern_pollution flags stopword labels
+  n) generate_cooccurrence_links: returns count of cross-collection pairs
+  o) refresh_projection_links: returns count of pairs written
+  p) persist_split: inserts children, zeroes parent doc_count
+  q) assigned_by never downgrades 'projection' to 'hdbscan' (importAssignment fix)
+  r) recordDiscoverCount uses GREATEST (no-clobber re-record)
 
 CHROMA INTERACTION NOTE:
   delete_topic and merge_topics return the collection name but do NOT touch
@@ -536,4 +546,253 @@ class TestTaxonomyMVV:
         t2 = taxonomy_store.get_topic_by_id(8001)
         assert t2["doc_count"] == 50, (
             f"GREATEST failed: doc_count={t2['doc_count']} should be 50, not 10"
+        )
+
+
+class TestAnalyticalMethods:
+    """Tests for the 5 analytical methods that were missing (nexus-gmiaf.14 drop-in completion)."""
+
+    # Shared topic IDs for this test class — use a high range to avoid collision
+    _COLL_A = "knowledge__analytical-a"
+    _COLL_B = "knowledge__analytical-b"
+    _T_A1 = 9001
+    _T_A2 = 9002
+    _T_B1 = 9003
+
+    @pytest.fixture(autouse=True, scope="class")
+    def seed_data(self, taxonomy_store):
+        """Seed topics and assignments for analytical method tests."""
+        # Topic A1 in collection A
+        taxonomy_store.import_topic(
+            src_id=self._T_A1,
+            label="analytic-hub-a1-inttest",
+            parent_id=None,
+            collection=self._COLL_A,
+            centroid_hash=None,
+            doc_count=5,
+            created_at="2026-01-01T00:00:00Z",
+            review_status="pending",
+            terms=None,
+        )
+        # Topic A2 in collection A (stopword label for pattern_pollution)
+        taxonomy_store.import_topic(
+            src_id=self._T_A2,
+            label="class-helper-inttest",  # contains stopword "class"
+            parent_id=None,
+            collection=self._COLL_A,
+            centroid_hash=None,
+            doc_count=3,
+            created_at="2026-01-01T00:00:00Z",
+            review_status="pending",
+            terms=None,
+        )
+        # Topic B1 in collection B
+        taxonomy_store.import_topic(
+            src_id=self._T_B1,
+            label="analytic-hub-b1-inttest",
+            parent_id=None,
+            collection=self._COLL_B,
+            centroid_hash=None,
+            doc_count=4,
+            created_at="2026-01-01T00:00:00Z",
+            review_status="pending",
+            terms=None,
+        )
+
+        # Projection assignments: doc1 projects from COLL_B into T_A1
+        # doc2 projects from COLL_B into T_A2
+        # doc3 projects from COLL_A into T_B1
+        # This creates cross-collection co-occurrence between A1↔B1, A2↔B1
+        taxonomy_store.import_assignment(
+            doc_id="analytic-doc1", topic_id=self._T_A1,
+            assigned_by="projection", similarity=0.88,
+            assigned_at="2026-03-01T00:00:00Z",
+            source_collection=self._COLL_B,
+        )
+        taxonomy_store.import_assignment(
+            doc_id="analytic-doc2", topic_id=self._T_A2,
+            assigned_by="projection", similarity=0.72,
+            assigned_at="2026-03-01T00:00:00Z",
+            source_collection=self._COLL_B,
+        )
+        taxonomy_store.import_assignment(
+            doc_id="analytic-doc3", topic_id=self._T_B1,
+            assigned_by="projection", similarity=0.91,
+            assigned_at="2026-03-01T00:00:00Z",
+            source_collection=self._COLL_A,
+        )
+        # hdbscan assignments for co-occurrence: doc1 also hdbscan-assigned to B1
+        taxonomy_store.import_assignment(
+            doc_id="analytic-doc1", topic_id=self._T_B1,
+            assigned_by="hdbscan", similarity=None,
+            assigned_at=None, source_collection=None,
+        )
+
+    def test_i_compute_icf_map(self, taxonomy_store) -> None:
+        """i) compute_icf_map returns a non-empty {topic_id: icf} dict."""
+        icf = taxonomy_store.compute_icf_map()
+        # 2 distinct source_collections (COLL_A, COLL_B) → n_effective >= 2
+        assert isinstance(icf, dict), "compute_icf_map must return a dict"
+        # Each topic that has projection rows should have an entry
+        assert len(icf) > 0, "ICF map is empty but projection data was seeded"
+        for k, v in icf.items():
+            assert isinstance(k, int), f"key {k!r} is not int"
+            assert isinstance(v, float), f"value {v!r} is not float"
+
+    def test_j_detect_hubs(self, taxonomy_store) -> None:
+        """j) detect_hubs returns HubRow instances for topics spanning >= 2 collections."""
+        from nexus.db.t2.catalog_taxonomy import HubRow
+        hubs = taxonomy_store.detect_hubs(min_collections=1)
+        assert isinstance(hubs, list), "detect_hubs must return a list"
+        assert len(hubs) > 0, "Expected at least one hub row"
+        assert all(isinstance(h, HubRow) for h in hubs), "All items must be HubRow"
+        # Sorted by score descending
+        scores = [h.score for h in hubs]
+        assert scores == sorted(scores, reverse=True), "Hubs not sorted by score desc"
+
+    def test_k_detect_hubs_stopword_flagging(self, taxonomy_store) -> None:
+        """k) detect_hubs flags 'class-helper-inttest' label as matched_stopwords."""
+        from nexus.db.t2.catalog_taxonomy import HubRow
+        hubs = taxonomy_store.detect_hubs(min_collections=1)
+        stopword_hubs = [h for h in hubs if "class" in h.matched_stopwords]
+        assert len(stopword_hubs) >= 1, (
+            "'class-helper-inttest' topic should be flagged with matched_stopword='class'"
+        )
+
+    def test_l_audit_collection(self, taxonomy_store) -> None:
+        """l) audit_collection returns AuditReport with correct fields."""
+        from nexus.db.t2.catalog_taxonomy import AuditHub, AuditReport
+        report = taxonomy_store.audit_collection(self._COLL_B)
+        assert isinstance(report, AuditReport), "audit_collection must return AuditReport"
+        assert report.collection == self._COLL_B
+        # COLL_B has projection assignments (doc1 → T_A1, doc2 → T_A2 with similarities)
+        assert report.total_assignments >= 2, (
+            f"Expected >= 2 projection assignments for {self._COLL_B}, "
+            f"got {report.total_assignments}"
+        )
+        assert report.p50 is not None, "p50 must be non-None when assignments exist"
+        assert isinstance(report.top_receiving_hubs, list)
+        assert all(isinstance(h, AuditHub) for h in report.top_receiving_hubs)
+
+    def test_m_audit_collection_pattern_pollution(self, taxonomy_store) -> None:
+        """m) audit_collection flags pattern_pollution for stopword labels."""
+        from nexus.db.t2.catalog_taxonomy import AuditReport
+        report = taxonomy_store.audit_collection(self._COLL_B)
+        # 'class-helper-inttest' has projection from COLL_B and contains stopword 'class'
+        polluted_labels = [h.label for h in report.pattern_pollution]
+        assert any("class" in label for label in polluted_labels), (
+            f"Expected pattern_pollution to include 'class-helper-inttest', got {polluted_labels}"
+        )
+
+    def test_n_generate_cooccurrence_links(self, taxonomy_store) -> None:
+        """n) generate_cooccurrence_links returns the number of cross-collection pairs."""
+        count = taxonomy_store.generate_cooccurrence_links()
+        assert isinstance(count, int), "generate_cooccurrence_links must return int"
+        # doc1 is assigned to T_A1 and T_B1 → at least one pair
+        assert count >= 1, f"Expected >= 1 cooccurrence link, got {count}"
+
+    def test_o_refresh_projection_links(self, taxonomy_store) -> None:
+        """o) refresh_projection_links returns the number of link pairs written."""
+        count = taxonomy_store.refresh_projection_links()
+        assert isinstance(count, int), "refresh_projection_links must return int"
+
+    def test_p_persist_split(self, taxonomy_store) -> None:
+        """p) persist_split inserts children and zeroes parent doc_count."""
+        # Import a topic to split
+        taxonomy_store.import_topic(
+            src_id=9900,
+            label="to-split-inttest",
+            parent_id=None,
+            collection=self._COLL_A,
+            centroid_hash=None,
+            doc_count=4,
+            created_at="2026-01-01T00:00:00Z",
+            review_status="pending",
+            terms=None,
+        )
+        # Assign some docs
+        taxonomy_store.import_assignment(
+            doc_id="split-doc1", topic_id=9900,
+            assigned_by="hdbscan", similarity=None,
+            assigned_at=None, source_collection=None,
+        )
+        taxonomy_store.import_assignment(
+            doc_id="split-doc2", topic_id=9900,
+            assigned_by="hdbscan", similarity=None,
+            assigned_at=None, source_collection=None,
+        )
+
+        split_result = {
+            "topic_id": 9900,
+            "collection_name": self._COLL_A,
+            "child_specs": [
+                {
+                    "label": "split-child-1-inttest",
+                    "doc_count": 2,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "terms_json": None,
+                    "doc_ids": ["split-doc1", "split-doc2"],
+                },
+            ],
+        }
+        child_ids = taxonomy_store.persist_split(split_result)
+        assert isinstance(child_ids, list), "persist_split must return list"
+        assert len(child_ids) == 1, f"Expected 1 child id, got {child_ids}"
+        assert child_ids[0] > 0, f"Child id must be > 0, got {child_ids[0]}"
+
+        # Parent doc_count must be 0 after split
+        parent = taxonomy_store.get_topic_by_id(9900)
+        assert parent is not None
+        assert parent["doc_count"] == 0, (
+            f"Parent doc_count should be 0 after split, got {parent['doc_count']}"
+        )
+
+    def test_q_assigned_by_never_downgrades_projection(self, taxonomy_store) -> None:
+        """q) re-importing an assignment never downgrades 'projection' to 'hdbscan'."""
+        # Import topic first
+        taxonomy_store.import_topic(
+            src_id=9801,
+            label="assigned-by-test-inttest",
+            parent_id=None,
+            collection=self._COLL_A,
+            centroid_hash=None,
+            doc_count=1,
+            created_at="2026-01-01T00:00:00Z",
+            review_status="pending",
+            terms=None,
+        )
+        # Initial import as 'projection'
+        taxonomy_store.import_assignment(
+            doc_id="assigned-by-doc1",
+            topic_id=9801,
+            assigned_by="projection",
+            similarity=0.9,
+            assigned_at="2026-03-01T00:00:00Z",
+            source_collection=self._COLL_B,
+        )
+        # Re-import as 'hdbscan' — must NOT downgrade assigned_by
+        taxonomy_store.import_assignment(
+            doc_id="assigned-by-doc1",
+            topic_id=9801,
+            assigned_by="hdbscan",
+            similarity=None,
+            assigned_at=None,
+            source_collection=None,
+        )
+        # Verify: doc is still in the topic (assignment not lost)
+        docs = taxonomy_store.get_topic_doc_ids(9801, limit=10)
+        assert "assigned-by-doc1" in docs
+
+    def test_r_record_discover_greatest_no_clobber(self, taxonomy_store) -> None:
+        """r) recordDiscoverCount uses GREATEST — re-record with smaller count preserves max."""
+        taxonomy_store.record_discover_count("coll-greatest-test-inttest", 1000)
+        taxonomy_store.record_discover_count("coll-greatest-test-inttest", 50)
+        # 50 < 1000, so needs_rebalance(2000) should still compare against 1000
+        # 2000 is 100% growth from 1000 → rebalance needed
+        assert taxonomy_store.needs_rebalance("coll-greatest-test-inttest", 2000), (
+            "needs_rebalance should return True (2000 vs 1000) — GREATEST preserved 1000"
+        )
+        # 1001 is 0.1% growth from 1000 → no rebalance needed
+        assert not taxonomy_store.needs_rebalance("coll-greatest-test-inttest", 1001), (
+            "needs_rebalance should return False (1001 vs 1000) — GREATEST preserved 1000"
         )

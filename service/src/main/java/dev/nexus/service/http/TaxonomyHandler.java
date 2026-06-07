@@ -55,10 +55,16 @@ import java.util.Optional;
  *   GET   /v1/taxonomy/top_topics          top topics for collection= &amp; top_n=
  *   GET   /v1/taxonomy/chunk_grounded      max similarity for doc_id= &amp; source_collection=
  *   GET   /v1/taxonomy/projection_counts   projection counts by collection
- *   POST  /v1/taxonomy/import/topic        fidelity ETL: topics row
- *   POST  /v1/taxonomy/import/assignment   fidelity ETL: assignments row
- *   POST  /v1/taxonomy/import/link         fidelity ETL: topic_links row
- *   POST  /v1/taxonomy/import/meta         fidelity ETL: taxonomy_meta row
+ *   POST  /v1/taxonomy/import/topic               fidelity ETL: topics row
+ *   POST  /v1/taxonomy/import/assignment          fidelity ETL: assignments row
+ *   POST  /v1/taxonomy/import/link                fidelity ETL: topic_links row
+ *   POST  /v1/taxonomy/import/meta                fidelity ETL: taxonomy_meta row
+ *   GET   /v1/taxonomy/icf/map                    atomic ICF map (n_effective + per-topic df)
+ *   GET   /v1/taxonomy/hubs                       hub detection data (min_collections=)
+ *   GET   /v1/taxonomy/audit                      audit collection data (collection=, top_n=)
+ *   POST  /v1/taxonomy/links/generate_cooccurrence generate cooccurrence links
+ *   POST  /v1/taxonomy/links/refresh_projection   refresh projection links
+ *   POST  /v1/taxonomy/topics/persist_split       persist topic split result
  * </pre>
  *
  * <p>All endpoints require {@code Authorization: Bearer <token>} (enforced by
@@ -142,6 +148,13 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/import/assignment"         -> handleImportAssignment(exchange, tenant, method);
                 case "/import/link"               -> handleImportLink(exchange, tenant, method);
                 case "/import/meta"               -> handleImportMeta(exchange, tenant, method);
+                // Analytical (nexus-gmiaf.14 drop-in completion)
+                case "/icf/map"                        -> handleIcfMap(exchange, tenant, method);
+                case "/hubs"                           -> handleDetectHubs(exchange, tenant, method);
+                case "/audit"                          -> handleAuditCollection(exchange, tenant, method);
+                case "/links/generate_cooccurrence"    -> handleGenerateCooccurrenceLinks(exchange, tenant, method);
+                case "/links/refresh_projection"       -> handleRefreshProjectionLinks(exchange, tenant, method);
+                case "/topics/persist_split"           -> handlePersistSplit(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -606,5 +619,71 @@ public final class TaxonomyHandler implements HttpHandler {
         if (val instanceof Number n) return n.doubleValue();
         try { return Double.parseDouble(val.toString()); }
         catch (NumberFormatException e) { return null; }
+    }
+
+    // ── Analytical handlers (nexus-gmiaf.14 drop-in completion) ───────────────
+
+    /** GET /v1/taxonomy/icf/map — atomic ICF map: {n_effective, rows:[{topic_id, df}]} */
+    private void handleIcfMap(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        var result = repo.computeIcfMapAtomic(tenant);
+        HttpUtil.send(ex, 200, json(result));
+    }
+
+    /**
+     * GET /v1/taxonomy/hubs — hub detection data.
+     * Query params: min_collections (default 2).
+     * Returns: [{topic_id, label, collection, df, total_chunks, last_assigned_at, source_collections}]
+     */
+    private void handleDetectHubs(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        int minCollections = optIntParam(ex, "min_collections", 2);
+        var rows = repo.detectHubsData(tenant, minCollections);
+        HttpUtil.send(ex, 200, json(rows));
+    }
+
+    /**
+     * GET /v1/taxonomy/audit — audit collection data.
+     * Query params: collection (required), top_n (default 5).
+     * Returns: {collection, similarities:[...], hub_rows:[{topic_id, label, chunk_count}]}
+     */
+    private void handleAuditCollection(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        String collection = requireQueryParam(ex, "collection");
+        int topN = optIntParam(ex, "top_n", 5);
+        var result = repo.auditCollectionData(tenant, collection, topN);
+        HttpUtil.send(ex, 200, json(result));
+    }
+
+    /** POST /v1/taxonomy/links/generate_cooccurrence — generate co-occurrence links. Returns {count}. */
+    private void handleGenerateCooccurrenceLinks(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        int count = repo.generateCooccurrenceLinks(tenant);
+        HttpUtil.send(ex, 200, json(Map.of("count", count)));
+    }
+
+    /** POST /v1/taxonomy/links/refresh_projection — refresh projection links. Returns {count}. */
+    private void handleRefreshProjectionLinks(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        int count = repo.refreshProjectionLinks(tenant);
+        HttpUtil.send(ex, 200, json(Map.of("count", count)));
+    }
+
+    /**
+     * POST /v1/taxonomy/topics/persist_split
+     * Body: {topic_id, collection_name, child_specs: [{label, doc_count, created_at, terms_json, doc_ids:[...]}]}
+     * Returns: {child_ids: [...]}
+     */
+    @SuppressWarnings("unchecked")
+    private void handlePersistSplit(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        long topicId = requireLong(body, "topic_id");
+        String collectionName = requireString(body, "collection_name");
+        List<Map<String, Object>> childSpecs =
+            (List<Map<String, Object>>) body.get("child_specs");
+        if (childSpecs == null) childSpecs = List.of();
+        var childIds = repo.persistSplit(tenant, topicId, collectionName, childSpecs);
+        HttpUtil.send(ex, 200, json(Map.of("child_ids", childIds)));
     }
 }

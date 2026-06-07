@@ -28,6 +28,17 @@ def _T2Database(path):
     from nexus.db.t2 import T2Database
     return T2Database(path)  # epsilon-allow: taxonomy CLI factory — read-only subcommands need raw-cursor SELECTs (no WAL writer contention) and discover/rebuild/split interleave chroma-centroid writes keyed on T2-generated topic_ids; neither can cross the daemon RPC (RDR-128 P3 documented-irreducible)
 
+def _has_raw_access(taxonomy: Any) -> bool:
+    """Return True when taxonomy is a SQLite CatalogTaxonomy (raw .conn / ._lock available).
+
+    Returns False for HttpTaxonomyStore (service mode), where raw cursor
+    access is unavailable.  CLI commands that need aggregate queries not
+    exposed by the public API must guard with this check and either use
+    the public API or skip that display section in service mode.
+    """
+    return hasattr(taxonomy, "_lock") and hasattr(taxonomy, "conn")
+
+
 if TYPE_CHECKING:
     from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
 
@@ -244,16 +255,34 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
       nx taxonomy status --needs-review               # pending review only
     """
     with _T2Database(_default_db_path()) as db:
-        # Storage review I-1: every .conn access goes through the
-        # domain-store lock. These are read-only queries but the lock
-        # protects against a concurrent writer on the same connection.
-        with db.taxonomy._lock:
-            all_topics = db.taxonomy.conn.execute(
-                "SELECT collection, COUNT(*), SUM(doc_count), "
-                "SUM(CASE WHEN review_status = 'pending' THEN 1 ELSE 0 END), "
-                "SUM(CASE WHEN review_status = 'accepted' THEN 1 ELSE 0 END) "
-                "FROM topics GROUP BY collection ORDER BY SUM(doc_count) DESC"
-            ).fetchall()
+        if _has_raw_access(db.taxonomy):
+            # Storage review I-1: every .conn access goes through the
+            # domain-store lock. These are read-only queries but the lock
+            # protects against a concurrent writer on the same connection.
+            with db.taxonomy._lock:
+                all_topics = db.taxonomy.conn.execute(
+                    "SELECT collection, COUNT(*), SUM(doc_count), "
+                    "SUM(CASE WHEN review_status = 'pending' THEN 1 ELSE 0 END), "
+                    "SUM(CASE WHEN review_status = 'accepted' THEN 1 ELSE 0 END) "
+                    "FROM topics GROUP BY collection ORDER BY SUM(doc_count) DESC"
+                ).fetchall()
+        else:
+            # Service mode: derive per-collection aggregate from public API
+            raw_topics = db.taxonomy.get_all_topics()
+            from collections import defaultdict
+            _agg: dict[str, list[int, int, int, int]] = defaultdict(lambda: [0, 0, 0, 0])
+            for t in raw_topics:
+                c = t.get("collection", "")
+                _agg[c][0] += 1  # n_topics
+                _agg[c][1] += int(t.get("doc_count") or 0)  # n_docs
+                if t.get("review_status") == "pending":
+                    _agg[c][2] += 1
+                if t.get("review_status") == "accepted":
+                    _agg[c][3] += 1
+            all_topics = [
+                (c, v[0], v[1], v[2], v[3])
+                for c, v in sorted(_agg.items(), key=lambda x: -x[1][1])
+            ]
 
         if not all_topics:
             click.echo("No taxonomy data. Run `nx index repo` or `nx taxonomy discover`.")
@@ -276,10 +305,13 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
             if n_topics > 0 and projection_counts.get(coll, 0) == 0
         ]
 
-        with db.taxonomy._lock:
-            link_count = db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topic_links"
-            ).fetchone()[0]
+        if _has_raw_access(db.taxonomy):
+            with db.taxonomy._lock:
+                link_count = db.taxonomy.conn.execute(
+                    "SELECT COUNT(*) FROM topic_links"
+                ).fetchone()[0]
+        else:
+            link_count = 0  # service mode: link count not exposed via public API
 
         # Apply filters
         rows = all_topics
@@ -296,12 +328,15 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         if not summary:
             click.echo("Taxonomy Status\n")
             for coll, n_topics, n_docs, n_pending, n_accepted in rows:
-                with db.taxonomy._lock:
-                    meta = db.taxonomy.conn.execute(
-                        "SELECT last_discover_doc_count, last_discover_at "
-                        "FROM taxonomy_meta WHERE collection = ?",
-                        (coll,),
-                    ).fetchone()
+                if _has_raw_access(db.taxonomy):
+                    with db.taxonomy._lock:
+                        meta = db.taxonomy.conn.execute(
+                            "SELECT last_discover_doc_count, last_discover_at "
+                            "FROM taxonomy_meta WHERE collection = ?",
+                            (coll,),
+                        ).fetchone()
+                else:
+                    meta = None  # service mode: per-collection meta not yet exposed
 
                 rebal = ""
                 if meta:
@@ -338,31 +373,28 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
                 f"(or `nx taxonomy project --backfill --persist` for all)."
             )
 
-        # GH #251 + RDR-095: surface recent post-store hook failures. The
-        # table may carry batch-shape rows (one row representing N
-        # documents) since RDR-095, so the affected-document count can
-        # exceed the row count. Reading is best-effort: pre-4.9.10 DBs
-        # have no table; pre-4.14.1 DBs have no batch columns. Each path
-        # falls back without crashing.
+        # GH #251 + RDR-095: surface recent post-store hook failures.
+        # SQLite-only: hook_failures table not accessible in service mode.
         rows: list[tuple[str, int, int, str | None]] = []
         try:
-            with db.taxonomy._lock:
-                try:
-                    rows = db.taxonomy.conn.execute(
-                        "SELECT hook_name, is_batch, "
-                        "       COALESCE(batch_doc_ids, '') "
-                        "FROM hook_failures "
-                        "WHERE occurred_at >= datetime('now', '-1 day')"
-                    ).fetchall()
-                    rows = [(r[0], 1, r[1], r[2]) for r in rows]
-                except Exception:
-                    # Pre-4.14.1 schema: batch columns absent. Read with
-                    # legacy shape and treat every row as scalar.
-                    legacy = db.taxonomy.conn.execute(
-                        "SELECT hook_name FROM hook_failures "
-                        "WHERE occurred_at >= datetime('now', '-1 day')"
-                    ).fetchall()
-                    rows = [(r[0], 1, 0, None) for r in legacy]
+            if _has_raw_access(db.taxonomy):
+                with db.taxonomy._lock:
+                    try:
+                        rows = db.taxonomy.conn.execute(
+                            "SELECT hook_name, is_batch, "
+                            "       COALESCE(batch_doc_ids, '') "
+                            "FROM hook_failures "
+                            "WHERE occurred_at >= datetime('now', '-1 day')"
+                        ).fetchall()
+                        rows = [(r[0], 1, r[1], r[2]) for r in rows]
+                    except Exception:
+                        # Pre-4.14.1 schema: batch columns absent. Read with
+                        # legacy shape and treat every row as scalar.
+                        legacy = db.taxonomy.conn.execute(
+                            "SELECT hook_name FROM hook_failures "
+                            "WHERE occurred_at >= datetime('now', '-1 day')"
+                        ).fetchall()
+                        rows = [(r[0], 1, 0, None) for r in legacy]
         except Exception:
             rows = []
 
@@ -411,13 +443,16 @@ def list_cmd(collection: str, depth: int) -> None:
     with _T2Database(_default_db_path()) as db:
         tree = get_topic_tree(db, collection, max_depth=depth)
         # Count docs with no topic assignment (noise / uncategorized).
-        # Lock taken per storage review I-1.
-        with db.taxonomy._lock:
-            total_assigned = db.taxonomy.conn.execute(
-                "SELECT COUNT(DISTINCT doc_id) FROM topic_assignments"
-                + (" WHERE topic_id IN (SELECT id FROM topics WHERE collection = ?)" if collection else ""),
-                (collection,) if collection else (),
-            ).fetchone()[0]
+        # Lock taken per storage review I-1 (SQLite only).
+        if _has_raw_access(db.taxonomy):
+            with db.taxonomy._lock:
+                total_assigned = db.taxonomy.conn.execute(
+                    "SELECT COUNT(DISTINCT doc_id) FROM topic_assignments"
+                    + (" WHERE topic_id IN (SELECT id FROM topics WHERE collection = ?)" if collection else ""),
+                    (collection,) if collection else (),
+                ).fetchone()[0]
+        else:
+            total_assigned = 0  # service mode: assignment count not exposed via public API
     if not tree:
         click.echo("No topics found. Run `nx taxonomy discover --collection <name>` first.")
         return
@@ -1108,28 +1143,49 @@ def links_cmd(collection: str, refresh: bool) -> None:
                 )
 
         # Display all rows in topic_links, joined with topic labels.
-        # Lock taken per storage review I-1.
-        with db.taxonomy._lock:
-            if collection:
-                rows = db.taxonomy.conn.execute(
-                    "SELECT t1.label, t1.collection, t2.label, t2.collection, "
-                    "       tl.link_count, tl.link_types "
-                    "FROM topic_links tl "
-                    "JOIN topics t1 ON tl.from_topic_id = t1.id "
-                    "JOIN topics t2 ON tl.to_topic_id = t2.id "
-                    "WHERE t1.collection = ? OR t2.collection = ? "
-                    "ORDER BY tl.link_count DESC",
-                    (collection, collection),
-                ).fetchall()
-            else:
-                rows = db.taxonomy.conn.execute(
-                    "SELECT t1.label, t1.collection, t2.label, t2.collection, "
-                    "       tl.link_count, tl.link_types "
-                    "FROM topic_links tl "
-                    "JOIN topics t1 ON tl.from_topic_id = t1.id "
-                    "JOIN topics t2 ON tl.to_topic_id = t2.id "
-                    "ORDER BY tl.link_count DESC"
-                ).fetchall()
+        # Lock taken per storage review I-1 (SQLite only).
+        if _has_raw_access(db.taxonomy):
+            with db.taxonomy._lock:
+                if collection:
+                    rows = db.taxonomy.conn.execute(
+                        "SELECT t1.label, t1.collection, t2.label, t2.collection, "
+                        "       tl.link_count, tl.link_types "
+                        "FROM topic_links tl "
+                        "JOIN topics t1 ON tl.from_topic_id = t1.id "
+                        "JOIN topics t2 ON tl.to_topic_id = t2.id "
+                        "WHERE t1.collection = ? OR t2.collection = ? "
+                        "ORDER BY tl.link_count DESC",
+                        (collection, collection),
+                    ).fetchall()
+                else:
+                    rows = db.taxonomy.conn.execute(
+                        "SELECT t1.label, t1.collection, t2.label, t2.collection, "
+                        "       tl.link_count, tl.link_types "
+                        "FROM topic_links tl "
+                        "JOIN topics t1 ON tl.from_topic_id = t1.id "
+                        "JOIN topics t2 ON tl.to_topic_id = t2.id "
+                        "ORDER BY tl.link_count DESC"
+                    ).fetchall()
+        else:
+            # Service mode: get link pairs via public API and resolve labels
+            _all_topics = {t["id"]: t for t in db.taxonomy.get_all_topics()}
+            _topic_ids = list(_all_topics.keys())
+            _pairs = db.taxonomy.get_topic_link_pairs(_topic_ids) if _topic_ids else []
+            rows = []
+            for from_id, to_id, count in _pairs:
+                from_t = _all_topics.get(from_id, {})
+                to_t   = _all_topics.get(to_id, {})
+                if collection and (from_t.get("collection") != collection and
+                                   to_t.get("collection") != collection):
+                    continue
+                rows.append((
+                    from_t.get("label", str(from_id)),
+                    from_t.get("collection", ""),
+                    to_t.get("label", str(to_id)),
+                    to_t.get("collection", ""),
+                    count,
+                    "[]",
+                ))
 
         if not rows:
             click.echo("No topic links found.")

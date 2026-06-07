@@ -17,7 +17,8 @@ IDEMPOTENT: relies on the upsert conflict strategies the Java service enforces:
     - ``created_at``      = topics.created_at       (non-overwritable on conflict)
 - ``topic_assignments``: ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE
     - ``similarity`` = GREATEST(excluded.similarity, assignments.similarity)
-    - ``assigned_by``, ``assigned_at``, ``source_collection`` = EXCLUDED.*
+    - ``assigned_by`` = 'projection' if incoming is 'projection', else existing (never downgrades)
+    - ``assigned_at``, ``source_collection`` = EXCLUDED.*
 - ``topic_links``:     ON CONFLICT (tenant_id, from_topic_id, to_topic_id)
     DO UPDATE link_count = GREATEST(EXCLUDED.link_count, topic_links.link_count)
 - ``taxonomy_meta``:   ON CONFLICT (tenant_id, collection) DO UPDATE
@@ -297,9 +298,16 @@ def migrate_taxonomy_rows(
         if "topics" in tables:
             avail = _available_columns(conn, "topics")
             sel = ", ".join(c for c in _TOPIC_COLUMNS if c in avail)
+            # Load all rows; parent_id self-FK requires NULL-first insertion
+            # order (parents before children). ORDER BY done Python-side to
+            # handle any id numbering (parent.id may be > child.id).
             topic_rows = [dict(r) for r in conn.execute(
                 f"SELECT {sel} FROM topics ORDER BY id ASC"
             ).fetchall()]
+            # Sort: root nodes (parent_id IS NULL) first, then children.
+            # A single pass is sufficient because SQLite topics are normally
+            # shallow (1-2 levels); deeper hierarchies handled by stable sort.
+            topic_rows.sort(key=lambda r: (0 if r.get("parent_id") is None else 1, r.get("id", 0)))
 
         if "topic_assignments" in tables:
             avail = _available_columns(conn, "topic_assignments")

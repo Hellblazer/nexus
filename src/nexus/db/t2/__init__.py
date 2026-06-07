@@ -831,22 +831,34 @@ class T2Database:
             counts["highlights"] = cur.rowcount
 
             # taxonomy (three sub-tables)
-            cur = conn.execute(
-                "UPDATE topics SET collection = ? WHERE collection = ?",
-                (new, old),
-            )
-            counts["tax_topics"] = cur.rowcount
-            cur = conn.execute(
-                "UPDATE topic_assignments SET source_collection = ? "
-                "WHERE source_collection = ?",
-                (new, old),
-            )
-            counts["tax_assignments"] = cur.rowcount
-            cur = conn.execute(
-                "UPDATE taxonomy_meta SET collection = ? WHERE collection = ?",
-                (new, old),
-            )
-            counts["tax_meta"] = cur.rowcount
+            # In service mode, self.taxonomy is an HttpTaxonomyStore whose
+            # rename_collection() calls the remote service endpoint.  The
+            # raw SQL UPDATE on the shared SQLite file would diverge from
+            # the service's Postgres tables, so we route through the
+            # domain-store API when the seam is active.
+            from nexus.db.storage_backend import StorageBackend, storage_backend_for
+            if storage_backend_for("taxonomy") == StorageBackend.SERVICE:
+                tax_counts = self.taxonomy.rename_collection(old, new)
+                counts["tax_topics"] = tax_counts.get("topics", 0)
+                counts["tax_assignments"] = tax_counts.get("assignments", 0)
+                counts["tax_meta"] = tax_counts.get("meta", 0)
+            else:
+                cur = conn.execute(
+                    "UPDATE topics SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                counts["tax_topics"] = cur.rowcount
+                cur = conn.execute(
+                    "UPDATE topic_assignments SET source_collection = ? "
+                    "WHERE source_collection = ?",
+                    (new, old),
+                )
+                counts["tax_assignments"] = cur.rowcount
+                cur = conn.execute(
+                    "UPDATE taxonomy_meta SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                counts["tax_meta"] = cur.rowcount
 
             # search_telemetry
             cur = conn.execute(
