@@ -93,8 +93,6 @@ def migrate_memory_cmd(
         # Dry run (count only, no writes):
         nx storage migrate memory --dry-run
     """
-    import sqlite3
-
     # Resolve source DB path
     resolved_db = _resolve_db_path(db_path)
     if not resolved_db.exists():
@@ -104,12 +102,12 @@ def migrate_memory_cmd(
         )
 
     if dry_run:
+        from nexus.db.t2.memory_etl import count_source_rows
+
         try:
-            conn = sqlite3.connect(f"file:{resolved_db}?mode=ro", uri=True)
-            count = conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
-            conn.close()
-        except sqlite3.OperationalError as exc:
-            raise click.ClickException(f"Cannot read source DB: {exc}")
+            count = count_source_rows(resolved_db)
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc))
         click.echo(f"Dry run: source has {count} memory rows (no writes performed).")
         return
 

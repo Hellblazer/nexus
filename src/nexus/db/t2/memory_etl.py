@@ -101,6 +101,25 @@ def _transform_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def count_source_rows(source_db_path: Path) -> int:
+    """Return the number of rows in the SQLite memory table (read-only).
+
+    Used by the ``--dry-run`` CLI path to report the row count without
+    writing.  Opens the source in ``uri=True mode=ro`` (read-only).
+    """
+    uri = f"file:{source_db_path}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    except sqlite3.OperationalError as exc:
+        raise RuntimeError(
+            f"Cannot open SQLite source for reading: {source_db_path}: {exc}"
+        ) from exc
+    try:
+        return conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
+    finally:
+        conn.close()
+
+
 def migrate_memory_rows(
     source_db_path: Path,
     store: Any,
