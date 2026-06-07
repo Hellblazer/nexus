@@ -846,7 +846,7 @@ their phase.
 | embed (local ONNX, masked-mean-pool) | onnxruntime-java + DJL tokenizer | **Spike S0.2 — VERIFIED (cosine 1.0)** |
 | embed (cloud) | Voyage REST (JVM) | **Spike S0.2 — VERIFIED (cosine 1.0 with SDK envelope)** |
 | query/upsert/get | ChromaDB HTTP (JVM) | Pending — Phase 3 (Seam B), not a Phase-0 gate |
-| native-image / jlink build | GraalVM / JOOQ + onnxruntime/DJL JNI | Pending — S0.4 build spike, before Phase-1 skeleton |
+| native-image / jlink build | GraalVM / JOOQ + onnxruntime/DJL JNI | **S0.4 VERIFIED (jlink PASS — production path); native-image OPEN (jOOQ 3.20.11 + GraalVM 25 DefaultDataType static-init NPE — nexus-gmiaf.9 C3; tracked for Phase 3+)** |
 
 ### Scope Verification
 

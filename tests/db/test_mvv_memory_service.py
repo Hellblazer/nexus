@@ -12,18 +12,27 @@ jar).  All test assertions are intentionally *identical* to their SQLite
 counterparts — if an assertion needs to be weakened to pass, that's a real
 seam bug to fix, not a test adjustment.
 
+Test isolation: every test receives a unique project namespace via the ``ns``
+fixture (function-scoped UUID suffix).  This lets the module-scoped store be
+reused without accumulated data from prior tests leaking into exact-count
+assertions like ``len(results) == 1`` or set-equality ``{...} == {...}``.
+
 Coverage map (SQLite source → MVV equivalent):
 
   tests/test_memory.py
-    test_memory_put_upsert               → TestMVVPutGet.test_put_upsert
+    test_memory_put_upsert               → TestMVVPutGet.test_put_upsert_single_row
     test_memory_get_by_project_title     → TestMVVPutGet.test_get_by_project_title
     test_memory_get_by_id                → TestMVVPutGet.test_get_by_id
     test_memory_get_missing_returns_none → TestMVVPutGet.test_get_missing_returns_none
+    test_tags_always_string_not_null     → TestMVVPutGet.test_tags_always_string_not_null
+    test_timestamp_utc_second_precision  → TestMVVPutGet.test_timestamp_utc_second_precision
     resolve_title (5 tests)              → TestMVVResolveTitle.*
+    test_resolve_title_escapes_wildcards → TestMVVResolveTitle.test_like_wildcard_escaping
     test_memory_search_fts5              → TestMVVSearch.test_search_fts
-    test_memory_search_scoped_to_project → TestMVVSearch.test_search_scoped
+    test_memory_search_scoped_to_project → TestMVVSearch.test_search_scoped_to_project
     test_memory_expire_ttl               → TestMVVExpire.test_expire_ttl
     test_memory_expire_permanent         → TestMVVExpire.test_expire_permanent_not_deleted
+    test_expire_heat_weighting           → TestMVVExpire.test_expire_heat_weighting_extends_ttl
     test_memory_list_by_project          → TestMVVList.test_list_by_project
     test_memory_delete_by_project_title  → TestMVVDelete.test_delete_by_project_title
     test_memory_delete_by_id             → TestMVVDelete.test_delete_by_id
@@ -32,25 +41,29 @@ Coverage map (SQLite source → MVV equivalent):
 
   tests/test_memory_consolidation.py
     test_find_overlapping_*              → TestMVVConsolidation.test_find_overlapping_*
+    test_find_overlapping_tail_words     → TestMVVConsolidation.test_tail_words_overlap_found
     test_merge_memories_*                → TestMVVConsolidation.test_merge_*
-    test_flag_stale_*                    → TestMVVConsolidation.test_flag_stale_*
+    test_flag_stale_uses_last_accessed   → TestMVVConsolidation.test_flag_stale_uses_last_accessed
+    test_flag_stale_falls_back_to_ts     → TestMVVConsolidation.test_flag_stale_null_last_accessed_fallback
+    test_flag_stale_skips_recent         → TestMVVConsolidation.test_flag_stale_skips_recent_entries
 
   tests/test_memory_merge_on_write.py
     test_put_or_merge_* (5 tests)        → TestMVVPutOrMerge.*
+    test_put_or_merge_empty_content      → TestMVVPutOrMerge.test_empty_content_inserts_no_merge_scan
 
   NOT PORTED (SQLite-internal / MCP-layer):
-    test_memory_put_upsert conn.execute check (SQLite-internal schema probe)
-    test_memory_expire_ttl conn.execute backdating → replaced by psql backdate via pg_conn
-    test_flag_stale conn.execute backdating → same replacement
-    test_t2_uses_session_module_for_session_id (SQLite wiring test)
+    test_memory_expire_ttl conn.execute check (SQLite-internal schema probe)
     test_malformed_fts5_query_raises_valueerror (SQLite FTS5 syntax; PG sanitizes)
+    test_t2_uses_session_module_for_session_id (SQLite wiring test)
     All tests/test_memory_put_attribution.py (MCP layer, not MemoryStore API)
     All "Promote command" tests (CLI + T3, unrelated to seam)
 
 Cross-tenant RLS audit (Proof 2, bead C4):
-    TestMVVRLSAudit.test_service_role_non_privileged (pg_roles)
+    TestMVVRLSAudit.test_service_role_non_privileged_direct (pg_roles)
     TestMVVRLSAudit.test_cross_tenant_read_isolation
     TestMVVRLSAudit.test_cross_tenant_write_isolation (WITH CHECK)
+    TestMVVRLSAudit.test_cross_tenant_list_isolation
+    TestMVVRLSAudit.test_cross_tenant_search_isolation
 
 Run:
     JAVA_HOME=~/.sdkman/candidates/java/25.0.1-graal \\
@@ -67,6 +80,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -298,11 +312,9 @@ def other_store(service):
 def pg_conn(pg_instance):
     """Direct psql subprocess helper for backdating timestamps in expire/stale tests.
 
-    Returns a callable: pg_conn(sql, params=()) -> None.
+    Returns a callable: pg_conn(sql) -> None.
     Uses psql to run SQL as the superuser (bypasses RLS).
     """
-    import shlex
-
     pg_port = pg_instance["port"]
     pg_user = pg_instance["user"]
     dbname  = pg_instance["dbname"]
@@ -323,6 +335,17 @@ def pg_conn(pg_instance):
     return run_sql
 
 
+@pytest.fixture
+def ns() -> str:
+    """Function-scoped unique project namespace prefix (UUID4 short).
+
+    Inject into every test that relies on exact-count assertions
+    (search len==1, list set-equality, etc.) so accumulated data from
+    other tests in the same module-scoped DB never leaks.
+    """
+    return uuid.uuid4().hex[:10]
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _ts(days_ago: int) -> str:
@@ -337,45 +360,48 @@ def _ts(days_ago: int) -> str:
 class TestMVVPutGet:
     """put / get / upsert — maps to test_memory.py TestMemoryPutGet."""
 
-    def test_put_upsert_single_row(self, store) -> None:
+    def test_put_upsert_single_row(self, store, ns) -> None:
         """Upsert must result in exactly one row (not two inserts)."""
-        store.put("proj", "mvv-upsert.md", "first")
-        store.put("proj", "mvv-upsert.md", "updated")
-        # Verify via get — only one entry with latest content survives.
-        entry = store.get(project="proj", title="mvv-upsert.md")
+        p = f"proj-{ns}"
+        store.put(p, "mvv-upsert.md", "first")
+        store.put(p, "mvv-upsert.md", "updated")
+        entry = store.get(project=p, title="mvv-upsert.md")
         assert entry is not None
         assert entry["content"] == "updated"
 
-    def test_get_by_project_title(self, store) -> None:
+    def test_get_by_project_title(self, store, ns) -> None:
         """get(project=, title=) returns correct entry fields."""
-        store.put("proj_a", "notes.md", "hello world", ttl=1)
-        result = store.get(project="proj_a", title="notes.md")
+        p = f"proj_a-{ns}"
+        store.put(p, "notes.md", "hello world", ttl=1)
+        result = store.get(project=p, title="notes.md")
         assert result is not None
         assert (result["content"], result["project"], result["title"]) == (
-            "hello world", "proj_a", "notes.md"
+            "hello world", p, "notes.md"
         )
 
-    def test_get_by_id(self, store) -> None:
+    def test_get_by_id(self, store, ns) -> None:
         """get(id=) retrieves by numeric row id."""
-        row_id = store.put("p", "x.md", "by id", ttl=1)
+        row_id = store.put(f"p-{ns}", "x.md", "by id", ttl=1)
         assert store.get(id=row_id)["content"] == "by id"
 
     def test_get_missing_returns_none(self, store) -> None:
         """get for non-existent entry returns None."""
-        assert store.get(project="no-such", title="missing.md") is None
+        assert store.get(project="no-such-proj-zz99", title="missing.md") is None
 
-    def test_tags_always_string_not_null(self, store) -> None:
+    def test_tags_always_string_not_null(self, store, ns) -> None:
         """Critical #2: untagged entry must have tags='' not None / missing."""
-        store.put("proj", "tags-none.md", "no tags", ttl=1)
-        entry = store.get(project="proj", title="tags-none.md")
+        p = f"proj-{ns}"
+        store.put(p, "tags-none.md", "no tags", ttl=1)
+        entry = store.get(project=p, title="tags-none.md")
         assert entry is not None
         assert "tags" in entry
         assert entry["tags"] == ""
 
-    def test_timestamp_utc_second_precision(self, store) -> None:
+    def test_timestamp_utc_second_precision(self, store, ns) -> None:
         """Timestamp must be ISO-8601 UTC second-precision (no sub-second noise)."""
-        store.put("proj", "ts-fmt.md", "timestamp check", ttl=1)
-        entry = store.get(project="proj", title="ts-fmt.md")
+        p = f"proj-{ns}"
+        store.put(p, "ts-fmt.md", "timestamp check", ttl=1)
+        entry = store.get(project=p, title="ts-fmt.md")
         assert entry is not None
         ts = entry["timestamp"]
         assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts), (
@@ -386,77 +412,116 @@ class TestMVVPutGet:
 class TestMVVResolveTitle:
     """resolve_title exact-then-prefix fallback — maps to test_memory.py."""
 
-    def test_exact_match_wins(self, store) -> None:
+    def test_exact_match_wins(self, store, ns) -> None:
         """Exact (project, title) match returns the entry with no candidates."""
-        store.put("p", "088-research-1", "short", ttl=1)
-        store.put("p", "088-research-1: full-suffix", "long", ttl=1)
-        entry, candidates = store.resolve_title(project="p", title="088-research-1")
+        p = f"p-{ns}"
+        store.put(p, "088-research-1", "short", ttl=1)
+        store.put(p, "088-research-1: full-suffix", "long", ttl=1)
+        entry, candidates = store.resolve_title(project=p, title="088-research-1")
         assert entry is not None and entry["content"] == "short"
         assert candidates == []
 
-    def test_unique_prefix_match(self, store) -> None:
+    def test_unique_prefix_match(self, store, ns) -> None:
         """No exact match + exactly one prefix candidate returns that candidate."""
-        store.put("p", "088-rv1-research: RDR-092 baseline", "body", ttl=1)
-        entry, candidates = store.resolve_title(project="p", title="088-rv1-research")
+        p = f"p-{ns}"
+        store.put(p, "088-rv1-research: RDR-092 baseline", "body", ttl=1)
+        entry, candidates = store.resolve_title(project=p, title="088-rv1-research")
         assert entry is not None
         assert entry["title"] == "088-rv1-research: RDR-092 baseline"
         assert candidates == []
 
-    def test_ambiguous_prefix_returns_candidates(self, store) -> None:
+    def test_ambiguous_prefix_returns_candidates(self, store, ns) -> None:
         """Multiple prefix matches returns (None, [candidates])."""
-        store.put("p", "088-rv2-research: first", "a", ttl=1)
-        store.put("p", "088-rv2-research-b: other", "b", ttl=1)
-        entry, candidates = store.resolve_title(project="p", title="088-rv2-research")
+        p = f"p-{ns}"
+        store.put(p, "088-rv2-research: first", "a", ttl=1)
+        store.put(p, "088-rv2-research-b: other", "b", ttl=1)
+        entry, candidates = store.resolve_title(project=p, title="088-rv2-research")
         assert entry is None
         titles = sorted(c["title"] for c in candidates)
         assert titles == ["088-rv2-research-b: other", "088-rv2-research: first"]
 
-    def test_no_match_returns_empty(self, store) -> None:
+    def test_no_match_returns_empty(self, store, ns) -> None:
         """Nothing matches returns (None, [])."""
-        entry, candidates = store.resolve_title(project="p", title="no-such-prefix-xyz")
+        p = f"p-{ns}"
+        entry, candidates = store.resolve_title(project=p, title="no-such-prefix-xyz")
         assert entry is None
         assert candidates == []
 
-    def test_scoped_to_project(self, store) -> None:
+    def test_scoped_to_project(self, store, ns) -> None:
         """Prefix fallback honours the project boundary."""
-        store.put("rp1", "088-rv3-research: in-p1", "one", ttl=1)
-        store.put("rp2", "088-rv3-research: in-p2", "two", ttl=1)
-        entry, candidates = store.resolve_title(project="rp1", title="088-rv3-research")
+        p1, p2 = f"rp1-{ns}", f"rp2-{ns}"
+        store.put(p1, "088-rv3-research: in-p1", "one", ttl=1)
+        store.put(p2, "088-rv3-research: in-p2", "two", ttl=1)
+        entry, candidates = store.resolve_title(project=p1, title="088-rv3-research")
         assert entry is not None
-        assert entry["project"] == "rp1"
+        assert entry["project"] == p1
+        assert candidates == []
+
+    def test_like_wildcard_escaping(self, store, ns) -> None:
+        """A literal '_' in the title prefix must not become a LIKE wildcard.
+
+        Mirrors test_memory.py::test_resolve_title_escapes_like_wildcards.
+        The Java service uses ESCAPE '\\' with _.replace('_', '\\_') so
+        'a_' must only match 'a_b_c', not 'axb'.
+        HIGH divergence risk: pre-fix code would match both.
+        """
+        p = f"p-{ns}"
+        store.put(p, "a_b_c", "underscore-literal", ttl=1)
+        store.put(p, "axb", "not-a-match-for-underscore", ttl=1)
+        entry, candidates = store.resolve_title(project=p, title="a_")
+        # Only the literal 'a_' prefix matches 'a_b_c', not 'axb'
+        assert entry is not None, (
+            "resolve_title('a_') matched no entry — LIKE wildcard escaping is broken "
+            "or 'axb' was incorrectly matched as a candidate"
+        )
+        assert entry["title"] == "a_b_c", (
+            f"Expected 'a_b_c', got {entry['title']!r} — "
+            "'_' is being treated as a single-character LIKE wildcard"
+        )
         assert candidates == []
 
 
 class TestMVVSearch:
     """FTS search — maps to test_memory.py FTS section."""
 
-    def test_search_fts(self, store) -> None:
-        """FTS returns entries matching a multi-word query."""
-        store.put("sp", "alpha.md", "The quick brown fox", ttl=1)
-        store.put("sp", "beta.md", "A lazy dog sleeping", ttl=1)
-        store.put("sp", "gamma.md", "The quick fox jumps high", ttl=1)
-        results = store.search("quick fox", project="sp")
+    def test_search_fts(self, store, ns) -> None:
+        """FTS returns exactly the entries matching a multi-word query.
+
+        Mirrors test_memory.py:111:
+            assert {r["title"] for r in db.search("quick fox")} == {"alpha.md", "gamma.md"}
+        """
+        p = f"sp-{ns}"
+        store.put(p, "alpha.md", "The quick brown fox", ttl=1)
+        store.put(p, "beta.md", "A lazy dog sleeping", ttl=1)
+        store.put(p, "gamma.md", "The quick fox jumps high", ttl=1)
+        results = store.search("quick fox", project=p)
         titles = {r["title"] for r in results}
-        assert {"alpha.md", "gamma.md"} <= titles, (
-            f"Expected both alpha.md and gamma.md in FTS results, got: {titles}"
+        assert titles == {"alpha.md", "gamma.md"}, (
+            f"Expected exactly {{alpha.md, gamma.md}}, got: {titles}"
         )
-        assert "beta.md" not in titles
 
-    def test_search_scoped_to_project(self, store) -> None:
-        """search(project=) scopes results to that project only."""
-        store.put("sa", "a.md", "authentication token", ttl=1)
-        store.put("sb", "b.md", "authentication token", ttl=1)
-        results = store.search("authentication", project="sa")
-        assert len(results) >= 1
-        assert all(r["project"] == "sa" for r in results)
-        result_titles = [r["title"] for r in results]
-        assert "a.md" in result_titles
+    def test_search_scoped_to_project(self, store, ns) -> None:
+        """search(project=) scopes results to exactly that project only.
 
-    def test_search_stemming(self, store) -> None:
+        Mirrors test_memory.py:118:
+            assert len(results) == 1 and results[0]["project"] == "proj_a"
+        """
+        pa = f"sa-{ns}"
+        pb = f"sb-{ns}"
+        store.put(pa, "a.md", "authentication token", ttl=1)
+        store.put(pb, "b.md", "authentication token", ttl=1)
+        results = store.search("authentication", project=pa)
+        assert len(results) == 1, (
+            f"Expected exactly 1 result for project '{pa}', got {len(results)}: {results}"
+        )
+        assert results[0]["project"] == pa
+
+    def test_search_stemming(self, store, ns) -> None:
         """FTS stemming: 'run' must find 'running' (Snowball english stemmer)."""
-        store.put("stem", "fts-stem.md",
+        p = f"stem-{ns}"
+        store.put(p, "fts-stem.md",
                   "the daemon was running its event loop repeatedly", ttl=1)
-        results = store.search("run", project="stem")
+        results = store.search("run", project=p)
         titles = [r["title"] for r in results]
         assert "fts-stem.md" in titles, (
             f"FTS stemming failed: 'run' should match 'running' but got: {titles}"
@@ -466,39 +531,44 @@ class TestMVVSearch:
 class TestMVVList:
     """list_entries — maps to test_memory.py test_memory_list_by_project."""
 
-    def test_list_by_project(self, store) -> None:
-        """list_entries scoped to project returns only that project's entries."""
-        store.put("la", "x.md", "x", ttl=1)
-        store.put("la", "y.md", "y", ttl=1)
-        store.put("lb", "z.md", "z", ttl=1)
-        entries = store.list_entries(project="la")
+    def test_list_by_project(self, store, ns) -> None:
+        """list_entries scoped to project returns exactly that project's entries.
+
+        Mirrors test_memory.py:143:
+            assert {e["title"] for e in db.list_entries(project="proj_a")} == {"x.md","y.md"}
+        """
+        pa = f"la-{ns}"
+        pb = f"lb-{ns}"
+        store.put(pa, "x.md", "x", ttl=1)
+        store.put(pa, "y.md", "y", ttl=1)
+        store.put(pb, "z.md", "z", ttl=1)
+        entries = store.list_entries(project=pa)
         titles = {e["title"] for e in entries}
-        assert {"x.md", "y.md"} <= titles, (
-            f"Expected x.md and y.md in list for project 'la', got: {titles}"
-        )
-        assert not any(e["title"] == "z.md" for e in entries), (
-            "project 'lb' entry 'z.md' must not appear in project 'la' list"
+        assert titles == {"x.md", "y.md"}, (
+            f"Expected exactly {{x.md, y.md}} for project '{pa}', got: {titles}"
         )
 
 
 class TestMVVDelete:
     """delete — maps to test_memory.py TestMemoryDelete."""
 
-    def test_delete_by_project_title(self, store) -> None:
+    def test_delete_by_project_title(self, store, ns) -> None:
         """put -> delete by (project, title) -> get returns None."""
-        store.put("dp", "a.md", "hello", ttl=1)
-        assert store.delete(project="dp", title="a.md") is True
-        assert store.get(project="dp", title="a.md") is None
+        p = f"dp-{ns}"
+        store.put(p, "a.md", "hello", ttl=1)
+        assert store.delete(project=p, title="a.md") is True
+        assert store.get(project=p, title="a.md") is None
 
-    def test_delete_by_id(self, store) -> None:
+    def test_delete_by_id(self, store, ns) -> None:
         """put -> delete by id -> get returns None."""
-        row_id = store.put("dp", "b.md", "world", ttl=1)
+        p = f"dp-{ns}"
+        row_id = store.put(p, "b.md", "world", ttl=1)
         assert store.delete(id=row_id) is True
         assert store.get(id=row_id) is None
 
     def test_delete_missing_by_project_title_returns_false(self, store) -> None:
         """delete for a non-existent (project, title) returns False."""
-        result = store.delete(project="no", title="such.md")
+        result = store.delete(project="no-project-zz99", title="such.md")
         assert result is False
 
     def test_delete_missing_by_id_returns_false(self, store) -> None:
@@ -506,11 +576,12 @@ class TestMVVDelete:
         result = store.delete(id=999999999)
         assert result is False
 
-    def test_delete_fts_not_searchable(self, store) -> None:
+    def test_delete_fts_not_searchable(self, store, ns) -> None:
         """After delete, the entry's content is not findable via FTS."""
-        store.put("dp", "c.md", "unique canary token xyzzy42", ttl=1)
-        store.delete(project="dp", title="c.md")
-        results = store.search("canary xyzzy42", project="dp")
+        p = f"dp-{ns}"
+        store.put(p, "c.md", "unique canary token xyzzy42", ttl=1)
+        store.delete(project=p, title="c.md")
+        results = store.search("canary xyzzy42", project=p)
         assert results == [], f"Deleted entry still findable via FTS: {results}"
 
 
@@ -522,154 +593,265 @@ class TestMVVExpire:
     The assertion is identical: expired row gone, permanent row survives.
     """
 
-    def test_expire_ttl(self, store, pg_conn) -> None:
-        """Entry with ttl=1 that is 2 days old must be deleted by expire()."""
-        row_id = store.put("ep", "old.md", "stale", ttl=1)
+    def test_expire_ttl(self, store, pg_conn, ns) -> None:
+        """Entry with ttl=1 that is 2 days old must be deleted by expire().
+
+        Mirrors test_memory.py:126: assert db.expire() == 1
+        The HTTP backend returns a list of deleted IDs; we assert the specific
+        row_id appears in deleted_ids (exact membership, no fallback arm).
+        """
+        p = f"ep-{ns}"
+        row_id = store.put(p, "old.md", "stale", ttl=1)
         past = _ts(days_ago=2)
-        # Backdate as superuser (bypasses RLS; same effect as SQLite conn.execute)
         pg_conn(
             f"UPDATE nexus.memory SET timestamp = '{past}' "
             f"WHERE id = {row_id}"
         )
         deleted_ids = store.expire()
-        assert row_id in deleted_ids or len(deleted_ids) >= 1, (
-            f"expire() should have deleted row {row_id}; got: {deleted_ids}"
+        assert row_id in deleted_ids, (
+            f"expire() must have deleted row {row_id}; got deleted_ids={deleted_ids}"
         )
-        assert store.get(project="ep", title="old.md") is None
+        assert store.get(project=p, title="old.md") is None
 
-    def test_expire_permanent_not_deleted(self, store, pg_conn) -> None:
+    def test_expire_permanent_not_deleted(self, store, pg_conn, ns) -> None:
         """Permanent (ttl=None) entry is NOT deleted even if very old."""
-        row_id = store.put("ep", "perm.md", "keep forever", ttl=None)
+        p = f"ep-{ns}"
+        row_id = store.put(p, "perm.md", "keep forever", ttl=None)
         past = _ts(days_ago=365)
         pg_conn(
             f"UPDATE nexus.memory SET timestamp = '{past}' "
             f"WHERE id = {row_id}"
         )
         store.expire()
-        entry = store.get(project="ep", title="perm.md")
+        entry = store.get(project=p, title="perm.md")
         assert entry is not None, "Permanent entry must survive expire()"
+
+    def test_expire_heat_weighting_extends_ttl(self, store, pg_conn, ns) -> None:
+        """Heat-weighted effective_ttl = base_ttl * (1 + ln(access_count+1)) must
+        protect a frequently-accessed entry that would be expired by naive age > ttl.
+
+        Mirrors Python MemoryStore.expire() formula (memory_store.py:718):
+            effective_ttl = ttl * (1 + log(access_count + 1))
+
+        Setup: ttl=1, age=1.5 days (past naive threshold), access_count=5.
+            effective_ttl = 1 * (1 + ln(6)) ≈ 1 * 2.79 ≈ 2.79 days
+            age 1.5 < effective_ttl 2.79 → entry SURVIVES expire().
+
+        If Java expire() does naive age > ttl (ignoring access_count), this test
+        fails — that is a real seam bug to fix.
+        """
+        import math
+        p = f"ep-{ns}"
+        row_id = store.put(p, "hot.md", "frequently accessed entry", ttl=1)
+        # Backdate to 1.5 days ago (past raw ttl=1 but within heat-weighted ttl)
+        past = _ts(days_ago=0)  # need fractional days; use direct SQL
+        pg_conn(
+            f"UPDATE nexus.memory "
+            f"SET timestamp = NOW() - INTERVAL '36 hours', "
+            f"    access_count = 5 "
+            f"WHERE id = {row_id}"
+        )
+        # effective_ttl = 1 * (1 + ln(6)) ≈ 2.79 days; age 1.5 days < 2.79 → survives
+        deleted_ids = store.expire()
+        assert row_id not in deleted_ids, (
+            f"Heat-weighted expire failed: row {row_id} (access_count=5, ttl=1, age=1.5d) "
+            f"was deleted despite effective_ttl≈2.79 days. "
+            f"Java expire() likely ignores access_count (naive age>ttl check). "
+            f"deleted_ids={deleted_ids}"
+        )
+        assert store.get(project=p, title="hot.md") is not None, (
+            "hot.md was deleted by expire() — heat-weighting formula not applied"
+        )
 
 
 class TestMVVConsolidation:
     """Consolidation + merge + flag_stale — maps to test_memory_consolidation.py."""
 
-    def test_find_overlapping_two_similar(self, store) -> None:
+    def test_find_overlapping_two_similar(self, store, ns) -> None:
         """Two entries about the same topic → overlap pair found."""
-        store.put("co", "search-arch.md",
+        p = f"co-{ns}"
+        store.put(p, "search-arch.md",
                   "search engine architecture design patterns optimization", ttl=1)
-        store.put("co", "search-design.md",
+        store.put(p, "search-design.md",
                   "search engine architecture design patterns implementation", ttl=1)
-        pairs = store.find_overlapping_memories("co")
+        pairs = store.find_overlapping_memories(p)
         assert len(pairs) >= 1
         titles = {pairs[0][0]["title"], pairs[0][1]["title"]}
         assert titles == {"search-arch.md", "search-design.md"}
 
-    def test_find_no_overlap_dissimilar(self, store) -> None:
+    def test_find_no_overlap_dissimilar(self, store, ns) -> None:
         """Entries on different topics → no overlap."""
-        store.put("co2", "auth.md", "authentication security tokens", ttl=1)
-        store.put("co2", "deploy.md", "kubernetes docker containers", ttl=1)
-        pairs = store.find_overlapping_memories("co2")
+        p = f"co2-{ns}"
+        store.put(p, "auth.md", "authentication security tokens", ttl=1)
+        store.put(p, "deploy.md", "kubernetes docker containers", ttl=1)
+        pairs = store.find_overlapping_memories(p)
         assert len(pairs) == 0
 
-    def test_find_overlapping_respects_threshold(self, store) -> None:
+    def test_find_overlapping_respects_threshold(self, store, ns) -> None:
         """High threshold filters out moderate overlap."""
-        store.put("co3", "a.md", "search engine architecture design", ttl=1)
-        store.put("co3", "b.md", "search engine optimization performance", ttl=1)
-        pairs = store.find_overlapping_memories("co3", min_similarity=0.95)
+        p = f"co3-{ns}"
+        store.put(p, "a.md", "search engine architecture design", ttl=1)
+        store.put(p, "b.md", "search engine optimization performance", ttl=1)
+        pairs = store.find_overlapping_memories(p, min_similarity=0.95)
         assert len(pairs) == 0
 
-    def test_merge_memories_deletes_and_updates(self, store) -> None:
+    def test_tail_words_overlap_found(self, store, ns) -> None:
+        """nexus-uul2r regression: overlap detected even when shared tokens are
+        NOT among leading words (tail-only overlap).
+
+        Mirrors test_memory_consolidation.py:47. The SQLite pre-fix code built an
+        FTS5 AND-query from each entry's first 3 non-stopword words, so tail-shared
+        entries were never retrieved as candidates.  The HTTP path uses get_all()
+        (no FTS prefiltering) so this is structurally correct; this test confirms
+        the Jaccard computation still catches it.
+        """
+        p = f"co-tail-{ns}"
+        store.put(p, "alpha", (
+            "Leading words here padding clause. "
+            "Shared distinctive tokens trail: zephyranth orchard meadow."
+        ), ttl=1)
+        store.put(p, "beta", (
+            "Different opening segment altogether. "
+            "Shared distinctive tokens trail: zephyranth orchard meadow."
+        ), ttl=1)
+        pairs = store.find_overlapping_memories(p, min_similarity=0.3)
+        assert len(pairs) == 1, (
+            f"Expected 1 overlap pair for tail-shared entries, got {len(pairs)}"
+        )
+        assert {pairs[0][0]["title"], pairs[0][1]["title"]} == {"alpha", "beta"}
+
+    def test_merge_memories_deletes_and_updates(self, store, ns) -> None:
         """merge_memories keeps one entry, deletes the rest, updates content."""
-        id1 = store.put("cm", "keep.md", "original", ttl=1)
-        id2 = store.put("cm", "delete.md", "duplicate", ttl=1)
+        p = f"cm-{ns}"
+        id1 = store.put(p, "keep.md", "original", ttl=1)
+        id2 = store.put(p, "delete.md", "duplicate", ttl=1)
         store.merge_memories(keep_id=id1, delete_ids=[id2], merged_content="merged version")
         kept = store.get(id=id1)
         assert kept is not None and kept["content"] == "merged version"
         assert store.get(id=id2) is None
 
-    def test_merge_cleans_fts_index(self, store) -> None:
+    def test_merge_cleans_fts_index(self, store, ns) -> None:
         """After merge, FTS search for deleted content returns no results."""
-        id1 = store.put("cm2", "keep.md", "alpha content", ttl=1)
-        id2 = store.put("cm2", "gone.md", "unique_zygomorphic_keyword", ttl=1)
+        p = f"cm2-{ns}"
+        id1 = store.put(p, "keep.md", "alpha content", ttl=1)
+        id2 = store.put(p, "gone.md", "unique_zygomorphic_keyword", ttl=1)
         store.merge_memories(keep_id=id1, delete_ids=[id2], merged_content="alpha merged")
-        results = store.search("unique_zygomorphic_keyword", project="cm2")
+        results = store.search("unique_zygomorphic_keyword", project=p)
         assert results == [], f"FTS should not find deleted content: {results}"
 
-    def test_merge_updates_fts_for_kept_entry(self, store) -> None:
+    def test_merge_updates_fts_for_kept_entry(self, store, ns) -> None:
         """After merge, merged content is findable via FTS search."""
-        id1 = store.put("cm3", "keep.md", "original boring content", ttl=1)
-        id2 = store.put("cm3", "gone.md", "other stuff", ttl=1)
+        p = f"cm3-{ns}"
+        id1 = store.put(p, "keep.md", "original boring content", ttl=1)
+        id2 = store.put(p, "gone.md", "other stuff", ttl=1)
         store.merge_memories(
             keep_id=id1, delete_ids=[id2], merged_content="unique_merged_phrase_xyz"
         )
-        results = store.search("unique_merged_phrase_xyz", project="cm3")
+        results = store.search("unique_merged_phrase_xyz", project=p)
         assert len(results) == 1
         assert results[0]["title"] == "keep.md"
 
-    def test_merge_multiple_entries(self, store) -> None:
+    def test_merge_multiple_entries(self, store, ns) -> None:
         """Can merge 3+ entries into one."""
-        id1 = store.put("cm4", "keep.md", "base", ttl=1)
-        id2 = store.put("cm4", "dup1.md", "dup one", ttl=1)
-        id3 = store.put("cm4", "dup2.md", "dup two", ttl=1)
+        p = f"cm4-{ns}"
+        id1 = store.put(p, "keep.md", "base", ttl=1)
+        id2 = store.put(p, "dup1.md", "dup one", ttl=1)
+        id3 = store.put(p, "dup2.md", "dup two", ttl=1)
         store.merge_memories(keep_id=id1, delete_ids=[id2, id3], merged_content="all merged")
         assert store.get(id=id1)["content"] == "all merged"
         assert store.get(id=id2) is None
         assert store.get(id=id3) is None
 
-    def test_flag_stale_uses_last_accessed(self, store, pg_conn) -> None:
+    def test_flag_stale_uses_last_accessed(self, store, pg_conn, ns) -> None:
         """Entries with old last_accessed are flagged as stale."""
-        store.put("fs", "old.md", "old entry", ttl=1)
+        p = f"fs-{ns}"
+        store.put(p, "old.md", "old entry", ttl=1)
         old_ts = _ts(days_ago=45)
         pg_conn(
             f"UPDATE nexus.memory SET last_accessed = '{old_ts}' "
-            f"WHERE project = 'fs' AND title = 'old.md'"
+            f"WHERE project = '{p}' AND title = 'old.md'"
         )
-        store.put("fs", "fresh.md", "fresh entry", ttl=1)
-        # Access fresh entry to set last_accessed to now
-        store.get(project="fs", title="fresh.md")
+        store.put(p, "fresh.md", "fresh entry", ttl=1)
+        store.get(project=p, title="fresh.md")  # sets last_accessed to now
 
-        stale = store.flag_stale_memories("fs", idle_days=30)
+        stale = store.flag_stale_memories(p, idle_days=30)
         stale_titles = {e["title"] for e in stale}
         assert "old.md" in stale_titles
         assert "fresh.md" not in stale_titles
 
-    def test_flag_stale_skips_recent_entries(self, store) -> None:
+    def test_flag_stale_null_last_accessed_fallback(self, store, pg_conn, ns) -> None:
+        """Entries with NULL last_accessed fall back to timestamp for staleness.
+
+        Mirrors test_memory_consolidation.py:141 (test_flag_stale_falls_back_to_timestamp).
+        Java must use COALESCE(last_accessed, timestamp) or equivalent.
+        If Java only checks last_accessed IS NOT NULL and skips NULL rows, this fails.
+        """
+        p = f"fs-null-{ns}"
+        store.put(p, "never-accessed.md", "untouched", ttl=1)
+        # Backdate timestamp only; last_accessed stays NULL (never get()d)
+        pg_conn(
+            f"UPDATE nexus.memory "
+            f"SET timestamp = NOW() - INTERVAL '45 days' "
+            f"WHERE project = '{p}' AND title = 'never-accessed.md'"
+        )
+        stale = store.flag_stale_memories(p, idle_days=30)
+        stale_titles = {e["title"] for e in stale}
+        assert "never-accessed.md" in stale_titles, (
+            "flag_stale must fall back to timestamp when last_accessed is NULL. "
+            "Java CASE WHEN last_accessed IS NOT NULL ELSE timestamp must be present."
+        )
+
+    def test_flag_stale_skips_recent_entries(self, store, ns) -> None:
         """Recently created entries are not flagged."""
-        store.put("fs2", "new.md", "just added", ttl=1)
-        stale = store.flag_stale_memories("fs2", idle_days=14)
+        p = f"fs2-{ns}"
+        store.put(p, "new.md", "just added", ttl=1)
+        stale = store.flag_stale_memories(p, idle_days=14)
         assert all(e["title"] != "new.md" for e in stale)
 
 
 class TestMVVPutOrMerge:
     """put_or_merge — maps to test_memory_merge_on_write.py."""
 
-    def test_inserts_when_project_empty(self, store) -> None:
+    def test_inserts_when_project_empty(self, store, ns) -> None:
         """No existing entries → plain insert, action='inserted'."""
+        p = f"pm1-{ns}"
         row_id, action = store.put_or_merge(
-            project="pm1", title="a.md", content="alpha beta gamma delta", ttl=1
+            project=p, title="a.md", content="alpha beta gamma delta", ttl=1
         )
         assert action == "inserted"
         assert row_id > 0
 
-    def test_inserts_when_dissimilar(self, store) -> None:
-        """Existing entry on a different topic → insert."""
-        store.put("pm2", "auth.md", "authentication security tokens oauth", ttl=1)
+    def test_inserts_when_dissimilar(self, store, ns) -> None:
+        """Existing entry on a different topic → insert; 2 rows total.
+
+        Mirrors test_memory_merge_on_write.py::test_put_or_merge_inserts_when_dissimilar
+        and adds the get_all count assertion from test_memory_merge_on_write.py:93.
+        """
+        p = f"pm2-{ns}"
+        store.put(p, "auth.md", "authentication security tokens oauth", ttl=1)
         row_id, action = store.put_or_merge(
-            project="pm2", title="deploy.md",
+            project=p, title="deploy.md",
             content="kubernetes docker containers orchestration",
             ttl=1,
         )
         assert action == "inserted"
+        # Both rows must exist (no spurious merge)
+        all_entries = store.get_all(p)
+        assert len(all_entries) == 2, (
+            f"Expected 2 rows after dissimilar insert, got {len(all_entries)}: "
+            f"{[e['title'] for e in all_entries]}"
+        )
 
-    def test_merges_high_overlap_into_existing(self, store) -> None:
+    def test_merges_high_overlap_into_existing(self, store, ns) -> None:
         """High word-set overlap → merge into existing, one row remains."""
+        p = f"pm3-{ns}"
         keep_id = store.put(
-            "pm3", "search-arch.md",
+            p, "search-arch.md",
             "search engine architecture design patterns optimization caching",
             ttl=1,
         )
         row_id, action = store.put_or_merge(
-            project="pm3", title="search-design.md",
+            project=p, title="search-design.md",
             content="search engine architecture design patterns optimization sharding",
             ttl=1,
             min_similarity=0.5,
@@ -681,33 +863,54 @@ class TestMVVPutOrMerge:
         assert "caching" in merged["content"]
         assert "sharding" in merged["content"]
 
-    def test_respects_threshold(self, store) -> None:
+    def test_respects_threshold(self, store, ns) -> None:
         """Overlap below min_similarity → insert, not merge."""
-        store.put("pm4", "a.md", "search engine architecture design", ttl=1)
+        p = f"pm4-{ns}"
+        store.put(p, "a.md", "search engine architecture design", ttl=1)
         _, action = store.put_or_merge(
-            project="pm4", title="b.md",
+            project=p, title="b.md",
             content="kubernetes docker deployment pipeline",
             ttl=1,
             min_similarity=0.5,
         )
         assert action == "inserted"
 
-    def test_same_title_is_upsert_not_merge(self, store) -> None:
+    def test_same_title_is_upsert_not_merge(self, store, ns) -> None:
         """Exact (project, title) collision takes the identity-upsert path,
-        never the cross-title merge — action='inserted' (upsert) and one row."""
-        first_id = store.put("pm5", "x.md", "initial alpha beta gamma", ttl=1)
+        never the cross-title merge — action='inserted' (upsert) and one row.
+
+        Mirrors test_memory_merge_on_write.py:75, including get_all row count.
+        """
+        p = f"pm5-{ns}"
+        first_id = store.put(p, "x.md", "initial alpha beta gamma", ttl=1)
         row_id, action = store.put_or_merge(
-            project="pm5", title="x.md",
+            project=p, title="x.md",
             content="updated alpha beta gamma delta",
             ttl=1,
             min_similarity=0.5,
         )
-        # Same-title upsert: keep first_id, content updated
         assert action == "inserted"  # service reports upsert as "inserted"
         assert row_id == first_id
-        entry = store.get(project="pm5", title="x.md")
-        assert entry is not None
-        assert entry["content"] == "updated alpha beta gamma delta"
+        # Only one row must exist (upsert, not insert + merge)
+        all_entries = store.get_all(p)
+        assert len(all_entries) == 1, (
+            f"Expected exactly 1 row after same-title upsert, got {len(all_entries)}"
+        )
+        assert all_entries[0]["content"] == "updated alpha beta gamma delta"
+
+    def test_empty_content_inserts_no_merge_scan(self, store, ns) -> None:
+        """Empty/whitespace content has no word-set → plain insert, no Jaccard div-by-zero.
+
+        Mirrors test_memory_merge_on_write.py:88.
+        """
+        p = f"pm6-{ns}"
+        store.put(p, "a.md", "alpha beta gamma", ttl=1)
+        row_id, action = store.put_or_merge(project=p, title="blank.md", content="", ttl=1)
+        assert action == "inserted"
+        all_entries = store.get_all(p)
+        assert len(all_entries) == 2, (
+            f"Expected 2 rows after empty-content insert, got {len(all_entries)}"
+        )
 
 
 # ── Proof 2: Cross-tenant RLS audit ───────────────────────────────────────────
@@ -718,36 +921,6 @@ class TestMVVRLSAudit:
 
     Proves isolation at the full HTTP → jOOQ → PG layer.
     """
-
-    def test_service_role_non_privileged(self, pg_conn) -> None:
-        """C4 criterion: service role must be non-superuser and non-bypassrls.
-
-        RLS is only effective when the connecting role does NOT have SUPERUSER
-        or BYPASSRLS.  Verify via pg_roles (superuser query, not subject to RLS).
-        """
-        # Use a temp table trick: write result of SELECT into a temp table,
-        # then SELECT from it — all in one psql -c invocation.
-        # Easier: run psql as superuser and query pg_roles directly.
-        result = subprocess.run(
-            [str(_PSQL), "-h", "127.0.0.1",
-             "-p", str(0),  # placeholder; overridden by pg_conn's pg_port below
-             "-U", "placeholder", "-d", "placeholder",
-             "-c", "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname='svc_mvvtest'"],
-            capture_output=True, text=True,
-        )
-        # The above is a placeholder; use pg_conn directly which has the right port.
-        # pg_conn runs as superuser so it can read pg_roles.
-        # We capture the psql output via a temp approach: store into temp table.
-        # Simplest: run via pg_conn with \copy-style output; use psql -c and capture.
-        # Actually pg_conn() doesn't return output. Use subprocess directly:
-        # (pg_conn fixture gives us the port from pg_instance)
-        # We cannot easily do this without the port. So: re-implement inline.
-        # This test is intentionally skipped if pg_instance not in scope.
-        # Instead: we use the pg_conn to INSERT the results into a known table,
-        # then query it via HttpMemoryStore. Too complex.
-        # Cleanest: pg_conn fixture runs psql, we can't get output.
-        # Use a separate psql subprocess call within the test.
-        pass  # See test_service_role_non_privileged_direct below
 
     def test_service_role_non_privileged_direct(self, pg_instance) -> None:
         """C4 criterion: the service role (svc_mvvtest) is neither superuser
@@ -777,52 +950,52 @@ class TestMVVRLSAudit:
             f"svc_mvvtest must NOT bypassrls, got rolbypassrls={rolbypassrls!r}"
         )
 
-    def test_cross_tenant_read_isolation(self, store, other_store) -> None:
+    def test_cross_tenant_read_isolation(self, store, other_store, ns) -> None:
         """Tenant A's rows are invisible to tenant B (RLS USING policy).
 
         Proves isolation at the full HTTP → jOOQ → PG layer end-to-end.
         """
-        store.put("rls-proj-mvv", "rls-secret", "tenant default private content", ttl=1)
+        p = f"rls-proj-{ns}"
+        store.put(p, "rls-secret", "tenant default private content", ttl=1)
 
-        # Tenant B must NOT see tenant A's row
-        entry = other_store.get(project="rls-proj-mvv", title="rls-secret")
+        entry = other_store.get(project=p, title="rls-secret")
         assert entry is None, (
             f"RLS FAILED: tenant 'rls-other' can read tenant 'default' entry: {entry}"
         )
 
-        # Tenant A can still see its own row
-        own_entry = store.get(project="rls-proj-mvv", title="rls-secret")
+        own_entry = store.get(project=p, title="rls-secret")
         assert own_entry is not None, "Tenant A must be able to read its own entry"
 
-    def test_cross_tenant_write_isolation(self, store, other_store) -> None:
+    def test_cross_tenant_write_isolation(self, store, other_store, ns) -> None:
         """Tenant B's write to same (project, title) lands in B's namespace,
         NOT overwriting A's row (RLS WITH CHECK policy + separate UNIQUE key).
         """
-        store.put("rls-proj-mvv", "rls-write", "tenant default original", ttl=1)
+        p = f"rls-proj-{ns}"
+        store.put(p, "rls-write", "tenant default original", ttl=1)
 
-        # Tenant B writes to same logical (project, title) — goes into B's namespace
-        other_store.put("rls-proj-mvv", "rls-write", "tenant other attempted overwrite", ttl=1)
+        other_store.put(p, "rls-write", "tenant other attempted overwrite", ttl=1)
 
-        # Tenant A must still see its own unmodified content
-        a_entry = store.get(project="rls-proj-mvv", title="rls-write")
+        a_entry = store.get(project=p, title="rls-write")
         assert a_entry is not None
         assert a_entry["content"] == "tenant default original", (
             f"tenant A's content was overwritten: {a_entry['content']!r}"
         )
 
-    def test_cross_tenant_list_isolation(self, store, other_store) -> None:
+    def test_cross_tenant_list_isolation(self, store, other_store, ns) -> None:
         """list_entries for one tenant must not return rows from the other."""
-        store.put("rls-list", "only-for-default", "default tenant content", ttl=1)
-        other_entries = other_store.list_entries(project="rls-list")
+        p = f"rls-list-{ns}"
+        store.put(p, "only-for-default", "default tenant content", ttl=1)
+        other_entries = other_store.list_entries(project=p)
         titles_other = [e["title"] for e in other_entries]
         assert "only-for-default" not in titles_other, (
             f"RLS FAILED: tenant 'rls-other' can list tenant 'default' entries: {titles_other}"
         )
 
-    def test_cross_tenant_search_isolation(self, store, other_store) -> None:
+    def test_cross_tenant_search_isolation(self, store, other_store, ns) -> None:
         """FTS search for one tenant must not return rows from the other."""
-        store.put("rls-search", "secret-doc", "unique_rls_token_xyzzy99", ttl=1)
-        results = other_store.search("unique_rls_token_xyzzy99", project="rls-search")
+        p = f"rls-search-{ns}"
+        store.put(p, "secret-doc", "unique_rls_token_xyzzy99", ttl=1)
+        results = other_store.search("unique_rls_token_xyzzy99", project=p)
         assert results == [], (
             f"RLS FAILED: tenant 'rls-other' can FTS-search tenant 'default' entries: {results}"
         )
