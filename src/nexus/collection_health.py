@@ -94,14 +94,29 @@ def _default_catalog_stats_fn(col: str) -> dict[str, Any]:
     so ``nx collection health`` and ``nx collection list`` cannot
     disagree (nexus-39zi).
     """
+    import structlog as _sl
+
+    _chlog = _sl.get_logger(__name__)
     cat = _open_catalog()
     if cat is None:
+        return {"last_indexed": None, "orphan_count": 0}
+    # nexus-qnp5s: service-mode guard — HttpCatalogClient has no _db._conn.
+    # The indexed_at + orphan-count queries need new Java endpoints; tracked
+    # in follow-on bead nexus-qnp5s-colhealth-service (filed below).
+    # Fail-loud so callers know the stats are unavailable, not silently 0.
+    if not hasattr(cat, "_db"):
+        _chlog.warning(
+            "collection_health_service_mode_degraded",
+            collection=col,
+            reason="indexed_at and orphan_count require SQLite _db; "
+            "not yet implemented for service mode (nexus-qnp5s-colhealth-service)",
+        )
         return {"last_indexed": None, "orphan_count": 0}
     try:
         # Catalog's SQL cache lives behind private attributes; an
         # explicit public accessor doesn't exist yet and isn't worth
         # adding just for this read-only path.
-        conn = cat._db._conn  # noqa: SLF001
+        conn = cat._db._conn  # noqa: SLF001  # epsilon-allow: guarded SQLite-only path (hasattr guard above; service mode returns early) — nexus-qnp5s-colhealth-service is the follow-on
         row = conn.execute(
             "SELECT MAX(indexed_at) "
             "FROM documents WHERE physical_collection = ?",

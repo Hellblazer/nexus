@@ -772,10 +772,13 @@ class TestAttachDocIdsFromCatalog:
         chash = "e" * 64
         catalog = MagicMock()
         catalog.docs_for_chashes.return_value = {chash: ["DOC-with-links"]}
-        catalog._db.execute.return_value.fetchall.return_value = [
-            ("DOC-with-links", "implements"),
-            ("DOC-with-links", "cites"),
-        ]
+        # nexus-qnp5s: apply_link_boost now uses links_from_batch() (public API).
+        catalog.links_from_batch.return_value = {
+            "DOC-with-links": [
+                {"from_tumbler": "DOC-with-links", "link_type": "implements"},
+                {"from_tumbler": "DOC-with-links", "link_type": "cites"},
+            ]
+        }
         r = self._result(chunk_text_hash=chash)
         r.hybrid_score = 1.0
 

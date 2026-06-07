@@ -174,6 +174,27 @@ class HttpCatalogClient:
     def __exit__(self, *_: Any) -> None:
         self.close()
 
+    @property
+    def _db(self) -> None:  # type: ignore[return]
+        """Guard: raises a clear error when commands/ code tries to use the raw SQLite handle.
+
+        All 46 ``commands/`` sites that call ``cat._db`` are tracked in bead
+        nexus-xnz0o (RDR-152: migrate commands/ catalog._db consumers).  Until
+        migrated, flipping ``NX_STORAGE_BACKEND_CATALOG=service`` in a session
+        that runs those commands will hit this property and get an actionable
+        message instead of a bare ``AttributeError``.
+
+        Bead nexus-xnz0o is a HARD BLOCKER of Phase-4 catalog deletion
+        (nexus-gmiaf.24).
+        """
+        raise RuntimeError(
+            "catalog._db is unavailable in service mode "
+            "(NX_STORAGE_BACKEND_CATALOG=service).  "
+            "This command path is not yet ported to the public catalog API — "
+            "tracked in bead nexus-xnz0o.  "
+            "Run with NX_STORAGE_BACKEND_CATALOG unset to use SQLite mode."
+        )
+
     # ── Internal helpers ───────────────────────────────────────────────────────
 
     def _get(self, path: str, **params: Any) -> Any:
@@ -305,6 +326,94 @@ class HttpCatalogClient:
             for o in owners
             if o.get("tumbler_prefix")
         ]
+
+    def curator_owner_tumbler_by_name(self, name: str) -> "Tumbler | None":
+        """Return the tumbler of the *curator*-type owner with this name, or None.
+
+        The ``(name, owner_type)`` constraint is UNIQUE so at most one curator
+        owner per name exists.  Returns ``None`` when no curator owner is found.
+        Used by doc_indexer / pipeline_stages curator lookups that previously
+        issued ``SELECT … WHERE name=? AND owner_type='curator'`` directly.
+
+        Implementation note — client-side ``owner_type`` filtering:
+        The service endpoint ``GET /owners/by_name?name=<name>`` returns ALL
+        owners across all ``owner_type`` values that match the given name (repo,
+        curator, …).  This method filters the response list to the first entry
+        where ``owner_type == "curator"``.  The filtering is therefore done on the
+        client, not pushed into the query.  This is safe because the server enforces
+        a ``UNIQUE(tenant_id, name, owner_type)`` constraint — there can be at most
+        one curator owner per name per tenant — so the client-side filter is
+        functionally equivalent to a server-side ``WHERE owner_type = 'curator'``
+        predicate and produces the same result without an extra round-trip.
+        """
+        result = self._get("/owners/by_name", name=name)
+        owners = result.get("owners", []) if result else []
+        for o in owners:
+            if o.get("owner_type") == "curator" and o.get("tumbler_prefix"):
+                return Tumbler.parse(o["tumbler_prefix"])
+        return None
+
+    def get_owner_by_prefix(self, tumbler_prefix: str) -> dict | None:
+        """Return full owner dict for the given tumbler_prefix, or None.
+
+        Backs repos.py head_hash lookup that previously issued
+        ``SELECT head_hash FROM owners WHERE tumbler_prefix=?`` directly.
+        Returns None when the server responds 404 (prefix not found).
+        """
+        try:
+            result = self._get("/owners/show", tumbler_prefix=tumbler_prefix)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        return result if result and result.get("tumbler_prefix") else None
+
+    def list_owners_by_type(self, owner_type: str) -> list[dict]:
+        """Return all owners of the given type.
+
+        Backs repos.py:list_repos_dual which previously queried
+        ``SELECT repo_root FROM owners WHERE owner_type='repo'`` directly.
+        Uses POST /v1/catalog/owners/by_type endpoint (nexus-qnp5s).
+        """
+        result = self._post("/owners/by_type", {"owner_type": owner_type})
+        return result.get("owners", []) if result else []
+
+    def chunk_counts_for_docs(self, doc_ids: list[str]) -> dict[str, int]:
+        """Batch-fetch chunk_count for a set of document tumblers.
+
+        Returns ``{tumbler: chunk_count}`` for docs that have a chunk_count.
+        Backs scoring.py hot-path which previously issued a batch
+        ``SELECT tumbler, chunk_count FROM documents WHERE tumbler IN (?)``
+        directly (nexus-qnp5s).
+        """
+        if not doc_ids:
+            return {}
+        result = self._post("/docs/chunk-counts", {"doc_ids": doc_ids})
+        return {k: int(v) for k, v in (result or {}).items() if v is not None}
+
+    def links_from_batch(self, tumblers: list[str]) -> dict[str, list[dict]]:
+        """Batch-fetch outbound links for a set of tumblers.
+
+        Returns ``{tumbler: [{"from_tumbler": ..., "link_type": ...}, ...]}``.
+        Backs scoring.py hot-path which previously issued a batch
+        ``SELECT from_tumbler, link_type FROM links WHERE from_tumbler IN (?)``
+        directly (nexus-qnp5s).
+        """
+        if not tumblers:
+            return {}
+        result = self._post("/links/from-batch", {"tumblers": tumblers})
+        return result if result else {}
+
+    def collections_by_owner(self, owner_id: str) -> list[dict]:
+        """Return collections registered for the given owner_id.
+
+        Backs repos.py which previously queried
+        ``SELECT name, content_type FROM collections WHERE owner_id=?`` directly.
+        Filters the full list_collections() result client-side (collection list
+        is small; avoids a dedicated server endpoint).
+        """
+        all_colls = self.list_collections()
+        return [c for c in all_colls if c.get("owner_id") == owner_id]
 
     # ══════════════════════════════════════════════════════════════════════════
     # DOCUMENTS

@@ -569,7 +569,7 @@ def catalog_auto_link(doc_id: str) -> int:
             return 0
     finally:
         try:
-            cat._db.close()
+            cat.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
         except Exception:  # noqa: BLE001
             pass
     from nexus.catalog.auto_linker import auto_link, read_link_contexts

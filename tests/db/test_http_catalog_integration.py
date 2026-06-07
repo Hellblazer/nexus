@@ -34,6 +34,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from tests.db._service_fixture import SERVICE_ROLES_SQL
+
 import pytest
 
 # ── Prerequisite paths ─────────────────────────────────────────────────────────
@@ -340,8 +342,12 @@ def _psql(pg: dict, sql: str) -> None:
 def pg_instance():
     """Hermetic PostgreSQL 16 instance with trust auth.
 
-    Schema is applied here (before the JAR starts) via _BOOTSTRAP_SQL — the
-    Java service does NOT run Liquibase at startup (bead nexus-net63 tracks that).
+    net63: the Java service runs Liquibase (SchemaMigrator) at startup before binding
+    the HTTP port.  The grants-nexus-svc.xml changeset (runAlways=true) issues
+    GRANT ... TO nexus_svc — this role must exist BEFORE the JAR starts.
+
+    Liquibase owns the full DDL lifecycle (run by the JAR as OS superuser via
+    NX_DB_ADMIN_*).  No schema pre-application is needed here.
     """
     pgdata = tempfile.mkdtemp(prefix="nexus_cat_inttest_pg_")
     pg_port = _free_port()
@@ -367,10 +373,15 @@ def pg_instance():
             check=True, capture_output=True,
         )
 
-        # Apply full catalog schema + RLS + svc_inttest_catalog role before the JAR starts
         pg = {"port": pg_port, "dbname": "nexuscattest", "user": pg_user, "pgdata": pgdata}
-        _psql(pg, _BOOTSTRAP_SQL)
 
+        # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml (runAlways=true)
+        # issues GRANT ... TO nexus_svc.  That role must exist BEFORE the JAR starts.
+        # Liquibase runs as the OS superuser (NX_DB_ADMIN_*) and creates the full schema.
+        # nexus_svc (NOSUPERUSER NOBYPASSRLS) is the app pool role; Liquibase grants it DML.
+        _psql(pg, SERVICE_ROLES_SQL)
+
+        # No _BOOTSTRAP_SQL pre-application: Liquibase owns the full DDL lifecycle.
         yield pg
     finally:
         subprocess.run(
@@ -382,24 +393,39 @@ def pg_instance():
 
 @pytest.fixture(scope="module")
 def service(pg_instance):
-    """Launch the shaded JAR against the pre-provisioned schema."""
+    """Launch the shaded JAR against the Liquibase-managed schema.
+
+    NX_DB_ADMIN_* = OS superuser (trust auth) — Liquibase runs DDL as this role.
+    NX_DB_*       = nexus_svc (NOSUPERUSER NOBYPASSRLS) — app HikariCP pool uses
+                    this role so FORCE ROW LEVEL SECURITY actually applies.
+                    nexus_svc is granted DML rights by grants-nexus-svc.xml (runAlways).
+    """
     svc_port = _free_port()
     token    = "cat-inttest-bearer-secret-xyz"
+    # Use a fresh temp dir for Chroma so the JAR does not open the dev Chroma
+    # database at ~/.config/nexus/chroma (which may have incompatible SQLite state).
+    chroma_data = tempfile.mkdtemp(prefix="nexus-cat-inttest-chroma-")
 
+    pg_user = pg_instance["user"]
+    pg_jdbc = (
+        f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}"
+        f"/{pg_instance['dbname']}"
+    )
     env = {
         **os.environ,
         "NX_SERVICE_PORT":  str(svc_port),
         "NX_SERVICE_TOKEN": token,
-        "NX_DB_URL": (
-            f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}"
-            f"/{pg_instance['dbname']}"
-        ),
-        # Use nexus_app (non-superuser, NOBYPASSRLS) so FORCE ROW LEVEL SECURITY
-        # actually applies. The OS superuser bypasses all RLS even with FORCE.
-        # Trust auth in this hermetic initdb allows login without password.
-        "NX_DB_USER": "nexus_app",
-        "NX_DB_PASS": "",
+        # App pool: nexus_svc (NOSUPERUSER NOBYPASSRLS) — FORCE RLS applies.
+        "NX_DB_URL":  pg_jdbc,
+        "NX_DB_USER": "nexus_svc",
+        "NX_DB_PASS": "nexus_svc_pass",
         "NX_POOL_SIZE": "3",
+        # Migration pool: OS superuser — has DDL rights for full Liquibase run.
+        "NX_DB_ADMIN_URL":  pg_jdbc,
+        "NX_DB_ADMIN_USER": pg_user,
+        "NX_DB_ADMIN_PASS": "",
+        # Isolate Chroma from the dev instance to avoid SQLite-version panics.
+        "NX_CHROMA_PATH": chroma_data,
     }
     env.pop("NX_STORAGE_BACKEND", None)
     env.pop("NX_STORAGE_BACKEND_CATALOG", None)
@@ -426,6 +452,7 @@ def service(pg_instance):
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+        shutil.rmtree(chroma_data, ignore_errors=True)
 
 
 @pytest.fixture(scope="module")

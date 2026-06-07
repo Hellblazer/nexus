@@ -363,6 +363,24 @@ class TestLinkBoost:
         # 0.2 * 0.5 = 0.1
         assert r.hybrid_score == pytest.approx(0.6, abs=0.01)
 
+    def test_links_from_batch_failure_degrades_gracefully(self, tmp_path):
+        """nexus-qnp5s: links_from_batch() raising (e.g. transient HTTP failure
+        in service mode) must not propagate — apply_link_boost returns the
+        original results unchanged and logs a warning instead of crashing."""
+        from unittest.mock import MagicMock
+
+        cat = MagicMock()
+        cat.links_from_batch.side_effect = RuntimeError("simulated network failure")
+
+        r = self._make_result(doc_id="1.1.1", score=0.7)
+        original_score = r.hybrid_score
+
+        # Must not raise; score must be unchanged (unboosted degradation).
+        apply_link_boost([r], cat)
+
+        assert r.hybrid_score == original_score
+        cat.links_from_batch.assert_called_once()
+
 
 # ── Topic boost (RDR-070, nexus-aym) ─────────────────────────────────────
 

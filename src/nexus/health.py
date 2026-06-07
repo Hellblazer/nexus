@@ -1213,8 +1213,11 @@ def _check_chroma_pagination(client: object, db_name: str) -> list[HealthResult]
 def _check_catalog(cat: "Catalog | None", cat_path: "Path") -> list[HealthResult]:
     try:
         if cat is not None:
-            doc_count = cat._db.execute("SELECT count(*) FROM documents").fetchone()[0]
-            link_count = cat._db.execute("SELECT count(*) FROM links").fetchone()[0]
+            # nexus-qnp5s: use cat.stats() which works on both SQLite Catalog
+            # and HttpCatalogClient (GET /v1/catalog/stats).
+            s = cat.stats()
+            doc_count = s.get("doc_count", 0)
+            link_count = s.get("link_count", 0)
             return [HealthResult(
                 label="Catalog", ok=True,
                 detail=f"{doc_count} documents, {link_count} links at {cat_path}",

@@ -46,6 +46,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.db._service_fixture import SERVICE_ROLES_SQL
+
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -286,6 +288,16 @@ def pg_instance():
         _psql(_BOOTSTRAP_SQL_SCHEMA)
         _psql(_MEMORY_BOOTSTRAP_SQL)
         _psql(_BOOTSTRAP_SQL_GRANTS)
+
+
+        # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
+        # Create nexus_svc BEFORE starting the JAR (pre-condition for runAlways grant changeset).
+        subprocess.run(
+            [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
+             "-U", pg_user, "-d", "nexusplantest",
+             "-v", "ON_ERROR_STOP=1", "-c", SERVICE_ROLES_SQL],
+            check=True, capture_output=True,
+        )
 
         yield {"port": pg_port, "dbname": "nexusplantest", "user": pg_user, "pgdata": pgdata}
 

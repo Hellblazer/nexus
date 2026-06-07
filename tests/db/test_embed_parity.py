@@ -55,6 +55,8 @@ from typing import Generator
 import numpy as np
 import pytest
 
+from tests.db._service_fixture import SERVICE_ROLES_SQL
+
 # ── Prerequisite paths ─────────────────────────────────────────────────────────
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -195,6 +197,13 @@ def pg_instance() -> Generator[dict, None, None]:
         subprocess.run(
             [str(_CREATEDB), "-h", "127.0.0.1", "-p", str(pg_port),
              "-U", pg_user, "paritytest"],
+            check=True, capture_output=True,
+        )
+        # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
+        subprocess.run(
+            [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
+             "-U", pg_user, "-d", "paritytest",
+             "-v", "ON_ERROR_STOP=1", "-c", SERVICE_ROLES_SQL],
             check=True, capture_output=True,
         )
         proc = subprocess.run(
