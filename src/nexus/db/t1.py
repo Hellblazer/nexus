@@ -759,3 +759,37 @@ class T1Database:
             return len(all_ids)
 
         return self._exec(_do)
+
+
+# ── Factory ───────────────────────────────────────────────────────────────────
+
+
+def get_t1_database(
+    session_id: str | None = None,
+    client=None,
+) -> "T1Database":
+    """Return the authoritative T1 scratch store for this process.
+
+    RDR-152 bead nexus-gmiaf.13 routing seam:
+
+    * ``NX_STORAGE_BACKEND_T1=service`` (or global ``NX_STORAGE_BACKEND=service``)
+      → :class:`~nexus.db.http_scratch_store.HttpScratchStore` (Postgres UNLOGGED).
+    * Default → :class:`T1Database` (ChromaDB path, unchanged).
+
+    The ``session_id`` and ``client`` arguments are forwarded to ``T1Database``
+    on the Chroma path; they are ignored on the service path (session_id is
+    sourced from ``NX_T1_SESSION`` env var in ``HttpScratchStore``).
+
+    Returns a ``T1Database``-shaped object: callers use ``put``, ``get``,
+    ``search``, ``list_entries``, ``flagged_entries``, ``flag``, ``unflag``,
+    ``promote``, ``delete``, ``clear``, ``resolve_prefix_candidates``, and
+    the ``session_id`` property.  All methods are available on both paths.
+    """
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+
+    if storage_backend_for("t1") == StorageBackend.SERVICE:
+        from nexus.db.http_scratch_store import HttpScratchStore
+
+        return HttpScratchStore()  # type: ignore[return-value]
+
+    return T1Database(session_id=session_id, client=client)
