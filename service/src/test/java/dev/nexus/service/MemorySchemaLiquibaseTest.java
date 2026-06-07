@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import liquibase.Contexts;
@@ -15,11 +16,11 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-152 bead nexus-gmiaf.5 — Liquibase memory baseline integration test.
@@ -32,10 +33,19 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <ol>
  *   <li>memory table exists with exact column set (tenant_id + all mirrored columns)</li>
  *   <li>RLS: relrowsecurity=t, relforcerowsecurity=t; pg_policies has USING + WITH CHECK</li>
- *   <li>fts_vector generated column + GIN index exist; tokenisation config verified</li>
+ *   <li>fts_vector generated column + GIN index exist; tokenisation config verified;
+ *       english/simple DISCRIMINATION proven by negative simple-does-not-stem probe</li>
  *   <li>End-to-end RLS + FTS via TenantScope.withTenant: tenant isolation + FTS query</li>
  *   <li>S0.4 C4 defensive: rolsuper=false, rolbypassrls=false for service role</li>
+ *   <li>RLS fail-closed: raw service-role connection without GUC stamp sees zero rows</li>
+ *   <li>RLS WITH CHECK: cross-tenant INSERT rejected</li>
+ *   <li>RLS WITH CHECK: cross-tenant tenant_id UPDATE (rewrite) rejected</li>
  * </ol>
+ *
+ * <p>Statistical FTS parity (top-K set equality + Spearman ≥ 0.90) is deferred
+ * to the .9 MVV gate per the locked parity contract (nexus-gmiaf.2 rev 2); it
+ * requires post-ETL production data.  This bead proves schema structure,
+ * tokenisation behavior, and RLS enforcement only.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class MemorySchemaLiquibaseTest {
@@ -68,9 +78,7 @@ class MemorySchemaLiquibaseTest {
                 "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "'; " +
                 "  END IF; " +
                 "END $$");
-            // Rename the role to nexus_svc so changeset 5's DO block finds it,
-            // then the svcDs connects using the original svc_memory_test credentials.
-            // Simpler: create nexus_svc alias as well.
+            // Create nexus_svc so changeset 5's grant DO block finds it.
             su.createStatement().execute(
                 "DO $$ BEGIN " +
                 "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
@@ -91,7 +99,7 @@ class MemorySchemaLiquibaseTest {
             liquibase.update(new Contexts());
         }
 
-        // Grant svc_memory_test the same privileges as nexus_svc (for RLS test).
+        // Grant svc_memory_test the same privileges as nexus_svc (for RLS tests).
         try (Connection su = pg.getPostgresDatabase().getConnection()) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
@@ -151,9 +159,9 @@ class MemorySchemaLiquibaseTest {
                 "FROM pg_policies " +
                 "WHERE schemaname = 'nexus' AND tablename = 'memory'");
             assertThat(pol.next()).as("at least one RLS policy must exist on nexus.memory").isTrue();
-            String polcmd     = pol.getString("cmd");
-            String qual       = pol.getString("qual");
-            String withCheck  = pol.getString("with_check");
+            String polcmd    = pol.getString("cmd");
+            String qual      = pol.getString("qual");
+            String withCheck = pol.getString("with_check");
             // pg_policies.cmd is 'ALL', 'SELECT', 'INSERT', 'UPDATE', or 'DELETE'
             assertThat(polcmd).as("policy must cover ALL commands").isEqualTo("ALL");
             assertThat(qual)
@@ -166,13 +174,27 @@ class MemorySchemaLiquibaseTest {
     }
 
     // ── Test 3: tsvector generated column + GIN index + tokenisation config ──
+    //
+    // Proves both the structural DDL (STORED generated column, GIN index) and
+    // the tokenisation behaviour required by the parity contract:
+    //   - english config stems 'programming' → 'program', so a query for the
+    //     stem matches the full form in the title (positive english probe)
+    //   - simple config does NOT stem, so plainto_tsquery('simple','program')
+    //     does NOT match tags='programming,systems' (negative discrimination probe)
+    //   - simple config does match the exact token 'programming' in tags (positive
+    //     simple probe confirms the column is indexed, just unstemmed)
+    //
+    // Statistical parity harness (top-K set equality + Spearman ≥ 0.90) is
+    // deferred to the .9 MVV gate per the locked parity contract (nexus-gmiaf.2
+    // rev 2); it requires post-ETL production data volumes.
 
     @Test
     void memoryTable_ftsColumnAndIndexExist_tokenisationCorrect() throws Exception {
         try (Connection su = pg.getPostgresDatabase().getConnection()) {
             // fts_vector column exists and is a generated stored column
             ResultSet gen = su.createStatement().executeQuery(
-                "SELECT a.attname, a.attgenerated, pg_catalog.format_type(a.atttypid, a.atttypmod) AS col_type " +
+                "SELECT a.attname, a.attgenerated, " +
+                "       pg_catalog.format_type(a.atttypid, a.atttypmod) AS col_type " +
                 "FROM pg_attribute a " +
                 "JOIN pg_class c ON c.oid = a.attrelid " +
                 "JOIN pg_namespace n ON n.oid = c.relnamespace " +
@@ -203,64 +225,95 @@ class MemorySchemaLiquibaseTest {
             assertThat(idx.getString("index_type"))
                 .as("index type must be GIN").isEqualTo("gin");
 
-            // Inspect generated column definition to verify tokenisation configs.
-            // pg_get_expr returns the expression from pg_attrdef for generated columns.
+            // Inspect generated column expression to verify tokenisation configs.
             ResultSet expr = su.createStatement().executeQuery(
                 "SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS col_expr " +
                 "FROM pg_attrdef d " +
                 "JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum " +
                 "JOIN pg_class c ON c.oid = d.adrelid " +
                 "JOIN pg_namespace n ON n.oid = c.relnamespace " +
-                "WHERE n.nspname = 'nexus' AND c.relname = 'memory' AND a.attname = 'fts_vector'");
+                "WHERE n.nspname = 'nexus' AND c.relname = 'memory' " +
+                "  AND a.attname = 'fts_vector'");
             assertThat(expr.next()).as("pg_attrdef must have entry for fts_vector").isTrue();
             String colExpr = expr.getString("col_expr");
-            // The expression must reference 'english' config for title/content
-            // and 'simple' config for tags, per parity contract rev 2.
             assertThat(colExpr)
                 .as("generated expression must use 'english' config for prose columns")
                 .contains("english");
             assertThat(colExpr)
                 .as("generated expression must use 'simple' config for tags column")
                 .contains("simple");
-            // Verify setweight calls with the expected weight letters
-            assertThat(colExpr)
-                .as("generated expression must include setweight 'A' for title")
-                .contains("'A'");
-            assertThat(colExpr)
-                .as("generated expression must include setweight 'B' for content")
-                .contains("'B'");
-            assertThat(colExpr)
-                .as("generated expression must include setweight 'C' for tags")
-                .contains("'C'");
+            assertThat(colExpr).as("must include setweight 'A' for title").contains("'A'");
+            assertThat(colExpr).as("must include setweight 'B' for content").contains("'B'");
+            assertThat(colExpr).as("must include setweight 'C' for tags").contains("'C'");
         }
 
-        // Probe row: insert via superuser, verify fts_vector populated correctly.
+        // Probe row: verify tokenisation behaviour, not just DDL strings.
+        //
+        // Design: the discriminating word ('running') appears ONLY in tags, not in
+        // title or content, so the fts_vector's 'running' lexeme comes exclusively
+        // from the simple-indexed tags column (weight C).  Title/content are indexed
+        // under english and contain no word that stems to 'run', so there is no
+        // cross-column contamination that could mask the negative assertion.
+        //
+        // The three probes together prove that title/content use english (stemming)
+        // and tags uses simple (verbatim, no stemming) as separate configs:
+        //   (1) english stems: 'mechanics' → 'mechan'; querying the stem 'mechanic'
+        //       hits the title lexeme (english config produces same stem for both forms)
+        //   (2) simple exact: 'running' stored verbatim in tags; exact query matches
+        //   (3) KEY NEGATIVE: 'run' is the english stem of 'running', but simple does
+        //       NOT stem, so plainto_tsquery('simple','run') → literal token 'run',
+        //       which does NOT match 'running' in the simple-indexed tags column.
+        //       If tags were accidentally indexed under english instead of simple,
+        //       'running' would be stored as 'run' and the query WOULD match.
         try (Connection su = pg.getPostgresDatabase().getConnection()) {
             su.setAutoCommit(false);
-            // Stamp a probe tenant to satisfy RLS (FORCE applies to owner too).
-            try (var ps = su.prepareStatement("SELECT set_config('nexus.tenant', ?, true)")) {
-                ps.setString(1, "probe-tenant");
+            try (var ps = su.prepareStatement("SELECT set_config(?, ?, true)")) {
+                ps.setString(1, TenantConstants.GUC_NAME);
+                ps.setString(2, "probe-tenant");
                 ps.execute();
             }
             su.createStatement().execute(
                 "INSERT INTO nexus.memory " +
                 "(tenant_id, project, title, content, tags, timestamp, access_count) " +
                 "VALUES " +
-                "('probe-tenant', 'probe-proj', 'Rust async programming', " +
-                " 'async await futures tokio', 'rust,async,systems', now(), 0)");
-            // Verify english tokenisation: 'programming' should be stemmed to 'program'
+                "('probe-tenant', 'probe-proj', 'Quantum mechanics overview', " +
+                " 'wave functions superposition entanglement', 'running,distributed', now(), 0)");
+
             ResultSet ftsCheck = su.createStatement().executeQuery(
-                "SELECT fts_vector @@ plainto_tsquery('english', 'programming') AS title_match, " +
-                "       fts_vector @@ plainto_tsquery('simple',  'rust')         AS tag_match " +
+                // (1) Positive english: 'mechanics' stems to 'mechan'; 'mechanic' also
+                //     stems to 'mechan' under english.  Title is indexed under english,
+                //     so the stem query must match.
+                "SELECT fts_vector @@ plainto_tsquery('english', 'mechanic')  AS english_stem_match, " +
+                // (2) Positive simple exact: tags='running,...'; simple stores verbatim.
+                "       fts_vector @@ plainto_tsquery('simple',  'running')   AS simple_exact_match, " +
+                // (3) NEGATIVE discrimination: 'run' is the english stem of 'running'.
+                //     Under simple, 'running' is stored as-is (no stemming), so querying
+                //     the stem 'run' must NOT match.  Proves tags≠english.
+                "       fts_vector @@ plainto_tsquery('simple',  'run')       AS simple_stem_no_match " +
                 "FROM nexus.memory " +
-                "WHERE tenant_id = 'probe-tenant' AND title = 'Rust async programming'");
+                "WHERE tenant_id = 'probe-tenant' AND title = 'Quantum mechanics overview'");
+
             assertThat(ftsCheck.next()).as("probe row must be retrievable").isTrue();
-            assertThat(ftsCheck.getBoolean("title_match"))
-                .as("english-stemmed title query 'programming' must match title 'Rust async programming'")
+
+            assertThat(ftsCheck.getBoolean("english_stem_match"))
+                .as("english config must stem: 'mechanic' and 'mechanics' share stem 'mechan'; " +
+                    "title is indexed under english so query matches")
                 .isTrue();
-            assertThat(ftsCheck.getBoolean("tag_match"))
-                .as("simple-config tag query 'rust' must match tags 'rust,async,systems'")
+
+            assertThat(ftsCheck.getBoolean("simple_exact_match"))
+                .as("simple config must match exact token: 'running' stored verbatim in tags")
                 .isTrue();
+
+            // This is the discrimination assertion: if tags were indexed under english
+            // instead of simple, 'running' would be stored as 'run' (stem) and
+            // plainto_tsquery('simple','run') → literal 'run' would match.
+            // Under correct simple indexing, 'running' ≠ 'run', so it must NOT match.
+            assertThat(ftsCheck.getBoolean("simple_stem_no_match"))
+                .as("simple config must NOT stem: plainto_tsquery('simple','run') " +
+                    "must NOT match tags='running,...' — proves tags use simple (verbatim), " +
+                    "not english (stemming).  If this fails, tags are accidentally english-indexed.")
+                .isFalse();
+
             su.rollback();  // cleanup probe row
         }
     }
@@ -360,6 +413,99 @@ class MemorySchemaLiquibaseTest {
         });
     }
 
+    // ── Test 6: RLS fail-closed — no GUC stamp → zero rows ──────────────────
+    //
+    // Proves that current_setting('nexus.tenant', true) returns NULL when unset,
+    // and NULL ≠ any tenant_id causes the USING predicate to filter all rows.
+    // The table is pre-seeded (tests 4 and 7 both insert rows before this runs
+    // in JUnit's natural ordering, but test ordering is non-guaranteed; we seed
+    // explicitly here so the assertion is never vacuously true against an empty table).
+
+    @Test
+    void rls_failClosed_noGucStamp_returnsZeroRows() throws Exception {
+        // Seed at least one row as superuser so the table is non-empty.
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            su.setAutoCommit(false);
+            insertRow(su, "failclosed-tenant", "fc-proj", "Sentinel row",
+                "content for fail-closed probe", "probe");
+            su.commit();
+        }
+
+        // Borrow a raw connection from the service-role datasource WITHOUT
+        // calling set_config — GUC is unset, so current_setting returns NULL.
+        // The USING predicate (tenant_id = NULL) is false for every row,
+        // so SELECT must return zero rows even though a row exists.
+        try (Connection svc = svcDs.getConnection()) {
+            svc.setAutoCommit(true);
+            // Do NOT stamp the GUC — this is the unstamped-connection scenario.
+            ResultSet rs = svc.createStatement().executeQuery(
+                "SELECT COUNT(*) AS cnt FROM nexus.memory");
+            assertThat(rs.next()).isTrue();
+            long count = rs.getLong("cnt");
+            assertThat(count)
+                .as("unstamped service connection must see zero rows (RLS fail-closed: " +
+                    "unset GUC → NULL → no tenant_id matches NULL)")
+                .isEqualTo(0L);
+        }
+    }
+
+    // ── Test 7: WITH CHECK blocks cross-tenant INSERT ────────────────────────
+    //
+    // Proves that the WITH CHECK predicate rejects an INSERT where tenant_id
+    // does not match the stamped GUC value.  This is the primary protection
+    // against a buggy service layer writing rows into the wrong tenant's space.
+
+    @Test
+    void rls_withCheck_blocksCrossTenantInsert() throws Exception {
+        assertThatThrownBy(() ->
+            tenantScope.withTenant("gamma", ctx ->
+                // tenant is stamped as 'gamma' but we try to INSERT with tenant_id='delta'
+                ctx.execute(
+                    "INSERT INTO nexus.memory " +
+                    "(tenant_id, project, title, content, timestamp, access_count) " +
+                    "VALUES (?, ?, ?, ?, now(), 0)",
+                    "delta",        // tenant_id mismatch — WITH CHECK must reject
+                    "gamma-proj",
+                    "Cross-tenant insert attempt",
+                    "this should be rejected by RLS WITH CHECK"))
+        )
+        .as("INSERT with tenant_id != GUC value must be rejected by RLS WITH CHECK")
+        .isInstanceOf(Exception.class)
+        .hasMessageContaining("violates row-level security policy");
+    }
+
+    // ── Test 8: WITH CHECK blocks cross-tenant tenant_id rewrite via UPDATE ──
+    //
+    // Proves the subtle UPDATE case: the USING predicate makes the alpha row
+    // visible to the alpha session, but the WITH CHECK predicate must block the
+    // attempt to rewrite tenant_id to 'beta'.  Without WITH CHECK on UPDATE,
+    // a row could be silently moved into another tenant's visibility space.
+
+    @Test
+    void rls_withCheck_blocksCrossTenantTenantIdRewrite() throws Exception {
+        // Seed a row for 'alpha-rw' via superuser.
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            su.setAutoCommit(false);
+            insertRow(su, "alpha-rw", "rw-proj", "Row to rewrite",
+                "content", "tag");
+            su.commit();
+        }
+
+        // Connecting as 'alpha-rw': the row is visible via USING (tenant_id='alpha-rw').
+        // Attempt to UPDATE tenant_id to 'beta-rw' — WITH CHECK must block it.
+        assertThatThrownBy(() ->
+            tenantScope.withTenant("alpha-rw", ctx ->
+                ctx.execute(
+                    "UPDATE nexus.memory SET tenant_id = ? " +
+                    "WHERE project = 'rw-proj' AND title = 'Row to rewrite'",
+                    "beta-rw")   // rewrite target — WITH CHECK must reject
+            )
+        )
+        .as("UPDATE SET tenant_id to a different value must be rejected by RLS WITH CHECK")
+        .isInstanceOf(Exception.class)
+        .hasMessageContaining("violates row-level security policy");
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDataSource() {
@@ -375,11 +521,14 @@ class MemorySchemaLiquibaseTest {
     /**
      * Insert a memory row via superuser connection (bypasses RLS for seeding).
      * Stamps the GUC so FORCE RLS WITH CHECK does not block the owner insert.
+     * Uses ON CONFLICT (tenant_id, project, title) — the required three-column
+     * key per the upsert contract documented in memory-001-baseline.xml.
      */
     private void insertRow(Connection su, String tenant, String project,
                            String title, String content, String tags) throws Exception {
-        try (var ps = su.prepareStatement("SELECT set_config('nexus.tenant', ?, true)")) {
-            ps.setString(1, tenant);
+        try (var ps = su.prepareStatement("SELECT set_config(?, ?, true)")) {
+            ps.setString(1, TenantConstants.GUC_NAME);
+            ps.setString(2, tenant);
             ps.execute();
         }
         try (var ps = su.prepareStatement(

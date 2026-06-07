@@ -45,6 +45,20 @@
       so the same (project, title) key can exist per tenant.  The BIGSERIAL id
       is still an independent surrogate PK so foreign keys from future tables
       remain stable.
+
+    ON CONFLICT key for service / ETL upserts:
+      ALWAYS use ON CONFLICT (tenant_id, project, title) — NOT (project, title).
+      Using the two-column form bypasses tenant_id and would allow cross-tenant
+      collisions, silently overwriting another tenant's row.
+      ETL (.8): INSERT ... ON CONFLICT (tenant_id, project, title) DO UPDATE SET ...
+      Python client (.7): same form for any upsert operation.
+
+    DEFAULT_TENANT sentinel:
+      Pre-multi-tenant SQLite data migrated by bead .8 uses tenant_id = 'default'
+      (TenantConstants.DEFAULT_TENANT).  The .7 Python client MUST supply this
+      same value in X-Nexus-Tenant when reading migrated data or RLS returns
+      zero rows (fail-closed).  Revisit at Phase 5 bead .32.
+      T2 decision: nexus_rdr/152-default-tenant.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -77,6 +91,7 @@ CREATE TABLE nexus.memory (
     access_count  INTEGER      NOT NULL DEFAULT 0,
     last_accessed TIMESTAMPTZ,
     CONSTRAINT memory_pk PRIMARY KEY (id),
+    -- Upsert MUST use ON CONFLICT (tenant_id, project, title) — never (project, title) alone.
     CONSTRAINT memory_tenant_project_title_uq UNIQUE (tenant_id, project, title)
 );
 
