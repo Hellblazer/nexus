@@ -23,11 +23,12 @@ import static org.jooq.impl.DSL.*;
  * All methods route through {@link TenantScope#withTenant} so every row
  * access is stamped with the tenant GUC and enforced by RLS.
  *
- * <p>FTS parity contract (Store 2, docs/rdr/rdr-152-fts-parity-contract.md):
+ * <p>FTS parity contract (Store 2, docs/rdr/rdr-152-fts-parity-contract.md, amended Option B 2026-06-07):
  * <ul>
- *   <li>{@code match_text} indexed with {@code 'english'} config (stemmed prose).
- *   <li>{@code tags} and {@code project} indexed with {@code 'simple'} config (identifier).
- *   <li>Query uses {@code plainto_tsquery('english', ?)} — must match match_text config.
+ *   <li>{@code match_text} indexed with {@code 'english'} config (stemmed prose, weight A).
+ *   <li>{@code tags} and {@code project} indexed with {@code 'simple'} config (identifier, weights B/C).
+ *   <li>Query uses OR'd tsquery: {@code plainto_tsquery('english', ?) || plainto_tsquery('simple', ?)}
+ *       so prose stems AND exact identifier tokens both match. PG results ⊇ FTS5 results.
  * </ul>
  *
  * <p>Metric columns ({@code use_count}, {@code match_count}, {@code match_conf_sum},
@@ -245,8 +246,20 @@ public final class PlanRepository {
 
     /**
      * FTS search using the {@code fts_vector} GIN index.
-     * Uses {@code plainto_tsquery('english', ?)} per the locked FTS parity contract.
-     * Skips expired and soft-disabled rows.
+     *
+     * <p>Uses a dual-tsquery OR to cover both prose and identifier columns:
+     * <ul>
+     *   <li>{@code plainto_tsquery('english', ?)} — stems prose tokens (match_text column,
+     *       weight A). "Indexing" → "index", "searches" → "search", etc.</li>
+     *   <li>{@code plainto_tsquery('simple', ?)} — exact match for identifier/tag columns
+     *       (tags, project, weights B/C).  "indexing" matches the stored simple lexeme
+     *       "indexing" that English stemming cannot reach.</li>
+     * </ul>
+     * The OR union ensures PG ⊇ FTS5 (superset criterion per the amended FTS parity
+     * contract, Option B decision, 2026-06-07).  ts_rank uses the same OR'd tsquery so
+     * rows that satisfy either path receive a non-zero rank.
+     *
+     * <p>Skips expired and soft-disabled rows.
      * Mirrors {@code PlanLibrary.search_plans}.
      */
     public List<PlansRecord> searchPlans(String tenant, String query, String project, int limit) {
@@ -255,15 +268,19 @@ public final class PlanRepository {
                 field("extract(epoch from now() - created_at) / 86400", Double.class)
                     .le(PLANS.TTL.cast(Double.class)));
             Condition active = PLANS.DISABLED_AT.isNull();
-            Condition fts = condition("fts_vector @@ plainto_tsquery('english', {0})", val(query));
+            // OR'd tsquery: prose stemming (english) + exact identifier match (simple)
+            Condition fts = condition(
+                "fts_vector @@ (plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))",
+                val(query));
             Condition cond = fts.and(expiry).and(active);
             if (project != null && !project.isBlank()) {
                 cond = cond.and(PLANS.PROJECT.eq(project));
             }
             return ctx.selectFrom(PLANS)
                       .where(cond)
-                      .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}))",
-                                     Double.class, val(query)).desc())
+                      .orderBy(field(
+                          "ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))",
+                          Double.class, val(query)).desc())
                       .limit(limit)
                       .fetch();
         });

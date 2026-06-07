@@ -196,10 +196,16 @@ public final class MemoryRepository {
     /**
      * FTS search using the {@code fts_vector} GIN index.
      *
-     * <p>Uses {@code plainto_tsquery('english', ?)} per the locked FTS parity
-     * contract ({@code docs/rdr/rdr-152-fts-parity-contract.md}, Store 1).
-     * {@code plainto_tsquery} sanitizes unstructured user input and matches the
-     * tokenization configuration of the stored {@code fts_vector} column.
+     * <p>Uses a dual-tsquery OR to cover both prose and identifier columns:
+     * <ul>
+     *   <li>{@code plainto_tsquery('english', ?)} — stems prose tokens (title/content
+     *       columns, weights A/C). "Indexing" → "index", etc.</li>
+     *   <li>{@code plainto_tsquery('simple', ?)} — exact match for the tags column
+     *       (weight B, stored with simple tokenizer). "indexing" matches stored
+     *       "indexing" that English stemming cannot reach.</li>
+     * </ul>
+     * The OR union ensures PG ⊇ FTS5 (superset criterion, Option B decision 2026-06-07).
+     * Mirrors {@code docs/rdr/rdr-152-fts-parity-contract.md} Store 1, amended §OPTION-B.
      *
      * <p>Access tracking: when {@code trackAccess=true} (default — mirrors
      * Python {@code access="track"}), increments {@code access_count} and sets
@@ -214,22 +220,22 @@ public final class MemoryRepository {
      */
     public List<MemoryRecord> search(String tenant, String query, String project, boolean trackAccess) {
         return tenantScope.withTenant(tenant, ctx -> {
-            // Use plain SQL for tsvector @@ operator (no jOOQ typed API for @@).
-            // plainto_tsquery is injection-safe: the query argument is bound via {0}.
+            // OR'd tsquery: prose stemming (english) + exact identifier/tag match (simple).
+            // plainto_tsquery is injection-safe: bound via {0}.
             String ftsWhere = project != null && !project.isBlank()
-                ? "fts_vector @@ plainto_tsquery('english', {0}) AND project = {1}"
-                : "fts_vector @@ plainto_tsquery('english', {0})";
+                ? "fts_vector @@ (plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0})) AND project = {1}"
+                : "fts_vector @@ (plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))";
 
             Result<MemoryRecord> rows;
             if (project != null && !project.isBlank()) {
                 rows = ctx.selectFrom(MEMORY)
                           .where(condition(ftsWhere, val(query), val(project)))
-                          .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}))", Double.class, val(query)).desc())
+                          .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc())
                           .fetch();
             } else {
                 rows = ctx.selectFrom(MEMORY)
                           .where(condition(ftsWhere, val(query)))
-                          .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}))", Double.class, val(query)).desc())
+                          .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc())
                           .fetch();
             }
             if (trackAccess && !rows.isEmpty()) {
@@ -306,8 +312,8 @@ public final class MemoryRepository {
      * FTS search scoped to projects matching a GLOB pattern.
      *
      * <p>Mirrors Python {@code search_glob} using SQL LIKE (converts {@code *} to
-     * {@code %} and escapes LIKE metacharacters). Uses
-     * {@code plainto_tsquery('english', ?)} per the FTS parity contract.
+     * {@code %} and escapes LIKE metacharacters). Uses dual-tsquery OR (english || simple)
+     * per the amended FTS parity contract (Option B, 2026-06-07).
      * For GLOB semantics: {@code *} → {@code %}, {@code ?} → {@code _}.
      */
     public List<MemoryRecord> searchGlob(String tenant, String query, String projectGlob) {
@@ -320,9 +326,9 @@ public final class MemoryRepository {
                                             .replace("?", "_");
             return ctx.selectFrom(MEMORY)
                       .where(condition(
-                          "fts_vector @@ plainto_tsquery('english', {0}) AND project LIKE {1} ESCAPE '\\'",
+                          "fts_vector @@ (plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0})) AND project LIKE {1} ESCAPE '\\'",
                           val(query), val(likePattern)))
-                      .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}))", Double.class, val(query)).desc())
+                      .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc())
                       .fetch();
         });
     }
@@ -331,8 +337,8 @@ public final class MemoryRepository {
      * FTS search scoped to entries whose tags contain {@code tag} exactly (boundary-matched).
      *
      * <p>Mirrors Python {@code search_by_tag} using
-     * {@code (',' || tags || ',') LIKE '%,tag,%'}. Uses
-     * {@code plainto_tsquery('english', ?)} per the FTS parity contract.
+     * {@code (',' || tags || ',') LIKE '%,tag,%'}. Uses dual-tsquery OR (english || simple)
+     * per the amended FTS parity contract (Option B, 2026-06-07).
      */
     public List<MemoryRecord> searchByTag(String tenant, String query, String tag) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -343,9 +349,9 @@ public final class MemoryRepository {
             String likePattern = "%," + escapedTag + ",%";
             return ctx.selectFrom(MEMORY)
                       .where(condition(
-                          "fts_vector @@ plainto_tsquery('english', {0}) AND (',' || tags || ',') LIKE {1} ESCAPE '\\'",
+                          "fts_vector @@ (plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0})) AND (',' || tags || ',') LIKE {1} ESCAPE '\\'",
                           val(query), val(likePattern)))
-                      .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}))", Double.class, val(query)).desc())
+                      .orderBy(field("ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))", Double.class, val(query)).desc())
                       .fetch();
         });
     }

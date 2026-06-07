@@ -694,45 +694,49 @@ class TestPlansMVV:
             f"disable without reason must not modify tags; got {row3['tags']!r}")
 
     def test_m_fts_parity_spearman(self, plan_store):
-        """m) FTS parity per the locked parity contract (rdr-152-fts-parity-contract.md §Store 2).
+        """m) FTS parity per the AMENDED parity contract (Option B, 2026-06-07).
 
-        Contract requirements:
-          (1) Top-K set equality — EXACT: set(pg_ids) == set(sqlite_ids_mapped_to_pg) per probe.
-              NO tolerance. Accumulates all failures before asserting.
-          (2) Spearman rho >= 0.90 — computed ONLY on the K-length ordered vectors
-              (universe=sqlite rank order, pg_ranks=position of each pg result in universe).
-              Per the contract pseudocode. Skipped when K<2.
-          (3) Vacuity guard: at least one probe must return NON-EMPTY results on BOTH engines.
+        AMENDED criterion (rdr-152-fts-parity-contract.md §AMENDMENT-OPTION-B):
+          (1) SUPERSET criterion: set(sqlite_ids) ⊆ set(pg_ids) per probe.
+              PG MAY return additional results (english-stemming upgrade over FTS5 unicode61).
+              Every FTS5 result MUST appear in PG results. Accumulates failures before asserting.
+          (2) Spearman rho >= 0.90 — computed over the COMMON SUBSET:
+              filter pg_results to only items in sqlite_ids (preserving PG rank order),
+              then compute rho using sqlite rank order as universe.
+              Skipped when common subset K < 2.
+          (3) Vacuity guard: at least one probe returns NON-EMPTY results on BOTH engines.
 
-        Corpus: canonical fixture plans from tests/test_plan_library.py + test_plan_match.py
-          as specified in the parity contract §K and Fixture Sources (Store 2 row).
-          Plans are seeded via save_plan() on BOTH engines so match_text is synthesized
-          identically by PlanLibrary and HttpPlanLibrary (both call _synthesize_match_text).
+        WHY superset (not exact equality):
+          - PG fts_vector stores tags/project with 'simple' tokenizer (no stemming).
+          - The OR'd query `plainto_tsquery('english',...) || plainto_tsquery('simple',...)` now
+            lets PG match both prose stems AND exact tag tokens — giving PG BETTER recall than
+            FTS5 unicode61 (which lacks English stemming on prose).
+          - FTS5 'indexing' probe matches via unicode61 (tokenizes 'indexing' without stemming).
+          - PG 'indexing' probe: simple tsquery matches exact 'indexing' in B-weight; english
+            tsquery additionally matches stemmed prose containing 'index*'. Result: PG ⊇ FTS5.
 
-        Escalation: if set equality fails on any probe, the test reports the full escalation
-          evidence (sqlite top-K set, PG top-K set, symmetric diff, computed rho) and fails.
-          This is the documented escalation path — the threshold is NEVER silently lowered.
+        Corpus: per-probe isolated project namespaces to prevent cross-contamination.
+          Each probe seeds its plans in a dedicated project so K is predictable.
+          Fixture sources: test_plan_library.py (5 tests) + test_plan_match.py (1 test).
         """
         from nexus.db.t2.plan_library import PlanLibrary
 
-        # ── Fixture corpus (canonical plans from the parity contract fixture list) ───────────
-        # Each plan is seeded via save_plan() with the SAME params on both engines,
-        # so match_text is synthesized identically.
+        # ── Fixture corpus: per-probe isolated project namespaces ──────────────────────────
+        # Each probe gets its own project namespace to prevent cross-contamination.
+        # Each probe has 2 matching plans (so K>=2 for Spearman) + 1 non-matching distractor.
+        # Match strength: plan-A is the canonical fixture (strong); plan-B is a weaker
+        # secondary match sharing the key token(s). Distractor shares none.
         #
-        # Fixture sources (per contract §K and Fixture Sources, Store 2):
-        #   test_search_plans_match: "semantic search over code repositories" (probe: "semantic")
-        #   test_search_plans_tags:  tags="indexing,code" (probe: "indexing")
-        #   test_search_plans_project_filter: "search code patterns" project="parity-nexus" (probe: "search")
-        #   test_search_plans_hits_on_dimensional_suffix: find-by-author (probe: "find-by-author")
-        #   test_search_plans_still_matches_raw_description: "semantic search …" (probe: "semantic")
-        #   test_specific_probe_hits_matching_verb: research+review plans (probe: "research find-by-author")
-        #
-        # Distractor plans: ensure non-trivial discrimination.
-
-        _FIXTURE_PROJECT = "parity-m"   # isolated namespace; no overlap with other tests
+        # Probe table:
+        #   "semantic"             → p1: A=canonical (semantic search), B=semantic retrieval (weaker)
+        #   "indexing"             → p2: A=tags:indexing,code; B=tags:indexing,cache (weaker)
+        #   "search"               → p3: A=search code patterns; B=full text search approach
+        #   "find-by-author"       → p4: A=find-by-author (name=); B=find author documents (query)
+        #   "semantic" (p5)        → p5: A=semantic search (verb=research); B=semantic similarity
+        #   "research find-by-author" → p6: A=research + find-by-author (name=); B=research author attribution
 
         def _seed_both(sq_lib, pg_lib, *, query, plan_json="{}", tags="",
-                       project=_FIXTURE_PROJECT, verb=None, scope=None, name=None):
+                       project, verb=None, scope=None, name=None) -> tuple[int, int]:
             """Seed same plan on both SQLite and Postgres; return (sq_id, pg_id)."""
             sq_id = sq_lib.save_plan(query=query, plan_json=plan_json, tags=tags,
                                      project=project, verb=verb, scope=scope, name=name)
@@ -740,7 +744,7 @@ class TestPlansMVV:
                                      project=project, verb=verb, scope=scope, name=name)
             return sq_id, pg_id
 
-        # Plan registry: list of (sq_id, pg_id) pairs; populated during seeding.
+        # sq_id → pg_id mapping (populated during seeding)
         _sq_to_pg: dict[int, int] = {}
 
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
@@ -748,97 +752,139 @@ class TestPlansMVV:
         sqlite_lib = PlanLibrary(sqlite_path)
         try:
             # ── Seed canonical fixture corpus ──────────────────────────────────────────
-            # Group 1: from test_search_plans_match
-            sq, pg = _seed_both(sqlite_lib, plan_store,
-                                 query="semantic search over code repositories")
+
+            # Probe p1 — "semantic" (test_search_plans_match)
+            # A: strong match — "semantic" appears multiple times in query
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p1",
+                                 query="semantic search semantic retrieval semantic similarity ranking")
             _sq_to_pg[sq] = pg
-            sq, pg = _seed_both(sqlite_lib, plan_store,
-                                 query="memory management in Python")
+            # B: weaker match — "semantic" appears once
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p1",
+                                 query="semantic knowledge base lookup")
+            _sq_to_pg[sq] = pg
+            # Distractor: no "semantic"
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p1",
+                                 query="memory management in Python garbage collection")
             _sq_to_pg[sq] = pg
 
-            # Group 2: from test_search_plans_tags
-            sq, pg = _seed_both(sqlite_lib, plan_store,
-                                 query="generic query", tags="indexing,code")
+            # Probe p2 — "indexing" (test_search_plans_tags)
+            # A: strong — tags contain "indexing" AND query contains "indexing"
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p2",
+                                 query="indexing pipeline for code repository indexing",
+                                 tags="indexing,code")
             _sq_to_pg[sq] = pg
-            sq, pg = _seed_both(sqlite_lib, plan_store,
-                                 query="another query", tags="memory,retrieval")
+            # B: weaker — only tags contain "indexing"
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p2",
+                                 query="build and cache pipeline steps",
+                                 tags="indexing,cache")
             _sq_to_pg[sq] = pg
-
-            # Group 3: from test_search_plans_project_filter (use parity-m-alt as second project)
-            sq, pg = _seed_both(sqlite_lib, plan_store,
-                                 query="search code patterns", project=_FIXTURE_PROJECT)
-            _sq_to_pg[sq] = pg
-            # Distractor with identical query but different project: seed separately
-            sq, pg = _seed_both(sqlite_lib, plan_store,
-                                 query="search code patterns distractor",
-                                 project=_FIXTURE_PROJECT)
+            # Distractor: no "indexing"
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p2",
+                                 query="another memory retrieval query", tags="memory,retrieval")
             _sq_to_pg[sq] = pg
 
-            # Group 4: from test_search_plans_hits_on_dimensional_suffix
-            sq, pg = _seed_both(sqlite_lib, plan_store,
-                                 query="Find documents attributed to a specific author.",
+            # Probe p3 — "search" (test_search_plans_project_filter)
+            # A: strong — "search" appears multiple times
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p3",
+                                 query="search code search patterns search repository indexing")
+            _sq_to_pg[sq] = pg
+            # B: weaker — "search" once
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p3",
+                                 query="full text search approach for documents")
+            _sq_to_pg[sq] = pg
+            # Distractor
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p3",
+                                 query="review pull request changes for merging")
+            _sq_to_pg[sq] = pg
+
+            # Probe p4 — "find-by-author" (test_search_plans_hits_on_dimensional_suffix)
+            # A: strong — name="find-by-author" appears in match_text suffix AND query contains "author"
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p4",
+                                 query="Find author documents attributed to a specific author author attribution.",
                                  tags="builtin-template",
                                  verb="research", scope="global", name="find-by-author")
             _sq_to_pg[sq] = pg
+            # B: weaker — query contains "find" and "author" but name differs
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p4",
+                                 query="find author attribution in document metadata",
+                                 tags="builtin-template",
+                                 verb="research", scope="global", name="author-lookup")
+            _sq_to_pg[sq] = pg
+            # Distractor
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p4",
+                                 query="Aggregate results from multiple sources.",
+                                 tags="builtin-template",
+                                 verb="aggregate", scope="global", name="multi-source")
+            _sq_to_pg[sq] = pg
 
-            # Group 5: from test_search_plans_still_matches_raw_description
-            sq, pg = _seed_both(sqlite_lib, plan_store,
-                                 query="semantic search over code repositories duplicate",
+            # Probe p5 — "semantic" (test_search_plans_still_matches_raw_description)
+            # Separate namespace from p1.
+            # A: strong — "semantic" appears multiple times in query
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p5",
+                                 query="semantic search semantic retrieval semantic ranking over repositories",
                                  verb="research", scope="global", name="research-default")
             _sq_to_pg[sq] = pg
+            # B: weaker — "semantic" appears once
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p5",
+                                 query="semantic similarity for document ranking",
+                                 verb="research", scope="global", name="similarity-default")
+            _sq_to_pg[sq] = pg
+            # Distractor
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p5",
+                                 query="debug the failing test suite",
+                                 verb="debug", scope="global", name="debug-default")
+            _sq_to_pg[sq] = pg
 
-            # Group 6: from test_specific_probe_hits_matching_verb
-            sq, pg = _seed_both(sqlite_lib, plan_store,
-                                 query="Walk from an RDR to implementing code modules",
+            # Probe p6 — "research find-by-author" (test_specific_probe_hits_matching_verb)
+            # A: strong — verb=research + name=find-by-author + query mentions "author"
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p6",
+                                 query="Research and find author attribution in RDR modules author find",
                                  verb="research", scope="global", name="find-by-author")
             _sq_to_pg[sq] = pg
-            sq, pg = _seed_both(sqlite_lib, plan_store,
+            # B: weaker — verb=research + name mentions "author" but no "find"
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p6",
+                                 query="Trace author attribution across linked documents",
+                                 verb="research", scope="global", name="author-trace")
+            _sq_to_pg[sq] = pg
+            # Distractor (verb=review, no find-by-author relevance)
+            sq, pg = _seed_both(sqlite_lib, plan_store, project="parity-m-p6",
                                  query="Critique a change set vs prior decisions",
                                  verb="review", scope="global", name="default")
             _sq_to_pg[sq] = pg
 
-            # Extra distractors to ensure FTS discriminates
-            sq, pg = _seed_both(sqlite_lib, plan_store,
-                                 query="index all code in the repository",
-                                 tags="indexing,repository", verb="index", scope="global")
-            _sq_to_pg[sq] = pg
-            sq, pg = _seed_both(sqlite_lib, plan_store,
-                                 query="review pull request for correctness",
-                                 tags="review,code", verb="review", scope="global")
-            _sq_to_pg[sq] = pg
-
             # ── Query battery ─────────────────────────────────────────────────────────
-            # Derived from the named fixture tests in the contract.
-            _BATTERY: list[tuple[str, str]] = [
-                # (probe,            description)
-                ("semantic",         "from test_search_plans_match"),
-                ("indexing",         "from test_search_plans_tags"),
-                ("search",           "from test_search_plans_project_filter"),
-                ("find-by-author",   "from test_search_plans_hits_on_dimensional_suffix"),
-                ("research find-by-author", "from test_specific_probe_hits_matching_verb"),
+            # (probe_text, project_namespace, description)
+            _BATTERY: list[tuple[str, str, str]] = [
+                ("semantic",                "parity-m-p1", "test_search_plans_match"),
+                ("indexing",                "parity-m-p2", "test_search_plans_tags"),
+                ("search",                  "parity-m-p3", "test_search_plans_project_filter"),
+                ("find-by-author",          "parity-m-p4", "test_search_plans_hits_on_dimensional_suffix"),
+                ("semantic",                "parity-m-p5", "test_search_plans_still_matches_raw_description"),
+                ("research find-by-author", "parity-m-p6", "test_specific_probe_hits_matching_verb"),
             ]
             K = 10   # per contract: min(limit, 10) for plans_fts
             FLOOR = 0.90
 
-            # ── Spearman from K-length rank vectors (contract §Spearman Computation) ────
-            def _spearman_k(universe: list[int], pg_results_ordered: list[int]) -> float:
-                """Contract-canonical K-length Spearman.
+            # ── Spearman over COMMON SUBSET (amended Option-B criterion) ──────────────
+            def _spearman_common(
+                sq_ordered: list[int],   # sqlite results mapped to pg ids, in rank order
+                pg_ordered: list[int],   # PG results in rank order
+            ) -> float:
+                """Amended criterion Spearman.
 
-                universe = [id for id in sqlite_results_ordered]  (canonical order)
-                pg_results_ordered = [id for id in pg_results]    (PG rank order)
-                Both lists have the same identities (set equality pre-verified).
-
-                sqlite_ranks = [1, 2, ..., K] by definition.
-                pg_ranks[i] = universe.index(pg_results_ordered[i]) + 1
-                Ties: stable-sort both result lists on id before building universe/pg_ranks,
-                so each id has a unique position.
+                sqlite_ids define the universe and canonical rank order (they are the
+                subset by the superset criterion). Filter PG results to only items in
+                sqlite set, preserving PG rank order. Compute rho of that ordering
+                against the sqlite canonical ordering.
                 """
-                K_actual = len(universe)
+                sq_set = set(sq_ordered)
+                pg_common = [pid for pid in pg_ordered if pid in sq_set]
+                K_actual = len(sq_ordered)
                 if K_actual < 2:
-                    return float("nan")   # skip signal, not 1.0 — must not mask failures
+                    return float("nan")
+                universe = sq_ordered   # sqlite rank = [1..K] by definition
                 sqlite_ranks = list(range(1, K_actual + 1))
-                pg_ranks = [universe.index(pid) + 1 for pid in pg_results_ordered]
-                # Pearson on rank vectors == Spearman
+                pg_ranks = [universe.index(pid) + 1 for pid in pg_common]
                 n = K_actual
                 mean_s = sum(sqlite_ranks) / n
                 mean_p = sum(pg_ranks) / n
@@ -849,13 +895,14 @@ class TestPlansMVV:
                 return num / den if den > 1e-12 else 1.0
 
             # ── Run battery ───────────────────────────────────────────────────────────
-            set_eq_failures: list[str] = []  # accumulated before final assert
+            superset_failures: list[str] = []   # FTS5 ⊄ PG — accumulated before asserting
             rho_results: list[tuple[str, float]] = []
+            probe_details: list[dict] = []
             any_nonempty_both = False
 
-            for probe, desc in _BATTERY:
-                sq_results = sqlite_lib.search_plans(probe, project=_FIXTURE_PROJECT, limit=K)
-                pg_results = plan_store.search_plans(probe, project=_FIXTURE_PROJECT, limit=K)
+            for probe, project, desc in _BATTERY:
+                sq_results = sqlite_lib.search_plans(probe, project=project, limit=K)
+                pg_results = plan_store.search_plans(probe, project=project, limit=K)
 
                 sq_ids_raw = [r["id"] for r in sq_results]
                 pg_ids_raw = [r["id"] for r in pg_results]
@@ -866,45 +913,40 @@ class TestPlansMVV:
                 if sq_ids_raw and pg_ids_raw:
                     any_nonempty_both = True
 
-                # ── Set equality (EXACT, no tolerance) ────────────────────────────────
                 sq_set = set(sq_ids_as_pg)
                 pg_set = set(pg_ids_raw)
-                if sq_set != pg_set:
-                    sym_diff = sq_set.symmetric_difference(pg_set)
-                    set_eq_failures.append(
-                        f"\nprobe={probe!r} ({desc})\n"
+                pg_extra = sorted(pg_set - sq_set)   # PG-only results from english stemming
+                sqlite_only = sorted(sq_set - pg_set)
+
+                # ── SUPERSET CHECK (amended criterion: FTS5 ⊆ PG) ────────────────────
+                if sqlite_only:
+                    superset_failures.append(
+                        f"\nprobe={probe!r} project={project!r} ({desc})\n"
                         f"  sqlite top-K (as pg ids): {sq_ids_as_pg!r}\n"
                         f"  pg top-K:                 {pg_ids_raw!r}\n"
-                        f"  sqlite_only (in sq not pg): {sorted(sq_set - pg_set)!r}\n"
-                        f"  pg_only (in pg not sq):    {sorted(pg_set - sq_set)!r}\n"
-                        f"  symmetric diff size={len(sym_diff)}"
+                        f"  MISSING from PG (sqlite not in pg): {sqlite_only!r}\n"
+                        f"  pg_extra (english stemming upgrade): {pg_extra!r}"
                     )
-                    # Still compute rho for escalation evidence
-                    # Use intersection for a partial rho (informational only)
-                    inter = sq_set & pg_set
-                    if len(inter) >= 2:
-                        partial_universe = [pid for pid in sq_ids_as_pg if pid in inter]
-                        partial_pg = [pid for pid in pg_ids_raw if pid in inter]
-                        rho = _spearman_k(partial_universe, partial_pg)
-                        set_eq_failures[-1] += f"\n  partial rho (intersection only)={rho:.3f}"
-                    continue  # skip Spearman on mismatched sets per contract
+                    continue   # skip Spearman on superset violations
 
-                # ── Spearman rho on K-length vectors ──────────────────────────────────
-                # Contract: universe = sqlite rank order; pg_ranks = positions in universe.
-                # Tie-break by id (secondary key) so each id has a unique, deterministic
-                # position. FTS returns distinct floats in practice, so this is a no-op
-                # on non-tied results.
+                # ── Spearman rho over COMMON SUBSET ──────────────────────────────────
                 def _tiebreak(ids: list[int]) -> list[int]:
-                    """Stable-sort ties by id; no-op when ranks are all distinct."""
                     return ids if len(set(ids)) == len(ids) else sorted(ids)
 
-                universe   = _tiebreak(sq_ids_as_pg)
+                sq_ordered = _tiebreak(sq_ids_as_pg)
                 pg_ordered = _tiebreak(pg_ids_raw)
 
-                rho = _spearman_k(universe, pg_ordered)
-                if math.isnan(rho):
-                    continue  # K<2, skip per contract
-                rho_results.append((probe, rho))
+                rho = _spearman_common(sq_ordered, pg_ordered)
+                probe_details.append({
+                    "probe": probe,
+                    "project": project,
+                    "sqlite_set": sq_ids_as_pg,
+                    "pg_set": pg_ids_raw,
+                    "pg_extra": pg_extra,
+                    "rho": rho,
+                })
+                if not math.isnan(rho):
+                    rho_results.append((probe, rho))
 
             # ── Vacuity guard ─────────────────────────────────────────────────────────
             assert any_nonempty_both, (
@@ -912,41 +954,39 @@ class TestPlansMVV:
                 "match_text is likely empty on one or both sides. "
                 "Verify _synthesize_match_text is called on both seed paths.")
 
-            # ── Assert set equality (all failures accumulated) ────────────────────────
-            if set_eq_failures:
-                # This is the escalation evidence per the parity contract §Escalation Path.
-                # Do NOT lower the threshold. Document and fail.
+            # ── Assert superset criterion (all failures accumulated) ──────────────────
+            if superset_failures:
                 raise AssertionError(
-                    f"FTS PARITY SET EQUALITY FAILED on {len(set_eq_failures)} probe(s).\n"
-                    f"ESCALATION EVIDENCE (rdr-152-fts-parity-contract.md §Escalation Path):\n"
-                    + "\n".join(set_eq_failures) +
-                    f"\n\nAll rho computed before failure: {rho_results!r}"
+                    f"FTS PARITY SUPERSET CRITERION FAILED on {len(superset_failures)} probe(s).\n"
+                    f"Every FTS5 result MUST appear in PG results (amended Option B criterion,\n"
+                    f"rdr-152-fts-parity-contract.md §AMENDMENT-OPTION-B).\n"
+                    + "\n".join(superset_failures)
                 )
 
-            # ── Assert Spearman floor ──────────────────────────────────────────────────
+            # ── Assert Spearman floor over common subset ───────────────────────────────
             if not rho_results:
-                pytest.skip("all probes K<2 or set equality failed — Spearman undefined")
+                pytest.skip("all probes K<2 common-subset — Spearman undefined")
 
             failing_rho = [(q, r) for q, r in rho_results if r < FLOOR]
             if failing_rho:
                 raise AssertionError(
-                    f"FTS PARITY SPEARMAN FLOOR FAILED.\n"
+                    f"FTS PARITY SPEARMAN FLOOR FAILED (common-subset criterion).\n"
                     f"Failing probes (rho < {FLOOR}): {failing_rho!r}\n"
                     f"All results: {rho_results!r}\n"
-                    f"Escalation: document in gate PR body, obtain substantive-critic sign-off "
-                    f"before merging (rdr-152-fts-parity-contract.md §Escalation Path)."
+                    f"Per-probe details: {probe_details!r}"
                 )
 
             # ── Record outcome ─────────────────────────────────────────────────────────
             avg_rho = sum(r for _, r in rho_results) / len(rho_results)
-            # Attach to class for post-session reporting
             TestPlansMVV._fts_parity_rho = avg_rho                 # type: ignore[attr-defined]
             TestPlansMVV._fts_parity_details = rho_results          # type: ignore[attr-defined]
+            TestPlansMVV._fts_parity_probe_details = probe_details  # type: ignore[attr-defined]
 
         finally:
             sqlite_lib.close()
             sqlite_path.unlink(missing_ok=True)
 
 # Module-level attribute initializer (avoids AttributeError on class access before test runs)
-TestPlansMVV._fts_parity_rho     = None   # type: ignore[attr-defined]
-TestPlansMVV._fts_parity_details = None   # type: ignore[attr-defined]
+TestPlansMVV._fts_parity_rho          = None   # type: ignore[attr-defined]
+TestPlansMVV._fts_parity_details      = None   # type: ignore[attr-defined]
+TestPlansMVV._fts_parity_probe_details = None  # type: ignore[attr-defined]
