@@ -56,6 +56,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  *   <li>CONCURRENCY: N concurrent claimNext calls each get a DISTINCT row (no double-claim)</li>
  *   <li>recordPromotion / listPromotions round-trip</li>
  *   <li>importPromotionRow: event-log DO NOTHING on conflict (idempotent)</li>
+ *   <li>renameHighlightsCollection: moves rows; unknown collection returns 0; RLS isolation</li>
  * </ol>
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -775,6 +776,62 @@ class AspectRepositoryTest {
         assertThat(tenantBPromos)
             .as("tenant B must not see tenant A's promotion log (RLS)")
             .noneMatch(p -> "private_field".equals(p.get("field_name")));
+    }
+
+    // ── renameHighlightsCollection ─────────────────────────────────────────────
+
+    @Test @Order(53)
+    void renameHighlightsCollection_movesRows() {
+        // Seed two highlight rows under old collection
+        for (int i = 1; i <= 2; i++) {
+            var body = new java.util.LinkedHashMap<String, Object>();
+            body.put("doc_id",       "hl-rename-doc-" + i);
+            body.put("source_uri",   "file://hl-rename-" + i + ".md");
+            body.put("collection",   "hl-src");
+            body.put("highlights_md","## h");
+            body.put("mentions_md",  "");
+            body.put("ingested_at",  "2026-01-01T00:00:00.000000Z");
+            repo.upsertHighlight(TENANT_A, body);
+        }
+        int n = repo.renameHighlightsCollection(TENANT_A, "hl-src", "hl-dst");
+        assertThat(n).as("renameHighlightsCollection must move 2 rows").isEqualTo(2);
+
+        // Verify rows now appear under new collection
+        var rows = repo.listHighlights(TENANT_A, 100, 0);
+        long underDst = rows.stream()
+            .filter(r -> "hl-dst".equals(r.get("collection")) &&
+                         ((String) r.get("doc_id")).startsWith("hl-rename-doc-"))
+            .count();
+        assertThat(underDst).as("both rows must appear under new collection").isEqualTo(2);
+    }
+
+    @Test @Order(54)
+    void renameHighlightsCollection_unknownCollection_returnsZero() {
+        int n = repo.renameHighlightsCollection(TENANT_A, "hl-ghost-src", "hl-ghost-dst");
+        assertThat(n).as("rename of absent collection must return 0").isEqualTo(0);
+    }
+
+    @Test @Order(55)
+    void renameHighlightsCollection_rlsIsolated() {
+        // TENANT_A inserts a highlight row; TENANT_B rename must not touch it
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("doc_id",      "hl-rls-doc");
+        body.put("source_uri",  "file://hl-rls.md");
+        body.put("collection",  "hl-rls-src");
+        body.put("highlights_md", "## private");
+        body.put("mentions_md", "");
+        body.put("ingested_at", "2026-01-01T00:00:00.000000Z");
+        repo.upsertHighlight(TENANT_A, body);
+
+        // TENANT_B renames: must see 0 rows affected
+        int n = repo.renameHighlightsCollection(TENANT_B, "hl-rls-src", "hl-rls-dst");
+        assertThat(n).as("TENANT_B rename must not affect TENANT_A rows (RLS)").isEqualTo(0);
+
+        // TENANT_A's row must still be under original collection
+        var rows = repo.listHighlights(TENANT_A, 100, 0);
+        boolean stillUnderSrc = rows.stream().anyMatch(r ->
+            "hl-rls-src".equals(r.get("collection")) && "hl-rls-doc".equals(r.get("doc_id")));
+        assertThat(stillUnderSrc).as("TENANT_A row must remain under hl-rls-src").isTrue();
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

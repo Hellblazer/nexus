@@ -36,12 +36,13 @@ import java.util.Optional;
  *   GET   /v1/aspects/salient_sentences/get       get salient_sentences for doc_id=
  *   POST  /v1/aspects/import                      ETL fidelity import
  *
- *   POST  /v1/aspects/highlights/upsert           upsert highlight record
- *   GET   /v1/aspects/highlights/get              get by doc_id=
- *   GET   /v1/aspects/highlights/get_by_source_uri get by source_uri=
- *   GET   /v1/aspects/highlights/list             list (limit=, offset=)
- *   POST  /v1/aspects/highlights/delete           delete by doc_id
- *   POST  /v1/aspects/highlights/import           ETL import
+ *   POST  /v1/aspects/highlights/upsert              upsert highlight record
+ *   GET   /v1/aspects/highlights/get               get by doc_id=
+ *   GET   /v1/aspects/highlights/get_by_source_uri  get by source_uri=
+ *   GET   /v1/aspects/highlights/list              list (limit=, offset=)
+ *   POST  /v1/aspects/highlights/delete            delete by doc_id
+ *   POST  /v1/aspects/highlights/import            ETL import
+ *   POST  /v1/aspects/highlights/rename_collection rename collection denorm
 
  *   POST  /v1/aspects/queue/enqueue               enqueue document
  *   POST  /v1/aspects/queue/claim_next            atomically claim one pending row
@@ -114,6 +115,7 @@ public final class AspectHandler implements HttpHandler {
                 case "/highlights/list"                 -> handleHighlightList(exchange, tenant, method);
                 case "/highlights/delete"               -> handleHighlightDelete(exchange, tenant, method);
                 case "/highlights/import"               -> handleHighlightImport(exchange, tenant, method);
+                case "/highlights/rename_collection"    -> handleHighlightRenameCollection(exchange, tenant, method);
                 // ── aspect_extraction_queue ───────────────────────────────────
                 case "/queue/enqueue"                   -> handleQueueEnqueue(exchange, tenant, method);
                 case "/queue/claim_next"                -> handleQueueClaimNext(exchange, tenant, method);
@@ -336,6 +338,18 @@ public final class AspectHandler implements HttpHandler {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
         int n = repo.importHighlight(tenant, readBody(ex));
         HttpUtil.send(ex, 200, "{\"imported\":" + n + "}");
+    }
+
+    private void handleHighlightRenameCollection(HttpExchange ex, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
+        Map<String, Object> body = readBody(ex);
+        String oldColl = (String) body.get("old");
+        String newColl = (String) body.get("new");
+        if (oldColl == null || newColl == null) {
+            HttpUtil.send(ex, 400, "{\"error\":\"old and new required\"}"); return;
+        }
+        int n = repo.renameHighlightsCollection(tenant, oldColl, newColl);
+        HttpUtil.send(ex, 200, "{\"updated\":" + n + "}");
     }
 
     // ── aspect_extraction_queue handlers ──────────────────────────────────────

@@ -10,8 +10,8 @@ Config:
     NX_SERVICE_PORT  — service port (required; raises if missing)
     NX_SERVICE_TOKEN — bearer token (required; raises if missing)
 
-Interface parity (bead nexus-gmiaf.15, RDR-152 P2.5):
-    upsert, get, get_by_source_uri, list, delete, close
+Interface parity (bead nexus-gmiaf.15, RDR-152 P2.5; extended nexus-gmiaf.16):
+    upsert, get, get_by_source_uri, list, delete, rename_collection, close
 """
 from __future__ import annotations
 
@@ -185,6 +185,17 @@ class HttpDocumentHighlightsStore:
         """Delete row by doc_id. Returns True if a row was deleted."""
         r = self._post("/delete", {"doc_id": doc_id})
         return bool(r.get("deleted", False))
+
+    def rename_collection(self, *, old: str, new: str) -> int:
+        """Re-point every row's collection from *old* to *new*.
+
+        Calls ``POST /v1/aspects/highlights/rename_collection``.
+        Returns the number of rows updated.
+        """
+        if not old or not new:
+            raise ValueError("old and new must not be empty")
+        r = self._post("/rename_collection", {"old": old, "new": new})
+        return int(r.get("updated", 0))
 
     # ── ETL import ────────────────────────────────────────────────────────────
 

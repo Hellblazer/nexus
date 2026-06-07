@@ -815,20 +815,27 @@ class T2Database:
             # migrated DBs and blocked ALL renames; a hardcoded doc_id would
             # symmetrically break unmigrated DBs. Resolve the column from the
             # live schema so both shapes work and dedup matches the real PK.
-            aspects_key = _rename_dedup_col(conn, "document_aspects")
-            conn.execute(
-                f"DELETE FROM document_aspects "
-                f"WHERE collection = ? "
-                f"  AND {aspects_key} IN ("
-                f"    SELECT {aspects_key} FROM document_aspects WHERE collection = ?"
-                f"  )",
-                (new, old),
-            )
-            cur = conn.execute(
-                "UPDATE document_aspects SET collection = ? WHERE collection = ?",
-                (new, old),
-            )
-            counts["aspects"] = cur.rowcount
+            # RDR-152 nexus-gmiaf.16: in service mode, self.document_aspects is
+            # an HttpDocumentAspectsStore whose rename_collection() calls the
+            # remote service endpoint.  Route through domain-store API to avoid
+            # SQLite/Postgres divergence.
+            if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+                counts["aspects"] = self.document_aspects.rename_collection(old=old, new=new)
+            else:
+                aspects_key = _rename_dedup_col(conn, "document_aspects")
+                conn.execute(
+                    f"DELETE FROM document_aspects "
+                    f"WHERE collection = ? "
+                    f"  AND {aspects_key} IN ("
+                    f"    SELECT {aspects_key} FROM document_aspects WHERE collection = ?"
+                    f"  )",
+                    (new, old),
+                )
+                cur = conn.execute(
+                    "UPDATE document_aspects SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                counts["aspects"] = cur.rowcount
 
             # aspect_extraction_queue (with collision defense). Same PK
             # migration (RDR-108 Phase 1c) applies; its source_path column is
@@ -836,31 +843,43 @@ class T2Database:
             # shared the latent bug of deduping on a non-PK column once the PK
             # moved to doc_id (a same-doc_id/different-source_path pair would
             # hit a PK collision on the UPDATE). Resolve the live PK column.
-            queue_key = _rename_dedup_col(conn, "aspect_extraction_queue")
-            conn.execute(
-                f"DELETE FROM aspect_extraction_queue "
-                f"WHERE collection = ? "
-                f"  AND {queue_key} IN ("
-                f"    SELECT {queue_key} FROM aspect_extraction_queue"
-                f"    WHERE collection = ?"
-                f"  )",
-                (new, old),
-            )
-            cur = conn.execute(
-                "UPDATE aspect_extraction_queue "
-                "SET collection = ? WHERE collection = ?",
-                (new, old),
-            )
-            counts["aspect_queue"] = cur.rowcount
+            # RDR-152 nexus-gmiaf.16: in service mode, route through
+            # self.aspect_queue.rename_collection() (HttpAspectQueue calls the
+            # remote /queue/rename_collection endpoint).
+            if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
+                counts["aspect_queue"] = self.aspect_queue.rename_collection(old=old, new=new)
+            else:
+                queue_key = _rename_dedup_col(conn, "aspect_extraction_queue")
+                conn.execute(
+                    f"DELETE FROM aspect_extraction_queue "
+                    f"WHERE collection = ? "
+                    f"  AND {queue_key} IN ("
+                    f"    SELECT {queue_key} FROM aspect_extraction_queue"
+                    f"    WHERE collection = ?"
+                    f"  )",
+                    (new, old),
+                )
+                cur = conn.execute(
+                    "UPDATE aspect_extraction_queue "
+                    "SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                counts["aspect_queue"] = cur.rowcount
 
             # document_highlights (RDR-139 Layer E). PK is doc_id (tumbler),
             # so the denorm collection column cannot collide on rename — a
             # plain UPDATE suffices (no collision-defense DELETE needed).
-            cur = conn.execute(
-                "UPDATE document_highlights SET collection = ? WHERE collection = ?",
-                (new, old),
-            )
-            counts["highlights"] = cur.rowcount
+            # RDR-152 nexus-gmiaf.16: in service mode, route through
+            # self.document_highlights.rename_collection() (calls the remote
+            # /highlights/rename_collection endpoint).
+            if storage_backend_for("document_highlights") == StorageBackend.SERVICE:
+                counts["highlights"] = self.document_highlights.rename_collection(old=old, new=new)
+            else:
+                cur = conn.execute(
+                    "UPDATE document_highlights SET collection = ? WHERE collection = ?",
+                    (new, old),
+                )
+                counts["highlights"] = cur.rowcount
 
             # taxonomy (three sub-tables)
             # In service mode, self.taxonomy is an HttpTaxonomyStore whose
@@ -868,7 +887,6 @@ class T2Database:
             # raw SQL UPDATE on the shared SQLite file would diverge from
             # the service's Postgres tables, so we route through the
             # domain-store API when the seam is active.
-            from nexus.db.storage_mode import StorageBackend, storage_backend_for
             if storage_backend_for("taxonomy") == StorageBackend.SERVICE:
                 tax_counts = self.taxonomy.rename_collection(old, new)
                 counts["tax_topics"] = tax_counts.get("topics", 0)
@@ -892,24 +910,33 @@ class T2Database:
                 )
                 counts["tax_meta"] = cur.rowcount
 
-            # search_telemetry
-            cur = conn.execute(
-                "UPDATE search_telemetry SET collection = ? WHERE collection = ?",
-                (new, old),
-            )
-            counts["search_telemetry"] = cur.rowcount
-
-            # hook_failures (optional table -- created by migration)
-            table_exists = conn.execute(
-                "SELECT COUNT(*) FROM sqlite_master "
-                "WHERE type='table' AND name='hook_failures'"
-            ).fetchone()[0]
-            if table_exists:
+            # search_telemetry + hook_failures
+            # RDR-152 nexus-gmiaf.16: in service mode, self.telemetry is an
+            # HttpTelemetryStore whose rename_collection() calls the remote
+            # /v1/telemetry/rename_collection endpoint and returns
+            # {"search_telemetry": N, "hook_failures": N}.
+            if storage_backend_for("telemetry") == StorageBackend.SERVICE:
+                tel_counts = self.telemetry.rename_collection(old=old, new=new)
+                counts["search_telemetry"] = tel_counts.get("search_telemetry", 0)
+                counts["hook_failures"] = tel_counts.get("hook_failures", 0)
+            else:
                 cur = conn.execute(
-                    "UPDATE hook_failures SET collection = ? WHERE collection = ?",
+                    "UPDATE search_telemetry SET collection = ? WHERE collection = ?",
                     (new, old),
                 )
-                counts["hook_failures"] = cur.rowcount
+                counts["search_telemetry"] = cur.rowcount
+
+                # hook_failures (optional table -- created by migration)
+                table_exists = conn.execute(
+                    "SELECT COUNT(*) FROM sqlite_master "
+                    "WHERE type='table' AND name='hook_failures'"
+                ).fetchone()[0]
+                if table_exists:
+                    cur = conn.execute(
+                        "UPDATE hook_failures SET collection = ? WHERE collection = ?",
+                        (new, old),
+                    )
+                    counts["hook_failures"] = cur.rowcount
 
             conn.commit()
 
