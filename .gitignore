@@ -50,3 +50,4 @@ output/
 notes/
 docs/workflow-engine-with-ext-apps.md
 scripts/spikes/s04-build/target/
+service/target/

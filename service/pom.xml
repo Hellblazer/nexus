@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>dev.nexus</groupId>
+    <artifactId>nexus-service</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <properties>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <jooq.version>3.20.11</jooq.version>
+        <hikari.version>6.2.1</hikari.version>
+        <postgresql.version>42.7.4</postgresql.version>
+        <slf4j.version>2.0.16</slf4j.version>
+        <logback.version>1.5.18</logback.version>
+        <jackson.version>2.18.3</jackson.version>
+        <junit.version>5.11.4</junit.version>
+        <assertj.version>3.27.3</assertj.version>
+        <zonky.version>2.1.0</zonky.version>
+
+        <mainClass>dev.nexus.service.Main</mainClass>
+
+        <!-- jlink image output directory -->
+        <jlink.output>${project.build.directory}/jlink-image</jlink.output>
+    </properties>
+
+    <dependencies>
+        <!-- PostgreSQL JDBC -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${postgresql.version}</version>
+        </dependency>
+
+        <!-- Connection pool -->
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>${hikari.version}</version>
+        </dependency>
+
+        <!-- jOOQ runtime (no codegen in skeleton — added at .6) -->
+        <dependency>
+            <groupId>org.jooq</groupId>
+            <artifactId>jooq</artifactId>
+            <version>${jooq.version}</version>
+        </dependency>
+
+        <!-- JSON -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+
+        <!-- Logging -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>${slf4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>${logback.version}</version>
+        </dependency>
+
+        <!-- Test: JUnit 5 -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Test: embedded-postgres (real PG in-process, no Docker) -->
+        <dependency>
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <version>${zonky.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- darwin-arm64v8 binary bundle -->
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
+            <version>16.4.0</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Compiler: Java 25, enable-preview for pattern matching etc. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <release>25</release>
+                    <compilerArgs>
+                        <arg>--enable-preview</arg>
+                    </compilerArgs>
+                </configuration>
+            </plugin>
+
+            <!-- Surefire: run JUnit 5, enable-preview, per-test JVM flags -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+                <configuration>
+                    <argLine>--enable-preview</argLine>
+                </configuration>
+            </plugin>
+
+            <!-- Fat/uber jar for standalone run and jlink input -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <shadedArtifactAttached>false</shadedArtifactAttached>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>${mainClass}</mainClass>
+                                </transformer>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>META-INF/MANIFEST.MF</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+                jlink: trimmed JRE image (live fallback, S0.4 C1).
+                Produces ${jlink.output}/bin/java — run the fat jar via:
+                  ${jlink.output}/bin/java -jar nexus-service-*.jar
+                The exec-maven-plugin step below writes a launcher script.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>jlink-image</id>
+                        <phase>package</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <!-- Remove stale image so jlink won't refuse to overwrite -->
+                                <delete dir="${jlink.output}" quiet="true"/>
+                                <exec executable="${java.home}/bin/jlink"
+                                      failonerror="true">
+                                    <arg value="--output=${jlink.output}"/>
+                                    <arg value="--no-header-files"/>
+                                    <arg value="--no-man-pages"/>
+                                    <arg value="--compress=zip-6"/>
+                                    <arg value="--add-modules"/>
+                                    <arg value="java.base,java.sql,java.management,java.naming,java.logging,jdk.crypto.ec,jdk.net,jdk.httpserver"/>
+                                </exec>
+                                <!-- Launcher script: runs fat jar with jlinked JRE -->
+                                <echo file="${jlink.output}/bin/nexus-service"
+                                      message="#!/bin/sh&#xa;DIR=&quot;$(cd &quot;$(dirname &quot;$0&quot;)&quot; &amp;&amp; pwd)&quot;&#xa;JAR=&quot;$(ls &quot;$DIR/../../target/nexus-service-&quot;*.jar | head -1)&quot;&#xa;exec &quot;$DIR/java&quot; --enable-preview -jar &quot;$JAR&quot; &quot;$@&quot;&#xa;"/>
+                                <chmod file="${jlink.output}/bin/nexus-service" perm="755"/>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <!-- -Pnative: opt-in native-image build (S0.4 C2 — CI must add Linux job) -->
+    <profiles>
+        <profile>
+            <id>native</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.graalvm.buildtools</groupId>
+                        <artifactId>native-maven-plugin</artifactId>
+                        <version>0.10.4</version>
+                        <extensions>true</extensions>
+                        <executions>
+                            <execution>
+                                <id>build-native</id>
+                                <goals><goal>compile-no-fork</goal></goals>
+                                <phase>package</phase>
+                                <configuration>
+                                    <imageName>nexus-service</imageName>
+                                    <mainClass>${mainClass}</mainClass>
+                                    <buildArgs>
+                                        <!-- no-fallback: fail at build instead of JVM fallback -->
+                                        <buildArg>--no-fallback</buildArg>
+                                        <buildArg>--enable-preview</buildArg>
+                                        <buildArg>--enable-native-access=ALL-UNNAMED</buildArg>
+                                        <buildArg>-H:+UnlockExperimentalVMOptions</buildArg>
+                                        <buildArg>-H:+AllowJRTFileSystem</buildArg>
+                                        <buildArg>-H:+ReportExceptionStackTraces</buildArg>
+                                        <!-- HTTP server support -->
+                                        <buildArg>--enable-http</buildArg>
+                                        <buildArg>--enable-https</buildArg>
+                                        <!-- Logback/SLF4J: initialize at build time -->
+                                        <buildArg>--initialize-at-build-time=org.slf4j,ch.qos.logback</buildArg>
+                                        <!-- jOOQ GraalVM 25 init: jOOQ 3.20.11 requires re-tracing
+                                             with native-image-agent against the real schema (bead .6).
+                                             Community metadata version mismatch (3.18.2 vs 3.20.11) causes
+                                             DefaultDataType ConcurrentHashMap NPE at run-time.
+                                             jlink path is the live fallback per S0.4 C1. -->
+                                        <buildArg>--initialize-at-run-time=org.jooq</buildArg>
+                                        <!-- Reachability config from traced metadata -->
+                                        <buildArg>-H:ConfigurationFileDirectories=src/main/resources/META-INF/native-image</buildArg>
+                                        <!-- Portability: compatibility march for CI/prod (not native) -->
+                                        <buildArg>-march=compatibility</buildArg>
+                                        <!-- Diagnostics during bring-up -->
+                                        <buildArg>--emit=build-report</buildArg>
+                                        <buildArg>--enable-monitoring</buildArg>
+                                        <!-- exact-reachability-metadata deferred to bead .6
+                                             after JOOQ codegen + full schema retracing.
+                                             Community metadataRepository handles logback/HikariCP/jackson. -->
+                                    </buildArgs>
+                                    <metadataRepository>
+                                        <enabled>true</enabled>
+                                    </metadataRepository>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+            <dependencies>
+                <!-- Community reachability metadata for common libs -->
+                <dependency>
+                    <groupId>org.graalvm.buildtools</groupId>
+                    <artifactId>graalvm-reachability-metadata</artifactId>
+                    <version>0.10.4</version>
+                    <classifier>repository</classifier>
+                    <type>zip</type>
+                    <scope>provided</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+    </profiles>
+</project>
