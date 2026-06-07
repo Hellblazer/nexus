@@ -206,6 +206,20 @@ class _FakeChashHandler(BaseHTTPRequestHandler):
                 count = sum(1 for k in _STORE if k[1] == coll)
             self._send(200, {"count": count})
 
+        elif pp == "/v1/chash/registered_chashes":
+            coll = qs.get("collection", "")
+            if not coll:
+                self._send(400, {"error": "collection query param required"})
+                return
+            with _STORE_LOCK:
+                # Mirror ChashIndex: substr(chash, 1, 32) for each chash in collection
+                chashes = [
+                    (ch[:32] if len(ch) > 32 else ch)
+                    for (ch, c) in _STORE
+                    if c == coll
+                ]
+            self._send(200, {"chashes": chashes})
+
         else:
             self._send(404, {"error": f"unknown path {pp}"})
 
@@ -443,6 +457,33 @@ class TestImportEndpoint:
         with _STORE_LOCK:
             assert len(_STORE) == 1
         s.close()
+
+
+class TestRegisteredChashesForCollection:
+    def test_returns_chash_prefixes_for_collection(self, store):
+        """registered_chashes_for_collection returns chash[:32] set for collection."""
+        # Insert 64-char chashes to exercise truncation
+        long_chash = "a" * 64
+        store.upsert(chash=long_chash, collection="col_reg")
+        store.upsert(chash="short_ch", collection="col_reg")
+        store.upsert(chash="other_ch", collection="col_other")
+
+        result = store.registered_chashes_for_collection("col_reg")
+        # long_chash is truncated to 32 chars
+        assert "a" * 32 in result
+        assert "short_ch" in result
+        # col_other chash NOT in result
+        assert "other_ch" not in result
+
+    def test_unknown_collection_returns_empty(self, store):
+        """registered_chashes_for_collection returns empty set for absent collection."""
+        result = store.registered_chashes_for_collection("no_such_collection")
+        assert result == set()
+
+    def test_empty_collection_raises(self, store):
+        """registered_chashes_for_collection raises ValueError on empty collection."""
+        with pytest.raises(ValueError, match="collection must not be empty"):
+            store.registered_chashes_for_collection("")
 
 
 class TestEtl:

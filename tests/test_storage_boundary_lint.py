@@ -476,7 +476,9 @@ def test_dual_population_baseline_locked():
     # added no raw sqlite3.connect sites (the migration-flock extension in
     # upgrade.py uses fcntl.flock, not a connect), and the T2Database
     # constructions it removed were not raw connects.
-    assert result.epsilon_allow_connects == 16, (
+    # 17 = +1 for RDR-152 P2.6 (nexus-gmiaf.16): commands/storage_cmd.py
+    # migrate_chash_cmd source-count query (ETL source-read, never T2Database).
+    assert result.epsilon_allow_connects == 17, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside

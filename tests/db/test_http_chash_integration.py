@@ -505,3 +505,40 @@ class TestChashMVV:
         assert resp.status_code in (400, 401), (
             f"Missing X-Nexus-Tenant must be rejected (400/401); got {resp.status_code}"
         )
+
+    def test_m_registered_chashes_for_collection(self, chash_store):
+        """m) registered_chashes_for_collection returns chash[:32] set for collection.
+
+        Mirrors ChashIndex.registered_chashes_for_collection: 32-char prefix
+        matches Chroma natural-ID shape (RDR-108 D1). Exercises the new
+        GET /v1/chash/registered_chashes endpoint end-to-end.
+        """
+        # Insert rows for col_reg
+        chash_store.upsert(chash="reg_chash001", collection="col_reg")
+        chash_store.upsert(chash="reg_chash002", collection="col_reg")
+        chash_store.upsert(chash="other_chash", collection="col_other")
+
+        result = chash_store.registered_chashes_for_collection("col_reg")
+
+        assert "reg_chash001" in result, f"reg_chash001 must be in result; got {result!r}"
+        assert "reg_chash002" in result
+        assert "other_chash" not in result, "other_chash must not appear for col_reg"
+
+    def test_m2_registered_chashes_unknown_collection(self, chash_store):
+        """m2) registered_chashes_for_collection returns empty for absent collection."""
+        result = chash_store.registered_chashes_for_collection("col_no_such")
+        assert result == set()
+
+    def test_m3_registered_chashes_rls_isolation(self, chash_store, other_chash_store):
+        """m3) registered_chashes_for_collection is RLS-isolated per tenant."""
+        chash_store.upsert(chash="rls_reg_chash", collection="col_rls_reg")
+
+        # default tenant sees its own row
+        own = chash_store.registered_chashes_for_collection("col_rls_reg")
+        assert "rls_reg_chash" in own
+
+        # other-tenant gets empty (RLS filter)
+        other = other_chash_store.registered_chashes_for_collection("col_rls_reg")
+        assert other == set(), (
+            f"RLS must isolate registered_chashes: 'other-tenant' must get empty; got {other!r}"
+        )

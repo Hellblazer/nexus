@@ -615,7 +615,7 @@ def migrate_chash_cmd(
 
     # Count source rows for dry-run or progress display
     try:
-        conn = sqlite3.connect(str(resolved_db), check_same_thread=False)
+        conn = sqlite3.connect(str(resolved_db), check_same_thread=False)  # epsilon-allow: ETL source-read; resolved_db is the migration SOURCE SQLite (never T2Database); read-only count query
         try:
             row = conn.execute("SELECT COUNT(*) FROM chash_index").fetchone()
             source_count = int(row[0]) if row else 0

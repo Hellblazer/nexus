@@ -780,21 +780,30 @@ class T2Database:
         try:
             conn.execute("BEGIN")
 
-            # chash_index (with collision defense)
-            conn.execute(
-                "DELETE FROM chash_index "
-                "WHERE physical_collection = ? "
-                "  AND chash IN ("
-                "    SELECT chash FROM chash_index WHERE physical_collection = ?"
-                "  )",
-                (new, old),
-            )
-            cur = conn.execute(
-                "UPDATE chash_index SET physical_collection = ? "
-                "WHERE physical_collection = ?",
-                (new, old),
-            )
-            counts["chash"] = cur.rowcount
+            # chash_index (with collision defense).
+            # In service mode, self.chash_index is an HttpChashIndex whose
+            # rename_collection() calls the remote service endpoint. The raw
+            # SQL UPDATE on the shared SQLite file would diverge from the
+            # service's Postgres tables, so we route through the domain-store
+            # API when the seam is active (same pattern as taxonomy below).
+            from nexus.db.storage_mode import StorageBackend, storage_backend_for
+            if storage_backend_for("chash_index") == StorageBackend.SERVICE:
+                counts["chash"] = self.chash_index.rename_collection(old=old, new=new)
+            else:
+                conn.execute(
+                    "DELETE FROM chash_index "
+                    "WHERE physical_collection = ? "
+                    "  AND chash IN ("
+                    "    SELECT chash FROM chash_index WHERE physical_collection = ?"
+                    "  )",
+                    (new, old),
+                )
+                cur = conn.execute(
+                    "UPDATE chash_index SET physical_collection = ? "
+                    "WHERE physical_collection = ?",
+                    (new, old),
+                )
+                counts["chash"] = cur.rowcount
 
             # document_aspects (with collision defense). #1057: dedup on the
             # live PRIMARY KEY, which differs by migration state. RDR-108

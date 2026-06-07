@@ -260,6 +260,44 @@ public final class ChashRepository {
         });
     }
 
+    // ── registered_chashes_for_collection ─────────────────────────────────────
+
+    /**
+     * Return every distinct {@code chash[:32]} registered for {@code collection}.
+     *
+     * <p>Mirrors {@code ChashIndex.registered_chashes_for_collection}: returns
+     * the set of {@code substr(chash, 1, 32)} values so callers can intersect
+     * directly with Chroma chunk IDs (RDR-108 §D1: natural ID = {@code chash[:32]}).
+     *
+     * <p>Used by the collection-audit coverage probe
+     * ({@code collection_audit.py}): one set-difference against T3 chunk IDs
+     * replaces the per-page IN-list query.
+     *
+     * @param tenant     tenant principal (sets RLS GUC)
+     * @param collection physical collection name to query
+     * @return set of 32-char chash prefixes; empty when collection is unknown
+     */
+    public Set<String> registeredChashesForCollection(String tenant, String collection) {
+        if (collection == null || collection.isBlank()) {
+            throw new IllegalArgumentException("collection must not be empty");
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.selectDistinct(DSL.field(DSL.name("chash_index", "chash"), String.class))
+                          .from(CHASH_INDEX)
+                          .where(F_COLLECTION.eq(collection))
+                          .fetch();
+            Set<String> result = new HashSet<>(rows.size());
+            for (var r : rows) {
+                String ch = r.value1();
+                if (ch != null && !ch.isBlank()) {
+                    // substr(chash, 1, 32) — Chroma natural ID shape (RDR-108 D1)
+                    result.add(ch.length() > 32 ? ch.substring(0, 32) : ch);
+                }
+            }
+            return result;
+        });
+    }
+
     // ── import (fidelity-preserving ETL) ──────────────────────────────────────
 
     /**

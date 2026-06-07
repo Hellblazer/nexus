@@ -24,16 +24,17 @@ import java.util.Map;
  *
  * <p>Routes (all under {@code /v1/chash/}):
  * <pre>
- *   POST   /v1/chash/upsert              register (chash, collection) row
- *   POST   /v1/chash/upsert_many         batch register (chashes[], collection)
- *   GET    /v1/chash/lookup              lookup(chash=) -> [{collection, created_at}]
- *   POST   /v1/chash/delete_collection   delete all rows for collection
- *   GET    /v1/chash/distinct_collections  all distinct collection names
- *   POST   /v1/chash/rename_collection   rename old -> new
- *   POST   /v1/chash/delete_stale        delete (chash, collection) PK row
- *   GET    /v1/chash/is_empty            true when no rows exist
- *   GET    /v1/chash/count_for_collection count rows for collection=
- *   POST   /v1/chash/import              fidelity-preserving ETL import
+ *   POST   /v1/chash/upsert               register (chash, collection) row
+ *   POST   /v1/chash/upsert_many          batch register (chashes[], collection)
+ *   GET    /v1/chash/lookup               lookup(chash=) -> [{collection, created_at}]
+ *   POST   /v1/chash/delete_collection    delete all rows for collection
+ *   GET    /v1/chash/distinct_collections   all distinct collection names
+ *   POST   /v1/chash/rename_collection    rename old -> new
+ *   POST   /v1/chash/delete_stale         delete (chash, collection) PK row
+ *   GET    /v1/chash/is_empty             true when no rows exist
+ *   GET    /v1/chash/count_for_collection  count rows for collection=
+ *   POST   /v1/chash/import               fidelity-preserving ETL import
+ *   GET    /v1/chash/registered_chashes   set of chash[:32] for collection= (audit)
  * </pre>
  *
  * <p>All endpoints require {@code Authorization: Bearer <token>} (enforced by
@@ -82,9 +83,10 @@ public final class ChashHandler implements HttpHandler {
                 case "/rename_collection"    -> handleRenameCollection(exchange, tenant, method);
                 case "/delete_stale"         -> handleDeleteStale(exchange, tenant, method);
                 case "/is_empty"             -> handleIsEmpty(exchange, tenant, method);
-                case "/count_for_collection" -> handleCountForCollection(exchange, tenant, method);
-                case "/import"               -> handleImport(exchange, tenant, method);
-                default                      -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
+                case "/count_for_collection"   -> handleCountForCollection(exchange, tenant, method);
+                case "/import"                 -> handleImport(exchange, tenant, method);
+                case "/registered_chashes"     -> handleRegisteredChashes(exchange, tenant, method);
+                default                        -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
@@ -237,6 +239,29 @@ public final class ChashHandler implements HttpHandler {
             imported++;
         }
         HttpUtil.send(exchange, 200, "{\"imported\":" + imported + "}");
+    }
+
+    // ── GET /v1/chash/registered_chashes?collection=<name> ───────────────────
+
+    /**
+     * Return the set of {@code chash[:32]} values registered for {@code collection}.
+     *
+     * <p>Mirrors {@code ChashIndex.registered_chashes_for_collection}: the 32-char
+     * prefix matches Chroma natural-ID shape (RDR-108 §D1) and is used by the
+     * collection-audit coverage probe to produce the set-difference against T3
+     * chunk IDs.
+     *
+     * <p>Response: {@code {"chashes": ["<hex32>", ...]}}
+     */
+    private void handleRegisteredChashes(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String collection = queryParam(exchange, "collection");
+        if (collection == null || collection.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"collection query param required\"}");
+            return;
+        }
+        var chashes = repo.registeredChashesForCollection(tenant, collection);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("chashes", new ArrayList<>(chashes))));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

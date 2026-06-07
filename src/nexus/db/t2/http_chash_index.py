@@ -16,7 +16,8 @@ All methods send ``Authorization: Bearer <token>`` and
 
 Interface parity (bead nexus-gmiaf.16, RDR-152 P2.6):
     upsert, upsert_many, lookup, delete_collection, distinct_collections,
-    rename_collection, delete_stale, is_empty, count_for_collection, close
+    rename_collection, delete_stale, is_empty, count_for_collection,
+    registered_chashes_for_collection, close
 
 Method-by-method parity vs ChashIndex (SQLite):
     upsert(*, chash, collection) -> None
@@ -28,13 +29,8 @@ Method-by-method parity vs ChashIndex (SQLite):
     delete_stale(*, chash, collection) -> int
     is_empty() -> bool
     count_for_collection(collection) -> int
+    registered_chashes_for_collection(collection) -> set[str]
     close() -> None
-
-Note: ``registered_chashes_for_collection`` exists on ChashIndex but is NOT
-in the gate requirements public method list and is NOT called via T2Database;
-it is a helper used only in audit/backfill paths that open ChashIndex directly.
-It is intentionally omitted from HttpChashIndex because those paths bypass
-the T2Database seam anyway (and remain SQLite-backed until Phase 4 decommission).
 """
 
 from __future__ import annotations
@@ -254,6 +250,35 @@ class HttpChashIndex:
         resp = self._client.get("/v1/chash/count_for_collection", params={"collection": collection})
         _raise_for_status(resp, "count_for_collection")
         return int(resp.json().get("count", 0))
+
+    # ── registered_chashes_for_collection ─────────────────────────────────────
+
+    def registered_chashes_for_collection(self, collection: str) -> set[str]:
+        """Return the set of ``chash[:32]`` values registered for ``collection``.
+
+        Mirrors :meth:`~nexus.db.t2.chash_index.ChashIndex.registered_chashes_for_collection`:
+        returns the 32-char prefix of each stored chash so callers can
+        intersect directly with Chroma chunk IDs (RDR-108 D1: natural ID
+        = ``chash[:32]``).
+
+        Used by the collection-audit coverage probe (``collection_audit.py``)
+        and the catalog orphan-backfill path.
+
+        Args:
+            collection: physical collection name to query.
+
+        Returns:
+            Set of 32-char hex strings; empty when ``collection`` is unknown.
+
+        Raises:
+            ValueError:   if ``collection`` is empty.
+            RuntimeError: on HTTP error.
+        """
+        if not collection:
+            raise ValueError("collection must not be empty")
+        resp = self._client.get("/v1/chash/registered_chashes", params={"collection": collection})
+        _raise_for_status(resp, "registered_chashes_for_collection")
+        return set(resp.json().get("chashes", []))
 
     # ── close ──────────────────────────────────────────────────────────────────
 

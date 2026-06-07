@@ -65,7 +65,7 @@ def migrate_chash_rows(
             - ``imported``: total rows successfully sent to the service
             - ``errors``: count of rows that caused an exception
     """
-    conn = sqlite3.connect(str(sqlite_path), check_same_thread=False)
+    conn = sqlite3.connect(str(sqlite_path), check_same_thread=False)  # epsilon-allow: ETL source-read; sqlite_path is the migration source SQLite, never T2Database
     conn.row_factory = sqlite3.Row
 
     total = 0

@@ -385,4 +385,44 @@ class ChashRepositoryTest {
             conn.rollback();
         }
     }
+
+    // ── Test 15: registeredChashesForCollection ───────────────────────────────
+
+    @Test
+    @Order(15)
+    void registeredChashesForCollection_returnsPrefixSet() {
+        // 64-char chash — exercises substr(chash, 1, 32) truncation
+        String longChash = "a".repeat(64);
+        repo.upsert(TENANT_A, longChash, "reg__coll");
+        repo.upsert(TENANT_A, "short_ch_001",  "reg__coll");
+        repo.upsert(TENANT_A, "other_ch_001", "other__coll");
+
+        Set<String> result = repo.registeredChashesForCollection(TENANT_A, "reg__coll");
+
+        // Long chash is truncated to 32
+        assertThat(result).contains("a".repeat(32));
+        assertThat(result).contains("short_ch_001");
+        // other__coll chash must NOT appear
+        assertThat(result).doesNotContain("other_ch_001");
+    }
+
+    @Test
+    @Order(16)
+    void registeredChashesForCollection_unknownCollection_returnsEmpty() {
+        Set<String> result = repo.registeredChashesForCollection(TENANT_A, "no__such__coll");
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    @Order(17)
+    void registeredChashesForCollection_rlsIsolated() {
+        // Seed under TENANT_A; TENANT_B must see empty
+        repo.upsert(TENANT_A, "rls_reg_chash_001", "rls__reg__coll");
+
+        Set<String> resultA = repo.registeredChashesForCollection(TENANT_A, "rls__reg__coll");
+        assertThat(resultA).contains("rls_reg_chash_001");
+
+        Set<String> resultB = repo.registeredChashesForCollection(TENANT_B, "rls__reg__coll");
+        assertThat(resultB).isEmpty();
+    }
 }
