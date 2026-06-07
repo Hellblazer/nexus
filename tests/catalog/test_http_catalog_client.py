@@ -525,9 +525,15 @@ class TestFactorySeam:
         outside of factory.py (seam audit).
         """
         import subprocess
+        from pathlib import Path
+        # Repo root derived from this file's location, not a hardcoded
+        # absolute path — the latter breaks on CI runners (the dir does
+        # not exist there). tests/catalog/test_http_catalog_client.py
+        # → parents[2] is the repo root.
+        repo_root = Path(__file__).resolve().parents[2]
         result = subprocess.run(
             ["grep", "-rn", "HttpCatalogClient(", "--include=*.py", "src/"],
-            cwd="/Users/hal.hildebrand/git/nexus",
+            cwd=str(repo_root),
             capture_output=True, text=True,
         )
         hits = [
