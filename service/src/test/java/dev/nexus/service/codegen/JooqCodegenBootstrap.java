@@ -25,19 +25,21 @@ import java.sql.Connection;
  * GenerationTool with PostgresDatabase to generate typed classes for the nexus
  * schema into {@code target/generated-sources/jooq}.
  *
- * <p>This class is compiled from {@code src/codegen/java} by the
- * maven-antrun-plugin in the {@code generate-sources} phase and run via
- * exec-maven-plugin in the same phase (after compilation).
+ * <p>Invoked via the {@code -Pcodegen} Maven profile:
+ * {@code mvn -Pcodegen process-test-classes} (from the service/ directory).
+ * The profile uses exec-maven-plugin {@code exec:java} in the
+ * {@code process-test-classes} phase with {@code classpathScope=test}, so all
+ * test-scope dependencies (embedded-postgres, jooq-codegen, jooq-meta, liquibase)
+ * are already on the classpath — no manual jar enumeration required.
  *
  * <p>WHY NOT OPTION 1 (LiquibaseDatabase/H2): the changelog uses Postgres-only DDL
  * (TSVECTOR GENERATED ALWAYS AS STORED, ENABLE/FORCE ROW LEVEL SECURITY,
  * CREATE POLICY, PL/pgSQL DO blocks) that H2 cannot simulate. The PG features
  * are load-bearing; contorting the changelog is explicitly forbidden.
  *
- * <p>WHY NOT GMaven Plus: GMaven Plus 1.13.1 (cached) uses Groovy 4.0.21 which
- * does not support Java 25 class file format (major version 69). The compile+exec
- * approach via maven-antrun-plugin is fully self-contained using only the Maven
- * local repository jars already present for the test suite.
+ * <p>WHY NOT GMaven Plus: GMaven Plus 1.13.1 uses Groovy 4.0.21 which does not
+ * support Java 25 class file format (major version 69). The exec:java approach
+ * resolves deps through Maven and is fully self-contained.
  */
 public class JooqCodegenBootstrap {
 

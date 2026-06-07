@@ -55,6 +55,9 @@ public final class MemoryRepository {
      * <p>ON CONFLICT key is {@code (tenant_id, project, title)} per the changelog
      * comment (cross-tenant key invariant: never use {@code (project, title)} alone).
      *
+     * <p>{@code session} is the Python-side session identifier carried on every T2 write
+     * and required by the .8 ETL to preserve provenance. Pass {@code null} if not known.
+     *
      * @return the generated {@code id} of the inserted/updated row
      */
     public long upsert(String tenant,
@@ -62,10 +65,11 @@ public final class MemoryRepository {
                        String title,
                        String content,
                        String tags,
+                       String session,
                        String agent,
                        Integer ttlDays) {
         return tenantScope.withTenant(tenant, ctx -> doUpsert(
-                ctx, tenant, project, title, content, tags, agent, ttlDays));
+                ctx, tenant, project, title, content, tags, session, agent, ttlDays));
     }
 
     /**
@@ -112,6 +116,7 @@ public final class MemoryRepository {
                            String title,
                            String content,
                            String tags,
+                           String session,
                            String agent,
                            Integer ttlDays) {
         OffsetDateTime now = OffsetDateTime.now();
@@ -127,6 +132,7 @@ public final class MemoryRepository {
                         .set(MEMORY.TITLE,        title)
                         .set(MEMORY.CONTENT,      content)
                         .set(MEMORY.TAGS,         tags)
+                        .set(MEMORY.SESSION,      session)
                         .set(MEMORY.AGENT,        agent)
                         .set(MEMORY.TIMESTAMP,    now)
                         .set(MEMORY.TTL,          ttlDays)
@@ -135,6 +141,7 @@ public final class MemoryRepository {
                         .doUpdate()
                         .set(MEMORY.CONTENT,      content)
                         .set(MEMORY.TAGS,         tags)
+                        .set(MEMORY.SESSION,      session)
                         .set(MEMORY.AGENT,        agent)
                         .set(MEMORY.TIMESTAMP,    now)
                         .set(MEMORY.TTL,          ttlDays)

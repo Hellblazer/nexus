@@ -370,11 +370,18 @@
                                         <buildArg>--enable-https</buildArg>
                                         <!-- Logback/SLF4J: initialize at build time -->
                                         <buildArg>--initialize-at-build-time=org.slf4j,ch.qos.logback</buildArg>
-                                        <!-- jOOQ 3.20.11: initialize at run time to avoid
-                                             DefaultDataType ConcurrentHashMap NPE.
-                                             Community metadata covers 3.18.2; we re-trace via
-                                             native-image-agent after codegen (bead .6 C3 closure).
-                                             jlink path is the live fallback per S0.4 C1. -->
+                                        <!-- jOOQ 3.20.11 + GraalVM 25 native-image initialization.
+                                             Two approaches tried in nexus-gmiaf.6:
+                                             (a) run-time: binary builds, but DSL.using() at runtime
+                                                 throws ExceptionInInitializerError (ConcurrentHashMap
+                                                 NPE in DefaultDataType) because community metadata
+                                                 3.18.2 uses typeReachable guards that initialize
+                                                 SQLDataType at build time, conflicting with run-time.
+                                             (b) build-time: native-image fails at build time with
+                                                 UnsupportedFeatureException: LocatorImpl in heap.
+                                             Resolution requires either jOOQ-provided GraalVM 25
+                                             metadata or a substitution. Deferred to nexus-gmiaf.9.
+                                             jlink is the live fallback per S0.4 C1. -->
                                         <buildArg>--initialize-at-run-time=org.jooq</buildArg>
                                         <!-- Reachability config from traced metadata -->
                                         <buildArg>-H:ConfigurationFileDirectories=src/main/resources/META-INF/native-image</buildArg>

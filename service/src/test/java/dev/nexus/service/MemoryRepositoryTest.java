@@ -125,7 +125,8 @@ class MemoryRepositoryTest {
     @Test
     void upsert_insert_returnsPositiveId_rowVisible() {
         long id = repo.upsert(TENANT_A, "repo-proj", "first-entry",
-                              "hello from generated jOOQ", "tag1,tag2", "test-agent", 30);
+                              "hello from generated jOOQ", "tag1,tag2",
+                              /*session*/ null, "test-agent", 30);
 
         assertThat(id).as("generated id from RETURNING must be positive").isPositive();
 
@@ -150,12 +151,12 @@ class MemoryRepositoryTest {
     void upsert_update_onConflict_replacesContent() {
         // Initial insert.
         long id1 = repo.upsert(TENANT_A, "repo-proj", "update-entry",
-                               "original content", "tag-old", null, 7);
+                               "original content", "tag-old", null, null, 7);
         assertThat(id1).isPositive();
 
         // Second upsert with same (tenant, project, title) — should update.
         long id2 = repo.upsert(TENANT_A, "repo-proj", "update-entry",
-                               "updated content", "tag-new", "updater", 14);
+                               "updated content", "tag-new", null, "updater", 14);
         assertThat(id2).as("ON CONFLICT RETURNING must still return a valid id").isPositive();
 
         // Read back — content must be updated.
@@ -174,7 +175,7 @@ class MemoryRepositoryTest {
     void rls_tenantIsolation_crossTenantInvisible() {
         // Seed a row for tenant-A.
         repo.upsert(TENANT_A, "isolation-proj", "alpha-secret",
-                    "sensitive content", null, null, null);
+                    "sensitive content", null, null, null, null);
 
         // tenant-B must not see it.
         Optional<MemoryRecord> viewedByB = repo.findByTitle(TENANT_B, "isolation-proj", "alpha-secret");
@@ -192,9 +193,9 @@ class MemoryRepositoryTest {
     void findByProject_returnsAllRowsForTenant() {
         String proj = "list-proj-" + System.nanoTime();  // unique project to avoid cross-test pollution
 
-        repo.upsert(TENANT_A, proj, "alpha-entry-1", "content 1", null, null, null);
-        repo.upsert(TENANT_A, proj, "alpha-entry-2", "content 2", null, null, null);
-        repo.upsert(TENANT_A, proj, "alpha-entry-3", "content 3", null, null, null);
+        repo.upsert(TENANT_A, proj, "alpha-entry-1", "content 1", null, null, null, null);
+        repo.upsert(TENANT_A, proj, "alpha-entry-2", "content 2", null, null, null, null);
+        repo.upsert(TENANT_A, proj, "alpha-entry-3", "content 3", null, null, null, null);
 
         List<MemoryRecord> rows = repo.findByProject(TENANT_A, proj);
         assertThat(rows).as("findByProject must return all 3 tenant-A rows").hasSize(3);
@@ -220,7 +221,7 @@ class MemoryRepositoryTest {
 
     @Test
     void delete_removesRow_secondDeleteReturnsFalse() {
-        repo.upsert(TENANT_A, "delete-proj", "to-delete", "delete me", null, null, null);
+        repo.upsert(TENANT_A, "delete-proj", "to-delete", "delete me", null, null, null, null);
 
         boolean firstDelete = repo.delete(TENANT_A, "delete-proj", "to-delete");
         assertThat(firstDelete).as("first delete must return true (row existed)").isTrue();
@@ -237,7 +238,7 @@ class MemoryRepositoryTest {
     @Test
     void delete_crossTenant_returnsZeroRows() {
         String proj = "delete-iso-proj-" + System.nanoTime();
-        repo.upsert(TENANT_A, proj, "a-row", "content", null, null, null);
+        repo.upsert(TENANT_A, proj, "a-row", "content", null, null, null, null);
 
         // tenant-B tries to delete tenant-A's row — RLS makes it invisible, returns false
         boolean deleted = repo.delete(TENANT_B, proj, "a-row");
@@ -248,5 +249,51 @@ class MemoryRepositoryTest {
         Optional<MemoryRecord> stillThere = repo.findByTitle(TENANT_A, proj, "a-row");
         assertThat(stillThere)
             .as("tenant-A's row must be unaffected by cross-tenant delete attempt").isPresent();
+    }
+
+    // ── Test 8: session round-trip — session column persists and survives UPDATE ─
+    //
+    // Proves that the session provenance required by the .8 ETL is preserved.
+    // Two sub-cases:
+    //   (a) INSERT with non-null session → read back equals the stored value
+    //   (b) UPDATE ON CONFLICT with a different session → read back shows new session
+    //       (session is updated so the latest write's provenance is canonical)
+
+    @Test
+    void session_roundTrips_throughInsertAndUpdate() {
+        String proj = "session-proj-" + System.nanoTime();
+        String sessionA = "python-session-abc123";
+        String sessionB = "python-session-def456";
+
+        // Insert with sessionA
+        long id = repo.upsert(TENANT_A, proj, "session-entry",
+                              "content", "tag", sessionA, "agent-a", 30);
+        assertThat(id).isPositive();
+
+        Optional<MemoryRecord> afterInsert = repo.findByTitle(TENANT_A, proj, "session-entry");
+        assertThat(afterInsert).isPresent();
+        assertThat(afterInsert.get().getSession())
+            .as("session must round-trip through insert: stored value must equal the passed session")
+            .isEqualTo(sessionA);
+
+        // Update with sessionB — ON CONFLICT DO UPDATE also sets SESSION
+        repo.upsert(TENANT_A, proj, "session-entry",
+                    "updated content", "tag", sessionB, "agent-b", 30);
+
+        Optional<MemoryRecord> afterUpdate = repo.findByTitle(TENANT_A, proj, "session-entry");
+        assertThat(afterUpdate).isPresent();
+        assertThat(afterUpdate.get().getSession())
+            .as("session must round-trip through ON CONFLICT DO UPDATE: stored value must equal the new session")
+            .isEqualTo(sessionB);
+
+        // Null session: verify it stores as NULL (not empty string or prior value)
+        String proj2 = "session-null-proj-" + System.nanoTime();
+        repo.upsert(TENANT_A, proj2, "null-session-entry",
+                    "content", null, /*session*/ null, null, null);
+        Optional<MemoryRecord> nullRow = repo.findByTitle(TENANT_A, proj2, "null-session-entry");
+        assertThat(nullRow).isPresent();
+        assertThat(nullRow.get().getSession())
+            .as("null session must be stored as NULL (not empty string)")
+            .isNull();
     }
 }
