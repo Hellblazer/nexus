@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.6] - 2026-06-07
+
+Plugin version aligned with conexus 5.10.6 (hotfix: RDR-080
+agent-replacement MCP tools work again under Claude Code's tightened
+MCP-server approval). No plugin-side changes.
+
 ## [5.10.5] - 2026-06-06
 
 Plugin version aligned with conexus 5.10.5 (RDR-151 daemon CPU-peg hardening:

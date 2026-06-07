@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [5.10.6] - 2026-06-07
+
+Hotfix: the RDR-080 agent-replacement MCP tools regressed when Claude Code
+tightened MCP-server auto-approval.
+
+### Fixed
+
+- **Agent-replacement MCP tools no longer fail when the `claude -p`
+  subprocess lacks MCP approval (nexus-mawqw).** `nx_tidy`,
+  `nx_enrich_beads`, and `nx_plan_audit` reused the stateless operator
+  dispatch but their prompts instructed the child `claude -p` to call nx
+  MCP tools. Claude Code tightened MCP-server auto-approval (~2.1.162), so
+  the child saw the conexus server as unapproved and every tool call was
+  denied mid-operation. Two-part fix: (1) `nx_tidy` now pre-fetches the
+  entries to consolidate **server-side** (the MCP process holds direct T3
+  access), inlines them into the prompt, and dispatches a **tool-free**
+  `claude -p` — immune to CC permission posture, and now read-only with a
+  surfaced retrieval cap (no silent truncation); (2) `nx_enrich_beads` and
+  `nx_plan_audit`, which do open-ended codebase exploration that cannot be
+  pre-fetched, get an opt-in inline `--mcp-config` (explicitly-supplied
+  servers clear the pending-approval gate) plus `--allowedTools`. Stateless
+  operators (extract/filter/rank/etc.) stay tool-free, now guarded by a
+  concrete-operator argv-inspection test.
+
 ## [5.10.5] - 2026-06-06
 
 RDR-151 daemon CPU-peg hardening: a cause-agnostic spin backstop plus the
