@@ -48,6 +48,36 @@ jobs:
           path: /tmp/embedded-pg
           key: embedded-pg-${{ runner.os }}-${{ runner.arch }}-v1
 
+      - name: Cache ChromaDB ONNX model
+        # EmbedParityTest constructs OnnxEmbedder, which loads the
+        # all-MiniLM-L6-v2 model from ~/.cache/chroma. Mirror the SAME
+        # cache key as ci.yml (the Python suite) so this Java-only runner
+        # restores the model the Python workflow already downloaded.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/chroma
+          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            chromadb-onnx-${{ runner.os }}-
+
+      - name: Prime ONNX model on cache miss
+        # Self-sufficiency: if the cache was empty (e.g. ci.yml has not run
+        # on this branch yet), fetch the model directly. chromadb downloads
+        # this exact tarball on first use; mirror its layout under
+        # ~/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx/.
+        run: |
+          MODEL_DIR="$HOME/.cache/chroma/onnx_models/all-MiniLM-L6-v2"
+          if [ ! -f "$MODEL_DIR/onnx/model.onnx" ]; then
+            echo "ONNX model not in cache; downloading."
+            mkdir -p "$MODEL_DIR"
+            curl -fsSL https://chroma-onnx-models.s3.amazonaws.com/all-MiniLM-L6-v2/onnx.tar.gz \
+              -o /tmp/onnx.tar.gz
+            tar -xzf /tmp/onnx.tar.gz -C "$MODEL_DIR"
+            test -f "$MODEL_DIR/onnx/model.onnx" || { echo "model.onnx missing after extract"; exit 1; }
+          else
+            echo "ONNX model restored from cache."
+          fi
+
       - name: Run Java test suite
         working-directory: service
         run: mvn -q test
