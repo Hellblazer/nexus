@@ -155,31 +155,13 @@ CREATE INDEX idx_scratch_fts ON t1.scratch USING GIN (fts_vector);
         </rollback>
     </changeSet>
 
-    <!-- ── Changeset 5: service role grants ─────────────────────────────────── -->
-    <changeSet id="t1-001-5" author="nexus-gmiaf.13">
-        <comment>
-            Grant t1.scratch privileges to nexus_svc role.
-            Also sets search_path to include t1 so the service role can access
-            both nexus (T2) and t1 (T1) schemas without qualification.
-            Idempotent: IF EXISTS guard skips gracefully when role absent.
-        </comment>
-        <sql splitStatements="false">
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
-        EXECUTE 'GRANT USAGE ON SCHEMA t1 TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON t1.scratch TO nexus_svc';
-        EXECUTE 'ALTER ROLE nexus_svc SET search_path TO nexus, t1, public';
-        RAISE NOTICE 'Granted t1.scratch privileges to nexus_svc';
-    ELSE
-        RAISE NOTICE 'nexus_svc role not found; skipping grants (create role before first run)';
-    END IF;
-END
-$$;
-        </sql>
-        <rollback>
-            <!-- Grants are not rolled back; role removal is a DBA operation. -->
-        </rollback>
-    </changeSet>
+    <!--
+        Changeset 5 (t1-001-5): per-store IF-EXISTS grant removed (bead nexus-net63).
+        DML grants for nexus_svc are now consolidated in grants-nexus-svc.xml with
+        runAlways="true" so late-created roles are provisioned on restart and no silent
+        skip can leave nexus_svc without table access.  ALTER ROLE ... SET search_path
+        removed: requires superuser/CREATEROLE; search_path is now set via HikariCP
+        connectionInitSql on the application pool at startup.
+    -->
 
 </databaseChangeLog>

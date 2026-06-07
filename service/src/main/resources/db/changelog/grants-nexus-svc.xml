@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-152 nexus service — consolidated nexus_svc service-role grants (bead nexus-net63).
+
+    WHY runAlways="true":
+      Per-store grant changesets historically used IF-EXISTS-skip DO-blocks that were
+      idempotent but CONDITIONAL — if nexus_svc did not exist at first-migration time the
+      grants were skipped and Liquibase marked the changeset as applied, so the grants
+      never ran again on subsequent startups.  This changeset replaces that pattern:
+        - runAlways="true" means it re-executes on EVERY startup.
+        - nexus_svc is REQUIRED (no IF-EXISTS skip) — if the role is missing, the GRANT
+          fails loud and migration fails fast.  The service is useless without its role;
+          silent skipping hides provisioning errors.
+        - ALTER DEFAULT PRIVILEGES ensures future tables/sequences added to these schemas
+          are also automatically accessible by nexus_svc.
+
+    WHAT nexus_svc needs:
+      - USAGE on schemas nexus and t1
+      - SELECT, INSERT, UPDATE, DELETE on ALL TABLES in those schemas
+      - USAGE, SELECT on ALL SEQUENCES in those schemas (for BIGSERIAL id columns)
+      - ALTER DEFAULT PRIVILEGES: future DDL from the schema owner automatically grants
+        the same rights to nexus_svc on newly created tables/sequences
+
+    WHAT nexus_svc does NOT need:
+      - search_path role parameter — formerly set via ALTER ROLE (requires superuser
+        or CREATEROLE), now handled by connectionInitSql on HikariCP pools.
+      - CREATEROLE, SUPERUSER, BYPASSRLS — service role must be NOSUPERUSER NOBYPASSRLS.
+      - DDL privileges (CREATE TABLE, ALTER TABLE, etc.) — the migration role (nexus_admin)
+        holds those.
+
+    PROVISIONING PRE-CONDITION (Phase-5 .31 nx step):
+      Both nexus_admin (non-superuser schema owner) and nexus_svc (NOSUPERUSER NOBYPASSRLS
+      LOGIN) must be created BEFORE the service's first migration run.
+      Without nexus_svc this changeset fails loud — correct behavior.
+
+    IDEMPOTENCY:
+      GRANT is naturally idempotent in PostgreSQL: re-granting an already-held privilege
+      is a no-op (no error).  runAlways="true" is safe.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!--
+        Consolidated service-role grants — runAlways so a late-created nexus_svc
+        is fully provisioned on the next service restart.
+        splitStatements="false": the block contains multiple SQL statements.
+    -->
+    <changeSet id="grants-nexus-svc-1" author="nexus-net63" runAlways="true">
+        <comment>
+            Grant nexus_svc role the DML privileges it needs on the nexus and t1 schemas.
+            REQUIRED: nexus_svc must exist before first migration; if missing, GRANT fails
+            loudly and migration aborts (fail-fast — no silent skip).
+            runAlways: re-executed on every startup so a role created after the first
+            migration is automatically provisioned on the next restart.
+        </comment>
+        <sql splitStatements="false">
+-- Schema usage
+GRANT USAGE ON SCHEMA nexus TO nexus_svc;
+GRANT USAGE ON SCHEMA t1    TO nexus_svc;
+
+-- DML on all existing tables in both schemas
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA nexus TO nexus_svc;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA t1    TO nexus_svc;
+
+-- Sequence usage (BIGSERIAL id columns)
+GRANT USAGE, SELECT                  ON ALL SEQUENCES IN SCHEMA nexus TO nexus_svc;
+GRANT USAGE, SELECT                  ON ALL SEQUENCES IN SCHEMA t1    TO nexus_svc;
+
+-- Default privileges: future tables/sequences created by the schema owner automatically
+-- carry the same grants for nexus_svc (self-healing for new migrations).
+ALTER DEFAULT PRIVILEGES IN SCHEMA nexus GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES    TO nexus_svc;
+ALTER DEFAULT PRIVILEGES IN SCHEMA nexus GRANT USAGE, SELECT                  ON SEQUENCES TO nexus_svc;
+ALTER DEFAULT PRIVILEGES IN SCHEMA t1    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES    TO nexus_svc;
+ALTER DEFAULT PRIVILEGES IN SCHEMA t1    GRANT USAGE, SELECT                  ON SEQUENCES TO nexus_svc;
+        </sql>
+        <rollback>
+            <!-- Revoke is a DBA operation; not automated. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

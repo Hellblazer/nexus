@@ -191,26 +191,9 @@ CREATE POLICY tenant_isolation ON nexus.topic_links
         </rollback>
     </changeSet>
 
-    <!-- ── Changeset 6: service role grants ──────────────────────────────────── -->
-    <changeSet id="taxonomy-001-6" author="nexus-gmiaf.14">
-        <comment>Grant table privileges to nexus_svc role (idempotent)</comment>
-        <sql splitStatements="false">
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.topics TO nexus_svc';
-        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.topics_id_seq TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.taxonomy_meta TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.topic_assignments TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.topic_links TO nexus_svc';
-        RAISE NOTICE 'Granted nexus taxonomy table privileges to nexus_svc';
-    ELSE
-        RAISE NOTICE 'nexus_svc role not found; skipping grants';
-    END IF;
-END
-$$;
-        </sql>
-        <rollback></rollback>
-    </changeSet>
+    <!--
+        Changeset 6 (taxonomy-001-6): per-store IF-EXISTS grant removed (bead nexus-net63).
+        DML grants for nexus_svc consolidated in grants-nexus-svc.xml (runAlways=true).
+    -->
 
 </databaseChangeLog>

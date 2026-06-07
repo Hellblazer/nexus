@@ -65,6 +65,9 @@ public final class Main {
         hikari.setPassword(dbPass);
         hikari.setMaximumPoolSize(poolSize);
         hikari.setAutoCommit(true);   // pool default; TenantScope toggles to false per borrow
+        // search_path: set via connectionInitSql (not ALTER ROLE, which requires superuser).
+        // Covers nexus (T2 tables), t1 (T1 scratch), and public for pg_catalog visibility.
+        hikari.setConnectionInitSql("SET search_path TO nexus, t1, public");
         var ds = new HikariDataSource(hikari);
 
         // ── Schema migration (RDR-152 bead nexus-net63) ───────────────────────
@@ -80,11 +83,13 @@ public final class Main {
         try {
             SchemaMigrator.migrate(migrationDs);
         } catch (SchemaMigrator.MigrationException e) {
+            // Close the migration pool BEFORE System.exit: exit does not run finally blocks,
+            // so explicit close here avoids leaking the pool on the error path.
+            migrationDs.close();
             log.error("event=schema_migration_failed error=\"{}\"", e.getMessage(), e);
             System.exit(1);
-        } finally {
-            migrationDs.close();
         }
+        migrationDs.close();
 
         // Vector backend setup (Seam B — optional; only when configured)
         LocalChromaServer localChroma    = null;
@@ -156,14 +161,35 @@ public final class Main {
      * {@code defaultUrl/defaultUser/defaultPass} (the regular application
      * credentials) for dev/test setups where one role owns both DDL and DML.
      *
+     * <p><strong>Partial-config guard</strong>: if any one of {@code NX_DB_ADMIN_URL},
+     * {@code NX_DB_ADMIN_USER}, or {@code NX_DB_ADMIN_PASS} is set, all three must be
+     * set. A partial configuration (e.g. ADMIN_USER set but ADMIN_PASS absent) would
+     * silently mix admin and app credentials, producing a cryptic auth error at connect
+     * time instead of a clear startup failure.
+     *
      * <p>Pool size 1: Liquibase uses a single connection sequentially.
      */
     private static HikariDataSource buildMigrationDataSource(String defaultUrl,
                                                               String defaultUser,
                                                               String defaultPass) {
-        String url  = System.getenv().getOrDefault("NX_DB_ADMIN_URL",  defaultUrl);
-        String user = System.getenv().getOrDefault("NX_DB_ADMIN_USER", defaultUser);
-        String pass = System.getenv().getOrDefault("NX_DB_ADMIN_PASS", defaultPass);
+        String adminUrl  = System.getenv("NX_DB_ADMIN_URL");
+        String adminUser = System.getenv("NX_DB_ADMIN_USER");
+        String adminPass = System.getenv("NX_DB_ADMIN_PASS");
+
+        // Partial-config guard: require all-or-nothing.
+        long adminSet = (adminUrl != null ? 1 : 0)
+                      + (adminUser != null ? 1 : 0)
+                      + (adminPass != null ? 1 : 0);
+        if (adminSet > 0 && adminSet < 3) {
+            throw new IllegalStateException(
+                "Partial NX_DB_ADMIN_* configuration detected (" + adminSet + "/3 vars set). " +
+                "Set all of NX_DB_ADMIN_URL, NX_DB_ADMIN_USER, NX_DB_ADMIN_PASS, " +
+                "or none (to fall back to NX_DB_* credentials).");
+        }
+
+        String url  = adminSet == 3 ? adminUrl  : defaultUrl;
+        String user = adminSet == 3 ? adminUser : defaultUser;
+        String pass = adminSet == 3 ? adminPass : defaultPass;
 
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(url);

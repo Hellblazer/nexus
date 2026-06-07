@@ -38,4 +38,12 @@
     <!-- Cross-store FKs (bead nexus-b7v6i) — composite (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) -->
     <include file="db/changelog/fk-001-catalog-cross-store.xml"/>
 
+    <!--
+        Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
+        Must be LAST so all schema objects exist before grants are issued.
+        Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when
+        nexus_svc was created after the first migration run.
+    -->
+    <include file="db/changelog/grants-nexus-svc.xml"/>
+
 </databaseChangeLog>
