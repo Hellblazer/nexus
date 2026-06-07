@@ -273,7 +273,15 @@ def apply_link_boost(
     # tumbler projection step here.
     # nexus-qnp5s: links_from_batch() is implemented on both SQLite
     # Catalog and HttpCatalogClient — no raw _db access.
-    links_by_tumbler = catalog.links_from_batch(list(doc_ids))
+    try:
+        links_by_tumbler = catalog.links_from_batch(list(doc_ids))
+    except Exception as exc:
+        _log.warning(
+            "scoring_link_boost_lookup_failed",
+            error=str(exc),
+            doc_id_count=len(doc_ids),
+        )
+        return results
 
     # Aggregate: tumbler -> total weighted signal
     tumbler_signal: dict[str, float] = {}

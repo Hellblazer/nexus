@@ -121,23 +121,26 @@ CATALOG_CONSTRUCTION_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 
 
 #: nexus-qnp5s: allowlist for ``._db`` attribute accesses.
-#: Only the catalog module itself may access ``._db`` (internal SQLite handle);
-#: all consumers must call the public API (curator_owner_tumbler_by_name,
+#: Only the catalog module itself and the daemon (which legitimately owns the
+#: catalog write handle via t2_daemon.py) may access ``._db`` internally.
+#: All consumer code must call the public API (curator_owner_tumbler_by_name,
 #: chunk_counts_for_docs, links_from_batch, etc.) which works on both
 #: SQLite Catalog and HttpCatalogClient.
 CATALOG_DB_ACCESS_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     "src/nexus/catalog/",
+    "src/nexus/daemon/",  # t2_daemon.py legitimately owns the catalog write handle
 )
 
 #: nexus-qnp5s: baseline for ``._db`` accesses outside the catalog module.
-#: Seeded at 46 — the AST count of remaining sites after the nexus-qnp5s
-#: 20-site migration (commands/catalog.py, commands/enrich.py, etc. are
-#: future migration work). Ratchets down as subsequent beads migrate
-#: commands/ sites onto public API. The acceptance test asserts
-#: ``scan_repo(...).catalog_db_accesses <= CATALOG_DB_ACCESS_BASELINE``;
+#: Seeded at 46 then lowered to 44 after:
+#:   - removing the dead ``else: db = cat._db`` branch in mcp/catalog.py (-1)
+#:   - scoping daemon/ into the allowlist (t2_daemon.py owner-internal) (-1)
+#: Remaining 44 sites are commands/ consumers tracked by nexus-xnz0o.
+#: Ratchets down as subsequent beads migrate commands/ sites onto public API.
+#: The acceptance test asserts ``scan_repo(...).catalog_db_accesses <= BASELINE``;
 #: a PR that adds a new ._db access will push the count above the floor
 #: and fail CI before the floor is updated.
-CATALOG_DB_ACCESS_BASELINE: int = 46
+CATALOG_DB_ACCESS_BASELINE: int = 44
 
 
 #: RDR-146 catalog-construction floor. P0.1 seeded this at 49 (the AST
@@ -233,9 +236,10 @@ class LintResult:
     #: as Phase-1 waves migrate sites onto ``T2Client.catalog``.
     catalog_constructions: int = 0
     #: nexus-qnp5s: ``._db`` attribute accesses outside ``src/nexus/catalog/``.
-    #: Baseline is 0 — enforced as hard violations (consumers must call the
-    #: public API on both SQLite Catalog and HttpCatalogClient; any new
-    #: ``._db`` access outside catalog/ bypasses the service-mode backend).
+    #: NOT yet enforced as hard violations — baseline seeded at 46 (commands/
+    #: consumer sites, nexus-xnz0o migration bead).  Ratchets down toward 0 as
+    #: subsequent beads port commands/ onto the public API.  The acceptance test
+    #: asserts ``<= CATALOG_DB_ACCESS_BASELINE`` (NOT included in total_violations).
     catalog_db_accesses: int = 0
 
     @property

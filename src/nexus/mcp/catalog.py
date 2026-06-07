@@ -562,30 +562,19 @@ def catalog_stats() -> dict:
     if err:
         return {"error": err}
     try:
-        # Service mode: cat.stats() calls GET /stats (HttpCatalogClient).
-        # SQLite mode: fall back to direct _db queries (Catalog has no stats()).
-        if hasattr(cat, "stats") and callable(cat.stats):
-            s = cat.stats()
-            # Normalise field names: Java returns doc_count/link_count/owner_count/links_by_type.
-            return {
-                "owners":       s.get("owner_count",      s.get("owners",    0)),
-                "documents":    s.get("doc_count",        s.get("documents", 0)),
-                "links":        s.get("link_count",       s.get("links",     0)),
-                "collections":  s.get("collection_count", s.get("collections", 0)),
-                "by_link_type": s.get("links_by_type",    s.get("by_link_type", {})),
-            }
-        # SQLite fallback (Catalog._db is always present in local mode)
-        db = cat._db
+        # Both Catalog (SQLite) and HttpCatalogClient implement .stats() —
+        # nexus-qnp5s migrated the SQLite backend to expose stats() on the
+        # public API so both backends are uniform. The old _db fallback branch
+        # has been removed (it was unreachable once Catalog.stats() was added).
+        s = cat.stats()
+        # Normalise field names: Java returns doc_count/link_count/owner_count/collection_count.
+        # SQLite Catalog returns the same keys (added for parity in nexus-qnp5s).
         return {
-            "owners":       db.execute("SELECT count(*) FROM owners").fetchone()[0],
-            "documents":    db.execute("SELECT count(*) FROM documents").fetchone()[0],
-            "links":        db.execute("SELECT count(*) FROM links").fetchone()[0],
-            "by_type":      dict(db.execute(
-                "SELECT content_type, count(*) FROM documents GROUP BY content_type"
-            ).fetchall()),
-            "by_link_type": dict(db.execute(
-                "SELECT link_type, count(*) FROM links GROUP BY link_type"
-            ).fetchall()),
+            "owners":       s.get("owner_count",      s.get("owners",    0)),
+            "documents":    s.get("doc_count",        s.get("documents", 0)),
+            "links":        s.get("link_count",       s.get("links",     0)),
+            "collections":  s.get("collection_count", s.get("collections", 0)),
+            "by_link_type": s.get("links_by_type",    s.get("by_link_type", {})),
         }
     except Exception as e:
         return {"error": str(e)}

@@ -970,6 +970,79 @@ class CatalogRepositoryTest {
         assertThat(resultB.get("cc.b1")).isEqualTo(99);
     }
 
+    @Test @Order(111)
+    void linksFromBatch_tenantIsolation() {
+        // Seed docs and a link under TENANT_B using "lfb.*" prefix
+        repo.upsertDocument(TENANT_B, mapOf(
+            "tumbler", "lfb.1",
+            "title", "Links From Batch Tenant B Doc 1",
+            "content_type", "paper",
+            "corpus", "knowledge"
+        ));
+        repo.upsertDocument(TENANT_B, mapOf(
+            "tumbler", "lfb.2",
+            "title", "Links From Batch Tenant B Doc 2",
+            "content_type", "paper",
+            "corpus", "knowledge"
+        ));
+        repo.upsertLink(TENANT_B, Map.of("from_tumbler", "lfb.1", "to_tumbler", "lfb.2", "link_type", "cites"));
+
+        // TENANT_A must not see TENANT_B's links
+        var resultA = repo.linksFromBatch(TENANT_A, List.of("lfb.1"));
+        assertThat(resultA).doesNotContainKey("lfb.1");
+
+        // TENANT_B must see its own link
+        var resultB = repo.linksFromBatch(TENANT_B, List.of("lfb.1"));
+        assertThat(resultB).containsKey("lfb.1");
+        assertThat(resultB.get("lfb.1")).hasSize(1);
+        assertThat(resultB.get("lfb.1").get(0).get("link_type")).isEqualTo("cites");
+    }
+
+    @Test @Order(112)
+    void ownersByType_tenantIsolation() {
+        // Seed a repo-type owner under TENANT_B using "obt.*" prefix
+        repo.upsertOwner(TENANT_B, mapOf(
+            "tumbler_prefix", "obt.1",
+            "name", "obt-tenant-b-repo",
+            "owner_type", "repo",
+            "repo_hash", "obthash1",
+            "repo_root", "/obt/repo",
+            "head_hash", "obthead1"
+        ));
+
+        // TENANT_A must not see TENANT_B's owner in its ownersByType result
+        var reposA = repo.ownersByType(TENANT_A, "repo");
+        var namesA = reposA.stream().map(o -> (String) o.get("name")).toList();
+        assertThat(namesA).doesNotContain("obt-tenant-b-repo");
+
+        // TENANT_B must see its own owner
+        var reposB = repo.ownersByType(TENANT_B, "repo");
+        var namesB = reposB.stream().map(o -> (String) o.get("name")).toList();
+        assertThat(namesB).contains("obt-tenant-b-repo");
+    }
+
+    @Test @Order(113)
+    void ownerByPrefix_tenantIsolation() {
+        // Seed an owner under TENANT_B using "opb.*" prefix
+        repo.upsertOwner(TENANT_B, mapOf(
+            "tumbler_prefix", "opb.1",
+            "name", "opb-tenant-b-owner",
+            "owner_type", "repo",
+            "repo_hash", "opbhash1",
+            "repo_root", "/opb/repo",
+            "head_hash", "opbhead1"
+        ));
+
+        // TENANT_A must not see TENANT_B's owner by prefix
+        var foundByA = repo.ownerByPrefix(TENANT_A, "opb.1");
+        assertThat(foundByA).isNull();
+
+        // TENANT_B must find its own owner
+        var foundByB = repo.ownerByPrefix(TENANT_B, "opb.1");
+        assertThat(foundByB).isNotNull();
+        assertThat(foundByB.get("name")).isEqualTo("opb-tenant-b-owner");
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // TENANT B ISOLATION CHECK
     // ══════════════════════════════════════════════════════════════════════════

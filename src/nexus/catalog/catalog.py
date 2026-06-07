@@ -1082,16 +1082,21 @@ class Catalog:
     def stats(self) -> dict:
         """Return catalog statistics: doc_count, link_count, owner_count, collection_count.
 
-        nexus-qnp5s: mirrors HttpCatalogClient.stats() so health.py can call
-        cat.stats() on both SQLite Catalog and HttpCatalogClient uniformly.
+        nexus-qnp5s: mirrors HttpCatalogClient.stats() so health.py and
+        mcp/catalog.py can call cat.stats() on both backends uniformly.
+
+        Key parity with Java /stats response:
+          doc_count, link_count, owner_count, collection_count
         """
-        doc_count = self._db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-        link_count = self._db.execute("SELECT COUNT(*) FROM links").fetchone()[0]
-        owner_count = self._db.execute("SELECT COUNT(*) FROM owners").fetchone()[0]
+        doc_count        = self._db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        link_count       = self._db.execute("SELECT COUNT(*) FROM links").fetchone()[0]
+        owner_count      = self._db.execute("SELECT COUNT(*) FROM owners").fetchone()[0]
+        collection_count = self._db.execute("SELECT COUNT(*) FROM collections").fetchone()[0]
         return {
-            "doc_count": doc_count,
-            "link_count": link_count,
-            "owner_count": owner_count,
+            "doc_count":        doc_count,
+            "link_count":       link_count,
+            "owner_count":      owner_count,
+            "collection_count": collection_count,
         }
 
     def ensure_owner_for_repo(

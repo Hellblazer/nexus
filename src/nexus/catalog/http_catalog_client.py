@@ -174,6 +174,27 @@ class HttpCatalogClient:
     def __exit__(self, *_: Any) -> None:
         self.close()
 
+    @property
+    def _db(self) -> None:  # type: ignore[return]
+        """Guard: raises a clear error when commands/ code tries to use the raw SQLite handle.
+
+        All 46 ``commands/`` sites that call ``cat._db`` are tracked in bead
+        nexus-xnz0o (RDR-152: migrate commands/ catalog._db consumers).  Until
+        migrated, flipping ``NX_STORAGE_BACKEND_CATALOG=service`` in a session
+        that runs those commands will hit this property and get an actionable
+        message instead of a bare ``AttributeError``.
+
+        Bead nexus-xnz0o is a HARD BLOCKER of Phase-4 catalog deletion
+        (nexus-gmiaf.24).
+        """
+        raise RuntimeError(
+            "catalog._db is unavailable in service mode "
+            "(NX_STORAGE_BACKEND_CATALOG=service).  "
+            "This command path is not yet ported to the public catalog API — "
+            "tracked in bead nexus-xnz0o.  "
+            "Run with NX_STORAGE_BACKEND_CATALOG unset to use SQLite mode."
+        )
+
     # ── Internal helpers ───────────────────────────────────────────────────────
 
     def _get(self, path: str, **params: Any) -> Any:
@@ -313,6 +334,17 @@ class HttpCatalogClient:
         owner per name exists.  Returns ``None`` when no curator owner is found.
         Used by doc_indexer / pipeline_stages curator lookups that previously
         issued ``SELECT … WHERE name=? AND owner_type='curator'`` directly.
+
+        Implementation note — client-side ``owner_type`` filtering:
+        The service endpoint ``GET /owners/by_name?name=<name>`` returns ALL
+        owners across all ``owner_type`` values that match the given name (repo,
+        curator, …).  This method filters the response list to the first entry
+        where ``owner_type == "curator"``.  The filtering is therefore done on the
+        client, not pushed into the query.  This is safe because the server enforces
+        a ``UNIQUE(tenant_id, name, owner_type)`` constraint — there can be at most
+        one curator owner per name per tenant — so the client-side filter is
+        functionally equivalent to a server-side ``WHERE owner_type = 'curator'``
+        predicate and produces the same result without an extra round-trip.
         """
         result = self._get("/owners/by_name", name=name)
         owners = result.get("owners", []) if result else []
