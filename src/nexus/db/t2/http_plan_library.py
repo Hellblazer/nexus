@@ -314,11 +314,10 @@ class HttpPlanLibrary:
     def set_plan_disabled(self, plan_id: int, *, reason: str = "") -> bool:
         """Soft-disable the plan. Returns True if updated, False if not found.
 
-        The ``reason`` tag manipulation from PlanLibrary.set_plan_disabled
-        (appending ``disable-reason:<text>`` to tags) is NOT performed here;
-        the Java endpoint simply stamps ``disabled_at=now()``. Reason-tag
-        injection was a client-side convenience in the SQLite path; callers
-        that need it should update ``tags`` separately via a ``save_plan`` call.
+        When *reason* is non-empty the Java endpoint appends
+        ``disable-reason:<reason>`` to the ``tags`` column (removing any
+        existing ``disable-reason:*`` tag first), mirroring
+        ``PlanLibrary.set_plan_disabled`` exactly.
         """
         payload: dict[str, Any] = {"id": plan_id}
         if reason:

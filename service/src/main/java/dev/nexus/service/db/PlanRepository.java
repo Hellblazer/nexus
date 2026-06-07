@@ -128,16 +128,66 @@ public final class PlanRepository {
 
     /**
      * Soft-disable a plan by stamping {@code disabled_at = now()}.
-     * Mirrors {@code PlanLibrary.set_plan_disabled}.
+     * When {@code reason} is non-empty, appends {@code disable-reason:<reason>}
+     * to the {@code tags} column (replacing any existing disable-reason tag),
+     * mirroring {@code PlanLibrary.set_plan_disabled}.
      *
      * @return true if the row was updated, false if the id does not exist
      */
     public boolean disable(String tenant, long id) {
-        return tenantScope.withTenant(tenant, ctx ->
-                ctx.update(PLANS)
-                   .set(PLANS.DISABLED_AT, OffsetDateTime.now(ZoneOffset.UTC))
-                   .where(PLANS.ID.eq(id))
-                   .execute() > 0);
+        return disable(tenant, id, "");
+    }
+
+    /**
+     * Soft-disable a plan, optionally tagging with a reason.
+     * Mirrors {@code PlanLibrary.set_plan_disabled(reason=...)}.
+     *
+     * @param reason non-empty string appended as {@code disable-reason:<reason>} tag;
+     *               empty or null means no tag change
+     * @return true if the row was updated, false if the id does not exist
+     */
+    public boolean disable(String tenant, long id, String reason) {
+        String trimmedReason = reason != null ? reason.trim() : "";
+        return tenantScope.withTenant(tenant, ctx -> {
+            if (trimmedReason.isEmpty()) {
+                // No reason: just stamp disabled_at
+                return ctx.update(PLANS)
+                          .set(PLANS.DISABLED_AT, OffsetDateTime.now(ZoneOffset.UTC))
+                          .where(PLANS.ID.eq(id))
+                          .execute() > 0;
+            }
+            // Reason: fetch existing tags, remove old disable-reason:*, append new one
+            var existing = ctx.select(PLANS.TAGS)
+                              .from(PLANS)
+                              .where(PLANS.ID.eq(id))
+                              .fetchOne();
+            if (existing == null) return false;
+            String currentTags = existing.get(PLANS.TAGS);
+            if (currentTags == null) currentTags = "";
+            String newTags = appendDisableReason(currentTags, trimmedReason);
+            return ctx.update(PLANS)
+                      .set(PLANS.DISABLED_AT, OffsetDateTime.now(ZoneOffset.UTC))
+                      .set(PLANS.TAGS, newTags)
+                      .where(PLANS.ID.eq(id))
+                      .execute() > 0;
+        });
+    }
+
+    /**
+     * Append (or replace) a {@code disable-reason:<reason>} tag in a comma-separated tag string.
+     * Existing {@code disable-reason:*} tokens are removed first to avoid duplicates.
+     * Mirrors Python {@code PlanLibrary.set_plan_disabled} tag logic.
+     */
+    static String appendDisableReason(String existingTags, String reason) {
+        java.util.List<String> parts = new java.util.ArrayList<>();
+        for (String t : existingTags.split(",")) {
+            String trimmed = t.trim();
+            if (!trimmed.isEmpty() && !trimmed.startsWith("disable-reason:")) {
+                parts.add(trimmed);
+            }
+        }
+        parts.add("disable-reason:" + reason);
+        return String.join(", ", parts);
     }
 
     /**
@@ -489,7 +539,7 @@ public final class PlanRepository {
                         .set(PLANS.DISABLED_AT,      disabledAt)
                         .onConflict(PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY)
                         .doUpdate()
-                        // Content fields: propagate source values
+                        // Content fields: propagate source values (content changes allowed)
                         .set(PLANS.PLAN_JSON,        excluded(PLANS.PLAN_JSON))
                         .set(PLANS.OUTCOME,          excluded(PLANS.OUTCOME))
                         .set(PLANS.TAGS,             excluded(PLANS.TAGS))
@@ -502,15 +552,27 @@ public final class PlanRepository {
                         .set(PLANS.PARENT_DIMS,      excluded(PLANS.PARENT_DIMS))
                         .set(PLANS.SCOPE_TAGS,       excluded(PLANS.SCOPE_TAGS))
                         .set(PLANS.MATCH_TEXT,       excluded(PLANS.MATCH_TEXT))
-                        .set(PLANS.DISABLED_AT,      excluded(PLANS.DISABLED_AT))
-                        // Fidelity fields: copy verbatim from source (not now(), not 0)
+                        // created_at: immutable once set, keep source value
                         .set(PLANS.CREATED_AT,       excluded(PLANS.CREATED_AT))
-                        .set(PLANS.USE_COUNT,        excluded(PLANS.USE_COUNT))
-                        .set(PLANS.LAST_USED,        excluded(PLANS.LAST_USED))
-                        .set(PLANS.MATCH_COUNT,      excluded(PLANS.MATCH_COUNT))
-                        .set(PLANS.MATCH_CONF_SUM,   excluded(PLANS.MATCH_CONF_SUM))
-                        .set(PLANS.SUCCESS_COUNT,    excluded(PLANS.SUCCESS_COUNT))
-                        .set(PLANS.FAILURE_COUNT,    excluded(PLANS.FAILURE_COUNT))
+                        // disabled_at: live-mutable — keep whichever is non-null (PG-side wins)
+                        .set(PLANS.DISABLED_AT,
+                             coalesce(PLANS.DISABLED_AT, excluded(PLANS.DISABLED_AT)))
+                        // Live-mutable monotonic counters: GREATEST(source, live) so idempotent
+                        // re-runs after live traffic never roll back PG-advanced counters.
+                        // During initial seeding PG=0 so source wins; after live traffic PG>source.
+                        .set(PLANS.USE_COUNT,
+                             greatest(excluded(PLANS.USE_COUNT), PLANS.USE_COUNT))
+                        .set(PLANS.MATCH_COUNT,
+                             greatest(excluded(PLANS.MATCH_COUNT), PLANS.MATCH_COUNT))
+                        .set(PLANS.MATCH_CONF_SUM,
+                             greatest(excluded(PLANS.MATCH_CONF_SUM), PLANS.MATCH_CONF_SUM))
+                        .set(PLANS.SUCCESS_COUNT,
+                             greatest(excluded(PLANS.SUCCESS_COUNT), PLANS.SUCCESS_COUNT))
+                        .set(PLANS.FAILURE_COUNT,
+                             greatest(excluded(PLANS.FAILURE_COUNT), PLANS.FAILURE_COUNT))
+                        // last_used: keep the later timestamp (GREATEST is null-safe: GREATEST(null,x)=x)
+                        .set(PLANS.LAST_USED,
+                             greatest(excluded(PLANS.LAST_USED), PLANS.LAST_USED))
                         .returning(PLANS.ID)
                         .fetchOne();
 

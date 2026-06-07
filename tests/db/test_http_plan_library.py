@@ -169,7 +169,22 @@ class _FakePlanHandler(BaseHTTPRequestHandler):
                     None,
                 )
                 if existing:
-                    # Fidelity: update all fields including counters from source
+                    # Fidelity on conflict: content fields propagate from source;
+                    # monotonic counters use GREATEST(source, live) — mirrors PlanRepository.doImport.
+                    def _greatest(src_val, live_val, default=0):
+                        """Null-safe GREATEST: if both None, return default."""
+                        s = src_val if src_val is not None else default
+                        l = live_val if live_val is not None else default
+                        return max(s, l)
+                    def _greatest_ts(src_ts, live_ts):
+                        """GREATEST for timestamp strings (ISO-8601 lexicographic safe)."""
+                        if src_ts is None and live_ts is None:
+                            return None
+                        if src_ts is None:
+                            return live_ts
+                        if live_ts is None:
+                            return src_ts
+                        return max(src_ts, live_ts)
                     existing.update({
                         "plan_json":        body.get("plan_json", existing["plan_json"]),
                         "outcome":          body.get("outcome", "success"),
@@ -177,15 +192,24 @@ class _FakePlanHandler(BaseHTTPRequestHandler):
                         "created_at":       body.get("created_at", existing["created_at"]),
                         "ttl":              body.get("ttl"),
                         "verb":             body.get("verb"),
-                        "use_count":        body.get("use_count", 0),
-                        "last_used":        body.get("last_used"),
-                        "match_count":      body.get("match_count", 0),
-                        "match_conf_sum":   body.get("match_conf_sum", 0.0),
-                        "success_count":    body.get("success_count", 0),
-                        "failure_count":    body.get("failure_count", 0),
+                        # Live-mutable monotonic counters: GREATEST(source, live)
+                        "use_count":        _greatest(body.get("use_count", 0),
+                                                      existing.get("use_count", 0)),
+                        "last_used":        _greatest_ts(body.get("last_used"),
+                                                         existing.get("last_used")),
+                        "match_count":      _greatest(body.get("match_count", 0),
+                                                      existing.get("match_count", 0)),
+                        "match_conf_sum":   _greatest(body.get("match_conf_sum", 0.0),
+                                                      existing.get("match_conf_sum", 0.0),
+                                                      default=0.0),
+                        "success_count":    _greatest(body.get("success_count", 0),
+                                                      existing.get("success_count", 0)),
+                        "failure_count":    _greatest(body.get("failure_count", 0),
+                                                      existing.get("failure_count", 0)),
                         "scope_tags":       body.get("scope_tags", ""),
                         "match_text":       body.get("match_text", ""),
-                        "disabled_at":      body.get("disabled_at"),
+                        # disabled_at: live-mutable — keep PG value if already set
+                        "disabled_at":      existing.get("disabled_at") or body.get("disabled_at"),
                     })
                     self._send(200, {"id": existing["id"]})
                 else:
@@ -226,9 +250,17 @@ class _FakePlanHandler(BaseHTTPRequestHandler):
 
         elif pp == "/v1/plans/disable":
             pid = int(body.get("id", 0))
+            reason = body.get("reason", "")
             with _STORE_LOCK:
                 if pid in _STORE:
                     _STORE[pid]["disabled_at"] = "2026-06-06T12:00:00Z"
+                    if reason:
+                        # Mirror PlanRepository.appendDisableReason: remove old, append new
+                        existing = _STORE[pid].get("tags", "") or ""
+                        parts = [t.strip() for t in existing.split(",")
+                                 if t.strip() and not t.strip().startswith("disable-reason:")]
+                        parts.append(f"disable-reason:{reason.strip()}")
+                        _STORE[pid]["tags"] = ", ".join(parts)
                     self._send(200, {"updated": True})
                 else:
                     self._send(200, {"updated": False})
@@ -508,6 +540,30 @@ class TestDisableEnable:
     def test_disable_absent_returns_false(self, client):
         assert not client.set_plan_disabled(99999)
 
+    def test_disable_with_reason_appends_tag(self, client):
+        pid = client.save_plan(query="Reason tag test", plan_json="{}", tags="existing-tag")
+        assert client.set_plan_disabled(pid, reason="too slow")
+        row = client.get_plan(pid)
+        assert "disable-reason:too slow" in row["tags"], (
+            f"tags must contain disable-reason:too slow; got {row['tags']!r}")
+        assert "existing-tag" in row["tags"], "existing tag must be preserved"
+
+    def test_disable_with_reason_replaces_old_reason(self, client):
+        pid = client.save_plan(query="Replace reason test", plan_json="{}")
+        client.set_plan_disabled(pid, reason="first reason")
+        client.set_plan_disabled(pid, reason="second reason")
+        row = client.get_plan(pid)
+        assert "disable-reason:second reason" in row["tags"]
+        assert "disable-reason:first reason" not in row["tags"], (
+            "old disable-reason must be replaced, not duplicated")
+
+    def test_disable_without_reason_leaves_tags_unchanged(self, client):
+        pid = client.save_plan(query="No reason test", plan_json="{}", tags="keep-this")
+        client.set_plan_disabled(pid)
+        row = client.get_plan(pid)
+        assert row["tags"] == "keep-this", (
+            f"disable without reason must not modify tags; got {row['tags']!r}")
+
 
 class TestListActivePlans:
     def test_excludes_disabled(self, client):
@@ -669,6 +725,65 @@ class TestImportPlan:
         row = client.get_plan(pid)
         assert row["disabled_at"] is not None
         assert "2025-06-01" in str(row["disabled_at"])
+
+    def test_import_greatest_does_not_clobber_live_counters(self, client):
+        """Re-import with stale source counters must NOT roll back live-incremented values.
+
+        Mirrors PlanRepositoryTest.importRow_greatestMerge_doesNotClobberLiveCounters.
+        The fake server applies GREATEST(source, live) on conflict.
+        """
+        # Seed with low source counters
+        pid = client.import_plan(
+            project="greatest-test",
+            query="GREATEST clobber unit test",
+            plan_json="{}",
+            outcome="success",
+            tags="",
+            created_at="2025-01-01T00:00:00Z",
+            use_count=5,
+            match_count=10,
+            match_conf_sum=2.5,
+            success_count=4,
+            failure_count=1,
+        )
+        # Simulate live increments (fake server tracks them directly)
+        client.increment_match_metrics(pid, confidence=0.9)
+        client.increment_match_metrics(pid, confidence=0.9)
+        client.increment_match_metrics(pid, confidence=0.9)
+        client.increment_run_outcome(pid, success=True)
+        client.increment_run_outcome(pid, success=True)
+
+        row_after_live = client.get_plan(pid)
+        live_match_count  = row_after_live["match_count"]  # should be 10+3=13
+        live_conf_sum     = row_after_live["match_conf_sum"]
+        live_success_count = row_after_live["success_count"]
+
+        assert live_match_count > 10, f"precondition: live increments advanced match_count; got {live_match_count}"
+
+        # Re-import with the original STALE counters (lower than live)
+        pid2 = client.import_plan(
+            project="greatest-test",
+            query="GREATEST clobber unit test",
+            plan_json="{}",
+            outcome="success",
+            tags="",
+            created_at="2025-01-01T00:00:00Z",
+            use_count=5,          # stale
+            match_count=10,       # stale
+            match_conf_sum=2.5,   # stale
+            success_count=4,      # stale
+            failure_count=1,
+        )
+        assert pid2 == pid, "idempotent re-import must return same id"
+
+        row_after_reimport = client.get_plan(pid)
+        assert row_after_reimport["match_count"] == live_match_count, (
+            f"GREATEST: re-import must not clobber live match_count "
+            f"({live_match_count}); got {row_after_reimport['match_count']}")
+        assert abs(row_after_reimport["match_conf_sum"] - live_conf_sum) < 1e-9, (
+            "GREATEST: re-import must not clobber live match_conf_sum")
+        assert row_after_reimport["success_count"] == live_success_count, (
+            "GREATEST: re-import must not clobber live success_count")
 
 
 class TestNormalize:

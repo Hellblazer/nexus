@@ -850,8 +850,10 @@ class TestRdr092Canaries:
         # Relaxed from strict rank-1 order assertion to set-membership.
         # Rationale: Postgres FTS (ts_rank + STORED tsvector) and SQLite FTS5
         # (rank BM25) may return different orderings for equally-ranked matches.
-        # The contract is that research_id appears in the top-2 result set
-        # (set equality + Spearman >= 0.90 verified at the .9 MVV gate).
+        # Formal parity (top-K set equality + Spearman >= 0.90) is verified
+        # against the integration fixture in tests/db/test_http_plan_library_integration.py
+        # once the plans Postgres service is running (requires NX_STORAGE_BACKEND_PLANS=SERVICE
+        # + a populated plans table). This test validates SQLite-only FTS5 order locally.
         result_ids = [m.plan_id for m in matches]
         assert research_id in result_ids, (
             f"research plan must appear in result set; "

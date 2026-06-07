@@ -13,12 +13,14 @@ import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.*;
 
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * RDR-152 bead nexus-gmiaf.11 — PlanRepository integration tests.
@@ -29,15 +31,19 @@ import static org.assertj.core.api.Assertions.*;
  *   <li>savePlan round-trip: id returned, row retrievable by id</li>
  *   <li>ON CONFLICT (tenant_id, project, query): second save with same key updates plan_json</li>
  *   <li>RLS isolation: tenant A plans invisible to tenant B</li>
- *   <li>Cross-tenant RLS WITH CHECK: INSERT with mismatched tenant_id rejected</li>
  *   <li>delete: row removed by id</li>
  *   <li>disable/enable: disabled_at set/cleared; disabled plans excluded from listActivePlans</li>
  *   <li>searchPlans FTS: returns match on match_text ('english' config stemming)</li>
  *   <li>listActivePlans: returns only non-expired, non-disabled rows for the correct outcome</li>
  *   <li>incrementMatchMetrics: match_count increments; match_conf_sum increments when confidence given</li>
  *   <li>incrementRunStarted / incrementRunOutcome: counters update correctly</li>
- *   <li>importRow fidelity: created_at, counters preserved verbatim on insert and idempotent re-run</li>
+ *   <li>importRow fidelity: all 7 fidelity fields (created_at + 6 counters incl. last_used) preserved</li>
  *   <li>planExists: boundary-safe tag match</li>
+ *   <li>setScopeTags: field updated atomically</li>
+ *   <li>listPlans: excludes disabled by default, includes when requested</li>
+ *   <li>importRow GREATEST merge: re-import with stale source values does NOT clobber live PG counters</li>
+ *   <li>RLS WITH CHECK: raw INSERT with mismatched tenant_id rejected by Postgres RLS policy</li>
+ *   <li>disable with reason: appends disable-reason tag, replaces on re-disable, no-reason disable unchanged tags</li>
  * </ol>
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -303,6 +309,11 @@ class PlanRepositoryTest {
         assertThat(row.get().getMatchConfSum()).as("match_conf_sum must be 12.5").isEqualTo(12.5);
         assertThat(row.get().getSuccessCount()).as("success_count must be 40").isEqualTo(40);
         assertThat(row.get().getFailureCount()).as("failure_count must be 2").isEqualTo(2);
+        // last_used: the 7th fidelity field — must not be lost
+        assertThat(row.get().getLastUsed()).as("last_used must be preserved").isNotNull();
+        assertThat(row.get().getLastUsed().withOffsetSameInstant(ZoneOffset.UTC))
+            .as("last_used must equal srcLastUsed verbatim")
+            .isEqualTo(srcLastUsed);
 
         // Idempotency: re-run with same data, same id, counters still from source
         long id2 = repo.importRow(
@@ -360,6 +371,124 @@ class PlanRepositoryTest {
         var included = repo.listPlans(TENANT_A, "proj-list", 100, true);
         assertThat(included).anyMatch(r -> r.getId().equals(activeId));
         assertThat(included).anyMatch(r -> r.getId().equals(disabledId));
+    }
+
+    @Test
+    @Order(13)
+    void importRow_greatestMerge_doesNotClobberLiveCounters() {
+        // Seed via importRow with low source counters
+        long id = repo.importRow(
+            TENANT_A,
+            "proj-greatest", "GREATEST merge test plan", "{\"v\":1}",
+            "success", "test", OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC),
+            null, null, null, null, null, null, null,
+            5, null, 10, 2.5, 4, 1,     // low source counters
+            "", "GREATEST merge test plan", null);
+
+        // Simulate live traffic advancing counters on the PG side
+        repo.incrementRunStarted(TENANT_A, id);
+        repo.incrementRunStarted(TENANT_A, id);
+        repo.incrementRunStarted(TENANT_A, id);     // use_count=3 (above source's 0? no, source=5)
+        repo.incrementMatchMetrics(TENANT_A, id, 0.9);
+        repo.incrementMatchMetrics(TENANT_A, id, 0.9);
+        repo.incrementMatchMetrics(TENANT_A, id, 0.9);  // match_count = 10+3=13, conf_sum=2.5+2.7=5.2
+        repo.incrementRunOutcome(TENANT_A, id, true);
+        repo.incrementRunOutcome(TENANT_A, id, true);   // success_count=4+2=6
+
+        // Verify PG counters are above source values (precondition for the test)
+        var beforeReimport = repo.getById(TENANT_A, id).get();
+        assertThat(beforeReimport.getMatchCount()).as("match_count must be above source after live increments")
+            .isGreaterThan(10);
+        int pgMatchCount = beforeReimport.getMatchCount();
+        double pgConfSum   = beforeReimport.getMatchConfSum();
+        int pgSuccessCount = beforeReimport.getSuccessCount();
+        OffsetDateTime pgLastUsed = beforeReimport.getLastUsed();
+
+        // Re-import with the STALE source values (lower counters)
+        repo.importRow(
+            TENANT_A,
+            "proj-greatest", "GREATEST merge test plan", "{\"v\":1}",
+            "success", "test", OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC),
+            null, null, null, null, null, null, null,
+            5, null, 10, 2.5, 4, 1,     // SAME stale source counters
+            "", "GREATEST merge test plan", null);
+
+        // Assert: live PG counters are NOT rolled back to stale source values
+        var afterReimport = repo.getById(TENANT_A, id).get();
+        assertThat(afterReimport.getMatchCount())
+            .as("re-import must not clobber live match_count (GREATEST wins)")
+            .isEqualTo(pgMatchCount);
+        assertThat(afterReimport.getMatchConfSum())
+            .as("re-import must not clobber live match_conf_sum (GREATEST wins)")
+            .isEqualTo(pgConfSum);
+        assertThat(afterReimport.getSuccessCount())
+            .as("re-import must not clobber live success_count (GREATEST wins)")
+            .isEqualTo(pgSuccessCount);
+        assertThat(afterReimport.getLastUsed())
+            .as("re-import must not clobber live last_used with stale null (GREATEST null-safe)")
+            .isEqualTo(pgLastUsed);
+    }
+
+    @Test
+    @Order(14)
+    void rlsWithCheck_crossTenantInsert_rejected() {
+        // The service role has FORCE RLS with tenant_isolation WITH CHECK.
+        // Attempting to INSERT with tenant_id != GUC must raise a PSQLException.
+        // We stamp TENANT_A in the GUC but try to insert with TENANT_B manually.
+        // TenantScope.withTenant stamps the GUC, so we reach below it via raw SQL.
+        assertThatThrownBy(() -> {
+            try (var conn = svcDs.getConnection()) {
+                conn.setAutoCommit(true);
+                // Set GUC to TENANT_A but try to insert with TENANT_B — WITH CHECK violation
+                conn.createStatement().execute(
+                    "SET LOCAL nexus.tenant = '" + TENANT_A + "'");
+                conn.createStatement().execute(
+                    "INSERT INTO nexus.plans (tenant_id, project, query, plan_json) " +
+                    "VALUES ('" + TENANT_B + "', 'bad-proj', 'RLS violation test', '{}')");
+            }
+        })
+        .as("RLS WITH CHECK must reject INSERT where tenant_id != nexus.tenant GUC")
+        .isInstanceOfAny(org.postgresql.util.PSQLException.class,
+                         java.sql.SQLException.class);
+    }
+
+    @Test
+    @Order(15)
+    void disable_withReason_appendsTagAndStampsDisabledAt() {
+        long id = repo.savePlan(TENANT_A, "proj-reason", "Plan for disable-reason test",
+                                "{}", "success", "existing-tag", null,
+                                null, null, null, null, null, null, "", "");
+
+        // Disable with a reason
+        assertThat(repo.disable(TENANT_A, id, "too slow")).isTrue();
+        var row = repo.getById(TENANT_A, id).get();
+
+        assertThat(row.getDisabledAt())
+            .as("disabled_at must be stamped").isNotNull();
+        assertThat(row.getTags())
+            .as("tags must contain disable-reason:too slow")
+            .contains("disable-reason:too slow");
+        assertThat(row.getTags())
+            .as("existing tag must be preserved")
+            .contains("existing-tag");
+
+        // Re-disable with a different reason — old disable-reason: replaced, not duplicated
+        assertThat(repo.disable(TENANT_A, id, "replaced reason")).isTrue();
+        row = repo.getById(TENANT_A, id).get();
+        assertThat(row.getTags())
+            .as("tags must have the NEW disable-reason only (old one replaced)")
+            .contains("disable-reason:replaced reason");
+        assertThat(row.getTags())
+            .as("old disable-reason must be removed")
+            .doesNotContain("disable-reason:too slow");
+
+        // Disable without reason — no tag added; existing tags unchanged
+        long id2 = repo.savePlan(TENANT_A, "proj-reason", "Plan for no-reason disable",
+                                 "{}", "success", "tag-a", null,
+                                 null, null, null, null, null, null, "", "");
+        assertThat(repo.disable(TENANT_A, id2)).isTrue();
+        row = repo.getById(TENANT_A, id2).get();
+        assertThat(row.getTags()).as("no-reason disable must not modify tags").isEqualTo("tag-a");
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

@@ -181,7 +181,8 @@ public final class PlanHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
         long id = requireLong(body, "id");
-        boolean updated = repo.disable(tenant, id);
+        String reason = body.containsKey("reason") ? String.valueOf(body.get("reason")) : "";
+        boolean updated = repo.disable(tenant, id, reason);
         HttpUtil.send(ex, 200, json(Map.of("updated", updated)));
     }
 
