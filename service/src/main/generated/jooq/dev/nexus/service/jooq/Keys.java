@@ -4,10 +4,22 @@
 package dev.nexus.service.jooq;
 
 
+import dev.nexus.service.jooq.tables.Frecency;
+import dev.nexus.service.jooq.tables.HookFailures;
 import dev.nexus.service.jooq.tables.Memory;
+import dev.nexus.service.jooq.tables.NxAnswerRuns;
 import dev.nexus.service.jooq.tables.Plans;
+import dev.nexus.service.jooq.tables.RelevanceLog;
+import dev.nexus.service.jooq.tables.SearchTelemetry;
+import dev.nexus.service.jooq.tables.TierWrites;
+import dev.nexus.service.jooq.tables.records.FrecencyRecord;
+import dev.nexus.service.jooq.tables.records.HookFailuresRecord;
 import dev.nexus.service.jooq.tables.records.MemoryRecord;
+import dev.nexus.service.jooq.tables.records.NxAnswerRunsRecord;
 import dev.nexus.service.jooq.tables.records.PlansRecord;
+import dev.nexus.service.jooq.tables.records.RelevanceLogRecord;
+import dev.nexus.service.jooq.tables.records.SearchTelemetryRecord;
+import dev.nexus.service.jooq.tables.records.TierWritesRecord;
 
 import org.jooq.TableField;
 import org.jooq.UniqueKey;
@@ -26,8 +38,14 @@ public class Keys {
     // UNIQUE and PRIMARY KEY definitions
     // -------------------------------------------------------------------------
 
+    public static final UniqueKey<FrecencyRecord> FRECENCY_PK = Internal.createUniqueKey(Frecency.FRECENCY, DSL.name("frecency_pk"), new TableField[] { Frecency.FRECENCY.TENANT_ID, Frecency.FRECENCY.CHUNK_ID }, true);
+    public static final UniqueKey<HookFailuresRecord> HOOK_FAILURES_PK = Internal.createUniqueKey(HookFailures.HOOK_FAILURES, DSL.name("hook_failures_pk"), new TableField[] { HookFailures.HOOK_FAILURES.ID }, true);
     public static final UniqueKey<MemoryRecord> MEMORY_PK = Internal.createUniqueKey(Memory.MEMORY, DSL.name("memory_pk"), new TableField[] { Memory.MEMORY.ID }, true);
     public static final UniqueKey<MemoryRecord> MEMORY_TENANT_PROJECT_TITLE_UQ = Internal.createUniqueKey(Memory.MEMORY, DSL.name("memory_tenant_project_title_uq"), new TableField[] { Memory.MEMORY.TENANT_ID, Memory.MEMORY.PROJECT, Memory.MEMORY.TITLE }, true);
+    public static final UniqueKey<NxAnswerRunsRecord> NX_ANSWER_RUNS_PK = Internal.createUniqueKey(NxAnswerRuns.NX_ANSWER_RUNS, DSL.name("nx_answer_runs_pk"), new TableField[] { NxAnswerRuns.NX_ANSWER_RUNS.ID }, true);
     public static final UniqueKey<PlansRecord> PLANS_PK = Internal.createUniqueKey(Plans.PLANS, DSL.name("plans_pk"), new TableField[] { Plans.PLANS.ID }, true);
     public static final UniqueKey<PlansRecord> PLANS_TENANT_PROJECT_QUERY_UQ = Internal.createUniqueKey(Plans.PLANS, DSL.name("plans_tenant_project_query_uq"), new TableField[] { Plans.PLANS.TENANT_ID, Plans.PLANS.PROJECT, Plans.PLANS.QUERY }, true);
+    public static final UniqueKey<RelevanceLogRecord> RELEVANCE_LOG_PK = Internal.createUniqueKey(RelevanceLog.RELEVANCE_LOG, DSL.name("relevance_log_pk"), new TableField[] { RelevanceLog.RELEVANCE_LOG.ID }, true);
+    public static final UniqueKey<SearchTelemetryRecord> SEARCH_TELEMETRY_PK = Internal.createUniqueKey(SearchTelemetry.SEARCH_TELEMETRY, DSL.name("search_telemetry_pk"), new TableField[] { SearchTelemetry.SEARCH_TELEMETRY.TENANT_ID, SearchTelemetry.SEARCH_TELEMETRY.TS, SearchTelemetry.SEARCH_TELEMETRY.QUERY_HASH, SearchTelemetry.SEARCH_TELEMETRY.COLLECTION }, true);
+    public static final UniqueKey<TierWritesRecord> TIER_WRITES_PK = Internal.createUniqueKey(TierWrites.TIER_WRITES, DSL.name("tier_writes_pk"), new TableField[] { TierWrites.TIER_WRITES.ID }, true);
 }

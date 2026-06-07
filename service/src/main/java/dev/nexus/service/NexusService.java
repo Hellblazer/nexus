@@ -3,11 +3,13 @@ package dev.nexus.service;
 import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.PlanRepository;
+import dev.nexus.service.db.TelemetryRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.HealthHandler;
 import dev.nexus.service.http.MemoryHandler;
 import dev.nexus.service.http.PlanHandler;
+import dev.nexus.service.http.TelemetryHandler;
 import dev.nexus.service.http.WhoamiHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,8 +50,9 @@ public final class NexusService {
      */
     public NexusService(int port, String token, DataSource dataSource) throws IOException {
         this.tenantScope = new TenantScope(dataSource);
-        var memoryRepo = new MemoryRepository(tenantScope);
-        var planRepo   = new PlanRepository(tenantScope);
+        var memoryRepo    = new MemoryRepository(tenantScope);
+        var planRepo      = new PlanRepository(tenantScope);
+        var telemetryRepo = new TelemetryRepository(tenantScope);
 
         this.server = HttpServer.create(
             new InetSocketAddress("127.0.0.1", port), /* backlog */ 10);
@@ -70,6 +73,10 @@ public final class NexusService {
         // /v1/plans/* — plan library endpoints (bead nexus-gmiaf.11)
         var planCtx = server.createContext("/v1/plans", new PlanHandler(planRepo));
         planCtx.getFilters().addAll(authFilter);
+
+        // /v1/telemetry/* — telemetry endpoints (bead nexus-gmiaf.12)
+        var telCtx = server.createContext("/v1/telemetry", new TelemetryHandler(telemetryRepo));
+        telCtx.getFilters().addAll(authFilter);
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
     }

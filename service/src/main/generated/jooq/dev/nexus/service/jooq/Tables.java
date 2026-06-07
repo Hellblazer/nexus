@@ -4,8 +4,14 @@
 package dev.nexus.service.jooq;
 
 
+import dev.nexus.service.jooq.tables.Frecency;
+import dev.nexus.service.jooq.tables.HookFailures;
 import dev.nexus.service.jooq.tables.Memory;
+import dev.nexus.service.jooq.tables.NxAnswerRuns;
 import dev.nexus.service.jooq.tables.Plans;
+import dev.nexus.service.jooq.tables.RelevanceLog;
+import dev.nexus.service.jooq.tables.SearchTelemetry;
+import dev.nexus.service.jooq.tables.TierWrites;
 
 
 /**
@@ -15,12 +21,42 @@ import dev.nexus.service.jooq.tables.Plans;
 public class Tables {
 
     /**
+     * The table <code>nexus.frecency</code>.
+     */
+    public static final Frecency FRECENCY = Frecency.FRECENCY;
+
+    /**
+     * The table <code>nexus.hook_failures</code>.
+     */
+    public static final HookFailures HOOK_FAILURES = HookFailures.HOOK_FAILURES;
+
+    /**
      * The table <code>nexus.memory</code>.
      */
     public static final Memory MEMORY = Memory.MEMORY;
 
     /**
+     * The table <code>nexus.nx_answer_runs</code>.
+     */
+    public static final NxAnswerRuns NX_ANSWER_RUNS = NxAnswerRuns.NX_ANSWER_RUNS;
+
+    /**
      * The table <code>nexus.plans</code>.
      */
     public static final Plans PLANS = Plans.PLANS;
+
+    /**
+     * The table <code>nexus.relevance_log</code>.
+     */
+    public static final RelevanceLog RELEVANCE_LOG = RelevanceLog.RELEVANCE_LOG;
+
+    /**
+     * The table <code>nexus.search_telemetry</code>.
+     */
+    public static final SearchTelemetry SEARCH_TELEMETRY = SearchTelemetry.SEARCH_TELEMETRY;
+
+    /**
+     * The table <code>nexus.tier_writes</code>.
+     */
+    public static final TierWrites TIER_WRITES = TierWrites.TIER_WRITES;
 }

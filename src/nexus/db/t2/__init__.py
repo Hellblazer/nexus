@@ -440,7 +440,14 @@ class T2Database:
         # CatalogTaxonomy takes a MemoryStore reference for the
         # get_topic_docs JOIN (RDR-063 §Cross-Domain Contracts).
         self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)
-        self.telemetry: Telemetry = Telemetry(path)
+
+        # RDR-152 nexus-gmiaf.12: telemetry service seam.
+        # NX_STORAGE_BACKEND_TELEMETRY=service routes to HttpTelemetryStore.
+        if storage_backend_for("telemetry") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+            self.telemetry: Telemetry = HttpTelemetryStore()  # type: ignore[assignment]
+        else:
+            self.telemetry: Telemetry = Telemetry(path)
         # RDR-086 Phase 1: global chash → (collection, doc_id) lookup
         # populated by the six indexing write sites via best-effort
         # dual-write after each T3 upsert.

@@ -1,0 +1,343 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-152 bead nexus-gmiaf.12 — telemetry store baseline changelog.
+
+    Creates six telemetry tables that mirror the SQLite telemetry.py /
+    migrations.py schemas 1:1, adds tenant_id for RLS, and defines
+    ENABLE + FORCE ROW LEVEL SECURITY + tenant_isolation policy on each.
+
+    Tables (append semantics unless noted):
+      relevance_log    — (query, chunk_id, action) triples from MCP tools (event log)
+      search_telemetry — per-call threshold-filter stats (event log; composite PK)
+      tier_writes      — tier-discipline write audit (event log)
+      nx_answer_runs   — nx_answer invocation metrics (event log)
+      hook_failures    — post-store hook failure capture (event log)
+      frecency         — chunk-level recency projection (LIVE-MUTABLE: GREATEST on re-import)
+
+    NO FTS columns: telemetry is queried by time-range + exact-match fields, never
+    full-text searched. Confirmed per relay — do NOT add tsvector.
+
+    Import conflict strategies (relay + .8/.11 reviews):
+      Event logs   (relevance_log, search_telemetry, tier_writes, nx_answer_runs,
+                   hook_failures): ON CONFLICT ... DO NOTHING — event timestamps
+                   are the data; never overwrite a historical event.
+      frecency     (live-mutable): ON CONFLICT ... DO UPDATE with GREATEST() for
+                   monotonic counters/scores and max-timestamps; LEAST() for
+                   embedded_at (keep oldest embed time). DO NOT use now() on import.
+
+    Index rationale (time-range + aggregation query profile):
+      All timestamp columns get BTree indexes — the primary query pattern is
+      "WHERE ts >= ? AND collection = ?" for stats/expire/trim.
+      Composite indexes on (tenant_id, collection, ts) and (tenant_id, session_id)
+      cover the most selective joins.
+
+    Column mapping deviations from SQLite:
+      - All id columns: INTEGER PRIMARY KEY → BIGSERIAL
+      - Timestamp text columns (timestamp, ts, occurred_at, created_at,
+        embedded_at, last_hit_at): TEXT (ISO-8601) → TIMESTAMPTZ
+      - frecency.embedded_at default: '' → now()
+      - frecency.last_hit_at default: '' → now()
+      - search_telemetry.kept_count: 4.6.1 rename from dropped_count; PG baseline
+        ships the correct name directly (no rename migration needed)
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: relevance_log ───────────────────────────────────────── -->
+    <changeSet id="telemetry-001-1" author="nexus-gmiaf.12">
+        <comment>Create relevance_log table (event log; append-only)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.relevance_log (
+    id          BIGSERIAL    NOT NULL,
+    tenant_id   TEXT         NOT NULL,
+    query       TEXT         NOT NULL,
+    chunk_id    TEXT         NOT NULL,
+    collection  TEXT                   DEFAULT '',
+    action      TEXT         NOT NULL,
+    session_id  TEXT                   DEFAULT '',
+    timestamp   TIMESTAMPTZ  NOT NULL,
+    CONSTRAINT relevance_log_pk PRIMARY KEY (id)
+);
+
+-- BTree index on timestamp: expire/purge queries ("WHERE timestamp &lt; ?")
+CREATE INDEX idx_relevance_log_ts          ON nexus.relevance_log (tenant_id, timestamp DESC);
+CREATE INDEX idx_relevance_log_query       ON nexus.relevance_log (tenant_id, query);
+CREATE INDEX idx_relevance_log_chunk       ON nexus.relevance_log (tenant_id, chunk_id);
+CREATE INDEX idx_relevance_log_session     ON nexus.relevance_log (tenant_id, session_id);
+
+-- Unique index for idempotent ETL import: same (query, chunk, action, session, ts) = duplicate event.
+-- COALESCE handles '' / NULL interchangeably since Python normalises empty to ''.
+CREATE UNIQUE INDEX idx_relevance_log_etl_dedup
+    ON nexus.relevance_log (tenant_id, query, chunk_id, action, COALESCE(session_id,''), timestamp);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.relevance_log CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: relevance_log RLS ───────────────────────────────────── -->
+    <changeSet id="telemetry-001-2" author="nexus-gmiaf.12">
+        <comment>RLS: ENABLE + FORCE + tenant_isolation policy on relevance_log</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.relevance_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.relevance_log FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.relevance_log
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.relevance_log;
+            ALTER TABLE nexus.relevance_log NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.relevance_log DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: search_telemetry ────────────────────────────────────── -->
+    <changeSet id="telemetry-001-3" author="nexus-gmiaf.12">
+        <comment>Create search_telemetry table (event log; composite PK includes tenant_id)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.search_telemetry (
+    tenant_id    TEXT             NOT NULL,
+    ts           TIMESTAMPTZ      NOT NULL,
+    query_hash   TEXT             NOT NULL,
+    collection   TEXT             NOT NULL,
+    raw_count    INTEGER          NOT NULL,
+    kept_count   INTEGER          NOT NULL,
+    top_distance DOUBLE PRECISION,
+    threshold    DOUBLE PRECISION,
+    CONSTRAINT search_telemetry_pk PRIMARY KEY (tenant_id, ts, query_hash, collection)
+);
+
+-- BTree indexes for time-range + collection stats queries
+CREATE INDEX idx_search_tel_ts         ON nexus.search_telemetry (tenant_id, ts DESC);
+CREATE INDEX idx_search_tel_collection ON nexus.search_telemetry (tenant_id, collection, ts DESC);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.search_telemetry CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: search_telemetry RLS ────────────────────────────────── -->
+    <changeSet id="telemetry-001-4" author="nexus-gmiaf.12">
+        <comment>RLS on search_telemetry</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.search_telemetry ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.search_telemetry FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.search_telemetry
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.search_telemetry;
+            ALTER TABLE nexus.search_telemetry NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.search_telemetry DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 5: tier_writes ─────────────────────────────────────────── -->
+    <changeSet id="telemetry-001-5" author="nexus-gmiaf.12">
+        <comment>Create tier_writes table (event log; tier-discipline audit)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.tier_writes (
+    id           BIGSERIAL    NOT NULL,
+    tenant_id    TEXT         NOT NULL,
+    session_id   TEXT         NOT NULL,
+    ts           TIMESTAMPTZ  NOT NULL,
+    tool         TEXT         NOT NULL,
+    tier         TEXT         NOT NULL,
+    agent        TEXT,
+    project      TEXT,
+    target_title TEXT,
+    CONSTRAINT tier_writes_pk PRIMARY KEY (id)
+);
+
+-- BTree indexes: nx tier-status queries by session_id + ts; time-window scans
+CREATE INDEX idx_tier_writes_ts      ON nexus.tier_writes (tenant_id, ts DESC);
+CREATE INDEX idx_tier_writes_session ON nexus.tier_writes (tenant_id, session_id, ts DESC);
+CREATE INDEX idx_tier_writes_tool    ON nexus.tier_writes (tenant_id, tool);
+
+-- ETL dedup: same (session, ts, tool, tier) within a tenant = same event
+CREATE UNIQUE INDEX idx_tier_writes_etl_dedup
+    ON nexus.tier_writes (tenant_id, session_id, ts, tool, tier);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.tier_writes CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 6: tier_writes RLS ─────────────────────────────────────── -->
+    <changeSet id="telemetry-001-6" author="nexus-gmiaf.12">
+        <comment>RLS on tier_writes</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.tier_writes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.tier_writes FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.tier_writes
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.tier_writes;
+            ALTER TABLE nexus.tier_writes NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.tier_writes DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 7: nx_answer_runs ──────────────────────────────────────── -->
+    <changeSet id="telemetry-001-7" author="nexus-gmiaf.12">
+        <comment>Create nx_answer_runs table (event log; RDR-080 run metrics)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.nx_answer_runs (
+    id                  BIGSERIAL        NOT NULL,
+    tenant_id           TEXT             NOT NULL,
+    question            TEXT             NOT NULL,
+    plan_id             BIGINT,
+    matched_confidence  DOUBLE PRECISION,
+    step_count          INTEGER          NOT NULL DEFAULT 0,
+    final_text          TEXT             NOT NULL DEFAULT '',
+    cost_usd            DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    duration_ms         BIGINT           NOT NULL DEFAULT 0,
+    created_at          TIMESTAMPTZ      NOT NULL,
+    CONSTRAINT nx_answer_runs_pk PRIMARY KEY (id)
+);
+
+-- BTree index on created_at for time-range queries and ordering
+CREATE INDEX idx_nx_answer_runs_ts      ON nexus.nx_answer_runs (tenant_id, created_at DESC);
+CREATE INDEX idx_nx_answer_runs_plan_id ON nexus.nx_answer_runs (tenant_id, plan_id);
+
+-- ETL dedup: same question at same timestamp from same tenant = same run
+CREATE UNIQUE INDEX idx_nx_answer_runs_etl_dedup
+    ON nexus.nx_answer_runs (tenant_id, question, created_at);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.nx_answer_runs CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 8: nx_answer_runs RLS ──────────────────────────────────── -->
+    <changeSet id="telemetry-001-8" author="nexus-gmiaf.12">
+        <comment>RLS on nx_answer_runs</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.nx_answer_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.nx_answer_runs FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.nx_answer_runs
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.nx_answer_runs;
+            ALTER TABLE nexus.nx_answer_runs NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.nx_answer_runs DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 9: hook_failures ───────────────────────────────────────── -->
+    <changeSet id="telemetry-001-9" author="nexus-gmiaf.12">
+        <comment>Create hook_failures table (event log; post-store hook audit)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.hook_failures (
+    id             BIGSERIAL    NOT NULL,
+    tenant_id      TEXT         NOT NULL,
+    doc_id         TEXT         NOT NULL DEFAULT '',
+    collection     TEXT         NOT NULL DEFAULT '',
+    hook_name      TEXT         NOT NULL,
+    error          TEXT         NOT NULL DEFAULT '',
+    occurred_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    batch_doc_ids  TEXT,
+    is_batch       INTEGER      NOT NULL DEFAULT 0,
+    chain          TEXT         NOT NULL DEFAULT 'single',
+    CONSTRAINT hook_failures_pk PRIMARY KEY (id)
+);
+
+-- BTree indexes: nx doctor hooks queries "WHERE occurred_at >= ?" + collection scoping
+CREATE INDEX idx_hook_failures_ts         ON nexus.hook_failures (tenant_id, occurred_at DESC);
+CREATE INDEX idx_hook_failures_collection ON nexus.hook_failures (tenant_id, collection, occurred_at DESC);
+
+-- ETL dedup: same doc+hook+timestamp within a tenant = same failure event
+CREATE UNIQUE INDEX idx_hook_failures_etl_dedup
+    ON nexus.hook_failures (tenant_id, doc_id, hook_name, occurred_at);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.hook_failures CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 10: hook_failures RLS ──────────────────────────────────── -->
+    <changeSet id="telemetry-001-10" author="nexus-gmiaf.12">
+        <comment>RLS on hook_failures</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.hook_failures ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.hook_failures FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.hook_failures
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.hook_failures;
+            ALTER TABLE nexus.hook_failures NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.hook_failures DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 11: frecency ────────────────────────────────────────────── -->
+    <changeSet id="telemetry-001-11" author="nexus-gmiaf.12">
+        <comment>Create frecency projection table (live-mutable; GREATEST on re-import)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.frecency (
+    tenant_id      TEXT             NOT NULL,
+    chunk_id       TEXT             NOT NULL,
+    embedded_at    TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    ttl_days       INTEGER          NOT NULL DEFAULT 0,
+    frecency_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+    miss_count     INTEGER          NOT NULL DEFAULT 0,
+    last_hit_at    TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    CONSTRAINT frecency_pk PRIMARY KEY (tenant_id, chunk_id)
+);
+
+-- BTree indexes: frecency-only re-index scans by chunk_id
+CREATE INDEX idx_frecency_chunk        ON nexus.frecency (tenant_id, chunk_id);
+CREATE INDEX idx_frecency_last_hit     ON nexus.frecency (tenant_id, last_hit_at DESC);
+CREATE INDEX idx_frecency_score        ON nexus.frecency (tenant_id, frecency_score DESC);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.frecency CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 12: frecency RLS ────────────────────────────────────────── -->
+    <changeSet id="telemetry-001-12" author="nexus-gmiaf.12">
+        <comment>RLS on frecency</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.frecency ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.frecency FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.frecency
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.frecency;
+            ALTER TABLE nexus.frecency NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.frecency DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 13: service role grants ─────────────────────────────────── -->
+    <changeSet id="telemetry-001-13" author="nexus-gmiaf.12">
+        <comment>Grant table privileges to nexus_svc role</comment>
+        <sql splitStatements="false">
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.relevance_log    TO nexus_svc';
+        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.relevance_log_id_seq             TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.search_telemetry TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.tier_writes       TO nexus_svc';
+        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.tier_writes_id_seq               TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.nx_answer_runs   TO nexus_svc';
+        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.nx_answer_runs_id_seq            TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.hook_failures    TO nexus_svc';
+        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.hook_failures_id_seq             TO nexus_svc';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.frecency         TO nexus_svc';
+        RAISE NOTICE 'Granted telemetry table privileges to nexus_svc';
+    ELSE
+        RAISE NOTICE 'nexus_svc role not found; skipping grants (create role before first run)';
+    END IF;
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- Grants are not rolled back; role removal is a DBA operation. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
