@@ -237,29 +237,9 @@ CREATE POLICY tenant_isolation ON nexus.aspect_promotion_log
         </rollback>
     </changeSet>
 
-    <!-- ── Changeset 9: service role grants ──────────────────────────────────── -->
-    <changeSet id="aspects-001-9" author="nexus-gmiaf.15">
-        <comment>Grant table privileges to nexus_svc role</comment>
-        <sql splitStatements="false">
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.document_aspects        TO nexus_svc';
-        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.document_aspects_id_seq                 TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.document_highlights     TO nexus_svc';
-        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.document_highlights_id_seq              TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.aspect_extraction_queue TO nexus_svc';
-        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.aspect_extraction_queue_id_seq          TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.aspect_promotion_log    TO nexus_svc';
-        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.aspect_promotion_log_id_seq             TO nexus_svc';
-        RAISE NOTICE 'Granted aspects table privileges to nexus_svc';
-    ELSE
-        RAISE NOTICE 'nexus_svc role not found; skipping grants';
-    END IF;
-END
-$$;
-        </sql>
-        <rollback><!-- Grants not rolled back; DBA operation. --></rollback>
-    </changeSet>
+    <!--
+        Changeset 9 (aspects-001-9): per-store IF-EXISTS grant removed (bead nexus-net63).
+        DML grants for nexus_svc consolidated in grants-nexus-svc.xml (runAlways=true).
+    -->
 
 </databaseChangeLog>

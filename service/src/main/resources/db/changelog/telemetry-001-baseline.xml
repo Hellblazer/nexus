@@ -311,33 +311,9 @@ CREATE POLICY tenant_isolation ON nexus.frecency
         </rollback>
     </changeSet>
 
-    <!-- ── Changeset 13: service role grants ─────────────────────────────────── -->
-    <changeSet id="telemetry-001-13" author="nexus-gmiaf.12">
-        <comment>Grant table privileges to nexus_svc role</comment>
-        <sql splitStatements="false">
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.relevance_log    TO nexus_svc';
-        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.relevance_log_id_seq             TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.search_telemetry TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.tier_writes       TO nexus_svc';
-        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.tier_writes_id_seq               TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.nx_answer_runs   TO nexus_svc';
-        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.nx_answer_runs_id_seq            TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.hook_failures    TO nexus_svc';
-        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.hook_failures_id_seq             TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.frecency         TO nexus_svc';
-        RAISE NOTICE 'Granted telemetry table privileges to nexus_svc';
-    ELSE
-        RAISE NOTICE 'nexus_svc role not found; skipping grants (create role before first run)';
-    END IF;
-END
-$$;
-        </sql>
-        <rollback>
-            <!-- Grants are not rolled back; role removal is a DBA operation. -->
-        </rollback>
-    </changeSet>
+    <!--
+        Changeset 13 (telemetry-001-13): per-store IF-EXISTS grant removed (bead nexus-net63).
+        DML grants for nexus_svc consolidated in grants-nexus-svc.xml (runAlways=true).
+    -->
 
 </databaseChangeLog>

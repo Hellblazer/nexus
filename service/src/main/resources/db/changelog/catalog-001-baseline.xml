@@ -315,28 +315,9 @@ ALTER TABLE nexus.catalog_owners ADD COLUMN IF NOT EXISTS next_seq BIGINT NOT NU
         <rollback>ALTER TABLE nexus.catalog_owners DROP COLUMN IF EXISTS next_seq</rollback>
     </changeSet>
 
-    <!-- ── Changeset 8: grants to nexus_svc ──────────────────────────────── -->
-    <changeSet id="catalog-001-8" author="nexus-gmiaf.18">
-        <comment>Grant table privileges to nexus_svc role (idempotent)</comment>
-        <sql splitStatements="false">
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_owners TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_documents TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_links TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_document_chunks TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_collections TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_meta TO nexus_svc';
-        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.catalog_links_id_seq TO nexus_svc';
-        RAISE NOTICE 'Granted catalog table privileges to nexus_svc';
-    ELSE
-        RAISE NOTICE 'nexus_svc role not found; skipping grants';
-    END IF;
-END
-$$;
-        </sql>
-        <rollback><!-- Grants not rolled back --></rollback>
-    </changeSet>
+    <!--
+        Changeset 8 (catalog-001-8): per-store IF-EXISTS grant removed (bead nexus-net63).
+        DML grants for nexus_svc consolidated in grants-nexus-svc.xml (runAlways=true).
+    -->
 
 </databaseChangeLog>

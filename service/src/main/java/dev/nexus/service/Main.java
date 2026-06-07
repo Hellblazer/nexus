@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.vectors.ChromaRestClient;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.LocalChromaServer;
@@ -18,9 +19,14 @@ import org.slf4j.LoggerFactory;
  *   <li>{@code NX_SERVICE_PORT} — listen port (default 8080)</li>
  *   <li>{@code NX_SERVICE_TOKEN} — bearer token for authentication</li>
  *   <li>{@code NX_DB_URL} — JDBC URL (e.g. {@code jdbc:postgresql://localhost/nexus})</li>
- *   <li>{@code NX_DB_USER} — database user</li>
+ *   <li>{@code NX_DB_USER} — database user (application / DML role)</li>
  *   <li>{@code NX_DB_PASS} — database password</li>
  *   <li>{@code NX_POOL_SIZE} — HikariCP pool size (default 10)</li>
+ *   <li>{@code NX_DB_ADMIN_URL} — optional JDBC URL for schema migration (defaults to
+ *       {@code NX_DB_URL}). Useful when the application role is {@code nexus_svc}
+ *       (NOSUPERUSER NOBYPASSRLS) and a separate schema-owner role runs DDL.</li>
+ *   <li>{@code NX_DB_ADMIN_USER} — optional migration user (defaults to {@code NX_DB_USER})</li>
+ *   <li>{@code NX_DB_ADMIN_PASS} — optional migration password (defaults to {@code NX_DB_PASS})</li>
  * </ul>
  *
  * <p>Vector backend (Seam B, bead nexus-gmiaf.20):
@@ -59,7 +65,31 @@ public final class Main {
         hikari.setPassword(dbPass);
         hikari.setMaximumPoolSize(poolSize);
         hikari.setAutoCommit(true);   // pool default; TenantScope toggles to false per borrow
+        // search_path: set via connectionInitSql (not ALTER ROLE, which requires superuser).
+        // Covers nexus (T2 tables), t1 (T1 scratch), and public for pg_catalog visibility.
+        hikari.setConnectionInitSql("SET search_path TO nexus, t1, public");
         var ds = new HikariDataSource(hikari);
+
+        // ── Schema migration (RDR-152 bead nexus-net63) ───────────────────────
+        // Run Liquibase BEFORE the HTTP server binds so the service never serves
+        // requests against an unmigrated database.  Fail fast on any error so
+        // the process exits non-zero and the supervisor knows not to route traffic.
+        //
+        // When NX_DB_ADMIN_* are set, use a dedicated single-connection migration
+        // pool whose credentials have DDL rights (schema-owner or superuser).
+        // Falls back to NX_DB_* when NX_DB_ADMIN_* are absent, covering dev/test
+        // setups where the application role also owns the schema.
+        var migrationDs = buildMigrationDataSource(dbUrl, dbUser, dbPass);
+        try {
+            SchemaMigrator.migrate(migrationDs);
+        } catch (SchemaMigrator.MigrationException e) {
+            // Close the migration pool BEFORE System.exit: exit does not run finally blocks,
+            // so explicit close here avoids leaking the pool on the error path.
+            migrationDs.close();
+            log.error("event=schema_migration_failed error=\"{}\"", e.getMessage(), e);
+            System.exit(1);
+        }
+        migrationDs.close();
 
         // Vector backend setup (Seam B — optional; only when configured)
         LocalChromaServer localChroma    = null;
@@ -120,6 +150,56 @@ public final class Main {
 
         // Block main thread until shutdown
         Thread.currentThread().join();
+    }
+
+    // ── Migration datasource factory ─────────────────────────────────────────
+
+    /**
+     * Builds a single-connection HikariCP pool for schema migration.
+     *
+     * <p>Uses {@code NX_DB_ADMIN_*} when present, falling back to the supplied
+     * {@code defaultUrl/defaultUser/defaultPass} (the regular application
+     * credentials) for dev/test setups where one role owns both DDL and DML.
+     *
+     * <p><strong>Partial-config guard</strong>: if any one of {@code NX_DB_ADMIN_URL},
+     * {@code NX_DB_ADMIN_USER}, or {@code NX_DB_ADMIN_PASS} is set, all three must be
+     * set. A partial configuration (e.g. ADMIN_USER set but ADMIN_PASS absent) would
+     * silently mix admin and app credentials, producing a cryptic auth error at connect
+     * time instead of a clear startup failure.
+     *
+     * <p>Pool size 1: Liquibase uses a single connection sequentially.
+     */
+    private static HikariDataSource buildMigrationDataSource(String defaultUrl,
+                                                              String defaultUser,
+                                                              String defaultPass) {
+        String adminUrl  = System.getenv("NX_DB_ADMIN_URL");
+        String adminUser = System.getenv("NX_DB_ADMIN_USER");
+        String adminPass = System.getenv("NX_DB_ADMIN_PASS");
+
+        // Partial-config guard: require all-or-nothing.
+        long adminSet = (adminUrl != null ? 1 : 0)
+                      + (adminUser != null ? 1 : 0)
+                      + (adminPass != null ? 1 : 0);
+        if (adminSet > 0 && adminSet < 3) {
+            throw new IllegalStateException(
+                "Partial NX_DB_ADMIN_* configuration detected (" + adminSet + "/3 vars set). " +
+                "Set all of NX_DB_ADMIN_URL, NX_DB_ADMIN_USER, NX_DB_ADMIN_PASS, " +
+                "or none (to fall back to NX_DB_* credentials).");
+        }
+
+        String url  = adminSet == 3 ? adminUrl  : defaultUrl;
+        String user = adminSet == 3 ? adminUser : defaultUser;
+        String pass = adminSet == 3 ? adminPass : defaultPass;
+
+        var cfg = new HikariConfig();
+        cfg.setJdbcUrl(url);
+        cfg.setUsername(user);
+        cfg.setPassword(pass);
+        cfg.setMaximumPoolSize(1);
+        cfg.setMinimumIdle(1);
+        cfg.setConnectionTimeout(30_000);
+        cfg.setPoolName("nexus-migration");
+        return new HikariDataSource(cfg);
     }
 
     // ── Vector backend factories ──────────────────────────────────────────────

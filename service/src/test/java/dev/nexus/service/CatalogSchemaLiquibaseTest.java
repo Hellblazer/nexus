@@ -26,6 +26,17 @@ class CatalogSchemaLiquibaseTest {
         try (var pg = EmbeddedPostgres.builder().start();
              Connection su = pg.getPostgresDatabase().getConnection()) {
 
+            // The consolidated grants-nexus-svc.xml changeset (runAlways=true, nexus-net63)
+            // requires nexus_svc to exist — it fails loud when the role is missing.
+            // Create it here as the DBA bootstrap would in production.
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "DO $$ BEGIN " +
+                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
+                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
+                "  END IF; " +
+                "END $$");
+
             // Apply full master changelog (includes catalog-001-baseline.xml)
             var lb = new Liquibase(
                 "db/changelog/db.changelog-master.xml",
@@ -38,6 +49,15 @@ class CatalogSchemaLiquibaseTest {
         // Re-open a fresh connection after changelog committed to verify schema
         try (var pg = EmbeddedPostgres.builder().start();
              Connection su = pg.getPostgresDatabase().getConnection()) {
+
+            // Create nexus_svc for the grants changeset (runAlways=true).
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "DO $$ BEGIN " +
+                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
+                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
+                "  END IF; " +
+                "END $$");
 
             // Apply
             var lb = new Liquibase(

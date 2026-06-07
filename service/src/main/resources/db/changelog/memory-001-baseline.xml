@@ -154,35 +154,13 @@ CREATE INDEX idx_memory_fts ON nexus.memory USING GIN (fts_vector);
         </rollback>
     </changeSet>
 
-    <!-- ── Changeset 5: service role grants ─────────────────────────────────── -->
-    <changeSet id="memory-001-5" author="nexus-gmiaf.5">
-        <comment>
-            Grant table privileges to nexus_svc role.
-            The nexus_svc LOGIN role is created outside Liquibase (DBA bootstrap
-            or test @BeforeAll) so Liquibase does not require CREATEROLE privilege.
-            This changeset is idempotent: IF EXISTS guards on the conditional
-            GRANT make it safe to run even if the role does not exist yet, in
-            which case the DO block logs a notice and skips gracefully.
-            The test overrides this with svc_memory_test for hermetic isolation.
-        </comment>
-        <sql splitStatements="false">
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
-        EXECUTE 'GRANT USAGE ON SCHEMA nexus TO nexus_svc';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.memory TO nexus_svc';
-        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.memory_id_seq TO nexus_svc';
-        EXECUTE 'ALTER ROLE nexus_svc SET search_path TO nexus, public';
-        RAISE NOTICE 'Granted nexus.memory privileges to nexus_svc';
-    ELSE
-        RAISE NOTICE 'nexus_svc role not found; skipping grants (create role before first run)';
-    END IF;
-END
-$$;
-        </sql>
-        <rollback>
-            <!-- Grants are not rolled back; role removal is a DBA operation. -->
-        </rollback>
-    </changeSet>
+    <!--
+        Changeset 5 (memory-001-5): per-store IF-EXISTS grant removed (bead nexus-net63).
+        DML grants for nexus_svc are now consolidated in grants-nexus-svc.xml with
+        runAlways="true" so late-created roles are provisioned on restart and no silent
+        skip can leave nexus_svc without table access.  ALTER ROLE ... SET search_path
+        removed: requires superuser/CREATEROLE; search_path is now set via HikariCP
+        connectionInitSql on the application pool at startup.
+    -->
 
 </databaseChangeLog>

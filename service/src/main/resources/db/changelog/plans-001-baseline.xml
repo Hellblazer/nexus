@@ -164,31 +164,9 @@ CREATE INDEX idx_plans_fts ON nexus.plans USING GIN (fts_vector);
         </rollback>
     </changeSet>
 
-    <!-- ── Changeset 4: service role grants ─────────────────────────────────── -->
-    <changeSet id="plans-001-4" author="nexus-gmiaf.11">
-        <comment>
-            Grant table privileges to nexus_svc role.
-            The nexus_svc LOGIN role is created outside Liquibase (DBA bootstrap
-            or test @BeforeAll) so Liquibase does not require CREATEROLE privilege.
-            This changeset is idempotent: IF EXISTS guards on the conditional
-            GRANT make it safe to run even if the role does not exist yet.
-        </comment>
-        <sql splitStatements="false">
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.plans TO nexus_svc';
-        EXECUTE 'GRANT USAGE ON SEQUENCE nexus.plans_id_seq TO nexus_svc';
-        RAISE NOTICE 'Granted nexus.plans privileges to nexus_svc';
-    ELSE
-        RAISE NOTICE 'nexus_svc role not found; skipping grants (create role before first run)';
-    END IF;
-END
-$$;
-        </sql>
-        <rollback>
-            <!-- Grants are not rolled back; role removal is a DBA operation. -->
-        </rollback>
-    </changeSet>
+    <!--
+        Changeset 4 (plans-001-4): per-store IF-EXISTS grant removed (bead nexus-net63).
+        DML grants for nexus_svc consolidated in grants-nexus-svc.xml (runAlways=true).
+    -->
 
 </databaseChangeLog>
