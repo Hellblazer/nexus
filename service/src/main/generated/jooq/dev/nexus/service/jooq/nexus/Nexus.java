@@ -5,6 +5,17 @@ package dev.nexus.service.jooq.nexus;
 
 
 import dev.nexus.service.jooq.DefaultCatalog;
+import dev.nexus.service.jooq.nexus.tables.AspectExtractionQueue;
+import dev.nexus.service.jooq.nexus.tables.AspectPromotionLog;
+import dev.nexus.service.jooq.nexus.tables.CatalogCollections;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocumentChunks;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocuments;
+import dev.nexus.service.jooq.nexus.tables.CatalogLinks;
+import dev.nexus.service.jooq.nexus.tables.CatalogMeta;
+import dev.nexus.service.jooq.nexus.tables.CatalogOwners;
+import dev.nexus.service.jooq.nexus.tables.ChashIndex;
+import dev.nexus.service.jooq.nexus.tables.DocumentAspects;
+import dev.nexus.service.jooq.nexus.tables.DocumentHighlights;
 import dev.nexus.service.jooq.nexus.tables.Frecency;
 import dev.nexus.service.jooq.nexus.tables.HookFailures;
 import dev.nexus.service.jooq.nexus.tables.Memory;
@@ -39,6 +50,61 @@ public class Nexus extends SchemaImpl {
      * The reference instance of <code>nexus</code>
      */
     public static final Nexus NEXUS = new Nexus();
+
+    /**
+     * The table <code>nexus.aspect_extraction_queue</code>.
+     */
+    public final AspectExtractionQueue ASPECT_EXTRACTION_QUEUE = AspectExtractionQueue.ASPECT_EXTRACTION_QUEUE;
+
+    /**
+     * The table <code>nexus.aspect_promotion_log</code>.
+     */
+    public final AspectPromotionLog ASPECT_PROMOTION_LOG = AspectPromotionLog.ASPECT_PROMOTION_LOG;
+
+    /**
+     * The table <code>nexus.catalog_collections</code>.
+     */
+    public final CatalogCollections CATALOG_COLLECTIONS = CatalogCollections.CATALOG_COLLECTIONS;
+
+    /**
+     * The table <code>nexus.catalog_document_chunks</code>.
+     */
+    public final CatalogDocumentChunks CATALOG_DOCUMENT_CHUNKS = CatalogDocumentChunks.CATALOG_DOCUMENT_CHUNKS;
+
+    /**
+     * The table <code>nexus.catalog_documents</code>.
+     */
+    public final CatalogDocuments CATALOG_DOCUMENTS = CatalogDocuments.CATALOG_DOCUMENTS;
+
+    /**
+     * The table <code>nexus.catalog_links</code>.
+     */
+    public final CatalogLinks CATALOG_LINKS = CatalogLinks.CATALOG_LINKS;
+
+    /**
+     * The table <code>nexus.catalog_meta</code>.
+     */
+    public final CatalogMeta CATALOG_META = CatalogMeta.CATALOG_META;
+
+    /**
+     * The table <code>nexus.catalog_owners</code>.
+     */
+    public final CatalogOwners CATALOG_OWNERS = CatalogOwners.CATALOG_OWNERS;
+
+    /**
+     * The table <code>nexus.chash_index</code>.
+     */
+    public final ChashIndex CHASH_INDEX = ChashIndex.CHASH_INDEX;
+
+    /**
+     * The table <code>nexus.document_aspects</code>.
+     */
+    public final DocumentAspects DOCUMENT_ASPECTS = DocumentAspects.DOCUMENT_ASPECTS;
+
+    /**
+     * The table <code>nexus.document_highlights</code>.
+     */
+    public final DocumentHighlights DOCUMENT_HIGHLIGHTS = DocumentHighlights.DOCUMENT_HIGHLIGHTS;
 
     /**
      * The table <code>nexus.frecency</code>.
@@ -116,6 +182,17 @@ public class Nexus extends SchemaImpl {
     @Override
     public final List<Table<?>> getTables() {
         return Arrays.asList(
+            AspectExtractionQueue.ASPECT_EXTRACTION_QUEUE,
+            AspectPromotionLog.ASPECT_PROMOTION_LOG,
+            CatalogCollections.CATALOG_COLLECTIONS,
+            CatalogDocumentChunks.CATALOG_DOCUMENT_CHUNKS,
+            CatalogDocuments.CATALOG_DOCUMENTS,
+            CatalogLinks.CATALOG_LINKS,
+            CatalogMeta.CATALOG_META,
+            CatalogOwners.CATALOG_OWNERS,
+            ChashIndex.CHASH_INDEX,
+            DocumentAspects.DOCUMENT_ASPECTS,
+            DocumentHighlights.DOCUMENT_HIGHLIGHTS,
             Frecency.FRECENCY,
             HookFailures.HOOK_FAILURES,
             Memory.MEMORY,

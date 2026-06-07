@@ -7,6 +7,7 @@ package dev.nexus.service.jooq.nexus.tables;
 import dev.nexus.service.jooq.nexus.Indexes;
 import dev.nexus.service.jooq.nexus.Keys;
 import dev.nexus.service.jooq.nexus.Nexus;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocuments.CatalogDocumentsPath;
 import dev.nexus.service.jooq.nexus.tables.TopicAssignments.TopicAssignmentsPath;
 import dev.nexus.service.jooq.nexus.tables.TopicLinks.TopicLinksPath;
 import dev.nexus.service.jooq.nexus.tables.Topics.TopicsPath;
@@ -248,6 +249,14 @@ public class Topics extends TableImpl<TopicsRecord> {
             _topicLinksToTopicIdFkey = new TopicLinksPath(this, null, Keys.TOPIC_LINKS__TOPIC_LINKS_TO_TOPIC_ID_FKEY.getInverseKey());
 
         return _topicLinksToTopicIdFkey;
+    }
+
+    /**
+     * Get the implicit many-to-many join path to the
+     * <code>nexus.catalog_documents</code> table
+     */
+    public CatalogDocumentsPath catalogDocuments() {
+        return topicAssignments().catalogDocuments();
     }
 
     @Override
