@@ -57,6 +57,7 @@ from nexus.commands.plan import plan as plan_group
 from nexus.commands.rdr import rdr as rdr_group
 from nexus.commands.scratch import scratch
 from nexus.commands.search_cmd import search_cmd
+from nexus.commands.storage_cmd import storage_group
 from nexus.commands.store import store
 from nexus.commands.t3 import t3 as t3_group
 from nexus.commands.taxonomy_cmd import taxonomy
@@ -109,6 +110,7 @@ main.add_command(plan_group, name="plan")
 main.add_command(rdr_group, name="rdr")
 main.add_command(scratch)
 main.add_command(search_cmd, name="search")
+main.add_command(storage_group, name="storage")
 main.add_command(store)
 main.add_command(t3_group, name="t3")
 main.add_command(taxonomy)

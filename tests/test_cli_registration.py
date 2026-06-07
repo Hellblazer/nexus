@@ -39,6 +39,7 @@ def test_all_command_modules_registered():
         "hook": "hook",
         "mineru": "mineru",
         "search_cmd": "search",
+        "storage_cmd": "storage",
         "taxonomy_cmd": "taxonomy",
         "tier_status": "tier-status",
     }
