@@ -5,6 +5,7 @@ package dev.nexus.service.jooq;
 
 
 import dev.nexus.service.jooq.tables.Memory;
+import dev.nexus.service.jooq.tables.Plans;
 
 import org.jooq.Index;
 import org.jooq.OrderField;
@@ -27,4 +28,11 @@ public class Indexes {
     public static final Index IDX_MEMORY_TENANT_PROJECT = Internal.createIndex(DSL.name("idx_memory_tenant_project"), Memory.MEMORY, new OrderField[] { Memory.MEMORY.TENANT_ID, Memory.MEMORY.PROJECT }, false);
     public static final Index IDX_MEMORY_TENANT_TIMESTAMP = Internal.createIndex(DSL.name("idx_memory_tenant_timestamp"), Memory.MEMORY, new OrderField[] { Memory.MEMORY.TENANT_ID, Memory.MEMORY.TIMESTAMP.desc() }, false);
     public static final Index IDX_MEMORY_TENANT_TTL_TIMESTAMP = Internal.createIndex(DSL.name("idx_memory_tenant_ttl_timestamp"), Memory.MEMORY, new OrderField[] { Memory.MEMORY.TENANT_ID, Memory.MEMORY.TTL, Memory.MEMORY.TIMESTAMP }, false);
+    public static final Index IDX_PLANS_FTS = Internal.createIndex(DSL.name("idx_plans_fts"), Plans.PLANS, new OrderField[] { Plans.PLANS.FTS_VECTOR }, false);
+    public static final Index IDX_PLANS_TENANT_CREATED_AT = Internal.createIndex(DSL.name("idx_plans_tenant_created_at"), Plans.PLANS, new OrderField[] { Plans.PLANS.TENANT_ID, Plans.PLANS.CREATED_AT.desc() }, false);
+    public static final Index IDX_PLANS_TENANT_DIMENSIONS = Internal.createIndex(DSL.name("idx_plans_tenant_dimensions"), Plans.PLANS, new OrderField[] { Plans.PLANS.TENANT_ID, Plans.PLANS.PROJECT, Plans.PLANS.DIMENSIONS }, true);
+    public static final Index IDX_PLANS_TENANT_DISABLED_AT = Internal.createIndex(DSL.name("idx_plans_tenant_disabled_at"), Plans.PLANS, new OrderField[] { Plans.PLANS.TENANT_ID, Plans.PLANS.DISABLED_AT }, false);
+    public static final Index IDX_PLANS_TENANT_OUTCOME = Internal.createIndex(DSL.name("idx_plans_tenant_outcome"), Plans.PLANS, new OrderField[] { Plans.PLANS.TENANT_ID, Plans.PLANS.OUTCOME }, false);
+    public static final Index IDX_PLANS_TENANT_PROJECT = Internal.createIndex(DSL.name("idx_plans_tenant_project"), Plans.PLANS, new OrderField[] { Plans.PLANS.TENANT_ID, Plans.PLANS.PROJECT }, false);
+    public static final Index IDX_PLANS_TENANT_VERB = Internal.createIndex(DSL.name("idx_plans_tenant_verb"), Plans.PLANS, new OrderField[] { Plans.PLANS.TENANT_ID, Plans.PLANS.VERB }, false);
 }

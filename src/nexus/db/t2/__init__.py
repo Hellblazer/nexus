@@ -429,7 +429,14 @@ class T2Database:
             self.memory: MemoryStore = HttpMemoryStore()  # type: ignore[assignment]
         else:
             self.memory: MemoryStore = MemoryStore(path)
-        self.plans: PlanLibrary = PlanLibrary(path)
+
+        # RDR-152 nexus-gmiaf.11: plans service seam.
+        # NX_STORAGE_BACKEND_PLANS=service routes to the Java HTTP plans endpoint.
+        if storage_backend_for("plans") == StorageBackend.SERVICE:
+            from nexus.db.t2.http_plan_library import HttpPlanLibrary
+            self.plans: PlanLibrary = HttpPlanLibrary()  # type: ignore[assignment]
+        else:
+            self.plans: PlanLibrary = PlanLibrary(path)
         # CatalogTaxonomy takes a MemoryStore reference for the
         # get_topic_docs JOIN (RDR-063 §Cross-Domain Contracts).
         self.taxonomy: CatalogTaxonomy = CatalogTaxonomy(path, self.memory)

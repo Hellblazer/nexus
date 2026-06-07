@@ -412,3 +412,82 @@ Note: the query passed to `plainto_tsquery` must use the same `'english'` or
 `'simple'` config as the indexed column being searched. Mixing configs (e.g.
 `plainto_tsquery('english', ...)` against a `'simple'`-indexed column) produces
 zero matches.
+
+---
+
+## AMENDMENT-OPTION-B: Superset Criterion (2026-06-07)
+
+**Decision:** OPTION B - Intentional upgrade. Recorded in T2 memory `152-FTS-tokenizer-DECISION`.
+**Applies to:** Store 2 (plans_fts) and Store 1 (memory_fts). Committed on branch
+`feature/nexus-gmiaf.11-plans-migration`, bead `nexus-gmiaf.11`.
+
+### Background: the tokenizer mismatch
+
+The `.11` parity harness exposed a latent within-PG config mismatch:
+
+- `plans.fts_vector` stores tags via `to_tsvector('simple', tags)` (no stemming).
+- The original `PlanRepository.searchPlans` used `plainto_tsquery('english', query)`
+  exclusively. English stemming converts "indexing" to lexeme "index", which does NOT
+  match the simple-tokenized lexeme "indexing" stored in the B-weight tag sub-vector.
+- Result: FTS5 unicode61 (which does NOT stem) matched "indexing" tags correctly;
+  PG did NOT match them (sqlite_set ⊄ pg_set). The original locked contract's
+  set-equality criterion correctly flagged this as a failure.
+
+The same latent bug exists in `MemoryRepository.search`, `searchGlob`, `searchByTag`.
+
+### Fix (applied in this bead)
+
+Both `PlanRepository` and `MemoryRepository` now use an OR'd tsquery:
+
+```sql
+fts_vector @@ (plainto_tsquery('english', ?) || plainto_tsquery('simple', ?))
+```
+
+The same OR'd tsquery is used for `ts_rank` scoring. jOOQ `{0}` double-binding
+expands the single bind parameter to two identical values.
+
+**Effect:** PG now matches via EITHER English-stemmed prose OR simple exact-identifier
+tokens. English-stemming gives PG BETTER recall than FTS5 unicode61 on prose columns
+(e.g. "index" matches "indexing" AND "indexed" AND "indexes" via stemming). Tag columns
+match exactly (simple), consistent with FTS5 unicode61 on the same tokens.
+
+### Amended parity criterion for stores 1 and 2
+
+The locked §Parity Definition above defined **set equality** (exact). This amendment
+REPLACES that criterion for stores 1 and 2 ONLY with the following:
+
+1. **SUPERSET criterion** (replaces exact set equality):
+   `set(sqlite_ids) ⊆ set(pg_ids)` per probe.
+   - Every FTS5 result MUST appear in PG results.
+   - PG MAY return additional results (from English stemming on prose columns).
+     These are an intentional search-quality upgrade over FTS5 unicode61 and are
+     NOT a parity failure.
+
+2. **Spearman rho >= 0.90 over the COMMON SUBSET** (replaces full-set Spearman):
+   - Filter PG results to only those IDs present in the SQLite set (the FTS5 result
+     set), preserving PG rank order.
+   - Compute Spearman rho comparing this filtered PG ordering against the SQLite
+     canonical ordering.
+   - The common-subset Spearman measures whether the FTS5 results appear in the same
+     relative order within PG results -- the relevant quality signal.
+   - Skipped when common-subset K < 2.
+
+3. **Vacuity guard** (unchanged): at least one probe returns non-empty on BOTH engines.
+
+The §Escalation Path (Spearman floor never silently lowered, PR sign-off required) is
+unchanged and applies to the amended criterion.
+
+### Why superset not exact equality
+
+FTS5 `unicode61` tokenizer: no stemming. An FTS5 probe of "indexing" matches stored
+text "indexing" exactly. PG English-tsquery probe "indexing" produces lexeme "index"
+(stemmed), which matches: "index", "indexing", "indexed", "indexes" in the A-weight
+prose sub-vector, AND is now paired with a simple-tsquery probe that matches "indexing"
+exactly in the B-weight tag sub-vector. Net result: PG ⊇ FTS5. The additional PG hits
+are improvements, not regressions.
+
+Store 3 (documents_fts) and Store 4 (taxonomy) are unaffected by this amendment.
+Store 3 uses `plainto_tsquery('english', ?)` against only prose columns (title,
+author, corpus, file_path use `'simple'` but that store has no standalone tag
+sub-vector matching prose queries). The original exact set-equality criterion
+remains correct for Store 3.

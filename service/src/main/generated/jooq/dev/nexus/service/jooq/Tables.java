@@ -5,6 +5,7 @@ package dev.nexus.service.jooq;
 
 
 import dev.nexus.service.jooq.tables.Memory;
+import dev.nexus.service.jooq.tables.Plans;
 
 
 /**
@@ -17,4 +18,9 @@ public class Tables {
      * The table <code>nexus.memory</code>.
      */
     public static final Memory MEMORY = Memory.MEMORY;
+
+    /**
+     * The table <code>nexus.plans</code>.
+     */
+    public static final Plans PLANS = Plans.PLANS;
 }
