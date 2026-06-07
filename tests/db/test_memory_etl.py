@@ -4,7 +4,8 @@
 Two test levels:
 
 Unit tests (fast, no service):
-  - Row transform logic (field mapping, last_accessed '' -> None, id not copied)
+  - Row transform logic (field mapping, last_accessed '' -> None, id not copied,
+    timestamp/access_count copied verbatim)
   - Idempotency invariants at the transform level
   - Copy-not-move: SQLite source is read-only
 
@@ -14,6 +15,9 @@ Integration tests (@pytest.mark.integration):
   - Copy-not-move (SQLite unchanged after ETL)
   - Tenant stamping (all rows have tenant_id=DEFAULT_TENANT)
   - Field mapping round-trip (tags='', last_accessed='', session, access_count>0)
+  - Fidelity: timestamp/access_count preserved verbatim (not reset to now()/0)
+  - Content-change idempotency: source content change propagates on re-run;
+    timestamp still matches source (not migration-time)
 """
 from __future__ import annotations
 
@@ -105,12 +109,11 @@ class TestRowTransform:
         result = _transform_row(row)
         assert result["tags"] == "alpha,beta"
 
-    def test_access_count_not_in_transform_output(self):
-        """access_count is NOT in _transform_row output — put() does not accept it.
+    def test_access_count_in_transform_output(self):
+        """access_count IS in _transform_row output (import_entry requires it).
 
-        The service manages access_count server-side.  The ETL reads
-        access_count from SQLite but does not pass it to put(), so it must
-        not appear in the transformed dict.
+        The fidelity-preserving import path sends access_count verbatim to
+        POST /v1/memory/import so the source value is preserved, not reset to 0.
         """
         from nexus.db.t2.memory_etl import _transform_row
 
@@ -121,9 +124,24 @@ class TestRowTransform:
             "access_count": 7, "last_accessed": "2026-06-03T10:00:00Z",
         }
         result = _transform_row(row)
-        # access_count is server-managed; put() has no such parameter.
-        # The ETL cannot carry it through the HTTP seam.
-        assert "access_count" not in result
+        # access_count must be present and equal the source value
+        assert "access_count" in result
+        assert result["access_count"] == 7
+
+    def test_timestamp_in_transform_output(self):
+        """timestamp IS in _transform_row output (import_entry carries it verbatim)."""
+        from nexus.db.t2.memory_etl import _transform_row
+
+        src_ts = "2026-05-15T08:30:00Z"
+        row = {
+            "id": 1, "project": "p", "title": "t", "content": "c",
+            "tags": "", "session": None, "agent": None,
+            "timestamp": src_ts, "ttl": 30,
+            "access_count": 3, "last_accessed": "",
+        }
+        result = _transform_row(row)
+        assert "timestamp" in result
+        assert result["timestamp"] == src_ts
 
     def test_session_preserved(self):
         """session value is carried through to the payload."""
@@ -139,7 +157,7 @@ class TestRowTransform:
         assert result["session"] == "my-session-id"
 
     def test_tenant_id_not_in_put_payload(self):
-        """tenant_id is NOT in the put payload; the service stamps it via X-Nexus-Tenant."""
+        """tenant_id is NOT in the import payload; the service stamps it via X-Nexus-Tenant."""
         from nexus.db.t2.memory_etl import _transform_row
 
         row = {
@@ -149,12 +167,12 @@ class TestRowTransform:
             "access_count": 0, "last_accessed": "",
         }
         result = _transform_row(row)
-        # tenant_id is NOT part of the HttpMemoryStore.put() signature;
+        # tenant_id is NOT part of the HttpMemoryStore.import_entry() signature;
         # the service stamps it from X-Nexus-Tenant header.
         assert "tenant_id" not in result
 
     def test_required_fields_present(self):
-        """All required HttpMemoryStore.put() fields must be in the payload."""
+        """All required HttpMemoryStore.import_entry() fields must be in the payload."""
         from nexus.db.t2.memory_etl import _transform_row
 
         row = {
@@ -164,8 +182,9 @@ class TestRowTransform:
             "access_count": 3, "last_accessed": "",
         }
         result = _transform_row(row)
-        # These map to HttpMemoryStore.put() kwargs
-        for field in ("project", "title", "content", "tags", "ttl", "session", "agent"):
+        # These map to HttpMemoryStore.import_entry() kwargs
+        for field in ("project", "title", "content", "tags", "ttl", "session", "agent",
+                      "timestamp", "access_count"):
             assert field in result, f"missing field: {field}"
 
 
@@ -214,8 +233,8 @@ class TestMigrateMemoryMocked:
         conn.close()
         return db_path
 
-    def test_migrate_calls_put_for_each_row(self, tmp_path):
-        """migrate_memory_rows calls store.put for each SQLite row."""
+    def test_migrate_calls_import_entry_for_each_row(self, tmp_path):
+        """migrate_memory_rows calls store.import_entry for each SQLite row."""
         from nexus.db.t2.memory_etl import migrate_memory_rows
 
         db_path = self._make_sqlite_db([
@@ -224,12 +243,12 @@ class TestMigrateMemoryMocked:
             {"project": "p3", "title": "t3", "content": "c3"},
         ])
         mock_store = MagicMock()
-        mock_store.put.return_value = 1
+        mock_store.import_entry.return_value = 1
 
         result = migrate_memory_rows(db_path, mock_store)
         assert result["read"] == 3
         assert result["written"] == 3
-        assert mock_store.put.call_count == 3
+        assert mock_store.import_entry.call_count == 3
 
     def test_source_sqlite_unchanged(self, tmp_path):
         """SQLite source rows must be untouched after ETL (copy-not-move)."""
@@ -242,7 +261,7 @@ class TestMigrateMemoryMocked:
         db_path = self._make_sqlite_db(rows)
 
         mock_store = MagicMock()
-        mock_store.put.return_value = 1
+        mock_store.import_entry.return_value = 1
 
         migrate_memory_rows(db_path, mock_store)
 
@@ -253,7 +272,7 @@ class TestMigrateMemoryMocked:
         assert count == 2, "SQLite source must retain all rows after ETL"
 
     def test_idempotency_via_mock(self, tmp_path):
-        """Running ETL twice calls put twice per row (idempotency is upsert on server)."""
+        """Running ETL twice calls import_entry twice per row (idempotency is upsert on server)."""
         from nexus.db.t2.memory_etl import migrate_memory_rows
 
         db_path = self._make_sqlite_db([
@@ -261,15 +280,15 @@ class TestMigrateMemoryMocked:
             {"project": "p", "title": "t2", "content": "c2"},
         ])
         mock_store = MagicMock()
-        mock_store.put.return_value = 1
+        mock_store.import_entry.return_value = 1
 
         r1 = migrate_memory_rows(db_path, mock_store)
         r2 = migrate_memory_rows(db_path, mock_store)
 
         assert r1["read"] == 2
         assert r2["read"] == 2
-        # put called 2x each run = 4 total
-        assert mock_store.put.call_count == 4
+        # import_entry called 2x each run = 4 total
+        assert mock_store.import_entry.call_count == 4
 
     def test_field_mapping_last_accessed_empty(self, tmp_path):
         """last_accessed='' in SQLite transforms to None (PG TIMESTAMPTZ nullable)."""
@@ -285,28 +304,47 @@ class TestMigrateMemoryMocked:
         assert result.get("last_accessed") is None
 
     def test_field_mapping_id_not_passed(self, tmp_path):
-        """SQLite id must NOT appear in the put() call."""
+        """SQLite id must NOT appear in the import_entry() call."""
         from nexus.db.t2.memory_etl import migrate_memory_rows
 
         db_path = self._make_sqlite_db([
             {"project": "p", "title": "t", "content": "c"},
         ])
         mock_store = MagicMock()
-        mock_store.put.return_value = 99
+        mock_store.import_entry.return_value = 99
 
         migrate_memory_rows(db_path, mock_store)
 
         # Inspect call args: id must not appear in kwargs or positional args
-        assert mock_store.put.call_count == 1
-        call_args = mock_store.put.call_args
-        kwargs = call_args[1] if call_args else {}
-        args = call_args[0] if call_args else ()
+        assert mock_store.import_entry.call_count == 1
+        call_args = mock_store.import_entry.call_args
+        kwargs = call_args.kwargs if call_args else {}
+        args = call_args.args if call_args else ()
         assert "id" not in kwargs
-        # The SQLite row id=1 must not be positionally passed as project/title/content/...
-        # Check the positional args match the expected put() signature:
-        # put(project, title, content, tags, ttl, agent, session)
-        # None of these should be "1" (the sqlite id)
+        # The SQLite row id=1 must not be positionally passed
         assert 1 not in args
+
+    def test_import_entry_receives_timestamp(self, tmp_path):
+        """import_entry must be called with the source timestamp (not absent)."""
+        from nexus.db.t2.memory_etl import migrate_memory_rows
+
+        src_ts = "2026-05-15T08:30:00Z"
+        db_path = self._make_sqlite_db([
+            {"project": "p", "title": "t", "content": "c", "timestamp": src_ts, "access_count": 5},
+        ])
+        mock_store = MagicMock()
+        mock_store.import_entry.return_value = 1
+
+        migrate_memory_rows(db_path, mock_store)
+
+        call_args = mock_store.import_entry.call_args
+        kwargs = call_args.kwargs if call_args else {}
+        assert kwargs.get("timestamp") == src_ts, (
+            f"import_entry must receive source timestamp={src_ts!r}, got {kwargs.get('timestamp')!r}"
+        )
+        assert kwargs.get("access_count") == 5, (
+            f"import_entry must receive source access_count=5, got {kwargs.get('access_count')!r}"
+        )
 
     def test_returns_counts(self, tmp_path):
         """migrate_memory_rows returns {read, written} counts."""
@@ -317,7 +355,7 @@ class TestMigrateMemoryMocked:
             {"project": "p", "title": "t2", "content": "c"},
         ])
         mock_store = MagicMock()
-        mock_store.put.return_value = 1
+        mock_store.import_entry.return_value = 1
 
         result = migrate_memory_rows(db_path, mock_store)
         assert "read" in result
@@ -335,7 +373,7 @@ class TestMigrateMemoryMocked:
         result = migrate_memory_rows(db_path, mock_store)
         assert result["read"] == 0
         assert result["written"] == 0
-        mock_store.put.assert_not_called()
+        mock_store.import_entry.assert_not_called()
 
 
 # ── Integration tests: real service + hermetic Postgres ───────────────────────
@@ -676,6 +714,125 @@ class TestMemoryEtlIntegration:
         )
         assert entry["content"] == "tenant stamp test"
 
+    def test_field_mapping_timestamp_preserved(self, etl_store):
+        """FIDELITY: migrated PG row timestamp EQUALS source SQLite timestamp (not migration-time).
+
+        This is the core fidelity guarantee: the ETL uses POST /v1/memory/import (not /put),
+        which writes timestamp verbatim via EXCLUDED.timestamp in the ON CONFLICT clause.
+        A store.put() path would have reset timestamp=now() and this test would fail.
+        """
+        from nexus.db.t2.memory_etl import migrate_memory_rows
+
+        src_timestamp = "2026-05-15T08:30:00Z"
+        rows = [
+            {
+                "project": "etl-fidelity",
+                "title": "fidelity-ts",
+                "content": "fidelity timestamp test",
+                "timestamp": src_timestamp,
+                "access_count": 4,
+                "last_accessed": "",
+            }
+        ]
+        db_path = _make_source_db(rows)
+
+        migrate_memory_rows(db_path, etl_store)
+
+        # Use list (not get) to read back timestamp without triggering access tracking
+        entries = etl_store.get_all("etl-fidelity")
+        match = next((e for e in entries if e.get("title") == "fidelity-ts"), None)
+        assert match is not None, "fidelity-ts row not found after ETL"
+        assert match["timestamp"] == src_timestamp, (
+            f"timestamp must be source value {src_timestamp!r}, got {match.get('timestamp')!r}. "
+            "This means the ETL reset timestamp to migration-time (used /put instead of /import)."
+        )
+
+    def test_field_mapping_access_count_preserved(self, etl_store):
+        """FIDELITY: access_count is copied verbatim from source (not reset to 0)."""
+        from nexus.db.t2.memory_etl import migrate_memory_rows
+
+        rows = [
+            {
+                "project": "etl-fidelity2",
+                "title": "fidelity-ac",
+                "content": "access count test",
+                "timestamp": "2026-05-20T10:00:00Z",
+                "access_count": 9,
+                "last_accessed": "2026-05-21T08:00:00Z",
+            }
+        ]
+        db_path = _make_source_db(rows)
+
+        migrate_memory_rows(db_path, etl_store)
+
+        entries = etl_store.get_all("etl-fidelity2")
+        match = next((e for e in entries if e.get("title") == "fidelity-ac"), None)
+        assert match is not None, "fidelity-ac row not found after ETL"
+        # access_count must be >= 9 (the source value); get_all may increment it
+        assert match.get("access_count", 0) >= 9, (
+            f"access_count must be >= source value 9, got {match.get('access_count')!r}. "
+            "This means the ETL reset access_count to 0 (used /put instead of /import)."
+        )
+
+    def test_content_change_idempotency(self, etl_store):
+        """FIDELITY: after source content change + re-ETL, PG content updated,
+        row count unchanged, and timestamp still equals source timestamp (not now()).
+
+        This validates the EXCLUDED.* semantics in the ON CONFLICT clause: content
+        propagates; timestamp comes from EXCLUDED (source), not now().
+        """
+        from nexus.db.t2.memory_etl import migrate_memory_rows
+
+        src_timestamp = "2026-03-10T12:00:00Z"
+        K = 3
+        rows = [
+            {
+                "project": "etl-mut",
+                "title": f"mut-{i}",
+                "content": f"v1 content {i}",
+                "timestamp": src_timestamp,
+                "access_count": 2,
+            }
+            for i in range(K)
+        ]
+        db_path = _make_source_db(rows)
+
+        # First ETL run
+        r1 = migrate_memory_rows(db_path, etl_store)
+        assert r1["read"] == K
+
+        # Mutate source content for one row
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE memory SET content=? WHERE title=?",
+            ("v2 mutated content 1", "mut-1"),
+        )
+        conn.commit()
+        conn.close()
+
+        # Second ETL run
+        r2 = migrate_memory_rows(db_path, etl_store)
+        assert r2["read"] == K
+
+        # Row count must still be K (no duplication)
+        entries = etl_store.get_all("etl-mut")
+        assert len(entries) == K, (
+            f"Expected {K} rows after content-change re-run, got {len(entries)}"
+        )
+
+        # Mutated row must reflect new content
+        mutated = next((e for e in entries if e.get("title") == "mut-1"), None)
+        assert mutated is not None
+        assert mutated["content"] == "v2 mutated content 1", (
+            f"Content change did not propagate on re-run; got {mutated.get('content')!r}"
+        )
+
+        # Timestamp must still be source timestamp (NOT migration-time)
+        assert mutated["timestamp"] == src_timestamp, (
+            f"timestamp must be source value {src_timestamp!r} after re-run, "
+            f"got {mutated.get('timestamp')!r}"
+        )
+
     def test_field_mapping_round_trip(self, etl_store):
         """Full field-mapping round-trip: tags='', last_accessed='', session, access_count>0."""
         from nexus.db.t2.memory_etl import migrate_memory_rows
@@ -711,8 +868,7 @@ class TestMemoryEtlIntegration:
         # We verify it is either '' (if access tracking were disabled) or a
         # valid UTC timestamp string.
         last_acc = entry.get("last_accessed", "")
-        import re as _re
-        assert last_acc == "" or _re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", last_acc), (
+        assert last_acc == "" or re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", last_acc), (
             f"last_accessed must be '' or UTC ISO-Z, got: {last_acc!r}"
         )
 

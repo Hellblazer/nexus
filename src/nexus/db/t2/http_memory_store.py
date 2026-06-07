@@ -172,6 +172,69 @@ class HttpMemoryStore:
         resp = self._post("/v1/memory/put", payload)
         return int(resp["id"])
 
+    def import_entry(
+        self,
+        project: str,
+        title: str,
+        content: str,
+        timestamp: str,
+        tags: str = "",
+        ttl: int | None = None,
+        agent: str | None = None,
+        session: str | None = None,
+        access_count: int = 0,
+        last_accessed: str | None = None,
+    ) -> int:
+        """Fidelity-preserving ETL import (bead nexus-gmiaf.8, RDR-152 P1.8).
+
+        Unlike :meth:`put` (which routes through ``/v1/memory/put`` and
+        lets the Java service stamp ``timestamp=now()``), this method calls
+        ``POST /v1/memory/import`` which writes ``timestamp``,
+        ``access_count``, and ``last_accessed`` **verbatim** from the
+        source row.  This is the correct path for any ETL that must
+        preserve event-time (e.g. the telemetry store .12, where
+        ``timestamp`` IS the event-time).
+
+        The Java side uses ``ON CONFLICT (tenant_id, project, title)
+        DO UPDATE SET … = EXCLUDED.*`` so re-runs are idempotent and
+        content changes in the source propagate on the next run, while
+        source ``timestamp`` / ``access_count`` are preserved.
+
+        Args:
+            project:       Project namespace.
+            title:         Entry title (unique within project).
+            content:       Entry body.
+            timestamp:     ISO-8601 UTC string, e.g. ``"2026-05-15T08:30:00Z"``.
+            tags:          Comma-separated tag string (default ``""``).
+            ttl:           Time-to-live in days (``None`` for permanent).
+            agent:         Optional agent attribution.
+            session:       Optional session id.
+            access_count:  Source access count (default 0).
+            last_accessed: ISO-8601 UTC string or ``None``
+                           (``None`` means never accessed — stored as SQL NULL).
+
+        Returns:
+            The Postgres row id (BIGSERIAL, always positive).
+        """
+        payload: dict[str, Any] = {
+            "project":      project,
+            "title":        title,
+            "content":      content,
+            "tags":         tags or "",
+            "ttl":          ttl,
+            "timestamp":    timestamp,
+            "access_count": access_count,
+        }
+        if agent is not None:
+            payload["agent"] = agent
+        if session is not None:
+            payload["session"] = session
+        if last_accessed is not None:
+            payload["last_accessed"] = last_accessed
+
+        resp = self._post("/v1/memory/import", payload)
+        return int(resp["id"])
+
     # ── Read ───────────────────────────────────────────────────────────────────
 
     def get(

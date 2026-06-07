@@ -136,7 +136,6 @@ def migrate_memory_cmd(
     try:
         result = migrate_memory_rows(resolved_db, store)
     except Exception as exc:
-        store.close()
         raise click.ClickException(f"ETL failed: {exc}")
     finally:
         store.close()

@@ -625,6 +625,98 @@ public final class MemoryRepository {
         }
     }
 
+    /**
+     * Fidelity-preserving import for ETL use (bead nexus-gmiaf.8, RDR-152 P1.8).
+     *
+     * <p>Unlike {@link #upsert}, which stamps {@code timestamp=now()} and resets
+     * {@code access_count=0}, this method copies the source row's
+     * {@code timestamp}, {@code access_count}, and {@code last_accessed} verbatim.
+     *
+     * <p>ON CONFLICT (tenant_id, project, title) DO UPDATE propagates the source
+     * values for ALL fields including timestamp/access_count/last_accessed via
+     * {@code EXCLUDED.*} semantics — so re-running the ETL with the same source
+     * data is a no-op, and running it after a source content change applies the
+     * new content while preserving the source timestamp.
+     *
+     * <p>Still routes through {@link TenantScope#withTenant} so RLS and tenant
+     * stamping are enforced identically to normal upserts.
+     *
+     * @param tenant       tenant to stamp (DEFAULT_TENANT for single-tenant SQLite migration)
+     * @param project      source project namespace
+     * @param title        source entry title (upsert key with project)
+     * @param content      source entry content
+     * @param tags         source tags; null normalised to ""
+     * @param session      source session (may be null)
+     * @param agent        source agent (may be null)
+     * @param ttlDays      source TTL in days (may be null)
+     * @param timestamp    source creation timestamp (non-null; required for fidelity)
+     * @param accessCount  source access count (0 if never accessed)
+     * @param lastAccessed source last-accessed timestamp (null when source value was "")
+     * @return the id of the inserted/updated row
+     */
+    public long importRow(String tenant,
+                          String project,
+                          String title,
+                          String content,
+                          String tags,
+                          String session,
+                          String agent,
+                          Integer ttlDays,
+                          OffsetDateTime timestamp,
+                          int accessCount,
+                          OffsetDateTime lastAccessed) {
+        return tenantScope.withTenant(tenant, ctx -> doImport(
+                ctx, tenant, project, title, content, tags, session, agent,
+                ttlDays, timestamp, accessCount, lastAccessed));
+    }
+
+    private long doImport(DSLContext ctx,
+                          String tenant,
+                          String project,
+                          String title,
+                          String content,
+                          String tags,
+                          String session,
+                          String agent,
+                          Integer ttlDays,
+                          OffsetDateTime timestamp,
+                          int accessCount,
+                          OffsetDateTime lastAccessed) {
+        String normalizedTags = tags != null ? tags : "";
+
+        var result = ctx.insertInto(MEMORY)
+                        .set(MEMORY.TENANT_ID,    tenant)
+                        .set(MEMORY.PROJECT,      project)
+                        .set(MEMORY.TITLE,        title)
+                        .set(MEMORY.CONTENT,      content)
+                        .set(MEMORY.TAGS,         normalizedTags)
+                        .set(MEMORY.SESSION,      session)
+                        .set(MEMORY.AGENT,        agent)
+                        .set(MEMORY.TIMESTAMP,    timestamp)
+                        .set(MEMORY.TTL,          ttlDays)
+                        .set(MEMORY.ACCESS_COUNT, accessCount)
+                        .set(MEMORY.LAST_ACCESSED, lastAccessed)
+                        .onConflict(MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE)
+                        .doUpdate()
+                        // Content fields: propagate source values (idempotent on same data,
+                        // applies source mutations on re-run)
+                        .set(MEMORY.CONTENT,       excluded(MEMORY.CONTENT))
+                        .set(MEMORY.TAGS,          excluded(MEMORY.TAGS))
+                        .set(MEMORY.SESSION,       excluded(MEMORY.SESSION))
+                        .set(MEMORY.AGENT,         excluded(MEMORY.AGENT))
+                        .set(MEMORY.TTL,           excluded(MEMORY.TTL))
+                        // Fidelity fields: copy verbatim from source (not now(), not 0)
+                        .set(MEMORY.TIMESTAMP,     excluded(MEMORY.TIMESTAMP))
+                        .set(MEMORY.ACCESS_COUNT,  excluded(MEMORY.ACCESS_COUNT))
+                        .set(MEMORY.LAST_ACCESSED, excluded(MEMORY.LAST_ACCESSED))
+                        .returning(MEMORY.ID)
+                        .fetchOne();
+
+        long id = result != null ? result.getId() : -1L;
+        log.debug("event=memory_import tenant={} project={} title={} id={}", tenant, project, title, id);
+        return id;
+    }
+
     private long doUpsert(DSLContext ctx,
                            String tenant,
                            String project,
