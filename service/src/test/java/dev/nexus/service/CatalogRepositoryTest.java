@@ -1103,7 +1103,8 @@ class CatalogRepositoryTest {
             "indexed_at", "2026-05-01T00:00:00"
         ));
 
-        // TENANT_Y: 1 doc with a later indexed_at; 0 orphans (a link TO it)
+        // TENANT_Y: 1 doc with a later indexed_at; no incoming link, so it is
+        // itself an orphan (orphan_count == 1). RLS keeps it invisible to TENANT_X.
         repo.upsertDocument(tenantY, mapOf(
             "tumbler", "chmy.1", "title", "Y Doc 1",
             "content_type", "knowledge", "physical_collection", sharedColl,

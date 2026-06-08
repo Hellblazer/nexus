@@ -1092,13 +1092,12 @@ public final class CatalogRepository {
                 .fetchOne(0, String.class);
 
             // orphan_count: documents with no incoming link (to_tumbler).
-            Field<Long> F_LNK_ID_ALIAS = DSL.field(DSL.name("catalog_links", "id"), Long.class);
             long orphanCount = ctx
                 .selectCount()
                 .from(T_DOCS)
                 .leftJoin(T_LINKS).on(F_DOC_TUMBLER.eq(F_LNK_TO))
                 .where(F_DOC_PCOLL.eq(collection))
-                .and(F_LNK_ID_ALIAS.isNull())
+                .and(F_LNK_ID.isNull())
                 .fetchOne(0, Long.class);
 
             Map<String, Object> result = new LinkedHashMap<>();

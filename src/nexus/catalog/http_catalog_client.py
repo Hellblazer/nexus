@@ -941,12 +941,16 @@ class HttpCatalogClient:
         Routes to ``GET /v1/catalog/collections/health?collection=<name>``.
 
         Returns ``{"last_indexed": None, "orphan_count": 0}`` when the service
-        responds with an empty/absent payload.
+        responds with an empty/absent payload or 404 (collection unknown).
+        Non-404 errors (auth, bad-request, 5xx) propagate — they signal
+        misconfiguration that must not be masked as a healthy-empty result.
         """
         try:
             result = self._get("/collections/health", collection=collection)
-        except Exception:
-            return {"last_indexed": None, "orphan_count": 0}
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return {"last_indexed": None, "orphan_count": 0}
+            raise
         if not result:
             return {"last_indexed": None, "orphan_count": 0}
         return {
