@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.20.xsd">
+
+    <!--
+        nexus-sa14p: drop fk_ta_catalog_doc.
+
+        topic_assignments.doc_id holds a 32-char CHUNK content-hash (chash), not a
+        document tumbler. The HDBSCAN taxonomy clusters chunk embeddings, so an
+        assignment maps a CHUNK (by chash) to a topic. fk_ta_catalog_doc (fk-001,
+        nexus-b7v6i) referenced catalog_documents(tenant_id, tumbler), which is a
+        different identity space (dotted tumblers, never 32-hex). The FK could never
+        be satisfied for chash-keyed rows: a real prod migration imported only
+        7082/198986 assignments, skipping 180801. Chunks are content-addressed blobs
+        in Chroma + the catalog document_chunks manifest, not a relational table, so
+        there is nothing valid for doc_id to reference. Drop the FK; doc_id is an
+        opaque chunk identity.
+
+        The supporting index idx_ta_tenant_doc_id_fk is retained — it still serves
+        (tenant_id, doc_id) lookups independent of the FK.
+    -->
+    <changeSet id="fk-002-1" author="nexus-sa14p">
+        <comment>Drop fk_ta_catalog_doc — topic_assignments.doc_id is a chunk chash, not a tumbler</comment>
+        <sql>
+ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS fk_ta_catalog_doc;
+        </sql>
+        <rollback>
+ALTER TABLE nexus.topic_assignments
+    ADD CONSTRAINT fk_ta_catalog_doc
+    FOREIGN KEY (tenant_id, doc_id)
+    REFERENCES nexus.catalog_documents (tenant_id, tumbler)
+    ON DELETE CASCADE;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

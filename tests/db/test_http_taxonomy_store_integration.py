@@ -573,22 +573,25 @@ class TestTaxonomyMVV:
         assert applied is True
         assert "analytic-doc1" in taxonomy_store.get_topic_doc_ids(6002, limit=10)
 
-    def test_f3_import_assignment_skipped_when_doc_absent(self, taxonomy_store) -> None:
-        """REGRESSION (nexus-0a7xc): an assignment whose doc is NOT in the catalog is
-        SKIPPED (returns False), not a 500. This is the exact failure mode that made
-        the taxonomy ETL report 0/180496 when catalog was not migrated first — now it
-        is a counted skip instead of a per-row crash."""
+    def test_f3_import_assignment_chash_doc_id_no_catalog_fk(self, taxonomy_store) -> None:
+        """REGRESSION (nexus-sa14p): topic_assignments.doc_id is a CHUNK chash, not a
+        document tumbler. After dropping fk_ta_catalog_doc, an assignment whose doc_id
+        is not a catalog tumbler (the normal case — chashes never match tumblers) imports
+        successfully. This is the fix for the real-prod 7082/198986 catastrophe: with the
+        wrong FK removed, all chash-keyed assignments migrate."""
         taxonomy_store.import_topic(
-            src_id=6003, label="xstore-absent", parent_id=None,
+            src_id=6003, label="chash-assign", parent_id=None,
             collection="knowledge__papers", centroid_hash=None, doc_count=0,
             created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
         )
+        # A realistic chunk chash — not seeded in catalog_documents, never a tumbler.
+        chash = "7740557a279d0481db33c93fd0342464"
         applied = taxonomy_store.import_assignment(
-            doc_id="doc-never-in-catalog-xyz", topic_id=6003, assigned_by="hdbscan",
+            doc_id=chash, topic_id=6003, assigned_by="hdbscan",
             similarity=0.5, assigned_at=None, source_collection="knowledge__papers",
         )
-        assert applied is False
-        assert taxonomy_store.get_topic_doc_ids(6003, limit=10) == []
+        assert applied is True
+        assert chash in taxonomy_store.get_topic_doc_ids(6003, limit=10)
 
     def test_g_needs_rebalance_after_growth(self, taxonomy_store) -> None:
         """g) needs_rebalance detects >5% growth after record_discover_count."""

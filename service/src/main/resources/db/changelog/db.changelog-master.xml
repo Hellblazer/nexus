@@ -38,6 +38,13 @@
     <!-- Cross-store FKs (bead nexus-b7v6i) — composite (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) -->
     <include file="db/changelog/fk-001-catalog-cross-store.xml"/>
 
+    <!-- Drop fk_ta_catalog_doc (bead nexus-sa14p): topic_assignments.doc_id is a
+         chunk content-hash (chash), NOT a document tumbler, so the FK to
+         catalog_documents(tumbler) was added on a false premise and blocked 91% of
+         assignments from migrating. The other fk-001 FKs (aspects/highlights/queue/
+         chunks) reference tumbler-keyed doc_ids and remain correct. -->
+    <include file="db/changelog/fk-002-drop-ta-catalog-doc.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
