@@ -318,7 +318,7 @@ def _provision_postgres_step() -> None:
     if result.cluster_created:
         lines.append("  Cluster initialised.")
     if result.db_created:
-        lines.append(f"  Database '{_config.nexus_config_dir() / 'postgres'}' (nexus) created.")
+        lines.append(f"  Database 'nexus' created at {result.credentials_path.parent / 'postgres'}.")
     if result.admin_role_created:
         lines.append("  Role nexus_admin created (schema owner).")
     if result.svc_role_created:

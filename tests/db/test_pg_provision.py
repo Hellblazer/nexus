@@ -247,6 +247,16 @@ class TestCredentialsFile:
             f"credentials file must be 0600, got {oct(mode)}"
         )
 
+    def test_credentials_contain_pg_data(self, provisioned):
+        """PG_DATA must be in credentials so the daemon (.30) can run pg_ctl."""
+        result, config_dir = provisioned
+        creds = _read_credentials(config_dir / CREDENTIALS_FILENAME)
+        assert "PG_DATA" in creds, "PG_DATA missing from credentials (required by bead .30 daemon)"
+        expected_pgdata = str(config_dir / "postgres")
+        assert creds["PG_DATA"] == expected_pgdata, (
+            f"PG_DATA must be {expected_pgdata!r}, got {creds['PG_DATA']!r}"
+        )
+
     def test_credentials_contain_pg_port(self, provisioned):
         result, config_dir = provisioned
         creds = _read_credentials(config_dir / CREDENTIALS_FILENAME)
@@ -313,9 +323,46 @@ class TestIdempotency:
 
 # ── Test 5: end-to-end provision → migrate DDL → svc DML under RLS ────────────
 
-# Minimal DDL subset that replicates just enough of the Liquibase baseline
-# to prove the two-role contract without the service JAR.
-_MINIMAL_DDL = """
+# DDL run AS nexus_admin to prove the two-role contract WITHOUT the service JAR.
+#
+# Structure mirrors what Liquibase does at service startup:
+#   1. Public-schema Liquibase tracking tables (DATABASECHANGELOG + lock).
+#      This is the CRITICAL part: on PG 15/16 the PUBLIC role lost CREATE on
+#      the public schema. nexus_admin must have GRANT CREATE ON SCHEMA public
+#      or this CREATE TABLE statement fails with "permission denied for schema
+#      public" — exactly as SchemaMigratorIntegrationTest.java:120 documents.
+#   2. Application schema 'nexus' with a representative table + RLS policy.
+#   3. Grants for nexus_svc (mirrors grants-nexus-svc.xml, runAlways=true).
+#
+# ALL of this DDL is run as nexus_admin (NOSUPERUSER) — never as the OS
+# superuser — so the test proves the grants are correct, not just the schema.
+_LIQUIBASE_TRACKING_DDL = """
+CREATE TABLE IF NOT EXISTS public.databasechangelog (
+    id              VARCHAR(255) NOT NULL,
+    author          VARCHAR(255) NOT NULL,
+    filename        VARCHAR(255) NOT NULL,
+    dateexecuted    TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+    orderexecuted   INTEGER NOT NULL,
+    exectype        VARCHAR(10) NOT NULL,
+    md5sum          VARCHAR(35),
+    description     VARCHAR(255),
+    comments        VARCHAR(255),
+    tag             VARCHAR(255),
+    liquibase       VARCHAR(20),
+    contexts        VARCHAR(255),
+    labels          VARCHAR(255),
+    deployment_id   VARCHAR(10)
+);
+CREATE TABLE IF NOT EXISTS public.databasechangeloglock (
+    id          INTEGER NOT NULL,
+    locked      BOOLEAN NOT NULL,
+    lockgranted TIMESTAMP WITHOUT TIME ZONE,
+    lockedby    VARCHAR(255),
+    CONSTRAINT pk_databasechangeloglock PRIMARY KEY (id)
+);
+"""
+
+_APP_SCHEMA_DDL = """
 CREATE SCHEMA IF NOT EXISTS nexus;
 
 CREATE TABLE IF NOT EXISTS nexus.memory (
@@ -337,10 +384,6 @@ ALTER TABLE nexus.memory FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON nexus.memory
     USING      (tenant_id = current_setting('nexus.tenant', true))
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
--- Grant schema owner privileges to nexus_admin (already has CONNECT+CREATE on DB).
-GRANT USAGE ON SCHEMA nexus TO nexus_admin;
-ALTER SCHEMA nexus OWNER TO nexus_admin;
 
 -- DML grants for nexus_svc (mirrors grants-nexus-svc.xml).
 GRANT USAGE ON SCHEMA nexus TO nexus_svc;
@@ -381,21 +424,40 @@ def e2e_provisioned(bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionResult
 
 
 class TestEndToEndProvisionMigrateDML:
-    """provision → apply DDL as nexus_admin → nexus_svc DML under RLS."""
+    """provision → apply DDL AS nexus_admin → nexus_svc DML under RLS.
 
-    def test_nexus_admin_can_run_ddl(self, e2e_provisioned, bins):
-        """nexus_admin (NOSUPERUSER, has CREATE ON DATABASE) can create schemas + tables."""
+    The DDL is intentionally run AS nexus_admin (NOSUPERUSER), not as the OS
+    superuser, to prove the grant set is correct.  Running as the superuser
+    would mask any missing privilege and make the tests vacuous.
+    """
+
+    def test_nexus_admin_can_create_liquibase_tracking_tables_in_public(
+        self, e2e_provisioned, bins
+    ):
+        """nexus_admin can CREATE TABLE in the public schema.
+
+        This exercises the GRANT CREATE ON SCHEMA public grant that is
+        required for Liquibase (on PG 15/16 the PUBLIC role lost this
+        privilege).  The test would fail with "permission denied for schema
+        public" if the grant were absent.
+        """
         result, config_dir = e2e_provisioned
         creds = _read_credentials(config_dir / CREDENTIALS_FILENAME)
         admin_pass = creds["NX_DB_ADMIN_PASS"]
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        # Run as nexus_admin — if GRANT CREATE ON SCHEMA public is missing
+        # this raises RuntimeError("psql as nexus_admin failed: ... permission denied")
+        _psql_as(bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
+                 _LIQUIBASE_TRACKING_DDL)
 
-        # Apply the minimal DDL as the OS superuser first (CREATE EXTENSION, schema
-        # ownership is superuser territory — in production this is the provisioning
-        # step before nexus_admin takes over DDL).  For our purposes we run the full
-        # DDL as the superuser to bootstrap the schema, then verify nexus_admin can
-        # subsequently ALTER TABLE and CREATE INDEX (normal schema-owner operations).
-        _psql(bins, result.port, NEXUS_DB_NAME, os_user, _MINIMAL_DDL)
+    def test_nexus_admin_can_create_app_schema_and_tables(
+        self, e2e_provisioned, bins
+    ):
+        """nexus_admin can CREATE SCHEMA nexus and the application tables within it."""
+        result, config_dir = e2e_provisioned
+        creds = _read_credentials(config_dir / CREDENTIALS_FILENAME)
+        admin_pass = creds["NX_DB_ADMIN_PASS"]
+        _psql_as(bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
+                 _APP_SCHEMA_DDL)
 
     def test_nexus_svc_insert_under_rls(self, e2e_provisioned, bins):
         """nexus_svc can INSERT rows when the tenant GUC is stamped."""
@@ -444,3 +506,89 @@ class TestEndToEndProvisionMigrateDML:
             f"nexus_svc without GUC stamp must see zero rows (RLS fail-closed), "
             f"got count={count_line[-1]}"
         )
+
+
+# ── Test 6: public-schema grant is load-bearing (red-without-grant proof) ──────
+
+
+@pytest.fixture(scope="module")
+def grant_proof_cluster(bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionResult, Path]:
+    """Hermetic cluster used ONLY for the grant-revocation proof.
+
+    Separate fixture so the revoke/regrant cycle does not disturb the other
+    module-scoped clusters.
+    """
+    config_dir = tmp_path_factory.mktemp("nexus_grant_proof")
+    result = provision(config_dir, force_new_port=True)
+    yield result, config_dir
+    pgdata = config_dir / "postgres"
+    _stop_pg(bins, pgdata)
+
+
+class TestPublicSchemaGrantIsLoadBearing:
+    """Prove that GRANT CREATE ON SCHEMA public TO nexus_admin is required.
+
+    This test class:
+      1. Revokes the public-schema grant from nexus_admin.
+      2. Asserts that creating a table in public AS nexus_admin FAILS.
+      3. Re-grants it.
+      4. Asserts that creating the table now SUCCEEDS.
+
+    This proves the grant is not decorative — removing it breaks the
+    Liquibase migration path exactly as described in the critique.
+    """
+
+    def _os_user(self) -> str:
+        return os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+
+    def test_without_public_grant_nexus_admin_cannot_create_table(
+        self, grant_proof_cluster, bins
+    ):
+        """After revoking CREATE ON SCHEMA public, nexus_admin cannot CREATE TABLE there."""
+        result, config_dir = grant_proof_cluster
+        creds = _read_credentials(config_dir / CREDENTIALS_FILENAME)
+        admin_pass = creds["NX_DB_ADMIN_PASS"]
+        os_user = self._os_user()
+
+        # Revoke the grant as the OS superuser.
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "REVOKE CREATE ON SCHEMA public FROM nexus_admin")
+
+        # Attempt to CREATE TABLE in public as nexus_admin — must fail.
+        env = {**os.environ, "PGPASSWORD": admin_pass}
+        proc = subprocess.run(
+            [str(bins.psql), "-h", "127.0.0.1", "-p", str(result.port),
+             "-U", "nexus_admin", "-d", NEXUS_DB_NAME, "-t", "-A",
+             "-c", "CREATE TABLE IF NOT EXISTS public.nx_grant_proof (id INT)"],
+            capture_output=True, text=True, env=env,
+        )
+        assert proc.returncode != 0, (
+            "Expected CREATE TABLE in public to fail for nexus_admin without "
+            "the public-schema grant, but it succeeded — grant may not have been revoked"
+        )
+        assert "permission denied" in proc.stderr.lower(), (
+            f"Expected 'permission denied' in stderr; got: {proc.stderr!r}"
+        )
+
+    def test_with_public_grant_nexus_admin_can_create_table(
+        self, grant_proof_cluster, bins
+    ):
+        """After re-granting CREATE ON SCHEMA public, nexus_admin can CREATE TABLE there."""
+        result, config_dir = grant_proof_cluster
+        creds = _read_credentials(config_dir / CREDENTIALS_FILENAME)
+        admin_pass = creds["NX_DB_ADMIN_PASS"]
+        os_user = self._os_user()
+
+        # Re-grant as OS superuser.
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "GRANT CREATE ON SCHEMA public TO nexus_admin")
+
+        # Now the CREATE TABLE must succeed.
+        _psql_as(bins, result.port, "nexus_admin", admin_pass, NEXUS_DB_NAME,
+                 "CREATE TABLE IF NOT EXISTS public.nx_grant_proof (id INT)")
+
+        # Verify the table exists.
+        row = _query(bins, result.port, NEXUS_DB_NAME, os_user,
+                     "SELECT 1 FROM information_schema.tables "
+                     "WHERE table_schema='public' AND table_name='nx_grant_proof'")
+        assert row == "1", "nx_grant_proof table must exist after nexus_admin CREATE TABLE"

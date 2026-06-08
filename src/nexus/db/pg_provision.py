@@ -151,6 +151,10 @@ def discover_pg_binaries() -> PgBinaries:
     is found.
     """
     # 1. Explicit override — highest priority (tests + custom installs).
+    #    If the env var is set but the directory does not contain the required
+    #    binaries, fail loudly instead of silently falling back to system paths.
+    #    A misconfigured NEXUS_PG_BIN is always a user error; using a different
+    #    PG install silently would be more surprising than an explicit error.
     env_override = os.environ.get("NEXUS_PG_BIN", "").strip()
     if env_override:
         d = Path(env_override)
@@ -158,7 +162,13 @@ def discover_pg_binaries() -> PgBinaries:
         if bins.all_present():
             _log.debug("pg_binaries_from_env", bin_dir=str(d))
             return bins
-        _log.warning("NEXUS_PG_BIN set but binaries missing", bin_dir=str(d))
+        missing = [str(p) for p in [bins.initdb, bins.pg_ctl, bins.psql, bins.createdb] if not p.is_file()]
+        raise PgBinaryNotFoundError(
+            f"NEXUS_PG_BIN is set to '{env_override}' but the following required "
+            f"binaries are missing: {', '.join(missing)}\n"
+            "Fix NEXUS_PG_BIN or unset it to use auto-discovery.\n"
+            + _install_hint()
+        )
 
     # 2. Fixed candidate directories.
     for d in _CANDIDATE_DIRS:
@@ -377,13 +387,22 @@ def _create_roles(
     admin_pass: str,
     svc_pass: str,
 ) -> tuple[bool, bool]:
-    """Create nexus_admin and nexus_svc roles.
+    """Create nexus_admin and nexus_svc roles, then synchronise passwords.
 
     nexus_admin — NOSUPERUSER NOCREATEDB NOCREATEROLE LOGIN.
-                  Has CREATE ON DATABASE nexus so it can run Liquibase DDL.
+                  Has CREATE ON DATABASE nexus (allows creating new schemas).
+                  Has CREATE ON SCHEMA public (required for Liquibase: its
+                  DATABASECHANGELOG / DATABASECHANGELOGLOCK tables land in
+                  the public schema by default; on PG 15/16 the PUBLIC role
+                  no longer holds CREATE on public, so nexus_admin needs it
+                  explicitly — as validated by SchemaMigratorIntegrationTest).
 
     nexus_svc   — NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS LOGIN.
                   DML-only; FORCE RLS subjects it to all row-level policies.
+
+    Passwords are synchronised UNCONDITIONALLY after create/skip so that the
+    credentials file always matches the DB state, even if a previous run
+    created roles but crashed before writing credentials.
 
     Returns (admin_created, svc_created).
     """
@@ -397,11 +416,21 @@ def _create_roles(
             f"NOSUPERUSER NOCREATEDB NOCREATEROLE LOGIN "
             f"PASSWORD '{admin_pass}'",
         )
-        # Grant CREATE on the nexus database so Liquibase DDL (CREATE TABLE,
-        # ALTER TABLE, CREATE POLICY, etc.) runs as nexus_admin.
+        # Grant CREATE on the nexus database (allows creating new schemas).
         _psql(
             bins, port, NEXUS_DB_NAME, os_user,
             "GRANT CREATE ON DATABASE nexus TO nexus_admin",
+        )
+        # Grant CREATE on the public schema so Liquibase's tracking tables
+        # (DATABASECHANGELOG, DATABASECHANGELOGLOCK) can be created there.
+        # On PG 15/16 the PUBLIC role lost this privilege; nexus_admin is
+        # NOSUPERUSER and not the DB owner, so it needs an explicit grant.
+        # Evidence: SchemaMigratorIntegrationTest.java:120 issues this grant
+        # in its bootstrap — the requirement is known and documented in the
+        # net63 integration test.
+        _psql(
+            bins, port, NEXUS_DB_NAME, os_user,
+            "GRANT CREATE ON SCHEMA public TO nexus_admin",
         )
         _log.info("pg_role_created", role="nexus_admin")
         admin_created = True
@@ -420,20 +449,44 @@ def _create_roles(
     else:
         _log.info("pg_role_exists_skip", role="nexus_svc")
 
+    # Unconditional password sync: even if roles were created on a previous
+    # run that crashed before writing credentials, this ensures DB state
+    # matches the passwords we are about to persist.  ALTER ROLE … PASSWORD
+    # is idempotent (updating to the current value is a no-op in PG).
+    _psql(
+        bins, port, NEXUS_DB_NAME, os_user,
+        f"ALTER ROLE nexus_admin PASSWORD '{admin_pass}'",
+    )
+    _psql(
+        bins, port, NEXUS_DB_NAME, os_user,
+        f"ALTER ROLE nexus_svc PASSWORD '{svc_pass}'",
+    )
+    _log.debug("pg_role_passwords_synced")
+
     return admin_created, svc_created
 
 
-def _write_credentials(creds_path: Path, port: int, admin_pass: str, svc_pass: str) -> None:
+def _write_credentials(
+    creds_path: Path,
+    pgdata: Path,
+    port: int,
+    admin_pass: str,
+    svc_pass: str,
+) -> None:
     """Write the credentials env-file at 0600.
 
     The file is consumed by the service daemon (bead .30) which sources it
     before starting the JVM.  It uses the NX_DB_ADMIN_* and NX_DB_* names
     that Main.java reads directly.
+
+    PG_DATA and PG_PORT are written for the daemon's lifecycle operations
+    (pg_ctl start/stop/status in bead .30).
     """
     db_url = f"jdbc:postgresql://127.0.0.1:{port}/{NEXUS_DB_NAME}"
     content = (
         f"# nexus-managed Postgres credentials — DO NOT EDIT MANUALLY\n"
         f"# Re-run 'nx init --service' to regenerate.\n"
+        f"PG_DATA={pgdata}\n"
         f"PG_PORT={port}\n"
         f"NX_DB_ADMIN_URL={db_url}\n"
         f"NX_DB_ADMIN_USER=nexus_admin\n"
@@ -580,7 +633,7 @@ def provision(
     )
 
     # ── Write credentials ──────────────────────────────────────────────────────
-    _write_credentials(creds_path, port, admin_pass, svc_pass)
+    _write_credentials(creds_path, pgdata, port, admin_pass, svc_pass)
 
     _log.info(
         "pg_provision_complete",
