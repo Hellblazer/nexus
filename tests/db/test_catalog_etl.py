@@ -211,11 +211,18 @@ def _make_source_catalog(
     collections: list[dict] | None = None,
     chunks: list[dict] | None = None,
     meta: list[dict] | None = None,
+    owner_high_water: dict[str, int] | None = None,
 ) -> Path:
     """Build a hermetic SQLite catalog DB for use as an ETL source.
 
     Returns the path to the .catalog.db file (in a temp directory).
     All tables are created even if no rows are provided.
+
+    ``owner_high_water`` writes a sibling ``owners.jsonl`` mapping owner prefix to
+    ``next_seq`` (the high-water mark the real catalog keeps there, NOT in the DB).
+    The ETL reads it to floor next_seq, defending against tumbler reuse on a source
+    catalog that has had documents deleted/compacted. When omitted, no owners.jsonl
+    is written and the ETL falls back to max(surviving doc seq).
     """
     tmp = tempfile.mkdtemp(prefix="nexus_cat_etl_src_")
     db_path = Path(tmp) / ".catalog.db"
@@ -341,6 +348,20 @@ def _make_source_catalog(
 
     conn.commit()
     conn.close()
+
+    if owner_high_water:
+        jsonl_path = db_path.parent / "owners.jsonl"
+        with jsonl_path.open("w") as f:
+            for prefix, next_seq in owner_high_water.items():
+                f.write(json.dumps({
+                    "owner": prefix,
+                    "name": f"owner-{prefix}",
+                    "owner_type": "repo",
+                    "repo_hash": "",
+                    "description": "",
+                    "next_seq": next_seq,
+                }) + "\n")
+
     return db_path
 
 
@@ -1346,3 +1367,74 @@ class TestCatalogEtlIntegration:
         # And the migrated documents are untouched.
         docs = {str(e.tumbler) for e in cat_etl_client.by_owner("1.20")}
         assert docs == {"1.20.1", "1.20.2", "1.20.3"}
+
+    def test_next_seq_uses_jsonl_high_water_no_tumbler_reuse(self, cat_etl_client):
+        """REGRESSION (substantive-critic Significant): a source catalog with deleted
+        documents must NOT reuse a deleted tumbler slot after migration.
+
+        The high-water mark lives in owners.jsonl and is never decremented on delete.
+        Deriving next_seq from surviving documents alone would allocate into the gap
+        left by deletions, reusing an address that links / T3 chunks / external tools
+        may still reference. The ETL must floor next_seq at jsonl_next_seq - 1.
+        """
+        from nexus.db.t2.catalog_etl import migrate_catalog
+
+        # Owner 1.21: docs 1..5 were assigned; 2, 4, 5 later deleted+compacted, so
+        # only 1.21.1 and 1.21.3 survive in .catalog.db. owners.jsonl high-water
+        # next_seq=6 (next-to-assign) records that 5 was the last allocated.
+        db_path = _make_source_catalog(
+            owners=[
+                {"tumbler_prefix": "1.21", "name": "owner-gap", "owner_type": "repo"},
+            ],
+            documents=[
+                {"tumbler": "1.21.1", "title": "gap-doc-1"},
+                {"tumbler": "1.21.3", "title": "gap-doc-3"},
+            ],
+            owner_high_water={"1.21": 6},
+        )
+        migrate_catalog(db_path, cat_etl_client)
+
+        # Next allocation must be 1.21.6 (high-water), NOT 1.21.2/1.21.4 (reused gap).
+        new_tumbler = cat_etl_client.register(
+            "1.21",
+            "post-cutover after deletions",
+            source_uri="file:///repo21/new.pdf",
+        )
+        assert str(new_tumbler) == "1.21.6", (
+            f"must allocate 1.21.6 from the high-water mark, not reuse a deleted "
+            f"slot — got {new_tumbler}"
+        )
+
+    def test_next_seq_greatest_merge_no_downgrade_on_rerun(self, cat_etl_client):
+        """REGRESSION (substantive-critic Significant): a second ETL run after the live
+        service has advanced next_seq must NOT downgrade the counter (GREATEST merge).
+
+        Migration rehearsal-then-cutover is operationally common: run ETL, the service
+        takes live writes, then re-run ETL. The re-import sends a lower floor; the
+        service GREATEST keeps the higher live value.
+        """
+        from nexus.db.t2.catalog_etl import migrate_catalog
+
+        db_path = _make_source_catalog(
+            owners=[
+                {"tumbler_prefix": "1.22", "name": "owner-rerun", "owner_type": "repo"},
+            ],
+            documents=[
+                {"tumbler": "1.22.1", "title": "rr-doc-1"},
+                {"tumbler": "1.22.2", "title": "rr-doc-2"},
+            ],
+        )
+        migrate_catalog(db_path, cat_etl_client)
+
+        # Live registration advances next_seq past the ETL floor (2 -> 3 assigned).
+        first = cat_etl_client.register("1.22", "live doc", source_uri="file:///r22/a.pdf")
+        assert str(first) == "1.22.3"
+
+        # Re-run ETL: reconcile sends next_seq=2; GREATEST(current=3, 2) keeps 3.
+        migrate_catalog(db_path, cat_etl_client)
+
+        # The live-advanced counter is preserved — next alloc is 1.22.4, not a re-1.22.3.
+        second = cat_etl_client.register("1.22", "after rerun", source_uri="file:///r22/b.pdf")
+        assert str(second) == "1.22.4", (
+            f"GREATEST merge must not downgrade a live-advanced next_seq — got {second}"
+        )

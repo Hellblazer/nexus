@@ -527,13 +527,17 @@ def migrate_catalog(
     results["catalog_meta"] = {"read": 0, "written": 0, "skipped": len(meta_rows)}
 
     # ── 7. Reconcile next_seq on owners ────────────────────────────────────────
-    # After importing all documents, set next_seq = max(doc_seq) + 1 per owner
-    # so future server-side tumbler assignment won't collide with migrated docs.
+    # Floor each owner's next_seq so future server-side tumbler allocation cannot
+    # collide with -- or REUSE -- a migrated tumbler. The authoritative high-water
+    # mark is owners.jsonl (never decremented on delete); max(surviving doc seq) is
+    # only a lower bound and would reuse deleted slots on a compacted catalog.
     doc_tumblers = [r["tumbler"] for r in docs_rows]
-    reconcile = _reconcile_next_seq(client, owners_rows, doc_tumblers)
+    high_water = _read_owner_high_water(catalog_db_path)
+    reconcile = _reconcile_next_seq(client, owners_rows, doc_tumblers, high_water)
     results["next_seq_reconcile"] = {
         "read": 0,
         "written": reconcile["reconciled"],
+        "failed": reconcile["failed"],
     }
 
     # Totals cover the genuine per-table imports only. catalog_meta (intentional
@@ -608,52 +612,99 @@ def _import_table(
     return {"read": read_count, "written": written_count}
 
 
+def _read_owner_high_water(catalog_db_path: Path) -> dict[str, int]:
+    """Return ``{owner_prefix: next_seq}`` from the catalog's ``owners.jsonl``.
+
+    ``owners.jsonl`` (sibling of ``.catalog.db``) holds the authoritative tumbler
+    high-water mark: ``OwnerRecord.next_seq`` is the *next* document number to assign
+    and is NEVER decremented on delete/compact (catalog.py: "prevents tumbler reuse
+    after delete+compact").  Deriving next_seq from surviving document tumblers alone
+    under-counts on a compacted catalog and would reuse deleted tumbler slots.
+
+    Returns an empty dict (with a warning) when ``owners.jsonl`` is absent so callers
+    fall back to the surviving-doc floor; that fallback is correct only for catalogs
+    that have never had a document deleted.
+    """
+    jsonl_path = catalog_db_path.parent / "owners.jsonl"
+    if not jsonl_path.exists():
+        _log.warning(
+            "catalog_etl.owners_jsonl_absent",
+            path=str(jsonl_path),
+            impact="next_seq floor falls back to max surviving doc seq; safe only "
+                   "if no documents were ever deleted from this catalog",
+        )
+        return {}
+    from nexus.catalog.tumbler import read_owners  # noqa: PLC0415
+
+    records = read_owners(jsonl_path)
+    return {owner: rec.next_seq for owner, rec in records.items()}
+
+
 def _reconcile_next_seq(
     client: Any,
     owners_rows: list[dict[str, Any]],
     doc_tumblers: list[str],
+    high_water: dict[str, int],
 ) -> dict[str, int]:
-    """Reconcile ``next_seq`` on each owner so post-cutover tumbler allocation
-    cannot collide with a migrated document.
+    """Reconcile ``next_seq`` on each owner so post-cutover tumbler allocation can
+    neither collide with NOR reuse a migrated tumbler.
 
-    The SQLite ``.catalog.db`` has no next_seq column (it lives in owners.jsonl,
-    which this ETL never reads), so the owner import carries next_seq=0 from a real
-    source.  This pass supplies the authoritative value: it re-POSTs each owner with
-    ``next_seq = max(document_sequence_for_owner)``, derived from the tumblers of the
-    documents just migrated.  The service GREATEST-merges next_seq on conflict, so the
-    result is always ``>= max_doc_seq`` and is never downgraded below a counter the
-    live service may have already advanced.
+    The SQLite ``.catalog.db`` has no next_seq column; the authoritative high-water
+    mark lives in ``owners.jsonl`` (``high_water``).  JSONL ``next_seq`` is the *next*
+    number to assign, whereas the Java service stores the *last assigned* and allocates
+    ``last + 1`` -- so the correct service floor is ``jsonl_next_seq - 1``.  Where the
+    JSONL value is unavailable we fall back to ``max(surviving doc sequence)`` (a lower
+    bound, correct only when nothing was deleted).  We take the max of the two so a
+    stale JSONL can never drop us below an actually-present document.
+
+    The service GREATEST-merges next_seq on conflict, so this is idempotent and never
+    downgrades a counter the live service has already advanced past the floor.
 
     ``registerDocument`` reads ``seq = next_seq`` then assigns
-    ``tumbler = ownerPrefix + "." + (seq + 1)`` and stores ``next_seq = seq + 1``.
-    With ``next_seq = max_seq`` the next assigned tumbler is ``prefix.{max_seq+1}``,
-    which cannot collide with any migrated document.
+    ``tumbler = ownerPrefix + "." + (seq + 1)``.  With ``next_seq = floor`` the next
+    assigned tumbler is ``prefix.{floor+1}``, which is ``>= jsonl_next_seq`` and so
+    cannot collide with or reuse any migrated/deleted tumbler.
 
-    Returns ``{"reconciled": N}`` — the count of owners with at least one document
-    that were re-imported with a floored ``next_seq``.
+    Returns ``{"reconciled": N, "failed": M}``.
     """
     reconciled = 0
+    failed = 0
     for owner in owners_rows:
         prefix = owner["tumbler_prefix"]
-        max_seq = _max_seq_for_owner(prefix, doc_tumblers)
-        if max_seq <= 0:
+        max_doc_seq = _max_seq_for_owner(prefix, doc_tumblers)
+        # jsonl next_seq is "next to assign"; the service stores "last assigned",
+        # so the service-side floor is jsonl_next_seq - 1.
+        jsonl_floor = high_water.get(prefix, 0) - 1
+        floor = max(max_doc_seq, jsonl_floor)
+        if floor <= 0:
             _log.debug("catalog_etl.next_seq_no_docs", owner=prefix)
             continue
+        if jsonl_floor < max_doc_seq and prefix in high_water:
+            # owners.jsonl high-water is below a surviving document — the source
+            # catalog's own counter is corrupt; the doc floor protects us.
+            _log.warning(
+                "catalog_etl.next_seq_jsonl_below_docs",
+                owner=prefix,
+                jsonl_next_seq=high_water.get(prefix),
+                max_doc_seq=max_doc_seq,
+            )
         payload = _transform_owner(owner)
-        payload["next_seq"] = max_seq
+        payload["next_seq"] = floor
         try:
             client._post("/import/owner", payload)
             reconciled += 1
             _log.info(
                 "catalog_etl.next_seq_reconciled",
                 owner=prefix,
-                next_seq=max_seq,
+                next_seq=floor,
+                source="jsonl" if jsonl_floor >= max_doc_seq else "max_doc_seq",
             )
         except Exception as exc:
+            failed += 1
             _log.error(
                 "catalog_etl.next_seq_reconcile_failed",
                 owner=prefix,
-                next_seq=max_seq,
+                next_seq=floor,
                 error=str(exc),
             )
-    return {"reconciled": reconciled}
+    return {"reconciled": reconciled, "failed": failed}

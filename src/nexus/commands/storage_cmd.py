@@ -803,7 +803,14 @@ def migrate_catalog_cmd(
     if reconcile and reconcile.get("written"):
         click.echo(
             f"  next_seq: reconciled on {reconcile['written']} owner(s) "
-            "(tumbler allocation floored at max migrated sequence)"
+            "(tumbler allocation floored at high-water mark)"
+        )
+    if reconcile and reconcile.get("failed"):
+        click.echo(
+            f"ERROR: next_seq reconciliation FAILED on {reconcile['failed']} owner(s) — "
+            "those owners may collide on the first new document registration. "
+            "Re-run the migration before cutover (the pass is idempotent).",
+            err=True,
         )
 
     if skipped:
