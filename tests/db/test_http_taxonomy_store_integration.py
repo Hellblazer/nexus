@@ -286,19 +286,13 @@ def pg_instance():
                     f"stdout={proc.stdout}\nstderr={proc.stderr}"
                 )
 
-        _psql(_BOOTSTRAP_SQL_ROLE)
-        _psql(_BOOTSTRAP_SQL_SCHEMA)
-        _psql(_BOOTSTRAP_SQL_GRANTS)
-
-
-        # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
-        # Create nexus_svc BEFORE starting the JAR (pre-condition for runAlways grant changeset).
-        subprocess.run(
-            [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
-             "-U", pg_user, "-d", "nexustaxonomytest",
-             "-v", "ON_ERROR_STOP=1", "-c", SERVICE_ROLES_SQL],
-            check=True, capture_output=True,
-        )
+        # net63: the JAR runs Liquibase at startup and owns the full taxonomy schema
+        # + grants before binding the HTTP port. The fixture must NOT pre-apply schema
+        # (the _BOOTSTRAP_SQL_* constants below) — doing so collides ("relation already
+        # exists") and the service exits at migration. The only pre-start SQL is
+        # SERVICE_ROLES_SQL, which creates nexus_svc (the NOSUPERUSER NOBYPASSRLS DML/RLS
+        # role grants-nexus-svc.xml grants to, and the role the RLS-negative tests use).
+        _psql(SERVICE_ROLES_SQL)
 
         yield {"port": pg_port, "dbname": "nexustaxonomytest", "user": pg_user, "pgdata": pgdata}
 
@@ -320,13 +314,22 @@ def service(pg_instance):
         **os.environ,
         "NX_SERVICE_PORT":  str(svc_port),
         "NX_SERVICE_TOKEN": token,
+        # net63 two-role: app pool = nexus_svc (NOSUPERUSER NOBYPASSRLS → FORCE RLS
+        # applies); migration pool = OS superuser (trust auth) for the Liquibase DDL.
         "NX_DB_URL": (
             f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}"
             f"/{pg_instance['dbname']}"
         ),
-        "NX_DB_USER": "svc_taxonomy_inttest",
-        "NX_DB_PASS": "svc_taxonomy_inttest_pass",
+        "NX_DB_USER": "nexus_svc",
+        "NX_DB_PASS": "nexus_svc_pass",
         "NX_POOL_SIZE": "3",
+        "NX_DB_ADMIN_URL": (
+            f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}"
+            f"/{pg_instance['dbname']}"
+        ),
+        "NX_DB_ADMIN_USER": pg_instance["user"],
+        "NX_DB_ADMIN_PASS": "",
+        "NX_CHROMA_PATH": tempfile.mkdtemp(prefix="nexus-tax-chroma-"),
     }
     env.pop("NX_STORAGE_BACKEND", None)
 
@@ -372,6 +375,40 @@ def other_taxonomy_store(service):
     s = HttpTaxonomyStore(base_url=base_url, tenant="other-tenant", _token=token)
     yield s
     s.close()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _seed_catalog_docs(pg_instance, service):
+    """Seed catalog_documents rows the assignment tests reference.
+
+    topic_assignments carries a HARD cross-store FK (fk_ta_catalog_doc):
+    (tenant_id, doc_id) -> catalog_documents(tenant_id, tumbler). Both the live
+    assign_topic path and the ETL import/assignment path require the doc to exist.
+    These tests assert taxonomy mechanics, so we establish the precondition here
+    (superuser psql bypasses FORCE RLS). Depends on `service` so Liquibase has
+    created catalog_documents before we insert. (nexus-0a7xc)
+    """
+    docs = [
+        "doc-inttest-a1", "doc-merge-src", "doc-fidelity-sim-inttest",
+        "analytic-doc1", "analytic-doc2", "analytic-doc3",
+        "assigned-by-doc1", "split-doc1", "split-doc2",
+    ]
+    values = ",".join(
+        f"('default', '{d}', 'seed-{d}')" for d in docs
+    )
+    sql = (
+        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
+        f"VALUES {values} ON CONFLICT (tenant_id, tumbler) DO NOTHING;"
+    )
+    proc = subprocess.run(
+        [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_instance["port"]),
+         "-U", pg_instance["user"], "-d", pg_instance["dbname"],
+         "-v", "ON_ERROR_STOP=1", "-c", sql],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"catalog-doc seed failed:\n{proc.stderr}")
+    yield
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -520,6 +557,38 @@ class TestTaxonomyMVV:
         )
         docs = taxonomy_store.get_topic_doc_ids(6001, limit=10)
         assert "doc-fidelity-sim-inttest" in docs
+
+    def test_f2_import_assignment_applied_when_doc_present(self, taxonomy_store) -> None:
+        """REGRESSION (nexus-0a7xc): import_assignment returns True when the referenced
+        catalog doc exists (seeded), and the row is queryable."""
+        taxonomy_store.import_topic(
+            src_id=6002, label="xstore-present", parent_id=None,
+            collection="knowledge__papers", centroid_hash=None, doc_count=1,
+            created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+        )
+        applied = taxonomy_store.import_assignment(
+            doc_id="analytic-doc1", topic_id=6002, assigned_by="hdbscan",
+            similarity=0.5, assigned_at=None, source_collection="knowledge__papers",
+        )
+        assert applied is True
+        assert "analytic-doc1" in taxonomy_store.get_topic_doc_ids(6002, limit=10)
+
+    def test_f3_import_assignment_skipped_when_doc_absent(self, taxonomy_store) -> None:
+        """REGRESSION (nexus-0a7xc): an assignment whose doc is NOT in the catalog is
+        SKIPPED (returns False), not a 500. This is the exact failure mode that made
+        the taxonomy ETL report 0/180496 when catalog was not migrated first — now it
+        is a counted skip instead of a per-row crash."""
+        taxonomy_store.import_topic(
+            src_id=6003, label="xstore-absent", parent_id=None,
+            collection="knowledge__papers", centroid_hash=None, doc_count=0,
+            created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None,
+        )
+        applied = taxonomy_store.import_assignment(
+            doc_id="doc-never-in-catalog-xyz", topic_id=6003, assigned_by="hdbscan",
+            similarity=0.5, assigned_at=None, source_collection="knowledge__papers",
+        )
+        assert applied is False
+        assert taxonomy_store.get_topic_doc_ids(6003, limit=10) == []
 
     def test_g_needs_rebalance_after_growth(self, taxonomy_store) -> None:
         """g) needs_rebalance detects >5% growth after record_discover_count."""

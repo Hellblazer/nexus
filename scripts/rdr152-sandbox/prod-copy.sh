@@ -142,8 +142,10 @@ if [[ -n "${PROD_MEMORY_DB:-}" ]]; then
     # NOTE: ETL commands continue on per-row HTTP errors (each ETL logs failures
     # but returns exit 0 when at least some rows succeed).  We use || true here
     # for the outer shell so a warning summary line does not fail the script.
-    # Known gaps documented in README: nx_answer_runs ClassCastException in
-    # TelemetryHandler (pre-existing service bug), topic_links FK ordering.
+    # Migration order matters: catalog before taxonomy (cross-store doc_id FK).
+    # Both prior known gaps are now fixed: nx_answer_runs plan_id ClassCastException
+    # (nexus-5gaj7) and the taxonomy assignment cross-store FK (nexus-0a7xc, now a
+    # counted skip when the doc is absent rather than a hard per-row failure).
 
     # memory
     echo "[prod-copy]   memory ETL..."
@@ -161,16 +163,28 @@ if [[ -n "${PROD_MEMORY_DB:-}" ]]; then
         --db "${PROD_MEMORY_DB}" \
         --service-url "${NX_SERVICE_URL}" || true
 
-    # telemetry (6 tables) — nx_answer_runs may have per-row ClassCastException failures
-    echo "[prod-copy]   telemetry ETL (per-row failures may occur; see README gap notes)..."
+    # telemetry (6 tables) — nx_answer_runs plan_id ClassCastException FIXED (nexus-5gaj7)
+    echo "[prod-copy]   telemetry ETL..."
     NX_SERVICE_TOKEN="${NX_SERVICE_TOKEN}" \
     NEXUS_CONFIG_DIR="${NEXUS_CONFIG_DIR}" \
     uv run nx storage migrate telemetry \
         --db "${PROD_MEMORY_DB}" \
         --service-url "${NX_SERVICE_URL}" 2>&1 | grep -v "row_failed" | head -20 || true
 
-    # taxonomy (4 tables) — topic_links may have FK ordering issues on first run
-    echo "[prod-copy]   taxonomy ETL (topic_links FK errors are expected on first pass)..."
+    # catalog — MUST run BEFORE taxonomy: topic_assignments carries a hard cross-store
+    # FK (doc_id -> catalog_documents.tumbler). Without catalog first, every assignment
+    # is skipped (nexus-0a7xc). Reads the prod catalog .catalog.db + owners.jsonl
+    # read-only (copy-not-move).
+    echo "[prod-copy]   catalog ETL (must precede taxonomy for the doc_id FK)..."
+    NX_SERVICE_TOKEN="${NX_SERVICE_TOKEN}" \
+    NEXUS_CONFIG_DIR="${NEXUS_CONFIG_DIR}" \
+    uv run nx storage migrate catalog \
+        --catalog-db "${PROD_CATALOG_DIR}/.catalog.db" \
+        --service-url "${NX_SERVICE_URL}" 2>&1 | grep -v "row_failed" | head -20 || true
+
+    # taxonomy (4 tables) — assignments referencing docs not in the catalog are SKIPPED
+    # (counted, not failed); catalog ran above so the vast majority import (nexus-0a7xc).
+    echo "[prod-copy]   taxonomy ETL (assignments skip-and-count if doc absent)..."
     NX_SERVICE_TOKEN="${NX_SERVICE_TOKEN}" \
     NEXUS_CONFIG_DIR="${NEXUS_CONFIG_DIR}" \
     uv run nx storage migrate taxonomy \
@@ -318,19 +332,19 @@ verify_pg_count_exact   "frecency"            "frecency"           "${PROD_TELEM
 # Gap tracked in nexus-5gaj7 (same TelemetryHandler/PlanHandler cast issue class).
 # Expected sandbox count: ~70 of 88 (stable across runs on this prod state).
 verify_pg_count_known_gap "plans"             "plans"              "${PROD_PLANS_COUNT:-0}"       70 "nexus-5gaj7"
-# topic_assignments: FK ordering issue — topics+assignments in same pass.
-# Gap tracked in nexus-0a7xc. Expected sandbox count: 0.
-verify_pg_count_known_gap "topic_assignments" "topic_assignments"  "${PROD_TOPIC_ASSIGN_COUNT:-0}" 0 "nexus-0a7xc"
-# topic_links: same FK ordering issue. Expected sandbox count: partial (>0, varies by prod state).
-# Gap tracked in nexus-0a7xc. The known-gap count is approximate; use 0 as a floor —
-# any non-zero count is acceptable (the FAIL path triggers if count < 0 somehow).
-# When the FK fix ships this will move to verify_pg_count_exact.
-# Last observed: 6525 (2026-06-08).
-verify_pg_count_known_gap "topic_links"       "topic_links"        "${PROD_TOPIC_LINKS_COUNT:-0}"  6525 "nexus-0a7xc"
-# nx_answer_runs: ClassCastException in TelemetryHandler.java:328 (String→Number cast).
-# Gap tracked in nexus-5gaj7. Expected sandbox count: 2 (a very small number succeed).
-# Last observed: 2 (2026-06-08).
-verify_pg_count_known_gap "nx_answer_runs"    "nx_answer_runs"     "${PROD_TELEMETRY_RUNS:-0}"    2 "nexus-5gaj7"
+# topic_assignments: cross-store FK to catalog_documents FIXED (nexus-0a7xc) and
+# catalog now migrates first (above). Expect near-full import; a small shortfall is
+# legitimate (SQLite source assignments to docs deleted before snapshot = true orphans
+# the FK-guarded import skips). Floor at 90% of prod catches a broken fix (near-0) while
+# tolerating orphans. TIGHTEN to verify_pg_count_exact (or an exact tolerance) once the
+# real orphan count is measured in the acceptance battery run.
+verify_pg_count_at_least "topic_assignments" "topic_assignments"  "$(( ${PROD_TOPIC_ASSIGN_COUNT:-0} * 90 / 100 ))"
+# topic_links: FK is topic→topic only (no catalog FK); topics migrate first, so links
+# import fully. nexus-0a7xc.
+verify_pg_count_at_least "topic_links"       "topic_links"        "${PROD_TOPIC_LINKS_COUNT:-0}"
+# nx_answer_runs: plan_id String→Number ClassCastException FIXED (nexus-5gaj7). Expect
+# full import (event log; at_least tolerates live writes during ETL).
+verify_pg_count_at_least "nx_answer_runs"    "nx_answer_runs"     "${PROD_TELEMETRY_RUNS:-0}"
 # hook_failures: likely same ClassCastException pattern.
 # Gap tracked in nexus-5gaj7. Expected sandbox count: 0.
 verify_pg_count_known_gap "hook_failures"     "hook_failures"      "${PROD_TELEMETRY_HOOKS:-0}"   0 "nexus-5gaj7"

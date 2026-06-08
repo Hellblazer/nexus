@@ -566,9 +566,15 @@ class HttpTaxonomyStore:
         similarity: float | None,
         assigned_at: str | None,
         source_collection: str | None,
-    ) -> None:
-        """Fidelity-preserving import for a topic_assignments row."""
-        self._post("/import/assignment", {
+    ) -> bool:
+        """Fidelity-preserving import for a topic_assignments row.
+
+        Returns ``True`` if the row was applied, ``False`` if skipped because the
+        referenced catalog document does not exist (cross-store ``fk_ta_catalog_doc``).
+        Skipped rows are not errors: they mean the catalog has not been migrated first,
+        or the assignment references a deleted doc (nexus-0a7xc).
+        """
+        r = self._post("/import/assignment", {
             "doc_id": doc_id,
             "topic_id": topic_id,
             "assigned_by": assigned_by,
@@ -576,6 +582,8 @@ class HttpTaxonomyStore:
             "assigned_at": assigned_at,
             "source_collection": source_collection,
         })
+        # Older services returned only {"ok": true}; treat missing "applied" as True.
+        return bool(r.get("applied", True)) if isinstance(r, dict) else True
 
     def import_topic_link(
         self,

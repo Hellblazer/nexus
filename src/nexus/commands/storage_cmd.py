@@ -463,6 +463,12 @@ def migrate_taxonomy_cmd(
     CHROMA BOUNDARY: only the four relational tables are migrated. The
     ``taxonomy__centroids`` ChromaDB collection is NOT touched by this command.
 
+    CROSS-STORE PREREQUISITE: topic_assignments carries a hard FK to
+    catalog_documents (doc_id -> tumbler). Run ``nx storage migrate catalog``
+    BEFORE this command, or assignments whose doc is not yet in the catalog are
+    SKIPPED (counted and reported, not failed). The ETL is idempotent — re-run
+    after the catalog is present to import the skipped assignments.
+
     Requires NX_SERVICE_PORT and NX_SERVICE_TOKEN to be set (or --service-url
     for the URL component; token is always read from NX_SERVICE_TOKEN).
 
@@ -527,15 +533,31 @@ def migrate_taxonomy_cmd(
 
     total_read    = sum(v["read"]    for v in results.values())
     total_written = sum(v["written"] for v in results.values())
-    skipped       = total_read - total_written
+    # "skipped" (cross-store fk_ta_catalog_doc: assignment doc not in catalog) is an
+    # expected, recoverable outcome — distinct from a genuine write failure.
+    total_skipped = sum(v.get("skipped", 0) for v in results.values())
+    failed        = total_read - total_written - total_skipped
 
-    click.echo(f"Done. total_read={total_read}, total_written={total_written}")
+    click.echo(
+        f"Done. total_read={total_read}, total_written={total_written}, "
+        f"total_skipped={total_skipped}"
+    )
     for table, v in results.items():
         if v["read"] > 0:
-            click.echo(f"  {table}: read={v['read']}, written={v['written']}")
-    if skipped:
+            line = f"  {table}: read={v['read']}, written={v['written']}"
+            if v.get("skipped"):
+                line += f", skipped={v['skipped']}"
+            click.echo(line)
+    if total_skipped:
         click.echo(
-            f"Warning: {skipped} row(s) failed to write — check logs for details.",
+            f"Note: {total_skipped} assignment(s) skipped because their doc_id is not "
+            "in the catalog. Run `nx storage migrate catalog` BEFORE taxonomy, then "
+            "re-run this command (it is idempotent) to import them.",
+            err=True,
+        )
+    if failed:
+        click.echo(
+            f"Warning: {failed} row(s) failed to write — check logs for details.",
             err=True,
         )
 
