@@ -1262,6 +1262,78 @@ public final class CatalogRepository {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // COVERAGE ANALYTICS (nexus-3cwnx)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Return per-content-type link coverage: for each distinct content_type in
+     * catalog_documents, return {content_type, total, linked} where:
+     * <ul>
+     *   <li>{@code total}  — COUNT(*) documents of that type (in scope)</li>
+     *   <li>{@code linked} — COUNT(DISTINCT tumbler) documents that have
+     *       at least one link in either direction (from_tumbler OR to_tumbler)</li>
+     * </ul>
+     *
+     * <p>When {@code ownerPrefix} is non-empty, scope is limited to documents
+     * whose tumbler LIKE 'prefix.%' OR = 'prefix' (mirrors the SQLite semantics
+     * in coverage_cmd exactly).
+     *
+     * <p>Tenant-scoped via TenantScope.withTenant (RLS).
+     *
+     * @param tenant      tenant identifier
+     * @param ownerPrefix filter to this owner prefix; empty string = all documents
+     * @return list of maps, each with keys {content_type, total, linked}
+     */
+    public List<Map<String, Object>> coverageByContentType(String tenant, String ownerPrefix) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // Build owner-prefix condition (empty = no filter)
+            Condition prefixCond = DSL.trueCondition();
+            if (ownerPrefix != null && !ownerPrefix.isBlank()) {
+                String likePat = ownerPrefix.replaceAll("\\.$", "") + ".%";
+                prefixCond = F_DOC_TUMBLER.like(likePat).or(F_DOC_TUMBLER.eq(ownerPrefix));
+            }
+
+            // Distinct content types in scope
+            var typeRows = ctx.selectDistinct(F_DOC_CTYPE)
+                              .from(T_DOCS)
+                              .where(prefixCond)
+                              .fetch(F_DOC_CTYPE);
+
+            List<Map<String, Object>> result = new ArrayList<>();
+            for (String ct : typeRows) {
+                String ctKey = ct == null ? "" : ct;
+                Condition typeCond = (ct == null)
+                    ? prefixCond.and(F_DOC_CTYPE.isNull())
+                    : prefixCond.and(F_DOC_CTYPE.eq(ct));
+
+                // Total count for this content_type + scope
+                long total = ctx.selectCount().from(T_DOCS).where(typeCond)
+                                .fetchOne(0, Long.class);
+
+                // Linked: documents that have at least one link in either direction.
+                // Use EXISTS subqueries for correct RLS scoping (mirrors SQLite JOIN ON
+                // d.tumbler = l.from_tumbler OR d.tumbler = l.to_tumbler).
+                var hasLink = DSL.exists(
+                    ctx.selectOne().from(T_LINKS)
+                       .where(F_LNK_FROM.eq(F_DOC_TUMBLER)
+                              .or(F_LNK_TO.eq(F_DOC_TUMBLER)))
+                );
+                long linked = ctx.selectCount()
+                                 .from(T_DOCS)
+                                 .where(typeCond.and(hasLink))
+                                 .fetchOne(0, Long.class);
+
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("content_type", ctKey);
+                row.put("total",        total);
+                row.put("linked",       linked);
+                result.add(row);
+            }
+            return result;
+        });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // ETL / IMPORT (fidelity-preserving, idempotent)
     // ══════════════════════════════════════════════════════════════════════════
 

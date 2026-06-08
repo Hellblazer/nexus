@@ -504,6 +504,32 @@ class HttpCatalogClient:
         result = self._get("/docs/collection-counts")
         return {k: int(v) for k, v in result.get("counts", {}).items()}
 
+    def coverage_by_content_type(self, owner_prefix: str = "") -> list[dict]:
+        """Return per-content-type link coverage.
+
+        For each distinct content_type in documents (optionally scoped to
+        owner_prefix), return {content_type, total, linked} where:
+          - total  = COUNT(*) documents of that type
+          - linked = COUNT(DISTINCT tumbler) documents with at least one link
+                     in either direction (from_tumbler OR to_tumbler)
+
+        Uses GET /v1/catalog/coverage?owner_prefix=<opt> (nexus-3cwnx).
+        Mirrors Catalog.coverage_by_content_type().
+        """
+        params: dict = {}
+        if owner_prefix:
+            params["owner_prefix"] = owner_prefix
+        result = self._get("/coverage", **params)
+        rows = result.get("coverage", []) if result else []
+        return [
+            {
+                "content_type": str(r.get("content_type", "")),
+                "total":  int(r.get("total", 0)),
+                "linked": int(r.get("linked", 0)),
+            }
+            for r in rows
+        ]
+
     # ══════════════════════════════════════════════════════════════════════════
     # DOCUMENTS
     # ══════════════════════════════════════════════════════════════════════════

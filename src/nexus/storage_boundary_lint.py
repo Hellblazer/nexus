@@ -136,14 +136,15 @@ CATALOG_DB_ACCESS_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 #:   - removing the dead ``else: db = cat._db`` branch in mcp/catalog.py (-1)
 #:   - scoping daemon/ into the allowlist (t2_daemon.py owner-internal) (-1)
 #: Lowered from 44 to 3 by nexus-xnz0o: all 44 commands/ consumer sites migrated
-#: to the public catalog API. Residual 3 are epsilon-allowed SQLite-only paths
-#: (backfill-owner-id write at catalog.py:514+516, coverage analytics at :2748)
-#: that are guarded with service-mode fail-loud gates.
-#: Ratchets down as subsequent beads migrate commands/ sites onto public API.
-#: The acceptance test asserts ``scan_repo(...).catalog_db_accesses <= BASELINE``;
-#: a PR that adds a new ._db access will push the count above the floor
-#: and fail CI before the floor is updated.
-CATALOG_DB_ACCESS_BASELINE: int = 3
+#: to the public catalog API. Lowered from 3 to 1 by nexus-3cwnx: coverage analytics
+#: migrated to service API (the ``coverage_cmd`` guard removed).
+#: Current unsuppressed count is 0: the two remaining ._db sites in
+#: catalog.py:514+516 (backfill-owner-id, SQLite-only write) both carry
+#: ``# epsilon-allow:`` annotations and are excluded from the scanner's count.
+#: Baseline 1 is the ceiling; a new unsuppressed ._db access anywhere outside
+#: the catalog/ allowlist will push the count to 1 and trip the assertion.
+#: Ratchets down to 0 when backfill-owner-id is ported to the service API.
+CATALOG_DB_ACCESS_BASELINE: int = 1
 
 
 #: RDR-146 catalog-construction floor. P0.1 seeded this at 49 (the AST
