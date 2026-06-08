@@ -336,3 +336,116 @@ class HttpDocumentAspectsStore:
         """Fidelity-preserving import for ETL. Returns 1 on success."""
         r = self._post("/import", body)
         return int(r.get("imported", 0))
+
+    # ── RDR-089 SQL fast-path operator queries (bead nexus-l9hd8) ─────────────
+
+    def operator_filter(
+        self,
+        source_uris: list[str],
+        field: str,
+        predicate: str,
+    ) -> list[str]:
+        """Filter: return source_uris matching field ILIKE predicate.
+
+        Mirrors ``aspect_sql._query_filter`` semantics over the service
+        backend. Batching is handled server-side.
+
+        Args:
+            source_uris: candidate URIs (already derived from idents via uri_for)
+            field:       aspect column name or ``extras.key``
+            predicate:   SQL LIKE/ILIKE pattern (e.g. ``"%paxos%"``)
+
+        Returns:
+            subset of source_uris whose aspect row matches the predicate
+        """
+        if not source_uris:
+            return []
+        r = self._post("/operator-query", {
+            "op": "filter",
+            "field": field,
+            "predicate": predicate,
+            "source_uris": source_uris,
+        })
+        result: list[str] = r.get("matched_uris", [])
+        _log.debug(
+            "http_aspects.operator_filter",
+            field=field,
+            input_count=len(source_uris),
+            matched_count=len(result),
+        )
+        return result
+
+    def operator_groupby(
+        self,
+        source_uris: list[str],
+        field: str,
+    ) -> dict[str, str | None]:
+        """GroupBy: return {source_uri: key_value} for each URI with an aspect row.
+
+        Mirrors ``aspect_sql._query_groupby`` semantics. URIs without aspect
+        rows are absent from the result dict; the Python caller maps absent
+        entries to ``"unassigned"``.
+
+        Args:
+            source_uris: candidate URIs
+            field:       aspect column name or ``extras.key``
+
+        Returns:
+            dict mapping source_uri to its field value (str or None)
+        """
+        if not source_uris:
+            return {}
+        r = self._post("/operator-query", {
+            "op": "groupby",
+            "field": field,
+            "source_uris": source_uris,
+        })
+        groups: list[dict] = r.get("uri_groups", [])
+        result: dict[str, str | None] = {}
+        for entry in groups:
+            uri = entry.get("source_uri")
+            val = entry.get("key_value")
+            if uri is not None:
+                result[uri] = val
+        _log.debug(
+            "http_aspects.operator_groupby",
+            field=field,
+            input_count=len(source_uris),
+            group_count=len(result),
+        )
+        return result
+
+    def operator_confidence_aggregate(
+        self,
+        source_uris: list[str],
+        reducer_kind: str,
+    ) -> float | None:
+        """Confidence aggregate: AVG / MIN / MAX confidence across source_uris.
+
+        Mirrors ``aspect_sql._query_confidence_aggregate`` semantics.
+
+        Args:
+            source_uris:  candidate URIs
+            reducer_kind: one of ``avg_confidence``, ``min_confidence``,
+                          ``max_confidence``
+
+        Returns:
+            the aggregate value as a float, or None when no rows matched
+        """
+        if not source_uris:
+            return None
+        r = self._post("/operator-query", {
+            "op": "confidence_aggregate",
+            "reducer_kind": reducer_kind,
+            "source_uris": source_uris,
+        })
+        value = r.get("value")
+        if value is None:
+            return None
+        _log.debug(
+            "http_aspects.operator_confidence_aggregate",
+            reducer_kind=reducer_kind,
+            input_count=len(source_uris),
+            value=value,
+        )
+        return float(value)

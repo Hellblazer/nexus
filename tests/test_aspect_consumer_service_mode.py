@@ -122,7 +122,11 @@ class TestAspectPromotionServiceModeGuard:
         )
 
 
-# ── .36: operators/aspect_sql.py — LLM fallback in service mode ───────────────
+# ── .36: operators/aspect_sql.py — service-mode routing (nexus-l9hd8) ─────────
+#
+# In service mode, the SQL fast-path operators now call the HTTP client instead
+# of returning None/stub. These tests mock _get_http_aspects_client() to verify
+# the right methods are invoked and that results are passed back correctly.
 
 
 def _items_json(*paths: str, collection: str = "knowledge__delos") -> str:
@@ -142,57 +146,103 @@ def _groups_json(key_value: str, *paths: str) -> str:
     }])
 
 
-class TestAspectSqlServiceModeFallback:
-    """In service mode, the SQL fast-path operators must not crash.
+class _MockClient:
+    """Minimal HTTP client stub for service-mode routing tests."""
 
-    source='auto' (default) must return None → operator falls back to LLM.
-    source='aspects' must return a stub result with an explanatory note.
-    source='llm' is already a no-op (handled before the SQL path).
+    def __init__(
+        self,
+        *,
+        filter_result: list[str] | None = None,
+        groupby_result: dict | None = None,
+        confidence_result: float | None = None,
+    ) -> None:
+        self._filter_result = filter_result or []
+        self._groupby_result = groupby_result or {}
+        self._confidence_result = confidence_result
+        self.filter_calls: list[tuple] = []
+        self.groupby_calls: list[tuple] = []
+        self.confidence_calls: list[tuple] = []
+        self.closed = False
 
-    These tests verify the guard fires BEFORE any SQL attempt, so no real
-    T2 database is needed. The test is purely about routing."""
+    def operator_filter(self, source_uris: list, field: str, predicate: str) -> list[str]:
+        self.filter_calls.append((source_uris, field, predicate))
+        return self._filter_result
+
+    def operator_groupby(self, source_uris: list, field: str) -> dict:
+        self.groupby_calls.append((source_uris, field))
+        return self._groupby_result
+
+    def operator_confidence_aggregate(self, source_uris: list, reducer_kind: str) -> float | None:
+        self.confidence_calls.append((source_uris, reducer_kind))
+        return self._confidence_result
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestAspectSqlServiceModeRouting:
+    """In service mode (nexus-l9hd8), the SQL fast-path operators route to the
+    HTTP client.  These tests mock _get_http_aspects_client() to verify routing
+    and result pass-through without requiring a live service.
+
+    The old guard behavior (None/stub returns) was removed; the operators now
+    produce real results from the service path in service mode."""
 
     # --- try_filter ---
 
-    def test_filter_auto_returns_none_in_service_mode(
-        self, service_mode: None,
+    def test_filter_auto_calls_service_and_returns_matched_items(
+        self, service_mode: None, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """source='auto' + service mode → None (LLM fallback, no crash)."""
-        items = _items_json("/papers/paxos.pdf")
+        """service mode + source='auto': matched URIs from service → items returned."""
+        from nexus.aspect_readers import uri_for
+        path = "/papers/paxos.pdf"
+        collection = "knowledge__delos"
+        expected_uri = uri_for(collection, path) or f"file://{path}"
+
+        mock = _MockClient(filter_result=[expected_uri])
+        monkeypatch.setattr(aspect_sql, "_get_http_aspects_client", lambda: mock)
+
+        items = _items_json(path, collection=collection)
         result = aspect_sql.try_filter(
             items,
             "paxos",
             source="auto",
             aspect_field="proposed_method",
         )
-        assert result is None, (
-            f"Expected None (LLM fallback) in service mode auto, got: {result!r}"
-        )
+        assert result is not None, f"Expected a result dict, got None; mock.filter_calls={mock.filter_calls}"
+        assert "items" in result
+        assert len(result["items"]) == 1
+        assert mock.filter_calls, "Expected HTTP client.operator_filter to be called"
+        assert mock.closed, "Client must be closed after call"
 
-    def test_filter_aspects_mode_returns_stub_in_service_mode(
-        self, service_mode: None,
+    def test_filter_aspects_mode_calls_service_returns_schema(
+        self, service_mode: None, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """source='aspects' + service mode → stub result (no crash)."""
-        items = _items_json("/papers/paxos.pdf")
+        """source='aspects' + service mode: service call happens, result has schema."""
+        from nexus.aspect_readers import uri_for
+        path = "/papers/paxos.pdf"
+        collection = "knowledge__delos"
+        expected_uri = uri_for(collection, path) or f"file://{path}"
+
+        mock = _MockClient(filter_result=[expected_uri])
+        monkeypatch.setattr(aspect_sql, "_get_http_aspects_client", lambda: mock)
+
+        items = _items_json(path, collection=collection)
         result = aspect_sql.try_filter(
             items,
             "paxos",
             source="aspects",
             aspect_field="proposed_method",
         )
-        assert result is not None, (
-            "Expected stub dict (not None) in aspects mode + service mode"
-        )
-        # Must have the operator's schema shape.
+        assert result is not None
         assert "items" in result
         assert "rationale" in result
-        # Stub items must be empty (no SQL ran).
-        assert result["items"] == []
+        assert mock.filter_calls, "Expected HTTP client.operator_filter to be called"
 
     def test_filter_llm_mode_unaffected_by_service_mode(
         self, service_mode: None,
     ) -> None:
-        """source='llm' → None unconditionally (service mode irrelevant)."""
+        """source='llm' → None unconditionally (service mode irrelevant, no client call)."""
         items = _items_json("/papers/paxos.pdf")
         result = aspect_sql.try_filter(
             items,
@@ -202,27 +252,79 @@ class TestAspectSqlServiceModeFallback:
         )
         assert result is None
 
+    def test_filter_no_match_from_service_returns_empty_items(
+        self, service_mode: None, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Service returns empty list → no items in result (no crash, no LLM fallback)."""
+        mock = _MockClient(filter_result=[])
+        monkeypatch.setattr(aspect_sql, "_get_http_aspects_client", lambda: mock)
+
+        items = _items_json("/papers/paxos.pdf")
+        result = aspect_sql.try_filter(
+            items,
+            "paxos",
+            source="aspects",
+            aspect_field="proposed_method",
+        )
+        assert result is not None
+        assert result["items"] == []
+
     # --- try_groupby ---
 
-    def test_groupby_auto_returns_none_in_service_mode(
-        self, service_mode: None,
+    def test_groupby_calls_service_returns_groups(
+        self, service_mode: None, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """source='auto' + service mode → None (LLM fallback, no crash)."""
-        items = _items_json("/papers/paxos.pdf")
+        """service mode: HTTP client called, grouped result returned."""
+        from nexus.aspect_readers import uri_for
+        path = "/papers/paxos.pdf"
+        collection = "knowledge__delos"
+        expected_uri = uri_for(collection, path) or f"file://{path}"
+
+        mock = _MockClient(groupby_result={expected_uri: "VLDB"})
+        monkeypatch.setattr(aspect_sql, "_get_http_aspects_client", lambda: mock)
+
+        items = _items_json(path, collection=collection)
         result = aspect_sql.try_groupby(
             items,
             "venue",
             source="auto",
             aspect_field="extras.venue",
         )
-        assert result is None, (
-            f"Expected None (LLM fallback) in service mode auto, got: {result!r}"
-        )
+        assert result is not None, f"Expected groups dict, got None; calls={mock.groupby_calls}"
+        assert "groups" in result
+        assert mock.groupby_calls, "Expected HTTP client.operator_groupby to be called"
+        assert mock.closed
 
-    def test_groupby_aspects_mode_returns_stub_in_service_mode(
-        self, service_mode: None,
+    def test_groupby_aspects_mode_calls_service(
+        self, service_mode: None, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """source='aspects' + service mode → stub result (no crash)."""
+        """source='aspects' + service mode: client called, groups returned."""
+        from nexus.aspect_readers import uri_for
+        path = "/papers/paxos.pdf"
+        collection = "knowledge__delos"
+        expected_uri = uri_for(collection, path) or f"file://{path}"
+
+        mock = _MockClient(groupby_result={expected_uri: "SOSP"})
+        monkeypatch.setattr(aspect_sql, "_get_http_aspects_client", lambda: mock)
+
+        items = _items_json(path, collection=collection)
+        result = aspect_sql.try_groupby(
+            items,
+            "venue",
+            source="aspects",
+            aspect_field="extras.venue",
+        )
+        assert result is not None
+        assert "groups" in result
+        assert mock.groupby_calls
+
+    def test_groupby_absent_uri_lands_in_unassigned(
+        self, service_mode: None, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """URIs absent from service response land in 'unassigned' group."""
+        mock = _MockClient(groupby_result={})  # no matches
+        monkeypatch.setattr(aspect_sql, "_get_http_aspects_client", lambda: mock)
+
         items = _items_json("/papers/paxos.pdf")
         result = aspect_sql.try_groupby(
             items,
@@ -230,17 +332,21 @@ class TestAspectSqlServiceModeFallback:
             source="aspects",
             aspect_field="extras.venue",
         )
-        assert result is not None, (
-            "Expected stub dict (not None) in aspects mode + service mode"
+        assert result is not None
+        groups = result["groups"]
+        assert any(g["key_value"] == "unassigned" for g in groups), (
+            f"Expected 'unassigned' group; got: {groups!r}"
         )
-        assert "groups" in result
 
     # --- try_aggregate ---
 
-    def test_aggregate_auto_returns_none_in_service_mode(
-        self, service_mode: None,
+    def test_aggregate_confidence_calls_service(
+        self, service_mode: None, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """source='auto' + service mode → None (LLM fallback, no crash)."""
+        """source='auto' + confidence reducer: HTTP client called, value returned."""
+        mock = _MockClient(confidence_result=0.82)
+        monkeypatch.setattr(aspect_sql, "_get_http_aspects_client", lambda: mock)
+
         groups = _groups_json("VLDB", "/papers/paxos.pdf")
         result = aspect_sql.try_aggregate(
             groups,
@@ -248,14 +354,15 @@ class TestAspectSqlServiceModeFallback:
             source="auto",
             aspect_field="confidence",
         )
-        assert result is None, (
-            f"Expected None (LLM fallback) in service mode auto, got: {result!r}"
-        )
+        assert result is not None, f"Expected aggregates dict; got None. Calls: {mock.confidence_calls}"
+        assert "aggregates" in result
+        assert mock.confidence_calls, "Expected HTTP client.operator_confidence_aggregate called"
+        assert mock.closed
 
     def test_aggregate_count_unaffected_by_service_mode(
         self, service_mode: None,
     ) -> None:
-        """'count' reducer doesn't touch T2 SQL at all; service mode must not
+        """'count' reducer doesn't touch T2 SQL or HTTP; service mode must not
         block it (count is computed purely from items)."""
         groups = _groups_json("VLDB", "/papers/paxos.pdf", "/papers/raft.pdf")
         result = aspect_sql.try_aggregate(
@@ -264,14 +371,14 @@ class TestAspectSqlServiceModeFallback:
             source="auto",
             aspect_field="",
         )
-        # count uses len(items) — no SQL dispatch — must work in service mode.
+        # count uses len(items) — no SQL/HTTP dispatch — must work in service mode.
         assert result is not None
         assert result["aggregates"][0]["summary"] == "2 item(s)"
 
     def test_aggregate_count_distinct_unaffected_by_service_mode(
         self, service_mode: None,
     ) -> None:
-        """'count distinct' deduplicates by id/identity — no SQL dispatch."""
+        """'count distinct' deduplicates by id/identity — no SQL/HTTP dispatch."""
         groups = _groups_json("VLDB", "/papers/paxos.pdf", "/papers/raft.pdf")
         result = aspect_sql.try_aggregate(
             groups,
@@ -282,18 +389,14 @@ class TestAspectSqlServiceModeFallback:
         assert result is not None
         assert "2 distinct" in result["aggregates"][0]["summary"]
 
-    def test_aggregate_mixed_reducer_auto_returns_none(
-        self, service_mode: None,
+    def test_aggregate_mixed_groups_confidence_calls_service(
+        self, service_mode: None, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Mixed groups list (count group first, confidence group second) with
-        source='auto' and a confidence reducer must return None cleanly without
-        partial aggregation state.
+        """Multi-group confidence reducer: HTTP client called once with all URIs,
+        result applied across groups (nexus-l9hd8 parity with SQLite fold)."""
+        mock = _MockClient(confidence_result=0.75)
+        monkeypatch.setattr(aspect_sql, "_get_http_aspects_client", lambda: mock)
 
-        Regression guard for the guard-inside-loop bug (nexus-gmiaf.36):
-        previously, try_aggregate appended the count group's result to
-        `aggregates` before hitting `return None` on the confidence group,
-        silently discarding the count state. The guard is now hoisted before
-        the loop so the whole call returns None consistently."""
         groups = json.dumps([
             {
                 "key_value": "VLDB",
@@ -318,15 +421,17 @@ class TestAspectSqlServiceModeFallback:
             source="auto",
             aspect_field="confidence",
         )
-        assert result is None, (
-            "Mixed-group confidence reducer in auto+service mode must return "
-            f"None (LLM fallback), not partial state. Got: {result!r}"
-        )
+        assert result is not None, f"Expected aggregates dict in service mode; got None"
+        assert "aggregates" in result
+        assert mock.confidence_calls, "HTTP client must be called for confidence reducer"
 
-    def test_aggregate_aspects_mode_confidence_returns_stub(
-        self, service_mode: None,
+    def test_aggregate_aspects_mode_confidence_calls_service(
+        self, service_mode: None, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """aspects mode + confidence reducer → stub (no crash)."""
+        """aspects mode + confidence reducer: service call happens, result returned."""
+        mock = _MockClient(confidence_result=0.9)
+        monkeypatch.setattr(aspect_sql, "_get_http_aspects_client", lambda: mock)
+
         groups = _groups_json("VLDB", "/papers/paxos.pdf")
         result = aspect_sql.try_aggregate(
             groups,
@@ -336,12 +441,100 @@ class TestAspectSqlServiceModeFallback:
         )
         assert result is not None
         assert "aggregates" in result
-        # Stub must reference the service backend and tracking bead so the
-        # operator caller knows why the fast-path was bypassed.
-        summary = result["aggregates"][0]["summary"]
-        assert "service" in summary or "nexus-gmiaf.36" in summary, (
-            f"Expected 'service' or 'nexus-gmiaf.36' in stub summary; got: {summary!r}"
+        assert mock.confidence_calls
+
+
+class TestServiceErrorFallback:
+    """Service transport errors in source='auto' must trigger LLM fallback (return None),
+    not propagate as exceptions. (nexus-l9hd8 Sig-2 fix)
+
+    In source='aspects' mode service errors return a stub result (no LLM fallback).
+    """
+
+    class _RaisingClient:
+        """Mock client that always raises a RuntimeError (simulates missing NX_SERVICE_PORT)."""
+
+        def operator_filter(self, *_a, **_kw):
+            raise RuntimeError("service port not configured")
+
+        def operator_groupby(self, *_a, **_kw):
+            raise RuntimeError("connection refused")
+
+        def operator_confidence_aggregate(self, *_a, **_kw):
+            raise RuntimeError("service unreachable")
+
+        def close(self) -> None:
+            pass
+
+    @pytest.fixture(autouse=True)
+    def _patch_client(self, monkeypatch: pytest.MonkeyPatch, service_mode: None) -> None:  # noqa: PT004
+        """Inject the raising client and set service mode for all tests in this class."""
+        monkeypatch.setattr(
+            aspect_sql, "_get_http_aspects_client",
+            lambda: self._RaisingClient(),
         )
+
+    def test_filter_auto_service_error_falls_back_to_none(self) -> None:
+        """source='auto': filter service error → None (triggers LLM fallback, no raise)."""
+        items = _items_json("/papers/paxos.pdf")
+        result = aspect_sql.try_filter(
+            items, "paxos", source="auto", aspect_field="proposed_method",
+        )
+        assert result is None, (
+            "Expected None (LLM fallback) on service error in source='auto'; "
+            f"got: {result!r}"
+        )
+
+    def test_filter_aspects_service_error_returns_stub(self) -> None:
+        """source='aspects': filter service error → stub result, not raise."""
+        items = _items_json("/papers/paxos.pdf")
+        result = aspect_sql.try_filter(
+            items, "paxos", source="aspects", aspect_field="proposed_method",
+        )
+        assert result is not None, (
+            "source='aspects' must return stub on error, not raise"
+        )
+        assert result["items"] == []
+
+    def test_groupby_auto_service_error_falls_back_to_none(self) -> None:
+        """source='auto': groupby service error → None (LLM fallback)."""
+        items = _items_json("/papers/paxos.pdf")
+        result = aspect_sql.try_groupby(
+            items, "venue", source="auto", aspect_field="extras.venue",
+        )
+        assert result is None, (
+            "Expected None (LLM fallback) on service error in source='auto'; "
+            f"got: {result!r}"
+        )
+
+    def test_groupby_aspects_service_error_returns_stub(self) -> None:
+        """source='aspects': groupby service error → stub result, not raise."""
+        items = _items_json("/papers/paxos.pdf")
+        result = aspect_sql.try_groupby(
+            items, "venue", source="aspects", aspect_field="extras.venue",
+        )
+        assert result is not None
+        assert "groups" in result
+
+    def test_aggregate_confidence_auto_service_error_falls_back_to_none(self) -> None:
+        """source='auto': confidence aggregate service error → None (LLM fallback)."""
+        groups = _groups_json("VLDB", "/papers/paxos.pdf")
+        result = aspect_sql.try_aggregate(
+            groups, "avg confidence", source="auto", aspect_field="confidence",
+        )
+        assert result is None, (
+            "Expected None (LLM fallback) on service error in source='auto'; "
+            f"got: {result!r}"
+        )
+
+    def test_aggregate_confidence_aspects_service_error_returns_stub(self) -> None:
+        """source='aspects': confidence aggregate service error → stub result, not raise."""
+        groups = _groups_json("VLDB", "/papers/paxos.pdf")
+        result = aspect_sql.try_aggregate(
+            groups, "avg confidence", source="aspects", aspect_field="confidence",
+        )
+        assert result is not None
+        assert "aggregates" in result
 
 
 # ── .37: commands/aspects.py gc-fixtures — CLI guard ──────────────────────────
