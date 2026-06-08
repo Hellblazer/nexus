@@ -144,6 +144,11 @@ public final class CatalogRepository {
     private static final Field<String>  EX_OWN_DESC   = DSL.field("EXCLUDED.description",  String.class);
     private static final Field<String>  EX_OWN_ROOT   = DSL.field("EXCLUDED.repo_root",    String.class);
     private static final Field<String>  EX_OWN_HEAD   = DSL.field("EXCLUDED.head_hash",    String.class);
+    // GREATEST for next_seq on owner ETL import: never downgrade a live-advanced sequence
+    // counter on re-import. A faithful migration must carry next_seq from the source so the
+    // first post-cutover registerDocument does not collide with an already-imported tumbler.
+    private static final Field<Long>    EX_OWN_SEQ_GREATEST =
+        DSL.field("GREATEST(catalog_owners.next_seq, EXCLUDED.next_seq)", Long.class);
 
     private static final Field<String>  EX_DOC_TITLE  = DSL.field("EXCLUDED.title",        String.class);
     private static final Field<String>  EX_DOC_AUTHOR = DSL.field("EXCLUDED.author",       String.class);
@@ -1337,7 +1342,36 @@ public final class CatalogRepository {
     // ETL / IMPORT (fidelity-preserving, idempotent)
     // ══════════════════════════════════════════════════════════════════════════
 
-    public void importOwner(String tenant, Map<String, Object> o) { upsertOwner(tenant, o); }
+    /**
+     * Fidelity-preserving owner import. Unlike {@link #upsertOwner} (the live write path,
+     * which never touches next_seq), the ETL path MUST carry next_seq from the SQLite source.
+     * Otherwise every imported owner lands with next_seq=0 and the first post-cutover
+     * registerDocument allocates tumbler {@code prefix.1}, colliding with the already-imported
+     * document at that tumbler (unique violation on (tenant, tumbler), no ON CONFLICT clause).
+     * GREATEST guards re-runs from downgrading a seq the live service has already advanced.
+     */
+    public void importOwner(String tenant, Map<String, Object> o) {
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(T_OWNERS,
+                    F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,
+                    F_OWN_REPO, F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD, F_OWN_SEQ)
+               .values(tenant,
+                       s(o,"tumbler_prefix"), s(o,"name"), s(o,"owner_type"),
+                       s(o,"repo_hash"), s(o,"description"), nne(s(o,"repo_root")),
+                       s(o,"head_hash"), lng(o,"next_seq", 0L))
+               .onConflict(F_OWN_TENANT, F_OWN_PREFIX)
+               .doUpdate()
+               .set(F_OWN_NAME, EX_OWN_NAME)
+               .set(F_OWN_TYPE, EX_OWN_TYPE)
+               .set(F_OWN_REPO, EX_OWN_REPO)
+               .set(F_OWN_DESC, EX_OWN_DESC)
+               .set(F_OWN_ROOT, EX_OWN_ROOT)
+               .set(F_OWN_HEAD, EX_OWN_HEAD)
+               .set(F_OWN_SEQ,  EX_OWN_SEQ_GREATEST)
+               .execute();
+            return null;
+        });
+    }
 
     /** Fidelity-preserving document import. Uses GREATEST for source_mtime. */
     public void importDocument(String tenant, Map<String, Object> d) {
@@ -1580,6 +1614,12 @@ public final class CatalogRepository {
 
     /** Non-null double: returns 0.0 if null. */
     private static double nd(Double v) { return v != null ? v : 0.0; }
+
+    /** Long with default: returns def if absent or non-numeric. */
+    private static long lng(Map<String, Object> m, String k, long def) {
+        Object v = m.get(k);
+        return v instanceof Number n ? n.longValue() : def;
+    }
 
     private String jsonOrNull(Object v) {
         if (v == null) return null;

@@ -672,6 +672,179 @@ def migrate_chash_cmd(
     )
 
 
+@migrate_group.command(name="catalog")
+@click.option(
+    "--catalog-db",
+    "catalog_db_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+    help=(
+        "Path to the SQLite catalog DB file (.catalog.db). "
+        "Defaults to NX_CATALOG_DB_PATH env var or "
+        "~/.config/nexus/catalog/.catalog.db."
+    ),
+)
+@click.option(
+    "--service-url",
+    "service_url",
+    default=None,
+    help=(
+        "Base URL of the nexus-service (e.g. http://127.0.0.1:8080). "
+        "Defaults to NX_SERVICE_HOST + NX_SERVICE_PORT env vars."
+    ),
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Count rows in all catalog tables without writing. No service connection is made.",
+)
+def migrate_catalog_cmd(
+    catalog_db_path: Path | None,
+    service_url: str | None,
+    dry_run: bool,
+) -> None:
+    """Migrate the SQLite catalog to Postgres via the nexus-service.
+
+    Reads owners, documents, links, collections, document_chunks, and
+    _meta from the SQLite catalog DB and writes them through the service
+    HTTP import API.  The ETL is idempotent:
+
+    - owners:           ON CONFLICT DO UPDATE (all fields from EXCLUDED)
+    - documents:        ON CONFLICT DO UPDATE (GREATEST source_mtime)
+    - collections:      ON CONFLICT DO NOTHING
+    - document_chunks:  ON CONFLICT DO NOTHING
+    - links:            ON CONFLICT DO NOTHING
+
+    Insertion order: owners -> documents -> collections -> document_chunks
+    -> links (respects cross-store FK constraints from fk-001-catalog).
+
+    Requires NX_SERVICE_PORT and NX_SERVICE_TOKEN to be set (or --service-url
+    for the URL component; token is always read from NX_SERVICE_TOKEN).
+
+    Examples::
+
+        # Auto-detect catalog DB, service from env:
+        nx storage migrate catalog
+
+        # Explicit paths:
+        nx storage migrate catalog \\
+            --catalog-db ~/.config/nexus/catalog/.catalog.db \\
+            --service-url http://127.0.0.1:8080
+
+        # Dry run (count only, no writes):
+        nx storage migrate catalog --dry-run
+    """
+    resolved_catalog = _resolve_catalog_db_path(catalog_db_path)
+    if not resolved_catalog.exists():
+        raise click.ClickException(
+            f"SQLite catalog DB not found: {resolved_catalog}\n"
+            "Set NX_CATALOG_DB_PATH or pass --catalog-db."
+        )
+
+    if dry_run:
+        from nexus.db.t2.catalog_etl import count_source_rows
+
+        try:
+            counts = count_source_rows(resolved_catalog)
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc))
+        total = sum(counts.values())
+        click.echo(f"Dry run: source has {total} catalog rows across {len(counts)} tables:")
+        for table, n in counts.items():
+            click.echo(f"  {table}: {n}")
+        click.echo("(no writes performed)")
+        return
+
+    from nexus.catalog.factory import make_catalog_client_for_migration
+
+    token = os.environ.get("NX_SERVICE_TOKEN", "")
+    if not token:
+        raise click.ClickException(
+            "NX_SERVICE_TOKEN is required for storage migrate catalog.\n"
+            "Set it to the bearer token configured in the nexus-service."
+        )
+
+    try:
+        client = make_catalog_client_for_migration(base_url=service_url, token=token)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc))
+
+    from nexus.db.t2.catalog_etl import migrate_catalog
+
+    click.echo(f"Migrating catalog from {resolved_catalog} ...")
+    try:
+        results = migrate_catalog(resolved_catalog, client)
+    except Exception as exc:
+        raise click.ClickException(f"ETL failed: {exc}")
+    finally:
+        client.close()
+
+    from nexus.db.t2.catalog_etl import IMPORT_TABLE_KEYS
+
+    total_read    = sum(results[k]["read"]    for k in IMPORT_TABLE_KEYS if k in results)
+    total_written = sum(results[k]["written"] for k in IMPORT_TABLE_KEYS if k in results)
+    skipped       = total_read - total_written
+
+    click.echo(f"Done. total_read={total_read}, total_written={total_written}")
+    for table in IMPORT_TABLE_KEYS:
+        v = results.get(table)
+        if v and v["read"] > 0:
+            click.echo(f"  {table}: read={v['read']}, written={v['written']}")
+
+    # Bookkeeping entries reported distinctly so dry-run and live counts reconcile.
+    meta = results.get("catalog_meta")
+    if meta and meta.get("skipped"):
+        click.echo(
+            f"  catalog_meta: {meta['skipped']} row(s) intentionally skipped "
+            "(SQLite projection markers, not applicable to Postgres)"
+        )
+    reconcile = results.get("next_seq_reconcile")
+    if reconcile and reconcile.get("written"):
+        click.echo(
+            f"  next_seq: reconciled on {reconcile['written']} owner(s) "
+            "(tumbler allocation floored at high-water mark)"
+        )
+    if reconcile and reconcile.get("failed"):
+        click.echo(
+            f"ERROR: next_seq reconciliation FAILED on {reconcile['failed']} owner(s) — "
+            "those owners may collide on the first new document registration. "
+            "Re-run the migration before cutover (the pass is idempotent).",
+            err=True,
+        )
+
+    if skipped:
+        click.echo(
+            f"Warning: {skipped} row(s) failed to write — check logs for details.",
+            err=True,
+        )
+
+    _log.info(
+        "storage.migrate.catalog.complete",
+        catalog_db=str(resolved_catalog),
+        total_read=total_read,
+        total_written=total_written,
+        by_table=results,
+    )
+
+
+def _resolve_catalog_db_path(explicit: Path | None) -> Path:
+    """Resolve the SQLite catalog DB path.
+
+    Priority:
+    1. Explicit ``--catalog-db PATH`` argument.
+    2. ``NX_CATALOG_DB_PATH`` environment variable.
+    3. ``~/.config/nexus/catalog/.catalog.db`` (conventional default).
+    """
+    if explicit is not None:
+        return explicit
+    env_path = os.environ.get("NX_CATALOG_DB_PATH", "")
+    if env_path:
+        return Path(env_path)
+    from nexus.config import nexus_config_dir
+    return nexus_config_dir() / "catalog" / ".catalog.db"
+
+
 def _resolve_db_path(explicit: Path | None) -> Path:
     """Resolve the SQLite T2 database path.
 
