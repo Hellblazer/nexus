@@ -10,6 +10,8 @@ SANDBOX_ENV="${SANDBOX_HOME}/sandbox.env"
 SERVICE_PID_FILE="${SANDBOX_HOME}/service.pid"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# Honour NEXUS_CONFIG_DIR so the prod-touch guard is correct on non-default deployments.
+PROD_CONFIG="${NEXUS_CONFIG_DIR:-${HOME}/.config/nexus}"
 PURGE=0
 
 for arg in "$@"; do
@@ -69,10 +71,62 @@ else
     echo "[down] No pg_credentials found — skipping Postgres stop"
 fi
 
+# ── KILL ORPHANED CHROMA CHILD ────────────────────────────────────────────────
+# LocalChromaServer's 'chroma run' can double-fork; if the JVM was SIGKILLed its
+# shutdown hook did not run, leaving an orphan uvicorn on NX_CHROMA_HTTP_PORT.
+if [[ -f "${SANDBOX_ENV}" ]]; then
+    ORPHAN_CHROMA_PORT="$(grep 'NX_CHROMA_HTTP_PORT' "${SANDBOX_ENV}" 2>/dev/null | sed 's/.*=//' | tr -d '"' | tr -d "'" | head -1 || true)"
+    if [[ -n "${ORPHAN_CHROMA_PORT}" ]]; then
+        ORPHAN_PIDS="$(lsof -ti "tcp:${ORPHAN_CHROMA_PORT}" 2>/dev/null || true)"
+        if [[ -n "${ORPHAN_PIDS}" ]]; then
+            echo "[down] Killing orphaned chroma process(es) on port ${ORPHAN_CHROMA_PORT}: ${ORPHAN_PIDS}"
+            echo "${ORPHAN_PIDS}" | xargs kill -TERM 2>/dev/null || true
+        fi
+    fi
+fi
+
 # ── PURGE ─────────────────────────────────────────────────────────────────────
 if [[ "${PURGE}" -eq 1 ]]; then
-    echo "[down] --purge: removing ${SANDBOX_HOME}..."
-    rm -rf "${SANDBOX_HOME}"
+    # Safety guard — refuse to rm -rf if any of the following conditions hold:
+    # 1. SANDBOX_HOME has fewer than 3 path components (e.g. /, /tmp, $HOME).
+    # 2. SANDBOX_HOME == HOME.
+    # 3. SANDBOX_HOME resolves to / or is under prod ~/.config/nexus.
+    # 4. SANDBOX_HOME contains no harness marker file (sandbox.env or service.pid)
+    #    AND the directory is not empty — i.e. it was never a sandbox.
+    SANDBOX_HOME_REAL="$(realpath -m "${SANDBOX_HOME}" 2>/dev/null || echo "${SANDBOX_HOME}")"
+    PROD_REAL="$(realpath -m "${PROD_CONFIG}" 2>/dev/null || realpath "${PROD_CONFIG}" 2>/dev/null || echo "${PROD_CONFIG}")"
+    HOME_REAL="$(realpath "${HOME}")"
+
+    # Count path components (split on /)
+    IFS='/' read -ra _PARTS <<< "${SANDBOX_HOME_REAL}"
+    _COMPONENT_COUNT=0
+    for _p in "${_PARTS[@]}"; do
+        [[ -n "${_p}" ]] && (( _COMPONENT_COUNT++ )) || true
+    done
+
+    PURGE_ABORT=""
+    if [[ "${SANDBOX_HOME_REAL}" == "/" ]]; then
+        PURGE_ABORT="SANDBOX_HOME resolved to /; refusing to purge"
+    elif [[ "${SANDBOX_HOME_REAL}" == "${HOME_REAL}" ]]; then
+        PURGE_ABORT="SANDBOX_HOME resolved to HOME (${HOME_REAL}); refusing to purge"
+    elif [[ "${_COMPONENT_COUNT}" -lt 2 ]]; then
+        # Blocks: / (0), /tmp (1), /Users (1) — but allows /tmp/something (2)
+        PURGE_ABORT="SANDBOX_HOME '${SANDBOX_HOME_REAL}' has only ${_COMPONENT_COUNT} path component(s); refusing to purge (need >= 2)"
+    elif [[ "${SANDBOX_HOME_REAL}" == "${PROD_REAL}" || "${SANDBOX_HOME_REAL}" == "${PROD_REAL}/"* ]]; then
+        PURGE_ABORT="SANDBOX_HOME '${SANDBOX_HOME_REAL}' is under prod '${PROD_REAL}'; refusing to purge"
+    elif [[ ! -f "${SANDBOX_HOME}/sandbox.env" && ! -f "${SANDBOX_HOME}/service.pid" ]]; then
+        PURGE_ABORT="SANDBOX_HOME '${SANDBOX_HOME_REAL}' contains no harness marker (sandbox.env or service.pid); not a sandbox dir"
+    fi
+
+    if [[ -n "${PURGE_ABORT}" ]]; then
+        echo ""
+        echo "  ABORT --purge: ${PURGE_ABORT}." >&2
+        echo ""
+        exit 1
+    fi
+
+    echo "[down] --purge: removing ${SANDBOX_HOME_REAL}..."
+    rm -rf "${SANDBOX_HOME_REAL}"
     echo "[down] Purge complete"
 fi
 

@@ -14,7 +14,8 @@ set -euo pipefail
 SANDBOX_HOME="${SANDBOX_HOME:-${HOME}/nexus-rdr152-sandbox}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROD_CONFIG="${HOME}/.config/nexus"
+# Honour NEXUS_CONFIG_DIR for prod path so the guard is correct on non-default deployments.
+PROD_CONFIG="${NEXUS_CONFIG_DIR:-${HOME}/.config/nexus}"
 SANDBOX_CONFIG="${SANDBOX_HOME}/.config/nexus"
 SANDBOX_ENV="${SANDBOX_HOME}/sandbox.env"
 SERVICE_PID_FILE="${SANDBOX_HOME}/service.pid"
@@ -24,22 +25,26 @@ echo "[up] SANDBOX_HOME=${SANDBOX_HOME}"
 echo "[up] REPO_ROOT=${REPO_ROOT}"
 
 # ── HARD PROD-TOUCH GUARD ─────────────────────────────────────────────────────
-# Resolve both to realpaths; abort if sandbox config is equal to or under prod.
-mkdir -p "${SANDBOX_CONFIG}"
-PROD_REAL="$(realpath "${PROD_CONFIG}" 2>/dev/null || echo "${PROD_CONFIG}")"
-SANDBOX_REAL="$(realpath "${SANDBOX_CONFIG}")"
+# Resolve both to realpaths BEFORE creating any directories so the guard fires
+# before any filesystem mutation.  realpath -m canonicalises without requiring
+# the path to exist.
+PROD_REAL="$(realpath -m "${PROD_CONFIG}" 2>/dev/null || realpath "${PROD_CONFIG}" 2>/dev/null || echo "${PROD_CONFIG}")"
+SANDBOX_REAL="$(realpath -m "${SANDBOX_CONFIG}" 2>/dev/null || echo "${SANDBOX_CONFIG}")"
 
 if [[ "${SANDBOX_REAL}" == "${PROD_REAL}" || "${SANDBOX_REAL}" == "${PROD_REAL}/"* ]]; then
     echo ""
     echo "  ABORT: sandbox config dir '${SANDBOX_REAL}'" >&2
     echo "         is equal to or under prod '${PROD_REAL}'." >&2
-    echo "  Set SANDBOX_HOME to a path outside ~/.config/nexus." >&2
+    echo "  Set SANDBOX_HOME to a path outside ${PROD_CONFIG}." >&2
     echo ""
     exit 1
 fi
 echo "[up] Prod-touch guard PASSED"
 echo "[up]   sandbox=${SANDBOX_REAL}"
 echo "[up]   prod   =${PROD_REAL}"
+
+# Guard passed — safe to create sandbox directories.
+mkdir -p "${SANDBOX_CONFIG}"
 
 # ── REDIRECT ALL NX CONFIG PATHS INTO SANDBOX ─────────────────────────────────
 export NEXUS_CONFIG_DIR="${SANDBOX_CONFIG}"

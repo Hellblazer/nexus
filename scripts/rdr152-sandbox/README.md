@@ -61,7 +61,12 @@ SANDBOX_HOME=/tmp/my-sandbox ./up.sh
    as destination.  Each ETL opens the source in `mode=ro` (OS-level
    read-only; the fidelity-preserving `/import` endpoints are idempotent).
 4. Assert prod file mtimes UNCHANGED after the copy.
-5. Verify sandbox collection/document counts >= prod counts.
+5. Assert prod file mtimes UNCHANGED after the copy — including `.db`, `-shm`,
+   and `-wal` WAL-mode sidecar files.
+6. Verify sandbox counts match prod exactly (strict `==`) for stores that copy
+   completely.  Tables with known service-side gaps (nexus-0a7xc, nexus-5gaj7)
+   are verified against their known-gap count and annotated with the tracking
+   bead so the assertion tightens automatically when the gaps are fixed.
 
 ### 3. Check status
 
@@ -97,7 +102,18 @@ Reports:
   All credentials are sandbox-specific.
 - **Read-only ETL source**: all T2 SQLite ETLs open the prod file with
   SQLite URI `mode=ro`; the Chroma copy uses `cp -R` with no `--archive`
-  timestamp-update flags.
+  timestamp-update flags.  All `sqlite3` CLI invocations on prod paths use
+  `--readonly` so the WAL-mode `-shm` sidecar is never updated.
+- **Chroma copy is a live-prod snapshot** (best-effort): `cp -R` takes the
+  Chroma directory while the prod MCP may be writing new embeddings.  If the
+  sandbox produces odd query results, stop the prod MCP (`nx daemon stop`),
+  re-run `prod-copy.sh`, then restart the prod MCP.  For Phase-4 smoke testing
+  the snapshot is sufficient; the exact embedding counts are asserted post-copy.
+- **Down --purge safety guard**: `down.sh --purge` refuses to `rm -rf` unless
+  the target contains a harness marker file (`sandbox.env` or `service.pid`),
+  has >= 2 path components, is not `$HOME`, and is not under prod
+  `~/.config/nexus`.  This prevents `SANDBOX_HOME=~ ./down.sh --purge` from
+  deleting the home directory.
 - **Separate Chroma**: `NX_CHROMA_PATH` points at
   `$SANDBOX_HOME/.config/nexus/chroma`, not the prod path.
 - **Separate service token**: `NX_SERVICE_TOKEN` is a freshly generated

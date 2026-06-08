@@ -105,13 +105,25 @@ def _cmd_sqlite_counts(args: argparse.Namespace) -> None:
 
 
 def _cmd_chroma_counts(args: argparse.Namespace) -> None:
-    """Print JSON counts from a Chroma sqlite3 file."""
+    """Print JSON counts from a Chroma sqlite3 file.
+
+    Opens the file in read-only mode (mode=ro URI) to prevent SQLite from
+    creating or updating the -shm sidecar on a WAL-mode database.
+    Chroma uses 'delete' journal mode rather than WAL so the sidecar risk is
+    lower here than for memory.db, but mode=ro is still the correct default
+    for any prod-path read.
+    """
     sqlite_path = Path(args.chroma_sqlite)
     if not sqlite_path.exists():
         print(json.dumps({"error": f"not found: {sqlite_path}"}))
         sys.exit(1)
 
-    conn = sqlite3.connect(str(sqlite_path), check_same_thread=False)
+    uri = f"file:{sqlite_path}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    except sqlite3.OperationalError as e:
+        print(json.dumps({"error": str(e)}))
+        sys.exit(1)
     try:
         collections = conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0]
         embeddings = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
