@@ -7,7 +7,6 @@ package dev.nexus.service.jooq.nexus.tables;
 import dev.nexus.service.jooq.nexus.Indexes;
 import dev.nexus.service.jooq.nexus.Keys;
 import dev.nexus.service.jooq.nexus.Nexus;
-import dev.nexus.service.jooq.nexus.tables.CatalogDocuments.CatalogDocumentsPath;
 import dev.nexus.service.jooq.nexus.tables.Topics.TopicsPath;
 import dev.nexus.service.jooq.nexus.tables.records.TopicAssignmentsRecord;
 
@@ -174,20 +173,7 @@ public class TopicAssignments extends TableImpl<TopicAssignmentsRecord> {
 
     @Override
     public List<ForeignKey<TopicAssignmentsRecord, ?>> getReferences() {
-        return Arrays.asList(Keys.TOPIC_ASSIGNMENTS__FK_TA_CATALOG_DOC, Keys.TOPIC_ASSIGNMENTS__TOPIC_ASSIGNMENTS_TOPIC_ID_FKEY);
-    }
-
-    private transient CatalogDocumentsPath _catalogDocuments;
-
-    /**
-     * Get the implicit join path to the <code>nexus.catalog_documents</code>
-     * table.
-     */
-    public CatalogDocumentsPath catalogDocuments() {
-        if (_catalogDocuments == null)
-            _catalogDocuments = new CatalogDocumentsPath(this, Keys.TOPIC_ASSIGNMENTS__FK_TA_CATALOG_DOC, null);
-
-        return _catalogDocuments;
+        return Arrays.asList(Keys.TOPIC_ASSIGNMENTS__TOPIC_ASSIGNMENTS_TOPIC_ID_FKEY);
     }
 
     private transient TopicsPath _topics;

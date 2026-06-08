@@ -106,9 +106,11 @@ class TaxonomyRepositoryTest {
             }
             su.createStatement().execute(
                 "GRANT USAGE ON SEQUENCE " + schema + ".topics_id_seq TO " + SVC_ROLE);
-            // nexus-0a7xc: importAssignment now reads catalog_documents (cross-store FK
-            // existence guard), so the DML role needs SELECT on it. In prod, nexus_svc
-            // gets this via grants-nexus-svc.xml; this bespoke test role must mirror it.
+            // Grant SELECT on catalog_documents to the DML role for general catalog
+            // query coverage in mixed tests. (nexus-sa14p: importAssignment no longer
+            // reads catalog_documents — fk_ta_catalog_doc was removed — so this is not
+            // strictly required for assignment imports, but is harmless and mirrors the
+            // prod nexus_svc grant set.)
             su.createStatement().execute(
                 "GRANT SELECT ON " + schema + ".catalog_documents TO " + SVC_ROLE);
             su.createStatement().execute("GRANT USAGE ON SCHEMA " + schema + " TO " + SVC_ROLE);

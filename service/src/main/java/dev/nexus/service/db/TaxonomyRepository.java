@@ -633,32 +633,25 @@ public final class TaxonomyRepository {
     /**
      * Fidelity ETL import of one topic_assignments row.
      *
-     * <p>topic_assignments carries a HARD cross-store FK ({@code fk_ta_catalog_doc}):
-     * {@code (tenant_id, doc_id) -> catalog_documents(tenant_id, tumbler)}. An assignment
-     * whose doc is not (yet) in the catalog cannot be inserted. Rather than 500 per such
-     * row — which made the taxonomy ETL fail 0/180496 when catalog had not been migrated
-     * first (nexus-0a7xc) — this guards the insert with {@code WHERE EXISTS (catalog doc)}
-     * and returns whether it was applied. Callers count skips and surface a clear
-     * "run catalog migration first" summary. ETL-only path; live assignment creation
-     * uses a separate endpoint that legitimately requires the doc to exist.
+     * <p>doc_id is a CHUNK content-hash (the HDBSCAN taxonomy clusters chunk
+     * embeddings), not a document tumbler. fk_ta_catalog_doc was dropped (nexus-sa14p)
+     * because it referenced catalog_documents(tumbler) — a different identity space —
+     * and could never be satisfied for chash-keyed rows. So this is a plain idempotent
+     * insert with no cross-store existence guard.
      *
-     * @return {@code true} if the row was inserted/updated, {@code false} if skipped
-     *         because the referenced catalog document does not exist.
+     * @return always {@code true} (the row is applied). The boolean return is retained
+     *         for caller-API stability; nothing skips now that the FK is gone.
      */
     public boolean importAssignment(String tenant, String docId, long topicId,
                                      String assignedBy, Double similarity,
                                      String assignedAt, String sourceCollection) {
         String tsStr = (assignedAt != null && !assignedAt.isBlank())
             ? fmtTs(parseTsStrict(assignedAt)) : null;
-        return tenantScope.withTenant(tenant, ctx -> {
-            int n = ctx.execute("""
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.execute("""
                 INSERT INTO nexus.topic_assignments
                     (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)
-                SELECT ?, ?, ?, ?, ?, ?::timestamptz, ?
-                WHERE EXISTS (
-                    SELECT 1 FROM nexus.catalog_documents cd
-                    WHERE cd.tenant_id = ? AND cd.tumbler = ?
-                )
+                VALUES (?, ?, ?, ?, ?, ?::timestamptz, ?)
                 ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
                     -- Never downgrade 'projection' to 'hdbscan' or similar:
                     -- keep existing assigned_by unless the incoming row is 'projection'
@@ -672,10 +665,10 @@ public final class TaxonomyRepository {
                         COALESCE(EXCLUDED.similarity, -1.0)),
                     assigned_at       = EXCLUDED.assigned_at,
                     source_collection = EXCLUDED.source_collection
-                """, tenant, docId, topicId, assignedBy, similarity, tsStr, sourceCollection,
-                     tenant, docId);
-            return n > 0;
+                """, tenant, docId, topicId, assignedBy, similarity, tsStr, sourceCollection);
+            return null;
         });
+        return true;
     }
 
     /** Fidelity-preserving import for a topic_links row. */
