@@ -482,6 +482,112 @@ class TestStaleMigrationOffer:
         assert seen == [("knowledge__notes__minilm-l6-v2-384__v1", True)]
 
 
+# ── P5: --service / Postgres provisioning flag ────────────────────────────────
+
+
+class TestServiceProvisioningFlag:
+    """Unit tests for the ``--service`` flag wiring in init_cmd.
+
+    These are pure unit tests — they stub out the provisioner so no real
+    Postgres cluster is needed.  The full integration evidence lives in
+    tests/db/test_pg_provision.py.
+    """
+
+    def _stub_provision(self, monkeypatch, *, already_provisioned: bool = False, fail: bool = False):
+        """Patch nexus.db.pg_provision.provision with a stub."""
+        from nexus.db.pg_provision import ProvisionResult
+
+        stub_result = ProvisionResult(
+            cluster_created=not already_provisioned,
+            db_created=not already_provisioned,
+            admin_role_created=not already_provisioned,
+            svc_role_created=not already_provisioned,
+            already_provisioned=already_provisioned,
+            port=15432,
+        )
+
+        def _fake_provision(config_dir=None, **kw):
+            if fail:
+                from nexus.db.pg_provision import PgBinaryNotFoundError
+                raise PgBinaryNotFoundError("No binaries. Install postgresql@16.")
+            return stub_result
+
+        monkeypatch.setattr("nexus.commands.init._provision_postgres_step",
+                            lambda: _fake_provision())
+
+        return stub_result
+
+    def test_service_flag_triggers_provisioning(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--service`` triggers _provision_postgres_step."""
+        called: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_postgres_step",
+            lambda: called.append("called"),
+        )
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+
+        result = CliRunner().invoke(init_cmd, ["--service"])
+
+        assert result.exit_code == 0, result.output
+        assert called == ["called"], "provisioning step must be called with --service"
+
+    def test_service_flag_not_triggered_without_flag(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without ``--service``, provisioning is NOT triggered."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._local_extra_installed", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._warmup_bge", lambda: None)
+        called: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_postgres_step",
+            lambda: called.append("called"),
+        )
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert called == [], "provisioning step must NOT be called without --service"
+
+    def test_service_flag_auto_triggered_by_nx_storage_backend_env(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When ``NX_STORAGE_BACKEND=service`` is set, provisioning auto-triggers."""
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        called: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_postgres_step",
+            lambda: called.append("called"),
+        )
+
+        result = CliRunner().invoke(init_cmd, [])
+
+        assert result.exit_code == 0, result.output
+        assert called == ["called"], "auto-provisioning must fire when NX_STORAGE_BACKEND=service"
+
+    def test_service_flag_no_auto_trigger_without_env(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without NX_STORAGE_BACKEND=service, no auto-trigger."""
+        monkeypatch.delenv("NX_STORAGE_BACKEND", raising=False)
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._local_extra_installed", lambda: True)
+        monkeypatch.setattr("nexus.commands.init._warmup_bge", lambda: None)
+        called: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_postgres_step",
+            lambda: called.append("called"),
+        )
+
+        result = CliRunner().invoke(init_cmd, ["--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert called == [], "provisioning must NOT auto-trigger without env var"
+
+
 def _wrap(fn):
     """Wrap a bare callable in a trivial Click command so CliRunner can drive
     its ``click.echo`` / ``click.confirm`` I/O."""
