@@ -54,6 +54,7 @@ import java.util.*;
  *   GET   /v1/catalog/collections/get    get collection by name
  *   POST  /v1/catalog/collections/supersede supersede collection
  *   POST  /v1/catalog/collections/rename rename collection (cascade)
+ *   GET   /v1/catalog/coverage            link coverage by content type (nexus-3cwnx)
  *   POST  /v1/catalog/import/owner       ETL import owner
  *   POST  /v1/catalog/import/document    ETL import document
  *   POST  /v1/catalog/import/link        ETL import link
@@ -148,6 +149,9 @@ public final class CatalogHandler implements HttpHandler {
                 case "/import/link"           -> handleImportLink(exchange, tenant, method);
                 case "/import/chunk"          -> handleImportChunk(exchange, tenant, method);
                 case "/import/collection"     -> handleImportCollection(exchange, tenant, method);
+
+                // ── Coverage analytics (nexus-3cwnx) ──────────────────────────
+                case "/coverage"                  -> handleCoverage(exchange, tenant, method);
 
                 // ── Analytics queries (nexus-xnz0o CLI port helpers) ─────────
                 case "/docs/distinct-collections" -> handleDocsDistinctCollections(exchange, tenant, method);
@@ -747,6 +751,26 @@ public final class CatalogHandler implements HttpHandler {
         }
         var owners = repo.ownersByType(tenant, ownerType);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("owners", owners)));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // COVERAGE ANALYTICS (nexus-3cwnx)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * GET /v1/catalog/coverage?owner_prefix=<opt>
+     *
+     * <p>Returns per-content-type link coverage.  Optional {@code owner_prefix}
+     * parameter scopes to documents whose tumbler LIKE 'prefix.%' OR = 'prefix'.
+     *
+     * <p>Response: {@code {"coverage": [{"content_type":"paper","total":10,"linked":7}, ...]}}
+     */
+    private void handleCoverage(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String ownerPrefix = queryParam(exchange, "owner_prefix");
+        if (ownerPrefix == null) ownerPrefix = "";
+        var rows = repo.coverageByContentType(tenant, ownerPrefix);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("coverage", rows)));
     }
 
     // ══════════════════════════════════════════════════════════════════════════

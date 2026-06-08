@@ -2367,6 +2367,99 @@ class Catalog:
         ).fetchall()
         return {r[0]: r[1] for r in rows if r[0]}
 
+    def coverage_by_content_type(self, owner_prefix: str = "") -> list[dict]:
+        """Return per-content-type link coverage.
+
+        For each distinct content_type in documents (optionally scoped to
+        owner_prefix), return {content_type, total, linked} where:
+          - total  = COUNT(*) documents of that type
+          - linked = COUNT(DISTINCT tumbler) documents with at least one link
+                     in either direction (from_tumbler OR to_tumbler)
+
+        Owner-prefix filter: tumbler LIKE 'prefix.%' OR tumbler = 'prefix'.
+        Backs coverage_cmd.  Mirrors HttpCatalogClient.coverage_by_content_type().
+        (nexus-3cwnx)
+        """
+        if owner_prefix:
+            like_pat = owner_prefix.rstrip(".") + ".%"
+            type_rows = self._db.execute(
+                "SELECT DISTINCT content_type FROM documents "
+                "WHERE tumbler LIKE ? OR tumbler = ?",
+                (like_pat, owner_prefix),
+            ).fetchall()
+        else:
+            type_rows = self._db.execute(
+                "SELECT DISTINCT content_type FROM documents"
+            ).fetchall()
+
+        result = []
+        for (ct,) in type_rows:
+            ct_key = ct if ct is not None else ""
+            if owner_prefix:
+                like_pat = owner_prefix.rstrip(".") + ".%"
+                if ct is None:
+                    total = self._db.execute(
+                        "SELECT COUNT(*) FROM documents "
+                        "WHERE content_type IS NULL "
+                        "  AND (tumbler LIKE ? OR tumbler = ?)",
+                        (like_pat, owner_prefix),
+                    ).fetchone()[0]
+                    linked = self._db.execute(
+                        """
+                        SELECT COUNT(DISTINCT d.tumbler)
+                        FROM documents d
+                        JOIN links l ON d.tumbler = l.from_tumbler OR d.tumbler = l.to_tumbler
+                        WHERE d.content_type IS NULL
+                          AND (d.tumbler LIKE ? OR d.tumbler = ?)
+                        """,
+                        (like_pat, owner_prefix),
+                    ).fetchone()[0]
+                else:
+                    total = self._db.execute(
+                        "SELECT COUNT(*) FROM documents "
+                        "WHERE content_type = ? AND (tumbler LIKE ? OR tumbler = ?)",
+                        (ct, like_pat, owner_prefix),
+                    ).fetchone()[0]
+                    linked = self._db.execute(
+                        """
+                        SELECT COUNT(DISTINCT d.tumbler)
+                        FROM documents d
+                        JOIN links l ON d.tumbler = l.from_tumbler OR d.tumbler = l.to_tumbler
+                        WHERE d.content_type = ?
+                          AND (d.tumbler LIKE ? OR d.tumbler = ?)
+                        """,
+                        (ct, like_pat, owner_prefix),
+                    ).fetchone()[0]
+            else:
+                if ct is None:
+                    total = self._db.execute(
+                        "SELECT COUNT(*) FROM documents WHERE content_type IS NULL"
+                    ).fetchone()[0]
+                    linked = self._db.execute(
+                        """
+                        SELECT COUNT(DISTINCT d.tumbler)
+                        FROM documents d
+                        JOIN links l ON d.tumbler = l.from_tumbler OR d.tumbler = l.to_tumbler
+                        WHERE d.content_type IS NULL
+                        """
+                    ).fetchone()[0]
+                else:
+                    total = self._db.execute(
+                        "SELECT COUNT(*) FROM documents WHERE content_type = ?",
+                        (ct,),
+                    ).fetchone()[0]
+                    linked = self._db.execute(
+                        """
+                        SELECT COUNT(DISTINCT d.tumbler)
+                        FROM documents d
+                        JOIN links l ON d.tumbler = l.from_tumbler OR d.tumbler = l.to_tumbler
+                        WHERE d.content_type = ?
+                        """,
+                        (ct,),
+                    ).fetchone()[0]
+            result.append({"content_type": ct_key, "total": total, "linked": linked})
+        return result
+
     def get_collection_owner_root(self, name: str) -> tuple[str, str]:
         """Return (owner_id, repo_root) for a collection name.
 

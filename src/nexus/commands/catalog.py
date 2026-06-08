@@ -2737,66 +2737,16 @@ def coverage_cmd(owner_prefix: str) -> None:
       nx catalog coverage --owner 1.1   # only entries under owner 1.1
     """
     cat = _get_catalog()
-    # nexus-xnz0o: coverage_cmd uses complex GROUP BY + JOIN analytics that are
-    # not yet available via the service API. Guard fail-loud in service mode.
-    from nexus.catalog.factory import _is_catalog_service_mode  # noqa: PLC0415
-    if _is_catalog_service_mode():
-        raise click.ClickException(
-            "nx catalog coverage is not supported in service mode — "
-            "this command uses complex SQL analytics. "
-            "Tracked as follow-on to nexus-xnz0o (gated on nexus-gmiaf.24)."
-        )
-
-    db = cat._db  # epsilon-allow: SQLite-only path, service mode guarded above
-
-    # Fetch all distinct content types under filter
-    if owner_prefix:
-        like_pat = owner_prefix.rstrip(".") + ".%"
-        type_rows = db.execute(
-            "SELECT DISTINCT content_type FROM documents WHERE tumbler LIKE ? OR tumbler = ?",
-            (like_pat, owner_prefix),
-        ).fetchall()
-    else:
-        type_rows = db.execute("SELECT DISTINCT content_type FROM documents").fetchall()
-
-    content_types = [r[0] for r in type_rows]
-    if not content_types:
+    rows = cat.coverage_by_content_type(owner_prefix)
+    if not rows:
         click.echo("No documents in catalog.")
         return
 
     click.echo("Link coverage by content type:")
-    for ct in sorted(content_types):
-        if owner_prefix:
-            like_pat = owner_prefix.rstrip(".") + ".%"
-            total = db.execute(
-                "SELECT COUNT(*) FROM documents WHERE content_type = ? AND (tumbler LIKE ? OR tumbler = ?)",
-                (ct, like_pat, owner_prefix),
-            ).fetchone()[0]
-            linked = db.execute(
-                """
-                SELECT COUNT(DISTINCT d.tumbler)
-                FROM documents d
-                JOIN links l ON d.tumbler = l.from_tumbler OR d.tumbler = l.to_tumbler
-                WHERE d.content_type = ?
-                  AND (d.tumbler LIKE ? OR d.tumbler = ?)
-                """,
-                (ct, like_pat, owner_prefix),
-            ).fetchone()[0]
-        else:
-            total = db.execute(
-                "SELECT COUNT(*) FROM documents WHERE content_type = ?",
-                (ct,),
-            ).fetchone()[0]
-            linked = db.execute(
-                """
-                SELECT COUNT(DISTINCT d.tumbler)
-                FROM documents d
-                JOIN links l ON d.tumbler = l.from_tumbler OR d.tumbler = l.to_tumbler
-                WHERE d.content_type = ?
-                """,
-                (ct,),
-            ).fetchone()[0]
-
+    for row in sorted(rows, key=lambda r: r["content_type"]):
+        ct = row["content_type"] or "(none)"
+        total = row["total"]
+        linked = row["linked"]
         pct = (linked / total * 100) if total else 0.0
         click.echo(f"  {ct:<12} {linked:>4}/{total:<4} = {pct:5.1f}%")
 

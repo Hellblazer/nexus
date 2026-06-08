@@ -1590,6 +1590,131 @@ class CatalogRepositoryTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // COVERAGE BY CONTENT TYPE (nexus-3cwnx)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Seed:
+     *   - 3 papers (2 with links, 1 unlinked)
+     *   - 2 rdrs   (1 with link, 1 unlinked)
+     *   - 1 code   (0 links)
+     * Expected coverage:
+     *   paper  -> total=3 linked=2
+     *   rdr    -> total=2 linked=1
+     *   code   -> total=1 linked=0
+     */
+    @Test @Order(143)
+    void coverageByContentType_exactValues() {
+        String cov1 = "cov1-tenant";
+
+        // Seed documents: 3 papers, 2 rdrs, 1 code
+        repo.upsertDocument(cov1, mapOf("tumbler","cov1.1","title","Paper A","content_type","paper"));
+        repo.upsertDocument(cov1, mapOf("tumbler","cov1.2","title","Paper B","content_type","paper"));
+        repo.upsertDocument(cov1, mapOf("tumbler","cov1.3","title","Paper C (unlinked)","content_type","paper"));
+        repo.upsertDocument(cov1, mapOf("tumbler","cov1.4","title","RDR A","content_type","rdr"));
+        repo.upsertDocument(cov1, mapOf("tumbler","cov1.5","title","RDR B (unlinked)","content_type","rdr"));
+        repo.upsertDocument(cov1, mapOf("tumbler","cov1.6","title","Code A (unlinked)","content_type","code"));
+
+        // Links: cov1.1->cov1.2 (cites), cov1.2->cov1.4 (implements)
+        // => linked papers: cov1.1, cov1.2 (two distinct); linked rdrs: cov1.4 (one distinct)
+        repo.upsertLink(cov1, mapOf(
+            "from_tumbler","cov1.1","to_tumbler","cov1.2","link_type","cites","created_by","test"));
+        repo.upsertLink(cov1, mapOf(
+            "from_tumbler","cov1.2","to_tumbler","cov1.4","link_type","implements","created_by","test"));
+
+        var rows = repo.coverageByContentType(cov1, "");
+
+        // Build a lookup map for easy assertion
+        var byType = new java.util.HashMap<String, Map<String, Object>>();
+        for (var r : rows) byType.put((String) r.get("content_type"), r);
+
+        // paper: 3 total, 2 linked (cov1.1 from, cov1.2 from+to, cov1.3 none)
+        assertThat(byType).containsKey("paper");
+        assertThat(((Number) byType.get("paper").get("total")).longValue()).isEqualTo(3L);
+        assertThat(((Number) byType.get("paper").get("linked")).longValue()).isEqualTo(2L);
+
+        // rdr: 2 total, 1 linked (cov1.4 as to_tumbler)
+        assertThat(byType).containsKey("rdr");
+        assertThat(((Number) byType.get("rdr").get("total")).longValue()).isEqualTo(2L);
+        assertThat(((Number) byType.get("rdr").get("linked")).longValue()).isEqualTo(1L);
+
+        // code: 1 total, 0 linked
+        assertThat(byType).containsKey("code");
+        assertThat(((Number) byType.get("code").get("total")).longValue()).isEqualTo(1L);
+        assertThat(((Number) byType.get("code").get("linked")).longValue()).isEqualTo(0L);
+    }
+
+    /**
+     * Owner-prefix filter: only documents under the given prefix are counted.
+     * cov2.1.X documents (prefix="cov2.1") should be isolated from cov2.2.X.
+     */
+    @Test @Order(144)
+    void coverageByContentType_ownerPrefixFilter() {
+        String cov2 = "cov2-tenant";
+        // Under owner prefix cov2.1: 2 papers, one with link
+        repo.upsertDocument(cov2, mapOf("tumbler","cov2.1.1","title","Cov2 Paper A","content_type","paper"));
+        repo.upsertDocument(cov2, mapOf("tumbler","cov2.1.2","title","Cov2 Paper B","content_type","paper"));
+        // Under owner prefix cov2.2: 1 paper, with link to cov2.2.2
+        repo.upsertDocument(cov2, mapOf("tumbler","cov2.2.1","title","Cov2 Paper C","content_type","paper"));
+        repo.upsertDocument(cov2, mapOf("tumbler","cov2.2.2","title","Cov2 Paper D","content_type","paper"));
+
+        // Link only within cov2.1: cov2.1.1 -> cov2.1.2
+        repo.upsertLink(cov2, mapOf(
+            "from_tumbler","cov2.1.1","to_tumbler","cov2.1.2","link_type","cites","created_by","test"));
+        // Link within cov2.2: cov2.2.1 -> cov2.2.2
+        repo.upsertLink(cov2, mapOf(
+            "from_tumbler","cov2.2.1","to_tumbler","cov2.2.2","link_type","cites","created_by","test"));
+
+        // Query with prefix "cov2.1" — should only see cov2.1.X docs
+        var rows = repo.coverageByContentType(cov2, "cov2.1");
+        assertThat(rows).hasSize(1);
+        var paperRow = rows.get(0);
+        assertThat(paperRow.get("content_type")).isEqualTo("paper");
+        assertThat(((Number) paperRow.get("total")).longValue()).isEqualTo(2L);
+        assertThat(((Number) paperRow.get("linked")).longValue()).isEqualTo(2L); // both linked
+    }
+
+    /**
+     * RLS: cross-tenant isolation — coverageByContentType for tenant X must not
+     * reveal tenant Y's documents or links.
+     */
+    @Test @Order(145)
+    void coverageByContentType_crossTenantIsolation() {
+        String tX = "cov-rls-x";
+        String tY = "cov-rls-y";
+
+        // Seed tX: 1 paper with link
+        repo.upsertDocument(tX, mapOf("tumbler","covx.1","title","X Paper A","content_type","paper"));
+        repo.upsertDocument(tX, mapOf("tumbler","covx.2","title","X Paper B","content_type","paper"));
+        repo.upsertLink(tX, mapOf(
+            "from_tumbler","covx.1","to_tumbler","covx.2","link_type","cites","created_by","test"));
+
+        // Seed tY: 3 papers, 2 with links
+        repo.upsertDocument(tY, mapOf("tumbler","covy.1","title","Y Paper A","content_type","paper"));
+        repo.upsertDocument(tY, mapOf("tumbler","covy.2","title","Y Paper B","content_type","paper"));
+        repo.upsertDocument(tY, mapOf("tumbler","covy.3","title","Y Paper C","content_type","paper"));
+        repo.upsertLink(tY, mapOf(
+            "from_tumbler","covy.1","to_tumbler","covy.2","link_type","cites","created_by","test"));
+        repo.upsertLink(tY, mapOf(
+            "from_tumbler","covy.2","to_tumbler","covy.3","link_type","cites","created_by","test"));
+
+        var rowsX = repo.coverageByContentType(tX, "");
+        var rowsY = repo.coverageByContentType(tY, "");
+
+        // tX sees exactly its own 2 papers, 2 linked
+        assertThat(rowsX).hasSize(1);
+        var xPaper = rowsX.get(0);
+        assertThat(((Number) xPaper.get("total")).longValue()).isEqualTo(2L);
+        assertThat(((Number) xPaper.get("linked")).longValue()).isEqualTo(2L);
+
+        // tY sees exactly its own 3 papers, 3 linked (covy.1 as from, covy.2 as from+to, covy.3 as to)
+        assertThat(rowsY).hasSize(1);
+        var yPaper = rowsY.get(0);
+        assertThat(((Number) yPaper.get("total")).longValue()).isEqualTo(3L);
+        assertThat(((Number) yPaper.get("linked")).longValue()).isEqualTo(3L);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // TENANT B ISOLATION CHECK
     // ══════════════════════════════════════════════════════════════════════════
 
