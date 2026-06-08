@@ -84,59 +84,6 @@ pytestmark = [
     ),
 ]
 
-# ── Bootstrap SQL ─────────────────────────────────────────────────────────────
-# The Java service does NOT run Liquibase at startup (bead nexus-net63 tracks that gap).
-# We bootstrap the schema manually here, mirroring what chash-001-baseline.xml does.
-# Split into three psql invocations (CREATE ROLE cannot run inside a transaction):
-#   1. Role creation
-#   2. Schema + chash_index DDL + RLS + policy
-#   3. GRANTs
-
-_BOOTSTRAP_SQL_ROLE = """\
-CREATE ROLE svc_chash_inttest LOGIN PASSWORD 'svc_chash_inttest_pass';
-"""
-
-_BOOTSTRAP_SQL_SCHEMA = """\
-CREATE SCHEMA IF NOT EXISTS nexus;
-
-CREATE TABLE IF NOT EXISTS nexus.chash_index (
-    tenant_id           TEXT        NOT NULL,
-    chash               TEXT        NOT NULL,
-    physical_collection TEXT        NOT NULL,
-    created_at          TIMESTAMPTZ NOT NULL,
-    CONSTRAINT chash_index_pk PRIMARY KEY (tenant_id, chash, physical_collection)
-);
-
-CREATE INDEX IF NOT EXISTS idx_chash_index_chash
-    ON nexus.chash_index (tenant_id, chash);
-
-CREATE INDEX IF NOT EXISTS idx_chash_index_collection
-    ON nexus.chash_index (tenant_id, physical_collection);
-
-ALTER TABLE nexus.chash_index ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.chash_index FORCE ROW LEVEL SECURITY;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_policies
-        WHERE schemaname = 'nexus' AND tablename = 'chash_index'
-        AND policyname = 'tenant_isolation'
-    ) THEN
-        CREATE POLICY tenant_isolation ON nexus.chash_index
-            USING      (tenant_id = current_setting('nexus.tenant', true))
-            WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-    END IF;
-END $$;
-"""
-
-_BOOTSTRAP_SQL_GRANTS = """\
-GRANT USAGE ON SCHEMA nexus TO svc_chash_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chash_index TO svc_chash_inttest;
-ALTER ROLE svc_chash_inttest SET search_path TO nexus, public;
-"""
-
-
 # ── Port helpers ──────────────────────────────────────────────────────────────
 
 def _free_port() -> int:
@@ -199,16 +146,13 @@ def pg_instance():
                     f"stdout={proc.stdout}\nstderr={proc.stderr}"
                 )
 
-        # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
+        # net63: the JAR runs Liquibase at startup and owns the full chash schema
+        # + grants before binding the HTTP port. The fixture must NOT pre-apply schema
+        # — doing so collides ("relation already exists") and the service exits at
+        # migration. The only pre-start SQL is SERVICE_ROLES_SQL, which creates
+        # nexus_svc (the NOSUPERUSER NOBYPASSRLS DML/RLS role grants-nexus-svc.xml
+        # grants to, and the role the RLS-negative tests use).
         _psql(SERVICE_ROLES_SQL)
-
-        # Bootstrap in three phases (CREATE ROLE cannot run inside a transaction):
-        #   1. Role creation (autocommit outside any txn)
-        #   2. Schema + table + indexes + RLS + policy DDL
-        #   3. GRANTs (role must exist before GRANT)
-        _psql(_BOOTSTRAP_SQL_ROLE)
-        _psql(_BOOTSTRAP_SQL_SCHEMA)
-        _psql(_BOOTSTRAP_SQL_GRANTS)
 
         yield {"port": pg_port, "dbname": "nexuschashtest", "user": pg_user,
                "pgdata": pgdata}
@@ -223,12 +167,7 @@ def pg_instance():
 
 @pytest.fixture(scope="module")
 def service(pg_instance):
-    """Launch the shaded JAR against the hermetic PG.
-
-    The schema + RLS + grants are bootstrapped before the service starts (in pg_instance).
-    The service connects as svc_chash_inttest (which has limited privileges and IS
-    subject to RLS). This validates that real service operations work under RLS.
-    """
+    """Launch the shaded JAR against the hermetic PG."""
     svc_port = _free_port()
     token    = "chash-inttest-bearer-secret"
 
@@ -236,13 +175,22 @@ def service(pg_instance):
         **os.environ,
         "NX_SERVICE_PORT":  str(svc_port),
         "NX_SERVICE_TOKEN": token,
+        # net63 two-role: app pool = nexus_svc (NOSUPERUSER NOBYPASSRLS → FORCE RLS
+        # applies); migration pool = OS superuser (trust auth) for the Liquibase DDL.
         "NX_DB_URL": (
             f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}"
             f"/{pg_instance['dbname']}"
         ),
-        "NX_DB_USER": "svc_chash_inttest",
-        "NX_DB_PASS": "svc_chash_inttest_pass",
+        "NX_DB_USER": "nexus_svc",
+        "NX_DB_PASS": "nexus_svc_pass",
         "NX_POOL_SIZE": "3",
+        "NX_DB_ADMIN_URL": (
+            f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}"
+            f"/{pg_instance['dbname']}"
+        ),
+        "NX_DB_ADMIN_USER": pg_instance["user"],
+        "NX_DB_ADMIN_PASS": "",
+        "NX_CHROMA_PATH": tempfile.mkdtemp(prefix="nexus-chash-chroma-"),
     }
     env.pop("NX_STORAGE_BACKEND", None)
 
