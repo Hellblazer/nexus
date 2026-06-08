@@ -1072,6 +1072,42 @@ public final class CatalogRepository {
         });
     }
 
+    /**
+     * nexus-dsu5z: Return {last_indexed, orphan_count} for a physical_collection.
+     *
+     * <p>{@code last_indexed} — MAX(indexed_at) over documents in the collection
+     * (null when no documents found).
+     * {@code orphan_count} — count of documents in the collection that have no
+     * incoming link (LEFT JOIN catalog_links ON to_tumbler; id IS NULL).
+     *
+     * <p>Tenant-scoped via TenantScope.withTenant (RLS).
+     */
+    public Map<String, Object> collectionHealthMeta(String tenant, String collection) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // MAX(indexed_at) for documents in the collection.
+            String lastIndexed = ctx
+                .select(DSL.max(F_DOC_IDXAT))
+                .from(T_DOCS)
+                .where(F_DOC_PCOLL.eq(collection))
+                .fetchOne(0, String.class);
+
+            // orphan_count: documents with no incoming link (to_tumbler).
+            Field<Long> F_LNK_ID_ALIAS = DSL.field(DSL.name("catalog_links", "id"), Long.class);
+            long orphanCount = ctx
+                .selectCount()
+                .from(T_DOCS)
+                .leftJoin(T_LINKS).on(F_DOC_TUMBLER.eq(F_LNK_TO))
+                .where(F_DOC_PCOLL.eq(collection))
+                .and(F_LNK_ID_ALIAS.isNull())
+                .fetchOne(0, Long.class);
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("last_indexed", lastIndexed);
+            result.put("orphan_count", orphanCount);
+            return result;
+        });
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // ETL / IMPORT (fidelity-preserving, idempotent)
     // ══════════════════════════════════════════════════════════════════════════

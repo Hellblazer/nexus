@@ -1155,6 +1155,15 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     """Update frecency_score metadata on all indexed chunks without re-embedding.
 
     Handles both code__ and docs__ collections.
+
+    nexus-67ljl split-brain guard: in service mode
+    (NX_STORAGE_BACKEND_VECTORS=service) the Java service manages its own
+    Chroma instance.  Writing frecency_score to the daemon-Chroma via
+    make_t3() would create split-brain updates invisible to service-mode
+    search.  Frecency is a ranking *optimisation*, not a correctness
+    requirement, so we skip the update entirely in service mode and log
+    the skip.  A follow-on bead should port frecency metadata updates to
+    the service's vector endpoint.
     """
     from nexus.config import get_credential
     from nexus.frecency import batch_frecency
@@ -1162,6 +1171,18 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
 
     info = registry.get(repo)
     if info is None:
+        return
+
+    # nexus-67ljl: guard against split-brain in service mode.
+    from nexus.db.http_vector_client import is_vector_service_mode as _is_svc  # noqa: PLC0415
+    if _is_svc():
+        _log.info(
+            "frecency_skipped_service_mode",
+            repo=str(repo),
+            reason="NX_STORAGE_BACKEND_VECTORS=service; frecency metadata update "
+                   "skipped to avoid split-brain with Java-owned Chroma. "
+                   "Port frecency update to service endpoint to restore (follow-on bead).",
+        )
         return
 
     # RDR-103 Phase 3a: registry value preserves the legacy name when the

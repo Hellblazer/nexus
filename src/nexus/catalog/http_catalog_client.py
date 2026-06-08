@@ -933,6 +933,27 @@ class HttpCatalogClient:
     # STATS / HEALTH
     # ══════════════════════════════════════════════════════════════════════════
 
+    def collection_health_meta(self, collection: str) -> dict:
+        """Return ``{last_indexed, orphan_count}`` for *collection* from the service.
+
+        nexus-dsu5z: public service-mode method replacing the guarded
+        ``hasattr(cat, '_db')`` path in ``collection_health._default_catalog_stats_fn``.
+        Routes to ``GET /v1/catalog/collections/health?collection=<name>``.
+
+        Returns ``{"last_indexed": None, "orphan_count": 0}`` when the service
+        responds with an empty/absent payload.
+        """
+        try:
+            result = self._get("/collections/health", collection=collection)
+        except Exception:
+            return {"last_indexed": None, "orphan_count": 0}
+        if not result:
+            return {"last_indexed": None, "orphan_count": 0}
+        return {
+            "last_indexed": result.get("last_indexed"),
+            "orphan_count": int(result.get("orphan_count") or 0),
+        }
+
     def stats(self) -> dict:
         return self._get("/stats") or {}
 

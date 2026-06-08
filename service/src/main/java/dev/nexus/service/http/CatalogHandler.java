@@ -140,6 +140,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/collections/supersede" -> handleCollectionSupersede(exchange, tenant, method);
                 case "/collections/rename"    -> handleCollectionRename(exchange, tenant, method);
                 case "/collections/for_tuple" -> handleCollectionForTuple(exchange, tenant, method);
+                case "/collections/health"    -> handleCollectionHealth(exchange, tenant, method);
 
                 // ── ETL imports ───────────────────────────────────────────────
                 case "/import/owner"          -> handleImportOwner(exchange, tenant, method);
@@ -609,6 +610,27 @@ public final class CatalogHandler implements HttpHandler {
         var coll = repo.collectionForTuple(tenant, contentType, ownerId, embeddingModel);
         if (coll == null) { HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}"); return; }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(coll));
+    }
+
+    /**
+     * GET /v1/catalog/collections/health?collection=X — nexus-dsu5z.
+     *
+     * <p>Returns {@code {last_indexed, orphan_count}} for the given
+     * physical_collection.  {@code last_indexed} is MAX(indexed_at) over
+     * documents in the collection (null when no documents found).
+     * {@code orphan_count} is the count of documents with no incoming link.
+     *
+     * <p>Both fields are tenant-scoped (RLS via TenantScope).  Unknown
+     * collections return {@code {last_indexed: null, orphan_count: 0}}.
+     */
+    private void handleCollectionHealth(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String collection = queryParam(exchange, "collection");
+        if (collection == null || collection.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"collection query param required\"}"); return;
+        }
+        var result = repo.collectionHealthMeta(tenant, collection);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
     // ══════════════════════════════════════════════════════════════════════════
