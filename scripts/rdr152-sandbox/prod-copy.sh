@@ -142,8 +142,10 @@ if [[ -n "${PROD_MEMORY_DB:-}" ]]; then
     # NOTE: ETL commands continue on per-row HTTP errors (each ETL logs failures
     # but returns exit 0 when at least some rows succeed).  We use || true here
     # for the outer shell so a warning summary line does not fail the script.
-    # Known gaps documented in README: nx_answer_runs ClassCastException in
-    # TelemetryHandler (pre-existing service bug), topic_links FK ordering.
+    # Migration order matters: catalog before taxonomy (cross-store doc_id FK).
+    # Both prior known gaps are now fixed: nx_answer_runs plan_id ClassCastException
+    # (nexus-5gaj7) and the taxonomy assignment cross-store FK (nexus-0a7xc, now a
+    # counted skip when the doc is absent rather than a hard per-row failure).
 
     # memory
     echo "[prod-copy]   memory ETL..."
@@ -161,16 +163,28 @@ if [[ -n "${PROD_MEMORY_DB:-}" ]]; then
         --db "${PROD_MEMORY_DB}" \
         --service-url "${NX_SERVICE_URL}" || true
 
-    # telemetry (6 tables) — nx_answer_runs may have per-row ClassCastException failures
-    echo "[prod-copy]   telemetry ETL (per-row failures may occur; see README gap notes)..."
+    # telemetry (6 tables) — nx_answer_runs plan_id ClassCastException FIXED (nexus-5gaj7)
+    echo "[prod-copy]   telemetry ETL..."
     NX_SERVICE_TOKEN="${NX_SERVICE_TOKEN}" \
     NEXUS_CONFIG_DIR="${NEXUS_CONFIG_DIR}" \
     uv run nx storage migrate telemetry \
         --db "${PROD_MEMORY_DB}" \
         --service-url "${NX_SERVICE_URL}" 2>&1 | grep -v "row_failed" | head -20 || true
 
-    # taxonomy (4 tables) — topic_links may have FK ordering issues on first run
-    echo "[prod-copy]   taxonomy ETL (topic_links FK errors are expected on first pass)..."
+    # catalog — MUST run BEFORE taxonomy: topic_assignments carries a hard cross-store
+    # FK (doc_id -> catalog_documents.tumbler). Without catalog first, every assignment
+    # is skipped (nexus-0a7xc). Reads the prod catalog .catalog.db + owners.jsonl
+    # read-only (copy-not-move).
+    echo "[prod-copy]   catalog ETL (must precede taxonomy for the doc_id FK)..."
+    NX_SERVICE_TOKEN="${NX_SERVICE_TOKEN}" \
+    NEXUS_CONFIG_DIR="${NEXUS_CONFIG_DIR}" \
+    uv run nx storage migrate catalog \
+        --catalog-db "${PROD_CATALOG_DIR}/.catalog.db" \
+        --service-url "${NX_SERVICE_URL}" 2>&1 | grep -v "row_failed" | head -20 || true
+
+    # taxonomy (4 tables) — assignments referencing docs not in the catalog are SKIPPED
+    # (counted, not failed); catalog ran above so the vast majority import (nexus-0a7xc).
+    echo "[prod-copy]   taxonomy ETL (assignments skip-and-count if doc absent)..."
     NX_SERVICE_TOKEN="${NX_SERVICE_TOKEN}" \
     NEXUS_CONFIG_DIR="${NEXUS_CONFIG_DIR}" \
     uv run nx storage migrate taxonomy \

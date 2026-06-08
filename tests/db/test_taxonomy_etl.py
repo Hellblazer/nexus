@@ -317,6 +317,29 @@ class TestMigrateTaxonomyRows:
         assert result["meta"]["read"] == 1
         assert result["meta"]["written"] == 1
 
+    def test_assignment_skipped_when_import_returns_false(self, tmp_path: Path) -> None:
+        """REGRESSION (nexus-0a7xc): import_assignment returns False when the referenced
+        catalog doc is absent (cross-store fk_ta_catalog_doc). Such rows are counted as
+        skipped, NOT written and NOT a hard failure — turning the old 0/180496 silent
+        crash into a legible skip count."""
+        db = tmp_path / "t.db"
+        _make_taxonomy_db(
+            db,
+            topics=[{"id": 1, "label": "ml", "collection": "c", "created_at": "ts"}],
+            assignments=[
+                {"doc_id": "present", "topic_id": 1, "assigned_by": "hdbscan"},
+                {"doc_id": "orphan",  "topic_id": 1, "assigned_by": "hdbscan"},
+            ],
+        )
+        store = self._make_store()
+        # First assignment applied (True), second skipped (False — doc not in catalog).
+        store.import_assignment.side_effect = [True, False]
+        result = migrate_taxonomy_rows(db, store)
+
+        assert result["assignments"]["read"] == 2
+        assert result["assignments"]["written"] == 1
+        assert result["assignments"]["skipped"] == 1
+
     def test_topics_migrated_before_assignments(self, tmp_path: Path) -> None:
         """Topics must be written first since assignments reference topic.id."""
         db = tmp_path / "t.db"

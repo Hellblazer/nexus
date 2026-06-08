@@ -481,8 +481,12 @@ public final class TaxonomyHandler implements HttpHandler {
         Double similarity       = optDoubleOrNull(body, "similarity");
         String assignedAt       = optStringOrNull(body, "assigned_at");
         String sourceCollection = optStringOrNull(body, "source_collection");
-        repo.importAssignment(tenant, docId, topicId, assignedBy, similarity, assignedAt, sourceCollection);
-        HttpUtil.send(ex, 200, "{\"ok\":true}");
+        boolean applied = repo.importAssignment(
+            tenant, docId, topicId, assignedBy, similarity, assignedAt, sourceCollection);
+        // applied=false means the referenced catalog doc is absent (cross-store FK):
+        // skipped, not an error — the ETL counts these and tells the operator to run
+        // the catalog migration first (nexus-0a7xc).
+        HttpUtil.send(ex, 200, json(Map.of("ok", true, "applied", applied)));
     }
 
     private void handleImportLink(HttpExchange ex, String tenant, String method) throws IOException {

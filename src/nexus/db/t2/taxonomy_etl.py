@@ -402,17 +402,27 @@ def _migrate_table(
     table: str,
     batch_log_every: int,
 ) -> dict[str, int]:
-    """Generic per-table migration loop. Returns ``{"read": N, "written": M}``."""
+    """Generic per-table migration loop. Returns ``{"read": N, "written": M, "skipped": K}``.
+
+    An ``import_fn`` that returns ``False`` (currently only ``import_assignment``, when
+    the cross-store ``fk_ta_catalog_doc`` doc is absent) counts the row as ``skipped``
+    rather than ``written`` — not an error, but a signal that the catalog was not
+    migrated first (nexus-0a7xc). ``import_fn``s returning ``None`` count as written.
+    """
     read_count = 0
     written_count = 0
+    skipped_count = 0
     total = len(rows)
 
     for row_dict in rows:
         read_count += 1
         try:
             transformed = transform_fn(row_dict)
-            import_fn(**transformed)
-            written_count += 1
+            applied = import_fn(**transformed)
+            if applied is False:
+                skipped_count += 1
+            else:
+                written_count += 1
         except Exception as exc:
             _log.error(
                 "taxonomy_etl.row_failed",
@@ -429,7 +439,18 @@ def _migrate_table(
                 table=table,
                 read=read_count,
                 written=written_count,
+                skipped=skipped_count,
                 total=total,
             )
 
-    return {"read": read_count, "written": written_count}
+    if skipped_count:
+        _log.warning(
+            "taxonomy_etl.rows_skipped_missing_catalog_doc",
+            table=table,
+            skipped=skipped_count,
+            read=read_count,
+            hint="assignment doc_id not in catalog_documents — run "
+                 "`nx storage migrate catalog` BEFORE taxonomy, then re-run",
+        )
+
+    return {"read": read_count, "written": written_count, "skipped": skipped_count}
