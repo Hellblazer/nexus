@@ -376,6 +376,35 @@ public final class ChromaRestClient {
     }
 
     /**
+     * Update metadata on existing chunks WITHOUT re-embedding.
+     *
+     * <p>Frecency-only path (RDR-152 bead nexus-enehl): updates {@code frecency_score}
+     * and other metadata fields on already-stored chunks. No documents or embeddings
+     * are supplied — Chroma preserves the original text and vectors unchanged.
+     *
+     * @param collectionName target collection
+     * @param ids            chunk IDs to update (must already exist in the collection)
+     * @param metadatas      per-chunk metadata maps (replaces existing metadata)
+     */
+    public void update(String collectionName,
+                       List<String> ids,
+                       List<Map<String, Object>> metadatas) {
+        if (ids.isEmpty()) return;
+        String colId = getOrCreateCollection(collectionName);
+
+        // Paginate at 300 per Chroma quota
+        int page = ChromaQuotaValidator.MAX_RECORDS_PER_WRITE;
+        for (int start = 0; start < ids.size(); start += page) {
+            int end = Math.min(start + page, ids.size());
+            Map<String, Object> body = new HashMap<>();
+            body.put("ids",       ids.subList(start, end));
+            body.put("metadatas", metadatas.subList(start, end));
+            // No embeddings, no documents — metadata-only update
+            doPost(collectionBase(colId) + "/update", body);
+        }
+    }
+
+    /**
      * Heartbeat check — returns true if Chroma server is responsive.
      */
     public boolean heartbeat() {

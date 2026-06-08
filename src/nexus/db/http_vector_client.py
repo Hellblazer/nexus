@@ -138,23 +138,42 @@ class _ServiceCollectionStub:
 
     def get(
         self,
+        ids: list[str] | None = None,
         where: dict | None = None,
         include: list[str] | None = None,
         limit: int = 10,
         offset: int = 0,
     ) -> dict:
-        """Query chunks from the service. Returns Chroma-style result dict."""
+        """Query chunks from the service. Returns Chroma-style result dict.
+
+        RDR-152 nexus-enehl: added ``ids`` parameter to support the
+        frecency manifest-based lookup path (``col.get(ids=natural_ids,
+        include=["metadatas"])``). When ``ids`` is provided the request is
+        routed to ``/v1/vectors/store-get``; when ``where`` is provided it
+        is routed to ``/v1/vectors/get`` (staleness-check path).
+        """
         try:
-            body: dict[str, Any] = {
-                "collection": self._name,
-                "limit": limit,
-                "offset": offset,
-            }
-            if where:
-                body["where"] = where
-            if include:
-                body["include"] = include
-            result = _post("/v1/vectors/get", body, tenant=self._tenant)
+            if ids is not None:
+                # Manifest-based lookup: fetch specific chunk IDs
+                body: dict[str, Any] = {
+                    "collection": self._name,
+                    "ids": ids,
+                    "limit": limit,
+                    "offset": offset,
+                }
+                result = _post("/v1/vectors/store-get", body, tenant=self._tenant)
+            else:
+                # Where-filter lookup (incremental-sync staleness check)
+                body = {
+                    "collection": self._name,
+                    "limit": limit,
+                    "offset": offset,
+                }
+                if where:
+                    body["where"] = where
+                if include:
+                    body["include"] = include
+                result = _post("/v1/vectors/get", body, tenant=self._tenant)
             # Normalise to Chroma shape: {ids, documents, metadatas}
             return {
                 "ids":       result.get("ids", []),
@@ -374,7 +393,66 @@ class HttpVectorClient:
             _log.warning("http_vector_list_collections_failed", error=str(e))
             return []
 
+    def update_chunks(
+        self,
+        collection: str,
+        ids: list[str],
+        metadatas: list[dict],
+    ) -> None:
+        """Metadata-only update on existing chunks — no re-embedding.
+
+        RDR-152 bead nexus-enehl: the frecency-only reindex path calls
+        ``db.update_chunks(collection=..., ids=..., metadatas=...)`` on the
+        db object.  In service mode ``db`` is an :class:`HttpVectorClient`;
+        this method routes the update through the service's
+        ``/v1/vectors/update-metadata`` endpoint so the frecency_score lands
+        in the service's Chroma (the one search reads) — not daemon-Chroma.
+
+        Batches at MAX_RECORDS_PER_WRITE (300) to match the service's quota
+        validator and to mirror :meth:`T3Database.update_chunks` parity.
+        """
+        if not ids:
+            return
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+        size = QUOTAS.MAX_RECORDS_PER_WRITE
+        for start in range(0, len(ids), size):
+            batch_ids  = ids[start : start + size]
+            batch_meta = metadatas[start : start + size]
+            _post(
+                "/v1/vectors/update-metadata",
+                {"collection": collection, "ids": batch_ids, "metadatas": batch_meta},
+                tenant=self._tenant,
+            )
+        _log.debug(
+            "http_vector_update_chunks",
+            collection=collection,
+            count=len(ids),
+        )
+
     # ── Collection-handle stub for doc_indexer staleness + prune paths ─────────
+
+    def get_collection(self, name: str) -> "_ServiceCollectionStub":
+        """Return a collection stub, raising ChromaNotFoundError if the collection does not exist.
+
+        RDR-152 bead nexus-enehl: mirrors T3Database.get_collection() semantics
+        for the frecency-only loop.  The loop catches ChromaNotFoundError and
+        skips collections that have not yet been indexed.
+
+        Checks existence via the service's ``/v1/vectors/collections`` list.
+        A missing collection raises ``chromadb.errors.NotFoundError`` rather than
+        creating a zombie collection (contrast with
+        :meth:`get_or_create_collection`).
+        """
+        from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415
+        try:
+            cols = self.list_collections()
+            if not any(c.get("name") == name for c in cols):
+                raise _ChromaNotFoundError(f"collection {name!r} not found in service")
+        except VectorServiceError as exc:
+            raise _ChromaNotFoundError(
+                f"service unavailable checking collection {name!r}"
+            ) from exc
+        return _ServiceCollectionStub(name=name, tenant=self._tenant)
 
     def get_or_create_collection(self, name: str) -> "_ServiceCollectionStub":
         """Return a stub collection handle for staleness checks.
