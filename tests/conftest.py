@@ -462,6 +462,10 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     "test_catalog_concurrent_writer_lock.py",
     "test_catalog_consolidation.py",
     "test_catalog_db.py",
+    # RDR-152 catalog SQLite->Postgres ETL: voyage tokens are collection-NAME
+    # fixtures being migrated as data (owner/collection/document rows), never
+    # assertions of cloud-mode embedding behaviour. The whole file is mode-agnostic.
+    "test_catalog_etl.py",
     "test_catalog_doctor_collections_drift.py",
     # RDR-103 / nexus-j9ey + b03o advisor: voyage tokens appear in
     # synthetic collection names being asserted against, not as
