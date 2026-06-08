@@ -1044,6 +1044,85 @@ class CatalogRepositoryTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // COLLECTION HEALTH META (nexus-dsu5z)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(120)
+    void collectionHealthMeta_exactValues() {
+        // Seed 3 documents in a dedicated collection with known indexed_at values.
+        String chmTenant = "chm-tenant";
+        String chmColl   = "chm__test__voyage__v1";
+        repo.upsertDocument(chmTenant, mapOf(
+            "tumbler", "chm.1", "title", "CHM Doc A",
+            "content_type", "knowledge", "physical_collection", chmColl,
+            "indexed_at", "2026-01-01T08:00:00"
+        ));
+        repo.upsertDocument(chmTenant, mapOf(
+            "tumbler", "chm.2", "title", "CHM Doc B",
+            "content_type", "knowledge", "physical_collection", chmColl,
+            "indexed_at", "2026-06-01T12:00:00"
+        ));
+        repo.upsertDocument(chmTenant, mapOf(
+            "tumbler", "chm.3", "title", "CHM Doc C",
+            "content_type", "knowledge", "physical_collection", chmColl,
+            "indexed_at", "2026-03-15T00:00:00"
+        ));
+
+        // Add one link pointing TO chm.2 — makes it a non-orphan.
+        repo.upsertLink(chmTenant, Map.of(
+            "from_tumbler", "chm.1",
+            "to_tumbler",   "chm.2",
+            "link_type",    "cites",
+            "created_by",   "test"
+        ));
+
+        var meta = repo.collectionHealthMeta(chmTenant, chmColl);
+
+        // last_indexed = MAX("2026-01-01", "2026-06-01", "2026-03-15") = "2026-06-01..."
+        assertThat(meta.get("last_indexed")).isEqualTo("2026-06-01T12:00:00");
+        // orphan_count = 2 (chm.1 and chm.3 have no incoming links)
+        assertThat(meta.get("orphan_count")).isEqualTo(2L);
+    }
+
+    @Test @Order(121)
+    void collectionHealthMeta_crossTenantIsolation() {
+        // Same physical_collection name used by two tenants — each sees only its own rows.
+        String tenantX = "chm-tenant-x";
+        String tenantY = "chm-tenant-y";
+        String sharedColl = "shared__knowledge__v1";
+
+        // TENANT_X: 2 docs, no links (both orphans); indexed_at = "2026-05-01"
+        repo.upsertDocument(tenantX, mapOf(
+            "tumbler", "chmx.1", "title", "X Doc 1",
+            "content_type", "knowledge", "physical_collection", sharedColl,
+            "indexed_at", "2026-05-01T00:00:00"
+        ));
+        repo.upsertDocument(tenantX, mapOf(
+            "tumbler", "chmx.2", "title", "X Doc 2",
+            "content_type", "knowledge", "physical_collection", sharedColl,
+            "indexed_at", "2026-05-01T00:00:00"
+        ));
+
+        // TENANT_Y: 1 doc with a later indexed_at; no incoming link, so it is
+        // itself an orphan (orphan_count == 1). RLS keeps it invisible to TENANT_X.
+        repo.upsertDocument(tenantY, mapOf(
+            "tumbler", "chmy.1", "title", "Y Doc 1",
+            "content_type", "knowledge", "physical_collection", sharedColl,
+            "indexed_at", "2026-06-07T10:00:00"
+        ));
+
+        // TENANT_X must see only its own rows: last_indexed="2026-05-01T00:00:00", orphan_count=2
+        var metaX = repo.collectionHealthMeta(tenantX, sharedColl);
+        assertThat(metaX.get("last_indexed")).isEqualTo("2026-05-01T00:00:00");
+        assertThat(metaX.get("orphan_count")).isEqualTo(2L);
+
+        // TENANT_Y must see only its own rows: last_indexed="2026-06-07T10:00:00", orphan_count=1
+        var metaY = repo.collectionHealthMeta(tenantY, sharedColl);
+        assertThat(metaY.get("last_indexed")).isEqualTo("2026-06-07T10:00:00");
+        assertThat(metaY.get("orphan_count")).isEqualTo(1L);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // TENANT B ISOLATION CHECK
     // ══════════════════════════════════════════════════════════════════════════
 

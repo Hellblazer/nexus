@@ -1099,6 +1099,38 @@ class Catalog:
             "collection_count": collection_count,
         }
 
+    def collection_health_meta(self, collection: str) -> dict:
+        """Return ``{last_indexed, orphan_count}`` for *collection*.
+
+        nexus-dsu5z: public mirror of the queries previously embedded inline
+        in ``collection_health._default_catalog_stats_fn`` behind a
+        ``hasattr(cat, '_db')`` guard.  Both SQLite and service backends now
+        implement this method uniformly so callers don't need backend checks.
+
+        ``last_indexed`` — MAX(indexed_at) over documents with
+        ``physical_collection = collection``; ``None`` when no documents found.
+        ``orphan_count``  — count of documents in the collection that have
+        no incoming ``links.to_tumbler`` entry (i.e. no document points to them).
+        """
+        row = self._db.execute(
+            "SELECT MAX(indexed_at) FROM documents WHERE physical_collection = ?",
+            (collection,),
+        ).fetchone()
+        last_indexed: str | None = row[0] if row and row[0] else None
+
+        orphan_row = self._db.execute(
+            "SELECT COUNT(*) FROM documents d "
+            "LEFT JOIN links l ON d.tumbler = l.to_tumbler "
+            "WHERE d.physical_collection = ? AND l.id IS NULL",
+            (collection,),
+        ).fetchone()
+        orphan_count: int = int(orphan_row[0] or 0)
+
+        return {
+            "last_indexed": last_indexed,
+            "orphan_count": orphan_count,
+        }
+
     def ensure_owner_for_repo(
         self, repo: Path, *, repo_name: str = "", description: str = "",
     ) -> Tumbler:
