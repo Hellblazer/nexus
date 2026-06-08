@@ -1651,27 +1651,31 @@ class CatalogRepositoryTest {
     @Test @Order(144)
     void coverageByContentType_ownerPrefixFilter() {
         String cov2 = "cov2-tenant";
-        // Under owner prefix cov2.1: 2 papers, one with link
+        // tumbler "cov2.1" itself (exercises the OR tumbler = prefix arm)
+        repo.upsertDocument(cov2, mapOf("tumbler","cov2.1","title","Cov2 Owner","content_type","paper"));
+        // Under owner prefix cov2.1: 2 more papers, one with link
         repo.upsertDocument(cov2, mapOf("tumbler","cov2.1.1","title","Cov2 Paper A","content_type","paper"));
         repo.upsertDocument(cov2, mapOf("tumbler","cov2.1.2","title","Cov2 Paper B","content_type","paper"));
-        // Under owner prefix cov2.2: 1 paper, with link to cov2.2.2
+        // Under owner prefix cov2.2: 2 papers with link (must NOT appear)
         repo.upsertDocument(cov2, mapOf("tumbler","cov2.2.1","title","Cov2 Paper C","content_type","paper"));
         repo.upsertDocument(cov2, mapOf("tumbler","cov2.2.2","title","Cov2 Paper D","content_type","paper"));
 
-        // Link only within cov2.1: cov2.1.1 -> cov2.1.2
+        // Link within cov2.1: cov2.1.1 -> cov2.1.2
         repo.upsertLink(cov2, mapOf(
             "from_tumbler","cov2.1.1","to_tumbler","cov2.1.2","link_type","cites","created_by","test"));
-        // Link within cov2.2: cov2.2.1 -> cov2.2.2
+        // Link within cov2.2: cov2.2.1 -> cov2.2.2 (must NOT affect cov2.1 results)
         repo.upsertLink(cov2, mapOf(
             "from_tumbler","cov2.2.1","to_tumbler","cov2.2.2","link_type","cites","created_by","test"));
 
-        // Query with prefix "cov2.1" — should only see cov2.1.X docs
+        // Query with prefix "cov2.1" — should see cov2.1 (exact) + cov2.1.X (LIKE)
         var rows = repo.coverageByContentType(cov2, "cov2.1");
         assertThat(rows).hasSize(1);
         var paperRow = rows.get(0);
         assertThat(paperRow.get("content_type")).isEqualTo("paper");
-        assertThat(((Number) paperRow.get("total")).longValue()).isEqualTo(2L);
-        assertThat(((Number) paperRow.get("linked")).longValue()).isEqualTo(2L); // both linked
+        // 3 docs: "cov2.1" (exact), "cov2.1.1", "cov2.1.2"
+        assertThat(((Number) paperRow.get("total")).longValue()).isEqualTo(3L);
+        // Linked: cov2.1.1 (from_tumbler), cov2.1.2 (to_tumbler) = 2 linked; "cov2.1" unlinked
+        assertThat(((Number) paperRow.get("linked")).longValue()).isEqualTo(2L);
     }
 
     /**

@@ -230,165 +230,70 @@ def cat(java_service):
 
 @pytest.fixture(scope="module")
 def sqlite_db():
-    """Raw SQLite database pre-seeded with identical data for parity checks.
-
-    Returns (db_path, conn) so tests can call Catalog.coverage_by_content_type
-    directly via a fresh Catalog wrapping the same DB.
-    """
+    """Raw SQLite CatalogStore pre-seeded with identical data for parity checks."""
     from nexus.db.t2.catalog import CatalogStore
     db_fd, db_path = tempfile.mkstemp(suffix=".db", prefix="3cwnx_parity_")
     os.close(db_fd)
     store = CatalogStore(Path(db_path))
-    yield store
+    yield store, Path(db_path)
     store.close()
     Path(db_path).unlink(missing_ok=True)
 
 
 @pytest.fixture(scope="module")
 def sqlite_cat(sqlite_db):
-    """Thin wrapper that exposes coverage_by_content_type on the SQLite store
-    using the same SQL logic as Catalog.coverage_by_content_type.
+    """Real Catalog instance wrapping sqlite_db for parity checks.
 
-    We call the method directly on the Catalog instance by creating a minimal
-    Catalog-like shim that delegates to sqlite_db.execute.  This avoids the
-    full Catalog constructor which needs catalog_dir + complex initialisation.
+    Uses the actual Catalog.coverage_by_content_type() method — not a proxy —
+    so the parity assertion covers the real implementation, not a reimplementation.
     """
-    class _SqliteCoverageProxy:
-        """Proxy that exposes coverage_by_content_type backed by CatalogStore."""
+    from nexus.catalog.catalog import Catalog
+    store, db_path = sqlite_db
+    catalog_dir = Path(tempfile.mkdtemp(prefix="3cwnx_catdir_"))
+    # Open read_only=False so Catalog can initialise; the store's _conn is
+    # already open from the sqlite_db fixture, but Catalog opens its own
+    # CatalogDB handle on the same file — SQLite WAL mode allows this.
+    cat = Catalog(catalog_dir, db_path, read_only=False)
+    yield cat
+    cat._db.close()
+    shutil.rmtree(catalog_dir, ignore_errors=True)
 
-        def __init__(self, store):
-            self._db = store
 
-        def coverage_by_content_type(self, owner_prefix: str = "") -> list[dict]:
-            """Mirror of Catalog.coverage_by_content_type using CatalogStore."""
-            if owner_prefix:
-                like_pat = owner_prefix.rstrip(".") + ".%"
-                type_rows = self._db.execute(
-                    "SELECT DISTINCT content_type FROM documents "
-                    "WHERE tumbler LIKE ? OR tumbler = ?",
-                    (like_pat, owner_prefix),
-                ).fetchall()
-            else:
-                type_rows = self._db.execute(
-                    "SELECT DISTINCT content_type FROM documents"
-                ).fetchall()
+_DOCS = [
+    # (tumbler, title, content_type)
+    # tumbler "30" exercises the ``OR tumbler = prefix`` arm of owner_prefix filter
+    ("30",   "3cwnx Owner 30 (exact match)",  "paper"),
+    ("30.1", "3cwnx Paper A",                 "paper"),
+    ("30.2", "3cwnx Paper B",                 "paper"),
+    ("30.3", "3cwnx Paper C (unlinked)",      "paper"),
+    ("30.4", "3cwnx RDR A",                   "rdr"),
+    ("30.5", "3cwnx RDR B (unlinked)",        "rdr"),
+    ("30.6", "3cwnx Code A (unlinked)",       "code"),
+    ("31.1", "3cwnx Sub-Paper A",             "paper"),
+]
 
-            result = []
-            for (ct,) in type_rows:
-                ct_key = ct if ct is not None else ""
-                if owner_prefix:
-                    like_pat = owner_prefix.rstrip(".") + ".%"
-                    if ct is None:
-                        total = self._db.execute(
-                            "SELECT COUNT(*) FROM documents "
-                            "WHERE content_type IS NULL "
-                            "  AND (tumbler LIKE ? OR tumbler = ?)",
-                            (like_pat, owner_prefix),
-                        ).fetchone()[0]
-                        linked = self._db.execute(
-                            """
-                            SELECT COUNT(DISTINCT d.tumbler)
-                            FROM documents d
-                            JOIN links l ON d.tumbler = l.from_tumbler
-                                         OR d.tumbler = l.to_tumbler
-                            WHERE d.content_type IS NULL
-                              AND (d.tumbler LIKE ? OR d.tumbler = ?)
-                            """,
-                            (like_pat, owner_prefix),
-                        ).fetchone()[0]
-                    else:
-                        total = self._db.execute(
-                            "SELECT COUNT(*) FROM documents "
-                            "WHERE content_type = ? AND (tumbler LIKE ? OR tumbler = ?)",
-                            (ct, like_pat, owner_prefix),
-                        ).fetchone()[0]
-                        linked = self._db.execute(
-                            """
-                            SELECT COUNT(DISTINCT d.tumbler)
-                            FROM documents d
-                            JOIN links l ON d.tumbler = l.from_tumbler
-                                         OR d.tumbler = l.to_tumbler
-                            WHERE d.content_type = ?
-                              AND (d.tumbler LIKE ? OR d.tumbler = ?)
-                            """,
-                            (ct, like_pat, owner_prefix),
-                        ).fetchone()[0]
-                else:
-                    if ct is None:
-                        total = self._db.execute(
-                            "SELECT COUNT(*) FROM documents WHERE content_type IS NULL"
-                        ).fetchone()[0]
-                        linked = self._db.execute(
-                            """
-                            SELECT COUNT(DISTINCT d.tumbler)
-                            FROM documents d
-                            JOIN links l ON d.tumbler = l.from_tumbler
-                                         OR d.tumbler = l.to_tumbler
-                            WHERE d.content_type IS NULL
-                            """
-                        ).fetchone()[0]
-                    else:
-                        total = self._db.execute(
-                            "SELECT COUNT(*) FROM documents WHERE content_type = ?",
-                            (ct,),
-                        ).fetchone()[0]
-                        linked = self._db.execute(
-                            """
-                            SELECT COUNT(DISTINCT d.tumbler)
-                            FROM documents d
-                            JOIN links l ON d.tumbler = l.from_tumbler
-                                         OR d.tumbler = l.to_tumbler
-                            WHERE d.content_type = ?
-                            """,
-                            (ct,),
-                        ).fetchone()[0]
-                result.append({"content_type": ct_key, "total": total, "linked": linked})
-            return result
-
-    yield _SqliteCoverageProxy(sqlite_db)
+_LINKS = [
+    # (from_tumbler, to_tumbler, link_type)
+    # 30.1 -> 30.2 (cites)       => 30.1 from, 30.2 from+to
+    # 30.2 -> 30.4 (implements)  => 30.4 to
+    # 31.1 -> 30.1 (relates)     => 31.1 from, 30.1 also to
+    ("30.1", "30.2", "cites"),
+    ("30.2", "30.4", "implements"),
+    ("31.1", "30.1", "relates"),
+]
 
 
 def _seed_http(cat) -> None:
-    """Seed the HTTP (service) catalog with deterministic coverage test data.
-
-    Seed:
-      3 papers under "30": 30.1, 30.2, 30.3
-      2 rdrs   under "30": 30.4, 30.5
-      1 code   under "30": 30.6
-      1 paper  under "31": 31.1
-
-      Links:
-        30.1 -> 30.2 (cites)       => 30.1 from, 30.2 from+to
-        30.2 -> 30.4 (implements)  => 30.4 to
-        31.1 -> 30.1 (relates)     => 31.1 from, 30.1 also to
-    """
-    for tumbler, title, ct in [
-        ("30.1", "3cwnx Paper A",           "paper"),
-        ("30.2", "3cwnx Paper B",           "paper"),
-        ("30.3", "3cwnx Paper C (unlinked)","paper"),
-        ("30.4", "3cwnx RDR A",             "rdr"),
-        ("30.5", "3cwnx RDR B (unlinked)",  "rdr"),
-        ("30.6", "3cwnx Code A (unlinked)", "code"),
-        ("31.1", "3cwnx Sub-Paper A",       "paper"),
-    ]:
+    """Seed the HTTP (service) catalog with deterministic coverage test data."""
+    for tumbler, title, ct in _DOCS:
         cat._post("/register", {"tumbler": tumbler, "title": title, "content_type": ct})
-
-    cat.link("30.1", "30.2", "cites",      created_by="inttest-3cwnx")
-    cat.link("30.2", "30.4", "implements", created_by="inttest-3cwnx")
-    cat.link("31.1", "30.1", "relates",    created_by="inttest-3cwnx")
+    for from_t, to_t, lt in _LINKS:
+        cat.link(from_t, to_t, lt, created_by="inttest-3cwnx")
 
 
 def _seed_sqlite(store) -> None:
     """Seed the SQLite CatalogStore with identical data."""
-    for tumbler, title, ct in [
-        ("30.1", "3cwnx Paper A",           "paper"),
-        ("30.2", "3cwnx Paper B",           "paper"),
-        ("30.3", "3cwnx Paper C (unlinked)","paper"),
-        ("30.4", "3cwnx RDR A",             "rdr"),
-        ("30.5", "3cwnx RDR B (unlinked)",  "rdr"),
-        ("30.6", "3cwnx Code A (unlinked)", "code"),
-        ("31.1", "3cwnx Sub-Paper A",       "paper"),
-    ]:
+    for tumbler, title, ct in _DOCS:
         store.execute(
             "INSERT OR IGNORE INTO documents (tumbler, title, content_type) "
             "VALUES (?, ?, ?)",
@@ -396,11 +301,7 @@ def _seed_sqlite(store) -> None:
         )
     store._conn.commit()
 
-    for from_t, to_t, lt in [
-        ("30.1", "30.2", "cites"),
-        ("30.2", "30.4", "implements"),
-        ("31.1", "30.1", "relates"),
-    ]:
+    for from_t, to_t, lt in _LINKS:
         store.execute(
             "INSERT OR IGNORE INTO links (from_tumbler, to_tumbler, link_type, created_by) "
             "VALUES (?, ?, ?, ?)",
@@ -412,8 +313,9 @@ def _seed_sqlite(store) -> None:
 @pytest.fixture(scope="module")
 def seeded(cat, sqlite_db):
     """Seed both backends with identical data."""
+    store, _ = sqlite_db
     _seed_http(cat)
-    _seed_sqlite(sqlite_db)
+    _seed_sqlite(store)
     return True
 
 
@@ -424,9 +326,10 @@ def test_coverage_no_prefix_exact_values(seeded, cat) -> None:
     rows = cat.coverage_by_content_type()
     by_type = {r["content_type"]: r for r in rows}
 
-    # paper: 30.1+30.2+30.3 (under 30) + 31.1 (under 31) = 4 total
+    # paper: "30" + 30.1 + 30.2 + 30.3 (under 30) + 31.1 (under 31) = 5 total
     # linked: 30.1 (from+to), 30.2 (from+to), 31.1 (from) = 3 linked papers
-    assert by_type["paper"]["total"] == 4
+    # "30" is unlinked (no links); 30.3 is unlinked
+    assert by_type["paper"]["total"] == 5
     assert by_type["paper"]["linked"] == 3
 
     # rdr: 30.4 + 30.5 = 2 total; 30.4 (as to_tumbler) = 1 linked
@@ -439,53 +342,60 @@ def test_coverage_no_prefix_exact_values(seeded, cat) -> None:
 
 
 def test_coverage_owner_prefix_scoping(seeded, cat) -> None:
-    """B) Service: owner_prefix scopes to the 30.X subtree only."""
+    """B) Service: owner_prefix scopes to the 30.X subtree AND tumbler == "30".
+
+    The filter is ``tumbler LIKE '30.%' OR tumbler = '30'`` — the second arm
+    (exact equality) ensures the owner document itself is included when it exists.
+    This test exercises that arm explicitly via tumbler "30" in the seed data.
+    """
     rows = cat.coverage_by_content_type(owner_prefix="30")
     by_type = {r["content_type"]: r for r in rows}
 
-    # Under prefix "30": papers 30.1+30.2+30.3 = 3; linked 30.1, 30.2 = 2
-    # (31.1 is NOT in scope, and 31.1->30.1 link still counts 30.1 as linked
-    # because 30.1 is in scope and has a link: either from (30.1->30.2) or
-    # as to_tumbler (31.1->30.1). The to_tumbler link makes 30.1 linked even
-    # in the prefix scope — the JOIN is on d.tumbler, not on the peer.)
-    assert by_type["paper"]["total"] == 3
-    # 30.1 is linked (as from_tumbler cites 30.2, AND as to_tumbler from 31.1)
-    # 30.2 is linked (as from_tumbler implements 30.4, AND as to_tumbler from 30.1)
-    # 30.3 is unlinked
+    # Under prefix "30" (LIKE '30.%' OR = '30'):
+    #   "30", 30.1, 30.2, 30.3 = 4 papers total
+    # Linked papers in scope:
+    #   30.1 is linked (from_tumbler in cites→30.2, AND to_tumbler from 31.1→30.1)
+    #   30.2 is linked (from_tumbler in 30.2→30.4, AND to_tumbler from 30.1→30.2)
+    #   "30" is unlinked; 30.3 is unlinked
+    # => 2 linked papers
+    assert by_type["paper"]["total"] == 4
     assert by_type["paper"]["linked"] == 2
 
-    # rdr: 2 total, 30.4 linked (to_tumbler)
+    # rdr: 30.4 + 30.5 = 2 total; 30.4 linked (to_tumbler of 30.2->30.4)
     assert by_type["rdr"]["total"] == 2
     assert by_type["rdr"]["linked"] == 1
 
-    # code: 1 total, 0 linked
+    # code: 30.6 = 1 total; 0 linked
     assert by_type["code"]["total"] == 1
     assert by_type["code"]["linked"] == 0
 
-    # 31.1 paper must NOT appear in the results (not under prefix "30")
-    # Verify by checking total count: only 3 papers, not 4
-    assert by_type["paper"]["total"] == 3
+    # 31.1 paper must NOT be counted (not under prefix "30")
+    # Total paper count of 4 (not 5) confirms 31.1 is excluded
+    # AND that the "30" exact-match arm fired (contributing 1 doc)
+    assert by_type["paper"]["total"] == 4
 
 
 def test_coverage_parity_service_equals_sqlite(seeded, cat, sqlite_cat) -> None:
-    """C) Differential parity: service == SQLite Catalog on identical data.
+    """C) Differential parity: service == real Catalog.coverage_by_content_type().
 
-    Compares coverage_by_content_type() and coverage_by_content_type(owner_prefix='30')
-    from both backends, asserting exact equality of {total, linked} for each type.
+    Calls the ACTUAL Catalog.coverage_by_content_type() method (not a proxy
+    reimplementation) on an identical seeded SQLite store, then asserts exact
+    equality with the service result.  A bug in Catalog.coverage_by_content_type
+    would surface here as a parity mismatch, not a silent pass.
     """
     def _normalize(rows: list[dict]) -> dict[str, dict]:
-        """Sort and normalize for deterministic comparison."""
+        """Normalise for deterministic comparison."""
         return {r["content_type"]: {"total": int(r["total"]), "linked": int(r["linked"])}
                 for r in rows}
 
     # No prefix: all documents
-    svc_all  = _normalize(cat.coverage_by_content_type())
-    sql_all  = _normalize(sqlite_cat.coverage_by_content_type())
+    svc_all = _normalize(cat.coverage_by_content_type())
+    sql_all = _normalize(sqlite_cat.coverage_by_content_type())
     assert svc_all == sql_all, (
         f"Parity failure (no prefix):\n  service={svc_all}\n  sqlite={sql_all}"
     )
 
-    # With prefix "30"
+    # With prefix "30" — exercises LIKE arm AND exact-match arm
     svc_30 = _normalize(cat.coverage_by_content_type(owner_prefix="30"))
     sql_30 = _normalize(sqlite_cat.coverage_by_content_type(owner_prefix="30"))
     assert svc_30 == sql_30, (
