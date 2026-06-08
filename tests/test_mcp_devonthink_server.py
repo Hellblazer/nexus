@@ -130,7 +130,7 @@ def test_incorporate_sync_unindexed_returns_error(tmp_path, monkeypatch) -> None
     out = srv._incorporate_sync("NO-SUCH-UUID")
     assert "not indexed" in out["error"]
     assert called == {"links": False, "wb": False}  # never reached Layer B/F
-    cat._db.close.assert_called_once()  # connection released even on the error path
+    cat.close.assert_called_once()  # connection released even on the error path (nexus-qnp5s: cat.close(), not cat._db.close())
 
 
 def test_incorporate_sync_uninitialized_catalog(tmp_path, monkeypatch) -> None:
