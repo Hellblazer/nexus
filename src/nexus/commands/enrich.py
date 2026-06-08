@@ -1602,8 +1602,14 @@ def enrich_aspects_promote_field(
     from nexus.db.t2 import T2Database
 
     if history:
-        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-            entries = list_promotions(db)
+        try:
+            with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+                entries = list_promotions(db)
+        except (NotImplementedError, RuntimeError) as exc:
+            # nexus-gmiaf.35: NotImplementedError from list_promotions guard;
+            # RuntimeError from T2Database init when NX_SERVICE_PORT is absent.
+            click.echo(f"Error: {exc}", err=True)
+            raise click.exceptions.Exit(2)
         if not entries:
             click.echo("No promotion history.")
             return
@@ -1616,16 +1622,31 @@ def enrich_aspects_promote_field(
             )
         return
 
-    with T2Database(default_db_path()) as db:  # epsilon-allow: promote_extras_field runs raw DDL plus aspect_promotion_log writes on the live connection; not a routable store op (RDR-128 P3 documented-irreducible)
-        try:
-            result = promote_extras_field(
-                db, field_name,
-                sql_type=sql_type.upper(),
-                prune=prune,
-            )
-        except ValueError as exc:
-            click.echo(f"Error: {exc}", err=True)
-            raise click.exceptions.Exit(2)
+    try:
+        with T2Database(default_db_path()) as db:  # epsilon-allow: promote_extras_field runs raw DDL plus aspect_promotion_log writes on the live connection; not a routable store op (RDR-128 P3 documented-irreducible)
+            try:
+                result = promote_extras_field(
+                    db, field_name,
+                    sql_type=sql_type.upper(),
+                    prune=prune,
+                )
+            except ValueError as exc:
+                click.echo(f"Error: {exc}", err=True)
+                raise click.exceptions.Exit(2)
+            except NotImplementedError as exc:
+                # nexus-gmiaf.35: promote_extras_field is not supported on the
+                # service backend (document_aspects=service). Fail with a clear
+                # message and non-zero exit rather than an unhandled traceback.
+                click.echo(f"Error: {exc}", err=True)
+                raise click.exceptions.Exit(2)
+    except click.exceptions.Exit:
+        raise
+    except RuntimeError as exc:
+        # nexus-gmiaf.35: T2Database init fails with RuntimeError when the
+        # service backend is configured (NX_STORAGE_BACKEND_DOCUMENT_ASPECTS=service)
+        # but NX_SERVICE_PORT/NX_SERVICE_TOKEN are missing. Surface clearly.
+        click.echo(f"Error: {exc}", err=True)
+        raise click.exceptions.Exit(2)
 
     if result.column_added:
         click.echo(

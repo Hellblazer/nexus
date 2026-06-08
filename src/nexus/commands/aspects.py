@@ -222,10 +222,10 @@ def aspects_gc_fixtures(yes: bool) -> None:
     any_rows = False
     from nexus.db.storage_mode import StorageBackend, storage_backend_for
     if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-        raise NotImplementedError(
-            "gc-fixtures not yet supported on the service backend "
-            "(document_aspects=service); fixture cleanup uses raw SQL DELETE "
-            "via SQLite cursors which are unavailable over HTTP. "
+        raise click.UsageError(
+            "gc-fixtures requires sqlite mode "
+            "(document_aspects=service not supported; fixture cleanup uses raw "
+            "SQL DELETE via SQLite cursors which are unavailable over HTTP). "
             "Track: nexus-gmiaf.37"
         )
 
