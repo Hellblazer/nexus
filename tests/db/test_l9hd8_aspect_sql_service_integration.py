@@ -550,6 +550,173 @@ class TestOperatorGroupbyServiceParity:
         assert len(vldb_groups) == 1
         assert len(vldb_groups[0]["items"]) == 1
 
+    def test_groupby_contents_equal_sqlite(
+        self, java_service, monkeypatch, tmp_path
+    ) -> None:
+        """DIFFERENTIAL: service groupby group item-sets == SQLite group item-sets.
+
+        This tests that not just the group KEYS match (tested in test_groupby_keys_equal_sqlite)
+        but also the source_paths within each group are identical across backends.
+        """
+        from nexus.operators import aspect_sql
+
+        collection = "knowledge__l9hd8"
+        paths = [
+            "/l9hd8/groupby-vldb.pdf",
+            "/l9hd8/groupby-sosp.pdf",
+            "/l9hd8/groupby-sosp2.pdf",
+            "/l9hd8/groupby-nv.pdf",
+        ]
+        items = _items_json(paths, collection)
+
+        # --- Service path ---
+        base_url, token, svc_port = java_service
+        monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
+        monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+        monkeypatch.setenv("NX_SERVICE_TENANT", "l9hd8-tenant")
+
+        svc_result = aspect_sql.try_groupby(
+            items, "venue", source="aspects", aspect_field="extras.venue",
+        )
+        assert svc_result is not None
+
+        # Build {key_value: frozenset(source_paths)} from service result
+        def _groups_to_map(result):
+            out = {}
+            for g in result["groups"]:
+                kv = g["key_value"]
+                out[kv] = frozenset(
+                    item["source_path"] for item in g["items"]
+                )
+            return out
+
+        svc_map = _groups_to_map(svc_result)
+
+        # --- SQLite path (same fixture) ---
+        monkeypatch.delenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", raising=False)
+
+        from nexus.db.t2.document_aspects import AspectRecord
+        from nexus.aspect_readers import uri_for as _uri_for
+        sqlite_rows = []
+        for path, venue in [
+            ("/l9hd8/groupby-vldb.pdf", "VLDB"),
+            ("/l9hd8/groupby-sosp.pdf", "SOSP"),
+            ("/l9hd8/groupby-sosp2.pdf", "SOSP"),
+            ("/l9hd8/groupby-nv.pdf", None),
+        ]:
+            extras = {"venue": venue} if venue else {}
+            sqlite_rows.append(AspectRecord(
+                collection=collection, source_path=path,
+                problem_formulation="P", proposed_method="M",
+                experimental_datasets=[], experimental_baselines=[],
+                experimental_results="R", extras=extras,
+                confidence=0.8, extracted_at="2026-01-15T10:00:00Z",
+                model_version="v1", extractor_name="test",
+                source_uri=_uri_for(collection, path) or "", doc_id=f"doc-gbcont-{path[-7:-4]}",
+                salient_sentences=[],
+            ))
+
+        sqlite_db = tmp_path / "groupby_contents_parity.db"
+        _seed_sqlite(sqlite_db, sqlite_rows)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: sqlite_db)
+
+        sqlite_result = aspect_sql.try_groupby(
+            items, "venue", source="aspects", aspect_field="extras.venue",
+        )
+        assert sqlite_result is not None
+        sqlite_map = _groups_to_map(sqlite_result)
+
+        # DIFFERENTIAL: same group keys AND same item membership
+        assert svc_map == sqlite_map, (
+            f"PARITY FAILURE (group contents):\n"
+            f"  service  = {svc_map}\n"
+            f"  sqlite   = {sqlite_map}"
+        )
+
+    def test_groupby_nested_extras_key_equal_sqlite(
+        self, aspects_client, java_service, monkeypatch, tmp_path
+    ) -> None:
+        """DIFFERENTIAL: nested extras key (extras.meta.year) resolves correctly in
+        Postgres (using #>> path operator) and equals SQLite's json_extract($.meta.year).
+
+        This is the H1 fix: Java must use extras::json#>>'{meta,year}' not
+        extras::json->>'meta.year' (which treats dotted key as a single top-level key).
+        """
+        from nexus.operators import aspect_sql
+
+        collection = "knowledge__l9hd8"
+        # Seed rows with nested extras (meta.year)
+        nested_rows = [
+            _make_aspect("nested-a", venue=None),
+            _make_aspect("nested-b", venue=None),
+        ]
+        # Override extras with nested structure
+        from nexus.db.t2.document_aspects import AspectRecord
+        from nexus.aspect_readers import uri_for as _uri_for
+        nested_rows_with_meta = []
+        for suffix, year in [("nested-a", "2023"), ("nested-b", "2024")]:
+            source_path = f"/l9hd8/{suffix}.pdf"
+            nested_rows_with_meta.append(AspectRecord(
+                collection=collection, source_path=source_path,
+                problem_formulation="P", proposed_method="M",
+                experimental_datasets=[], experimental_baselines=[],
+                experimental_results="R",
+                extras={"meta": {"year": year}},  # nested extras
+                confidence=0.8, extracted_at="2026-01-15T10:00:00Z",
+                model_version="v1", extractor_name="test",
+                source_uri=_uri_for(collection, source_path) or "",
+                salient_sentences=[],
+            ))
+        for r in nested_rows_with_meta:
+            aspects_client.upsert(r)
+
+        paths = ["/l9hd8/nested-a.pdf", "/l9hd8/nested-b.pdf"]
+        items = _items_json(paths, collection)
+
+        # --- Service path ---
+        base_url, token, svc_port = java_service
+        monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
+        monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+        monkeypatch.setenv("NX_SERVICE_TENANT", "l9hd8-tenant")
+
+        svc_result = aspect_sql.try_groupby(
+            items, "meta.year", source="aspects", aspect_field="extras.meta.year",
+        )
+        assert svc_result is not None, f"Service groupby returned None for nested extras key"
+        svc_keys = {g["key_value"] for g in svc_result["groups"]}
+
+        # --- SQLite path (same fixture) ---
+        monkeypatch.delenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", raising=False)
+
+        sqlite_db = tmp_path / "nested_extras_parity.db"
+        _seed_sqlite(sqlite_db, nested_rows_with_meta)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: sqlite_db)
+
+        sqlite_result = aspect_sql.try_groupby(
+            items, "meta.year", source="aspects", aspect_field="extras.meta.year",
+        )
+        assert sqlite_result is not None
+        sqlite_keys = {g["key_value"] for g in sqlite_result["groups"]}
+
+        # DIFFERENTIAL: nested key must resolve correctly on both backends
+        assert svc_keys == sqlite_keys, (
+            f"PARITY FAILURE (nested extras.meta.year):\n"
+            f"  service  keys = {svc_keys}\n"
+            f"  sqlite   keys = {sqlite_keys}\n"
+            "Likely cause: Java uses ->>'meta.year' (treats dotted key as single "
+            "top-level JSON key) instead of #>>'{meta,year}' (path traversal)."
+        )
+        # Both must produce the year groups (not 'unassigned')
+        assert "2023" in svc_keys, f"Expected '2023' in service keys; got {svc_keys}"
+        assert "2024" in svc_keys, f"Expected '2024' in service keys; got {svc_keys}"
+        assert "unassigned" not in svc_keys, (
+            "No unassigned expected — all rows have nested meta.year"
+        )
+
 
 class TestOperatorConfidenceAggregateServiceParity:
     """operator_aggregate (confidence): service path produces EQUAL numeric results to SQLite."""
@@ -651,13 +818,15 @@ class TestOperatorConfidenceAggregateServiceParity:
     def test_max_confidence_equal_sqlite(
         self, java_service, monkeypatch, tmp_path
     ) -> None:
-        """max(confidence) from service == max from SQLite (0.90 exact)."""
+        """max(confidence) from service == max from SQLite (DIFFERENTIAL: same fixture, both paths)."""
+        import re as _re
         from nexus.operators import aspect_sql
 
         collection = "knowledge__l9hd8"
         paths = ["/l9hd8/conf-a.pdf", "/l9hd8/conf-b.pdf", "/l9hd8/conf-c.pdf"]
         groups = _groups_json({"g1": paths}, collection)
 
+        # --- Service path ---
         base_url, token, svc_port = java_service
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
@@ -665,26 +834,67 @@ class TestOperatorConfidenceAggregateServiceParity:
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
         monkeypatch.setenv("NX_SERVICE_TENANT", "l9hd8-tenant")
 
-        result = aspect_sql.try_aggregate(
+        svc_result = aspect_sql.try_aggregate(
             groups, "max confidence", source="aspects", aspect_field="confidence",
         )
-        assert result is not None
-        import re as _re
-        m = _re.search(r"=\s*([\d.]+)", result["aggregates"][0]["summary"])
-        assert m, f"Cannot parse confidence from: {result}"
-        val = float(m.group(1))
-        assert abs(val - 0.90) < 1e-6, f"Expected max=0.90, got {val}"
+        assert svc_result is not None
+        m = _re.search(r"=\s*([\d.]+)", svc_result["aggregates"][0]["summary"])
+        assert m, f"Cannot parse confidence from service result: {svc_result}"
+        svc_val = float(m.group(1))
+
+        # --- SQLite path (same fixture) ---
+        monkeypatch.delenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", raising=False)
+
+        from nexus.db.t2.document_aspects import AspectRecord
+        from nexus.aspect_readers import uri_for as _uri_for
+        sqlite_rows = [
+            AspectRecord(
+                collection=collection, source_path=p,
+                problem_formulation="P", proposed_method="M",
+                experimental_datasets=[], experimental_baselines=[],
+                experimental_results="R", extras={},
+                confidence=c, extracted_at="2026-01-15T10:00:00Z",
+                model_version="v1", extractor_name="test",
+                source_uri=_uri_for(collection, p) or "", doc_id=f"doc-max-{i}",
+                salient_sentences=[],
+            )
+            for i, (p, c) in enumerate([
+                ("/l9hd8/conf-a.pdf", 0.80),
+                ("/l9hd8/conf-b.pdf", 0.90),
+                ("/l9hd8/conf-c.pdf", 0.70),
+            ])
+        ]
+        sqlite_db = tmp_path / "max_parity.db"
+        _seed_sqlite(sqlite_db, sqlite_rows)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: sqlite_db)
+
+        sqlite_result = aspect_sql.try_aggregate(
+            groups, "max confidence", source="aspects", aspect_field="confidence",
+        )
+        assert sqlite_result is not None
+        m2 = _re.search(r"=\s*([\d.]+)", sqlite_result["aggregates"][0]["summary"])
+        assert m2, f"Cannot parse confidence from SQLite result: {sqlite_result}"
+        sqlite_val = float(m2.group(1))
+
+        # DIFFERENTIAL PARITY: both must agree
+        assert abs(svc_val - sqlite_val) < 1e-6, (
+            f"PARITY FAILURE: service max={svc_val}, SQLite max={sqlite_val}"
+        )
+        # Expected max = 0.90
+        assert abs(svc_val - 0.90) < 1e-6, f"Expected max(confidence)=0.90, got {svc_val}"
 
     def test_min_confidence_equal_sqlite(
         self, java_service, monkeypatch, tmp_path
     ) -> None:
-        """min(confidence) from service == min from SQLite (0.70 exact)."""
+        """min(confidence) from service == min from SQLite (DIFFERENTIAL: same fixture, both paths)."""
+        import re as _re
         from nexus.operators import aspect_sql
 
         collection = "knowledge__l9hd8"
         paths = ["/l9hd8/conf-a.pdf", "/l9hd8/conf-b.pdf", "/l9hd8/conf-c.pdf"]
         groups = _groups_json({"g1": paths}, collection)
 
+        # --- Service path ---
         base_url, token, svc_port = java_service
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
@@ -692,15 +902,54 @@ class TestOperatorConfidenceAggregateServiceParity:
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
         monkeypatch.setenv("NX_SERVICE_TENANT", "l9hd8-tenant")
 
-        result = aspect_sql.try_aggregate(
+        svc_result = aspect_sql.try_aggregate(
             groups, "min confidence", source="aspects", aspect_field="confidence",
         )
-        assert result is not None
-        import re as _re
-        m = _re.search(r"=\s*([\d.]+)", result["aggregates"][0]["summary"])
-        assert m, f"Cannot parse confidence from: {result}"
-        val = float(m.group(1))
-        assert abs(val - 0.70) < 1e-6, f"Expected min=0.70, got {val}"
+        assert svc_result is not None
+        m = _re.search(r"=\s*([\d.]+)", svc_result["aggregates"][0]["summary"])
+        assert m, f"Cannot parse confidence from service result: {svc_result}"
+        svc_val = float(m.group(1))
+
+        # --- SQLite path (same fixture) ---
+        monkeypatch.delenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", raising=False)
+
+        from nexus.db.t2.document_aspects import AspectRecord
+        from nexus.aspect_readers import uri_for as _uri_for
+        sqlite_rows = [
+            AspectRecord(
+                collection=collection, source_path=p,
+                problem_formulation="P", proposed_method="M",
+                experimental_datasets=[], experimental_baselines=[],
+                experimental_results="R", extras={},
+                confidence=c, extracted_at="2026-01-15T10:00:00Z",
+                model_version="v1", extractor_name="test",
+                source_uri=_uri_for(collection, p) or "", doc_id=f"doc-min-{i}",
+                salient_sentences=[],
+            )
+            for i, (p, c) in enumerate([
+                ("/l9hd8/conf-a.pdf", 0.80),
+                ("/l9hd8/conf-b.pdf", 0.90),
+                ("/l9hd8/conf-c.pdf", 0.70),
+            ])
+        ]
+        sqlite_db = tmp_path / "min_parity.db"
+        _seed_sqlite(sqlite_db, sqlite_rows)
+        monkeypatch.setattr("nexus.config.default_db_path", lambda: sqlite_db)
+
+        sqlite_result = aspect_sql.try_aggregate(
+            groups, "min confidence", source="aspects", aspect_field="confidence",
+        )
+        assert sqlite_result is not None
+        m2 = _re.search(r"=\s*([\d.]+)", sqlite_result["aggregates"][0]["summary"])
+        assert m2, f"Cannot parse confidence from SQLite result: {sqlite_result}"
+        sqlite_val = float(m2.group(1))
+
+        # DIFFERENTIAL PARITY: both must agree
+        assert abs(svc_val - sqlite_val) < 1e-6, (
+            f"PARITY FAILURE: service min={svc_val}, SQLite min={sqlite_val}"
+        )
+        # Expected min = 0.70
+        assert abs(svc_val - 0.70) < 1e-6, f"Expected min(confidence)=0.70, got {svc_val}"
 
 
 class TestRLSIsolation:

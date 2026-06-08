@@ -501,7 +501,12 @@ def try_aggregate(
             if not idents:
                 summary = "no items with identity for confidence aggregate"
             else:
-                value = _query_confidence_aggregate(idents, reducer_kind)
+                try:
+                    value = _query_confidence_aggregate(idents, reducer_kind)
+                except ValueError as exc:
+                    # Service transport error: use _aspects_only_or_none_aggregated
+                    # to trigger LLM fallback (source="auto") or stub (source="aspects").
+                    return _aspects_only_or_none_aggregated(source, str(exc))
                 if value is None:
                     summary = "no aspect rows found for items"
                 else:
@@ -572,6 +577,12 @@ def _query_filter(
                 _, pred_params_list = _build_filter_predicate(field, query)
                 predicate = pred_params_list[-1]  # last param is always the LIKE pattern
                 matched_uris = set(client.operator_filter(uri_list, field, predicate))
+            except Exception as exc:
+                # Transport errors (RuntimeError from missing NX_SERVICE_PORT,
+                # httpx.HTTPStatusError, ConnectError) are re-raised as ValueError
+                # so try_filter's ``except ValueError`` catch triggers graceful
+                # LLM fallback for source="auto" (nexus-l9hd8 Sig-2 fix).
+                raise ValueError(f"service operator_filter failed: {exc}") from exc
             finally:
                 client.close()
             for ident, u in ident_to_uri.items():
@@ -667,6 +678,10 @@ def _query_groupby(
         try:
             uri_list = list(ident_to_uri.values())
             uri_to_value = client.operator_groupby(uri_list, field)
+        except Exception as exc:
+            # Transport errors re-raised as ValueError so try_groupby's
+            # ``except ValueError`` catch triggers LLM fallback for source="auto".
+            raise ValueError(f"service operator_groupby failed: {exc}") from exc
         finally:
             client.close()
         for ident, u in ident_to_uri.items():
@@ -756,6 +771,13 @@ def _query_confidence_aggregate(
         client = _get_http_aspects_client()
         try:
             return client.operator_confidence_aggregate(uris_for_query, reducer_kind)
+        except Exception as exc:
+            # Transport errors re-raised as ValueError so try_aggregate's
+            # ``except (ValueError, TypeError)`` catch triggers LLM fallback
+            # for source="auto" (nexus-l9hd8 Sig-2 fix).
+            raise ValueError(
+                f"service operator_confidence_aggregate failed: {exc}"
+            ) from exc
         finally:
             client.close()
     with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)

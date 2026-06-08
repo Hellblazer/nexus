@@ -444,6 +444,99 @@ class TestAspectSqlServiceModeRouting:
         assert mock.confidence_calls
 
 
+class TestServiceErrorFallback:
+    """Service transport errors in source='auto' must trigger LLM fallback (return None),
+    not propagate as exceptions. (nexus-l9hd8 Sig-2 fix)
+
+    In source='aspects' mode service errors return a stub result (no LLM fallback).
+    """
+
+    class _RaisingClient:
+        """Mock client that always raises a RuntimeError (simulates missing NX_SERVICE_PORT)."""
+
+        def operator_filter(self, *_a, **_kw):
+            raise RuntimeError("service port not configured")
+
+        def operator_groupby(self, *_a, **_kw):
+            raise RuntimeError("connection refused")
+
+        def operator_confidence_aggregate(self, *_a, **_kw):
+            raise RuntimeError("service unreachable")
+
+        def close(self) -> None:
+            pass
+
+    @pytest.fixture(autouse=True)
+    def _patch_client(self, monkeypatch: pytest.MonkeyPatch, service_mode: None) -> None:  # noqa: PT004
+        """Inject the raising client and set service mode for all tests in this class."""
+        monkeypatch.setattr(
+            aspect_sql, "_get_http_aspects_client",
+            lambda: self._RaisingClient(),
+        )
+
+    def test_filter_auto_service_error_falls_back_to_none(self) -> None:
+        """source='auto': filter service error → None (triggers LLM fallback, no raise)."""
+        items = _items_json("/papers/paxos.pdf")
+        result = aspect_sql.try_filter(
+            items, "paxos", source="auto", aspect_field="proposed_method",
+        )
+        assert result is None, (
+            "Expected None (LLM fallback) on service error in source='auto'; "
+            f"got: {result!r}"
+        )
+
+    def test_filter_aspects_service_error_returns_stub(self) -> None:
+        """source='aspects': filter service error → stub result, not raise."""
+        items = _items_json("/papers/paxos.pdf")
+        result = aspect_sql.try_filter(
+            items, "paxos", source="aspects", aspect_field="proposed_method",
+        )
+        assert result is not None, (
+            "source='aspects' must return stub on error, not raise"
+        )
+        assert result["items"] == []
+
+    def test_groupby_auto_service_error_falls_back_to_none(self) -> None:
+        """source='auto': groupby service error → None (LLM fallback)."""
+        items = _items_json("/papers/paxos.pdf")
+        result = aspect_sql.try_groupby(
+            items, "venue", source="auto", aspect_field="extras.venue",
+        )
+        assert result is None, (
+            "Expected None (LLM fallback) on service error in source='auto'; "
+            f"got: {result!r}"
+        )
+
+    def test_groupby_aspects_service_error_returns_stub(self) -> None:
+        """source='aspects': groupby service error → stub result, not raise."""
+        items = _items_json("/papers/paxos.pdf")
+        result = aspect_sql.try_groupby(
+            items, "venue", source="aspects", aspect_field="extras.venue",
+        )
+        assert result is not None
+        assert "groups" in result
+
+    def test_aggregate_confidence_auto_service_error_falls_back_to_none(self) -> None:
+        """source='auto': confidence aggregate service error → None (LLM fallback)."""
+        groups = _groups_json("VLDB", "/papers/paxos.pdf")
+        result = aspect_sql.try_aggregate(
+            groups, "avg confidence", source="auto", aspect_field="confidence",
+        )
+        assert result is None, (
+            "Expected None (LLM fallback) on service error in source='auto'; "
+            f"got: {result!r}"
+        )
+
+    def test_aggregate_confidence_aspects_service_error_returns_stub(self) -> None:
+        """source='aspects': confidence aggregate service error → stub result, not raise."""
+        groups = _groups_json("VLDB", "/papers/paxos.pdf")
+        result = aspect_sql.try_aggregate(
+            groups, "avg confidence", source="aspects", aspect_field="confidence",
+        )
+        assert result is not None
+        assert "aggregates" in result
+
+
 # ── .37: commands/aspects.py gc-fixtures — CLI guard ──────────────────────────
 
 

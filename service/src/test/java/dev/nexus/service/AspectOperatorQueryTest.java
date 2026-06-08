@@ -335,4 +335,100 @@ class AspectOperatorQueryTest {
 
         assertThat(val).as("unknown reducer kind must return null").isNull();
     }
+
+    // ── C1: field allowlist / injection-rejection tests ────────────────────────
+
+    @Test @Order(30)
+    void validateField_knownColumn_passes() {
+        // All ALLOWED_ASPECT_COLUMNS must validate without exception
+        for (String col : AspectRepository.ALLOWED_ASPECT_COLUMNS) {
+            // Should not throw
+            assertThatCode(() -> AspectRepository.validateField(col))
+                .as("known column " + col + " must pass validation")
+                .doesNotThrowAnyException();
+        }
+    }
+
+    @Test @Order(31)
+    void validateField_extrasKey_passes() {
+        assertThatCode(() -> AspectRepository.validateField("extras.venue"))
+            .doesNotThrowAnyException();
+        assertThatCode(() -> AspectRepository.validateField("extras.meta.year"))
+            .doesNotThrowAnyException();
+    }
+
+    @Test @Order(32)
+    void validateField_injectionAttempt_throws() {
+        // Classic SQL injection attempt must be rejected with IllegalArgumentException
+        assertThatThrownBy(() -> AspectRepository.validateField(
+                "x; DROP TABLE nexus.document_aspects; --"))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(33)
+    void validateField_unknownColumn_throws() {
+        assertThatThrownBy(() -> AspectRepository.validateField("not_a_real_column"))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(34)
+    void validateField_blankField_throws() {
+        assertThatThrownBy(() -> AspectRepository.validateField(""))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> AspectRepository.validateField("   "))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(35)
+    void filter_unknownField_throws400() {
+        // filterBySourceUris must throw IllegalArgumentException for unknown field
+        // (AspectHandler routes this to HTTP 400)
+        assertThatThrownBy(() -> repo.filterBySourceUris(
+                TENANT_A,
+                List.of("file:///filter-a.pdf"),
+                "injected; DROP TABLE nexus.document_aspects; --",
+                "%paxos%"))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(36)
+    void groupby_unknownField_throws400() {
+        assertThatThrownBy(() -> repo.groupByField(
+                TENANT_A,
+                List.of("file:///filter-a.pdf"),
+                "injected; SELECT 1; --"))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    // ── H1: nested extras key traversal (extras.meta.year) ────────────────────
+
+    @Test @Order(40)
+    void groupby_nestedExtrasKey_traversesCorrectly() {
+        // Seed a row with nested extras: {"meta": {"year": "2023"}}
+        seed(TENANT_A, "coll-op", "nested-extras.pdf", "file:///nested-extras.pdf",
+             "Nested method", "[]",
+             "{\"meta\":{\"year\":\"2023\"}}", 0.80, null);
+
+        // extras.meta.year — Postgres must use #>>'{meta,year}' (not ->>'meta.year')
+        Map<String, String> groups = repo.groupByField(
+            TENANT_A,
+            List.of("file:///nested-extras.pdf"),
+            "extras.meta.year");
+
+        assertThat(groups).as("nested extras.meta.year must resolve to '2023'")
+            .containsEntry("file:///nested-extras.pdf", "2023");
+    }
+
+    @Test @Order(41)
+    void filter_nestedExtrasKey_matchesCorrectly() {
+        // Use the row seeded in test @Order(40)
+        List<String> matched = repo.filterBySourceUris(
+            TENANT_A,
+            List.of("file:///nested-extras.pdf"),
+            "extras.meta.year",
+            "%2023%");
+
+        assertThat(matched).as("extras.meta.year ILIKE '%2023%' must match")
+            .containsExactly("file:///nested-extras.pdf");
+    }
 }

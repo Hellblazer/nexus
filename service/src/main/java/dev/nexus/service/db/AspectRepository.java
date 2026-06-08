@@ -13,6 +13,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * RDR-152 bead nexus-gmiaf.15 — repository for aspects, highlights, queue, and promotion-log.
@@ -864,7 +865,7 @@ public final class AspectRepository {
     public List<String> filterBySourceUris(
             String tenant, List<String> sourceUris, String field, String predicate) {
         if (sourceUris == null || sourceUris.isEmpty()) return List.of();
-
+        validateField(field);
         String fieldExpr = fieldExpression(field);
 
         List<String> result = new ArrayList<>();
@@ -910,7 +911,7 @@ public final class AspectRepository {
      */
     public Map<String, String> groupByField(String tenant, List<String> sourceUris, String field) {
         if (sourceUris == null || sourceUris.isEmpty()) return Map.of();
-
+        validateField(field);
         String fieldExpr = fieldExpression(field);
 
         Map<String, String> result = new java.util.LinkedHashMap<>();
@@ -1031,21 +1032,93 @@ public final class AspectRepository {
     }
 
     /**
+     * Bare column names allowed as operator query fields.
+     *
+     * <p>Mirrors Python {@code _ASPECT_COLUMN_TYPES} keys. The {@code "extras"} key itself
+     * is excluded because it is only valid as the {@code extras.<key>} form; direct use of
+     * the JSON object column is not meaningful as a filter/groupby field.
+     *
+     * <p>Server-side allowlist: even though Python callers validate field names before
+     * posting, the service endpoint is externally reachable (any curl). Without a server-
+     * side guard, a POST with {@code "field": "x; DROP TABLE nexus.document_aspects; --"}
+     * would be injected directly into the SQL string via {@link #fieldExpression}.
+     */
+    public static final Set<String> ALLOWED_ASPECT_COLUMNS = Set.of(
+        "problem_formulation",
+        "proposed_method",
+        "experimental_datasets",
+        "experimental_baselines",
+        "experimental_results",
+        "confidence"
+    );
+
+    /**
+     * Validate that {@code field} is either a known scalar column or an {@code extras.<key>}
+     * reference. Throws {@link IllegalArgumentException} (→ HTTP 400) for anything else.
+     *
+     * <p>This is the server-side allowlist guard (C1 injection fix). Python callers
+     * pre-validate via {@code _ASPECT_COLUMN_TYPES}, but the service is a public HTTP
+     * endpoint — this guard prevents direct-POST injection.
+     */
+    public static void validateField(String field) {
+        if (field == null || field.isBlank()) {
+            throw new IllegalArgumentException("field must not be blank");
+        }
+        if (field.startsWith("extras.")) {
+            String key = field.substring("extras.".length());
+            if (key.isBlank()) {
+                throw new IllegalArgumentException("extras. field requires a non-empty key");
+            }
+            // Key may contain dots (nested path) — dots and alphanumerics are allowed.
+            // Reject anything that would escape the JSON path (single-quote, semicolon, etc.)
+            if (!key.matches("[A-Za-z0-9_.]+")) {
+                throw new IllegalArgumentException(
+                    "extras key must match [A-Za-z0-9_.]+; got: " + key);
+            }
+            return;
+        }
+        if (!ALLOWED_ASPECT_COLUMNS.contains(field)) {
+            throw new IllegalArgumentException(
+                "field " + field + " is not a known aspect column; "
+                + "allowed: " + ALLOWED_ASPECT_COLUMNS + " or extras.<key>");
+        }
+    }
+
+    /**
      * Build the SQL field expression for a column name or extras.key.
      *
-     * <p>For {@code extras.key}: {@code COALESCE(extras,'{}')::json->>'key'}.
-     * Null-safe: when {@code extras} IS NULL the COALESCE falls back to '{}',
-     * so the extraction returns null rather than throwing a cast error.
+     * <p>For {@code extras.key}: uses Postgres {@code #>>} (path operator) for
+     * true JSONPath-equivalent traversal, so {@code extras.a.b} correctly resolves
+     * {@code extras → a → b} (mirrors SQLite's {@code json_extract(extras, '$.a.b')}).
+     * Single-level keys (e.g. {@code extras.venue}) still work correctly via the
+     * path form {@code extras #>> '{venue}'}.
      *
-     * <p>For bare column names: returned verbatim (SQL injection protection:
-     * callers must supply validated column names from {@code _ASPECT_COLUMN_TYPES}).
+     * <p>COALESCE: when {@code extras} IS NULL the cast to {@code json} would fail;
+     * {@code COALESCE(extras,'{}')::json} substitutes an empty object, so the path
+     * extraction returns null instead of throwing.
+     *
+     * <p>For bare column names: returned verbatim after allowlist validation in
+     * {@link #validateField}. The allowlist is the injection guard; this method
+     * is only called after validateField passes.
      */
     private static String fieldExpression(String field) {
         if (field.startsWith("extras.")) {
-            String key = field.substring("extras.".length()).replace("'", "''");
-            return "COALESCE(extras,'{}')::json->>'" + key + "'";
+            // Split on '.' to build the Postgres array literal {a,b,...}
+            // e.g. "extras.venue"   → "{venue}"
+            //      "extras.a.b"     → "{a,b}"
+            String keyPart = field.substring("extras.".length());
+            String[] segments = keyPart.split("\\.");
+            StringBuilder sb = new StringBuilder("COALESCE(extras,'{}')::json#>>'{");
+            for (int i = 0; i < segments.length; i++) {
+                if (i > 0) sb.append(',');
+                // Segments were validated by validateField to match [A-Za-z0-9_.]+ so
+                // no quoting is needed inside the Postgres array literal.
+                sb.append(segments[i]);
+            }
+            sb.append("}'");
+            return sb.toString();
         }
-        // Bare column name — must be a known aspect column (validated by Python callers)
+        // Bare column name — allowlist validated by validateField before this call.
         return field;
     }
 
