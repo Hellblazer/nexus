@@ -355,7 +355,7 @@ class HttpTelemetryStore:
         self,
         *,
         question: str,
-        plan_id: str | None,
+        plan_id: int | None,
         matched_confidence: float | None,
         step_count: int,
         final_text: str,

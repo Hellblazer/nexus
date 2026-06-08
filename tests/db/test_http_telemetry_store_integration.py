@@ -89,10 +89,14 @@ pytestmark = [
 #: MUST NOT be within 2 years of now() (2026); this is the fidelity sentinel.
 PAST_TS = "2024-01-15T10:30:00Z"
 
-# ── Bootstrap SQL ─────────────────────────────────────────────────────────────
-# Schema is bootstrapped via raw psql (the service does NOT run Liquibase at
-# startup).  DDL is verbatim from telemetry-001-baseline.xml.
-# Split into three invocations: role (autocommit), schema+DDL, grants.
+# ── Bootstrap SQL (DEAD — retained only for reference) ───────────────────────
+# net63 (RDR-152): the JAR now runs Liquibase at startup and owns the full
+# telemetry schema + grants (telemetry-*.xml). These constants are NO LONGER
+# APPLIED — the fixture pre-applying them collides with the service's startup
+# self-migration ("relation already exists") and the service exits before
+# binding the port. The schema of record is service/src/main/resources/db/
+# changelog/telemetry-*.xml, NOT this duplicated DDL. Follow-up: delete these
+# constants (kept out of this change to bound the diff).
 
 _BOOTSTRAP_ROLE_SQL = """\
 CREATE ROLE svc_tel_inttest LOGIN PASSWORD 'svc_tel_inttest_pass';
@@ -318,13 +322,14 @@ def pg_service():
                 f"stdout={proc.stdout}\nstderr={proc.stderr}"
             )
 
-    # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
+    # net63: the JAR runs Liquibase at startup and owns the FULL telemetry schema
+    # (the telemetry-*.xml changelog) BEFORE binding the HTTP port. The fixture must
+    # NOT pre-apply schema — doing so collides ("relation already exists") and the
+    # service exits at migration. The only pre-start SQL is SERVICE_ROLES_SQL, which
+    # creates nexus_svc (the NOSUPERUSER NOBYPASSRLS DML/RLS role that
+    # grants-nexus-svc.xml grants to). nexus_svc is also the role the RLS-negative
+    # tests exercise (FORCE ROW LEVEL SECURITY applies to it).
     _psql(SERVICE_ROLES_SQL)
-
-    # Three phases: role (outside any txn), schema DDL, grants
-    _psql(_BOOTSTRAP_ROLE_SQL)
-    _psql(_BOOTSTRAP_SCHEMA_SQL)
-    _psql(_BOOTSTRAP_GRANTS_SQL)
 
     yield pgport, tmpdir, "nxteltest", pg_user
 
@@ -343,15 +348,23 @@ def java_service(pg_service):
     svc_token = "inttest-telemetry-token-xyz"
 
     jdbc_url = f"jdbc:postgresql://127.0.0.1:{pgport}/{dbname}"
+    chroma_data = tempfile.mkdtemp(prefix="nx-tel-chroma-")
 
     env = dict(os.environ)
     env.update({
         "NX_SERVICE_PORT":  str(svc_port),
         "NX_SERVICE_TOKEN": svc_token,
+        # net63 two-role: app pool = nexus_svc (NOSUPERUSER NOBYPASSRLS) so FORCE RLS
+        # applies; migration pool = OS superuser (trust auth) for the Liquibase DDL run.
         "NX_DB_URL":        jdbc_url,
-        "NX_DB_USER":       "svc_tel_inttest",
-        "NX_DB_PASS":       "svc_tel_inttest_pass",
+        "NX_DB_USER":       "nexus_svc",
+        "NX_DB_PASS":       "nexus_svc_pass",
         "NX_POOL_SIZE":     "3",
+        "NX_DB_ADMIN_URL":  jdbc_url,
+        "NX_DB_ADMIN_USER": pg_user,
+        "NX_DB_ADMIN_PASS": "",
+        # Isolated Chroma so the service does not open the dev instance at startup.
+        "NX_CHROMA_PATH":   chroma_data,
     })
     env.pop("NX_STORAGE_BACKEND", None)
 
@@ -573,6 +586,35 @@ class TestTimestampPreservationPerTable:
         # Two identical imports — no exception on either, and no 500
         tel_store.import_nx_answer_run(**kwargs)
         tel_store.import_nx_answer_run(**kwargs)
+
+    def test_nx_answer_runs_plan_id_integer_and_string_coercion(self, tel_store):
+        """REGRESSION (nexus-5gaj7): plan_id is a BIGINT. The corrected ETL sends an
+        int; the service must also tolerate a numeric STRING (defensive optLongNull),
+        since the old ETL stringified it. Both must import without a 500."""
+        # (a) Corrected path: int plan_id via the store.
+        tel_store.import_nx_answer_run(
+            question="nx-ans-planid-int",
+            plan_id=42,
+            matched_confidence=0.9,
+            step_count=1,
+            final_text="a",
+            cost_usd=0.001,
+            duration_ms=100,
+            created_at=PAST_TS,
+        )
+        # (b) Defensive path: raw payload with plan_id as a STRING (old ETL shape).
+        # Must NOT raise (Java coerces "7" -> 7L); previously threw ClassCastException.
+        tel_store._post("/v1/telemetry/import", {
+            "table": "nx_answer_runs",
+            "question": "nx-ans-planid-str",
+            "plan_id": "7",
+            "matched_confidence": "0.5",
+            "step_count": 1,
+            "final_text": "b",
+            "cost_usd": "0.002",
+            "duration_ms": "200",
+            "created_at": PAST_TS,
+        })
 
     def test_hook_failures_timestamp_verbatim_and_idempotent(self, tel_store):
         kwargs = dict(

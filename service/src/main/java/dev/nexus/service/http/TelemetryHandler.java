@@ -324,17 +324,20 @@ public final class TelemetryHandler implements HttpHandler {
                     optStrNull(body, "target_title"));
             }
             case "nx_answer_runs" -> {
-                Long planId = body.get("plan_id") != null
-                    ? ((Number) body.get("plan_id")).longValue() : null;
-                Double conf = body.get("matched_confidence") != null
-                    ? ((Number) body.get("matched_confidence")).doubleValue() : null;
+                // plan_id is a BIGINT; the SQLite ETL historically serialized it as a
+                // string, causing String->Number ClassCastException (nexus-5gaj7).
+                // optLongNull / optDoubleNull accept either a number or a numeric string.
+                Long planId = optLongNull(body, "plan_id");
+                Double conf = optDoubleNull(body, "matched_confidence");
+                Double cost = optDoubleNull(body, "cost_usd");
+                Long durationMs = optLongNull(body, "duration_ms");
                 repo.importNxAnswerRunRow(tenant,
                     requireString(body, "question"),
                     planId, conf,
                     optInt(body, "step_count", 0),
                     optStr(body, "final_text"),
-                    body.get("cost_usd") != null ? ((Number) body.get("cost_usd")).doubleValue() : 0.0,
-                    body.get("duration_ms") != null ? ((Number) body.get("duration_ms")).longValue() : 0L,
+                    cost != null ? cost : 0.0,
+                    durationMs != null ? durationMs : 0L,
                     requireString(body, "created_at"));
             }
             case "hook_failures" -> {
@@ -410,6 +413,53 @@ public final class TelemetryHandler implements HttpHandler {
     private int optInt(Map<String, Object> body, String key, int defaultVal) {
         Object v = body.get(key);
         return v instanceof Number n ? n.intValue() : defaultVal;
+    }
+
+    /**
+     * Coerce an optional numeric field to Long, accepting either a JSON number or a
+     * numeric string. Defensive against ETL payloads that serialize an INTEGER column
+     * as a string (the nx_answer_runs.plan_id ClassCastException class). Returns null
+     * for absent/blank values; throws IllegalArgumentException (HTTP 400, not a 500
+     * crash) for a non-numeric string.
+     */
+    private Long optLongNull(Map<String, Object> body, String key) {
+        Object v = body.get(key);
+        if (v == null) return null;
+        if (v instanceof Number n) return n.longValue();
+        if (v instanceof String s) {
+            String t = s.trim();
+            if (t.isEmpty()) return null;
+            try {
+                return Long.parseLong(t);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                    "Field '" + key + "' is not a valid integer: " + s);
+            }
+        }
+        throw new IllegalArgumentException(
+            "Field '" + key + "' has unexpected type: " + v.getClass().getSimpleName());
+    }
+
+    /**
+     * Coerce an optional numeric field to Double, accepting a JSON number or numeric
+     * string. Companion to {@link #optLongNull} for the same ETL-stringification class.
+     */
+    private Double optDoubleNull(Map<String, Object> body, String key) {
+        Object v = body.get(key);
+        if (v == null) return null;
+        if (v instanceof Number n) return n.doubleValue();
+        if (v instanceof String s) {
+            String t = s.trim();
+            if (t.isEmpty()) return null;
+            try {
+                return Double.parseDouble(t);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                    "Field '" + key + "' is not a valid number: " + s);
+            }
+        }
+        throw new IllegalArgumentException(
+            "Field '" + key + "' has unexpected type: " + v.getClass().getSimpleName());
     }
 
     private Map<String, String> queryParams(HttpExchange ex) {

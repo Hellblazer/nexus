@@ -131,6 +131,15 @@ def _int_or_zero(v: Any) -> int:
     return int(v) if v is not None else 0
 
 
+def _nullable_int(v: Any) -> int | None:
+    """Coerce to int, preserving NULL. For INTEGER columns (e.g. nx_answer_runs.plan_id,
+    a BIGINT on the service side) that must NOT be stringified — sending a string trips
+    the service's String->Number cast (nexus-5gaj7)."""
+    if v is None or v == "":
+        return None
+    return int(v)
+
+
 def _float_or_zero(v: Any) -> float:
     return float(v) if v is not None else 0.0
 
@@ -332,7 +341,7 @@ def _migrate_nx_answer_runs(
         try:
             store.import_nx_answer_run(
                 question=row.get("question", ""),
-                plan_id=_nullable_str(row.get("plan_id")),
+                plan_id=_nullable_int(row.get("plan_id")),
                 matched_confidence=row.get("matched_confidence"),
                 step_count=_int_or_zero(row.get("step_count")),
                 final_text=_str_or_empty(row.get("final_text")),

@@ -214,6 +214,71 @@ class TestTierWriteNullPreservation:
             "empty-string agent must also map to None (not '') via _nullable_str")
 
 
+class TestNxAnswerRunPlanIdType:
+    """REGRESSION (nexus-5gaj7): nx_answer_runs.plan_id is an INTEGER column (BIGINT
+    on the service). The ETL stringified it via _nullable_str, so the service's
+    ((Number) plan_id) cast threw ClassCastException and 180/182 rows failed import.
+    The ETL must pass plan_id as an int (or None), never a string.
+    """
+
+    @staticmethod
+    def _seed(db_path: Path, plan_id_sql: str) -> None:
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE nx_answer_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, question TEXT NOT NULL,
+                plan_id INTEGER, matched_confidence REAL, step_count INTEGER NOT NULL DEFAULT 0,
+                final_text TEXT NOT NULL DEFAULT '', cost_usd REAL NOT NULL DEFAULT 0.0,
+                duration_ms INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(
+            f"INSERT INTO nx_answer_runs (question, plan_id, created_at) "
+            f"VALUES ('q', {plan_id_sql}, '2024-01-15T10:30:00Z')"
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def _mock_store() -> MagicMock:
+        store = MagicMock()
+        for m in ("import_tier_write", "import_relevance_row", "import_search_row",
+                  "import_nx_answer_run", "import_hook_failure", "import_frecency_row"):
+            getattr(store, m).return_value = None
+        return store
+
+    def test_integer_plan_id_passed_as_int_not_str(self):
+        store = self._mock_store()
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = Path(f.name)
+        self._seed(db_path, "42")
+        try:
+            migrate_telemetry_rows(db_path, store)
+        finally:
+            db_path.unlink(missing_ok=True)
+
+        assert store.import_nx_answer_run.call_count == 1
+        _, kwargs = store.import_nx_answer_run.call_args
+        assert kwargs["plan_id"] == 42
+        assert isinstance(kwargs["plan_id"], int), (
+            f"plan_id must be int, not {type(kwargs['plan_id']).__name__} — "
+            "a str trips the service ((Number) plan_id) cast (nexus-5gaj7)"
+        )
+
+    def test_null_plan_id_passed_as_none(self):
+        store = self._mock_store()
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = Path(f.name)
+        self._seed(db_path, "NULL")
+        try:
+            migrate_telemetry_rows(db_path, store)
+        finally:
+            db_path.unlink(missing_ok=True)
+
+        _, kwargs = store.import_nx_answer_run.call_args
+        assert kwargs["plan_id"] is None
+
+
 # ── Unit tests: copy-not-move ──────────────────────────────────────────────────
 
 class TestCopyNotMove:
