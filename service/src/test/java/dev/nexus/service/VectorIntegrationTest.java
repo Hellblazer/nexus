@@ -355,11 +355,14 @@ class VectorIntegrationTest {
         var upsertResp = post("/v1/vectors/upsert-chunks", upsertBody);
         assertThat(upsertResp.statusCode()).as("upsert 200").isEqualTo(200);
 
-        // 2. Update metadata (frecency_score only — no document text or embedding)
+        // 2. Update ONLY frecency_score — deliberately omit source_path to prove
+        //    Chroma preserves metadata fields that were not re-sent.
+        //    This is the regression guard: sending only {"frecency_score": X} must
+        //    not clobber pre-existing metadata fields.
         var updateBody = Map.of(
                 "collection", colName,
                 "ids",        List.of(chunkId),
-                "metadatas",  List.of(Map.of("frecency_score", 0.88, "source_path", "/test/path.py"))
+                "metadatas",  List.of(Map.of("frecency_score", 0.88))
         );
         var updateResp = post("/v1/vectors/update-metadata", updateBody);
         assertThat(updateResp.statusCode()).as("update-metadata 200").isEqualTo(200);
@@ -369,7 +372,7 @@ class VectorIntegrationTest {
         assertThat(((Number) updateJson.get("updated")).intValue())
                 .as("updated count").isEqualTo(1);
 
-        // 3. Read back via store-get — verify frecency_score is updated
+        // 3. Read back via store-get — verify frecency_score is updated AND source_path survived
         var getBody = Map.of(
                 "collection", colName,
                 "ids",        List.of(chunkId)
@@ -392,6 +395,13 @@ class VectorIntegrationTest {
         assertThat(((Number) meta.get("frecency_score")).doubleValue())
                 .as("frecency_score updated to 0.88 (exact)")
                 .isEqualTo(0.88);
+
+        // Metadata preservation: source_path must survive even though it was NOT re-sent
+        // in the update body.  A regression to a full-replace (not Chroma's merge) would
+        // drop this field and this assertion catches it.
+        assertThat(meta.get("source_path"))
+                .as("source_path preserved after frecency-only metadata update")
+                .isEqualTo("/test/path.py");
 
         // 4. Verify document text is preserved (no re-embed happened)
         @SuppressWarnings("unchecked")

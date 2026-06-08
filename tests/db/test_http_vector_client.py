@@ -343,6 +343,29 @@ class TestUpdateChunks:
         client.update_chunks("col", ["id1"], [{"k": "v"}])
         assert calls == ["my-tenant"]
 
+    def test_batches_at_300(self, monkeypatch):
+        """update_chunks MUST batch at 300 to match the service quota validator."""
+        client = HttpVectorClient()
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append(body["ids"])
+            return {"updated": len(body["ids"])}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+
+        # 350 ids: expect 2 POST calls (300 + 50)
+        ids = [f"id{i:04d}" for i in range(350)]
+        metas = [{"frecency_score": float(i)} for i in range(350)]
+        client.update_chunks("code__repo__model__v1", ids, metas)
+
+        assert len(calls) == 2, (
+            f"Expected 2 batched POSTs for 350 ids, got {len(calls)}"
+        )
+        assert len(calls[0]) == 300
+        assert len(calls[1]) == 50
+        # All ids appear exactly once across batches
+        all_sent = [x for batch in calls for x in batch]
+        assert sorted(all_sent) == sorted(ids)
+
 
 class TestGetCollection:
     """RDR-152 nexus-enehl: get_collection raises ChromaNotFoundError when absent."""
@@ -427,46 +450,6 @@ class TestServiceCollectionStubGetWithIds:
         stub = _ServiceCollectionStub("col__test__m__v1")
         stub.get(limit=5, offset=0)
         assert calls[0][0] == "/v1/vectors/get"
-
-
-class TestServiceCollectionStubUpdate:
-    """RDR-152 nexus-enehl: _ServiceCollectionStub.update routes to update-metadata."""
-
-    def test_posts_to_update_metadata(self, monkeypatch):
-        from nexus.db.http_vector_client import _ServiceCollectionStub
-        calls = []
-        def fake_post(path, body, **kw):
-            calls.append((path, body))
-            return {"updated": 1}
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        stub = _ServiceCollectionStub("code__repo__model__v1")
-        stub.update(["id1"], [{"frecency_score": 0.75}])
-        assert len(calls) == 1
-        path, body = calls[0]
-        assert path == "/v1/vectors/update-metadata"
-        assert body["collection"] == "code__repo__model__v1"
-        assert body["ids"] == ["id1"]
-        assert body["metadatas"] == [{"frecency_score": 0.75}]
-
-    def test_empty_ids_is_noop(self, monkeypatch):
-        from nexus.db.http_vector_client import _ServiceCollectionStub
-        posted = []
-        monkeypatch.setattr(
-            "nexus.db.http_vector_client._post",
-            lambda path, body, **kw: posted.append((path, body))
-        )
-        stub = _ServiceCollectionStub("col")
-        stub.update([], [])
-        assert posted == []
-
-    def test_service_error_logged_not_raised(self, monkeypatch):
-        from nexus.db.http_vector_client import _ServiceCollectionStub
-        def raise_err(path, body, **kw):
-            raise VectorServiceError("500")
-        monkeypatch.setattr("nexus.db.http_vector_client._post", raise_err)
-        stub = _ServiceCollectionStub("col")
-        # Must not raise
-        stub.update(["id1"], [{"frecency_score": 0.5}])
 
 
 class TestNotImplementedMethods:

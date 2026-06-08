@@ -355,6 +355,17 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
         "and is visible to service-mode search."
     )
 
+    # Metadata preservation: source_path must survive even though _run_index_frecency_only
+    # sends {**existing_meta, "frecency_score": score} — this asserts the seeded source_path
+    # field is present after the frecency update.  A regression to sending only
+    # {"frecency_score": X} would drop source_path and this would catch it.
+    expected_source = str(tmp_path / "test_file.py")
+    actual_source = meta.get("source_path")
+    assert actual_source == expected_source, (
+        f"source_path must survive after frecency-only metadata update: "
+        f"expected {expected_source!r}, got {actual_source!r}"
+    )
+
     # Step 6: Verify the chunk is also visible via search (frecency restored = searchable)
     search_result = _svc_post(base_url, token, "/v1/vectors/search", {
         "query": "frecency_score_test function",

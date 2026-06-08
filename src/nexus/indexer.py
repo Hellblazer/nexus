@@ -1156,14 +1156,17 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
 
     Handles both code__ and docs__ collections.
 
-    nexus-67ljl split-brain guard: in service mode
-    (NX_STORAGE_BACKEND_VECTORS=service) the Java service manages its own
-    Chroma instance.  Writing frecency_score to the daemon-Chroma via
-    make_t3() would create split-brain updates invisible to service-mode
-    search.  Frecency is a ranking *optimisation*, not a correctness
-    requirement, so we skip the update entirely in service mode and log
-    the skip.  A follow-on bead should port frecency metadata updates to
-    the service's vector endpoint.
+    Routing (nexus-enehl, RDR-152):
+    - Service mode (NX_STORAGE_BACKEND_VECTORS=service): obtains an
+      :class:`HttpVectorClient` and routes the metadata update through
+      the Java service's ``/v1/vectors/update-metadata`` endpoint so the
+      frecency_score lands in the service's Chroma — the one that
+      service-mode search reads.  No credential check is needed; the
+      service handles its own Chroma/Voyage.  This replaces the
+      nexus-67ljl early-return skip-guard that previously prevented
+      split-brain writes to daemon-Chroma.
+    - Local/cloud mode: checks credentials, then obtains a
+      :class:`T3Database` via ``make_t3()`` and updates directly.
     """
     from nexus.config import get_credential
     from nexus.frecency import batch_frecency

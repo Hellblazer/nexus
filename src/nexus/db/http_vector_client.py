@@ -188,30 +188,6 @@ class _ServiceCollectionStub:
             )
             return {"ids": [], "documents": [], "metadatas": []}
 
-    def update(self, ids: list[str], metadatas: list[dict]) -> None:
-        """Update chunk metadata without re-embedding.
-
-        RDR-152 bead nexus-enehl: routes frecency_score metadata updates
-        through the service's ``/v1/vectors/update-metadata`` endpoint.
-        No documents or embeddings are sent — Chroma preserves the original
-        vectors unchanged.
-        """
-        if not ids:
-            return
-        try:
-            _post(
-                "/v1/vectors/update-metadata",
-                {"collection": self._name, "ids": ids, "metadatas": metadatas},
-                tenant=self._tenant,
-            )
-        except VectorServiceError as exc:
-            _log.warning(
-                "service_collection_update_failed",
-                collection=self._name,
-                count=len(ids),
-                error=str(exc),
-            )
-
     def delete(self, ids: list[str]) -> None:
         """Delete chunks by ID from the service."""
         if not ids:
@@ -431,14 +407,22 @@ class HttpVectorClient:
         this method routes the update through the service's
         ``/v1/vectors/update-metadata`` endpoint so the frecency_score lands
         in the service's Chroma (the one search reads) — not daemon-Chroma.
+
+        Batches at MAX_RECORDS_PER_WRITE (300) to match the service's quota
+        validator and to mirror :meth:`T3Database.update_chunks` parity.
         """
         if not ids:
             return
-        _post(
-            "/v1/vectors/update-metadata",
-            {"collection": collection, "ids": ids, "metadatas": metadatas},
-            tenant=self._tenant,
-        )
+        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415
+        size = QUOTAS.MAX_RECORDS_PER_WRITE
+        for start in range(0, len(ids), size):
+            batch_ids  = ids[start : start + size]
+            batch_meta = metadatas[start : start + size]
+            _post(
+                "/v1/vectors/update-metadata",
+                {"collection": collection, "ids": batch_ids, "metadatas": batch_meta},
+                tenant=self._tenant,
+            )
         _log.debug(
             "http_vector_update_chunks",
             collection=collection,
