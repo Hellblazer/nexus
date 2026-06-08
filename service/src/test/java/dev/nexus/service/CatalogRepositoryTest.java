@@ -1123,6 +1123,403 @@ class CatalogRepositoryTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // ANALYTICS QUERIES — PER-ENDPOINT EXACT + RLS TESTS (nexus-xnz0o)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // ── distinctDocCollections ────────────────────────────────────────────────
+
+    @Test @Order(130)
+    void distinctDocCollections_exactValues() {
+        String dTenant = "ddc-tenant";
+        String cA = "ddc__knowledge__voyage__v1";
+        String cB = "ddc__code__voyage__v1";
+
+        repo.upsertDocument(dTenant, mapOf(
+            "tumbler", "ddc.1", "title", "DDC Doc 1",
+            "content_type", "knowledge", "physical_collection", cA
+        ));
+        repo.upsertDocument(dTenant, mapOf(
+            "tumbler", "ddc.2", "title", "DDC Doc 2",
+            "content_type", "knowledge", "physical_collection", cA
+        ));
+        repo.upsertDocument(dTenant, mapOf(
+            "tumbler", "ddc.3", "title", "DDC Doc 3",
+            "content_type", "code", "physical_collection", cB
+        ));
+        // Doc with empty physical_collection — must NOT appear.
+        repo.upsertDocument(dTenant, mapOf(
+            "tumbler", "ddc.4", "title", "DDC Doc 4", "content_type", "paper"
+        ));
+
+        var result = repo.distinctDocCollections(dTenant);
+
+        assertThat(result).contains(cA, cB);
+        assertThat(result).doesNotContain("");
+        assertThat(result).noneMatch(s -> s == null);
+        assertThat(result).hasSizeGreaterThanOrEqualTo(2);
+    }
+
+    @Test @Order(131)
+    void distinctDocCollections_crossTenantIsolation() {
+        String tX = "ddc-tenant-x";
+        String tY = "ddc-tenant-y";
+        String shared = "shared__ddc__v1";
+        String exclusive = "exclusive__ddc-x__v1";
+
+        repo.upsertDocument(tX, mapOf(
+            "tumbler", "ddcx.1", "title", "X1",
+            "content_type", "knowledge", "physical_collection", shared
+        ));
+        repo.upsertDocument(tX, mapOf(
+            "tumbler", "ddcx.2", "title", "X2",
+            "content_type", "knowledge", "physical_collection", exclusive
+        ));
+        repo.upsertDocument(tY, mapOf(
+            "tumbler", "ddcy.1", "title", "Y1",
+            "content_type", "knowledge", "physical_collection", shared
+        ));
+
+        var colsX = repo.distinctDocCollections(tX);
+        var colsY = repo.distinctDocCollections(tY);
+
+        // tX sees its own collections (shared + exclusive)
+        assertThat(colsX).contains(shared, exclusive);
+        // tY sees only shared; exclusive is tX-only
+        assertThat(colsY).contains(shared);
+        assertThat(colsY).doesNotContain(exclusive);
+    }
+
+    // ── ownersWithRoots ───────────────────────────────────────────────────────
+
+    @Test @Order(132)
+    void ownersWithRoots_exactValues() {
+        String owrTenant = "owr-tenant";
+
+        repo.upsertOwner(owrTenant, mapOf(
+            "tumbler_prefix", "owr.1",
+            "name", "OWR Root Repo",
+            "owner_type", "repo",
+            "repo_root", "/projects/owr-root-repo"
+        ));
+        repo.upsertOwner(owrTenant, mapOf(
+            "tumbler_prefix", "owr.2",
+            "name", "OWR No Root",
+            "owner_type", "curator"
+            // repo_root absent => stored as empty string
+        ));
+
+        var result = repo.ownersWithRoots(owrTenant);
+
+        // Only the owner with a non-empty repo_root must appear
+        assertThat(result).hasSize(1);
+        var m = result.get(0);
+        assertThat(m).containsEntry("tumbler_prefix", "owr.1");
+        assertThat(m).containsEntry("repo_root", "/projects/owr-root-repo");
+        assertThat(m.get("name")).isEqualTo("OWR Root Repo");
+    }
+
+    @Test @Order(133)
+    void ownersWithRoots_crossTenantIsolation() {
+        String tA = "owr-tenant-a";
+        String tB = "owr-tenant-b";
+
+        repo.upsertOwner(tA, mapOf(
+            "tumbler_prefix", "owra.1", "name", "A Repo",
+            "owner_type", "repo", "repo_root", "/projects/a"
+        ));
+        repo.upsertOwner(tB, mapOf(
+            "tumbler_prefix", "owrb.1", "name", "B Repo",
+            "owner_type", "repo", "repo_root", "/projects/b"
+        ));
+
+        var resultA = repo.ownersWithRoots(tA);
+        var resultB = repo.ownersWithRoots(tB);
+
+        // Each tenant sees only its own owners
+        var prefixesA = resultA.stream().map(m -> (String) m.get("tumbler_prefix")).toList();
+        var prefixesB = resultB.stream().map(m -> (String) m.get("tumbler_prefix")).toList();
+        assertThat(prefixesA).contains("owra.1").doesNotContain("owrb.1");
+        assertThat(prefixesB).contains("owrb.1").doesNotContain("owra.1");
+    }
+
+    // ── orphanedDocs ──────────────────────────────────────────────────────────
+
+    @Test @Order(134)
+    void orphanedDocs_exactValues() {
+        String orpTenant = "orp-tenant";
+
+        // Three docs: A↔B linked, C is isolated (orphan)
+        repo.upsertDocument(orpTenant, mapOf(
+            "tumbler", "orp.1", "title", "ORP Doc A",
+            "content_type", "paper", "file_path", "a.pdf"
+        ));
+        repo.upsertDocument(orpTenant, mapOf(
+            "tumbler", "orp.2", "title", "ORP Doc B",
+            "content_type", "paper", "file_path", "b.pdf"
+        ));
+        repo.upsertDocument(orpTenant, mapOf(
+            "tumbler", "orp.3", "title", "ORP Doc C",
+            "content_type", "paper", "file_path", "c.pdf"
+        ));
+        repo.upsertLink(orpTenant, Map.of(
+            "from_tumbler", "orp.1",
+            "to_tumbler",   "orp.2",
+            "link_type",    "cites",
+            "created_by",   "test"
+        ));
+
+        var result = repo.orphanedDocs(orpTenant);
+
+        // Only orp.3 has no links in either direction
+        var tumblers = result.stream().map(m -> (String) m.get("tumbler")).toList();
+        assertThat(tumblers).contains("orp.3");
+        // orp.1 (from) and orp.2 (to) are linked — must NOT appear
+        assertThat(tumblers).doesNotContain("orp.1", "orp.2");
+        // Response must include expected fields
+        var orphan = result.stream().filter(m -> "orp.3".equals(m.get("tumbler"))).findFirst().orElseThrow();
+        assertThat(orphan).containsKey("title");
+        assertThat(orphan).containsKey("content_type");
+        assertThat(orphan).containsKey("file_path");
+    }
+
+    @Test @Order(135)
+    void orphanedDocs_crossTenantIsolation() {
+        String tX = "orp-tenant-x";
+        String tY = "orp-tenant-y";
+
+        // tX: one orphan
+        repo.upsertDocument(tX, mapOf(
+            "tumbler", "orpx.1", "title", "X Orphan",
+            "content_type", "paper", "file_path", "x.pdf"
+        ));
+        // tY: one linked pair (neither is an orphan)
+        repo.upsertDocument(tY, mapOf(
+            "tumbler", "orpy.1", "title", "Y From",
+            "content_type", "paper", "file_path", "yf.pdf"
+        ));
+        repo.upsertDocument(tY, mapOf(
+            "tumbler", "orpy.2", "title", "Y To",
+            "content_type", "paper", "file_path", "yt.pdf"
+        ));
+        repo.upsertLink(tY, Map.of(
+            "from_tumbler", "orpy.1", "to_tumbler", "orpy.2",
+            "link_type", "cites", "created_by", "test"
+        ));
+
+        var orphansX = repo.orphanedDocs(tX);
+        var orphansY = repo.orphanedDocs(tY);
+
+        var tumblersX = orphansX.stream().map(m -> (String) m.get("tumbler")).toList();
+        var tumblersY = orphansY.stream().map(m -> (String) m.get("tumbler")).toList();
+
+        // tX sees its own orphan; tY docs must NOT appear
+        assertThat(tumblersX).contains("orpx.1");
+        assertThat(tumblersX).doesNotContain("orpy.1", "orpy.2");
+        // tY has no orphans (both docs are linked)
+        assertThat(tumblersY).isEmpty();
+    }
+
+    // ── docsWithAbsolutePaths ─────────────────────────────────────────────────
+
+    @Test @Order(136)
+    void docsWithAbsolutePaths_exactValues() {
+        String absTenant = "abs-tenant";
+
+        repo.upsertDocument(absTenant, mapOf(
+            "tumbler", "abs.1", "title", "ABS Absolute",
+            "content_type", "paper",
+            "file_path", "/usr/local/data/abs.pdf",
+            "physical_collection", "abs__knowledge__v1"
+        ));
+        repo.upsertDocument(absTenant, mapOf(
+            "tumbler", "abs.2", "title", "ABS Relative",
+            "content_type", "paper",
+            "file_path", "relative/path.pdf",
+            "physical_collection", "abs__knowledge__v1"
+        ));
+
+        var result = repo.docsWithAbsolutePaths(absTenant);
+
+        var tumblers = result.stream().map(m -> (String) m.get("tumbler")).toList();
+        assertThat(tumblers).contains("abs.1");
+        assertThat(tumblers).doesNotContain("abs.2");
+
+        var entry = result.stream()
+            .filter(m -> "abs.1".equals(m.get("tumbler"))).findFirst().orElseThrow();
+        assertThat(entry.get("file_path")).isEqualTo("/usr/local/data/abs.pdf");
+        assertThat(entry.get("physical_collection")).isEqualTo("abs__knowledge__v1");
+    }
+
+    @Test @Order(137)
+    void docsWithAbsolutePaths_crossTenantIsolation() {
+        String tA = "abs-tenant-a";
+        String tB = "abs-tenant-b";
+
+        repo.upsertDocument(tA, mapOf(
+            "tumbler", "absa.1", "title", "A Abs",
+            "content_type", "paper", "file_path", "/a/absolute.pdf"
+        ));
+        repo.upsertDocument(tB, mapOf(
+            "tumbler", "absb.1", "title", "B Abs",
+            "content_type", "paper", "file_path", "/b/absolute.pdf"
+        ));
+
+        var resultA = repo.docsWithAbsolutePaths(tA);
+        var resultB = repo.docsWithAbsolutePaths(tB);
+
+        var tumblersA = resultA.stream().map(m -> (String) m.get("tumbler")).toList();
+        var tumblersB = resultB.stream().map(m -> (String) m.get("tumbler")).toList();
+
+        assertThat(tumblersA).contains("absa.1").doesNotContain("absb.1");
+        assertThat(tumblersB).contains("absb.1").doesNotContain("absa.1");
+    }
+
+    // ── collectionOwnerRoot ───────────────────────────────────────────────────
+
+    @Test @Order(138)
+    void collectionOwnerRoot_exactValues() {
+        String corTenant = "cor-tenant";
+        String collName  = "cor__knowledge__voyage__v1";
+
+        repo.upsertOwner(corTenant, mapOf(
+            "tumbler_prefix", "cor.1",
+            "name", "COR Owner",
+            "owner_type", "repo",
+            "repo_root", "/projects/cor"
+        ));
+        repo.upsertCollection(corTenant, Map.of(
+            "name", collName,
+            "content_type", "knowledge",
+            "owner_id", "cor.1",
+            "embedding_model", "voyage-context-3"
+        ));
+
+        var result = repo.collectionOwnerRoot(corTenant, collName);
+
+        assertThat(result).isNotNull();
+        assertThat(result.get("owner_id")).isEqualTo("cor.1");
+        assertThat(result.get("repo_root")).isEqualTo("/projects/cor");
+    }
+
+    @Test @Order(139)
+    void collectionOwnerRoot_absentCollectionReturnsNull() {
+        var result = repo.collectionOwnerRoot(TENANT_A, "no-such-collection-xyz");
+        assertThat(result).isNull();
+    }
+
+    @Test @Order(140)
+    void collectionOwnerRoot_crossTenantIsolation() {
+        String tA = "cor-tenant-a";
+        String tB = "cor-tenant-b";
+        String collA = "cor__a__voyage__v1";
+        String collB = "cor__b__voyage__v1";
+
+        repo.upsertOwner(tA, mapOf(
+            "tumbler_prefix", "cora.1", "name", "A Owner",
+            "owner_type", "repo", "repo_root", "/projects/a"
+        ));
+        repo.upsertCollection(tA, Map.of(
+            "name", collA, "content_type", "knowledge",
+            "owner_id", "cora.1", "embedding_model", "voyage-context-3"
+        ));
+
+        repo.upsertOwner(tB, mapOf(
+            "tumbler_prefix", "corb.1", "name", "B Owner",
+            "owner_type", "repo", "repo_root", "/projects/b"
+        ));
+        repo.upsertCollection(tB, Map.of(
+            "name", collB, "content_type", "knowledge",
+            "owner_id", "corb.1", "embedding_model", "voyage-context-3"
+        ));
+
+        // tA cannot see tB's collection and vice versa
+        var resultAforB = repo.collectionOwnerRoot(tA, collB);
+        var resultBforA = repo.collectionOwnerRoot(tB, collA);
+
+        assertThat(resultAforB).isNull();
+        assertThat(resultBforA).isNull();
+    }
+
+    // ── stats with by_content_type ────────────────────────────────────────────
+
+    @Test @Order(141)
+    void stats_byContentType_exactValues() {
+        String stTenant = "st-tenant";
+
+        repo.upsertDocument(stTenant, mapOf(
+            "tumbler", "st.1", "title", "ST Paper 1", "content_type", "paper"
+        ));
+        repo.upsertDocument(stTenant, mapOf(
+            "tumbler", "st.2", "title", "ST Paper 2", "content_type", "paper"
+        ));
+        repo.upsertDocument(stTenant, mapOf(
+            "tumbler", "st.3", "title", "ST Code 1", "content_type", "code"
+        ));
+        repo.upsertLink(stTenant, Map.of(
+            "from_tumbler", "st.1", "to_tumbler", "st.2",
+            "link_type", "cites", "created_by", "test"
+        ));
+        repo.upsertLink(stTenant, Map.of(
+            "from_tumbler", "st.2", "to_tumbler", "st.3",
+            "link_type", "relates", "created_by", "test"
+        ));
+
+        var stats = repo.stats(stTenant);
+
+        @SuppressWarnings("unchecked")
+        var byType = (Map<String, Long>) stats.get("by_content_type");
+        assertThat(byType).isNotNull();
+        assertThat(byType.get("paper")).isEqualTo(2L);
+        assertThat(byType.get("code")).isEqualTo(1L);
+
+        @SuppressWarnings("unchecked")
+        var byLinkType = (Map<String, Long>) stats.get("links_by_type");
+        assertThat(byLinkType).isNotNull();
+        assertThat(byLinkType.get("cites")).isEqualTo(1L);
+        assertThat(byLinkType.get("relates")).isEqualTo(1L);
+    }
+
+    @Test @Order(142)
+    void stats_byContentType_crossTenantIsolation() {
+        String tA = "st-tenant-a";
+        String tB = "st-tenant-b";
+
+        repo.upsertDocument(tA, mapOf(
+            "tumbler", "sta.1", "title", "STA Paper", "content_type", "paper"
+        ));
+        repo.upsertDocument(tA, mapOf(
+            "tumbler", "sta.2", "title", "STA RDR", "content_type", "rdr"
+        ));
+        repo.upsertDocument(tB, mapOf(
+            "tumbler", "stb.1", "title", "STB Paper", "content_type", "paper"
+        ));
+        repo.upsertDocument(tB, mapOf(
+            "tumbler", "stb.2", "title", "STB Paper 2", "content_type", "paper"
+        ));
+        repo.upsertDocument(tB, mapOf(
+            "tumbler", "stb.3", "title", "STB Code", "content_type", "code"
+        ));
+
+        var statsA = repo.stats(tA);
+        var statsB = repo.stats(tB);
+
+        @SuppressWarnings("unchecked")
+        var byTypeA = (Map<String, Long>) statsA.get("by_content_type");
+        @SuppressWarnings("unchecked")
+        var byTypeB = (Map<String, Long>) statsB.get("by_content_type");
+
+        // tA: 1 paper + 1 rdr; no code
+        assertThat(byTypeA.get("paper")).isEqualTo(1L);
+        assertThat(byTypeA.get("rdr")).isEqualTo(1L);
+        assertThat(byTypeA.get("code")).isNull();
+
+        // tB: 2 papers + 1 code; no rdr
+        assertThat(byTypeB.get("paper")).isEqualTo(2L);
+        assertThat(byTypeB.get("code")).isEqualTo(1L);
+        assertThat(byTypeB.get("rdr")).isNull();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // ANALYTICS QUERIES (nexus-xnz0o)
     // ══════════════════════════════════════════════════════════════════════════
 
