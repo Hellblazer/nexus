@@ -12,6 +12,7 @@ guaranteed present). This module performs NO network or install work.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -281,6 +282,57 @@ def _warmup_bge() -> None:
         )
 
 
+# ── P5 (A) Postgres provisioning ──────────────────────────────────────────────
+
+
+def _provision_postgres_step() -> None:
+    """Provision (or verify) the nx-managed local Postgres cluster.
+
+    Called from init_cmd when ``--service`` is passed or when the service
+    storage backend is already configured (``NX_STORAGE_BACKEND=service``).
+
+    Structured to be robust: any failure is reported as a clear, actionable
+    error rather than a traceback — the user needs an install hint, not a
+    Python exception.
+    """
+    from nexus.db.pg_provision import PgBinaryNotFoundError, provision
+
+    config_dir = _config.nexus_config_dir()
+    click.echo("\nProvisioning local Postgres cluster for the service backend …")
+
+    try:
+        result = provision(config_dir)
+    except PgBinaryNotFoundError as exc:
+        click.echo(f"\nPostgres binaries not found.\n{exc}", err=True)
+        raise SystemExit(1)
+    except Exception as exc:  # noqa: BLE001 — user-facing
+        _log.error("pg_provision_failed", error=str(exc))
+        click.echo(f"\nPostgres provisioning failed: {exc}", err=True)
+        raise SystemExit(1)
+
+    if result.already_provisioned:
+        click.echo(f"  Postgres already running on port {result.port} — no changes.")
+        return
+
+    lines = []
+    if result.cluster_created:
+        lines.append("  Cluster initialised.")
+    if result.db_created:
+        lines.append(f"  Database 'nexus' created at {result.credentials_path.parent / 'postgres'}.")
+    if result.admin_role_created:
+        lines.append("  Role nexus_admin created (schema owner).")
+    if result.svc_role_created:
+        lines.append("  Role nexus_svc created (DML service role).")
+    lines.append(f"  Credentials written to {result.credentials_path} (0600).")
+    lines.append(
+        f"  Cluster listening on 127.0.0.1:{result.port}.\n"
+        f"  Set NX_STORAGE_BACKEND=service and source {result.credentials_path} "
+        f"before starting the service."
+    )
+    for line in lines:
+        click.echo(line)
+
+
 @click.command("init")
 @click.option(
     "--embedder",
@@ -295,14 +347,41 @@ def _warmup_bge() -> None:
     is_flag=True,
     help="Accept the recommended default (bge-768 for local) without prompting.",
 )
-def init_cmd(embedder: str | None, assume_yes: bool) -> None:
+@click.option(
+    "--service",
+    "provision_service",
+    is_flag=True,
+    default=False,
+    help=(
+        "Provision the local Postgres cluster for the RDR-152 Java service backend. "
+        "Creates nexus_admin and nexus_svc roles and writes credentials to "
+        "~/.config/nexus/pg_credentials. Idempotent: safe to re-run."
+    ),
+)
+def init_cmd(embedder: str | None, assume_yes: bool, provision_service: bool) -> None:
     """Guided first-run setup: choose your local embedding model.
 
     In cloud mode there is no local model to provision — embeddings run
     server-side via Voyage. In local mode this records your embedder choice
     so subsequent indexing/search uses it. The model itself is fetched later
     (``nx init`` does not download or install anything in this phase).
+
+    Pass ``--service`` to also provision the local Postgres cluster required
+    by the RDR-152 Java service backend.
     """
+    # Postgres provisioning: run if --service flag passed, or if the global
+    # NX_STORAGE_BACKEND is already set to 'service' (operator re-running
+    # init to refresh a provisioned cluster).
+    _auto_service = (
+        not provision_service
+        and "service" in os.environ.get("NX_STORAGE_BACKEND", "").lower()
+    )
+    if provision_service or _auto_service:
+        _provision_postgres_step()
+        if not _config.is_local_mode():
+            # Cloud mode + service backend: nothing more to do for embedding.
+            return
+
     # Import-site call so tests can patch ``nexus.config.is_local_mode``
     # (mem:feedback_pin_local_mode_in_cloud_tests).
     if not _config.is_local_mode():
