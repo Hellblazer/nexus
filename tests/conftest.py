@@ -563,6 +563,14 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # server-side — so it makes no cloud-mode embedder assertion and the
     # cloud_mode fixture is not applicable.
     "tests/test_indexer_seam_b_cutover.py::test_index_pdf_incremental_service_mode_skips_embed_fallback",
+    #
+    # RDR-152 nexus-qnp5s: catalog consumer migration tests. Voyage tokens
+    # appear only as realistic collection-NAME fixtures in collections_by_owner
+    # assertions (real collections ARE voyage-named); these test the catalog
+    # public-API methods, not cloud-mode embedder behavior, so cloud_mode is
+    # not applicable.
+    "tests/test_catalog_consumer_service_mode.py::TestSQLiteCatalogNewMethods::test_collections_by_owner_filters",
+    "tests/test_catalog_consumer_service_mode.py::TestHttpCatalogClientNewMethods::test_collections_by_owner",
 })
 
 
