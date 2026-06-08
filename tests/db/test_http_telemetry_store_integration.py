@@ -25,11 +25,13 @@ What is exercised (bead nexus-gmiaf.12 requirements):
 
 NX_STORAGE_BACKEND is NOT touched — default SQLite path is unchanged.
 
-Schema bootstrap pattern (mirrors test_http_plan_library_integration.py):
-  The Java service does NOT run Liquibase at startup.  The hermetic test fixture
-  bootstraps the full telemetry DDL via raw psql calls — identical DDL to
-  telemetry-001-baseline.xml so behaviour is 1:1.  A dedicated service role
-  svc_tel_inttest is created and granted table privileges.
+Schema bootstrap pattern (net63, mirrors the catalog ETL fixture):
+  The Java service runs Liquibase at startup (SchemaMigrator) and owns the full
+  telemetry schema + grants before binding the HTTP port.  The hermetic fixture
+  pre-applies NOTHING but the nexus_svc role (SERVICE_ROLES_SQL) — the NOSUPERUSER
+  NOBYPASSRLS DML/RLS role that grants-nexus-svc.xml grants to and that the
+  RLS-negative tests exercise.  Two-role DB config: NX_DB_ADMIN_* = OS superuser
+  (Liquibase DDL), NX_DB_USER = nexus_svc (app pool under FORCE RLS).
 """
 from __future__ import annotations
 
@@ -89,185 +91,25 @@ pytestmark = [
 #: MUST NOT be within 2 years of now() (2026); this is the fidelity sentinel.
 PAST_TS = "2024-01-15T10:30:00Z"
 
-# ── Bootstrap SQL ─────────────────────────────────────────────────────────────
-# Schema is bootstrapped via raw psql (the service does NOT run Liquibase at
-# startup).  DDL is verbatim from telemetry-001-baseline.xml.
-# Split into three invocations: role (autocommit), schema+DDL, grants.
+# (The pre-net63 raw-psql schema/role/grant bootstrap constants were removed:
+#  the service self-migrates via Liquibase at startup; the schema of record is
+#  service/src/main/resources/db/changelog/telemetry-*.xml.)
 
-_BOOTSTRAP_ROLE_SQL = """\
-CREATE ROLE svc_tel_inttest LOGIN PASSWORD 'svc_tel_inttest_pass';
-"""
 
-_BOOTSTRAP_SCHEMA_SQL = """\
-CREATE SCHEMA IF NOT EXISTS nexus;
+def _psql_query(pgport: int, dbname: str, pg_user: str, sql: str) -> list[list[str]]:
+    """Run a read-only SELECT via psql and return rows as lists of string cells.
 
--- ── relevance_log ─────────────────────────────────────────────────────────────
-CREATE TABLE nexus.relevance_log (
-    id          BIGSERIAL    NOT NULL,
-    tenant_id   TEXT         NOT NULL,
-    query       TEXT         NOT NULL,
-    chunk_id    TEXT         NOT NULL,
-    collection  TEXT                   DEFAULT '',
-    action      TEXT         NOT NULL,
-    session_id  TEXT                   DEFAULT '',
-    timestamp   TIMESTAMPTZ  NOT NULL,
-    CONSTRAINT relevance_log_pk PRIMARY KEY (id)
-);
-
-CREATE INDEX idx_relevance_log_ts      ON nexus.relevance_log (tenant_id, timestamp DESC);
-CREATE INDEX idx_relevance_log_query   ON nexus.relevance_log (tenant_id, query);
-CREATE INDEX idx_relevance_log_chunk   ON nexus.relevance_log (tenant_id, chunk_id);
-CREATE INDEX idx_relevance_log_session ON nexus.relevance_log (tenant_id, session_id);
-
-CREATE UNIQUE INDEX idx_relevance_log_etl_dedup
-    ON nexus.relevance_log (tenant_id, query, chunk_id, action, COALESCE(session_id,''), timestamp);
-
-ALTER TABLE nexus.relevance_log ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.relevance_log FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.relevance_log
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
--- ── search_telemetry ──────────────────────────────────────────────────────────
-CREATE TABLE nexus.search_telemetry (
-    tenant_id    TEXT             NOT NULL,
-    ts           TIMESTAMPTZ      NOT NULL,
-    query_hash   TEXT             NOT NULL,
-    collection   TEXT             NOT NULL,
-    raw_count    INTEGER          NOT NULL,
-    kept_count   INTEGER          NOT NULL,
-    top_distance DOUBLE PRECISION,
-    threshold    DOUBLE PRECISION,
-    CONSTRAINT search_telemetry_pk PRIMARY KEY (tenant_id, ts, query_hash, collection)
-);
-
-CREATE INDEX idx_search_tel_ts         ON nexus.search_telemetry (tenant_id, ts DESC);
-CREATE INDEX idx_search_tel_collection ON nexus.search_telemetry (tenant_id, collection, ts DESC);
-
-ALTER TABLE nexus.search_telemetry ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.search_telemetry FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.search_telemetry
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
--- ── tier_writes ───────────────────────────────────────────────────────────────
-CREATE TABLE nexus.tier_writes (
-    id           BIGSERIAL    NOT NULL,
-    tenant_id    TEXT         NOT NULL,
-    session_id   TEXT         NOT NULL,
-    ts           TIMESTAMPTZ  NOT NULL,
-    tool         TEXT         NOT NULL,
-    tier         TEXT         NOT NULL,
-    agent        TEXT,
-    project      TEXT,
-    target_title TEXT,
-    CONSTRAINT tier_writes_pk PRIMARY KEY (id)
-);
-
-CREATE INDEX idx_tier_writes_ts      ON nexus.tier_writes (tenant_id, ts DESC);
-CREATE INDEX idx_tier_writes_session ON nexus.tier_writes (tenant_id, session_id, ts DESC);
-CREATE INDEX idx_tier_writes_tool    ON nexus.tier_writes (tenant_id, tool);
-
-CREATE UNIQUE INDEX idx_tier_writes_etl_dedup
-    ON nexus.tier_writes (tenant_id, session_id, ts, tool, tier);
-
-ALTER TABLE nexus.tier_writes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.tier_writes FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.tier_writes
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
--- ── nx_answer_runs ────────────────────────────────────────────────────────────
-CREATE TABLE nexus.nx_answer_runs (
-    id                  BIGSERIAL        NOT NULL,
-    tenant_id           TEXT             NOT NULL,
-    question            TEXT             NOT NULL,
-    plan_id             BIGINT,
-    matched_confidence  DOUBLE PRECISION,
-    step_count          INTEGER          NOT NULL DEFAULT 0,
-    final_text          TEXT             NOT NULL DEFAULT '',
-    cost_usd            DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-    duration_ms         BIGINT           NOT NULL DEFAULT 0,
-    created_at          TIMESTAMPTZ      NOT NULL,
-    CONSTRAINT nx_answer_runs_pk PRIMARY KEY (id)
-);
-
-CREATE INDEX idx_nx_answer_runs_ts      ON nexus.nx_answer_runs (tenant_id, created_at DESC);
-CREATE INDEX idx_nx_answer_runs_plan_id ON nexus.nx_answer_runs (tenant_id, plan_id);
-
-CREATE UNIQUE INDEX idx_nx_answer_runs_etl_dedup
-    ON nexus.nx_answer_runs (tenant_id, question, created_at);
-
-ALTER TABLE nexus.nx_answer_runs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.nx_answer_runs FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.nx_answer_runs
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
--- ── hook_failures ─────────────────────────────────────────────────────────────
-CREATE TABLE nexus.hook_failures (
-    id             BIGSERIAL    NOT NULL,
-    tenant_id      TEXT         NOT NULL,
-    doc_id         TEXT         NOT NULL DEFAULT '',
-    collection     TEXT         NOT NULL DEFAULT '',
-    hook_name      TEXT         NOT NULL,
-    error          TEXT         NOT NULL DEFAULT '',
-    occurred_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    batch_doc_ids  TEXT,
-    is_batch       INTEGER      NOT NULL DEFAULT 0,
-    chain          TEXT         NOT NULL DEFAULT 'single',
-    CONSTRAINT hook_failures_pk PRIMARY KEY (id)
-);
-
-CREATE INDEX idx_hook_failures_ts         ON nexus.hook_failures (tenant_id, occurred_at DESC);
-CREATE INDEX idx_hook_failures_collection ON nexus.hook_failures (tenant_id, collection, occurred_at DESC);
-
-CREATE UNIQUE INDEX idx_hook_failures_etl_dedup
-    ON nexus.hook_failures (tenant_id, doc_id, hook_name, occurred_at);
-
-ALTER TABLE nexus.hook_failures ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.hook_failures FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.hook_failures
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
--- ── frecency ──────────────────────────────────────────────────────────────────
-CREATE TABLE nexus.frecency (
-    tenant_id      TEXT             NOT NULL,
-    chunk_id       TEXT             NOT NULL,
-    embedded_at    TIMESTAMPTZ      NOT NULL DEFAULT now(),
-    ttl_days       INTEGER          NOT NULL DEFAULT 0,
-    frecency_score DOUBLE PRECISION NOT NULL DEFAULT 0,
-    miss_count     INTEGER          NOT NULL DEFAULT 0,
-    last_hit_at    TIMESTAMPTZ      NOT NULL DEFAULT now(),
-    CONSTRAINT frecency_pk PRIMARY KEY (tenant_id, chunk_id)
-);
-
-CREATE INDEX idx_frecency_chunk    ON nexus.frecency (tenant_id, chunk_id);
-CREATE INDEX idx_frecency_last_hit ON nexus.frecency (tenant_id, last_hit_at DESC);
-CREATE INDEX idx_frecency_score    ON nexus.frecency (tenant_id, frecency_score DESC);
-
-ALTER TABLE nexus.frecency ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.frecency FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.frecency
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-"""
-
-_BOOTSTRAP_GRANTS_SQL = """\
-GRANT USAGE ON SCHEMA nexus TO svc_tel_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.relevance_log    TO svc_tel_inttest;
-GRANT USAGE ON SEQUENCE nexus.relevance_log_id_seq             TO svc_tel_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.search_telemetry TO svc_tel_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.tier_writes       TO svc_tel_inttest;
-GRANT USAGE ON SEQUENCE nexus.tier_writes_id_seq               TO svc_tel_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.nx_answer_runs   TO svc_tel_inttest;
-GRANT USAGE ON SEQUENCE nexus.nx_answer_runs_id_seq            TO svc_tel_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.hook_failures    TO svc_tel_inttest;
-GRANT USAGE ON SEQUENCE nexus.hook_failures_id_seq             TO svc_tel_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.frecency         TO svc_tel_inttest;
-ALTER ROLE svc_tel_inttest SET search_path TO nexus, public;
-"""
+    Uses the OS superuser (trust auth), which bypasses RLS, so this sees rows for all
+    tenants — appropriate for value-fidelity assertions in tests.
+    """
+    proc = subprocess.run(
+        [str(_PSQL), "-h", "127.0.0.1", "-p", str(pgport), "-U", pg_user,
+         "-d", dbname, "-t", "-A", "-F", "\t", "-c", sql],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"psql query failed (rc={proc.returncode}):\n{proc.stderr}")
+    return [line.split("\t") for line in proc.stdout.strip().splitlines() if line]
 
 
 def _find_free_port() -> int:
@@ -318,13 +160,14 @@ def pg_service():
                 f"stdout={proc.stdout}\nstderr={proc.stderr}"
             )
 
-    # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
+    # net63: the JAR runs Liquibase at startup and owns the FULL telemetry schema
+    # (the telemetry-*.xml changelog) BEFORE binding the HTTP port. The fixture must
+    # NOT pre-apply schema — doing so collides ("relation already exists") and the
+    # service exits at migration. The only pre-start SQL is SERVICE_ROLES_SQL, which
+    # creates nexus_svc (the NOSUPERUSER NOBYPASSRLS DML/RLS role that
+    # grants-nexus-svc.xml grants to). nexus_svc is also the role the RLS-negative
+    # tests exercise (FORCE ROW LEVEL SECURITY applies to it).
     _psql(SERVICE_ROLES_SQL)
-
-    # Three phases: role (outside any txn), schema DDL, grants
-    _psql(_BOOTSTRAP_ROLE_SQL)
-    _psql(_BOOTSTRAP_SCHEMA_SQL)
-    _psql(_BOOTSTRAP_GRANTS_SQL)
 
     yield pgport, tmpdir, "nxteltest", pg_user
 
@@ -343,15 +186,23 @@ def java_service(pg_service):
     svc_token = "inttest-telemetry-token-xyz"
 
     jdbc_url = f"jdbc:postgresql://127.0.0.1:{pgport}/{dbname}"
+    chroma_data = tempfile.mkdtemp(prefix="nx-tel-chroma-")
 
     env = dict(os.environ)
     env.update({
         "NX_SERVICE_PORT":  str(svc_port),
         "NX_SERVICE_TOKEN": svc_token,
+        # net63 two-role: app pool = nexus_svc (NOSUPERUSER NOBYPASSRLS) so FORCE RLS
+        # applies; migration pool = OS superuser (trust auth) for the Liquibase DDL run.
         "NX_DB_URL":        jdbc_url,
-        "NX_DB_USER":       "svc_tel_inttest",
-        "NX_DB_PASS":       "svc_tel_inttest_pass",
+        "NX_DB_USER":       "nexus_svc",
+        "NX_DB_PASS":       "nexus_svc_pass",
         "NX_POOL_SIZE":     "3",
+        "NX_DB_ADMIN_URL":  jdbc_url,
+        "NX_DB_ADMIN_USER": pg_user,
+        "NX_DB_ADMIN_PASS": "",
+        # Isolated Chroma so the service does not open the dev instance at startup.
+        "NX_CHROMA_PATH":   chroma_data,
     })
     env.pop("NX_STORAGE_BACKEND", None)
 
@@ -573,6 +424,48 @@ class TestTimestampPreservationPerTable:
         # Two identical imports — no exception on either, and no 500
         tel_store.import_nx_answer_run(**kwargs)
         tel_store.import_nx_answer_run(**kwargs)
+
+    def test_nx_answer_runs_plan_id_integer_and_string_coercion(self, tel_store, pg_service):
+        """REGRESSION (nexus-5gaj7): plan_id is a BIGINT. The corrected ETL sends an
+        int; the service must also tolerate a numeric STRING (defensive optLongNull),
+        since the old ETL stringified it. Both must import without a 500 AND the
+        coerced value must land correctly (verified via psql, not just no-exception)."""
+        # (a) Corrected path: int plan_id via the store.
+        tel_store.import_nx_answer_run(
+            question="nx-ans-planid-int",
+            plan_id=42,
+            matched_confidence=0.9,
+            step_count=1,
+            final_text="a",
+            cost_usd=0.001,
+            duration_ms=100,
+            created_at=PAST_TS,
+        )
+        # (b) Defensive path: raw payload with plan_id/numeric fields as STRINGS (old
+        # ETL shape). Must NOT raise (Java coerces "7" -> 7L); previously 500ed.
+        tel_store._post("/v1/telemetry/import", {
+            "table": "nx_answer_runs",
+            "question": "nx-ans-planid-str",
+            "plan_id": "7",
+            "matched_confidence": "0.5",
+            "step_count": 1,
+            "final_text": "b",
+            "cost_usd": "0.002",
+            "duration_ms": "200",
+            "created_at": PAST_TS,
+        })
+
+        # Value fidelity: the coerced values actually landed (superuser psql bypasses RLS).
+        pgport, _tmpdir, dbname, pg_user = pg_service
+        rows = _psql_query(
+            pgport, dbname, pg_user,
+            "SELECT plan_id, duration_ms FROM nexus.nx_answer_runs "
+            "WHERE question IN ('nx-ans-planid-int','nx-ans-planid-str') ORDER BY plan_id;",
+        )
+        # Two rows: plan_id 7 (string-coerced) and 42 (int); duration_ms 200 and 100.
+        assert rows == [["7", "200"], ["42", "100"]], (
+            f"coerced plan_id/duration_ms must round-trip exactly; got {rows}"
+        )
 
     def test_hook_failures_timestamp_verbatim_and_idempotent(self, tel_store):
         kwargs = dict(

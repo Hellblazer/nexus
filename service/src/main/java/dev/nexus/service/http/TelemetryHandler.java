@@ -206,15 +206,18 @@ public final class TelemetryHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         var body = readBody(ex);
         String question = requireString(body, "question");
-        Long planId = body.get("plan_id") != null ? ((Number) body.get("plan_id")).longValue() : null;
-        Double conf = body.get("matched_confidence") != null
-            ? ((Number) body.get("matched_confidence")).doubleValue() : null;
+        // Same number-or-string coercion as the /import path (nexus-5gaj7): never a
+        // bare ((Number)) cast that 500s on a stringified numeric field.
+        Long planId      = optLongNull(body, "plan_id");
+        Double conf      = optDoubleNull(body, "matched_confidence");
         int stepCount    = optInt(body, "step_count", 0);
         String finalText = optStr(body, "final_text");
-        double costUsd   = body.get("cost_usd") != null ? ((Number) body.get("cost_usd")).doubleValue() : 0.0;
-        long durationMs  = body.get("duration_ms") != null ? ((Number) body.get("duration_ms")).longValue() : 0L;
+        Double cost      = optDoubleNull(body, "cost_usd");
+        Long durationMs  = optLongNull(body, "duration_ms");
+        double costUsd   = cost != null ? cost : 0.0;
+        long durationMsV = durationMs != null ? durationMs : 0L;
         String createdAt = optStr(body, "created_at");
-        repo.recordNxAnswerRun(tenant, question, planId, conf, stepCount, finalText, costUsd, durationMs, createdAt);
+        repo.recordNxAnswerRun(tenant, question, planId, conf, stepCount, finalText, costUsd, durationMsV, createdAt);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
     }
 
@@ -301,16 +304,18 @@ public final class TelemetryHandler implements HttpHandler {
                     requireString(body, "timestamp"));
             }
             case "search_telemetry" -> {
-                Double topDist = body.get("top_distance") != null
-                    ? ((Number) body.get("top_distance")).doubleValue() : null;
-                Double threshold = body.get("threshold") != null
-                    ? ((Number) body.get("threshold")).doubleValue() : null;
+                Double topDist = optDoubleNull(body, "top_distance");
+                Double threshold = optDoubleNull(body, "threshold");
+                Long rawCount = optLongNull(body, "raw_count");
+                Long keptCount = optLongNull(body, "kept_count");
+                if (rawCount == null) throw new IllegalArgumentException("Missing required field: raw_count");
+                if (keptCount == null) throw new IllegalArgumentException("Missing required field: kept_count");
                 repo.importSearchRow(tenant,
                     requireString(body, "ts"),
                     requireString(body, "query_hash"),
                     requireString(body, "collection"),
-                    ((Number) requireObj(body, "raw_count")).intValue(),
-                    ((Number) requireObj(body, "kept_count")).intValue(),
+                    rawCount.intValue(),
+                    keptCount.intValue(),
                     topDist, threshold);
             }
             case "tier_writes" -> {
@@ -324,17 +329,20 @@ public final class TelemetryHandler implements HttpHandler {
                     optStrNull(body, "target_title"));
             }
             case "nx_answer_runs" -> {
-                Long planId = body.get("plan_id") != null
-                    ? ((Number) body.get("plan_id")).longValue() : null;
-                Double conf = body.get("matched_confidence") != null
-                    ? ((Number) body.get("matched_confidence")).doubleValue() : null;
+                // plan_id is a BIGINT; the SQLite ETL historically serialized it as a
+                // string, causing String->Number ClassCastException (nexus-5gaj7).
+                // optLongNull / optDoubleNull accept either a number or a numeric string.
+                Long planId = optLongNull(body, "plan_id");
+                Double conf = optDoubleNull(body, "matched_confidence");
+                Double cost = optDoubleNull(body, "cost_usd");
+                Long durationMs = optLongNull(body, "duration_ms");
                 repo.importNxAnswerRunRow(tenant,
                     requireString(body, "question"),
                     planId, conf,
                     optInt(body, "step_count", 0),
                     optStr(body, "final_text"),
-                    body.get("cost_usd") != null ? ((Number) body.get("cost_usd")).doubleValue() : 0.0,
-                    body.get("duration_ms") != null ? ((Number) body.get("duration_ms")).longValue() : 0L,
+                    cost != null ? cost : 0.0,
+                    durationMs != null ? durationMs : 0L,
                     requireString(body, "created_at"));
             }
             case "hook_failures" -> {
@@ -349,12 +357,12 @@ public final class TelemetryHandler implements HttpHandler {
                     optStr(body, "chain"));
             }
             case "frecency" -> {
+                Double frecScore = optDoubleNull(body, "frecency_score");
                 repo.upsertFrecency(tenant,
                     requireString(body, "chunk_id"),
                     optStr(body, "embedded_at"),
                     optInt(body, "ttl_days", 0),
-                    body.get("frecency_score") != null
-                        ? ((Number) body.get("frecency_score")).doubleValue() : 0.0,
+                    frecScore != null ? frecScore : 0.0,
                     optInt(body, "miss_count", 0),
                     optStr(body, "last_hit_at"));
             }
@@ -409,7 +417,70 @@ public final class TelemetryHandler implements HttpHandler {
 
     private int optInt(Map<String, Object> body, String key, int defaultVal) {
         Object v = body.get(key);
-        return v instanceof Number n ? n.intValue() : defaultVal;
+        if (v == null) return defaultVal;
+        if (v instanceof Number n) return n.intValue();
+        // A numeric string is coerced (same ETL-stringification class as optLongNull);
+        // a non-numeric string throws (HTTP 400) rather than silently returning the
+        // default, which would corrupt step_count / ttl_days / miss_count telemetry.
+        if (v instanceof String s) {
+            String t = s.trim();
+            if (t.isEmpty()) return defaultVal;
+            try {
+                return Integer.parseInt(t);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                    "Field '" + key + "' is not a valid integer: " + s);
+            }
+        }
+        throw new IllegalArgumentException(
+            "Field '" + key + "' has unexpected type: " + v.getClass().getSimpleName());
+    }
+
+    /**
+     * Coerce an optional numeric field to Long, accepting either a JSON number or a
+     * numeric string. Defensive against ETL payloads that serialize an INTEGER column
+     * as a string (the nx_answer_runs.plan_id ClassCastException class). Returns null
+     * for absent/blank values; throws IllegalArgumentException (HTTP 400, not a 500
+     * crash) for a non-numeric string.
+     */
+    private Long optLongNull(Map<String, Object> body, String key) {
+        Object v = body.get(key);
+        if (v == null) return null;
+        if (v instanceof Number n) return n.longValue();
+        if (v instanceof String s) {
+            String t = s.trim();
+            if (t.isEmpty()) return null;
+            try {
+                return Long.parseLong(t);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                    "Field '" + key + "' is not a valid integer: " + s);
+            }
+        }
+        throw new IllegalArgumentException(
+            "Field '" + key + "' has unexpected type: " + v.getClass().getSimpleName());
+    }
+
+    /**
+     * Coerce an optional numeric field to Double, accepting a JSON number or numeric
+     * string. Companion to {@link #optLongNull} for the same ETL-stringification class.
+     */
+    private Double optDoubleNull(Map<String, Object> body, String key) {
+        Object v = body.get(key);
+        if (v == null) return null;
+        if (v instanceof Number n) return n.doubleValue();
+        if (v instanceof String s) {
+            String t = s.trim();
+            if (t.isEmpty()) return null;
+            try {
+                return Double.parseDouble(t);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                    "Field '" + key + "' is not a valid number: " + s);
+            }
+        }
+        throw new IllegalArgumentException(
+            "Field '" + key + "' has unexpected type: " + v.getClass().getSimpleName());
     }
 
     private Map<String, String> queryParams(HttpExchange ex) {
