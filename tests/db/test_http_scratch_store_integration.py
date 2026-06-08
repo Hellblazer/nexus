@@ -92,66 +92,6 @@ pytestmark = [
     ),
 ]
 
-# ── Bootstrap SQL (t1 schema) ─────────────────────────────────────────────────
-# Mirrors t1-001-baseline.xml changesets 1-5, written as plain SQL for psql.
-# Run as the initdb superuser so CREATE ROLE/SCHEMA/POLICY all succeed.
-
-_BOOTSTRAP_SQL = """\
--- Changeset t1-001-1: t1 schema
-CREATE SCHEMA IF NOT EXISTS t1;
-
--- Changeset t1-001-2: UNLOGGED scratch table
-CREATE UNLOGGED TABLE t1.scratch (
-    id            TEXT         NOT NULL,
-    tenant_id     TEXT         NOT NULL,
-    session_id    TEXT         NOT NULL,
-    content       TEXT         NOT NULL,
-    tags          TEXT,
-    flagged       BOOLEAN      NOT NULL DEFAULT FALSE,
-    flush_project TEXT,
-    flush_title   TEXT,
-    agent         TEXT,
-    access_count  INTEGER      NOT NULL DEFAULT 0,
-    last_accessed TIMESTAMPTZ,
-    ts            TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    CONSTRAINT scratch_pk PRIMARY KEY (id)
-);
-
-CREATE INDEX idx_scratch_tenant_session ON t1.scratch (tenant_id, session_id);
-CREATE INDEX idx_scratch_ts ON t1.scratch (ts);
-
--- Changeset t1-001-3: RLS tenant isolation via nexus.t1_tenant GUC
-ALTER TABLE t1.scratch ENABLE ROW LEVEL SECURITY;
-ALTER TABLE t1.scratch FORCE ROW LEVEL SECURITY;
-
-CREATE POLICY tenant_isolation ON t1.scratch
-    USING      (tenant_id = current_setting('nexus.t1_tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.t1_tenant', true));
-
--- Changeset t1-001-4: FTS generated tsvector column + GIN index
-ALTER TABLE t1.scratch
-    ADD COLUMN fts_vector TSVECTOR GENERATED ALWAYS AS (
-        setweight(to_tsvector('english', coalesce(content, '')), 'B') ||
-        setweight(to_tsvector('simple',  coalesce(tags,    '')), 'C')
-    ) STORED;
-
-CREATE INDEX idx_scratch_fts ON t1.scratch USING GIN (fts_vector);
-
--- Changeset t1-001-5: service role + grants
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_t1_inttest') THEN
-    CREATE ROLE svc_t1_inttest LOGIN PASSWORD 'svc_t1_inttest_pass';
-  END IF;
-END $$;
-
-GRANT USAGE ON SCHEMA t1 TO svc_t1_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON t1.scratch TO svc_t1_inttest;
-ALTER ROLE svc_t1_inttest SET search_path TO t1, public;
-
--- Prove the service role has neither superuser nor bypassrls privilege
--- (tested later by test_service_role_is_not_superuser_or_bypassrls)
-"""
 
 
 # ── Port helpers ──────────────────────────────────────────────────────────────
@@ -206,28 +146,23 @@ def pg_instance():
             check=True, capture_output=True,
         )
 
+        # net63: JAR runs Liquibase at startup and owns the full t1.scratch schema
+        # (t1-001-baseline.xml changesets 1-5). The fixture must NOT pre-apply schema
+        # — doing so collides ("relation already exists") and the service exits at
+        # migration. The only pre-start SQL creates nexus_svc (the NOSUPERUSER
+        # NOBYPASSRLS role grants-nexus-svc.xml grants to).
         proc = subprocess.run(
             [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
              "-U", pg_user, "-d", "nexust1test",
              "-v", "ON_ERROR_STOP=1",
-             "-c", _BOOTSTRAP_SQL],
+             "-c", SERVICE_ROLES_SQL],
             capture_output=True, text=True,
         )
         if proc.returncode != 0:
             raise RuntimeError(
-                f"psql t1 bootstrap failed (rc={proc.returncode}):\n"
+                f"psql SERVICE_ROLES_SQL failed (rc={proc.returncode}):\n"
                 f"stdout={proc.stdout}\nstderr={proc.stderr}"
             )
-
-
-        # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
-        # Create nexus_svc BEFORE starting the JAR (pre-condition for runAlways grant changeset).
-        subprocess.run(
-            [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
-             "-U", pg_user, "-d", "nexust1test",
-             "-v", "ON_ERROR_STOP=1", "-c", SERVICE_ROLES_SQL],
-            check=True, capture_output=True,
-        )
 
         yield {"port": pg_port, "dbname": "nexust1test", "user": pg_user, "pgdata": pgdata}
 
@@ -243,7 +178,9 @@ def pg_instance():
 def service(pg_instance):
     """Launch the shaded JAR against the hermetic PG for T1 scratch.
 
-    The service role is svc_t1_inttest — matches the grants applied in _BOOTSTRAP_SQL.
+    net63: JAR runs Liquibase at startup and owns the t1.scratch schema via
+    t1-001-baseline.xml.  Two-role pattern: nexus_svc for DML (NOSUPERUSER
+    NOBYPASSRLS, subject to FORCE RLS); OS superuser for Liquibase DDL.
     NX_STORAGE_BACKEND is intentionally absent so the Python client can construct
     HttpScratchStore directly by base_url without triggering backend-routing.
     """
@@ -254,13 +191,22 @@ def service(pg_instance):
         **os.environ,
         "NX_SERVICE_PORT":  str(svc_port),
         "NX_SERVICE_TOKEN": token,
+        # net63 two-role: app pool = nexus_svc (NOSUPERUSER NOBYPASSRLS → FORCE RLS
+        # applies); migration pool = OS superuser (trust auth) for the Liquibase DDL.
         "NX_DB_URL": (
             f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}"
             f"/{pg_instance['dbname']}"
         ),
-        "NX_DB_USER": "svc_t1_inttest",
-        "NX_DB_PASS": "svc_t1_inttest_pass",
+        "NX_DB_USER": "nexus_svc",
+        "NX_DB_PASS": "nexus_svc_pass",
         "NX_POOL_SIZE": "3",
+        "NX_DB_ADMIN_URL": (
+            f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}"
+            f"/{pg_instance['dbname']}"
+        ),
+        "NX_DB_ADMIN_USER": pg_instance["user"],
+        "NX_DB_ADMIN_PASS": "",
+        "NX_CHROMA_PATH": tempfile.mkdtemp(prefix="nexus-scratch-chroma-"),
     }
     env.pop("NX_STORAGE_BACKEND", None)
     env.pop("NX_STORAGE_BACKEND_T1", None)
@@ -550,11 +496,11 @@ class TestTenantRLS:
         storeB.close()
 
     def test_service_role_is_not_superuser_or_bypassrls(self, service, pg_instance):
-        """The service role (svc_t1_inttest) must have rolsuper=false and rolbypassrls=false.
+        """The service role (nexus_svc) must have rolsuper=false and rolbypassrls=false.
 
         Proves the RLS policy is not trivially bypassable by the service role used
-        in production (nexus_svc). Both attributes must be false on svc_t1_inttest,
-        which is the integration test stand-in for nexus_svc.
+        in production. Both attributes must be false on nexus_svc (the NOSUPERUSER
+        NOBYPASSRLS role created by SERVICE_ROLES_SQL and granted by grants-nexus-svc.xml).
         """
         import subprocess as _sp
         result = _sp.run(
@@ -564,21 +510,21 @@ class TestTenantRLS:
              "-U", pg_instance["user"],
              "-d", pg_instance["dbname"],
              "-t", "-c",
-             "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'svc_t1_inttest'"],
+             "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'nexus_svc'"],
             capture_output=True, text=True,
         )
         assert result.returncode == 0, f"psql query failed: {result.stderr}"
         row = result.stdout.strip()
-        assert row, "svc_t1_inttest role must exist in pg_roles"
+        assert row, "nexus_svc role must exist in pg_roles"
         parts = [p.strip() for p in row.split("|")]
         assert len(parts) == 2, f"unexpected row format: {row!r}"
         rolsuper, rolbypassrls = parts
         assert rolsuper == "f", (
-            f"svc_t1_inttest must NOT be a superuser (rolsuper=f). Got: {rolsuper!r}. "
+            f"nexus_svc must NOT be a superuser (rolsuper=f). Got: {rolsuper!r}. "
             "A superuser bypasses all RLS policies including tenant_isolation."
         )
         assert rolbypassrls == "f", (
-            f"svc_t1_inttest must NOT have BYPASSRLS (rolbypassrls=f). Got: {rolbypassrls!r}. "
+            f"nexus_svc must NOT have BYPASSRLS (rolbypassrls=f). Got: {rolbypassrls!r}. "
             "A role with BYPASSRLS silently skips all RLS policies, breaking tenant isolation."
         )
 
@@ -613,7 +559,7 @@ class TestTenantRLS:
         query_sql = "SELECT count(*) FROM t1.scratch WHERE id = 'fail-closed-test-id';"
         r2 = _sp.run(
             [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_instance["port"]),
-             "-U", "svc_t1_inttest", "-d", pg_instance["dbname"],
+             "-U", "nexus_svc", "-d", pg_instance["dbname"],
              "-t", "-c", query_sql],
             capture_output=True, text=True,
         )

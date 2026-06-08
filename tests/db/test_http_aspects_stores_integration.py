@@ -29,6 +29,7 @@ What is exercised (bead nexus-gmiaf.15 gate requirements):
   j) ETL fidelity: import_queue_row never downgrades in_progress; GREATEST for retry_count
   k) promotion_log record/list round-trip
   l) document_aspects confidence < 0.3 gate (upsert rejected)
+  x) cross-store FK enforcement: upsert with unknown doc_id is rejected (fk_doc_aspects_catalog_doc)
 
 NX_STORAGE_BACKEND is NOT touched — default SQLite path is unchanged.
 """
@@ -85,160 +86,6 @@ pytestmark = [
         ),
     ),
 ]
-
-# ── Bootstrap SQL ─────────────────────────────────────────────────────────────
-# Mirrors aspects-001-baseline.xml changesets, applied manually for the hermetic test.
-
-_BOOTSTRAP_SQL_ROLE = """\
-CREATE ROLE svc_aspects_inttest LOGIN PASSWORD 'svc_aspects_inttest_pass';
-"""
-
-_BOOTSTRAP_SQL_SCHEMA = """\
-CREATE SCHEMA IF NOT EXISTS nexus;
-
--- memory table (required by the service startup check)
-CREATE TABLE IF NOT EXISTS nexus.memory (
-    id            BIGSERIAL    NOT NULL,
-    tenant_id     TEXT         NOT NULL,
-    project       TEXT         NOT NULL,
-    title         TEXT         NOT NULL,
-    session       TEXT,
-    agent         TEXT,
-    content       TEXT         NOT NULL,
-    tags          TEXT,
-    timestamp     TIMESTAMPTZ  NOT NULL,
-    ttl           INTEGER,
-    access_count  INTEGER      NOT NULL DEFAULT 0,
-    last_accessed TIMESTAMPTZ,
-    CONSTRAINT memory_pk PRIMARY KEY (id),
-    CONSTRAINT memory_tenant_project_title_uq UNIQUE (tenant_id, project, title)
-);
-ALTER TABLE IF EXISTS nexus.memory ENABLE ROW LEVEL SECURITY;
-ALTER TABLE IF EXISTS nexus.memory FORCE ROW LEVEL SECURITY;
-DO $$ BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname='nexus' AND tablename='memory' AND policyname='tenant_isolation') THEN
-        CREATE POLICY tenant_isolation ON nexus.memory
-            USING (tenant_id = current_setting('nexus.tenant', true))
-            WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-    END IF;
-END $$;
-
--- document_aspects
-CREATE TABLE nexus.document_aspects (
-    id                      BIGSERIAL    NOT NULL,
-    tenant_id               TEXT         NOT NULL,
-    collection              TEXT         NOT NULL,
-    source_path             TEXT         NOT NULL,
-    problem_formulation     TEXT,
-    proposed_method         TEXT,
-    experimental_datasets   TEXT,
-    experimental_baselines  TEXT,
-    experimental_results    TEXT,
-    extras                  TEXT,
-    confidence              DOUBLE PRECISION,
-    extracted_at            TIMESTAMPTZ  NOT NULL,
-    model_version           TEXT         NOT NULL,
-    extractor_name          TEXT         NOT NULL,
-    source_uri              TEXT,
-    salient_sentences       TEXT,
-    doc_id                  TEXT         NOT NULL DEFAULT '',
-    CONSTRAINT document_aspects_pk PRIMARY KEY (id),
-    CONSTRAINT document_aspects_tenant_col_path_uq UNIQUE (tenant_id, collection, source_path)
-);
-CREATE INDEX idx_doc_aspects_extractor  ON nexus.document_aspects (tenant_id, extractor_name, model_version);
-CREATE INDEX idx_doc_aspects_source_uri ON nexus.document_aspects (tenant_id, source_uri);
-CREATE INDEX idx_doc_aspects_collection ON nexus.document_aspects (tenant_id, collection);
-CREATE INDEX idx_doc_aspects_doc_id     ON nexus.document_aspects (tenant_id, doc_id) WHERE doc_id != '';
-ALTER TABLE nexus.document_aspects ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.document_aspects FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.document_aspects
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
--- document_highlights
-CREATE TABLE nexus.document_highlights (
-    id            BIGSERIAL    NOT NULL,
-    tenant_id     TEXT         NOT NULL,
-    doc_id        TEXT         NOT NULL,
-    source_uri    TEXT,
-    collection    TEXT,
-    highlights_md TEXT,
-    mentions_md   TEXT,
-    ingested_at   TIMESTAMPTZ  NOT NULL,
-    CONSTRAINT document_highlights_pk PRIMARY KEY (id),
-    CONSTRAINT document_highlights_tenant_doc_uq UNIQUE (tenant_id, doc_id)
-);
-CREATE INDEX idx_doc_highlights_source_uri ON nexus.document_highlights (tenant_id, source_uri);
-CREATE INDEX idx_doc_highlights_ingested   ON nexus.document_highlights (tenant_id, ingested_at DESC);
-ALTER TABLE nexus.document_highlights ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.document_highlights FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.document_highlights
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
--- aspect_extraction_queue
-CREATE TABLE nexus.aspect_extraction_queue (
-    id              BIGSERIAL    NOT NULL,
-    tenant_id       TEXT         NOT NULL,
-    collection      TEXT         NOT NULL,
-    source_path     TEXT         NOT NULL,
-    doc_id          TEXT         NOT NULL DEFAULT '',
-    content_hash    TEXT         NOT NULL DEFAULT '',
-    content         TEXT         NOT NULL DEFAULT '',
-    status          TEXT         NOT NULL DEFAULT 'pending',
-    retry_count     INTEGER      NOT NULL DEFAULT 0,
-    enqueued_at     TIMESTAMPTZ  NOT NULL,
-    last_attempt_at TIMESTAMPTZ,
-    last_error      TEXT,
-    CONSTRAINT aspect_queue_pk PRIMARY KEY (id),
-    CONSTRAINT aspect_queue_tenant_col_path_uq UNIQUE (tenant_id, collection, source_path)
-);
-CREATE INDEX idx_aspect_queue_status ON nexus.aspect_extraction_queue (tenant_id, status);
-CREATE INDEX idx_aspect_queue_fifo   ON nexus.aspect_extraction_queue (tenant_id, status, enqueued_at ASC);
-CREATE INDEX idx_aspect_queue_doc_id ON nexus.aspect_extraction_queue (tenant_id, doc_id) WHERE doc_id != '';
-ALTER TABLE nexus.aspect_extraction_queue ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.aspect_extraction_queue FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.aspect_extraction_queue
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
--- aspect_promotion_log
-CREATE TABLE nexus.aspect_promotion_log (
-    id              BIGSERIAL    NOT NULL,
-    tenant_id       TEXT         NOT NULL,
-    field_name      TEXT         NOT NULL,
-    sql_type        TEXT         NOT NULL,
-    column_added    INTEGER      NOT NULL DEFAULT 0,
-    rows_backfilled INTEGER      NOT NULL DEFAULT 0,
-    rows_pruned     INTEGER      NOT NULL DEFAULT 0,
-    pruned          INTEGER      NOT NULL DEFAULT 0,
-    promoted_at     TIMESTAMPTZ  NOT NULL,
-    CONSTRAINT aspect_promotion_log_pk PRIMARY KEY (id)
-);
-CREATE INDEX idx_aspect_promo_field ON nexus.aspect_promotion_log (tenant_id, field_name);
-CREATE UNIQUE INDEX idx_aspect_promo_etl_dedup
-    ON nexus.aspect_promotion_log (tenant_id, field_name, promoted_at);
-ALTER TABLE nexus.aspect_promotion_log ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.aspect_promotion_log FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.aspect_promotion_log
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-"""
-
-_BOOTSTRAP_SQL_GRANTS = """\
-GRANT USAGE ON SCHEMA nexus TO svc_aspects_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.document_aspects        TO svc_aspects_inttest;
-GRANT USAGE ON SEQUENCE nexus.document_aspects_id_seq                 TO svc_aspects_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.document_highlights     TO svc_aspects_inttest;
-GRANT USAGE ON SEQUENCE nexus.document_highlights_id_seq              TO svc_aspects_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.aspect_extraction_queue TO svc_aspects_inttest;
-GRANT USAGE ON SEQUENCE nexus.aspect_extraction_queue_id_seq          TO svc_aspects_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.aspect_promotion_log    TO svc_aspects_inttest;
-GRANT USAGE ON SEQUENCE nexus.aspect_promotion_log_id_seq             TO svc_aspects_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.memory                  TO svc_aspects_inttest;
-GRANT USAGE ON SEQUENCE nexus.memory_id_seq                           TO svc_aspects_inttest;
-ALTER ROLE svc_aspects_inttest SET search_path TO nexus, public;
-"""
 
 
 # ── Port helpers ──────────────────────────────────────────────────────────────
@@ -303,19 +150,13 @@ def pg_instance():
                     f"stdout={proc.stdout}\nstderr={proc.stderr}"
                 )
 
-        _psql(_BOOTSTRAP_SQL_ROLE)
-        _psql(_BOOTSTRAP_SQL_SCHEMA)
-        _psql(_BOOTSTRAP_SQL_GRANTS)
-
-
-        # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
-        # Create nexus_svc BEFORE starting the JAR (pre-condition for runAlways grant changeset).
-        subprocess.run(
-            [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
-             "-U", pg_user, "-d", "nexusaspectstest",
-             "-v", "ON_ERROR_STOP=1", "-c", SERVICE_ROLES_SQL],
-            check=True, capture_output=True,
-        )
+        # net63: the JAR runs Liquibase at startup and owns the full aspects schema
+        # + grants before binding the HTTP port. The fixture must NOT pre-apply schema
+        # — doing so collides ("relation already exists") and the service exits at
+        # migration. The only pre-start SQL is SERVICE_ROLES_SQL, which creates
+        # nexus_svc (the NOSUPERUSER NOBYPASSRLS DML/RLS role grants-nexus-svc.xml
+        # grants to, and the role the RLS-negative tests use).
+        _psql(SERVICE_ROLES_SQL)
 
         yield {"port": pg_port, "dbname": "nexusaspectstest", "user": pg_user, "pgdata": pgdata}
 
@@ -337,13 +178,22 @@ def service(pg_instance):
         **os.environ,
         "NX_SERVICE_PORT":  str(svc_port),
         "NX_SERVICE_TOKEN": token,
+        # net63 two-role: app pool = nexus_svc (NOSUPERUSER NOBYPASSRLS → FORCE RLS
+        # applies); migration pool = OS superuser (trust auth) for the Liquibase DDL.
         "NX_DB_URL": (
             f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}"
             f"/{pg_instance['dbname']}"
         ),
-        "NX_DB_USER": "svc_aspects_inttest",
-        "NX_DB_PASS": "svc_aspects_inttest_pass",
+        "NX_DB_USER": "nexus_svc",
+        "NX_DB_PASS": "nexus_svc_pass",
         "NX_POOL_SIZE": "8",
+        "NX_DB_ADMIN_URL": (
+            f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}"
+            f"/{pg_instance['dbname']}"
+        ),
+        "NX_DB_ADMIN_USER": pg_instance["user"],
+        "NX_DB_ADMIN_PASS": "",
+        "NX_CHROMA_PATH": tempfile.mkdtemp(prefix="nexus-asp-chroma-"),
     }
     env.pop("NX_STORAGE_BACKEND", None)
 
@@ -369,6 +219,53 @@ def service(pg_instance):
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _seed_catalog_docs(pg_instance, service):
+    """Seed catalog_documents rows referenced by the aspects tests.
+
+    document_aspects.doc_id and aspect_extraction_queue.doc_id carry real cross-store
+    FKs (fk_doc_aspects_catalog_doc, fk_aspect_queue_catalog_doc) added by
+    fk-001-catalog-cross-store.xml Liquibase changeset.  Non-null doc_id values must
+    have a matching nexus.catalog_documents(tenant_id, tumbler) row or the INSERT is
+    rejected by Postgres FK enforcement.
+
+    Superuser psql bypasses FORCE RLS; depends on `service` so Liquibase has created
+    catalog_documents first.
+
+    Queue rows all use a NULL doc_id (NULL satisfies the FK), so the queue tests
+    (test_f, test_j unique-per-run, concurrency) need no catalog seed.
+    """
+    docs = [
+        # document_aspects test doc_ids
+        "doc-inttest-mvv-a",
+        "doc-inttest-mvv-b",
+        "doc-inttest-mvv-c",
+        "doc-inttest-mvv-d",
+        "doc-inttest-rls-h",
+        "doc-etl-fidelity",
+        # control parent for the cross-store FK test (valid-doc_id branch of test_x)
+        "doc-fk-control",
+        # document_highlights test doc_id (fk_doc_highlights_catalog_doc also enforced)
+        "doc-highlights-inttest-e",
+    ]
+    values = ",".join(
+        f"('default', '{d}', 'seed-{d}')" for d in docs
+    )
+    sql = (
+        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
+        f"VALUES {values} ON CONFLICT (tenant_id, tumbler) DO NOTHING;"
+    )
+    proc = subprocess.run(
+        [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_instance["port"]),
+         "-U", pg_instance["user"], "-d", pg_instance["dbname"],
+         "-v", "ON_ERROR_STOP=1", "-c", sql],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"catalog-doc seed failed:\n{proc.stderr}")
+    yield
 
 
 @pytest.fixture(scope="module")
@@ -512,6 +409,71 @@ class TestDocumentAspectsMVV:
         fetched = aspects_store.get("knowledge__inttest", "/papers/paper-mvv-l.pdf")
         assert fetched is None, "low-confidence record must not be stored"
 
+    def test_x_cross_store_fk_unknown_doc_id_rejected(self, aspects_store) -> None:
+        """x) FK enforcement: upsert with a doc_id not in catalog_documents is rejected.
+
+        fk_doc_aspects_catalog_doc is a real composite FK (tenant_id, doc_id) →
+        catalog_documents(tenant_id, tumbler) added by fk-001-catalog-cross-store.xml.
+        Unlike fk_ta_catalog_doc (which was deliberately never registered because
+        topic_assignments.doc_id is a chunk chash), document_aspects.doc_id IS a document
+        tumbler and the FK is enforced. A non-null doc_id with no matching catalog row
+        must cause the service to reject the upsert.
+        """
+        from nexus.db.t2.document_aspects import AspectRecord
+
+        def _aspect(suffix: str, doc_id: str) -> "AspectRecord":
+            return AspectRecord(
+                collection="knowledge__inttest",
+                source_path=f"/papers/paper-{suffix}.pdf",
+                problem_formulation=f"Problem {suffix}",
+                proposed_method=f"Method {suffix}",
+                experimental_datasets=[],
+                experimental_baselines=[],
+                experimental_results=f"Results {suffix}",
+                extras={},
+                confidence=0.80,
+                extracted_at="2026-01-15T10:00:00Z",
+                model_version="v1.0",
+                extractor_name="test-extractor",
+                source_uri=f"file:///papers/paper-{suffix}.pdf",
+                doc_id=doc_id,
+                salient_sentences=[],
+            )
+
+        # CONTROL: a valid, seeded doc_id MUST upsert successfully. This proves the
+        # endpoint is live and accepts inserts, so the orphan rejection below is
+        # specifically the cross-store FK — not a dead service or an unrelated 500.
+        # Without this control the orphan-rejected + row-absent assertions would also
+        # pass if the service were broken for any reason (the vacuity the review flagged).
+        control = _aspect("fk-control", "doc-fk-control")  # doc-fk-control IS seeded
+        control_result = aspects_store.upsert(control)
+        assert control_result is not False and control_result is not None, (
+            f"control upsert with a seeded doc_id must succeed; got {control_result!r}. "
+            "If this fails the orphan-rejection assertion below is not FK-specific."
+        )
+        assert aspects_store.get("knowledge__inttest", "/papers/paper-fk-control.pdf") is not None, (
+            "control aspect with a valid catalog_documents parent must be stored"
+        )
+
+        # ORPHAN: identical shape, doc_id deliberately NOT in catalog_documents.
+        # Given the control succeeded, the only difference is the missing FK parent.
+        orphan = _aspect("fk-orphan", "doc-fk-orphan-unknown-xxxxxxxxxxx")
+        rejected = False
+        try:
+            result = aspects_store.upsert(orphan)
+            # A structured error response surfaces as a falsy return rather than raising.
+            rejected = result is False or result is None
+        except Exception:
+            # HTTP 4xx/5xx from the FK violation surfaces as a client exception.
+            rejected = True
+        assert rejected, (
+            "upsert with an orphan doc_id must be rejected by fk_doc_aspects_catalog_doc "
+            "(the control upsert just succeeded, so the service is live)"
+        )
+        assert aspects_store.get("knowledge__inttest", "/papers/paper-fk-orphan.pdf") is None, (
+            "orphan aspect must not be stored when doc_id has no catalog_documents parent"
+        )
+
 
 class TestDocumentHighlightsMVV:
     """Minimum viable verification for HttpDocumentHighlightsStore (gmiaf.15 gate e)."""
@@ -561,13 +523,12 @@ class TestQueueMVV:
             "Content-Type": "application/json",
         }
         with httpx.Client(base_url=base_url, headers=headers) as client:
-            # Enqueue
+            # Enqueue with doc_id omitted (NULL) so no catalog FK is required.
             enq = client.post("/v1/aspects/queue/enqueue", content=_json.dumps({
                 "collection": "knowledge__queue-inttest",
                 "source_path": "/queue/doc-f.pdf",
                 "content_hash": "hash-f",
                 "content": "Content F",
-                "doc_id": "doc-queue-f",
             }))
             assert enq.status_code == 200, f"enqueue failed: {enq.text}"
 
@@ -603,13 +564,13 @@ class TestQueueMVV:
             "Content-Type": "application/json",
         }
         with httpx.Client(base_url=base_url, headers=headers) as client:
-            # Enqueue
+            # Enqueue with no doc_id (NULL) to avoid catalog FK dependency on
+            # a per-run-unique identifier.
             enq = client.post("/v1/aspects/queue/enqueue", content=_json.dumps({
                 "collection": "knowledge__queue-etl-inttest",
                 "source_path": unique_path,
                 "content_hash": f"hash-{unique}",
                 "content": "ETL content",
-                "doc_id": f"doc-{unique}",
             }))
             assert enq.status_code == 200
 
@@ -630,7 +591,6 @@ class TestQueueMVV:
                 "source_path": unique_path,
                 "content_hash": f"hash-{unique}",
                 "content": "ETL content",
-                "doc_id": f"doc-{unique}",
                 "status": "pending",
                 "retry_count": 0,
                 "enqueued_at": "2026-01-01T00:00:00Z",
@@ -667,7 +627,11 @@ class TestQueueConcurrency:
 
     @pytest.fixture(autouse=True, scope="class")
     def seed_concurrency_queue(self, service) -> None:
-        """Seed N rows for the concurrency tenant via direct HTTP."""
+        """Seed N rows for the concurrency tenant via direct HTTP.
+
+        doc_id is omitted (NULL) so no catalog_documents FK is triggered for
+        the per-run-isolated concurrency tenant.
+        """
         import httpx, json as _json, time as _time
         base_url, token, _ = service
         tenant = f"concurrency-tenant-{_time.time_ns()}"
@@ -687,7 +651,6 @@ class TestQueueConcurrency:
                     "source_path": f"/concurrent/doc-{i}.pdf",
                     "content_hash": f"hash-{i}",
                     "content": f"Content {i}",
-                    "doc_id": f"doc-concurrent-{i}",
                 }))
                 assert resp.status_code == 200, f"seed enqueue failed: {resp.text}"
 
@@ -800,6 +763,46 @@ class TestETLFidelity:
         # document_aspects import is EXCLUDED.* overwrite — last-writer-wins for confidence
         # The test verifies the row persists (no crash, no duplicate) and confidence is a number
         assert isinstance(fetched2.confidence, float), "confidence must remain a float after re-import"
+
+
+class TestQueuePositiveFK:
+    """Positive queue FK path: enqueue with a known-good catalog doc_id must succeed."""
+
+    def test_y_enqueue_with_valid_catalog_doc_id_succeeds(self, service) -> None:
+        """y) FK acceptance path: enqueue with a seeded catalog doc_id is NOT rejected.
+
+        The queue tests in TestQueueMVV all omit doc_id (NULL, which satisfies
+        fk_aspect_queue_catalog_doc trivially).  This test proves the non-NULL path:
+        a real tumbler that IS in catalog_documents must be accepted.  Without this
+        test the FK acceptance branch is untested and a misconfigured FK that rejects
+        ALL non-null doc_ids would go undetected.
+
+        doc-fk-control is seeded in _seed_catalog_docs.
+        """
+        import httpx, json as _json, time as _time
+        base_url, token, _ = service
+        tenant = f"queue-fk-pos-{_time.time_ns()}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Nexus-Tenant": tenant,
+            "Content-Type": "application/json",
+        }
+        # _seed_catalog_docs seeds under tenant='default'. We must seed for this
+        # per-run tenant too, or use tenant='default'.  Use tenant='default' to
+        # leverage the already-seeded row.
+        headers["X-Nexus-Tenant"] = "default"
+        with httpx.Client(base_url=base_url, headers=headers) as client:
+            enq = client.post("/v1/aspects/queue/enqueue", content=_json.dumps({
+                "collection": "knowledge__queue-fk-pos-inttest",
+                "source_path": f"/queue/fk-pos-{_time.time_ns()}.pdf",
+                "content_hash": f"hash-fk-pos-{_time.time_ns()}",
+                "content": "FK positive control content",
+                "doc_id": "doc-fk-control",
+            }))
+            assert enq.status_code == 200, (
+                f"enqueue with a seeded doc_id must succeed (HTTP 200); "
+                f"got {enq.status_code}: {enq.text}"
+            )
 
 
 class TestPromotionLog:

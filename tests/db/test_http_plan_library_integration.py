@@ -86,138 +86,6 @@ pytestmark = [
     ),
 ]
 
-# ── Bootstrap SQL (extracted from plans-001-baseline.xml) ─────────────────────
-# Run as the superuser (the initdb OS user) so CREATE ROLE succeeds.
-# The Java service uses Liquibase so for the hermetic test we bootstrap manually.
-#
-# IMPORTANT: CREATE ROLE cannot run inside a transaction block or a DO body.
-# Split into three separate psql invocations:
-#   1. _BOOTSTRAP_SQL_ROLE   — CREATE ROLE (autocommit, outside any txn)
-#   2. _BOOTSTRAP_SQL_SCHEMA — DDL: schema + tables + indexes + RLS + FTS
-#   3. _BOOTSTRAP_SQL_GRANTS — GRANT + ALTER ROLE
-
-_BOOTSTRAP_SQL_ROLE = """\
-CREATE ROLE svc_plan_inttest LOGIN PASSWORD 'svc_plan_inttest_pass';
-"""
-
-_BOOTSTRAP_SQL_SCHEMA = """\
-CREATE SCHEMA IF NOT EXISTS nexus;
-
-CREATE TABLE IF NOT EXISTS nexus.memory (
-    id            BIGSERIAL    NOT NULL,
-    tenant_id     TEXT         NOT NULL,
-    project       TEXT         NOT NULL,
-    title         TEXT         NOT NULL,
-    session       TEXT,
-    agent         TEXT,
-    content       TEXT         NOT NULL,
-    tags          TEXT,
-    timestamp     TIMESTAMPTZ  NOT NULL,
-    ttl           INTEGER,
-    access_count  INTEGER      NOT NULL DEFAULT 0,
-    last_accessed TIMESTAMPTZ,
-    CONSTRAINT memory_pk PRIMARY KEY (id),
-    CONSTRAINT memory_tenant_project_title_uq UNIQUE (tenant_id, project, title)
-);
-
-ALTER TABLE IF EXISTS nexus.memory ENABLE ROW LEVEL SECURITY;
-ALTER TABLE IF EXISTS nexus.memory FORCE ROW LEVEL SECURITY;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_policies
-        WHERE schemaname = 'nexus' AND tablename = 'memory'
-        AND policyname = 'tenant_isolation'
-    ) THEN
-        CREATE POLICY tenant_isolation ON nexus.memory
-            USING      (tenant_id = current_setting('nexus.tenant', true))
-            WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-    END IF;
-END $$;
-
-CREATE TABLE nexus.plans (
-    id              BIGSERIAL NOT NULL,
-    tenant_id       TEXT NOT NULL,
-    project         TEXT NOT NULL DEFAULT '',
-    query           TEXT NOT NULL,
-    plan_json       TEXT NOT NULL,
-    outcome         TEXT NOT NULL DEFAULT 'success',
-    tags            TEXT NOT NULL DEFAULT '',
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    ttl             INTEGER,
-    name            TEXT,
-    verb            TEXT,
-    scope           TEXT,
-    dimensions      TEXT,
-    default_bindings TEXT,
-    parent_dims     TEXT,
-    use_count       INTEGER NOT NULL DEFAULT 0,
-    last_used       TIMESTAMPTZ,
-    match_count     INTEGER NOT NULL DEFAULT 0,
-    match_conf_sum  DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-    success_count   INTEGER NOT NULL DEFAULT 0,
-    failure_count   INTEGER NOT NULL DEFAULT 0,
-    scope_tags      TEXT NOT NULL DEFAULT '',
-    match_text      TEXT NOT NULL DEFAULT '',
-    disabled_at     TIMESTAMPTZ,
-    CONSTRAINT plans_pk PRIMARY KEY (id),
-    CONSTRAINT plans_tenant_project_query_uq UNIQUE (tenant_id, project, query)
-);
-
-CREATE INDEX idx_plans_tenant_project  ON nexus.plans (tenant_id, project);
-CREATE INDEX idx_plans_tenant_verb     ON nexus.plans (tenant_id, verb);
-CREATE INDEX idx_plans_tenant_outcome  ON nexus.plans (tenant_id, outcome);
-CREATE INDEX idx_plans_tenant_created  ON nexus.plans (tenant_id, created_at DESC);
-CREATE INDEX idx_plans_tenant_disabled ON nexus.plans (tenant_id, disabled_at);
-
-ALTER TABLE nexus.plans ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.plans FORCE ROW LEVEL SECURITY;
-
-CREATE POLICY tenant_isolation ON nexus.plans
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
-ALTER TABLE nexus.plans
-    ADD COLUMN fts_vector TSVECTOR GENERATED ALWAYS AS (
-        setweight(to_tsvector('english', coalesce(match_text, '')), 'A') ||
-        setweight(to_tsvector('simple',  coalesce(tags, '')), 'B') ||
-        setweight(to_tsvector('simple',  coalesce(project, '')), 'C')
-    ) STORED;
-
-CREATE INDEX idx_plans_fts ON nexus.plans USING GIN (fts_vector);
-"""
-
-_BOOTSTRAP_SQL_GRANTS = """\
-GRANT USAGE ON SCHEMA nexus TO svc_plan_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.plans TO svc_plan_inttest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.memory TO svc_plan_inttest;
-GRANT USAGE ON SEQUENCE nexus.plans_id_seq TO svc_plan_inttest;
-GRANT USAGE ON SEQUENCE nexus.memory_id_seq TO svc_plan_inttest;
-ALTER ROLE svc_plan_inttest SET search_path TO nexus, public;
-"""
-
-# For the memory fts_vector column (added after the base schema in
-# older migration steps; harmless IF NOT EXISTS guard handles fresh dbs).
-_MEMORY_BOOTSTRAP_SQL = """\
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = 'nexus' AND table_name = 'memory'
-        AND column_name = 'fts_vector'
-    ) THEN
-        ALTER TABLE nexus.memory
-        ADD COLUMN fts_vector TSVECTOR GENERATED ALWAYS AS (
-            setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
-            setweight(to_tsvector('english', coalesce(content, '')), 'B') ||
-            setweight(to_tsvector('simple', coalesce(tags, '')), 'C')
-        ) STORED;
-    END IF;
-END $$;
-"""
-
-
 # ── Port helpers ──────────────────────────────────────────────────────────────
 
 def _free_port() -> int:
@@ -267,10 +135,6 @@ def pg_instance():
             check=True, capture_output=True,
         )
 
-        # Bootstrap in three phases:
-        #  1. Role creation — must run outside any transaction (CREATE ROLE restriction).
-        #  2. Schema + tables + indexes + RLS + FTS tsvector columns.
-        #  3. GRANTs + fts_vector migration guard — role must exist first.
         def _psql(sql: str) -> None:
             proc = subprocess.run(
                 [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
@@ -284,20 +148,13 @@ def pg_instance():
                     f"stdout={proc.stdout}\nstderr={proc.stderr}"
                 )
 
-        _psql(_BOOTSTRAP_SQL_ROLE)
-        _psql(_BOOTSTRAP_SQL_SCHEMA)
-        _psql(_MEMORY_BOOTSTRAP_SQL)
-        _psql(_BOOTSTRAP_SQL_GRANTS)
-
-
-        # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
-        # Create nexus_svc BEFORE starting the JAR (pre-condition for runAlways grant changeset).
-        subprocess.run(
-            [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
-             "-U", pg_user, "-d", "nexusplantest",
-             "-v", "ON_ERROR_STOP=1", "-c", SERVICE_ROLES_SQL],
-            check=True, capture_output=True,
-        )
+        # net63: the JAR runs Liquibase at startup and owns the full plans schema
+        # + grants before binding the HTTP port. The fixture must NOT pre-apply schema
+        # — doing so collides ("relation already exists") and the service exits at
+        # migration. The only pre-start SQL is SERVICE_ROLES_SQL, which creates
+        # nexus_svc (the NOSUPERUSER NOBYPASSRLS DML/RLS role grants-nexus-svc.xml
+        # grants to, and the role the RLS-negative tests use).
+        _psql(SERVICE_ROLES_SQL)
 
         yield {"port": pg_port, "dbname": "nexusplantest", "user": pg_user, "pgdata": pgdata}
 
@@ -319,13 +176,22 @@ def service(pg_instance):
         **os.environ,
         "NX_SERVICE_PORT":  str(svc_port),
         "NX_SERVICE_TOKEN": token,
+        # net63 two-role: app pool = nexus_svc (NOSUPERUSER NOBYPASSRLS → FORCE RLS
+        # applies); migration pool = OS superuser (trust auth) for the Liquibase DDL.
         "NX_DB_URL": (
             f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}"
             f"/{pg_instance['dbname']}"
         ),
-        "NX_DB_USER": "svc_plan_inttest",
-        "NX_DB_PASS": "svc_plan_inttest_pass",
+        "NX_DB_USER": "nexus_svc",
+        "NX_DB_PASS": "nexus_svc_pass",
         "NX_POOL_SIZE": "3",
+        "NX_DB_ADMIN_URL": (
+            f"jdbc:postgresql://127.0.0.1:{pg_instance['port']}"
+            f"/{pg_instance['dbname']}"
+        ),
+        "NX_DB_ADMIN_USER": pg_instance["user"],
+        "NX_DB_ADMIN_PASS": "",
+        "NX_CHROMA_PATH": tempfile.mkdtemp(prefix="nexus-plan-chroma-"),
     }
     env.pop("NX_STORAGE_BACKEND", None)
 

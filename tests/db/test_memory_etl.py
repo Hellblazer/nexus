@@ -399,58 +399,6 @@ _ALL_PREREQS = (
     and (_JAVA.exists() if _JAVA_HOME else shutil.which("java") is not None)
 )
 
-_BOOTSTRAP_SQL = """\
-CREATE SCHEMA IF NOT EXISTS nexus;
-
-CREATE TABLE nexus.memory (
-    id            BIGSERIAL    NOT NULL,
-    tenant_id     TEXT         NOT NULL,
-    project       TEXT         NOT NULL,
-    title         TEXT         NOT NULL,
-    session       TEXT,
-    agent         TEXT,
-    content       TEXT         NOT NULL,
-    tags          TEXT,
-    timestamp     TIMESTAMPTZ  NOT NULL,
-    ttl           INTEGER,
-    access_count  INTEGER      NOT NULL DEFAULT 0,
-    last_accessed TIMESTAMPTZ,
-    CONSTRAINT memory_pk PRIMARY KEY (id),
-    CONSTRAINT memory_tenant_project_title_uq UNIQUE (tenant_id, project, title)
-);
-
-CREATE INDEX idx_memory_tenant_project       ON nexus.memory (tenant_id, project);
-CREATE INDEX idx_memory_tenant_agent         ON nexus.memory (tenant_id, agent);
-CREATE INDEX idx_memory_tenant_timestamp     ON nexus.memory (tenant_id, timestamp DESC);
-CREATE INDEX idx_memory_tenant_ttl_timestamp ON nexus.memory (tenant_id, ttl, timestamp);
-
-ALTER TABLE nexus.memory ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.memory FORCE ROW LEVEL SECURITY;
-
-CREATE POLICY tenant_isolation ON nexus.memory
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
-ALTER TABLE nexus.memory
-    ADD COLUMN fts_vector TSVECTOR GENERATED ALWAYS AS (
-        setweight(to_tsvector('english', coalesce(title,   '')), 'A') ||
-        setweight(to_tsvector('english', coalesce(content, '')), 'B') ||
-        setweight(to_tsvector('simple',  coalesce(tags,    '')), 'C')
-    ) STORED;
-
-CREATE INDEX idx_memory_fts ON nexus.memory USING GIN (fts_vector);
-
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_etltest') THEN
-    CREATE ROLE svc_etltest LOGIN PASSWORD 'svc_etltest_pass';
-  END IF;
-END $$;
-
-GRANT USAGE ON SCHEMA nexus TO svc_etltest;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.memory TO svc_etltest;
-GRANT USAGE ON SEQUENCE nexus.memory_id_seq TO svc_etltest;
-ALTER ROLE svc_etltest SET search_path TO nexus, public;
-"""
 
 _SKIP_INTEGRATION = pytest.mark.skipif(
     not _ALL_PREREQS,
@@ -550,27 +498,23 @@ def etl_pg_instance():
              "-U", pg_user, "nexus_etltest"],
             check=True, capture_output=True,
         )
+        # net63: JAR runs Liquibase at startup and owns the full memory schema
+        # (memory-001-baseline.xml). The fixture must NOT pre-apply schema —
+        # doing so collides ("relation already exists") and the service exits at
+        # migration. The only pre-start SQL creates nexus_svc (the NOSUPERUSER
+        # NOBYPASSRLS role grants-nexus-svc.xml grants to).
         proc = subprocess.run(
             [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
              "-U", pg_user, "-d", "nexus_etltest",
              "-v", "ON_ERROR_STOP=1",
-             "-c", _BOOTSTRAP_SQL],
+             "-c", SERVICE_ROLES_SQL],
             capture_output=True, text=True,
         )
         if proc.returncode != 0:
             raise RuntimeError(
-                f"psql bootstrap failed (rc={proc.returncode}):\n"
+                f"psql SERVICE_ROLES_SQL failed (rc={proc.returncode}):\n"
                 f"stdout={proc.stdout}\nstderr={proc.stderr}"
             )
-
-        # net63: JAR runs Liquibase at startup; grants-nexus-svc.xml requires nexus_svc.
-        # Create nexus_svc BEFORE starting the JAR (pre-condition for runAlways grant changeset).
-        subprocess.run(
-            [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
-             "-U", pg_user, "-d", "nexus_etltest",
-             "-v", "ON_ERROR_STOP=1", "-c", SERVICE_ROLES_SQL],
-            check=True, capture_output=True,
-        )
 
         yield {"port": pg_port, "dbname": "nexus_etltest", "user": pg_user, "pgdata": pgdata}
     finally:
@@ -583,20 +527,33 @@ def etl_pg_instance():
 
 @pytest.fixture(scope="module")
 def etl_service(etl_pg_instance):
-    """Java service against the hermetic Postgres for ETL tests."""
+    """Java service against the hermetic Postgres for ETL tests.
+
+    net63: JAR runs Liquibase at startup; two-role pattern (nexus_svc for DML,
+    OS superuser for DDL migration via NX_DB_ADMIN_*).
+    """
     svc_port = _free_port()
     token = "etltest-bearer-token-abc"
     env = {
         **os.environ,
         "NX_SERVICE_PORT":  str(svc_port),
         "NX_SERVICE_TOKEN": token,
+        # net63 two-role: app pool = nexus_svc (NOSUPERUSER NOBYPASSRLS → FORCE RLS
+        # applies); migration pool = OS superuser (trust auth) for the Liquibase DDL.
         "NX_DB_URL": (
             f"jdbc:postgresql://127.0.0.1:{etl_pg_instance['port']}"
             f"/{etl_pg_instance['dbname']}"
         ),
-        "NX_DB_USER": "svc_etltest",
-        "NX_DB_PASS": "svc_etltest_pass",
+        "NX_DB_USER": "nexus_svc",
+        "NX_DB_PASS": "nexus_svc_pass",
         "NX_POOL_SIZE": "3",
+        "NX_DB_ADMIN_URL": (
+            f"jdbc:postgresql://127.0.0.1:{etl_pg_instance['port']}"
+            f"/{etl_pg_instance['dbname']}"
+        ),
+        "NX_DB_ADMIN_USER": etl_pg_instance["user"],
+        "NX_DB_ADMIN_PASS": "",
+        "NX_CHROMA_PATH": tempfile.mkdtemp(prefix="nexus-etl-chroma-"),
     }
     env.pop("NX_STORAGE_BACKEND", None)
     proc = subprocess.Popen(
