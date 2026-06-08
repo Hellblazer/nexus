@@ -1605,7 +1605,9 @@ def enrich_aspects_promote_field(
         try:
             with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
                 entries = list_promotions(db)
-        except NotImplementedError as exc:
+        except (NotImplementedError, RuntimeError) as exc:
+            # nexus-gmiaf.35: NotImplementedError from list_promotions guard;
+            # RuntimeError from T2Database init when NX_SERVICE_PORT is absent.
             click.echo(f"Error: {exc}", err=True)
             raise click.exceptions.Exit(2)
         if not entries:

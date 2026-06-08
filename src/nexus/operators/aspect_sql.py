@@ -462,6 +462,24 @@ def try_aggregate(
             f"avg/min/max confidence",
         )
 
+    # nexus-gmiaf.36: confidence aggregate requires SQLite access via
+    # db.document_aspects.conn.  In service mode the conn is unavailable.
+    # Guard BEFORE the loop to prevent partial aggregation state (e.g. a
+    # mixed groups list with count groups aggregated before a confidence
+    # group triggers return None from mid-loop — silently discarding state).
+    # Mirrors the top-of-function guard pattern in try_filter / try_groupby.
+    # auto mode → None (LLM fallback); aspects mode → stub result.
+    # Track port to a service endpoint: nexus-l9hd8.
+    if reducer_kind in ("avg_confidence", "max_confidence", "min_confidence") and _is_service_mode():
+        if source == "auto":
+            return None
+        op = reducer_kind.split("_")[0]
+        return {"aggregates": [{"key_value": "_meta", "summary": (
+            f"{op}(confidence) unavailable: document_aspects=service "
+            f"(SQL fast-path requires SQLite; Track: nexus-gmiaf.36 / "
+            f"port bead: nexus-l9hd8)"
+        )}]}
+
     aggregates = []
     for group in parsed_groups:
         if not isinstance(group, dict):
@@ -508,20 +526,6 @@ def try_aggregate(
                         f"field; cannot dedup)"
                     )
         elif reducer_kind in ("avg_confidence", "max_confidence", "min_confidence"):
-            # nexus-gmiaf.36: confidence aggregate requires SQLite access via
-            # db.document_aspects.conn.  In service mode the conn is unavailable.
-            # auto mode → return None now so the whole call LLM-falls-back.
-            # aspects mode → stub the group with an explanatory summary.
-            if _is_service_mode():
-                if source == "auto":
-                    return None
-                op = reducer_kind.split("_")[0]
-                summary = (
-                    f"{op}(confidence) unavailable: document_aspects=service "
-                    f"(SQL fast-path requires SQLite; Track: nexus-gmiaf.36)"
-                )
-                aggregates.append({"key_value": key_value, "summary": summary})
-                continue
             idents = [_resolve_identity(item) for item in items if isinstance(item, dict)]
             idents = [i for i in idents if i is not None]
             if not idents:

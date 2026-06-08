@@ -51,7 +51,7 @@ class TestAspectPromotionServiceModeGuard:
         class FakeDB:
             pass
 
-        with pytest.raises((NotImplementedError, Exception), match="nexus-gmiaf.35"):
+        with pytest.raises(NotImplementedError, match="nexus-gmiaf.35"):
             promote_extras_field(FakeDB(), "my_field")
 
     def test_list_promotions_raises_in_service_mode(
@@ -63,7 +63,7 @@ class TestAspectPromotionServiceModeGuard:
         class FakeDB:
             pass
 
-        with pytest.raises((NotImplementedError, Exception), match="nexus-gmiaf.35"):
+        with pytest.raises(NotImplementedError, match="nexus-gmiaf.35"):
             list_promotions(FakeDB())
 
     def test_cli_promote_field_fails_cleanly_in_service_mode(
@@ -282,6 +282,47 @@ class TestAspectSqlServiceModeFallback:
         assert result is not None
         assert "2 distinct" in result["aggregates"][0]["summary"]
 
+    def test_aggregate_mixed_reducer_auto_returns_none(
+        self, service_mode: None,
+    ) -> None:
+        """Mixed groups list (count group first, confidence group second) with
+        source='auto' and a confidence reducer must return None cleanly without
+        partial aggregation state.
+
+        Regression guard for the guard-inside-loop bug (nexus-gmiaf.36):
+        previously, try_aggregate appended the count group's result to
+        `aggregates` before hitting `return None` on the confidence group,
+        silently discarding the count state. The guard is now hoisted before
+        the loop so the whole call returns None consistently."""
+        groups = json.dumps([
+            {
+                "key_value": "VLDB",
+                "items": [
+                    {"id": "/papers/paxos.pdf", "collection": "knowledge__delos",
+                     "source_path": "/papers/paxos.pdf"},
+                    {"id": "/papers/raft.pdf", "collection": "knowledge__delos",
+                     "source_path": "/papers/raft.pdf"},
+                ],
+            },
+            {
+                "key_value": "SOSP",
+                "items": [
+                    {"id": "/papers/bigtable.pdf", "collection": "knowledge__delos",
+                     "source_path": "/papers/bigtable.pdf"},
+                ],
+            },
+        ])
+        result = aspect_sql.try_aggregate(
+            groups,
+            "avg confidence",
+            source="auto",
+            aspect_field="confidence",
+        )
+        assert result is None, (
+            "Mixed-group confidence reducer in auto+service mode must return "
+            f"None (LLM fallback), not partial state. Got: {result!r}"
+        )
+
     def test_aggregate_aspects_mode_confidence_returns_stub(
         self, service_mode: None,
     ) -> None:
@@ -295,6 +336,12 @@ class TestAspectSqlServiceModeFallback:
         )
         assert result is not None
         assert "aggregates" in result
+        # Stub must reference the service backend and tracking bead so the
+        # operator caller knows why the fast-path was bypassed.
+        summary = result["aggregates"][0]["summary"]
+        assert "service" in summary or "nexus-gmiaf.36" in summary, (
+            f"Expected 'service' or 'nexus-gmiaf.36' in stub summary; got: {summary!r}"
+        )
 
 
 # ── .37: commands/aspects.py gc-fixtures — CLI guard ──────────────────────────
@@ -311,7 +358,7 @@ class TestGcFixturesServiceModeGuard:
         monkeypatch: pytest.MonkeyPatch,
         service_mode: None,
     ) -> None:
-        """Dry-run (no --yes): service mode → non-zero exit, clear message."""
+        """Dry-run (no --yes): service mode → exit code 2, clear message."""
         mem_path = tmp_path / "memory.db"
         monkeypatch.setattr(
             "nexus.commands._helpers.default_db_path",
@@ -323,8 +370,9 @@ class TestGcFixturesServiceModeGuard:
         runner = CliRunner()
         result = runner.invoke(aspects_group, ["gc-fixtures"])
 
-        assert result.exit_code != 0, (
-            f"Expected non-zero exit in service mode; got 0. Output: {result.output!r}"
+        assert result.exit_code == 2, (
+            f"Expected exit code 2 (click.UsageError) in service mode; "
+            f"got {result.exit_code}. Output: {result.output!r}"
         )
         output = (result.output or "")
         assert "service" in output.lower() or "gc-fixtures" in output.lower() or "nexus-gmiaf.37" in output, (
@@ -340,7 +388,7 @@ class TestGcFixturesServiceModeGuard:
         monkeypatch: pytest.MonkeyPatch,
         service_mode: None,
     ) -> None:
-        """--yes flag: service mode → non-zero exit, clear message."""
+        """--yes flag: service mode → exit code 2, clear message."""
         mem_path = tmp_path / "memory.db"
         monkeypatch.setattr(
             "nexus.commands._helpers.default_db_path",
@@ -351,8 +399,9 @@ class TestGcFixturesServiceModeGuard:
         runner = CliRunner()
         result = runner.invoke(aspects_group, ["gc-fixtures", "--yes"])
 
-        assert result.exit_code != 0, (
-            f"Expected non-zero exit in service mode; got 0. Output: {result.output!r}"
+        assert result.exit_code == 2, (
+            f"Expected exit code 2 (click.UsageError) in service mode; "
+            f"got {result.exit_code}. Output: {result.output!r}"
         )
         assert "Traceback" not in (result.output or ""), (
             f"Got unhandled exception traceback: {result.output!r}"
