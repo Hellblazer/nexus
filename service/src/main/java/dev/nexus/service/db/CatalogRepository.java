@@ -1065,12 +1065,14 @@ public final class CatalogRepository {
             Map<String, Long> byType = new LinkedHashMap<>();
             for (var r : ltypes) byType.put(r.value1(), (long) r.value2());
             // nexus-xnz0o: add by_content_type for stats_cmd in catalog.py.
+            // Include the empty/null bucket (operators use it to detect un-typed docs).
+            // Key is "" for null/empty content_type rows, matching SQLite Catalog.stats().
             var ctypes = ctx.select(F_DOC_CTYPE, DSL.count()).from(T_DOCS)
-                            .where(F_DOC_CTYPE.ne(""))
                             .groupBy(F_DOC_CTYPE).fetch();
             Map<String, Long> byContentType = new LinkedHashMap<>();
             for (var r : ctypes) {
-                if (r.value1() != null) byContentType.put(r.value1(), (long) r.value2());
+                String key = (r.value1() == null) ? "" : r.value1();
+                byContentType.put(key, (long) r.value2());
             }
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("doc_count", docCount);

@@ -1153,10 +1153,11 @@ class CatalogRepositoryTest {
 
         var result = repo.distinctDocCollections(dTenant);
 
+        // RLS-isolated tenant — exactly 2 distinct non-empty collections seeded.
         assertThat(result).contains(cA, cB);
         assertThat(result).doesNotContain("");
         assertThat(result).noneMatch(s -> s == null);
-        assertThat(result).hasSizeGreaterThanOrEqualTo(2);
+        assertThat(result).hasSize(2);
     }
 
     @Test @Order(131)

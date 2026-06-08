@@ -632,14 +632,14 @@ class TestStatsByContentType:
         stats = cat.stats()
         assert "by_content_type" in stats, f"by_content_type missing from stats: {stats.keys()}"
         by_type = stats["by_content_type"]
-        # 5 docs of type "paper" (doc_p1/p2/p3/abs/no_coll) + 1 code + 1 rdr
+        # Module-scoped tenant: 5 paper (p1/p2/p3/abs/no_coll) + 1 code + 1 rdr
         paper_count = by_type.get("paper", 0)
-        assert paper_count >= 5, (
-            f"expected >= 5 paper docs, got {paper_count}; by_content_type={by_type}"
+        assert paper_count == 5, (
+            f"expected 5 paper docs, got {paper_count}; by_content_type={by_type}"
         )
         code_count = by_type.get("code", 0)
-        assert code_count >= 1, (
-            f"expected >= 1 code doc, got {code_count}; by_content_type={by_type}"
+        assert code_count == 1, (
+            f"expected 1 code doc, got {code_count}; by_content_type={by_type}"
         )
 
     def test_by_content_type_is_dict(self, cat, seeded) -> None:
@@ -651,11 +651,11 @@ class TestStatsByContentType:
         stats = cat.stats()
         assert "links_by_type" in stats, f"links_by_type missing from stats: {stats.keys()}"
         by_link = stats["links_by_type"]
-        assert by_link.get("cites", 0) >= 1, (
-            f"expected >= 1 cites link, got {by_link.get('cites', 0)}"
+        assert by_link.get("cites", 0) == 1, (
+            f"expected 1 cites link, got {by_link.get('cites', 0)}"
         )
-        assert by_link.get("relates", 0) >= 1, (
-            f"expected >= 1 relates link, got {by_link.get('relates', 0)}"
+        assert by_link.get("relates", 0) == 1, (
+            f"expected 1 relates link, got {by_link.get('relates', 0)}"
         )
 
 
@@ -697,7 +697,8 @@ class TestCommonCommandSpotChecks:
     def test_owners_cmd_path_list_owners(self, cat, seeded) -> None:
         """owners_cmd uses list_owners() to enumerate tenant owners."""
         owners = cat.list_owners()
-        assert len(owners) >= 3, f"expected >= 3 owners, got {len(owners)}"
+        # Module-scoped tenant: exactly 3 seeded owners (repo_a, repo_b, curator)
+        assert len(owners) == 3, f"expected 3 owners, got {len(owners)}: {[o['name'] for o in owners]}"
         types = {o["owner_type"] for o in owners}
         assert "repo" in types
         assert "curator" in types

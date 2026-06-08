@@ -1096,18 +1096,20 @@ class Catalog:
         owner_count      = self._db.execute("SELECT COUNT(*) FROM owners").fetchone()[0]
         collection_count = self._db.execute("SELECT COUNT(*) FROM collections").fetchone()[0]
         by_ctype_rows = self._db.execute(
-            "SELECT content_type, COUNT(*) FROM documents "
-            "WHERE content_type != '' GROUP BY content_type"
+            "SELECT content_type, COUNT(*) FROM documents GROUP BY content_type"
         ).fetchall()
         by_ltype_rows = self._db.execute(
             "SELECT link_type, COUNT(*) FROM links GROUP BY link_type"
         ).fetchall()
+        # Include the empty-content_type bucket (r[0] is "" or None) so operators
+        # can detect un-typed docs.  Original SQL had no WHERE filter on content_type.
+        # Use "" as the key for the NULL/empty bucket (nexus-xnz0o).
         return {
             "doc_count":        doc_count,
             "link_count":       link_count,
             "owner_count":      owner_count,
             "collection_count": collection_count,
-            "by_content_type":  {r[0]: r[1] for r in by_ctype_rows if r[0]},
+            "by_content_type":  {(r[0] or ""): r[1] for r in by_ctype_rows},
             "links_by_type":    {r[0]: r[1] for r in by_ltype_rows if r[0]},
         }
 
