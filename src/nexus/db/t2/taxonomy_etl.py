@@ -412,6 +412,8 @@ def _migrate_table(
     read_count = 0
     written_count = 0
     skipped_count = 0
+    skipped_ids: list[str] = []
+    _SKIPPED_ID_CAP = 200  # bound memory; near-zero expected after catalog-first ETL
     total = len(rows)
 
     for row_dict in rows:
@@ -421,6 +423,20 @@ def _migrate_table(
             applied = import_fn(**transformed)
             if applied is False:
                 skipped_count += 1
+                if skipped_count == 1:
+                    # Surface the wrong-order operator error in seconds, not after all
+                    # rows have round-tripped as no-ops.
+                    _log.warning(
+                        "taxonomy_etl.first_skip_missing_catalog_doc",
+                        table=table,
+                        hint="catalog not migrated first? run `nx storage migrate "
+                             "catalog` then re-run (idempotent)",
+                    )
+                # Record the orphan doc_id for audit (which assignments were skipped),
+                # not just the aggregate count — a fidelity migration must be auditable.
+                doc_id = transformed.get("doc_id")
+                if doc_id is not None and len(skipped_ids) < _SKIPPED_ID_CAP:
+                    skipped_ids.append(str(doc_id))
             else:
                 written_count += 1
         except Exception as exc:
@@ -449,6 +465,10 @@ def _migrate_table(
             table=table,
             skipped=skipped_count,
             read=read_count,
+            # Sample of the skipped doc_ids (capped) so an operator can audit which
+            # assignments were dropped — full set is reproducible by re-running.
+            skipped_doc_ids_sample=skipped_ids,
+            skipped_ids_truncated=skipped_count > len(skipped_ids),
             hint="assignment doc_id not in catalog_documents — run "
                  "`nx storage migrate catalog` BEFORE taxonomy, then re-run",
         )

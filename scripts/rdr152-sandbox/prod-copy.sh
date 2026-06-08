@@ -332,19 +332,19 @@ verify_pg_count_exact   "frecency"            "frecency"           "${PROD_TELEM
 # Gap tracked in nexus-5gaj7 (same TelemetryHandler/PlanHandler cast issue class).
 # Expected sandbox count: ~70 of 88 (stable across runs on this prod state).
 verify_pg_count_known_gap "plans"             "plans"              "${PROD_PLANS_COUNT:-0}"       70 "nexus-5gaj7"
-# topic_assignments: FK ordering issue — topics+assignments in same pass.
-# Gap tracked in nexus-0a7xc. Expected sandbox count: 0.
-verify_pg_count_known_gap "topic_assignments" "topic_assignments"  "${PROD_TOPIC_ASSIGN_COUNT:-0}" 0 "nexus-0a7xc"
-# topic_links: same FK ordering issue. Expected sandbox count: partial (>0, varies by prod state).
-# Gap tracked in nexus-0a7xc. The known-gap count is approximate; use 0 as a floor —
-# any non-zero count is acceptable (the FAIL path triggers if count < 0 somehow).
-# When the FK fix ships this will move to verify_pg_count_exact.
-# Last observed: 6525 (2026-06-08).
-verify_pg_count_known_gap "topic_links"       "topic_links"        "${PROD_TOPIC_LINKS_COUNT:-0}"  6525 "nexus-0a7xc"
-# nx_answer_runs: ClassCastException in TelemetryHandler.java:328 (String→Number cast).
-# Gap tracked in nexus-5gaj7. Expected sandbox count: 2 (a very small number succeed).
-# Last observed: 2 (2026-06-08).
-verify_pg_count_known_gap "nx_answer_runs"    "nx_answer_runs"     "${PROD_TELEMETRY_RUNS:-0}"    2 "nexus-5gaj7"
+# topic_assignments: cross-store FK to catalog_documents FIXED (nexus-0a7xc) and
+# catalog now migrates first (above). Expect near-full import; a small shortfall is
+# legitimate (SQLite source assignments to docs deleted before snapshot = true orphans
+# the FK-guarded import skips). Floor at 90% of prod catches a broken fix (near-0) while
+# tolerating orphans. TIGHTEN to verify_pg_count_exact (or an exact tolerance) once the
+# real orphan count is measured in the acceptance battery run.
+verify_pg_count_at_least "topic_assignments" "topic_assignments"  "$(( ${PROD_TOPIC_ASSIGN_COUNT:-0} * 90 / 100 ))"
+# topic_links: FK is topic→topic only (no catalog FK); topics migrate first, so links
+# import fully. nexus-0a7xc.
+verify_pg_count_at_least "topic_links"       "topic_links"        "${PROD_TOPIC_LINKS_COUNT:-0}"
+# nx_answer_runs: plan_id String→Number ClassCastException FIXED (nexus-5gaj7). Expect
+# full import (event log; at_least tolerates live writes during ETL).
+verify_pg_count_at_least "nx_answer_runs"    "nx_answer_runs"     "${PROD_TELEMETRY_RUNS:-0}"
 # hook_failures: likely same ClassCastException pattern.
 # Gap tracked in nexus-5gaj7. Expected sandbox count: 0.
 verify_pg_count_known_gap "hook_failures"     "hook_failures"      "${PROD_TELEMETRY_HOOKS:-0}"   0 "nexus-5gaj7"
