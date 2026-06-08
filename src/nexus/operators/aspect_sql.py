@@ -188,6 +188,19 @@ def _build_filter_predicate(field: str, query: str) -> tuple[str, list]:
 _VALID_SOURCES = ("auto", "aspects", "llm")
 
 
+def _is_service_mode() -> bool:
+    """Return True when document_aspects is routed to the Java service backend.
+
+    Checked at the top of every ``try_*`` operator entry point so that the
+    service-mode routing decision is made once per operator call rather than
+    buried inside the SQL-execution helpers.  This avoids propagating a
+    ``NotImplementedError`` from ``_query_*`` functions which the ``try_*``
+    wrappers only catch ``ValueError`` from.  (nexus-gmiaf.36)
+    """
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+    return storage_backend_for("document_aspects") == StorageBackend.SERVICE
+
+
 def _validate_source(source: str) -> None:
     """Reject silent typos like ``"LLM"`` or ``"auto "``. Without this
     guard the unrecognised value falls through to the SQL path and the
@@ -228,6 +241,20 @@ def try_filter(
     _validate_source(source)
     if source == "llm":
         return None
+
+    # nexus-gmiaf.36: the SQL fast-path requires direct SQLite access via
+    # db.document_aspects.conn.  When the aspects store is in service mode
+    # (NX_STORAGE_BACKEND_DOCUMENT_ASPECTS=service) that conn is unavailable.
+    # In 'auto' mode the correct behaviour is to return None so the operator
+    # falls back to LLM dispatch.  In 'aspects' mode return a stub result with
+    # a clear explanation so the caller knows why the SQL path was skipped.
+    if _is_service_mode():
+        return _aspects_only_or_none(
+            source,
+            "aspect_sql filter fast-path requires SQLite access "
+            "(document_aspects=service); falling back to LLM path. "
+            "Track: nexus-gmiaf.36",
+        )
 
     parsed = _parse_items(items)
     if parsed is None:
@@ -323,6 +350,15 @@ def try_groupby(
     _validate_source(source)
     if source == "llm":
         return None
+
+    # nexus-gmiaf.36: service-mode guard — same rationale as try_filter.
+    if _is_service_mode():
+        return _aspects_only_or_none_grouped(
+            source,
+            "aspect_sql groupby fast-path requires SQLite access "
+            "(document_aspects=service); falling back to LLM path. "
+            "Track: nexus-gmiaf.36",
+        )
 
     parsed = _parse_items(items)
     if parsed is None:
@@ -472,6 +508,20 @@ def try_aggregate(
                         f"field; cannot dedup)"
                     )
         elif reducer_kind in ("avg_confidence", "max_confidence", "min_confidence"):
+            # nexus-gmiaf.36: confidence aggregate requires SQLite access via
+            # db.document_aspects.conn.  In service mode the conn is unavailable.
+            # auto mode → return None now so the whole call LLM-falls-back.
+            # aspects mode → stub the group with an explanatory summary.
+            if _is_service_mode():
+                if source == "auto":
+                    return None
+                op = reducer_kind.split("_")[0]
+                summary = (
+                    f"{op}(confidence) unavailable: document_aspects=service "
+                    f"(SQL fast-path requires SQLite; Track: nexus-gmiaf.36)"
+                )
+                aggregates.append({"key_value": key_value, "summary": summary})
+                continue
             idents = [_resolve_identity(item) for item in items if isinstance(item, dict)]
             idents = [i for i in idents if i is not None]
             if not idents:
