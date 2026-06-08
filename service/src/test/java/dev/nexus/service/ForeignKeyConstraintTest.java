@@ -147,14 +147,20 @@ class ForeignKeyConstraintTest {
     @Test @Order(1)
     void fkChangeset_appliesCleanly_allFkConstraintsPresent() throws Exception {
         try (Connection su = pg.getPostgresDatabase().getConnection()) {
-            // Verify all 4 FK constraints exist in pg_constraint
+            // Verify the 4 cross-store FK constraints exist in pg_constraint.
+            // topic_assignments is intentionally EXCLUDED (nexus-sa14p): its doc_id is a
+            // chunk chash, not a document tumbler, so no fk_ta_catalog_doc is registered.
             List<String> expectedFks = List.of(
-                "fk_ta_catalog_doc",
                 "fk_doc_aspects_catalog_doc",
                 "fk_doc_highlights_catalog_doc",
                 "fk_aspect_queue_catalog_doc",
                 "fk_catalog_chunks_catalog_doc"
             );
+            // And assert fk_ta_catalog_doc does NOT exist.
+            ResultSet noTaFk = su.createStatement().executeQuery(
+                "SELECT 1 FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace " +
+                "WHERE c.contype='f' AND c.conname='fk_ta_catalog_doc' AND n.nspname='nexus'");
+            assertThat(noTaFk.next()).as("fk_ta_catalog_doc must NOT exist (nexus-sa14p)").isFalse();
             for (String fkName : expectedFks) {
                 ResultSet rs = su.createStatement().executeQuery(
                     "SELECT 1 FROM pg_constraint c " +
@@ -194,70 +200,65 @@ class ForeignKeyConstraintTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(10)
-    void topicAssignment_validCatalogDoc_succeeds() throws Exception {
+    void topicAssignment_chashDocId_succeeds_noCatalogFk() throws Exception {
+        // nexus-sa14p: doc_id is a chunk chash, not a catalog tumbler, and there is no
+        // fk_ta_catalog_doc. A chash doc_id with no matching catalog_documents row imports.
         try (Connection su = pg.getPostgresDatabase().getConnection()) {
             su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, TUMBLER_A);
             insertTopic(su, TENANT_A, 100L, "test-topic", "col-a");
-            // Insert a topic_assignment referencing the catalog document
+            String chash = "7740557a279d0481db33c93fd0342464"; // 32-hex chunk chash, not a tumbler
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments " +
                 "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                "('" + TENANT_A + "', '" + TUMBLER_A + "', 100, 'hdbscan', NOW())");
-            // Verify it was inserted
+                "('" + TENANT_A + "', '" + chash + "', 100, 'hdbscan', NOW())");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.topic_assignments " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='" + TUMBLER_A + "'");
+                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='" + chash + "'");
             rs.next();
             assertThat(rs.getInt(1)).isEqualTo(1);
         }
     }
 
     @Test @Order(11)
-    void topicAssignment_orphanDocId_rejectsWithFKViolation() throws Exception {
+    void topicAssignment_topicIdFk_stillEnforced() throws Exception {
+        // The topic_id -> topics(id) FK IS correct and remains enforced (only the
+        // catalog doc_id FK was removed). An assignment to a non-existent topic rejects.
         try (Connection su = pg.getPostgresDatabase().getConnection()) {
             su.setAutoCommit(true);
-            insertTopic(su, TENANT_A, 101L, "another-topic", "col-a");
-            // Attempt to insert topic_assignment with a doc_id not in catalog_documents
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
                     "INSERT INTO nexus.topic_assignments " +
                     "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                    "('" + TENANT_A + "', 'nonexistent-tumbler', 101, 'hdbscan', NOW())")
+                    "('" + TENANT_A + "', 'aabbccddeeff00112233445566778899', 999999, 'hdbscan', NOW())")
             );
             assertThat(ex.getMessage()).containsIgnoringCase("foreign key");
         }
     }
 
     @Test @Order(12)
-    void deleteCatalogDoc_cascadesToTopicAssignments() throws Exception {
+    void deleteCatalogDoc_doesNotAffectTopicAssignments() throws Exception {
+        // nexus-sa14p: with no catalog FK, deleting a catalog document does NOT cascade
+        // to topic_assignments (assignments are chunk-keyed and independent of the catalog).
         try (Connection su = pg.getPostgresDatabase().getConnection()) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "1.99");
-            insertTopic(su, TENANT_A, 199L, "cascade-topic", "col-a");
+            insertTopic(su, TENANT_A, 199L, "no-cascade-topic", "col-a");
+            String chash = "1199aabbccddeeff00112233445566ab";
             su.createStatement().execute(
                 "INSERT INTO nexus.topic_assignments " +
                 "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                "('" + TENANT_A + "', '1.99', 199, 'hdbscan', NOW())");
+                "('" + TENANT_A + "', '" + chash + "', 199, 'hdbscan', NOW())");
 
-            // Verify assignment exists
-            ResultSet before = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.topic_assignments " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='1.99'");
-            before.next();
-            assertThat(before.getInt(1)).isEqualTo(1);
-
-            // Delete the catalog document
             su.createStatement().execute(
                 "DELETE FROM nexus.catalog_documents " +
                 "WHERE tenant_id='" + TENANT_A + "' AND tumbler='1.99'");
 
-            // Assignment must be gone (ON DELETE CASCADE)
+            // Assignment must SURVIVE (no cascade — chash doc_id is independent of catalog).
             ResultSet after = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.topic_assignments " +
-                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='1.99'");
+                "WHERE tenant_id='" + TENANT_A + "' AND doc_id='" + chash + "'");
             after.next();
-            assertThat(after.getInt(1)).as("Cascade delete must remove topic_assignments").isZero();
+            assertThat(after.getInt(1)).as("assignment must survive catalog-doc delete").isEqualTo(1);
         }
     }
 
@@ -501,40 +502,10 @@ class ForeignKeyConstraintTest {
      * CRITICAL: proves that the composite FK (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler)
      * prevents cross-tenant references WITHOUT relying on RLS.
      *
-     * Scenario:
-     *   - Tenant-A has catalog_documents row (tenant_id='fk-tenant-a', tumbler='1.1').
-     *   - Tenant-B tries to insert topic_assignment (tenant_id='fk-tenant-b', doc_id='1.1').
-     *   - The FK checks catalog_documents(tenant_id='fk-tenant-b', tumbler='1.1') — NOT FOUND.
-     *   - Result: PSQLException (FK violation), not silent success.
-     *
-     * This test is distinct from RLS: it uses the superuser connection (bypasses RLS) to
-     * prove the FK itself enforces tenant scope even when RLS is circumvented.
+     * Proven below for document_aspects (@Order(51)). NOT applicable to topic_assignments:
+     * its doc_id is a chunk chash with no catalog FK (nexus-sa14p), so cross-tenant
+     * catalog references do not apply there — tenant isolation for assignments is RLS-only.
      */
-    @Test @Order(50)
-    void crossTenantTopicAssignment_isRejectedByCompositeFk() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
-            su.setAutoCommit(true);
-            // Tenant-A has a catalog document with tumbler TUMBLER_A
-            insertCatalogDocument(su, TENANT_A, TUMBLER_A); // idempotent; may already exist from @Order(10)
-
-            // Tenant-B inserts a topic (needed for topic_assignments FK)
-            insertTopic(su, TENANT_B, 200L, "cross-tenant-topic", "col-b");
-
-            // Tenant-B tries to reference Tenant-A's document tumbler
-            // The composite FK (tenant_id='fk-tenant-b', doc_id='1.1') must check
-            // catalog_documents(tenant_id='fk-tenant-b', tumbler='1.1') — which does NOT exist.
-            Exception ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.topic_assignments " +
-                    "(tenant_id, doc_id, topic_id, assigned_by, assigned_at) VALUES " +
-                    "('" + TENANT_B + "', '" + TUMBLER_A + "', 200, 'hdbscan', NOW())")
-            );
-            assertThat(ex.getMessage())
-                .as("FK must reject cross-tenant reference even via superuser connection")
-                .containsIgnoringCase("foreign key");
-        }
-    }
-
     @Test @Order(51)
     void crossTenantAspect_isRejectedByCompositeFk() throws Exception {
         try (Connection su = pg.getPostgresDatabase().getConnection()) {

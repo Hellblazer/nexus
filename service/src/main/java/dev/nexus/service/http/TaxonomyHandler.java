@@ -483,9 +483,9 @@ public final class TaxonomyHandler implements HttpHandler {
         String sourceCollection = optStringOrNull(body, "source_collection");
         boolean applied = repo.importAssignment(
             tenant, docId, topicId, assignedBy, similarity, assignedAt, sourceCollection);
-        // applied=false means the referenced catalog doc is absent (cross-store FK):
-        // skipped, not an error — the ETL counts these and tells the operator to run
-        // the catalog migration first (nexus-0a7xc).
+        // applied is always true: doc_id is a chunk chash with no catalog FK
+        // (fk_ta_catalog_doc was never registered — nexus-sa14p). The {ok, applied}
+        // shape is kept for the ETL client's generic skip-accounting contract.
         HttpUtil.send(ex, 200, json(Map.of("ok", true, "applied", applied)));
     }
 

@@ -11,8 +11,6 @@ import dev.nexus.service.jooq.nexus.tables.AspectExtractionQueue.AspectExtractio
 import dev.nexus.service.jooq.nexus.tables.CatalogDocumentChunks.CatalogDocumentChunksPath;
 import dev.nexus.service.jooq.nexus.tables.DocumentAspects.DocumentAspectsPath;
 import dev.nexus.service.jooq.nexus.tables.DocumentHighlights.DocumentHighlightsPath;
-import dev.nexus.service.jooq.nexus.tables.TopicAssignments.TopicAssignmentsPath;
-import dev.nexus.service.jooq.nexus.tables.Topics.TopicsPath;
 import dev.nexus.service.jooq.nexus.tables.records.CatalogDocumentsRecord;
 
 import java.util.Arrays;
@@ -323,27 +321,6 @@ public class CatalogDocuments extends TableImpl<CatalogDocumentsRecord> {
             _documentHighlights = new DocumentHighlightsPath(this, null, Keys.DOCUMENT_HIGHLIGHTS__FK_DOC_HIGHLIGHTS_CATALOG_DOC.getInverseKey());
 
         return _documentHighlights;
-    }
-
-    private transient TopicAssignmentsPath _topicAssignments;
-
-    /**
-     * Get the implicit to-many join path to the
-     * <code>nexus.topic_assignments</code> table
-     */
-    public TopicAssignmentsPath topicAssignments() {
-        if (_topicAssignments == null)
-            _topicAssignments = new TopicAssignmentsPath(this, null, Keys.TOPIC_ASSIGNMENTS__FK_TA_CATALOG_DOC.getInverseKey());
-
-        return _topicAssignments;
-    }
-
-    /**
-     * Get the implicit many-to-many join path to the <code>nexus.topics</code>
-     * table
-     */
-    public TopicsPath topics() {
-        return topicAssignments().topics();
     }
 
     @Override

@@ -35,15 +35,10 @@
     <!-- Store 8: catalog (bead nexus-gmiaf.18) — owners/documents/links/chunks/collections + FTS + RLS -->
     <include file="db/changelog/catalog-001-baseline.xml"/>
 
-    <!-- Cross-store FKs (bead nexus-b7v6i) — composite (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler) -->
+    <!-- Cross-store FKs (bead nexus-b7v6i) — (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler).
+         NOTE (nexus-sa14p): topic_assignments is intentionally EXCLUDED — its doc_id is a
+         chunk chash, not a tumbler. aspects/highlights/queue/chunks keep their FKs. -->
     <include file="db/changelog/fk-001-catalog-cross-store.xml"/>
-
-    <!-- Drop fk_ta_catalog_doc (bead nexus-sa14p): topic_assignments.doc_id is a
-         chunk content-hash (chash), NOT a document tumbler, so the FK to
-         catalog_documents(tumbler) was added on a false premise and blocked 91% of
-         assignments from migrating. The other fk-001 FKs (aspects/highlights/queue/
-         chunks) reference tumbler-keyed doc_ids and remain correct. -->
-    <include file="db/changelog/fk-002-drop-ta-catalog-doc.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

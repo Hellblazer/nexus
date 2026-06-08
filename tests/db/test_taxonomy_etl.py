@@ -318,10 +318,11 @@ class TestMigrateTaxonomyRows:
         assert result["meta"]["written"] == 1
 
     def test_assignment_skipped_when_import_returns_false(self, tmp_path: Path) -> None:
-        """REGRESSION (nexus-0a7xc): import_assignment returns False when the referenced
-        catalog doc is absent (cross-store fk_ta_catalog_doc). Such rows are counted as
-        skipped, NOT written and NOT a hard failure — turning the old 0/180496 silent
-        crash into a legible skip count."""
+        """Generic skip-accounting: _migrate_table counts a row as skipped (not written,
+        not failed) when import_fn returns False. NOTE: no real taxonomy import_fn returns
+        False today (import_assignment always applies — fk_ta_catalog_doc was never
+        registered, nexus-sa14p); this test pins the generic skip hook via a mock for any
+        future import_fn that needs it."""
         db = tmp_path / "t.db"
         _make_taxonomy_db(
             db,

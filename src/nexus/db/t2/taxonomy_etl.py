@@ -404,10 +404,12 @@ def _migrate_table(
 ) -> dict[str, int]:
     """Generic per-table migration loop. Returns ``{"read": N, "written": M, "skipped": K}``.
 
-    An ``import_fn`` that returns ``False`` (currently only ``import_assignment``, when
-    the cross-store ``fk_ta_catalog_doc`` doc is absent) counts the row as ``skipped``
-    rather than ``written`` — not an error, but a signal that the catalog was not
-    migrated first (nexus-0a7xc). ``import_fn``s returning ``None`` count as written.
+    An ``import_fn`` that returns ``False`` counts the row as ``skipped`` rather than
+    ``written`` (an ``import_fn`` returning ``None`` counts as written). This is a generic
+    skip-accounting hook. NOTE: no current taxonomy ``import_fn`` returns ``False`` —
+    ``import_assignment`` always applies now that ``fk_ta_catalog_doc`` is gone
+    (nexus-sa14p), so ``skipped`` is 0 for assignments. The hook is retained for any
+    future ``import_fn`` that needs to skip-and-count a row.
     """
     read_count = 0
     written_count = 0
@@ -424,16 +426,9 @@ def _migrate_table(
             if applied is False:
                 skipped_count += 1
                 if skipped_count == 1:
-                    # Surface the wrong-order operator error in seconds, not after all
-                    # rows have round-tripped as no-ops.
-                    _log.warning(
-                        "taxonomy_etl.first_skip_missing_catalog_doc",
-                        table=table,
-                        hint="catalog not migrated first? run `nx storage migrate "
-                             "catalog` then re-run (idempotent)",
-                    )
-                # Record the orphan doc_id for audit (which assignments were skipped),
-                # not just the aggregate count — a fidelity migration must be auditable.
+                    _log.warning("taxonomy_etl.first_skip", table=table)
+                # Record the skipped row's doc_id for audit (if present) — a fidelity
+                # migration must be auditable, not just an aggregate count.
                 doc_id = transformed.get("doc_id")
                 if doc_id is not None and len(skipped_ids) < _SKIPPED_ID_CAP:
                     skipped_ids.append(str(doc_id))
@@ -461,16 +456,14 @@ def _migrate_table(
 
     if skipped_count:
         _log.warning(
-            "taxonomy_etl.rows_skipped_missing_catalog_doc",
+            "taxonomy_etl.rows_skipped",
             table=table,
             skipped=skipped_count,
             read=read_count,
-            # Sample of the skipped doc_ids (capped) so an operator can audit which
-            # assignments were dropped — full set is reproducible by re-running.
+            # Sample of the skipped ids (capped) so an operator can audit which rows
+            # were dropped — full set is reproducible by re-running.
             skipped_doc_ids_sample=skipped_ids,
             skipped_ids_truncated=skipped_count > len(skipped_ids),
-            hint="assignment doc_id not in catalog_documents — run "
-                 "`nx storage migrate catalog` BEFORE taxonomy, then re-run",
         )
 
     return {"read": read_count, "written": written_count, "skipped": skipped_count}

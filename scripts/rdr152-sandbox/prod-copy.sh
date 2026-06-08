@@ -171,20 +171,21 @@ if [[ -n "${PROD_MEMORY_DB:-}" ]]; then
         --db "${PROD_MEMORY_DB}" \
         --service-url "${NX_SERVICE_URL}" 2>&1 | grep -v "row_failed" | head -20 || true
 
-    # catalog — MUST run BEFORE taxonomy: topic_assignments carries a hard cross-store
-    # FK (doc_id -> catalog_documents.tumbler). Without catalog first, every assignment
-    # is skipped (nexus-0a7xc). Reads the prod catalog .catalog.db + owners.jsonl
-    # read-only (copy-not-move).
-    echo "[prod-copy]   catalog ETL (must precede taxonomy for the doc_id FK)..."
+    # catalog — run BEFORE aspects (document_aspects/highlights/queue carry hard
+    # cross-store FKs to catalog_documents.tumbler). taxonomy assignments do NOT need
+    # catalog first (doc_id is a chunk chash, no FK — nexus-sa14p), but catalog-first
+    # is the safe global order. Reads prod .catalog.db + owners.jsonl read-only.
+    echo "[prod-copy]   catalog ETL (precedes aspects for the doc_id FKs)..."
     NX_SERVICE_TOKEN="${NX_SERVICE_TOKEN}" \
     NEXUS_CONFIG_DIR="${NEXUS_CONFIG_DIR}" \
     uv run nx storage migrate catalog \
         --catalog-db "${PROD_CATALOG_DIR}/.catalog.db" \
         --service-url "${NX_SERVICE_URL}" 2>&1 | grep -v "row_failed" | head -20 || true
 
-    # taxonomy (4 tables) — assignments referencing docs not in the catalog are SKIPPED
-    # (counted, not failed); catalog ran above so the vast majority import (nexus-0a7xc).
-    echo "[prod-copy]   taxonomy ETL (assignments skip-and-count if doc absent)..."
+    # taxonomy (4 tables) — assignments import independently (chash doc_id, no catalog
+    # FK; nexus-sa14p). Rows whose topic_id references a deleted topic fail the
+    # topics(id) FK and are reported (RDR-153 data-quality policy).
+    echo "[prod-copy]   taxonomy ETL (assignments chash-keyed, topic_id FK enforced)..."
     NX_SERVICE_TOKEN="${NX_SERVICE_TOKEN}" \
     NEXUS_CONFIG_DIR="${NEXUS_CONFIG_DIR}" \
     uv run nx storage migrate taxonomy \
@@ -332,13 +333,15 @@ verify_pg_count_exact   "frecency"            "frecency"           "${PROD_TELEM
 # Gap tracked in nexus-5gaj7 (same TelemetryHandler/PlanHandler cast issue class).
 # Expected sandbox count: ~70 of 88 (stable across runs on this prod state).
 verify_pg_count_known_gap "plans"             "plans"              "${PROD_PLANS_COUNT:-0}"       70 "nexus-5gaj7"
-# topic_assignments: cross-store FK to catalog_documents FIXED (nexus-0a7xc) and
-# catalog now migrates first (above). Expect near-full import; a small shortfall is
-# legitimate (SQLite source assignments to docs deleted before snapshot = true orphans
-# the FK-guarded import skips). Floor at 90% of prod catches a broken fix (near-0) while
-# tolerating orphans. TIGHTEN to verify_pg_count_exact (or an exact tolerance) once the
-# real orphan count is measured in the acceptance battery run.
-verify_pg_count_at_least "topic_assignments" "topic_assignments"  "$(( ${PROD_TOPIC_ASSIGN_COUNT:-0} * 90 / 100 ))"
+# topic_assignments: doc_id is a chunk chash with NO catalog FK (nexus-sa14p), so
+# assignments import independently of the catalog. The shortfall vs prod is NOT a
+# catalog issue: ~28% of source assignments reference a DELETED topic (orphan topic_id)
+# and are correctly rejected by the topics(id) FK. Measured valid ratio ~72%
+# (129520/180806 on the 2026-06-08 prod state). Floor at 65% catches a real regression
+# (import broken / FK wrongly re-added) while tolerating the known topic-orphan garbage.
+# RDR-153: the migration-report.json will carry the exact expected-valid count, at which
+# point this floor becomes verify against report.summary, not a heuristic percentage.
+verify_pg_count_at_least "topic_assignments" "topic_assignments"  "$(( ${PROD_TOPIC_ASSIGN_COUNT:-0} * 65 / 100 ))"
 # topic_links: FK is topic→topic only (no catalog FK); topics migrate first, so links
 # import fully. nexus-0a7xc.
 verify_pg_count_at_least "topic_links"       "topic_links"        "${PROD_TOPIC_LINKS_COUNT:-0}"

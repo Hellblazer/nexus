@@ -463,11 +463,11 @@ def migrate_taxonomy_cmd(
     CHROMA BOUNDARY: only the four relational tables are migrated. The
     ``taxonomy__centroids`` ChromaDB collection is NOT touched by this command.
 
-    CROSS-STORE PREREQUISITE: topic_assignments carries a hard FK to
-    catalog_documents (doc_id -> tumbler). Run ``nx storage migrate catalog``
-    BEFORE this command, or assignments whose doc is not yet in the catalog are
-    SKIPPED (counted and reported, not failed). The ETL is idempotent — re-run
-    after the catalog is present to import the skipped assignments.
+    NO CATALOG PREREQUISITE: topic_assignments.doc_id is a chunk chash, not a
+    document tumbler, and carries NO catalog FK (fk_ta_catalog_doc was never
+    registered — nexus-sa14p). Assignments import independently of the catalog.
+    (topic_id -> topics(id) IS enforced; assignments referencing a deleted topic
+    fail and are reported, per the RDR-153 migration data-quality policy.)
 
     Requires NX_SERVICE_PORT and NX_SERVICE_TOKEN to be set (or --service-url
     for the URL component; token is always read from NX_SERVICE_TOKEN).
@@ -533,8 +533,9 @@ def migrate_taxonomy_cmd(
 
     total_read    = sum(v["read"]    for v in results.values())
     total_written = sum(v["written"] for v in results.values())
-    # "skipped" (cross-store fk_ta_catalog_doc: assignment doc not in catalog) is an
-    # expected, recoverable outcome — distinct from a genuine write failure.
+    # "skipped" is a generic skip-accounting outcome (no taxonomy import currently
+    # skips — fk_ta_catalog_doc was never registered, nexus-sa14p), distinct from a
+    # genuine write failure. Retained for forward-compat with the generic ETL loop.
     total_skipped = sum(v.get("skipped", 0) for v in results.values())
     failed        = total_read - total_written - total_skipped
 
@@ -550,9 +551,7 @@ def migrate_taxonomy_cmd(
             click.echo(line)
     if total_skipped:
         click.echo(
-            f"Note: {total_skipped} assignment(s) skipped because their doc_id is not "
-            "in the catalog. Run `nx storage migrate catalog` BEFORE taxonomy, then "
-            "re-run this command (it is idempotent) to import them.",
+            f"Note: {total_skipped} row(s) skipped (see logs for the per-row reason).",
             err=True,
         )
     if failed:

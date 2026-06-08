@@ -569,10 +569,10 @@ class HttpTaxonomyStore:
     ) -> bool:
         """Fidelity-preserving import for a topic_assignments row.
 
-        Returns ``True`` if the row was applied, ``False`` if skipped because the
-        referenced catalog document does not exist (cross-store ``fk_ta_catalog_doc``).
-        Skipped rows are not errors: they mean the catalog has not been migrated first,
-        or the assignment references a deleted doc (nexus-0a7xc).
+        Always returns ``True``. doc_id is a chunk chash with no catalog FK
+        (``fk_ta_catalog_doc`` was never registered — nexus-sa14p), so there is no
+        catalog-existence guard and nothing to skip. The ``bool`` return is retained
+        for caller-API stability with the generic ``_migrate_table`` loop.
         """
         r = self._post("/import/assignment", {
             "doc_id": doc_id,

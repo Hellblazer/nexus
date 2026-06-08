@@ -379,14 +379,14 @@ def other_taxonomy_store(service):
 
 @pytest.fixture(scope="module", autouse=True)
 def _seed_catalog_docs(pg_instance, service):
-    """Seed catalog_documents rows the assignment tests reference.
+    """Seed catalog_documents rows referenced by the assignment tests.
 
-    topic_assignments carries a HARD cross-store FK (fk_ta_catalog_doc):
-    (tenant_id, doc_id) -> catalog_documents(tenant_id, tumbler). Both the live
-    assign_topic path and the ETL import/assignment path require the doc to exist.
-    These tests assert taxonomy mechanics, so we establish the precondition here
-    (superuser psql bypasses FORCE RLS). Depends on `service` so Liquibase has
-    created catalog_documents before we insert. (nexus-0a7xc)
+    NOTE (nexus-sa14p): topic_assignments has NO catalog FK anymore (fk_ta_catalog_doc
+    was never registered — doc_id is a chunk chash, not a tumbler), so this seed is no
+    longer strictly required for assignments to insert. It is retained as harmless
+    defensive setup and to keep any catalog-doc lookups in mixed tests satisfied.
+    Superuser psql bypasses FORCE RLS; depends on `service` so Liquibase has created
+    catalog_documents first.
     """
     docs = [
         "doc-inttest-a1", "doc-merge-src", "doc-fidelity-sim-inttest",
