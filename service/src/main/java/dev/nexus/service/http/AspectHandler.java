@@ -35,6 +35,7 @@ import java.util.Optional;
  *   POST  /v1/aspects/salient_sentences/set_by_key set by (collection, source_path)
  *   GET   /v1/aspects/salient_sentences/get       get salient_sentences for doc_id=
  *   POST  /v1/aspects/import                      ETL fidelity import
+ *   POST  /v1/aspects/operator-query              RDR-089 SQL fast-path (filter/groupby/confidence_aggregate)
  *
  *   POST  /v1/aspects/highlights/upsert              upsert highlight record
  *   GET   /v1/aspects/highlights/get               get by doc_id=
@@ -108,6 +109,7 @@ public final class AspectHandler implements HttpHandler {
                 case "/salient_sentences/set_by_key"    -> handleSetSalientByKey(exchange, tenant, method);
                 case "/salient_sentences/get"           -> handleGetSalient(exchange, tenant, method);
                 case "/import"                          -> handleImportAspect(exchange, tenant, method);
+                case "/operator-query"                  -> handleOperatorQuery(exchange, tenant, method);
                 // ── document_highlights ───────────────────────────────────────
                 case "/highlights/upsert"               -> handleHighlightUpsert(exchange, tenant, method);
                 case "/highlights/get"                  -> handleHighlightGet(exchange, tenant, method);
@@ -293,6 +295,81 @@ public final class AspectHandler implements HttpHandler {
         Map<String, Object> body = serializeAspectBody(readBody(ex));
         int n = repo.importAspect(tenant, body);
         HttpUtil.send(ex, 200, "{\"imported\":" + n + "}");
+    }
+
+    /**
+     * POST /v1/aspects/operator-query
+     *
+     * <p>Unified endpoint for the three RDR-089 SQL fast-path operator queries.
+     * Discriminated by {@code op} field in the JSON body:
+     *
+     * <pre>
+     * op = "filter"
+     *   body: { op, field, predicate, source_uris: [...] }
+     *   response: { matched_uris: [...] }
+     *
+     * op = "groupby"
+     *   body: { op, field, source_uris: [...] }
+     *   response: { uri_groups: [{ source_uri, key_value }, ...] }
+     *
+     * op = "confidence_aggregate"
+     *   body: { op, reducer_kind, source_uris: [...] }
+     *   response: { value: float | null }
+     * </pre>
+     *
+     * <p>All three ops route through RLS via {@link dev.nexus.service.db.TenantScope#withTenant}.
+     * Parity: exact same semantics as the Python SQLite fast paths (RDR-089,
+     * {@code aspect_sql._query_filter / _query_groupby / _query_confidence_aggregate}).
+     * Bead: nexus-l9hd8.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleOperatorQuery(HttpExchange ex, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
+
+        Map<String, Object> body = readBody(ex);
+        String op = body.containsKey("op") ? body.get("op").toString() : "";
+
+        switch (op) {
+            case "filter" -> {
+                String field     = (String) body.get("field");
+                String predicate = (String) body.get("predicate");
+                List<String> sourceUris = (List<String>) body.getOrDefault("source_uris", List.of());
+                if (field == null || predicate == null) {
+                    HttpUtil.send(ex, 400, "{\"error\":\"field and predicate required for op=filter\"}");
+                    return;
+                }
+                List<String> matched = repo.filterBySourceUris(tenant, sourceUris, field, predicate);
+                HttpUtil.send(ex, 200, MAPPER.writeValueAsString(Map.of("matched_uris", matched)));
+            }
+            case "groupby" -> {
+                String field     = (String) body.get("field");
+                List<String> sourceUris = (List<String>) body.getOrDefault("source_uris", List.of());
+                if (field == null) {
+                    HttpUtil.send(ex, 400, "{\"error\":\"field required for op=groupby\"}");
+                    return;
+                }
+                java.util.Map<String, String> groups = repo.groupByField(tenant, sourceUris, field);
+                // Serialize as list of {source_uri, key_value} for easy Python consumption
+                List<Map<String, String>> out = new java.util.ArrayList<>();
+                for (var entry : groups.entrySet()) {
+                    out.add(Map.of("source_uri", entry.getKey(), "key_value", entry.getValue()));
+                }
+                HttpUtil.send(ex, 200, MAPPER.writeValueAsString(Map.of("uri_groups", out)));
+            }
+            case "confidence_aggregate" -> {
+                String reducerKind = (String) body.get("reducer_kind");
+                List<String> sourceUris = (List<String>) body.getOrDefault("source_uris", List.of());
+                if (reducerKind == null) {
+                    HttpUtil.send(ex, 400, "{\"error\":\"reducer_kind required for op=confidence_aggregate\"}");
+                    return;
+                }
+                Double value = repo.confidenceAggregate(tenant, sourceUris, reducerKind);
+                // Use explicit null serialization: {"value": null} or {"value": 0.85}
+                String json = value == null ? "{\"value\":null}" : "{\"value\":" + value + "}";
+                HttpUtil.send(ex, 200, json);
+            }
+            default -> HttpUtil.send(ex, 400, "{\"error\":\"unknown op: " + op + "; expected filter|groupby|confidence_aggregate\"}");
+        }
     }
 
     // ── document_highlights handlers ───────────────────────────────────────────

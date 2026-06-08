@@ -836,6 +836,219 @@ public final class AspectRepository {
                 columnAdded, rowsBackfilled, rowsPruned, pruned, formatTs(promotedAtTs)));
     }
 
+    // ── Operator fast-path queries (RDR-152 bead nexus-l9hd8) ──────────────────
+
+    /**
+     * Filter: return source_uris from {@code document_aspects} whose
+     * {@code field} column (or {@code extras.key} sub-field) matches
+     * {@code predicate} (a SQL LIKE pattern such as {@code "%paxos%"}).
+     *
+     * <p>Mirrors Python {@code aspect_sql._query_filter} (RDR-089). Uses
+     * {@code ILIKE} (case-insensitive LIKE) to match SQLite's default case-insensitive
+     * LIKE behaviour for ASCII data. Per-batch IN-list pagination (300 per batch)
+     * matches the SQLite fast path for exact result-set parity.
+     *
+     * <p>For {@code extras.key} fields ({@code field.startsWith("extras.")}):
+     * Postgres {@code COALESCE(extras, '{}')::json->>'key' LIKE ?}.
+     * For all other fields: {@code field LIKE ?}.
+     *
+     * <p>RLS enforcement: tenant isolation via {@link TenantScope#withTenant}.
+     *
+     * @param tenant      tenant scope
+     * @param sourceUris  candidate source URIs to evaluate
+     * @param field       aspect column or extras.key (e.g. {@code "proposed_method"},
+     *                    {@code "experimental_datasets"}, {@code "extras.venue"})
+     * @param predicate   SQL LIKE pattern (e.g. {@code "%paxos%"}, {@code "%\"TPC-C\"%"})
+     * @return list of source_uris that match the predicate (subset of input)
+     */
+    public List<String> filterBySourceUris(
+            String tenant, List<String> sourceUris, String field, String predicate) {
+        if (sourceUris == null || sourceUris.isEmpty()) return List.of();
+
+        String fieldExpr = fieldExpression(field);
+
+        List<String> result = new ArrayList<>();
+        for (int start = 0; start < sourceUris.size(); start += 300) {
+            List<String> batch = sourceUris.subList(start, Math.min(start + 300, sourceUris.size()));
+            String placeholders = String.join(",", java.util.Collections.nCopies(batch.size(), "?"));
+            // ILIKE (case-insensitive) mirrors SQLite's default LIKE behaviour for ASCII.
+            String sql = "SELECT source_uri FROM nexus.document_aspects "
+                + "WHERE source_uri IN (" + placeholders + ") "
+                + "  AND " + fieldExpr + " ILIKE ?";
+            Object[] params = new Object[batch.size() + 1];
+            for (int i = 0; i < batch.size(); i++) params[i] = batch.get(i);
+            params[batch.size()] = predicate;
+
+            List<String> matched = tenantScope.withTenant(tenant, ctx -> {
+                var rows = ctx.fetch(sql, params);
+                List<String> out = new ArrayList<>();
+                for (var r : rows) {
+                    Object v = r.get(0);
+                    if (v != null) out.add(v.toString());
+                }
+                return out;
+            });
+            result.addAll(matched);
+        }
+        return result;
+    }
+
+    /**
+     * GroupBy: return a map of {@code source_uri → key_value} for each URI
+     * whose aspect row exists and has a non-null value for {@code field}.
+     *
+     * <p>Mirrors Python {@code aspect_sql._query_groupby} (RDR-089). URIs
+     * without a matching aspect row are absent from the result map; the
+     * Python caller maps absent entries to {@code "unassigned"}.
+     *
+     * <p>For {@code extras.key}: Postgres {@code COALESCE(extras,'{}')::json->>'key'}.
+     *
+     * @param tenant      tenant scope
+     * @param sourceUris  candidate source URIs
+     * @param field       aspect column or extras.key
+     * @return map of uri → value string (null values omitted from map)
+     */
+    public Map<String, String> groupByField(String tenant, List<String> sourceUris, String field) {
+        if (sourceUris == null || sourceUris.isEmpty()) return Map.of();
+
+        String fieldExpr = fieldExpression(field);
+
+        Map<String, String> result = new java.util.LinkedHashMap<>();
+        for (int start = 0; start < sourceUris.size(); start += 300) {
+            List<String> batch = sourceUris.subList(start, Math.min(start + 300, sourceUris.size()));
+            String placeholders = String.join(",", java.util.Collections.nCopies(batch.size(), "?"));
+            String sql = "SELECT source_uri, " + fieldExpr
+                + " FROM nexus.document_aspects "
+                + "WHERE source_uri IN (" + placeholders + ")";
+            Object[] params = batch.toArray();
+
+            tenantScope.withTenant(tenant, ctx -> {
+                var rows = ctx.fetch(sql, params);
+                for (var r : rows) {
+                    Object uri = r.get(0);
+                    Object val = r.get(1);
+                    if (uri != null && val != null) {
+                        result.put(uri.toString(), val.toString());
+                    }
+                }
+                return null;
+            });
+        }
+        return result;
+    }
+
+    /**
+     * ConfidenceAggregate: compute AVG / MIN / MAX confidence across the
+     * provided source URIs.
+     *
+     * <p>Mirrors Python {@code aspect_sql._query_confidence_aggregate} (RDR-089).
+     * Uses a single SQL aggregate per batch (more efficient than fetching all
+     * confidence values and folding in Java/Python).
+     *
+     * <p>Supported {@code reducerKind} values: {@code "avg_confidence"},
+     * {@code "min_confidence"}, {@code "max_confidence"}. Any other value
+     * returns {@code null}.
+     *
+     * @param tenant      tenant scope
+     * @param sourceUris  candidate source URIs
+     * @param reducerKind one of avg_confidence / min_confidence / max_confidence
+     * @return the aggregate value, or null when no aspect rows exist or
+     *         reducerKind is unrecognised
+     */
+    public Double confidenceAggregate(String tenant, List<String> sourceUris, String reducerKind) {
+        if (sourceUris == null || sourceUris.isEmpty()) return null;
+
+        String aggFunc = switch (reducerKind) {
+            case "avg_confidence" -> "AVG";
+            case "min_confidence" -> "MIN";
+            case "max_confidence" -> "MAX";
+            default -> null;
+        };
+        if (aggFunc == null) return null;
+
+        // Accumulate across batches: AVG needs sum+count; MIN/MAX fold naturally.
+        double sumAcc = 0.0;
+        long   cntAcc = 0L;
+        Double minAcc = null;
+        Double maxAcc = null;
+
+        for (int start = 0; start < sourceUris.size(); start += 300) {
+            List<String> batch = sourceUris.subList(start, Math.min(start + 300, sourceUris.size()));
+            String placeholders = String.join(",", java.util.Collections.nCopies(batch.size(), "?"));
+            // For AVG we still need SUM+COUNT to fold across batches correctly.
+            // For MIN/MAX a single pass suffices; use the aggregate directly.
+            final String sql;
+            if ("AVG".equals(aggFunc)) {
+                sql = "SELECT SUM(confidence), COUNT(confidence) "
+                    + "FROM nexus.document_aspects "
+                    + "WHERE source_uri IN (" + placeholders + ") "
+                    + "  AND confidence IS NOT NULL";
+            } else {
+                sql = "SELECT " + aggFunc + "(confidence) "
+                    + "FROM nexus.document_aspects "
+                    + "WHERE source_uri IN (" + placeholders + ") "
+                    + "  AND confidence IS NOT NULL";
+            }
+            final Object[] params = batch.toArray();
+
+            final double[] localSum = {0.0};
+            final long[]   localCnt = {0L};
+            final Double[] localVal = {null};
+
+            tenantScope.withTenant(tenant, ctx -> {
+                var rows = ctx.fetch(sql, params);
+                if (rows.isEmpty()) return null;
+                if ("AVG".equals(aggFunc)) {
+                    Object sumVal = rows.get(0).get(0);
+                    Object cntVal = rows.get(0).get(1);
+                    if (sumVal != null) localSum[0] = ((Number) sumVal).doubleValue();
+                    if (cntVal != null) localCnt[0] = ((Number) cntVal).longValue();
+                } else {
+                    Object val = rows.get(0).get(0);
+                    if (val != null) localVal[0] = ((Number) val).doubleValue();
+                }
+                return null;
+            });
+
+            if ("AVG".equals(aggFunc)) {
+                sumAcc += localSum[0];
+                cntAcc += localCnt[0];
+            } else if (localVal[0] != null) {
+                if ("MIN".equals(aggFunc)) {
+                    minAcc = (minAcc == null) ? localVal[0] : Math.min(minAcc, localVal[0]);
+                } else {
+                    maxAcc = (maxAcc == null) ? localVal[0] : Math.max(maxAcc, localVal[0]);
+                }
+            }
+        }
+
+        return switch (reducerKind) {
+            case "avg_confidence" -> cntAcc == 0 ? null : sumAcc / cntAcc;
+            case "min_confidence" -> minAcc;
+            case "max_confidence" -> maxAcc;
+            default -> null;
+        };
+    }
+
+    /**
+     * Build the SQL field expression for a column name or extras.key.
+     *
+     * <p>For {@code extras.key}: {@code COALESCE(extras,'{}')::json->>'key'}.
+     * Null-safe: when {@code extras} IS NULL the COALESCE falls back to '{}',
+     * so the extraction returns null rather than throwing a cast error.
+     *
+     * <p>For bare column names: returned verbatim (SQL injection protection:
+     * callers must supply validated column names from {@code _ASPECT_COLUMN_TYPES}).
+     */
+    private static String fieldExpression(String field) {
+        if (field.startsWith("extras.")) {
+            String key = field.substring("extras.".length()).replace("'", "''");
+            return "COALESCE(extras,'{}')::json->>'" + key + "'";
+        }
+        // Bare column name — must be a known aspect column (validated by Python callers)
+        return field;
+    }
+
     // ── Private helpers ────────────────────────────────────────────────────────
 
     private static Map<String, Object> recordToMap(org.jooq.Record r) {

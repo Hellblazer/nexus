@@ -191,14 +191,25 @@ _VALID_SOURCES = ("auto", "aspects", "llm")
 def _is_service_mode() -> bool:
     """Return True when document_aspects is routed to the Java service backend.
 
-    Checked at the top of every ``try_*`` operator entry point so that the
-    service-mode routing decision is made once per operator call rather than
-    buried inside the SQL-execution helpers.  This avoids propagating a
-    ``NotImplementedError`` from ``_query_*`` functions which the ``try_*``
-    wrappers only catch ``ValueError`` from.  (nexus-gmiaf.36)
+    Used by ``try_filter`` and by the ``_query_*`` SQL-execution helpers to
+    pick the HTTP service path (nexus-l9hd8) vs the local SQLite path.
     """
     from nexus.db.storage_mode import StorageBackend, storage_backend_for
     return storage_backend_for("document_aspects") == StorageBackend.SERVICE
+
+
+def _get_http_aspects_client():
+    """Return a new ``HttpDocumentAspectsStore`` configured from environment.
+
+    Imported and instantiated lazily to avoid circular imports; callers
+    must ``close()`` the returned client when done.  (nexus-l9hd8)
+
+    Tenant resolution order: ``NX_SERVICE_TENANT`` env → ``"default"``.
+    """
+    import os
+    from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
+    tenant = os.environ.get("NX_SERVICE_TENANT", "default")
+    return HttpDocumentAspectsStore(tenant=tenant)
 
 
 def _validate_source(source: str) -> None:
@@ -241,20 +252,6 @@ def try_filter(
     _validate_source(source)
     if source == "llm":
         return None
-
-    # nexus-gmiaf.36: the SQL fast-path requires direct SQLite access via
-    # db.document_aspects.conn.  When the aspects store is in service mode
-    # (NX_STORAGE_BACKEND_DOCUMENT_ASPECTS=service) that conn is unavailable.
-    # In 'auto' mode the correct behaviour is to return None so the operator
-    # falls back to LLM dispatch.  In 'aspects' mode return a stub result with
-    # a clear explanation so the caller knows why the SQL path was skipped.
-    if _is_service_mode():
-        return _aspects_only_or_none(
-            source,
-            "aspect_sql filter fast-path requires SQLite access "
-            "(document_aspects=service); falling back to LLM path. "
-            "Track: nexus-gmiaf.36",
-        )
 
     parsed = _parse_items(items)
     if parsed is None:
@@ -350,15 +347,6 @@ def try_groupby(
     _validate_source(source)
     if source == "llm":
         return None
-
-    # nexus-gmiaf.36: service-mode guard — same rationale as try_filter.
-    if _is_service_mode():
-        return _aspects_only_or_none_grouped(
-            source,
-            "aspect_sql groupby fast-path requires SQLite access "
-            "(document_aspects=service); falling back to LLM path. "
-            "Track: nexus-gmiaf.36",
-        )
 
     parsed = _parse_items(items)
     if parsed is None:
@@ -461,24 +449,6 @@ def try_aggregate(
             f"supported: count, count distinct, "
             f"avg/min/max confidence",
         )
-
-    # nexus-gmiaf.36: confidence aggregate requires SQLite access via
-    # db.document_aspects.conn.  In service mode the conn is unavailable.
-    # Guard BEFORE the loop to prevent partial aggregation state (e.g. a
-    # mixed groups list with count groups aggregated before a confidence
-    # group triggers return None from mid-loop — silently discarding state).
-    # Mirrors the top-of-function guard pattern in try_filter / try_groupby.
-    # auto mode → None (LLM fallback); aspects mode → stub result.
-    # Track port to a service endpoint: nexus-l9hd8.
-    if reducer_kind in ("avg_confidence", "max_confidence", "min_confidence") and _is_service_mode():
-        if source == "auto":
-            return None
-        op = reducer_kind.split("_")[0]
-        return {"aggregates": [{"key_value": "_meta", "summary": (
-            f"{op}(confidence) unavailable: document_aspects=service "
-            f"(SQL fast-path requires SQLite; Track: nexus-gmiaf.36 / "
-            f"port bead: nexus-l9hd8)"
-        )}]}
 
     aggregates = []
     for group in parsed_groups:
@@ -587,34 +557,49 @@ def _query_filter(
     matches: dict[tuple[str, str], bool] = {}
     uris: dict[tuple[str, str], str] = {}
     if ident_to_uri:
-        # Batch in 300s to leave plenty of headroom under SQLite's
-        # 999-param default cap.
         from nexus.db.storage_mode import StorageBackend, storage_backend_for
         if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-            raise NotImplementedError(
-                "aspect_sql operator_filter fast-path not yet supported on the service backend "
-                "(document_aspects=service); raw SQL filter via conn is SQLite-specific. "
-                "Track: nexus-gmiaf.36"
-            )
-        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-            conn = db.document_aspects.conn
-            uri_list = list(ident_to_uri.values())
-            for chunk_start in range(0, len(uri_list), 300):
-                batch = uri_list[chunk_start:chunk_start + 300]
-                placeholders = ",".join(["?"] * len(batch))
-                sql = (
-                    f"SELECT source_uri "
-                    f"FROM document_aspects "
-                    f"WHERE source_uri IN ({placeholders}) "
-                    f"  AND {pred_sql}"
-                )
-                params: list[Any] = list(batch) + list(pred_params)
-                for (uri,) in conn.execute(sql, params).fetchall():
-                    ident = uri_to_ident.get(uri)
-                    if ident is None:
-                        continue
+            # nexus-l9hd8: service mode — call the real HTTP endpoint.
+            # The predicate pattern mirrors _build_filter_predicate output;
+            # the service uses ILIKE (case-insensitive) to match SQLite's
+            # default case-insensitive LIKE behaviour.
+            _log.debug("aspect_sql.filter_service_path", field=field, query=query)
+            client = _get_http_aspects_client()
+            try:
+                uri_list = list(ident_to_uri.values())
+                # Build predicate pattern identical to _build_filter_predicate.
+                # Service expects the LIKE pattern string (e.g. "%paxos%").
+                _, pred_params_list = _build_filter_predicate(field, query)
+                predicate = pred_params_list[-1]  # last param is always the LIKE pattern
+                matched_uris = set(client.operator_filter(uri_list, field, predicate))
+            finally:
+                client.close()
+            for ident, u in ident_to_uri.items():
+                if u in matched_uris:
                     matches[ident] = True
-                    uris[ident] = uri
+                    uris[ident] = u
+        else:
+            # Batch in 300s to leave plenty of headroom under SQLite's
+            # 999-param default cap.
+            with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+                conn = db.document_aspects.conn
+                uri_list = list(ident_to_uri.values())
+                for chunk_start in range(0, len(uri_list), 300):
+                    batch = uri_list[chunk_start:chunk_start + 300]
+                    placeholders = ",".join(["?"] * len(batch))
+                    sql = (
+                        f"SELECT source_uri "
+                        f"FROM document_aspects "
+                        f"WHERE source_uri IN ({placeholders}) "
+                        f"  AND {pred_sql}"
+                    )
+                    params: list[Any] = list(batch) + list(pred_params)
+                    for (uri,) in conn.execute(sql, params).fetchall():
+                        ident = uri_to_ident.get(uri)
+                        if ident is None:
+                            continue
+                        matches[ident] = True
+                        uris[ident] = uri
 
     rationale = []
     for c, sp in idents:
@@ -676,28 +661,35 @@ def _query_groupby(
 
     from nexus.db.storage_mode import StorageBackend, storage_backend_for
     if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-        raise NotImplementedError(
-            "aspect_sql operator_groupby fast-path not yet supported on the service backend "
-            "(document_aspects=service); raw SQL groupby via conn is SQLite-specific. "
-            "Track: nexus-gmiaf.36"
-        )
-    with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-        conn = db.document_aspects.conn
-        uri_list = list(ident_to_uri.values())
-        for chunk_start in range(0, len(uri_list), 300):
-            batch = uri_list[chunk_start:chunk_start + 300]
-            placeholders = ",".join(["?"] * len(batch))
-            params: list[Any] = list(select_params) + list(batch)
-            sql = (
-                f"SELECT source_uri, {select_expr} "
-                f"FROM document_aspects "
-                f"WHERE source_uri IN ({placeholders})"
-            )
-            for uri, value in conn.execute(sql, params).fetchall():
-                ident = uri_to_ident.get(uri)
-                if ident is None:
-                    continue
-                fetched[ident] = value
+        # nexus-l9hd8: service mode — call the real HTTP endpoint.
+        _log.debug("aspect_sql.groupby_service_path", field=field)
+        client = _get_http_aspects_client()
+        try:
+            uri_list = list(ident_to_uri.values())
+            uri_to_value = client.operator_groupby(uri_list, field)
+        finally:
+            client.close()
+        for ident, u in ident_to_uri.items():
+            if u in uri_to_value:
+                fetched[ident] = uri_to_value[u]
+    else:
+        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+            conn = db.document_aspects.conn
+            uri_list = list(ident_to_uri.values())
+            for chunk_start in range(0, len(uri_list), 300):
+                batch = uri_list[chunk_start:chunk_start + 300]
+                placeholders = ",".join(["?"] * len(batch))
+                params: list[Any] = list(select_params) + list(batch)
+                sql = (
+                    f"SELECT source_uri, {select_expr} "
+                    f"FROM document_aspects "
+                    f"WHERE source_uri IN ({placeholders})"
+                )
+                for uri, value in conn.execute(sql, params).fetchall():
+                    ident = uri_to_ident.get(uri)
+                    if ident is None:
+                        continue
+                    fetched[ident] = value
 
     for ident in idents:
         value = fetched.get(ident)
@@ -759,11 +751,13 @@ def _query_confidence_aggregate(
 
     from nexus.db.storage_mode import StorageBackend, storage_backend_for
     if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
-        raise NotImplementedError(
-            "aspect_sql operator_aggregate confidence fast-path not yet supported on the service backend "
-            "(document_aspects=service); raw SQL confidence aggregate via conn is SQLite-specific. "
-            "Track: nexus-gmiaf.36"
-        )
+        # nexus-l9hd8: service mode — call the real HTTP endpoint.
+        _log.debug("aspect_sql.confidence_aggregate_service_path", reducer_kind=reducer_kind)
+        client = _get_http_aspects_client()
+        try:
+            return client.operator_confidence_aggregate(uris_for_query, reducer_kind)
+        finally:
+            client.close()
     with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
         conn = db.document_aspects.conn
         for chunk_start in range(0, len(uris_for_query), 300):
