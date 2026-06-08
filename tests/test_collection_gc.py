@@ -260,11 +260,13 @@ class TestCollectionGCCli:
         import sqlite3
         from unittest.mock import MagicMock
 
-        # Stub _get_catalog to return a catalog whose _db.execute
+        # Stub _get_catalog to return a catalog whose distinct_doc_collections
         # raises on the documents.physical_collection query.
+        # nexus-xnz0o: _db.execute is no longer called directly; the code now
+        # uses distinct_doc_collections() which is the uniform API.
         fake_cat = MagicMock()
         fake_cat.list_collections.return_value = []
-        fake_cat._db.execute.side_effect = sqlite3.OperationalError(
+        fake_cat.distinct_doc_collections.side_effect = sqlite3.OperationalError(
             "database is locked"
         )
 

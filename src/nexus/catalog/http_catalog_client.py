@@ -38,6 +38,7 @@ below maps to an exact ``case`` in the Java handler's switch:
   GET   /v1/catalog/owners/by_repo?repo_hash=X
   GET   /v1/catalog/owners/by_name?name=X
   POST  /v1/catalog/owners/head_hash    {tumbler_prefix, head_hash}
+  GET   /v1/catalog/docs/collection-counts
   POST  /v1/catalog/collections/upsert
   GET   /v1/catalog/collections/list
   GET   /v1/catalog/collections/get?name=X
@@ -415,6 +416,94 @@ class HttpCatalogClient:
         all_colls = self.list_collections()
         return [c for c in all_colls if c.get("owner_id") == owner_id]
 
+    def list_owners(self) -> list[dict]:
+        """Return all owners for this tenant.
+
+        Backs commands/catalog.py owners_cmd which previously queried
+        ``SELECT tumbler_prefix, name, owner_type, repo_hash, description FROM owners``
+        directly.  Uses GET /v1/catalog/owners/list (nexus-xnz0o).
+        Returns list of dicts with keys: tumbler_prefix, name, owner_type,
+        repo_hash, description, repo_root, head_hash.
+        """
+        result = self._get("/owners/list")
+        return result.get("owners", []) if result else []
+
+    def distinct_doc_collections(self) -> list[str]:
+        """Return distinct physical_collection values from documents (non-empty).
+
+        Backs commands/catalog.py backfill_collections_cmd and
+        _run_collections_drift which previously issued
+        ``SELECT DISTINCT physical_collection FROM documents WHERE physical_collection != ''``
+        directly.  Uses GET /v1/catalog/docs/distinct-collections (nexus-xnz0o).
+        """
+        result = self._get("/docs/distinct-collections")
+        return result.get("collections", []) if result else []
+
+    def owners_with_roots(self) -> dict[str, str]:
+        """Return {tumbler_prefix: repo_root} for owners with non-empty repo_root.
+
+        Backs commands/catalog.py prune_stale_cmd and commands/t3.py which
+        previously issued ``SELECT tumbler_prefix, repo_root FROM owners
+        WHERE repo_root != ''`` directly.  Uses GET /v1/catalog/owners/all-with-roots
+        (nexus-xnz0o).
+        """
+        result = self._get("/owners/all-with-roots")
+        owners = result.get("owners", []) if result else []
+        return {o["tumbler_prefix"]: o["repo_root"] for o in owners
+                if o.get("tumbler_prefix") and o.get("repo_root")}
+
+    def orphaned_docs(self) -> list[dict]:
+        """Return documents with no incoming AND no outgoing links.
+
+        Backs commands/catalog.py orphans_cmd which previously issued
+        a ``LEFT JOIN links`` query directly.
+        Uses GET /v1/catalog/docs/orphaned (nexus-xnz0o).
+        Returns list of dicts with tumbler, title, content_type, file_path.
+        """
+        result = self._get("/docs/orphaned")
+        return result.get("documents", []) if result else []
+
+    def docs_with_absolute_paths(self) -> list[dict]:
+        """Return documents whose file_path begins with '/'.
+
+        Backs commands/doctor.py fix-paths which previously issued
+        ``SELECT tumbler, file_path, physical_collection FROM documents
+        WHERE file_path LIKE '/%'`` directly.
+        Uses GET /v1/catalog/docs/absolute-paths (nexus-xnz0o).
+        Returns list of dicts with tumbler, file_path, physical_collection.
+        """
+        result = self._get("/docs/absolute-paths")
+        return result.get("documents", []) if result else []
+
+    def get_collection_owner_root(self, name: str) -> tuple[str, str]:
+        """Return (owner_id, repo_root) for a collection name.
+
+        Backs commands/collection.py which previously chained
+        ``SELECT owner_id FROM collections WHERE name=?`` then
+        ``SELECT repo_root FROM owners WHERE tumbler_prefix=?`` directly.
+        Uses GET /v1/catalog/collections/owner-root?name=X (nexus-xnz0o).
+        Returns ("", "") when either lookup fails.
+        """
+        try:
+            result = self._get("/collections/owner-root", name=name)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return "", ""
+            raise
+        if not result:
+            return "", ""
+        return result.get("owner_id", ""), result.get("repo_root", "")
+
+    def collection_doc_counts(self) -> dict[str, int]:
+        """Return {physical_collection: doc_count} for all non-empty collections.
+
+        Backs commands/catalog.py _check_collection_health which needs per-collection
+        doc counts to identify T3 orphans.
+        Uses GET /v1/catalog/docs/collection-counts (nexus-xnz0o).
+        """
+        result = self._get("/docs/collection-counts")
+        return {k: int(v) for k, v in result.get("counts", {}).items()}
+
     # ══════════════════════════════════════════════════════════════════════════
     # DOCUMENTS
     # ══════════════════════════════════════════════════════════════════════════
@@ -502,6 +591,17 @@ class HttpCatalogClient:
 
     def by_source_uri(self, uri: str) -> CatalogEntry | None:
         result = self._get("/list", source_uri=uri)
+        docs = result.get("documents", []) if result else []
+        return _to_entry(docs[0]) if docs else None
+
+    def find_by_file_path(self, file_path: str) -> CatalogEntry | None:
+        """Return the first document matching file_path (no owner filter).
+
+        Backs dt.py stamp command which looks up by file_path without a
+        known owner (nexus-xnz0o).  Uses GET /list?file_path=X (owner-agnostic
+        form supported by the Java /list endpoint).
+        """
+        result = self._get("/list", file_path=file_path)
         docs = result.get("documents", []) if result else []
         return _to_entry(docs[0]) if docs else None
 

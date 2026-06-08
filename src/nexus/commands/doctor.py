@@ -1354,7 +1354,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         from nexus.catalog import Catalog
         from nexus.catalog.catalog import make_relative
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
-        from nexus.catalog.tumbler import Tumbler, read_owners
+        from nexus.catalog.tumbler import Tumbler
         from nexus.config import catalog_path
         from nexus.db import make_t3
 
@@ -1366,10 +1366,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         reader = make_catalog_reader()
         writer = make_catalog_writer()
 
-        # Find all entries with absolute file_path
-        rows = reader._db.execute(
-            "SELECT tumbler, file_path, physical_collection FROM documents WHERE file_path LIKE '/%'"
-        ).fetchall()
+        # Find all entries with absolute file_path (nexus-xnz0o: uses
+        # docs_with_absolute_paths() which is uniform across SQLite and service mode).
+        doc_rows = reader.docs_with_absolute_paths()
+        rows = [(d["tumbler"], d["file_path"], d["physical_collection"]) for d in doc_rows]
 
         if not rows:
             click.echo("No absolute file_path entries found.")
@@ -1377,20 +1377,17 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
         click.echo(f"Found {len(rows)} entries with absolute paths.")
 
-        # Load owners for repo_root lookup
-        owners_path = reader._owners_path
-        # RDR-137 followup IMP-18 (nexus-43qgm.18): early exit when
-        # owners.jsonl is absent. Pre-fix code degraded to owners={},
-        # skipped every row in the loop, and reported "Fixed 0
-        # entries" — indistinguishable from "all paths already
-        # relative". Surface the actionable cause instead.
-        if not owners_path.exists():
+        # Load owners for repo_root lookup via uniform catalog API
+        # (nexus-xnz0o: list_owners() works on both SQLite and service mode).
+        owner_list = reader.list_owners()
+        # Build a lookup dict keyed by tumbler_prefix, storing owner_type + repo_root.
+        owners = {o["tumbler_prefix"]: o for o in owner_list}
+        if not owners:
             click.echo(
-                "Warning: owners.jsonl not found — run 'nx index repo "
+                "Warning: no owners registered — run 'nx index repo "
                 "<path>' to populate catalog owners before fix-paths."
             )
             return
-        owners = read_owners(owners_path)
 
         # RDR-137 Phase 3.7 (nexus-tts0d.12): registry fallback removed.
         # Post-nexus-nzyrh owner.repo_root is always populated for
@@ -1409,11 +1406,11 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
             if not owner_rec:
                 continue
-            if owner_rec.owner_type == "curator":
+            if owner_rec.get("owner_type") == "curator":
                 continue
 
             # Determine repo_root (catalog-only; no registry fallback)
-            repo_root = Path(owner_rec.repo_root) if owner_rec.repo_root else None
+            repo_root = Path(owner_rec.get("repo_root") or "") if owner_rec.get("repo_root") else None
 
             if repo_root is None:
                 _log.warning(
@@ -1446,7 +1443,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
         writer.close()
         if reader is not None:
-            reader._db.close()
+            reader.close()
 
         if dry_run:
             click.echo(f"\n{fixed} entries would be fixed. Use --fix-paths without --dry-run to apply.")

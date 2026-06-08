@@ -696,7 +696,7 @@ class _DocumentOps:
         return row[0] if row else 0
 
     def all_documents(
-        self, limit: int = 0, *, content_type: str = "",
+        self, limit: int = 0, *, content_type: str = "", offset: int = 0,
     ) -> list[CatalogEntry]:
         """Return all catalog entries. limit=0 means unlimited.
 
@@ -708,12 +708,20 @@ class _DocumentOps:
         pre-LIMIT slice held no matching rows -- e.g. 15K-entry
         catalog with only 2 rdr rows: ``--type rdr -n 3`` got 0.
         Mirrors PR #533's fix for the MCP ``catalog_list`` surface.
+
+        nexus-xnz0o: ``offset`` added so callers can paginate with
+        ``all_documents(limit=200, offset=N)`` on both SQLite and
+        HttpCatalogClient (which already supported offset).
         """
         cat = self._cat
         from nexus.catalog.catalog import CatalogEntry
+        # alias_of at position 13 — required so verify_cmd's alias filter is non-vacuous.
+        # Without alias_of in the SELECT, CatalogEntry.alias_of defaults to "" for every
+        # row and the `not e.alias_of` guard in verify_cmd is vacuously True (nexus-xnz0o).
         sql = (
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, "
+            "source_mtime, alias_of, source_uri "
             "FROM documents"
         )
         params: tuple = ()
@@ -722,6 +730,8 @@ class _DocumentOps:
             params = (content_type,)
         if limit > 0:
             sql += f" LIMIT {limit}"
+        if offset > 0:
+            sql += f" OFFSET {offset}"
         rows = cat._db.execute(sql, params).fetchall()
         return [
             CatalogEntry(
@@ -730,7 +740,8 @@ class _DocumentOps:
                 physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
                 indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
                 source_mtime=r[12] or 0.0,
-                source_uri=r[13] or "",
+                alias_of=r[13] or "",
+                source_uri=r[14] or "",
             )
             for r in rows
         ]

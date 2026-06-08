@@ -1084,19 +1084,33 @@ class Catalog:
 
         nexus-qnp5s: mirrors HttpCatalogClient.stats() so health.py and
         mcp/catalog.py can call cat.stats() on both backends uniformly.
+        nexus-xnz0o: added by_content_type and links_by_type to match the
+        Java /stats response used by stats_cmd.
 
         Key parity with Java /stats response:
-          doc_count, link_count, owner_count, collection_count
+          doc_count, link_count, owner_count, collection_count,
+          by_content_type, links_by_type
         """
         doc_count        = self._db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
         link_count       = self._db.execute("SELECT COUNT(*) FROM links").fetchone()[0]
         owner_count      = self._db.execute("SELECT COUNT(*) FROM owners").fetchone()[0]
         collection_count = self._db.execute("SELECT COUNT(*) FROM collections").fetchone()[0]
+        by_ctype_rows = self._db.execute(
+            "SELECT content_type, COUNT(*) FROM documents GROUP BY content_type"
+        ).fetchall()
+        by_ltype_rows = self._db.execute(
+            "SELECT link_type, COUNT(*) FROM links GROUP BY link_type"
+        ).fetchall()
+        # Include the empty-content_type bucket (r[0] is "" or None) so operators
+        # can detect un-typed docs.  Original SQL had no WHERE filter on content_type.
+        # Use "" as the key for the NULL/empty bucket (nexus-xnz0o).
         return {
             "doc_count":        doc_count,
             "link_count":       link_count,
             "owner_count":      owner_count,
             "collection_count": collection_count,
+            "by_content_type":  {(r[0] or ""): r[1] for r in by_ctype_rows},
+            "links_by_type":    {r[0]: r[1] for r in by_ltype_rows if r[0]},
         }
 
     def collection_health_meta(self, collection: str) -> dict:
@@ -1952,7 +1966,23 @@ class Catalog:
         """Delegates to ``_DocumentOps.by_file_path`` (nexus-mbm)."""
         return self._docs.by_file_path(owner, file_path)
 
-    def by_source_uri(self, uri: str) -> CatalogEntry | None:
+    def find_by_file_path(self, file_path: str) -> "CatalogEntry | None":
+        """Return the first document matching file_path (no owner filter).
+
+        Backs dt.py stamp command (nexus-xnz0o).  Uses raw SQL for the
+        owner-agnostic file_path lookup on SQLite. Mirrors
+        HttpCatalogClient.find_by_file_path().
+        """
+        row = self._db.execute(
+            "SELECT tumbler FROM documents WHERE file_path = ? LIMIT 1",
+            (file_path,),
+        ).fetchone()
+        if row is None:
+            return None
+        from nexus.catalog.tumbler import Tumbler as _T  # noqa: PLC0415
+        return self._docs.resolve(_T.parse(row[0]))
+
+    def by_source_uri(self, uri: str) -> "CatalogEntry | None":
         """Delegates to ``_DocumentOps.by_source_uri`` (RDR-139 P1.4)."""
         return self._docs.by_source_uri(uri)
 
@@ -1973,10 +2003,15 @@ class Catalog:
         return self._docs.doc_count()
 
     def all_documents(
-        self, limit: int = 0, *, content_type: str = "",
+        self, limit: int = 0, *, content_type: str = "", offset: int = 0,
     ) -> list[CatalogEntry]:
-        """Delegates to ``_DocumentOps.all_documents`` (nexus-mbm)."""
-        return self._docs.all_documents(limit, content_type=content_type)
+        """Delegates to ``_DocumentOps.all_documents`` (nexus-mbm).
+
+        nexus-xnz0o: ``offset`` forwarded to ``_DocumentOps`` so pagination
+        works uniformly with ``all_documents(limit=200, offset=N)`` on both
+        SQLite and HttpCatalogClient.
+        """
+        return self._docs.all_documents(limit, content_type=content_type, offset=offset)
 
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
         """Delegates to ``_DocumentOps.by_doc_id`` (nexus-mbm)."""
@@ -2223,4 +2258,135 @@ class Catalog:
     def compact(self) -> dict[str, int]:
         """Delegates to ``_SyncOps.compact`` (nexus-mbm)."""
         return self._sync.compact()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ANALYTICS QUERIES (nexus-xnz0o CLI port helpers — SQLite mirrors)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def list_owners(self) -> list[dict]:
+        """Return all owners for this catalog.
+
+        Backs commands/catalog.py owners_cmd.  Mirrors HttpCatalogClient.list_owners()
+        (nexus-xnz0o).  Returns list of dicts with keys: tumbler_prefix, name,
+        owner_type, repo_hash, description, repo_root, head_hash.
+        """
+        rows = self._db.execute(
+            "SELECT tumbler_prefix, name, owner_type, repo_hash, "
+            "description, repo_root, head_hash FROM owners"
+        ).fetchall()
+        return [
+            {
+                "tumbler_prefix": r[0],
+                "name": r[1],
+                "owner_type": r[2],
+                "repo_hash": r[3],
+                "description": r[4],
+                "repo_root": r[5] or "",
+                "head_hash": r[6],
+            }
+            for r in rows
+        ]
+
+    def distinct_doc_collections(self) -> list[str]:
+        """Return distinct non-empty physical_collection values from documents.
+
+        Backs commands/catalog.py backfill_collections_cmd.
+        Mirrors HttpCatalogClient.distinct_doc_collections() (nexus-xnz0o).
+        """
+        rows = self._db.execute(
+            "SELECT DISTINCT physical_collection FROM documents "
+            "WHERE physical_collection != '' ORDER BY physical_collection"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def owners_with_roots(self) -> dict[str, str]:
+        """Return {tumbler_prefix: repo_root} for owners with non-empty repo_root.
+
+        Backs commands/catalog.py prune_stale_cmd.
+        Mirrors HttpCatalogClient.owners_with_roots() (nexus-xnz0o).
+        """
+        rows = self._db.execute(
+            "SELECT tumbler_prefix, repo_root FROM owners WHERE repo_root != ''"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def orphaned_docs(self) -> list[dict]:
+        """Return documents with no incoming and no outgoing links.
+
+        Backs commands/catalog.py orphans_cmd.
+        Mirrors HttpCatalogClient.orphaned_docs() (nexus-xnz0o).
+        Returns list of dicts with tumbler, title, content_type, file_path.
+        """
+        rows = self._db.execute(
+            "SELECT d.tumbler, d.title, d.content_type, d.file_path "
+            "FROM documents d "
+            "WHERE NOT EXISTS (SELECT 1 FROM links WHERE from_tumbler = d.tumbler) "
+            "  AND NOT EXISTS (SELECT 1 FROM links WHERE to_tumbler = d.tumbler) "
+            "ORDER BY d.tumbler"
+        ).fetchall()
+        return [
+            {
+                "tumbler": r[0],
+                "title": r[1],
+                "content_type": r[2],
+                "file_path": r[3],
+            }
+            for r in rows
+        ]
+
+    def docs_with_absolute_paths(self) -> list[dict]:
+        """Return documents whose file_path begins with '/'.
+
+        Backs commands/doctor.py fix-paths check.
+        Mirrors HttpCatalogClient.docs_with_absolute_paths() (nexus-xnz0o).
+        Returns list of dicts with tumbler, file_path, physical_collection.
+        """
+        rows = self._db.execute(
+            "SELECT tumbler, file_path, physical_collection "
+            "FROM documents WHERE file_path LIKE '/%' ORDER BY tumbler"
+        ).fetchall()
+        return [
+            {
+                "tumbler": r[0],
+                "file_path": r[1],
+                "physical_collection": r[2] or "",
+            }
+            for r in rows
+        ]
+
+    def collection_doc_counts(self) -> dict[str, int]:
+        """Return {physical_collection: doc_count} for all non-empty collections.
+
+        Backs commands/catalog.py _check_collection_health which needs per-collection
+        doc counts to identify T3 orphans.
+        Mirrors HttpCatalogClient.collection_doc_counts() (nexus-xnz0o).
+        """
+        rows = self._db.execute(
+            "SELECT physical_collection, COUNT(*) FROM documents "
+            "WHERE physical_collection != '' GROUP BY physical_collection"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows if r[0]}
+
+    def get_collection_owner_root(self, name: str) -> tuple[str, str]:
+        """Return (owner_id, repo_root) for a collection name.
+
+        Backs commands/collection.py chain that previously queried
+        ``SELECT owner_id FROM collections WHERE name=?`` then
+        ``SELECT repo_root FROM owners WHERE tumbler_prefix=?``.
+        Mirrors HttpCatalogClient.get_collection_owner_root() (nexus-xnz0o).
+        Returns ("", "") when either lookup fails.
+        """
+        row = self._db.execute(
+            "SELECT owner_id FROM collections WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None:
+            return "", ""
+        owner_id: str = row[0] or ""
+        if not owner_id:
+            return owner_id, ""
+        o_row = self._db.execute(
+            "SELECT repo_root FROM owners WHERE tumbler_prefix = ?", (owner_id,)
+        ).fetchone()
+        repo_root: str = (o_row[0] if o_row else None) or ""
+        return owner_id, repo_root
 

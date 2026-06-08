@@ -1056,6 +1056,56 @@ class TestVerifyCommand:
         # No tumblers to verify, since doc_id was missing.
         assert "nothing to verify" in result.output.lower()
 
+    def test_verify_excludes_alias_rows(
+        self, initialized_catalog, catalog_env, monkeypatch,
+    ):
+        """Alias rows (alias_of != '') must NOT appear as ghosts in verify_cmd.
+
+        This pins the fix for nexus-xnz0o: all_documents() previously omitted
+        alias_of from its SELECT, so CatalogEntry.alias_of was always "" and
+        the ``not e.alias_of`` guard in verify_cmd was vacuously True.
+
+        Setup:
+          - Register a real doc with a doc_id in coll_paper; T3 says it's gone (ghost).
+          - Register a second doc with a doc_id; alias it to the first doc.
+          - T3 mock returns no IDs (both are "ghosts" if the alias filter is broken).
+          - Correct behaviour: only the real doc is a ghost; the alias is excluded.
+        """
+        from nexus.catalog.tumbler import Tumbler
+
+        coll = "knowledge__alias_test"
+        # Register the canonical doc (verifiable — has doc_id, has collection).
+        self._register_with_doc_id(
+            initialized_catalog, "1.1", "Canonical",
+            coll, "alias-test-canon-docid",
+        )
+        # Register a second doc and alias it to the canonical.
+        alias_tumbler = initialized_catalog.register(
+            Tumbler.parse("1.1"),
+            "Alias Doc",
+            content_type="knowledge",
+            physical_collection=coll,
+            meta={"doc_id": "alias-test-alias-docid"},
+        )
+        # Mark it as an alias of the canonical.
+        initialized_catalog.set_alias(alias_tumbler, Tumbler.parse("1.1.1"))
+
+        # T3 reports nothing in coll — both would be "ghosts" if alias filter broken.
+        self._patch_t3(monkeypatch, {coll: set()})
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "verify", "--collection", coll])
+
+        assert result.exit_code == 0, result.output
+        # "Canonical" is a ghost (expected).
+        assert "Canonical" in result.output or "1 ghost" in result.output or "ghost" in result.output.lower(), (
+            f"Expected Canonical to be flagged as ghost; output:\n{result.output}"
+        )
+        # "Alias Doc" must NOT appear — alias rows are excluded from ghost checks.
+        assert "Alias Doc" not in result.output, (
+            f"Alias row 'Alias Doc' appeared in verify output — alias filter broken:\n{result.output}"
+        )
+
     def test_verify_heal_drops_ghost(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):

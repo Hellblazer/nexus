@@ -149,6 +149,14 @@ public final class CatalogHandler implements HttpHandler {
                 case "/import/chunk"          -> handleImportChunk(exchange, tenant, method);
                 case "/import/collection"     -> handleImportCollection(exchange, tenant, method);
 
+                // ── Analytics queries (nexus-xnz0o CLI port helpers) ─────────
+                case "/docs/distinct-collections" -> handleDocsDistinctCollections(exchange, tenant, method);
+                case "/docs/collection-counts"    -> handleDocsCollectionCounts(exchange, tenant, method);
+                case "/docs/orphaned"             -> handleDocsOrphaned(exchange, tenant, method);
+                case "/docs/absolute-paths"       -> handleDocsAbsolutePaths(exchange, tenant, method);
+                case "/owners/all-with-roots"     -> handleOwnersWithRoots(exchange, tenant, method);
+                case "/collections/owner-root"    -> handleCollectionOwnerRoot(exchange, tenant, method);
+
                 // ── Scoring hot-path batch endpoints (nexus-qnp5s) ───────────
                 case "/docs/chunk-counts"     -> handleDocChunkCounts(exchange, tenant, method);
                 case "/links/from-batch"      -> handleLinksFromBatch(exchange, tenant, method);
@@ -739,6 +747,62 @@ public final class CatalogHandler implements HttpHandler {
         }
         var owners = repo.ownersByType(tenant, ownerType);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("owners", owners)));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ANALYTICS QUERIES (nexus-xnz0o CLI port helpers)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /** GET /v1/catalog/docs/distinct-collections — distinct non-empty physical_collection values. */
+    private void handleDocsDistinctCollections(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var colls = repo.distinctDocCollections(tenant);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("collections", colls)));
+    }
+
+    /** GET /v1/catalog/docs/collection-counts — {physical_collection: doc_count} for all non-empty collections. */
+    private void handleDocsCollectionCounts(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var counts = repo.collectionDocCounts(tenant);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("counts", counts)));
+    }
+
+    /** GET /v1/catalog/docs/orphaned — documents with no incoming or outgoing links. */
+    private void handleDocsOrphaned(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var docs = repo.orphanedDocs(tenant);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("documents", docs)));
+    }
+
+    /** GET /v1/catalog/docs/absolute-paths — documents whose file_path starts with '/'. */
+    private void handleDocsAbsolutePaths(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var docs = repo.docsWithAbsolutePaths(tenant);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("documents", docs)));
+    }
+
+    /** GET /v1/catalog/owners/all-with-roots — owners with non-empty repo_root. */
+    private void handleOwnersWithRoots(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var owners = repo.ownersWithRoots(tenant);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("owners", owners)));
+    }
+
+    /**
+     * GET /v1/catalog/collections/owner-root?name=X — (owner_id, repo_root) for a collection.
+     *
+     * <p>Returns 404 when the collection does not exist.
+     * Response: {"owner_id": "1.1", "repo_root": "/path/to/repo"}
+     */
+    private void handleCollectionOwnerRoot(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String name = queryParam(exchange, "name");
+        if (name == null || name.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"name query param required\"}"); return;
+        }
+        var result = repo.collectionOwnerRoot(tenant, name);
+        if (result == null) { HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}"); return; }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
     // ══════════════════════════════════════════════════════════════════════════

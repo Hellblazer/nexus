@@ -399,11 +399,7 @@ def backfill_collections_cmd(dry_run: bool) -> None:
             f"partial backfill. Re-run after T3 is reachable."
         ) from exc
 
-    rows = cat._db.execute(
-        "SELECT DISTINCT physical_collection FROM documents "
-        "WHERE physical_collection != ''"
-    ).fetchall()
-    catalog_names = {r[0] for r in rows if r[0]}
+    catalog_names = set(cat.distinct_doc_collections())
 
     candidate_names = sorted(t3_names | catalog_names)
     already = {r["name"] for r in cat.list_collections()}
@@ -501,11 +497,23 @@ def backfill_owner_id_cmd(dry_run: bool, from_documents: bool) -> None:
     from nexus.catalog.collections_owner_backfill import (  # noqa: PLC0415
         backfill_owner_id,
     )
+    from nexus.catalog.factory import _is_catalog_service_mode  # noqa: PLC0415
+
+    if _is_catalog_service_mode():
+        raise click.ClickException(
+            "nx catalog backfill-owner-id is not supported in service mode — "
+            "this one-time migration runs against the SQLite database directly. "
+            "Run it locally before switching to service mode. "
+            "Tracked in nexus follow-on bead (gated on nexus-gmiaf.24)."
+        )
 
     cat = _get_catalog()
-    with cat._db:
+    # epsilon-allow: backfill_owner_id() requires a raw SQLite connection by
+    # contract; service mode is guarded above. This pair will remain until
+    # the backfill function is refactored to use the catalog API.
+    with cat._db:  # epsilon-allow: SQLite-only write, service mode guarded above
         result = backfill_owner_id(
-            cat._db,
+            cat._db,  # epsilon-allow: SQLite-only write, service mode guarded above
             include_documents_fallback=from_documents,
             dry_run=dry_run,
         )
@@ -627,11 +635,8 @@ def migrate_fallback_cmd(
     if not target_model:
         target_model = voyage_model_for_collection(source)
 
-    rows = cat._db.execute(
-        "SELECT tumbler FROM documents WHERE physical_collection = ? "
-        "ORDER BY tumbler",
-        (source,),
-    ).fetchall()
+    entries = cat.list_by_collection(source)
+    rows = [(str(e.tumbler),) for e in sorted(entries, key=lambda e: str(e.tumbler))]
 
     if not rows:
         click.echo(f"{source}: 0 doc(s) to migrate.")
@@ -1600,18 +1605,26 @@ def link_audit_cmd(as_json: bool) -> None:
 def owners_cmd(as_json: bool) -> None:
     """List registered owners."""
     cat = _get_catalog()
-    rows = cat._db.execute(
-        "SELECT tumbler_prefix, name, owner_type, repo_hash, description FROM owners"
-    ).fetchall()
+    owners = cat.list_owners()
     if as_json:
         data = [
-            {"tumbler": r[0], "name": r[1], "type": r[2], "repo_hash": r[3], "description": r[4]}
-            for r in rows
+            {
+                "tumbler": o.get("tumbler_prefix"),
+                "name": o.get("name"),
+                "type": o.get("owner_type"),
+                "repo_hash": o.get("repo_hash"),
+                "description": o.get("description"),
+            }
+            for o in owners
         ]
         click.echo(json.dumps(data, indent=2))
     else:
-        for r in rows:
-            click.echo(f"{r[0]:<8} {r[2]:<10} {r[1]}")
+        for o in owners:
+            click.echo(
+                f"{o.get('tumbler_prefix', ''):<8} "
+                f"{o.get('owner_type', ''):<10} "
+                f"{o.get('name', '')}"
+            )
 
 
 @catalog.command("sync")
@@ -1796,20 +1809,14 @@ def _taxonomy_stats() -> dict | None:
 def stats_cmd(as_json: bool) -> None:
     """Show catalog statistics."""
     cat = _get_catalog()
-    db = cat._db
-    owner_count = db.execute("SELECT count(*) FROM owners").fetchone()[0]
-    doc_count = db.execute("SELECT count(*) FROM documents").fetchone()[0]
-    link_count = db.execute("SELECT count(*) FROM links").fetchone()[0]
-    type_counts = dict(
-        db.execute(
-            "SELECT content_type, count(*) FROM documents GROUP BY content_type"
-        ).fetchall()
-    )
-    link_type_counts = dict(
-        db.execute(
-            "SELECT link_type, count(*) FROM links GROUP BY link_type"
-        ).fetchall()
-    )
+    # nexus-xnz0o: stats() is uniform across SQLite and service mode.
+    s = cat.stats()
+    owner_count = s.get("owner_count", 0)
+    doc_count = s.get("doc_count", 0)
+    link_count = s.get("link_count", 0)
+    # by_content_type is included in the stats() response (nexus-xnz0o).
+    type_counts = s.get("by_content_type", {})
+    link_type_counts = s.get("links_by_type", {})
     tax = _taxonomy_stats()
     if as_json:
         payload: dict = {
@@ -1963,11 +1970,8 @@ def audit_membership_cmd(
             "Specify a COLLECTION or use --all-collections.",
         )
     cat = _get_catalog()
-    rows = cat._db.execute(
-        "SELECT tumbler, source_uri FROM documents "
-        "WHERE physical_collection = ?",
-        (collection,),
-    ).fetchall()
+    entries = cat.list_by_collection(collection)
+    rows = [(str(e.tumbler), e.source_uri or "") for e in entries]
 
     if not rows:
         if as_json:
@@ -2088,17 +2092,31 @@ def _audit_membership_all(*, as_json: bool) -> None:
     pre-fix.
     """
     cat = _get_catalog()
-    rows = cat._db.execute(
-        "SELECT physical_collection, source_uri, tumbler FROM documents "
-        "WHERE physical_collection != ''",
-    ).fetchall()
+    # nexus-xnz0o: replaced _db.execute with uniform catalog API.
+    # all_documents() paginates through the full catalog 200 at a time.
+    all_docs: list = []
+    offset = 0
+    while True:
+        page = cat.all_documents(limit=200, offset=offset)
+        if not page:
+            break
+        all_docs.extend(page)
+        if len(page) < 200:
+            break
+        offset += 200
+    rows = [
+        (e.physical_collection, e.source_uri or "", str(e.tumbler))
+        for e in all_docs
+        if e.physical_collection
+    ]
 
-    owner_rows = cat._db.execute(
-        "SELECT tumbler_prefix, owner_type, repo_root FROM owners",
-    ).fetchall()
+    owner_list = cat.list_owners()
     owners_by_prefix: dict[str, dict[str, str]] = {
-        row[0]: {"owner_type": row[1] or "", "repo_root": row[2] or ""}
-        for row in owner_rows
+        o["tumbler_prefix"]: {
+            "owner_type": o.get("owner_type") or "",
+            "repo_root":  o.get("repo_root") or "",
+        }
+        for o in owner_list
     }
 
     by_collection: dict[str, dict[str, int]] = {}
@@ -2290,23 +2308,16 @@ def orphans_cmd(no_links: bool) -> None:
         raise click.UsageError("Specify a mode: --no-links")
 
     cat = _get_catalog()
-    db = cat._db
-    rows = db.execute(
-        """
-        SELECT tumbler, title, content_type, file_path
-        FROM documents
-        WHERE tumbler NOT IN (SELECT from_tumbler FROM links)
-          AND tumbler NOT IN (SELECT to_tumbler FROM links)
-        ORDER BY content_type, tumbler
-        """
-    ).fetchall()
+    # nexus-xnz0o: orphaned_docs() is uniform across SQLite and service mode.
+    orphans = cat.orphaned_docs()
+    rows = [(d["tumbler"], d["title"], d["content_type"], d["file_path"]) for d in orphans]
 
     if not rows:
         click.echo("No orphan entries (all documents have at least one link).")
         return
 
     click.echo(f"Orphan entries ({len(rows)} with no links):")
-    for tumbler, title, content_type, file_path in rows:
+    for tumbler, title, content_type, file_path in sorted(rows, key=lambda r: (r[2], r[0])):
         loc = f"  [{file_path}]" if file_path else ""
         click.echo(f"  {tumbler:<12} {content_type:<10} {title}{loc}")
 
@@ -2355,23 +2366,35 @@ def verify_cmd(heal: bool, collection: str, json_out: bool) -> None:
     import json as _json
 
     cat = _get_catalog()
-    db = cat._db
-
-    sql = (
-        "SELECT tumbler, title, physical_collection, "
-        "json_extract(metadata, '$.doc_id') AS doc_id "
-        "FROM documents "
-        "WHERE alias_of = '' "
-        "  AND physical_collection IS NOT NULL "
-        "  AND physical_collection != '' "
-        "  AND doc_id IS NOT NULL "
-    )
-    params: tuple = ()
+    # nexus-xnz0o: replaced raw SQL with catalog API.
+    # Fetch docs for a single collection or all distinct collections.
     if collection:
-        sql += "  AND physical_collection = ? "
-        params = (collection,)
-    sql += "ORDER BY physical_collection, tumbler"
-    rows = db.execute(sql, params).fetchall()
+        coll_entries = cat.list_by_collection(collection)
+        all_entries = [(e, collection) for e in coll_entries]
+    else:
+        # Paginate through all documents.
+        all_entries = []
+        offset = 0
+        while True:
+            page = cat.all_documents(limit=200, offset=offset)
+            if not page:
+                break
+            for e in page:
+                if e.physical_collection and not e.alias_of:
+                    all_entries.append((e, e.physical_collection))
+            if len(page) < 200:
+                break
+            offset += 200
+
+    # Build rows: (tumbler, title, physical_collection, doc_id)
+    # Only entries with a non-empty meta.doc_id are verifiable; entries
+    # without doc_id are silently skipped (same semantics as original SQL
+    # ``WHERE metadata->>'doc_id' != ''``).
+    rows = [
+        (str(e.tumbler), e.title, coll, e.meta.get("doc_id"))
+        for e, coll in all_entries
+        if not e.alias_of and coll and e.meta.get("doc_id")
+    ]
 
     if not rows:
         if collection:
@@ -2490,34 +2513,45 @@ def links_for_file_cmd(file_path: str) -> None:
       nx catalog links-for-file docs/rdr/rdr-060.md
     """
     cat = _get_catalog()
-    db = cat._db
-
-    row = db.execute(
-        "SELECT tumbler, title, content_type FROM documents WHERE file_path = ?",
-        (file_path,),
-    ).fetchone()
-    if not row:
+    # nexus-xnz0o: replaced raw SQL with catalog API.
+    entry = cat.find_by_file_path(file_path)
+    if not entry:
         click.echo(f"No catalog entry for: {file_path}")
         return
 
-    tumbler_str, title, content_type = row
-    click.echo(f"{tumbler_str} {content_type}: {title}")
+    tumbler_str = str(entry.tumbler)
+    click.echo(f"{tumbler_str} {entry.content_type}: {entry.title}")
 
-    link_rows = db.execute(
-        """SELECT d.tumbler, d.title, d.content_type, l.link_type,
-                  CASE WHEN l.from_tumbler = ? THEN 'outgoing' ELSE 'incoming' END as direction
-           FROM links l
-           JOIN documents d ON (d.tumbler = l.to_tumbler AND l.from_tumbler = ?)
-                            OR (d.tumbler = l.from_tumbler AND l.to_tumbler = ?)
-           ORDER BY l.link_type, d.content_type""",
-        (tumbler_str, tumbler_str, tumbler_str),
-    ).fetchall()
+    links_out = cat.links_from(entry.tumbler)
+    links_in  = cat.links_to(entry.tumbler)
 
-    if not link_rows:
+    all_link_rows = []
+    for lnk in links_out:
+        peer = cat.resolve(lnk.to_tumbler) if hasattr(lnk, "to_tumbler") else None
+        to_t = getattr(lnk, "to_tumbler", "")
+        all_link_rows.append((
+            str(to_t),
+            peer.title if peer else str(to_t),
+            peer.content_type if peer else "",
+            getattr(lnk, "link_type", ""),
+            "outgoing",
+        ))
+    for lnk in links_in:
+        peer = cat.resolve(lnk.from_tumbler) if hasattr(lnk, "from_tumbler") else None
+        from_t = getattr(lnk, "from_tumbler", "")
+        all_link_rows.append((
+            str(from_t),
+            peer.title if peer else str(from_t),
+            peer.content_type if peer else "",
+            getattr(lnk, "link_type", ""),
+            "incoming",
+        ))
+
+    if not all_link_rows:
         click.echo("  No links.")
         return
 
-    for t, t_title, t_type, l_type, direction in link_rows:
+    for t, t_title, t_type, l_type, direction in sorted(all_link_rows, key=lambda r: (r[3], r[2])):
         arrow = "→" if direction == "outgoing" else "←"
         click.echo(f"  {arrow} [{l_type}] {t} {t_type}: {t_title}")
 
@@ -2559,31 +2593,37 @@ def session_summary_cmd(since: int) -> None:
     if not files:
         click.echo(f"No files modified in the last {since} hours.")
     else:
-        db = cat._db
+        # nexus-xnz0o: replaced raw SQL with catalog API (uniform across backends).
         found_any = False
         for fp in sorted(files):
-            row = db.execute(
-                "SELECT tumbler FROM documents WHERE file_path = ?", (fp,)
-            ).fetchone()
-            if not row:
+            entry = cat.find_by_file_path(fp)
+            if not entry:
                 continue
-            tumbler_str = row[0]
-            link_rows = db.execute(
-                """SELECT DISTINCT d.title FROM links l
-                   JOIN documents d ON (d.tumbler = l.to_tumbler AND l.from_tumbler = ?)
-                                    OR (d.tumbler = l.from_tumbler AND l.to_tumbler = ?)
-                   WHERE d.content_type = 'rdr'""",
-                (tumbler_str, tumbler_str),
-            ).fetchall()
-            if link_rows:
-                rdrs = ", ".join(r[0] for r in link_rows)
-                click.echo(f"  {fp} — {len(link_rows)} RDR(s): {rdrs}")
+            tumbler = entry.tumbler
+            # Collect titles of linked RDR documents (content_type == 'rdr').
+            rdr_titles: list[str] = []
+            for lnk in cat.links_from(tumbler):
+                peer_t = getattr(lnk, "to_tumbler", None)
+                if peer_t:
+                    peer = cat.resolve(peer_t)
+                    if peer and peer.content_type == "rdr":
+                        rdr_titles.append(peer.title)
+            for lnk in cat.links_to(tumbler):
+                peer_t = getattr(lnk, "from_tumbler", None)
+                if peer_t:
+                    peer = cat.resolve(peer_t)
+                    if peer and peer.content_type == "rdr":
+                        rdr_titles.append(peer.title)
+            rdr_titles = list(dict.fromkeys(rdr_titles))  # deduplicate order-preserving
+            if rdr_titles:
+                rdrs = ", ".join(rdr_titles)
+                click.echo(f"  {fp} — {len(rdr_titles)} RDR(s): {rdrs}")
                 found_any = True
 
         if not found_any:
             click.echo("No linked RDRs found for recently modified files.")
 
-    total = cat._db.execute("SELECT COUNT(*) FROM links").fetchone()[0]
+    total = cat.stats().get("link_count", 0)
     click.echo(f"\nLink graph: {total} links active.")
 
 
@@ -2623,15 +2663,22 @@ def gc_cmd(dry_run: bool, confirm: bool) -> None:
     cat = _get_catalog()
     writer = _get_catalog_writer()
 
-    rows = cat._db.execute(
-        "SELECT tumbler, title, file_path, metadata FROM documents"
-    ).fetchall()
+    # nexus-xnz0o: use all_documents() (uniform across SQLite + service mode).
+    all_docs = []
+    offset = 0
+    while True:
+        page = cat.all_documents(limit=200, offset=offset)
+        if not page:
+            break
+        all_docs.extend(page)
+        if len(page) < 200:
+            break
+        offset += 200
 
     orphans: list[tuple[str, str, str]] = []
-    for tumbler_str, title, file_path, meta_json in rows:
-        meta = json.loads(meta_json) if meta_json else {}
-        if int(meta.get("miss_count", 0)) >= 2:
-            orphans.append((tumbler_str, title or "", file_path or ""))
+    for entry in all_docs:
+        if int(entry.meta.get("miss_count", 0)) >= 2:
+            orphans.append((str(entry.tumbler), entry.title or "", entry.file_path or ""))
 
     if not orphans:
         click.echo("No orphan entries found.")
@@ -2690,7 +2737,17 @@ def coverage_cmd(owner_prefix: str) -> None:
       nx catalog coverage --owner 1.1   # only entries under owner 1.1
     """
     cat = _get_catalog()
-    db = cat._db
+    # nexus-xnz0o: coverage_cmd uses complex GROUP BY + JOIN analytics that are
+    # not yet available via the service API. Guard fail-loud in service mode.
+    from nexus.catalog.factory import _is_catalog_service_mode  # noqa: PLC0415
+    if _is_catalog_service_mode():
+        raise click.ClickException(
+            "nx catalog coverage is not supported in service mode — "
+            "this command uses complex SQL analytics. "
+            "Tracked as follow-on to nexus-xnz0o (gated on nexus-gmiaf.24)."
+        )
+
+    db = cat._db  # epsilon-allow: SQLite-only path, service mode guarded above
 
     # Fetch all distinct content types under filter
     if owner_prefix:
@@ -2788,8 +2845,6 @@ def link_density_cmd(
     import statistics  # noqa: PLC0415
 
     cat = _get_catalog()
-    db = cat._db
-
     # By design the bead specifies physical_collection grouping; the
     # ``--no-by-collection`` flag is a placeholder for a future
     # global-density rollup so the option signature stays stable.
@@ -2797,13 +2852,14 @@ def link_density_cmd(
         click.echo("Global rollup not yet implemented — use --by-collection.")
         return
 
-    rows = db.execute(
-        "SELECT physical_collection, COUNT(*) FROM documents "
-        "WHERE physical_collection IS NOT NULL "
-        "  AND physical_collection != '' "
-        "GROUP BY physical_collection "
-        "ORDER BY physical_collection"
-    ).fetchall()
+    # nexus-xnz0o: replaced raw SQL GROUP BY with distinct_doc_collections() +
+    # list_by_collection() for uniform SQLite + service mode support.
+    collections = cat.distinct_doc_collections()
+    # Build (collection, total) pairs via list_by_collection (cached per-call).
+    coll_entries: dict[str, list] = {}
+    for coll in collections:
+        coll_entries[coll] = cat.list_by_collection(coll)
+    rows = [(coll, len(entries)) for coll, entries in sorted(coll_entries.items())]
 
     if not rows:
         click.echo("No collections registered in catalog.")
@@ -2821,17 +2877,11 @@ def link_density_cmd(
                f"{'-' * 6:<8}  ----------")
 
     for coll, total in rows:
-        seed_rows = db.execute(
-            "SELECT tumbler FROM documents "
-            "WHERE physical_collection = ? "
-            "LIMIT ?",
-            (coll, sample),
-        ).fetchall()
-
+        seed_entries = coll_entries.get(coll, [])[:sample]
         seeds: list[Tumbler] = []
-        for r in seed_rows:
+        for e in seed_entries:
             try:
-                seeds.append(Tumbler.parse(r[0]))
+                seeds.append(Tumbler.parse(str(e.tumbler)))
             except Exception:
                 continue
 
@@ -2961,12 +3011,9 @@ def _owner_by_name(cat: Catalog, name: str) -> Tumbler | None:
     namespaces are separate; repo owners are reachable only via
     ``Catalog.owner_for_repo(repo_hash)``.
     """
-    row = cat._db.execute(
-        "SELECT tumbler_prefix FROM owners WHERE name = ? "
-        "AND owner_type = 'curator'",
-        (name,),
-    ).fetchone()
-    return Tumbler.parse(row[0]) if row else None
+    # nexus-xnz0o: use curator_owner_tumbler_by_name() (portable API).
+    prefix = cat.curator_owner_tumbler_by_name(name)
+    return Tumbler.parse(prefix) if prefix else None
 
 
 def _get_or_create_curator(cat: Catalog, name: str, *, writer: object = None) -> Tumbler:
@@ -3456,11 +3503,9 @@ def _backfill_per_file_from_t3(
 
     # Look up the owner's repo_root so we can anchor file_paths
     # relative to it (matches the post-RDR-060 catalog convention).
-    repo_root_row = cat._db.execute(
-        "SELECT repo_root FROM owners WHERE tumbler_prefix = ?",
-        (str(owner),),
-    ).fetchone()
-    repo_root = (repo_root_row[0] or "") if repo_root_row else ""
+    # nexus-xnz0o: use get_owner_by_prefix() (uniform API).
+    owner_rec = cat.get_owner_by_prefix(str(owner))
+    repo_root = (owner_rec.get("repo_root") or "") if owner_rec else ""
 
     # Determine content_type from prefix.
     if collection.startswith("code__"):
@@ -4156,9 +4201,8 @@ def prune_stale_cmd(
     # operator ran the verb from a different repo (verified 2026-05-08:
     # 11,766 valid entries reported as stale because cwd was nexus, not
     # the entry's owning repo).
-    owner_roots = dict(cat._db.execute(
-        "SELECT tumbler_prefix, repo_root FROM owners WHERE repo_root != ''"
-    ))
+    # nexus-xnz0o: use owners_with_roots() (uniform API).
+    owner_roots = cat.owners_with_roots()
 
     stale: list = []  # entries to delete
     skipped_replacement: list = []  # entries with RDR-prefix replacement
@@ -4762,11 +4806,8 @@ def _run_collections_drift() -> dict:
         r["name"] for r in projection if r.get("superseded_by")
     }
 
-    rows = cat._db.execute(
-        "SELECT DISTINCT physical_collection FROM documents "
-        "WHERE physical_collection != ''"
-    ).fetchall()
-    doc_collections = {r[0] for r in rows if r[0]}
+    # nexus-xnz0o: use distinct_doc_collections() (uniform API).
+    doc_collections = set(cat.distinct_doc_collections())
 
     t3_not_in_projection = sorted(t3_names - projection_names)
     doc_not_in_projection = sorted(doc_collections - projection_names)
@@ -5134,11 +5175,8 @@ def _run_t3_vs_catalog() -> dict:
         }
 
     t3_names = set(t3_listing.keys())
-    rows = cat._db.execute(
-        "SELECT physical_collection, COUNT(*) FROM documents "
-        "WHERE physical_collection != '' GROUP BY physical_collection"
-    ).fetchall()
-    docs_per_coll: dict[str, int] = dict(rows)
+    # nexus-xnz0o: use collection_doc_counts() (uniform API).
+    docs_per_coll: dict[str, int] = cat.collection_doc_counts()
 
     # T3 collections with chunks but zero catalog docs:
     t3_orphans = []
@@ -5842,14 +5880,14 @@ def _run_t3_doc_id_coverage(
     # rename via ``superseded_by``; skip those in T3 lookups instead of
     # reporting them as ``error: open: Collection X does not exist``
     # (which would flip overall_pass to false on every renamed coll).
+    # nexus-xnz0o: use list_collections() (uniform API) — superseded_by is in every row.
     superseded_map: dict[str, str] = {}
     try:
-        rows = cat._db.execute(
-            "SELECT name, superseded_by FROM collections "
-            "WHERE superseded_by != ''"
-        ).fetchall()
-        for row in rows:
-            superseded_map[row[0]] = row[1]
+        superseded_map = {
+            r["name"]: r["superseded_by"]
+            for r in cat.list_collections()
+            if r.get("superseded_by")
+        }
     except Exception:
         pass
 
@@ -6479,14 +6517,11 @@ def collection_gc_cmd(apply: bool) -> None:
     # than a raw Python traceback.
     try:
         projection_names = {r["name"] for r in cat.list_collections()}
-        doc_collection_rows = cat._db.execute(
-            "SELECT DISTINCT physical_collection FROM documents "
-            "WHERE physical_collection != ''"
-        ).fetchall()
+        # nexus-xnz0o: use distinct_doc_collections() (uniform API).
+        doc_collection_names = set(cat.distinct_doc_collections())
     except Exception as exc:
         click.echo(f"Failed to query catalog: {exc}", err=True)
         raise SystemExit(1)
-    doc_collection_names = {r[0] for r in doc_collection_rows if r[0]}
 
     candidates: list[tuple[str, int]] = []
     skipped_referenced = 0
@@ -6882,17 +6917,15 @@ def link_existing_cmd(
     t3 = make_t3()
 
     if dry_run:
-        # Dry-run only: count without writing.
-        rows = cat._db.execute(
-            "SELECT COUNT(*) FROM documents "
-            "WHERE physical_collection = ? AND title != ''"
-            if match_by == "title" else
-            "SELECT COUNT(*) FROM documents "
-            "WHERE physical_collection = ? AND head_hash != ''",
-            (collection,),
-        ).fetchone()
+        # nexus-xnz0o: use list_by_collection() to count matching docs (uniform API).
+        # Avoids direct _db access for this diagnostic-only count.
+        coll_docs = cat.list_by_collection(collection)
+        if match_by == "title":
+            count = sum(1 for e in coll_docs if e.title)
+        else:
+            count = sum(1 for e in coll_docs if e.head_hash)
         click.echo(
-            f"Existing catalog Documents with {match_by}: {rows[0]}"
+            f"Existing catalog Documents with {match_by}: {count}"
         )
         col = t3._client.get_collection(name=collection)
         click.echo(f"T3 chunks in {collection}: {col.count()}")
