@@ -233,6 +233,29 @@ public final class VectorRepository {
         return chroma.delete(collection, ids);
     }
 
+    // ── update-metadata (frecency, RDR-152 nexus-enehl) ──────────────────────
+
+    /**
+     * Metadata-only update on existing chunks — no re-embedding.
+     *
+     * <p>Used by the frecency-only reindex path: updates {@code frecency_score}
+     * on already-stored chunks without touching document text or embedding vectors.
+     * Batches at {@code MAX_RECORDS_PER_WRITE} (300) per quota.
+     *
+     * @param collection target collection name
+     * @param ids        chunk IDs to update
+     * @param metadatas  replacement metadata maps (must be aligned with ids)
+     */
+    public void updateMetadata(String collection,
+                               List<String> ids,
+                               List<Map<String, Object>> metadatas) {
+        if (ids.isEmpty()) return;
+        quota.validateMetadataUpdate(ids, metadatas);
+        log.debug("event=update_metadata collection={} count={}", collection, ids.size());
+        chroma.update(collection, ids, metadatas);
+        log.debug("event=update_metadata_done collection={} count={}", collection, ids.size());
+    }
+
     // ── list_collections ──────────────────────────────────────────────────────
 
     public List<Map<String, Object>> listCollections() {

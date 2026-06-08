@@ -93,6 +93,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/store-get"     -> handleStoreGet(exchange, method);
                 case "/store-list"    -> handleStoreList(exchange, method);
                 case "/store-delete"  -> handleStoreDelete(exchange, method);
+                case "/update-metadata" -> handleUpdateMetadata(exchange, method);
                 case "/collections"   -> handleCollections(exchange, method);
                 case "/count"         -> handleCount(exchange, method);
                 case "/embed"         -> handleEmbed(exchange, method);    // parity gate
@@ -301,6 +302,44 @@ public final class VectorHandler implements HttpHandler {
 
         int deleted = repo.delete(collection, ids);
         HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
+    }
+
+    /**
+     * POST /v1/vectors/update-metadata  (RDR-152 bead nexus-enehl)
+     *
+     * <p>Metadata-only update on existing chunks — no re-embedding.
+     * Used by the Python {@code _ServiceCollectionStub.update()} call from
+     * {@code _run_index_frecency_only}: updates {@code frecency_score} on
+     * already-stored chunks without touching document text or vectors.
+     *
+     * <p>Quota: ≤ 300 ids per call (client batches larger updates).
+     * Tenant header accepted but not applied to Chroma (collection-name scoping is the boundary).
+     *
+     * <p>Request:
+     * <pre>
+     * {
+     *   "collection": "code__owner__voyage-code-3__v1",
+     *   "ids":        ["sha256hex...", ...],
+     *   "metadatas":  [{"frecency_score": 0.75, ...}, ...]
+     * }
+     * </pre>
+     *
+     * <p>Response 200: {"updated": N}
+     */
+    private void handleUpdateMetadata(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        String collection                     = requireString(body, "collection");
+        List<String> ids                      = requireStringList(body, "ids");
+        List<Map<String, Object>> metadatas   = optMetadataList(body, "metadatas", ids.size());
+
+        if (metadatas.size() != ids.size()) {
+            throw new IllegalArgumentException(
+                    "metadatas length " + metadatas.size() + " != ids length " + ids.size());
+        }
+
+        repo.updateMetadata(collection, ids, metadatas);
+        HttpUtil.send(ex, 200, json(Map.of("updated", ids.size())));
     }
 
     /**

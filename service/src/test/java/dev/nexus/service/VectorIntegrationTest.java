@@ -329,6 +329,139 @@ class VectorIntegrationTest {
         assertThat(collections).anyMatch(c -> colName.equals(c.get("name")));
     }
 
+    // ── Test 7a: update-metadata (nexus-enehl frecency port) ─────────────────
+    //
+    // Proves that POST /v1/vectors/update-metadata:
+    //   1. Returns HTTP 200 {"updated": N}
+    //   2. The Chroma metadata is actually updated (frecency_score visible via store-get)
+    //   3. The original document text is preserved (no re-embed — metadata-only update)
+    //
+    // This is the real-service proof that the split-brain guard fix works:
+    // frecency updates land in the service's Chroma, NOT daemon-Chroma.
+
+    @Test
+    void updateMetadata_updatesFrecencyScore_andPreservesDocument() throws Exception {
+        String colName   = COLLECTION + "-update-meta";
+        String chunkId   = "update-meta-chunk-01";
+        String chunkText = "Frecency metadata update test: semantic search uses this chunk.";
+
+        // 1. Seed one chunk
+        var upsertBody = Map.of(
+                "collection", colName,
+                "ids",        List.of(chunkId),
+                "documents",  List.of(chunkText),
+                "metadatas",  List.of(Map.of("frecency_score", 0.0, "source_path", "/test/path.py"))
+        );
+        var upsertResp = post("/v1/vectors/upsert-chunks", upsertBody);
+        assertThat(upsertResp.statusCode()).as("upsert 200").isEqualTo(200);
+
+        // 2. Update metadata (frecency_score only — no document text or embedding)
+        var updateBody = Map.of(
+                "collection", colName,
+                "ids",        List.of(chunkId),
+                "metadatas",  List.of(Map.of("frecency_score", 0.88, "source_path", "/test/path.py"))
+        );
+        var updateResp = post("/v1/vectors/update-metadata", updateBody);
+        assertThat(updateResp.statusCode()).as("update-metadata 200").isEqualTo(200);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> updateJson = MAPPER.readValue(updateResp.body(), MAP_TYPE);
+        assertThat(((Number) updateJson.get("updated")).intValue())
+                .as("updated count").isEqualTo(1);
+
+        // 3. Read back via store-get — verify frecency_score is updated
+        var getBody = Map.of(
+                "collection", colName,
+                "ids",        List.of(chunkId)
+        );
+        var getResp = post("/v1/vectors/store-get", getBody);
+        assertThat(getResp.statusCode()).as("store-get 200").isEqualTo(200);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> getJson = MAPPER.readValue(getResp.body(), MAP_TYPE);
+
+        @SuppressWarnings("unchecked")
+        List<String> returnedIds = (List<String>) getJson.get("ids");
+        assertThat(returnedIds).as("chunk id present after update").contains(chunkId);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> returnedMetas =
+                (List<Map<String, Object>>) getJson.get("metadatas");
+        assertThat(returnedMetas).isNotEmpty();
+        Map<String, Object> meta = returnedMetas.get(0);
+        assertThat(((Number) meta.get("frecency_score")).doubleValue())
+                .as("frecency_score updated to 0.88 (exact)")
+                .isEqualTo(0.88);
+
+        // 4. Verify document text is preserved (no re-embed happened)
+        @SuppressWarnings("unchecked")
+        List<String> returnedDocs = (List<String>) getJson.get("documents");
+        assertThat(returnedDocs).isNotEmpty();
+        assertThat(returnedDocs.get(0))
+                .as("document text preserved after metadata-only update")
+                .isEqualTo(chunkText);
+    }
+
+    // ── Test 7b: update-metadata — batch of multiple chunks ───────────────────
+
+    @Test
+    void updateMetadata_batchUpdate_allChunksUpdated() throws Exception {
+        String colName = COLLECTION + "-update-batch";
+        List<String> ids = List.of("batch-chunk-01", "batch-chunk-02", "batch-chunk-03");
+        List<String> docs = List.of(
+                "First chunk about machine learning.",
+                "Second chunk about databases.",
+                "Third chunk about cloud infrastructure.");
+        List<Map<String, Object>> metas = List.of(
+                Map.of("frecency_score", 0.0, "idx", 1),
+                Map.of("frecency_score", 0.0, "idx", 2),
+                Map.of("frecency_score", 0.0, "idx", 3)
+        );
+
+        // Seed all three
+        post("/v1/vectors/upsert-chunks", Map.of(
+                "collection", colName, "ids", ids,
+                "documents", docs, "metadatas", metas));
+
+        // Update all three with distinct frecency scores
+        List<Map<String, Object>> updatedMetas = List.of(
+                Map.of("frecency_score", 0.11, "idx", 1),
+                Map.of("frecency_score", 0.22, "idx", 2),
+                Map.of("frecency_score", 0.33, "idx", 3)
+        );
+        var updateResp = post("/v1/vectors/update-metadata", Map.of(
+                "collection", colName, "ids", ids, "metadatas", updatedMetas));
+        assertThat(updateResp.statusCode()).as("batch update 200").isEqualTo(200);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> updateJson = MAPPER.readValue(updateResp.body(), MAP_TYPE);
+        assertThat(((Number) updateJson.get("updated")).intValue())
+                .as("batch updated count").isEqualTo(3);
+
+        // Read back and verify all scores
+        var getResp = post("/v1/vectors/store-get", Map.of(
+                "collection", colName, "ids", ids));
+        assertThat(getResp.statusCode()).isEqualTo(200);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> getJson = MAPPER.readValue(getResp.body(), MAP_TYPE);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> returnedMetas =
+                (List<Map<String, Object>>) getJson.get("metadatas");
+        @SuppressWarnings("unchecked")
+        List<String> returnedIds = (List<String>) getJson.get("ids");
+
+        // Collect actual scores by id
+        java.util.Map<String, Double> scoreById = new java.util.HashMap<>();
+        for (int i = 0; i < returnedIds.size(); i++) {
+            scoreById.put(returnedIds.get(i),
+                    ((Number) returnedMetas.get(i).get("frecency_score")).doubleValue());
+        }
+        assertThat(scoreById).containsEntry("batch-chunk-01", 0.11)
+                              .containsEntry("batch-chunk-02", 0.22)
+                              .containsEntry("batch-chunk-03", 0.33);
+    }
+
     // ── Test 7: store-delete removes the chunk ───────────────────────────────
 
     @Test

@@ -1173,34 +1173,36 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     if info is None:
         return
 
-    # nexus-67ljl: guard against split-brain in service mode.
-    from nexus.db.http_vector_client import is_vector_service_mode as _is_svc  # noqa: PLC0415
-    if _is_svc():
-        _log.info(
-            "frecency_skipped_service_mode",
-            repo=str(repo),
-            reason="NX_STORAGE_BACKEND_VECTORS=service; frecency metadata update "
-                   "skipped to avoid split-brain with Java-owned Chroma. "
-                   "Port frecency update to service endpoint to restore (follow-on bead).",
-        )
-        return
-
     # RDR-103 Phase 3a: registry value preserves the legacy name when the
     # repo was added before the migration; fallback queries the catalog
     # for a conformant name (Phase 5 drops the legacy branch entirely).
     code_collection = info.get("code_collection", info["collection"])
     docs_collection = info.get("docs_collection") or _repo_collection_or_legacy(repo, "docs")
 
-    from nexus.config import is_local_mode
-    if not is_local_mode():
-        voyage_key = get_credential("voyage_api_key")
-        chroma_key = get_credential("chroma_api_key")
-        check_credentials(voyage_key, chroma_key)
+    from nexus.db.http_vector_client import is_vector_service_mode as _is_svc  # noqa: PLC0415
+    if _is_svc():
+        # nexus-enehl: service mode — route frecency metadata updates through
+        # the Java service's /v1/vectors/update-metadata endpoint.
+        # No credential check needed: the service handles its own Chroma/Voyage.
+        from nexus.db.http_vector_client import get_http_vector_client as _get_svc  # noqa: PLC0415
+        db = _get_svc()
+        _log.info(
+            "frecency_service_mode",
+            repo=str(repo),
+            reason="NX_STORAGE_BACKEND_VECTORS=service; routing frecency updates "
+                   "through Java service /v1/vectors/update-metadata endpoint.",
+        )
     else:
-        check_local_path_writable()
+        from nexus.config import is_local_mode
+        if not is_local_mode():
+            voyage_key = get_credential("voyage_api_key")
+            chroma_key = get_credential("chroma_api_key")
+            check_credentials(voyage_key, chroma_key)
+        else:
+            check_local_path_writable()
+        db = make_t3()
 
     frecency_map = batch_frecency(repo)
-    db = make_t3()
 
     # nexus-f4z9: pre-resolve doc_ids once for all files so the chunk
     # lookup can key on ``doc_id`` when the catalog has the entry.

@@ -301,6 +301,174 @@ class TestListCollections:
         assert result == []
 
 
+class TestUpdateChunks:
+    """RDR-152 nexus-enehl: update_chunks routes to /v1/vectors/update-metadata."""
+
+    def test_posts_to_update_metadata_endpoint(self, monkeypatch):
+        client = HttpVectorClient()
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            return {"updated": 2}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        client.update_chunks(
+            "code__repo__voyage-code-3__v1",
+            ["id1", "id2"],
+            [{"frecency_score": 0.5}, {"frecency_score": 0.8}],
+        )
+        assert len(calls) == 1
+        path, body = calls[0]
+        assert path == "/v1/vectors/update-metadata"
+        assert body["collection"] == "code__repo__voyage-code-3__v1"
+        assert body["ids"] == ["id1", "id2"]
+        assert body["metadatas"] == [{"frecency_score": 0.5}, {"frecency_score": 0.8}]
+
+    def test_empty_ids_is_noop(self, monkeypatch):
+        client = HttpVectorClient()
+        posted = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: posted.append((path, body))
+        )
+        client.update_chunks("col", [], [])
+        assert posted == []
+
+    def test_tenant_forwarded(self, monkeypatch):
+        client = HttpVectorClient(tenant="my-tenant")
+        calls = []
+        def fake_post(path, body, *, tenant="default"):
+            calls.append(tenant)
+            return {"updated": 1}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        client.update_chunks("col", ["id1"], [{"k": "v"}])
+        assert calls == ["my-tenant"]
+
+
+class TestGetCollection:
+    """RDR-152 nexus-enehl: get_collection raises ChromaNotFoundError when absent."""
+
+    def test_returns_stub_when_collection_exists(self, monkeypatch):
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        client = HttpVectorClient()
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._get",
+            lambda path, **kw: [{"name": "code__repo__model__v1", "id": "uuid-1"}]
+        )
+        stub = client.get_collection("code__repo__model__v1")
+        assert isinstance(stub, _ServiceCollectionStub)
+
+    def test_raises_not_found_when_absent(self, monkeypatch):
+        from chromadb.errors import NotFoundError as _ChromaNotFoundError
+        client = HttpVectorClient()
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._get",
+            lambda path, **kw: [{"name": "other__col__model__v1", "id": "uuid-2"}]
+        )
+        with pytest.raises(_ChromaNotFoundError):
+            client.get_collection("code__repo__model__v1")
+
+    def test_raises_not_found_on_empty_list(self, monkeypatch):
+        from chromadb.errors import NotFoundError as _ChromaNotFoundError
+        client = HttpVectorClient()
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._get",
+            lambda path, **kw: []
+        )
+        with pytest.raises(_ChromaNotFoundError):
+            client.get_collection("any__col__model__v1")
+
+    def test_raises_not_found_on_service_error(self, monkeypatch):
+        from chromadb.errors import NotFoundError as _ChromaNotFoundError
+        client = HttpVectorClient()
+        def raise_err(path, **kw):
+            raise VectorServiceError("connection refused")
+        monkeypatch.setattr("nexus.db.http_vector_client._get", raise_err)
+        with pytest.raises(_ChromaNotFoundError):
+            client.get_collection("col__name__model__v1")
+
+
+class TestServiceCollectionStubGetWithIds:
+    """RDR-152 nexus-enehl: _ServiceCollectionStub.get(ids=...) routes to store-get."""
+
+    def test_ids_routes_to_store_get(self, monkeypatch):
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            return {"ids": ["id1"], "documents": ["text"], "metadatas": [{"k": "v"}]}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        result = stub.get(ids=["id1"], include=["metadatas"])
+        assert len(calls) == 1
+        path, body = calls[0]
+        assert path == "/v1/vectors/store-get"
+        assert body["ids"] == ["id1"]
+        assert result["ids"] == ["id1"]
+        assert result["metadatas"] == [{"k": "v"}]
+
+    def test_where_routes_to_get(self, monkeypatch):
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            return {"ids": [], "documents": [], "metadatas": []}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        stub.get(where={"source_path": "/foo.py"}, limit=10, offset=0)
+        assert calls[0][0] == "/v1/vectors/get"
+
+    def test_neither_ids_nor_where_routes_to_get(self, monkeypatch):
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            return {"ids": [], "documents": [], "metadatas": []}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("col__test__m__v1")
+        stub.get(limit=5, offset=0)
+        assert calls[0][0] == "/v1/vectors/get"
+
+
+class TestServiceCollectionStubUpdate:
+    """RDR-152 nexus-enehl: _ServiceCollectionStub.update routes to update-metadata."""
+
+    def test_posts_to_update_metadata(self, monkeypatch):
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        calls = []
+        def fake_post(path, body, **kw):
+            calls.append((path, body))
+            return {"updated": 1}
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        stub = _ServiceCollectionStub("code__repo__model__v1")
+        stub.update(["id1"], [{"frecency_score": 0.75}])
+        assert len(calls) == 1
+        path, body = calls[0]
+        assert path == "/v1/vectors/update-metadata"
+        assert body["collection"] == "code__repo__model__v1"
+        assert body["ids"] == ["id1"]
+        assert body["metadatas"] == [{"frecency_score": 0.75}]
+
+    def test_empty_ids_is_noop(self, monkeypatch):
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        posted = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: posted.append((path, body))
+        )
+        stub = _ServiceCollectionStub("col")
+        stub.update([], [])
+        assert posted == []
+
+    def test_service_error_logged_not_raised(self, monkeypatch):
+        from nexus.db.http_vector_client import _ServiceCollectionStub
+        def raise_err(path, body, **kw):
+            raise VectorServiceError("500")
+        monkeypatch.setattr("nexus.db.http_vector_client._post", raise_err)
+        stub = _ServiceCollectionStub("col")
+        # Must not raise
+        stub.update(["id1"], [{"frecency_score": 0.5}])
+
+
 class TestNotImplementedMethods:
     def test_delete_collection_raises(self):
         client = HttpVectorClient()

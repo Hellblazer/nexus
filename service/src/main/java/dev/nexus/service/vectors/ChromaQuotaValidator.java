@@ -150,4 +150,27 @@ public final class ChromaQuotaValidator {
             validateRecord(ids.get(i), doc, emb, meta);
         }
     }
+
+    /**
+     * Validate a metadata-only update batch (no documents or embeddings).
+     *
+     * <p>Used by the frecency-only update path (RDR-152 nexus-enehl):
+     * validates batch size and per-entry metadata without checking document
+     * or embedding constraints.
+     *
+     * @param ids       chunk IDs to update
+     * @param metadatas replacement metadata maps
+     */
+    public void validateMetadataUpdate(List<String> ids,
+                                        List<Map<String, Object>> metadatas) {
+        if (ids.size() > MAX_RECORDS_PER_WRITE) {
+            throw new QuotaViolation("batch_size", ids.size(), MAX_RECORDS_PER_WRITE,
+                    "Batch metadata updates in groups of <= " + MAX_RECORDS_PER_WRITE);
+        }
+        for (int i = 0; i < ids.size(); i++) {
+            Map<String, Object> meta = (metadatas != null && i < metadatas.size())
+                    ? metadatas.get(i) : null;
+            validateRecord(ids.get(i), null, null, meta);
+        }
+    }
 }
