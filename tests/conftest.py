@@ -571,6 +571,12 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # not applicable.
     "tests/test_catalog_consumer_service_mode.py::TestSQLiteCatalogNewMethods::test_collections_by_owner_filters",
     "tests/test_catalog_consumer_service_mode.py::TestHttpCatalogClientNewMethods::test_collections_by_owner",
+    #
+    # RDR-152 nexus-enehl: frecency metadata-update service client test. The
+    # voyage token is a realistic collection-NAME fixture for the update-chunks
+    # HTTP request body; the test asserts the request is POSTed to the
+    # /update-metadata endpoint, not any cloud-mode embedder behavior.
+    "tests/db/test_http_vector_client.py::TestUpdateChunks::test_posts_to_update_metadata_endpoint",
 })
 
 
