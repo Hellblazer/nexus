@@ -67,6 +67,13 @@ _SKIP_INTEGRATION = pytest.mark.skipif(
     ),
 )
 
+# Note: NO _BOOTSTRAP_SQL here.  The Java service runs Liquibase (SchemaMigrator)
+# at startup and self-migrates the full catalog schema before binding the HTTP port.
+# Pre-applying DDL causes "relation already exists" → MigrationException →
+# System.exit(1) → service never binds (same bug fixed in net63 / qnp5s).
+# The only pre-start SQL is SERVICE_ROLES_SQL (creates nexus_svc role needed by
+# grants-nexus-svc.xml runAlways changeset) applied in cat_etl_pg_instance.
+
 # ── SQLite schema (minimal, mirrors CatalogStore._SCHEMA_SQL) ─────────────────
 
 _CATALOG_SCHEMA = """\
@@ -151,181 +158,6 @@ CREATE TABLE IF NOT EXISTS _meta (
 """
 
 # ── Bootstrap SQL for hermetic Postgres (from test_http_catalog_integration.py) ─
-
-_BOOTSTRAP_SQL = """\
-CREATE SCHEMA IF NOT EXISTS nexus;
-
-CREATE TABLE nexus.catalog_owners (
-    tenant_id      TEXT NOT NULL,
-    tumbler_prefix TEXT NOT NULL,
-    name           TEXT NOT NULL,
-    owner_type     TEXT NOT NULL,
-    repo_hash      TEXT,
-    description    TEXT,
-    repo_root      TEXT NOT NULL DEFAULT '',
-    head_hash      TEXT,
-    next_seq       BIGINT NOT NULL DEFAULT 0,
-    CONSTRAINT catalog_owners_pk PRIMARY KEY (tenant_id, tumbler_prefix),
-    CONSTRAINT catalog_owners_unique_name_type UNIQUE (tenant_id, name, owner_type)
-);
-
-CREATE UNIQUE INDEX idx_catalog_owners_repo_hash
-    ON nexus.catalog_owners (tenant_id, repo_hash)
-    WHERE repo_hash IS NOT NULL AND repo_hash != '';
-
-CREATE TABLE nexus.catalog_documents (
-    tenant_id           TEXT             NOT NULL,
-    tumbler             TEXT             NOT NULL,
-    title               TEXT             NOT NULL,
-    author              TEXT,
-    year                INTEGER,
-    content_type        TEXT,
-    file_path           TEXT,
-    corpus              TEXT,
-    physical_collection TEXT,
-    chunk_count         INTEGER,
-    head_hash           TEXT,
-    indexed_at          TEXT,
-    metadata            JSONB,
-    source_mtime        DOUBLE PRECISION NOT NULL DEFAULT 0,
-    alias_of            TEXT             NOT NULL DEFAULT '',
-    source_uri          TEXT             NOT NULL DEFAULT '',
-    bib_year                  INTEGER NOT NULL DEFAULT 0,
-    bib_authors               TEXT    NOT NULL DEFAULT '',
-    bib_venue                 TEXT    NOT NULL DEFAULT '',
-    bib_citation_count        INTEGER NOT NULL DEFAULT 0,
-    bib_semantic_scholar_id   TEXT    NOT NULL DEFAULT '',
-    bib_openalex_id           TEXT    NOT NULL DEFAULT '',
-    bib_doi                   TEXT    NOT NULL DEFAULT '',
-    bib_enriched_at           TEXT    NOT NULL DEFAULT '',
-    fts_vector tsvector GENERATED ALWAYS AS (
-        to_tsvector('english', coalesce(title, ''))
-        || to_tsvector('simple',  coalesce(author, ''))
-        || to_tsvector('simple',  coalesce(corpus, ''))
-        || to_tsvector('simple',  coalesce(file_path, ''))
-    ) STORED,
-    CONSTRAINT catalog_documents_pk PRIMARY KEY (tenant_id, tumbler)
-);
-
-CREATE INDEX idx_catalog_documents_fts
-    ON nexus.catalog_documents USING GIN (fts_vector);
-CREATE INDEX idx_catalog_documents_collection
-    ON nexus.catalog_documents (tenant_id, physical_collection);
-CREATE INDEX idx_catalog_documents_source_uri
-    ON nexus.catalog_documents (tenant_id, source_uri)
-    WHERE source_uri != '';
-
-CREATE TABLE nexus.catalog_links (
-    tenant_id    TEXT    NOT NULL,
-    id           BIGSERIAL,
-    from_tumbler TEXT    NOT NULL,
-    to_tumbler   TEXT    NOT NULL,
-    link_type    TEXT    NOT NULL,
-    from_span    TEXT,
-    to_span      TEXT,
-    created_by   TEXT    NOT NULL,
-    created_at   TEXT,
-    metadata     JSONB,
-    CONSTRAINT catalog_links_pk PRIMARY KEY (tenant_id, id),
-    CONSTRAINT catalog_links_unique UNIQUE (tenant_id, from_tumbler, to_tumbler, link_type)
-);
-
-CREATE INDEX idx_catalog_links_from ON nexus.catalog_links (tenant_id, from_tumbler);
-CREATE INDEX idx_catalog_links_to   ON nexus.catalog_links (tenant_id, to_tumbler);
-
-CREATE TABLE nexus.catalog_document_chunks (
-    tenant_id   TEXT    NOT NULL,
-    doc_id      TEXT    NOT NULL,
-    position    INTEGER NOT NULL,
-    chash       TEXT    NOT NULL,
-    chunk_index INTEGER,
-    line_start  INTEGER,
-    line_end    INTEGER,
-    char_start  INTEGER,
-    char_end    INTEGER,
-    CONSTRAINT catalog_document_chunks_pk PRIMARY KEY (tenant_id, doc_id, position)
-);
-
-CREATE INDEX idx_catalog_chunks_doc_id
-    ON nexus.catalog_document_chunks (tenant_id, doc_id);
-
-CREATE TABLE nexus.catalog_collections (
-    tenant_id            TEXT NOT NULL,
-    name                 TEXT NOT NULL,
-    content_type         TEXT NOT NULL DEFAULT '',
-    owner_id             TEXT NOT NULL DEFAULT '',
-    embedding_model      TEXT NOT NULL DEFAULT '',
-    model_version        TEXT NOT NULL DEFAULT '',
-    display_name         TEXT NOT NULL DEFAULT '',
-    legacy_grandfathered INTEGER NOT NULL DEFAULT 0,
-    superseded_by        TEXT NOT NULL DEFAULT '',
-    superseded_at        TEXT NOT NULL DEFAULT '',
-    created_at           TEXT NOT NULL DEFAULT '',
-    CONSTRAINT catalog_collections_pk PRIMARY KEY (tenant_id, name)
-);
-
-CREATE TABLE nexus.catalog_meta (
-    tenant_id TEXT NOT NULL,
-    key       TEXT NOT NULL,
-    value     TEXT,
-    CONSTRAINT catalog_meta_pk PRIMARY KEY (tenant_id, key)
-);
-
-ALTER TABLE nexus.catalog_owners          ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.catalog_owners          FORCE  ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.catalog_owners
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
-ALTER TABLE nexus.catalog_documents       ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.catalog_documents       FORCE  ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.catalog_documents
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
-ALTER TABLE nexus.catalog_links           ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.catalog_links           FORCE  ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.catalog_links
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
-ALTER TABLE nexus.catalog_document_chunks ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.catalog_document_chunks FORCE  ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.catalog_document_chunks
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
-ALTER TABLE nexus.catalog_collections     ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.catalog_collections     FORCE  ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.catalog_collections
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
-ALTER TABLE nexus.catalog_meta            ENABLE ROW LEVEL SECURITY;
-ALTER TABLE nexus.catalog_meta            FORCE  ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON nexus.catalog_meta
-    USING      (tenant_id = current_setting('nexus.tenant', true))
-    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
-
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_etl_catalog') THEN
-    CREATE ROLE nexus_etl_catalog LOGIN PASSWORD 'nexus_etl_catalog_pass'
-    NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOBYPASSRLS;
-  END IF;
-END $$;
-
-GRANT CONNECT ON DATABASE nexus_cat_etltest TO nexus_etl_catalog;
-GRANT USAGE ON SCHEMA nexus TO nexus_etl_catalog;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_owners          TO nexus_etl_catalog;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_documents       TO nexus_etl_catalog;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_links           TO nexus_etl_catalog;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_document_chunks TO nexus_etl_catalog;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_collections     TO nexus_etl_catalog;
-GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_meta            TO nexus_etl_catalog;
-GRANT USAGE ON SEQUENCE nexus.catalog_links_id_seq TO nexus_etl_catalog;
-ALTER ROLE nexus_etl_catalog SET search_path TO nexus, public;
-"""
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -981,7 +813,16 @@ class TestMigrateCatalogMocked:
 
 @pytest.fixture(scope="module")
 def cat_etl_pg_instance():
-    """Hermetic PostgreSQL 16 instance for catalog ETL integration tests."""
+    """Hermetic PostgreSQL 16 instance for catalog ETL integration tests.
+
+    net63 pattern (same as test_http_catalog_integration.py / pg_instance):
+    - NO schema pre-application: Liquibase owns the full DDL lifecycle.
+      The JAR runs SchemaMigrator at startup and applies the full catalog-*
+      changelog before binding the HTTP port.
+    - nexus_svc role MUST exist before the JAR starts because
+      grants-nexus-svc.xml (runAlways=true) issues GRANT ... TO nexus_svc.
+      SERVICE_ROLES_SQL creates it as a NOSUPERUSER NOBYPASSRLS login role.
+    """
     if not _ALL_PREREQS:
         pytest.skip("missing jar or pg16 binaries")
 
@@ -1011,21 +852,8 @@ def cat_etl_pg_instance():
 
         pg = {"port": pg_port, "dbname": "nexus_cat_etltest", "user": pg_user, "pgdata": pgdata}
 
-        # Apply schema directly (JAR runs Liquibase at startup)
-        proc = subprocess.run(
-            [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
-             "-U", pg_user, "-d", "nexus_cat_etltest",
-             "-v", "ON_ERROR_STOP=1",
-             "-c", _BOOTSTRAP_SQL],
-            capture_output=True, text=True,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"psql bootstrap failed (rc={proc.returncode}):\n"
-                f"stdout={proc.stdout}\nstderr={proc.stderr}"
-            )
-
-        # Create nexus_svc before starting JAR (Liquibase grants-nexus-svc.xml)
+        # Create nexus_svc BEFORE starting the JAR (grants-nexus-svc.xml requires it).
+        # No _BOOTSTRAP_SQL: Liquibase creates the full catalog_* schema at JAR startup.
         _psql(pg, SERVICE_ROLES_SQL)
 
         yield pg
@@ -1039,24 +867,42 @@ def cat_etl_pg_instance():
 
 @pytest.fixture(scope="module")
 def cat_etl_service(cat_etl_pg_instance):
-    """Java service against the hermetic Postgres for catalog ETL tests."""
+    """Java service against the hermetic Postgres for catalog ETL tests.
+
+    Two-role DB configuration (same as test_http_catalog_integration.py / service):
+    - NX_DB_ADMIN_* = OS superuser (trust auth): Liquibase runs DDL as this role.
+    - NX_DB_USER/PASS = nexus_svc (NOSUPERUSER NOBYPASSRLS): HikariCP app pool
+      connects as this role so FORCE ROW LEVEL SECURITY actually applies.
+      nexus_svc is granted DML by grants-nexus-svc.xml (runAlways changeset).
+
+    NX_CHROMA_PATH: isolated temp dir to avoid opening the dev Chroma instance
+    at ~/.config/nexus/chroma (may have incompatible SQLite state).
+    """
     svc_port = _free_port()
     token = "cat-etl-bearer-token-abc123"
     pg = cat_etl_pg_instance
     pg_user = pg["user"]
+    pg_jdbc = f"jdbc:postgresql://127.0.0.1:{pg['port']}/{pg['dbname']}"
+    chroma_data = tempfile.mkdtemp(prefix="nexus-cat-etl-chroma-")
 
     env = {
         **os.environ,
         "NX_SERVICE_PORT":  str(svc_port),
         "NX_SERVICE_TOKEN": token,
-        "NX_DB_URL": (
-            f"jdbc:postgresql://127.0.0.1:{pg['port']}/{pg['dbname']}"
-        ),
-        "NX_DB_USER": pg_user,
-        "NX_DB_PASS": "",
+        # App pool: nexus_svc (NOSUPERUSER NOBYPASSRLS) — FORCE RLS applies.
+        "NX_DB_URL":  pg_jdbc,
+        "NX_DB_USER": "nexus_svc",
+        "NX_DB_PASS": "nexus_svc_pass",
         "NX_POOL_SIZE": "3",
+        # Migration pool: OS superuser — has DDL rights for full Liquibase run.
+        "NX_DB_ADMIN_URL":  pg_jdbc,
+        "NX_DB_ADMIN_USER": pg_user,
+        "NX_DB_ADMIN_PASS": "",
+        # Isolated Chroma: avoids version-mismatch panics against dev instance.
+        "NX_CHROMA_PATH": chroma_data,
     }
     env.pop("NX_STORAGE_BACKEND", None)
+    env.pop("NX_STORAGE_BACKEND_CATALOG", None)
 
     proc = subprocess.Popen(
         [str(_JAVA), "-jar", str(_JAR)],
@@ -1080,6 +926,7 @@ def cat_etl_service(cat_etl_pg_instance):
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+        shutil.rmtree(chroma_data, ignore_errors=True)
 
 
 @pytest.fixture(scope="module")
@@ -1275,7 +1122,7 @@ class TestCatalogEtlIntegration:
 
         # Documents visible once (not duplicated)
         docs = cat_etl_client.by_owner("1.6")
-        idem_docs = [d for d in docs if d.tumbler.startswith("1.6.")]
+        idem_docs = [d for d in docs if str(d.tumbler).startswith("1.6.")]
         assert len(idem_docs) == 2, (
             f"Expected 2 docs for owner 1.6 after 2 ETL runs, got {len(idem_docs)} — "
             "idempotency broken"
