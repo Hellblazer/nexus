@@ -343,3 +343,34 @@ class _ServiceCatalogWriter:
 
     def __exit__(self, *exc_info: Any) -> None:
         self.close()
+
+
+def make_catalog_client_for_migration(
+    *,
+    base_url: Optional[str] = None,
+    token: str = "",
+) -> Any:
+    """Return an :class:`HttpCatalogClient` for the ``storage migrate catalog`` ETL.
+
+    This is the sole authorised site for constructing an ``HttpCatalogClient``
+    with an explicit *base_url* and *token* outside the service-mode defaults.
+    Migration needs direct control over the target URL because it runs against
+    a specific Postgres service endpoint that may differ from the configured
+    default (e.g. a fresh staging instance during an initial data load).
+
+    Args:
+        base_url: Override the service URL.  ``None`` falls back to the
+            client's built-in env/config resolution (``NX_SERVICE_URL``).
+        token: Bearer token for ``X-Nexus-Token`` authentication.
+            Required; the caller is responsible for sourcing it.
+
+    Returns:
+        A live ``HttpCatalogClient`` configured for *base_url* / *token*.
+        Callers must call ``.close()`` or use it as a context manager.
+    """
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+    _log.debug("catalog_client_for_migration", base_url=base_url)
+    if base_url:
+        return HttpCatalogClient(base_url=base_url, _token=token)
+    return HttpCatalogClient(_token=token) if token else HttpCatalogClient()

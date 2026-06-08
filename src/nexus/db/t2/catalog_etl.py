@@ -39,11 +39,18 @@ FK INSERTION ORDER (critical):
   links come last to be safe.
 
 NEXT_SEQ RECONCILIATION:
-  After importing owners + documents, we issue a POST /v1/catalog/owners/head_hash
-  placeholder to bump next_seq on each owner so the service can safely
-  assign new document tumblers without colliding with migrated ones.
-  The post-migration next_seq = max(existing_doc_sequence) + 1 per owner,
-  derived by parsing the document tumbler strings.
+  The SQLite ``.catalog.db`` this ETL reads does NOT store next_seq -- in the
+  SQLite-backed catalog that counter lives in ``owners.jsonl`` (see
+  catalog.py: "next_seq is JSONL-only state"), which the ETL never opens.  The
+  authoritative post-migration value is therefore DERIVED from the migrated data:
+  ``next_seq = max(document_sequence_for_owner)``, computed by parsing the document
+  tumbler strings.  ``_reconcile_next_seq`` re-POSTs each owner with that floor; the
+  service GREATEST-merges next_seq on conflict (importOwner in CatalogRepository), so
+  the pass is idempotent and never downgrades a counter the live service has already
+  advanced.  ``registerDocument`` then assigns ``prefix.{next_seq+1}``, which cannot
+  collide with any migrated tumbler.  (The owner payload also carries ``next_seq``
+  verbatim for forward-compat with any future source that does persist it; from
+  SQLite that value is always 0 and the derived floor wins via GREATEST.)
 
 BATCH SIZE:
   Each table is imported row-by-row through the ``POST /v1/catalog/import/*``
@@ -55,7 +62,7 @@ BATCH SIZE:
 FIELD MAPPING:
 
 owners (SQLite) -> POST /v1/catalog/import/owner:
-  tumbler_prefix, name, owner_type, repo_hash, description, repo_root, head_hash
+  tumbler_prefix, name, owner_type, repo_hash, description, repo_root, head_hash, next_seq
 
 documents (SQLite) -> POST /v1/catalog/import/document:
   tumbler, title, author, year, content_type, file_path, corpus,
@@ -94,6 +101,11 @@ _log = structlog.get_logger(__name__)
 
 # Tables read from the SQLite catalog (read-only, copy-not-move).
 _CATALOG_DB_FILENAME = ".catalog.db"
+
+# Result keys that represent a genuine per-table import (read N rows, wrote M).
+# Used for total_read/total_written; excludes bookkeeping entries (catalog_meta,
+# next_seq_reconcile) whose read/written do not pair up. Consumed by the CLI too.
+IMPORT_TABLE_KEYS = ("owners", "documents", "collections", "document_chunks", "links")
 
 # ── column lists aligned to _SCHEMA_SQL in nexus/db/t2/catalog.py ────────────
 
@@ -134,7 +146,8 @@ _DOC_COLUMNS = (
 )
 
 _LINK_COLUMNS = (
-    "id",
+    "id",  # SQLite AUTOINCREMENT PK — fetched by SELECT * but intentionally
+           # OMITTED from the import payload (_transform_link); PG uses BIGSERIAL.
     "from_tumbler",
     "to_tumbler",
     "link_type",
@@ -210,6 +223,12 @@ def _transform_owner(row: dict[str, Any]) -> dict[str, Any]:
         "description":    row.get("description") or "",
         "repo_root":      row.get("repo_root") or "",
         "head_hash":      row.get("head_hash") or "",
+        # next_seq is NOT in the SQLite .catalog.db (it lives in owners.jsonl), so this
+        # is 0 from a real source. The authoritative value is derived from the migrated
+        # document tumblers in _reconcile_next_seq's second pass; this field is forward-
+        # compat transport for any future source that does persist next_seq. The service
+        # GREATEST-merges on conflict, so the derived floor always wins.
+        "next_seq":       int(row.get("next_seq") or 0),
     }
 
 
@@ -384,11 +403,11 @@ def migrate_catalog(
     Insertion order respects FK constraints:
       owners -> documents -> collections -> document_chunks -> links
 
-    After importing all documents, reconciles ``next_seq`` on each owner
-    via ``POST /v1/catalog/owners/head_hash`` (a no-op for the head_hash
-    field but the endpoint is the cheapest path to trigger an upsert that
-    carries ``next_seq`` in the payload).  We do this by calling
-    ``_post("/owners/upsert", {..., "next_seq": N})``.
+    After importing all documents, reconciles ``next_seq`` on each owner by
+    re-POSTing ``/v1/catalog/import/owner`` with ``next_seq`` floored at the max
+    migrated document sequence.  The service GREATEST-merges ``next_seq`` on
+    conflict, so this is idempotent and never downgrades a live-advanced counter.
+    See ``_reconcile_next_seq``.
 
     Args:
         catalog_db_path: Path to the SQLite ``.catalog.db`` file.
@@ -511,10 +530,18 @@ def migrate_catalog(
     # After importing all documents, set next_seq = max(doc_seq) + 1 per owner
     # so future server-side tumbler assignment won't collide with migrated docs.
     doc_tumblers = [r["tumbler"] for r in docs_rows]
-    _reconcile_next_seq(client, owners_rows, doc_tumblers)
+    reconcile = _reconcile_next_seq(client, owners_rows, doc_tumblers)
+    results["next_seq_reconcile"] = {
+        "read": 0,
+        "written": reconcile["reconciled"],
+    }
 
-    total_read    = sum(v["read"]    for v in results.values())
-    total_written = sum(v["written"] for v in results.values())
+    # Totals cover the genuine per-table imports only. catalog_meta (intentional
+    # skip) and next_seq_reconcile (second-pass owner re-imports with no source
+    # "read") are bookkeeping entries; including them would make total_written
+    # exceed total_read and corrupt the CLI's skipped-rows calculation.
+    total_read    = sum(results[k]["read"]    for k in IMPORT_TABLE_KEYS if k in results)
+    total_written = sum(results[k]["written"] for k in IMPORT_TABLE_KEYS if k in results)
     _log.info(
         "catalog_etl.complete",
         source=str(catalog_db_path),
@@ -585,42 +612,48 @@ def _reconcile_next_seq(
     client: Any,
     owners_rows: list[dict[str, Any]],
     doc_tumblers: list[str],
-) -> None:
-    """Log the required ``next_seq`` values per owner (informational).
+) -> dict[str, int]:
+    """Reconcile ``next_seq`` on each owner so post-cutover tumbler allocation
+    cannot collide with a migrated document.
 
-    ``upsertOwner`` on the Java service does NOT accept a ``next_seq``
-    override in the import payload — the column is omitted from the jOOQ
-    ``onConflict.doUpdate()`` clause.  Reconciling ``next_seq`` after ETL
-    requires a dedicated service operation (tracked in a follow-on bead).
+    The SQLite ``.catalog.db`` has no next_seq column (it lives in owners.jsonl,
+    which this ETL never reads), so the owner import carries next_seq=0 from a real
+    source.  This pass supplies the authoritative value: it re-POSTs each owner with
+    ``next_seq = max(document_sequence_for_owner)``, derived from the tumblers of the
+    documents just migrated.  The service GREATEST-merges next_seq on conflict, so the
+    result is always ``>= max_doc_seq`` and is never downgraded below a counter the
+    live service may have already advanced.
 
-    This function computes and logs the correct target values so an
-    operator can verify or apply them manually if needed.  It does NOT
-    make any HTTP calls.
+    ``registerDocument`` reads ``seq = next_seq`` then assigns
+    ``tumbler = ownerPrefix + "." + (seq + 1)`` and stores ``next_seq = seq + 1``.
+    With ``next_seq = max_seq`` the next assigned tumbler is ``prefix.{max_seq+1}``,
+    which cannot collide with any migrated document.
 
-    The correct value for ``next_seq`` after ETL:
-        next_seq = max(document_sequence_for_owner)
-
-    ``registerDocument`` reads ``seq = next_seq`` and then assigns
-    ``tumbler = ownerPrefix + "." + (seq + 1)``, setting
-    ``next_seq = seq + 1``.  With ``next_seq = max_seq``, the next
-    assigned tumbler is ``prefix.{max_seq+1}``, which is safe.
+    Returns ``{"reconciled": N}`` — the count of owners with at least one document
+    that were re-imported with a floored ``next_seq``.
     """
+    reconciled = 0
     for owner in owners_rows:
         prefix = owner["tumbler_prefix"]
         max_seq = _max_seq_for_owner(prefix, doc_tumblers)
-        if max_seq > 0:
+        if max_seq <= 0:
+            _log.debug("catalog_etl.next_seq_no_docs", owner=prefix)
+            continue
+        payload = _transform_owner(owner)
+        payload["next_seq"] = max_seq
+        try:
+            client._post("/import/owner", payload)
+            reconciled += 1
             _log.info(
-                "catalog_etl.next_seq_advisory",
+                "catalog_etl.next_seq_reconciled",
                 owner=prefix,
-                recommended_next_seq=max_seq,
-                note=(
-                    "upsertOwner does not accept next_seq override. "
-                    "Follow-on: service-side endpoint needed to SET next_seq "
-                    "so registerDocument won't collide with migrated tumblers."
-                ),
+                next_seq=max_seq,
             )
-        else:
-            _log.debug(
-                "catalog_etl.next_seq_no_docs",
+        except Exception as exc:
+            _log.error(
+                "catalog_etl.next_seq_reconcile_failed",
                 owner=prefix,
+                next_seq=max_seq,
+                error=str(exc),
             )
+    return {"reconciled": reconciled}

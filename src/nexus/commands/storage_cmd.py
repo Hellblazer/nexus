@@ -756,7 +756,7 @@ def migrate_catalog_cmd(
         click.echo("(no writes performed)")
         return
 
-    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.catalog.factory import make_catalog_client_for_migration
 
     token = os.environ.get("NX_SERVICE_TOKEN", "")
     if not token:
@@ -766,10 +766,7 @@ def migrate_catalog_cmd(
         )
 
     try:
-        if service_url:
-            client = HttpCatalogClient(base_url=service_url, _token=token)
-        else:
-            client = HttpCatalogClient()
+        client = make_catalog_client_for_migration(base_url=service_url, token=token)
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
@@ -783,14 +780,32 @@ def migrate_catalog_cmd(
     finally:
         client.close()
 
-    total_read    = sum(v["read"]    for v in results.values())
-    total_written = sum(v["written"] for v in results.values())
+    from nexus.db.t2.catalog_etl import IMPORT_TABLE_KEYS
+
+    total_read    = sum(results[k]["read"]    for k in IMPORT_TABLE_KEYS if k in results)
+    total_written = sum(results[k]["written"] for k in IMPORT_TABLE_KEYS if k in results)
     skipped       = total_read - total_written
 
     click.echo(f"Done. total_read={total_read}, total_written={total_written}")
-    for table, v in results.items():
-        if v["read"] > 0:
+    for table in IMPORT_TABLE_KEYS:
+        v = results.get(table)
+        if v and v["read"] > 0:
             click.echo(f"  {table}: read={v['read']}, written={v['written']}")
+
+    # Bookkeeping entries reported distinctly so dry-run and live counts reconcile.
+    meta = results.get("catalog_meta")
+    if meta and meta.get("skipped"):
+        click.echo(
+            f"  catalog_meta: {meta['skipped']} row(s) intentionally skipped "
+            "(SQLite projection markers, not applicable to Postgres)"
+        )
+    reconcile = results.get("next_seq_reconcile")
+    if reconcile and reconcile.get("written"):
+        click.echo(
+            f"  next_seq: reconciled on {reconcile['written']} owner(s) "
+            "(tumbler allocation floored at max migrated sequence)"
+        )
+
     if skipped:
         click.echo(
             f"Warning: {skipped} row(s) failed to write — check logs for details.",

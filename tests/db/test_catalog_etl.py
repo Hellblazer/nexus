@@ -86,6 +86,9 @@ CREATE TABLE IF NOT EXISTS owners (
     repo_root      TEXT DEFAULT '',
     head_hash      TEXT
 );
+-- Note: the real SQLite .catalog.db owners table has NO next_seq column
+-- (next_seq is JSONL-only state in the SQLite-backed catalog). The ETL derives
+-- the post-migration next_seq from the migrated document tumblers, not from here.
 
 CREATE TABLE IF NOT EXISTS documents (
     tumbler              TEXT PRIMARY KEY,
@@ -982,12 +985,21 @@ class TestCatalogEtlIntegration:
         assert results["links"]["read"]    == N_LINKS
         assert results["links"]["written"] == N_LINKS
 
-        # Verify via client stats
-        stats = cat_etl_client.stats()
-        pg_doc_count = int(stats.get("doc_count", 0))
-        assert pg_doc_count == N_DOCS, (
-            f"PG catalog_documents count must equal SQLite count {N_DOCS}, got {pg_doc_count}"
-        )
+        # Verify against PG owner-scoped state, NOT global stats() — the module-scoped
+        # client accumulates rows across tests, so a global doc_count assertion would be
+        # order-dependent and pass vacuously. by_owner() is scoped to these owners.
+        owner1_docs = cat_etl_client.by_owner("1.1")
+        owner2_docs = cat_etl_client.by_owner("1.2")
+        assert len(owner1_docs) == 2, f"owner 1.1 must have 2 docs, got {len(owner1_docs)}"
+        assert len(owner2_docs) == 1, f"owner 1.2 must have 1 doc, got {len(owner2_docs)}"
+        assert {str(e.tumbler) for e in owner1_docs} == {"1.1.1", "1.1.2"}
+        assert {str(e.tumbler) for e in owner2_docs} == {"1.2.1"}
+
+        # Links round-tripped exactly through the real service (not just ETL's own count).
+        cites = cat_etl_client.links_from("1.1.1", link_type="cites")
+        impls = cat_etl_client.links_from("1.1.2", link_type="implements")
+        assert [str(l["to_tumbler"]) for l in cites] == ["1.2.1"]
+        assert [str(l["to_tumbler"]) for l in impls] == ["1.1.1"]
 
     def test_document_field_round_trip(self, cat_etl_client):
         """Spot-check: a document's fields come back correctly from PG after ETL."""
@@ -1103,8 +1115,14 @@ class TestCatalogEtlIntegration:
                 {"tumbler_prefix": "1.6", "name": "owner-idem", "owner_type": "repo"},
             ],
             documents=[
-                {"tumbler": "1.6.1", "title": "idem-doc-1"},
+                {"tumbler": "1.6.1", "title": "idem-doc-1", "chunk_count": 2},
                 {"tumbler": "1.6.2", "title": "idem-doc-2"},
+            ],
+            chunks=[
+                {"doc_id": "1.6.1", "position": 0, "chash": "c" * 32,
+                 "chunk_index": 0, "line_start": 1, "line_end": 40},
+                {"doc_id": "1.6.1", "position": 1, "chash": "d" * 32,
+                 "chunk_index": 1, "line_start": 41, "line_end": 80},
             ],
             links=[
                 {"from_tumbler": "1.6.1", "to_tumbler": "1.6.2",
@@ -1118,6 +1136,7 @@ class TestCatalogEtlIntegration:
         # Both runs must report the same read counts
         assert r1["owners"]["read"] == r2["owners"]["read"]
         assert r1["documents"]["read"] == r2["documents"]["read"]
+        assert r1["document_chunks"]["read"] == r2["document_chunks"]["read"]
         assert r1["links"]["read"] == r2["links"]["read"]
 
         # Documents visible once (not duplicated)
@@ -1127,6 +1146,15 @@ class TestCatalogEtlIntegration:
             f"Expected 2 docs for owner 1.6 after 2 ETL runs, got {len(idem_docs)} — "
             "idempotency broken"
         )
+
+        # Chunk manifest visible once after 2 runs (ON CONFLICT DO NOTHING is
+        # idempotent — re-import must not duplicate nor truncate the manifest).
+        manifest = cat_etl_client.get_manifest("1.6.1")
+        assert len(manifest) == 2, (
+            f"Expected 2 manifest rows for 1.6.1 after 2 ETL runs, got {len(manifest)} — "
+            "chunk idempotency broken"
+        )
+        assert {r["chash"] for r in manifest} == {"c" * 32, "d" * 32}
 
         # Links visible once
         links = cat_etl_client.links_from("1.6.1", link_type="relates")
@@ -1275,3 +1303,46 @@ class TestCatalogEtlIntegration:
 
         assert owner_count == 1, f"owners count changed post-ETL: {owner_count}"
         assert doc_count   == 2, f"docs count changed post-ETL: {doc_count}"
+
+    def test_next_seq_reconciled_no_tumbler_collision_post_cutover(self, cat_etl_client):
+        """REGRESSION (substantive-critic Critical): after ETL, registering a NEW
+        document must NOT collide with a migrated tumbler.
+
+        Without next_seq reconciliation every imported owner lands with next_seq=0,
+        so the first registerDocument allocates ``prefix.1`` — which already exists —
+        and the bare INSERT throws a unique violation (DataAccessException). The fix
+        derives next_seq = max(migrated doc sequence) and GREATEST-merges it on the
+        owner, so the next allocation is ``prefix.{max+1}``.
+        """
+        from nexus.db.t2.catalog_etl import migrate_catalog
+
+        # Owner 1.20 (unused elsewhere — module-scoped client) with docs at seq 1, 2.
+        db_path = _make_source_catalog(
+            owners=[
+                {"tumbler_prefix": "1.20", "name": "owner-seq", "owner_type": "repo"},
+            ],
+            documents=[
+                {"tumbler": "1.20.1", "title": "seq-doc-1"},
+                {"tumbler": "1.20.2", "title": "seq-doc-2"},
+            ],
+        )
+        results = migrate_catalog(db_path, cat_etl_client)
+
+        # The reconcile pass ran for exactly this owner (1 owner with docs).
+        assert results["next_seq_reconcile"]["written"] == 1
+
+        # Register a genuinely new document for the migrated owner. With next_seq
+        # left at 0 this would raise (collision on 1.20.1); reconciled it gets 1.20.3.
+        new_tumbler = cat_etl_client.register(
+            "1.20",
+            "post-cutover new doc",
+            content_type="paper",
+            source_uri="file:///repo20/brand_new.pdf",
+        )
+        assert str(new_tumbler) == "1.20.3", (
+            f"new doc must allocate 1.20.3 (max migrated seq + 1), got {new_tumbler}"
+        )
+
+        # And the migrated documents are untouched.
+        docs = {str(e.tumbler) for e in cat_etl_client.by_owner("1.20")}
+        assert docs == {"1.20.1", "1.20.2", "1.20.3"}
