@@ -466,19 +466,12 @@ def reindex_cmd(name: str, force: bool) -> None:
                 from nexus.config import nexus_config_dir
                 cat = make_catalog_reader()
                 if cat is not None:
-                    row = cat._db.execute(
-                        "SELECT owner_id FROM collections WHERE name = ?",
-                        (name,),
-                    ).fetchone()
-                    if row and row[0]:
-                        owner_tumbler = row[0].replace("-", ".")
-                        o_row = cat._db.execute(
-                            "SELECT repo_root FROM owners "
-                            "WHERE tumbler_prefix = ?",
-                            (owner_tumbler,),
-                        ).fetchone()
-                        if o_row and o_row[0]:
-                            repo_path = Path(o_row[0])
+                    # nexus-xnz0o: replaced two chained _db.execute calls with
+                    # get_collection_owner_root() which is uniform across SQLite
+                    # and service mode.
+                    owner_id, repo_root_str = cat.get_collection_owner_root(name)
+                    if repo_root_str:
+                        repo_path = Path(repo_root_str)
                 if repo_path is None:
                     # Fallback: legacy registry walk for pre-Phase-1.5a
                     # installs where collections.owner_id is empty.

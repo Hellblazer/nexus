@@ -696,7 +696,7 @@ class _DocumentOps:
         return row[0] if row else 0
 
     def all_documents(
-        self, limit: int = 0, *, content_type: str = "",
+        self, limit: int = 0, *, content_type: str = "", offset: int = 0,
     ) -> list[CatalogEntry]:
         """Return all catalog entries. limit=0 means unlimited.
 
@@ -708,6 +708,10 @@ class _DocumentOps:
         pre-LIMIT slice held no matching rows -- e.g. 15K-entry
         catalog with only 2 rdr rows: ``--type rdr -n 3`` got 0.
         Mirrors PR #533's fix for the MCP ``catalog_list`` surface.
+
+        nexus-xnz0o: ``offset`` added so callers can paginate with
+        ``all_documents(limit=200, offset=N)`` on both SQLite and
+        HttpCatalogClient (which already supported offset).
         """
         cat = self._cat
         from nexus.catalog.catalog import CatalogEntry
@@ -722,6 +726,8 @@ class _DocumentOps:
             params = (content_type,)
         if limit > 0:
             sql += f" LIMIT {limit}"
+            if offset > 0:
+                sql += f" OFFSET {offset}"
         rows = cat._db.execute(sql, params).fetchall()
         return [
             CatalogEntry(

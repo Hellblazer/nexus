@@ -88,21 +88,22 @@ def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
         # reader still receives a usable identity; chunks indexed via
         # the indexer's _doc_id_resolver carry str(tumbler) as their
         # doc_id metadata, which matches.
+        # nexus-xnz0o: replaced raw SQL with catalog API uniform across SQLite
+        # and service mode. Tries file_path match first, then title search.
         try:
-            row = cat._db.execute(
-                "SELECT json_extract(metadata, '$.doc_id'), tumbler "
-                "FROM documents "
-                "WHERE physical_collection = ? "
-                "  AND (file_path = ? OR title = ?) "
-                "LIMIT 1",
-                (collection, source_id, source_id),
-            ).fetchone()
+            # Try file_path match via resolve (fast point-query on the service).
+            tumbler = cat.lookup_doc_id_by_collection_and_path(collection, source_id)
+            if tumbler:
+                # doc_id and tumbler are identical in the catalog contract.
+                return tumbler
+            # Try title search as fallback.
+            hits = cat.find(source_id)
+            for hit in hits:
+                if hit.physical_collection == collection:
+                    return str(hit.tumbler)
         except Exception:
             return ""
-        if not row:
-            return ""
-        # row[0] = metadata.doc_id (may be NULL/empty); row[1] = tumbler.
-        return row[0] or row[1] or ""
+        return ""
 
     return _lookup
 
@@ -399,7 +400,7 @@ def run_bib_enrichment(
                 finally:
                     writer.close()
                     if reader is not None:
-                        reader._db.close()
+                        reader.close()
                 if link_count > 0:
                     click.echo(f"Auto-generated {link_count} citation links in catalog.")
         except Exception:
@@ -657,7 +658,7 @@ def _catalog_enrich_hook(
         finally:
             writer.close()
             if reader is not None:
-                reader._db.close()
+                reader.close()
     except Exception:
         _log.debug("catalog_enrich_hook_failed", exc_info=True)
 
@@ -674,34 +675,56 @@ def _enrich_apply(
     # Catalog rows store either absolute or relative file_path
     # (relative is canonical post-RDR-060; absolute lingers from
     # legacy ingests). Try both forms so the lookup works either way.
+    # nexus-xnz0o: replaced raw _db.execute with uniform catalog API.
     if source_paths:
+        # nexus-xnz0o: replaced raw _db.execute (which used LIKE '%/'||file_path
+        # for suffix matching) with uniform catalog API.
+        # Load the collection once for suffix matching to avoid repeated fetches.
+        _coll_cache: list | None = None
+
+        def _coll_entries() -> list:
+            nonlocal _coll_cache
+            if _coll_cache is None:
+                _coll_cache = reader.list_by_collection(collection_name) if collection_name else []
+            return _coll_cache
+
         for sp in source_paths:
             if not sp:
                 continue
-            rows = reader._db.execute(
-                "SELECT tumbler FROM documents "
-                "WHERE (physical_collection = ? OR ? = '') "
-                "AND (file_path = ? OR file_path = ? "
-                "OR ? LIKE '%/' || file_path)",
-                (
-                    collection_name, collection_name,
-                    sp, sp.lstrip("/"), sp,
-                ),
-            ).fetchall()
-            for (t_str,) in rows:
-                target_tumblers.append(Tumbler.parse(t_str))
+            found_any = False
+            # Step 1: exact match on absolute or relative form.
+            for path_variant in (sp, sp.lstrip("/")):
+                tumbler_str = reader.lookup_doc_id_by_collection_and_path(
+                    collection_name or "", path_variant
+                )
+                if tumbler_str:
+                    target_tumblers.append(Tumbler.parse(tumbler_str))
+                    found_any = True
+                    break
+            if found_any:
+                continue
+            # Step 2: suffix match — sp LIKE '%/' || file_path from the original SQL.
+            # The catalog stores relative file_path; the caller may supply an absolute path.
+            # Walk the collection and check if sp ends with '/' + file_path.
+            for entry in _coll_entries():
+                fp = entry.file_path
+                if fp and (fp == sp or sp.endswith("/" + fp)):
+                    target_tumblers.append(entry.tumbler)
+                    found_any = True
+            # Note: no break after suffix match — original SQL returned ALL matching rows.
 
     # Title match as fallback when source_paths are not provided
     # (preserves backward compatibility with callers that haven't
     # been updated yet — e.g. third-party scripts).
     if not target_tumblers and collection_name:
-        row = reader._db.execute(
-            "SELECT tumbler FROM documents "
-            "WHERE physical_collection = ? AND title = ? LIMIT 1",
-            (collection_name, title),
-        ).fetchone()
-        if row:
-            target_tumblers.append(Tumbler.parse(row[0]))
+        # Use list_by_collection + filter by title (avoids raw SQL).
+        # For service mode this is a paginated HTTP fetch; acceptable since
+        # this is a rare fallback path.
+        coll_entries = reader.list_by_collection(collection_name)
+        for e in coll_entries:
+            if e.title == title:
+                target_tumblers.append(e.tumbler)
+                break
 
     # Last-resort FTS title search across the whole catalog
     # (legacy path; only fires when the caller passed neither

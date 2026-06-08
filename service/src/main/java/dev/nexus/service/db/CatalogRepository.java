@@ -1064,11 +1064,23 @@ public final class CatalogRepository {
             var ltypes = ctx.select(F_LNK_TYPE, DSL.count()).from(T_LINKS).groupBy(F_LNK_TYPE).fetch();
             Map<String, Long> byType = new LinkedHashMap<>();
             for (var r : ltypes) byType.put(r.value1(), (long) r.value2());
-            return Map.of(
-                "doc_count", docCount, "link_count", lnkCount,
-                "owner_count", ownCount, "collection_count", collCount,
-                "chunk_count", chkCount, "links_by_type", byType
-            );
+            // nexus-xnz0o: add by_content_type for stats_cmd in catalog.py.
+            var ctypes = ctx.select(F_DOC_CTYPE, DSL.count()).from(T_DOCS)
+                            .where(F_DOC_CTYPE.ne(""))
+                            .groupBy(F_DOC_CTYPE).fetch();
+            Map<String, Long> byContentType = new LinkedHashMap<>();
+            for (var r : ctypes) {
+                if (r.value1() != null) byContentType.put(r.value1(), (long) r.value2());
+            }
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("doc_count", docCount);
+            result.put("link_count", lnkCount);
+            result.put("owner_count", ownCount);
+            result.put("collection_count", collCount);
+            result.put("chunk_count", chkCount);
+            result.put("links_by_type", byType);
+            result.put("by_content_type", byContentType);
+            return result;
         });
     }
 
@@ -1103,6 +1115,146 @@ public final class CatalogRepository {
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("last_indexed", lastIndexed);
             result.put("orphan_count", orphanCount);
+            return result;
+        });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ANALYTICS QUERIES (nexus-xnz0o CLI port helpers)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Return distinct non-empty physical_collection values across all documents.
+     *
+     * <p>Backs the Python {@code distinct_doc_collections()} HttpCatalogClient method.
+     * Replaces direct SQLite:
+     * {@code SELECT DISTINCT physical_collection FROM documents WHERE physical_collection != ''}
+     */
+    public List<String> distinctDocCollections(String tenant) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.selectDistinct(F_DOC_PCOLL)
+               .from(T_DOCS)
+               .where(F_DOC_PCOLL.ne(""))
+               .orderBy(F_DOC_PCOLL)
+               .fetch(F_DOC_PCOLL)
+        );
+    }
+
+    /**
+     * Return owners whose repo_root is non-empty, as
+     * {@code [{tumbler_prefix, name, owner_type, repo_hash, description, repo_root, head_hash}]}.
+     *
+     * <p>Backs the Python {@code owners_with_roots()} HttpCatalogClient method.
+     * Replaces direct SQLite:
+     * {@code SELECT tumbler_prefix, repo_root FROM owners WHERE repo_root != ''}
+     */
+    public List<Map<String, Object>> ownersWithRoots(String tenant) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE, F_OWN_REPO,
+                       F_OWN_DESC, F_OWN_ROOT, F_OWN_HEAD)
+               .from(T_OWNERS)
+               .where(F_OWN_ROOT.ne(""))
+               .fetch()
+               .map(r -> ownerRow(r.value1(), r.value2(), r.value3(), r.value4(),
+                                  r.value5(), r.value6(), r.value7()))
+        );
+    }
+
+    /**
+     * Return documents with no incoming AND no outgoing links.
+     *
+     * <p>Backs the Python {@code orphaned_docs()} HttpCatalogClient method.
+     * Replaces direct SQLite LEFT JOIN query in orphans_cmd.
+     * Returns list of dicts with tumbler, title, content_type, file_path.
+     */
+    public List<Map<String, Object>> orphanedDocs(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // Documents with no outgoing links (from_tumbler not in links)
+            // AND no incoming links (to_tumbler not in links).
+            // Use NOT EXISTS subqueries for cross-tenant RLS safety.
+            var noOut = DSL.notExists(
+                ctx.selectOne().from(T_LINKS).where(F_LNK_FROM.eq(F_DOC_TUMBLER))
+            );
+            var noIn = DSL.notExists(
+                ctx.selectOne().from(T_LINKS).where(F_LNK_TO.eq(F_DOC_TUMBLER))
+            );
+            return ctx.select(F_DOC_TUMBLER, F_DOC_TITLE, F_DOC_CTYPE, F_DOC_FPATH)
+                      .from(T_DOCS)
+                      .where(noOut.and(noIn))
+                      .orderBy(F_DOC_TUMBLER)
+                      .fetch()
+                      .map(r -> {
+                          Map<String, Object> m = new LinkedHashMap<>();
+                          m.put("tumbler",      r.value1());
+                          m.put("title",        r.value2());
+                          m.put("content_type", r.value3());
+                          m.put("file_path",    r.value4());
+                          return m;
+                      });
+        });
+    }
+
+    /**
+     * Return documents whose file_path begins with '/' (absolute path).
+     *
+     * <p>Backs the Python {@code docs_with_absolute_paths()} HttpCatalogClient method.
+     * Replaces direct SQLite:
+     * {@code SELECT tumbler, file_path, physical_collection FROM documents WHERE file_path LIKE '/%'}
+     */
+    public List<Map<String, Object>> docsWithAbsolutePaths(String tenant) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(F_DOC_TUMBLER, F_DOC_FPATH, F_DOC_PCOLL)
+               .from(T_DOCS)
+               .where(F_DOC_FPATH.startsWith("/"))
+               .orderBy(F_DOC_TUMBLER)
+               .fetch()
+               .map(r -> {
+                   Map<String, Object> m = new LinkedHashMap<>();
+                   m.put("tumbler",             r.value1());
+                   m.put("file_path",           r.value2());
+                   m.put("physical_collection", r.value3());
+                   return m;
+               })
+        );
+    }
+
+    /**
+     * Return (owner_id, repo_root) for a collection by name.
+     *
+     * <p>Backs the Python {@code get_collection_owner_root()} HttpCatalogClient method.
+     * Replaces the two-query pattern in commands/collection.py:
+     * {@code SELECT owner_id FROM collections WHERE name=?} then
+     * {@code SELECT repo_root FROM owners WHERE tumbler_prefix=?}.
+     * Returns null when the collection does not exist.
+     */
+    public Map<String, Object> collectionOwnerRoot(String tenant, String name) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var r = ctx.select(F_COL_OWNER, F_OWN_ROOT)
+                       .from(T_COLLS)
+                       .leftJoin(T_OWNERS)
+                       .on(F_COL_OWNER.eq(F_OWN_PREFIX))
+                       .where(F_COL_NAME.eq(name))
+                       .fetchOne();
+            if (r == null) return null;
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("owner_id",  r.value1());
+            m.put("repo_root", r.value2() != null ? r.value2() : "");
+            return m;
+        });
+    }
+
+    /** Return {physical_collection -> doc_count} for all non-empty collections (nexus-xnz0o). */
+    public Map<String, Long> collectionDocCounts(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.select(F_DOC_PCOLL, DSL.count().cast(Long.class))
+                          .from(T_DOCS)
+                          .where(F_DOC_PCOLL.ne("").and(F_DOC_PCOLL.isNotNull()))
+                          .groupBy(F_DOC_PCOLL)
+                          .fetch();
+            Map<String, Long> result = new LinkedHashMap<>();
+            for (var r : rows) {
+                result.put(r.value1(), r.value2());
+            }
             return result;
         });
     }

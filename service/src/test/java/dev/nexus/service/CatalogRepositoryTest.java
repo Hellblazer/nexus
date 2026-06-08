@@ -1123,6 +1123,75 @@ class CatalogRepositoryTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // ANALYTICS QUERIES (nexus-xnz0o)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(122)
+    void collectionDocCounts_exactValues() {
+        // Seed docs in two distinct collections.
+        String anTenant = "an-tenant";
+        String coll1    = "an__knowledge__voyage__v1";
+        String coll2    = "an__code__voyage__v1";
+
+        repo.upsertDocument(anTenant, mapOf(
+            "tumbler", "an.1", "title", "AN Doc 1",
+            "content_type", "knowledge", "physical_collection", coll1
+        ));
+        repo.upsertDocument(anTenant, mapOf(
+            "tumbler", "an.2", "title", "AN Doc 2",
+            "content_type", "knowledge", "physical_collection", coll1
+        ));
+        repo.upsertDocument(anTenant, mapOf(
+            "tumbler", "an.3", "title", "AN Doc 3",
+            "content_type", "code", "physical_collection", coll2
+        ));
+        // One doc with no physical_collection — must NOT appear in counts.
+        repo.upsertDocument(anTenant, mapOf(
+            "tumbler", "an.4", "title", "AN Doc 4", "content_type", "paper"
+        ));
+
+        var counts = repo.collectionDocCounts(anTenant);
+
+        assertThat(counts).containsEntry(coll1, 2L);
+        assertThat(counts).containsEntry(coll2, 1L);
+        // doc with no physical_collection must not appear
+        assertThat(counts).doesNotContainKey("");
+        assertThat(counts).doesNotContainKey(null);
+    }
+
+    @Test @Order(123)
+    void collectionDocCounts_crossTenantIsolation() {
+        // Two tenants share the same physical_collection name.
+        String tenantP = "anp-tenant";
+        String tenantQ = "anq-tenant";
+        String shared  = "shared__analytics__v1";
+
+        repo.upsertDocument(tenantP, mapOf(
+            "tumbler", "anp.1", "title", "P1",
+            "content_type", "knowledge", "physical_collection", shared
+        ));
+        repo.upsertDocument(tenantP, mapOf(
+            "tumbler", "anp.2", "title", "P2",
+            "content_type", "knowledge", "physical_collection", shared
+        ));
+        repo.upsertDocument(tenantP, mapOf(
+            "tumbler", "anp.3", "title", "P3",
+            "content_type", "knowledge", "physical_collection", shared
+        ));
+        repo.upsertDocument(tenantQ, mapOf(
+            "tumbler", "anq.1", "title", "Q1",
+            "content_type", "knowledge", "physical_collection", shared
+        ));
+
+        var countsP = repo.collectionDocCounts(tenantP);
+        var countsQ = repo.collectionDocCounts(tenantQ);
+
+        // TENANT_P sees 3 docs; TENANT_Q sees 1 doc — RLS must isolate.
+        assertThat(countsP).containsEntry(shared, 3L);
+        assertThat(countsQ).containsEntry(shared, 1L);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // TENANT B ISOLATION CHECK
     // ══════════════════════════════════════════════════════════════════════════
 
