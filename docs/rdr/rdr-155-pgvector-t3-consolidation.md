@@ -24,21 +24,39 @@ related_tests: []
 
 RDR-152 moved T2 (and T1's server mode) onto a Postgres substrate owned by one strict
 Java storage service. T3 — permanent vectors — is the last tier still on ChromaDB
-(local `PersistentClient` or `CloudClient`). Keeping T3 on Chroma forces a split store:
-two engines, two tenancy models, a cross-store doc-to-chunk lookup (the RDR-108
-manifest cannot be a real FK), the ChromaDB external-quota constraint class, and no
-native hybrid search.
+(local `PersistentClient` or `CloudClient`). That leaves four concrete gaps.
 
-It also leaves a **live multi-tenant hole**: `VectorHandler` does not scope Chroma ops
-by `RequestContext.tenant()` — isolation rests only on the collection-name convention,
-so an authenticated client could read/write another tenant's collections if the name is
-known (bead `nexus-skp06`). Postgres RLS does not cover Chroma.
+#### Gap 1: Split store — T3 on Chroma, T2 on Postgres
+
+Two storage engines means two backups, two connection pools, two tenancy models, and a
+**cross-store doc-to-chunk lookup**: the RDR-108 manifest (`documents.tumbler →
+document_chunks.chash → chunk`) cannot be a real foreign-key join because the chunks
+live in a different engine. A catalog write and its chunk writes are a two-phase dance
+with no transactional consistency.
+
+#### Gap 2: Live multi-tenant vector isolation hole
+
+`VectorHandler` does not scope Chroma ops by `RequestContext.tenant()` — isolation rests
+only on the collection-name convention, so an authenticated client could read/write
+another tenant's collections if the name is known (bead `nexus-skp06`). Postgres RLS
+does not cover Chroma, so the tenant boundary RDR-152 establishes for T2 does not extend
+to vectors. An app-layer Chroma guard would be throwaway once T3 moves to pgvector.
+
+#### Gap 3: Chroma quota constraint class and no native hybrid search
+
+The engine carries a ChromaDB external-quota constraint class (result caps, concurrency
+caps, document-byte caps in `chroma_quotas.py`) imposed by Chroma, not by the data. And
+hybrid retrieval is a two-path fusion across two engines (FTS5 + Chroma) rather than a
+single ranked query.
+
+#### Gap 4: The product is blocked on the engine's pgvector changesets
 
 The product repo (`conexus`) has already decided, validated, and built around the
 resolution: **T3 lives in pgvector in the same Postgres as T2.** conexus RDR-001 is
 accepted; Phases 1–7 shipped; its deploy stack runs against a throwaway stub schema
-that is explicitly *"replaced by the engine's real Liquibase changesets when nexus
-RDR-152 ships"* (tracked `conexus-xr7.3.11`). This RDR delivers those engine changesets.
+explicitly *"replaced by the engine's real Liquibase changesets when nexus RDR-152
+ships"* (tracked `conexus-xr7.3.11`). Until the engine delivers those changesets,
+conexus cannot reach go-live (gates `conexus-xr7.8.9`). This RDR delivers them.
 
 ## Context
 
@@ -50,10 +68,14 @@ RDR-152 ships"* (tracked `conexus-xr7.3.11`). This RDR delivers those engine cha
 - **Locality decision is fixed** (T2 memory `152-cloud-locality-scope`): T1 stays
   local/per-process; T2 and T3 move to cloud Postgres; T3 is consolidated into pgvector
   in the **same** instance as T2 — not kept on Chroma.
-- **The embedding pipeline does not change.** The engine already owns embedding
-  generation (Voyage direct + retry + embed-only-prefix; bundled ONNX MiniLM local).
-  The Java service already embeds server-side in `VectorRepository.upsertChunks`. This
-  is a **storage + ANN swap** (Chroma → pgvector), not a pipeline rewrite.
+- **The embedding pipeline does not change** at the *storage-substrate* level: this is a
+  **storage + ANN swap** (Chroma → pgvector), not a chunking/embedding rewrite. The engine
+  already owns embedding generation (Voyage direct + retry + embed-only-prefix; bundled
+  ONNX MiniLM local) and already embeds server-side in `VectorRepository.upsertChunks`.
+  RDR-155 Phase 2 is the **schema component of RDR-152 Phase 3 Seam B**; it inherits that
+  phase's embedding-equivalence parity gate (RDR-152 §Failure Modes names "a JVM pipeline
+  producing subtly different chunks/embeddings" as the silent danger). The "unchanged"
+  claim is about *what* gets embedded, not a waiver of the Seam B equivalence harness.
 - **RLS posture already exists** (RDR-152): FORCE RLS, plain-LOGIN non-owner data role,
   a tenant-scope wrapper that stamps the tenant GUC inside the transaction. The chunks
   table joins that same model.
@@ -96,15 +118,29 @@ hybrid search, the RDR-108 manifest as a real FK join, retirement of Chroma and
 ### Schema (adopt the conexus-validated contract)
 
 - Extensions: `vector` (≥ 0.8), `pg_trgm`.
-- A chunks table keyed by the existing content-addressed identity (`chash[:32]` = the
-  Chroma natural ID today), carrying `tenant_id`, `collection` (the four-segment
-  conformant name, now a *column*/filter rather than a separate store), document text,
-  the embedding `vector(N)`, a `tsvector` (generated) for FTS, and metadata.
-- FORCE RLS by `tenant_id` keyed on the engine tenant GUC (see Open Decision 1).
+- Per-dim chunks tables `chunks_<dim>` (`chunks_384` / `chunks_768` / `chunks_1024`,
+  see Research Resolution 3), each carrying `tenant_id`, `collection` (the four-segment
+  conformant name, now a *column*/filter rather than a separate store), `chash` (the
+  content-addressed identity = the Chroma natural ID today), document text, the embedding
+  `vector(<dim>)`, a generated `tsvector` for FTS, and metadata.
+- **Primary key `(tenant_id, collection, chash)`** — per-collection uniqueness, matching
+  current Chroma per-collection scope: identical chunk text in the *same* collection
+  collapses to one row (CLAUDE.md §Catalog/T3 split), but the same text in two collections
+  is two independent rows. (PK is NOT `(tenant_id, chash)` — that would wrongly dedup
+  across collections.)
+- FORCE RLS by `tenant_id` keyed on the engine tenant GUC `nexus.tenant` (Research
+  Resolution 1).
 - HNSW index `m=16, ef_construction=64`; session `hnsw.iterative_scan='relaxed_order'`.
-- The RDR-108 `document_chunks` manifest gains a real FK to the chunks table
-  (`documents.tumbler → document_chunks.chash → chunk`), enabling a SQL join with
-  referential integrity in place of the cross-store lookup.
+- **`VectorRepository` dispatches to the per-dim table at runtime** by parsing the
+  collection-name embedding-model segment → dim (RDR-103 collection-name authority);
+  each table has identical shape, RLS, and HNSW.
+- **Manifest FK.** The RDR-108 `document_chunks` manifest gains referential integrity to
+  the chunks rows. Because a SQL FK cannot dispatch across the per-dim tables at runtime,
+  the manifest join needs `catalog_document_chunks` to carry the `collection` (hence the
+  dim) — add a `collection` column so the join resolves `(tenant_id, collection, chash)`
+  to the correct `chunks_<dim>` table. Open at Phase 1: a static per-dim FK (one FK per
+  dimension table, gated on the added column) vs an application-enforced referential
+  check. This replaces the cross-store lookup with an in-database join either way.
 
 ### Query path
 
@@ -124,7 +160,16 @@ hybrid search, the RDR-108 manifest as a real FK join, retirement of Chroma and
 
 - Copy-not-move ETL of existing local `PersistentClient` + ChromaCloud collections into
   pgvector (re-home vectors; re-embed only if a model/dim change forces it), with a
-  rollback flag, mirroring conexus RDR-001 Phase 8 cutover.
+  rollback flag, mirroring conexus RDR-001 Phase 8 cutover. ChromaCloud has no direct
+  psql/`pg_restore` path — its leg of the ETL reads via the Chroma REST/auth API and
+  writes through the engine's pgvector upsert, distinct from the local `PersistentClient`
+  copy; Phase 5 plans both legs explicitly.
+- **Collection-name preservation.** `topic_assignments.source_collection` (T2 taxonomy)
+  stores four-segment Chroma collection names. The migration preserves collection names
+  *verbatim* into the pgvector `collection` column (no namespace normalization), so those
+  references stay valid. If any normalization is later required, it must update
+  `source_collection` in lock-step — the same string-copy-orphan class RDR-108 fixed.
+  Phase 5 tests assert this (see §Test Plan).
 
 ## Open Decisions (to settle during research/gate)
 
@@ -241,7 +286,9 @@ substantive-critic + suite green) before the next. Detailed planning follows acc
 - Hybrid-search parity: tsvector+vector vs the current FTS5+Chroma path on a fixture
   set, with an overlap threshold (load-bearing for cutover — a divergence is a
   user-visible behavior change).
-- Migration: copy-not-move integrity (row counts, vector identity, manifest FK).
+- Migration: copy-not-move integrity (row counts, vector identity, manifest FK) plus
+  T2 consistency — `topic_assignments.source_collection` values resolve to a migrated
+  `collection` (no orphaned taxonomy attribution post-cutover).
 
 ## Validation
 
@@ -272,3 +319,13 @@ _Pending — run `/conexus:rdr-gate` when the draft is complete._
   supersedes `nexus-skp06` (vector tenant isolation becomes native RLS). Four open
   decisions registered (GUC reconciliation, pgvector test substrate, per-model
   dimensions, production-scale validation seam).
+- 2026-06-09: Research complete — all four decisions resolved (T2 `155-research-1..4`):
+  `nexus.tenant` canonical; Testcontainers `pgvector/pgvector:pg17` (CI Docker confirmed);
+  per-dim `chunks_<dim>` tables; service-API + dual-run validation seam.
+- 2026-06-09: Finalization gate — **PASSED** (0 critical). substantive-critic raised 3
+  significant spec gaps, all resolved in-place before accept: (1) chunks PK
+  `(tenant_id, collection, chash)` + per-dim manifest-FK shape (add `collection` to
+  `catalog_document_chunks`); (2) the "embedding pipeline unchanged" claim scoped to the
+  storage substrate, inheriting the RDR-152 Seam B embedding-equivalence gate; (3)
+  migration preserves `topic_assignments.source_collection` verbatim with a Phase 5
+  consistency test. ChromaCloud ETL leg and runtime per-dim dispatch documented.
