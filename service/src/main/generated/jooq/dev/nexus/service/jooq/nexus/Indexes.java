@@ -21,6 +21,8 @@ import dev.nexus.service.jooq.nexus.tables.NxAnswerRuns;
 import dev.nexus.service.jooq.nexus.tables.Plans;
 import dev.nexus.service.jooq.nexus.tables.RelevanceLog;
 import dev.nexus.service.jooq.nexus.tables.SearchTelemetry;
+import dev.nexus.service.jooq.nexus.tables.ServiceTokens;
+import dev.nexus.service.jooq.nexus.tables.SessionTokens;
 import dev.nexus.service.jooq.nexus.tables.TaxonomyMeta;
 import dev.nexus.service.jooq.nexus.tables.TierWrites;
 import dev.nexus.service.jooq.nexus.tables.TopicAssignments;
@@ -102,6 +104,8 @@ public class Indexes {
     public static final Index IDX_RELEVANCE_LOG_TS = Internal.createIndex(DSL.name("idx_relevance_log_ts"), RelevanceLog.RELEVANCE_LOG, new OrderField[] { RelevanceLog.RELEVANCE_LOG.TENANT_ID, RelevanceLog.RELEVANCE_LOG.TIMESTAMP.desc() }, false);
     public static final Index IDX_SEARCH_TEL_COLLECTION = Internal.createIndex(DSL.name("idx_search_tel_collection"), SearchTelemetry.SEARCH_TELEMETRY, new OrderField[] { SearchTelemetry.SEARCH_TELEMETRY.TENANT_ID, SearchTelemetry.SEARCH_TELEMETRY.COLLECTION, SearchTelemetry.SEARCH_TELEMETRY.TS.desc() }, false);
     public static final Index IDX_SEARCH_TEL_TS = Internal.createIndex(DSL.name("idx_search_tel_ts"), SearchTelemetry.SEARCH_TELEMETRY, new OrderField[] { SearchTelemetry.SEARCH_TELEMETRY.TENANT_ID, SearchTelemetry.SEARCH_TELEMETRY.TS.desc() }, false);
+    public static final Index IDX_SERVICE_TOKENS_TENANT = Internal.createIndex(DSL.name("idx_service_tokens_tenant"), ServiceTokens.SERVICE_TOKENS, new OrderField[] { ServiceTokens.SERVICE_TOKENS.TENANT_ID }, false);
+    public static final Index IDX_SESSION_TOKENS_EXPIRES = Internal.createIndex(DSL.name("idx_session_tokens_expires"), SessionTokens.SESSION_TOKENS, new OrderField[] { SessionTokens.SESSION_TOKENS.EXPIRES_AT }, false);
     public static final Index IDX_TA_TENANT_BY_SOURCE = Internal.createIndex(DSL.name("idx_ta_tenant_by_source"), TopicAssignments.TOPIC_ASSIGNMENTS, new OrderField[] { TopicAssignments.TOPIC_ASSIGNMENTS.TENANT_ID, TopicAssignments.TOPIC_ASSIGNMENTS.ASSIGNED_BY, TopicAssignments.TOPIC_ASSIGNMENTS.SOURCE_COLLECTION }, false);
     public static final Index IDX_TA_TENANT_DOC_ID = Internal.createIndex(DSL.name("idx_ta_tenant_doc_id"), TopicAssignments.TOPIC_ASSIGNMENTS, new OrderField[] { TopicAssignments.TOPIC_ASSIGNMENTS.TENANT_ID, TopicAssignments.TOPIC_ASSIGNMENTS.DOC_ID }, false);
     public static final Index IDX_TA_TENANT_DOC_ID_FK = Internal.createIndex(DSL.name("idx_ta_tenant_doc_id_fk"), TopicAssignments.TOPIC_ASSIGNMENTS, new OrderField[] { TopicAssignments.TOPIC_ASSIGNMENTS.TENANT_ID, TopicAssignments.TOPIC_ASSIGNMENTS.DOC_ID }, false);

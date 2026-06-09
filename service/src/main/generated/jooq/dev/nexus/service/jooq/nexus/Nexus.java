@@ -23,6 +23,8 @@ import dev.nexus.service.jooq.nexus.tables.NxAnswerRuns;
 import dev.nexus.service.jooq.nexus.tables.Plans;
 import dev.nexus.service.jooq.nexus.tables.RelevanceLog;
 import dev.nexus.service.jooq.nexus.tables.SearchTelemetry;
+import dev.nexus.service.jooq.nexus.tables.ServiceTokens;
+import dev.nexus.service.jooq.nexus.tables.SessionTokens;
 import dev.nexus.service.jooq.nexus.tables.TaxonomyMeta;
 import dev.nexus.service.jooq.nexus.tables.TierWrites;
 import dev.nexus.service.jooq.nexus.tables.TopicAssignments;
@@ -142,6 +144,16 @@ public class Nexus extends SchemaImpl {
     public final SearchTelemetry SEARCH_TELEMETRY = SearchTelemetry.SEARCH_TELEMETRY;
 
     /**
+     * The table <code>nexus.service_tokens</code>.
+     */
+    public final ServiceTokens SERVICE_TOKENS = ServiceTokens.SERVICE_TOKENS;
+
+    /**
+     * The table <code>nexus.session_tokens</code>.
+     */
+    public final SessionTokens SESSION_TOKENS = SessionTokens.SESSION_TOKENS;
+
+    /**
      * The table <code>nexus.taxonomy_meta</code>.
      */
     public final TaxonomyMeta TAXONOMY_META = TaxonomyMeta.TAXONOMY_META;
@@ -200,6 +212,8 @@ public class Nexus extends SchemaImpl {
             Plans.PLANS,
             RelevanceLog.RELEVANCE_LOG,
             SearchTelemetry.SEARCH_TELEMETRY,
+            ServiceTokens.SERVICE_TOKENS,
+            SessionTokens.SESSION_TOKENS,
             TaxonomyMeta.TAXONOMY_META,
             TierWrites.TIER_WRITES,
             TopicAssignments.TOPIC_ASSIGNMENTS,

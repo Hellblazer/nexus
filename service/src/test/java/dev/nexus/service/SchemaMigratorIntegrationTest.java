@@ -64,7 +64,8 @@ class SchemaMigratorIntegrationTest {
         "aspect_extraction_queue", "aspect_promotion_log",
         "chash_index",
         "catalog_owners", "catalog_documents", "catalog_links",
-        "catalog_document_chunks", "catalog_collections", "catalog_meta"
+        "catalog_document_chunks", "catalog_collections", "catalog_meta",
+        "service_tokens", "session_tokens"
     );
 
     private static final Set<String> EXPECTED_T1_TABLES = Set.of("scratch");
