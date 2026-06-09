@@ -445,20 +445,10 @@ class ScratchHandlerTest {
     // RDR-152 bead nexus-gmiaf.32.2: when a MINTED session token is presented, the
     // server-resolved session_id is authoritative — a differing body session_id is a
     // cross-session attempt and must be rejected with 403 (Decision 2 enforcement).
-    @org.junit.jupiter.api.Test
+    @Test
     void mintedSession_enforcesResolvedSessionId() throws Exception {
+        seedMintedSession("raw-minted-session-token-xyz", "minted-sess");
         String rawSess = "raw-minted-session-token-xyz";
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
-            su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.session_tokens (session_token_hash, tenant_id, session_id, expires_at) "
-                + "VALUES (?, ?, ?, now() + interval '1 hour') ON CONFLICT (session_token_hash) DO NOTHING")) {
-                ps.setString(1, dev.nexus.service.db.TokenHashing.sha256Hex(rawSess));
-                ps.setString(2, TENANT);
-                ps.setString(3, "minted-sess");
-                ps.executeUpdate();
-            }
-        }
         // Body session_id matches the minted session → allowed.
         var ok = postWithSession("/v1/t1/put", TENANT, rawSess,
             json("id", uuid(), "session_id", "minted-sess", "content", "ok"));
@@ -467,6 +457,34 @@ class ScratchHandlerTest {
         var denied = postWithSession("/v1/t1/get", TENANT, rawSess,
             json("id", "whatever", "session_id", "other-sess"));
         assertThat(denied.statusCode()).isEqualTo(403);
+    }
+
+    @Test
+    void mintedSession_sessionCloseDeniedOnMismatch() throws Exception {
+        // /session/close is the highest-impact cross-session surface: a minted token
+        // for S1 must not be able to close S2 by naming it in the body.
+        seedMintedSession("raw-minted-close-token", "close-sess-1");
+        var denied = postWithSession("/v1/t1/session/close", TENANT, "raw-minted-close-token",
+            json("session_id", "victim-sess-2"));
+        assertThat(denied.statusCode()).isEqualTo(403);
+        // Closing its OWN session is allowed.
+        var ok = postWithSession("/v1/t1/session/close", TENANT, "raw-minted-close-token",
+            json("session_id", "close-sess-1"));
+        assertThat(ok.statusCode()).isEqualTo(200);
+    }
+
+    private void seedMintedSession(String rawSessionToken, String sessionId) throws Exception {
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            su.setAutoCommit(true);
+            try (var ps = su.prepareStatement(
+                "INSERT INTO nexus.session_tokens (session_token_hash, tenant_id, session_id, expires_at) "
+                + "VALUES (?, ?, ?, now() + interval '1 hour') ON CONFLICT (session_token_hash) DO NOTHING")) {
+                ps.setString(1, dev.nexus.service.db.TokenHashing.sha256Hex(rawSessionToken));
+                ps.setString(2, TENANT);
+                ps.setString(3, sessionId);
+                ps.executeUpdate();
+            }
+        }
     }
 
     private HttpResponse<String> postWithSession(String path, String tenant,
