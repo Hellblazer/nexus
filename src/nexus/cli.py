@@ -57,10 +57,12 @@ from nexus.commands.plan import plan as plan_group
 from nexus.commands.rdr import rdr as rdr_group
 from nexus.commands.scratch import scratch
 from nexus.commands.search_cmd import search_cmd
+from nexus.commands.service_cmd import service
 from nexus.commands.storage_cmd import storage_group
 from nexus.commands.store import store
 from nexus.commands.t3 import t3 as t3_group
 from nexus.commands.taxonomy_cmd import taxonomy
+from nexus.commands.tenant_cmd import tenant
 from nexus.commands.tier_status import tier_status_cmd
 from nexus.commands.aspects import aspects_group
 from nexus.commands.upgrade import upgrade
@@ -110,10 +112,12 @@ main.add_command(plan_group, name="plan")
 main.add_command(rdr_group, name="rdr")
 main.add_command(scratch)
 main.add_command(search_cmd, name="search")
+main.add_command(service, name="service")
 main.add_command(storage_group, name="storage")
 main.add_command(store)
 main.add_command(t3_group, name="t3")
 main.add_command(taxonomy)
+main.add_command(tenant, name="tenant")
 main.add_command(tier_status_cmd, name="tier-status")
 main.add_command(aspects_group, name="aspects")
 main.add_command(upgrade)

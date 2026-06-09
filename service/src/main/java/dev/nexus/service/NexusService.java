@@ -22,6 +22,7 @@ import dev.nexus.service.http.PlanHandler;
 import dev.nexus.service.http.ScratchHandler;
 import dev.nexus.service.http.TaxonomyHandler;
 import dev.nexus.service.http.TelemetryHandler;
+import dev.nexus.service.http.TokenAdminHandler;
 import dev.nexus.service.http.VectorHandler;
 import dev.nexus.service.http.WhoamiHandler;
 import dev.nexus.service.vectors.EmbedderRouter;
@@ -174,6 +175,14 @@ public final class NexusService {
         // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18)
         var catalogCtx = server.createContext("/v1/catalog", new CatalogHandler(catalogRepo));
         catalogCtx.getFilters().addAll(authFilter);
+
+        // /v1/tenants/* + /v1/service-tokens/* — token lifecycle admin (bead nexus-gmiaf.32.3).
+        // Shares the live tokenStore + tokenCache so revoke invalidates the cache AuthFilter reads.
+        var tokenAdmin = new TokenAdminHandler(tokenStore, tokenCache, java.time.Clock.systemUTC());
+        var tenantsCtx = server.createContext("/v1/tenants", tokenAdmin);
+        tenantsCtx.getFilters().addAll(authFilter);
+        var svcTokensCtx = server.createContext("/v1/service-tokens", tokenAdmin);
+        svcTokensCtx.getFilters().addAll(authFilter);
 
         // /v1/vectors/* — vector (Chroma) endpoints (bead nexus-gmiaf.20)
         // Registered when a VectorRepository is provided OR an EmbedderRouter alone is provided

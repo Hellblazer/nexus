@@ -41,4 +41,13 @@ public final class TenantConstants {
      * <p>T2 decision record: {@code nexus_rdr/152-default-tenant}.
      */
     public static final String DEFAULT_TENANT = "default";
+
+    /**
+     * Sentinel {@code tenant_id} marking the transitional grandfathered bootstrap token
+     * (RDR-152 bead nexus-gmiaf.32). The legacy fixed {@code NX_SERVICE_TOKEN} is seeded
+     * with this value so it may act as any tenant via {@code X-Nexus-Tenant} (the Phase
+     * 1-4 posture) for that one credential. Minted tokens (bead .32.3) are strictly
+     * bound and MUST never be minted with this value; Phase E (bead .32.5) retires it.
+     */
+    public static final String BOOTSTRAP_ANY_TENANT = "*";
 }
