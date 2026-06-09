@@ -104,6 +104,20 @@ public final class AuthFilter extends Filter {
         }
         String tokenTenant = resolved.get();
 
+        // nexus-45ykb (defense in depth): deny any token that resolves to the wildcard
+        // sentinel tenant. '*' is a reserved name that token minting, `nx tenant create`,
+        // and catalog owner-registration all refuse, so it can NEVER be a registered
+        // catalog_owners principal. A token bound to '*' is therefore a legacy grandfathered
+        // credential with no legitimate owner; letting it operate would write ghost data
+        // under an unregistered tenant. Phase E (nexus-gmiaf.32.5) already retired the
+        // any-tenant GRANT (the header is no longer honored); this closes the residual
+        // legacy-credential vector by refusing the sentinel tenant outright. Validated
+        // against catalog_owners by construction (no DB read): '*' is never an owner.
+        if (BOOTSTRAP_ANY_TENANT.equals(tokenTenant)) {
+            reject(exchange, "wildcard_sentinel_tenant");
+            return;
+        }
+
         // Bound token (Phase E nexus-gmiaf.32.5): the token's tenant_id is authoritative;
         // the client X-Nexus-Tenant header is never trusted (logged at debug on mismatch).
         // The transitional wildcard ("*") any-tenant grant is retired — no token crosses
