@@ -39,9 +39,9 @@ import java.util.Map;
  * response; only its hash is stored. {@code tenant_id='*'} is rejected (the wildcard is the
  * bootstrap sentinel — bead nexus-45ykb). Revoke calls {@link TokenCache#invalidate} on the
  * LIVE cache for immediate effect; rotate likewise invalidates the grace-expiring hashes so
- * their cache entries re-read the new deadline and expire precisely at the grace window's end
- * (not up to a cache-TTL later). Rotate is atomic (one transaction), so a crash cannot strand
- * a tenant with zero live tokens.
+ * their cache entries re-read the new deadline, bounding old-token over-validity to one
+ * cache-TTL window rather than leaving it unbounded. Rotate is atomic (one transaction), so a
+ * crash cannot strand a tenant with zero live tokens.
  *
  * <p>AUTHORIZATION NOTE (deferred): any authenticated caller may administer any named tenant
  * (provisioning rides the bootstrap token until per-tenant principals exist). Per-caller

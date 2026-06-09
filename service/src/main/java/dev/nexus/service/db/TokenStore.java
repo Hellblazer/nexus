@@ -217,16 +217,20 @@ public final class TokenStore {
     public record RotationResult(IssuedToken issued, List<String> expiredHashes) {
     }
 
+    /**
+     * Zero-downtime rotation: set {@code expires_at = now + grace} on every currently-live
+     * token for {@code tenant}, then issue a fresh one, ALL in one transaction so a crash can
+     * never leave the tenant with zero live tokens (Decision 3). Returns the new token plus
+     * the grace-expired hashes so the caller can invalidate their cache entries.
+     *
+     * @param tenant       the tenant to rotate (not {@code '*'})
+     * @param graceSeconds overlap window before the old tokens expire (must be positive)
+     */
     public RotationResult rotateTokens(String tenant, long graceSeconds) {
         rejectWildcard(tenant);
         if (graceSeconds <= 0) {
             throw new IllegalArgumentException("grace_seconds must be positive");
         }
-        // ATOMIC (RDR-152 P5.3-C review): grace-expire the old rows AND issue the new one in
-        // ONE transaction, so a crash can never leave the tenant with zero live tokens (the
-        // exact zero-downtime guarantee Decision 3 promises). Returns the expired hashes so
-        // the caller can invalidate their cache entries, making grace expiry precise rather
-        // than stale-by-up-to-cache-TTL.
         OffsetDateTime graceDeadline =
             OffsetDateTime.ofInstant(clock.instant().plusSeconds(graceSeconds), ZoneOffset.UTC);
         return dsl().transactionResult(cfg -> {

@@ -237,6 +237,7 @@ class TokenAdminHandlerTest {
     void rotate_rejectsNonPositiveGrace() throws Exception {
         postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-grace\"}");
         assertThat(status("/v1/service-tokens/rotate", "{\"tenant\":\"tenant-grace\",\"grace_seconds\":0}")).isEqualTo(400);
+        assertThat(status("/v1/service-tokens/rotate", "{\"tenant\":\"tenant-grace\",\"grace_seconds\":-1}")).isEqualTo(400);
     }
 
     @Test
@@ -244,9 +245,11 @@ class TokenAdminHandlerTest {
         JsonNode issued = postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-overlap\"}");
         String oldRaw = issued.get("token").asText();
         assertThat(whoami(oldRaw, null)).isEqualTo(200);  // warms the cache
-        postJson("/v1/service-tokens/rotate", "{\"tenant\":\"tenant-overlap\",\"grace_seconds\":300}");
+        JsonNode rot = postJson("/v1/service-tokens/rotate", "{\"tenant\":\"tenant-overlap\",\"grace_seconds\":300}");
         // The old token is invalidated then re-resolves to the future grace deadline → still valid.
         assertThat(whoami(oldRaw, null)).as("old token must stay valid through the grace window").isEqualTo(200);
+        // The freshly issued token must also authenticate (correct tenant binding).
+        assertThat(whoami(rot.get("token").asText(), null)).as("new rotated token must authenticate").isEqualTo(200);
     }
 
     @Test
