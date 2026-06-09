@@ -92,7 +92,7 @@ class SessionTokenHandlerTest {
 
     @Test
     void start_mintsSessionToken_storedForTenantAndSession() throws Exception {
-        JsonNode r = post("/v1/sessions/start", "{\"session_id\":\"sess-store\"}", null);
+        JsonNode r = post("/v1/sessions/start", "{\"session_id\":\"sess-store\"}");
         assertThat(r.path("session_token").asText()).isNotBlank();
         assertThat(r.get("session_id").asText()).isEqualTo("sess-store");
         String hash = TokenHashing.sha256Hex(r.get("session_token").asText());
@@ -107,7 +107,7 @@ class SessionTokenHandlerTest {
 
     @Test
     void mintedToken_authorizesOwnSession_deniesSiblingSession() throws Exception {
-        String token = post("/v1/sessions/start", "{\"session_id\":\"sess-1\"}", null)
+        String token = post("/v1/sessions/start", "{\"session_id\":\"sess-1\"}")
             .get("session_token").asText();
         // Authorizes its own session (minted token + matching body session_id).
         assertThat(scratchPut(token, "sess-1")).isEqualTo(200);
@@ -119,9 +119,9 @@ class SessionTokenHandlerTest {
 
     @Test
     void reMint_replacesPriorToken() throws Exception {
-        String first = post("/v1/sessions/start", "{\"session_id\":\"sess-remint\"}", null)
+        String first = post("/v1/sessions/start", "{\"session_id\":\"sess-remint\"}")
             .get("session_token").asText();
-        String second = post("/v1/sessions/start", "{\"session_id\":\"sess-remint\"}", null)
+        String second = post("/v1/sessions/start", "{\"session_id\":\"sess-remint\"}")
             .get("session_token").asText();
         assertThat(second).isNotEqualTo(first);
         // Exactly one live row for the session; the old token's hash is gone.
@@ -148,12 +148,12 @@ class SessionTokenHandlerTest {
 
     @Test
     void close_deletesSessionToken_idempotent() throws Exception {
-        String token = post("/v1/sessions/start", "{\"session_id\":\"sess-close\"}", null)
+        String token = post("/v1/sessions/start", "{\"session_id\":\"sess-close\"}")
             .get("session_token").asText();
-        assertThat(post("/v1/sessions/close", "{\"session_id\":\"sess-close\"}", null)
+        assertThat(post("/v1/sessions/close", "{\"session_id\":\"sess-close\"}")
             .get("closed").asInt()).isEqualTo(1);
         // Double close is a no-op (0), not an error.
-        assertThat(post("/v1/sessions/close", "{\"session_id\":\"sess-close\"}", null)
+        assertThat(post("/v1/sessions/close", "{\"session_id\":\"sess-close\"}")
             .get("closed").asInt()).isEqualTo(0);
         // The row is gone.
         try (Connection su = pg.getPostgresDatabase().getConnection()) {
@@ -186,7 +186,7 @@ class SessionTokenHandlerTest {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private JsonNode post(String path, String body, String ignored) throws Exception {
+    private JsonNode post(String path, String body) throws Exception {
         var resp = http.send(req(path, body), HttpResponse.BodyHandlers.ofString());
         assertThat(resp.statusCode()).as("POST %s -> %s", path, resp.body()).isEqualTo(200);
         return MAPPER.readTree(resp.body());
