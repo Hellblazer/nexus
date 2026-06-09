@@ -169,6 +169,14 @@ DO $$ BEGIN
 END $$;
 GRANT USAGE ON SCHEMA nexus TO svc_parity;
 GRANT USAGE ON SCHEMA public TO svc_parity;
+-- The service runs Liquibase at startup AS this role (NX_DB_USER=svc_parity).
+-- It must create the public.databasechangelog tracker, the t1 schema, and tables
+-- in the nexus schema. PostgreSQL 15+ no longer grants CREATE on public by default,
+-- so mirror the DDL grants production gives the schema-owner role (nexus_admin):
+-- pg_provision grants CREATE ON SCHEMA public + CREATE ON DATABASE to the migrator.
+GRANT CREATE ON DATABASE paritytest TO svc_parity;
+GRANT CREATE ON SCHEMA public TO svc_parity;
+GRANT CREATE ON SCHEMA nexus TO svc_parity;
 """
 
 
