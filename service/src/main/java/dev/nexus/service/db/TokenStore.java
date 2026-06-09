@@ -110,14 +110,25 @@ public final class TokenStore {
     }
 
     /**
-     * Transitional bootstrap (superseded by Phase E nexus-gmiaf.32.5): ensure a
-     * service_tokens row exists for a legacy fixed {@code NX_SERVICE_TOKEN} so the
-     * single-token clients started by the storage-service supervisor (gmiaf.30) keep
-     * working through the B→E window. Idempotent: inserts under {@code tenantId} only
-     * if the hash is absent. Never sets expiry/revocation.
+     * Label of the persistent root token (gmiaf.32.5), seeded by Main from the
+     * provisioned {@code NX_SERVICE_TOKEN}. It re-keys the lockout protection that
+     * formerly relied on the wildcard sentinel: the root credential is protected from
+     * {@code revokeToken} (no self-lockout), excluded from {@code listTokens}
+     * enumeration, and left untouched by {@code rotateTokens}'s expiry sweep — all keyed
+     * on this label rather than {@code tenant_id = '*'} (which is retired). The root token
+     * is now a BOUND default-tenant row; only this label distinguishes it from ordinary
+     * default-tenant tokens.
+     */
+    public static final String ROOT_TOKEN_LABEL = "bootstrap-legacy-token";
+
+    /**
+     * Seed the persistent root token (Phase E nexus-gmiaf.32.5): ensure a service_tokens
+     * row exists for the provisioned {@code NX_SERVICE_TOKEN}, BOUND to {@code tenantId}
+     * (the default tenant) with the {@link #ROOT_TOKEN_LABEL} marker. Idempotent: inserts
+     * only if the hash is absent. Never sets expiry/revocation.
      *
-     * @param rawToken the legacy raw bearer (no-op if null/blank)
-     * @param tenantId the tenant to bind it to (typically "default")
+     * @param rawToken the root raw bearer (no-op if null/blank)
+     * @param tenantId the tenant to bind it to (the default tenant)
      */
     public void ensureBootstrapToken(String rawToken, String tenantId) {
         if (rawToken == null || rawToken.isBlank()) {
@@ -127,12 +138,12 @@ public final class TokenStore {
         int inserted = dsl()
             .insertInto(SERVICE_TOKENS)
             .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
-            .values(hash, tenantId, "bootstrap-legacy-token")
+            .values(hash, tenantId, ROOT_TOKEN_LABEL)
             .onConflict(SERVICE_TOKENS.TOKEN_HASH)
             .doNothing()
             .execute();
         if (inserted > 0) {
-            log.info("event=bootstrap_token_seeded tenant={}", tenantId);
+            log.info("event=root_token_seeded tenant={}", tenantId);
         }
     }
 
@@ -239,6 +250,7 @@ public final class TokenStore {
                 .from(SERVICE_TOKENS)
                 .where(SERVICE_TOKENS.TENANT_ID.eq(tenant))
                 .and(SERVICE_TOKENS.REVOKED_AT.isNull())
+                .and(SERVICE_TOKENS.LABEL.isDistinctFrom(ROOT_TOKEN_LABEL))
                 .and(SERVICE_TOKENS.EXPIRES_AT.isNull().or(SERVICE_TOKENS.EXPIRES_AT.gt(graceDeadline)))
                 .fetch(SERVICE_TOKENS.TOKEN_HASH);
             if (!expired.isEmpty()) {
@@ -270,10 +282,11 @@ public final class TokenStore {
         if (selector == null || selector.isBlank()) {
             return Optional.empty();
         }
-        // Resolve selector to exactly one LIVE, non-bootstrap hash (exact match preferred,
+        // Resolve selector to exactly one LIVE, non-root hash (exact match preferred,
         // else unique prefix). Excluding already-revoked rows avoids false-success on
-        // re-revoke and prefix-shadowing by a stale revoked token; excluding the bootstrap
-        // sentinel row prevents an authenticated caller from revoking the sole admin
+        // re-revoke and prefix-shadowing by a stale revoked token; excluding the root
+        // token (by ROOT_TOKEN_LABEL — re-keyed off the retired wildcard sentinel in
+        // Phase E) prevents an authenticated caller from revoking the supervisor
         // credential into a total lockout (review P5.3-C).
         List<String> matches = dsl()
             .select(SERVICE_TOKENS.TOKEN_HASH)
@@ -281,7 +294,7 @@ public final class TokenStore {
             .where(SERVICE_TOKENS.TOKEN_HASH.eq(selector)
                 .or(SERVICE_TOKENS.TOKEN_HASH.startsWith(selector)))
             .and(SERVICE_TOKENS.REVOKED_AT.isNull())
-            .and(SERVICE_TOKENS.TENANT_ID.ne(TenantConstants.BOOTSTRAP_ANY_TENANT))
+            .and(SERVICE_TOKENS.LABEL.isDistinctFrom(ROOT_TOKEN_LABEL))
             .fetch(SERVICE_TOKENS.TOKEN_HASH);
         String hash;
         if (matches.contains(selector)) {
@@ -313,13 +326,14 @@ public final class TokenStore {
         if (TenantConstants.BOOTSTRAP_ANY_TENANT.equals(tenant)) {
             throw new IllegalArgumentException("'*' is the reserved bootstrap sentinel, not a listable tenant");
         }
-        // Always exclude the bootstrap sentinel row: it is the internal admin credential
-        // and must not be enumerable by an authenticated caller (review P5.3-C).
+        // Always exclude the root token row: it is the internal supervisor credential
+        // and must not be enumerable by an authenticated caller (review P5.3-C, re-keyed
+        // off the retired wildcard sentinel onto ROOT_TOKEN_LABEL in Phase E).
         var base = dsl()
             .select(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL,
                     SERVICE_TOKENS.CREATED_AT, SERVICE_TOKENS.EXPIRES_AT, SERVICE_TOKENS.REVOKED_AT)
             .from(SERVICE_TOKENS)
-            .where(SERVICE_TOKENS.TENANT_ID.ne(TenantConstants.BOOTSTRAP_ANY_TENANT));
+            .where(SERVICE_TOKENS.LABEL.isDistinctFrom(ROOT_TOKEN_LABEL));
         var filtered = (tenant == null || tenant.isBlank())
             ? base.orderBy(SERVICE_TOKENS.CREATED_AT)
             : base.and(SERVICE_TOKENS.TENANT_ID.eq(tenant)).orderBy(SERVICE_TOKENS.CREATED_AT);

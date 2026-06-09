@@ -101,19 +101,27 @@ class ServiceIntegrationTest {
         var badToken = get("/v1/_whoami", "Bearer wrong-token");
         assertThat(badToken.statusCode()).isEqualTo(401);
 
-        // Good token but no tenant header → 400 (tested in test 3)
-        // Good token + tenant → 200 (tested transitively via test 4, also here)
+        // Good bound token → 200; the token's tenant is authoritative (tested in test 3
+        // that the X-Nexus-Tenant header is not required and a mismatch is ignored).
         var goodResp = getWithTenant("/v1/_whoami", TOKEN, "test-tenant");
         assertThat(goodResp.statusCode()).isEqualTo(200);
         assertThat(goodResp.body()).contains("test-tenant");
     }
 
-    // ─── Test 3: missing X-Nexus-Tenant → 400 ───────────────────────────────
+    // ─── Test 3: bound token resolves tenant server-side (header not required) ──
 
     @Test
-    void missingTenant_returns400() throws Exception {
-        var resp = get("/v1/_whoami", "Bearer " + TOKEN);
-        assertThat(resp.statusCode()).isEqualTo(400);
+    void boundToken_resolvesTenant_withoutTenantHeader() throws Exception {
+        // Phase E (nexus-gmiaf.32.5): the wildcard any-tenant grant is retired. A bound
+        // token resolves its tenant SERVER-SIDE, so no X-Nexus-Tenant header is required
+        // (and a mismatched one is ignored, not honored).
+        var noHeader = get("/v1/_whoami", "Bearer " + TOKEN);
+        assertThat(noHeader.statusCode()).isEqualTo(200);
+        assertThat(noHeader.body()).contains("test-tenant");
+
+        var mismatch = getWithTenant("/v1/_whoami", TOKEN, "some-other-tenant");
+        assertThat(mismatch.statusCode()).isEqualTo(200);
+        assertThat(mismatch.body()).contains("test-tenant");  // header ignored
     }
 
     // ─── Test 4: GUC tenant isolation with RLS + defensive role assertion ────
@@ -279,8 +287,7 @@ class ServiceIntegrationTest {
             conn.createStatement().execute(
                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES ('"
                 + dev.nexus.service.db.TokenHashing.sha256Hex(TOKEN)
-                + "', '" + dev.nexus.service.http.AuthFilter.BOOTSTRAP_ANY_TENANT
-                + "', 'test-bootstrap') ON CONFLICT (token_hash) DO NOTHING");
+                + "', 'test-tenant', 'test-bound') ON CONFLICT (token_hash) DO NOTHING");
         }
     }
 

@@ -21,20 +21,13 @@ import java.util.Optional;
  * <p><b>Decision 1 (token→tenant binding).</b> The presented bearer is hashed
  * ({@link TokenHashing#sha256Hex}) and resolved against the {@code service_tokens}
  * registry via {@link TokenCache}. Missing/revoked/expired → 401. The matched row's
- * {@code tenant_id} determines the tenant:
- * <ul>
- *   <li><b>Bound token</b> (concrete tenant_id): that tenant is authoritative; the
- *       client {@code X-Nexus-Tenant} header is IGNORED (logged at debug on mismatch).</li>
- *   <li><b>Bootstrap token</b> (tenant_id = {@value #BOOTSTRAP_ANY_TENANT}): a
- *       transitional grandfathered credential (the legacy fixed NX_SERVICE_TOKEN seeded
- *       by Phase B; retired by Phase E nexus-gmiaf.32.5). It may act as ANY tenant, taken
- *       from the required {@code X-Nexus-Tenant} header (400 if absent) — exactly the
- *       Phase 1–4 posture, preserved ONLY for this one legacy credential so existing
- *       clients/tests keep working through the B→E window. Minted tokens are strictly
- *       bound; once the bootstrap token is retired, no token can cross tenants.</li>
- * </ul>
+ * {@code tenant_id} is authoritative: that tenant wins and the client
+ * {@code X-Nexus-Tenant} header is IGNORED (logged at debug on mismatch). Phase E
+ * (nexus-gmiaf.32.5) retired the transitional wildcard ("*") any-tenant grant — every
+ * token, including the persistent root token, is strictly tenant-bound, so no token can
+ * cross tenants.
  *
- * <p><b>Decision 2 (per-session verification), transitional option (a).</b> If
+ * <p><b>Decision 2 (per-session verification), require-minted.</b> If
  * {@code X-Nexus-T1-Session} is present, its value is hashed and looked up in
  * {@code session_tokens}:
  * <ul>
@@ -43,14 +36,12 @@ import java.util.Optional;
  *       exposed via {@link RequestContext#session()} with {@link RequestContext#isMintedSession()}
  *       true. Session-scoped handlers MUST use it and reject a differing client-supplied
  *       session id (ScratchHandler enforces this with a 403) — this is what makes "a
- *       session-S1 token cannot act as session-S2 within one tenant" hold server-side.
- *       Phase D (nexus-gmiaf.32.4) wires clients to mint and send these tokens.</li>
- *   <li><b>Bootstrap (no live row — absent or expired):</b> the raw header value is
- *       exposed as a bare session id (the pre-Decision-2 client-side-scoping posture).
- *       An expired minted token therefore degrades to its own token string as the
- *       session id, NEVER the victim's resolved session_id. Transitional: once Phase D
- *       mints session tokens universally and a require-minted flag flips, a non-live
- *       session token is a 401. No regression: t1.scratch stays tenant-GUC isolated.</li>
+ *       session-S1 token cannot act as session-S2 within one tenant" hold server-side.</li>
+ *   <li><b>Non-live (absent or expired row):</b> 401 ({@code session_not_minted}). Phase E
+ *       retired the transitional bootstrap path that exposed the raw header as a bare
+ *       session id — that was the victim-impersonation vector. Callers MUST mint a session
+ *       token (the MCP lifespan does so at session start). A request with NO session header
+ *       still proceeds tenant-scoped (session-scoped handlers are not exercised).</li>
  * </ul>
  *
  * <p>The resolved principal is published via the thread-confined {@link RequestContext}
@@ -66,7 +57,12 @@ public final class AuthFilter extends Filter {
 
     private static final Logger log = LoggerFactory.getLogger(AuthFilter.class);
 
-    /** Sentinel tenant_id marking the transitional grandfathered bootstrap token. */
+    /**
+     * Reserved tenant-name sentinel ("*"). Phase E (nexus-gmiaf.32.5) retired its
+     * any-tenant grant in this filter; it now survives only as a FORBIDDEN tenant name
+     * that {@code TokenStore.rejectWildcard} refuses to mint or create, so no real tenant
+     * can collide with the legacy sentinel.
+     */
     public static final String BOOTSTRAP_ANY_TENANT = dev.nexus.service.db.TenantConstants.BOOTSTRAP_ANY_TENANT;
 
     private static final String BEARER_PREFIX = "Bearer ";
@@ -108,22 +104,15 @@ public final class AuthFilter extends Filter {
         }
         String tokenTenant = resolved.get();
 
-        String tenant;
+        // Bound token (Phase E nexus-gmiaf.32.5): the token's tenant_id is authoritative;
+        // the client X-Nexus-Tenant header is never trusted (logged at debug on mismatch).
+        // The transitional wildcard ("*") any-tenant grant is retired — no token crosses
+        // tenants.
+        String tenant = tokenTenant;
         String claimedTenant = exchange.getRequestHeaders().getFirst(TENANT_HEADER);
-        if (BOOTSTRAP_ANY_TENANT.equals(tokenTenant)) {
-            // Transitional grandfathered token: tenant comes from the (required) header.
-            if (claimedTenant == null || claimedTenant.isBlank()) {
-                sendError(exchange, 400, "missing X-Nexus-Tenant header");
-                return;
-            }
-            tenant = claimedTenant;
-        } else {
-            // Bound token: the token's tenant wins; client header is not trusted.
-            tenant = tokenTenant;
-            if (claimedTenant != null && !claimedTenant.equals(tenant)) {
-                log.debug("event=tenant_header_ignored claimed={} resolved={} path={}",
-                          claimedTenant, tenant, exchange.getRequestURI().getPath());
-            }
+        if (claimedTenant != null && !claimedTenant.equals(tenant)) {
+            log.debug("event=tenant_header_ignored claimed={} resolved={} path={}",
+                      claimedTenant, tenant, exchange.getRequestURI().getPath());
         }
 
         // 3. Per-session verification (Decision 2), transitional option (a).
@@ -142,7 +131,13 @@ public final class AuthFilter extends Filter {
                 sessionId = sp.sessionId();  // server-resolved
                 mintedSession = true;        // handlers MUST use this, not a body value
             } else {
-                sessionId = sessionHeader;   // transitional bootstrap bare id
+                // Phase E (nexus-gmiaf.32.5) require-minted: a present-but-non-live
+                // session token (absent or expired) is a 401. The transitional bootstrap
+                // path that degraded to a bare session id is retired — it was the
+                // victim-impersonation vector (a bare id could collide with another
+                // session's resolved id). Callers MUST mint a session token.
+                reject(exchange, "session_not_minted");
+                return;
             }
         }
 

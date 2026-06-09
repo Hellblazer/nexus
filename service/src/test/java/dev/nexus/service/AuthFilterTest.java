@@ -227,38 +227,37 @@ class AuthFilterTest {
     }
 
     @Test
-    void bootstrapSession_bareIdStampedAsIs() throws Exception {
-        // No minted row for this value → transitional bootstrap: stamped verbatim.
-        HttpResponse<String> r = call(TOK_A, null, "bare-session-xyz");
+    void nonLiveSessionToken_is401() throws Exception {
+        // Phase E require-minted (nexus-gmiaf.32.5): a present-but-non-live session
+        // header is a 401. The transitional bootstrap path that stamped the raw value
+        // as a bare session id is retired (it was the victim-impersonation vector).
+        assertThat(call(TOK_A, null, "bare-session-xyz").statusCode()).isEqualTo(401);
+    }
+
+    @Test
+    void expiredSessionToken_is401_notVictimSession() throws Exception {
+        // An expired minted token has no LIVE row → 401 (no degrade to a bare id).
+        assertThat(call(TOK_A, null, SESS_EXPIRED).statusCode()).isEqualTo(401);
+    }
+
+    @Test
+    void noSessionHeader_proceedsTenantScoped() throws Exception {
+        // A request with NO session header still authenticates and proceeds
+        // tenant-scoped (session-scoped handlers simply are not exercised).
+        HttpResponse<String> r = call(TOK_A, null, null);
         assertThat(r.statusCode()).isEqualTo(200);
-        assertThat(r.body()).isEqualTo("tenant=tenant-a;session=bare-session-xyz");
+        assertThat(r.body()).isEqualTo("tenant=tenant-a;session=");
     }
 
     @Test
-    void expiredSessionToken_degradesToBootstrap_notVictimSession() throws Exception {
-        // An expired minted token has no LIVE row → bootstrap path stamps the raw
-        // presented value (the token string), NEVER the victim's resolved session_id.
-        // Transitional posture; Phase D + a require-minted flip makes this a 401.
-        HttpResponse<String> r = call(TOK_A, null, SESS_EXPIRED);
+    void wildcardBoundToken_resolvesToStarTenant_headerIgnored() throws Exception {
+        // Phase E retired the any-tenant GRANT: a token whose tenant_id == "*" is now
+        // just a bound token to the literal "*" tenant; the client header is ignored,
+        // NOT honored as an any-tenant claim. (Such a row can no longer be minted; this
+        // proves the grant is gone if a legacy row survives.)
+        HttpResponse<String> r = call(TOK_WILDCARD, "tenant-zzz", null);
         assertThat(r.statusCode()).isEqualTo(200);
-        assertThat(r.body()).isEqualTo("tenant=tenant-a;session=" + SESS_EXPIRED);
-    }
-
-    @Test
-    void bootstrapWildcardToken_takesTenantFromHeader() throws Exception {
-        // Transitional grandfathered token (tenant_id="*") may claim any tenant.
-        HttpResponse<String> ra = call(TOK_WILDCARD, "tenant-a", null);
-        assertThat(ra.statusCode()).isEqualTo(200);
-        assertThat(ra.body()).isEqualTo("tenant=tenant-a;session=");
-        HttpResponse<String> rb = call(TOK_WILDCARD, "tenant-zzz", null);
-        assertThat(rb.statusCode()).isEqualTo(200);
-        assertThat(rb.body()).isEqualTo("tenant=tenant-zzz;session=");
-    }
-
-    @Test
-    void bootstrapWildcardToken_missingTenantHeader_is400() throws Exception {
-        // The wildcard token has no bound tenant, so the header is REQUIRED.
-        assertThat(call(TOK_WILDCARD, null, null).statusCode()).isEqualTo(400);
+        assertThat(r.body()).isEqualTo("tenant=*;session=");
     }
 
     // ── Cache-level seam (fresh cache per test, mutable clock) ────────────────
@@ -337,23 +336,24 @@ class AuthFilterTest {
     }
 
     @Test
-    void ensureBootstrapToken_nullNoop_seedsWildcard_idempotent() throws Exception {
+    void ensureBootstrapToken_nullNoop_seedsBoundDefault_idempotent() throws Exception {
         String raw = "raw-bootstrap-ensure";
         String h = TokenHashing.sha256Hex(raw);
+        String defaultTenant = dev.nexus.service.db.TenantConstants.DEFAULT_TENANT;
 
         // null / blank is a no-op (no row, no error).
-        store.ensureBootstrapToken(null, AuthFilter.BOOTSTRAP_ANY_TENANT);
-        store.ensureBootstrapToken("   ", AuthFilter.BOOTSTRAP_ANY_TENANT);
+        store.ensureBootstrapToken(null, defaultTenant);
+        store.ensureBootstrapToken("   ", defaultTenant);
         assertThat(store.lookupServiceToken(h)).isEmpty();
 
-        // Seeds a wildcard row.
-        store.ensureBootstrapToken(raw, AuthFilter.BOOTSTRAP_ANY_TENANT);
+        // Phase E (nexus-gmiaf.32.5): seeds a BOUND default-tenant row, not a wildcard.
+        store.ensureBootstrapToken(raw, defaultTenant);
         var seeded = store.lookupServiceToken(h);
         assertThat(seeded).isPresent();
-        assertThat(seeded.get().tenantId()).isEqualTo(AuthFilter.BOOTSTRAP_ANY_TENANT);
+        assertThat(seeded.get().tenantId()).isEqualTo(defaultTenant);
 
         // Idempotent: a second call does not error or duplicate.
-        store.ensureBootstrapToken(raw, AuthFilter.BOOTSTRAP_ANY_TENANT);
+        store.ensureBootstrapToken(raw, defaultTenant);
         try (Connection su = pg.getPostgresDatabase().getConnection()) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) AS c FROM nexus.service_tokens WHERE token_hash = '" + h + "'");

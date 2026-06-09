@@ -198,8 +198,14 @@ async def _t1_chroma_lifespan(_app: Any):
         # Phase D (bead nexus-gmiaf.32.4): mint a per-session token at session start.
         # Set NX_T1_SESSION to the minted secret (the X-Nexus-T1-Session header value) and
         # NX_T1_SESSION_ID to the session id (body + flush-title). Sub-agents inherit both
-        # via os.environ. On mint failure, fall back to the transitional bootstrap posture
-        # (bare session id in NX_T1_SESSION) — degraded but visible, not silent.
+        # via os.environ.
+        #
+        # Phase E (bead nexus-gmiaf.32.5): the server now REQUIRES a minted session
+        # token (a present-but-non-live X-Nexus-T1-Session is a 401 — the transitional
+        # bootstrap session path is retired). So a mint failure can no longer degrade to
+        # a bare session id (it would 401 on every scratch op). With a resolvable session
+        # id, mint failure is FATAL: we fail loud rather than ship a broken or silently
+        # session-unscoped T1 (no silent fallback for a security-boundary input).
         from nexus.session import resolve_active_session_id
         _t1_session_id = (
             resolve_active_session_id()
@@ -224,15 +230,18 @@ async def _t1_chroma_lifespan(_app: Any):
                 _os.environ["NX_T1_SESSION_ID"] = _t1_session_id
                 _svc_log.info("t1_session_isolation_minted", session_id=_t1_session_id)
             except Exception as _exc:
-                # Bootstrap fallback: overwrite any stale inherited token so the header
-                # carries the bare id consistently. Visible (warning), not silent;
-                # isolation is NOT server-enforced this session.
-                _os.environ["NX_T1_SESSION"] = _t1_session_id
-                _os.environ["NX_T1_SESSION_ID"] = _t1_session_id
-                _svc_log.warning(
-                    "t1_session_isolation_bootstrap", reason="mint_failed",
-                    session_id=_t1_session_id, error=str(_exc),
-                    msg="T1 session isolation NOT server-enforced this session")
+                # Fail loud (Phase E require-minted): a bare-id fallback would 401 on
+                # every scratch op now that the bootstrap session path is retired, and
+                # silently dropping session scoping is forbidden for a security boundary.
+                _svc_log.error(
+                    "t1_session_mint_failed", session_id=_t1_session_id, error=str(_exc),
+                    msg="could not mint a T1 session token; refusing to start the MCP "
+                    "session without server-enforced session isolation")
+                raise RuntimeError(
+                    f"T1 session token mint failed for session {_t1_session_id!r}: {_exc}. "
+                    "The storage service must be reachable to mint a session token "
+                    "(Phase E require-minted)."
+                ) from _exc
 
         yield
         # Teardown: close the scratch rows AND delete the minted session token.

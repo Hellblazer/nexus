@@ -62,14 +62,17 @@ class TokenAdminHandlerTest {
             new Liquibase("db/changelog/db.changelog-master.xml",
                 new ClassLoaderResourceAccessor(), db).update(new Contexts());
         }
-        // Seed the wildcard bootstrap token used to authenticate the admin calls.
+        // Seed the persistent root token (Phase E nexus-gmiaf.32.5) used to authenticate
+        // the admin calls: BOUND to the default tenant with ROOT_TOKEN_LABEL so the
+        // lockout protection (revoke-refused / list-excluded) applies to it.
         try (Connection su = pg.getPostgresDatabase().getConnection()) {
             su.setAutoCommit(true);
             try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES (?, ?, 'boot') "
+                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES (?, ?, ?) "
                 + "ON CONFLICT (token_hash) DO NOTHING")) {
                 ps.setString(1, TokenHashing.sha256Hex(BOOT));
-                ps.setString(2, TenantConstants.BOOTSTRAP_ANY_TENANT);
+                ps.setString(2, TenantConstants.DEFAULT_TENANT);
+                ps.setString(3, dev.nexus.service.db.TokenStore.ROOT_TOKEN_LABEL);
                 ps.executeUpdate();
             }
         }
@@ -206,12 +209,15 @@ class TokenAdminHandlerTest {
     }
 
     @Test
-    void list_excludesBootstrapRow_andRejectsWildcardFilter() throws Exception {
-        // Unfiltered list never surfaces the tenant='*' bootstrap row.
+    void list_excludesRootToken_andRejectsWildcardFilter() throws Exception {
+        // Unfiltered list never surfaces the root token row (excluded by ROOT_TOKEN_LABEL).
+        String bootHash = TokenHashing.sha256Hex(BOOT);
         for (JsonNode row : postJson("/v1/service-tokens/list", "{}").get("tokens")) {
             assertThat(row.get("tenant").asText()).isNotEqualTo("*");
+            assertThat(row.get("token_hash").asText())
+                .as("root token must not be enumerable").isNotEqualTo(bootHash);
         }
-        // Explicit '*' filter is rejected.
+        // Explicit '*' filter is still rejected as a reserved sentinel name.
         assertThat(status("/v1/service-tokens/list", "{\"tenant\":\"*\"}")).isEqualTo(400);
     }
 

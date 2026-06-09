@@ -308,63 +308,40 @@ class StorageServiceSupervisor:
         # When this reaches _MAX_UNHEALTHY_HEARTBEATS the run loop treats the
         # stuck JVM like a jar death and triggers _respawn().
         self._consecutive_unhealthy_heartbeats: int = 0
-        # Stable service token: derived from pg_credentials so it survives
-        # restarts. Clients re-read it from the lease endpoint after restart.
-        self._service_token: str = self._derive_stable_token()
+        # Persistent root bearer token (gmiaf.32.5). Read from pg_credentials
+        # (or the env override); NOT derived from DB passwords. Stable across
+        # restarts because it is persisted, not because it is a function of the
+        # credentials. Clients re-read it from the lease endpoint after restart.
+        self._service_token: str = self._resolve_service_token()
 
-    def _derive_stable_token(self) -> str:
-        """Return the NX_SERVICE_TOKEN to use.
+    def _resolve_service_token(self) -> str:
+        """Return the persistent NX_SERVICE_TOKEN (the bound root token).
 
-        Preference order:
-        1. ``NX_SERVICE_TOKEN`` env var (set by nx init --service or the user).
-        2. A token derived from pg_credentials (stable across restarts).
-        3. A secrets.token_hex(32) generated once per supervisor lifetime.
+        Resolution order:
+        1. ``NX_SERVICE_TOKEN`` env var (operator / test override).
+        2. ``NX_SERVICE_TOKEN`` persisted in ``pg_credentials`` by
+           ``nx init --service`` (a random secret minted at provisioning time).
 
-        The token is included in the lease endpoint so HTTP clients can
-        discover it after a restart without stale 401 errors (HIGH-3 fix).
-
-        INTERIM DESIGN NOTE (gmiaf.32): token = sha256(admin_pass:svc_pass)
-        couples the bearer token to the DB credentials. A DB password rotation
-        silently rotates all live client tokens. Token secrecy depends on
-        pg_credentials file secrecy. This is acceptable until gmiaf.32 (bridge
-        token lifecycle) revisits the coupling.
+        Retires the gmiaf.30 ``_derive_stable_token`` coupling: the token is a
+        random secret, NOT ``sha256(admin_pass:svc_pass)``, so rotating the DB
+        passwords does not change the bearer token and reading pg_credentials no
+        longer reveals a derivable token. Fail loud if absent — a missing token
+        means the cluster was not provisioned through ``nx init --service``
+        (no silent fallback for an auth-correctness input).
         """
-        # 1. Env var takes precedence.
         env_tok = os.environ.get("NX_SERVICE_TOKEN", "").strip()
         if env_tok:
             _log.info("storage_service_token_path", path="env")
             return env_tok
-
-        # 2. Derive from pg_credentials passwords (stable across restarts as long as
-        #    credentials are stable). Hash the admin password + service password so
-        #    we don't embed raw passwords. Use a 32-hex truncation of sha256.
-        import hashlib
-        parts = [
-            self._creds.get("NX_DB_ADMIN_PASS", ""),
-            self._creds.get("NX_DB_PASS", ""),
-        ]
-        if any(parts):
-            # Interim mode (gmiaf.32): WARN so operators can see the service is
-            # running with a token coupled to DB credentials — a DB password
-            # rotation will silently 401 all clients until they rediscover.
-            _log.warning(
-                "storage_service_token_path",
-                path="derived",
-                msg="bearer token derived from DB credentials (interim, gmiaf.32); "
-                "set NX_SERVICE_TOKEN for independent rotation",
-            )
-            raw = ":".join(parts).encode("utf-8")
-            return hashlib.sha256(raw).hexdigest()[:32]
-
-        # 3. Fresh token for this supervisor instance.
-        import secrets
-        _log.warning(
-            "storage_service_token_path",
-            path="fresh",
-            msg="no NX_SERVICE_TOKEN and no DB credentials; generated an "
-            "ephemeral token (not stable across supervisor restarts)",
+        creds_tok = self._creds.get("NX_SERVICE_TOKEN", "").strip()
+        if creds_tok:
+            _log.info("storage_service_token_path", path="pg_credentials")
+            return creds_tok
+        raise StorageServiceStartError(
+            "NX_SERVICE_TOKEN is absent from both the environment and "
+            "pg_credentials. Run 'nx init --service' to provision the cluster "
+            "and persist the root token."
         )
-        return secrets.token_hex(32)
 
     # -- Public properties --------------------------------------------------
 
