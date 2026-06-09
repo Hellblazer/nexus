@@ -20,6 +20,7 @@ import dev.nexus.service.http.HealthHandler;
 import dev.nexus.service.http.MemoryHandler;
 import dev.nexus.service.http.PlanHandler;
 import dev.nexus.service.http.ScratchHandler;
+import dev.nexus.service.http.SessionTokenHandler;
 import dev.nexus.service.http.TaxonomyHandler;
 import dev.nexus.service.http.TelemetryHandler;
 import dev.nexus.service.http.TokenAdminHandler;
@@ -183,6 +184,11 @@ public final class NexusService {
         tenantsCtx.getFilters().addAll(authFilter);
         var svcTokensCtx = server.createContext("/v1/service-tokens", tokenAdmin);
         svcTokensCtx.getFilters().addAll(authFilter);
+
+        // /v1/sessions/* — per-session token mint/close (bead nexus-gmiaf.32.4). Tenant from
+        // the authenticated bearer; the MCP lifespan mints on session start, closes on end.
+        var sessionsCtx = server.createContext("/v1/sessions", new SessionTokenHandler(tokenStore));
+        sessionsCtx.getFilters().addAll(authFilter);
 
         // /v1/vectors/* — vector (Chroma) endpoints (bead nexus-gmiaf.20)
         // Registered when a VectorRepository is provided OR an EmbedderRouter alone is provided

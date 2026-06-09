@@ -194,8 +194,48 @@ async def _t1_chroma_lifespan(_app: Any):
         import structlog as _structlog
         _svc_log = _structlog.get_logger(__name__)
         _svc_log.info("t1_service_path_active", backend="service")
+
+        # Phase D (bead nexus-gmiaf.32.4): mint a per-session token at session start.
+        # Set NX_T1_SESSION to the minted secret (the X-Nexus-T1-Session header value) and
+        # NX_T1_SESSION_ID to the session id (body + flush-title). Sub-agents inherit both
+        # via os.environ. On mint failure, fall back to the transitional bootstrap posture
+        # (bare session id in NX_T1_SESSION) — degraded but visible, not silent.
+        from nexus.session import resolve_active_session_id
+        _t1_session_id = (
+            resolve_active_session_id()
+            or _os.environ.get("NX_T1_SESSION_ID", "").strip()
+            or _os.environ.get("NX_T1_SESSION", "").strip()
+        )
+        if not _t1_session_id or _t1_session_id == "unknown":
+            # No resolvable session — do NOT mint a shared "unknown" row (concurrent
+            # MCPs would collide on the (tenant, session_id) UPSERT, each invalidating
+            # the other's token). Run in bootstrap mode: session isolation is NOT
+            # server-enforced this session (closed when Phase E ships require-minted).
+            _t1_session_id = ""
+            _svc_log.warning(
+                "t1_session_isolation_bootstrap", reason="no_resolvable_session",
+                msg="T1 session isolation NOT server-enforced this session")
+        else:
+            try:
+                from nexus.db.t2.http_token_store import HttpTokenStore
+                with HttpTokenStore() as _ts:
+                    _minted = _ts.start_session(_t1_session_id)
+                _os.environ["NX_T1_SESSION"] = _minted["session_token"]
+                _os.environ["NX_T1_SESSION_ID"] = _t1_session_id
+                _svc_log.info("t1_session_isolation_minted", session_id=_t1_session_id)
+            except Exception as _exc:
+                # Bootstrap fallback: overwrite any stale inherited token so the header
+                # carries the bare id consistently. Visible (warning), not silent;
+                # isolation is NOT server-enforced this session.
+                _os.environ["NX_T1_SESSION"] = _t1_session_id
+                _os.environ["NX_T1_SESSION_ID"] = _t1_session_id
+                _svc_log.warning(
+                    "t1_session_isolation_bootstrap", reason="mint_failed",
+                    session_id=_t1_session_id, error=str(_exc),
+                    msg="T1 session isolation NOT server-enforced this session")
+
         yield
-        # Teardown: close the session so UNLOGGED rows are reaped promptly.
+        # Teardown: close the scratch rows AND delete the minted session token.
         try:
             from nexus.db.http_scratch_store import HttpScratchStore
             _svc_log.info("t1_service_session_close_start")
@@ -205,6 +245,14 @@ async def _t1_chroma_lifespan(_app: Any):
             _svc_log.info("t1_service_session_close_done", deleted=deleted)
         except Exception as _exc:
             _svc_log.warning("t1_service_session_close_failed", error=str(_exc))
+        if _t1_session_id:
+            try:
+                from nexus.db.t2.http_token_store import HttpTokenStore
+                with HttpTokenStore() as _ts:
+                    _ts.close_session(_t1_session_id)
+                _svc_log.info("t1_session_token_closed", session_id=_t1_session_id)
+            except Exception as _exc:
+                _svc_log.warning("t1_session_token_close_failed", error=str(_exc))
         return
 
     if _os.environ.get("NX_T1_HOST", "").strip() and _os.environ.get("NX_T1_PORT", "").strip():

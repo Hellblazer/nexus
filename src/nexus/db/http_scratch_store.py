@@ -50,10 +50,16 @@ _log = structlog.get_logger(__name__)
 #: Default tenant matching TenantConstants.DEFAULT_TENANT in the Java service.
 DEFAULT_TENANT: str = "default"
 
-#: Env var carrying the session identifier (replaces NX_T1_HOST/PORT).
+#: Env var carrying the per-session TOKEN sent in the X-Nexus-T1-Session header
+#: (RDR-152 bead nexus-gmiaf.32.4). In the transitional bootstrap (no minted token)
+#: this is the bare session id, used as both the header value and the body session_id.
 _SESSION_ENV: str = "NX_T1_SESSION"
 
-#: Header the Java service uses to record the session for observability.
+#: Env var carrying the session IDENTIFIER (body session_id + flush-title). Distinct from
+#: the token once minting is active; falls back to NX_T1_SESSION when unset (bootstrap).
+_SESSION_ID_ENV: str = "NX_T1_SESSION_ID"
+
+#: Header carrying the per-session token; the service hashes it to resolve (tenant, session).
 _HEADER_T1_SESSION: str = "X-Nexus-T1-Session"
 
 
@@ -84,20 +90,6 @@ def _resolve_config() -> tuple[str, int, str]:
         )
 
     return host, port, token
-
-
-def _resolve_session() -> str:
-    """Return session identifier from NX_T1_SESSION (required).
-
-    Raises RuntimeError when the env var is absent or blank.
-    """
-    session = os.environ.get(_SESSION_ENV, "").strip()
-    if not session:
-        raise RuntimeError(
-            f"{_SESSION_ENV} is required when NX_STORAGE_BACKEND_T1=service. "
-            "Set it to the session identifier shared across all sibling agents."
-        )
-    return session
 
 
 # ── HttpScratchStore ───────────────────────────────────────────────────────────
@@ -142,12 +134,23 @@ class HttpScratchStore:
             _token = token
 
         self._tenant = tenant
-        self._session_id: str = session_id if session_id else _resolve_session()
+        # session_id (body + flush-title) and session_token (header) are distinct once
+        # minting is active (Phase D). Back-compat: with only NX_T1_SESSION set, both
+        # collapse to the bare session id (the pre-minting bootstrap posture).
+        env_id = os.environ.get(_SESSION_ID_ENV, "").strip()
+        env_token = os.environ.get(_SESSION_ENV, "").strip()
+        self._session_id: str = session_id or env_id or env_token
+        if not self._session_id:
+            raise RuntimeError(
+                f"{_SESSION_ENV} (or {_SESSION_ID_ENV}) is required when "
+                "NX_STORAGE_BACKEND_T1=service. Set it to the session shared across siblings."
+            )
+        self._session_token: str = env_token or self._session_id
 
         self._headers = {
             "Authorization": f"Bearer {_token}",
             "X-Nexus-Tenant": tenant,
-            _HEADER_T1_SESSION: self._session_id,
+            _HEADER_T1_SESSION: self._session_token,
             "Content-Type": "application/json",
         }
         self._client = httpx.Client(
