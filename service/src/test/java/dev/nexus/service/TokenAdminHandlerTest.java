@@ -317,7 +317,7 @@ class TokenAdminHandlerTest {
     private HttpRequest req(String path, String body) {
         return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
             .header("Authorization", "Bearer " + BOOT)
-            .header("X-Nexus-Tenant", "default")  // wildcard token requires a tenant header
+            .header("X-Nexus-Tenant", "default")  // ignored post-Phase-E; BOOT is bound to default
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .build();

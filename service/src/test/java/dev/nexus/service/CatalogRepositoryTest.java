@@ -148,6 +148,17 @@ class CatalogRepositoryTest {
         assertThat(owner.get().get("owner_type")).isEqualTo("repo");
     }
 
+    @Test @Order(1)
+    void owner_upsertRejectsWildcardSentinel() {
+        // nexus-45ykb: '*' is a reserved sentinel and can never be a registered owner.
+        // Enforced independently at the repository layer (not merely via AuthFilter).
+        assertThrows(IllegalArgumentException.class, () ->
+            repo.upsertOwner("*", Map.of(
+                "tumbler_prefix", "1",
+                "name", "ghost",
+                "owner_type", "repo")));
+    }
+
     @Test @Order(2)
     void owner_byRepoHash_found() {
         repo.upsertOwner(TENANT_A, Map.of(

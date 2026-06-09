@@ -50,4 +50,15 @@ public final class TenantConstants {
      * bound and MUST never be minted with this value; Phase E (bead .32.5) retires it.
      */
     public static final String BOOTSTRAP_ANY_TENANT = "*";
+
+    /**
+     * True if {@code tenant} is the reserved wildcard sentinel ({@link #BOOTSTRAP_ANY_TENANT}).
+     * The sentinel is a forbidden tenant name: token minting/rotation, {@code nx tenant
+     * create}, catalog owner-registration, and the {@code AuthFilter} all refuse it
+     * (RDR-152 bead nexus-45ykb), so no real principal may collide with it and no
+     * grandfathered {@code '*'}-bound credential may write ghost data.
+     */
+    public static boolean isWildcard(String tenant) {
+        return BOOTSTRAP_ANY_TENANT.equals(tenant);
+    }
 }
