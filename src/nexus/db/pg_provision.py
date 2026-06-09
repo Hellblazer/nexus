@@ -472,6 +472,7 @@ def _write_credentials(
     port: int,
     admin_pass: str,
     svc_pass: str,
+    service_token: str,
 ) -> None:
     """Write the credentials env-file at 0600.
 
@@ -481,6 +482,13 @@ def _write_credentials(
 
     PG_DATA and PG_PORT are written for the daemon's lifecycle operations
     (pg_ctl start/stop/status in bead .30).
+
+    NX_SERVICE_TOKEN (gmiaf.32.5) is the persistent random root bearer token.
+    It is generated once at provisioning time and is deliberately INDEPENDENT
+    of the DB passwords: rotating ``NX_DB_PASS`` / ``NX_DB_ADMIN_PASS`` does not
+    change the bearer token (retires the gmiaf.30 ``_derive_stable_token``
+    coupling). The supervisor publishes it in the lease; Main.java seeds it as
+    a bound ``default``-tenant row.
     """
     db_url = f"jdbc:postgresql://127.0.0.1:{port}/{NEXUS_DB_NAME}"
     content = (
@@ -494,6 +502,7 @@ def _write_credentials(
         f"NX_DB_URL={db_url}\n"
         f"NX_DB_USER=nexus_svc\n"
         f"NX_DB_PASS={svc_pass}\n"
+        f"NX_SERVICE_TOKEN={service_token}\n"
     )
     creds_path.parent.mkdir(parents=True, exist_ok=True)
     # Write to a temp file then replace atomically so the file is never
@@ -511,6 +520,40 @@ def _write_credentials(
             pass
         raise
     _log.info("pg_credentials_written", path=str(creds_path))
+
+
+def _persist_service_token(creds_path: Path, service_token: str) -> None:
+    """Append ``NX_SERVICE_TOKEN`` to an existing 0600 credentials file.
+
+    Used to backfill the persistent root token (gmiaf.32.5) for clusters
+    provisioned before this field existed, without rewriting the whole file
+    (which would require reconstructing every line). Atomic: writes a temp
+    file then ``os.replace``.
+
+    Idempotent: a no-op if ``NX_SERVICE_TOKEN`` is already present, so a double
+    call (or a race between two ``provision`` runs) cannot append a second,
+    conflicting token line that ``_read_credentials`` would silently shadow.
+    """
+    if "NX_SERVICE_TOKEN" in _read_credentials(creds_path):
+        _log.info("pg_service_token_backfill_noop", path=str(creds_path))
+        return
+    existing = creds_path.read_text()
+    if not existing.endswith("\n"):
+        existing += "\n"
+    content = existing + f"NX_SERVICE_TOKEN={service_token}\n"
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=creds_path.parent, prefix=".pg_creds_")
+    try:
+        os.fchmod(tmp_fd, 0o600)
+        with os.fdopen(tmp_fd, "w") as fh:
+            fh.write(content)
+        os.replace(tmp_path, creds_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    _log.info("pg_service_token_backfilled", path=str(creds_path))
 
 
 def _read_credentials(creds_path: Path) -> dict[str, str]:
@@ -580,6 +623,10 @@ def provision(
         if port_str.isdigit():
             stored_port = int(port_str)
             if (pgdata / _PG_VERSION_MARKER).exists() and _port_accepting("127.0.0.1", stored_port):
+                # Backfill the persistent root token (gmiaf.32.5) for clusters
+                # provisioned before NX_SERVICE_TOKEN existed in the file.
+                if not creds.get("NX_SERVICE_TOKEN"):
+                    _persist_service_token(creds_path, secrets.token_hex(32))
                 _log.info(
                     "pg_provision_no_op",
                     port=stored_port,
@@ -609,9 +656,13 @@ def provision(
         creds = _read_credentials(creds_path)
         admin_pass = creds.get("NX_DB_ADMIN_PASS") or secrets.token_hex(16)
         svc_pass = creds.get("NX_DB_PASS") or secrets.token_hex(16)
+        # Reuse the persisted root token when present so the bearer survives a
+        # re-provision; mint a fresh one otherwise (gmiaf.32.5).
+        service_token = creds.get("NX_SERVICE_TOKEN") or secrets.token_hex(32)
     else:
         admin_pass = secrets.token_hex(16)
         svc_pass = secrets.token_hex(16)
+        service_token = secrets.token_hex(32)
 
     # ── initdb ─────────────────────────────────────────────────────────────────
     result.cluster_created = _init_cluster(bins, pgdata, os_user)
@@ -633,7 +684,7 @@ def provision(
     )
 
     # ── Write credentials ──────────────────────────────────────────────────────
-    _write_credentials(creds_path, pgdata, port, admin_pass, svc_pass)
+    _write_credentials(creds_path, pgdata, port, admin_pass, svc_pass, service_token)
 
     _log.info(
         "pg_provision_complete",

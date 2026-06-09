@@ -62,14 +62,17 @@ class TokenAdminHandlerTest {
             new Liquibase("db/changelog/db.changelog-master.xml",
                 new ClassLoaderResourceAccessor(), db).update(new Contexts());
         }
-        // Seed the wildcard bootstrap token used to authenticate the admin calls.
+        // Seed the persistent root token (Phase E nexus-gmiaf.32.5) used to authenticate
+        // the admin calls: BOUND to the default tenant with ROOT_TOKEN_LABEL so the
+        // lockout protection (revoke-refused / list-excluded) applies to it.
         try (Connection su = pg.getPostgresDatabase().getConnection()) {
             su.setAutoCommit(true);
             try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES (?, ?, 'boot') "
+                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES (?, ?, ?) "
                 + "ON CONFLICT (token_hash) DO NOTHING")) {
                 ps.setString(1, TokenHashing.sha256Hex(BOOT));
-                ps.setString(2, TenantConstants.BOOTSTRAP_ANY_TENANT);
+                ps.setString(2, TenantConstants.DEFAULT_TENANT);
+                ps.setString(3, dev.nexus.service.db.TokenStore.ROOT_TOKEN_LABEL);
                 ps.executeUpdate();
             }
         }
@@ -113,6 +116,15 @@ class TokenAdminHandlerTest {
         assertThat(status("/v1/service-tokens/issue", "{\"tenant\":\"*\"}")).isEqualTo(400);
     }
 
+    @Test
+    void issue_rejectsReservedRootLabel() throws Exception {
+        // P5.3-E: minting a token under ROOT_TOKEN_LABEL would inherit the root-credential
+        // lockout protections (irrevocable / invisible / non-rotating). Must be rejected.
+        assertThat(status("/v1/service-tokens/issue",
+            "{\"tenant\":\"tenant-a\",\"label\":\"" + dev.nexus.service.db.TokenStore.ROOT_TOKEN_LABEL + "\"}"))
+            .isEqualTo(400);
+    }
+
     // ── tenant create ──────────────────────────────────────────────────────────
 
     @Test
@@ -146,6 +158,26 @@ class TokenAdminHandlerTest {
                 + "AND revoked_at IS NULL AND expires_at IS NULL");
             assertThat(rs2.next()).isTrue();
             assertThat(rs2.getLong("c")).as("exactly one fresh non-expiring token").isEqualTo(1L);
+        }
+    }
+
+    @Test
+    void rotate_skipsRootToken() throws Exception {
+        // P5.3-E: the root token (ROOT_TOKEN_LABEL, bound to the default tenant) must NOT
+        // be grace-expired when its tenant is rotated, or the supervisor's persisted
+        // credential would die after the grace window. Seed a normal default-tenant token,
+        // rotate "default", and assert the root row's expires_at stays NULL.
+        postJson("/v1/service-tokens/issue", "{\"tenant\":\"" + TenantConstants.DEFAULT_TENANT + "\"}");
+        postJson("/v1/service-tokens/rotate",
+            "{\"tenant\":\"" + TenantConstants.DEFAULT_TENANT + "\",\"grace_seconds\":300}");
+        String bootHash = TokenHashing.sha256Hex(BOOT);
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT expires_at, revoked_at FROM nexus.service_tokens WHERE token_hash = '"
+                + bootHash + "'");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getObject("expires_at")).as("root token must not be grace-expired").isNull();
+            assertThat(rs.getObject("revoked_at")).as("root token must not be revoked").isNull();
         }
     }
 
@@ -206,12 +238,15 @@ class TokenAdminHandlerTest {
     }
 
     @Test
-    void list_excludesBootstrapRow_andRejectsWildcardFilter() throws Exception {
-        // Unfiltered list never surfaces the tenant='*' bootstrap row.
+    void list_excludesRootToken_andRejectsWildcardFilter() throws Exception {
+        // Unfiltered list never surfaces the root token row (excluded by ROOT_TOKEN_LABEL).
+        String bootHash = TokenHashing.sha256Hex(BOOT);
         for (JsonNode row : postJson("/v1/service-tokens/list", "{}").get("tokens")) {
             assertThat(row.get("tenant").asText()).isNotEqualTo("*");
+            assertThat(row.get("token_hash").asText())
+                .as("root token must not be enumerable").isNotEqualTo(bootHash);
         }
-        // Explicit '*' filter is rejected.
+        // Explicit '*' filter is still rejected as a reserved sentinel name.
         assertThat(status("/v1/service-tokens/list", "{\"tenant\":\"*\"}")).isEqualTo(400);
     }
 

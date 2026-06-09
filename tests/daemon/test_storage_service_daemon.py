@@ -125,6 +125,8 @@ def _make_supervisor(
             "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "admin",
             "NX_DB_ADMIN_PASS": "adminpass", "PG_PORT": str(pg_port),
             "PG_DATA": "/tmp/pgdata",
+            # gmiaf.32.5: persistent root token, read from pg_credentials.
+            "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
         }
     return StorageServiceSupervisor(
         config_dir=config_dir,
@@ -347,23 +349,59 @@ class TestStorageServiceSupervisorUnit:
     def test_token_stable_across_restarts_from_creds(
         self, config_dir: Path, clock: _FakeClock
     ) -> None:
-        """Token is derived from pg_credentials so it is stable across restarts.
+        """Token is the persisted NX_SERVICE_TOKEN, stable across restarts.
 
-        HIGH-3 fix: two supervisor instances built from the same creds must
-        produce the same token (so HTTP clients don't get 401 after respawn).
+        gmiaf.32.5: stability now comes from persistence in pg_credentials, not
+        from derivation. Two supervisor instances built from the same creds
+        publish the same token (so HTTP clients don't get 401 after respawn).
         """
         creds = {
             "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc",
             "NX_DB_PASS": "stablepass", "NX_DB_ADMIN_URL": "jdbc:...",
             "NX_DB_ADMIN_USER": "admin", "NX_DB_ADMIN_PASS": "stableadmin",
             "PG_PORT": "15432", "PG_DATA": "/tmp/pgdata",
+            "NX_SERVICE_TOKEN": "persisted-root-token-cafef00d",
         }
         sup1 = _make_supervisor(config_dir, clock, creds=creds)
         sup2 = _make_supervisor(config_dir, clock, creds=creds)
-        assert sup1._service_token == sup2._service_token, (
-            "Token derived from the same creds must be identical so respawn "
-            "clients don't get 401"
+        assert sup1._service_token == sup2._service_token == "persisted-root-token-cafef00d"
+
+    def test_token_decoupled_from_db_credentials(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """Anti-coupling (gmiaf.32.5): rotating DB passwords does NOT change the
+        bearer token. The token is the persisted NX_SERVICE_TOKEN, independent
+        of NX_DB_PASS / NX_DB_ADMIN_PASS (retires _derive_stable_token)."""
+        base = {
+            "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc",
+            "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "admin",
+            "PG_PORT": "15432", "PG_DATA": "/tmp/pgdata",
+            "NX_SERVICE_TOKEN": "fixed-root-token-1234",
+        }
+        sup1 = _make_supervisor(
+            config_dir, clock,
+            creds={**base, "NX_DB_PASS": "passA", "NX_DB_ADMIN_PASS": "adminA"},
         )
+        sup2 = _make_supervisor(
+            config_dir, clock,
+            creds={**base, "NX_DB_PASS": "passB", "NX_DB_ADMIN_PASS": "adminB"},
+        )
+        assert sup1._service_token == sup2._service_token == "fixed-root-token-1234"
+
+    def test_missing_token_fails_loud(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """No NX_SERVICE_TOKEN in env or creds => StorageServiceStartError
+        (no silent fallback for the auth-correctness input, gmiaf.32.5)."""
+        creds = {
+            "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc", "NX_DB_PASS": "p",
+            "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "admin",
+            "NX_DB_ADMIN_PASS": "a", "PG_PORT": "15432", "PG_DATA": "/tmp/pgdata",
+        }
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NX_SERVICE_TOKEN", None)
+            with pytest.raises(StorageServiceStartError):
+                _make_supervisor(config_dir, clock, creds=creds)
 
     def test_token_in_lease_after_publish(
         self, config_dir: Path, clock: _FakeClock

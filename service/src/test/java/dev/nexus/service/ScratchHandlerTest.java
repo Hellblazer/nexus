@@ -55,6 +55,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ScratchHandlerTest {
 
     private static final String TOKEN = "scratch-handler-test-token-abc789";
+    private static final String OTHER_TOKEN = "scratch-handler-test-token-other-def456";
     private static final String SVC_ROLE = "svc_scratch_handler_test";
     private static final String SVC_PASS = "svc_scratch_handler_test_pass";
     private static final String TENANT = TenantConstants.DEFAULT_TENANT;
@@ -110,15 +111,19 @@ class ScratchHandlerTest {
             su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON t1.scratch TO " + SVC_ROLE);
-            // RDR-152 bead nexus-gmiaf.32.2: AuthFilter reads service_tokens as the app
-            // role; grant SELECT and seed the test TOKEN as a wildcard bootstrap row.
+            // RDR-152 bead nexus-gmiaf.32.5: AuthFilter reads service_tokens as the app
+            // role; grant SELECT and seed two BOUND tokens (one per tenant) — the wildcard
+            // any-tenant grant is retired, so cross-tenant requests use their own token.
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.service_tokens, nexus.session_tokens TO " + SVC_ROLE);
             su.createStatement().execute(
                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES ('"
                 + dev.nexus.service.db.TokenHashing.sha256Hex(TOKEN)
-                + "', '" + dev.nexus.service.http.AuthFilter.BOOTSTRAP_ANY_TENANT
-                + "', 'test-bootstrap') ON CONFLICT (token_hash) DO NOTHING");
+                + "', '" + TENANT + "', 'test-bound') ON CONFLICT (token_hash) DO NOTHING");
+            su.createStatement().execute(
+                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES ('"
+                + dev.nexus.service.db.TokenHashing.sha256Hex(OTHER_TOKEN)
+                + "', '" + OTHER_TENANT + "', 'test-bound-other') ON CONFLICT (token_hash) DO NOTHING");
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, t1, public");
         }
@@ -491,7 +496,7 @@ class ScratchHandlerTest {
                                                  String rawSessionToken, String body) throws Exception {
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
-            .header("Authorization", "Bearer " + TOKEN)
+            .header("Authorization", "Bearer " + tokenFor(tenant))
             .header("X-Nexus-Tenant", tenant)
             .header("X-Nexus-T1-Session", rawSessionToken)
             .header("Content-Type", "application/json")
@@ -503,12 +508,17 @@ class ScratchHandlerTest {
     private HttpResponse<String> post(String path, String tenant, String body) throws Exception {
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
-            .header("Authorization", "Bearer " + TOKEN)
+            .header("Authorization", "Bearer " + tokenFor(tenant))
             .header("X-Nexus-Tenant", tenant)
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .build();
         return http.send(req, HttpResponse.BodyHandlers.ofString());
+    }
+
+    /** Phase E: each tenant authenticates with its own bound token (no wildcard). */
+    private static String tokenFor(String tenant) {
+        return OTHER_TENANT.equals(tenant) ? OTHER_TOKEN : TOKEN;
     }
 
     private static String uuid() {

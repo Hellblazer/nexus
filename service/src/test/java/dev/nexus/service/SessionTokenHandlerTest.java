@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
-import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TokenHashing;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import liquibase.Contexts;
@@ -67,7 +66,8 @@ class SessionTokenHandlerTest {
                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES (?, ?, 'boot') "
                 + "ON CONFLICT (token_hash) DO NOTHING")) {
                 ps.setString(1, TokenHashing.sha256Hex(BOOT));
-                ps.setString(2, TenantConstants.BOOTSTRAP_ANY_TENANT);
+                // Phase E (nexus-gmiaf.32.5): BOOT is a BOUND token (wildcard retired).
+                ps.setString(2, TENANT);
                 ps.executeUpdate();
             }
         }
@@ -139,11 +139,11 @@ class SessionTokenHandlerTest {
         }
         // The new token works (minted-enforced).
         assertThat(scratchGet(second, "sess-remint")).isEqualTo(200);
-        // The old token is no longer minted-enforced: it degrades to the transitional
-        // bootstrap path (no matching row → body session_id trusted), so it still returns
-        // 200 rather than 401. Full revocation of the old token awaits Phase E's
-        // require-minted flag (nexus-gmiaf.32.5); asserting 401 here would be a false test.
-        assertThat(scratchGet(first, "sess-remint")).isEqualTo(200);
+        // Phase E (nexus-gmiaf.32.5) require-minted: the old token's row was replaced by
+        // the re-mint, so presenting it is a present-but-non-live session header → 401.
+        // The transitional bootstrap degrade-to-bare-id path is retired (it was the
+        // victim-impersonation vector), so re-mint now fully invalidates the old token.
+        assertThat(scratchGet(first, "sess-remint")).isEqualTo(401);
     }
 
     @Test
