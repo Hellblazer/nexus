@@ -9,7 +9,6 @@ import org.slf4j.LoggerFactory;
 import javax.sql.DataSource;
 import java.time.Instant;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.Optional;
 
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
@@ -131,9 +130,5 @@ public final class TokenStore {
         if (inserted > 0) {
             log.info("event=bootstrap_token_seeded tenant={}", tenantId);
         }
-    }
-
-    static OffsetDateTime nowUtc() {
-        return OffsetDateTime.now(ZoneOffset.UTC);
     }
 }

@@ -105,6 +105,10 @@ public final class ScratchHandler implements HttpHandler {
                 case "/sweep"          -> handleSweep(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
+        } catch (SessionMismatchException e) {
+            log.debug("event=t1_session_mismatch tenant={} op={}", tenant, op);
+            HttpUtil.send(exchange, 403,
+                json(Map.of("error", "session_id does not match the minted session token")));
         } catch (IllegalArgumentException e) {
             log.debug("event=t1_bad_request tenant={} op={} error={}", tenant, op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
@@ -112,6 +116,29 @@ public final class ScratchHandler implements HttpHandler {
             log.error("event=t1_handler_error tenant={} op={}", tenant, op, e);
             HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
         }
+    }
+
+    /**
+     * Resolve the effective session id for a request body (RDR-152 bead nexus-gmiaf.32.2,
+     * Decision 2 enforcement). When AuthFilter verified a MINTED session token, the
+     * server-resolved session id is authoritative: a body {@code session_id} that differs
+     * is a cross-session attempt and is rejected with 403. Otherwise (transitional bootstrap
+     * — no minted token) the body field is used as today.
+     */
+    private String effectiveSession(Map<String, Object> body) {
+        String bodySession = requireString(body, "session_id");
+        if (RequestContext.isMintedSession()) {
+            String resolved = RequestContext.session();
+            if (!resolved.equals(bodySession)) {
+                throw new SessionMismatchException();
+            }
+            return resolved;
+        }
+        return bodySession;
+    }
+
+    /** Raised when a request body session_id conflicts with a verified minted session token. */
+    private static final class SessionMismatchException extends RuntimeException {
     }
 
     // ── Handlers ─────────────────────────────────────────────────────────────
@@ -125,7 +152,7 @@ public final class ScratchHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
         String id         = requireString(body, "id");
-        String sessionId  = requireString(body, "session_id");
+        String sessionId  = effectiveSession(body);
         String content    = requireString(body, "content");
         String tags       = optStringOrEmpty(body, "tags");
         String agent      = optStringOrNull(body, "agent");
@@ -147,7 +174,7 @@ public final class ScratchHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
         String id        = requireString(body, "id");
-        String sessionId = requireString(body, "session_id");
+        String sessionId = effectiveSession(body);
 
         Map<String, Object> row = repo.get(tenant, sessionId, id);
         if (row.isEmpty()) {
@@ -168,7 +195,7 @@ public final class ScratchHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
         String query     = requireString(body, "query");
-        String sessionId = requireString(body, "session_id");
+        String sessionId = effectiveSession(body);
         int limit        = optIntOrDefault(body, "limit", 10);
 
         List<Map<String, Object>> results = repo.search(tenant, sessionId, query, limit);
@@ -183,7 +210,7 @@ public final class ScratchHandler implements HttpHandler {
     private void handleList(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
-        String sessionId = requireString(body, "session_id");
+        String sessionId = effectiveSession(body);
 
         List<Map<String, Object>> entries = repo.listEntries(tenant, sessionId);
         HttpUtil.send(ex, 200, json(Map.of("entries", entries)));
@@ -197,7 +224,7 @@ public final class ScratchHandler implements HttpHandler {
     private void handleFlagged(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
-        String sessionId = requireString(body, "session_id");
+        String sessionId = effectiveSession(body);
 
         List<Map<String, Object>> entries = repo.flaggedEntries(tenant, sessionId);
         HttpUtil.send(ex, 200, json(Map.of("entries", entries)));
@@ -212,7 +239,7 @@ public final class ScratchHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
         String id         = requireString(body, "id");
-        String sessionId  = requireString(body, "session_id");
+        String sessionId  = effectiveSession(body);
         String flushProj  = optStringOrEmpty(body, "flush_project");
         String flushTitle = optStringOrEmpty(body, "flush_title");
 
@@ -229,7 +256,7 @@ public final class ScratchHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
         String id        = requireString(body, "id");
-        String sessionId = requireString(body, "session_id");
+        String sessionId = effectiveSession(body);
 
         boolean ok = repo.unflag(tenant, sessionId, id);
         HttpUtil.send(ex, 200, json(Map.of("ok", ok)));
@@ -244,7 +271,7 @@ public final class ScratchHandler implements HttpHandler {
         requireMethod(ex, method, "POST", "DELETE");
         Map<String, Object> body = readBody(ex);
         String id        = requireString(body, "id");
-        String sessionId = requireString(body, "session_id");
+        String sessionId = effectiveSession(body);
 
         boolean deleted = repo.delete(tenant, sessionId, id);
         HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
@@ -259,7 +286,7 @@ public final class ScratchHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
         String prefix    = requireString(body, "prefix");
-        String sessionId = requireString(body, "session_id");
+        String sessionId = effectiveSession(body);
 
         List<String> ids = repo.resolvePrefix(tenant, sessionId, prefix);
         HttpUtil.send(ex, 200, json(Map.of("ids", ids)));
@@ -276,7 +303,7 @@ public final class ScratchHandler implements HttpHandler {
     private void handleSessionClose(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
-        String sessionId = requireString(body, "session_id");
+        String sessionId = effectiveSession(body);
 
         int deleted = repo.closeSession(tenant, sessionId);
         HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));

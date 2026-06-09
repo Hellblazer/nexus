@@ -78,6 +78,10 @@ public final class VectorHandler implements HttpHandler {
 
     @Override
     public void handle(HttpExchange exchange) throws IOException {
+        // DEFERRED (bead nexus-skp06): unlike the T2/T1 handlers this does NOT scope
+        // Chroma operations by RequestContext.tenant(); isolation rests on the
+        // collection-name convention only. App-layer tenant enforcement for vector ops
+        // is tracked separately and must land before multi-principal deployment.
         String path = exchange.getRequestURI().getPath();
         // Strip prefix /v1/vectors → /upsert-chunks, /search, etc.
         String op = path.replaceFirst("^/v1/vectors", "");

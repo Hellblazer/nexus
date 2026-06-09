@@ -442,6 +442,46 @@ class ScratchHandlerTest {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    // RDR-152 bead nexus-gmiaf.32.2: when a MINTED session token is presented, the
+    // server-resolved session_id is authoritative — a differing body session_id is a
+    // cross-session attempt and must be rejected with 403 (Decision 2 enforcement).
+    @org.junit.jupiter.api.Test
+    void mintedSession_enforcesResolvedSessionId() throws Exception {
+        String rawSess = "raw-minted-session-token-xyz";
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            su.setAutoCommit(true);
+            try (var ps = su.prepareStatement(
+                "INSERT INTO nexus.session_tokens (session_token_hash, tenant_id, session_id, expires_at) "
+                + "VALUES (?, ?, ?, now() + interval '1 hour') ON CONFLICT (session_token_hash) DO NOTHING")) {
+                ps.setString(1, dev.nexus.service.db.TokenHashing.sha256Hex(rawSess));
+                ps.setString(2, TENANT);
+                ps.setString(3, "minted-sess");
+                ps.executeUpdate();
+            }
+        }
+        // Body session_id matches the minted session → allowed.
+        var ok = postWithSession("/v1/t1/put", TENANT, rawSess,
+            json("id", uuid(), "session_id", "minted-sess", "content", "ok"));
+        assertThat(ok.statusCode()).isEqualTo(200);
+        // Body session_id differs from the minted session → 403 cross-session denial.
+        var denied = postWithSession("/v1/t1/get", TENANT, rawSess,
+            json("id", "whatever", "session_id", "other-sess"));
+        assertThat(denied.statusCode()).isEqualTo(403);
+    }
+
+    private HttpResponse<String> postWithSession(String path, String tenant,
+                                                 String rawSessionToken, String body) throws Exception {
+        var req = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
+            .header("Authorization", "Bearer " + TOKEN)
+            .header("X-Nexus-Tenant", tenant)
+            .header("X-Nexus-T1-Session", rawSessionToken)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
+    }
+
     private HttpResponse<String> post(String path, String tenant, String body) throws Exception {
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))

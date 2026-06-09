@@ -20,10 +20,15 @@ public final class RequestContext {
     /**
      * The resolved principal for the current request.
      *
-     * @param tenant  the SERVER-RESOLVED tenant (never null once auth passes)
-     * @param session the resolved session id (minted) or bootstrap bare id; null if none
+     * @param tenant        the SERVER-RESOLVED tenant (never null once auth passes)
+     * @param session       the resolved session id (minted) or bootstrap bare id; null if none
+     * @param mintedSession true iff {@code session} came from a verified minted
+     *                      {@code session_tokens} row (server-resolved). When true,
+     *                      handlers MUST use {@code session} and reject any client-supplied
+     *                      session id that differs (Decision 2 cross-session denial). When
+     *                      false the session is a transitional bootstrap bare id.
      */
-    public record Principal(String tenant, String session) {
+    public record Principal(String tenant, String session, boolean mintedSession) {
     }
 
     private static final ThreadLocal<Principal> CURRENT = new ThreadLocal<>();
@@ -54,5 +59,11 @@ public final class RequestContext {
     public static String session() {
         Principal p = CURRENT.get();
         return p == null ? null : p.session();
+    }
+
+    /** @return true iff the current session was resolved from a verified minted token. */
+    public static boolean isMintedSession() {
+        Principal p = CURRENT.get();
+        return p != null && p.mintedSession();
     }
 }

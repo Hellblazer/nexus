@@ -40,9 +40,11 @@ import java.util.Optional;
  * <ul>
  *   <li><b>Minted (live row found):</b> the row's tenant MUST equal the resolved tenant
  *       (else 401 — cross-tenant session); the SERVER-RESOLVED {@code session_id} is
- *       exposed via {@link RequestContext#session()}. Handlers (Phase D) must use it,
- *       never a client-supplied session id — this is what makes "a session-S1 token
- *       cannot act as session-S2 within one tenant" hold server-side.</li>
+ *       exposed via {@link RequestContext#session()} with {@link RequestContext#isMintedSession()}
+ *       true. Session-scoped handlers MUST use it and reject a differing client-supplied
+ *       session id (ScratchHandler enforces this with a 403) — this is what makes "a
+ *       session-S1 token cannot act as session-S2 within one tenant" hold server-side.
+ *       Phase D (nexus-gmiaf.32.4) wires clients to mint and send these tokens.</li>
  *   <li><b>Bootstrap (no live row — absent or expired):</b> the raw header value is
  *       exposed as a bare session id (the pre-Decision-2 client-side-scoping posture).
  *       An expired minted token therefore degrades to its own token string as the
@@ -126,6 +128,7 @@ public final class AuthFilter extends Filter {
 
         // 3. Per-session verification (Decision 2), transitional option (a).
         String sessionId = null;
+        boolean mintedSession = false;
         String sessionHeader = exchange.getRequestHeaders().getFirst(SESSION_HEADER);
         if (sessionHeader != null && !sessionHeader.isBlank()) {
             Optional<SessionPrincipal> minted =
@@ -137,13 +140,14 @@ public final class AuthFilter extends Filter {
                     return;
                 }
                 sessionId = sp.sessionId();  // server-resolved
+                mintedSession = true;        // handlers MUST use this, not a body value
             } else {
                 sessionId = sessionHeader;   // transitional bootstrap bare id
             }
         }
 
         // 4. Publish the principal thread-confined; clear after dispatch.
-        RequestContext.set(new RequestContext.Principal(tenant, sessionId));
+        RequestContext.set(new RequestContext.Principal(tenant, sessionId, mintedSession));
         try {
             chain.doFilter(exchange);
         } finally {

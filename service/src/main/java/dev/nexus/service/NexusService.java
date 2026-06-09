@@ -72,6 +72,8 @@ public final class NexusService {
     private final HttpServer server;
     private final TenantScope tenantScope;
     private final ScheduledExecutorService sweepScheduler;
+    private final TokenStore tokenStore;
+    private final TokenCache tokenCache;
 
     /**
      * Convenience constructor: no vector backend (original signature for existing tests).
@@ -117,8 +119,8 @@ public final class NexusService {
         // nexus-gmiaf.32.5), so constructing the service has no schema side effect.
         // The `token` parameter is retained for source/signature compatibility but is
         // no longer the auth secret (auth is registry-backed).
-        var tokenStore = new TokenStore(dataSource, java.time.Clock.systemUTC());
-        var tokenCache = new TokenCache(tokenStore, java.time.Clock.systemUTC());
+        this.tokenStore = new TokenStore(dataSource, java.time.Clock.systemUTC());
+        this.tokenCache = new TokenCache(tokenStore, java.time.Clock.systemUTC());
 
         var memoryRepo    = new MemoryRepository(tenantScope);
         var planRepo      = new PlanRepository(tenantScope);
@@ -226,5 +228,20 @@ public final class NexusService {
      */
     public int getPort() {
         return server.getAddress().getPort();
+    }
+
+    /**
+     * The live token cache the AuthFilter reads on every request. Phase C's
+     * revoke/rotate endpoint MUST call {@code getTokenCache().invalidate(hash)} on this
+     * instance for immediate revocation — allocating a separate TokenCache would no-op
+     * against the cache actually serving requests (RDR-152 bead nexus-gmiaf.32.2).
+     */
+    public TokenCache getTokenCache() {
+        return tokenCache;
+    }
+
+    /** The token store backing auth resolution (shared seam for Phase C/E lifecycle ops). */
+    public TokenStore getTokenStore() {
+        return tokenStore;
     }
 }

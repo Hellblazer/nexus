@@ -32,6 +32,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -326,8 +327,39 @@ class AuthFilterTest {
         assertThat(c.resolveTenant(h)).contains("tenant-a");  // cached, valid at T0
         clock.set(T0.plusSeconds(50));
         assertThat(c.resolveTenant(h)).as("still valid before expiry").contains("tenant-a");
+        clock.set(T0.plusSeconds(99));
+        assertThat(c.resolveTenant(h)).as("valid one second before expiry").contains("tenant-a");
+        // Boundary: expiry is !isAfter(now), so the token is expired AT expires_at, not after.
+        clock.set(T0.plusSeconds(100));
+        assertThat(c.resolveTenant(h)).as("expired exactly AT expires_at (boundary)").isEmpty();
         clock.set(T0.plusSeconds(101));  // past expiry but well within the 300s TTL
         assertThat(c.resolveTenant(h)).as("expiry re-checked on hit, before TTL elapses").isEmpty();
+    }
+
+    @Test
+    void ensureBootstrapToken_nullNoop_seedsWildcard_idempotent() throws Exception {
+        String raw = "raw-bootstrap-ensure";
+        String h = TokenHashing.sha256Hex(raw);
+
+        // null / blank is a no-op (no row, no error).
+        store.ensureBootstrapToken(null, AuthFilter.BOOTSTRAP_ANY_TENANT);
+        store.ensureBootstrapToken("   ", AuthFilter.BOOTSTRAP_ANY_TENANT);
+        assertThat(store.lookupServiceToken(h)).isEmpty();
+
+        // Seeds a wildcard row.
+        store.ensureBootstrapToken(raw, AuthFilter.BOOTSTRAP_ANY_TENANT);
+        var seeded = store.lookupServiceToken(h);
+        assertThat(seeded).isPresent();
+        assertThat(seeded.get().tenantId()).isEqualTo(AuthFilter.BOOTSTRAP_ANY_TENANT);
+
+        // Idempotent: a second call does not error or duplicate.
+        store.ensureBootstrapToken(raw, AuthFilter.BOOTSTRAP_ANY_TENANT);
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT COUNT(*) AS c FROM nexus.service_tokens WHERE token_hash = '" + h + "'");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getLong("c")).as("bootstrap seed must be idempotent (one row)").isEqualTo(1L);
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
