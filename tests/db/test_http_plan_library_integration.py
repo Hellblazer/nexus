@@ -473,20 +473,24 @@ class TestPlansMVV:
         assert not plan_store.plan_exists("Exists boundary test", "builtin")
         assert not plan_store.plan_exists("Exists boundary test", "no-such-tag")
 
-    def test_k_greatest_merge_no_clobber(self, plan_store):
-        """k) GREATEST(source, live): re-import with stale counters does NOT clobber PG-live values.
+    def test_k_source_authoritative_overwrites_live_counters(self, plan_store):
+        """k) Source-authoritative re-import: additive counters use EXCLUDED (source wins).
 
-        This is the only test that validates Critical 1 end-to-end against the real
-        Java service + real Postgres. The fake-server Python unit test mirrors the
-        logic; this confirms the SQL GREATEST clause in PlanRepository.doImport fires.
+        Bug nexus-0jq9u: additive event-tally counters (use_count, match_count,
+        match_conf_sum, success_count, failure_count) must NOT use GREATEST on
+        re-import.  The SQLite snapshot is the authoritative record; a one-shot
+        migration overwrites the current PG value with the source value.
+
+        Non-vacuous: this test FAILS if the SQL still uses GREATEST (source < live
+        means GREATEST would keep live, not replace with source).
         """
-        # Seed with low source counters
+        # Seed with source counters
         pid = plan_store.import_plan(
-            project="greatest-int",
-            query="GREATEST merge integration test",
-            plan_json='{"greatest":true}',
+            project="src-auth-int",
+            query="Source-authoritative merge integration test",
+            plan_json='{"src_auth":true}',
             outcome="success",
-            tags="greatest-test",
+            tags="src-auth-test",
             created_at="2025-03-01T00:00:00Z",
             use_count=5,
             match_count=10,
@@ -504,37 +508,43 @@ class TestPlansMVV:
         plan_store.increment_run_outcome(pid, success=True)      # success_count=4+2=6
 
         row_live = plan_store.get_plan(pid)
-        live_match_count   = row_live["match_count"]
-        live_conf_sum      = row_live["match_conf_sum"]
-        live_success_count = row_live["success_count"]
+        assert row_live["match_count"] > 10, (
+            f"precondition: live increments advanced match_count above source=10; "
+            f"got {row_live['match_count']}")
 
-        assert live_match_count > 10, (
-            f"precondition: live increments advanced match_count above source=10; got {live_match_count}")
-
-        # Re-import with the STALE source values (same as first import)
+        # Re-import with the SOURCE values (lower than live PG)
         pid2 = plan_store.import_plan(
-            project="greatest-int",
-            query="GREATEST merge integration test",
-            plan_json='{"greatest":true}',
+            project="src-auth-int",
+            query="Source-authoritative merge integration test",
+            plan_json='{"src_auth":true}',
             outcome="success",
-            tags="greatest-test",
+            tags="src-auth-test",
             created_at="2025-03-01T00:00:00Z",
-            use_count=5,      # stale
-            match_count=10,   # stale (< live)
-            match_conf_sum=2.5,
-            success_count=4,  # stale (< live)
+            use_count=5,       # source value (< live use_count)
+            match_count=10,    # source value (< live match_count=13)
+            match_conf_sum=2.5,  # source value (< live conf_sum=5.2)
+            success_count=4,   # source value (< live success_count=6)
             failure_count=1,
         )
         assert pid2 == pid, "idempotent re-import must return same id"
 
         row_after = plan_store.get_plan(pid)
-        assert row_after["match_count"] == live_match_count, (
-            f"GREATEST: re-import with stale source must NOT clobber live match_count="
-            f"{live_match_count}; got {row_after['match_count']}")
-        assert abs(row_after["match_conf_sum"] - live_conf_sum) < 1e-9, (
-            "GREATEST: re-import must NOT clobber live match_conf_sum")
-        assert row_after["success_count"] == live_success_count, (
-            "GREATEST: re-import must NOT clobber live success_count")
+        # Source MUST win for all five additive counters: PG values replaced by source
+        assert row_after["match_count"] == 10, (
+            f"source must overwrite live match_count=13 with source=10; "
+            f"got {row_after['match_count']} (GREATEST still in use?)")
+        assert abs(row_after["match_conf_sum"] - 2.5) < 1e-9, (
+            f"source must overwrite live match_conf_sum with source=2.5; "
+            f"got {row_after['match_conf_sum']} (GREATEST still in use?)")
+        assert row_after["success_count"] == 4, (
+            f"source must overwrite live success_count=6 with source=4; "
+            f"got {row_after['success_count']} (GREATEST still in use?)")
+        assert row_after["use_count"] == 5, (
+            f"source must overwrite live use_count with source=5; "
+            f"got {row_after['use_count']} (GREATEST still in use?)")
+        assert row_after["failure_count"] == 1, (
+            f"source must overwrite live failure_count with source=1; "
+            f"got {row_after['failure_count']} (GREATEST still in use?)")
 
     def test_l_disable_reason_tag(self, plan_store):
         """l) disable with reason appends disable-reason:<reason> to tags via real service."""

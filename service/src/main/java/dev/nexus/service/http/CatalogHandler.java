@@ -46,6 +46,7 @@ import java.util.*;
  *   GET   /v1/catalog/manifest/get       get manifest for doc_id
  *   POST  /v1/catalog/manifest/purge     purge manifest for doc_id
  *   GET   /v1/catalog/manifest/chashes   chashes for collection
+ *   POST  /v1/catalog/manifest/resync    recompute chunk_count from manifest row count
  *   POST  /v1/catalog/owners/upsert      upsert owner
  *   GET   /v1/catalog/owners/list        list all owners
  *   GET   /v1/catalog/owners/by_repo     get owner by repo_hash
@@ -124,6 +125,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/purge"        -> handleManifestPurge(exchange, tenant, method);
                 case "/manifest/chashes"      -> handleManifestChashes(exchange, tenant, method);
                 case "/manifest/docs_for_chashes" -> handleDocsForChashes(exchange, tenant, method);
+                case "/manifest/resync"       -> handleManifestResync(exchange, tenant, method);
 
                 // ── Owners ────────────────────────────────────────────────────
                 case "/owners/upsert"         -> handleOwnerUpsert(exchange, tenant, method);
@@ -505,6 +507,35 @@ public final class CatalogHandler implements HttpHandler {
             : List.of();
         var docs = repo.docsForChashes(tenant, chashes);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("tumblers", docs)));
+    }
+
+    /**
+     * POST /v1/catalog/manifest/resync
+     *
+     * <p>Recomputes {@code documents.chunk_count} for a given document by counting
+     * rows in {@code catalog_document_chunks}.  Fixes the discrepancy that arises
+     * when the client-pushed {@code chunk_count} in the upsert is stale or wrong.
+     *
+     * <p>Request body: {@code {"doc_id": "<tumbler>"}}
+     * Response body:   {@code {"updated": <0|1>, "chunk_count": <N>}}
+     *
+     * <p>Exposes {@link CatalogRepository#resyncChunkCount} over HTTP so the Python
+     * client's {@code resync_chunk_count_cache} becomes a real reconciliation call
+     * instead of a no-op (bug nexus-0jq9u).
+     */
+    private void handleManifestResync(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String docId = (String) body.get("doc_id");
+        if (docId == null || docId.isBlank()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'doc_id' required\"}"); return;
+        }
+        int updated = repo.resyncChunkCount(tenant, docId);
+        var doc = repo.getDocument(tenant, docId);
+        int chunkCount = doc != null && doc.get("chunk_count") instanceof Number n
+            ? n.intValue() : 0;
+        HttpUtil.send(exchange, 200,
+            "{\"updated\":" + updated + ",\"chunk_count\":" + chunkCount + "}");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
