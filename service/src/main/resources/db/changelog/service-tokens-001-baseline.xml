@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-152 bead nexus-gmiaf.32.1 — bridge token lifecycle, Phase A schema.
+
+    LOCKED design: T2 nexus_rdr/gmiaf.32-token-design-DECISIONS. Creates the two
+    credential-resolution tables that replace the Phase-1 single fixed bootstrap
+    token:
+
+      - nexus.service_tokens   — bearer-token registry. token_hash -> tenant_id.
+        Decision 1: AuthFilter hashes the presented bearer, looks the row up here,
+        and resolves the tenant SERVER-SIDE (it stops trusting the client-supplied
+        X-Nexus-Tenant header). Supports per-tenant tokens, zero-downtime rotation
+        (multiple live rows per tenant, old expires_at = now+grace), revocation
+        (revoked_at), and expiry (expires_at).
+
+      - nexus.session_tokens   — per-session token store. session_token_hash ->
+        (tenant_id, session_id). Decision 2: NX_T1_SESSION carries a short-lived
+        per-session secret; the handler resolves it here, then stamps the
+        nexus.t1_tenant GUC and passes session_id as the WHERE-column filter into
+        t1.scratch. Server-enforced session isolation lives on t1.scratch
+        (FORCE-RLS by tenant + session_id column), NOT on this credential table.
+
+    ── WHY NEITHER TABLE ENABLES RLS (the load-bearing decision) ──────────────
+    Every tenant-scoped DATA table uses ENABLE + FORCE ROW LEVEL SECURITY with a
+    tenant_isolation policy USING (tenant_id = current_setting('nexus.tenant', true))
+    (see catalog-001-baseline.xml; t1-001-baseline.xml for the t1_tenant variant).
+    These two tables are different in kind: they are read by the auth layer BEFORE
+    any tenant GUC is set, because the presented token is precisely what RESOLVES
+    the tenant. If a tenant RLS policy were applied, a pre-context read would match
+    NULL against tenant_id and return zero rows (fail-closed), making authentication
+    structurally impossible.
+
+    The service role nexus_svc is NOSUPERUSER NOBYPASSRLS (grants-nexus-svc.xml) and
+    CANNOT bypass RLS at the role level, so readability must come from the table's
+    RLS configuration, not the role. We therefore do NOT enable RLS on either table.
+    The sole grantee is the service's own auth layer; there is no lower-privilege
+    reader to defend against at the DB layer, and the stored material is already a
+    hash (token_hash / session_token_hash), never the raw token. Isolation of the
+    DATA these tokens authorize remains fully enforced on the domain tables.
+
+    Both tables live in the `nexus` schema, so grants-nexus-svc.xml (runAlways, LAST
+    in the master order) grants nexus_svc SELECT/INSERT/UPDATE/DELETE on them via its
+    ALL TABLES IN SCHEMA nexus grant + ALTER DEFAULT PRIVILEGES — no per-table grant
+    is added here (verified by ServiceTokenSchemaLiquibaseTest: nexus_svc reads
+    service_tokens with no tenant GUC set).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: service_tokens registry (bearer -> tenant) ───────────── -->
+    <changeSet id="service-tokens-001-1" author="nexus-gmiaf.32.1">
+        <comment>
+            Create nexus.service_tokens — bearer-token registry resolving token_hash
+            to tenant_id. NO RLS (read before tenant context exists; see header).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.service_tokens (
+    token_hash  TEXT        NOT NULL,
+    tenant_id   TEXT        NOT NULL,
+    label       TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at  TIMESTAMPTZ,
+    revoked_at  TIMESTAMPTZ,
+    CONSTRAINT service_tokens_pk PRIMARY KEY (token_hash)
+);
+
+-- List/rotate/revoke a tenant's tokens.
+CREATE INDEX idx_service_tokens_tenant ON nexus.service_tokens (tenant_id);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.service_tokens CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: session_tokens (per-session secret -> tenant/session) ── -->
+    <changeSet id="service-tokens-001-2" author="nexus-gmiaf.32.1">
+        <comment>
+            Create nexus.session_tokens — per-session token store resolving
+            session_token_hash to (tenant_id, session_id). Short TTL via expires_at
+            (NOT NULL). NO RLS (credential-resolution table; see header).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.session_tokens (
+    session_token_hash TEXT        NOT NULL,
+    tenant_id          TEXT        NOT NULL,
+    session_id         TEXT        NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at         TIMESTAMPTZ NOT NULL,
+    CONSTRAINT session_tokens_pk PRIMARY KEY (session_token_hash)
+);
+
+-- Lookups / sweeps by (tenant, session).
+CREATE INDEX idx_session_tokens_tenant_session
+    ON nexus.session_tokens (tenant_id, session_id);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.session_tokens CASCADE</rollback>
+    </changeSet>
+
+</databaseChangeLog>

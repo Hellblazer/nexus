@@ -22,6 +22,8 @@ import dev.nexus.service.jooq.nexus.tables.NxAnswerRuns;
 import dev.nexus.service.jooq.nexus.tables.Plans;
 import dev.nexus.service.jooq.nexus.tables.RelevanceLog;
 import dev.nexus.service.jooq.nexus.tables.SearchTelemetry;
+import dev.nexus.service.jooq.nexus.tables.ServiceTokens;
+import dev.nexus.service.jooq.nexus.tables.SessionTokens;
 import dev.nexus.service.jooq.nexus.tables.TaxonomyMeta;
 import dev.nexus.service.jooq.nexus.tables.TierWrites;
 import dev.nexus.service.jooq.nexus.tables.TopicAssignments;
@@ -124,6 +126,16 @@ public class Tables {
      * The table <code>nexus.search_telemetry</code>.
      */
     public static final SearchTelemetry SEARCH_TELEMETRY = SearchTelemetry.SEARCH_TELEMETRY;
+
+    /**
+     * The table <code>nexus.service_tokens</code>.
+     */
+    public static final ServiceTokens SERVICE_TOKENS = ServiceTokens.SERVICE_TOKENS;
+
+    /**
+     * The table <code>nexus.session_tokens</code>.
+     */
+    public static final SessionTokens SESSION_TOKENS = SessionTokens.SESSION_TOKENS;
 
     /**
      * The table <code>nexus.taxonomy_meta</code>.

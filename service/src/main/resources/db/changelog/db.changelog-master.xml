@@ -40,6 +40,11 @@
          chunk chash, not a tumbler. aspects/highlights/queue/chunks keep their FKs. -->
     <include file="db/changelog/fk-001-catalog-cross-store.xml"/>
 
+    <!-- Store 9: bridge token lifecycle (bead nexus-gmiaf.32.1) — service_tokens +
+         session_tokens credential-resolution tables. NO RLS (read before tenant
+         context exists; the token resolves the tenant). nexus schema. -->
+    <include file="db/changelog/service-tokens-001-baseline.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
