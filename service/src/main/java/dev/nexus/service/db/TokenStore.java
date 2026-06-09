@@ -7,8 +7,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.Base64;
+import java.util.List;
 import java.util.Optional;
 
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
@@ -130,5 +134,154 @@ public final class TokenStore {
         if (inserted > 0) {
             log.info("event=bootstrap_token_seeded tenant={}", tenantId);
         }
+    }
+
+    // ── Admin / lifecycle (RDR-152 bead nexus-gmiaf.32.3) ──────────────────────
+
+    private static final SecureRandom RNG = new SecureRandom();
+    private static final Base64.Encoder TOKEN_ENCODER = Base64.getUrlEncoder().withoutPadding();
+
+    /** A freshly issued token: the raw secret (shown ONCE) and its stored hash. */
+    public record IssuedToken(String rawToken, String tokenHash) {
+    }
+
+    /** A token registry row for listing (never carries the raw secret). */
+    public record TokenInfo(String tokenHash, String tenantId, String label,
+                            OffsetDateTime createdAt, OffsetDateTime expiresAt,
+                            OffsetDateTime revokedAt) {
+        /** active | revoked | expired, evaluated against {@code now}. */
+        public String status(Instant now) {
+            if (revokedAt != null) {
+                return "revoked";
+            }
+            if (expiresAt != null && !expiresAt.toInstant().isAfter(now)) {
+                return "expired";
+            }
+            return "active";
+        }
+    }
+
+    private static void rejectWildcard(String tenant) {
+        if (tenant == null || tenant.isBlank()) {
+            throw new IllegalArgumentException("tenant must not be null or blank");
+        }
+        if (TenantConstants.BOOTSTRAP_ANY_TENANT.equals(tenant)) {
+            throw new IllegalArgumentException(
+                "tenant '*' is reserved for the transitional bootstrap token and cannot be minted");
+        }
+    }
+
+    private static String newRawToken() {
+        byte[] bytes = new byte[32];
+        RNG.nextBytes(bytes);
+        return TOKEN_ENCODER.encodeToString(bytes);
+    }
+
+    /**
+     * Issue a new bound token for {@code tenant} (rejects the wildcard sentinel).
+     *
+     * @param tenant     the tenant to bind the token to (not {@code '*'})
+     * @param label      optional human label (may be null)
+     * @param ttlSeconds optional lifetime; null means no expiry
+     * @return the issued token: raw secret (show once) + stored hash
+     */
+    public IssuedToken issueToken(String tenant, String label, Long ttlSeconds) {
+        rejectWildcard(tenant);
+        String raw = newRawToken();
+        String hash = TokenHashing.sha256Hex(raw);
+        OffsetDateTime expiresAt = ttlSeconds == null
+            ? null
+            : OffsetDateTime.ofInstant(clock.instant().plusSeconds(ttlSeconds), ZoneOffset.UTC);
+        dsl().insertInto(SERVICE_TOKENS)
+            .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID,
+                     SERVICE_TOKENS.LABEL, SERVICE_TOKENS.EXPIRES_AT)
+            .values(hash, tenant, label, expiresAt)
+            .execute();
+        log.info("event=service_token_issued tenant={} label={} ttl={}", tenant, label, ttlSeconds);
+        return new IssuedToken(raw, hash);
+    }
+
+    /**
+     * Zero-downtime rotation: set {@code expires_at = now + grace} on every currently-live
+     * token for {@code tenant}, then issue a fresh one. Old and new are BOTH valid through
+     * the grace window; clients rediscover the new token via the lease the supervisor
+     * publishes. Returns the newly issued token.
+     *
+     * @param tenant       the tenant to rotate (not {@code '*'})
+     * @param graceSeconds overlap window before the old tokens expire
+     */
+    public IssuedToken rotateTokens(String tenant, long graceSeconds) {
+        rejectWildcard(tenant);
+        OffsetDateTime graceDeadline =
+            OffsetDateTime.ofInstant(clock.instant().plusSeconds(graceSeconds), ZoneOffset.UTC);
+        // Expire the live rows (not revoked; no expiry or expiring later than the grace
+        // deadline). Rows already expiring sooner are left alone.
+        int expired = dsl().update(SERVICE_TOKENS)
+            .set(SERVICE_TOKENS.EXPIRES_AT, graceDeadline)
+            .where(SERVICE_TOKENS.TENANT_ID.eq(tenant))
+            .and(SERVICE_TOKENS.REVOKED_AT.isNull())
+            .and(SERVICE_TOKENS.EXPIRES_AT.isNull().or(SERVICE_TOKENS.EXPIRES_AT.gt(graceDeadline)))
+            .execute();
+        log.info("event=service_token_rotated tenant={} expiring_old={} grace_s={}",
+                 tenant, expired, graceSeconds);
+        return issueToken(tenant, "rotated", null);
+    }
+
+    /**
+     * Revoke a token by full hash or a unique hash prefix. Sets {@code revoked_at = now}.
+     *
+     * @param selector full token_hash or a unique prefix
+     * @return the full token_hash revoked, or empty if no unique match (caller invalidates
+     *         the cache for the returned hash)
+     */
+    public Optional<String> revokeToken(String selector) {
+        if (selector == null || selector.isBlank()) {
+            return Optional.empty();
+        }
+        // Resolve selector to exactly one live hash (exact match preferred, else unique prefix).
+        List<String> matches = dsl()
+            .select(SERVICE_TOKENS.TOKEN_HASH)
+            .from(SERVICE_TOKENS)
+            .where(SERVICE_TOKENS.TOKEN_HASH.eq(selector)
+                .or(SERVICE_TOKENS.TOKEN_HASH.startsWith(selector)))
+            .fetch(SERVICE_TOKENS.TOKEN_HASH);
+        String hash;
+        if (matches.contains(selector)) {
+            hash = selector;  // exact match wins even if it is also a prefix of others
+        } else if (matches.size() == 1) {
+            hash = matches.get(0);
+        } else {
+            return Optional.empty();  // not found or ambiguous prefix
+        }
+        dsl().update(SERVICE_TOKENS)
+            .set(SERVICE_TOKENS.REVOKED_AT,
+                 OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC))
+            .where(SERVICE_TOKENS.TOKEN_HASH.eq(hash))
+            .and(SERVICE_TOKENS.REVOKED_AT.isNull())
+            .execute();
+        log.info("event=service_token_revoked hash_prefix={}", hash.substring(0, Math.min(12, hash.length())));
+        return Optional.of(hash);
+    }
+
+    /**
+     * List token registry rows, optionally filtered by tenant. Never returns raw secrets.
+     *
+     * @param tenant tenant filter, or null for all tenants
+     */
+    public List<TokenInfo> listTokens(String tenant) {
+        var query = dsl()
+            .select(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL,
+                    SERVICE_TOKENS.CREATED_AT, SERVICE_TOKENS.EXPIRES_AT, SERVICE_TOKENS.REVOKED_AT)
+            .from(SERVICE_TOKENS);
+        var filtered = (tenant == null || tenant.isBlank())
+            ? query.orderBy(SERVICE_TOKENS.CREATED_AT)
+            : query.where(SERVICE_TOKENS.TENANT_ID.eq(tenant)).orderBy(SERVICE_TOKENS.CREATED_AT);
+        return filtered.fetch(r -> new TokenInfo(
+            r.get(SERVICE_TOKENS.TOKEN_HASH),
+            r.get(SERVICE_TOKENS.TENANT_ID),
+            r.get(SERVICE_TOKENS.LABEL),
+            r.get(SERVICE_TOKENS.CREATED_AT),
+            r.get(SERVICE_TOKENS.EXPIRES_AT),
+            r.get(SERVICE_TOKENS.REVOKED_AT)));
     }
 }

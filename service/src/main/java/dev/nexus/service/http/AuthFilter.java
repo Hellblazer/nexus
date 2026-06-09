@@ -67,7 +67,7 @@ public final class AuthFilter extends Filter {
     private static final Logger log = LoggerFactory.getLogger(AuthFilter.class);
 
     /** Sentinel tenant_id marking the transitional grandfathered bootstrap token. */
-    public static final String BOOTSTRAP_ANY_TENANT = "*";
+    public static final String BOOTSTRAP_ANY_TENANT = dev.nexus.service.db.TenantConstants.BOOTSTRAP_ANY_TENANT;
 
     private static final String BEARER_PREFIX = "Bearer ";
     private static final String TENANT_HEADER = "X-Nexus-Tenant";

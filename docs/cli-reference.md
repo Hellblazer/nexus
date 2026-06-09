@@ -1724,3 +1724,51 @@ nx mineru status
 ```
 
 Show server status: running/stopped, PID, port, active tasks, and completed tasks. Removes stale PID file if the server process is no longer running.
+
+## nx tenant
+
+Tenant provisioning for the RDR-152 storage service (bead nexus-gmiaf.32.3). Requires `NX_SERVICE_PORT` and `NX_SERVICE_TOKEN` (the bootstrap credential the storage-service supervisor publishes). All SQL runs in the Java service; the CLI is a thin client.
+
+### nx tenant create
+
+```
+nx tenant create NAME
+```
+
+Create tenant `NAME` and mint its first bound service token. The token is printed **once** (store it immediately); only its hash is kept server-side. The name `*` is reserved for the bootstrap token and is rejected.
+
+## nx service
+
+Storage-service administration.
+
+### nx service token issue
+
+```
+nx service token issue --tenant TENANT [--label LABEL] [--ttl SECONDS]
+```
+
+Issue a new bearer token bound to `TENANT`. Printed once; only the hash is stored. `--ttl` sets an optional lifetime in seconds (default: no expiry). A token bound to a tenant ignores the client `X-Nexus-Tenant` header; the tenant comes from the token.
+
+### nx service token rotate
+
+```
+nx service token rotate --tenant TENANT [--grace SECONDS]
+```
+
+Rotate `TENANT`'s tokens with zero downtime: issue a new token and set the previous live tokens to expire after the grace window (`--grace`, service default 300s), so both are valid during the overlap. Running clients pick up the new token by rediscovering the lease the storage-service supervisor publishes; no restart and no 401s during the window.
+
+### nx service token revoke
+
+```
+nx service token revoke SELECTOR
+```
+
+Revoke a token by full hash or a unique hash prefix. Revocation is immediate on the storage service that handles the request (its auth cache is invalidated in-process). For any other reader, revocation propagates within the AuthFilter token-cache TTL bound (default 30s). Exits non-zero if no unique token matches.
+
+### nx service token list
+
+```
+nx service token list [--tenant TENANT]
+```
+
+List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revoked`), label, expiry, and revocation time. Never prints the raw token. Use the id prefix with `nx service token revoke`.
