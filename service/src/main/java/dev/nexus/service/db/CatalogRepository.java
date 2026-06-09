@@ -203,6 +203,14 @@ public final class CatalogRepository {
 
     /** Upsert an owner row. ON CONFLICT update all mutable fields. */
     public void upsertOwner(String tenant, Map<String, Object> o) {
+        // nexus-45ykb: the wildcard sentinel '*' can never be a registered owner. Enforce
+        // it independently here (not merely transitively via AuthFilter) so the invariant
+        // holds even if a future internal/admin path reaches this repository outside the
+        // request filter — consistent with TokenStore.rejectWildcard at the mint surface.
+        if (TenantConstants.isWildcard(tenant)) {
+            throw new IllegalArgumentException(
+                "tenant '*' is a reserved sentinel and cannot own catalog entries");
+        }
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(T_OWNERS,
                     F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,
@@ -333,6 +341,10 @@ public final class CatalogRepository {
      * from the owner_prefix directly (the owner should have been registered first).
      */
     public String registerDocument(String tenant, String ownerPrefix, Map<String, Object> fields) {
+        if (TenantConstants.isWildcard(tenant)) {
+            throw new IllegalArgumentException(
+                "tenant '*' is a reserved sentinel and cannot own catalog entries");
+        }
         return tenantScope.withTenant(tenant, ctx -> {
             // Ensure owner row exists (idempotent upsert with minimal fields)
             ctx.insertInto(T_OWNERS, F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,
@@ -1351,6 +1363,10 @@ public final class CatalogRepository {
      * GREATEST guards re-runs from downgrading a seq the live service has already advanced.
      */
     public void importOwner(String tenant, Map<String, Object> o) {
+        if (TenantConstants.isWildcard(tenant)) {
+            throw new IllegalArgumentException(
+                "tenant '*' is a reserved sentinel and cannot own catalog entries");
+        }
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(T_OWNERS,
                     F_OWN_TENANT, F_OWN_PREFIX, F_OWN_NAME, F_OWN_TYPE,

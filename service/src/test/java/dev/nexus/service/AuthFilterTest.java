@@ -250,14 +250,15 @@ class AuthFilterTest {
     }
 
     @Test
-    void wildcardBoundToken_resolvesToStarTenant_headerIgnored() throws Exception {
-        // Phase E retired the any-tenant GRANT: a token whose tenant_id == "*" is now
-        // just a bound token to the literal "*" tenant; the client header is ignored,
-        // NOT honored as an any-tenant claim. (Such a row can no longer be minted; this
-        // proves the grant is gone if a legacy row survives.)
+    void wildcardBoundToken_isDenied() throws Exception {
+        // nexus-45ykb: a token whose tenant_id == "*" (a legacy grandfathered row — the
+        // sentinel can no longer be minted) is now DENIED at the filter. Phase E retired
+        // the any-tenant GRANT (the client header is already ignored); this closes the
+        // residual legacy-credential vector: '*' is a reserved name that is never a
+        // registered catalog_owners principal, so operating under it would write ghost
+        // data under an unregistered tenant. Defense in depth → 401.
         HttpResponse<String> r = call(TOK_WILDCARD, "tenant-zzz", null);
-        assertThat(r.statusCode()).isEqualTo(200);
-        assertThat(r.body()).isEqualTo("tenant=*;session=");
+        assertThat(r.statusCode()).isEqualTo(401);
     }
 
     // ── Cache-level seam (fresh cache per test, mutable clock) ────────────────

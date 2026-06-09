@@ -148,6 +148,23 @@ class CatalogRepositoryTest {
         assertThat(owner.get().get("owner_type")).isEqualTo("repo");
     }
 
+    @Test @Order(1)
+    void owner_writePathsRejectWildcardSentinel() {
+        // nexus-45ykb: '*' is a reserved sentinel and can never be a registered owner.
+        // Enforced independently at EVERY repository owner-write path (not merely via
+        // AuthFilter): upsertOwner, importOwner, and registerDocument (which auto-creates
+        // an owner row). Locks the full T_OWNERS write surface.
+        assertThrows(IllegalArgumentException.class, () ->
+            repo.upsertOwner("*", Map.of(
+                "tumbler_prefix", "1", "name", "ghost", "owner_type", "repo")));
+        assertThrows(IllegalArgumentException.class, () ->
+            repo.importOwner("*", Map.of(
+                "tumbler_prefix", "1", "name", "ghost", "owner_type", "repo")));
+        assertThrows(IllegalArgumentException.class, () ->
+            repo.registerDocument("*", "1", Map.of(
+                "tumbler", "1.1", "title", "ghost-doc", "source_uri", "ghost://x")));
+    }
+
     @Test @Order(2)
     void owner_byRepoHash_found() {
         repo.upsertOwner(TENANT_A, Map.of(

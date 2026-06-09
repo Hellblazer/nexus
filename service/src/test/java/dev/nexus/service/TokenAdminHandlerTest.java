@@ -269,6 +269,14 @@ class TokenAdminHandlerTest {
     }
 
     @Test
+    void rotate_rejectsWildcardTenant() throws Exception {
+        // nexus-45ykb: the wildcard sentinel '*' is rejected at EVERY mint surface
+        // (issue / tenant-create / list already covered) — lock rotate symmetrically so
+        // no rotation can resurrect a wildcard-bound token.
+        assertThat(status("/v1/service-tokens/rotate", "{\"tenant\":\"*\"}")).isEqualTo(400);
+    }
+
+    @Test
     void rotate_rejectsNonPositiveGrace() throws Exception {
         postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-grace\"}");
         assertThat(status("/v1/service-tokens/rotate", "{\"tenant\":\"tenant-grace\",\"grace_seconds\":0}")).isEqualTo(400);
@@ -309,7 +317,7 @@ class TokenAdminHandlerTest {
     private HttpRequest req(String path, String body) {
         return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
             .header("Authorization", "Bearer " + BOOT)
-            .header("X-Nexus-Tenant", "default")  // wildcard token requires a tenant header
+            .header("X-Nexus-Tenant", "default")  // ignored post-Phase-E; BOOT is bound to default
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .build();
