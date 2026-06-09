@@ -331,4 +331,62 @@ public final class TokenStore {
             r.get(SERVICE_TOKENS.EXPIRES_AT),
             r.get(SERVICE_TOKENS.REVOKED_AT)));
     }
+
+    // ── Session tokens (RDR-152 bead nexus-gmiaf.32.4) ─────────────────────────
+
+    /**
+     * Mint (or re-mint) the per-session token for {@code (tenant, sessionId)}. The raw
+     * secret is returned once; only its hash is stored. UPSERT on the
+     * {@code UNIQUE(tenant_id, session_id)} constraint so a re-mint REPLACES the prior
+     * token (the old session token is immediately invalidated), keeping at most one live
+     * token per logical session (Decision 2).
+     *
+     * @param tenant     the session's tenant (not {@code '*'})
+     * @param sessionId  the logical session id
+     * @param ttlSeconds session-token lifetime (must be positive)
+     * @return the minted token: raw secret (set into NX_T1_SESSION) + stored hash
+     */
+    public IssuedToken issueSessionToken(String tenant, String sessionId, long ttlSeconds) {
+        rejectWildcard(tenant);
+        if (sessionId == null || sessionId.isBlank()) {
+            throw new IllegalArgumentException("session_id must not be null or blank");
+        }
+        if (ttlSeconds <= 0) {
+            throw new IllegalArgumentException("ttl_seconds must be positive");
+        }
+        String raw = newRawToken();
+        String hash = TokenHashing.sha256Hex(raw);
+        OffsetDateTime expiresAt =
+            OffsetDateTime.ofInstant(clock.instant().plusSeconds(ttlSeconds), ZoneOffset.UTC);
+        dsl().insertInto(SESSION_TOKENS)
+            .columns(SESSION_TOKENS.SESSION_TOKEN_HASH, SESSION_TOKENS.TENANT_ID,
+                     SESSION_TOKENS.SESSION_ID, SESSION_TOKENS.EXPIRES_AT)
+            .values(hash, tenant, sessionId, expiresAt)
+            .onConflict(SESSION_TOKENS.TENANT_ID, SESSION_TOKENS.SESSION_ID)
+            .doUpdate()
+            .set(SESSION_TOKENS.SESSION_TOKEN_HASH, hash)
+            .set(SESSION_TOKENS.EXPIRES_AT, expiresAt)
+            .execute();
+        log.info("event=session_token_minted tenant={} session={}", tenant, sessionId);
+        return new IssuedToken(raw, hash);
+    }
+
+    /**
+     * Delete the session token for {@code (tenant, sessionId)} (session close). Idempotent:
+     * a double-close returns 0, not an error.
+     *
+     * @return number of rows deleted (0 or 1)
+     */
+    public int closeSession(String tenant, String sessionId) {
+        if (tenant == null || tenant.isBlank() || sessionId == null || sessionId.isBlank()) {
+            return 0;
+        }
+        int deleted = dsl().deleteFrom(SESSION_TOKENS)
+            .where(SESSION_TOKENS.TENANT_ID.eq(tenant))
+            .and(SESSION_TOKENS.SESSION_ID.eq(sessionId))
+            .execute();
+        log.info("event=session_token_closed tenant={} session={} deleted={}",
+                 tenant, sessionId, deleted);
+        return deleted;
+    }
 }

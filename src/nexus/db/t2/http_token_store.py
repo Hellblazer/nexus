@@ -144,3 +144,18 @@ class HttpTokenStore:
         if tenant is not None:
             body["tenant"] = tenant
         return self._post("/v1/service-tokens/list", body).get("tokens", [])
+
+    # ── Session tokens (bead nexus-gmiaf.32.4) ────────────────────────────────
+
+    def start_session(self, session_id: str, ttl_seconds: int | None = None) -> dict[str, Any]:
+        """Mint the per-session token for SESSION_ID (tenant from the bearer). Returns
+        {session_token, session_id, expires_in_seconds}; the raw token is set into
+        NX_T1_SESSION by the caller and shown to no one."""
+        body: dict[str, Any] = {"session_id": session_id}
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = ttl_seconds
+        return self._post("/v1/sessions/start", body)
+
+    def close_session(self, session_id: str) -> dict[str, Any]:
+        """Delete the per-session token for SESSION_ID. Returns {closed: <count>}."""
+        return self._post("/v1/sessions/close", {"session_id": session_id})
