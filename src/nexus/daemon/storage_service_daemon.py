@@ -818,7 +818,17 @@ def _load_credentials(config_dir: Path) -> dict[str, str]:
             f"pg_credentials not found at {creds_path}. "
             "Run 'nx init --service' to provision Postgres and write credentials."
         )
-    return _read_pg_credentials(creds_path)
+    creds = _read_pg_credentials(creds_path)
+    # Self-heal upgraded clusters (gmiaf.32.5): a cluster provisioned before the
+    # persistent root token existed has no NX_SERVICE_TOKEN in its credentials. Backfill
+    # one here so the supervisor starts cleanly on upgrade rather than hard-failing in
+    # _resolve_service_token. Idempotent (no-op if already present).
+    if not creds.get("NX_SERVICE_TOKEN"):
+        import secrets
+        from nexus.db.pg_provision import _persist_service_token
+        _persist_service_token(creds_path, secrets.token_hex(32))
+        creds = _read_pg_credentials(creds_path)
+    return creds
 
 
 def start_storage_service(

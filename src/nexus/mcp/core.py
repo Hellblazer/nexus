@@ -213,14 +213,19 @@ async def _t1_chroma_lifespan(_app: Any):
             or _os.environ.get("NX_T1_SESSION", "").strip()
         )
         if not _t1_session_id or _t1_session_id == "unknown":
-            # No resolvable session — do NOT mint a shared "unknown" row (concurrent
+            # No resolvable session id — do NOT mint a shared "unknown" row (concurrent
             # MCPs would collide on the (tenant, session_id) UPSERT, each invalidating
-            # the other's token). Run in bootstrap mode: session isolation is NOT
-            # server-enforced this session (closed when Phase E ships require-minted).
+            # the other's token). We leave NX_T1_SESSION untouched: a sub-agent that
+            # inherited a LIVE minted token from its parent keeps working (require-minted
+            # is satisfied by the inherited token). With no inherited token, T1 scratch is
+            # unavailable this process — HttpScratchStore raises on first use (fail-loud),
+            # and a stale inherited token gets a server-side 401. There is no degraded
+            # client-side-only isolation path anymore (Phase E retired it).
             _t1_session_id = ""
             _svc_log.warning(
-                "t1_session_isolation_bootstrap", reason="no_resolvable_session",
-                msg="T1 session isolation NOT server-enforced this session")
+                "t1_session_unresolved", reason="no_resolvable_session",
+                msg="no session id to mint; T1 scratch uses an inherited token if live, "
+                "else is unavailable this process")
         else:
             try:
                 from nexus.db.t2.http_token_store import HttpTokenStore

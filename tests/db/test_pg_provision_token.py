@@ -56,6 +56,21 @@ def test_persist_service_token_backfills_and_preserves(tmp_path: Path) -> None:
     assert stat.S_IMODE(creds_path.stat().st_mode) == 0o600
 
 
+def test_persist_service_token_is_idempotent(tmp_path: Path) -> None:
+    creds_path = tmp_path / "pg_credentials"
+    creds_path.write_text("PG_PORT=15999\nNX_DB_PASS=svcpw\n")
+    creds_path.chmod(0o600)
+
+    _persist_service_token(creds_path, "first-token")
+    # A second call with a DIFFERENT token must NOT append a second line; the
+    # original token survives (no silent shadow-write).
+    _persist_service_token(creds_path, "second-token-different")
+
+    text = creds_path.read_text()
+    assert text.count("NX_SERVICE_TOKEN=") == 1
+    assert _read_credentials(creds_path)["NX_SERVICE_TOKEN"] == "first-token"
+
+
 def test_persist_service_token_handles_missing_trailing_newline(tmp_path: Path) -> None:
     creds_path = tmp_path / "pg_credentials"
     creds_path.write_text("PG_PORT=15999")  # no trailing newline

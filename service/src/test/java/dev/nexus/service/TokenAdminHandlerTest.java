@@ -116,6 +116,15 @@ class TokenAdminHandlerTest {
         assertThat(status("/v1/service-tokens/issue", "{\"tenant\":\"*\"}")).isEqualTo(400);
     }
 
+    @Test
+    void issue_rejectsReservedRootLabel() throws Exception {
+        // P5.3-E: minting a token under ROOT_TOKEN_LABEL would inherit the root-credential
+        // lockout protections (irrevocable / invisible / non-rotating). Must be rejected.
+        assertThat(status("/v1/service-tokens/issue",
+            "{\"tenant\":\"tenant-a\",\"label\":\"" + dev.nexus.service.db.TokenStore.ROOT_TOKEN_LABEL + "\"}"))
+            .isEqualTo(400);
+    }
+
     // ── tenant create ──────────────────────────────────────────────────────────
 
     @Test

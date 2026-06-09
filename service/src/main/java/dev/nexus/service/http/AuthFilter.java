@@ -115,7 +115,7 @@ public final class AuthFilter extends Filter {
                       claimedTenant, tenant, exchange.getRequestURI().getPath());
         }
 
-        // 3. Per-session verification (Decision 2), transitional option (a).
+        // 3. Per-session verification (Decision 2), require-minted.
         String sessionId = null;
         boolean mintedSession = false;
         String sessionHeader = exchange.getRequestHeaders().getFirst(SESSION_HEADER);

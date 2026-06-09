@@ -178,7 +178,22 @@ public final class TokenStore {
         }
         if (TenantConstants.BOOTSTRAP_ANY_TENANT.equals(tenant)) {
             throw new IllegalArgumentException(
-                "tenant '*' is reserved for the transitional bootstrap token and cannot be minted");
+                "tenant '*' is a reserved sentinel and cannot be used");
+        }
+    }
+
+    /**
+     * Reject minting a token under the reserved root label. The lockout protection
+     * (revoke-refused / list-excluded / rotate-expiry-skip) keys on
+     * {@link #ROOT_TOKEN_LABEL}; without this guard an authenticated caller could mint a
+     * token carrying that label and inherit those protections — an irrevocable, invisible,
+     * non-rotating token (P5.3-E review). Only the internal {@code ensureBootstrapToken}
+     * seeder may use the root label.
+     */
+    private static void rejectRootLabel(String label) {
+        if (ROOT_TOKEN_LABEL.equals(label)) {
+            throw new IllegalArgumentException(
+                "label '" + ROOT_TOKEN_LABEL + "' is reserved for the root token");
         }
     }
 
@@ -198,6 +213,7 @@ public final class TokenStore {
      */
     public IssuedToken issueToken(String tenant, String label, Long ttlSeconds) {
         rejectWildcard(tenant);
+        rejectRootLabel(label);
         if (ttlSeconds != null && ttlSeconds <= 0) {
             throw new IllegalArgumentException("ttl_seconds must be positive");
         }

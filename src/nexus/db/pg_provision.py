@@ -529,7 +529,14 @@ def _persist_service_token(creds_path: Path, service_token: str) -> None:
     provisioned before this field existed, without rewriting the whole file
     (which would require reconstructing every line). Atomic: writes a temp
     file then ``os.replace``.
+
+    Idempotent: a no-op if ``NX_SERVICE_TOKEN`` is already present, so a double
+    call (or a race between two ``provision`` runs) cannot append a second,
+    conflicting token line that ``_read_credentials`` would silently shadow.
     """
+    if "NX_SERVICE_TOKEN" in _read_credentials(creds_path):
+        _log.info("pg_service_token_backfill_noop", path=str(creds_path))
+        return
     existing = creds_path.read_text()
     if not existing.endswith("\n"):
         existing += "\n"
