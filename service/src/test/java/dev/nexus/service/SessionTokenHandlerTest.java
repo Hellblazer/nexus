@@ -111,9 +111,10 @@ class SessionTokenHandlerTest {
             .get("session_token").asText();
         // Authorizes its own session (minted token + matching body session_id).
         assertThat(scratchPut(token, "sess-1")).isEqualTo(200);
+        assertThat(scratchGet(token, "sess-1")).as("own session allowed").isEqualTo(200);
         // DENIED for a sibling session within the same tenant: the minted token resolves
         // sess-1, the body claims sess-2 → 403 (server-enforced cross-session denial).
-        assertThat(scratchGet(token, "sess-2")).isEqualTo(403);
+        assertThat(scratchGet(token, "sess-2")).as("sibling session denied").isEqualTo(403);
     }
 
     @Test
@@ -133,10 +134,16 @@ class SessionTokenHandlerTest {
             ResultSet old = su.createStatement().executeQuery(
                 "SELECT 1 FROM nexus.session_tokens WHERE session_token_hash = '"
                 + TokenHashing.sha256Hex(first) + "'");
-            assertThat(old.next()).as("the prior session token must be invalidated").isFalse();
+            assertThat(old.next())
+                .as("the prior session token row is gone (DB-level invalidation)").isFalse();
         }
-        // The new token works; the old does not authorize its session anymore.
+        // The new token works (minted-enforced).
         assertThat(scratchGet(second, "sess-remint")).isEqualTo(200);
+        // The old token is no longer minted-enforced: it degrades to the transitional
+        // bootstrap path (no matching row → body session_id trusted), so it still returns
+        // 200 rather than 401. Full revocation of the old token awaits Phase E's
+        // require-minted flag (nexus-gmiaf.32.5); asserting 401 here would be a false test.
+        assertThat(scratchGet(first, "sess-remint")).isEqualTo(200);
     }
 
     @Test
@@ -156,6 +163,16 @@ class SessionTokenHandlerTest {
             assertThat(rs.next()).isTrue();
             assertThat(rs.getLong("c")).isEqualTo(0L);
         }
+    }
+
+    @Test
+    void start_rejectsNonPositiveTtl() throws Exception {
+        var r0 = http.send(req("/v1/sessions/start", "{\"session_id\":\"s\",\"ttl_seconds\":0}"),
+            HttpResponse.BodyHandlers.ofString());
+        assertThat(r0.statusCode()).isEqualTo(400);
+        var rneg = http.send(req("/v1/sessions/start", "{\"session_id\":\"s\",\"ttl_seconds\":-1}"),
+            HttpResponse.BodyHandlers.ofString());
+        assertThat(rneg.statusCode()).isEqualTo(400);
     }
 
     @Test

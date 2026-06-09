@@ -47,7 +47,10 @@ public final class SessionTokenHandler implements HttpHandler {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
     /** Default session-token lifetime: long enough not to expire mid-session, re-minted on
-     *  each session start. Bounds how long a leaked session token is usable. */
+     *  each session start. Bounds how long a leaked session token is usable. NOTE: a session
+     *  alive past the TTL without a re-mint loses minted-enforcement — its token stops
+     *  resolving and the client degrades to the transitional bootstrap path (body session_id
+     *  trusted) until Phase E's require-minted flag (nexus-gmiaf.32.5) makes that a 401. */
     static final long DEFAULT_TTL_SECONDS = 86_400L;  // 24h
 
     private final TokenStore store;
