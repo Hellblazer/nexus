@@ -115,6 +115,17 @@ class MemoryHandlerTest {
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.memory TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT USAGE ON SEQUENCE nexus.memory_id_seq TO " + SVC_ROLE);
+            // RDR-152 bead nexus-gmiaf.32.2: AuthFilter resolves bearer→tenant against
+            // service_tokens as the app role, so the role needs SELECT on it. Then seed
+            // the test TOKEN as a wildcard bootstrap row so Bearer TOKEN + X-Nexus-Tenant
+            // resolves to the header tenant (the grandfathered Phase 1–4 posture).
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.service_tokens, nexus.session_tokens TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES ('"
+                + dev.nexus.service.db.TokenHashing.sha256Hex(TOKEN)
+                + "', '" + dev.nexus.service.http.AuthFilter.BOOTSTRAP_ANY_TENANT
+                + "', 'test-bootstrap') ON CONFLICT (token_hash) DO NOTHING");
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }

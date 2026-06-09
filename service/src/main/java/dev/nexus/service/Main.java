@@ -53,7 +53,13 @@ public final class Main {
 
     public static void main(String[] args) throws Exception {
         int port   = intEnv("NX_SERVICE_PORT", 8080);
-        String token  = requireEnv("NX_SERVICE_TOKEN");
+        // RDR-152 bead nexus-gmiaf.32.2: NX_SERVICE_TOKEN is no longer the auth
+        // secret — auth resolves bearer→tenant against the service_tokens registry.
+        // When present it is seeded as a transitional bootstrap row (under the default
+        // tenant) so supervisor-started clients keep working until Phase E mints a
+        // real root token. Optional: a deployment whose tokens already live in the DB
+        // can start without it.
+        String token  = System.getenv("NX_SERVICE_TOKEN");
         String dbUrl  = requireEnv("NX_DB_URL");
         String dbUser = requireEnv("NX_DB_USER");
         String dbPass = requireEnv("NX_DB_PASS");
@@ -90,6 +96,16 @@ public final class Main {
             System.exit(1);
         }
         migrationDs.close();
+
+        // Bootstrap-token provisioning (RDR-152 bead nexus-gmiaf.32.2): seed the legacy
+        // NX_SERVICE_TOKEN as a transitional grandfathered WILDCARD row (tenant_id="*")
+        // so supervisor-started clients keep working through the B→E window — it still
+        // honors X-Nexus-Tenant (the Phase 1–4 posture) ONLY for this one credential.
+        // Runs AFTER migration (table exists) as the app role (nexus_svc has INSERT via
+        // grants-nexus-svc). Minted tokens (Phase C/E) are strictly tenant-bound; Phase E
+        // (nexus-gmiaf.32.5) retires the wildcard. No-op when NX_SERVICE_TOKEN is unset.
+        new dev.nexus.service.db.TokenStore(ds, java.time.Clock.systemUTC())
+            .ensureBootstrapToken(token, dev.nexus.service.http.AuthFilter.BOOTSTRAP_ANY_TENANT);
 
         // Vector backend setup (Seam B — optional; only when configured)
         LocalChromaServer localChroma    = null;

@@ -40,7 +40,7 @@ public final class WhoamiHandler implements HttpHandler {
         }
 
         // Tenant was validated and extracted by AuthFilter
-        String tenant = (String) exchange.getAttribute(AuthFilter.ATTR_TENANT);
+        String tenant = RequestContext.tenant();
         if (tenant == null) {
             // Defensive: should not happen if filter chain is correctly wired
             log.error("event=whoami_no_tenant path={}", exchange.getRequestURI().getPath());

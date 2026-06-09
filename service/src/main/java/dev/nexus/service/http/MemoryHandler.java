@@ -43,8 +43,8 @@ import java.util.*;
  * </pre>
  *
  * <p>All endpoints require {@code Authorization: Bearer <token>} (enforced by
- * {@link AuthFilter}) and {@code X-Nexus-Tenant} header (extracted by AuthFilter
- * into exchange attribute {@link AuthFilter#ATTR_TENANT}).
+ * {@link AuthFilter}, which resolves the tenant server-side from the token and
+ * publishes it via {@link RequestContext#tenant()}).
  *
  * <p>All request/response bodies are JSON. Errors return
  * {@code {"error":"<message>"}} with appropriate HTTP status.
@@ -70,7 +70,7 @@ public final class MemoryHandler implements HttpHandler {
 
     @Override
     public void handle(HttpExchange exchange) throws IOException {
-        String tenant = (String) exchange.getAttribute(AuthFilter.ATTR_TENANT);
+        String tenant = RequestContext.tenant();
         if (tenant == null) {
             HttpUtil.send(exchange, 500, "{\"error\":\"internal: tenant not set\"}");
             return;

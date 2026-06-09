@@ -110,6 +110,15 @@ class ScratchHandlerTest {
             su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON t1.scratch TO " + SVC_ROLE);
+            // RDR-152 bead nexus-gmiaf.32.2: AuthFilter reads service_tokens as the app
+            // role; grant SELECT and seed the test TOKEN as a wildcard bootstrap row.
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.service_tokens, nexus.session_tokens TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES ('"
+                + dev.nexus.service.db.TokenHashing.sha256Hex(TOKEN)
+                + "', '" + dev.nexus.service.http.AuthFilter.BOOTSTRAP_ANY_TENANT
+                + "', 'test-bootstrap') ON CONFLICT (token_hash) DO NOTHING");
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, t1, public");
         }
@@ -432,6 +441,64 @@ class ScratchHandlerTest {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    // RDR-152 bead nexus-gmiaf.32.2: when a MINTED session token is presented, the
+    // server-resolved session_id is authoritative — a differing body session_id is a
+    // cross-session attempt and must be rejected with 403 (Decision 2 enforcement).
+    @Test
+    void mintedSession_enforcesResolvedSessionId() throws Exception {
+        seedMintedSession("raw-minted-session-token-xyz", "minted-sess");
+        String rawSess = "raw-minted-session-token-xyz";
+        // Body session_id matches the minted session → allowed.
+        var ok = postWithSession("/v1/t1/put", TENANT, rawSess,
+            json("id", uuid(), "session_id", "minted-sess", "content", "ok"));
+        assertThat(ok.statusCode()).isEqualTo(200);
+        // Body session_id differs from the minted session → 403 cross-session denial.
+        var denied = postWithSession("/v1/t1/get", TENANT, rawSess,
+            json("id", "whatever", "session_id", "other-sess"));
+        assertThat(denied.statusCode()).isEqualTo(403);
+    }
+
+    @Test
+    void mintedSession_sessionCloseDeniedOnMismatch() throws Exception {
+        // /session/close is the highest-impact cross-session surface: a minted token
+        // for S1 must not be able to close S2 by naming it in the body.
+        seedMintedSession("raw-minted-close-token", "close-sess-1");
+        var denied = postWithSession("/v1/t1/session/close", TENANT, "raw-minted-close-token",
+            json("session_id", "victim-sess-2"));
+        assertThat(denied.statusCode()).isEqualTo(403);
+        // Closing its OWN session is allowed.
+        var ok = postWithSession("/v1/t1/session/close", TENANT, "raw-minted-close-token",
+            json("session_id", "close-sess-1"));
+        assertThat(ok.statusCode()).isEqualTo(200);
+    }
+
+    private void seedMintedSession(String rawSessionToken, String sessionId) throws Exception {
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            su.setAutoCommit(true);
+            try (var ps = su.prepareStatement(
+                "INSERT INTO nexus.session_tokens (session_token_hash, tenant_id, session_id, expires_at) "
+                + "VALUES (?, ?, ?, now() + interval '1 hour') ON CONFLICT (session_token_hash) DO NOTHING")) {
+                ps.setString(1, dev.nexus.service.db.TokenHashing.sha256Hex(rawSessionToken));
+                ps.setString(2, TENANT);
+                ps.setString(3, sessionId);
+                ps.executeUpdate();
+            }
+        }
+    }
+
+    private HttpResponse<String> postWithSession(String path, String tenant,
+                                                 String rawSessionToken, String body) throws Exception {
+        var req = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
+            .header("Authorization", "Bearer " + TOKEN)
+            .header("X-Nexus-Tenant", tenant)
+            .header("X-Nexus-T1-Session", rawSessionToken)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
+    }
 
     private HttpResponse<String> post(String path, String tenant, String body) throws Exception {
         var req = HttpRequest.newBuilder()
