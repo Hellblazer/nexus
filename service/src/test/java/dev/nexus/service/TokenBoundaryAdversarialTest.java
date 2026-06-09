@@ -83,6 +83,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * revocation; a {@link MutableClock}-driven {@link AuthFilter} server (classes 3 and the
  * revocation TTL bound) covers the precise grace/TTL crossings the service's system
  * clock cannot drive.
+ *
+ * <p><b>Scope.</b> This is the Java service-boundary matrix. The Python client-wiring
+ * legs (the four HTTP clients sending {@code Authorization} + {@code X-Nexus-T1-Session})
+ * are out of scope here and covered by the Python client tests. The rotation cache-
+ * INVALIDATE path ({@code TokenAdminHandler} calling {@code invalidate} on the live cache
+ * after rotate) is covered by {@code TokenAdminHandlerTest}; this matrix proves the
+ * grace-window expiry semantics (the TTL-backstop crossing) plus the generic
+ * immediate-invalidate boundary ({@link #revokedToken_is401_immediatelyAfterCacheInvalidate}).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TokenBoundaryAdversarialTest {
@@ -90,8 +98,11 @@ class TokenBoundaryAdversarialTest {
     // ── Tenants / sessions ────────────────────────────────────────────────────
     private static final String TENANT_A = "adv-tenant-a";
     private static final String TENANT_B = "adv-tenant-b";
-    private static final String SESS_1   = "adv-sess-1";
-    private static final String SESS_2   = "adv-sess-2";
+    private static final String SESS_1     = "adv-sess-1";
+    private static final String SESS_2     = "adv-sess-2";
+    // Dedicated session for the destructive close test — its DELETE-on-close must not
+    // poison SESS_TOK_1, which the other cross-session tests rely on (no @TestMethodOrder).
+    private static final String SESS_CLOSE = "adv-sess-close";
 
     // ── Raw bearer / session secrets (hashed before storage) ──────────────────
     private static final String TOK_A             = "adv-raw-token-tenant-a";
@@ -100,6 +111,7 @@ class TokenBoundaryAdversarialTest {
     private static final String TOK_REVOKE_ME     = "adv-raw-token-revoke-me";
     private static final String SESS_TOK_1        = "adv-raw-session-token-1";
     private static final String SESS_TOK_2        = "adv-raw-session-token-2";
+    private static final String SESS_TOK_CLOSE    = "adv-raw-session-token-close";
     private static final String SESS_TOK_EXPIRED  = "adv-raw-session-token-expired";
 
     private static final String SVC_ROLE = "svc_adv_matrix_test";
@@ -173,6 +185,7 @@ class TokenBoundaryAdversarialTest {
             // Minted session tokens for the cross-session matrix (same tenant).
             insertSessionToken(su, SESS_TOK_1, TENANT_A, SESS_1, ahead(su, 3600));
             insertSessionToken(su, SESS_TOK_2, TENANT_A, SESS_2, ahead(su, 3600));
+            insertSessionToken(su, SESS_TOK_CLOSE, TENANT_A, SESS_CLOSE, ahead(su, 3600));
             // Expired minted session token (class 5).
             insertSessionToken(su, SESS_TOK_EXPIRED, TENANT_A, "adv-sess-old", ago(su, 60));
         }
@@ -239,6 +252,33 @@ class TokenBoundaryAdversarialTest {
             .isEqualTo(TENANT_A);
     }
 
+    @Test
+    void crossTenant_writeIsStampedWithBoundTenant_andInvisibleToOther() throws Exception {
+        // Exercises the RLS WITH CHECK / write path (not just USING/read): a write as the
+        // tenant-A token is stamped tenant_id=TENANT_A (server-resolved, never from the
+        // body), so it lands in tenant-A's space and is invisible to tenant-B.
+        //
+        // Architectural note: handlers derive tenant_id from RequestContext.tenant()
+        // (the bound token), never from the request body, so a cross-tenant write is not
+        // expressible at the API. This test pins the GUC→tenant_id→RLS flow end to end:
+        // the row exists for A (superuser COUNT==1, tenant_id==TENANT_A) and B sees 404.
+        String project = "adv-xtenant-write-" + System.nanoTime();
+        HttpResponse<String> put = svcPost("/v1/memory/put", TOK_A, TENANT_A,
+            "{\"project\":\"" + project + "\",\"title\":\"w\",\"content\":\"A only\",\"ttl\":30}");
+        assertThat(put.statusCode()).isEqualTo(200);
+
+        // The write was stamped with the BOUND tenant (A), proving WITH CHECK passed for A.
+        assertThat(superuserMemoryCount(TENANT_A, project))
+            .as("write stamped tenant_id=TENANT_A").isEqualTo(1);
+        assertThat(superuserMemoryCount(TENANT_B, project))
+            .as("no row leaked into tenant-B's space").isEqualTo(0);
+
+        // tenant-B cannot read it (USING filters → 404).
+        assertThat(svcGet("/v1/memory/get?project=" + project + "&title=w", TOK_B, TENANT_B)
+            .statusCode())
+            .as("tenant-B cannot read a tenant-A write").isEqualTo(404);
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     //  Class 2 — CROSS-SESSION denial (same tenant)
     // ══════════════════════════════════════════════════════════════════════════
@@ -282,17 +322,40 @@ class TokenBoundaryAdversarialTest {
     }
 
     @Test
+    void crossSession_putNamingSiblingSessionInBody_is403() throws Exception {
+        // The WRITE surface of the same enforcement: a session-1 token may not PUT into
+        // session-2 by naming it in the body.
+        HttpResponse<String> r = sessionPost("/v1/t1/put", TOK_A, SESS_TOK_1,
+            json("id", UUID.randomUUID().toString(), "session_id", SESS_2, "content", "x"));
+        assertThat(r.statusCode())
+            .as("session-1 token may not write into session-2").isEqualTo(403);
+    }
+
+    @Test
     void crossSession_closingSiblingSessionIsDenied_butOwnSucceeds() throws Exception {
-        // /session/close is the highest-impact cross-session surface.
-        HttpResponse<String> denied = sessionPost("/v1/t1/session/close", TOK_A, SESS_TOK_1,
+        // /session/close is the highest-impact cross-session surface. Uses a DEDICATED
+        // session pair (SESS_CLOSE): its DELETE-on-close must not invalidate SESS_TOK_1,
+        // which the sibling cross-session tests depend on (no @TestMethodOrder guard).
+        HttpResponse<String> denied = sessionPost("/v1/t1/session/close", TOK_A, SESS_TOK_CLOSE,
             json("session_id", SESS_2));
         assertThat(denied.statusCode())
-            .as("session-1 token must not close session-2").isEqualTo(403);
+            .as("a token must not close a different session").isEqualTo(403);
 
-        HttpResponse<String> ok = sessionPost("/v1/t1/session/close", TOK_A, SESS_TOK_1,
-            json("session_id", SESS_1));
+        HttpResponse<String> ok = sessionPost("/v1/t1/session/close", TOK_A, SESS_TOK_CLOSE,
+            json("session_id", SESS_CLOSE));
         assertThat(ok.statusCode())
             .as("closing its OWN session is allowed").isEqualTo(200);
+    }
+
+    @Test
+    void crossTenant_sessionTokenFromAnotherTenant_is401() throws Exception {
+        // The one AuthFilter reject path not otherwise exercised (cross_tenant_session):
+        // a tenant-B bearer presenting a tenant-A-minted session token → 401, the session
+        // layer's own tenant check (AuthFilter: sp.tenantId() must equal the resolved tenant).
+        HttpResponse<String> r = sessionPost("/v1/t1/get", TOK_B, SESS_TOK_1,
+            json("id", "x", "session_id", SESS_1));
+        assertThat(r.statusCode())
+            .as("a session token minted for another tenant → 401").isEqualTo(401);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -344,6 +407,15 @@ class TokenBoundaryAdversarialTest {
             .as("malformed (non-Bearer) scheme → 401").isEqualTo(401);
     }
 
+    @Test
+    void bearerWithoutTrailingSpace_is401() throws Exception {
+        // "Bearer" with no trailing space fails the startsWith("Bearer ") guard → 401.
+        HttpRequest req = HttpRequest.newBuilder(URI.create(svcBase() + "/v1/_whoami"))
+            .header("Authorization", "Bearer").GET().build();
+        assertThat(http.send(req, HttpResponse.BodyHandlers.ofString()).statusCode())
+            .as("\"Bearer\" with no token → 401").isEqualTo(401);
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     //  Class 4 — REVOCATION (immediate, through the live service cache)
     // ══════════════════════════════════════════════════════════════════════════
@@ -385,8 +457,8 @@ class TokenBoundaryAdversarialTest {
             long graceSeconds = 300;
 
             // An existing ("old") live token, then rotate → new token + old grace-expiring.
-            TokenStore.IssuedToken old = h.store.issueToken(tenant, "old", null);
-            TokenStore.RotationResult rot = h.store.rotateTokens(tenant, graceSeconds);
+            TokenStore.IssuedToken old = h.seedStore.issueToken(tenant, "old", null);
+            TokenStore.RotationResult rot = h.seedStore.rotateTokens(tenant, graceSeconds);
             String newRaw = rot.issued().rawToken();
 
             // Within the grace window (T0): BOTH authorize.
@@ -395,12 +467,20 @@ class TokenBoundaryAdversarialTest {
             assertThat(h.call(newRaw).statusCode())
                 .as("new token authorizes within grace").isEqualTo(200);
 
-            // One second before grace expiry: old STILL authorizes (no early 401).
+            // One second before grace expiry: old STILL authorizes (no early 401); new too.
             clock.set(t0.plusSeconds(graceSeconds - 1));
             assertThat(h.call(old.rawToken()).statusCode())
                 .as("no rotation-induced 401 inside the grace window").isEqualTo(200);
+            assertThat(h.call(newRaw).statusCode())
+                .as("new token unaffected inside the grace window").isEqualTo(200);
 
-            // At/after grace expiry: old 401s; new is unaffected (it has no expiry).
+            // Exact grace instant: expiry is inclusive (!expiresAt.isAfter(now)) → old 401s AT
+            // the boundary, not one tick later. Pins the inclusive contract.
+            clock.set(t0.plusSeconds(graceSeconds));
+            assertThat(h.call(old.rawToken()).statusCode())
+                .as("old token 401s AT the exact grace instant (inclusive expiry)").isEqualTo(401);
+
+            // After grace expiry: old still 401s; new is unaffected (it has no expiry).
             clock.set(t0.plusSeconds(graceSeconds + 1));
             assertThat(h.call(old.rawToken()).statusCode())
                 .as("old token 401s after grace expiry").isEqualTo(401);
@@ -417,7 +497,7 @@ class TokenBoundaryAdversarialTest {
         long ttlSeconds = TokenCache.DEFAULT_TTL.toSeconds();
         try (ClockHarness h = new ClockHarness(clock)) {
             String tenant = "rev-tenant-" + System.nanoTime();
-            TokenStore.IssuedToken tok = h.store.issueToken(tenant, "revoke-ttl", null);
+            TokenStore.IssuedToken tok = h.seedStore.issueToken(tenant, "revoke-ttl", null);
 
             // Warm the cache at T0.
             assertThat(h.call(tok.rawToken()).statusCode()).isEqualTo(200);
@@ -455,6 +535,17 @@ class TokenBoundaryAdversarialTest {
             .header("Authorization", "Bearer " + bearer)
             .header("X-Nexus-Tenant", tenantHeader)
             .GET().build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> svcPost(String path, String bearer, String tenantHeader,
+                                         String body) throws Exception {
+        HttpRequest req = HttpRequest.newBuilder(URI.create(svcBase() + path))
+            .header("Authorization", "Bearer " + bearer)
+            .header("X-Nexus-Tenant", tenantHeader)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .build();
         return http.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
@@ -562,7 +653,8 @@ class TokenBoundaryAdversarialTest {
     }
 
     private static OffsetDateTime offsetNow(Connection su) throws Exception {
-        try (ResultSet rs = su.createStatement().executeQuery("SELECT now()")) {
+        try (var st = su.createStatement();
+             ResultSet rs = st.executeQuery("SELECT now()")) {
             rs.next();
             return rs.getObject(1, OffsetDateTime.class);
         }
@@ -589,14 +681,22 @@ class TokenBoundaryAdversarialTest {
      * means the filter rejected.
      */
     private final class ClockHarness implements AutoCloseable {
+        /** The auth-resolution store the filter reads — wired to the RESTRICTED svcDs, the
+         *  exact credential path production's AuthFilter traverses (SELECT on the RLS-off
+         *  credential tables). */
         final TokenStore store;
         final TokenCache cache;
+        /** Admin/seed store on the superuser DataSource: issue/rotate WRITE to service_tokens,
+         *  which the restricted role cannot. Mirrors production's split (auth reads via the
+         *  app role; lifecycle writes via the admin/provisioning path). Shares the clock. */
+        final TokenStore seedStore;
         final HttpServer server;
         final int port;
 
         ClockHarness(Clock clock) throws IOException {
-            this.store  = new TokenStore(pg.getPostgresDatabase(), clock);
-            this.cache  = new TokenCache(store, clock);
+            this.store     = new TokenStore(svcDs, clock);
+            this.cache     = new TokenCache(store, clock);
+            this.seedStore = new TokenStore(pg.getPostgresDatabase(), clock);
             this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             var ctx = server.createContext("/v1/echo", new EchoHandler());
             ctx.getFilters().add(new AuthFilter(cache, store));
