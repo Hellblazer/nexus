@@ -1052,8 +1052,19 @@ class HttpCatalogClient:
             self._post("/update", {"tumbler": doc_id, **updates})
 
     def resync_chunk_count_cache(self, doc_id: str) -> None:
-        """No-op in service mode: Postgres tracks chunk_count automatically."""
-        pass
+        """Recompute ``documents.chunk_count`` from the true manifest row count.
+
+        Calls ``POST /v1/catalog/manifest/resync`` which runs
+        ``COUNT(catalog_document_chunks WHERE doc_id=?)`` server-side and
+        updates ``documents.chunk_count`` atomically.  Mirrors the local-SQLite
+        path in ``catalog_writes.py`` (nexus-zq79).
+
+        Bug nexus-0jq9u: the previous implementation was a literal no-op whose
+        docstring falsely claimed Postgres tracks chunk_count automatically.  The
+        real recompute (``CatalogRepository.resyncChunkCount``) was wired to no
+        HTTP endpoint, leaving service mode with no reconciliation path at all.
+        """
+        self._post("/manifest/resync", {"doc_id": doc_id})
 
     # ══════════════════════════════════════════════════════════════════════════
     # STATS / HEALTH

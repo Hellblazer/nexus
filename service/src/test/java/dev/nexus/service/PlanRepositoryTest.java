@@ -375,58 +375,82 @@ class PlanRepositoryTest {
 
     @Test
     @Order(13)
-    void importRow_greatestMerge_doesNotClobberLiveCounters() {
-        // Seed via importRow with low source counters
+    void importRow_sourceAuthoritative_overwritesLiveCounters() {
+        // Bug nexus-0jq9u: additive counters (use_count, match_count, match_conf_sum,
+        // success_count, failure_count) must use EXCLUDED (source wins) on re-import,
+        // not GREATEST.  The SQLite snapshot is the authoritative record; a one-shot
+        // migration always overwrites the current PG value with the source value.
+        // Only last_used (a timestamp high-water mark) keeps GREATEST.
+
+        // Seed via importRow with initial source counters
         long id = repo.importRow(
             TENANT_A,
-            "proj-greatest", "GREATEST merge test plan", "{\"v\":1}",
+            "proj-src-auth", "Source-authoritative merge test", "{\"v\":1}",
             "success", "test", OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC),
             null, null, null, null, null, null, null,
-            5, null, 10, 2.5, 4, 1,     // low source counters
-            "", "GREATEST merge test plan", null);
+            5, null, 10, 2.5, 4, 1,     // source counters
+            "", "Source-authoritative merge test", null);
 
         // Simulate live traffic advancing counters on the PG side
-        repo.incrementRunStarted(TENANT_A, id);
-        repo.incrementRunStarted(TENANT_A, id);
-        repo.incrementRunStarted(TENANT_A, id);     // use_count=3 (above source's 0? no, source=5)
         repo.incrementMatchMetrics(TENANT_A, id, 0.9);
         repo.incrementMatchMetrics(TENANT_A, id, 0.9);
-        repo.incrementMatchMetrics(TENANT_A, id, 0.9);  // match_count = 10+3=13, conf_sum=2.5+2.7=5.2
+        repo.incrementMatchMetrics(TENANT_A, id, 0.9);  // match_count=13, conf_sum=5.2
         repo.incrementRunOutcome(TENANT_A, id, true);
-        repo.incrementRunOutcome(TENANT_A, id, true);   // success_count=4+2=6
+        repo.incrementRunOutcome(TENANT_A, id, true);   // success_count=6
+        // record the live last_used before re-import (GREATEST must preserve it if source is null)
+        repo.incrementRunStarted(TENANT_A, id);
+        OffsetDateTime pgLastUsed = repo.getById(TENANT_A, id).get().getLastUsed();
+        assertThat(pgLastUsed).as("precondition: last_used set by incrementRunStarted").isNotNull();
 
-        // Verify PG counters are above source values (precondition for the test)
-        var beforeReimport = repo.getById(TENANT_A, id).get();
-        assertThat(beforeReimport.getMatchCount()).as("match_count must be above source after live increments")
-            .isGreaterThan(10);
-        int pgMatchCount = beforeReimport.getMatchCount();
-        double pgConfSum   = beforeReimport.getMatchConfSum();
-        int pgSuccessCount = beforeReimport.getSuccessCount();
-        OffsetDateTime pgLastUsed = beforeReimport.getLastUsed();
-
-        // Re-import with the STALE source values (lower counters)
-        repo.importRow(
+        // Re-import with LOWER counters (the authoritative source snapshot)
+        long id2 = repo.importRow(
             TENANT_A,
-            "proj-greatest", "GREATEST merge test plan", "{\"v\":1}",
+            "proj-src-auth", "Source-authoritative merge test", "{\"v\":1}",
             "success", "test", OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC),
             null, null, null, null, null, null, null,
-            5, null, 10, 2.5, 4, 1,     // SAME stale source counters
-            "", "GREATEST merge test plan", null);
+            5, null, 10, 2.5, 4, 1,     // source values (lower than live PG)
+            "", "Source-authoritative merge test", null);
 
-        // Assert: live PG counters are NOT rolled back to stale source values
+        assertThat(id2).as("idempotent re-import must return same id").isEqualTo(id);
+
+        // Assert: source values OVERWRITE live PG counters (EXCLUDED semantics)
         var afterReimport = repo.getById(TENANT_A, id).get();
         assertThat(afterReimport.getMatchCount())
-            .as("re-import must not clobber live match_count (GREATEST wins)")
-            .isEqualTo(pgMatchCount);
+            .as("source must overwrite live match_count (EXCLUDED semantics, not GREATEST)")
+            .isEqualTo(10);
         assertThat(afterReimport.getMatchConfSum())
-            .as("re-import must not clobber live match_conf_sum (GREATEST wins)")
-            .isEqualTo(pgConfSum);
+            .as("source must overwrite live match_conf_sum (additive sum, not high-water)")
+            .isEqualTo(2.5);
         assertThat(afterReimport.getSuccessCount())
-            .as("re-import must not clobber live success_count (GREATEST wins)")
-            .isEqualTo(pgSuccessCount);
+            .as("source must overwrite live success_count (EXCLUDED semantics, not GREATEST)")
+            .isEqualTo(4);
+        assertThat(afterReimport.getUseCount())
+            .as("source must overwrite live use_count (EXCLUDED semantics, not GREATEST)")
+            .isEqualTo(5);
+        assertThat(afterReimport.getFailureCount())
+            .as("source must overwrite live failure_count (EXCLUDED semantics, not GREATEST)")
+            .isEqualTo(1);
+        // last_used: GREATEST is still correct — it is a high-water timestamp, not an additive sum.
+        // Direction A: null source must NOT clobber a live timestamp.
         assertThat(afterReimport.getLastUsed())
-            .as("re-import must not clobber live last_used with stale null (GREATEST null-safe)")
+            .as("last_used must NOT be clobbered by a null source (GREATEST null-safe keeps live value)")
             .isEqualTo(pgLastUsed);
+
+        // Direction B: source last_used NEWER than PG — GREATEST must pick the source (newer) value.
+        // This validates the contract is non-vacuous in both directions: GREATEST(newer, older) = newer.
+        OffsetDateTime newerLastUsed = pgLastUsed.plusSeconds(3600);
+        repo.importRow(
+            TENANT_A,
+            "proj-src-auth", "Source-authoritative merge test", "{\"v\":1}",
+            "success", "test", OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC),
+            null, null, null, null, null, null, null,
+            5, newerLastUsed, 10, 2.5, 4, 1,
+            "", "Source-authoritative merge test", null);
+
+        var afterNewerImport = repo.getById(TENANT_A, id).get();
+        assertThat(afterNewerImport.getLastUsed().withOffsetSameInstant(ZoneOffset.UTC))
+            .as("last_used: GREATEST must advance to source when source is newer than PG")
+            .isEqualTo(newerLastUsed.withOffsetSameInstant(ZoneOffset.UTC));
     }
 
     @Test

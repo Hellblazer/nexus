@@ -1364,3 +1364,53 @@ class TestRegisterSeqIdempotency:
         assert b_seq > a_seq, (
             f"Seq gap detected: after idempotent re-register, next seq {b_seq} <= a_seq {a_seq}"
         )
+
+
+class TestResyncChunkCount:
+    """
+    Bug nexus-0jq9u: resync_chunk_count_cache was a no-op in service mode with a
+    false docstring claiming Postgres tracks chunk_count automatically.  The real
+    recompute (COUNT catalog_document_chunks) was wired to no HTTP endpoint.
+
+    Fix: POST /v1/catalog/manifest/resync exposes CatalogRepository.resyncChunkCount.
+    Python client calls the real endpoint instead of no-op'ing.
+
+    Non-vacuous: the test pushes a WRONG chunk_count (99), then calls resync and
+    asserts the count is corrected to the true manifest count (3).  This test FAILS
+    if resync_chunk_count_cache is still a no-op.
+    """
+
+    def test_resync_corrects_wrong_chunk_count(self, cat) -> None:
+        """push wrong chunk_count, write 3-chunk manifest, resync, assert corrected to 3."""
+        # Register a doc with a deliberately wrong chunk_count
+        tumbler = cat.register(
+            "1.1",
+            "Resync Chunk Count Test Doc",
+            content_type="paper",
+            source_uri="file:///resync-chunk-test/doc.md",
+            chunk_count=99,   # wrong — actual manifest will have 3 chunks
+        )
+        # Confirm the wrong value is stored
+        entry = cat.resolve(tumbler)
+        assert entry is not None
+        assert entry.chunk_count == 99, (
+            f"precondition: chunk_count must be 99 before manifest write; got {entry.chunk_count}"
+        )
+
+        # Write a 3-chunk manifest
+        cat.write_manifest(str(tumbler), [
+            {"position": 0, "chash": "resync_chk_aaa000", "chunk_index": 0},
+            {"position": 1, "chash": "resync_chk_bbb111", "chunk_index": 1},
+            {"position": 2, "chash": "resync_chk_ccc222", "chunk_index": 2},
+        ])
+
+        # Resync: must recompute from catalog_document_chunks and update documents.chunk_count
+        cat.resync_chunk_count_cache(str(tumbler))
+
+        # Assert the count is now 3 (the true manifest count)
+        entry_after = cat.resolve(tumbler)
+        assert entry_after is not None
+        assert entry_after.chunk_count == 3, (
+            f"resync_chunk_count_cache must correct chunk_count to 3 (true manifest count); "
+            f"got {entry_after.chunk_count} — resync is still a no-op?"
+        )

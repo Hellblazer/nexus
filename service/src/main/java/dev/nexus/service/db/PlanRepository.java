@@ -396,9 +396,23 @@ public final class PlanRepository {
      * {@code created_at}, {@code use_count}, {@code last_used}, {@code match_count},
      * {@code match_conf_sum}, {@code success_count}, {@code failure_count}.
      *
-     * <p>ON CONFLICT (tenant_id, project, query) propagates ALL source values
-     * via {@code EXCLUDED.*} semantics so re-running is idempotent and metric
-     * evolution is applied on content-change re-runs.
+     * <p><strong>ON CONFLICT merge contract (bug nexus-0jq9u):</strong>
+     * This method is called ONCE at store cutover, before the application flips to
+     * Postgres.  At that point PG has taken zero live increments, so the SQLite
+     * snapshot IS the authoritative counter record.  All additive event-tally counters
+     * ({@code use_count}, {@code match_count}, {@code match_conf_sum},
+     * {@code success_count}, {@code failure_count}) use {@code EXCLUDED.*} (source
+     * wins) for exactly this reason.
+     *
+     * <p><strong>WARNING — do not re-run after client flip:</strong> calling this
+     * method again after the client has started writing live increments to Postgres
+     * will overwrite those live counters with the stale SQLite snapshot.  Plans have
+     * no orphaned-from-repairable-parent rows, so the RDR-153 recovery-path re-run
+     * pattern does NOT apply here.
+     *
+     * <p>The sole exception is {@code last_used}: it uses {@code GREATEST} because it
+     * is a timestamp high-water mark, not an additive sum.  {@code GREATEST(null, x) = x}
+     * ensures a source row with no {@code last_used} never clobbers a live PG timestamp.
      *
      * @return the id of the inserted/updated row
      */
@@ -574,20 +588,19 @@ public final class PlanRepository {
                         // disabled_at: live-mutable — keep whichever is non-null (PG-side wins)
                         .set(PLANS.DISABLED_AT,
                              coalesce(PLANS.DISABLED_AT, excluded(PLANS.DISABLED_AT)))
-                        // Live-mutable monotonic counters: GREATEST(source, live) so idempotent
-                        // re-runs after live traffic never roll back PG-advanced counters.
-                        // During initial seeding PG=0 so source wins; after live traffic PG>source.
-                        .set(PLANS.USE_COUNT,
-                             greatest(excluded(PLANS.USE_COUNT), PLANS.USE_COUNT))
-                        .set(PLANS.MATCH_COUNT,
-                             greatest(excluded(PLANS.MATCH_COUNT), PLANS.MATCH_COUNT))
-                        .set(PLANS.MATCH_CONF_SUM,
-                             greatest(excluded(PLANS.MATCH_CONF_SUM), PLANS.MATCH_CONF_SUM))
-                        .set(PLANS.SUCCESS_COUNT,
-                             greatest(excluded(PLANS.SUCCESS_COUNT), PLANS.SUCCESS_COUNT))
-                        .set(PLANS.FAILURE_COUNT,
-                             greatest(excluded(PLANS.FAILURE_COUNT), PLANS.FAILURE_COUNT))
-                        // last_used: keep the later timestamp (GREATEST is null-safe: GREATEST(null,x)=x)
+                        // Additive event-tally counters: EXCLUDED (source wins).
+                        // At cutover PG counters are zero; source is the authoritative record.
+                        // GREATEST would corrupt match_conf_sum/match_count avg-confidence when
+                        // PG drifts independently.  Do NOT re-run after the client flip — that
+                        // would clobber live increments with the stale snapshot (bug nexus-0jq9u).
+                        .set(PLANS.USE_COUNT,     excluded(PLANS.USE_COUNT))
+                        .set(PLANS.MATCH_COUNT,   excluded(PLANS.MATCH_COUNT))
+                        .set(PLANS.MATCH_CONF_SUM, excluded(PLANS.MATCH_CONF_SUM))
+                        .set(PLANS.SUCCESS_COUNT, excluded(PLANS.SUCCESS_COUNT))
+                        .set(PLANS.FAILURE_COUNT, excluded(PLANS.FAILURE_COUNT))
+                        // last_used: keep the later timestamp — it is a high-water mark, not an
+                        // additive sum.  GREATEST is null-safe: GREATEST(null, x) = x so a source
+                        // with no last_used never clobbers a live PG timestamp.
                         .set(PLANS.LAST_USED,
                              greatest(excluded(PLANS.LAST_USED), PLANS.LAST_USED))
                         .returning(PLANS.ID)
