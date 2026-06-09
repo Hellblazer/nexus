@@ -2,10 +2,12 @@
 title: "Replace ChromaDB with pgvector for T3: Consolidate Permanent Vectors into the RDR-152 Postgres (Engine Side of conexus RDR-001)"
 id: RDR-155
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
+reviewed-by: self
 created: 2026-06-09
+accepted_date: 2026-06-09
 related_rdrs: [RDR-152, RDR-108, RDR-105, RDR-101, conexus:RDR-001]
 related_issues: [nexus-skp06]
 related_tests: []
