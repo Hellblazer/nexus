@@ -166,10 +166,11 @@ Recorded in T2 `nexus_rdr/155-research-1..4`.
    **every** test needs pgvector — which io.zonky EmbeddedPostgres does not ship.
    Recommendation: move the Java service test module to Testcontainers
    `pgvector/pgvector:pg17` (uniform, conexus-aligned; the consolidated schema cannot be
-   half-applied). **Gate sub-item:** confirm nexus CI provides Docker for the service
-   module (Testcontainers needs a Docker daemon). If CI has no Docker, fall back to
-   Liquibase context-gating the pgvector changeset (keep zonky for non-vector suites) —
-   the only thing that flips the recommendation. Resolve in Phase 1 (gates the TDD loop).
+   half-applied). **CI confirmed:** `service-ci.yml` runs on `ubuntu-latest`, which
+   provides a Docker daemon, so Testcontainers works in CI — the context-gating fallback
+   is not needed. Sub-task: the jOOQ codegen bootstrap (`-Pcodegen` drift guard) also
+   applies the master changelog and must switch to the pgvector image (mirror conexus's
+   `generate-sources`). Resolve in Phase 1 (gates the TDD loop and the codegen guard).
 3. **Dimensions — RESOLVED (recommendation).** Verified: local = MiniLM 384 or bge-base
    768 (RDR-144 guided choice); cloud = Voyage 1024 (context/code/3 all 1024). A
    deployment uses one model, so single-dim-per-deployment is the common case; the
