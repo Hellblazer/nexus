@@ -184,6 +184,78 @@ class TokenAdminHandlerTest {
         }
     }
 
+    // ── R-C remediation: revoke/rotate/list/validation hardening ──────────────
+
+    @Test
+    void revoke_alreadyRevoked_returnsFalse() throws Exception {
+        JsonNode issued = postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-rerev\"}");
+        String hash = issued.get("token_hash").asText();
+        assertThat(postJson("/v1/service-tokens/revoke", "{\"selector\":\"" + hash + "\"}")
+            .get("revoked").asBoolean()).isTrue();
+        // Second revoke of the same (now-revoked) token must NOT report success.
+        assertThat(postJson("/v1/service-tokens/revoke", "{\"selector\":\"" + hash + "\"}")
+            .get("revoked").asBoolean()).isFalse();
+    }
+
+    @Test
+    void revoke_bootstrapToken_isRefused() throws Exception {
+        // The sole admin credential must not be revocable into a lockout.
+        String bootHash = TokenHashing.sha256Hex(BOOT);
+        assertThat(postJson("/v1/service-tokens/revoke", "{\"selector\":\"" + bootHash + "\"}")
+            .get("revoked").asBoolean()).isFalse();
+    }
+
+    @Test
+    void list_excludesBootstrapRow_andRejectsWildcardFilter() throws Exception {
+        // Unfiltered list never surfaces the tenant='*' bootstrap row.
+        for (JsonNode row : postJson("/v1/service-tokens/list", "{}").get("tokens")) {
+            assertThat(row.get("tenant").asText()).isNotEqualTo("*");
+        }
+        // Explicit '*' filter is rejected.
+        assertThat(status("/v1/service-tokens/list", "{\"tenant\":\"*\"}")).isEqualTo(400);
+    }
+
+    @Test
+    void issue_rejectsNonPositiveTtl() throws Exception {
+        assertThat(status("/v1/service-tokens/issue", "{\"tenant\":\"tenant-ttl\",\"ttl_seconds\":0}")).isEqualTo(400);
+        assertThat(status("/v1/service-tokens/issue", "{\"tenant\":\"tenant-ttl\",\"ttl_seconds\":-5}")).isEqualTo(400);
+    }
+
+    @Test
+    void issue_withTtl_setsExpiry() throws Exception {
+        JsonNode r = postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-exp\",\"ttl_seconds\":3600}");
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT expires_at FROM nexus.service_tokens WHERE token_hash = '"
+                + r.get("token_hash").asText() + "'");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getObject("expires_at")).as("ttl must set expires_at").isNotNull();
+        }
+    }
+
+    @Test
+    void rotate_rejectsNonPositiveGrace() throws Exception {
+        postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-grace\"}");
+        assertThat(status("/v1/service-tokens/rotate", "{\"tenant\":\"tenant-grace\",\"grace_seconds\":0}")).isEqualTo(400);
+    }
+
+    @Test
+    void rotate_oldTokenStillAuthenticatesDuringGrace() throws Exception {
+        JsonNode issued = postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-overlap\"}");
+        String oldRaw = issued.get("token").asText();
+        assertThat(whoami(oldRaw, null)).isEqualTo(200);  // warms the cache
+        postJson("/v1/service-tokens/rotate", "{\"tenant\":\"tenant-overlap\",\"grace_seconds\":300}");
+        // The old token is invalidated then re-resolves to the future grace deadline → still valid.
+        assertThat(whoami(oldRaw, null)).as("old token must stay valid through the grace window").isEqualTo(200);
+    }
+
+    @Test
+    void nonPostMethod_is405() throws Exception {
+        var req = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/v1/service-tokens/list"))
+            .header("Authorization", "Bearer " + BOOT).header("X-Nexus-Tenant", "default").GET().build();
+        assertThat(http.send(req, HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(405);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private JsonNode postJson(String path, String body) throws Exception {

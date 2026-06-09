@@ -38,8 +38,10 @@ import java.util.Map;
  * <p>The raw token is generated server-side and returned ONCE in the issue/rotate/create
  * response; only its hash is stored. {@code tenant_id='*'} is rejected (the wildcard is the
  * bootstrap sentinel — bead nexus-45ykb). Revoke calls {@link TokenCache#invalidate} on the
- * LIVE cache for immediate effect (rotate relies on the cache's precise expiry re-check, so
- * the grace-windowed old tokens stay valid then expire on their own).
+ * LIVE cache for immediate effect; rotate likewise invalidates the grace-expiring hashes so
+ * their cache entries re-read the new deadline and expire precisely at the grace window's end
+ * (not up to a cache-TTL later). Rotate is atomic (one transaction), so a crash cannot strand
+ * a tenant with zero live tokens.
  *
  * <p>AUTHORIZATION NOTE (deferred): any authenticated caller may administer any named tenant
  * (provisioning rides the bootstrap token until per-tenant principals exist). Per-caller
@@ -76,8 +78,11 @@ public final class TokenAdminHandler implements HttpHandler {
         }
         String path = exchange.getRequestURI().getPath();
         String method = exchange.getRequestMethod().toUpperCase(Locale.ROOT);
+        if (!"POST".equals(method)) {
+            HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}");
+            return;
+        }
         try {
-            requirePost(method);
             switch (path) {
                 case "/v1/tenants/create"        -> handleTenantCreate(exchange);
                 case "/v1/service-tokens/issue"  -> handleIssue(exchange);
@@ -117,8 +122,12 @@ public final class TokenAdminHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String tenant = requireString(body, "tenant");
         Long grace = optLong(body, "grace_seconds");
-        TokenStore.IssuedToken issued =
+        TokenStore.RotationResult result =
             store.rotateTokens(tenant, grace == null ? DEFAULT_GRACE_SECONDS : grace);
+        // Invalidate the grace-expiring tokens so their cache entries re-read the new
+        // deadline: they stay valid through the grace window then expire precisely at it.
+        result.expiredHashes().forEach(cache::invalidate);
+        TokenStore.IssuedToken issued = result.issued();
         HttpUtil.send(ex, 200, json(new LinkedHashMap<>(Map.of(
             "tenant", tenant, "token", issued.rawToken(), "token_hash", issued.tokenHash()))));
     }
@@ -154,12 +163,6 @@ public final class TokenAdminHandler implements HttpHandler {
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
-
-    private static void requirePost(String method) {
-        if (!"POST".equals(method)) {
-            throw new IllegalArgumentException("method not allowed: " + method);
-        }
-    }
 
     private Map<String, Object> readBody(HttpExchange ex) throws IOException {
         byte[] bytes = ex.getRequestBody().readAllBytes();

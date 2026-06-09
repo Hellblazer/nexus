@@ -187,6 +187,9 @@ public final class TokenStore {
      */
     public IssuedToken issueToken(String tenant, String label, Long ttlSeconds) {
         rejectWildcard(tenant);
+        if (ttlSeconds != null && ttlSeconds <= 0) {
+            throw new IllegalArgumentException("ttl_seconds must be positive");
+        }
         String raw = newRawToken();
         String hash = TokenHashing.sha256Hex(raw);
         OffsetDateTime expiresAt = ttlSeconds == null
@@ -210,21 +213,46 @@ public final class TokenStore {
      * @param tenant       the tenant to rotate (not {@code '*'})
      * @param graceSeconds overlap window before the old tokens expire
      */
-    public IssuedToken rotateTokens(String tenant, long graceSeconds) {
+    /** A rotation outcome: the freshly issued token + the old hashes now grace-expiring. */
+    public record RotationResult(IssuedToken issued, List<String> expiredHashes) {
+    }
+
+    public RotationResult rotateTokens(String tenant, long graceSeconds) {
         rejectWildcard(tenant);
+        if (graceSeconds <= 0) {
+            throw new IllegalArgumentException("grace_seconds must be positive");
+        }
+        // ATOMIC (RDR-152 P5.3-C review): grace-expire the old rows AND issue the new one in
+        // ONE transaction, so a crash can never leave the tenant with zero live tokens (the
+        // exact zero-downtime guarantee Decision 3 promises). Returns the expired hashes so
+        // the caller can invalidate their cache entries, making grace expiry precise rather
+        // than stale-by-up-to-cache-TTL.
         OffsetDateTime graceDeadline =
             OffsetDateTime.ofInstant(clock.instant().plusSeconds(graceSeconds), ZoneOffset.UTC);
-        // Expire the live rows (not revoked; no expiry or expiring later than the grace
-        // deadline). Rows already expiring sooner are left alone.
-        int expired = dsl().update(SERVICE_TOKENS)
-            .set(SERVICE_TOKENS.EXPIRES_AT, graceDeadline)
-            .where(SERVICE_TOKENS.TENANT_ID.eq(tenant))
-            .and(SERVICE_TOKENS.REVOKED_AT.isNull())
-            .and(SERVICE_TOKENS.EXPIRES_AT.isNull().or(SERVICE_TOKENS.EXPIRES_AT.gt(graceDeadline)))
-            .execute();
-        log.info("event=service_token_rotated tenant={} expiring_old={} grace_s={}",
-                 tenant, expired, graceSeconds);
-        return issueToken(tenant, "rotated", null);
+        return dsl().transactionResult(cfg -> {
+            DSLContext tx = DSL.using(cfg);
+            List<String> expired = tx.select(SERVICE_TOKENS.TOKEN_HASH)
+                .from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TENANT_ID.eq(tenant))
+                .and(SERVICE_TOKENS.REVOKED_AT.isNull())
+                .and(SERVICE_TOKENS.EXPIRES_AT.isNull().or(SERVICE_TOKENS.EXPIRES_AT.gt(graceDeadline)))
+                .fetch(SERVICE_TOKENS.TOKEN_HASH);
+            if (!expired.isEmpty()) {
+                tx.update(SERVICE_TOKENS)
+                    .set(SERVICE_TOKENS.EXPIRES_AT, graceDeadline)
+                    .where(SERVICE_TOKENS.TOKEN_HASH.in(expired))
+                    .execute();
+            }
+            String raw = newRawToken();
+            String hash = TokenHashing.sha256Hex(raw);
+            tx.insertInto(SERVICE_TOKENS)
+                .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
+                .values(hash, tenant, "rotated")
+                .execute();
+            log.info("event=service_token_rotated tenant={} expiring_old={} grace_s={}",
+                     tenant, expired.size(), graceSeconds);
+            return new RotationResult(new IssuedToken(raw, hash), expired);
+        });
     }
 
     /**
@@ -238,12 +266,18 @@ public final class TokenStore {
         if (selector == null || selector.isBlank()) {
             return Optional.empty();
         }
-        // Resolve selector to exactly one live hash (exact match preferred, else unique prefix).
+        // Resolve selector to exactly one LIVE, non-bootstrap hash (exact match preferred,
+        // else unique prefix). Excluding already-revoked rows avoids false-success on
+        // re-revoke and prefix-shadowing by a stale revoked token; excluding the bootstrap
+        // sentinel row prevents an authenticated caller from revoking the sole admin
+        // credential into a total lockout (review P5.3-C).
         List<String> matches = dsl()
             .select(SERVICE_TOKENS.TOKEN_HASH)
             .from(SERVICE_TOKENS)
             .where(SERVICE_TOKENS.TOKEN_HASH.eq(selector)
                 .or(SERVICE_TOKENS.TOKEN_HASH.startsWith(selector)))
+            .and(SERVICE_TOKENS.REVOKED_AT.isNull())
+            .and(SERVICE_TOKENS.TENANT_ID.ne(TenantConstants.BOOTSTRAP_ANY_TENANT))
             .fetch(SERVICE_TOKENS.TOKEN_HASH);
         String hash;
         if (matches.contains(selector)) {
@@ -251,14 +285,17 @@ public final class TokenStore {
         } else if (matches.size() == 1) {
             hash = matches.get(0);
         } else {
-            return Optional.empty();  // not found or ambiguous prefix
+            return Optional.empty();  // not found, already revoked, bootstrap, or ambiguous
         }
-        dsl().update(SERVICE_TOKENS)
+        int updated = dsl().update(SERVICE_TOKENS)
             .set(SERVICE_TOKENS.REVOKED_AT,
                  OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC))
             .where(SERVICE_TOKENS.TOKEN_HASH.eq(hash))
             .and(SERVICE_TOKENS.REVOKED_AT.isNull())
             .execute();
+        if (updated == 0) {
+            return Optional.empty();  // raced to revoked between SELECT and UPDATE
+        }
         log.info("event=service_token_revoked hash_prefix={}", hash.substring(0, Math.min(12, hash.length())));
         return Optional.of(hash);
     }
@@ -269,13 +306,19 @@ public final class TokenStore {
      * @param tenant tenant filter, or null for all tenants
      */
     public List<TokenInfo> listTokens(String tenant) {
-        var query = dsl()
+        if (TenantConstants.BOOTSTRAP_ANY_TENANT.equals(tenant)) {
+            throw new IllegalArgumentException("'*' is the reserved bootstrap sentinel, not a listable tenant");
+        }
+        // Always exclude the bootstrap sentinel row: it is the internal admin credential
+        // and must not be enumerable by an authenticated caller (review P5.3-C).
+        var base = dsl()
             .select(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL,
                     SERVICE_TOKENS.CREATED_AT, SERVICE_TOKENS.EXPIRES_AT, SERVICE_TOKENS.REVOKED_AT)
-            .from(SERVICE_TOKENS);
+            .from(SERVICE_TOKENS)
+            .where(SERVICE_TOKENS.TENANT_ID.ne(TenantConstants.BOOTSTRAP_ANY_TENANT));
         var filtered = (tenant == null || tenant.isBlank())
-            ? query.orderBy(SERVICE_TOKENS.CREATED_AT)
-            : query.where(SERVICE_TOKENS.TENANT_ID.eq(tenant)).orderBy(SERVICE_TOKENS.CREATED_AT);
+            ? base.orderBy(SERVICE_TOKENS.CREATED_AT)
+            : base.and(SERVICE_TOKENS.TENANT_ID.eq(tenant)).orderBy(SERVICE_TOKENS.CREATED_AT);
         return filtered.fetch(r -> new TokenInfo(
             r.get(SERVICE_TOKENS.TOKEN_HASH),
             r.get(SERVICE_TOKENS.TENANT_ID),
