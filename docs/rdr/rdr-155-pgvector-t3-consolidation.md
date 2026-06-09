@@ -150,6 +150,42 @@ hybrid search, the RDR-108 manifest as a real FK join, retirement of Chroma and
    vs the current FTS5+Chroma path) against the *live* engine. This RDR must expose a
    test-invocable seam to that path.
 
+## Research Resolutions (2026-06-09)
+
+Recorded in T2 `nexus_rdr/155-research-1..4`.
+
+1. **GUC — RESOLVED: `nexus.tenant` canonical.** Verified the engine uses `nexus.tenant`
+   uniformly (TenantConstants.GUC_NAME; TenantScope stamps it) and `nexus.t1_tenant` for
+   T1; zero `app.tenant_id` in `service/src` (it exists only in the conexus throwaway
+   stub). The engine owns RLS policy (conexus:RDR-001), so the chunks table keys on
+   `nexus.tenant` and `SET LOCAL` via `TenantScope.withTenant` scopes vectors with no new
+   mechanism. conexus reconciles its stub path; the engine ships `nexus.tenant`.
+2. **Test substrate — RESOLVED (recommendation), one CI confirmation outstanding.** The
+   Liquibase **master** changelog is applied wholesale by every service test, so once the
+   pgvector changeset (`CREATE EXTENSION vector` + `vector(N)` + HNSW) is in master,
+   **every** test needs pgvector — which io.zonky EmbeddedPostgres does not ship.
+   Recommendation: move the Java service test module to Testcontainers
+   `pgvector/pgvector:pg17` (uniform, conexus-aligned; the consolidated schema cannot be
+   half-applied). **Gate sub-item:** confirm nexus CI provides Docker for the service
+   module (Testcontainers needs a Docker daemon). If CI has no Docker, fall back to
+   Liquibase context-gating the pgvector changeset (keep zonky for non-vector suites) —
+   the only thing that flips the recommendation. Resolve in Phase 1 (gates the TDD loop).
+3. **Dimensions — RESOLVED (recommendation).** Verified: local = MiniLM 384 or bge-base
+   768 (RDR-144 guided choice); cloud = Voyage 1024 (context/code/3 all 1024). A
+   deployment uses one model, so single-dim-per-deployment is the common case; the
+   collection-name model segment deterministically yields the dim. pgvector needs a
+   fixed-dim column for HNSW. Recommendation: **per-dim physical tables `chunks_<dim>`**
+   (384/768/1024) routed by the model segment — handles the RDR-144 384↔768 window and
+   future multi-model without an ALTER. Fallback: single `chunks` table at the
+   deployment dim. Confirm at gate.
+4. **Validation seam — RESOLVED.** The seam is the existing `nexus-service` HTTP
+   `/v1/vectors/*` API on a pgvector PG (no new surface). The engine ships a fixture-load
+   + dual-run harness (engine pgvector vs a Chroma baseline on verbatim-identical
+   vectors; exact-count recall + a p95 bound) and a hybrid-parity comparand. **Ordering
+   constraint:** hybrid parity must be green on the live engine **before** Chroma is
+   deleted (Phase 4 retire is gated behind Phase 3 parity). conexus `xr7.8.9` owns the
+   production-scale gate, driving the engine artifact.
+
 ## Alternatives Considered
 
 - **Keep T3 on Chroma, scope it app-layer (the original skp06 fix).** Rejected. Leaves
