@@ -260,6 +260,27 @@ class ServiceIntegrationTest {
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus_test.rls_probe TO svc_test");
             conn.createStatement().execute(
                 "GRANT USAGE ON SEQUENCE nexus_test.rls_probe_id_seq TO svc_test");
+
+            // RDR-152 bead nexus-gmiaf.32.2: this hand-rolled harness does not run the
+            // master migration, but AuthFilter now resolves bearer→tenant against
+            // nexus.service_tokens. Provide a minimal credential table (shape mirrors
+            // service-tokens-001-baseline.xml; NO RLS — read pre-tenant-context), grant
+            // svc_test SELECT, and seed the test TOKEN as a wildcard bootstrap row so
+            // /v1/_whoami auth resolves the X-Nexus-Tenant header (auth_matrix).
+            conn.createStatement().execute("CREATE SCHEMA IF NOT EXISTS nexus");
+            conn.createStatement().execute(
+                "CREATE TABLE IF NOT EXISTS nexus.service_tokens ("
+                + "  token_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, label TEXT,"
+                + "  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+                + "  expires_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ)");
+            conn.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO svc_test");
+            conn.createStatement().execute(
+                "GRANT SELECT ON nexus.service_tokens TO svc_test");
+            conn.createStatement().execute(
+                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES ('"
+                + dev.nexus.service.db.TokenHashing.sha256Hex(TOKEN)
+                + "', '" + dev.nexus.service.http.AuthFilter.BOOTSTRAP_ANY_TENANT
+                + "', 'test-bootstrap') ON CONFLICT (token_hash) DO NOTHING");
         }
     }
 

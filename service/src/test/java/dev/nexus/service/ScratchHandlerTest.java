@@ -110,6 +110,15 @@ class ScratchHandlerTest {
             su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON t1.scratch TO " + SVC_ROLE);
+            // RDR-152 bead nexus-gmiaf.32.2: AuthFilter reads service_tokens as the app
+            // role; grant SELECT and seed the test TOKEN as a wildcard bootstrap row.
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.service_tokens, nexus.session_tokens TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES ('"
+                + dev.nexus.service.db.TokenHashing.sha256Hex(TOKEN)
+                + "', '" + dev.nexus.service.http.AuthFilter.BOOTSTRAP_ANY_TENANT
+                + "', 'test-bootstrap') ON CONFLICT (token_hash) DO NOTHING");
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, t1, public");
         }

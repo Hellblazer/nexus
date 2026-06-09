@@ -79,7 +79,7 @@ public final class ScratchHandler implements HttpHandler {
 
     @Override
     public void handle(HttpExchange exchange) throws IOException {
-        String tenant = (String) exchange.getAttribute(AuthFilter.ATTR_TENANT);
+        String tenant = RequestContext.tenant();
         if (tenant == null) {
             HttpUtil.send(exchange, 500, "{\"error\":\"internal: tenant not set\"}");
             return;
