@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -1361,6 +1362,678 @@ def _check_credential_persistence() -> list[HealthResult]:
     ]
 
 
+# ── RDR-152 / bead nexus-gmiaf.33: storage-service health checks ──────────────
+
+# Authoritative set of tenant tables that MUST have RLS enabled, forced, and at
+# least one policy.  Derived from every ``ALTER TABLE ... ENABLE ROW LEVEL
+# SECURITY`` statement across all Liquibase changelog baseline files under
+# service/src/main/resources/db/changelog/.
+#
+# STRUCTURAL GUARD: tests/test_health_service_checks.py::TestRlsTableCompleteness
+# cross-walks this tuple against the actual XMLs at test time and fails loudly
+# on any drift.  When adding a new changelog baseline, run that test to catch
+# any newly RLS-protected table that needs to be added here.
+_RLS_TENANT_TABLES: tuple[str, ...] = (
+    "nexus.aspect_extraction_queue",
+    "nexus.aspect_promotion_log",
+    "nexus.catalog_collections",
+    "nexus.catalog_document_chunks",
+    "nexus.catalog_documents",
+    "nexus.catalog_links",
+    "nexus.catalog_meta",
+    "nexus.catalog_owners",
+    "nexus.chash_index",
+    "nexus.document_aspects",
+    "nexus.document_highlights",
+    "nexus.frecency",
+    "nexus.hook_failures",
+    "nexus.memory",
+    "nexus.nx_answer_runs",
+    "nexus.plans",
+    "nexus.relevance_log",
+    "nexus.search_telemetry",
+    "nexus.taxonomy_meta",
+    "nexus.tier_writes",
+    "nexus.topic_assignments",
+    "nexus.topic_links",
+    "nexus.topics",
+    "t1.scratch",
+)
+
+# Scope key published by the Java service supervisor (bead nexus-gmiaf.30).
+# The supervisor writes a t2-tier lease record under this key; doctor reads it
+# to resolve host:port without hard-coding or requiring env vars.
+_STORAGE_SERVICE_SCOPE_KEY: str = "storage_service"
+
+# Sentinel for distinguishing "caller passed None" from "use auto-discovery".
+_ENDPOINT_AUTO: object = object()
+
+
+
+def _resolve_service_endpoint(
+    config_dir: Path,
+) -> tuple[str, int] | None:
+    """Return (host, port) for the Java storage service, or None.
+
+    Resolution order:
+    1. ServiceRegistry discover() — the supervisor bead (gmiaf.30) publishes a
+       lease record under ``_STORAGE_SERVICE_SCOPE_KEY`` in the t2 tier.
+    2. NX_SERVICE_HOST / NX_SERVICE_PORT environment variables (fallback).
+    3. None — endpoint not discoverable (soft-warn, skip ping).
+    """
+    # 1. Registry discover.
+    try:
+        from nexus.daemon.service_registry import ServiceRegistry
+        registry = ServiceRegistry(dir=config_dir, tier="t2")
+        lease = registry.discover(_STORAGE_SERVICE_SCOPE_KEY)
+        if lease is not None:
+            ep = lease.endpoint
+            host = str(ep.get("host", "127.0.0.1"))
+            port = int(ep.get("port", 0))
+            if port > 0:
+                _log.debug(
+                    "storage_service_endpoint_from_registry",
+                    host=host, port=port,
+                )
+                return host, port
+    except Exception as exc:
+        _log.debug("storage_service_registry_discover_failed", error=str(exc))
+
+    # 2. Env var fallback.
+    host = os.environ.get("NX_SERVICE_HOST", "127.0.0.1")
+    port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
+    if port_str:
+        try:
+            port = int(port_str)
+            if port > 0:
+                _log.debug(
+                    "storage_service_endpoint_from_env",
+                    host=host, port=port,
+                )
+                return host, port
+        except ValueError:
+            pass
+
+    return None
+
+
+def _check_storage_service_health(
+    creds_path: Path | None = None,
+    endpoint: object = _ENDPOINT_AUTO,  # tuple[str,int] | None | _ENDPOINT_AUTO
+    http_get=None,  # injectable for unit tests: (url, timeout) -> httpx.Response
+) -> list[HealthResult]:
+    """Ping the Java storage service /health endpoint.
+
+    Gated on pg_credentials being present (service mode configured).
+    Endpoint resolved via ServiceRegistry → NX_SERVICE_HOST/PORT env →
+    soft-warn-and-skip if neither resolves.
+
+    Down service -> fatal (no direct-mode fallback per RDR-152).
+    """
+    import httpx as _httpx
+
+    # Resolve creds_path default.
+    if creds_path is None:
+        from nexus.config import nexus_config_dir
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+
+    # Gate: service/PG mode configured?
+    if not creds_path.exists():
+        return [HealthResult(
+            label="Storage service health",
+            ok=False,
+            detail="service mode not configured (pg_credentials absent); skipping",
+            warn=True,
+        )]
+
+    # Resolve endpoint.
+    # _ENDPOINT_AUTO -> auto-discover via registry / env.
+    # explicit tuple -> use directly (test injection or caller override).
+    # explicit None -> endpoint not available, soft-warn.
+    resolved_endpoint: tuple[str, int] | None
+    if endpoint is _ENDPOINT_AUTO:
+        from nexus.config import nexus_config_dir
+        resolved_endpoint = _resolve_service_endpoint(nexus_config_dir())
+    else:
+        resolved_endpoint = endpoint  # type: ignore[assignment]
+
+    if resolved_endpoint is None:
+        # Soft-warn (not fatal): the service supervisor (gmiaf.30) may not have
+        # published its lease yet, or the user simply has not configured service
+        # mode.  Either way there is no confirmed endpoint to blame — we cannot
+        # distinguish "service not started" from "bead .30 not landed yet".
+        # Once an endpoint IS known and the connection is refused, that changes
+        # to fatal (we pinged a confirmed address and got nothing back).
+        return [HealthResult(
+            label="Storage service health",
+            ok=False,
+            detail=(
+                "storage service endpoint not discoverable "
+                "(no registry lease and NX_SERVICE_HOST/PORT not set); skipping"
+            ),
+            warn=True,
+        )]
+
+    host, port = resolved_endpoint
+    url = f"http://{host}:{port}/health"
+
+    try:
+        if http_get is not None:
+            resp = http_get(url, timeout=5.0)
+        else:
+            resp = _httpx.get(url, timeout=5.0)
+    except (_httpx.ConnectError, _httpx.TimeoutException, OSError) as exc:
+        # Fatal: we have a confirmed endpoint and it is not responding.
+        # Unlike the undiscoverable case above, here we know the address and
+        # can definitively say the service is down.
+        return [HealthResult(
+            label="Storage service health",
+            ok=False,
+            detail=f"Storage service at {url} unreachable: {exc}",
+            fix_suggestions=[
+                "Start the service: nx service start",
+                f"Check that the service is listening on {host}:{port}",
+            ],
+            fatal=True,
+        )]
+    except Exception as exc:
+        return [HealthResult(
+            label="Storage service health",
+            ok=False,
+            detail=f"Storage service health check failed unexpectedly: {exc}",
+            fatal=True,
+        )]
+
+    try:
+        body = resp.json()
+    except Exception:
+        body = {}
+
+    db_field = body.get("db", "")
+    status_ok = resp.status_code == 200 and db_field == "up"
+
+    if status_ok:
+        return [HealthResult(
+            label="Storage service health",
+            ok=True,
+            detail=f"Storage service: up (HTTP {resp.status_code}, db={db_field!r})",
+        )]
+
+    detail = (
+        f"Storage service: DOWN "
+        f"(HTTP {resp.status_code}, status={body.get('status','?')!r}, "
+        f"db={db_field!r})"
+    )
+    if "detail" in body:
+        detail += f" — {body['detail']}"
+
+    return [HealthResult(
+        label="Storage service health",
+        ok=False,
+        detail=detail,
+        fix_suggestions=[
+            "Start the service: nx service start",
+            f"Check service logs; the DB probe at {host}:{port} is failing",
+        ],
+        fatal=True,
+    )]
+
+
+def _run_psql(
+    psql_bin: Path,
+    host: str,
+    port: int,
+    dbname: str,
+    user: str,
+    password: str,
+    sql: str,
+    *,
+    psql_runner=None,
+) -> subprocess.CompletedProcess:
+    """Run a single-statement psql query and return the CompletedProcess.
+
+    ``-t -A`` gives unaligned, tuple-only output suitable for line-by-line
+    parsing. ``-v ON_ERROR_STOP=1`` makes psql exit non-zero on SQL errors.
+    ``psql_runner`` is injectable for unit tests (avoids shelling out).
+    """
+    cmd = [
+        str(psql_bin),
+        "-h", host,
+        "-p", str(port),
+        "-U", user,
+        "-d", dbname,
+        "-v", "ON_ERROR_STOP=1",
+        "-t", "-A",
+        "-c", sql,
+    ]
+    if psql_runner is not None:
+        # Injected runner (unit tests) — does not accept env kwarg.
+        return psql_runner(cmd, capture_output=True, text=True, check=False)
+    env = {**os.environ, "PGPASSWORD": password}
+    return subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+
+
+def _check_migration_state(
+    creds_path: Path | None = None,
+    psql_bin: Path | None = None,
+    psql_runner=None,  # injectable for unit tests
+) -> list[HealthResult]:
+    """Verify Liquibase migration state on the nx-managed Postgres.
+
+    What this check verifies (client-side psql queries against databasechangelog):
+
+    1. The ``databasechangelog`` table exists and has at least one row.
+       A running service implies Liquibase applied all changesets bundled in
+       the JAR at startup (the JVM exits loudly on first-run migration failure),
+       so the completeness of applied changesets is guaranteed by the service
+       being up (/health).  This query confirms the table itself is reachable.
+
+    2. No row has ``exectype != 'EXECUTED'``.  Rows with FAILED or RERAN
+       exectype indicate a mid-run failure or a manually-rerun changeset that
+       left partial state; either can cause the service to refuse to start on
+       the next boot.
+
+    3. No EXECUTED row has a NULL md5sum.  Liquibase checksums every changeset
+       on re-run; a NULL checksum on an applied changeset causes Liquibase to
+       fail validation on next boot even though the row exists.
+
+    Gated on pg_credentials being present (service/PG mode configured).
+    """
+    # Resolve creds_path default.
+    if creds_path is None:
+        from nexus.config import nexus_config_dir
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+
+    if not creds_path.exists():
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail="service mode not configured (pg_credentials absent); skipping",
+            warn=True,
+        )]
+
+    from nexus.db.pg_provision import (
+        _read_credentials,
+        discover_pg_binaries,
+        PgBinaryNotFoundError,
+    )
+
+    creds = _read_credentials(creds_path)
+    host = "127.0.0.1"
+    try:
+        port = int(creds.get("PG_PORT", 0))
+    except ValueError:
+        port = 0
+    if port <= 0:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail="pg_credentials missing PG_PORT; cannot connect",
+            fatal=True,
+        )]
+
+    db_url = creds.get("NX_DB_ADMIN_URL", "")
+    # Extract database name from JDBC URL: jdbc:postgresql://host:port/dbname
+    dbname = "nexus"
+    if "/" in db_url:
+        dbname = db_url.rstrip("/").rsplit("/", 1)[-1] or "nexus"
+
+    user = creds.get("NX_DB_ADMIN_USER", "nexus_admin")
+    password = creds.get("NX_DB_ADMIN_PASS", "")
+
+    # Resolve psql binary.
+    if psql_bin is None:
+        try:
+            psql_bin = discover_pg_binaries().psql
+        except PgBinaryNotFoundError as exc:
+            return [HealthResult(
+                label="Schema migrations",
+                ok=False,
+                detail=f"psql binary not found: {exc}",
+                fatal=True,
+            )]
+
+    # Query 1: total row count (also verifies the table exists).
+    total_sql = "SELECT COUNT(*) FROM databasechangelog;"
+    proc = _run_psql(
+        psql_bin, host, port, dbname, user, password, total_sql,
+        psql_runner=psql_runner,
+    )
+    if proc.returncode != 0:
+        stderr_snip = (proc.stderr or "").strip()[:200]
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=(
+                f"Cannot query databasechangelog "
+                f"(psql exit {proc.returncode}): {stderr_snip}"
+            ),
+            fix_suggestions=[
+                "Run `nx init --service` to apply migrations",
+                "Check that the Postgres cluster is running: nx service status",
+            ],
+            fatal=True,
+        )]
+
+    try:
+        total = int(proc.stdout.strip())
+    except ValueError:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=(
+                f"Unexpected output from databasechangelog total-count query: "
+                f"{proc.stdout!r}"
+            ),
+            fatal=True,
+        )]
+
+    if total == 0:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail="databasechangelog exists but has 0 rows — migrations never ran",
+            fix_suggestions=["Run `nx init --service` to apply Liquibase migrations"],
+            fatal=True,
+        )]
+
+    # Query 2: non-EXECUTED rows (FAILED or RERAN drift).
+    drift_sql = "SELECT COUNT(*) FROM databasechangelog WHERE exectype != 'EXECUTED';"
+    proc2 = _run_psql(
+        psql_bin, host, port, dbname, user, password, drift_sql,
+        psql_runner=psql_runner,
+    )
+    if proc2.returncode != 0:
+        stderr_snip = (proc2.stderr or "").strip()[:200]
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=f"Migration drift query failed (psql exit {proc2.returncode}): {stderr_snip}",
+            fatal=True,
+        )]
+
+    raw2 = proc2.stdout.strip()
+    try:
+        drift = int(raw2)
+    except ValueError:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=(
+                f"Migration drift query returned unexpected output: {raw2!r}"
+            ),
+            fatal=True,
+        )]
+
+    if drift != 0:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=(
+                f"Migration state mismatch: {drift} changeset(s) with "
+                "exectype != 'EXECUTED' (FAILED or RERAN drift)"
+            ),
+            fix_suggestions=[
+                "Inspect: psql -c \"SELECT id,exectype FROM databasechangelog "
+                "WHERE exectype != 'EXECUTED'\"",
+                "Re-run: nx init --service to recover",
+            ],
+            fatal=True,
+        )]
+
+    # Query 3: NULL md5sum on EXECUTED rows.
+    # A NULL checksum causes Liquibase validation to fail on next boot even
+    # though the changeset row is present.
+    null_md5_sql = (
+        "SELECT COUNT(*) FROM databasechangelog "
+        "WHERE exectype='EXECUTED' AND md5sum IS NULL;"
+    )
+    proc3 = _run_psql(
+        psql_bin, host, port, dbname, user, password, null_md5_sql,
+        psql_runner=psql_runner,
+    )
+    if proc3.returncode != 0:
+        stderr_snip = (proc3.stderr or "").strip()[:200]
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=f"Migration md5sum query failed (psql exit {proc3.returncode}): {stderr_snip}",
+            fatal=True,
+        )]
+
+    raw3 = proc3.stdout.strip()
+    try:
+        null_md5 = int(raw3)
+    except ValueError:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=(
+                f"Migration md5sum query returned unexpected output: {raw3!r}"
+            ),
+            fatal=True,
+        )]
+
+    if null_md5 != 0:
+        return [HealthResult(
+            label="Schema migrations",
+            ok=False,
+            detail=(
+                f"Migration checksum gap: {null_md5} EXECUTED changeset(s) with "
+                "NULL md5sum — Liquibase will fail validation on next service boot"
+            ),
+            fix_suggestions=[
+                "Inspect: psql -c \"SELECT id,md5sum FROM databasechangelog "
+                "WHERE exectype='EXECUTED' AND md5sum IS NULL\"",
+                "Re-run: nx init --service to re-apply and restore checksums",
+            ],
+            fatal=True,
+        )]
+
+    return [HealthResult(
+        label="Schema migrations",
+        ok=True,
+        detail=f"Schema migrations: {total} applied (all EXECUTED, checksums present)",
+    )]
+
+
+def _check_rls_present(
+    creds_path: Path | None = None,
+    psql_bin: Path | None = None,
+    psql_runner=None,  # injectable for unit tests
+) -> list[HealthResult]:
+    """Structural RLS-presence check: verify every tenant table has RLS wired up.
+
+    For each table in ``_RLS_TENANT_TABLES`` this checks:
+    - ``pg_class.relrowsecurity = true`` (ENABLE ROW LEVEL SECURITY is set)
+    - ``pg_class.relforcerowsecurity = true`` (FORCE ROW LEVEL SECURITY is set)
+    - At least one row in ``pg_policies`` (a policy object exists)
+
+    This is a structural presence check, NOT a policy-predicate correctness
+    check — a policy of ``USING(true)`` would pass here.  Policy-predicate
+    correctness (cross-tenant isolation) is covered by the RLS negative /
+    cross-tenant integration tests in tests/db/test_http_*_integration.py.
+
+    ANY table missing any of these structural conditions is a fatal result:
+    the Liquibase changelogs must have failed to apply their RLS DDL, which
+    indicates a serious schema regression.
+
+    Gated on pg_credentials being present (service/PG mode configured).
+    """
+
+    # Resolve creds_path default.
+    if creds_path is None:
+        from nexus.config import nexus_config_dir
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+
+    if not creds_path.exists():
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            detail="service mode not configured (pg_credentials absent); skipping",
+            warn=True,
+        )]
+
+    from nexus.db.pg_provision import (
+        _read_credentials,
+        discover_pg_binaries,
+        PgBinaryNotFoundError,
+    )
+
+    creds = _read_credentials(creds_path)
+    host = "127.0.0.1"
+    try:
+        port = int(creds.get("PG_PORT", 0))
+    except ValueError:
+        port = 0
+    if port <= 0:
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            detail="pg_credentials missing PG_PORT; cannot connect",
+            fatal=True,
+        )]
+
+    db_url = creds.get("NX_DB_ADMIN_URL", "")
+    dbname = "nexus"
+    if "/" in db_url:
+        dbname = db_url.rstrip("/").rsplit("/", 1)[-1] or "nexus"
+
+    user = creds.get("NX_DB_ADMIN_USER", "nexus_admin")
+    password = creds.get("NX_DB_ADMIN_PASS", "")
+
+    # Resolve psql binary.
+    if psql_bin is None:
+        try:
+            psql_bin = discover_pg_binaries().psql
+        except PgBinaryNotFoundError as exc:
+            return [HealthResult(
+                label="RLS policies",
+                ok=False,
+                detail=f"psql binary not found: {exc}",
+                fatal=True,
+            )]
+
+    # Build a single query that returns one row per tenant table:
+    #   schema_name | table_name | relrowsecurity | relforcerowsecurity | policy_count
+    # Including schema_name + table_name in SELECT lets us match rows by identity
+    # rather than by position (ORDER BY is alphabetical, not VALUES-list order).
+    # Uses a VALUES list as the driving table so we get one output row per
+    # expected table even if the table doesn't exist in pg_class (NULL row).
+    table_values = ", ".join(
+        f"('{schema}', '{tname}')"
+        for schema, _, tname in (t.partition(".") for t in _RLS_TENANT_TABLES)
+    )
+    rls_sql = f"""
+SELECT
+    tbl.schema_name,
+    tbl.table_name,
+    c.relrowsecurity,
+    c.relforcerowsecurity,
+    COUNT(p.policyname) AS policy_count
+FROM (VALUES {table_values}) AS tbl(schema_name, table_name)
+LEFT JOIN pg_class c ON c.relname = tbl.table_name
+    AND c.relnamespace = (
+        SELECT oid FROM pg_namespace WHERE nspname = tbl.schema_name
+    )
+LEFT JOIN pg_policies p
+    ON p.schemaname = tbl.schema_name AND p.tablename = tbl.table_name
+GROUP BY tbl.schema_name, tbl.table_name, c.relrowsecurity, c.relforcerowsecurity
+ORDER BY tbl.schema_name, tbl.table_name;
+""".strip()
+
+    proc = _run_psql(
+        psql_bin, host, port, dbname, user, password, rls_sql,
+        psql_runner=psql_runner,
+    )
+    if proc.returncode != 0:
+        stderr_snip = (proc.stderr or "").strip()[:300]
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            detail=f"RLS introspection query failed (psql exit {proc.returncode}): {stderr_snip}",
+            fatal=True,
+        )]
+
+    # Parse output: one pipe-separated line per table.
+    # Format: schema_name|table_name|relrowsecurity|relforcerowsecurity|policy_count
+    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    if len(lines) != len(_RLS_TENANT_TABLES):
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            detail=(
+                f"RLS query returned {len(lines)} rows "
+                f"(expected {len(_RLS_TENANT_TABLES)}); schema mismatch"
+            ),
+            fatal=True,
+        )]
+
+    # Build a lookup dict keyed by "schema.table" for order-independent matching.
+    rls_by_table: dict[str, tuple[str, str, int]] = {}
+    for line in lines:
+        parts = line.split("|")
+        if len(parts) < 5:
+            # Malformed row — mark as unknown failure.
+            rls_by_table[line] = ("?", "?", 0)
+            continue
+        schema_name = parts[0].strip()
+        table_name = parts[1].strip()
+        key = f"{schema_name}.{table_name}"
+        rls_on = parts[2].strip().lower()
+        rls_force = parts[3].strip().lower()
+        try:
+            policy_count = int(parts[4].strip())
+        except ValueError:
+            policy_count = 0
+        rls_by_table[key] = (rls_on, rls_force, policy_count)
+
+    failed: list[str] = []
+    for table in _RLS_TENANT_TABLES:
+        if table not in rls_by_table:
+            failed.append(f"{table} (not in query output)")
+            continue
+        rls_on, rls_force, policy_count = rls_by_table[table]
+
+        if rls_on != "t" or rls_force != "t" or policy_count == 0:
+            reasons = []
+            if rls_on != "t":
+                reasons.append("RLS not enabled")
+            if rls_force != "t":
+                reasons.append("RLS not forced")
+            if policy_count == 0:
+                reasons.append("no policies")
+            failed.append(f"{table} ({', '.join(reasons)})")
+
+    if failed:
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            detail=(
+                f"RLS missing on {len(failed)}/{len(_RLS_TENANT_TABLES)} "
+                f"tenant table(s): {', '.join(failed)}"
+            ),
+            fix_suggestions=[
+                "Re-run migrations: nx init --service",
+                "Verify the Liquibase changeset applied RLS: "
+                "check service/src/main/resources/db/changelog/",
+            ],
+            fatal=True,
+        )]
+
+    return [HealthResult(
+        label="RLS policies",
+        ok=True,
+        detail=(
+            f"RLS policies: present on {len(_RLS_TENANT_TABLES)}/"
+            f"{len(_RLS_TENANT_TABLES)} tenant tables"
+        ),
+    )]
+
+
 def run_health_checks() -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -1420,5 +2093,13 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     _cat_path = catalog_path()
     _cat = make_catalog_reader()
     results.extend(_check_catalog(_cat, _cat_path))
+
+    # RDR-152 / bead nexus-gmiaf.33: storage-service checks.
+    # All three are gated internally on pg_credentials being present; they emit
+    # a single soft-warn-and-skip result when service/PG mode is not configured,
+    # so they are always safe to run.
+    results.extend(_check_storage_service_health())
+    results.extend(_check_migration_state())
+    results.extend(_check_rls_present())
 
     return results, _local
