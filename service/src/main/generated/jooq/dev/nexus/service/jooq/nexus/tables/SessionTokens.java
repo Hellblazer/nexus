@@ -115,12 +115,17 @@ public class SessionTokens extends TableImpl<SessionTokensRecord> {
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_SESSION_TOKENS_TENANT_SESSION);
+        return Arrays.asList(Indexes.IDX_SESSION_TOKENS_EXPIRES);
     }
 
     @Override
     public UniqueKey<SessionTokensRecord> getPrimaryKey() {
         return Keys.SESSION_TOKENS_PK;
+    }
+
+    @Override
+    public List<UniqueKey<SessionTokensRecord>> getUniqueKeys() {
+        return Arrays.asList(Keys.SESSION_TOKENS_TENANT_SESSION_UQ);
     }
 
     @Override

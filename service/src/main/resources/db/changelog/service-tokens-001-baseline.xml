@@ -37,6 +37,24 @@
     reader to defend against at the DB layer, and the stored material is already a
     hash (token_hash / session_token_hash), never the raw token. Isolation of the
     DATA these tokens authorize remains fully enforced on the domain tables.
+    Defense-in-depth note: nexus_svc holds DML on all nexus tables, so a SQL
+    injection on a non-auth handler running as nexus_svc could read these rows;
+    because only hashes are stored, that yields no usable credential without
+    inverting the hash (Phase B must mint tokens with adequate entropy).
+
+    ── service_tokens vs session_tokens lifecycle asymmetry (deliberate) ───────
+    service_tokens carries revoked_at: bearers are long-lived and need IMMEDIATE
+    revocation independent of expiry, and rotation keeps multiple live rows per
+    tenant (token_hash sole PK + non-unique tenant_id index — Decision 3 overlap).
+    session_tokens has NO revoked_at: session tokens are short-lived and follow the
+    existing t1.scratch session model — invalidation is DELETE-on-session-close
+    (MCP lifespan) or natural expiry/TTL-sweep, not soft-revoke. session_tokens
+    also carries UNIQUE(tenant_id, session_id): at most ONE active token per logical
+    session (Decision 2's one-session-one-token), which lets Phase D mint via
+    INSERT ... ON CONFLICT (tenant_id, session_id) DO UPDATE (re-mint replaces).
+    Active-token listing/sweep indexes for the Phase C CLI are added by Phase C
+    alongside the queries that need them (avoid speculative indexes here); the
+    AuthFilter hot path is a PK point-lookup and needs no extra index.
 
     Both tables live in the `nexus` schema, so grants-nexus-svc.xml (runAlways, LAST
     in the master order) grants nexus_svc SELECT/INSERT/UPDATE/DELETE on them via its
@@ -79,6 +97,9 @@ CREATE INDEX idx_service_tokens_tenant ON nexus.service_tokens (tenant_id);
             Create nexus.session_tokens — per-session token store resolving
             session_token_hash to (tenant_id, session_id). Short TTL via expires_at
             (NOT NULL). NO RLS (credential-resolution table; see header).
+            UNIQUE(tenant_id, session_id): one active token per logical session
+            (Decision 2); enables Phase D ON CONFLICT re-mint. No revoked_at:
+            DELETE-on-close + expiry only (see header asymmetry note).
         </comment>
         <sql splitStatements="true" stripComments="false">
 CREATE TABLE nexus.session_tokens (
@@ -87,12 +108,14 @@ CREATE TABLE nexus.session_tokens (
     session_id         TEXT        NOT NULL,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at         TIMESTAMPTZ NOT NULL,
-    CONSTRAINT session_tokens_pk PRIMARY KEY (session_token_hash)
+    CONSTRAINT session_tokens_pk PRIMARY KEY (session_token_hash),
+    -- One active token per logical session; the index this creates also serves
+    -- (tenant_id, session_id) lookups, so no separate index is needed.
+    CONSTRAINT session_tokens_tenant_session_uq UNIQUE (tenant_id, session_id)
 );
 
--- Lookups / sweeps by (tenant, session).
-CREATE INDEX idx_session_tokens_tenant_session
-    ON nexus.session_tokens (tenant_id, session_id);
+-- TTL sweep: DELETE FROM nexus.session_tokens WHERE expires_at &lt; now().
+CREATE INDEX idx_session_tokens_expires ON nexus.session_tokens (expires_at);
         </sql>
         <rollback>DROP TABLE IF EXISTS nexus.session_tokens CASCADE</rollback>
     </changeSet>

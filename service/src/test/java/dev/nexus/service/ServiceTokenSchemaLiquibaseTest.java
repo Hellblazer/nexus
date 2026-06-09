@@ -152,6 +152,7 @@ class ServiceTokenSchemaLiquibaseTest {
         // Seed two rows for two different tenants via superuser.
         try (Connection su = pg.getPostgresDatabase().getConnection()) {
             su.setAutoCommit(true);
+            su.createStatement().execute("TRUNCATE nexus.service_tokens");
             su.createStatement().execute(
                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES "
                 + "('hash-tenant-a', 'tenant-a', 'a-root'), "
@@ -177,6 +178,7 @@ class ServiceTokenSchemaLiquibaseTest {
     void sessionTokens_readableByServiceRole_withoutTenantGuc() throws Exception {
         try (Connection su = pg.getPostgresDatabase().getConnection()) {
             su.setAutoCommit(true);
+            su.createStatement().execute("TRUNCATE nexus.session_tokens");
             su.createStatement().execute(
                 "INSERT INTO nexus.session_tokens "
                 + "(session_token_hash, tenant_id, session_id, expires_at) VALUES "
@@ -228,8 +230,12 @@ class ServiceTokenSchemaLiquibaseTest {
             .as("session_tokens must have a PK on session_token_hash")
             .anyMatch(d -> d.contains("(session_token_hash)") && d.toLowerCase().contains("unique"));
         assertThat(sessIdx)
-            .as("session_tokens must have an index on (tenant_id, session_id)")
-            .anyMatch(d -> d.contains("(tenant_id, session_id)"));
+            .as("session_tokens must enforce UNIQUE(tenant_id, session_id) "
+                + "(one active token per logical session)")
+            .anyMatch(d -> d.contains("(tenant_id, session_id)") && d.toLowerCase().contains("unique"));
+        assertThat(sessIdx)
+            .as("session_tokens must have an index on (expires_at) for the TTL sweep")
+            .anyMatch(d -> d.contains("(expires_at)"));
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
