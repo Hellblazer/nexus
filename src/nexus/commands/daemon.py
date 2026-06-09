@@ -1327,3 +1327,199 @@ def t2_uninstall_cmd(autostart: bool) -> None:
     for warning in result.warnings:
         click.echo(f"Warning: {warning}", err=True)
     click.echo(f"Removed {result.dest}")
+
+
+# ---------------------------------------------------------------------------
+# service sub-group (RDR-152 P5.1, nexus-gmiaf.30)
+# ---------------------------------------------------------------------------
+
+
+@daemon_group.group("service")
+def service_group() -> None:
+    """Storage-service daemon: managed Java service JAR + local Postgres."""
+
+
+@service_group.command("start")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override (default: ~/.config/nexus/).",
+)
+@click.option(
+    "--jar",
+    "jar_path_str",
+    default=None,
+    help=(
+        "Path to nexus-service-*.jar. Default: auto-discovered from "
+        "service/target/ relative to the repository root."
+    ),
+)
+@click.option(
+    "--foreground",
+    is_flag=True,
+    default=False,
+    help=(
+        "Block until SIGTERM/SIGINT or the service exits. Required when "
+        "launched under a supervisor (launchd, systemd)."
+    ),
+)
+@click.option(
+    "--announce-stdout",
+    "announce_stdout",
+    is_flag=True,
+    default=False,
+    help="Emit the discovery JSON on stdout at startup.",
+)
+def service_start_cmd(
+    config_dir_str: str | None,
+    jar_path_str: str | None,
+    foreground: bool,
+    announce_stdout: bool,
+) -> None:
+    """Start the Java storage-service + Postgres supervisor (RDR-152 P5.1).
+
+    Reads pg_credentials from the config directory (written by 'nx init
+    --service'), starts the nx-managed Postgres cluster if it is not
+    running, spawns the Java JAR, waits for /health to return 200, then
+    publishes the service endpoint to the ServiceRegistry under the
+    'storage_service' scope key.
+
+    Without ``--foreground`` the command ensures the supervisor is running
+    (spawning one in the background if needed) and exits. With
+    ``--foreground`` the supervisor blocks until SIGTERM/SIGINT.
+
+    A service/PG outage is always fatal — there is no direct-mode
+    fallback (per RDR-152 §Approach).
+    """
+    from nexus.daemon.storage_service_daemon import (
+        StorageServiceStartError,
+        run_storage_supervisor,
+        start_storage_service,
+    )
+    from nexus.daemon.service_registry import ServiceRegistry
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    jar_path = Path(jar_path_str) if jar_path_str else None
+
+    if foreground:
+        try:
+            code = run_storage_supervisor(config_dir=config_dir, jar_path=jar_path)
+        except StorageServiceStartError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(2)
+        sys.exit(code)
+
+    # Non-foreground: check for a live lease; spawn detached supervisor if needed.
+    registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+    import os as _os
+    scope = str(_os.getuid())
+    existing = registry.discover(scope)
+    if existing is None:
+        argv = [
+            *_resolve_nx_bin(), "daemon", "service", "start", "--foreground",
+            "--config-dir", str(config_dir),
+        ]
+        if jar_path is not None:
+            argv += ["--jar", str(jar_path)]
+        subprocess.Popen(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            existing = registry.discover(scope)
+            if existing is not None:
+                break
+            time.sleep(0.5)
+        if existing is None:
+            click.echo(
+                "Error: Storage service supervisor did not become ready within 60s. "
+                "Check logs or run with --foreground to see the error.",
+                err=True,
+            )
+            sys.exit(2)
+
+    ep = existing.endpoint
+    if announce_stdout:
+        import json as _json
+        click.echo(_json.dumps({
+            "host": ep.get("host"),
+            "port": ep.get("port"),
+            "pid": ep.get("pid"),
+            "generation": existing.generation,
+        }))
+    else:
+        click.echo(
+            f"Storage service running on {ep.get('host')}:{ep.get('port')} "
+            f"(pid={ep.get('pid')}, generation={existing.generation})."
+        )
+
+
+@service_group.command("stop")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+def service_stop_cmd(config_dir_str: str | None) -> None:
+    """Stop the running storage-service supervisor (SIGTERM -> SIGKILL)."""
+    from nexus.daemon.storage_service_daemon import stop_storage_service
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    pid = stop_storage_service(config_dir=config_dir)
+    if pid is None:
+        click.echo("No storage service lease found — already stopped.")
+        return
+    click.echo(f"Storage service stopped (pid={pid}).")
+
+
+@service_group.command("status")
+@click.option(
+    "--config-dir",
+    "config_dir_str",
+    default=None,
+    help="Config directory override.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output raw JSON.")
+def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
+    """Print the storage-service endpoint (host, port, pid, generation).
+
+    Exits non-zero when no live lease is found.
+    """
+    import json as _json
+    from nexus.daemon.service_registry import ServiceRegistry
+    import os as _os
+
+    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+    scope = str(_os.getuid())
+    record = registry.discover(scope)
+
+    if record is None:
+        click.echo(
+            "No storage service lease found — is the service running?",
+            err=True,
+        )
+        sys.exit(1)
+
+    ep = record.endpoint
+    data = {
+        "host": ep.get("host"),
+        "port": ep.get("port"),
+        "pid": ep.get("pid"),
+        "generation": record.generation,
+        "version": record.version,
+        "heartbeat_epoch": record.heartbeat_epoch,
+        "status": record.status,
+    }
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    click.echo("Storage Service Status")
+    click.echo("-" * 40)
+    for key, value in data.items():
+        click.echo(f"  {key}: {value}")

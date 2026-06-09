@@ -1416,16 +1416,23 @@ def _resolve_service_endpoint(
     """Return (host, port) for the Java storage service, or None.
 
     Resolution order:
-    1. ServiceRegistry discover() — the supervisor bead (gmiaf.30) publishes a
-       lease record under ``_STORAGE_SERVICE_SCOPE_KEY`` in the t2 tier.
+    1. ServiceRegistry discover() — the supervisor (gmiaf.30) publishes a
+       lease record under tier="storage_service", scope=str(os.getuid()).
+       addr file = storage_service_addr.<uid>.  NOT the t2 tier.
     2. NX_SERVICE_HOST / NX_SERVICE_PORT environment variables (fallback).
     3. None — endpoint not discoverable (soft-warn, skip ping).
     """
     # 1. Registry discover.
+    # IMPORTANT: tier="storage_service", scope=str(os.getuid()) — this matches
+    # exactly what StorageServiceSupervisor._publish() writes (tier=_REGISTRY_TIER,
+    # scope=str(os.getuid())).  The stale comment "t2 tier" drove a bug where
+    # this used tier="t2" + scope_key="storage_service" (t2_addr.storage_service),
+    # which never matched the supervisor's storage_service_addr.<uid> file.
     try:
         from nexus.daemon.service_registry import ServiceRegistry
-        registry = ServiceRegistry(dir=config_dir, tier="t2")
-        lease = registry.discover(_STORAGE_SERVICE_SCOPE_KEY)
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+        scope = str(os.getuid())
+        lease = registry.discover(scope)
         if lease is not None:
             ep = lease.endpoint
             host = str(ep.get("host", "127.0.0.1"))

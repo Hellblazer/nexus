@@ -64,7 +64,7 @@ from nexus.daemon.t1_lease import T1LeasePublisher
 from nexus import session as _sess
 
 
-TIERS = ("t1", "t2", "t3")
+TIERS = ("t1", "t2", "t3", "storage_service")
 
 # Synthetic owner pids, never real live processes; liveness is injected.
 _OWNER_PID = 970001
@@ -361,10 +361,23 @@ class T3RecordHarness(_LeaseHarness):
     _REGISTRY_TIER = "t3"
 
 
+class StorageServiceRecordHarness(_LeaseHarness):
+    """RDR-149 P5.1 (nexus-gmiaf.30): storage_service rides the leased registry,
+    supervised by StorageServiceSupervisor. Identical lease semantics to T3 (uid-
+    scoped, uid-scoped external-process supervisor, version-cycled by
+    _cycle_storage_service_to_current). The scope key is str(os.getuid()); the
+    registry tier prefix is "storage_service"; addr file = storage_service_addr.<uid>.
+    """
+
+    tier = "storage_service"
+    _REGISTRY_TIER = "storage_service"
+
+
 _HARNESS_CLASSES: dict[str, type[RecordHarness]] = {
     "t1": T1RecordHarness,
     "t2": T2RecordHarness,
     "t3": T3RecordHarness,
+    "storage_service": StorageServiceRecordHarness,
 }
 
 
@@ -376,17 +389,19 @@ GAP = "gap"
 SPEC = "spec"
 
 EXPECTATIONS: dict[str, dict[str, Any]] = {
-    "roundtrip": {"t1": "pass", "t2": "pass", "t3": "pass"},
-    "reap_ungraceful": {"t1": "pass", "t2": "pass", "t3": "pass"},
+    "roundtrip": {"t1": "pass", "t2": "pass", "t3": "pass", "storage_service": "pass"},
+    "reap_ungraceful": {"t1": "pass", "t2": "pass", "t3": "pass", "storage_service": "pass"},
     "self_heal": {
         "t1": "pass",  # RDR-149 P4: publisher heartbeat self-heals (#1114)
         "t2": "pass",
         "t3": "pass",  # RDR-149 P3: supervisor heartbeat self-heals
+        "storage_service": "pass",  # RDR-149 P5.1: supervisor heartbeat self-heals
     },
     "concurrent_one_owner": {
         "t1": "pass",  # RDR-149 P4: session-id scope converges to one owner
         "t2": "pass",
         "t3": "pass",
+        "storage_service": "pass",  # uid-scoped, same lease fencing as T2/T3
     },
     "version_cycle": {
         # T1 is MCP-lifespan-owned, not covered by any upgrade-cycle: an
@@ -396,23 +411,27 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
         "t1": (GAP, "T1 is MCP-lifespan-owned, not upgrade-cycled; RDR-149 P4 N/A"),
         "t2": "pass",
         "t3": "pass",  # RDR-149 P3: supervisor owns cycle_to_current (#1112)
+        "storage_service": "pass",  # RDR-149 P5.1: _cycle_storage_service_to_current
     },
-    # RDR-149 P2/P3/P4: all three tiers ride the primitive, so their lease
+    # RDR-149 P2/P3/P4/P5.1: all four tiers ride the primitive, so their lease
     # properties pass.
     "pid_reuse_immunity": {
         "t1": "pass",  # RDR-149 P4: lease/generation kills pid-reuse
         "t2": "pass",
         "t3": "pass",
+        "storage_service": "pass",  # RDR-149 P5.1: lease/generation kills pid-reuse
     },
     "restart_higher_generation": {
         "t1": "pass",  # RDR-149 P4: generation fencing token
         "t2": "pass",
         "t3": "pass",
+        "storage_service": "pass",  # RDR-149 P5.1: generation fencing token
     },
     "restart_race_fencing": {
         "t1": "pass",  # RDR-149 P4: CA-4 heartbeat-fencing arm
         "t2": "pass",
         "t3": "pass",
+        "storage_service": "pass",  # RDR-149 P5.1: CA-4 heartbeat-fencing arm
     },
 }
 
@@ -763,6 +782,59 @@ class TestMatrixIsNotVacuous:
         assert isinstance(cell, tuple) and cell[0] == GAP, (
             "version_cycle[t1] must stay a documented N/A (MCP-lifespan-owned)"
         )
+
+    def test_storage_service_migration_flipped_its_cells(self) -> None:
+        # RDR-149 P5.1 ratchet: storage_service now rides the primitive
+        # (StorageServiceSupervisor + _cycle_storage_service_to_current), so
+        # all lease properties pass. A regression surfaces here.
+        for prop in (
+            "roundtrip",
+            "reap_ungraceful",
+            "self_heal",
+            "concurrent_one_owner",
+            "version_cycle",
+            "pid_reuse_immunity",
+            "restart_higher_generation",
+            "restart_race_fencing",
+        ):
+            assert EXPECTATIONS[prop]["storage_service"] == "pass", (
+                f"storage_service lease property {prop!r} regressed to non-pass after P5.1"
+            )
+
+    def test_storage_service_version_cycle_is_behaviorally_proven(self) -> None:
+        # version_cycle[storage_service] == "pass" above is a claim; this proves
+        # it. The shared ``test_version_cycle`` only asserts a class attribute,
+        # so the battery must exercise the real upgrade entrypoint
+        # (_cycle_storage_service_to_current) to show a running service is
+        # actually stopped-then-started (round-3 SIG: vacuity guard). Wrong verb
+        # order or a no-op would fail here.
+        from nexus.commands.upgrade import _cycle_storage_service_to_current
+
+        calls: list[str] = []
+
+        def _run(argv, **_kwargs):
+            # argv == [*nx, "daemon", "service", <verb>]
+            calls.append(argv[-1])
+
+        # A live lease is present -> the cycle must fire stop then start.
+        _cycle_storage_service_to_current(
+            _discover_fn=lambda: object(),
+            _run_fn=_run,
+            _nx_bin_fn=lambda: ["nx"],
+        )
+        assert calls == ["stop", "start"], (
+            "a running storage service must be stopped BEFORE start during an "
+            f"upgrade cycle; got {calls}"
+        )
+
+        # No live lease -> no subprocess calls (no auto-spawn during upgrade).
+        calls.clear()
+        _cycle_storage_service_to_current(
+            _discover_fn=lambda: None,
+            _run_fn=_run,
+            _nx_bin_fn=lambda: ["nx"],
+        )
+        assert calls == [], "upgrade cycle must not spawn a service that was not running"
 
     def test_every_cell_covers_all_tiers(self) -> None:
         for prop, cells in EXPECTATIONS.items():

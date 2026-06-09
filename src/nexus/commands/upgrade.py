@@ -305,6 +305,59 @@ def _cycle_t3_daemon_to_current() -> None:
         _log.warning("upgrade_t3_daemon_cycle_failed", error=str(exc))
 
 
+def _cycle_storage_service_to_current(
+    *,
+    _discover_fn=None,
+    _run_fn=None,
+    _nx_bin_fn=None,
+) -> None:
+    """Bring a stale supervised storage service to the just-installed version
+    (best-effort). RDR-149 P5.1 (nexus-gmiaf.30): symmetric to
+    ``_cycle_t3_daemon_to_current`` for the Java storage-service + Postgres.
+
+    The supervisor starts the Java JAR with the nexus Python code from the
+    same Python install, so a nexus upgrade requires a supervisor restart to
+    pick up the new StorageServiceSupervisor bytecode. Only acts on a running
+    service (no auto-spawn during upgrade). Never raises.
+
+    Keyword-only ``_discover_fn``, ``_run_fn``, ``_nx_bin_fn`` are injectable
+    seams for unit tests (avoids patching local imports deep in try blocks).
+    Default values reproduce production behaviour exactly.
+    """
+    import os
+    import subprocess
+
+    try:
+        from nexus.config import nexus_config_dir
+        from nexus.daemon.service_registry import ServiceRegistry
+
+        # Discover via the storage_service tier (matches what the supervisor
+        # publishes and health._resolve_service_endpoint reads).
+        if _discover_fn is None:
+            registry = ServiceRegistry(dir=nexus_config_dir(), tier="storage_service")
+            scope = str(os.getuid())
+            live = registry.discover(scope)
+        else:
+            live = _discover_fn()
+
+        if live is None:
+            return  # nothing running to cycle
+
+        from nexus.commands.daemon import _resolve_nx_bin as _real_nx_bin
+        nx = _nx_bin_fn() if _nx_bin_fn is not None else _real_nx_bin()
+        _run = _run_fn if _run_fn is not None else subprocess.run
+        for verb in ("stop", "start"):
+            _run(
+                [*nx, "daemon", "service", verb],
+                timeout=60,  # service start waits for PG + JVM
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("upgrade_storage_service_cycle_failed", error=str(exc))
+
+
 def _cycle_supervised_daemons_to_current(*, skip_t3: bool = False) -> None:
     """Cycle every supervised storage daemon to the just-installed version.
 
@@ -324,6 +377,7 @@ def _cycle_supervised_daemons_to_current(*, skip_t3: bool = False) -> None:
     _cycle_daemon_to_current()  # T2
     if not skip_t3:
         _cycle_t3_daemon_to_current()  # T3
+        _cycle_storage_service_to_current()  # Java storage service + Postgres (P5.1)
 
 
 def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool = False) -> None:
