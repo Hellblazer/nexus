@@ -1,6 +1,6 @@
 package dev.nexus.service;
 
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -27,9 +27,9 @@ class TaxonomySchemaLiquibaseTest {
 
     @Test
     void taxonomyChangeset_appliesAndCreatesExpectedTables() throws Exception {
-        try (EmbeddedPostgres pg = EmbeddedPostgres.builder().start()) {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.start()) {
 
-            try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            try (Connection su = pg.createConnection("")) {
                 su.createStatement().execute(
                     "DO $$ BEGIN " +
                     "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
@@ -45,7 +45,7 @@ class TaxonomySchemaLiquibaseTest {
                 lb.update(new Contexts());
             }
 
-            try (Connection c = pg.getPostgresDatabase().getConnection()) {
+            try (Connection c = pg.createConnection("")) {
                 // All four tables exist in nexus schema
                 for (String table : List.of("topics", "taxonomy_meta",
                                             "topic_assignments", "topic_links")) {

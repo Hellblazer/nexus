@@ -21,7 +21,7 @@
         <jackson.version>2.18.3</jackson.version>
         <junit.version>5.11.4</junit.version>
         <assertj.version>3.27.3</assertj.version>
-        <zonky.version>2.1.0</zonky.version>
+        <testcontainers.version>1.21.4</testcontainers.version>
         <liquibase.version>4.29.2</liquibase.version>
 
         <mainClass>dev.nexus.service.Main</mainClass>
@@ -33,7 +33,7 @@
             jOOQ generated sources:
             - Default build: src/main/generated/jooq (committed to git, always available)
             - -Pcodegen: regenerates into the same directory via JooqCodegenBootstrap
-              (boots io.zonky EmbeddedPostgres, applies Liquibase, runs GenerationTool)
+              (spins up pgvector/pgvector:pg17 container, applies Liquibase, runs GenerationTool)
 
             WHY COMMITTED SOURCES (OPTION 3 RATIONALE):
             Option 1 (LiquibaseDatabase/H2): REJECTED. The changelog uses Postgres-only DDL
@@ -48,7 +48,7 @@
                  Downloading a newer version requires network access not guaranteed in all CI
                  environments. Not viable without an explicit Groovy-Java25 compatible version.
               b) exec-maven-plugin + manual javac + hardcoded classpath: REJECTED. Requires
-                 enumerating ALL transitive dependencies of io.zonky:embedded-postgres by hand.
+                 enumerating ALL transitive dependencies of the embedded-postgres library by hand.
                  This is brittle (version drift breaks the codegen classpath silently) and
                  couples the pom to the local Maven repo structure.
 
@@ -57,7 +57,7 @@
             changes are infrequent (bead-gated), and committing them provides:
               - IDE support without running codegen first
               - Fast incremental builds (no PG startup on every mvn compile)
-              - Full CI reproducibility (no external process needed for standard builds)
+              - Full CI reproducibility (only the test suite needs Docker; standard builds do not)
               - A clear "schema changed => regenerate => commit" workflow enforced by -Pcodegen
             This pattern is used by jHipster, Spring, and many production Maven projects with jOOQ.
         -->
@@ -152,18 +152,23 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- Test: embedded-postgres (real PG in-process, no Docker) -->
+        <!-- Test: Testcontainers pgvector/pgvector:pg17 (replaces io.zonky embedded-postgres) -->
         <dependency>
-            <groupId>io.zonky.test</groupId>
-            <artifactId>embedded-postgres</artifactId>
-            <version>${zonky.version}</version>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <version>${testcontainers.version}</version>
             <scope>test</scope>
         </dependency>
-        <!-- darwin-arm64v8 binary bundle -->
         <dependency>
-            <groupId>io.zonky.test.postgres</groupId>
-            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
-            <version>16.4.0</version>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${testcontainers.version}</version>
             <scope>test</scope>
         </dependency>
 
@@ -324,13 +329,13 @@
               5. Normal builds pick up the committed sources automatically
 
             Implementation: JooqCodegenBootstrap (in src/test/java) is compiled at
-            test-compile phase (picks up test scope deps: embedded-postgres, jooq-codegen,
+            test-compile phase (picks up test scope deps: testcontainers, jooq-codegen,
             jooq-meta).  exec:java runs it in process-test-classes phase using the test
             classpath, which includes the compiled bootstrap class.  The bootstrap:
-              - Boots io.zonky EmbeddedPostgres (no Docker needed)
+              - Boots a Testcontainers pgvector/pgvector:pg17 container (requires Docker)
               - Applies the Liquibase changelog via programmatic API
               - Runs org.jooq.codegen.GenerationTool (PostgresDatabase)
-              - Stops embedded PG
+              - Stops the container
 
             The output goes to src/main/generated/jooq (NOT target/) so it is committed
             and available without running -Pcodegen.
@@ -351,7 +356,7 @@
                                     <goal>java</goal>
                                 </goals>
                                 <configuration>
-                                    <!-- Use test classpath: includes embedded-postgres, jooq-codegen,
+                                    <!-- Use test classpath: includes testcontainers, jooq-codegen,
                                          jooq-meta, liquibase-core, and the compiled bootstrap class -->
                                     <classpathScope>test</classpathScope>
                                     <mainClass>dev.nexus.service.codegen.JooqCodegenBootstrap</mainClass>
@@ -359,6 +364,16 @@
                                         <argument>${jooq.generated.dir}</argument>
                                         <argument>${project.basedir}/src/main/resources</argument>
                                     </arguments>
+                                    <!-- Disable Ryuk so the background reaper thread does not
+                                         survive main() exit and trigger exec-maven-plugin's
+                                         uncaught-exception handler with InterruptedException.
+                                         The env-var form is used because exec:java inherits
+                                         the Maven JVM's system properties, but Testcontainers
+                                         reads TESTCONTAINERS_RYUK_DISABLED at class-load time
+                                         from the environment, not from System.getProperty. -->
+                                    <environmentVariables>
+                                        <TESTCONTAINERS_RYUK_DISABLED>true</TESTCONTAINERS_RYUK_DISABLED>
+                                    </environmentVariables>
                                 </configuration>
                             </execution>
                         </executions>

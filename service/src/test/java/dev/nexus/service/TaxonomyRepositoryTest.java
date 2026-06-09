@@ -2,7 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -63,16 +63,16 @@ class TaxonomyRepositoryTest {
     private static final String COL_A    = "knowledge__a";
     private static final String COL_B    = "knowledge__b";
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     TaxonomyRepository repo;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN " +
@@ -88,7 +88,7 @@ class TaxonomyRepositoryTest {
                 "END $$");
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             Liquibase liquibase = new Liquibase(
@@ -97,7 +97,7 @@ class TaxonomyRepositoryTest {
             liquibase.update(new Contexts());
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             String schema = "nexus";
             for (String table : List.of("topics", "taxonomy_meta", "topic_assignments", "topic_links")) {
@@ -139,7 +139,7 @@ class TaxonomyRepositoryTest {
     @AfterAll
     void stopAll() throws Exception {
         if (svcDs != null) svcDs.close();
-        if (pg != null)    pg.close();
+        if (pg != null)    pg.stop();
     }
 
     // ── Topics CRUD ────────────────────────────────────────────────────────────
@@ -507,7 +507,7 @@ class TaxonomyRepositoryTest {
     void rls_withCheck_rejectsWrongTenant() throws Exception {
         // Direct INSERT with tenant_id != GUC → WITH CHECK violation
         // The GUC is 'injector-tenant' but the row has tenant_id='other-tenant' → rejected
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // Grant INSERT so the svc role can attempt the INSERT (it will be rejected by RLS)
             su.createStatement().execute(
@@ -542,7 +542,7 @@ class TaxonomyRepositoryTest {
 
         // Connect directly with svc role, no GUC stamp → RLS sees NULL tenant → 0 rows
         var rawConfig = new com.zaxxer.hikari.HikariConfig();
-        rawConfig.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        rawConfig.setJdbcUrl(pg.getJdbcUrl());
         rawConfig.setUsername(SVC_ROLE);
         rawConfig.setPassword(SVC_PASS);
         rawConfig.setMaximumPoolSize(1);
@@ -562,7 +562,7 @@ class TaxonomyRepositoryTest {
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDataSource() {
         var config = new com.zaxxer.hikari.HikariConfig();
-        config.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        config.setJdbcUrl(pg.getJdbcUrl());
         config.setUsername(SVC_ROLE);
         config.setPassword(SVC_PASS);
         config.setMaximumPoolSize(5);

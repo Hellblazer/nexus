@@ -2,7 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -24,7 +24,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * RDR-152 bead nexus-gmiaf.11 — Liquibase plans baseline integration test.
  *
- * <p>Hermetic: embedded Postgres (io.zonky), port 0, no Docker. Applies the
+ * <p>Hermetic: embedded Postgres (Testcontainers pgvector), port 0, requires Docker. Applies the
  * Liquibase master changelog programmatically and asserts all required structural
  * and runtime properties for the nexus.plans table (Store 2).
  *
@@ -64,16 +64,16 @@ class PlansSchemaLiquibaseTest {
     private static final String SVC_ROLE = "svc_plans_schema_test";
     private static final String SVC_PASS = "svc_plans_schema_test_pass";
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
         // Bootstrap service role BEFORE Liquibase runs (so changeset grants find it).
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN " +
@@ -89,7 +89,7 @@ class PlansSchemaLiquibaseTest {
                 "END $$");
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             Liquibase liquibase = new Liquibase(
@@ -100,7 +100,7 @@ class PlansSchemaLiquibaseTest {
         }
 
         // Grant svc role the same privileges as nexus_svc.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -122,14 +122,14 @@ class PlansSchemaLiquibaseTest {
     @AfterAll
     void stopAll() throws Exception {
         if (svcDs != null) svcDs.close();
-        if (pg != null)    pg.close();
+        if (pg != null)    pg.stop();
     }
 
     // ── Test 1: exact column set ─────────────────────────────────────────────
 
     @Test
     void plansTable_hasExactColumnSet() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.getMetaData().getColumns(null, "nexus", "plans", null);
             Set<String> actual = new java.util.HashSet<>();
             while (rs.next()) {
@@ -145,7 +145,7 @@ class PlansSchemaLiquibaseTest {
 
     @Test
     void plansTable_rlsEnabledAndForced() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet cls = su.createStatement().executeQuery(
                 "SELECT relrowsecurity, relforcerowsecurity " +
                 "FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid " +
@@ -188,7 +188,7 @@ class PlansSchemaLiquibaseTest {
 
     @Test
     void plansTable_ftsColumnAndIndexExist_tokenisationCorrect() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             // fts_vector column: exists and is a STORED generated tsvector
             ResultSet gen = su.createStatement().executeQuery(
                 "SELECT a.attname, a.attgenerated, " +
@@ -253,7 +253,7 @@ class PlansSchemaLiquibaseTest {
         //   plainto_tsquery('simple','plan') → literal 'plan' must NOT match 'planning'
         //   in simple-indexed tags (negative discrimination probe — proves tags use simple
         //   not english; if tags were english-indexed, 'planning'→'plan' and query would match).
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             try (var ps = su.prepareStatement("SELECT set_config(?, ?, true)")) {
                 ps.setString(1, TenantConstants.GUC_NAME);
@@ -312,7 +312,7 @@ class PlansSchemaLiquibaseTest {
     @Test
     void tenantIsolation_and_ftsQuery_viaWithTenant() throws Exception {
         // Seed rows for two tenants via superuser (bypasses RLS for seeding).
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             insertPlan(su, "plan-alpha", "plan-proj", "How to search knowledge bases",
                 "knowledge,search", "How to search knowledge bases. research scope global");
@@ -407,7 +407,7 @@ class PlansSchemaLiquibaseTest {
     @Test
     void rls_failClosed_noGucStamp_returnsZeroRows() throws Exception {
         // Seed at least one plan row as superuser so table is non-empty.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             insertPlan(su, "failclosed-tenant", "fc-proj",
                 "Sentinel plan for fail-closed probe", "sentinel", "Sentinel plan");
@@ -454,7 +454,7 @@ class PlansSchemaLiquibaseTest {
 
     @Test
     void rls_withCheck_blocksCrossTenantTenantIdRewrite() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             insertPlan(su, "alpha-plans-rw", "rw-proj", "Plan to rewrite", "rw", "Plan to rewrite");
             su.commit();
@@ -477,7 +477,7 @@ class PlansSchemaLiquibaseTest {
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDataSource() {
         var cfg = new com.zaxxer.hikari.HikariConfig();
-        cfg.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(SVC_ROLE);
         cfg.setPassword(SVC_PASS);
         cfg.setMaximumPoolSize(5);

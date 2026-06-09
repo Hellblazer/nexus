@@ -1,6 +1,6 @@
 package dev.nexus.service;
 
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -63,15 +63,15 @@ class ForeignKeyConstraintTest {
     private static final String TUMBLER_A = "1.1";
     private static final String TUMBLER_B = "2.1";
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
         // Phase 1: create roles (autoCommit=true; CREATE ROLE cannot run in txn)
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN " +
@@ -88,7 +88,7 @@ class ForeignKeyConstraintTest {
         }
 
         // Phase 2: apply full master changelog (includes fk-001-catalog-cross-store)
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             var lb = new Liquibase(
                 "db/changelog/db.changelog-master.xml",
                 new ClassLoaderResourceAccessor(),
@@ -98,7 +98,7 @@ class ForeignKeyConstraintTest {
         }
 
         // Phase 3: grant svc role access to all relevant tables
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             for (String tbl : List.of(
@@ -126,7 +126,7 @@ class ForeignKeyConstraintTest {
 
         // HikariCP as svc role (non-superuser, subject to RLS)
         var config = new com.zaxxer.hikari.HikariConfig();
-        config.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        config.setJdbcUrl(pg.getJdbcUrl());
         config.setUsername(SVC_ROLE);
         config.setPassword(SVC_PASS);
         config.setMaximumPoolSize(4);
@@ -137,7 +137,7 @@ class ForeignKeyConstraintTest {
     @AfterAll
     void stopAll() throws Exception {
         if (svcDs != null) svcDs.close();
-        if (pg != null)    pg.close();
+        if (pg != null)    pg.stop();
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -146,7 +146,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(1)
     void fkChangeset_appliesCleanly_allFkConstraintsPresent() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             // Verify the 4 cross-store FK constraints exist in pg_constraint.
             // topic_assignments is intentionally EXCLUDED (nexus-sa14p): its doc_id is a
             // chunk chash, not a document tumbler, so no fk_ta_catalog_doc is registered.
@@ -175,7 +175,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(2)
     void docAspectsDocId_isNullable() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT is_nullable FROM information_schema.columns " +
                 "WHERE table_schema='nexus' AND table_name='document_aspects' AND column_name='doc_id'");
@@ -186,7 +186,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(3)
     void aspectQueueDocId_isNullable() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT is_nullable FROM information_schema.columns " +
                 "WHERE table_schema='nexus' AND table_name='aspect_extraction_queue' AND column_name='doc_id'");
@@ -203,7 +203,7 @@ class ForeignKeyConstraintTest {
     void topicAssignment_chashDocId_succeeds_noCatalogFk() throws Exception {
         // nexus-sa14p: doc_id is a chunk chash, not a catalog tumbler, and there is no
         // fk_ta_catalog_doc. A chash doc_id with no matching catalog_documents row imports.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertTopic(su, TENANT_A, 100L, "test-topic", "col-a");
             String chash = "7740557a279d0481db33c93fd0342464"; // 32-hex chunk chash, not a tumbler
@@ -223,7 +223,7 @@ class ForeignKeyConstraintTest {
     void topicAssignment_topicIdFk_stillEnforced() throws Exception {
         // The topic_id -> topics(id) FK IS correct and remains enforced (only the
         // catalog doc_id FK was removed). An assignment to a non-existent topic rejects.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
@@ -239,7 +239,7 @@ class ForeignKeyConstraintTest {
     void deleteCatalogDoc_doesNotAffectTopicAssignments() throws Exception {
         // nexus-sa14p: with no catalog FK, deleting a catalog document does NOT cascade
         // to topic_assignments (assignments are chunk-keyed and independent of the catalog).
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "1.99");
             insertTopic(su, TENANT_A, 199L, "no-cascade-topic", "col-a");
@@ -268,7 +268,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(20)
     void aspect_nullDocId_isAccepted() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // doc_id=NULL is valid for a FK — no catalog reference required
             su.createStatement().execute(
@@ -285,7 +285,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(21)
     void aspect_validDocId_succeeds() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "3.1");
             su.createStatement().execute(
@@ -302,7 +302,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(22)
     void aspect_orphanDocId_rejectsWithFKViolation() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
@@ -316,7 +316,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(23)
     void deleteCatalogDoc_cascadesToAspects() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "3.99");
             su.createStatement().execute(
@@ -342,7 +342,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(30)
     void highlight_validDocId_succeeds() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "4.1");
             su.createStatement().execute(
@@ -359,7 +359,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(31)
     void highlight_orphanDocId_rejectsWithFKViolation() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
@@ -373,7 +373,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(32)
     void deleteCatalogDoc_cascadesToHighlights() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "4.99");
             su.createStatement().execute(
@@ -399,7 +399,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(40)
     void queue_nullDocId_isAccepted() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "INSERT INTO nexus.aspect_extraction_queue " +
@@ -415,7 +415,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(41)
     void queue_validDocId_succeeds() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "5.1");
             su.createStatement().execute(
@@ -432,7 +432,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(42)
     void queue_orphanDocId_rejectsWithFKViolation() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
@@ -446,7 +446,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(43)
     void deleteCatalogDoc_cascadesToQueue() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "5.99");
             su.createStatement().execute(
@@ -472,7 +472,7 @@ class ForeignKeyConstraintTest {
     void queue_nullDocId_survivesDocDeletion() throws Exception {
         // A queue item with doc_id=NULL is not bound to any catalog doc;
         // deleting catalog docs must not affect it.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "6.1");
             su.createStatement().execute(
@@ -508,7 +508,7 @@ class ForeignKeyConstraintTest {
      */
     @Test @Order(51)
     void crossTenantAspect_isRejectedByCompositeFk() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // Tenant-A has a catalog document; Tenant-B tries to reference it
             insertCatalogDocument(su, TENANT_A, TUMBLER_A);
@@ -527,7 +527,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(52)
     void crossTenantHighlight_isRejectedByCompositeFk() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, TUMBLER_A);
 
@@ -545,7 +545,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(53)
     void crossTenantQueueItem_isRejectedByCompositeFk() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, TUMBLER_A);
 
@@ -567,7 +567,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(70)
     void chunkManifest_validDocId_succeeds() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "chunk-doc-1");
             su.createStatement().execute(
@@ -584,7 +584,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(71)
     void chunkManifest_orphanDocId_rejectsWithFKViolation() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
@@ -600,7 +600,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(72)
     void deleteCatalogDoc_cascadesToChunkManifest() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "chunk-cascade-doc");
             su.createStatement().execute(
@@ -631,7 +631,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(73)
     void crossTenantChunkManifest_isRejectedByCompositeFk() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // Seed catalog_documents for TENANT_A only
             insertCatalogDocument(su, TENANT_A, TUMBLER_A);
@@ -661,7 +661,7 @@ class ForeignKeyConstraintTest {
     @Test @Order(60)
     void rlsIsolation_tenantA_invisibleToTenantB() throws Exception {
         // Insert a catalog doc for TENANT_A via superuser
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "rls-check-tumbler");
         }
@@ -682,7 +682,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(61)
     void rlsIsolation_topicAssignment_tenantA_invisibleToTenantB() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "rls-ta-tumbler");
             insertTopic(su, TENANT_A, 300L, "rls-topic", "col-rls");
@@ -706,7 +706,7 @@ class ForeignKeyConstraintTest {
 
     @Test @Order(62)
     void rlsIsolation_documentAspects_tenantA_invisibleToTenantB() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "rls-asp-tumbler");
             su.createStatement().execute(

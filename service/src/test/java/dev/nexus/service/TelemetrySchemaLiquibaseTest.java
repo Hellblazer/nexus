@@ -1,6 +1,6 @@
 package dev.nexus.service;
 
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -57,13 +57,13 @@ class TelemetrySchemaLiquibaseTest {
         "relevance_log", "search_telemetry", "tier_writes",
         "nx_answer_runs", "hook_failures", "frecency");
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN " +
@@ -73,7 +73,7 @@ class TelemetrySchemaLiquibaseTest {
                 "END $$");
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             Liquibase liquibase = new Liquibase(
@@ -85,7 +85,7 @@ class TelemetrySchemaLiquibaseTest {
 
     @AfterAll
     void stopAll() throws Exception {
-        if (pg != null) pg.close();
+        if (pg != null) pg.stop();
     }
 
     // ── Test 1: exact column sets ────────────────────────────────────────────
@@ -124,7 +124,7 @@ class TelemetrySchemaLiquibaseTest {
 
     @Test
     void allTelemetryTables_rlsEnabledForcedWithPolicy() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             for (String table : ALL_TEL_TABLES) {
                 ResultSet cls = su.createStatement().executeQuery(
                     "SELECT relrowsecurity, relforcerowsecurity " +
@@ -150,7 +150,7 @@ class TelemetrySchemaLiquibaseTest {
 
     @Test
     void allTelemetryTables_noTsvectorColumns() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             for (String table : ALL_TEL_TABLES) {
                 ResultSet rs = su.createStatement().executeQuery(
                     "SELECT COUNT(*) AS cnt " +
@@ -182,7 +182,7 @@ class TelemetrySchemaLiquibaseTest {
             new String[]{ "frecency",         "last_hit_at" }
         );
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             for (var entry : tableToTsCol) {
                 String table = entry[0];
                 String tsCol  = entry[1];
@@ -217,7 +217,7 @@ class TelemetrySchemaLiquibaseTest {
             new String[]{ "hook_failures",  "idx_hook_failures_etl_dedup" }
         );
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             for (var entry : dedupIndexNames) {
                 String table     = entry[0];
                 String indexName = entry[1];
@@ -238,7 +238,7 @@ class TelemetrySchemaLiquibaseTest {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private void assertColumns(String table, Set<String> expected) throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.getMetaData().getColumns(null, "nexus", table, null);
             Set<String> actual = new HashSet<>();
             while (rs.next()) {

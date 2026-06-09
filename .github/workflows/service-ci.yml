@@ -22,11 +22,10 @@ jobs:
   java-test-and-drift-guard:
     name: Java tests + jOOQ codegen drift guard
     runs-on: ubuntu-latest
-    # Embedded Postgres (io.zonky) downloads a PG binary on first run;
-    # subsequent runs use the Maven local-repo cache.  25m is generous:
-    # the test suite itself runs in ~8s locally; the first runner run
-    # (cold Maven cache + PG binary download) takes ~3-5m.
-    timeout-minutes: 25
+    # Testcontainers pulls pgvector/pgvector:pg17 on first run (~180 MB);
+    # subsequent runs use the Docker layer cache.  30m covers a cold
+    # runner: Maven cache miss + Docker image pull + suite (~8s locally).
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -38,15 +37,6 @@ jobs:
           distribution: 'graalvm'
           # Cache Maven local repo across runs; bust when pom.xml changes.
           cache: 'maven'
-
-      - name: Cache embedded-postgres binaries
-        # io.zonky EmbeddedPostgres downloads a platform-specific PG binary
-        # (~60 MB) on first use and caches it under /tmp/embedded-pg/.
-        # Caching here avoids re-downloading it on every CI run.
-        uses: actions/cache@v4
-        with:
-          path: /tmp/embedded-pg
-          key: embedded-pg-${{ runner.os }}-${{ runner.arch }}-v1
 
       - name: Cache ChromaDB ONNX model
         # EmbedParityTest constructs OnnxEmbedder, which loads the
@@ -85,8 +75,8 @@ jobs:
       # Drift guard: regenerate jOOQ sources from the changelog and
       # fail if the committed sources in src/main/generated/jooq/ differ.
       # This catches schema changes that were not followed by a regen+commit.
-      # Mechanism: -Pcodegen runs JooqCodegenBootstrap (boots embedded PG,
-      # applies Liquibase, generates to the committed output dir), then
+      # Mechanism: -Pcodegen runs JooqCodegenBootstrap (spins up a pgvector
+      # container, applies Liquibase, generates to the committed output dir), then
       # `git diff --exit-code` fails CI on any unstaged diff.
       - name: jOOQ codegen drift guard
         working-directory: service

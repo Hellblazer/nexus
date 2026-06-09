@@ -2,7 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.ScratchRepository;
 import dev.nexus.service.db.TenantScope;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -24,7 +24,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * RDR-152 bead nexus-gmiaf.13 — Liquibase t1 scratch schema integration test.
  *
- * <p>Hermetic: embedded Postgres (io.zonky), port 0, no Docker. Applies the
+ * <p>Hermetic: embedded Postgres (Testcontainers pgvector), port 0, requires Docker. Applies the
  * Liquibase master changelog and asserts all structural and runtime properties
  * of the T1 scratch tier.
  *
@@ -52,15 +52,15 @@ class ScratchSchemaLiquibaseTest {
     private static final String SVC_ROLE = "svc_scratch_schema_test";
     private static final String SVC_PASS = "svc_scratch_schema_test_pass";
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN " +
@@ -76,7 +76,7 @@ class ScratchSchemaLiquibaseTest {
                 "END $$");
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             new Liquibase("db/changelog/db.changelog-master.xml",
@@ -84,7 +84,7 @@ class ScratchSchemaLiquibaseTest {
                 .update(new Contexts());
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -100,14 +100,14 @@ class ScratchSchemaLiquibaseTest {
     @AfterAll
     void stopAll() throws Exception {
         if (svcDs != null) svcDs.close();
-        if (pg    != null) pg.close();
+        if (pg    != null) pg.stop();
     }
 
     // ── Test 1: exact column set ─────────────────────────────────────────────
 
     @Test
     void scratchTable_hasExactColumnSet() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.getMetaData().getColumns(null, "t1", "scratch", null);
             Set<String> actual = new java.util.HashSet<>();
             while (rs.next()) actual.add(rs.getString("COLUMN_NAME").toLowerCase());
@@ -121,7 +121,7 @@ class ScratchSchemaLiquibaseTest {
 
     @Test
     void scratchTable_isUnlogged() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT relpersistence FROM pg_class c " +
                 "JOIN pg_namespace n ON c.relnamespace = n.oid " +
@@ -137,7 +137,7 @@ class ScratchSchemaLiquibaseTest {
 
     @Test
     void scratchTable_rlsEnabledAndForced_usingT1TenantGuc() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet cls = su.createStatement().executeQuery(
                 "SELECT relrowsecurity, relforcerowsecurity " +
                 "FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid " +
@@ -164,7 +164,7 @@ class ScratchSchemaLiquibaseTest {
 
     @Test
     void scratchTable_ftsColumnAndIndex_tokenisationCorrect() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             // Verify STORED generated column
             ResultSet gen = su.createStatement().executeQuery(
                 "SELECT a.attgenerated, pg_catalog.format_type(a.atttypid, a.atttypmod) AS col_type " +
@@ -204,7 +204,7 @@ class ScratchSchemaLiquibaseTest {
         }
 
         // Tokenisation probe: insert via superuser, verify FTS behavior
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             try (var ps = su.prepareStatement("SELECT set_config('nexus.t1_tenant', ?, true)")) {
                 ps.setString(1, "probe-tenant-scratch");
@@ -238,7 +238,7 @@ class ScratchSchemaLiquibaseTest {
     @Test
     void rls_tenantIsolation_viaWithTenant() throws Exception {
         // Seed rows for two tenants via superuser
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             insertRow(su, "t1-alice", "session-alice", "alice-entry-1", "content for alice", "alice");
             insertRow(su, "t1-bob",   "session-bob",   "bob-entry-1",   "content for bob",   "bob");
@@ -284,7 +284,7 @@ class ScratchSchemaLiquibaseTest {
 
     @Test
     void rls_failClosed_noGucStamp_returnsZeroRows() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             insertRow(su, "fc-tenant", "fc-session", "fc-id", "fail-closed probe", "probe");
             su.commit();
@@ -325,7 +325,7 @@ class ScratchSchemaLiquibaseTest {
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDs() {
         var config = new com.zaxxer.hikari.HikariConfig();
-        config.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        config.setJdbcUrl(pg.getJdbcUrl());
         config.setUsername(SVC_ROLE);
         config.setPassword(SVC_PASS);
         config.setMaximumPoolSize(5);

@@ -2,7 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.TenantScope;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -50,19 +50,19 @@ class ChashRepositoryTest {
     private static final String SVC_ROLE = "svc_chash_test";
     private static final String SVC_PASS = "svc_chash_test_pass";
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     ChashRepository repo;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
         // Phase 1: create roles (separate connection, autoCommit=true).
         // CREATE ROLE cannot run inside a transaction; autoCommit=true ensures each
         // statement is committed immediately (mirrors PlanRepositoryTest bootstrap).
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN " +
@@ -80,7 +80,7 @@ class ChashRepositoryTest {
 
         // Phase 2: apply Liquibase master changelog (separate connection so Liquibase
         // commits all changesets before the svc-role grants below).
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             var lb = new Liquibase(
                 "db/changelog/db.changelog-master.xml",
                 new ClassLoaderResourceAccessor(),
@@ -91,7 +91,7 @@ class ChashRepositoryTest {
 
         // Phase 3: grant svc role access to chash_index (separate connection so all
         // Liquibase DDL is already committed and visible).
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute("GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chash_index TO " + SVC_ROLE);
@@ -102,7 +102,7 @@ class ChashRepositoryTest {
         // pattern: bare JDBC URL with explicit setUsername so the pool connects as svc_chash_test,
         // NOT as the postgres superuser (which would bypass RLS via BYPASSRLS privilege).
         var config = new com.zaxxer.hikari.HikariConfig();
-        config.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        config.setJdbcUrl(pg.getJdbcUrl());
         config.setUsername(SVC_ROLE);
         config.setPassword(SVC_PASS);
         config.setMaximumPoolSize(3);
@@ -116,7 +116,7 @@ class ChashRepositoryTest {
     @AfterAll
     void stopAll() throws Exception {
         if (svcDs != null) svcDs.close();
-        if (pg != null) pg.close();
+        if (pg != null) pg.stop();
     }
 
     // ── Test 1: upsert inserts a new row ─────────────────────────────────────

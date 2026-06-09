@@ -2,7 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.TenantScope;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -41,16 +41,16 @@ class AspectOperatorQueryTest {
     private static final String SVC_ROLE = "svc_op_query_test";
     private static final String SVC_PASS = "svc_op_query_test_pass";
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     AspectRepository repo;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN " +
@@ -66,7 +66,7 @@ class AspectOperatorQueryTest {
                 "END $$");
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             Liquibase liquibase = new Liquibase(
@@ -75,7 +75,7 @@ class AspectOperatorQueryTest {
             liquibase.update(new Contexts());
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             for (String table : List.of("document_aspects", "document_highlights",
@@ -100,7 +100,7 @@ class AspectOperatorQueryTest {
         }
 
         com.zaxxer.hikari.HikariConfig svcCfg = new com.zaxxer.hikari.HikariConfig();
-        svcCfg.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        svcCfg.setJdbcUrl(pg.getJdbcUrl());
         svcCfg.setUsername(SVC_ROLE);
         svcCfg.setPassword(SVC_PASS);
         svcCfg.setMaximumPoolSize(4);
@@ -113,7 +113,7 @@ class AspectOperatorQueryTest {
     @AfterAll
     void stopAll() throws Exception {
         if (svcDs != null) svcDs.close();
-        if (pg != null)    pg.close();
+        if (pg != null)    pg.stop();
     }
 
     /** Seed a minimal aspect row for operator-query tests. */

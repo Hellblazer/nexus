@@ -4,7 +4,7 @@ import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.nexus.tables.records.MemoryRecord;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -40,7 +40,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *   <li>cross-tenant upsert: inserting with mismatched tenant_id is blocked by RLS.</li>
  * </ol>
  *
- * <p>Hermetic: embedded Postgres (io.zonky), port 0, no Docker.
+ * <p>Hermetic: embedded Postgres (Testcontainers pgvector), port 0, requires Docker.
  * Schema applied via Liquibase master changelog (same as MemorySchemaLiquibaseTest).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -52,16 +52,16 @@ class MemoryRepositoryTest {
     private static final String TENANT_A = "tenant-a";
     private static final String TENANT_B = "tenant-b";
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     MemoryRepository repo;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // Create the service role used by TenantScope connections.
             su.createStatement().execute(
@@ -80,7 +80,7 @@ class MemoryRepositoryTest {
         }
 
         // Apply Liquibase changelog via superuser.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             Liquibase liquibase = new Liquibase(
@@ -91,7 +91,7 @@ class MemoryRepositoryTest {
         }
 
         // Grant the service role the same privileges as nexus_svc.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -103,7 +103,7 @@ class MemoryRepositoryTest {
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();
-        cfg.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(SVC_ROLE);
         cfg.setPassword(SVC_PASS);
         cfg.setMaximumPoolSize(5);
@@ -117,7 +117,7 @@ class MemoryRepositoryTest {
     @AfterAll
     void stopAll() throws Exception {
         if (svcDs != null) svcDs.close();
-        if (pg != null)    pg.close();
+        if (pg != null)    pg.stop();
     }
 
     // ── Test 1: upsert INSERT — generated id, row visible ───────────────────
