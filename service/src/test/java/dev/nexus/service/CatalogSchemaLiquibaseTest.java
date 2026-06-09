@@ -1,6 +1,6 @@
 package dev.nexus.service;
 
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -23,8 +23,8 @@ class CatalogSchemaLiquibaseTest {
 
     @Test
     void catalogSchemaAppliesCleanly() throws Exception {
-        try (var pg = EmbeddedPostgres.builder().start();
-             Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (var pg = PgContainerHelper.start();
+             Connection su = pg.createConnection("")) {
 
             // The consolidated grants-nexus-svc.xml changeset (runAlways=true, nexus-net63)
             // requires nexus_svc to exist — it fails loud when the role is missing.
@@ -47,8 +47,8 @@ class CatalogSchemaLiquibaseTest {
         }
 
         // Re-open a fresh connection after changelog committed to verify schema
-        try (var pg = EmbeddedPostgres.builder().start();
-             Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (var pg = PgContainerHelper.start();
+             Connection su = pg.createConnection("")) {
 
             // Create nexus_svc for the grants changeset (runAlways=true).
             su.setAutoCommit(true);

@@ -1,6 +1,6 @@
 package dev.nexus.service.codegen;
 
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import dev.nexus.service.PgContainerHelper;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
@@ -13,6 +13,7 @@ import org.jooq.meta.jaxb.Generator;
 import org.jooq.meta.jaxb.Jdbc;
 import org.jooq.meta.jaxb.SchemaMappingType;
 import org.jooq.meta.jaxb.Target;
+import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.io.File;
 import java.sql.Connection;
@@ -20,17 +21,17 @@ import java.sql.Connection;
 /**
  * RDR-152 bead nexus-gmiaf.6 — jOOQ codegen bootstrap.
  *
- * <p>Starts an io.zonky EmbeddedPostgres instance (no Docker required), applies
- * the Liquibase changelog to create the nexus schema, then runs the jOOQ
- * GenerationTool with PostgresDatabase to generate typed classes for the nexus
- * schema into {@code target/generated-sources/jooq}.
+ * <p>Starts a pgvector/pgvector:pg17 Testcontainers container (RDR-155 P1.0,
+ * nexus-22man), applies the Liquibase changelog to create the nexus schema, then
+ * runs the jOOQ GenerationTool with PostgresDatabase to generate typed classes for
+ * the nexus schema into {@code src/main/generated/jooq}.
  *
  * <p>Invoked via the {@code -Pcodegen} Maven profile:
  * {@code mvn -Pcodegen process-test-classes} (from the service/ directory).
  * The profile uses exec-maven-plugin {@code exec:java} in the
  * {@code process-test-classes} phase with {@code classpathScope=test}, so all
- * test-scope dependencies (embedded-postgres, jooq-codegen, jooq-meta, liquibase)
- * are already on the classpath — no manual jar enumeration required.
+ * test-scope dependencies (testcontainers, postgresql, jooq-codegen, jooq-meta,
+ * liquibase) are already on the classpath — no manual jar enumeration required.
  *
  * <p>WHY NOT OPTION 1 (LiquibaseDatabase/H2): the changelog uses Postgres-only DDL
  * (TSVECTOR GENERATED ALWAYS AS STORED, ENABLE/FORCE ROW LEVEL SECURITY,
@@ -51,18 +52,19 @@ public class JooqCodegenBootstrap {
         String resourcesDir = args.length > 1 ? args[1]
             : "src/main/resources";
 
-        System.out.println("[jooq-codegen] Starting embedded Postgres...");
-        EmbeddedPostgres pg = EmbeddedPostgres.builder().start();
+        System.out.println("[jooq-codegen] Starting pgvector container...");
+        PostgreSQLContainer<?> pg = PgContainerHelper.start();
+        boolean success = false;
         try {
-            String url  = "jdbc:postgresql://localhost:" + pg.getPort() + "/postgres";
-            String user = "postgres";
-            String pass = "";
+            String url  = pg.getJdbcUrl();
+            String user = PgContainerHelper.USERNAME;
+            String pass = PgContainerHelper.PASSWORD;
 
             // Apply Liquibase changelog via superuser connection.
             // DirectoryResourceAccessor resolves paths relative to the given directory,
             // so "db/changelog/db.changelog-master.xml" resolves from src/main/resources.
             System.out.println("[jooq-codegen] Applying Liquibase changelog...");
-            try (Connection conn = pg.getPostgresDatabase().getConnection()) {
+            try (Connection conn = pg.createConnection("")) {
                 // The master changelog's runAlways grants-nexus-svc changeset
                 // (RDR-152 nexus-net63) is fail-loud: it GRANTs to nexus_svc and
                 // errors if the role is absent. Codegen only needs the schema,
@@ -114,9 +116,16 @@ public class JooqCodegenBootstrap {
 
             GenerationTool.generate(config);
             System.out.println("[jooq-codegen] Done: " + outputDir);
+            success = true;
         } finally {
-            pg.close();
-            System.out.println("[jooq-codegen] Embedded Postgres stopped");
+            System.out.println("[jooq-codegen] Stopping pgvector container...");
+            pg.stop();
+            // Force JVM exit so Testcontainers background threads (Ryuk reaper) do not
+            // keep the Maven exec:java goal alive and trigger an InterruptedException on
+            // shutdown. Exit NON-ZERO if generation threw — otherwise a codegen failure
+            // would exit 0, the build would pass, and the drift guard would pass vacuously
+            // against stale committed sources (AC-3 review, nexus-22man).
+            System.exit(success ? 0 : 1);
         }
     }
 }

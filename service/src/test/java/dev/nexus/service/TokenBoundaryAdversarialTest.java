@@ -12,7 +12,7 @@ import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.RequestContext;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -119,7 +119,7 @@ class TokenBoundaryAdversarialTest {
 
     private static final TypeReference<Map<String, Object>> MAP_T = new TypeReference<>() {};
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     NexusService service;
     HikariDataSource svcDs;
     HttpClient http;
@@ -129,17 +129,16 @@ class TokenBoundaryAdversarialTest {
     void startAll() throws Exception {
         mapper = new ObjectMapper();
         http   = HttpClient.newHttpClient();
-        pg     = EmbeddedPostgres.builder().start();
+        pg     = PgContainerHelper.start();
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // RLS-enforcing app role: NOSUPERUSER NOBYPASSRLS makes the tenant policy a
             // real boundary. nexus_svc is fail-fast-required by grants-nexus-svc.xml.
             su.createStatement().execute(
                 "DO $$ BEGIN "
                 + "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN "
-                + "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                + "    ' NOSUPERUSER NOBYPASSRLS; "
+                + "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; "
                 + "  END IF; "
                 + "END $$");
             su.createStatement().execute(
@@ -150,14 +149,14 @@ class TokenBoundaryAdversarialTest {
                 + "END $$");
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             new Liquibase("db/changelog/db.changelog-master.xml",
                 new ClassLoaderResourceAccessor(), db).update(new Contexts());
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
@@ -191,7 +190,7 @@ class TokenBoundaryAdversarialTest {
         }
 
         var cfg = new HikariConfig();
-        cfg.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(SVC_ROLE);
         cfg.setPassword(SVC_PASS);
         cfg.setMaximumPoolSize(5);
@@ -206,7 +205,7 @@ class TokenBoundaryAdversarialTest {
     void stopAll() throws Exception {
         if (service != null) service.stop();
         if (svcDs   != null) svcDs.close();
-        if (pg      != null) pg.close();
+        if (pg      != null) pg.stop();
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -433,7 +432,7 @@ class TokenBoundaryAdversarialTest {
 
         // Revoke out-of-band, then invalidate the SAME cache the AuthFilter reads.
         String hash = TokenHashing.sha256Hex(TOK_REVOKE_ME);
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             try (var ps = su.prepareStatement(
                 "UPDATE nexus.service_tokens SET revoked_at = now() WHERE token_hash = ?")) {
@@ -508,7 +507,7 @@ class TokenBoundaryAdversarialTest {
             assertThat(h.call(tok.rawToken()).statusCode()).isEqualTo(200);
 
             // Revoke out-of-band WITHOUT invalidating the cache (e.g. a direct DB edit).
-            try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 try (var ps = su.prepareStatement(
                     "UPDATE nexus.service_tokens SET revoked_at = now() WHERE token_hash = ?")) {
@@ -568,7 +567,7 @@ class TokenBoundaryAdversarialTest {
     // ── Superuser seeding + counts (bypass RLS for non-vacuous negatives) ─────
 
     private void seedMemoryRow(String tenant, String project, String title, String content) throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             try (var ps = su.prepareStatement(
                 "INSERT INTO nexus.memory (tenant_id, project, title, content, timestamp) "
@@ -583,7 +582,7 @@ class TokenBoundaryAdversarialTest {
     }
 
     private int superuserMemoryCount(String tenant, String project) throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection();
+        try (Connection su = pg.createConnection("");
              var ps = su.prepareStatement(
                  "SELECT COUNT(*) AS c FROM nexus.memory WHERE tenant_id = ? AND project = ?")) {
             ps.setString(1, tenant);
@@ -595,7 +594,7 @@ class TokenBoundaryAdversarialTest {
     }
 
     private void seedScratchRow(String id, String tenant, String session, String content) throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             try (var ps = su.prepareStatement(
                 "INSERT INTO t1.scratch (id, tenant_id, session_id, content) VALUES (?, ?, ?, ?)")) {
@@ -609,7 +608,7 @@ class TokenBoundaryAdversarialTest {
     }
 
     private int superuserScratchCount(String tenant, String session) throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection();
+        try (Connection su = pg.createConnection("");
              var ps = su.prepareStatement(
                  "SELECT COUNT(*) AS c FROM t1.scratch WHERE tenant_id = ? AND session_id = ?")) {
             ps.setString(1, tenant);
@@ -696,13 +695,15 @@ class TokenBoundaryAdversarialTest {
          *  which the restricted role cannot. Mirrors production's split (auth reads via the
          *  app role; lifecycle writes via the admin/provisioning path). Shares the clock. */
         final TokenStore seedStore;
+        final com.zaxxer.hikari.HikariDataSource seedDs;
         final HttpServer server;
         final int port;
 
         ClockHarness(Clock clock) throws IOException {
             this.store     = new TokenStore(svcDs, clock);
             this.cache     = new TokenCache(store, clock);
-            this.seedStore = new TokenStore(pg.getPostgresDatabase(), clock);
+            this.seedDs    = PgContainerHelper.superuserDataSource(pg);
+            this.seedStore = new TokenStore(seedDs, clock);
             this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
             var ctx = server.createContext("/v1/echo", new EchoHandler());
             ctx.getFilters().add(new AuthFilter(cache, store));
@@ -719,6 +720,7 @@ class TokenBoundaryAdversarialTest {
 
         @Override public void close() {
             server.stop(0);
+            seedDs.close();  // the superuser seed pool is harness-owned (review nexus-22man)
         }
     }
 

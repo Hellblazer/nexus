@@ -3,7 +3,7 @@ package dev.nexus.service;
 import dev.nexus.service.db.TelemetryRepository;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -61,16 +61,16 @@ class TelemetryRepositoryTest {
     private static final OffsetDateTime PAST_ODT =
         OffsetDateTime.parse("2024-01-15T10:30:00+00:00");
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     TelemetryRepository repo;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN " +
@@ -86,7 +86,7 @@ class TelemetryRepositoryTest {
                 "END $$");
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             Liquibase liquibase = new Liquibase(
@@ -95,7 +95,7 @@ class TelemetryRepositoryTest {
             liquibase.update(new Contexts());
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             String schema = "nexus";
             // Grant all telemetry tables
@@ -122,7 +122,7 @@ class TelemetryRepositoryTest {
     @AfterAll
     void stopAll() throws Exception {
         if (svcDs != null) svcDs.close();
-        if (pg != null)    pg.close();
+        if (pg != null)    pg.stop();
     }
 
     // ── relevance_log ──────────────────────────────────────────────────────────
@@ -268,7 +268,7 @@ class TelemetryRepositoryTest {
             "sess-tier-fid", PAST_TS, "memory_put", "T2", "developer", "proj-a", "notes.md");
 
         // Verify via raw query
-        try (Connection conn = pg.getPostgresDatabase().getConnection()) {
+        try (Connection conn = pg.createConnection("")) {
             conn.createStatement().execute(
                 "SET nexus.tenant = '" + TENANT_A + "'");
             var rs = conn.createStatement().executeQuery(
@@ -298,7 +298,7 @@ class TelemetryRepositoryTest {
             "What is the meaning of RDR-152?", 42L, 0.95,
             3, "It is the storage migration RDR.", 0.003, 1500, PAST_TS);
 
-        try (Connection conn = pg.getPostgresDatabase().getConnection()) {
+        try (Connection conn = pg.createConnection("")) {
             conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
             var rs = conn.createStatement().executeQuery(
                 "SELECT created_at FROM nexus.nx_answer_runs WHERE question='What is the meaning of RDR-152?'");
@@ -327,7 +327,7 @@ class TelemetryRepositoryTest {
             "doc-hook-001", "code__nexus", "taxonomy_assign_batch_hook",
             "ChromaDB timeout", PAST_TS, null, false, "single");
 
-        try (Connection conn = pg.getPostgresDatabase().getConnection()) {
+        try (Connection conn = pg.createConnection("")) {
             conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
             var rs = conn.createStatement().executeQuery(
                 "SELECT occurred_at FROM nexus.hook_failures WHERE doc_id='doc-hook-001'");
@@ -395,7 +395,7 @@ class TelemetryRepositoryTest {
         repo.upsertFrecency(TENANT_A, "chunk-frec-embed",
             "2025-01-01T00:00:00Z", 30, 0.5, 1, "2025-01-01T00:00:00Z");
 
-        try (Connection conn = pg.getPostgresDatabase().getConnection()) {
+        try (Connection conn = pg.createConnection("")) {
             conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
             var rs = conn.createStatement().executeQuery(
                 "SELECT embedded_at FROM nexus.frecency WHERE chunk_id='chunk-frec-embed'");
@@ -545,7 +545,7 @@ class TelemetryRepositoryTest {
             null,   // project — must stay NULL
             null);  // target_title — must stay NULL
 
-        try (Connection conn = pg.getPostgresDatabase().getConnection()) {
+        try (Connection conn = pg.createConnection("")) {
             conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
             var rs = conn.createStatement().executeQuery(
                 "SELECT agent, project, target_title " +
@@ -587,7 +587,7 @@ class TelemetryRepositoryTest {
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDataSource() {
         var config = new com.zaxxer.hikari.HikariConfig();
-        config.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        config.setJdbcUrl(pg.getJdbcUrl());
         config.setUsername(SVC_ROLE);
         config.setPassword(SVC_PASS);
         config.setMaximumPoolSize(4);

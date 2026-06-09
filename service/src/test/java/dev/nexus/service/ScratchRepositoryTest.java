@@ -2,7 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.ScratchRepository;
 import dev.nexus.service.db.TenantScope;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -43,7 +43,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>resolvePrefix: full UUID found by prefix</li>
  * </ol>
  *
- * <p>Hermetic: embedded Postgres (io.zonky), port 0, no Docker.
+ * <p>Hermetic: embedded Postgres (Testcontainers pgvector), port 0, requires Docker.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ScratchRepositoryTest {
@@ -56,16 +56,16 @@ class ScratchRepositoryTest {
     private static final String SESSION_A = "session-aaaa";
     private static final String SESSION_B = "session-bbbb";
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     ScratchRepository repo;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN " +
@@ -81,7 +81,7 @@ class ScratchRepositoryTest {
                 "END $$");
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             new Liquibase("db/changelog/db.changelog-master.xml",
@@ -89,7 +89,7 @@ class ScratchRepositoryTest {
                 .update(new Contexts());
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -106,7 +106,7 @@ class ScratchRepositoryTest {
     @AfterAll
     void stopAll() throws Exception {
         if (svcDs != null) svcDs.close();
-        if (pg    != null) pg.close();
+        if (pg    != null) pg.stop();
     }
 
     // ── Test 1: put/get round-trip ────────────────────────────────────────────
@@ -485,7 +485,7 @@ class ScratchRepositoryTest {
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDs() {
         var config = new com.zaxxer.hikari.HikariConfig();
-        config.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        config.setJdbcUrl(pg.getJdbcUrl());
         config.setUsername(SVC_ROLE);
         config.setPassword(SVC_PASS);
         config.setMaximumPoolSize(5);

@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -58,7 +58,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>Auth: 401 on missing/bad token</li>
  * </ol>
  *
- * <p>Hermetic: embedded Postgres (io.zonky), port 0, no Docker.
+ * <p>Hermetic: embedded Postgres (Testcontainers pgvector), port 0, requires Docker.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class MemoryHandlerTest {
@@ -73,7 +73,7 @@ class MemoryHandlerTest {
     private static final TypeReference<Map<String, Object>> MAP_T = new TypeReference<>() {};
     private static final TypeReference<List<Map<String, Object>>> LIST_T = new TypeReference<>() {};
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     NexusService service;
     HttpClient http;
     com.zaxxer.hikari.HikariDataSource svcDs;
@@ -82,9 +82,9 @@ class MemoryHandlerTest {
     @BeforeAll
     void startAll() throws Exception {
         mapper = new ObjectMapper();
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN " +
@@ -100,7 +100,7 @@ class MemoryHandlerTest {
                 "END $$");
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             Liquibase liquibase = new Liquibase(
@@ -109,7 +109,7 @@ class MemoryHandlerTest {
             liquibase.update(new Contexts());
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -135,7 +135,7 @@ class MemoryHandlerTest {
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();
-        cfg.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(SVC_ROLE);
         cfg.setPassword(SVC_PASS);
         cfg.setMaximumPoolSize(5);
@@ -151,7 +151,7 @@ class MemoryHandlerTest {
     void stopAll() throws Exception {
         if (service != null) service.stop();
         if (svcDs != null)   svcDs.close();
-        if (pg != null)      pg.close();
+        if (pg != null)      pg.stop();
     }
 
     // ── Test 1: PUT ───────────────────────────────────────────────────────────

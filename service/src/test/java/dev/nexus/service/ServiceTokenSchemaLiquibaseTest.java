@@ -2,7 +2,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -25,7 +25,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-152 bead nexus-gmiaf.32.1 — Phase A schema integration test for the
  * bridge token lifecycle credential tables.
  *
- * <p>Hermetic: embedded Postgres (io.zonky), port 0, no Docker. Applies the
+ * <p>Hermetic: embedded Postgres (Testcontainers pgvector), port 0, requires Docker. Applies the
  * Liquibase master changelog and asserts the structural and runtime properties
  * of {@code nexus.service_tokens} and {@code nexus.session_tokens}.
  *
@@ -68,18 +68,18 @@ class ServiceTokenSchemaLiquibaseTest {
     private static final String SVC_ROLE = "nexus_svc";
     private static final String SVC_PASS = "nexus_svc_pass";
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
         // Create nexus_svc with the production posture: LOGIN, NOSUPERUSER,
         // NOBYPASSRLS. The grants-nexus-svc.xml changeset (runAlways, LAST) then
         // grants it DML on ALL TABLES in the nexus schema, including the two new
         // credential tables.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN " +
@@ -90,7 +90,7 @@ class ServiceTokenSchemaLiquibaseTest {
                 "END $$");
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             new Liquibase("db/changelog/db.changelog-master.xml",
@@ -104,7 +104,7 @@ class ServiceTokenSchemaLiquibaseTest {
     @AfterAll
     void stopAll() throws Exception {
         if (svcDs != null) svcDs.close();
-        if (pg    != null) pg.close();
+        if (pg    != null) pg.stop();
     }
 
     // ── Test 1: service_tokens exact column set ──────────────────────────────
@@ -150,7 +150,7 @@ class ServiceTokenSchemaLiquibaseTest {
     @Test
     void serviceTokens_readableByServiceRole_withoutTenantGuc() throws Exception {
         // Seed two rows for two different tenants via superuser.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("TRUNCATE nexus.service_tokens");
             su.createStatement().execute(
@@ -176,7 +176,7 @@ class ServiceTokenSchemaLiquibaseTest {
 
     @Test
     void sessionTokens_readableByServiceRole_withoutTenantGuc() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("TRUNCATE nexus.session_tokens");
             su.createStatement().execute(
@@ -241,7 +241,7 @@ class ServiceTokenSchemaLiquibaseTest {
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private Set<String> columnsOf(String schema, String table) throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.getMetaData().getColumns(null, schema, table, null);
             Set<String> actual = new HashSet<>();
             while (rs.next()) actual.add(rs.getString("COLUMN_NAME").toLowerCase());
@@ -250,7 +250,7 @@ class ServiceTokenSchemaLiquibaseTest {
     }
 
     private boolean rlsEnabled(String schema, String table) throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT relrowsecurity FROM pg_class c "
                 + "JOIN pg_namespace n ON c.relnamespace = n.oid "
@@ -261,7 +261,7 @@ class ServiceTokenSchemaLiquibaseTest {
     }
 
     private Set<String> indexDefsOf(String schema, String table) throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT indexdef FROM pg_indexes "
                 + "WHERE schemaname = '" + schema + "' AND tablename = '" + table + "'");
@@ -273,7 +273,7 @@ class ServiceTokenSchemaLiquibaseTest {
 
     private HikariDataSource buildSvcDs() {
         var config = new HikariConfig();
-        config.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        config.setJdbcUrl(pg.getJdbcUrl());
         config.setUsername(SVC_ROLE);
         config.setPassword(SVC_PASS);
         config.setMaximumPoolSize(5);

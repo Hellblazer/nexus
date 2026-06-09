@@ -1,7 +1,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.TenantScope;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -26,7 +26,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 /**
  * RDR-152 bead nexus-gmiaf.3 — skeleton integration tests.
  *
- * 5 required tests (all hermetic, port 0, embedded PG, no Docker):
+ * 5 required tests (all hermetic, port 0, embedded PG, requires Docker):
  *   1. /health returns 200 and DB is up
  *   2. auth 401 matrix (no token, bad token, good token)
  *   3. missing X-Nexus-Tenant → 400
@@ -38,7 +38,7 @@ class ServiceIntegrationTest {
 
     static final String TOKEN = "test-token-secret-0123456789abcdef";
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     NexusService service;
     HttpClient http;
     TenantScope tenantScope;
@@ -47,12 +47,13 @@ class ServiceIntegrationTest {
     @BeforeAll
     void startAll() throws Exception {
         // Start embedded postgres on a free port
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
-        DataSource ds = pg.getPostgresDatabase();
-
-        // Bootstrap: create service role and RLS schema for test 4
-        bootstrapTestSchema(ds);
+        // Bootstrap: create service role and RLS schema for test 4. The superuser pool is
+        // transient (setup only); close it so it does not leak (review nexus-22man).
+        try (com.zaxxer.hikari.HikariDataSource ds = PgContainerHelper.superuserDataSource(pg)) {
+            bootstrapTestSchema(ds);
+        }
 
         // Build the DataSource for service using the svc_user role
         // (service scope, subject to RLS)
@@ -76,7 +77,7 @@ class ServiceIntegrationTest {
             svcDs.close();
         }
         if (pg != null) {
-            pg.close();
+            pg.stop();
         }
     }
 
@@ -144,7 +145,7 @@ class ServiceIntegrationTest {
         });
 
         // Seed data via superuser (bypasses RLS) — 3 rows for A, 1 for B
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             stampAndInsert(su, "tenant-A", "key-a1", "alpha one");
             stampAndInsert(su, "tenant-A", "key-a2", "alpha two");
@@ -187,7 +188,7 @@ class ServiceIntegrationTest {
 
         // Verify via SUPERUSER (bypasses RLS) — an RLS-subject connection would
         // see empty due to RLS even if the row was committed; superuser proves rollback.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var rs = su.createStatement().executeQuery(
                 "SELECT key FROM nexus_test.rls_probe WHERE tenant_id = 'tenant-X'");
@@ -296,9 +297,9 @@ class ServiceIntegrationTest {
      * autoCommit=true matches the production pool default in Main.java;
      * TenantScope toggles to false per borrow.
      */
-    private com.zaxxer.hikari.HikariDataSource buildSvcDataSource(EmbeddedPostgres epg) {
+    private com.zaxxer.hikari.HikariDataSource buildSvcDataSource(PostgreSQLContainer<?> epg) {
         var config = new com.zaxxer.hikari.HikariConfig();
-        config.setJdbcUrl("jdbc:postgresql://localhost:" + epg.getPort() + "/postgres");
+        config.setJdbcUrl(epg.getJdbcUrl());
         config.setUsername("svc_test");
         config.setPassword("svc_test_pass");
         config.setMaximumPoolSize(5);

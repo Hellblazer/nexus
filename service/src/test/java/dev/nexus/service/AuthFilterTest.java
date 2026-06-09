@@ -10,7 +10,7 @@ import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.RequestContext;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -46,7 +46,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * RDR-152 bead nexus-gmiaf.32.2 — AuthFilter integration tests.
  *
- * <p>Hermetic: embedded Postgres (io.zonky), port 0, no Docker. A fixed/mutable
+ * <p>Hermetic: embedded Postgres (Testcontainers pgvector), port 0, requires Docker. A fixed/mutable
  * {@link Clock} drives all expiry/TTL assertions deterministically. Two layers:
  * HTTP-level (the filter end to end against a real {@link HttpServer}) and
  * cache-level (the TTL/invalidate/expiry seam against {@link TokenCache}).
@@ -71,7 +71,7 @@ class AuthFilterTest {
     private static final String SESS_EXPIRED = "raw-session-expired";
     private static final String TOK_WILDCARD = "raw-token-bootstrap-wildcard";
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     HikariDataSource ds;
     MutableClock clock;
     TokenStore store;
@@ -82,9 +82,9 @@ class AuthFilterTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
         // grants-nexus-svc.xml fail-fasts if the role is absent; create it first.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN "
@@ -93,7 +93,7 @@ class AuthFilterTest {
                 + "  END IF; "
                 + "END $$");
         }
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             new Liquibase("db/changelog/db.changelog-master.xml",
@@ -101,8 +101,9 @@ class AuthFilterTest {
         }
 
         var cfg = new HikariConfig();
-        cfg.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
-        cfg.setUsername("postgres");
+        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setUsername(PgContainerHelper.USERNAME);
+        cfg.setPassword(PgContainerHelper.PASSWORD);
         cfg.setMaximumPoolSize(5);
         cfg.setAutoCommit(true);
         cfg.setConnectionInitSql("SET search_path TO nexus, t1, public");
@@ -125,7 +126,7 @@ class AuthFilterTest {
     void stopAll() {
         if (server != null) server.stop(0);
         if (ds != null) ds.close();
-        if (pg != null) { try { pg.close(); } catch (IOException ignored) { } }
+        if (pg != null) pg.stop();
     }
 
     @BeforeEach
@@ -134,7 +135,7 @@ class AuthFilterTest {
     }
 
     private void seedTokens() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertServiceToken(su, TOK_A, "tenant-a", null, null);
             insertServiceToken(su, TOK_B, "tenant-b", null, null);
@@ -278,12 +279,12 @@ class AuthFilterTest {
         var c = new TokenCache(store, clock);
         String raw = "raw-token-invalidate";
         String h = TokenHashing.sha256Hex(raw);
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             insertServiceToken(su, raw, "tenant-a", null, null);
         }
         assertThat(c.resolveTenant(h)).contains("tenant-a");  // now cached
         // Revoke in DB, then invalidate the cache entry — must be empty immediately.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.createStatement().execute(
                 "UPDATE nexus.service_tokens SET revoked_at = now() WHERE token_hash = '" + h + "'");
         }
@@ -298,11 +299,11 @@ class AuthFilterTest {
         var c = new TokenCache(store, clock, Duration.ofSeconds(30), 10_000);
         String raw = "raw-token-ttl";
         String h = TokenHashing.sha256Hex(raw);
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             insertServiceToken(su, raw, "tenant-a", null, null);
         }
         assertThat(c.resolveTenant(h)).contains("tenant-a");  // cached at T0
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.createStatement().execute(
                 "UPDATE nexus.service_tokens SET revoked_at = now() WHERE token_hash = '" + h + "'");
         }
@@ -320,7 +321,7 @@ class AuthFilterTest {
         var c = new TokenCache(store, clock, Duration.ofSeconds(300), 10_000);
         String raw = "raw-token-expiring";
         String h = TokenHashing.sha256Hex(raw);
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             insertServiceToken(su, raw, "tenant-a",
                 OffsetDateTime.ofInstant(T0.plusSeconds(100), ZoneOffset.UTC), null);
         }
@@ -355,7 +356,7 @@ class AuthFilterTest {
 
         // Idempotent: a second call does not error or duplicate.
         store.ensureBootstrapToken(raw, defaultTenant);
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) AS c FROM nexus.service_tokens WHERE token_hash = '" + h + "'");
             assertThat(rs.next()).isTrue();

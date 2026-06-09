@@ -2,7 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.TenantScope;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -68,16 +68,16 @@ class AspectRepositoryTest {
     private static final String SVC_ROLE = "svc_aspect_test";
     private static final String SVC_PASS = "svc_aspect_test_pass";
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     AspectRepository repo;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN " +
@@ -93,7 +93,7 @@ class AspectRepositoryTest {
                 "END $$");
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             Liquibase liquibase = new Liquibase(
@@ -102,7 +102,7 @@ class AspectRepositoryTest {
             liquibase.update(new Contexts());
         }
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             // Grant on all 4 aspect tables
@@ -145,7 +145,7 @@ class AspectRepositoryTest {
     @AfterAll
     void stopAll() throws Exception {
         if (svcDs != null) svcDs.close();
-        if (pg != null)    pg.close();
+        if (pg != null)    pg.stop();
     }
 
     // ── Helper ─────────────────────────────────────────────────────────────────
@@ -860,7 +860,7 @@ class AspectRepositoryTest {
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDataSource() {
         var cfg = new com.zaxxer.hikari.HikariConfig();
-        cfg.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(SVC_ROLE);
         cfg.setPassword(SVC_PASS);
         cfg.setMaximumPoolSize(10);   // higher for concurrency test

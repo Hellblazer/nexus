@@ -9,7 +9,7 @@ import dev.nexus.service.vectors.ChromaRestClient;
 import dev.nexus.service.vectors.LocalChromaServer;
 import dev.nexus.service.vectors.OnnxEmbedder;
 import dev.nexus.service.vectors.VectorRepository;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
@@ -36,7 +36,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>All tests use:
  * <ul>
- *   <li>Embedded Postgres (io.zonky:embedded-postgres)</li>
+ *   <li>Embedded Postgres (Testcontainers pgvector/pgvector:pg17)</li>
  *   <li>Local ChromaDB child process ({@code chroma run}) on a free port</li>
  *   <li>Local ONNX embedder (all-MiniLM-L6-v2 from chromadb cache)</li>
  *   <li>Port 0 for the NexusService HTTP server</li>
@@ -64,7 +64,7 @@ class VectorIntegrationTest {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     LocalChromaServer localChroma;
     OnnxEmbedder      onnxEmbedder;
     VectorRepository  vectorRepo;
@@ -74,11 +74,13 @@ class VectorIntegrationTest {
     @BeforeAll
     void startAll() throws Exception {
         // Embedded Postgres — needed only for the service's DB-backed endpoints
-        pg = EmbeddedPostgres.builder().start();
-        var pgDs = pg.getPostgresDatabase();
+        pg = PgContainerHelper.start();
 
-        // Bootstrap minimal schema + tables the service expects
-        bootstrapSchema(pgDs);
+        // Bootstrap minimal schema + tables the service expects. The superuser pool is
+        // transient (setup only); close it so it does not leak (review nexus-22man).
+        try (var pgDs = PgContainerHelper.superuserDataSource(pg)) {
+            bootstrapSchema(pgDs);
+        }
 
         var svcDs = buildSvcDs(pg);
 
@@ -107,7 +109,7 @@ class VectorIntegrationTest {
         if (service     != null) service.stop();
         if (onnxEmbedder != null) onnxEmbedder.close();
         if (localChroma != null) localChroma.stop();
-        if (pg          != null) pg.close();
+        if (pg          != null) pg.stop();
     }
 
     // ── Test 1: upsert-chunks → search returns them ──────────────────────────
@@ -550,11 +552,11 @@ class VectorIntegrationTest {
         }
     }
 
-    private com.zaxxer.hikari.HikariDataSource buildSvcDs(EmbeddedPostgres pg) {
+    private com.zaxxer.hikari.HikariDataSource buildSvcDs(PostgreSQLContainer<?> pg) {
         var cfg = new com.zaxxer.hikari.HikariConfig();
-        cfg.setJdbcUrl(pg.getJdbcUrl("postgres", "postgres"));
-        cfg.setUsername("postgres");
-        cfg.setPassword("");
+        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setUsername(PgContainerHelper.USERNAME);
+        cfg.setPassword(PgContainerHelper.PASSWORD);
         cfg.setMaximumPoolSize(5);
         cfg.setAutoCommit(true);
         return new com.zaxxer.hikari.HikariDataSource(cfg);

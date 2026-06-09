@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TokenHashing;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -39,7 +39,7 @@ class SessionTokenHandlerTest {
     private static final String TENANT = "tenant-sess";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     HikariDataSource ds;
     NexusService service;
     int port;
@@ -47,20 +47,20 @@ class SessionTokenHandlerTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        pg = PgContainerHelper.start();
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='nexus_svc') THEN "
                 + "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
         }
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             new Liquibase("db/changelog/db.changelog-master.xml",
                 new ClassLoaderResourceAccessor(), db).update(new Contexts());
         }
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             try (var ps = su.prepareStatement(
                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES (?, ?, 'boot') "
@@ -72,8 +72,9 @@ class SessionTokenHandlerTest {
             }
         }
         var cfg = new HikariConfig();
-        cfg.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
-        cfg.setUsername("postgres");
+        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setUsername(PgContainerHelper.USERNAME);
+        cfg.setPassword(PgContainerHelper.PASSWORD);
         cfg.setMaximumPoolSize(5);
         cfg.setAutoCommit(true);
         cfg.setConnectionInitSql("SET search_path TO nexus, t1, public");
@@ -87,7 +88,7 @@ class SessionTokenHandlerTest {
     void stopAll() throws Exception {
         if (service != null) service.stop();
         if (ds != null) ds.close();
-        if (pg != null) pg.close();
+        if (pg != null) pg.stop();
     }
 
     @Test
@@ -96,7 +97,7 @@ class SessionTokenHandlerTest {
         assertThat(r.path("session_token").asText()).isNotBlank();
         assertThat(r.get("session_id").asText()).isEqualTo("sess-store");
         String hash = TokenHashing.sha256Hex(r.get("session_token").asText());
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT tenant_id, session_id FROM nexus.session_tokens WHERE session_token_hash = '" + hash + "'");
             assertThat(rs.next()).isTrue();
@@ -125,7 +126,7 @@ class SessionTokenHandlerTest {
             .get("session_token").asText();
         assertThat(second).isNotEqualTo(first);
         // Exactly one live row for the session; the old token's hash is gone.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) c FROM nexus.session_tokens WHERE tenant_id='" + TENANT
                 + "' AND session_id='sess-remint'");
@@ -156,7 +157,7 @@ class SessionTokenHandlerTest {
         assertThat(post("/v1/sessions/close", "{\"session_id\":\"sess-close\"}")
             .get("closed").asInt()).isEqualTo(0);
         // The row is gone.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) c FROM nexus.session_tokens WHERE session_token_hash = '"
                 + TokenHashing.sha256Hex(token) + "'");

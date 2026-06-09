@@ -2,7 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -25,7 +25,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * RDR-152 bead nexus-gmiaf.5 — Liquibase memory baseline integration test.
  *
- * <p>Hermetic: embedded Postgres (io.zonky), port 0, no Docker. Applies the
+ * <p>Hermetic: embedded Postgres (Testcontainers pgvector), port 0, requires Docker. Applies the
  * Liquibase master changelog programmatically (no Maven plugin binding yet —
  * that is bead .6) and asserts all required structural and runtime properties.
  *
@@ -61,16 +61,16 @@ class MemorySchemaLiquibaseTest {
     private static final String SVC_ROLE = "svc_memory_test";
     private static final String SVC_PASS = "svc_memory_test_pass";
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
         // Bootstrap service role BEFORE Liquibase runs (so changeset 5 finds it).
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN " +
@@ -89,7 +89,7 @@ class MemorySchemaLiquibaseTest {
 
         // Apply Liquibase changelog via superuser connection (schema DDL requires superuser
         // or schema owner; service role is granted privileges after table creation).
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             Liquibase liquibase = new Liquibase(
@@ -100,7 +100,7 @@ class MemorySchemaLiquibaseTest {
         }
 
         // Grant svc_memory_test the same privileges as nexus_svc (for RLS tests).
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -118,14 +118,14 @@ class MemorySchemaLiquibaseTest {
     @AfterAll
     void stopAll() throws Exception {
         if (svcDs != null) svcDs.close();
-        if (pg != null)    pg.close();
+        if (pg != null)    pg.stop();
     }
 
     // ── Test 1: exact column set ─────────────────────────────────────────────
 
     @Test
     void memoryTable_hasExactColumnSet() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.getMetaData().getColumns(null, "nexus", "memory", null);
             Set<String> actual = new java.util.HashSet<>();
             while (rs.next()) {
@@ -141,7 +141,7 @@ class MemorySchemaLiquibaseTest {
 
     @Test
     void memoryTable_rlsEnabledAndForced() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             // pg_class flags
             ResultSet cls = su.createStatement().executeQuery(
                 "SELECT relrowsecurity, relforcerowsecurity " +
@@ -190,7 +190,7 @@ class MemorySchemaLiquibaseTest {
 
     @Test
     void memoryTable_ftsColumnAndIndexExist_tokenisationCorrect() throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             // fts_vector column exists and is a generated stored column
             ResultSet gen = su.createStatement().executeQuery(
                 "SELECT a.attname, a.attgenerated, " +
@@ -265,7 +265,7 @@ class MemorySchemaLiquibaseTest {
         //       which does NOT match 'running' in the simple-indexed tags column.
         //       If tags were accidentally indexed under english instead of simple,
         //       'running' would be stored as 'run' and the query WOULD match.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             try (var ps = su.prepareStatement("SELECT set_config(?, ?, true)")) {
                 ps.setString(1, TenantConstants.GUC_NAME);
@@ -323,7 +323,7 @@ class MemorySchemaLiquibaseTest {
     @Test
     void tenantIsolation_and_ftsQuery_viaWithTenant() throws Exception {
         // Seed rows for two tenants via superuser (bypasses RLS for seeding).
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             insertRow(su, "alpha", "alpha-proj", "Machine learning basics",
                 "neural networks deep learning", "ml,ai,research");
@@ -424,7 +424,7 @@ class MemorySchemaLiquibaseTest {
     @Test
     void rls_failClosed_noGucStamp_returnsZeroRows() throws Exception {
         // Seed at least one row as superuser so the table is non-empty.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             insertRow(su, "failclosed-tenant", "fc-proj", "Sentinel row",
                 "content for fail-closed probe", "probe");
@@ -484,7 +484,7 @@ class MemorySchemaLiquibaseTest {
     @Test
     void rls_withCheck_blocksCrossTenantTenantIdRewrite() throws Exception {
         // Seed a row for 'alpha-rw' via superuser.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             insertRow(su, "alpha-rw", "rw-proj", "Row to rewrite",
                 "content", "tag");
@@ -510,7 +510,7 @@ class MemorySchemaLiquibaseTest {
 
     private com.zaxxer.hikari.HikariDataSource buildSvcDataSource() {
         var config = new com.zaxxer.hikari.HikariConfig();
-        config.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        config.setJdbcUrl(pg.getJdbcUrl());
         config.setUsername(SVC_ROLE);
         config.setPassword(SVC_PASS);
         config.setMaximumPoolSize(5);

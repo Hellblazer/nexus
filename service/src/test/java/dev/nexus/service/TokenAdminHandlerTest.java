@@ -6,7 +6,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TokenHashing;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -32,7 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-152 bead nexus-gmiaf.32.3 — token lifecycle admin endpoints, end-to-end through the
  * real {@link NexusService} (so the admin handler and AuthFilter share the live TokenCache).
  *
- * <p>Hermetic: embedded Postgres, port 0, no Docker. A wildcard bootstrap token authenticates
+ * <p>Hermetic: embedded Postgres, port 0, requires Docker. A wildcard bootstrap token authenticates
  * the admin calls (mirrors provisioning riding the legacy credential).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -41,7 +41,7 @@ class TokenAdminHandlerTest {
     private static final String BOOT = "boot-admin-token";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
     HikariDataSource ds;
     NexusService service;
     int port;
@@ -49,14 +49,14 @@ class TokenAdminHandlerTest {
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = EmbeddedPostgres.builder().start();
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        pg = PgContainerHelper.start();
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='nexus_svc') THEN "
                 + "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
         }
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             new Liquibase("db/changelog/db.changelog-master.xml",
@@ -65,7 +65,7 @@ class TokenAdminHandlerTest {
         // Seed the persistent root token (Phase E nexus-gmiaf.32.5) used to authenticate
         // the admin calls: BOUND to the default tenant with ROOT_TOKEN_LABEL so the
         // lockout protection (revoke-refused / list-excluded) applies to it.
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             try (var ps = su.prepareStatement(
                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES (?, ?, ?) "
@@ -77,8 +77,9 @@ class TokenAdminHandlerTest {
             }
         }
         var cfg = new HikariConfig();
-        cfg.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
-        cfg.setUsername("postgres");
+        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setUsername(PgContainerHelper.USERNAME);
+        cfg.setPassword(PgContainerHelper.PASSWORD);
         cfg.setMaximumPoolSize(5);
         cfg.setAutoCommit(true);
         cfg.setConnectionInitSql("SET search_path TO nexus, t1, public");
@@ -93,7 +94,7 @@ class TokenAdminHandlerTest {
     void stopAll() throws Exception {
         if (service != null) service.stop();
         if (ds != null) ds.close();
-        if (pg != null) pg.close();
+        if (pg != null) pg.stop();
     }
 
     // ── issue ────────────────────────────────────────────────────────────────
@@ -144,7 +145,7 @@ class TokenAdminHandlerTest {
         JsonNode r = postJson("/v1/service-tokens/rotate", "{\"tenant\":\"tenant-rot\",\"grace_seconds\":300}");
         assertThat(r.get("token").asText()).isNotBlank();
 
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             // All three rows are still live (revoked_at IS NULL) during the grace window.
             assertThat(countLive("tenant-rot", su)).isEqualTo(3L);
             // The two pre-existing rows now have a future expires_at; the new one has none.
@@ -171,7 +172,7 @@ class TokenAdminHandlerTest {
         postJson("/v1/service-tokens/rotate",
             "{\"tenant\":\"" + TenantConstants.DEFAULT_TENANT + "\",\"grace_seconds\":300}");
         String bootHash = TokenHashing.sha256Hex(BOOT);
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT expires_at, revoked_at FROM nexus.service_tokens WHERE token_hash = '"
                 + bootHash + "'");
@@ -259,7 +260,7 @@ class TokenAdminHandlerTest {
     @Test
     void issue_withTtl_setsExpiry() throws Exception {
         JsonNode r = postJson("/v1/service-tokens/issue", "{\"tenant\":\"tenant-exp\",\"ttl_seconds\":3600}");
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT expires_at FROM nexus.service_tokens WHERE token_hash = '"
                 + r.get("token_hash").asText() + "'");
@@ -331,7 +332,7 @@ class TokenAdminHandlerTest {
     }
 
     private String tenantOf(String hash) throws Exception {
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT tenant_id FROM nexus.service_tokens WHERE token_hash = '" + hash + "'");
             assertThat(rs.next()).isTrue();

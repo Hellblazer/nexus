@@ -1,7 +1,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.SchemaMigrator;
-import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 
 import java.sql.Connection;
@@ -72,7 +72,7 @@ class SchemaMigratorIntegrationTest {
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
-    EmbeddedPostgres pg;
+    PostgreSQLContainer<?> pg;
 
     /** Migration pool — uses nexus_admin_test (non-superuser owner). */
     com.zaxxer.hikari.HikariDataSource adminDs;
@@ -83,7 +83,7 @@ class SchemaMigratorIntegrationTest {
     @BeforeAll
     void bootstrap() throws Exception {
         // Start a completely schema-less embedded Postgres.
-        pg = EmbeddedPostgres.builder().start();
+        pg = PgContainerHelper.start();
 
         // ── Phase A: provisioning (done by DBA / Phase-5 nx step, NOT by Liquibase) ──
         // Using the embedded postgres superuser to simulate the DBA bootstrap:
@@ -92,7 +92,7 @@ class SchemaMigratorIntegrationTest {
         //   3. Create the schemas and transfer ownership to nexus_admin_test.
         //      (In real provisioning: CREATE DATABASE nexus; CREATE SCHEMA nexus
         //       AUTHORIZATION nexus_admin; Liquibase then runs as nexus_admin.)
-        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+        try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
 
             // nexus_admin_test: NOT superuser, NOT createrole — plain schema owner.
@@ -125,7 +125,7 @@ class SchemaMigratorIntegrationTest {
 
         // Migration pool: nexus_admin_test (non-superuser owner).
         var adminCfg = new com.zaxxer.hikari.HikariConfig();
-        adminCfg.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        adminCfg.setJdbcUrl(pg.getJdbcUrl());
         adminCfg.setUsername(ADMIN_ROLE);
         adminCfg.setPassword(ADMIN_PASS);
         adminCfg.setMaximumPoolSize(2);
@@ -134,7 +134,7 @@ class SchemaMigratorIntegrationTest {
 
         // Service pool: nexus_svc (NOSUPERUSER NOBYPASSRLS) with search_path via initSql.
         var svcCfg = new com.zaxxer.hikari.HikariConfig();
-        svcCfg.setJdbcUrl("jdbc:postgresql://localhost:" + pg.getPort() + "/postgres");
+        svcCfg.setJdbcUrl(pg.getJdbcUrl());
         svcCfg.setUsername(SVC_ROLE);
         svcCfg.setPassword(SVC_PASS);
         svcCfg.setMaximumPoolSize(3);
@@ -148,7 +148,7 @@ class SchemaMigratorIntegrationTest {
         if (adminDs != null) adminDs.close();
         if (svcDs   != null) svcDs.close();
         try {
-            if (pg != null) pg.close();
+            if (pg != null) pg.stop();
         } catch (Exception ignored) { }
     }
 
