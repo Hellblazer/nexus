@@ -161,6 +161,26 @@ class TokenAdminHandlerTest {
         }
     }
 
+    @Test
+    void rotate_skipsRootToken() throws Exception {
+        // P5.3-E: the root token (ROOT_TOKEN_LABEL, bound to the default tenant) must NOT
+        // be grace-expired when its tenant is rotated, or the supervisor's persisted
+        // credential would die after the grace window. Seed a normal default-tenant token,
+        // rotate "default", and assert the root row's expires_at stays NULL.
+        postJson("/v1/service-tokens/issue", "{\"tenant\":\"" + TenantConstants.DEFAULT_TENANT + "\"}");
+        postJson("/v1/service-tokens/rotate",
+            "{\"tenant\":\"" + TenantConstants.DEFAULT_TENANT + "\",\"grace_seconds\":300}");
+        String bootHash = TokenHashing.sha256Hex(BOOT);
+        try (Connection su = pg.getPostgresDatabase().getConnection()) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT expires_at, revoked_at FROM nexus.service_tokens WHERE token_hash = '"
+                + bootHash + "'");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getObject("expires_at")).as("root token must not be grace-expired").isNull();
+            assertThat(rs.getObject("revoked_at")).as("root token must not be revoked").isNull();
+        }
+    }
+
     // ── revoke ───────────────────────────────────────────────────────────────
 
     @Test
