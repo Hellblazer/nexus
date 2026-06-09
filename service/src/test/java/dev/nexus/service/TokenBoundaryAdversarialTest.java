@@ -267,7 +267,10 @@ class TokenBoundaryAdversarialTest {
             "{\"project\":\"" + project + "\",\"title\":\"w\",\"content\":\"A only\",\"ttl\":30}");
         assertThat(put.statusCode()).isEqualTo(200);
 
-        // The write was stamped with the BOUND tenant (A), proving WITH CHECK passed for A.
+        // The write was stamped with the BOUND tenant (A): the correct, server-resolved
+        // write is permitted by WITH CHECK and scoped to A. (The API cannot express a
+        // mismatched-tenant write — tenant_id comes from RequestContext, never the body —
+        // so this pins the GUC→tenant_id→RLS flow end to end, not an injection defense.)
         assertThat(superuserMemoryCount(TENANT_A, project))
             .as("write stamped tenant_id=TENANT_A").isEqualTo(1);
         assertThat(superuserMemoryCount(TENANT_B, project))
@@ -409,7 +412,9 @@ class TokenBoundaryAdversarialTest {
 
     @Test
     void bearerWithoutTrailingSpace_is401() throws Exception {
-        // "Bearer" with no trailing space fails the startsWith("Bearer ") guard → 401.
+        // Distinct AuthFilter branch from blankBearer: "Bearer" (no space) fails the
+        // prefix guard !startsWith("Bearer ") (same branch as a missing/wrong scheme),
+        // whereas "Bearer " passes the prefix then trips the rawToken.isBlank() guard.
         HttpRequest req = HttpRequest.newBuilder(URI.create(svcBase() + "/v1/_whoami"))
             .header("Authorization", "Bearer").GET().build();
         assertThat(http.send(req, HttpResponse.BodyHandlers.ofString()).statusCode())
@@ -675,10 +680,11 @@ class TokenBoundaryAdversarialTest {
     /**
      * A throwaway {@link HttpServer} wired exactly like production ({@link AuthFilter}
      * over a {@link TokenStore} + {@link TokenCache}) but on a {@link MutableClock}, so
-     * grace/TTL crossings are deterministic. Uses the superuser DataSource (the credential
-     * tables are RLS-off; the store also performs token writes for rotation/issue). A
-     * {@code 200} means the filter authorized and the {@link EchoHandler} ran; {@code 401}
-     * means the filter rejected.
+     * grace/TTL crossings are deterministic. The filter's auth-resolution {@code store}
+     * reads via the RESTRICTED {@code svcDs} (the real production credential path); a
+     * separate superuser {@code seedStore} performs the lifecycle WRITES (issue/rotate)
+     * the restricted role cannot. A {@code 200} means the filter authorized and the
+     * {@link EchoHandler} ran; {@code 401} means the filter rejected.
      */
     private final class ClockHarness implements AutoCloseable {
         /** The auth-resolution store the filter reads — wired to the RESTRICTED svcDs, the
