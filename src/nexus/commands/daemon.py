@@ -156,6 +156,90 @@ def _autostart_filename_t2() -> str:
     return _T2_PLIST_NAME if _autostart_platform() == "darwin" else _T2_SERVICE_NAME
 
 
+def _autostart_unit_installed() -> Path | None:
+    """Return the unit-file Path if the T2 autostart unit is installed, else None.
+
+    Reuses the existing _autostart_install_dir() / _autostart_filename_t2()
+    helpers as an indirection point so tests can stub them independently.
+    Platform-guarded: returns None on unsupported platforms without raising.
+    """
+    try:
+        unit_path = _autostart_install_dir() / _autostart_filename_t2()
+    except click.ClickException:
+        return None
+    return unit_path if unit_path.exists() else None
+
+
+#: Hard ceiling on each launchctl/systemctl invocation. A hung supervisor
+#: command would otherwise block ensure-running forever and the Popen
+#: fallback could never fire (RF-4: never trade a working spawn path for
+#: zero daemons). TimeoutExpired is caught by the except below → False →
+#: fallback.
+_SUPERVISOR_CMD_TIMEOUT: float = 10.0
+
+
+def _t2_supervisor_spawn(unit_path: Path) -> bool:
+    """Route a T2 cold-spawn through the OS supervisor.
+
+    darwin: try ``launchctl kickstart gui/<uid>/com.nexus.t2``; if it returns
+    non-zero (unit not loaded), run ``launchctl bootstrap gui/<uid> <plist>``
+    first, then kickstart again.  On any non-zero final exit, return False.
+    linux: run ``systemctl --user start nexus-t2.service``.  On non-zero, return False.
+
+    On ANY exception (binary absent, command timeout, permission error)
+    returns False. The caller logs a warning and falls back to
+    subprocess.Popen.
+    """
+    import os as _os
+
+    try:
+        platform = _autostart_platform()
+        if platform == "darwin":
+            uid = _os.getuid()
+            target = f"gui/{uid}/{_T2_LAUNCHD_LABEL}"
+            res = subprocess.run(
+                ["launchctl", "kickstart", target],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_SUPERVISOR_CMD_TIMEOUT,
+            )
+            if res.returncode != 0:
+                # Unit may not be bootstrapped yet; bootstrap then retry.
+                br = subprocess.run(
+                    ["launchctl", "bootstrap", f"gui/{uid}", str(unit_path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=_SUPERVISOR_CMD_TIMEOUT,
+                )
+                if br.returncode != 0:
+                    return False
+                res = subprocess.run(
+                    ["launchctl", "kickstart", target],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=_SUPERVISOR_CMD_TIMEOUT,
+                )
+                if res.returncode != 0:
+                    return False
+            return True
+        if platform.startswith("linux"):
+            res = subprocess.run(
+                ["systemctl", "--user", "start", _T2_SERVICE_NAME],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_SUPERVISOR_CMD_TIMEOUT,
+            )
+            return res.returncode == 0
+    except Exception as exc:
+        _log.warning(
+            "t2_supervisor_spawn_exception",
+            exc=str(exc),
+            exc_type=type(exc).__name__,
+        )
+        return False
+    return False
+
+
 # ---------------------------------------------------------------------------
 # t3 sub-group
 # ---------------------------------------------------------------------------
@@ -1142,22 +1226,71 @@ def _t2_ensure_running_inner(
             return T2EnsureOutcome.CRASHLOOP_SUPPRESSED
         _record_restart(config_dir, now=_cl_now)
 
-        # Cold spawn. Use the same nx binary the operator invoked (preserves
-        # PATH/virtualenv assumptions). start_new_session detaches the child
-        # so this command can exit while the daemon keeps running.
-        nx_bin = _resolve_nx_bin()
-        argv = [*nx_bin, "daemon", "t2", "start"]
-        if config_dir_str is not None:
-            argv.extend(["--config-dir", config_dir_str])
-        if not quiet:
-            click.echo(f"Spawning T2 daemon: {' '.join(argv)}")
-        proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
+        # Cold spawn.
+        #
+        # nexus-uybp6: single-owner routing. When the OS autostart unit is
+        # installed, route the respawn through the supervisor (launchd/systemd)
+        # so the unit keeps exclusive ownership — an ad-hoc Popen spawn would
+        # race launchd's KeepAlive and make the unit dormant again. On ANY
+        # supervisor failure (non-zero exit, missing binary, exception) we log
+        # a warning and fall through to the existing Popen path: never trade a
+        # working spawn path for zero daemons (RF-4).
+        #
+        # If no unit is installed, skip directly to Popen (unchanged path).
+        #
+        # Supervisor routing is UNQUALIFIED-DEFAULT ONLY: the installed unit's
+        # daemon resolves its config dir in LAUNCHD'S/SYSTEMD'S environment
+        # (bare `nx daemon t2 start`, no --config-dir, no NEXUS_CONFIG_DIR),
+        # i.e. the hard default. Kicking it on behalf of a caller that
+        # overrode the config dir — via the flag OR the env var — would start
+        # a daemon against the wrong data directory and never satisfy this
+        # caller's reachability wait (and repeatedly kick the user's real
+        # daemon: the multistack race harness found exactly that). Any
+        # override therefore Popen-spawns with explicit isolation.
+        proc = None
+        _unit_path = (
+            _autostart_unit_installed()
+            if config_dir_str is None
+            and not os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+            else None
         )
+        if _unit_path is not None:
+            if not quiet:
+                click.echo(f"Respawning T2 daemon via OS supervisor: {_unit_path.name}")
+            if _t2_supervisor_spawn(_unit_path):
+                # Supervisor accepted the start command — no Popen proc to poll.
+                # The reachability wait below handles convergence; proc stays None.
+                pass
+            else:
+                _log.warning(
+                    "t2_supervisor_spawn_failed",
+                    unit=str(_unit_path),
+                    fallback="popen",
+                )
+                if not quiet:
+                    click.echo(
+                        "Warning: OS supervisor spawn failed; falling back to direct spawn.",
+                        err=True,
+                    )
+                _unit_path = None  # signal: use Popen path
+
+        if _unit_path is None:
+            # Popen path: use the same nx binary the operator invoked (preserves
+            # PATH/virtualenv assumptions). start_new_session detaches the child
+            # so this command can exit while the daemon keeps running.
+            nx_bin = _resolve_nx_bin()
+            argv = [*nx_bin, "daemon", "t2", "start"]
+            if config_dir_str is not None:
+                argv.extend(["--config-dir", config_dir_str])
+            if not quiet:
+                click.echo(f"Spawning T2 daemon: {' '.join(argv)}")
+            proc = subprocess.Popen(
+                argv,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
 
         # nexus-u3mfr: migration-aware wait. A cold-start daemon runs its
         # one-time startup migration (multi-second, holds the write lock)
@@ -1169,6 +1302,8 @@ def _t2_ensure_running_inner(
         # without becoming reachable we fail fast with its exit code rather
         # than waiting out the whole budget on a corpse. The warning therefore
         # only fires on a genuinely slow/stuck migration, not a healthy boot.
+        # NOTE: the proc.poll() death-check only applies to the Popen path —
+        # on the supervisor path proc is None, so the check is skipped.
         deadline = _time.monotonic() + timeout
         while _time.monotonic() < deadline:
             if _daemon_is_alive():
@@ -1177,7 +1312,7 @@ def _t2_ensure_running_inner(
                 if not quiet:
                     click.echo("T2 daemon is reachable.")
                 return T2EnsureOutcome.REACHABLE
-            if proc.poll() is not None:
+            if proc is not None and proc.poll() is not None:
                 click.echo(
                     f"Error: T2 daemon process exited (code {proc.returncode}) "
                     "before becoming reachable. Check "

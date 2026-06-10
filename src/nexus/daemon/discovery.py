@@ -19,6 +19,12 @@ Validation invariants (PID-liveness, shutdown-marker, format_version
 forward-incompat refusal, non-dict shape) are shared across tiers via
 ``_validate_discovery_payload``.
 
+T2 lease records carry two additional liveness checks beyond heartbeat-age
+(nexus-md90p / conexus-scp): a stale-but-answering UDS rescue (expired lease
+but live socket → returns endpoint, no unlink) and a dead-pid fast-path (fresh
+lease but dead pid → returns None immediately without waiting for TTL expiry).
+T3 behavior is unchanged (heartbeat-age only).
+
 The daemon writes the file atomically (tmpfile + os.replace) so a
 partial read is not possible.
 
@@ -31,6 +37,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import socket
 import time
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -168,6 +175,49 @@ def _read_payload(path: Path, *, tier: Tier) -> Optional[Any]:
 #: lower-level module importing the substrate).
 _LEASE_FORMAT_VERSION: int = 1
 
+#: UDS probe connect timeout in seconds (T2 liveness check, nexus-md90p).
+_T2_PROBE_TIMEOUT: float = 0.25
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True iff *pid* refers to a live process.
+
+    Uses ``os.kill(pid, 0)`` per POSIX semantics:
+    - ``ProcessLookupError`` / ``ESRCH`` → dead.
+    - ``PermissionError`` → exists under another UID; treat as alive.
+    - Any other ``OSError`` → assume alive (can't probe, let connect fail).
+
+    Local to discovery.py to avoid an import cycle: t2_daemon imports
+    discovery, so the helper must live here (nexus-md90p audit advisory).
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return False
+        return True
+
+
+def _uds_answering(uds_path: str) -> bool:
+    """Return True iff a UDS listener is accepting connections at *uds_path*.
+
+    Performs a bounded connect probe (~0.25 s timeout) and closes
+    immediately.  Any ``OSError`` (refused, missing, timeout, etc.) is
+    treated as not answering — never raises.
+    """
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(_T2_PROBE_TIMEOUT)
+            s.connect(uds_path)
+        return True
+    except OSError:
+        return False
+
 
 def is_lease_record(raw: Any) -> bool:
     """True if *raw* is a RDR-149 leased-registry record (vs a legacy
@@ -212,16 +262,32 @@ def _resolve_lease_record(
 ) -> Optional[dict[str, Any]]:
     """Resolve a RDR-149 lease record to a connection dict, or ``None``.
 
-    Liveness is lease freshness (``now - heartbeat_epoch < ttl``), not pid:
-    a dead owner's lease simply ages out, giving pid-reuse immunity. A
-    stale, shutdown-marked, or forward-incompatible lease is rejected; an
-    expired one is best-effort unlinked so the next lookup is fast. The
-    endpoint fields (``uds_path`` / ``tcp_host`` / ``tcp_port``) are lifted
-    to the top level so the existing client contract
+    For the T3 tier, liveness is lease freshness (``now - heartbeat_epoch <
+    ttl``) only: a dead owner's lease simply ages out, giving pid-reuse
+    immunity.
+
+    For the T2 tier (nexus-md90p), two additional liveness checks augment
+    the heartbeat-age check so that process liveness is also considered:
+
+    (a) **Stale-but-answering rescue**: when ``age >= ttl`` and the endpoint
+        pid is alive, a bounded UDS connect probe (~0.25 s) is attempted.
+        If the socket answers, the endpoint is returned as live and the
+        discovery file is NOT unlinked (warning: ``t2_discovery_lease_stale_but_answering``).
+        If the connect fails (refused, missing socket, timeout) or the pid
+        is dead, the file is unlinked and ``None`` is returned (current behavior).
+
+    (b) **Dead-pid fast-path**: when the lease is fresh (``age < ttl``) but
+        the endpoint pid is dead, ``None`` is returned immediately without
+        waiting for the TTL to expire (instant hard-kill detection).  The
+        discovery file is best-effort unlinked.
+
+    A stale, shutdown-marked, or forward-incompatible lease is rejected
+    regardless of tier. The endpoint fields (``uds_path`` / ``tcp_host`` /
+    ``tcp_port``) are lifted to the top level so the existing client contract
     (``discovery_resolve`` -> connect) is unchanged; the lease metadata
     (``generation`` / ``owner_token`` / ``version``) rides alongside.
 
-    Tier-parameterized so the T3 migration (RDR-149 P3) reuses it verbatim.
+    Tier-parameterized so the T3 path is unchanged (RDR-149 P3 reuse).
     """
     fmt = raw.get("format_version", _LEASE_FORMAT_VERSION)
     if isinstance(fmt, int) and fmt > _LEASE_FORMAT_VERSION:
@@ -244,9 +310,68 @@ def _resolve_lease_record(
     ):
         _log.warning(f"{tier}_discovery_lease_malformed", path=str(path))
         return None
+
     # Guard a backward clock step (NTP correction): a suspiciously large
     # negative age is treated as stale rather than perpetually fresh.
     age = time.time() - heartbeat_epoch
+
+    # --- T2-only liveness checks (nexus-md90p) ---
+    if tier == "t2":
+        pid = endpoint.get("pid") if isinstance(endpoint, dict) else None
+
+        # (b) Fast-path: fresh lease but dead pid → stale immediately.
+        if age < ttl and age > -ttl:
+            if isinstance(pid, int) and pid > 0 and not _pid_alive(pid):
+                _log.warning(
+                    "t2_discovery_fresh_lease_dead_pid",
+                    path=str(path),
+                    pid=pid,
+                )
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    _log.warning(
+                        "t2_discovery_unlink_failed",
+                        path=str(path),
+                        error=str(exc),
+                    )
+                return None
+
+        # (a) Stale-but-answering rescue: expired lease, pid alive → UDS probe.
+        # The rescue does NOT refresh heartbeat_epoch (the daemon's heartbeat
+        # thread owns the record; clients never write it), so every resolve
+        # during the stale window re-probes. Bounded: the heartbeat thread
+        # re-stamps every _REASSERT_INTERVAL (1s) once the daemon recovers,
+        # and a healthy local UDS accept is sub-ms, so even an N-session
+        # swarm pays ~N ms per stale second — acceptable; do not cache.
+        if age >= ttl or age <= -ttl:
+            uds_path = endpoint.get("uds_path") if isinstance(endpoint, dict) else None
+            pid_alive = isinstance(pid, int) and pid > 0 and _pid_alive(pid)
+            if pid_alive and isinstance(uds_path, str) and _uds_answering(uds_path):
+                _log.warning(
+                    "t2_discovery_lease_stale_but_answering",
+                    path=str(path),
+                    age=age,
+                    pid=pid,
+                )
+                result = dict(endpoint)
+                result["generation"] = raw.get("generation")
+                result["owner_token"] = raw.get("owner_token")
+                result["version"] = raw.get("version")
+                return result
+            # Dead pid or refused connect: fall through to unlink + None.
+            _log.warning(
+                f"{tier}_discovery_lease_expired", path=str(path), age=age
+            )
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                _log.warning(
+                    f"{tier}_discovery_unlink_failed", path=str(path), error=str(exc)
+                )
+            return None
+
+    # --- T3 (and any future tier): original heartbeat-age-only logic ---
     if age >= ttl or age <= -ttl:
         _log.warning(f"{tier}_discovery_lease_expired", path=str(path), age=age)
         try:
@@ -256,6 +381,7 @@ def _resolve_lease_record(
                 f"{tier}_discovery_unlink_failed", path=str(path), error=str(exc)
             )
         return None
+
     result = dict(endpoint)
     result["generation"] = raw.get("generation")
     result["owner_token"] = raw.get("owner_token")
