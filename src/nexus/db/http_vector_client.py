@@ -76,7 +76,11 @@ def _post(path: str, body: dict, *, tenant: str = "default") -> Any:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        # 600s, not 120s: a 300-chunk CCE (voyage-context-3) upsert batch routinely
+        # exceeds 120s server-side (embed is synchronous in the request); the RDR-155
+        # production migration false-timed-out on exactly this until raised
+        # (bead nexus-rvfwj, 2026-06-10 — docs__1-16 + docs__1-1 evidence).
+        with urllib.request.urlopen(req, timeout=600) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         body_bytes = e.read()

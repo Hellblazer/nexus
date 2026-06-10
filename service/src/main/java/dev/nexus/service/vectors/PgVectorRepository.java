@@ -210,16 +210,33 @@ public final class PgVectorRepository {
         // De-duplicate IDs (first-wins, matching T3Database._write_batch). Also required
         // for correctness: ON CONFLICT cannot affect the same row twice within one
         // statement's snapshot, and the batch shares a transaction.
+        // Postgres text/jsonb cannot carry NUL (0x00) — Chroma and SQLite tolerated it,
+        // so legacy PDF-extraction chunks arrive with NUL noise (bead nexus-rvfwj; 62 of
+        // 5,233 production dt-papers chunks). Strip NULs from chunk text and metadata
+        // string values before embed+bind; without this the whole batch dies with
+        // "invalid byte sequence for encoding UTF8: 0x00". The chash is the caller's
+        // identity and is never recomputed from the sanitized text — affected chashes
+        // are logged so the sanitization delta stays auditable.
         List<String> dedupIds  = new ArrayList<>();
         List<String> dedupDocs = new ArrayList<>();
         List<Map<String, Object>> dedupMetas = new ArrayList<>();
+        List<String> nulSanitized = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (int i = 0; i < ids.size(); i++) {
             if (seen.add(ids.get(i))) {
+                String doc = documents.get(i);
+                String clean = stripNul(doc);
+                if (!clean.equals(doc)) {
+                    nulSanitized.add(ids.get(i));
+                }
                 dedupIds.add(ids.get(i));
-                dedupDocs.add(documents.get(i));
-                dedupMetas.add(metadatas.get(i));
+                dedupDocs.add(clean);
+                dedupMetas.add(sanitizeNulDeep(metadatas.get(i)));
             }
+        }
+        if (!nulSanitized.isEmpty()) {
+            log.warn("event=upsert_nul_sanitized collection={} count={} chashes={}",
+                    collection, nulSanitized.size(), String.join(",", nulSanitized));
         }
         int collapsed = ids.size() - dedupIds.size();
         if (collapsed > 0) {
@@ -834,6 +851,43 @@ public final class PgVectorRepository {
 
     private static String chunksTable(int dim) {
         return "nexus.chunks_" + dim;
+    }
+
+    /** Strip NUL (0x00) — unstorable in Postgres {@code text}/{@code jsonb} (nexus-rvfwj). */
+    private static String stripNul(String s) {
+        return (s != null && s.indexOf('\u0000') >= 0) ? s.replace("\u0000", "") : s;
+    }
+
+    /**
+     * Recursively strip NULs from metadata string values (and keys). Postgres
+     * {@code jsonb} rejects {@code NUL} escapes just as {@code text} rejects raw
+     * NUL bytes, so metadata needs the same sanitization as chunk text.
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> sanitizeNulDeep(Map<String, Object> meta) {
+        if (meta == null) return null;
+        return (Map<String, Object>) sanitizeNulValue(meta);
+    }
+
+    private static Object sanitizeNulValue(Object v) {
+        if (v instanceof String s) {
+            return stripNul(s);
+        }
+        if (v instanceof Map<?, ?> m) {
+            Map<String, Object> out = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> e : m.entrySet()) {
+                out.put(stripNul(String.valueOf(e.getKey())), sanitizeNulValue(e.getValue()));
+            }
+            return out;
+        }
+        if (v instanceof List<?> l) {
+            List<Object> out = new ArrayList<>(l.size());
+            for (Object o : l) {
+                out.add(sanitizeNulValue(o));
+            }
+            return out;
+        }
+        return v;
     }
 
     /** pgvector cast-safe text literal: {@code [f1,f2,...]}. */
