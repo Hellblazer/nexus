@@ -124,17 +124,19 @@ class TestUpsertChunks:
     def test_posts_to_upsert_chunks_endpoint(self, monkeypatch):
         client = HttpVectorClient()
         calls = []
-        def fake_post(path, body, *, tenant="default"):
-            calls.append((path, body))
+        def fake_post(path, body, *, tenant="default", timeout=120):
+            calls.append((path, body, timeout))
             return {"upserted": 2}
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         client.upsert_chunks("my-col", ["id1", "id2"], ["text1", "text2"])
         assert len(calls) == 1
-        path, body = calls[0]
+        path, body, timeout = calls[0]
         assert path == "/v1/vectors/upsert-chunks"
         assert body["collection"] == "my-col"
         assert body["ids"] == ["id1", "id2"]
         assert body["documents"] == ["text1", "text2"]
+        # nexus-rvfwj: the upsert path alone gets the long CCE-batch timeout.
+        assert timeout == 600
 
     def test_default_metadatas_are_empty_dicts(self, monkeypatch):
         client = HttpVectorClient()
