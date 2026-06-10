@@ -509,6 +509,13 @@ class PgVectorRepositoryContractTest {
     }
 
     @Test
+    void search_emptyCollectionList_returnsEmpty() {
+        assertThat(repo1024.search(TENANT_A, "any query", List.of(), 10, null))
+            .as("an empty collection list yields an empty result, not an error")
+            .isEmpty();
+    }
+
+    @Test
     void search_crossTenant_returnsNothing() throws Exception {
         String col = "code__searchrls__voyage-code-3__v1";
         seedSearchFixture(col);
@@ -620,6 +627,20 @@ class PgVectorRepositoryContractTest {
     }
 
     @Test
+    void list_crossTenant_returnsEmptyEnvelope() throws Exception {
+        String col = "code__listrls__voyage-code-3__v1";
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("lr-c1"), List.of("tenant a list row"), List.of(Map.of()));
+        assertThat(superuserCount(1024, col))
+            .as("control: tenant-a's row must physically exist before the RLS assertion")
+            .isEqualTo(1L);
+
+        @SuppressWarnings("unchecked")
+        List<String> ids = (List<String>) repo1024.list(TENANT_B, col, 10, 0).get("ids");
+        assertThat(ids).as("tenant-b must list 0 of tenant-a's chunks").isEmpty();
+    }
+
+    @Test
     void count_exactPerCollection_andZeroForOtherTenant() {
         String col = "code__countexact__voyage-code-3__v1";
         repo1024.upsertChunks(TENANT_A, col,
@@ -708,6 +729,16 @@ class PgVectorRepositoryContractTest {
         assertThat(distToOriginal)
             .as("embedding must be untouched by a metadata-only update (no re-embed)")
             .isCloseTo(0.0, within(1e-6));
+    }
+
+    @Test
+    void updateMetadata_misalignedIdsAndMetadatas_failsLoud() {
+        String col = "code__updatemeta-align__voyage-code-3__v1";
+        assertThatThrownBy(() ->
+            repo1024.updateMetadata(TENANT_A, col,
+                List.of("ma-c1", "ma-c2"), List.of(Map.of("v", "only-one"))))
+            .as("ids and metadatas of different sizes must fail loud, not zip-truncate")
+            .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
