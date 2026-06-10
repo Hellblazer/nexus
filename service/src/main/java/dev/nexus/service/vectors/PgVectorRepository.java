@@ -381,6 +381,22 @@ public final class PgVectorRepository {
      *       union, metadata {@code where} equality predicates ANDed with the text gate,
      *       {@code nResults} cap, flat row shape ({@code id}, {@code content},
      *       {@code distance}, {@code collection}, metadata flattened in).
+     *   <li><strong>Filtered-ANN session setting.</strong> The implementation MUST run
+     *       {@code SET LOCAL hnsw.iterative_scan = 'relaxed_order'} before the query,
+     *       exactly like {@link #search} - the text gate + RLS + {@code where} predicates
+     *       narrow the candidate set even harder than plain search, which is precisely the
+     *       filtered-recall risk the setting exists for (RDR-155 research resolution; the
+     *       fixture-scale suite cannot detect its absence, the conexus xr7.8.9
+     *       production-scale recall gate can).
+     *   <li><strong>Trigram gate calibration anchor (P3.2).</strong> The contract fixture
+     *       pins the gate's discriminating range, not an exact threshold: the typo probe's
+     *       candidate rows sit at word-similarity ≈ 0.9 (and plain trigram similarity
+     *       ≈ 0.5 against these short fixture texts) and MUST pass; the no-signal rows sit
+     *       at ≈ 0.1 and MUST NOT. Any gate inside that window satisfies the suite - e.g.
+     *       {@code word_similarity(queryText, chunk_text) >= 0.6} (pg_trgm's default
+     *       {@code <%} threshold) or {@code similarity >= 0.3}. P3.2 records the final
+     *       operator + threshold choice; P3.G cross-checks it against the conexus xr7.8.9
+     *       production-scale calibration.
      * </ul>
      *
      * @param tenant          tenant principal for RLS scoping

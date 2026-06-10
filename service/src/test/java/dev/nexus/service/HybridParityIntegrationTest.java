@@ -157,6 +157,7 @@ class HybridParityIntegrationTest {
     PgVectorRepository     pgRepo;
     LocalChromaServer      localChroma;
     VectorRepository       chromaRepo;
+    Path                   chromaData;
     Connection             sqlite;   // in-memory FTS5 lives and dies with this connection
 
     @BeforeAll
@@ -208,7 +209,7 @@ class HybridParityIntegrationTest {
 
         // --- Legacy vector leg: live local Chroma (cosine space via ChromaRestClient).
         String chromaBinary = LocalChromaServer.findChromaBinary();
-        Path chromaData = Files.createTempDirectory("hybrid-parity-chroma-");
+        chromaData = Files.createTempDirectory("hybrid-parity-chroma-");
         int chromaPort = LocalChromaServer.findFreePort();
         localChroma = new LocalChromaServer(chromaBinary, chromaData.toString(), chromaPort);
         localChroma.start();
@@ -242,6 +243,12 @@ class HybridParityIntegrationTest {
     void stopAll() throws Exception {
         if (sqlite      != null) sqlite.close();
         if (localChroma != null) localChroma.stop();
+        if (chromaData  != null) {
+            try (var walk = Files.walk(chromaData)) {
+                walk.sorted(java.util.Comparator.reverseOrder())
+                    .forEach(p -> p.toFile().delete());
+            }
+        }
         if (onnx        != null) onnx.close();
         if (svcDs       != null) svcDs.close();
         if (pg          != null) pg.stop();
@@ -333,24 +340,32 @@ class HybridParityIntegrationTest {
         // If a future corpus edit creates a near-tie between candidate rows, ordered
         // parity assertions would become float-noise-flaky. Catch it here by name
         // (conexus xr7.8.7 min-gap guard, runtime form — embeddings are real, not
-        // hand-authored).
+        // hand-authored). Both legs are checked: pgvector ranks in float8, Chroma in
+        // float32 — a near-tie in EITHER domain breaks ordered parity.
         for (var probe : List.of(Map.entry(QA, QA_LEGACY_CANDIDATES),
                                  Map.entry(QB, QB_ENGINE_CANDIDATES))) {
-            List<Map<String, Object>> rows =
+            List<Map<String, Object>> pgRows =
                 pgRepo.search(TENANT, probe.getKey(), List.of(PG_COL), CORPUS.size(), null);
-            List<Double> candidateDists = rows.stream()
-                .filter(r -> probe.getValue().contains((String) r.get("id")))
-                .map(r -> ((Number) r.get("distance")).doubleValue())
-                .toList();
-            assertThat(candidateDists)
-                .as("all candidates of %s must rank", probe.getKey())
-                .hasSize(probe.getValue().size());
-            for (int i = 1; i < candidateDists.size(); i++) {
-                assertThat(candidateDists.get(i) - candidateDists.get(i - 1))
-                    .as("consecutive candidate distances for query '%s' must be separated "
-                        + "by > 1e-4 — a near-tie makes ordered parity flaky; reword the "
-                        + "fixture text", probe.getKey())
-                    .isGreaterThan(1e-4);
+            List<Map<String, Object>> chromaRows =
+                chromaRepo.search(probe.getKey(), List.of(CHROMA_COL), CORPUS.size(), null);
+            for (var leg : List.of(Map.entry("pgvector", pgRows),
+                                   Map.entry("chroma", chromaRows))) {
+                List<Double> candidateDists = leg.getValue().stream()
+                    .filter(r -> probe.getValue().contains((String) r.get("id")))
+                    .map(r -> ((Number) r.get("distance")).doubleValue())
+                    .toList();
+                assertThat(candidateDists)
+                    .as("all candidates of '%s' must rank on the %s leg",
+                        probe.getKey(), leg.getKey())
+                    .hasSize(probe.getValue().size());
+                for (int i = 1; i < candidateDists.size(); i++) {
+                    assertThat(candidateDists.get(i) - candidateDists.get(i - 1))
+                        .as("consecutive candidate distances for query '%s' on the %s leg "
+                            + "must be separated by > 1e-4 — a near-tie makes ordered "
+                            + "parity flaky; reword the fixture text",
+                            probe.getKey(), leg.getKey())
+                        .isGreaterThan(1e-4);
+                }
             }
         }
     }
@@ -438,9 +453,14 @@ class HybridParityIntegrationTest {
 
         assertThat(overlapA).as("aligned-query overlap is exactly 1.0").isEqualTo(1.0);
         assertThat(overlapB).as("stemmer-delta overlap is exactly 1/3").isEqualTo(1.0 / 3.0);
-        assertThat((overlapA + overlapB) / 2.0)
-            .as("fixture-scale aggregate overlap (exact: 2/3) must clear the seam "
-                + "threshold %s", PARITY_OVERLAP_THRESHOLD)
+        double aggregate = (overlapA + overlapB) / 2.0;
+        assertThat(aggregate)
+            .as("fixture-scale aggregate overlap is EXACTLY 2/3 — an inequality here "
+                + "would mask partial divergence (exact-assertion rule)")
+            .isEqualTo(2.0 / 3.0);
+        assertThat(aggregate)
+            .as("the exact aggregate clears the named seam threshold %s",
+                PARITY_OVERLAP_THRESHOLD)
             .isGreaterThanOrEqualTo(PARITY_OVERLAP_THRESHOLD);
     }
 }

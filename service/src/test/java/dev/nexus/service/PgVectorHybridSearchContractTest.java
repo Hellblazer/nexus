@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
@@ -450,10 +452,14 @@ class PgVectorHybridSearchContractTest {
     }
 
     @Test
-    void hybridSearch_emptyCollections_returnsEmpty() {
+    void hybridSearch_emptyCollectionsList_returnsEmpty() {
         assertThat(repo1024.hybridSearch(TENANT_A, Q, List.of(), 10, null))
             .as("no collections to search returns empty, same as search()")
             .isEmpty();
+    }
+
+    @Test
+    void hybridSearch_nullCollections_returnsEmpty() {
         assertThat(repo1024.hybridSearch(TENANT_A, Q, null, 10, null))
             .as("null collections returns empty, same as search()")
             .isEmpty();
