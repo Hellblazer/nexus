@@ -11,6 +11,13 @@
     xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
+    <!-- Store 0: nexus_svc role bootstrap (bead nexus-9qvam) — MUST be first; the
+         catalog grant DO-blocks and the final grants changeset are fail-loud when the
+         role is absent, and build-time jOOQ codegen applies this changelog against a
+         fresh container with no pre-hook. Idempotent; production DBA pre-creation
+         makes it a no-op. -->
+    <include file="db/changelog/role-001-nexus-svc.xml"/>
+
     <!-- Store 1: memory (bead nexus-gmiaf.5) -->
     <include file="db/changelog/memory-001-baseline.xml"/>
 

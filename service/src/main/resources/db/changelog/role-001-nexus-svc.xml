@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus_svc role bootstrap (bead nexus-9qvam) - MUST be the FIRST include in the
+    master changelog.
+
+    Why this exists: the catalog baseline grant DO-blocks and the consolidated
+    grants-nexus-svc changeset are fail-loud when the nexus_svc role is absent.
+    Test fixtures create the role in @BeforeAll before applying the changelog, but
+    build-time jOOQ codegen (testcontainers-jooq-codegen-maven-plugin, generate-sources
+    phase) applies the master changelog against a fresh container with NO pre-hook -
+    so the changelog must be self-contained. Mirrors the conexus control-plane
+    001-role-conexus-svc pattern.
+
+    Production: the DBA pre-creates nexus_svc with managed credentials as bootstrap
+    step 0 (docs/configuration.md "Storage Service (Postgres) Prerequisites"); the
+    IF NOT EXISTS guard makes this changeset a no-op there. The password literal
+    below is the local/test convention only and is never used when the role already
+    exists.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="role-001-1" author="nexus-9qvam">
+        <comment>nexus_svc plain-LOGIN role: idempotent bootstrap so the changelog is
+            self-contained for codegen/test substrates; production DBA pre-creation
+            makes this a no-op</comment>
+        <!-- splitStatements=false: the DO $$ ... $$ block contains inner ';' that the
+             default splitter would mis-parse. -->
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
+        CREATE ROLE nexus_svc
+            LOGIN
+            NOSUPERUSER
+            NOCREATEDB
+            NOCREATEROLE
+            NOINHERIT
+            NOBYPASSRLS
+            PASSWORD 'nexus_svc_pass';
+    END IF;
+END
+$$;
+        </sql>
+        <rollback><!-- roles are cluster-level; never dropped by rollback --></rollback>
+    </changeSet>
+
+</databaseChangeLog>

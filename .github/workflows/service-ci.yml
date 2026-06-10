@@ -68,29 +68,17 @@ jobs:
             echo "ONNX model restored from cache."
           fi
 
+      # jOOQ codegen now runs INSIDE the build (bead nexus-9qvam): the
+      # testcontainers-jooq-codegen-maven-plugin generates into
+      # target/generated-sources/jooq at the generate-sources phase from the
+      # Liquibase changelog (sole schema authority), so generated sources are
+      # never committed and drift is impossible by construction — a codegen
+      # failure fails this step. The former -Pcodegen profile + committed
+      # src/main/generated/ tree + git-diff drift guard are retired.
+      #
+      # NOTE: the job id/display name still say "drift guard" — they are kept
+      # verbatim because the PR status-check name is referenced by branch
+      # protection; renaming would strand required checks.
       - name: Run Java test suite
         working-directory: service
         run: mvn -q test
-
-      # Drift guard: regenerate jOOQ sources from the changelog and
-      # fail if the committed sources in src/main/generated/jooq/ differ.
-      # This catches schema changes that were not followed by a regen+commit.
-      # Mechanism: -Pcodegen runs JooqCodegenBootstrap (spins up a pgvector
-      # container, applies Liquibase, generates to the committed output dir), then
-      # `git diff --exit-code` fails CI on any unstaged diff.
-      - name: jOOQ codegen drift guard
-        working-directory: service
-        run: |
-          mvn -Pcodegen process-test-classes -q
-          # NOTE: this step runs with working-directory: service, so the diff
-          # path is repo-relative-to-service ("src/main/generated/"), NOT
-          # "service/src/main/generated/" (which would resolve to
-          # service/service/... and fail with "ambiguous argument /
-          # unknown revision or path"). The `--` separates path from revision.
-          git diff --exit-code -- src/main/generated/ || {
-            echo "DRIFT DETECTED: committed jOOQ sources are stale vs. the current changelog."
-            echo "Re-run: mvn -Pcodegen process-test-classes && git add service/src/main/generated/ && git commit"
-            echo ""
-            git diff --stat -- src/main/generated/
-            exit 1
-          }
