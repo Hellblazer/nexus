@@ -159,6 +159,16 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- Test: SQLite FTS5 — the legacy FTS5 engine itself (unicode61 tokenizer), the
+             text leg of the RDR-155 Phase 3 hybrid-parity comparand. The Python T2 path
+             uses the same SQLite FTS5 C library; xerial bundles it. -->
+        <dependency>
+            <groupId>org.xerial</groupId>
+            <artifactId>sqlite-jdbc</artifactId>
+            <version>3.47.1.0</version>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
 
     <build>

@@ -55,6 +55,9 @@
     <!-- Store 10: pgvector chunks tables + manifest collection column (bead nexus-mf447) -->
     <include file="db/changelog/vectors-001-baseline.xml"/>
 
+    <!-- Store 10b: trigram GIN indexes for the hybrid pg_trgm gate (bead nexus-eap5l) -->
+    <include file="db/changelog/vectors-002-trgm-index.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

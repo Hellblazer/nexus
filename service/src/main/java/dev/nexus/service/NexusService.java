@@ -27,6 +27,7 @@ import dev.nexus.service.http.TokenAdminHandler;
 import dev.nexus.service.http.VectorHandler;
 import dev.nexus.service.http.WhoamiHandler;
 import dev.nexus.service.vectors.EmbedderRouter;
+import dev.nexus.service.vectors.PgVectorRepository;
 import dev.nexus.service.vectors.VectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -111,6 +112,26 @@ public final class NexusService {
     public NexusService(int port, String token, DataSource dataSource,
                         VectorRepository vectorRepository,
                         EmbedderRouter docEmbedderRouter) throws IOException {
+        this(port, token, dataSource, vectorRepository, docEmbedderRouter, null);
+    }
+
+    /**
+     * Full constructor with the pgvector repository for {@code /v1/vectors/hybrid-search}
+     * (RDR-155 P3.2, bead nexus-eap5l).
+     *
+     * @param port              listen port; 0 for OS-assigned ephemeral (use in tests)
+     * @param token             expected bearer token
+     * @param dataSource        pooled connection source
+     * @param vectorRepository  optional Chroma VectorRepository (may be null)
+     * @param docEmbedderRouter optional EmbedderRouter for {@code /v1/vectors/embed} (may be null)
+     * @param pgVectorRepository optional PgVectorRepository for {@code /v1/vectors/hybrid-search}
+     *                           (may be null; production serving wiring is the Phase 4a cutover —
+     *                           until then the validation harness wires it explicitly)
+     */
+    public NexusService(int port, String token, DataSource dataSource,
+                        VectorRepository vectorRepository,
+                        EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository) throws IOException {
         this.tenantScope = new TenantScope(dataSource);
 
         // Token lifecycle (RDR-152 bead nexus-gmiaf.32.2): resolve bearer→tenant
@@ -190,14 +211,16 @@ public final class NexusService {
         var sessionsCtx = server.createContext("/v1/sessions", new SessionTokenHandler(tokenStore));
         sessionsCtx.getFilters().addAll(authFilter);
 
-        // /v1/vectors/* — vector (Chroma) endpoints (bead nexus-gmiaf.20)
+        // /v1/vectors/* — vector endpoints (bead nexus-gmiaf.20; hybrid: RDR-155 P3.2)
         // Registered when a VectorRepository is provided OR an EmbedderRouter alone is provided
-        // (parity-gate mode: NX_CHROMA_MODE=none + NX_VOYAGE_API_KEY — only /embed is active).
-        if (vectorRepository != null || docEmbedderRouter != null) {
+        // (parity-gate mode: NX_CHROMA_MODE=none + NX_VOYAGE_API_KEY — only /embed is active)
+        // OR a PgVectorRepository is provided (hybrid-search validation seam).
+        if (vectorRepository != null || docEmbedderRouter != null || pgVectorRepository != null) {
             var vectorCtx = server.createContext("/v1/vectors",
-                    new VectorHandler(vectorRepository, docEmbedderRouter));
+                    new VectorHandler(vectorRepository, docEmbedderRouter, pgVectorRepository));
             vectorCtx.getFilters().addAll(authFilter);
-            log.info("event=vector_endpoints_registered has_storage={}", vectorRepository != null);
+            log.info("event=vector_endpoints_registered has_storage={} has_pgvector={}",
+                    vectorRepository != null, pgVectorRepository != null);
         }
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());

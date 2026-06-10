@@ -351,6 +351,164 @@ public final class PgVectorRepository {
     }
 
     /**
+     * RDR-155 Phase 3 - hybrid search: text signals ({@code tsvector} FTS + {@code pg_trgm}
+     * trigram similarity) gate the candidate set, vector cosine distance ranks it, fused in
+     * ONE query against the dispatched {@code chunks_<dim>} table. Replaces the engine's
+     * legacy FTS5 + Chroma two-path fusion.
+     *
+     * <p>Implemented by P3.2 (bead nexus-eap5l) against the locked P3.1 contract suite
+     * ({@code PgVectorHybridSearchContractTest} + {@code HybridParityIntegrationTest},
+     * bead nexus-sbvg0).
+     *
+     * <p>Contract pinned by the P3.1 suite (RDR-155 §Query path Hybrid search; aligned with
+     * the conexus xr7.8.7 fused reference that the xr7.8.9 go-live gate drives):
+     * <ul>
+     *   <li><strong>Text gate.</strong> A returned row must match at least one text signal:
+     *       {@code chunk_tsv @@ plainto_tsquery('english', queryText)} OR trigram similarity
+     *       between {@code queryText} and {@code chunk_text} above the implementation's
+     *       threshold. A row with NO text signal never appears, however close its vector -
+     *       semantic-only retrieval stays on {@link #search}. Zero text candidates returns
+     *       an empty list (no silent vector fallback).
+     *   <li><strong>Vector rank.</strong> Candidates are ordered by cosine distance
+     *       ({@code embedding <=> query}) ascending, {@code chash} ascending on ties - the
+     *       same ordering contract as {@link #search}.
+     *   <li><strong>Trigram rescue.</strong> The {@code pg_trgm} leg exists for queries the
+     *       english stemmer mishandles (typos, identifiers): a query that matches no FTS
+     *       lexeme still returns rows whose text is trigram-similar.
+     *   <li><strong>Same envelope as {@link #search}.</strong> Tenant RLS scope, per-dim
+     *       dispatch with mixed-dim fail-loud, {@code collection IN (...)} multi-collection
+     *       union, metadata {@code where} equality predicates ANDed with the text gate,
+     *       {@code nResults} cap, flat row shape ({@code id}, {@code content},
+     *       {@code distance}, {@code collection}, metadata flattened in).
+     *   <li><strong>Filtered-ANN session setting.</strong> The implementation MUST run
+     *       {@code SET LOCAL hnsw.iterative_scan = 'relaxed_order'} before the query,
+     *       exactly like {@link #search} - the text gate + RLS + {@code where} predicates
+     *       narrow the candidate set even harder than plain search, which is precisely the
+     *       filtered-recall risk the setting exists for (RDR-155 research resolution; the
+     *       fixture-scale suite cannot detect its absence, the conexus xr7.8.9
+     *       production-scale recall gate can).
+     *   <li><strong>Trigram gate calibration anchor.</strong> The contract fixture
+     *       pins the gate's discriminating range, not an exact threshold: the typo probe's
+     *       candidate rows sit at word-similarity ≈ 0.9 (and plain trigram similarity
+     *       ≈ 0.5 against these short fixture texts) and MUST pass; the no-signal rows sit
+     *       at ≈ 0.1 and MUST NOT. <strong>P3.2 decision (recorded):</strong>
+     *       {@code queryText <% chunk_text} (word_similarity) with
+     *       {@code SET LOCAL pg_trgm.word_similarity_threshold = 0.6} - the operator form
+     *       is gin_trgm_ops-indexable (vectors-002) where the function-call form is not;
+     *       word_similarity (vs plain similarity) does not dilute with chunk length; the
+     *       per-transaction pin removes cluster-config dependence. P3.G cross-checks this
+     *       against the conexus xr7.8.9 production-scale calibration.
+     * </ul>
+     *
+     * <p><strong>Seam B coverage note (P3.2):</strong> all current suites construct this
+     * repository through the plain-Embedder constructor ({@code queryRouter} null); the
+     * {@link EmbedderRouter#embedOneForCollection} branch of the hybrid query embed is
+     * exercised by the P3.E harness (nexus-h3ked) which wires the production router
+     * constructor - recorded there, not a silent gap.
+     *
+     * <p>No upper bound is applied to {@code nResults} by design: the result-size caps
+     * the Chroma path enforces are Chroma-imposed quotas (RDR-155 §Retire - they fall
+     * away with pgvector). Non-positive values fail loud.
+     *
+     * @param tenant          tenant principal for RLS scoping
+     * @param queryText       search query - used for BOTH the text gate and the
+     *                        server-side query embedding
+     * @param collectionNames collection names to search (filtered union, single query)
+     * @param nResults        maximum rows returned; must be >= 1
+     * @param where           optional metadata equality predicates (ANDed); null/empty = none
+     * @return text-gated rows sorted by cosine distance ascending; same flat row shape
+     *         as {@link #search}
+     * @throws IllegalArgumentException if {@code nResults < 1} (a non-positive LIMIT would
+     *                                  silently unbound the query: LIMIT -1 means no limit)
+     */
+    public List<Map<String, Object>> hybridSearch(String tenant, String queryText,
+                                                  List<String> collectionNames,
+                                                  int nResults,
+                                                  Map<String, Object> where) {
+        if (collectionNames == null || collectionNames.isEmpty()) {
+            return List.of();
+        }
+        if (nResults < 1) {
+            // LIMIT -1 is "no limit" in Postgres - a non-positive value would silently
+            // unbound the query instead of capping it.
+            throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
+        }
+        int dim = dimForCollection(collectionNames.get(0));
+        for (String col : collectionNames) {
+            int colDim = dimForCollection(col);
+            if (colDim != dim) {
+                throw new IllegalArgumentException(
+                    "mixed dimensions in one hybrid-search call: '" + collectionNames.get(0)
+                    + "' is " + dim + "-dim but '" + col + "' is " + colDim
+                    + "-dim - one query vector cannot serve both spaces");
+            }
+        }
+
+        float[] queryVec = (queryRouter != null)
+                ? queryRouter.embedOneForCollection(collectionNames.get(0), queryText)
+                : queryEmbedder.embedOne(queryText);
+        if (queryVec.length != dim) {
+            throw new IllegalArgumentException(
+                "query embedder produced a " + queryVec.length
+                + "-dim vector but the collections dispatch to chunks_" + dim);
+        }
+
+        // Text gate: FTS lexeme match OR word-trigram similarity. The <% operator form
+        // (word_similarity(query, chunk_text) >= pg_trgm.word_similarity_threshold) is
+        // chosen over the explicit function call because only the operator family is
+        // supported by the gin_trgm_ops index (vectors-002); the threshold GUC is pinned
+        // per-transaction below so the gate never depends on cluster config.
+        // word_similarity (not plain similarity): plain similarity dilutes with
+        // chunk_text length and would silently kill the trgm leg on production-size
+        // chunks; word_similarity matches the query against the best continuous extent.
+        StringBuilder sql = new StringBuilder()
+            .append("SELECT chash, chunk_text, collection, metadata::text AS metadata_json,")
+            .append(" (embedding <=> ?::vector) AS distance")
+            .append(" FROM ").append(chunksTable(dim))
+            .append(" WHERE collection IN (").append(placeholders(collectionNames.size())).append(")")
+            .append(" AND (chunk_tsv @@ plainto_tsquery('english', ?) OR ? <% chunk_text)");
+        List<Object> binds = new ArrayList<>();
+        binds.add(vectorLiteral(queryVec));
+        binds.addAll(collectionNames);
+        binds.add(queryText);
+        binds.add(queryText);
+        if (where != null) {
+            for (Map.Entry<String, Object> e : where.entrySet()) {
+                sql.append(" AND metadata->>? = ?");
+                binds.add(e.getKey());
+                binds.add(String.valueOf(e.getValue()));
+            }
+        }
+        sql.append(" ORDER BY distance ASC, chash ASC LIMIT ?");
+        binds.add(nResults);
+
+        Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
+            // Filtered-ANN recall: the text gate + RLS + where predicates narrow the
+            // candidate set even harder than plain search - keep HNSW scanning past
+            // ef_search (contract requirement; SET LOCAL is txn-scoped, pool-safe).
+            ctx.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'");
+            // Trigram gate calibration (contract anchor): word_similarity >= 0.6,
+            // pg_trgm's default - typo-probe candidates sit at ~0.9 and pass, no-signal
+            // rows at ~0.1 do not. Pinned per-transaction so the gate is independent of
+            // cluster-level GUC configuration.
+            ctx.execute("SET LOCAL pg_trgm.word_similarity_threshold = 0.6");
+            return ctx.fetch(sql.toString(), binds.toArray());
+        });
+
+        List<Map<String, Object>> rows = new ArrayList<>(result.size());
+        for (Record rec : result) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id",         rec.get("chash", String.class));
+            row.put("content",    rec.get("chunk_text", String.class));
+            row.put("distance",   rec.get("distance", Double.class));
+            row.put("collection", rec.get("collection", String.class));
+            row.putAll(fromJson(rec.get("metadata_json", String.class)));
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    /**
      * Fetch specific chunk IDs from a collection.
      *
      * @return Chroma-style envelope {@code {ids: List<String>, documents: List<String>,
