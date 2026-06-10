@@ -25,9 +25,13 @@ Phase 4a contract (RDR-155 §Retire; plan nx_plan_audit 4a/4b split):
 * **skp06 stays unbuilt.** The app-layer Chroma tenant guard was superseded by
   native FORCE RLS by tenant_id; nothing may reintroduce it.
 
-T1 is OUT OF SCOPE (RDR-105: T1 stays on local chroma) — this suite scans only
-the T3-scope client constructors (PersistentClient / CloudClient), never T1's
-Ephemeral/Http clients.
+T1 is OUT OF SCOPE (RDR-105: T1 stays on local chroma) — ``db/t1.py``'s
+``chromadb.HttpClient`` constructions (the per-session T1 chroma) are explicitly
+allowlisted. The T3-scope constructors scanned are PersistentClient, CloudClient,
+AND the T3-daemon ``chromadb.HttpClient`` leg (``daemon/t3_client.py``): in local
+mode ``make_t3()`` serves THROUGH that HttpClient to the chroma daemon process,
+so retiring only the PersistentClient/CloudClient constructions would leave a
+live Chroma serving path sheltered (P4a.1 critic finding, 2026-06-10).
 """
 from __future__ import annotations
 
@@ -42,17 +46,23 @@ SERVICE_MAIN = REPO_ROOT / "service" / "src" / "main" / "java" / "dev" / "nexus"
 # T3-scope Chroma clients after the Phase-4a serving retire. P4a.2 creates it.
 ETL_READ_LEG = SRC / "migration" / "chroma_read.py"
 
-# storage_boundary_lint must NAME the banned constructors to enforce the ban.
 _CONSTRUCTION_ALLOWED = {
     ETL_READ_LEG,
+    # The enforcement machinery: its module DOCSTRING spells the banned
+    # constructors in call form (``chromadb.PersistentClient(...)``), which
+    # incidentally matches the scan regex.
     SRC / "storage_boundary_lint.py",
+    # T1's per-session chroma client (RDR-105) — out of RDR-155 scope.
+    SRC / "db" / "t1.py",
 }
 
-# T3-scope Chroma client constructions (T1's Ephemeral/Http clients are out of
-# RDR-155 scope). Matches both `chromadb.PersistentClient(` and bare
-# `PersistentClient(` forms.
+# T3-scope Chroma client constructions. Matches `chromadb.PersistentClient(`,
+# bare `PersistentClient(`, same for CloudClient, plus the QUALIFIED
+# `chromadb.HttpClient(` form (the T3-daemon serving leg in daemon/t3_client.py;
+# the qualified form keeps unrelated HttpClient names out of scope).
 _T3_CLIENT_CONSTRUCTION = re.compile(
     r"\b(?:chromadb\s*\.\s*)?(PersistentClient|CloudClient)\s*\("
+    r"|chromadb\s*\.\s*HttpClient\s*\("
 )
 
 # Java serving-wiring files that must be Chroma-free after P4a.2. The Chroma
@@ -65,10 +75,11 @@ _JAVA_SERVING_FILES = [
     SERVICE_MAIN / "Main.java",
 ]
 
-# `(?<!Pg)VectorRepository` — PgVectorRepository is the pgvector path and is
-# exactly what serving SHOULD reference.
+# `(?<![Pp][Gg])VectorRepository` — Pg/pg-prefixed identifiers
+# (PgVectorRepository, pgVectorRepository) are the pgvector path and are exactly
+# what serving SHOULD reference; only the bare Chroma VectorRepository is banned.
 _JAVA_CHROMA_TOKENS = re.compile(
-    r"ChromaRestClient|LocalChromaServer|ChromaQuotaValidator|(?<!Pg)VectorRepository\b"
+    r"ChromaRestClient|LocalChromaServer|ChromaQuotaValidator|(?<![Pp][Gg])VectorRepository\b"
 )
 
 
@@ -111,6 +122,10 @@ class TestServingConstructionsRetired:
         # The ETL needs BOTH legs (RDR §Migrate): local PersistentClient copy and
         # ChromaCloud REST/auth read. An ETL module with only one leg is a silent
         # half-migration.
+        assert ETL_READ_LEG.is_file(), (
+            f"{ETL_READ_LEG.relative_to(REPO_ROOT)} does not exist yet (P4a.2 "
+            "creates it) — cannot check its read legs"
+        )
         text = ETL_READ_LEG.read_text(encoding="utf-8")
         assert re.search(r"\bPersistentClient\s*\(", text), (
             "ETL read leg must retain the local PersistentClient read path"

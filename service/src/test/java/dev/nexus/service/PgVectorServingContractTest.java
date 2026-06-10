@@ -88,6 +88,8 @@ class PgVectorServingContractTest {
     private static final String TENANT_A = "p4a-tenant-a";
     private static final String TENANT_B = "p4a-tenant-b";
 
+    // Chunk IDs are chosen so lexicographic chash order matches the expected
+    // sequences in the ordered assertions: 'p4a-c1' < 'p4a-c2' < 'p4a-c3' < 'p4a-put1'.
     private static final String COL = "knowledge__p4aserve__voyage-context-3__v1";
     private static final String Q   = "tenant isolation policy";
 
@@ -312,7 +314,9 @@ class PgVectorServingContractTest {
         assertThat((List<Object>) resp.get("ids"))
             .as("store-list paginates in chash order")
             .containsExactly("p4a-c1", "p4a-c2");
-        assertThat(resp).containsKey("metadatas");
+        assertThat((List<?>) resp.get("metadatas"))
+            .as("metadatas aligned with the page of ids")
+            .hasSize(2);
     }
 
     @Test
@@ -328,8 +332,9 @@ class PgVectorServingContractTest {
         try (Connection su = pg.createConnection("");
              var ps = su.prepareStatement(
                  "SELECT chunk_text, metadata->>'frecency_score' FROM nexus.chunks_1024"
-                 + " WHERE collection = ? AND chash = 'p4a-c1'")) {
+                 + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, COL);
+            ps.setString(2, "p4a-c1");
             try (var rs = ps.executeQuery()) {
                 assertThat(rs.next()).isTrue();
                 assertThat(rs.getString(1))
@@ -406,5 +411,54 @@ class PgVectorServingContractTest {
                     .isEqualTo(2L);
             }
         }
+    }
+
+    @Test
+    @Order(12)
+    void upsert_crossTenant_landsInOwnPartitionOnly() throws Exception {
+        // WRITE-side isolation: INSERT goes through the RLS WITH CHECK policy,
+        // a separate path from the SELECT USING policy the read tests exercise.
+        // TOKEN_B may write to the SAME collection name — the row must land in
+        // tenant-B's partition and tenant-A's rows must be untouched.
+        Map<String, Object> resp = postOk("/v1/vectors/upsert-chunks", TOKEN_B, Map.of(
+            "collection", COL,
+            "ids",        List.of("p4a-b1"),
+            "documents",  List.of("the tenant isolation policy guards every row"),
+            "metadatas",  List.of(Map.of("owner", "b"))));
+        assertThat(((Number) resp.get("upserted")).intValue()).isEqualTo(1);
+
+        try (Connection su = pg.createConnection("");
+             var ps = su.prepareStatement(
+                 "SELECT tenant_id, count(*) FROM nexus.chunks_1024"
+                 + " WHERE collection = ? GROUP BY tenant_id ORDER BY tenant_id")) {
+            ps.setString(1, COL);
+            try (var rs = ps.executeQuery()) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getString(1)).isEqualTo(TENANT_A);
+                assertThat(rs.getLong(2))
+                    .as("tenant-a still owns exactly its 2 remaining rows — the "
+                        + "foreign write must not touch them (WITH CHECK)")
+                    .isEqualTo(2L);
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getString(1)).isEqualTo(TENANT_B);
+                assertThat(rs.getLong(2))
+                    .as("tenant-b's write landed in tenant-b's partition")
+                    .isEqualTo(1L);
+                assertThat(rs.next()).isFalse();
+            }
+        }
+    }
+
+    @Test
+    @Order(13)
+    void embedEndpoint_returns503_withoutRouter() throws Exception {
+        // Invariant pin (GREEN now, by design): with no EmbedderRouter wired,
+        // /embed stays an explicit 503 — P4a.2's rewiring of NexusService must
+        // not silently change the embed endpoint's absent-backend behaviour.
+        var resp = post("/v1/vectors/embed", TOKEN_A, Map.of(
+            "collection", COL, "texts", List.of("probe")));
+        assertThat(resp.statusCode())
+            .as("embed without a router is an explicit 503, never a fallback")
+            .isEqualTo(503);
     }
 }
