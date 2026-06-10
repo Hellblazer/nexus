@@ -58,8 +58,17 @@ def _service_token() -> str:
 # ── HTTP transport ────────────────────────────────────────────────────────────
 
 
-def _post(path: str, body: dict, *, tenant: str = "default") -> Any:
-    """POST JSON to the service endpoint, return parsed response body."""
+def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120) -> Any:
+    """POST JSON to the service endpoint, return parsed response body.
+
+    ``timeout`` defaults to 120s for read/search/delete paths. The upsert-chunks
+    call site passes 600s: a 300-chunk CCE (voyage-context-3) upsert batch
+    routinely exceeds 120s server-side (embed is synchronous in the request);
+    the RDR-155 production migration false-timed-out on exactly this until
+    raised (bead nexus-rvfwj, 2026-06-10 — docs__1-16 + docs__1-1 evidence).
+    Per dual-review S2 the raise is deliberately NOT global — a slow search
+    should still fail fast.
+    """
     import urllib.error
     import urllib.request
 
@@ -76,11 +85,7 @@ def _post(path: str, body: dict, *, tenant: str = "default") -> Any:
         method="POST",
     )
     try:
-        # 600s, not 120s: a 300-chunk CCE (voyage-context-3) upsert batch routinely
-        # exceeds 120s server-side (embed is synchronous in the request); the RDR-155
-        # production migration false-timed-out on exactly this until raised
-        # (bead nexus-rvfwj, 2026-06-10 — docs__1-16 + docs__1-1 evidence).
-        with urllib.request.urlopen(req, timeout=600) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         body_bytes = e.read()
@@ -291,7 +296,7 @@ class HttpVectorClient:
             "documents": documents,
             "metadatas": metadatas or [{}] * len(ids),
         }
-        _post("/v1/vectors/upsert-chunks", body, tenant=self._tenant)
+        _post("/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600)
         _log.debug(
             "http_vector_upsert_chunks",
             collection=collection,

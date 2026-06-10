@@ -45,7 +45,13 @@ import java.util.Set;
  *       union ({@code collection IN (...)}), not N separate stores.
  *   <li><strong>Server-side embed unchanged.</strong> Chunk TEXT comes in; this class embeds
  *       via the injected embedders and stores the vector. This is a storage/ANN swap, not a
- *       chunking/embedding rewrite: texts pass through verbatim with zero transformation.
+ *       chunking/embedding rewrite: texts pass through verbatim with exactly ONE carve-out —
+ *       NUL (0x00) bytes are stripped from chunk text and metadata strings before embed+bind,
+ *       because Postgres {@code text}/{@code jsonb} physically cannot store them (Chroma and
+ *       SQLite tolerated them; bead nexus-rvfwj). For NUL-bearing chunks the stored text and
+ *       its embedding therefore differ from the Chroma-era original by NUL removal only; the
+ *       chash remains the caller's identity and is never recomputed from the stored text.
+ *       All other content is stored verbatim.
  *       <strong>Wiring caveat (Seam B):</strong> collection-aware routing only happens
  *       through the {@link EmbedderRouter} constructor - {@code EmbedderRouter.embed()}
  *       (the plain {@link Embedder} interface) always falls back to ONNX regardless of
@@ -445,6 +451,10 @@ public final class PgVectorRepository {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return List.of();
         }
+        // queryText is bound twice below as a raw text parameter (plainto_tsquery +
+        // trgm <%); a NUL-bearing query would hit the same UTF8-0x00 rejection the
+        // upsert path sanitizes (nexus-rvfwj sibling hole, dual-review H1).
+        queryText = stripNul(queryText);
         if (nResults < 1) {
             // LIMIT -1 is "no limit" in Postgres - a non-positive value would silently
             // unbound the query instead of capping it.
@@ -742,7 +752,9 @@ public final class PgVectorRepository {
             for (int i = 0; i < ids.size(); i++) {
                 ctx.execute("UPDATE " + chunksTable(dim)
                             + " SET metadata = ?::jsonb WHERE collection = ? AND chash = ?",
-                            toJson(metadatas.get(i)), collection, ids.get(i));
+                            // Same NUL defense as upsertChunks: jsonb rejects NUL just
+                            // like text does (nexus-rvfwj, dual-review M2).
+                            toJson(sanitizeNulDeep(metadatas.get(i))), collection, ids.get(i));
             }
             return null;
         });

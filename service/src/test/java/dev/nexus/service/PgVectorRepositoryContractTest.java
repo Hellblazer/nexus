@@ -259,6 +259,11 @@ class PgVectorRepositoryContractTest {
         assertThat(superuserChunkText(1024, col, "nul-c2"))
             .as("clean text untouched")
             .isEqualTo("clean text");
+        assertThat(superuserChunkMetadataJson(1024, col, "nul-c1"))
+            .as("metadata string values NUL-stripped too (jsonb rejects NUL like text)")
+            .contains("\"note\"")
+            .contains("\"metanul\"")
+            .doesNotContain("u0000");
     }
 
     @Test
@@ -909,6 +914,21 @@ class PgVectorRepositoryContractTest {
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return rs.getLong(1);
+            }
+        }
+    }
+
+    /** Superuser fetch of one chunk's metadata as JSON text (bypasses RLS). */
+    private String superuserChunkMetadataJson(int dim, String collection, String chash) throws SQLException {
+        try (Connection su = pg.createConnection("");
+             PreparedStatement ps = su.prepareStatement(
+                 "SELECT metadata::text FROM nexus.chunks_" + dim
+                 + " WHERE collection = ? AND chash = ?")) {
+            ps.setString(1, collection);
+            ps.setString(2, chash);
+            try (ResultSet rs = ps.executeQuery()) {
+                assertThat(rs.next()).as("row %s/%s must exist in chunks_%d", collection, chash, dim).isTrue();
+                return rs.getString(1);
             }
         }
     }
