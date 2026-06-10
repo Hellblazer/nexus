@@ -360,6 +360,19 @@ def rollback_collections(
                 "is idempotent). If this collection legitimately holds only "
                 "non-migrated chunks, exclude it via collections=[...]."
             )
+        if removed:
+            # The delete leg of the collection handle ALSO swallows transport
+            # errors — verify the count actually moved by what we deleted
+            # (rollback runs in the same quiescent window as migration).
+            target_after = int(vector_client.count(name))
+            if target_after != target_before - removed:
+                raise RuntimeError(
+                    f"rollback for '{name}': deleted {removed} chunk(s) but the "
+                    f"target count went {target_before} -> {target_after} "
+                    f"(expected {target_before - removed}) — deletes may have "
+                    "been swallowed by the transport layer; verify the service "
+                    "and re-run (rollback is idempotent)."
+                )
         deleted[name] = removed
         _log.info("vector_etl_rollback", collection=name, deleted=removed)
     return deleted

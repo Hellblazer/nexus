@@ -572,6 +572,27 @@ class TestRollbackUnit:
         with pytest.raises(RuntimeError, match="refusing to report a clean zero"):
             rollback_collections(source_client, fake, collections=[name])
 
+    def test_rollback_detects_swallowed_deletes(self, source_client) -> None:
+        """P5.G gate fix (gate-CRE M1, additive strengthening): the DELETE
+        leg of the collection handle also swallows transport errors — a
+        rollback whose deletes silently no-op must fail loud (post-delete
+        count verification), not report deleted == N."""
+        name = _coll("etlrb-noop-delete")
+        _seed_source(source_client, name, 4)
+
+        class _SwallowedDeleteClient(FakeVectorClient):
+            def get_or_create_collection(self, n: str):
+                handle = super().get_or_create_collection(n)
+                handle.delete = lambda ids: None  # transport swallow: no-op
+                return handle
+
+        fake = _SwallowedDeleteClient()
+        migrate_collections(source_client, fake, leg="local")
+        assert fake.count(name) == 4
+
+        with pytest.raises(RuntimeError, match="deletes may have been swallowed"):
+            rollback_collections(source_client, fake, collections=[name])
+
 
 # ── Unit: count verification ──────────────────────────────────────────────────
 
