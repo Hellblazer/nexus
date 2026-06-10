@@ -557,6 +557,21 @@ class TestRollbackUnit:
 
         assert deleted == {name: 0}
 
+    def test_rollback_refuses_false_clean_zero(self, source_client) -> None:
+        """P5.2 review fix (CRE H1 / critic S1, additive strengthening):
+        the service collection handle SWALLOWS transport errors and returns
+        empty lookups — a target that holds chunks while not a single
+        source chash resolves is indistinguishable from a failed read, and
+        must fail loud instead of reporting a clean ``deleted == 0``."""
+        name = _coll("etlrb-swallow")
+        _seed_source(source_client, name, 3)
+        # Target claims 6 chunks (count_delta) but the lookup layer
+        # resolves nothing (empty store) — the swallowed-error signature.
+        fake = FakeVectorClient(count_delta={name: 6})
+
+        with pytest.raises(RuntimeError, match="refusing to report a clean zero"):
+            rollback_collections(source_client, fake, collections=[name])
+
 
 # ── Unit: count verification ──────────────────────────────────────────────────
 
@@ -647,6 +662,16 @@ class TestVerifyTaxonomyConsistencyUnit:
 
         assert verify_taxonomy_consistency(db, fake) == []
 
+    def test_no_visible_collections_fails_loud(self, tmp_path) -> None:
+        """P5.2 review fix (CRE M2, additive strengthening):
+        ``list_collections()`` swallows service errors into ``[]`` — a down
+        service and a never-run migration would both read as 'everything is
+        an orphan'. Neither deserves a quiet all-orphan verdict."""
+        db = _make_t2_with_assignments(tmp_path, [_coll("etltax-down")])
+
+        with pytest.raises(RuntimeError, match="no migrated collections"):
+            verify_taxonomy_consistency(db, FakeVectorClient())
+
 
 # ── Unit: manifest SQL artifacts (c) ─────────────────────────────────────────
 
@@ -705,6 +730,34 @@ class TestManifestSqlArtifacts:
         assert "catalog_document_chunks" in flat
         assert "physical_collection" in flat
         assert "collection is null" in flat
+
+
+class TestModelDimsJavaParity:
+    """P5.2 review fix (CRE M1 / critic S2, additive strengthening): the
+    Python ``_MODEL_DIMS`` registry MIRRORS the Java authority
+    ``PgVectorRepository.MODEL_DIMS``. A Java-side token added without the
+    Python mirror would make the ETL skip that model's collections as
+    non-conformant — reported, but a confusing silent-partial-migration
+    trap. This parses the Java source so drift fails mechanically."""
+
+    def test_python_mirror_matches_java_authority(self) -> None:
+        import re
+
+        from nexus.migration.vector_etl import _MODEL_DIMS
+
+        java_file = (
+            Path(__file__).resolve().parents[2]
+            / "service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java"
+        )
+        java_src = java_file.read_text()
+        block_match = re.search(r"MODEL_DIMS\s*=\s*Map\.of\((.*?)\);", java_src, re.S)
+        assert block_match is not None, "MODEL_DIMS Map.of block not found in Java source"
+        java_map = {
+            token: int(dim)
+            for token, dim in re.findall(r'"([^"]+)",\s*(\d+)', block_match.group(1))
+        }
+        assert java_map, "parsed an empty MODEL_DIMS from the Java source"
+        assert _MODEL_DIMS == java_map
 
 
 # ══ Integration: real Java service + hermetic Postgres 16 ════════════════════

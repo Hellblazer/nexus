@@ -242,6 +242,12 @@ def migrate_collections(
     ``(tenant_id, collection, chash)``). Per-collection failures are
     reported in the :class:`MigrationReport`, never raised — a single bad
     collection must not abort the run (and must not be silently dropped).
+
+    The post-write count verification assumes a QUIESCENT write window:
+    concurrent serving writes into the same collection during the ETL would
+    inflate the target count and read as a (conservative) failure. Run the
+    migration with indexing paused. ``dry_run`` counts via ``col.count()``
+    as a pre-flight estimate, not a binding commitment on a later live run.
     """
     page = page_size or QUOTAS.MAX_QUERY_RESULTS
     names = collections if collections is not None else list_collection_names(read_client)
@@ -327,13 +333,33 @@ def rollback_collections(
     deleted: dict[str, int] = {}
     for name in names:
         handle = vector_client.get_or_create_collection(name)
+        # Reachability probe BEFORE any lookup: count() propagates service
+        # errors, unlike the collection handle's get(), which swallows them
+        # and returns empty — without this, an unreachable service would
+        # read as a clean "deleted 0".
+        target_before = int(vector_client.count(name))
         removed = 0
+        source_ids = 0
         for batch in _iter_id_pages(read_client, name, page):
             ids = [c["id"] for c in batch]
+            source_ids += len(ids)
             present = handle.get(ids=ids, limit=len(ids)).get("ids") or []
             if present:
                 handle.delete(present)
                 removed += len(present)
+        if removed == 0 and source_ids > 0 and target_before > 0:
+            # The target holds chunks and the source has chashes, yet not a
+            # single lookup resolved. The lookup layer swallows transport
+            # errors, so this state is indistinguishable from a failed read
+            # — refuse to report a clean zero (no-silent-fallback rule).
+            raise RuntimeError(
+                f"rollback for '{name}': target holds {target_before} chunk(s) "
+                f"and the source has {source_ids}, but no source chash resolved "
+                "in the target — possible swallowed service errors; refusing to "
+                "report a clean zero. Verify the service and re-run (rollback "
+                "is idempotent). If this collection legitimately holds only "
+                "non-migrated chunks, exclude it via collections=[...]."
+            )
         deleted[name] = removed
         _log.info("vector_etl_rollback", collection=name, deleted=removed)
     return deleted
@@ -380,6 +406,17 @@ def verify_taxonomy_consistency(
         conn.close()
     referenced = {r[0] for r in rows}
     migrated = {c.get("name") for c in vector_client.list_collections()}
+    if referenced and not migrated:
+        # list_collections() swallows service errors and returns [] — an
+        # unreachable service and a never-run migration would both produce
+        # an all-orphan verdict. Neither deserves a quiet list of "orphans":
+        # fail loud and let the operator disambiguate.
+        raise RuntimeError(
+            "taxonomy-consistency check: no migrated collections are visible "
+            "through the service (service down, or migration not yet run) — "
+            f"refusing to report all {len(referenced)} referenced "
+            "collection(s) as orphans."
+        )
     unresolved = sorted(referenced - migrated)
     if unresolved:
         _log.warning(
@@ -421,6 +458,10 @@ def manifest_orphan_sql(dim: int) -> str:
     to *dim* — without that filter every other-dim row would be a false
     orphan. Rows with ``collection IS NULL`` are pre-backfill state, not
     orphans (run :func:`manifest_backfill_sql` first).
+
+    Returns orphans across ALL tenants (no outer tenant filter) — intended
+    for superuser/admin cutover validation, where the whole-database answer
+    is the point.
     """
     if dim not in _KNOWN_DIMS:
         raise ValueError(
