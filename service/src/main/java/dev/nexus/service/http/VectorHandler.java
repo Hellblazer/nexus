@@ -227,6 +227,11 @@ public final class VectorHandler implements HttpHandler {
                     "error", "hybrid-search endpoint not configured (no pgvector repository)")));
             return;
         }
+        // Defense-in-depth, deliberately redundant: AuthFilter rejects unauthenticated
+        // requests before this handler runs, and TenantScope.withTenant fails loud on a
+        // blank tenant. This guard exists because the pgvector path's tenant boundary is
+        // RLS (unlike the Chroma routes, where collection names encode scope) - if this
+        // handler is ever instantiated without the filter, it must refuse, not widen.
         String tenant = RequestContext.tenant();
         if (tenant == null || tenant.isBlank()) {
             HttpUtil.send(ex, 401, json(Map.of("error", "no resolved tenant for request")));

@@ -95,14 +95,17 @@ class VectorHybridHttpTest {
                 .update(new Contexts());
         }
         // Bind one token per tenant (server-side tenant resolution under test).
-        try (Connection su = pg.createConnection("")) {
+        try (Connection su = pg.createConnection("");
+             var ps = su.prepareStatement(
+                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label)"
+                 + " VALUES (?, ?, ?) ON CONFLICT (token_hash) DO NOTHING")) {
             su.setAutoCommit(true);
             for (var bound : List.of(Map.entry(TOKEN_A, TENANT_A),
                                      Map.entry(TOKEN_B, TENANT_B))) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES ('"
-                    + TokenHashing.sha256Hex(bound.getKey()) + "', '" + bound.getValue()
-                    + "', 'hybrid-http-test') ON CONFLICT (token_hash) DO NOTHING");
+                ps.setString(1, TokenHashing.sha256Hex(bound.getKey()));
+                ps.setString(2, bound.getValue());
+                ps.setString(3, "hybrid-http-test");
+                ps.executeUpdate();
             }
         }
 

@@ -400,14 +400,26 @@ public final class PgVectorRepository {
      *       against the conexus xr7.8.9 production-scale calibration.
      * </ul>
      *
+     * <p><strong>Seam B coverage note (P3.2):</strong> all current suites construct this
+     * repository through the plain-Embedder constructor ({@code queryRouter} null); the
+     * {@link EmbedderRouter#embedOneForCollection} branch of the hybrid query embed is
+     * exercised by the P3.E harness (nexus-h3ked) which wires the production router
+     * constructor - recorded there, not a silent gap.
+     *
+     * <p>No upper bound is applied to {@code nResults} by design: the result-size caps
+     * the Chroma path enforces are Chroma-imposed quotas (RDR-155 §Retire - they fall
+     * away with pgvector). Non-positive values fail loud.
+     *
      * @param tenant          tenant principal for RLS scoping
      * @param queryText       search query - used for BOTH the text gate and the
      *                        server-side query embedding
      * @param collectionNames collection names to search (filtered union, single query)
-     * @param nResults        maximum rows returned
+     * @param nResults        maximum rows returned; must be >= 1
      * @param where           optional metadata equality predicates (ANDed); null/empty = none
      * @return text-gated rows sorted by cosine distance ascending; same flat row shape
      *         as {@link #search}
+     * @throws IllegalArgumentException if {@code nResults < 1} (a non-positive LIMIT would
+     *                                  silently unbound the query: LIMIT -1 means no limit)
      */
     public List<Map<String, Object>> hybridSearch(String tenant, String queryText,
                                                   List<String> collectionNames,
@@ -415,6 +427,11 @@ public final class PgVectorRepository {
                                                   Map<String, Object> where) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return List.of();
+        }
+        if (nResults < 1) {
+            // LIMIT -1 is "no limit" in Postgres - a non-positive value would silently
+            // unbound the query instead of capping it.
+            throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
         }
         int dim = dimForCollection(collectionNames.get(0));
         for (String col : collectionNames) {
