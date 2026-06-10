@@ -26,6 +26,10 @@ def _report(leg: str, *results: CollectionResult) -> MigrationReport:
 @pytest.fixture()
 def runner(monkeypatch) -> CliRunner:
     monkeypatch.setenv("NX_SERVICE_TOKEN", "cli-test-token")
+    # nexus-pebfx.1: the hardcoded :8080 default URL is retired (resolution is
+    # env > ServiceRegistry lease > fail loud), so tests must pin BOTH halves.
+    # The engine functions are monkeypatched below; no HTTP ever happens.
+    monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:1")
     return CliRunner()
 
 
