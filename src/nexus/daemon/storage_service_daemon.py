@@ -367,13 +367,11 @@ class StorageServiceSupervisor:
             if k in self._creds:
                 env[k] = self._creds[k]
         env["NX_SERVICE_PORT"] = str(port)
-        # NX_CHROMA_PATH: point service at the same chroma data the T3 daemon manages.
-        if "NX_CHROMA_PATH" not in env:
-            try:
-                from nexus.config import _default_local_path
-                env["NX_CHROMA_PATH"] = str(_default_local_path())
-            except Exception:
-                pass
+        # NX_CHROMA_PATH injection removed (RDR-155 P4a.2, nexus-1k8s1): the
+        # Java service no longer reads any NX_CHROMA_* variable — it serves
+        # vectors from pgvector. Leaving the injection in place was harmless
+        # but misleading to operators inspecting the process env (P4a.2
+        # dual-review finding M-2).
         # Use the stable token so clients don't get 401 after a restart.
         env["NX_SERVICE_TOKEN"] = self._service_token
 

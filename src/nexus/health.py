@@ -254,6 +254,10 @@ def _check_t3_local() -> list[HealthResult]:
 
     results: list[HealthResult] = []
     results.append(HealthResult(label="T3 mode", ok=True, detail="local (no API keys needed)"))
+    # RDR-155 P4a.2 (nexus-1k8s1): the nexus-service serves T3 in local mode
+    # too — probe it unconditionally (critique finding 2: a pgvector-only
+    # install with the service down must not doctor all-green).
+    results.append(_check_vector_service())
 
     local_path = _default_local_path()
     path_exists = local_path.exists()
@@ -334,11 +338,43 @@ def _check_t3_local() -> list[HealthResult]:
     return results
 
 
+def _check_vector_service() -> HealthResult:
+    """Reachability probe for the pgvector-backed vector serving surface.
+
+    RDR-155 P4a.2 (nexus-1k8s1): post-cutover the nexus-service IS the T3
+    serving path in BOTH modes, so this probe runs unconditionally — it must
+    not be gated on legacy ChromaCloud credential presence (a pgvector-only
+    install with the service down would otherwise doctor all-green;
+    P4a.2 critique finding 2).
+    """
+    try:
+        # Raw GET so failures surface (HttpVectorClient.list_collections
+        # deliberately swallows errors for its callers).
+        from nexus.db.http_vector_client import _get
+        _get("/v1/vectors/collections")
+        return HealthResult(
+            label="Vector service (/v1/vectors)", ok=True, detail="reachable",
+        )
+    except Exception as exc:
+        _log.debug("vector_service_not_reachable", error=str(exc))
+        return HealthResult(
+            label="Vector service (/v1/vectors)",
+            ok=False,
+            detail="not reachable",
+            fix_suggestions=[
+                "Start the nexus-service (pgvector backend) and export "
+                "NX_SERVICE_URL / NX_SERVICE_TOKEN.",
+            ],
+            fatal=True,
+        )
+
+
 def _check_t3_cloud() -> list[HealthResult]:
     from nexus.config import get_credential
 
     results: list[HealthResult] = []
     results.append(HealthResult(label="T3 mode", ok=True, detail="cloud"))
+    results.append(_check_vector_service())
 
     # CHROMA_API_KEY
     chroma_key = get_credential("chroma_api_key")
@@ -381,32 +417,12 @@ def _check_t3_cloud() -> list[HealthResult]:
         ]
     results.append(r)
 
-    # Vector-serving reachability (RDR-155 P4a.2, nexus-1k8s1): the direct
-    # ChromaDB Cloud probe retired with the serving path — T3 serving routes
-    # through the pgvector-backed nexus-service, so the probe that matters is
-    # the service's vector surface. The ChromaCloud credentials above still
-    # matter: the Phase-5 ETL reads the legacy store through them.
-    if chroma_key and chroma_database:
-        try:
-            # Raw GET so failures surface (HttpVectorClient.list_collections
-            # deliberately swallows errors for its callers).
-            from nexus.db.http_vector_client import _get
-            _get("/v1/vectors/collections")
-            results.append(HealthResult(
-                label="Vector service (/v1/vectors)", ok=True, detail="reachable",
-            ))
-        except Exception as exc:
-            _log.debug("vector_service_not_reachable", error=str(exc))
-            results.append(HealthResult(
-                label="Vector service (/v1/vectors)",
-                ok=False,
-                detail="not reachable",
-                fix_suggestions=[
-                    "Start the nexus-service (pgvector backend) and export "
-                    "NX_SERVICE_URL / NX_SERVICE_TOKEN.",
-                ],
-                fatal=True,
-            ))
+    # Vector-serving reachability is probed UNCONDITIONALLY at the top of
+    # this function via _check_vector_service() (RDR-155 P4a.2): the direct
+    # ChromaDB Cloud probe retired with the serving path, and the service
+    # probe must not be gated on legacy ChromaCloud credential presence.
+    # The ChromaCloud credentials above still matter: the Phase-5 ETL reads
+    # the legacy store through them.
 
     # VOYAGE_API_KEY
     voyage_key = get_credential("voyage_api_key")

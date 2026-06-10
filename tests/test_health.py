@@ -134,6 +134,7 @@ def test_t3_collections_census_via_service(tmp_path, monkeypatch) -> None:
             return [{"name": "knowledge__a"}, {"name": "code__b"}, {"name": "rdr__c"}]
 
     monkeypatch.setattr("nexus.db.make_t3", lambda **kw: _StubServiceClient())
+    monkeypatch.setattr("nexus.db.http_vector_client._get", lambda *a, **kw: [])
     results = _check_t3_local()
     line = next((r for r in results if r.label == "T3 collections"), None)
     assert line is not None
@@ -155,11 +156,51 @@ def test_t3_collections_census_degrades_when_service_unreachable(
         raise RuntimeError("service down")
 
     monkeypatch.setattr("nexus.db.make_t3", _boom)
+    monkeypatch.setattr("nexus.db.http_vector_client._get", lambda *a, **kw: [])
     results = _check_t3_local()
     line = next((r for r in results if r.label == "T3 collections"), None)
     assert line is not None
     assert line.ok is True
     assert "could not query" in line.detail
+
+
+def test_vector_service_probe_unconditional_and_fatal(monkeypatch, tmp_path) -> None:
+    """RDR-155 P4a.2 dual-review finding 2 (substantive-critic): the vector
+    service probe must fire in BOTH mode branches and without legacy Chroma
+    credentials — a pgvector-only install with the service down must not
+    doctor all-green. Service-down is a FATAL failure."""
+    from nexus.health import _check_t3_cloud, _check_t3_local
+
+    def _down(*a, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    # Local branch (census stubbed; the probe is what's under test).
+    monkeypatch.setattr("nexus.config._default_local_path", lambda: tmp_path / "nope")
+    monkeypatch.setattr("nexus.db.make_t3", _down)
+    local_line = next(
+        (r for r in _check_t3_local() if r.label == "Vector service (/v1/vectors)"),
+        None,
+    )
+    assert local_line is not None and local_line.ok is False and local_line.fatal
+
+    # Cloud branch with NO chroma credentials at all (the fresh-install shape).
+    monkeypatch.setattr("nexus.config.get_credential", lambda k: "")
+    cloud_line = next(
+        (r for r in _check_t3_cloud() if r.label == "Vector service (/v1/vectors)"),
+        None,
+    )
+    assert cloud_line is not None and cloud_line.ok is False and cloud_line.fatal
+
+
+def test_vector_service_probe_reachable(monkeypatch) -> None:
+    """Probe reports reachable when the service answers."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", lambda *a, **kw: [])
+    line = _check_vector_service()
+    assert line.ok is True
+    assert "reachable" in line.detail
 
 
 def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> None:

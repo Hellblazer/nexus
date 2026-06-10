@@ -1785,8 +1785,15 @@ def apply_hnsw_ef(db: "T3Database") -> int:
     ``hnsw:search_ef`` to the value from config (default 256).
 
     Returns the number of collections updated, or 0 if *db* is in cloud mode
-    (SPANN does not use HNSW tuning parameters).
+    (SPANN does not use HNSW tuning parameters) or is the service-backed
+    handle (the chroma ``hnsw:search_ef`` knob retired with the serving
+    path — pgvector tunes HNSW server-side via ``SET LOCAL
+    hnsw.iterative_scan``; RDR-155 P4a.2, nexus-1k8s1).
     """
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415
+
+    if is_service_backed(db):
+        return 0
     if not db._local_mode:
         return 0
 

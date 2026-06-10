@@ -123,13 +123,25 @@ public final class NexusService {
                         Object retiredChromaRepositorySlot,
                         EmbedderRouter docEmbedderRouter,
                         PgVectorRepository pgVectorRepository) throws IOException {
-        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository);
+        // Validation happens INSIDE the delegation expression so it runs BEFORE
+        // any resource creation — a post-this() check would leak the bound
+        // HTTP socket and the started sweep-scheduler thread on rejection
+        // (P4a.2 dual-review finding M-1/A-1).
+        this(port, token, dataSource,
+             requireRetiredSlotNull(retiredChromaRepositorySlot, docEmbedderRouter),
+             pgVectorRepository);
+    }
+
+    /** Fail-loud gate for the retired Chroma slot; returns the router unchanged. */
+    private static EmbedderRouter requireRetiredSlotNull(
+            Object retiredChromaRepositorySlot, EmbedderRouter docEmbedderRouter) {
         if (retiredChromaRepositorySlot != null) {
             throw new IllegalArgumentException(
                 "the Chroma repository slot is retired (RDR-155 Phase 4a): vector serving "
                 + "routes exclusively through PgVectorRepository — pass null or use the "
                 + "5-arg constructor");
         }
+        return docEmbedderRouter;
     }
 
     /**

@@ -82,7 +82,9 @@ def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
     if cloud_client is not None:
         patches.append(patch("nexus.db.http_vector_client._get",
                              **cloud_client))
-    elif cred and not callable(cred):
+    else:
+        # The probe runs UNCONDITIONALLY post-cutover (critique finding 2) —
+        # always stub it so no doctor invocation makes a real HTTP attempt.
         patches.append(patch("nexus.db.http_vector_client._get",
                              return_value=[]))
     patches.extend(extra_patches or [])
@@ -376,6 +378,8 @@ def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
             "nexus.repos.list_repos_dual",
             side_effect=lambda **_: list(mock_reg.all()),
         ),
+        # Unconditional service probe (critique finding 2) — stub it green.
+        patch("nexus.db.http_vector_client._get", return_value=[]),
     ):
         result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0
@@ -411,6 +415,8 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
             side_effect=lambda **_: list(mock_reg.all()),
         ),
         patch("nexus.db.make_t3", return_value=_StubServiceClient()),
+        # Unconditional service probe (critique finding 2) — stub it green.
+        patch("nexus.db.http_vector_client._get", return_value=[]),
     ):
         result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0
