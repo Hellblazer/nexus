@@ -59,7 +59,11 @@ _VECTORS_BACKEND_ENV = "NX_STORAGE_BACKEND_VECTORS"
 
 _endpoint_lock = threading.Lock()
 #: Cached (base_url, token) from the LEASE only — env halves are read fresh.
-_lease_cache: tuple[str | None, str | None] | None = None
+#: Module-global: shared by every HttpVectorClient instance and thread in the
+#: process (the client itself is a process-wide singleton). Populated only on
+#: a SUCCESSFUL discovery — a missing lease is never cached, so a client
+#: started before the supervisor picks the lease up as soon as it appears.
+_lease_cache: tuple[str, str | None] | None = None
 
 
 def _discover_lease() -> tuple[str | None, str | None]:
@@ -91,10 +95,23 @@ def _resolve_endpoint() -> tuple[str, str]:
     if url is None or token is None:
         with _endpoint_lock:
             if _lease_cache is None:
-                _lease_cache = _discover_lease()
-            lease_url, lease_token = _lease_cache
+                discovered = _discover_lease()
+                if discovered[0] is not None:
+                    # Cache ONLY on success: a (None, None) miss must not
+                    # stick, or a client started before the supervisor would
+                    # never discover it (dual-review S1).
+                    _lease_cache = discovered  # type: ignore[assignment]
+            lease_url, lease_token = _lease_cache or (None, None)
         url = url or lease_url
         token = token or lease_token
+        if env_url is not None and token is lease_token and token is not None:
+            _log.debug(
+                "vector_endpoint_mixed_source", url_source="env", token_source="lease"
+            )
+        elif env_token is not None and url is lease_url and url is not None:
+            _log.debug(
+                "vector_endpoint_mixed_source", url_source="lease", token_source="env"
+            )
     if url is None or token is None:
         raise RuntimeError(
             "nexus-service endpoint is not resolvable: T3 vector serving "
@@ -115,16 +132,25 @@ def _invalidate_endpoint() -> None:
 
 
 def _is_retryable_endpoint_error(exc: Exception) -> bool:
-    """401 (token rotated + republished) or connection-refused (supervisor
-    restarted on a new port) — the two auto-restart signatures."""
+    """The three auto-restart signatures (dual-review S2 added RST):
+
+    - 401: token rotated + republished with the lease.
+    - connection refused: supervisor restarted; old port is dead.
+    - connection reset (incl. ``http.client.RemoteDisconnected``): the
+      supervisor SIGTERMs the JVM process group on restart, so a request
+      IN FLIGHT at restart time gets a TCP RST, not a refusal. Every
+      operation this client issues is idempotent (upsert on
+      (tenant, collection, chash) ON CONFLICT; deletes; reads), so a
+      single retry after a mid-flight reset is safe.
+    """
     import urllib.error
 
     if isinstance(exc, urllib.error.HTTPError):
         return exc.code == 401
     if isinstance(exc, urllib.error.URLError):
         reason = getattr(exc, "reason", None)
-        return isinstance(reason, ConnectionRefusedError)
-    return isinstance(exc, ConnectionRefusedError)
+        return isinstance(reason, (ConnectionRefusedError, ConnectionResetError))
+    return isinstance(exc, (ConnectionRefusedError, ConnectionResetError))
 
 
 # ── HTTP transport ────────────────────────────────────────────────────────────
@@ -172,7 +198,10 @@ def _request(
 
     try:
         return _request_once(method, path, tenant=tenant, timeout=timeout, body=body)
-    except Exception as exc:
+    # Narrow catch (dual-review H1): only the transport/auth error families
+    # participate in retry classification. RuntimeError from an unresolvable
+    # endpoint propagates untouched — fail-loud must never become a retry.
+    except (urllib.error.URLError, ConnectionRefusedError, ConnectionResetError) as exc:
         if not _is_retryable_endpoint_error(exc):
             raise
         _log.info(

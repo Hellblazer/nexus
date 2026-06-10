@@ -77,6 +77,14 @@ def _resolve_config() -> tuple[str, int, str]:
     ServiceRegistry lease the supervisor publishes (the port churns on
     every restart, so env-only resolution broke after any auto-restart).
     Unresolvable fails loud.
+
+    RESTART-SAFETY CONTRACT (dual-review H2): unlike the vector client,
+    ``HttpCatalogClient`` resolves ONCE at construction and holds a
+    long-lived ``httpx.Client`` — there is no per-request re-resolve.
+    Restart ride-through therefore rests on callers constructing a fresh
+    client per operation (the ``get_catalog()`` MCP pattern: "no
+    process-level caching"). Do NOT cache an ``HttpCatalogClient``
+    instance across operations that may span a supervisor restart.
     """
     env_host = os.environ.get("NX_SERVICE_HOST", "").strip()
     port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
@@ -97,10 +105,11 @@ def _resolve_config() -> tuple[str, int, str]:
 
         lease_url, lease_token = _discover_lease()
         if lease_url is not None:
-            # lease_url is "http://<host>:<port>" by construction.
-            lease_host, _, lease_port = lease_url.removeprefix("http://").rpartition(":")
-            host = host or lease_host
-            port = port if port is not None else int(lease_port)
+            from urllib.parse import urlsplit
+
+            parsed = urlsplit(lease_url)
+            host = host or parsed.hostname
+            port = port if port is not None else parsed.port
         token = token or lease_token
     host = host or "127.0.0.1"
 
@@ -166,8 +175,12 @@ class HttpCatalogClient:
                 _token = os.environ.get("NX_SERVICE_TOKEN", "")
                 if not _token:
                     raise RuntimeError(
-                        "NX_SERVICE_TOKEN is required when "
-                        "NX_STORAGE_BACKEND_CATALOG=service."
+                        "NX_SERVICE_TOKEN is required when an explicit "
+                        "base_url is passed (NX_STORAGE_BACKEND_CATALOG="
+                        "service): with a caller-chosen URL the supervisor "
+                        "lease token may not match — export the token, or "
+                        "omit base_url to auto-discover both halves from "
+                        "the lease ('nx daemon service start')."
                     )
             self._base_url = base_url.rstrip("/")
         else:

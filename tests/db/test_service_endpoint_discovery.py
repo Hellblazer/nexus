@@ -265,3 +265,68 @@ class TestCatalogClientResolution:
         msg = str(exc_info.value)
         assert "nx daemon service start" in msg
         assert "NX_SERVICE_PORT" in msg
+
+
+# ── dual-review fixes (S1, S2) + AUDIT closure (make_t3 serving path) ────────
+
+
+class _OneShotResetHandler(_StubHandler):
+    """First request: abrupt close (TCP RST / RemoteDisconnected — the
+    mid-flight supervisor-SIGTERM signature). Subsequent requests: normal."""
+
+    def do_POST(self):  # noqa: N802
+        if not getattr(self.server, "reset_done", False):
+            self.server.reset_done = True  # type: ignore[attr-defined]
+            self.connection.close()
+            return
+        super().do_POST()
+
+
+class TestDualReviewFixes:
+    def test_lease_miss_is_not_cached_supervisor_starts_later(self):
+        """S1: a client that resolves BEFORE the supervisor publishes its
+        lease must pick the lease up on a later call without a process
+        restart — a (None, None) miss must never stick."""
+        from nexus.db import http_vector_client as hvc
+
+        with pytest.raises(RuntimeError):
+            hvc._resolve_endpoint()  # supervisor not up yet
+
+        _publish_lease(port=4242, token="late-token")  # supervisor arrives
+        url, token = hvc._resolve_endpoint()
+        assert url == "http://127.0.0.1:4242"
+        assert token == "late-token"
+
+    def test_midflight_reset_retries(self):
+        """S2: an in-flight request at supervisor-restart time gets a TCP
+        RST (RemoteDisconnected), not a refusal — it must re-resolve and
+        retry once, same as refused."""
+        from nexus.db import http_vector_client as hvc
+
+        srv = HTTPServer(("127.0.0.1", 0), _OneShotResetHandler)
+        srv.expected_token = None  # type: ignore[attr-defined]
+        srv.request_auths = []  # type: ignore[attr-defined]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            _publish_lease(port=srv.server_address[1], token="tok")
+            result = hvc._post("/v1/vectors/search", {"q": "x"})
+            assert result["ok"] is True
+        finally:
+            srv.shutdown()
+
+
+class TestServingPathAuditClosure:
+    def test_make_t3_serves_via_lease_with_no_env(self, stub_server):
+        """The bead's AUDIT clause: the post-P4a serving path must work
+        out-of-box with NO env set when the supervisor lease exists —
+        ``make_t3()`` → ``HttpVectorClient`` → request resolves via the
+        lease (this was exactly the broken-for-installed-users scenario)."""
+        from nexus.db import make_t3
+
+        _publish_lease(port=stub_server.server_address[1], token="lease-tok")
+        t3 = make_t3()
+        t3.search("anything", ["knowledge__x__minilm-l6-v2-384__v1"])
+        # The proof: the request reached the stub authenticated with the
+        # LEASE token, with zero env plumbing.
+        assert stub_server.request_auths == ["Bearer lease-tok"]
