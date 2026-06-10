@@ -11,6 +11,7 @@ from typing import Any
 import structlog
 
 from nexus.config import get_telemetry_config, load_config
+from nexus.db.http_vector_client import VectorServiceError
 from nexus.types import SearchResult
 
 _log = structlog.get_logger(__name__)
@@ -43,6 +44,10 @@ class SearchDiagnostics:
     )
     total_dropped: int = 0
     total_raw: int = 0
+    # nexus-pebfx.8: collections the backend refused to serve (e.g. service-mode
+    # HTTP 400 on an embedding-space mismatch), name → error text. These are
+    # excluded from ``per_collection`` so threshold telemetry stays clean.
+    failed_collections: dict[str, str] = field(default_factory=dict)
 
     def collections_with_drops(self) -> int:
         return sum(
@@ -463,6 +468,7 @@ def search_cross_corpus(
 
     all_results: list[SearchResult] = []
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
+    failed_collections: dict[str, str] = {}
     total_dropped = 0
     total_raw = 0
     # Per-collection raw min-distance accumulator for search_telemetry rows.
@@ -482,7 +488,19 @@ def search_cross_corpus(
             threshold = threshold_override
         else:
             threshold = _threshold_for_collection(col, cfg)
-        raw = t3.search(query, [col], n_results=per_k, where=effective_where)
+        try:
+            raw = t3.search(query, [col], n_results=per_k, where=effective_where)
+        except VectorServiceError as exc:
+            # nexus-pebfx.8: one unservable collection (embedding-space
+            # mismatch → service-side HTTP 400) must not sink the whole
+            # cross-corpus search. Skip it, keep the rest.
+            failed_collections[col] = str(exc)
+            _log.warning(
+                "collection_search_failed",
+                collection=col,
+                error=str(exc),
+            )
+            continue
         dropped = 0
         # Minimum distance among dropped items — best-of-dropped, used by
         # SearchDiagnostics.worst_offender() for the "threshold bump" hint.
@@ -521,11 +539,20 @@ def search_cross_corpus(
                 threshold=threshold,
             )
 
+    if failed_collections and len(failed_collections) == len(collections):
+        # Nothing was servable — surface the failure instead of silently
+        # returning zero results (a misconfigured service must fail loud).
+        raise VectorServiceError(
+            f"all {len(collections)} collections failed: "
+            + "; ".join(f"{c}: {e}" for c, e in failed_collections.items()),
+        )
+
     if diagnostics_out is not None:
         diagnostics_out.append(SearchDiagnostics(
             per_collection=diag_per_collection,
             total_dropped=total_dropped,
             total_raw=total_raw,
+            failed_collections=failed_collections,
         ))
 
     # RDR-087 Phase 2.2: persist per-call threshold-filter telemetry.

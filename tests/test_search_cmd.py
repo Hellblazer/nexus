@@ -892,3 +892,27 @@ def test_silent_zero_picks_worst_offender_across_collections(
     # Must NOT report the other collection's threshold as if it were worst.
     assert "code__a" not in result.output.split("knowledge__b")[0] or \
         "top_distance 0.82" in result.output
+
+
+# ── Service-error surface (nexus-pebfx.8) ───────────────────────────────────
+
+
+def test_vector_service_error_renders_clean_message(runner: CliRunner, cloud_env) -> None:
+    """An all-collections-failed VectorServiceError surfaces as a clean
+    click error, not a raw traceback (nexus-pebfx.8 secondary issue)."""
+    from nexus.db.http_vector_client import VectorServiceError
+
+    mock_t3 = _mock_t3()
+    err = VectorServiceError(
+        "all 1 collections failed: knowledge__test: POST /v1/vectors/search "
+        "→ HTTP 400: query embedder produced a 1024-dim vector but the "
+        "collections dispatch to chunks_384",
+    )
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=err), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        res = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
+    assert res.exit_code == 1
+    assert "HTTP 400" in res.output
+    assert "Traceback" not in res.output
+    assert not isinstance(res.exception, VectorServiceError)

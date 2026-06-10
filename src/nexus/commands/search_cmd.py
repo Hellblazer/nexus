@@ -19,6 +19,7 @@ from nexus.formatters import (
     format_vimgrep,
 )
 from nexus.scoring import RG_FLOOR_SCORE, apply_hybrid_scoring, rerank_results, round_robin_interleave
+from nexus.db.http_vector_client import VectorServiceError
 from nexus.search_engine import SearchDiagnostics, search_cross_corpus
 from nexus.types import SearchResult
 
@@ -326,7 +327,12 @@ def search_cmd(
                 raw.extend(_rg_hit_to_result(h) for h in rg_hits)
         return raw
 
-    results = _retrieve(query)
+    try:
+        results = _retrieve(query)
+    except VectorServiceError as exc:
+        # nexus-pebfx.8: every targeted collection was unservable — show the
+        # service's error body cleanly instead of a raw traceback.
+        raise click.ClickException(str(exc)) from exc
 
     if not results:
         _maybe_emit_silent_zero_note(
