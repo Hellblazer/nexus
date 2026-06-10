@@ -69,24 +69,48 @@ DEFAULT_TENANT: str = "default"
 
 
 def _resolve_config() -> tuple[str, int, str]:
-    """Return (host, port, token) from environment."""
-    host = os.environ.get("NX_SERVICE_HOST", "127.0.0.1")
-    port_str = os.environ.get("NX_SERVICE_PORT", "")
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not port_str:
+    """Return (host, port, token): env first, then the supervisor's lease.
+
+    nexus-pebfx.1: same resolution discipline as the vector client —
+    ``NX_SERVICE_HOST`` / ``NX_SERVICE_PORT`` / ``NX_SERVICE_TOKEN`` env
+    halves override individually; missing halves come from the
+    ServiceRegistry lease the supervisor publishes (the port churns on
+    every restart, so env-only resolution broke after any auto-restart).
+    Unresolvable fails loud.
+    """
+    env_host = os.environ.get("NX_SERVICE_HOST", "").strip()
+    port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
+    env_token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
+
+    port: int | None = None
+    if port_str:
+        try:
+            port = int(port_str)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"NX_SERVICE_PORT must be an integer, got: {port_str!r}"
+            ) from exc
+
+    host, token = env_host or None, env_token or None
+    if port is None or token is None or host is None:
+        from nexus.db.http_vector_client import _discover_lease
+
+        lease_url, lease_token = _discover_lease()
+        if lease_url is not None:
+            # lease_url is "http://<host>:<port>" by construction.
+            lease_host, _, lease_port = lease_url.removeprefix("http://").rpartition(":")
+            host = host or lease_host
+            port = port if port is not None else int(lease_port)
+        token = token or lease_token
+    host = host or "127.0.0.1"
+
+    if port is None or not token:
         raise RuntimeError(
-            "NX_SERVICE_PORT is required when NX_STORAGE_BACKEND_CATALOG=service. "
-            "Set it to the port where the nexus-service is listening."
-        )
-    try:
-        port = int(port_str)
-    except ValueError as exc:
-        raise RuntimeError(
-            f"NX_SERVICE_PORT must be an integer, got: {port_str!r}"
-        ) from exc
-    if not token:
-        raise RuntimeError(
-            "NX_SERVICE_TOKEN is required when NX_STORAGE_BACKEND_CATALOG=service."
+            "nexus-service endpoint is not resolvable for the catalog client "
+            "(NX_STORAGE_BACKEND_CATALOG=service): start the supervisor with "
+            "'nx daemon service start' (publishes the endpoint lease), or set "
+            "NX_SERVICE_PORT / NX_SERVICE_TOKEN (and optionally "
+            "NX_SERVICE_HOST) explicitly."
         )
     return host, port, token
 

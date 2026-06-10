@@ -926,14 +926,21 @@ def migrate_vectors_cmd(
     if dry_run and rollback:
         raise click.ClickException("--dry-run and --rollback are mutually exclusive.")
 
-    token = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not token:
-        raise click.ClickException(
-            "NX_SERVICE_TOKEN is required for storage migrate vectors.\n"
-            "Set it to the bearer token configured in the nexus-service."
-        )
+    # No explicit NX_SERVICE_TOKEN gate (nexus-pebfx.1): the client resolves
+    # {url, token} from the supervisor's ServiceRegistry lease, with env as
+    # the override. Pre-flight the resolution here so an unresolvable
+    # endpoint is a clean early error BEFORE the (potentially long) source
+    # read — except for --dry-run, which only counts source chunks and
+    # never touches the service at all.
     if service_url:
         os.environ["NX_SERVICE_URL"] = service_url
+    if not dry_run:
+        from nexus.db.http_vector_client import _resolve_endpoint
+
+        try:
+            _resolve_endpoint()
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc))
 
     from nexus.db.http_vector_client import HttpVectorClient
 

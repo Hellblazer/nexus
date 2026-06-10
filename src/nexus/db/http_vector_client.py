@@ -15,6 +15,13 @@ pgvector and embeds server-side. ``NX_STORAGE_BACKEND_VECTORS=service``
 survives only as the indexer-side opt-in that skips Python-side
 embedding (see :func:`is_vector_service_mode`).
 
+Endpoint discovery (nexus-pebfx.1): ``{url, token}`` resolve from the
+supervisor's ServiceRegistry lease (``storage_service_addr.<uid>``) by
+default, with ``NX_SERVICE_URL`` / ``NX_SERVICE_TOKEN`` env as per-half
+overrides and a single re-resolve retry on 401/connection-refused so
+clients ride through supervisor auto-restarts (the port churns on every
+restart). No hardcoded fallback URL — unresolvable fails loud.
+
 Chunking stays in Python; embed+write live in the JVM (Seam B contract —
 CHUNKING STAYS PYTHON per the bead relay).
 """
@@ -32,30 +39,149 @@ _log = structlog.get_logger(__name__)
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-#: Default service URL. Override via NX_SERVICE_URL env var.
-_DEFAULT_SERVICE_URL = "http://127.0.0.1:8080"
-
 #: Env var for the vector backend flag.
 _VECTORS_BACKEND_ENV = "NX_STORAGE_BACKEND_VECTORS"
 
 
-def _service_url() -> str:
-    return os.environ.get("NX_SERVICE_URL", _DEFAULT_SERVICE_URL).rstrip("/")
+# ── Endpoint resolution (nexus-pebfx.1) ──────────────────────────────────────
+#
+# The supervisor (``nx daemon service start``) publishes ``{host, port,
+# token}`` to the ServiceRegistry lease (``storage_service_addr.<uid>``)
+# after a healthy ``/health`` — and allocates a NEW free port on every
+# (re)start. Resolution order:
+#
+#   1. ``NX_SERVICE_URL`` / ``NX_SERVICE_TOKEN`` env — each half overrides
+#      independently (operator/test override; read fresh on every call).
+#   2. The ServiceRegistry lease (cached; invalidated on 401 / connection
+#      refused so clients ride through supervisor auto-restarts).
+#   3. FAIL LOUD. The legacy hardcoded localhost default is retired — a
+#      silent wrong-port fallback is a correctness hazard.
+
+_endpoint_lock = threading.Lock()
+#: Cached (base_url, token) from the LEASE only — env halves are read fresh.
+_lease_cache: tuple[str | None, str | None] | None = None
 
 
-def _service_token() -> str:
-    tok = os.environ.get("NX_SERVICE_TOKEN", "")
-    if not tok:
+def _discover_lease() -> tuple[str | None, str | None]:
+    """(url, token) from the supervisor's lease, or (None, None)."""
+    try:
+        from nexus.config import nexus_config_dir
+        from nexus.daemon.service_registry import ServiceRegistry
+
+        registry = ServiceRegistry(dir=nexus_config_dir(), tier="storage_service")
+        lease = registry.discover(str(os.getuid()))
+        if lease is not None:
+            ep = lease.endpoint
+            host = str(ep.get("host", "127.0.0.1"))
+            port = int(ep.get("port", 0))
+            token = str(ep.get("token", "")) or None
+            if port > 0:
+                return f"http://{host}:{port}", token
+    except Exception as exc:  # discovery is best-effort; absence fails loud below
+        _log.debug("vector_endpoint_lease_discover_failed", error=str(exc))
+    return None, None
+
+
+def _resolve_endpoint() -> tuple[str, str]:
+    """Return ``(base_url, token)`` per the resolution order above."""
+    global _lease_cache
+    env_url = os.environ.get("NX_SERVICE_URL", "").strip().rstrip("/") or None
+    env_token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or None
+    url, token = env_url, env_token
+    if url is None or token is None:
+        with _endpoint_lock:
+            if _lease_cache is None:
+                _lease_cache = _discover_lease()
+            lease_url, lease_token = _lease_cache
+        url = url or lease_url
+        token = token or lease_token
+    if url is None or token is None:
         raise RuntimeError(
-            "NX_SERVICE_TOKEN must be set: T3 vector serving routes through "
-            "the nexus-service HTTP API (RDR-155 Phase 4a — the direct Chroma "
-            "serving paths are retired). Start the service and export "
-            "NX_SERVICE_URL / NX_SERVICE_TOKEN."
+            "nexus-service endpoint is not resolvable: T3 vector serving "
+            "routes through the nexus-service HTTP API (RDR-155 Phase 4a — "
+            "the direct Chroma serving paths are retired). Either start the "
+            "supervisor with 'nx daemon service start' (publishes the "
+            "endpoint lease this client auto-discovers), or export "
+            "NX_SERVICE_URL / NX_SERVICE_TOKEN explicitly."
         )
-    return tok
+    return url, token
+
+
+def _invalidate_endpoint() -> None:
+    """Drop the cached lease so the next call re-discovers (port churn)."""
+    global _lease_cache
+    with _endpoint_lock:
+        _lease_cache = None
+
+
+def _is_retryable_endpoint_error(exc: Exception) -> bool:
+    """401 (token rotated + republished) or connection-refused (supervisor
+    restarted on a new port) — the two auto-restart signatures."""
+    import urllib.error
+
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code == 401
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", None)
+        return isinstance(reason, ConnectionRefusedError)
+    return isinstance(exc, ConnectionRefusedError)
 
 
 # ── HTTP transport ────────────────────────────────────────────────────────────
+
+
+def _request_once(
+    method: str, path: str, *, tenant: str, timeout: int, body: dict | None
+) -> Any:
+    """One HTTP round-trip against the currently-resolved endpoint.
+
+    Raises the raw ``urllib.error`` exceptions — the retry wrapper below
+    classifies them; the public ``_post``/``_get`` wrap HTTP errors into
+    :class:`VectorServiceError`.
+    """
+    import urllib.request
+
+    base_url, token = _resolve_endpoint()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Nexus-Tenant": tenant,
+    }
+    data = None
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        base_url + path, data=data, headers=headers, method=method
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def _request(
+    method: str, path: str, *, tenant: str, timeout: int, body: dict | None
+) -> Any:
+    """Round-trip with ONE re-resolve retry on the auto-restart signatures.
+
+    The supervisor allocates a new port (and republishes the lease, token
+    included) on every restart; a 401 or connection-refused against the
+    cached endpoint therefore means "re-read the lease and try once more"
+    (nexus-pebfx.1), not "give up". A second failure surfaces normally —
+    no retry loops.
+    """
+    import urllib.error
+
+    try:
+        return _request_once(method, path, tenant=tenant, timeout=timeout, body=body)
+    except Exception as exc:
+        if not _is_retryable_endpoint_error(exc):
+            raise
+        _log.info(
+            "vector_endpoint_reresolve",
+            path=path,
+            reason=type(exc).__name__,
+        )
+        _invalidate_endpoint()
+        return _request_once(method, path, tenant=tenant, timeout=timeout, body=body)
 
 
 def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120) -> Any:
@@ -70,23 +196,9 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
     should still fail fast.
     """
     import urllib.error
-    import urllib.request
 
-    url = _service_url() + path
-    data = json.dumps(body).encode()
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {_service_token()}",
-            "X-Nexus-Tenant": tenant,
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
+        return _request("POST", path, tenant=tenant, timeout=timeout, body=body)
     except urllib.error.HTTPError as e:
         body_bytes = e.read()
         try:
@@ -101,20 +213,9 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
 def _get(path: str, *, tenant: str = "default") -> Any:
     """GET from the service endpoint, return parsed response body."""
     import urllib.error
-    import urllib.request
 
-    url = _service_url() + path
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {_service_token()}",
-            "X-Nexus-Tenant": tenant,
-        },
-        method="GET",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())
+        return _request("GET", path, tenant=tenant, timeout=30, body=None)
     except urllib.error.HTTPError as e:
         body_bytes = e.read()
         try:
