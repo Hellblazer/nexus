@@ -76,10 +76,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       so the english-stemmer FTS candidate set equals plain word containment), and
  *       FTS-matching queries return non-empty results. The cross-engine FTS5
  *       comparand at fixture scale is {@code HybridParityIntegrationTest} (P3.1).
- *   <li><strong>Non-waivable p95 latency bound.</strong> p95 of the engine hybrid
- *       HTTP path over the query set must clear {@code nx.dualrun.p95.ms}. The
- *       assertion always runs — there is no skip flag; production tightens the bound,
- *       nothing can waive it.
+ *   <li><strong>p95 latency bound, always measured.</strong> p95 of the engine hybrid
+ *       HTTP path over the query set must clear {@code nx.dualrun.p95.ms}. No
+ *       dedicated skip flag exists — the assertion always runs and the latency is
+ *       always measured — but the bound itself is caller-parameterized (conexus owns
+ *       the production number; an absurd bound is the caller's responsibility, the
+ *       harness cannot police it).
  * </ul>
  *
  * <p><strong>Parameterization (conexus xr7.8.9 drives these):</strong>
@@ -88,13 +90,19 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   -Dnx.dualrun.queries=20         number of probe queries
  *   -Dnx.dualrun.k=10               top-k depth for recall
  *   -Dnx.dualrun.recall.min=1.0     minimum aggregate recall fraction
+ *   -Dnx.dualrun.recall.query.min=0.5  per-query overlap floor (fraction of k)
  *   -Dnx.dualrun.p95.ms=250         p95 bound for the hybrid HTTP path, milliseconds
  * </pre>
  *
  * <p>Fixture-load: the Chroma leg loads THROUGH the service
  * ({@code /v1/vectors/upsert-chunks}); the pgvector leg loads via the repository —
  * a pgvector HTTP write surface does not exist until the Phase 4a serving cutover,
- * and creating one here would be exactly the premature surface P4a gates.
+ * and creating one here would be exactly the premature surface P4a gates. The same
+ * boundary applies on the READ side: {@code /v1/vectors/search} routes to Chroma and
+ * no pgvector plain-ANN HTTP endpoint exists yet, so the recall test queries the
+ * pgvector leg via {@link PgVectorRepository#search} directly; only hybrid
+ * ({@code /v1/vectors/hybrid-search}) has an HTTP surface pre-P4a and it is driven
+ * through HTTP everywhere in this class.
  *
  * <p>Requires (same as {@code VectorIntegrationTest}): {@code chroma} CLI on PATH,
  * ONNX MiniLM files in the chromadb cache. Run via
@@ -118,6 +126,8 @@ class DualRunHarnessIntegrationTest {
     private static final int    K           = Integer.getInteger("nx.dualrun.k", 10);
     private static final double RECALL_MIN  =
         Double.parseDouble(System.getProperty("nx.dualrun.recall.min", "1.0"));
+    private static final double RECALL_QUERY_MIN =
+        Double.parseDouble(System.getProperty("nx.dualrun.recall.query.min", "0.5"));
     private static final long   P95_BOUND_MS =
         Long.getLong("nx.dualrun.p95.ms", 250L);
 
@@ -171,9 +181,16 @@ class DualRunHarnessIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             Database db = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                          new ClassLoaderResourceAccessor(), db)
-                .update(new Contexts());
+            try (Liquibase liquibase = new Liquibase(
+                    "db/changelog/db.changelog-master.xml",
+                    new ClassLoaderResourceAccessor(), db)) {
+                liquibase.update(new Contexts());
+            }
+        }
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "ALTER ROLE nexus_svc SET search_path TO nexus, public");
         }
         try (Connection su = pg.createConnection("");
              var ps = su.prepareStatement(
@@ -324,6 +341,10 @@ class DualRunHarnessIntegrationTest {
 
     @Test
     void guard_corpusLoadedIdentically_bothStores() throws Exception {
+        assertThat(QUERY_COUNT)
+            .as("nx.dualrun.queries must be >= 1 — zero queries makes every dual-run "
+                + "test vacuous and the p95 index math degenerate")
+            .isGreaterThanOrEqualTo(1);
         assertThat(pgRepo.count(TENANT, PG_COL))
             .as("pgvector leg holds the full corpus").isEqualTo(CORPUS_SIZE);
         assertThat(chromaRepo.count(CHROMA_COL))
@@ -334,6 +355,30 @@ class DualRunHarnessIntegrationTest {
                 .as("every probe query must have at least one text candidate "
                     + "(query construction guarantees it)")
                 .isNotEmpty();
+        }
+    }
+
+    @Test
+    void guard_trgmIndexesExist_notJustMigrationOrder() throws Exception {
+        // Recorded bead obligation (nexus-h3ked): verify the trgm GIN indexes exist
+        // rather than trusting Liquibase migration order. Without them hybridSearch
+        // still returns CORRECT results via sequential scan — every other test here
+        // stays green while the production latency property silently evaporates.
+        try (Connection su = pg.createConnection("")) {
+            for (int dim : new int[] {384, 768, 1024}) {
+                try (var ps = su.prepareStatement(
+                         "SELECT 1 FROM pg_indexes WHERE schemaname = 'nexus'"
+                         + " AND indexname = ?")) {
+                    ps.setString(1, "idx_chunks_" + dim + "_trgm");
+                    try (var rs = ps.executeQuery()) {
+                        assertThat(rs.next())
+                            .as("trgm GIN index idx_chunks_%d_trgm must exist "
+                                + "(vectors-002) — its absence is invisible to the "
+                                + "correctness tests", dim)
+                            .isTrue();
+                    }
+                }
+            }
         }
     }
 
@@ -360,6 +405,14 @@ class DualRunHarnessIntegrationTest {
 
             Set<String> inter = new LinkedHashSet<>(pgTop);
             inter.retainAll(chromaTop);
+            // Per-query floor: an aggregate-only bound lets one catastrophically
+            // broken query hide inside an otherwise-high average once production
+            // bounds drop recall.min below 1.0. Floor default 0.5 of k; conexus
+            // coordinates the production floor with its aggregate bound.
+            assertThat(inter.size())
+                .as("per-query recall floor for '%s': overlap %d/%d must be >= "
+                    + "ceil(k * %s)", q, inter.size(), K, RECALL_QUERY_MIN)
+                .isGreaterThanOrEqualTo((int) Math.ceil(K * RECALL_QUERY_MIN));
             totalOverlap  += inter.size();
             totalPossible += K;
             perQuery.add(q + "=" + inter.size() + "/" + K);
@@ -421,6 +474,11 @@ class DualRunHarnessIntegrationTest {
 
             String[] terms = q.split(" ");
             for (String id : hybridIds) {
+                assertThat(corpus)
+                    .as("hybrid row '%s' for query '%s' was never inserted by this "
+                        + "harness — an unknown ID means a cross-tenant leak or a "
+                        + "stale store, not a text-gate question", id, q)
+                    .containsKey(id);
                 Set<String> words = Set.of(corpus.get(id).split(" "));
                 boolean anyTerm = false;
                 for (String t : terms) {
@@ -468,7 +526,8 @@ class DualRunHarnessIntegrationTest {
         assertThat(p95)
             .as("p95 of the engine hybrid HTTP path over %d samples must be <= %dms "
                 + "(engine-side default; conexus xr7.8.9 sets the production bound via "
-                + "-Dnx.dualrun.p95.ms). This assertion has no skip flag.",
+                + "-Dnx.dualrun.p95.ms). No dedicated skip flag exists — the bound is "
+                + "caller-parameterized, the measurement is not.",
                 sorted.size(), P95_BOUND_MS)
             .isLessThanOrEqualTo(P95_BOUND_MS);
     }
