@@ -1307,22 +1307,16 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         if not is_local_mode():
             click.echo("SPANN defaults adequate — no HNSW tuning needed (cloud mode)")
             return
-        # RDR-120 P4.B (nexus-vyqah): route through make_t3() so the
-        # HNSW-tuning probe uses the T3 daemon's HttpClient in local
-        # mode instead of opening its own PersistentClient. A direct
-        # T3Database(local_mode=True, ...) here contended with the
-        # daemon for the same on-disk chroma store (the T3 analogue of
-        # the T2 multi-process WAL contention RDR-120 closed). make_t3()
-        # returns a daemon-backed T3Database with _local_mode=True, so
-        # apply_hnsw_ef's local-mode gate + col.modify() calls work
-        # unchanged over the HttpClient.
+        # RDR-155 P4a.2 (nexus-1k8s1): make_t3() returns the service-backed
+        # handle in production; apply_hnsw_ef no-ops on it (the chroma
+        # hnsw:search_ef knob retired with the serving path — pgvector
+        # tunes HNSW server-side). The tuning still applies for injected
+        # chroma-backed handles (tests, the P5 ETL wrapper).
         try:
             db = make_t3()
         except Exception as exc:
             raise click.ClickException(
-                f"T3 daemon unreachable for HNSW tuning: {exc}\n"
-                "Start it with `nx daemon t3 start`, then re-run "
-                "`nx doctor --fix`."
+                f"T3 handle unavailable for HNSW tuning: {exc}"
             ) from exc
         count = apply_hnsw_ef(db)
         click.echo(f"Updated HNSW search_ef on {count} collection(s).")

@@ -45,6 +45,26 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
+def _reject_service_backed_handle(t3: Any) -> None:
+    """Fail loud when the T3 handle has no raw Chroma client.
+
+    RDR-155 P4a.2 (nexus-1k8s1): taxonomy discovery reads embeddings through
+    the raw Chroma client, which retired with the Chroma serving paths —
+    ``make_t3()`` returns the service-backed handle in production now.
+    Taxonomy on the pgvector service is a tracked follow-on
+    (nexus-gmiaf.21+); until it lands this command refuses cleanly instead
+    of surfacing an AttributeError.
+    """
+    from nexus.db.http_vector_client import is_service_backed
+
+    if is_service_backed(t3):
+        raise click.ClickException(
+            "taxonomy discovery needs a raw Chroma client, which retired with "
+            "the Chroma serving paths (RDR-155 Phase 4a). Taxonomy on the "
+            "pgvector service is a tracked follow-on (nexus-gmiaf.21+)."
+        )
+
+
 def _progress(msg: str) -> None:
     """Print a progress message and flush immediately (works in pipes/redirects)."""
     import sys
@@ -529,6 +549,7 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         if is_local_mode() else []
     )
     t3 = make_t3()
+    _reject_service_backed_handle(t3)
 
     if discover_all:
         colls = t3._client.list_collections()
@@ -640,6 +661,7 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
 
     with _T2Database(_default_db_path()) as db:
         t3 = make_t3()
+        _reject_service_backed_handle(t3)
         count = discover_for_collection(
             collection, db.taxonomy, t3._client, force=True,
         )
@@ -906,6 +928,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
 
         collection_name = topic["collection"]
         t3 = make_t3()
+        _reject_service_backed_handle(t3)
         chroma_client = t3._client
 
         # Fetch texts from T3 collection

@@ -133,99 +133,18 @@ def test_force_stale_frecency_mutual_exclusion():
 # ── Phase 5: nx doctor pipeline version check ───────────────────────────────
 
 
-def test_doctor_reports_stale_collections():
-    """nx doctor flags collections with outdated pipeline_version."""
-    from unittest.mock import patch
-    from click.testing import CliRunner
-    from nexus.indexer import PIPELINE_VERSION
-
-    runner = CliRunner()
-
-    # Create a mock collection with old pipeline version
-    stale_col = MagicMock()
-    stale_col.name = "code__myrepo"
-    stale_col.metadata = {"pipeline_version": "2"}
-
-    current_col = MagicMock()
-    current_col.name = "docs__myrepo"
-    current_col.metadata = {"pipeline_version": PIPELINE_VERSION}
-
-    mock_client = MagicMock()
-    mock_client.list_collections.return_value = [stale_col, current_col]
-
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-
-    from nexus.cli import main
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.config.get_credential", return_value="sk-key"),
-        patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
-        patch("nexus.registry.RepoRegistry", return_value=mock_reg),
-        patch("nexus.health.chromadb.CloudClient", return_value=mock_client),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    # Stale collection should be flagged
-    assert "v2" in result.output
-    assert f"v{PIPELINE_VERSION}" in result.output
-    assert "force-stale" in result.output
-
-
-def test_doctor_handles_no_version_stamp():
-    """Collections without pipeline_version are reported but not flagged as errors."""
-    from unittest.mock import patch
-    from click.testing import CliRunner
-
-    runner = CliRunner()
-
-    col = MagicMock()
-    col.name = "code__newrepo"
-    col.metadata = {}
-
-    mock_client = MagicMock()
-    mock_client.list_collections.return_value = [col]
-
-    mock_reg = MagicMock()
-    mock_reg.all.return_value = []
-
-    from nexus.cli import main
-    with (
-        patch("nexus.config.is_local_mode", return_value=False),
-        patch("nexus.config.get_credential", return_value="sk-key"),
-        patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
-        patch("nexus.registry.RepoRegistry", return_value=mock_reg),
-        patch("nexus.health.chromadb.CloudClient", return_value=mock_client),
-    ):
-        result = runner.invoke(main, ["doctor"])
-
-    assert "no version stamp" in result.output
-
-
-def test_doctor_skips_taxonomy_collections():
-    """Taxonomy collections are not indexer outputs and must be skipped.
-
-    taxonomy__centroids is a BERTopic c-TF-IDF aggregate (RDR-070), not a
-    product of the embedding pipeline. The PIPELINE_VERSION semantics
-    (voyage-* + CCE prefixes + RDR-028 language registry) do not apply,
-    and no code path stamps it — so doctor should not nag about it.
+def test_doctor_pipeline_sweep_retired_on_service_handle():
+    """RDR-155 P4a.2 (nexus-1k8s1): the doctor pipeline-version sweep read
+    Chroma COLLECTION metadata, which has no pgvector equivalent — on the
+    service-backed handle (production) it reports a clean retired-skip line
+    instead of a misleading 'check failed'. The stale/no-stamp/taxonomy
+    detail tests retired with the sweep; staleness tracking on pgvector is
+    a P5 ETL concern.
     """
     from unittest.mock import patch
     from click.testing import CliRunner
 
     runner = CliRunner()
-
-    centroid_col = MagicMock()
-    centroid_col.name = "taxonomy__centroids"
-    centroid_col.metadata = {}
-
-    code_col = MagicMock()
-    code_col.name = "code__myrepo"
-    code_col.metadata = {}
-
-    mock_client = MagicMock()
-    mock_client.list_collections.return_value = [centroid_col, code_col]
-
     mock_reg = MagicMock()
     mock_reg.all.return_value = []
 
@@ -235,9 +154,12 @@ def test_doctor_skips_taxonomy_collections():
         patch("nexus.config.get_credential", return_value="sk-key"),
         patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
         patch("nexus.registry.RepoRegistry", return_value=mock_reg),
-        patch("nexus.health.chromadb.CloudClient", return_value=mock_client),
+        # Vector-service reachability probe: pretend the service is up.
+        patch("nexus.db.http_vector_client._get", return_value=[]),
     ):
         result = runner.invoke(main, ["doctor"])
 
-    assert "taxonomy__centroids" not in result.output
-    assert "code__myrepo" in result.output
+    assert "pipeline versions" in result.output
+    assert "sweep retired with the Chroma serving path" in result.output
+    # The sweep must not report a failure for what is a deliberate retire.
+    assert "check failed" not in result.output

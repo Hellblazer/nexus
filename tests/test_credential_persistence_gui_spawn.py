@@ -112,46 +112,26 @@ def test_check_credential_persistence_partial_warns(monkeypatch, tmp_path):
     assert "voyage_api_key" in " ".join([warning.detail] + warning.fix_suggestions)
 
 
-# ── make_t3 error message improvement ────────────────────────────────────────
+# ── service-token error message (GUI-spawn self-explanation) ─────────────────
 
 
-def test_make_t3_error_mentions_credential_persistence(monkeypatch, tmp_path):
-    """When ``make_t3`` falls into the daemon-not-running error path,
-    the resulting exception message should ALSO mention the cloud-
-    credential persistence option, because the spawned-from-GUI
-    process has no way to know which path the user intended.
-
-    Reproduces the actual Cowork failure mode: no env credentials
-    (launchd-spawned), no daemon, no config-file credentials. The
-    daemon path is hit and the error must self-explain the cloud
-    alternative.
+def test_service_token_error_self_explains(monkeypatch):
+    """RDR-155 P4a.2 (nexus-1k8s1): the daemon-vs-cloud fork — and the
+    T3DaemonError enrichment that explained it — retired with the Chroma
+    serving paths. The surviving GUI-spawn trap is a launchd-spawned
+    process missing ``NX_SERVICE_TOKEN``: the failure must self-explain
+    which knobs to set, because the spawned process cannot inspect the
+    parent shell.
     """
-    monkeypatch.delenv("CHROMA_API_KEY", raising=False)
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
 
-    from nexus.daemon.t3_client import T3DaemonError
+    from nexus.db.http_vector_client import HttpVectorClient
 
-    def fake_make_t3_client():
-        raise T3DaemonError(
-            "T3 daemon not reachable. Start with: nx daemon t3 start"
-        )
-
-    monkeypatch.setattr(
-        "nexus.daemon.t3_client.make_t3_client", fake_make_t3_client
-    )
-
-    from nexus.db import make_t3
-
-    with pytest.raises(T3DaemonError) as exc_info:
-        make_t3()
+    client = HttpVectorClient()
+    with pytest.raises(RuntimeError) as exc_info:
+        client.search("anything", ["knowledge__x__minilm-l6-v2-384__v1"])
 
     msg = str(exc_info.value)
-    assert "nx daemon t3 start" in msg, "daemon-start path must remain"
-    assert "nx config set" in msg, (
-        "must point at credential persistence as the alternative; "
-        "this is the GUI-spawn hint that the spawned process cannot "
-        "self-diagnose otherwise"
-    )
-    assert "Claude Desktop" in msg or "GUI" in msg or "shell env" in msg
+    assert "NX_SERVICE_TOKEN" in msg
+    assert "NX_SERVICE_URL" in msg
+    assert "RDR-155" in msg, "must name the retire so the error is traceable"

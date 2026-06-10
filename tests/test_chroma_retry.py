@@ -96,15 +96,13 @@ def test_backoff_curve_2_4_8_16() -> None:
 
 @pytest.fixture
 def t3_mock():
-    with patch("nexus.db.t3.chromadb") as chromadb_m:
+    # RDR-155 P4a.2 (nexus-1k8s1): the CloudClient construction is retired —
+    # inject the mock client directly (the retry machinery under test is
+    # downstream of construction and unchanged).
+    with patch("nexus.db.t3.chromadb"):
         mock_client = MagicMock()
-        def _cloud_client_factory(**kwargs):
-            if kwargs.get("database", "").endswith("_code"):
-                raise chromadb.errors.NotFoundError("probe")
-            return mock_client
-        chromadb_m.CloudClient.side_effect = _cloud_client_factory
         from nexus.db.t3 import T3Database
-        yield T3Database(tenant="t", database="d", api_key="k"), mock_client
+        yield T3Database(tenant="t", database="d", api_key="k", _client=mock_client), mock_client
 
 
 def test_search_retries_on_503(t3_mock) -> None:
@@ -199,10 +197,12 @@ class TestChromadbTimeoutPatch:
     """
 
     def test_cloud_client_timeout_is_finite(self) -> None:
-        """T3Database constructs CloudClient and overrides its httpx
-        timeout to something finite, not chromadb's hardcoded None."""
+        """T3Database overrides an injected HTTP-shaped client's httpx
+        timeout to something finite, not chromadb's hardcoded None.
+        (RDR-155 P4a.2: the client is injected — construction retired —
+        but the ETL wrapper still relies on this override.)"""
         from nexus.db.t3 import T3Database
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
         # Build a real CloudClient-shaped mock with the same _server._session
         # path the patch reaches into. Anything not matching that shape gets
         # left alone (the defensive hasattr in T3Database).
@@ -212,8 +212,7 @@ class TestChromadbTimeoutPatch:
         fake_server._session = fake_session
         fake_client = MagicMock()
         fake_client._server = fake_server
-        with patch("nexus.db.t3.chromadb.CloudClient", return_value=fake_client):
-            T3Database(tenant="t", database="d", api_key="k")
+        T3Database(tenant="t", database="d", api_key="k", _client=fake_client)
         # Post-construction: timeout must NOT be None (the bug condition).
         # Specific values are policy; this test only asserts "not the bug."
         assert fake_session.timeout is not None

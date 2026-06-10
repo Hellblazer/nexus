@@ -3,11 +3,10 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.SchemaMigrator;
-import dev.nexus.service.vectors.ChromaRestClient;
+import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.EmbedderRouter;
-import dev.nexus.service.vectors.LocalChromaServer;
 import dev.nexus.service.vectors.OnnxEmbedder;
-import dev.nexus.service.vectors.VectorRepository;
+import dev.nexus.service.vectors.PgVectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,19 +28,13 @@ import org.slf4j.LoggerFactory;
  *   <li>{@code NX_DB_ADMIN_PASS} — optional migration password (defaults to {@code NX_DB_PASS})</li>
  * </ul>
  *
- * <p>Vector backend (Seam B, bead nexus-gmiaf.20):
+ * <p>Vector backend (RDR-155 P4a.2, bead nexus-1k8s1 — pgvector serves every vector
+ * route; the Chroma serving backend and its {@code NX_CHROMA_*} wiring are retired):
  * <ul>
- *   <li>{@code NX_CHROMA_MODE} — {@code local} (default) or {@code cloud}</li>
- *   <li>{@code NX_CHROMA_PATH} — data directory for local mode
- *       (default {@code ~/.config/nexus/chroma})</li>
- *   <li>{@code NX_CHROMA_HTTP_PORT} — port for local chroma run server (default: ephemeral)</li>
- *   <li>{@code NX_CHROMA_BINARY} — path to {@code chroma} CLI (auto-detected if unset)</li>
- *   <li>{@code NX_VOYAGE_API_KEY} — cloud mode: Voyage AI API key</li>
- *   <li>{@code NX_VOYAGE_MODEL_DOC} — cloud mode: Voyage model for docs (default voyage-context-3)</li>
- *   <li>{@code NX_VOYAGE_MODEL_QUERY} — cloud mode: Voyage model for queries (default voyage-context-3)</li>
- *   <li>{@code NX_CHROMA_CLOUD_TENANT} — cloud mode: Chroma Cloud tenant</li>
- *   <li>{@code NX_CHROMA_CLOUD_DATABASE} — cloud mode: Chroma Cloud database</li>
- *   <li>{@code NX_CHROMA_CLOUD_API_KEY} — cloud mode: Chroma Cloud API key</li>
+ *   <li>{@code NX_VOYAGE_API_KEY} — optional Voyage AI API key. Present: embedders
+ *       route by collection prefix to Voyage (CCE for {@code knowledge__}/{@code docs__}/
+ *       {@code rdr__}, voyage-code-3 for {@code code__}), ONNX fallback for
+ *       unrecognised prefixes. Absent: ONNX-only (local mode).</li>
  * </ul>
  *
  * <p>Binds to {@code 127.0.0.1} only (loopback). No external TLS — forward proxy
@@ -106,49 +99,31 @@ public final class Main {
         new dev.nexus.service.db.TokenStore(ds, java.time.Clock.systemUTC())
             .ensureBootstrapToken(token, dev.nexus.service.db.TenantConstants.DEFAULT_TENANT);
 
-        // Vector backend setup (Seam B — optional; only when configured)
-        LocalChromaServer localChroma    = null;
-        VectorRepository  vectorRepo     = null;
-        EmbedderRouter    docEmbedRouter = null;
-
-        String chromaMode = System.getenv().getOrDefault("NX_CHROMA_MODE", "local");
-        if ("local".equalsIgnoreCase(chromaMode)) {
-            localChroma = buildLocalChroma();
-            localChroma.start();
-            ChromaRestClient chromaClient = ChromaRestClient.local("127.0.0.1", localChroma.getPort());
-            OnnxEmbedder onnx = new OnnxEmbedder();
-            // EmbedderRouter in local mode — all prefixes route to ONNX (S0.2 proof)
-            docEmbedRouter = new EmbedderRouter(onnx, "document");
-            EmbedderRouter qryEmbedRouter = new EmbedderRouter(onnx, "query");
-            vectorRepo = new VectorRepository(docEmbedRouter, qryEmbedRouter, chromaClient);
-            log.info("event=vector_backend_local port={}", localChroma.getPort());
-        } else if ("cloud".equalsIgnoreCase(chromaMode)) {
-            // Cloud mode: build collection-aware routers using VOYAGE_API_KEY
-            String voyageKey = requireEnv("NX_VOYAGE_API_KEY");
-            OnnxEmbedder onnx = new OnnxEmbedder();  // ONNX fallback for unrecognised prefixes
+        // Vector backend (RDR-155 P4a.2, bead nexus-1k8s1): pgvector serves every
+        // vector route against the SAME Postgres the service already requires — no
+        // separate vector store process. Embedders route by collection prefix
+        // (Voyage when NX_VOYAGE_API_KEY is present, ONNX otherwise/fallback).
+        // PRODUCTION WIRING INVARIANT (P2.2 contract, recorded on nexus-1k8s1):
+        // PgVectorRepository takes the ROUTER constructor — EmbedderRouter through the
+        // plain-Embedder constructor would fall back to ONNX for ALL collections and
+        // break cloud-mode routing (caught only at the first upsert's dim check).
+        OnnxEmbedder onnx = new OnnxEmbedder();
+        String voyageKey = System.getenv("NX_VOYAGE_API_KEY");
+        EmbedderRouter docEmbedRouter;
+        EmbedderRouter qryEmbedRouter;
+        if (voyageKey != null && !voyageKey.isBlank()) {
             docEmbedRouter = new EmbedderRouter(onnx, voyageKey, "document");
-            EmbedderRouter qryEmbedRouter = new EmbedderRouter(onnx, voyageKey, "query");
-            vectorRepo = buildCloudVectorRepo(docEmbedRouter, qryEmbedRouter);
-            log.info("event=vector_backend_cloud");
-        } else if (System.getenv("NX_VOYAGE_API_KEY") != null) {
-            // Parity-gate mode (cloud): no Chroma backend, but enable the /embed endpoint
-            // so test_embed_parity.py can call it without a full storage stack.
-            OnnxEmbedder onnx = new OnnxEmbedder();
-            docEmbedRouter = new EmbedderRouter(onnx, System.getenv("NX_VOYAGE_API_KEY"), "document");
-            log.info("event=embed_only_mode NX_CHROMA_MODE={}", chromaMode);
+            qryEmbedRouter = new EmbedderRouter(onnx, voyageKey, "query");
+            log.info("event=vector_backend_pgvector embedders=voyage+onnx_fallback");
         } else {
-            // Parity-gate mode (local): no Chroma backend, no Voyage key — ONNX-only /embed.
-            // Enables test_onnx_parity to call /v1/vectors/embed without any cloud credentials.
-            OnnxEmbedder onnx = new OnnxEmbedder();
             docEmbedRouter = new EmbedderRouter(onnx, "document");
-            log.info("event=embed_only_onnx_mode NX_CHROMA_MODE={}", chromaMode);
+            qryEmbedRouter = new EmbedderRouter(onnx, "query");
+            log.info("event=vector_backend_pgvector embedders=onnx_only");
         }
+        var pgVectorRepo = new PgVectorRepository(new TenantScope(ds), docEmbedRouter,
+                                                  qryEmbedRouter);
 
-        final LocalChromaServer finalLocalChroma    = localChroma;
-        final VectorRepository  finalVectorRepo      = vectorRepo;
-        final EmbedderRouter    finalDocEmbedRouter  = docEmbedRouter;
-
-        var service = new NexusService(port, token, ds, finalVectorRepo, finalDocEmbedRouter);
+        var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo);
         service.start();
 
         log.info("event=service_ready port={}", service.getPort());
@@ -157,10 +132,6 @@ public final class Main {
             log.info("event=shutdown_signal");
             service.stop();
             ds.close();
-            if (finalLocalChroma != null) {
-                log.info("event=stopping_local_chroma");
-                finalLocalChroma.stop();
-            }
         }));
 
         // Block main thread until shutdown
@@ -215,45 +186,6 @@ public final class Main {
         cfg.setConnectionTimeout(30_000);
         cfg.setPoolName("nexus-migration");
         return new HikariDataSource(cfg);
-    }
-
-    // ── Vector backend factories ──────────────────────────────────────────────
-
-    private static LocalChromaServer buildLocalChroma() throws Exception {
-        String dataPath = System.getenv().getOrDefault(
-                "NX_CHROMA_PATH",
-                System.getProperty("user.home") + "/.config/nexus/chroma");
-
-        int chromaPort;
-        String portStr = System.getenv("NX_CHROMA_HTTP_PORT");
-        if (portStr != null && !portStr.isBlank()) {
-            chromaPort = Integer.parseInt(portStr.trim());
-        } else {
-            chromaPort = LocalChromaServer.findFreePort();
-        }
-
-        String chromaBinary = LocalChromaServer.findChromaBinary();
-        return new LocalChromaServer(chromaBinary, dataPath, chromaPort);
-    }
-
-    /**
-     * Cloud vector backend using collection-aware EmbedderRouters (nexus-gmiaf.21).
-     *
-     * <p>Routes by collection prefix:
-     * <ul>
-     *   <li>{@code knowledge__}, {@code docs__}, {@code rdr__} → CCE (voyage-context-3)</li>
-     *   <li>{@code code__} → standard Voyage (voyage-code-3)</li>
-     *   <li>unrecognised → ONNX fallback</li>
-     * </ul>
-     */
-    private static VectorRepository buildCloudVectorRepo(EmbedderRouter docRouter,
-                                                          EmbedderRouter qryRouter) {
-        String tenant   = requireEnv("NX_CHROMA_CLOUD_TENANT");
-        String database = requireEnv("NX_CHROMA_CLOUD_DATABASE");
-        String apiKey   = requireEnv("NX_CHROMA_CLOUD_API_KEY");
-
-        ChromaRestClient chromaClient = ChromaRestClient.cloud(tenant, database, apiKey);
-        return new VectorRepository(docRouter, qryRouter, chromaClient);
     }
 
     private static String requireEnv(String name) {

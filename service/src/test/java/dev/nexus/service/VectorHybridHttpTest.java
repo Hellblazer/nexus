@@ -7,9 +7,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.TokenHashing;
-import dev.nexus.service.vectors.ChromaRestClient;
 import dev.nexus.service.vectors.PgVectorRepository;
-import dev.nexus.service.vectors.VectorRepository;
 import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
@@ -44,8 +42,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>Route exists, request body matches /search, response is the flat row list.
  *   <li>Tenant is SERVER-RESOLVED from the bearer token (RLS boundary) — a token bound
  *       to another tenant sees zero rows, and no client-supplied header can widen it.
- *   <li>503 when no PgVectorRepository is wired (the /embed absent-backend pattern);
- *       Chroma routes are untouched either way (Phase 4a owns the serving cutover).
+ *   <li>503 when no PgVectorRepository is wired (the /embed absent-backend pattern;
+ *       since the RDR-155 P4a.2 serving cutover this applies to every vector route).
  *   <li>400 on a malformed body (missing query).
  * </ul>
  *
@@ -70,7 +68,7 @@ class VectorHybridHttpTest {
     TenantScope tenantScope;
     PgVectorRepository pgRepo;
     NexusService service;        // hybrid-wired
-    NexusService serviceNoPg;    // Chroma-only — /hybrid-search must 503
+    NexusService serviceNoPg;    // no pgvector backend — /hybrid-search must 503
     HttpClient http;
 
     @BeforeAll
@@ -131,14 +129,12 @@ class VectorHybridHttpTest {
                     "quantum entanglement spectroscopy experiment"),
             List.of(Map.of("kind", "hh"), Map.of("kind", "hh"), Map.of("kind", "hh")));
 
-        service = new NexusService(0, TOKEN_A, svcDs, null, null, pgRepo);
+        service = new NexusService(0, TOKEN_A, svcDs, null, pgRepo);
         service.start();
 
-        // Chroma-only service: VectorRepository wired (client config only — the 503
-        // path never touches Chroma), no PgVectorRepository.
-        serviceNoPg = new NexusService(0, TOKEN_A, svcDs,
-            new VectorRepository(embedder, embedder, ChromaRestClient.local("127.0.0.1", 1)),
-            null);
+        // No-pgvector service (RDR-155 P4a.2: the vectors context is always
+        // registered; absent backend answers 503 per route, never 404/NPE).
+        serviceNoPg = new NexusService(0, TOKEN_A, svcDs);
         serviceNoPg.start();
 
         http = HttpClient.newHttpClient();
@@ -200,8 +196,8 @@ class VectorHybridHttpTest {
             Map.of("query", Q, "collections", List.of(COL), "n_results", 10));
 
         assertThat(resp.statusCode())
-            .as("Chroma-only service: hybrid-search is explicitly not configured (the "
-                + "/embed absent-backend pattern), never a silent Chroma fallback")
+            .as("no pgvector backend: hybrid-search is explicitly not configured (the "
+                + "/embed absent-backend pattern), never a silent fallback")
             .isEqualTo(503);
         assertThat(resp.body()).contains("not configured");
     }

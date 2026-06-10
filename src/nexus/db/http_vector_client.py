@@ -4,15 +4,19 @@
 
 Thin Python bridge that routes T3 vector operations (search, query,
 upsert-chunks, store_put, store_get, store_list, store_delete) through
-the Java nexus-service HTTP endpoints rather than hitting ChromaDB /
-Voyage AI directly from Python.
+the Java nexus-service HTTP endpoints rather than hitting a vector
+store / Voyage AI directly from Python.
 
-Activated by setting ``NX_STORAGE_BACKEND_VECTORS=service`` in the
-process environment. The default (flag unset) routes through the
-existing ``T3Database`` path unchanged.
+Since the RDR-155 P4a.2 serving cutover (bead nexus-1k8s1) this is THE
+production T3 handle: ``nexus.db.make_t3()`` returns the
+:class:`HttpVectorClient` singleton whenever no test ``_client`` is
+injected, in both local and cloud mode — the service stores vectors in
+pgvector and embeds server-side. ``NX_STORAGE_BACKEND_VECTORS=service``
+survives only as the indexer-side opt-in that skips Python-side
+embedding (see :func:`is_vector_service_mode`).
 
-Chunking stays in Python; only embed+quota+Chroma-write move to the JVM
-(Seam B contract — CHUNKING STAYS PYTHON per the bead relay).
+Chunking stays in Python; embed+write live in the JVM (Seam B contract —
+CHUNKING STAYS PYTHON per the bead relay).
 """
 from __future__ import annotations
 
@@ -43,7 +47,10 @@ def _service_token() -> str:
     tok = os.environ.get("NX_SERVICE_TOKEN", "")
     if not tok:
         raise RuntimeError(
-            "NX_SERVICE_TOKEN must be set when NX_STORAGE_BACKEND_VECTORS=service"
+            "NX_SERVICE_TOKEN must be set: T3 vector serving routes through "
+            "the nexus-service HTTP API (RDR-155 Phase 4a — the direct Chroma "
+            "serving paths are retired). Start the service and export "
+            "NX_SERVICE_URL / NX_SERVICE_TOKEN."
         )
     return tok
 
@@ -239,6 +246,22 @@ class HttpVectorClient:
     def __init__(self, *, tenant: str = "default") -> None:
         self._tenant = tenant
 
+    # ── Context manager (no-op: stateless HTTP, parity with T3Database) ──────
+
+    def __enter__(self) -> "HttpVectorClient":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        pass  # No persistent connection to close.
+
+    # NOTE — no ``_client`` attribute, deliberately (pinned by
+    # tests/db/test_http_vector_client.py): chroma-client-coupled features
+    # (taxonomy-via-chroma, catalog span/link embedding probes, raw collection
+    # surgery) retire with the Chroma serving paths (RDR-155 P4a.2,
+    # nexus-1k8s1). Accessing ``._client`` raises AttributeError — callers
+    # guard with :func:`is_service_backed`; pg-side equivalents are tracked
+    # follow-ons (taxonomy: nexus-gmiaf.21+).
+
     # ── Seam B write path ────────────────────────────────────────────────────
 
     def upsert_chunks(
@@ -385,13 +408,61 @@ class HttpVectorClient:
             return False
 
     def list_collections(self) -> list[dict]:
-        """List all Chroma collections managed by the service."""
+        """List the tenant's vector collections via the service."""
         try:
             result = _get("/v1/vectors/collections", tenant=self._tenant)
             return result if isinstance(result, list) else []
         except VectorServiceError as e:
             _log.warning("http_vector_list_collections_failed", error=str(e))
             return []
+
+    def collection_exists(self, name: str) -> bool:
+        """True if *name* holds at least one chunk (no create side-effect).
+
+        T3Database parity (RDR-155 P4a.2): on the pgvector path a collection
+        is a column value, so existence == "has rows for this tenant".
+        """
+        return any(c.get("name") == name for c in self.list_collections())
+
+    def count(self, collection: str) -> int:
+        """Number of chunks in *collection* visible to this tenant."""
+        from urllib.parse import quote  # noqa: PLC0415
+
+        result = _get(
+            "/v1/vectors/count?collection=" + quote(collection),
+            tenant=self._tenant,
+        )
+        return int(result.get("count", 0))
+
+    def existing_ids(self, collection: str, ids: list[str]) -> set[str]:
+        """Return the subset of *ids* present in *collection*.
+
+        T3Database parity (``nx catalog verify`` / gc paths). Pages at 300
+        ids per request to mirror the historical batch shape; a missing or
+        unreachable collection resolves to the empty set, matching
+        ``T3Database.existing_ids``.
+        """
+        if not ids:
+            return set()
+        found: set[str] = set()
+        page = 300
+        try:
+            for start in range(0, len(ids), page):
+                batch = ids[start : start + page]
+                result = _post(
+                    "/v1/vectors/store-get",
+                    {"collection": collection, "ids": batch, "limit": len(batch)},
+                    tenant=self._tenant,
+                )
+                found.update(result.get("ids") or [])
+        except VectorServiceError as exc:
+            _log.warning(
+                "http_vector_existing_ids_failed",
+                collection=collection,
+                error=str(exc),
+            )
+            return set()
+        return found
 
     def update_chunks(
         self,
@@ -512,5 +583,25 @@ def reset_http_vector_client_for_tests() -> None:
 
 
 def is_vector_service_mode() -> bool:
-    """Return True when NX_STORAGE_BACKEND_VECTORS=service."""
+    """Return True when NX_STORAGE_BACKEND_VECTORS=service.
+
+    RDR-155 P4a.2 note: since the serving cutover, ``make_t3()`` returns the
+    service-backed client unconditionally — this env flag survives only as
+    the explicit indexer-side opt-in (skip Python-side embedding). For
+    "can this HANDLE do chroma-client things?" decisions use
+    :func:`is_service_backed` on the handle instead: env state and handle
+    type diverge in tests that inject a chroma-backed ``T3Database``.
+    """
     return os.environ.get(_VECTORS_BACKEND_ENV, "").strip().lower() == "service"
+
+
+def is_service_backed(db: object) -> bool:
+    """True when *db* routes T3 ops through the nexus-service HTTP API.
+
+    The instance-based capability guard (RDR-155 P4a.2, nexus-1k8s1):
+    service-backed handles have no raw ``._client`` and no chroma-coupled
+    surface. Prefer this over :func:`is_vector_service_mode` wherever the
+    handle is in hand — injected chroma-backed ``T3Database`` test fixtures
+    must keep taking the legacy branches regardless of env state.
+    """
+    return isinstance(db, HttpVectorClient)
