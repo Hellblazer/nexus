@@ -13,6 +13,9 @@ import dev.nexus.service.jooq.nexus.tables.CatalogLinks;
 import dev.nexus.service.jooq.nexus.tables.CatalogMeta;
 import dev.nexus.service.jooq.nexus.tables.CatalogOwners;
 import dev.nexus.service.jooq.nexus.tables.ChashIndex;
+import dev.nexus.service.jooq.nexus.tables.Chunks_1024;
+import dev.nexus.service.jooq.nexus.tables.Chunks_384;
+import dev.nexus.service.jooq.nexus.tables.Chunks_768;
 import dev.nexus.service.jooq.nexus.tables.DocumentAspects;
 import dev.nexus.service.jooq.nexus.tables.DocumentHighlights;
 import dev.nexus.service.jooq.nexus.tables.Frecency;
@@ -81,6 +84,21 @@ public class Tables {
      * The table <code>nexus.chash_index</code>.
      */
     public static final ChashIndex CHASH_INDEX = ChashIndex.CHASH_INDEX;
+
+    /**
+     * The table <code>nexus.chunks_1024</code>.
+     */
+    public static final Chunks_1024 CHUNKS_1024 = Chunks_1024.CHUNKS_1024;
+
+    /**
+     * The table <code>nexus.chunks_384</code>.
+     */
+    public static final Chunks_384 CHUNKS_384 = Chunks_384.CHUNKS_384;
+
+    /**
+     * The table <code>nexus.chunks_768</code>.
+     */
+    public static final Chunks_768 CHUNKS_768 = Chunks_768.CHUNKS_768;
 
     /**
      * The table <code>nexus.document_aspects</code>.

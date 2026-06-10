@@ -153,6 +153,21 @@ public class CatalogDocumentChunksRecord extends UpdatableRecordImpl<CatalogDocu
         return (Integer) get(8);
     }
 
+    /**
+     * Setter for <code>nexus.catalog_document_chunks.collection</code>.
+     */
+    public CatalogDocumentChunksRecord setCollection(String value) {
+        set(9, value);
+        return this;
+    }
+
+    /**
+     * Getter for <code>nexus.catalog_document_chunks.collection</code>.
+     */
+    public String getCollection() {
+        return (String) get(9);
+    }
+
     // -------------------------------------------------------------------------
     // Primary key information
     // -------------------------------------------------------------------------
@@ -176,7 +191,7 @@ public class CatalogDocumentChunksRecord extends UpdatableRecordImpl<CatalogDocu
     /**
      * Create a detached, initialised CatalogDocumentChunksRecord
      */
-    public CatalogDocumentChunksRecord(String tenantId, String docId, Integer position, String chash, Integer chunkIndex, Integer lineStart, Integer lineEnd, Integer charStart, Integer charEnd) {
+    public CatalogDocumentChunksRecord(String tenantId, String docId, Integer position, String chash, Integer chunkIndex, Integer lineStart, Integer lineEnd, Integer charStart, Integer charEnd, String collection) {
         super(CatalogDocumentChunks.CATALOG_DOCUMENT_CHUNKS);
 
         setTenantId(tenantId);
@@ -188,6 +203,7 @@ public class CatalogDocumentChunksRecord extends UpdatableRecordImpl<CatalogDocu
         setLineEnd(lineEnd);
         setCharStart(charStart);
         setCharEnd(charEnd);
+        setCollection(collection);
         resetTouchedOnNotNull();
     }
 
@@ -207,6 +223,7 @@ public class CatalogDocumentChunksRecord extends UpdatableRecordImpl<CatalogDocu
             setLineEnd(value.getLineEnd());
             setCharStart(value.getCharStart());
             setCharEnd(value.getCharEnd());
+            setCollection(value.getCollection());
             resetTouchedOnNotNull();
         }
     }
