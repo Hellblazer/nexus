@@ -405,6 +405,50 @@ class ChunksRlsBehavioralTest {
     }
 
     // ---------------------------------------------------------------------------
+    // Behavior E: cross-tenant DELETE isolation (P1.G gate item, nexus-cj7qu)
+    //
+    // The tenant_isolation policy has no FOR clause, so it defaults to FOR ALL.
+    // The USING expression makes tenant-a's rows invisible to a DELETE issued
+    // inside tenant-b's scope: 0 rows affected, the row survives for its owner.
+    // ---------------------------------------------------------------------------
+
+    @ParameterizedTest
+    @ValueSource(ints = {384, 768, 1024})
+    void crossTenantDelete_deletesZeroRows_rowSurvives(int dim) {
+        String table = "nexus.chunks_" + dim;
+        String col = "code__delete-iso__vc3__v1";
+
+        insertChunk(dim, TENANT_A, col, "chash-del-own-" + dim, "own row for delete", dim);
+        assertThat(tenantCount(dim, TENANT_A, col))
+            .as("baseline count for tenant-a before cross-tenant DELETE")
+            .isEqualTo(1L);
+
+        // tenant-b attempts to delete tenant-a's row: RLS USING hides it, 0 affected.
+        int deleted = tenantScope.withTenant(TENANT_B, ctx ->
+            ctx.execute("DELETE FROM " + table + " WHERE chash = ? AND collection = ?",
+                        "chash-del-own-" + dim, col));
+        assertThat(deleted)
+            .as("cross-tenant DELETE must affect exactly 0 rows (RLS makes the row invisible)")
+            .isEqualTo(0);
+
+        // The row must still exist for its owner.
+        assertThat(tenantCount(dim, TENANT_A, col))
+            .as("tenant-a's row must survive the cross-tenant DELETE attempt")
+            .isEqualTo(1L);
+
+        // The owner can delete its own row: exactly 1 affected.
+        int ownDelete = tenantScope.withTenant(TENANT_A, ctx ->
+            ctx.execute("DELETE FROM " + table + " WHERE chash = ? AND collection = ?",
+                        "chash-del-own-" + dim, col));
+        assertThat(ownDelete)
+            .as("owner DELETE must affect exactly 1 row")
+            .isEqualTo(1);
+        assertThat(tenantCount(dim, TENANT_A, col))
+            .as("tenant-a count must be 0 after deleting its own row")
+            .isEqualTo(0L);
+    }
+
+    // ---------------------------------------------------------------------------
     // Private helpers
     // ---------------------------------------------------------------------------
 
