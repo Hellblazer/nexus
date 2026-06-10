@@ -916,3 +916,35 @@ def test_vector_service_error_renders_clean_message(runner: CliRunner, cloud_env
     assert "HTTP 400" in res.output
     assert "Traceback" not in res.output
     assert not isinstance(res.exception, VectorServiceError)
+
+
+def test_silent_zero_notes_failed_collections(
+    runner: CliRunner, cloud_env,
+) -> None:
+    """nexus-pebfx.8: zero results with service-error-excluded collections
+    must emit a stderr note naming them — a partial outage must not read
+    as a genuine miss."""
+    from nexus.search_engine import SearchDiagnostics
+
+    mock_t3 = _mock_t3(["knowledge__art"])
+
+    def fake(query, cols, n_results, t3, where=None, **kwargs):
+        diag_out = kwargs.get("diagnostics_out")
+        if diag_out is not None:
+            diag_out.append(SearchDiagnostics(
+                per_collection={"knowledge__art": (0, 0, 0.65, None)},
+                total_dropped=0,
+                total_raw=0,
+                failed_collections={
+                    "knowledge__seam": "HTTP 400: dim mismatch",
+                },
+            ))
+        return []
+
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", side_effect=fake), \
+         patch("nexus.commands.search_cmd.load_config", return_value=_LOAD_CFG):
+        result = runner.invoke(main, ["search", "query", "--corpus", "knowledge"])
+    assert result.exit_code == 0, result.output
+    assert "excluded by service errors" in result.output
+    assert "knowledge__seam" in result.output

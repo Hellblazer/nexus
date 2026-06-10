@@ -466,6 +466,11 @@ def search_cross_corpus(
     else:
         effective_where = where
 
+    # nexus-pebfx.8: dedupe — failed_collections is keyed by name, so a
+    # duplicated input name would break the all-failed equality check below
+    # (and duplicate searches buy nothing).
+    collections = list(dict.fromkeys(collections))
+
     all_results: list[SearchResult] = []
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
     failed_collections: dict[str, str] = {}
@@ -543,7 +548,7 @@ def search_cross_corpus(
         # Nothing was servable — surface the failure instead of silently
         # returning zero results (a misconfigured service must fail loud).
         raise VectorServiceError(
-            f"all {len(collections)} collections failed: "
+            f"all {len(failed_collections)} collections failed: "
             + "; ".join(f"{c}: {e}" for c, e in failed_collections.items()),
         )
 

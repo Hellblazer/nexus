@@ -882,3 +882,29 @@ class TestPerCollectionErrorIsolation:
         t3 = _FailingT3({}, failing={"code__a", "knowledge__b"})
         with pytest.raises(VectorServiceError, match="all 2 collections failed"):
             search_cross_corpus("q", ["code__a", "knowledge__b"], 10, t3)
+
+    def test_duplicate_collections_all_failing_still_reraises(self):
+        """The all-fail guard must not be defeated by a duplicated input
+        name (failed_collections is keyed by name; pre-dedup the input)."""
+        from nexus.db.http_vector_client import VectorServiceError
+
+        t3 = _FailingT3({}, failing={"code__a"})
+        with pytest.raises(VectorServiceError, match="all 1 collections failed"):
+            search_cross_corpus("q", ["code__a", "code__a"], 10, t3)
+
+    def test_failure_log_event_name_locked(self):
+        """Lock the ``collection_search_failed`` structlog event name —
+        downstream log consumers grep for it."""
+        from structlog.testing import capture_logs
+
+        t3 = _FailingT3(
+            {"code__nexus": [{"id": "a", "content": "hit", "distance": 0.30}]},
+            failing={"knowledge__seam"},
+        )
+        with capture_logs() as logs:
+            search_cross_corpus("q", ["code__nexus", "knowledge__seam"], 10, t3)
+        assert any(
+            entry["event"] == "collection_search_failed"
+            and entry["collection"] == "knowledge__seam"
+            for entry in logs
+        )

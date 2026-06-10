@@ -67,6 +67,15 @@ def _maybe_emit_silent_zero_note(
     if not diagnostics_out:
         return
     diag = diagnostics_out[0]
+    if diag.failed_collections:
+        # nexus-pebfx.8: skipped-by-service-error collections were never
+        # searched — a zero-hit must say so or it reads as a genuine miss.
+        click.echo(
+            f"note: {len(diag.failed_collections)} collection(s) excluded by "
+            "service errors and NOT searched: "
+            + ", ".join(diag.failed_collections),
+            err=True,
+        )
     if diag.total_dropped < 1:
         return
     worst = diag.worst_offender()
