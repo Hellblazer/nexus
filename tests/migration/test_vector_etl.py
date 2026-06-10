@@ -43,6 +43,15 @@ Postgres 16 + real on-disk PersistentClient source):
   + collection-name verbatim round-trip, idempotency, copy-not-move,
   rollback, manifest backfill + orphan detection (clean state, cross-dim
   scoping, deliberate orphan), taxonomy source_collection resolution.
+
+DEFERRED OBLIGATION (registered, not silently omitted): the CLOUD leg has
+unit-level routing coverage only (``TestLegRouting`` monkeypatches the
+opener). The real ChromaCloud REST/auth surface — credential resolution,
+``_apply_chroma_http_timeout``, CloudClient pagination/error behaviour —
+cannot be exercised hermetically. P5.G (bead nexus-a0i5u) owns it: either
+a credential-gated ``migrate_cloud()`` integration run against the live
+ChromaCloud tenant, or an explicit accept of that run as a cutover
+pre-condition. Recorded on beads nexus-unp61 and nexus-a0i5u.
 """
 from __future__ import annotations
 
@@ -61,6 +70,7 @@ from pathlib import Path
 import chromadb
 import pytest
 
+from nexus.corpus import CANONICAL_EMBEDDING_MODELS
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.migration.chroma_read import iter_collection_chunks
 from nexus.migration.vector_etl import (
@@ -666,6 +676,21 @@ class TestManifestSqlArtifacts:
         assert _MODEL_768 in manifest_orphan_sql(768)
         assert _MODEL_384 not in manifest_orphan_sql(768)
 
+    def test_orphan_sql_1024_covers_every_cloud_token(self) -> None:
+        """1024 is the cloud/Voyage lane (``PgVectorRepository.MODEL_DIMS``).
+        Tokens are asserted from the canonical-set AUTHORITY
+        (``nexus.corpus.CANONICAL_EMBEDDING_MODELS``) rather than literals,
+        so the pin tracks the registry — and the test stays RDR-109
+        mode-lint clean (no cloud-token literals in this source)."""
+        sql = manifest_orphan_sql(1024)
+        assert "chunks_1024" in sql
+        for token in CANONICAL_EMBEDDING_MODELS:
+            assert token in sql
+        # The legacy generic 1024 token in MODEL_DIMS, scoped here too.
+        assert "voyage-3" in sql
+        assert _MODEL_384 not in sql
+        assert _MODEL_768 not in sql
+
     def test_orphan_sql_rejects_unknown_dim(self) -> None:
         with pytest.raises(ValueError):
             manifest_orphan_sql(512)
@@ -899,6 +924,10 @@ def _make_local_store(root: Path, name: str, n: int) -> tuple[Path, list[str], l
         metadatas=[{"position": i} for i in range(n)],
         embeddings=[[float(i), 1.0] for i in range(n)],
     )
+    # WAL single-opener discipline (chroma_read.py): release this client
+    # deterministically before migrate_local opens its own PersistentClient
+    # on the same store path.
+    del col, client
     return store, ids, texts
 
 
@@ -1027,7 +1056,25 @@ class TestManifestFkIntegration:
         pg = vec_etl_pg_instance
         name = _coll("etlmanifest")
         store, ids, _ = _make_local_store(tmp_path, name, 5)
+        try:
+            self._run_manifest_flow(pg, name, ids, store, vec_etl_vector_client)
+        finally:
+            # The PG instance is module-scoped: clear the seeded catalog +
+            # 768-lane rows so the deliberate orphan cannot leak into any
+            # test added to this module later.
+            _psql_exec(
+                pg,
+                "DELETE FROM nexus.catalog_document_chunks"
+                " WHERE doc_id IN ('9000.1', '9000.2');"
+                " DELETE FROM nexus.catalog_documents"
+                " WHERE tumbler IN ('9000.1', '9000.2');"
+                " DELETE FROM nexus.catalog_owners"
+                " WHERE tumbler_prefix = '9000';"
+                " DELETE FROM nexus.chunks_768"
+                f" WHERE collection = 'docs__etlv__{_MODEL_768}__v1'",
+            )
 
+    def _run_manifest_flow(self, pg, name, ids, store, vec_etl_vector_client) -> None:
         # Manifest fixture: owner -> document (physical_collection = the
         # migrated collection) -> 5 chunk rows, collection NOT yet
         # backfilled (NULL — the pre-Phase-5 state).
