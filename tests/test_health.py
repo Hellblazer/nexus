@@ -116,69 +116,50 @@ def test_format_no_detail():
 # ── Local collections empty-count surfacing (nexus-obp2) ──────────────────────
 
 
-def test_local_collections_reports_empty_count(tmp_path, monkeypatch) -> None:
-    """nx doctor surfaces the count of empty local collections so deletion of
-    every doc from a collection doesn't leave callers wondering why the
-    collection still appears in `nx collection list`. (Empty collections are
-    intentional — they preserve the embedding-model binding for fast next
-    store_put.)
-
-    RDR-120 P6 (nexus-qg86h): the probe now routes through the T3
-    daemon's HttpClient; stub ``make_t3_client`` to return a wrapper
-    over the test's PersistentClient so the test exercises the new
-    routing path without requiring a running daemon.
+def test_t3_collections_census_via_service(tmp_path, monkeypatch) -> None:
+    """RDR-155 P4a.2 (nexus-1k8s1): the collection census routes through the
+    pgvector service handle (``make_t3()``) — the chroma-daemon probe and its
+    empty-collection note retired with the Chroma serving path. The on-disk
+    Chroma directory is reported as the legacy store awaiting the P5 ETL.
     """
-    import chromadb
+    from nexus.health import _check_t3_local
+
+    legacy = tmp_path / "chroma"
+    legacy.mkdir()
+    (legacy / "blob.bin").write_bytes(b"x" * 2048)
+    monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(legacy))
+
+    class _StubServiceClient:
+        def list_collections(self):
+            return [{"name": "knowledge__a"}, {"name": "code__b"}, {"name": "rdr__c"}]
+
+    monkeypatch.setattr("nexus.db.make_t3", lambda **kw: _StubServiceClient())
+    results = _check_t3_local()
+    line = next((r for r in results if r.label == "T3 collections"), None)
+    assert line is not None
+    assert "3 collections (pgvector service)" in line.detail
+    assert "legacy Chroma store" in line.detail
+    assert "awaiting P5 ETL" in line.detail
+
+
+def test_t3_collections_census_degrades_when_service_unreachable(
+    tmp_path, monkeypatch
+) -> None:
+    """An unreachable service degrades to an informational could-not-query
+    line — doctor must not crash on a down service."""
     from nexus.health import _check_t3_local
 
     monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma"))
-    # Create one populated, two empty collections.
-    client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
-    populated = client.get_or_create_collection("knowledge__has_data")
-    populated.add(ids=["a"], documents=["hello"], embeddings=[[0.1] * 384])
-    client.get_or_create_collection("knowledge__empty1")
-    client.get_or_create_collection("knowledge__empty2")
 
-    class _Stub:
-        _client = client
+    def _boom(**kw):
+        raise RuntimeError("service down")
 
-    monkeypatch.setattr(
-        "nexus.daemon.t3_client.make_t3_client", lambda: _Stub(),
-    )
+    monkeypatch.setattr("nexus.db.make_t3", _boom)
     results = _check_t3_local()
-    local_collections_line = next(
-        (r for r in results if r.label == "Local collections"), None
-    )
-    assert local_collections_line is not None
-    assert "3 collections" in local_collections_line.detail
-    assert "(including 2 empty)" in local_collections_line.detail
-
-
-def test_local_collections_omits_empty_note_when_none(tmp_path, monkeypatch) -> None:
-    """No `(including N empty)` note when every collection has data.
-
-    RDR-120 P6: same daemon-stub pattern as the preceding test.
-    """
-    import chromadb
-    from nexus.health import _check_t3_local
-
-    monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma"))
-    client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
-    populated = client.get_or_create_collection("knowledge__has_data")
-    populated.add(ids=["a"], documents=["hello"], embeddings=[[0.1] * 384])
-
-    class _Stub:
-        _client = client
-
-    monkeypatch.setattr(
-        "nexus.daemon.t3_client.make_t3_client", lambda: _Stub(),
-    )
-    results = _check_t3_local()
-    local_collections_line = next(
-        (r for r in results if r.label == "Local collections"), None
-    )
-    assert local_collections_line is not None
-    assert "(including" not in local_collections_line.detail
+    line = next((r for r in results if r.label == "T3 collections"), None)
+    assert line is not None
+    assert line.ok is True
+    assert "could not query" in line.detail
 
 
 def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> None:

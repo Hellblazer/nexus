@@ -16,8 +16,10 @@ from nexus.db.t3 import T3Database
 
 @pytest.fixture
 def mock_chromadb():
-    with patch("nexus.db.t3.chromadb") as m, \
-         patch("nexus.db.t3.get_credential", return_value=""):
+    # RDR-155 P4a.2: the constructor no longer consults get_credential (the
+    # bare-constructor fallback died with the retired CloudClient open), so
+    # only the chromadb module needs mocking.
+    with patch("nexus.db.t3.chromadb") as m:
         mock_client = MagicMock()
         m.CloudClient.return_value = mock_client
         yield m, mock_client
@@ -30,7 +32,7 @@ def mock_db(mock_chromadb):
     mock_col = MagicMock()
     mock_client.get_or_create_collection.return_value = mock_col
     mock_client.get_collection.return_value = mock_col
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     return db, mock_col, mock_client
 
 
@@ -41,7 +43,10 @@ def mock_db_voyage(mock_chromadb):
     mock_col = MagicMock()
     mock_client.get_or_create_collection.return_value = mock_col
     mock_client.get_collection.return_value = mock_col
-    db = T3Database(tenant="t", database="d", api_key="k", voyage_api_key="vkey")
+    db = T3Database(
+        tenant="t", database="d", api_key="k", voyage_api_key="vkey",
+        _client=mock_client,
+    )
     return db, mock_col, mock_client
 
 
@@ -52,110 +57,47 @@ def expire_db(mock_chromadb):
     mock_col = MagicMock()
     mock_client.list_collections.return_value = ["knowledge__sec"]
     mock_client.get_collection.return_value = mock_col
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     return db, mock_col
 
 
-# ── AC1: CloudClient init ──────────────────────────────────────────────────
+# ── AC1: injected-client-only construction (RDR-155 P4a.2) ─────────────────
 
 
-def test_cloudclient_init(mock_chromadb):
+def test_no_client_raises_and_never_constructs_cloudclient(mock_chromadb):
+    """RDR-155 P4a.2 (nexus-1k8s1): the serving-path CloudClient open is
+    retired. A T3Database without an injected ``_client`` fails loud and
+    never touches chromadb."""
     chromadb_m, _ = mock_chromadb
-    T3Database(tenant="my-tenant", database="my-db", api_key="secret")
-    assert chromadb_m.CloudClient.call_count == 1
-    call = chromadb_m.CloudClient.call_args
-    assert call.kwargs["database"] == "my-db"
-    assert call.kwargs["tenant"] == "my-tenant"
-    assert call.kwargs["api_key"] == "secret"
+    with pytest.raises(RuntimeError, match="RDR-155 Phase 4a"):
+        T3Database(tenant="my-tenant", database="my-db", api_key="secret")
+    assert chromadb_m.CloudClient.call_count == 0
+    assert chromadb_m.PersistentClient.call_count == 0
 
 
-def test_cloudclient_receives_none_for_empty_tenant(mock_chromadb):
+def test_local_mode_no_client_raises(tmp_path, mock_chromadb):
+    """Same pin for local mode: the PersistentClient open is retired."""
     chromadb_m, _ = mock_chromadb
-    T3Database(tenant="", database="mydb", api_key="key")
-    for c in chromadb_m.CloudClient.call_args_list:
-        assert c.kwargs["tenant"] is None
+    with pytest.raises(RuntimeError, match="RDR-155 Phase 4a"):
+        T3Database(local_mode=True, local_path=str(tmp_path))
+    assert chromadb_m.PersistentClient.call_count == 0
 
 
-def test_bare_constructor_falls_back_to_get_credential(mock_chromadb):
-    """Bare T3Database() (no args) must pick up credentials via
-    nexus.config.get_credential — otherwise scripts and research
-    probes hit 'Permission denied' from CloudClient auth because the
-    constructor forwards empty strings downstream.
-
-    Discovered 2026-04-17 during RDR-086 research; prior behaviour
-    required every caller to know about make_t3() in nexus.db.__init__.
-    """
-    chromadb_m, _ = mock_chromadb
-
-    fake = {
-        "chroma_tenant": "tenant-from-config",
-        "chroma_database": "db-from-config",
-        "chroma_api_key": "key-from-config",
-        "voyage_api_key": "voyage-key-from-config",
-    }
-    with patch(
-        "nexus.db.t3.get_credential",
-        side_effect=lambda k: fake.get(k, ""),
-    ):
-        T3Database()
-
-    # CloudClient must have been called with the config values, not ""
-    call = chromadb_m.CloudClient.call_args
-    assert call.kwargs["tenant"] == "tenant-from-config"
-    assert call.kwargs["database"] == "db-from-config"
-    assert call.kwargs["api_key"] == "key-from-config"
-
-
-def test_bare_constructor_explicit_args_override_fallback(mock_chromadb):
-    """Explicit args still win over the config fallback."""
-    chromadb_m, _ = mock_chromadb
-    with patch(
-        "nexus.db.t3.get_credential",
-        side_effect=lambda k: "should-not-see-this" if k != "migrated" else "1",
-    ):
-        T3Database(tenant="explicit-t", database="explicit-db", api_key="explicit-k")
-
-    call = chromadb_m.CloudClient.call_args
-    assert call.kwargs["tenant"] == "explicit-t"
-    assert call.kwargs["database"] == "explicit-db"
-    assert call.kwargs["api_key"] == "explicit-k"
-
-
-def test_fallback_skipped_when_client_injected(mock_chromadb):
-    """Tests that pass _client= must not trigger the credential
-    fallback — otherwise get_credential would get called on every
-    test that injects an EphemeralClient or MagicMock."""
+def test_injected_client_constructs_without_credential_lookup(mock_chromadb):
+    """Injected-client construction performs no credential lookups — the
+    nexus-9ji bare-constructor fallback died with the retired
+    constructions (there is nothing left for fallback credentials to
+    feed)."""
     from unittest.mock import MagicMock
-    chromadb_m, _ = mock_chromadb
     sentinel = MagicMock()
-    with patch(
-        "nexus.db.t3.get_credential",
-    ) as gc:
-        T3Database(_client=sentinel)
+    with patch("nexus.config.get_credential") as gc:
+        db = T3Database(_client=sentinel)
+    assert db._client is sentinel
     assert not gc.called, (
-        "get_credential must not be called when _client is injected"
+        "constructor must not consult get_credential — make_t3() owns "
+        "credential resolution"
     )
 
-
-def test_fallback_skipped_in_local_mode(tmp_path):
-    """Local mode skips the credential fallback — no cloud creds needed."""
-    from unittest.mock import patch, MagicMock
-    with patch("nexus.db.t3.get_credential") as gc, \
-         patch("chromadb.PersistentClient", return_value=MagicMock()):
-        T3Database(local_mode=True, local_path=str(tmp_path))
-    assert not gc.called
-
-
-def test_cloud_init_uses_single_database(mock_chromadb):
-    """Cloud init connects to the configured database directly — no probe.
-    RDR-037 consolidation removed the legacy four-database layout; the
-    transitional probe was retired once the migration window closed.
-    """
-    chromadb_m, _ = mock_chromadb
-    db = T3Database(tenant="t", database="mydb", api_key="k")
-    assert chromadb_m.CloudClient.call_count == 1
-    assert chromadb_m.CloudClient.call_args.kwargs["database"] == "mydb"
-    assert db._client is not None
 
 
 def test_client_injection_sets_single_client(mock_chromadb):
@@ -174,8 +116,11 @@ def test_client_injection_sets_single_client(mock_chromadb):
     ("knowledge__security", "voyage-context-3"),
 ])
 def test_voyage_embedding_fn_selects_model(mock_chromadb, collection, expected_model):
-    chromadb_m, _ = mock_chromadb
-    db = T3Database(tenant="t", database="d", api_key="key", voyage_api_key="vkey")
+    chromadb_m, mock_client = mock_chromadb
+    db = T3Database(
+        tenant="t", database="d", api_key="key", voyage_api_key="vkey",
+        _client=mock_client,
+    )
     db.get_or_create_collection(collection)
     chromadb_m.utils.embedding_functions.VoyageAIEmbeddingFunction.assert_called_with(
         model_name=expected_model, api_key="vkey"
@@ -267,7 +212,7 @@ def test_expire_skips_non_knowledge_collections(mock_chromadb):
     }
     mock_client.list_collections.return_value = ["code__myrepo", "docs__papers", "knowledge__sec"]
     mock_client.get_collection.return_value = mock_col
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     assert db.expire() == 1
     mock_client.get_collection.assert_called_once_with("knowledge__sec")
 
@@ -343,7 +288,7 @@ def test_search_empty_collection_returns_empty(mock_db):
 def test_search_skips_missing_collection_without_creating(mock_chromadb):
     chromadb_m, mock_client = mock_chromadb
     mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("Collection not found")
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     assert db.search("query", ["knowledge__missing"], n_results=10) == []
     mock_client.get_or_create_collection.assert_not_called()
 
@@ -397,7 +342,7 @@ def test_search_continues_past_dimension_mismatch_to_next_collection(
         return col_bad if name == "knowledge__stale" else col_good
 
     mock_client.get_collection.side_effect = _get_collection
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     results = db.search(
         "q", ["knowledge__stale", "code__healthy"], n_results=5,
     )
@@ -438,7 +383,10 @@ def test_search_cce_collection_uses_query_embeddings(mock_chromadb):
         mock_vo_inst = MagicMock()
         mock_vo_ctor.return_value = mock_vo_inst
         mock_vo_inst.contextualized_embed.return_value = MagicMock()
-        db = T3Database(tenant="t", database="d", api_key="k", voyage_api_key="vkey")
+        db = T3Database(
+            tenant="t", database="d", api_key="k", voyage_api_key="vkey",
+            _client=mock_client,
+        )
         results = db.search("four store t3 architecture", ["rdr__nexus-abc123"], n_results=5)
 
     mock_vo_ctor.assert_called_once_with(api_key="vkey", timeout=120.0, max_retries=0)
@@ -487,7 +435,10 @@ def test_put_cce_collection_uses_document_input_type(mock_chromadb):
         mock_vo_inst = MagicMock()
         mock_vo_ctor.return_value = mock_vo_inst
         mock_vo_inst.contextualized_embed.return_value = MagicMock()
-        db = T3Database(tenant="t", database="d", api_key="k", voyage_api_key="vkey")
+        db = T3Database(
+            tenant="t", database="d", api_key="k", voyage_api_key="vkey",
+            _client=mock_client,
+        )
         db.put(collection="knowledge__security", content="some document text about security findings", title="finding.md")
 
     mock_vo_inst.contextualized_embed.assert_called_once_with(
@@ -506,7 +457,7 @@ def test_list_collections_returns_names_and_counts(mock_chromadb):
     mock_col2.count.return_value = 7
     mock_client.list_collections.return_value = ["code__myrepo", "knowledge__sec"]
     mock_client.get_collection.side_effect = [mock_col1, mock_col2]
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     result = db.list_collections()
     assert len(result) == 2
     by_name = {r["name"]: r for r in result}
@@ -517,7 +468,7 @@ def test_list_collections_returns_names_and_counts(mock_chromadb):
 def test_list_collections_empty(mock_chromadb):
     _, mock_client = mock_chromadb
     mock_client.list_collections.return_value = []
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     assert db.list_collections() == []
 
 
@@ -529,7 +480,7 @@ def test_list_collections_skips_failed_count(mock_chromadb):
     mock_fail.count.side_effect = RuntimeError("network error")
     mock_client.list_collections.return_value = ["knowledge__good", "knowledge__broken"]
     mock_client.get_collection.side_effect = lambda name: mock_ok if name == "knowledge__good" else mock_fail
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     result = db.list_collections()
     names = [r["name"] for r in result]
     assert "knowledge__good" in names
@@ -701,7 +652,10 @@ def test_embedding_fn_cached_per_collection_name(mock_chromadb):
     mock_client.get_or_create_collection.return_value = MagicMock()
     with patch("nexus.db.t3.chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction") as mock_ef_cls:
         mock_ef_cls.return_value = MagicMock(name="ef_instance")
-        db = T3Database(tenant="t", database="d", api_key="k", voyage_api_key="vk")
+        db = T3Database(
+            tenant="t", database="d", api_key="k", voyage_api_key="vk",
+            _client=mock_client,
+        )
         ef1 = db._embedding_fn("knowledge__topic")
         ef2 = db._embedding_fn("knowledge__topic")
     assert ef1 is ef2
@@ -713,7 +667,10 @@ def test_embedding_fn_different_names_not_confused(mock_chromadb):
     mock_client.get_or_create_collection.return_value = MagicMock()
     ef_a, ef_b = MagicMock(name="ef_code"), MagicMock(name="ef_knowledge")
     with patch("nexus.db.t3.chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction", side_effect=[ef_a, ef_b]) as mock_ef_cls:
-        db = T3Database(tenant="t", database="d", api_key="k", voyage_api_key="vk")
+        db = T3Database(
+            tenant="t", database="d", api_key="k", voyage_api_key="vk",
+            _client=mock_client,
+        )
         r1 = db._embedding_fn("code__repo")
         r2 = db._embedding_fn("knowledge__topic")
         r3 = db._embedding_fn("code__repo")
@@ -724,7 +681,10 @@ def test_embedding_fn_different_names_not_confused(mock_chromadb):
 def test_ef_override_bypasses_cache(mock_chromadb):
     _, mock_client = mock_chromadb
     override_ef = MagicMock(name="override")
-    db = T3Database(tenant="t", database="d", api_key="k", _ef_override=override_ef)
+    db = T3Database(
+        tenant="t", database="d", api_key="k", _ef_override=override_ef,
+        _client=mock_client,
+    )
     assert db._embedding_fn("code__repo") is override_ef
     assert db._embedding_fn("knowledge__sec") is override_ef
     assert db._ef_cache == {}
@@ -733,14 +693,25 @@ def test_ef_override_bypasses_cache(mock_chromadb):
 # ── make_t3() factory ───────────────────────────────────────────────────────
 
 
-def test_make_t3_uses_credentials(mock_chromadb):
+def test_make_t3_no_client_returns_service_handle(mock_chromadb):
+    """RDR-155 P4a.2 (nexus-1k8s1): with no injected client, make_t3 returns
+    the service-backed HttpVectorClient and never opens a CloudClient —
+    credentials are only consulted on the injected-client (test/ETL) path."""
+    from nexus.db import make_t3
+    from nexus.db.http_vector_client import HttpVectorClient
+    with patch("nexus.config.is_local_mode", return_value=False):
+        db = make_t3()
+    assert isinstance(db, HttpVectorClient)
+    assert mock_chromadb[0].CloudClient.call_count == 0
+
+
+def test_make_t3_injected_client_uses_credentials(mock_chromadb):
+    """The injected-client path still resolves configured credentials so the
+    T3Database facade can build Voyage embedders (the ETL-wrapper shape)."""
     from nexus.db import make_t3
     creds = {"chroma_tenant": "my-tenant", "chroma_database": "my-db", "chroma_api_key": "ck-abc", "voyage_api_key": "vk-xyz"}
-    with patch("nexus.config.is_local_mode", return_value=False):
-        with patch("nexus.db.get_credential", side_effect=lambda k: creds.get(k, "")):
-            db = make_t3()
-    assert mock_chromadb[0].CloudClient.call_count == 1
-    assert mock_chromadb[0].CloudClient.call_args.kwargs["database"] == "my-db"
+    with patch("nexus.db.get_credential", side_effect=lambda k: creds.get(k, "")):
+        db = make_t3(_client=MagicMock())
     assert db._voyage_api_key == "vk-xyz"
 
 
@@ -841,7 +812,7 @@ def test_delete_by_source(mock_db, col, path, returned_ids, expected_count, expe
 def test_delete_by_source_nonexistent_collection_returns_zero(mock_chromadb):
     _, mock_client = mock_chromadb
     mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("Collection not found")
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     assert db.delete_by_source("code__nonexistent", "src/file.py") == 0
 
 
@@ -884,7 +855,7 @@ def test_ids_for_doc_id(mock_db, col, doc_id, chashes, present_ids):
 def test_ids_for_doc_id_nonexistent_collection_returns_empty(mock_chromadb):
     _, mock_client = mock_chromadb
     mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("Collection not found")
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     cat = _stub_catalog(["a" * 64])
     assert db.ids_for_doc_id("code__nonexistent", "ART-deadbeef", catalog=cat) == []
 
@@ -932,7 +903,7 @@ def test_delete_by_doc_id(mock_db, col, doc_id, chashes, present_ids, expect_del
 def test_delete_by_doc_id_nonexistent_collection_returns_zero(mock_chromadb):
     _, mock_client = mock_chromadb
     mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("Collection not found")
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     cat = _stub_catalog(["a" * 64])
     assert db.delete_by_doc_id("code__nonexistent", "ART-deadbeef", catalog=cat) == 0
 
@@ -970,7 +941,7 @@ def test_update_source_path_empty_result(mock_db):
 def test_update_source_path_missing_collection(mock_chromadb):
     _, mock_client = mock_chromadb
     mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("not found")
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     assert db.update_source_path("code__nonexistent", "/old", "new") == 0
 
 
@@ -1038,7 +1009,7 @@ def test_collection_metadata_returns_correct_fields(mock_db, col, expected_model
 def test_collection_missing_raises_keyerror(mock_chromadb, method):
     _, mock_client = mock_chromadb
     mock_client.get_collection.side_effect = chromadb.errors.NotFoundError("not found")
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     with pytest.raises(KeyError, match="Collection not found"):
         getattr(db, method)("knowledge__missing")
 
@@ -1153,7 +1124,7 @@ def test_update_chunks_calls_col_update_without_documents(mock_db):
 
 def test_t3_context_manager_enter_returns_self(mock_chromadb):
     _, mock_client = mock_chromadb
-    db = T3Database(tenant="t", database="d", api_key="k")
+    db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     with db as ctx:
         assert ctx is db
 
@@ -1162,7 +1133,7 @@ def test_t3_context_manager_works_end_to_end(mock_chromadb):
     _, mock_client = mock_chromadb
     mock_col = MagicMock()
     mock_client.get_or_create_collection.return_value = mock_col
-    with T3Database(tenant="t", database="d", api_key="k") as db:
+    with T3Database(tenant="t", database="d", api_key="k", _client=mock_client) as db:
         doc_id = db.put(collection="knowledge__cm_test", content="context manager test", title="cm.md")
         # nexus-oe2i: RDR-108 D1 natural id is chunk_text_hash[:32].
         assert isinstance(doc_id, str)

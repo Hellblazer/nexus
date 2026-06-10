@@ -28,7 +28,6 @@ import structlog
 # annotations`` at the top of this file so the lazy import does not
 # break static type checkers.
 
-from nexus.config import get_credential
 from nexus.corpus import (
     LOCAL_EMBEDDING_MODELS,
     embedding_model_for_collection,
@@ -259,13 +258,22 @@ class IncompatibleCollectionError(RuntimeError):
 
 
 class T3Database:
-    """T3 ChromaDB permanent knowledge store.
+    """T3 Chroma-API knowledge-store facade over an INJECTED client.
 
-    Supports two modes:
-    - **Cloud mode** (default): ``chromadb.CloudClient`` connected to the configured
-      ChromaDB Cloud database.
-    - **Local mode** (``local_mode=True``): ``chromadb.PersistentClient`` using a
-      local directory — zero API keys required.
+    RDR-155 P4a.2 (nexus-1k8s1): the serving-path Chroma constructions are
+    retired — this class no longer opens a ``chromadb.CloudClient`` or
+    ``chromadb.PersistentClient`` itself. Production T3 serving routes through
+    the pgvector-backed nexus-service (``nexus.db.make_t3()`` returns an
+    :class:`~nexus.db.http_vector_client.HttpVectorClient`); this facade
+    survives for callers that INJECT a chroma client:
+
+    - tests (``EphemeralClient`` + ``DefaultEmbeddingFunction``), and
+    - the Phase-5 migration ETL, which wraps the read legs opened by
+      ``nexus.migration.chroma_read``.
+
+    The two historical modes still shape embedding-function dispatch:
+    ``local_mode=True`` selects local EFs; cloud mode (default) selects
+    Voyage EFs when ``voyage_api_key`` is supplied.
 
     Single-database architecture (RDR-037, 2026-03-14): all collection
     prefixes (``code__``, ``docs__``, ``rdr__``, ``knowledge__``) coexist
@@ -291,16 +299,21 @@ class T3Database:
         _client=None,
         _ef_override=None,
     ) -> None:
-        # Credential fallback (nexus-9ji/086 follow-up): when a caller passes
-        # the bare constructor (scripts, research probes, quick repls), empty
-        # args default to the configured credentials via nexus.config so the
-        # constructor is not a footgun. Callers that supply explicit values
-        # still win. Skipped entirely when ``_client`` is injected (tests).
-        if _client is None and not local_mode:
-            tenant = tenant or get_credential("chroma_tenant")
-            database = database or get_credential("chroma_database")
-            api_key = api_key or get_credential("chroma_api_key")
-            voyage_api_key = voyage_api_key or get_credential("voyage_api_key")
+        # RDR-155 P4a.2 (nexus-1k8s1): the serving-path Chroma constructions
+        # (PersistentClient for local mode, CloudClient for cloud mode) are
+        # retired — an injected ``_client`` is now REQUIRED. Production T3
+        # serving routes through the pgvector-backed nexus-service
+        # (``nexus.db.make_t3()``); the ONLY surviving Chroma constructors are
+        # the Phase-5 ETL read legs (``nexus.migration.chroma_read``). The
+        # nexus-9ji credential fallback that served the bare constructor died
+        # with the constructions it fed.
+        if _client is None:
+            raise RuntimeError(
+                "T3Database without an injected _client is retired (RDR-155 "
+                "Phase 4a): Chroma no longer serves T3. Use nexus.db.make_t3() "
+                "(pgvector service) or inject _client (tests, the Phase-5 ETL "
+                "wrapper)."
+            )
 
         self._local_mode = local_mode
         self._voyage_api_key = voyage_api_key
@@ -312,19 +325,16 @@ class T3Database:
         self._sems_lock = threading.Lock()
         self._quota_validator = QuotaValidator()
 
-        # ── Local mode: PersistentClient, no cloud, no Voyage ────────────
+        # ── Local mode: injected client over a local-EF dispatch ──────────
         if local_mode:
             from pathlib import Path
             p = Path(local_path)
             p.mkdir(parents=True, exist_ok=True)
-            if _client is not None:
-                self._client = _client
-            else:
-                self._client = chromadb.PersistentClient(path=str(p))
+            self._client = _client
             self._voyage_client = None
             return
 
-        # ── Cloud mode ───────────────────────────────────────────────────
+        # ── Cloud mode (injected client + optional Voyage embedders) ──────
         # Lazy voyageai import: only loaded when cloud mode is actually
         # used (the eager top-level import was multi-second cold-start
         # cost on every CLI invocation through the indirect import chain).
@@ -337,15 +347,7 @@ class T3Database:
             )
         else:
             self._voyage_client = None
-        if _client is not None:
-            self._client = _client
-        else:
-            # Single-database architecture (RDR-037 consolidation,
-            # 2026-03-14). All collection prefixes (code__, docs__,
-            # rdr__, knowledge__) coexist in one cloud database.
-            self._client = chromadb.CloudClient(
-                tenant=tenant or None, database=database, api_key=api_key
-            )
+        self._client = _client
         _apply_chroma_http_timeout(self._client)
 
     # ── Context manager (no-op: CloudClient is stateless REST) ───────────────

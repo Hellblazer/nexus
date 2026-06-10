@@ -94,15 +94,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   -Dnx.dualrun.p95.ms=250         p95 bound for the hybrid HTTP path, milliseconds
  * </pre>
  *
- * <p>Fixture-load: the Chroma leg loads THROUGH the service
- * ({@code /v1/vectors/upsert-chunks}); the pgvector leg loads via the repository —
- * a pgvector HTTP write surface does not exist until the Phase 4a serving cutover,
- * and creating one here would be exactly the premature surface P4a gates. The same
- * boundary applies on the READ side: {@code /v1/vectors/search} routes to Chroma and
- * no pgvector plain-ANN HTTP endpoint exists yet, so the recall test queries the
- * pgvector leg via {@link PgVectorRepository#search} directly; only hybrid
- * ({@code /v1/vectors/hybrid-search}) has an HTTP surface pre-P4a and it is driven
- * through HTTP everywhere in this class.
+ * <p>Fixture-load (updated at the RDR-155 P4a.2 serving cutover, bead nexus-1k8s1):
+ * BOTH legs load via their repositories. {@code /v1/vectors/*} now serves pgvector
+ * exclusively, so the Chroma comparand leg is repo-direct end-to-end (load, search,
+ * count) — Chroma stays RUNNABLE as the baseline fixture without an HTTP surface.
+ * The ENGINE leg under test stays HTTP where an HTTP contract exists: hybrid
+ * ({@code /v1/vectors/hybrid-search}) is driven through HTTP everywhere in this
+ * class; the plain-ANN recall comparison reads the pgvector leg repo-direct (the
+ * recall property is a repository property, not an HTTP-seam property — HTTP seam
+ * fidelity has its own test below).
  *
  * <p>Requires (same as {@code VectorIntegrationTest}): {@code chroma} CLI on PATH,
  * ONNX MiniLM files in the chromadb cache. Run via
@@ -226,12 +226,14 @@ class DualRunHarnessIntegrationTest {
         chromaRepo = new VectorRepository(docRouter, queryRouter,
                                           ChromaRestClient.local("127.0.0.1", chromaPort));
 
-        service = new NexusService(0, TOKEN, svcDs, chromaRepo, docRouter, pgRepo);
+        service = new NexusService(0, TOKEN, svcDs, docRouter, pgRepo);
         service.start();
         http = HttpClient.newHttpClient();
 
-        // --- Fixture-load. Chroma THROUGH the service; pgvector via the repository
-        //     (no pgvector HTTP write surface until Phase 4a — deliberate).
+        // --- Fixture-load. BOTH legs repo-direct (RDR-155 P4a.2, bead nexus-1k8s1):
+        //     the serving cutover routes /v1/vectors exclusively to pgvector, so the
+        //     Chroma comparand leg loads via its repository — Chroma stays RUNNABLE
+        //     as the baseline fixture, it just no longer has an HTTP serving surface.
         List<String> ids   = new ArrayList<>(corpus.keySet());
         List<String> texts = new ArrayList<>(corpus.values());
         int batch = 100;   // under the Chroma MAX_RECORDS_PER_WRITE=300 quota
@@ -239,14 +241,8 @@ class DualRunHarnessIntegrationTest {
             int end = Math.min(i + batch, ids.size());
             List<Map<String, Object>> metas = new ArrayList<>();
             for (int j = i; j < end; j++) metas.add(Map.of());
-            var resp = post("/v1/vectors/upsert-chunks", Map.of(
-                "collection", CHROMA_COL,
-                "ids",        ids.subList(i, end),
-                "documents",  texts.subList(i, end),
-                "metadatas",  metas));
-            assertThat(resp.statusCode())
-                .as("chroma fixture-load batch %d..%d through the service", i, end)
-                .isEqualTo(200);
+            chromaRepo.upsertChunks(CHROMA_COL,
+                ids.subList(i, end), texts.subList(i, end), metas);
             pgRepo.upsertChunks(TENANT, PG_COL,
                 ids.subList(i, end), texts.subList(i, end), metas);
         }
@@ -393,8 +389,10 @@ class DualRunHarnessIntegrationTest {
         List<String> perQuery = new ArrayList<>();
 
         for (String q : queries) {
-            List<Map<String, Object>> chromaRows = postRows("/v1/vectors/search",
-                Map.of("query", q, "collections", List.of(CHROMA_COL), "n_results", K));
+            // Chroma baseline repo-direct (RDR-155 P4a.2: /v1/vectors/search serves
+            // pgvector now — the comparand leg reads its own store directly).
+            List<Map<String, Object>> chromaRows =
+                chromaRepo.search(q, List.of(CHROMA_COL), K, null);
             List<Map<String, Object>> pgRows =
                 pgRepo.search(TENANT, q, List.of(PG_COL), K, null);
 

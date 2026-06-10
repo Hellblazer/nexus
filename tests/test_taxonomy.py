@@ -1827,11 +1827,12 @@ def test_discover_for_collection_force(
 def test_discover_cli_invocation() -> None:
     """nx taxonomy discover --collection <name> exits 0 in local mode.
 
-    RDR-120 P6 (nexus-qg86h): the command's bootstrapping path
+    RDR-155 P4a.2 (nexus-1k8s1): the command's bootstrapping path
     constructs a T3 handle via ``make_t3()`` before reaching the
-    mocked ``discover_for_collection``. Post-direct-mode-decommission
-    that needs the T3 daemon. Stub ``make_t3_client`` so the CLI
-    invocation gets a valid T3 stand-in.
+    mocked ``discover_for_collection``. Post-cutover the real handle is
+    service-backed (no raw chroma client) and the command refuses; stub
+    ``make_t3`` with a chroma-shaped MagicMock so the CLI plumbing under
+    test still runs.
     """
     from unittest.mock import MagicMock, patch
 
@@ -1841,7 +1842,7 @@ def test_discover_cli_invocation() -> None:
     runner = CliRunner()
     with (
         patch("nexus.commands.taxonomy_cmd.discover_for_collection", return_value=3) as mock_fn,
-        patch("nexus.daemon.t3_client.make_t3_client", return_value=MagicMock()),
+        patch("nexus.db.make_t3", return_value=MagicMock()),
     ):
         result = runner.invoke(taxonomy, ["discover", "--collection", "test__coll"])
 
@@ -1863,7 +1864,7 @@ def test_rebuild_cli_is_discover_force_alias() -> None:
     runner = CliRunner()
     with (
         patch("nexus.commands.taxonomy_cmd.discover_for_collection", return_value=2) as mock_fn,
-        patch("nexus.daemon.t3_client.make_t3_client", return_value=MagicMock()),
+        patch("nexus.db.make_t3", return_value=MagicMock()),
     ):
         result = runner.invoke(taxonomy, ["rebuild", "--collection", "test__coll"])
 

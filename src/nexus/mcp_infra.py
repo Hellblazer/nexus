@@ -174,28 +174,22 @@ def get_t1():
 
 
 def get_t3():
-    """Return T3Database singleton (or HttpVectorClient) — lazy init on first call.
+    """Return the T3 handle singleton — lazy init on first call.
 
-    RDR-152 bead nexus-gmiaf.20 (Seam B): when ``NX_STORAGE_BACKEND_VECTORS=service``
-    is set in the environment, returns an :class:`~nexus.db.http_vector_client.HttpVectorClient`
-    that routes search/query/upsert through the Java nexus-service instead of
-    hitting ChromaDB / Voyage AI directly.
-
-    Default path (flag unset or any other value) is unchanged: constructs and
-    returns a ``T3Database`` as before.
+    RDR-155 P4a.2 (bead nexus-1k8s1): ``make_t3()`` itself returns the
+    service-backed :class:`~nexus.db.http_vector_client.HttpVectorClient`
+    whenever no test client is injected (the Chroma serving paths are
+    retired), so the RDR-152 Seam B env-flag routing gate that used to live
+    here is gone — there is exactly one production path. Capability checks
+    on the returned handle use
+    :func:`nexus.db.http_vector_client.is_service_backed`.
     """
     global _t3_instance
     if _t3_instance is None:
         with _t3_lock:
             if _t3_instance is None:
-                # RDR-152 Seam B routing gate
-                from nexus.db.http_vector_client import is_vector_service_mode
-                if is_vector_service_mode():
-                    from nexus.db.http_vector_client import get_http_vector_client
-                    _t3_instance = get_http_vector_client()
-                else:
-                    from nexus.db import make_t3
-                    _t3_instance = make_t3()
+                from nexus.db import make_t3
+                _t3_instance = make_t3()
     return _t3_instance
 
 
@@ -657,8 +651,11 @@ def taxonomy_assign_batch_hook(
     # would raise AttributeError, swallowed by the bare except below, causing
     # silent taxonomy loss.  Log once and return cleanly.  Taxonomy-on-service
     # is a tracked follow-on (bead nexus-gmiaf.21+).
-    from nexus.db.http_vector_client import is_vector_service_mode
-    if is_vector_service_mode():
+    # RDR-155 P4a.2 (nexus-1k8s1): guard is INSTANCE-based — the env flag and
+    # the handle type diverge now that make_t3() returns the service client
+    # unconditionally while tests inject chroma-backed T3Database fixtures.
+    from nexus.db.http_vector_client import is_service_backed
+    if is_service_backed(get_t3()):
         import structlog
         structlog.get_logger().info(
             "taxonomy_assign_skipped_service_mode",
@@ -728,8 +725,9 @@ def _fetch_or_embed(
     ._client; taxonomy-via-chroma is not supported on the service path).
     """
     # RDR-152 Seam B guard — see taxonomy_assign_batch_hook for rationale.
-    from nexus.db.http_vector_client import is_vector_service_mode
-    if is_vector_service_mode():
+    # RDR-155 P4a.2: instance-based (env flag no longer tracks the handle type).
+    from nexus.db.http_vector_client import is_service_backed
+    if is_service_backed(get_t3()):
         return None
 
     import numpy as np

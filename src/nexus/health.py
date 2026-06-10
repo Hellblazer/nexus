@@ -296,92 +296,40 @@ def _check_t3_local() -> list[HealthResult]:
     if advisory is not None:
         results.append(advisory)
 
-    # Collection count and disk usage. Empty collections are kept on purpose
-    # (they preserve embedding-model metadata so the next store_put doesn't
-    # need to re-derive it) — surface the count so users aren't surprised by
-    # a 0-chunk collection lingering after `nx store delete` of every entry.
-    if path_exists:
-        try:
-            # RDR-120 P6 (nexus-qg86h): direct mode decommissioned. The
-            # local-mode probe always routes through the T3 daemon's
-            # HttpClient; the legacy PersistentClient direct-open
-            # branch is deleted. (chromadb's WAL races between
-            # processes when two PersistentClients open the same store
-            # simultaneously, which is why the daemon path was added
-            # at P2 in the first place; P6 makes it the only path.)
-            from nexus.daemon.t3_client import make_t3_client
+    # Collection count + legacy-store disk usage.
+    #
+    # RDR-155 P4a.2 (nexus-1k8s1): the T3-daemon probe is retired with the
+    # Chroma serving path — T3 serving routes through the pgvector-backed
+    # nexus-service, so the collection census queries it via ``make_t3()``.
+    # The on-disk Chroma directory is reported as the LEGACY store awaiting
+    # the Phase-5 ETL (its deletion is Phase 4b, gated on P5.G).
+    #
+    # The GH-1061 E1 dimension-mismatch probe retired with the serving path
+    # too: it dummy-queried raw Chroma collections to catch stored-vs-active
+    # embedder drift, but on the pgvector path embedding is server-side and
+    # the collection-name model segment dispatches the dimension fail-loud
+    # at write time (PgVectorRepository.dimForCollection) — the hazard class
+    # the probe existed for cannot occur silently anymore.
+    try:
+        from nexus.db import make_t3
 
-            client = make_t3_client()._client
-            cols = client.list_collections()
-            col_count = len(cols)
-            empty_count = sum(1 for c in cols if c.count() == 0)
+        cols = make_t3().list_collections()
+        col_count = len(cols)
+        detail = f"{col_count} collections (pgvector service)"
+        if path_exists:
             total_bytes = sum(f.stat().st_size for f in local_path.rglob("*") if f.is_file())
             if total_bytes < 1024 * 1024:
                 size_str = f"{total_bytes / 1024:.1f} KB"
             else:
                 size_str = f"{total_bytes / (1024 * 1024):.1f} MB"
-            empty_note = f" (including {empty_count} empty)" if empty_count else ""
-            results.append(HealthResult(
-                label="Local collections", ok=True,
-                detail=f"{col_count} collections{empty_note}, {size_str} on disk",
-            ))
-
-            # GH-1061 E1: dimension-mismatch detection.  Probe each non-empty
-            # collection with a dummy vector of the active ef's dimension.  If
-            # ChromaDB rejects it with "dimension" in the error, the collection
-            # was indexed with a different embedder.  A total mismatch (every
-            # queryable collection rejects the active dim) is a FAIL; a partial
-            # mismatch is a WARN.  Both surface remediation hints.
-            non_empty_cols = [c for c in cols if c.count() > 0]
-            if non_empty_cols:
-                dummy = [0.0] * ef.dimensions
-                mismatched: list[str] = []
-                for col in non_empty_cols:
-                    try:
-                        col.query(query_embeddings=[dummy], n_results=1)
-                    except Exception as probe_exc:
-                        if "dimension" in str(probe_exc).lower():
-                            mismatched.append(col.name)
-                        # Other errors (e.g. collection empty race) are benign.
-
-                if mismatched:
-                    total_queryable = len(non_empty_cols)
-                    mismatch_count = len(mismatched)
-                    is_total = mismatch_count == total_queryable
-                    detail_msg = (
-                        f"active embedder is {ef.dimensions}d ({ef.model_name}) "
-                        f"but {mismatch_count} of {total_queryable} collection(s) "
-                        f"use a different dimension — search returns nothing for those"
-                    )
-                    # L-1: wording must be unambiguous about which side is "wrong".
-                    # The stored vectors were indexed with a different embedder;
-                    # the user must either activate the matching embedder or reindex.
-                    fix_hints = []
-                    if ef.model_name == "all-MiniLM-L6-v2":
-                        fix_hints.append(
-                            "Your collections were indexed with a 768d embedder "
-                            "(bge-base-en-v1.5) but the active embedder is 384d "
-                            "(all-MiniLM-L6-v2 fallback).  "
-                            "Activate the matching embedder: "
-                            "pip install conexus[local]"
-                        )
-                    fix_hints.append(
-                        "Or reindex the mismatched collection(s) with the active "
-                        f"{ef.dimensions}d embedder: "
-                        "nx collection reindex <collection>"
-                    )
-                    results.append(HealthResult(
-                        label="Local collections dimension",
-                        ok=False,
-                        warn=not is_total,   # partial = soft warn; total = hard fail
-                        detail=detail_msg,
-                        fix_suggestions=fix_hints,
-                        fatal=is_total,
-                    ))
-
-        except Exception as exc:
-            _log.debug("doctor_local_collections_failed", error=str(exc))
-            results.append(HealthResult(label="Local collections", ok=True, detail="could not query"))
+            detail += f"; legacy Chroma store {size_str} on disk (awaiting P5 ETL)"
+        results.append(HealthResult(
+            label="T3 collections", ok=True,
+            detail=detail,
+        ))
+    except Exception as exc:
+        _log.debug("doctor_t3_collections_failed", error=str(exc))
+        results.append(HealthResult(label="T3 collections", ok=True, detail="could not query"))
 
     return results
 
@@ -433,33 +381,32 @@ def _check_t3_cloud() -> list[HealthResult]:
         ]
     results.append(r)
 
-    # ChromaDB reachability
+    # Vector-serving reachability (RDR-155 P4a.2, nexus-1k8s1): the direct
+    # ChromaDB Cloud probe retired with the serving path — T3 serving routes
+    # through the pgvector-backed nexus-service, so the probe that matters is
+    # the service's vector surface. The ChromaCloud credentials above still
+    # matter: the Phase-5 ETL reads the legacy store through them.
     if chroma_key and chroma_database:
         try:
-            # RDR-120 P2: route through make_t3 so the reachability
-            # probe exercises the same code path the indexer takes.
-            # Daemon mode is local-only; this branch only fires in
-            # cloud mode, so make_t3 dispatches to CloudClient.
-            from nexus.db import make_t3
-            make_t3()
+            # Raw GET so failures surface (HttpVectorClient.list_collections
+            # deliberately swallows errors for its callers).
+            from nexus.db.http_vector_client import _get
+            _get("/v1/vectors/collections")
             results.append(HealthResult(
-                label=f"ChromaDB  ({chroma_database})", ok=True, detail="reachable",
+                label="Vector service (/v1/vectors)", ok=True, detail="reachable",
             ))
         except Exception as exc:
-            _log.debug("db_not_reachable", db_name=chroma_database, error=str(exc))
+            _log.debug("vector_service_not_reachable", error=str(exc))
             results.append(HealthResult(
-                label=f"ChromaDB  ({chroma_database})",
+                label="Vector service (/v1/vectors)",
                 ok=False,
                 detail="not reachable",
                 fix_suggestions=[
-                    "Run 'nx config init' to provision the database automatically.",
-                    f"Or create '{chroma_database}' manually in the ChromaDB Cloud dashboard.",
+                    "Start the nexus-service (pgvector backend) and export "
+                    "NX_SERVICE_URL / NX_SERVICE_TOKEN.",
                 ],
                 fatal=True,
             ))
-        # RDR-037 transitional probe for the legacy four-database
-        # layout was retired post-migration; the single-database
-        # architecture is the only supported shape.
 
     # VOYAGE_API_KEY
     voyage_key = get_credential("voyage_api_key")
@@ -481,14 +428,26 @@ def _check_t3_cloud() -> list[HealthResult]:
     if chroma_key and chroma_database and voyage_key:
         from nexus.indexer import PIPELINE_VERSION, get_collection_pipeline_version
 
+        # RDR-155 P4a.2 (nexus-1k8s1): the sweep reads Chroma COLLECTION
+        # metadata (the pipeline_version stamp), which has no pgvector
+        # equivalent — collection is a column, not an object with metadata.
+        # On the service-backed handle the sweep is retired, not "failed";
+        # pgvector-side staleness tracking is a P5 ETL concern.
+        from nexus.db import make_t3
+        from nexus.db.http_vector_client import is_service_backed
+
+        t3_handle = make_t3()
+        if is_service_backed(t3_handle):
+            results.append(HealthResult(
+                label="pipeline versions", ok=True,
+                detail="sweep retired with the Chroma serving path (RDR-155 P4a)",
+            ))
+            return results
+
         stale_count = 0
         pipeline_results: list[HealthResult] = []
         try:
-            # RDR-120 P2: route through make_t3 for the cloud-mode
-            # pipeline-version sweep. Cloud-only branch; daemon does
-            # not apply.
-            from nexus.db import make_t3
-            client = make_t3()._client
+            client = t3_handle._client
             cols = client.list_collections()
             for col in cols:
                 # taxonomy__* collections are BERTopic aggregates (RDR-070),

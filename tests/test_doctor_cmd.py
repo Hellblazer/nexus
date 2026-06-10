@@ -75,12 +75,16 @@ def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
     else:
         patches.append(patch("nexus.health.shutil.which",
                              return_value=which))
+    # RDR-155 P4a.2 (nexus-1k8s1): the cloud reachability probe targets the
+    # nexus-service vector surface (nexus.db.http_vector_client._get), not a
+    # chromadb.CloudClient construction. ``cloud_client`` keeps its kwarg name
+    # for the existing call sites but patches the service probe.
     if cloud_client is not None:
-        patches.append(patch("nexus.health.chromadb.CloudClient",
+        patches.append(patch("nexus.db.http_vector_client._get",
                              **cloud_client))
     elif cred and not callable(cred):
-        patches.append(patch("nexus.health.chromadb.CloudClient",
-                             return_value=MagicMock()))
+        patches.append(patch("nexus.db.http_vector_client._get",
+                             return_value=[]))
     patches.extend(extra_patches or [])
     with contextlib.ExitStack() as stack:
         for p in patches:
@@ -316,19 +320,12 @@ def test_doctor_index_log_not_created_yet(runner, mock_reg):
 
 # ── Single-database check ───────────────────────────────────────────────────
 
-def test_doctor_single_db_calls_cloud_client(runner, mock_reg):
-    import chromadb.errors
-    mock_client = MagicMock()
-    mock_client.list_collections.return_value = []
-
-    def cloud_side(**kwargs):
-        if kwargs.get("database", "").endswith("_code"):
-            raise chromadb.errors.NotFoundError("probe: not found")
-        return mock_client
-
+def test_doctor_probes_vector_service(runner, mock_reg):
+    # RDR-155 P4a.2: the probe hits the service's /v1/vectors/collections.
     result = _invoke(runner, mock_reg,
-                     cloud_client={"side_effect": cloud_side})
-    assert "reachable" in result.output
+                     cloud_client={"return_value": []})
+    assert "Vector service" in result.output
+    assert "not reachable" not in result.output
 
 
 def test_doctor_single_db_unreachable_fails(runner, mock_reg):
@@ -337,7 +334,7 @@ def test_doctor_single_db_unreachable_fails(runner, mock_reg):
     })
     assert result.exit_code == 1
     assert "not reachable" in result.output
-    assert "nx config init" in result.output
+    assert "NX_SERVICE_URL" in result.output
 
 
 def test_doctor_single_db_no_secret_leak(runner, mock_reg):
@@ -389,36 +386,23 @@ def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
 
 
 def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
-    """RDR-120 P6: the local-collections probe routes through the T3
-    daemon's HttpClient. Stub ``make_t3_client`` to wrap an existing
-    PersistentClient against the test's chroma path so the probe
-    sees the collection the test seeded.
+    """RDR-155 P4a.2 (nexus-1k8s1): the collection census routes through the
+    pgvector service handle (``make_t3()``); the on-disk chroma directory is
+    reported as the legacy store awaiting the P5 ETL.
     """
     chroma_path = tmp_path / "chroma"
-    import chromadb
-    from nexus.db.local_ef import LocalEmbeddingFunction
-    ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-    client = chromadb.PersistentClient(path=str(chroma_path))
-    col = client.get_or_create_collection("knowledge__test", embedding_function=ef)
-    col.add(ids=["doc1"], documents=["test content"])
+    chroma_path.mkdir()
+    (chroma_path / "blob.bin").write_bytes(b"x" * 1024)
 
-    # Stub the daemon-client factory to return a thin wrapper that
-    # exposes the existing PersistentClient as ``._client`` — that's
-    # the attribute the probe reaches into.
-    class _Stub:
-        _client = client
+    class _StubServiceClient:
+        def list_collections(self):
+            return [{"name": "knowledge__test"}]
 
     # RDR-137 followup IMP-22 (nexus-43qgm.22): patch the live
     # nexus.repos.list_repos_dual path, not the dead nexus.registry
     # one (see sibling test for rationale).
     with (
         patch("nexus.config.is_local_mode", return_value=True),
-        # Pin the active local embedder to the 384-dim tier so doctor's
-        # dimension probe matches the 384-seeded collection. Without this the
-        # probe builds LocalEmbeddingFunction() which auto-selects bge-768 in a
-        # [local]-extra dev env, fails the 384 collection as a dimension
-        # mismatch, and doctor exits non-zero (passes in CI only because CI
-        # lacks the extra). mem:feedback_pin_local_mode_in_cloud_tests.
         patch("nexus.config.local_embed_model_choice", return_value="all-MiniLM-L6-v2"),
         patch("nexus.config._default_local_path", return_value=chroma_path),
         patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
@@ -426,7 +410,7 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
             "nexus.repos.list_repos_dual",
             side_effect=lambda **_: list(mock_reg.all()),
         ),
-        patch("nexus.daemon.t3_client.make_t3_client", return_value=_Stub()),
+        patch("nexus.db.make_t3", return_value=_StubServiceClient()),
     ):
         result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0

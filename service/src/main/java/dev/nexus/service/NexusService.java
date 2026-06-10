@@ -28,7 +28,6 @@ import dev.nexus.service.http.VectorHandler;
 import dev.nexus.service.http.WhoamiHandler;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PgVectorRepository;
-import dev.nexus.service.vectors.VectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -80,56 +79,73 @@ public final class NexusService {
 
     /**
      * Convenience constructor: no vector backend (original signature for existing tests).
+     * The {@code /v1/vectors/*} routes answer 503 (explicit refusal, never a 404 or NPE).
      *
      * @param port      listen port; 0 for OS-assigned ephemeral (use in tests)
      * @param token     expected bearer token (from NX_SERVICE_TOKEN env or config)
      * @param dataSource pooled connection source (HikariCP in production)
      */
     public NexusService(int port, String token, DataSource dataSource) throws IOException {
-        this(port, token, dataSource, null);
+        this(port, token, dataSource, null, null);
     }
 
     /**
-     * @param port             listen port; 0 for OS-assigned ephemeral (use in tests)
-     * @param token            expected bearer token (from NX_SERVICE_TOKEN env or config)
-     * @param dataSource       pooled connection source (HikariCP in production)
-     * @param vectorRepository optional VectorRepository for Seam B vector ops (may be null)
-     */
-    public NexusService(int port, String token, DataSource dataSource,
-                        VectorRepository vectorRepository) throws IOException {
-        this(port, token, dataSource, vectorRepository, null);
-    }
-
-    /**
-     * Full constructor with EmbedderRouter for the parity gate endpoint (nexus-gmiaf.21).
-     *
-     * @param port             listen port; 0 for OS-assigned ephemeral (use in tests)
-     * @param token            expected bearer token
-     * @param dataSource       pooled connection source
-     * @param vectorRepository optional VectorRepository (may be null)
-     * @param docEmbedderRouter optional EmbedderRouter for {@code /v1/vectors/embed} (may be null)
-     */
-    public NexusService(int port, String token, DataSource dataSource,
-                        VectorRepository vectorRepository,
-                        EmbedderRouter docEmbedderRouter) throws IOException {
-        this(port, token, dataSource, vectorRepository, docEmbedderRouter, null);
-    }
-
-    /**
-     * Full constructor with the pgvector repository for {@code /v1/vectors/hybrid-search}
-     * (RDR-155 P3.2, bead nexus-eap5l).
+     * Embed-only constructor (parity-gate mode, nexus-gmiaf.21): {@code /v1/vectors/embed}
+     * is live, every storage/query route answers 503.
      *
      * @param port              listen port; 0 for OS-assigned ephemeral (use in tests)
      * @param token             expected bearer token
      * @param dataSource        pooled connection source
-     * @param vectorRepository  optional Chroma VectorRepository (may be null)
-     * @param docEmbedderRouter optional EmbedderRouter for {@code /v1/vectors/embed} (may be null)
-     * @param pgVectorRepository optional PgVectorRepository for {@code /v1/vectors/hybrid-search}
-     *                           (may be null; production serving wiring is the Phase 4a cutover —
-     *                           until then the validation harness wires it explicitly)
+     * @param docEmbedderRouter EmbedderRouter for {@code /v1/vectors/embed} (may be null)
      */
     public NexusService(int port, String token, DataSource dataSource,
-                        VectorRepository vectorRepository,
+                        EmbedderRouter docEmbedderRouter) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, null);
+    }
+
+    /**
+     * Deprecated 6-arg bridge for pre-P4a callers (RDR-155 P4a.2, bead nexus-1k8s1).
+     *
+     * <p>The fourth parameter is the RETIRED Chroma vector-repository slot —
+     * the Phase 4a serving cutover removed Chroma from the serving wiring, so the
+     * slot survives only because the locked P4a.1 contract suite
+     * ({@code PgVectorServingContractTest}) pins this call shape with {@code null}
+     * in the slot. Passing anything non-null fails loud.
+     *
+     * @param retiredChromaRepositorySlot MUST be null — the Chroma serving backend
+     *                                    is retired (pgvector serves all vector routes)
+     * @deprecated use {@link #NexusService(int, String, DataSource, EmbedderRouter,
+     *             PgVectorRepository)}; this bridge is deleted with the Phase 4b
+     *             Chroma removal (gated on P5.G)
+     */
+    @Deprecated(forRemoval = true)
+    public NexusService(int port, String token, DataSource dataSource,
+                        Object retiredChromaRepositorySlot,
+                        EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository);
+        if (retiredChromaRepositorySlot != null) {
+            throw new IllegalArgumentException(
+                "the Chroma repository slot is retired (RDR-155 Phase 4a): vector serving "
+                + "routes exclusively through PgVectorRepository — pass null or use the "
+                + "5-arg constructor");
+        }
+    }
+
+    /**
+     * Full constructor — the production wiring (RDR-155 P4a.2, bead nexus-1k8s1).
+     *
+     * @param port              listen port; 0 for OS-assigned ephemeral (use in tests)
+     * @param token             expected bearer token
+     * @param dataSource        pooled connection source
+     * @param docEmbedderRouter optional EmbedderRouter for {@code /v1/vectors/embed}
+     *                          (may be null — /embed answers 503, the pinned
+     *                          absent-router invariant)
+     * @param pgVectorRepository optional PgVectorRepository serving every
+     *                          {@code /v1/vectors/*} storage/query route (may be null —
+     *                          those routes answer 503)
+     */
+    public NexusService(int port, String token, DataSource dataSource,
                         EmbedderRouter docEmbedderRouter,
                         PgVectorRepository pgVectorRepository) throws IOException {
         this.tenantScope = new TenantScope(dataSource);
@@ -211,17 +227,16 @@ public final class NexusService {
         var sessionsCtx = server.createContext("/v1/sessions", new SessionTokenHandler(tokenStore));
         sessionsCtx.getFilters().addAll(authFilter);
 
-        // /v1/vectors/* — vector endpoints (bead nexus-gmiaf.20; hybrid: RDR-155 P3.2)
-        // Registered when a VectorRepository is provided OR an EmbedderRouter alone is provided
-        // (parity-gate mode: NX_CHROMA_MODE=none + NX_VOYAGE_API_KEY — only /embed is active)
-        // OR a PgVectorRepository is provided (hybrid-search validation seam).
-        if (vectorRepository != null || docEmbedderRouter != null || pgVectorRepository != null) {
-            var vectorCtx = server.createContext("/v1/vectors",
-                    new VectorHandler(vectorRepository, docEmbedderRouter, pgVectorRepository));
-            vectorCtx.getFilters().addAll(authFilter);
-            log.info("event=vector_endpoints_registered has_storage={} has_pgvector={}",
-                    vectorRepository != null, pgVectorRepository != null);
-        }
+        // /v1/vectors/* — vector endpoints (bead nexus-gmiaf.20; hybrid: RDR-155 P3.2;
+        // pgvector serving cutover: RDR-155 P4a.2, bead nexus-1k8s1). Always registered:
+        // the handler answers an explicit 503 per route when its backend (pgvector
+        // repository for storage/query, embedder router for /embed) is absent — a
+        // missing backend is a refusal, never a 404 that masquerades as an unknown route.
+        var vectorCtx = server.createContext("/v1/vectors",
+                new VectorHandler(docEmbedderRouter, pgVectorRepository));
+        vectorCtx.getFilters().addAll(authFilter);
+        log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={}",
+                docEmbedderRouter != null, pgVectorRepository != null);
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
 

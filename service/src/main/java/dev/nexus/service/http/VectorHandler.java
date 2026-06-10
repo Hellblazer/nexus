@@ -10,44 +10,65 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
-import dev.nexus.service.vectors.ChromaQuotaValidator;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PgVectorRepository;
-import dev.nexus.service.vectors.VectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
 /**
- * RDR-152 bead nexus-gmiaf.20 — Vector HTTP endpoints.
+ * Vector HTTP endpoints — pgvector serving surface (RDR-155 P4a.2, bead nexus-1k8s1).
  *
  * <p>Routes (all under {@code /v1/vectors/}):
  * <pre>
- *   POST /v1/vectors/upsert-chunks   server-side embed + quota + Chroma write
- *   POST /v1/vectors/search          embed query server-side + Chroma query (multi-collection)
+ *   POST /v1/vectors/upsert-chunks   server-side embed + pgvector write
+ *   POST /v1/vectors/search          embed query server-side + cosine rank (multi-collection)
  *   POST /v1/vectors/query           alias for search (mirrors MCP query tool)
  *   POST /v1/vectors/hybrid-search   pgvector hybrid fusion (tsvector+pg_trgm gate, vector rank) — RDR-155 P3
  *   POST /v1/vectors/store-put       single-chunk put (MCP store_put path)
- *   POST /v1/vectors/get              get chunks by metadata where-filter (incremental-sync staleness check)
+ *   POST /v1/vectors/get             get chunks by metadata where-filter (incremental-sync staleness check)
  *   POST /v1/vectors/store-get       fetch chunks by IDs (MCP store_get/store_get_many)
  *   POST /v1/vectors/store-list      list collection (MCP store_list)
  *   POST /v1/vectors/store-delete    delete by IDs (MCP store_delete)
- *   GET  /v1/vectors/collections     list all Chroma collections
+ *   POST /v1/vectors/update-metadata metadata-only update (frecency reindex)
+ *   GET  /v1/vectors/collections     list the tenant's collections
  *   GET  /v1/vectors/count           count chunks in a collection
+ *   POST /v1/vectors/embed           embed-only (parity gate); 503 without a router
  * </pre>
  *
- * <p>Auth: all routes require Bearer token (enforced by {@link AuthFilter}).
- * Tenant header ({@code X-Nexus-Tenant}) is accepted but used only for Postgres RLS;
- * Chroma collection names encode scope via the four-segment convention.
+ * <p><strong>Tenant contract (skp06 supersession).</strong> Every serving op is
+ * scoped by the SERVER-RESOLVED tenant from {@link RequestContext} under FORCE RLS —
+ * a bearer bound to another tenant sees and affects exactly 0 rows. The Chroma-era
+ * collection-name boundary (and the never-built skp06 app-layer guard) is replaced
+ * by native RLS.
  *
- * <p>Quota violations are caught and returned as HTTP 413 with a JSON error body.
+ * <p><strong>Envelope parity.</strong> Response envelopes are byte-shape-identical
+ * to the retired Chroma path (locked by {@code PgVectorServingContractTest}), so the
+ * Python {@code _ServiceCollectionStub} / {@code HttpVectorClient} port unchanged.
+ *
+ * <p><strong>/get {@code include} parameter (P4a.2 decision, recorded on
+ * nexus-1k8s1):</strong> the {@code include} field the Python stub sends is accepted
+ * and IGNORED — /get always returns the full {@code {ids, documents, metadatas}}
+ * envelope. Honouring {@code include} would make the envelope shape request-dependent
+ * for no consumer benefit (the stub normalises all three keys unconditionally).
+ *
+ * <p><strong>Error mapping (P4a.2 decision, recorded on nexus-1k8s1):</strong>
+ * {@link IllegalArgumentException} messages (including
+ * {@code dimForCollection}'s, which echo the collection name) pass verbatim into
+ * 400 bodies — the collection name is the caller's own request data and the bearer
+ * is already tenant-bound, so nothing crosses a trust boundary. The Chroma quota
+ * 413 mapping is retired with the Chroma serving path: pgvector imposes no
+ * record-count / document-size quotas (RDR-155 §Retire).
+ *
+ * <p>503 when no {@link PgVectorRepository} is wired (matches the /embed
+ * absent-router pin): a service constructed without a vector backend refuses
+ * loudly instead of NPEing.
  */
 public final class VectorHandler implements HttpHandler {
 
@@ -61,45 +82,22 @@ public final class VectorHandler implements HttpHandler {
 
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
-    private final VectorRepository    repo;
     private final EmbedderRouter      embedderRouter;
     private final PgVectorRepository  pgRepo;
 
     /**
-     * Full constructor (RDR-155 P3.2, bead nexus-eap5l).
-     *
-     * @param repo           Chroma vector repository for storage ops (may be null)
-     * @param embedderRouter collection-aware embedder router for /embed (may be null)
-     * @param pgRepo         pgvector repository for /hybrid-search (may be null until the
-     *                       Phase 4a serving cutover wires it in production; the conexus
-     *                       xr7.8.9 validation harness wires it explicitly)
+     * @param embedderRouter collection-aware embedder router for /embed (may be null —
+     *                       /embed answers 503, the pinned absent-router behaviour)
+     * @param pgRepo         pgvector repository serving every storage/query route
+     *                       (may be null — all serving routes answer 503)
      */
-    public VectorHandler(VectorRepository repo, EmbedderRouter embedderRouter,
-                         PgVectorRepository pgRepo) {
-        this.repo           = repo;
+    public VectorHandler(EmbedderRouter embedderRouter, PgVectorRepository pgRepo) {
         this.embedderRouter = embedderRouter;
         this.pgRepo         = pgRepo;
     }
 
-    /**
-     * @param repo          vector repository for storage ops
-     * @param embedderRouter collection-aware embedder router (for /embed endpoint)
-     */
-    public VectorHandler(VectorRepository repo, EmbedderRouter embedderRouter) {
-        this(repo, embedderRouter, null);
-    }
-
-    /** Backwards-compatible constructor for tests without an embedder router. */
-    public VectorHandler(VectorRepository repo) {
-        this(repo, null, null);
-    }
-
     @Override
     public void handle(HttpExchange exchange) throws IOException {
-        // DEFERRED (bead nexus-skp06): unlike the T2/T1 handlers this does NOT scope
-        // Chroma operations by RequestContext.tenant(); isolation rests on the
-        // collection-name convention only. App-layer tenant enforcement for vector ops
-        // is tracked separately and must land before multi-principal deployment.
         String path = exchange.getRequestURI().getPath();
         // Strip prefix /v1/vectors → /upsert-chunks, /search, etc.
         String op = path.replaceFirst("^/v1/vectors", "");
@@ -122,14 +120,8 @@ public final class VectorHandler implements HttpHandler {
                 case "/embed"         -> handleEmbed(exchange, method);    // parity gate
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
-        } catch (ChromaQuotaValidator.QuotaViolation e) {
-            log.debug("event=vector_quota_violation op={} field={} actual={} limit={}",
-                    op, e.field, e.actual, e.limit);
-            HttpUtil.send(exchange, 413, json(Map.of(
-                    "error", "quota_violation",
-                    "field", e.field,
-                    "actual", e.actual,
-                    "limit", e.limit)));
+        } catch (SkipHandlerException e) {
+            // Response already sent (405 / 503 / 401 guard) — nothing further.
         } catch (IllegalArgumentException e) {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
@@ -139,13 +131,44 @@ public final class VectorHandler implements HttpHandler {
         }
     }
 
+    // ── Per-request guards ────────────────────────────────────────────────────
+
+    /**
+     * 503 + skip when no pgvector repository is wired (matches the /embed
+     * absent-router pattern: refuse explicitly, never NPE).
+     */
+    private PgVectorRepository requirePgRepo(HttpExchange ex) throws IOException {
+        if (pgRepo == null) {
+            HttpUtil.send(ex, 503, json(Map.of(
+                    "error", "vector serving not configured (no pgvector repository)")));
+            throw new SkipHandlerException();
+        }
+        return pgRepo;
+    }
+
+    /**
+     * The SERVER-RESOLVED tenant for this request. Defense-in-depth, deliberately
+     * redundant: AuthFilter rejects unauthenticated requests before this handler
+     * runs, and TenantScope.withTenant fails loud on a blank tenant. This guard
+     * exists because RLS is the tenant boundary on the pgvector path — if this
+     * handler is ever instantiated without the filter, it must refuse, not widen.
+     */
+    private String requireTenant(HttpExchange ex) throws IOException {
+        String tenant = RequestContext.tenant();
+        if (tenant == null || tenant.isBlank()) {
+            HttpUtil.send(ex, 401, json(Map.of("error", "no resolved tenant for request")));
+            throw new SkipHandlerException();
+        }
+        return tenant;
+    }
+
     // ── Handlers ──────────────────────────────────────────────────────────────
 
     /**
      * POST /v1/vectors/upsert-chunks
      *
      * <p>Primary Seam B write path.  Python sends chunk text (not vectors);
-     * this service embeds + validates + writes to Chroma.
+     * this service embeds + writes to the dispatched {@code chunks_<dim>} table.
      *
      * <p>Request:
      * <pre>
@@ -161,6 +184,8 @@ public final class VectorHandler implements HttpHandler {
      */
     private void handleUpsertChunks(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String collection           = requireString(body, "collection");
         List<String> ids            = requireStringList(body, "ids");
@@ -172,7 +197,7 @@ public final class VectorHandler implements HttpHandler {
                     "ids length " + ids.size() + " != documents length " + documents.size());
         }
 
-        repo.upsertChunks(collection, ids, documents, metadatas);
+        repo.upsertChunks(tenant, collection, ids, documents, metadatas);
         HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size())));
     }
 
@@ -191,59 +216,38 @@ public final class VectorHandler implements HttpHandler {
      *
      * <p>Response 200: [{"id","content","distance","collection", ...metadata}]
      */
-    @SuppressWarnings("unchecked")
     private void handleSearch(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String queryText              = requireString(body, "query");
         List<String> collections      = requireStringList(body, "collections");
         int nResults                  = optInt(body, "n_results", 10);
         Map<String, Object> where     = optMap(body, "where");
 
-        var results = repo.search(queryText, collections, nResults, where);
+        var results = repo.search(tenant, queryText, collections, nResults, where);
         HttpUtil.send(ex, 200, json(results));
     }
 
     /**
      * POST /v1/vectors/hybrid-search — RDR-155 Phase 3 (bead nexus-eap5l).
      *
-     * <p>The pgvector hybrid fusion query (tsvector + pg_trgm text gate, vector rank)
-     * through the EXISTING /v1/vectors surface — the validation seam the conexus
-     * xr7.8.9 go-live gate drives. Request body matches /search:
+     * <p>The pgvector hybrid fusion query (tsvector + pg_trgm text gate, vector rank).
+     * Request body matches /search:
      * {@code {"query": "...", "collections": [...], "n_results": 10, "where": {...}}}.
-     *
-     * <p>Tenant: SERVER-RESOLVED from the authenticated bearer
-     * ({@link RequestContext#tenant()}) — RLS is the tenant boundary on the pgvector
-     * path, unlike the Chroma routes where collection names encode scope.
-     *
-     * <p>503 when no {@link PgVectorRepository} is wired (same pattern as /embed):
-     * production wiring is the Phase 4a serving cutover; until then the harness wires
-     * it explicitly.
      */
     private void handleHybridSearch(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
-        if (pgRepo == null) {
-            HttpUtil.send(ex, 503, json(Map.of(
-                    "error", "hybrid-search endpoint not configured (no pgvector repository)")));
-            return;
-        }
-        // Defense-in-depth, deliberately redundant: AuthFilter rejects unauthenticated
-        // requests before this handler runs, and TenantScope.withTenant fails loud on a
-        // blank tenant. This guard exists because the pgvector path's tenant boundary is
-        // RLS (unlike the Chroma routes, where collection names encode scope) - if this
-        // handler is ever instantiated without the filter, it must refuse, not widen.
-        String tenant = RequestContext.tenant();
-        if (tenant == null || tenant.isBlank()) {
-            HttpUtil.send(ex, 401, json(Map.of("error", "no resolved tenant for request")));
-            return;
-        }
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String queryText          = requireString(body, "query");
         List<String> collections  = requireStringList(body, "collections");
         int nResults              = optInt(body, "n_results", 10);
         Map<String, Object> where = optMap(body, "where");
 
-        var results = pgRepo.hybridSearch(tenant, queryText, collections, nResults, where);
+        var results = repo.hybridSearch(tenant, queryText, collections, nResults, where);
         HttpUtil.send(ex, 200, json(results));
     }
 
@@ -264,6 +268,8 @@ public final class VectorHandler implements HttpHandler {
      */
     private void handleStorePut(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String collection  = requireString(body, "collection");
         String docId       = requireString(body, "doc_id");
@@ -271,7 +277,7 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> metadata = optMap(body, "metadata");
         if (metadata == null) metadata = Map.of();
 
-        String returnedId = repo.put(collection, docId, content, metadata);
+        String returnedId = repo.put(tenant, collection, docId, content, metadata);
         HttpUtil.send(ex, 200, json(Map.of("id", returnedId)));
     }
 
@@ -279,16 +285,17 @@ public final class VectorHandler implements HttpHandler {
      * POST /v1/vectors/get
      *
      * <p>Incremental-sync staleness check for the Python {@code _ServiceCollectionStub}
-     * (RDR-152 Seam B nexus-gmiaf.22). Accepts a metadata {@code where} filter
-     * so doc_indexer can query existing chunks by {@code source_key} /
-     * {@code content_hash} without fetching the full collection.
+     * (RDR-152 Seam B nexus-gmiaf.22): doc_indexer queries existing chunks by
+     * {@code source_key} / {@code content_hash} without fetching the full collection.
+     * Plain-equality predicates only (the staleness check's shape).
      *
      * <p>Request:
      * <pre>
      * {
      *   "collection": "...",
-     *   "where":      {"$and": [...]},  // optional metadata filter
-     *   "include":    ["metadatas"],    // optional, ignored (always returns ids+docs+metadatas)
+     *   "where":      {"source_key": "..."},  // optional plain-equality metadata filter
+     *   "include":    ["metadatas"],    // optional, ignored — always returns ids+docs+metadatas
+     *                                   // (P4a.2 decision, recorded on nexus-1k8s1)
      *   "limit":      10,              // optional, default 10
      *   "offset":     0               // optional, default 0
      * }
@@ -296,16 +303,17 @@ public final class VectorHandler implements HttpHandler {
      *
      * <p>Response 200: {"ids":[...], "documents":[...], "metadatas":[...]}
      */
-    @SuppressWarnings("unchecked")
     private void handleGet(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String collection              = requireString(body, "collection");
         Map<String, Object> where      = optMap(body, "where");
         int limit                      = optInt(body, "limit", 10);
         int offset                     = optInt(body, "offset", 0);
 
-        var result = repo.getWhere(collection, where, limit, offset);
+        var result = repo.getWhere(tenant, collection, where, limit, offset);
         HttpUtil.send(ex, 200, json(result));
     }
 
@@ -324,16 +332,21 @@ public final class VectorHandler implements HttpHandler {
      *
      * <p>Response 200: {"ids":[...], "documents":[...], "metadatas":[...]}
      */
-    @SuppressWarnings("unchecked")
     private void handleStoreGet(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String collection  = requireString(body, "collection");
         List<String> ids   = optStringList(body, "ids");
         int limit          = optInt(body, "limit", 20);
         int offset         = optInt(body, "offset", 0);
 
-        var result = repo.get(collection, ids, limit, offset);
+        // No ids → paginated full fetch (same envelope); getWhere with no
+        // predicates is exactly that shape.
+        var result = (ids == null)
+                ? repo.getWhere(tenant, collection, null, limit, offset)
+                : repo.get(tenant, collection, ids, limit, offset);
         HttpUtil.send(ex, 200, json(result));
     }
 
@@ -345,28 +358,39 @@ public final class VectorHandler implements HttpHandler {
      */
     private void handleStoreList(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String collection = requireString(body, "collection");
         int limit         = optInt(body, "limit", 20);
         int offset        = optInt(body, "offset", 0);
 
-        var result = repo.list(collection, limit, offset);
+        var result = repo.list(tenant, collection, limit, offset);
         HttpUtil.send(ex, 200, json(result));
     }
 
     /**
      * POST /v1/vectors/store-delete
      *
+     * <p>Manifest obligation (P4a.2 decision, recorded on nexus-1k8s1): callers are
+     * responsible for removing {@code catalog_document_chunks} rows referencing the
+     * deleted chunks — the serving path does NOT pre-check the manifest (documented
+     * caller obligation per {@link PgVectorRepository#delete}; dangling references
+     * fail loud at {@code fetchDocumentChunks}, never silently).
+     *
      * <p>Request: {"collection": "...", "ids": ["...", ...]}
-     * <p>Response 200: {"deleted": N}
+     * <p>Response 200: {"deleted": N} — rows ACTUALLY deleted (RLS makes foreign
+     * tenants' rows invisible, so cross-tenant attempts delete exactly 0)
      */
     private void handleStoreDelete(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String collection  = requireString(body, "collection");
         List<String> ids   = requireStringList(body, "ids");
 
-        int deleted = repo.delete(collection, ids);
+        int deleted = repo.delete(tenant, collection, ids);
         HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
     }
 
@@ -377,9 +401,6 @@ public final class VectorHandler implements HttpHandler {
      * Used by the Python {@code _ServiceCollectionStub.update()} call from
      * {@code _run_index_frecency_only}: updates {@code frecency_score} on
      * already-stored chunks without touching document text or vectors.
-     *
-     * <p>Quota: ≤ 300 ids per call (client batches larger updates).
-     * Tenant header accepted but not applied to Chroma (collection-name scoping is the boundary).
      *
      * <p>Request:
      * <pre>
@@ -394,6 +415,8 @@ public final class VectorHandler implements HttpHandler {
      */
     private void handleUpdateMetadata(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String collection                     = requireString(body, "collection");
         List<String> ids                      = requireStringList(body, "ids");
@@ -404,17 +427,19 @@ public final class VectorHandler implements HttpHandler {
                     "metadatas length " + metadatas.size() + " != ids length " + ids.size());
         }
 
-        repo.updateMetadata(collection, ids, metadatas);
+        repo.updateMetadata(tenant, collection, ids, metadatas);
         HttpUtil.send(ex, 200, json(Map.of("updated", ids.size())));
     }
 
     /**
      * GET /v1/vectors/collections
-     * Response 200: [{"name":"...", ...}, ...]
+     * Response 200: [{"name":"..."}, ...] — the tenant's collections only (RLS)
      */
     private void handleCollections(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "GET");
-        var cols = repo.listCollections();
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        var cols = repo.listCollections(tenant);
         HttpUtil.send(ex, 200, json(cols));
     }
 
@@ -424,15 +449,17 @@ public final class VectorHandler implements HttpHandler {
      */
     private void handleCount(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "GET");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
         String collection = requireQueryParam(ex, "collection");
-        int count = repo.count(collection);
+        int count = repo.count(tenant, collection);
         HttpUtil.send(ex, 200, json(Map.of("count", count)));
     }
 
     /**
      * POST /v1/vectors/embed
      *
-     * <p>Embed-only endpoint — returns raw vectors WITHOUT storing to Chroma.
+     * <p>Embed-only endpoint — returns raw vectors WITHOUT storing.
      * Used by the parity gate (bead nexus-gmiaf.21) to compare Java vs Python
      * embedding output directly (cosine == 1.0 exactly).
      *
@@ -451,7 +478,9 @@ public final class VectorHandler implements HttpHandler {
      * }
      * </pre>
      *
-     * <p>Returns 503 if no EmbedderRouter was configured.
+     * <p>Returns 503 if no EmbedderRouter was configured — a pinned invariant
+     * ({@code PgVectorServingContractTest} Order 13): absent backend is an explicit
+     * refusal, never a fallback.
      */
     private void handleEmbed(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -497,7 +526,6 @@ public final class VectorHandler implements HttpHandler {
         return val.toString();
     }
 
-    @SuppressWarnings("unchecked")
     private List<String> requireStringList(Map<String, Object> body, String key) {
         Object val = body.get(key);
         if (!(val instanceof List<?> list)) {
@@ -508,7 +536,6 @@ public final class VectorHandler implements HttpHandler {
         return result;
     }
 
-    @SuppressWarnings("unchecked")
     private List<String> optStringList(Map<String, Object> body, String key) {
         Object val = body.get(key);
         if (val == null) return null;

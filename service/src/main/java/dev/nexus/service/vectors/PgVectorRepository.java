@@ -547,6 +547,100 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Single-chunk put (MCP {@code store_put} path) — embed + upsert one chunk.
+     *
+     * <p>RDR-155 P4a.2 (bead nexus-1k8s1): mirrors the Chroma
+     * {@code VectorRepository.put} envelope (returns the chunk ID verbatim).
+     * Delegates to {@link #upsertChunks} so dim dispatch, router-aware embedding,
+     * and the fail-loud dimension check are identical to the batch path.
+     *
+     * @return the chunk ID, unchanged
+     */
+    public String put(String tenant, String collection, String docId,
+                      String content, Map<String, Object> metadata) {
+        upsertChunks(tenant, collection, List.of(docId), List.of(content),
+                     List.of(metadata != null ? metadata : Map.of()));
+        return docId;
+    }
+
+    /**
+     * Get chunks matching a metadata {@code where} equality filter, paginated in
+     * chash order (RDR-155 P4a.2, bead nexus-1k8s1).
+     *
+     * <p>The incremental-sync staleness check's shape: the Python
+     * {@code _ServiceCollectionStub.get(where=...)} asks for chunks whose
+     * {@code source_key} / {@code content_hash} match. Only plain equality
+     * predicates are supported (ANDed) — the same subset {@link #search} applies;
+     * Chroma operator-form filters ({@code $and}, {@code $gte}, ...) are NOT
+     * translated (deliberately unpinned by the P4a.1 contract, recorded on
+     * nexus-1k8s1).
+     *
+     * @param where metadata equality predicates (ANDed); null/empty returns the
+     *              collection paginated (the {@code store-get}-without-ids shape)
+     * @return Chroma-style envelope {@code {ids, documents, metadatas}} aligned by
+     *         index, chash ascending
+     */
+    public Map<String, Object> getWhere(String tenant, String collection,
+                                        Map<String, Object> where,
+                                        int limit, int offset) {
+        int dim = dimForCollection(collection);
+        StringBuilder sql = new StringBuilder()
+            .append("SELECT chash, chunk_text, metadata::text AS metadata_json FROM ")
+            .append(chunksTable(dim))
+            .append(" WHERE collection = ?");
+        List<Object> binds = new ArrayList<>();
+        binds.add(collection);
+        if (where != null) {
+            for (Map.Entry<String, Object> e : where.entrySet()) {
+                sql.append(" AND metadata->>? = ?");
+                binds.add(e.getKey());
+                binds.add(String.valueOf(e.getValue()));
+            }
+        }
+        sql.append(" ORDER BY chash ASC LIMIT ? OFFSET ?");
+        binds.add(limit);
+        binds.add(offset);
+
+        Result<Record> result = tenantScope.withTenant(tenant, ctx ->
+            ctx.fetch(sql.toString(), binds.toArray()));
+
+        List<String> outIds = new ArrayList<>(result.size());
+        List<String> outDocs = new ArrayList<>(result.size());
+        List<Map<String, Object>> outMetas = new ArrayList<>(result.size());
+        for (Record rec : result) {
+            outIds.add(rec.get("chash", String.class));
+            outDocs.add(rec.get("chunk_text", String.class));
+            outMetas.add(fromJson(rec.get("metadata_json", String.class)));
+        }
+        return Map.of("ids", outIds, "documents", outDocs, "metadatas", outMetas);
+    }
+
+    /**
+     * List the collections visible to {@code tenant} (RDR-155 P4a.2,
+     * bead nexus-1k8s1).
+     *
+     * <p>Union across all three {@code chunks_<dim>} tables — collection is a
+     * column, not a table, so "a collection exists" means "at least one chunk row
+     * carries the name". RLS scopes the union to the tenant's rows, so a foreign
+     * tenant's collections are invisible (no existence leak).
+     *
+     * @return Chroma-style envelope {@code [{"name": ...}, ...]}, name ascending
+     */
+    public List<Map<String, Object>> listCollections(String tenant) {
+        Result<Record> result = tenantScope.withTenant(tenant, ctx ->
+            ctx.fetch("SELECT collection FROM ("
+                      + "  SELECT DISTINCT collection FROM nexus.chunks_384"
+                      + "  UNION SELECT DISTINCT collection FROM nexus.chunks_768"
+                      + "  UNION SELECT DISTINCT collection FROM nexus.chunks_1024"
+                      + ") cols ORDER BY collection ASC"));
+        List<Map<String, Object>> out = new ArrayList<>(result.size());
+        for (Record rec : result) {
+            out.add(Map.of("name", rec.get("collection", String.class)));
+        }
+        return out;
+    }
+
+    /**
      * List entries in a collection (metadata only), paginated by chash ordering.
      *
      * @return Chroma-style envelope {@code {ids: List<String>, metadatas: List<Map>}}
