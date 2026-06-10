@@ -356,10 +356,9 @@ public final class PgVectorRepository {
      * ONE query against the dispatched {@code chunks_<dim>} table. Replaces the engine's
      * legacy FTS5 + Chroma two-path fusion.
      *
-     * <p><strong>P3.1 skeleton (bead nexus-sbvg0): NOT IMPLEMENTED.</strong> Throws
-     * {@link UnsupportedOperationException} so the locked contract suite
-     * ({@code PgVectorHybridSearchContractTest}) compiles and runs RED; bead nexus-eap5l
-     * (P3.2) implements against that suite without changing it.
+     * <p>Implemented by P3.2 (bead nexus-eap5l) against the locked P3.1 contract suite
+     * ({@code PgVectorHybridSearchContractTest} + {@code HybridParityIntegrationTest},
+     * bead nexus-sbvg0).
      *
      * <p>Contract pinned by the P3.1 suite (RDR-155 §Query path Hybrid search; aligned with
      * the conexus xr7.8.7 fused reference that the xr7.8.9 go-live gate drives):
@@ -388,15 +387,17 @@ public final class PgVectorRepository {
      *       filtered-recall risk the setting exists for (RDR-155 research resolution; the
      *       fixture-scale suite cannot detect its absence, the conexus xr7.8.9
      *       production-scale recall gate can).
-     *   <li><strong>Trigram gate calibration anchor (P3.2).</strong> The contract fixture
+     *   <li><strong>Trigram gate calibration anchor.</strong> The contract fixture
      *       pins the gate's discriminating range, not an exact threshold: the typo probe's
      *       candidate rows sit at word-similarity ≈ 0.9 (and plain trigram similarity
      *       ≈ 0.5 against these short fixture texts) and MUST pass; the no-signal rows sit
-     *       at ≈ 0.1 and MUST NOT. Any gate inside that window satisfies the suite - e.g.
-     *       {@code word_similarity(queryText, chunk_text) >= 0.6} (pg_trgm's default
-     *       {@code <%} threshold) or {@code similarity >= 0.3}. P3.2 records the final
-     *       operator + threshold choice; P3.G cross-checks it against the conexus xr7.8.9
-     *       production-scale calibration.
+     *       at ≈ 0.1 and MUST NOT. <strong>P3.2 decision (recorded):</strong>
+     *       {@code queryText <% chunk_text} (word_similarity) with
+     *       {@code SET LOCAL pg_trgm.word_similarity_threshold = 0.6} - the operator form
+     *       is gin_trgm_ops-indexable (vectors-002) where the function-call form is not;
+     *       word_similarity (vs plain similarity) does not dilute with chunk length; the
+     *       per-transaction pin removes cluster-config dependence. P3.G cross-checks this
+     *       against the conexus xr7.8.9 production-scale calibration.
      * </ul>
      *
      * @param tenant          tenant principal for RLS scoping
@@ -412,8 +413,82 @@ public final class PgVectorRepository {
                                                   List<String> collectionNames,
                                                   int nResults,
                                                   Map<String, Object> where) {
-        throw new UnsupportedOperationException(
-            "hybridSearch is implemented by RDR-155 P3.2 (bead nexus-eap5l)");
+        if (collectionNames == null || collectionNames.isEmpty()) {
+            return List.of();
+        }
+        int dim = dimForCollection(collectionNames.get(0));
+        for (String col : collectionNames) {
+            int colDim = dimForCollection(col);
+            if (colDim != dim) {
+                throw new IllegalArgumentException(
+                    "mixed dimensions in one hybrid-search call: '" + collectionNames.get(0)
+                    + "' is " + dim + "-dim but '" + col + "' is " + colDim
+                    + "-dim - one query vector cannot serve both spaces");
+            }
+        }
+
+        float[] queryVec = (queryRouter != null)
+                ? queryRouter.embedOneForCollection(collectionNames.get(0), queryText)
+                : queryEmbedder.embedOne(queryText);
+        if (queryVec.length != dim) {
+            throw new IllegalArgumentException(
+                "query embedder produced a " + queryVec.length
+                + "-dim vector but the collections dispatch to chunks_" + dim);
+        }
+
+        // Text gate: FTS lexeme match OR word-trigram similarity. The <% operator form
+        // (word_similarity(query, chunk_text) >= pg_trgm.word_similarity_threshold) is
+        // chosen over the explicit function call because only the operator family is
+        // supported by the gin_trgm_ops index (vectors-002); the threshold GUC is pinned
+        // per-transaction below so the gate never depends on cluster config.
+        // word_similarity (not plain similarity): plain similarity dilutes with
+        // chunk_text length and would silently kill the trgm leg on production-size
+        // chunks; word_similarity matches the query against the best continuous extent.
+        StringBuilder sql = new StringBuilder()
+            .append("SELECT chash, chunk_text, collection, metadata::text AS metadata_json,")
+            .append(" (embedding <=> ?::vector) AS distance")
+            .append(" FROM ").append(chunksTable(dim))
+            .append(" WHERE collection IN (").append(placeholders(collectionNames.size())).append(")")
+            .append(" AND (chunk_tsv @@ plainto_tsquery('english', ?) OR ? <% chunk_text)");
+        List<Object> binds = new ArrayList<>();
+        binds.add(vectorLiteral(queryVec));
+        binds.addAll(collectionNames);
+        binds.add(queryText);
+        binds.add(queryText);
+        if (where != null) {
+            for (Map.Entry<String, Object> e : where.entrySet()) {
+                sql.append(" AND metadata->>? = ?");
+                binds.add(e.getKey());
+                binds.add(String.valueOf(e.getValue()));
+            }
+        }
+        sql.append(" ORDER BY distance ASC, chash ASC LIMIT ?");
+        binds.add(nResults);
+
+        Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
+            // Filtered-ANN recall: the text gate + RLS + where predicates narrow the
+            // candidate set even harder than plain search - keep HNSW scanning past
+            // ef_search (contract requirement; SET LOCAL is txn-scoped, pool-safe).
+            ctx.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'");
+            // Trigram gate calibration (contract anchor): word_similarity >= 0.6,
+            // pg_trgm's default - typo-probe candidates sit at ~0.9 and pass, no-signal
+            // rows at ~0.1 do not. Pinned per-transaction so the gate is independent of
+            // cluster-level GUC configuration.
+            ctx.execute("SET LOCAL pg_trgm.word_similarity_threshold = 0.6");
+            return ctx.fetch(sql.toString(), binds.toArray());
+        });
+
+        List<Map<String, Object>> rows = new ArrayList<>(result.size());
+        for (Record rec : result) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id",         rec.get("chash", String.class));
+            row.put("content",    rec.get("chunk_text", String.class));
+            row.put("distance",   rec.get("distance", Double.class));
+            row.put("collection", rec.get("collection", String.class));
+            row.putAll(fromJson(rec.get("metadata_json", String.class)));
+            rows.add(row);
+        }
+        return rows;
     }
 
     /**

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-155 bead nexus-eap5l (P3.2) — trigram GIN indexes for the hybrid-search
+    pg_trgm gate leg.
+
+    The hybrid query gates candidates with
+        chunk_tsv @@ plainto_tsquery('english', q)  OR  q <% chunk_text
+    The <% (word_similarity) operator family is index-supported by gin_trgm_ops;
+    without this index the trgm leg sequential-scans chunk_text on every hybrid
+    query (invisible at fixture scale, a latency problem at production scale —
+    flagged by the P3.1 substantive-critic review, recorded on nexus-eap5l).
+    Postgres combines this index with the existing chunk_tsv GIN via BitmapOr,
+    keeping the OR-gate a single indexed query.
+
+    Per-dim DDL stays byte-identical modulo dim (locked RDR-155 invariant):
+    any changeset touching one chunks_<dim> table touches all three.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-002-1" author="nexus-eap5l">
+        <comment>Trigram GIN index on chunks_384.chunk_text for the hybrid pg_trgm gate</comment>
+        <sql>
+CREATE INDEX idx_chunks_384_trgm
+    ON nexus.chunks_384
+    USING GIN (chunk_text gin_trgm_ops);
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_chunks_384_trgm</rollback>
+    </changeSet>
+
+    <changeSet id="vectors-002-2" author="nexus-eap5l">
+        <comment>Trigram GIN index on chunks_768.chunk_text for the hybrid pg_trgm gate</comment>
+        <sql>
+CREATE INDEX idx_chunks_768_trgm
+    ON nexus.chunks_768
+    USING GIN (chunk_text gin_trgm_ops);
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_chunks_768_trgm</rollback>
+    </changeSet>
+
+    <changeSet id="vectors-002-3" author="nexus-eap5l">
+        <comment>Trigram GIN index on chunks_1024.chunk_text for the hybrid pg_trgm gate</comment>
+        <sql>
+CREATE INDEX idx_chunks_1024_trgm
+    ON nexus.chunks_1024
+    USING GIN (chunk_text gin_trgm_ops);
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_chunks_1024_trgm</rollback>
+    </changeSet>
+
+</databaseChangeLog>

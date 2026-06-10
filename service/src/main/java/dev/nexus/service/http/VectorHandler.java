@@ -12,6 +12,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.vectors.ChromaQuotaValidator;
 import dev.nexus.service.vectors.EmbedderRouter;
+import dev.nexus.service.vectors.PgVectorRepository;
 import dev.nexus.service.vectors.VectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,6 +33,7 @@ import java.util.Map;
  *   POST /v1/vectors/upsert-chunks   server-side embed + quota + Chroma write
  *   POST /v1/vectors/search          embed query server-side + Chroma query (multi-collection)
  *   POST /v1/vectors/query           alias for search (mirrors MCP query tool)
+ *   POST /v1/vectors/hybrid-search   pgvector hybrid fusion (tsvector+pg_trgm gate, vector rank) — RDR-155 P3
  *   POST /v1/vectors/store-put       single-chunk put (MCP store_put path)
  *   POST /v1/vectors/get              get chunks by metadata where-filter (incremental-sync staleness check)
  *   POST /v1/vectors/store-get       fetch chunks by IDs (MCP store_get/store_get_many)
@@ -59,21 +61,37 @@ public final class VectorHandler implements HttpHandler {
 
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
-    private final VectorRepository repo;
-    private final EmbedderRouter   embedderRouter;
+    private final VectorRepository    repo;
+    private final EmbedderRouter      embedderRouter;
+    private final PgVectorRepository  pgRepo;
+
+    /**
+     * Full constructor (RDR-155 P3.2, bead nexus-eap5l).
+     *
+     * @param repo           Chroma vector repository for storage ops (may be null)
+     * @param embedderRouter collection-aware embedder router for /embed (may be null)
+     * @param pgRepo         pgvector repository for /hybrid-search (may be null until the
+     *                       Phase 4a serving cutover wires it in production; the conexus
+     *                       xr7.8.9 validation harness wires it explicitly)
+     */
+    public VectorHandler(VectorRepository repo, EmbedderRouter embedderRouter,
+                         PgVectorRepository pgRepo) {
+        this.repo           = repo;
+        this.embedderRouter = embedderRouter;
+        this.pgRepo         = pgRepo;
+    }
 
     /**
      * @param repo          vector repository for storage ops
      * @param embedderRouter collection-aware embedder router (for /embed endpoint)
      */
     public VectorHandler(VectorRepository repo, EmbedderRouter embedderRouter) {
-        this.repo          = repo;
-        this.embedderRouter = embedderRouter;
+        this(repo, embedderRouter, null);
     }
 
     /** Backwards-compatible constructor for tests without an embedder router. */
     public VectorHandler(VectorRepository repo) {
-        this(repo, null);
+        this(repo, null, null);
     }
 
     @Override
@@ -92,6 +110,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/upsert-chunks" -> handleUpsertChunks(exchange, method);
                 case "/search"        -> handleSearch(exchange, method);
                 case "/query"         -> handleSearch(exchange, method);   // alias
+                case "/hybrid-search" -> handleHybridSearch(exchange, method);  // RDR-155 P3
                 case "/store-put"     -> handleStorePut(exchange, method);
                 case "/get"           -> handleGet(exchange, method);
                 case "/store-get"     -> handleStoreGet(exchange, method);
@@ -182,6 +201,44 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> where     = optMap(body, "where");
 
         var results = repo.search(queryText, collections, nResults, where);
+        HttpUtil.send(ex, 200, json(results));
+    }
+
+    /**
+     * POST /v1/vectors/hybrid-search — RDR-155 Phase 3 (bead nexus-eap5l).
+     *
+     * <p>The pgvector hybrid fusion query (tsvector + pg_trgm text gate, vector rank)
+     * through the EXISTING /v1/vectors surface — the validation seam the conexus
+     * xr7.8.9 go-live gate drives. Request body matches /search:
+     * {@code {"query": "...", "collections": [...], "n_results": 10, "where": {...}}}.
+     *
+     * <p>Tenant: SERVER-RESOLVED from the authenticated bearer
+     * ({@link RequestContext#tenant()}) — RLS is the tenant boundary on the pgvector
+     * path, unlike the Chroma routes where collection names encode scope.
+     *
+     * <p>503 when no {@link PgVectorRepository} is wired (same pattern as /embed):
+     * production wiring is the Phase 4a serving cutover; until then the harness wires
+     * it explicitly.
+     */
+    private void handleHybridSearch(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        if (pgRepo == null) {
+            HttpUtil.send(ex, 503, json(Map.of(
+                    "error", "hybrid-search endpoint not configured (no pgvector repository)")));
+            return;
+        }
+        String tenant = RequestContext.tenant();
+        if (tenant == null || tenant.isBlank()) {
+            HttpUtil.send(ex, 401, json(Map.of("error", "no resolved tenant for request")));
+            return;
+        }
+        Map<String, Object> body = readBody(ex);
+        String queryText          = requireString(body, "query");
+        List<String> collections  = requireStringList(body, "collections");
+        int nResults              = optInt(body, "n_results", 10);
+        Map<String, Object> where = optMap(body, "where");
+
+        var results = pgRepo.hybridSearch(tenant, queryText, collections, nResults, where);
         HttpUtil.send(ex, 200, json(results));
     }
 
