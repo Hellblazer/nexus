@@ -788,6 +788,21 @@ class PgVectorRepositoryContractTest {
     }
 
     @Test
+    void manifestJoin_emptyManifest_returnsEmpty_unlikeUnknownTumbler() throws Exception {
+        // Boundary: a KNOWN tumbler with zero manifest rows (registered before chunking,
+        // or all chunks purged) returns an empty list; an UNKNOWN tumbler throws. A
+        // refactor collapsing the two cases would either leak fail-loud onto a valid
+        // operational state or silently empty out unknown documents.
+        String tumbler = "1.9.5";
+        seedCatalogDocument(TENANT_A, tumbler, "Empty Manifest Doc");
+
+        List<Map<String, Object>> rows = repo1024.fetchDocumentChunks(TENANT_A, tumbler);
+        assertThat(rows)
+            .as("a visible document with zero manifest rows yields an empty chunk list")
+            .isEmpty();
+    }
+
+    @Test
     void manifestJoin_unresolvableChash_failsLoud() throws Exception {
         String col = "code__manifestbroken__voyage-code-3__v1";
         String tumbler = "1.9.3";
