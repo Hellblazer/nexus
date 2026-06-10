@@ -45,6 +45,9 @@
          context exists; the token resolves the tenant). nexus schema. -->
     <include file="db/changelog/service-tokens-001-baseline.xml"/>
 
+    <!-- Store 10: pgvector chunks tables + manifest collection column (bead nexus-mf447) -->
+    <include file="db/changelog/vectors-001-baseline.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

@@ -161,6 +161,22 @@ file. If no daemon is reachable, the CLI raises
 [Container Integration](container-integration.md) for the full
 operator-facing matrix of transport choices per platform.
 
+## Storage Service (Postgres) Prerequisites
+
+The Java storage service (RDR-152/RDR-155) applies its Liquibase changelog at
+startup using the `NX_DB_ADMIN_*` credentials (falling back to `NX_DB_*` in
+single-role development setups). Two prerequisites must be satisfied by a DBA
+(superuser) before the first migration run:
+
+1. **Extensions.** `CREATE EXTENSION IF NOT EXISTS vector;` and
+   `CREATE EXTENSION IF NOT EXISTS pg_trgm;` — neither is a trusted extension,
+   and the migration role (`nexus_admin`) is NOSUPERUSER, so changeset
+   `vectors-001-1` fails without this pre-step. Once the extensions exist the
+   changeset is an idempotent no-op.
+2. **Roles.** Create `nexus_admin` (schema owner, NOSUPERUSER) and `nexus_svc`
+   (NOSUPERUSER NOBYPASSRLS LOGIN data role). The changelog's grant changesets
+   give `nexus_svc` its DML rights automatically during the first run.
+
 ## Tuning Parameters
 
 The `[tuning]` section in `~/.config/nexus/config.yml` controls search scoring, chunking, and timeout behavior. All values have sensible defaults — only override what you need.

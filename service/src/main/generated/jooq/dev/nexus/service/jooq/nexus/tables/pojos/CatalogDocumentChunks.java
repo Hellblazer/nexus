@@ -24,6 +24,7 @@ public class CatalogDocumentChunks implements Serializable {
     private Integer lineEnd;
     private Integer charStart;
     private Integer charEnd;
+    private String collection;
 
     public CatalogDocumentChunks() {}
 
@@ -37,6 +38,7 @@ public class CatalogDocumentChunks implements Serializable {
         this.lineEnd = value.lineEnd;
         this.charStart = value.charStart;
         this.charEnd = value.charEnd;
+        this.collection = value.collection;
     }
 
     public CatalogDocumentChunks(
@@ -48,7 +50,8 @@ public class CatalogDocumentChunks implements Serializable {
         Integer lineStart,
         Integer lineEnd,
         Integer charStart,
-        Integer charEnd
+        Integer charEnd,
+        String collection
     ) {
         this.tenantId = tenantId;
         this.docId = docId;
@@ -59,6 +62,7 @@ public class CatalogDocumentChunks implements Serializable {
         this.lineEnd = lineEnd;
         this.charStart = charStart;
         this.charEnd = charEnd;
+        this.collection = collection;
     }
 
     /**
@@ -196,6 +200,21 @@ public class CatalogDocumentChunks implements Serializable {
         return this;
     }
 
+    /**
+     * Getter for <code>nexus.catalog_document_chunks.collection</code>.
+     */
+    public String getCollection() {
+        return this.collection;
+    }
+
+    /**
+     * Setter for <code>nexus.catalog_document_chunks.collection</code>.
+     */
+    public CatalogDocumentChunks setCollection(String collection) {
+        this.collection = collection;
+        return this;
+    }
+
     @Override
     public boolean equals(Object obj) {
         if (this == obj)
@@ -259,6 +278,12 @@ public class CatalogDocumentChunks implements Serializable {
         }
         else if (!this.charEnd.equals(other.charEnd))
             return false;
+        if (this.collection == null) {
+            if (other.collection != null)
+                return false;
+        }
+        else if (!this.collection.equals(other.collection))
+            return false;
         return true;
     }
 
@@ -275,6 +300,7 @@ public class CatalogDocumentChunks implements Serializable {
         result = prime * result + ((this.lineEnd == null) ? 0 : this.lineEnd.hashCode());
         result = prime * result + ((this.charStart == null) ? 0 : this.charStart.hashCode());
         result = prime * result + ((this.charEnd == null) ? 0 : this.charEnd.hashCode());
+        result = prime * result + ((this.collection == null) ? 0 : this.collection.hashCode());
         return result;
     }
 
@@ -291,6 +317,7 @@ public class CatalogDocumentChunks implements Serializable {
         sb.append(", ").append(lineEnd);
         sb.append(", ").append(charStart);
         sb.append(", ").append(charEnd);
+        sb.append(", ").append(collection);
 
         sb.append(")");
         return sb.toString();

@@ -65,7 +65,8 @@ class SchemaMigratorIntegrationTest {
         "chash_index",
         "catalog_owners", "catalog_documents", "catalog_links",
         "catalog_document_chunks", "catalog_collections", "catalog_meta",
-        "service_tokens", "session_tokens"
+        "service_tokens", "session_tokens",
+        "chunks_384", "chunks_768", "chunks_1024"
     );
 
     private static final Set<String> EXPECTED_T1_TABLES = Set.of("scratch");
@@ -119,6 +120,15 @@ class SchemaMigratorIntegrationTest {
 
             // Allow nexus_admin_test to write Liquibase's DATABASECHANGELOG to public.
             su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
+
+            // Pre-create pgvector and pg_trgm extensions as superuser (DBA step).
+            // CREATE EXTENSION requires superuser in PostgreSQL; in production the DBA
+            // installs extensions before nexus_admin runs the Liquibase changelog.
+            // The vectors-001-baseline.xml changeset uses CREATE EXTENSION IF NOT EXISTS,
+            // so it is idempotent: if already installed here it becomes a no-op when
+            // Liquibase runs as nexus_admin_test.
+            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+            su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
         }
 
         // ── Phase B: build connection pools ─────────────────────────────────────

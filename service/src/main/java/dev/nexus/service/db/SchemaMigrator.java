@@ -42,6 +42,12 @@ import java.sql.SQLException;
  * deployment uses two roles (schema-owner + service role), the Phase-5 {@code
  * nx} provisioning step must:
  * <ol>
+ *   <li>Install extensions as superuser BEFORE the first migration run:
+ *       {@code CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT
+ *       EXISTS pg_trgm;} Neither is a trusted extension and the schema-owner
+ *       role below is NOSUPERUSER, so changeset {@code vectors-001-1} fails
+ *       without this DBA pre-step (it becomes an idempotent no-op once the
+ *       extensions exist).</li>
  *   <li>Create the schema-owner role (e.g. {@code nexus_admin}) with
  *       {@code CREATE ON DATABASE nexus} and ownership of the {@code nexus}
  *       and {@code t1} schemas.</li>

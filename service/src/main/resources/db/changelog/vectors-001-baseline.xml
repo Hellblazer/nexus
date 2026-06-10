@@ -1,0 +1,220 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-155 bead nexus-mf447 — pgvector chunks baseline changelog.
+
+    Creates:
+      - nexus.chunks_384, nexus.chunks_768, nexus.chunks_1024
+        (RLS + FORCE, HNSW + GIN indexes, per-table tenant_isolation policy)
+      - Adds nullable collection column to nexus.catalog_document_chunks
+        (backfilled by Phase 5 ETL; NOT NULL promotion is a post-migration changeset).
+
+    Schema contract (P1.1 test nexus-s7crg documents exactly these):
+      tenant_id  TEXT NOT NULL
+      collection TEXT NOT NULL
+      chash      TEXT NOT NULL
+      chunk_text TEXT NOT NULL
+      embedding  vector(<dim>) NOT NULL
+      PK (tenant_id, collection, chash)
+      FORCE RLS: USING/WITH CHECK (tenant_id = current_setting('nexus.tenant', true))
+
+    Extra columns (nullable or defaulted, test does not touch them):
+      chunk_tsv  tsvector GENERATED ALWAYS AS (to_tsvector('english', chunk_text)) STORED
+      metadata   JSONB (nullable)
+      created_at timestamptz NOT NULL DEFAULT now()
+
+    NOTE: hnsw.iterative_scan='relaxed_order' is a runtime session setting, NOT
+    schema DDL. It is NOT baked into these changesets; it lands with the P2 repository.
+
+    DEPLOYMENT PREREQUISITE (changeset vectors-001-1): CREATE EXTENSION requires
+    superuser; neither vector nor pg_trgm is a trusted extension. In production the
+    Liquibase runner (nexus_admin) is NOSUPERUSER, so a DBA must pre-install both
+    extensions BEFORE the first migration run:
+        CREATE EXTENSION IF NOT EXISTS vector;
+        CREATE EXTENSION IF NOT EXISTS pg_trgm;
+    Changeset vectors-001-1 is then an idempotent no-op. SchemaMigratorIntegrationTest
+    models this two-phase split (superuser bootstrap, then non-superuser Liquibase).
+    See SchemaMigrator Phase-5 provisioning javadoc step 0.
+
+    FTS CONFIG (Phase 3 parity anchor): chunk_tsv uses to_tsvector('english', ...)
+    (prose lane only, per 152-FTS-tokenizer-DECISION Option B; chunk_text needs no
+    'simple' identifier lane). The Phase 3 hybrid-parity harness must treat the
+    english-stemmer vs FTS5-unicode61 tokenization divergence as the expected delta,
+    not a regression; changing this config post-deploy requires ALTER TABLE plus a
+    full tsvector rebuild on a live corpus.
+
+    Decision record (T2 nexus_rdr/155-manifest-fk-decision): application-enforced
+    referential check between catalog_document_chunks and chunks_<dim>; no FK constraints.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: pgvector + pg_trgm extensions ───────────────────────── -->
+    <changeSet id="vectors-001-1" author="nexus-mf447">
+        <comment>Enable pgvector (vector type, HNSW/IVFFlat operators) and pg_trgm (trigram similarity)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+        </sql>
+        <rollback>
+            DROP EXTENSION IF EXISTS pg_trgm;
+            DROP EXTENSION IF EXISTS vector;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: nexus.chunks_384 ─────────────────────────────────────── -->
+    <changeSet id="vectors-001-2" author="nexus-mf447">
+        <comment>chunks_384: tenant-isolated pgvector table for 384-dimension embeddings (e.g. MiniLM)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.chunks_384 (
+    tenant_id  TEXT        NOT NULL,
+    collection TEXT        NOT NULL,
+    chash      TEXT        NOT NULL,
+    chunk_text TEXT        NOT NULL,
+    embedding  vector(384) NOT NULL,
+    chunk_tsv  tsvector    GENERATED ALWAYS AS (to_tsvector('english', chunk_text)) STORED,
+    metadata   JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chunks_384_pk PRIMARY KEY (tenant_id, collection, chash)
+);
+
+-- HNSW index for approximate nearest-neighbour cosine search
+CREATE INDEX idx_chunks_384_embedding
+    ON nexus.chunks_384
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- GIN index on tsvector for Phase 3 hybrid FTS
+CREATE INDEX idx_chunks_384_tsv
+    ON nexus.chunks_384
+    USING GIN (chunk_tsv);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.chunks_384 CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: nexus.chunks_768 ─────────────────────────────────────── -->
+    <changeSet id="vectors-001-3" author="nexus-mf447">
+        <comment>chunks_768: tenant-isolated pgvector table for 768-dimension embeddings</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.chunks_768 (
+    tenant_id  TEXT        NOT NULL,
+    collection TEXT        NOT NULL,
+    chash      TEXT        NOT NULL,
+    chunk_text TEXT        NOT NULL,
+    embedding  vector(768) NOT NULL,
+    chunk_tsv  tsvector    GENERATED ALWAYS AS (to_tsvector('english', chunk_text)) STORED,
+    metadata   JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chunks_768_pk PRIMARY KEY (tenant_id, collection, chash)
+);
+
+-- HNSW index for approximate nearest-neighbour cosine search
+CREATE INDEX idx_chunks_768_embedding
+    ON nexus.chunks_768
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- GIN index on tsvector for Phase 3 hybrid FTS
+CREATE INDEX idx_chunks_768_tsv
+    ON nexus.chunks_768
+    USING GIN (chunk_tsv);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.chunks_768 CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: nexus.chunks_1024 ────────────────────────────────────── -->
+    <changeSet id="vectors-001-4" author="nexus-mf447">
+        <comment>chunks_1024: tenant-isolated pgvector table for 1024-dimension embeddings (Voyage AI)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.chunks_1024 (
+    tenant_id  TEXT         NOT NULL,
+    collection TEXT         NOT NULL,
+    chash      TEXT         NOT NULL,
+    chunk_text TEXT         NOT NULL,
+    embedding  vector(1024) NOT NULL,
+    chunk_tsv  tsvector     GENERATED ALWAYS AS (to_tsvector('english', chunk_text)) STORED,
+    metadata   JSONB,
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT chunks_1024_pk PRIMARY KEY (tenant_id, collection, chash)
+);
+
+-- HNSW index for approximate nearest-neighbour cosine search
+CREATE INDEX idx_chunks_1024_embedding
+    ON nexus.chunks_1024
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+-- GIN index on tsvector for Phase 3 hybrid FTS
+CREATE INDEX idx_chunks_1024_tsv
+    ON nexus.chunks_1024
+    USING GIN (chunk_tsv);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.chunks_1024 CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 5: RLS on all three chunks tables ───────────────────────── -->
+    <changeSet id="vectors-001-5" author="nexus-mf447">
+        <comment>Enable and FORCE RLS; create tenant_isolation policy on chunks_384, chunks_768, chunks_1024</comment>
+        <sql splitStatements="true" stripComments="false">
+-- chunks_384
+ALTER TABLE nexus.chunks_384 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_384 FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.chunks_384
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+-- chunks_768
+ALTER TABLE nexus.chunks_768 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_768 FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.chunks_768
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+-- chunks_1024
+ALTER TABLE nexus.chunks_1024 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_1024 FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.chunks_1024
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.chunks_1024;
+            ALTER TABLE nexus.chunks_1024 NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.chunks_1024 DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.chunks_768;
+            ALTER TABLE nexus.chunks_768 NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.chunks_768 DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.chunks_384;
+            ALTER TABLE nexus.chunks_384 NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.chunks_384 DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 6: collection column on catalog_document_chunks ─────────── -->
+    <!--
+        Decision (T2 nexus_rdr/155-manifest-fk-decision): application-enforced referential
+        check only; NO FK constraint between catalog_document_chunks and chunks_<dim>.
+        Reason: PG declarative FKs cannot be conditional on collection-name model segment;
+        and at P1.2 the chunks tables are empty while manifest rows already exist.
+        Backfill by Phase 5 ETL; NOT NULL promotion is a post-migration changeset.
+    -->
+    <changeSet id="vectors-001-6" author="nexus-mf447">
+        <comment>Add nullable collection column to catalog_document_chunks for pgvector routing (RDR-155 P1.2)</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_document_chunks
+    ADD COLUMN IF NOT EXISTS collection TEXT;
+
+-- Index for collection-scoped manifest lookups used by VectorRepository write path
+CREATE INDEX idx_catalog_chunks_collection
+    ON nexus.catalog_document_chunks (tenant_id, collection)
+    WHERE collection IS NOT NULL;
+        </sql>
+        <rollback>
+            DROP INDEX IF EXISTS nexus.idx_catalog_chunks_collection;
+            ALTER TABLE nexus.catalog_document_chunks DROP COLUMN IF EXISTS collection;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

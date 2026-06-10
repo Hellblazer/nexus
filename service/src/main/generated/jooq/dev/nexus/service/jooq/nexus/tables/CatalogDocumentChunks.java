@@ -103,6 +103,11 @@ public class CatalogDocumentChunks extends TableImpl<CatalogDocumentChunksRecord
      */
     public final TableField<CatalogDocumentChunksRecord, Integer> CHAR_END = createField(DSL.name("char_end"), SQLDataType.INTEGER, this, "");
 
+    /**
+     * The column <code>nexus.catalog_document_chunks.collection</code>.
+     */
+    public final TableField<CatalogDocumentChunksRecord, String> COLLECTION = createField(DSL.name("collection"), SQLDataType.CLOB, this, "");
+
     private CatalogDocumentChunks(Name alias, Table<CatalogDocumentChunksRecord> aliased) {
         this(alias, aliased, (Field<?>[]) null, null);
     }
@@ -174,7 +179,7 @@ public class CatalogDocumentChunks extends TableImpl<CatalogDocumentChunksRecord
 
     @Override
     public List<Index> getIndexes() {
-        return Arrays.asList(Indexes.IDX_CATALOG_CHUNKS_CHASH, Indexes.IDX_CATALOG_CHUNKS_DOC_ID);
+        return Arrays.asList(Indexes.IDX_CATALOG_CHUNKS_CHASH, Indexes.IDX_CATALOG_CHUNKS_COLLECTION, Indexes.IDX_CATALOG_CHUNKS_DOC_ID);
     }
 
     @Override
