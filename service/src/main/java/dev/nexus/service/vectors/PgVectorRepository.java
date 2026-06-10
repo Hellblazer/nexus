@@ -351,6 +351,56 @@ public final class PgVectorRepository {
     }
 
     /**
+     * RDR-155 Phase 3 - hybrid search: text signals ({@code tsvector} FTS + {@code pg_trgm}
+     * trigram similarity) gate the candidate set, vector cosine distance ranks it, fused in
+     * ONE query against the dispatched {@code chunks_<dim>} table. Replaces the engine's
+     * legacy FTS5 + Chroma two-path fusion.
+     *
+     * <p><strong>P3.1 skeleton (bead nexus-sbvg0): NOT IMPLEMENTED.</strong> Throws
+     * {@link UnsupportedOperationException} so the locked contract suite
+     * ({@code PgVectorHybridSearchContractTest}) compiles and runs RED; bead nexus-eap5l
+     * (P3.2) implements against that suite without changing it.
+     *
+     * <p>Contract pinned by the P3.1 suite (RDR-155 §Query path Hybrid search; aligned with
+     * the conexus xr7.8.7 fused reference that the xr7.8.9 go-live gate drives):
+     * <ul>
+     *   <li><strong>Text gate.</strong> A returned row must match at least one text signal:
+     *       {@code chunk_tsv @@ plainto_tsquery('english', queryText)} OR trigram similarity
+     *       between {@code queryText} and {@code chunk_text} above the implementation's
+     *       threshold. A row with NO text signal never appears, however close its vector -
+     *       semantic-only retrieval stays on {@link #search}. Zero text candidates returns
+     *       an empty list (no silent vector fallback).
+     *   <li><strong>Vector rank.</strong> Candidates are ordered by cosine distance
+     *       ({@code embedding <=> query}) ascending, {@code chash} ascending on ties - the
+     *       same ordering contract as {@link #search}.
+     *   <li><strong>Trigram rescue.</strong> The {@code pg_trgm} leg exists for queries the
+     *       english stemmer mishandles (typos, identifiers): a query that matches no FTS
+     *       lexeme still returns rows whose text is trigram-similar.
+     *   <li><strong>Same envelope as {@link #search}.</strong> Tenant RLS scope, per-dim
+     *       dispatch with mixed-dim fail-loud, {@code collection IN (...)} multi-collection
+     *       union, metadata {@code where} equality predicates ANDed with the text gate,
+     *       {@code nResults} cap, flat row shape ({@code id}, {@code content},
+     *       {@code distance}, {@code collection}, metadata flattened in).
+     * </ul>
+     *
+     * @param tenant          tenant principal for RLS scoping
+     * @param queryText       search query - used for BOTH the text gate and the
+     *                        server-side query embedding
+     * @param collectionNames collection names to search (filtered union, single query)
+     * @param nResults        maximum rows returned
+     * @param where           optional metadata equality predicates (ANDed); null/empty = none
+     * @return text-gated rows sorted by cosine distance ascending; same flat row shape
+     *         as {@link #search}
+     */
+    public List<Map<String, Object>> hybridSearch(String tenant, String queryText,
+                                                  List<String> collectionNames,
+                                                  int nResults,
+                                                  Map<String, Object> where) {
+        throw new UnsupportedOperationException(
+            "hybridSearch is implemented by RDR-155 P3.2 (bead nexus-eap5l)");
+    }
+
+    /**
      * Fetch specific chunk IDs from a collection.
      *
      * @return Chroma-style envelope {@code {ids: List<String>, documents: List<String>,
