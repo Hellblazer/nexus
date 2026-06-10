@@ -1772,3 +1772,25 @@ nx service token list [--tenant TENANT]
 ```
 
 List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revoked`), label, expiry, and revocation time. Never prints the raw token. Use the id prefix with `nx service token revoke`.
+
+## nx storage
+
+Storage migration ETLs (RDR-152 T2 stores; RDR-155 vectors). Every ETL is copy-not-move (the source is never modified) and idempotent (server-side upsert; re-runs produce no duplicates). All require `NX_SERVICE_TOKEN`.
+
+### nx storage migrate
+
+```
+nx storage migrate memory|plans|telemetry|taxonomy|chash|catalog [--db PATH] [--service-url URL] [--dry-run]
+```
+
+Migrate a T2 SQLite store into the Postgres service tier through the validated HTTP seam.
+
+### nx storage migrate vectors
+
+```
+nx storage migrate vectors [--local-path PATH | --cloud] [--collections A,B] [--service-url URL] [--dry-run | --rollback]
+```
+
+Migrate Chroma vector collections into pgvector (RDR-155 Phase 5). Two legs, run separately: the default local leg reads the on-disk store the retired T3 daemon served (`--local-path`, default `~/.config/nexus/chroma`); `--cloud` reads via the ChromaCloud REST/auth API using the configured `chroma_*` credentials. Chunk text, chash, and metadata transfer verbatim and the service re-embeds server-side; collection names are preserved verbatim so `topic_assignments.source_collection` references stay valid. `--rollback` deletes from pgvector exactly the chashes present in the source collections, leaving the source untouched. Exits non-zero when any collection is skipped (non-conformant name) or failed — a partial migration is never a green run.
+
+Run the ETL with indexing paused (the post-write count verification assumes a quiescent window). Cutover validation sequence after both legs complete: run `manifest_backfill_sql()` then `manifest_orphan_sql(dim)` for each of 384/768/1024 (from `nexus.migration.vector_etl`) via psql as a superuser/admin role — zero orphan rows per dim is the pass condition. See the module docstring for the rationale (direct SQL, never the repository read API).

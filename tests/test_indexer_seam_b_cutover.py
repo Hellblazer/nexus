@@ -433,17 +433,19 @@ def test_indexer_has_zero_unallowed_voyageai_after_cutover():
 
 
 def test_lint_baseline_unchanged_after_voyageai_extension():
-    """The existing baseline metrics (epsilon_allow_connects == 17,
+    """The existing baseline metrics (epsilon_allow_connects == 18,
     total_violations == 0, t2database_constructions == 31) must remain
     stable after adding voyageai to the BANLIST.
 
-    This ensures the lint extension does not silently break existing counts."""
+    This ensures the lint extension does not silently break existing counts.
+    (18 = +1 for RDR-155 P5.2 nexus-9n4pn: migration/vector_etl.py read-only
+    taxonomy-consistency T2 read — same bump as test_storage_boundary_lint.)"""
     result = _lint_check()
     assert result.total_violations == 0, (
         f"Baseline violation count changed after voyageai lint extension: "
         f"{[(v.file, v.line, v.symbol) for v in result.violations]}"
     )
-    assert result.epsilon_allow_connects == 17, (
+    assert result.epsilon_allow_connects == 18, (
         f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
     )
     assert result.t2database_constructions == 31, (

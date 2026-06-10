@@ -478,7 +478,10 @@ def test_dual_population_baseline_locked():
     # constructions it removed were not raw connects.
     # 17 = +1 for RDR-152 P2.6 (nexus-gmiaf.16): commands/storage_cmd.py
     # migrate_chash_cmd source-count query (ETL source-read, never T2Database).
-    assert result.epsilon_allow_connects == 17, (
+    # 18 = +1 for RDR-155 P5.2 (nexus-9n4pn): migration/vector_etl.py
+    # verify_taxonomy_consistency read-only T2 source read (mode=ro URI,
+    # taxonomy-consistency check; ETL-adjacent reader, never a T2 writer).
+    assert result.epsilon_allow_connects == 18, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside

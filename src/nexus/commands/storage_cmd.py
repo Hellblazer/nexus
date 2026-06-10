@@ -12,6 +12,7 @@ Usage::
     nx storage migrate telemetry [--db PATH] [--service-url URL]
     nx storage migrate taxonomy  [--db PATH] [--service-url URL]
     nx storage migrate chash     [--db PATH] [--service-url URL]
+    nx storage migrate vectors   [--local-path PATH | --cloud] [--rollback]
 
 Run flags:
   --db PATH       Path to the SQLite T2 database (default: auto-detected
@@ -847,6 +848,153 @@ def migrate_catalog_cmd(
         total_written=total_written,
         by_table=results,
     )
+
+
+@migrate_group.command(name="vectors")
+@click.option(
+    "--local-path",
+    "local_path",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help=(
+        "Path to the on-disk Chroma store for the LOCAL leg. "
+        "Defaults to ~/.config/nexus/chroma (the store the retired T3 "
+        "daemon served). Ignored with --cloud."
+    ),
+)
+@click.option(
+    "--cloud",
+    is_flag=True,
+    default=False,
+    help=(
+        "Run the CLOUD leg instead: read via the ChromaCloud REST/auth API "
+        "(credentials from nx config chroma_*). Run each leg separately — "
+        "an ETL with only one leg is a silent half-migration."
+    ),
+)
+@click.option(
+    "--collections",
+    "collections_csv",
+    default="",
+    help="Comma-separated collection subset. Default: every source collection.",
+)
+@click.option(
+    "--service-url",
+    "service_url",
+    default=None,
+    help="Base URL of the nexus-service. Defaults to NX_SERVICE_URL.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Count source chunks per collection without writing.",
+)
+@click.option(
+    "--rollback",
+    is_flag=True,
+    default=False,
+    help=(
+        "Undo the copy: delete from pgvector exactly the chashes present "
+        "in the source collections. The Chroma source is never modified."
+    ),
+)
+def migrate_vectors_cmd(
+    local_path: Path | None,
+    cloud: bool,
+    collections_csv: str,
+    service_url: str | None,
+    dry_run: bool,
+    rollback: bool,
+) -> None:
+    """Migrate Chroma vector collections into pgvector (RDR-155 Phase 5).
+
+    COPY-NOT-MOVE: chunk text + chash + metadata transfer verbatim and the
+    service re-embeds server-side (vector-identity decision (a), bead
+    nexus-unp61); the Chroma source is never modified. Idempotent: re-runs
+    upsert onto ``(tenant, collection, chash)``. Collection names are
+    preserved VERBATIM so ``topic_assignments.source_collection`` stays
+    valid.
+
+    Examples::
+
+        nx storage migrate vectors --dry-run          # local leg, count only
+        nx storage migrate vectors                    # local leg
+        nx storage migrate vectors --cloud            # ChromaCloud leg
+        nx storage migrate vectors --rollback         # undo the local copy
+    """
+    if dry_run and rollback:
+        raise click.ClickException("--dry-run and --rollback are mutually exclusive.")
+
+    token = os.environ.get("NX_SERVICE_TOKEN", "")
+    if not token:
+        raise click.ClickException(
+            "NX_SERVICE_TOKEN is required for storage migrate vectors.\n"
+            "Set it to the bearer token configured in the nexus-service."
+        )
+    if service_url:
+        os.environ["NX_SERVICE_URL"] = service_url
+
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    vector_client = HttpVectorClient()
+    collections = [c.strip() for c in collections_csv.split(",") if c.strip()] or None
+
+    if local_path is None:
+        from nexus.config import nexus_config_dir
+
+        local_path = nexus_config_dir() / "chroma"
+
+    from nexus.migration.vector_etl import (
+        migrate_cloud,
+        migrate_local,
+        rollback_collections,
+    )
+
+    if rollback:
+        from nexus.migration.chroma_read import (
+            open_cloud_read_client,
+            open_local_read_client,
+        )
+
+        try:
+            read_client = (
+                open_cloud_read_client() if cloud else open_local_read_client(local_path)
+            )
+            deleted = rollback_collections(
+                read_client, vector_client, collections=collections
+            )
+        except Exception as exc:
+            raise click.ClickException(f"rollback failed: {exc}")
+        for name, count in sorted(deleted.items()):
+            click.echo(f"rolled-back  {name}: {count} chunk(s) removed from pgvector")
+        click.echo(f"Done. {sum(deleted.values())} chunk(s) removed; source untouched.")
+        return
+
+    try:
+        if cloud:
+            report = migrate_cloud(vector_client, collections=collections, dry_run=dry_run)
+        else:
+            report = migrate_local(
+                local_path, vector_client, collections=collections, dry_run=dry_run
+            )
+    except Exception as exc:
+        raise click.ClickException(f"ETL failed: {exc}")
+
+    for r in report.results:
+        line = f"{r.status:<9} {r.collection}: source={r.source_count} written={r.written_count}"
+        if r.reason:
+            line += f" — {r.reason}"
+        click.echo(line, err=(r.status in ("failed", "skipped")))
+    click.echo(
+        f"Done ({report.leg} leg). collections={len(report.results)}, "
+        f"source={report.total_source}, written={report.total_written}."
+    )
+    if not report.ok:
+        raise click.ClickException(
+            "migration is NOT clean — fix the failed/skipped collections above "
+            "and re-run (idempotent)."
+        )
 
 
 def _resolve_catalog_db_path(explicit: Path | None) -> Path:
