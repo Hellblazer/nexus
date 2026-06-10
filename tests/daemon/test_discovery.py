@@ -5,11 +5,17 @@ Covers ``discovery_path``, ``find_t3_daemon``, and ``discovery_resolve``
 including the C2 precedence contract: env-var wins when set + non-empty,
 file is fallback when env unset, and a set-but-unreachable env-var does
 NOT fall through silently to the file.
+
+Also covers nexus-md90p: T2-only liveness probe + pid fast-path.
 """
 from __future__ import annotations
 
 import json
 import os
+import socket
+import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -300,3 +306,240 @@ class TestNormalizeDiscoveryView:
         view = normalize_discovery_view(_t2_lease(os.getpid(), version="7.0.0"))
         version, _reachable = _peer_handshake(os.getpid(), view)
         assert version == "7.0.0"  # would be None if it read raw lease["version"] wrongly
+
+
+# ---------------------------------------------------------------------------
+# nexus-md90p: T2-only liveness probe + pid fast-path
+# ---------------------------------------------------------------------------
+
+
+def _t2_lease_with_sock(
+    pid: int, sock_path: str, *, expired: bool = False, generation: int = 1
+) -> dict:
+    """T2 lease record pointing at a UDS socket on tmp_path."""
+    epoch = 0.0 if expired else time.time()
+    return {
+        "scope_key": str(os.getuid()),
+        "generation": generation,
+        "owner_token": "tok-abc",
+        "heartbeat_epoch": epoch,
+        "ttl": 3.0,
+        "endpoint": {
+            "uds_path": sock_path,
+            "tcp_host": "127.0.0.1",
+            "tcp_port": 5555,
+            "pid": pid,
+        },
+        "version": "5.10.6",
+        "payload": {},
+        "status": "live",
+        "format_version": 1,
+    }
+
+
+def _start_uds_listener(sock_path: str) -> threading.Thread:
+    """Start a background thread that listens on an AF_UNIX socket.
+
+    Returns the thread (already started). The socket is bound and listening
+    before the function returns; connections are accepted and immediately
+    closed so the probe is a pure connectivity check.
+    """
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(sock_path)
+    srv.listen(5)
+    srv.settimeout(5.0)
+
+    def _serve() -> None:
+        try:
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                    conn.close()
+                except socket.timeout:
+                    break
+                except OSError:
+                    break
+        finally:
+            srv.close()
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    return t
+
+
+@pytest.fixture
+def short_tmp(tmp_path: Path) -> Path:
+    """Config dir under a short /tmp base to stay within AF_UNIX 104-byte limit."""
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    return cfg
+
+
+@pytest.fixture
+def uds_base() -> Path:
+    """A short directory under /tmp for UDS sockets (AF_UNIX path <= 104 bytes)."""
+    d = Path(tempfile.mkdtemp(dir="/tmp", prefix="nx_"))
+    yield d
+    # best-effort cleanup
+    import shutil
+    shutil.rmtree(str(d), ignore_errors=True)
+
+
+class TestT2LivenessProbeAndPidFastPath:
+    """nexus-md90p: discovery staleness = process liveness, not heartbeat-age alone.
+
+    All cases are fully deterministic: real AF_UNIX sockets on tmp_path,
+    injected heartbeat_epoch values for clock control, no sleeps.
+    """
+
+    def test_expired_lease_live_answering_uds_resolves_no_unlink(
+        self, short_tmp: Path, uds_base: Path
+    ) -> None:
+        """Expired lease + pid alive + UDS answers -> resolves, file NOT unlinked."""
+        from nexus.daemon.discovery import find_t2_daemon
+
+        sock_path = str(uds_base / "t2.sock")
+        _start_uds_listener(sock_path)
+
+        path = discovery_path(short_tmp, tier="t2")
+        lease = _t2_lease_with_sock(os.getpid(), sock_path, expired=True)
+        path.write_text(json.dumps(lease))
+
+        resolved = find_t2_daemon(short_tmp)
+
+        assert resolved is not None, "Should resolve because UDS is answering"
+        assert resolved["uds_path"] == sock_path
+        assert path.exists(), "File must NOT be unlinked when UDS answered"
+
+    def test_expired_lease_dead_pid_returns_none_and_unlinks(
+        self, short_tmp: Path, uds_base: Path
+    ) -> None:
+        """Expired lease + dead pid -> None + file unlinked (regression-lock)."""
+        from nexus.daemon.discovery import find_t2_daemon
+
+        sock_path = str(uds_base / "dead.sock")
+        # No listener bound; connect will be refused or fail.
+
+        path = discovery_path(short_tmp, tier="t2")
+        # Use a pid that is guaranteed not to exist: max int32
+        lease = _t2_lease_with_sock(2**31 - 1, sock_path, expired=True)
+        path.write_text(json.dumps(lease))
+
+        result = find_t2_daemon(short_tmp)
+
+        assert result is None
+        assert not path.exists(), "File must be unlinked when pid is dead"
+
+    def test_expired_lease_refused_connect_returns_none_and_unlinks(
+        self, short_tmp: Path, uds_base: Path
+    ) -> None:
+        """Expired lease + pid alive + UDS not listening -> None + unlinked."""
+        from nexus.daemon.discovery import find_t2_daemon
+
+        sock_path = str(uds_base / "refused.sock")
+        # No listener — connect will fail with ConnectionRefusedError or
+        # FileNotFoundError
+
+        path = discovery_path(short_tmp, tier="t2")
+        lease = _t2_lease_with_sock(os.getpid(), sock_path, expired=True)
+        path.write_text(json.dumps(lease))
+
+        result = find_t2_daemon(short_tmp)
+
+        assert result is None
+        assert not path.exists(), "File must be unlinked when socket not answering"
+
+    def test_fresh_lease_dead_pid_returns_none(
+        self, short_tmp: Path, uds_base: Path
+    ) -> None:
+        """Fresh lease + dead pid -> None immediately (hard-kill fast-path)."""
+        from nexus.daemon.discovery import find_t2_daemon
+
+        sock_path = str(uds_base / "fresh_dead.sock")
+
+        path = discovery_path(short_tmp, tier="t2")
+        # Fresh lease (heartbeat_epoch = now) but corpse pid
+        lease = _t2_lease_with_sock(2**31 - 1, sock_path, expired=False)
+        path.write_text(json.dumps(lease))
+
+        result = find_t2_daemon(short_tmp)
+
+        assert result is None
+        assert not path.exists(), (
+            "file must be unlinked when pid is dead (fresh-lease fast-path)"
+        )
+
+    def test_fresh_lease_alive_pid_resolves(
+        self, short_tmp: Path, uds_base: Path
+    ) -> None:
+        """Fresh lease + alive pid -> resolves (regression: existing happy path)."""
+        from nexus.daemon.discovery import find_t2_daemon
+
+        sock_path = str(uds_base / "fresh_alive.sock")
+
+        path = discovery_path(short_tmp, tier="t2")
+        lease = _t2_lease_with_sock(os.getpid(), sock_path, expired=False)
+        path.write_text(json.dumps(lease))
+
+        resolved = find_t2_daemon(short_tmp)
+
+        assert resolved is not None
+        assert resolved["uds_path"] == sock_path
+
+    def test_t3_expired_lease_no_uds_probe(self, short_tmp: Path) -> None:
+        """T3 expired lease -> None + unlinked WITHOUT attempting a UDS probe.
+
+        The T3 path must be byte-for-byte identical to before this bead.
+        No UDS probe is performed (T3 is TCP chroma).
+        """
+        from nexus.daemon.discovery import find_t3_daemon
+
+        path = discovery_path(short_tmp, tier="t3")
+
+        # T3 lease uses TCP, no uds_path; expired
+        lease = {
+            "scope_key": str(os.getuid()),
+            "generation": 1,
+            "owner_token": "tok-t3",
+            "heartbeat_epoch": 0.0,  # ancient
+            "ttl": 3.0,
+            "endpoint": {
+                "tcp_host": "127.0.0.1",
+                "tcp_port": 8000,
+                "pid": os.getpid(),
+            },
+            "version": "5.10.6",
+            "payload": {},
+            "status": "live",
+            "format_version": 1,
+        }
+        path.write_text(json.dumps(lease))
+
+        result = find_t3_daemon(short_tmp)
+
+        assert result is None
+        assert not path.exists(), "T3 expired lease must be unlinked"
+
+    def test_expired_lease_warning_logged(
+        self, short_tmp: Path, uds_base: Path
+    ) -> None:
+        """Warning t2_discovery_lease_stale_but_answering is emitted on UDS rescue."""
+        from structlog.testing import capture_logs
+
+        from nexus.daemon.discovery import find_t2_daemon
+
+        sock_path = str(uds_base / "warn.sock")
+        _start_uds_listener(sock_path)
+
+        path = discovery_path(short_tmp, tier="t2")
+        lease = _t2_lease_with_sock(os.getpid(), sock_path, expired=True)
+        path.write_text(json.dumps(lease))
+
+        with capture_logs() as captured:
+            resolved = find_t2_daemon(short_tmp)
+
+        assert resolved is not None
+        events = [e.get("event", "") for e in captured]
+        assert any(
+            "t2_discovery_lease_stale_but_answering" in ev for ev in events
+        ), f"Must log t2_discovery_lease_stale_but_answering; got: {events}"

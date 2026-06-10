@@ -459,14 +459,15 @@ class TestSpawnLockLoserQuietAttach:
             stop.set()
             thread.join(timeout=10.0)
 
-    def test_reassert_task_cancelled_before_discovery_unlink(
+    def test_heartbeat_stop_before_discovery_unlink_legacy_ordering(
         self, config_dir: Path, db_path: Path,
     ) -> None:
-        """RDR-129 ordering: stop() must cancel the self-healing re-assert task
-        BEFORE unlinking the discovery file, else the task could resurrect a
-        mid-shutdown daemon's addr. Pin the order by recording the relative
-        sequence of Task.cancel and Path.unlink.
+        """RDR-129 ordering: stop() must signal the heartbeat thread BEFORE
+        unlinking the discovery file. nexus-6j39a: task.cancel → threading.Event.set.
+        Pin the order by recording the relative sequence of stop_set and unlink.
         """
+        import unittest.mock as _mock
+
         from nexus.daemon.t2_daemon import T2Daemon, t2_discovery_path
 
         events: list[str] = []
@@ -474,32 +475,30 @@ class TestSpawnLockLoserQuietAttach:
         async def _main() -> None:
             daemon = T2Daemon(config_dir=config_dir, db_path=db_path)
             await daemon.start()
-            assert daemon._reassert_task is not None
+            assert daemon._heartbeat_stop is not None
 
-            real_cancel = daemon._reassert_task.cancel
+            real_set = daemon._heartbeat_stop.set
             disc_path = t2_discovery_path(config_dir)
             orig_unlink = Path.unlink
 
-            def spy_cancel(*a, **k):
-                events.append("cancel")
-                return real_cancel(*a, **k)
+            def spy_set(*a, **k):
+                events.append("stop_set")
+                return real_set(*a, **k)
 
             def spy_unlink(self_path, *a, **k):
                 if self_path == disc_path:
                     events.append("unlink")
                 return orig_unlink(self_path, *a, **k)
 
-            daemon._reassert_task.cancel = spy_cancel  # type: ignore[method-assign]
-            import unittest.mock as _mock
-
+            daemon._heartbeat_stop.set = spy_set  # type: ignore[method-assign]
             with _mock.patch.object(Path, "unlink", spy_unlink):
                 await daemon.stop()
 
         asyncio.run(_main())
 
-        assert "cancel" in events, "re-assert task was never cancelled"
+        assert "stop_set" in events, "heartbeat stop signal was never set"
         assert "unlink" in events, "discovery file was never unlinked"
-        assert events.index("cancel") < events.index("unlink")
+        assert events.index("stop_set") < events.index("unlink")
 
 
 # ---------------------------------------------------------------------------
@@ -649,3 +648,169 @@ class TestStopBoundedClose:
         # while still well below the 2s unguarded path.
         assert elapsed < 1.2, f"stop() not bounded — took {elapsed:.2f}s"
         assert daemon._t2db is None
+
+
+# ---------------------------------------------------------------------------
+# nexus-6j39a: heartbeat thread — reassert off the event loop
+# ---------------------------------------------------------------------------
+
+
+def _run_daemon_capturing_loop(
+    daemon,
+    ready: threading.Event,
+    stop: threading.Event,
+    loop_out: list,
+) -> None:
+    """Like _run_daemon_in_thread but captures the event loop into loop_out[0]."""
+    async def _main() -> None:
+        await daemon.start()
+        ready.set()
+        while not stop.is_set():
+            await asyncio.sleep(0.05)
+        await daemon.stop()
+
+    loop = asyncio.new_event_loop()
+    loop_out.append(loop)
+    try:
+        loop.run_until_complete(_main())
+    finally:
+        loop.close()
+
+
+class TestHeartbeatThread:
+    """nexus-6j39a: heartbeat runs on a dedicated thread, not the event loop.
+
+    Key test: block the daemon's event loop with a synchronous sleep longer than
+    the lease TTL (3.0 s). With the old asyncio task the lease would expire
+    (asyncio.sleep can't wake up). With a dedicated threading.Thread it ticks
+    independently and the lease stays fresh.
+    """
+
+    def test_heartbeat_survives_event_loop_stall(
+        self, config_dir: Path, db_path: Path,
+    ) -> None:
+        """Integration: event-loop stall > TTL must not expire the lease.
+
+        Injects a synchronous time.sleep onto the daemon's event loop via
+        loop.call_soon_threadsafe so the loop blocks for stall_s seconds.
+        The heartbeat thread must keep ticking and find_t2_daemon must still
+        resolve (non-None) mid-stall.
+        """
+        from nexus.daemon.discovery import find_t2_daemon
+        from nexus.daemon.service_registry import DEFAULT_TTL
+        from nexus.daemon.t2_daemon import T2Daemon, _REASSERT_INTERVAL
+
+        daemon = T2Daemon(config_dir=config_dir, db_path=db_path)
+        ready = threading.Event()
+        stop = threading.Event()
+        loop_out: list = []
+        t = threading.Thread(
+            target=_run_daemon_capturing_loop,
+            args=(daemon, ready, stop, loop_out),
+        )
+        t.start()
+        try:
+            assert ready.wait(timeout=15.0), "daemon did not start within 15 s"
+
+            loop = loop_out[0]
+            # Stall the event loop for longer than the lease TTL so any asyncio-
+            # based heartbeat would expire the lease.
+            stall_s = DEFAULT_TTL + 1.0  # e.g. 4.0 s when DEFAULT_TTL == 3.0 s
+            loop.call_soon_threadsafe(time.sleep, stall_s)
+
+            # Allow at least one heartbeat tick before checking.
+            # _REASSERT_INTERVAL is the thread's wait() timeout; give it 2x
+            # so we know at least one tick fired even accounting for scheduling.
+            time.sleep(_REASSERT_INTERVAL * 2 + 0.5)
+
+            # Lease must be fresh despite the event loop being stuck.
+            result = find_t2_daemon(config_dir)
+            assert result is not None, (
+                "Lease expired during event-loop stall: heartbeat thread is not "
+                "running independently of the event loop"
+            )
+            assert result.get("tcp_port") is not None
+
+            # Wait for the stall to finish so stop() can run cleanly.
+            remaining = stall_s - (_REASSERT_INTERVAL * 2 + 0.5)
+            if remaining > 0:
+                time.sleep(remaining + 0.3)
+        finally:
+            stop.set()
+            t.join(timeout=15.0)
+            assert not t.is_alive(), "daemon thread did not stop"
+
+        # After stop, discovery file must be gone (no resurrection).
+        from nexus.daemon.t2_daemon import t2_discovery_path
+        assert not t2_discovery_path(config_dir).exists(), (
+            "Discovery file still present after stop — heartbeat thread may have "
+            "resurrected the addr after unlink"
+        )
+
+    def test_stop_joins_heartbeat_thread_and_removes_discovery_file(
+        self, config_dir: Path, db_path: Path,
+    ) -> None:
+        """stop() must join the heartbeat thread and remove the discovery file.
+
+        Verifies: (a) the heartbeat thread is no longer alive after stop()
+        returns; (b) the discovery file is absent.
+        """
+        from nexus.daemon.t2_daemon import T2Daemon, t2_discovery_path
+
+        async def _run() -> None:
+            daemon = T2Daemon(config_dir=config_dir, db_path=db_path)
+            await daemon.start()
+            assert daemon._heartbeat_thread is not None
+            assert daemon._heartbeat_thread.is_alive()
+            captured_thread = daemon._heartbeat_thread
+            await daemon.stop()
+            # Thread must have been joined (not alive).
+            assert not captured_thread.is_alive(), (
+                "heartbeat thread still alive after stop() returned"
+            )
+
+        asyncio.run(_run())
+        assert not t2_discovery_path(config_dir).exists()
+
+    def test_heartbeat_stop_signal_before_discovery_unlink(
+        self, config_dir: Path, db_path: Path,
+    ) -> None:
+        """RDR-129 ordering: the heartbeat stop signal must be set BEFORE the
+        discovery-file unlink so the thread cannot resurrect a shutting-down
+        daemon's addr file.
+        """
+        import unittest.mock as _mock
+
+        from nexus.daemon.t2_daemon import T2Daemon, t2_discovery_path
+
+        events: list[str] = []
+
+        async def _main() -> None:
+            daemon = T2Daemon(config_dir=config_dir, db_path=db_path)
+            await daemon.start()
+            assert daemon._heartbeat_stop is not None
+
+            real_set = daemon._heartbeat_stop.set
+            disc_path = t2_discovery_path(config_dir)
+            orig_unlink = Path.unlink
+
+            def spy_set(*a: object, **k: object) -> None:
+                events.append("stop_set")
+                return real_set(*a, **k)  # type: ignore[return-value]
+
+            def spy_unlink(self_path: Path, *a: object, **k: object) -> None:
+                if self_path == disc_path:
+                    events.append("unlink")
+                return orig_unlink(self_path, *a, **k)  # type: ignore[return-value]
+
+            daemon._heartbeat_stop.set = spy_set  # type: ignore[method-assign]
+            with _mock.patch.object(Path, "unlink", spy_unlink):
+                await daemon.stop()
+
+        asyncio.run(_main())
+
+        assert "stop_set" in events, "heartbeat stop signal was never set"
+        assert "unlink" in events, "discovery file was never unlinked"
+        assert events.index("stop_set") < events.index("unlink"), (
+            "heartbeat stop signal set AFTER discovery unlink — resurrection race possible"
+        )

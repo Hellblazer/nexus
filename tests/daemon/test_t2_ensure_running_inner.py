@@ -473,3 +473,528 @@ class TestInnerSpawnFailed:
             )
 
         assert result == T2EnsureOutcome.SPAWN_FAILED
+
+
+# ---------------------------------------------------------------------------
+# nexus-uybp6: OS-supervisor single-owner routing for cold-spawn
+# ---------------------------------------------------------------------------
+
+
+class TestOsSupervisorRouting:
+    """Tests for _autostart_unit_installed() + supervisor-routed cold-spawn.
+
+    All subprocess invocations are recorded via monkeypatch.  No real
+    launchctl/systemctl is ever invoked.  Deterministic: tmp_path config dirs.
+    """
+
+    # -- test 1: darwin unit installed, kickstart succeeds -> no Popen ----------
+
+    def test_darwin_unit_installed_kickstart_succeeds_no_popen(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Unit installed (darwin), supervisor kickstart succeeds -> REACHABLE, Popen NOT called."""
+        import time as _t
+        import subprocess as _subprocess
+        import os as _os
+        import nexus.commands.daemon as _daemon
+
+        unit_dir = tmp_path / "LaunchAgents"
+        unit_dir.mkdir(parents=True)
+        (unit_dir / _daemon._T2_PLIST_NAME).write_text("<plist/>")
+
+        monkeypatch.setattr(_daemon, "_autostart_platform", lambda: "darwin")
+        monkeypatch.setattr(_daemon, "_autostart_install_dir", lambda: unit_dir)
+        # Supervisor routing is gated on the UNQUALIFIED default config
+        # dir (no flag, no env): clear the env override and make the
+        # default resolve to the test tmp_path so the gate passes.
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(_daemon, "nexus_config_dir", lambda: tmp_path)
+
+        recorded_runs: list[list[str]] = []
+
+        def _fake_run(argv, **kw):
+            recorded_runs.append(list(argv))
+
+            class _Res:
+                returncode = 0
+
+            return _Res()
+
+        monkeypatch.setattr(_subprocess, "run", _fake_run)
+        monkeypatch.setattr(
+            _subprocess, "Popen",
+            lambda *a, **kw: pytest.fail("Popen must NOT be called when supervisor route succeeds"),
+        )
+
+        state = {"n": 0}
+
+        def _fake_sleep(_s):
+            state["n"] += 1
+            if state["n"] == 2:
+                _write_discovery(tmp_path, _os.getpid())
+
+        monkeypatch.setattr(_t, "sleep", _fake_sleep)
+
+        outcome = _t2_ensure_running_inner(None, timeout=30.0, quiet=True)
+        assert outcome == T2EnsureOutcome.REACHABLE
+
+        uid = _os.getuid()
+        kickstart_args = [a for a in recorded_runs if "kickstart" in a]
+        assert kickstart_args, f"expected launchctl kickstart call; got {recorded_runs}"
+        assert any(
+            f"gui/{uid}/com.nexus.t2" in " ".join(a) for a in kickstart_args
+        ), f"kickstart target missing gui/{uid}/com.nexus.t2; recorded: {recorded_runs}"
+
+    # -- test 2: linux unit installed, systemctl start -> no Popen --------------
+
+    def test_linux_unit_installed_systemctl_start_no_popen(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Unit installed (linux), systemctl --user start succeeds -> REACHABLE, Popen NOT called."""
+        import time as _t
+        import subprocess as _subprocess
+        import os as _os
+        import nexus.commands.daemon as _daemon
+
+        unit_dir = tmp_path / "systemd" / "user"
+        unit_dir.mkdir(parents=True)
+        (unit_dir / _daemon._T2_SERVICE_NAME).write_text("[Unit]")
+
+        monkeypatch.setattr(_daemon, "_autostart_platform", lambda: "linux")
+        monkeypatch.setattr(_daemon, "_autostart_install_dir", lambda: unit_dir)
+        # Supervisor routing is gated on the UNQUALIFIED default config
+        # dir (no flag, no env): clear the env override and make the
+        # default resolve to the test tmp_path so the gate passes.
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(_daemon, "nexus_config_dir", lambda: tmp_path)
+
+        recorded_runs: list[list[str]] = []
+
+        def _fake_run(argv, **kw):
+            recorded_runs.append(list(argv))
+
+            class _Res:
+                returncode = 0
+
+            return _Res()
+
+        monkeypatch.setattr(_subprocess, "run", _fake_run)
+        monkeypatch.setattr(
+            _subprocess, "Popen",
+            lambda *a, **kw: pytest.fail("Popen must NOT be called when supervisor route succeeds"),
+        )
+
+        state = {"n": 0}
+
+        def _fake_sleep(_s):
+            state["n"] += 1
+            if state["n"] == 2:
+                _write_discovery(tmp_path, _os.getpid())
+
+        monkeypatch.setattr(_t, "sleep", _fake_sleep)
+
+        outcome = _t2_ensure_running_inner(None, timeout=30.0, quiet=True)
+        assert outcome == T2EnsureOutcome.REACHABLE
+
+        systemctl_calls = [a for a in recorded_runs if "systemctl" in a]
+        assert systemctl_calls, f"expected systemctl call; got {recorded_runs}"
+        assert any(
+            "--user" in a and "start" in a and _daemon._T2_SERVICE_NAME in " ".join(a)
+            for a in systemctl_calls
+        ), f"systemctl --user start nexus-t2.service not found; recorded: {recorded_runs}"
+
+    # -- test 3a: unit installed, supervisor returns non-zero -> Popen fallback --
+
+    def test_unit_installed_supervisor_nonzero_popen_fallback(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Unit installed (darwin), kickstart returns non-zero -> Popen fallback -> REACHABLE."""
+        import time as _t
+        import subprocess as _subprocess
+        import os as _os
+        import nexus.commands.daemon as _daemon
+
+        unit_dir = tmp_path / "LaunchAgents"
+        unit_dir.mkdir(parents=True)
+        (unit_dir / _daemon._T2_PLIST_NAME).write_text("<plist/>")
+
+        monkeypatch.setattr(_daemon, "_autostart_platform", lambda: "darwin")
+        monkeypatch.setattr(_daemon, "_autostart_install_dir", lambda: unit_dir)
+        # Supervisor routing is gated on the UNQUALIFIED default config
+        # dir (no flag, no env): clear the env override and make the
+        # default resolve to the test tmp_path so the gate passes.
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(_daemon, "nexus_config_dir", lambda: tmp_path)
+
+        recorded_runs: list[list[str]] = []
+
+        def _fake_run(argv, **kw):
+            recorded_runs.append(list(argv))
+
+            class _Res:
+                returncode = 1  # every supervisor cmd fails
+
+            return _Res()
+
+        monkeypatch.setattr(_subprocess, "run", _fake_run)
+
+        popen_called = {"called": False}
+
+        class _AlivePopen:
+            def __init__(self, argv, **_kw):
+                popen_called["called"] = True
+
+            def poll(self):
+                return None
+
+        monkeypatch.setattr(_subprocess, "Popen", _AlivePopen)
+
+        state = {"n": 0}
+
+        def _fake_sleep(_s):
+            state["n"] += 1
+            if state["n"] == 2:
+                _write_discovery(tmp_path, _os.getpid())
+
+        monkeypatch.setattr(_t, "sleep", _fake_sleep)
+
+        outcome = _t2_ensure_running_inner(None, timeout=30.0, quiet=True)
+        assert outcome == T2EnsureOutcome.REACHABLE
+        # Non-vacuous direction (critic SIG-1): the supervisor must have been
+        # ATTEMPTED before the fallback — pre-change code went straight to
+        # Popen and would pass the two assertions below it.
+        assert any("kickstart" in a for a in recorded_runs), (
+            f"supervisor must be attempted before Popen fallback; got {recorded_runs}"
+        )
+        assert popen_called["called"], "Popen fallback must be invoked when supervisor returns non-zero"
+
+    # -- test 3b: unit installed, supervisor raises -> Popen fallback -----------
+
+    def test_unit_installed_supervisor_raises_popen_fallback(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Unit installed (darwin), launchctl not found (raises) -> Popen fallback."""
+        import time as _t
+        import subprocess as _subprocess
+        import os as _os
+        import nexus.commands.daemon as _daemon
+
+        unit_dir = tmp_path / "LaunchAgents"
+        unit_dir.mkdir(parents=True)
+        (unit_dir / _daemon._T2_PLIST_NAME).write_text("<plist/>")
+
+        monkeypatch.setattr(_daemon, "_autostart_platform", lambda: "darwin")
+        monkeypatch.setattr(_daemon, "_autostart_install_dir", lambda: unit_dir)
+        # Supervisor routing is gated on the UNQUALIFIED default config
+        # dir (no flag, no env): clear the env override and make the
+        # default resolve to the test tmp_path so the gate passes.
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(_daemon, "nexus_config_dir", lambda: tmp_path)
+
+        recorded_runs: list[list[str]] = []
+
+        def _fake_run(argv, **kw):
+            recorded_runs.append(list(argv))
+            raise FileNotFoundError("launchctl not found")
+
+        monkeypatch.setattr(_subprocess, "run", _fake_run)
+
+        popen_called = {"called": False}
+
+        class _AlivePopen:
+            def __init__(self, argv, **_kw):
+                popen_called["called"] = True
+
+            def poll(self):
+                return None
+
+        monkeypatch.setattr(_subprocess, "Popen", _AlivePopen)
+
+        state = {"n": 0}
+
+        def _fake_sleep(_s):
+            state["n"] += 1
+            if state["n"] == 2:
+                _write_discovery(tmp_path, _os.getpid())
+
+        monkeypatch.setattr(_t, "sleep", _fake_sleep)
+
+        outcome = _t2_ensure_running_inner(None, timeout=30.0, quiet=True)
+        assert outcome == T2EnsureOutcome.REACHABLE
+        assert any("kickstart" in a for a in recorded_runs), (
+            f"supervisor must be attempted before Popen fallback; got {recorded_runs}"
+        )
+        assert popen_called["called"], "Popen fallback must be invoked when launchctl raises"
+
+    # -- test 4: unit NOT installed -> Popen path unchanged (regression) --------
+
+    def test_no_unit_installed_uses_popen(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """No unit file present -> straight Popen path (regression: unchanged)."""
+        import time as _t
+        import subprocess as _subprocess
+        import os as _os
+        import nexus.commands.daemon as _daemon
+
+        unit_dir = tmp_path / "LaunchAgents"
+        unit_dir.mkdir(parents=True)
+        # Do NOT create the plist file.
+
+        monkeypatch.setattr(_daemon, "_autostart_platform", lambda: "darwin")
+        monkeypatch.setattr(_daemon, "_autostart_install_dir", lambda: unit_dir)
+        # Supervisor routing is gated on the UNQUALIFIED default config
+        # dir (no flag, no env): clear the env override and make the
+        # default resolve to the test tmp_path so the gate passes.
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(_daemon, "nexus_config_dir", lambda: tmp_path)
+
+        def _fail_run(argv, **kw):
+            pytest.fail("subprocess.run (supervisor) must NOT be called when unit absent")
+
+        monkeypatch.setattr(_subprocess, "run", _fail_run)
+
+        popen_called = {"called": False}
+
+        class _AlivePopen:
+            def __init__(self, argv, **_kw):
+                popen_called["called"] = True
+
+            def poll(self):
+                return None
+
+        monkeypatch.setattr(_subprocess, "Popen", _AlivePopen)
+
+        state = {"n": 0}
+
+        def _fake_sleep(_s):
+            state["n"] += 1
+            if state["n"] == 2:
+                _write_discovery(tmp_path, _os.getpid())
+
+        monkeypatch.setattr(_t, "sleep", _fake_sleep)
+
+        outcome = _t2_ensure_running_inner(None, timeout=30.0, quiet=True)
+        assert outcome == T2EnsureOutcome.REACHABLE
+        assert popen_called["called"], "Popen must be used when unit not installed"
+
+    # -- test 5: version-skew + unit installed -> supervisor route after SIGTERM -
+
+    def test_version_skew_with_unit_installed_uses_supervisor(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """Version-skew path: stale daemon SIGTERM'd+dead, then cold-spawn via supervisor."""
+        import time as _t
+        import subprocess as _subprocess
+        import os as _os
+        import nexus.commands.daemon as _daemon
+
+        _write_discovery(tmp_path, pid=424242, version="0.0.1-stale")
+        monkeypatch.setattr(
+            "importlib.metadata.version", lambda _name: "9.9.9-installed"
+        )
+        _seed_wal_db(tmp_path / "memory.db")
+        monkeypatch.setattr(_daemon, "_T2_CYCLE_EXIT_TIMEOUT", 5.0)
+
+        unit_dir = tmp_path / "LaunchAgents"
+        unit_dir.mkdir(parents=True)
+        (unit_dir / _daemon._T2_PLIST_NAME).write_text("<plist/>")
+        monkeypatch.setattr(_daemon, "_autostart_platform", lambda: "darwin")
+        monkeypatch.setattr(_daemon, "_autostart_install_dir", lambda: unit_dir)
+        # Supervisor routing is gated on the UNQUALIFIED default config
+        # dir (no flag, no env): clear the env override and make the
+        # default resolve to the test tmp_path so the gate passes.
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(_daemon, "nexus_config_dir", lambda: tmp_path)
+
+        # os.kill: pid 424242 alive until SIGTERM, then dead.
+        # Any other pid (including the test process's real pid used in the
+        # discovery file written by _fake_sleep) must be treated as alive.
+        state = {"sigtermed": False}
+
+        def _fake_kill(pid, sig):
+            if pid == 424242:
+                if sig == 0:
+                    if state["sigtermed"]:
+                        raise ProcessLookupError  # dead post-SIGTERM
+                    return
+                state["sigtermed"] = True
+                return
+            # Any other pid (real process in test): alive for kill(0) probe.
+            if sig == 0:
+                return  # alive
+            # pass other signals through silently
+
+        monkeypatch.setattr("os.kill", _fake_kill)
+        monkeypatch.setattr(
+            "nexus.daemon.t2_daemon._is_t2_daemon_process", lambda pid: True
+        )
+
+        recorded_runs: list[list[str]] = []
+
+        def _fake_run(argv, **kw):
+            recorded_runs.append(list(argv))
+
+            class _Res:
+                returncode = 0
+
+            return _Res()
+
+        monkeypatch.setattr(_subprocess, "run", _fake_run)
+        monkeypatch.setattr(
+            _subprocess, "Popen",
+            lambda *a, **kw: pytest.fail("Popen must NOT be called when supervisor route succeeds"),
+        )
+
+        sleep_state = {"n": 0}
+
+        def _fake_sleep(_s):
+            sleep_state["n"] += 1
+            if sleep_state["n"] == 2:
+                _write_discovery(tmp_path, _os.getpid())
+
+        monkeypatch.setattr(_t, "sleep", _fake_sleep)
+
+        outcome = _t2_ensure_running_inner(None, timeout=30.0, quiet=True)
+        assert outcome == T2EnsureOutcome.REACHABLE
+        assert state["sigtermed"], "stale daemon must have been SIGTERM'd"
+        uid = _os.getuid()
+        kickstart_args = [a for a in recorded_runs if "kickstart" in a]
+        assert kickstart_args, f"expected launchctl kickstart; got {recorded_runs}"
+        assert any(f"gui/{uid}/com.nexus.t2" in " ".join(a) for a in kickstart_args)
+
+    # -- test 6 (audit advisory): darwin not-loaded -> bootstrap then kickstart --
+
+    def test_darwin_not_loaded_bootstrap_then_kickstart(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """darwin: kickstart returns non-zero (unit not bootstrapped) -> fallback to Popen.
+
+        The audit advisory notes this exercises the Popen-fallback clause for
+        the residual failure mode: if bootstrap-then-kickstart inside the
+        supervisor path also fails, we fall back to Popen rather than leaving
+        zero daemons.  The implementation must NOT require a successful
+        bootstrap+kickstart; it must fall back to Popen on any failure.
+        """
+        import time as _t
+        import subprocess as _subprocess
+        import os as _os
+        import nexus.commands.daemon as _daemon
+
+        unit_dir = tmp_path / "LaunchAgents"
+        unit_dir.mkdir(parents=True)
+        (unit_dir / _daemon._T2_PLIST_NAME).write_text("<plist/>")
+
+        monkeypatch.setattr(_daemon, "_autostart_platform", lambda: "darwin")
+        monkeypatch.setattr(_daemon, "_autostart_install_dir", lambda: unit_dir)
+        # Supervisor routing is gated on the UNQUALIFIED default config
+        # dir (no flag, no env): clear the env override and make the
+        # default resolve to the test tmp_path so the gate passes.
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(_daemon, "nexus_config_dir", lambda: tmp_path)
+
+        # All supervisor attempts fail (bootstrap + kickstart both non-zero)
+        recorded_runs: list[list[str]] = []
+
+        def _all_fail(argv, **kw):
+            recorded_runs.append(list(argv))
+
+            class _Res:
+                returncode = 1
+
+            return _Res()
+
+        monkeypatch.setattr(_subprocess, "run", _all_fail)
+
+        popen_called = {"called": False}
+
+        class _AlivePopen:
+            def __init__(self, argv, **_kw):
+                popen_called["called"] = True
+
+            def poll(self):
+                return None
+
+        monkeypatch.setattr(_subprocess, "Popen", _AlivePopen)
+
+        state = {"n": 0}
+
+        def _fake_sleep(_s):
+            state["n"] += 1
+            if state["n"] == 2:
+                _write_discovery(tmp_path, _os.getpid())
+
+        monkeypatch.setattr(_t, "sleep", _fake_sleep)
+
+        outcome = _t2_ensure_running_inner(None, timeout=30.0, quiet=True)
+        assert outcome == T2EnsureOutcome.REACHABLE
+        # The full not-loaded sequence must have been attempted before the
+        # fallback: kickstart -> bootstrap -> (kickstart retry suppressed by
+        # bootstrap failure) -> Popen (critic SIG-1).
+        assert any("kickstart" in a for a in recorded_runs), (
+            f"kickstart must be attempted; got {recorded_runs}"
+        )
+        assert any("bootstrap" in a for a in recorded_runs), (
+            f"bootstrap must be attempted after failed kickstart; got {recorded_runs}"
+        )
+        assert popen_called["called"], "Popen fallback must fire when all supervisor cmds fail"
+
+    # -- test 7 (review LOW-1): bootstrap-then-kickstart POSITIVE path -----------
+
+    def test_darwin_bootstrap_then_kickstart_succeeds_no_popen(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """darwin: first kickstart non-zero, bootstrap OK, retry kickstart OK -> no Popen."""
+        import time as _t
+        import subprocess as _subprocess
+        import os as _os
+        import nexus.commands.daemon as _daemon
+
+        unit_dir = tmp_path / "LaunchAgents"
+        unit_dir.mkdir(parents=True)
+        (unit_dir / _daemon._T2_PLIST_NAME).write_text("<plist/>")
+
+        monkeypatch.setattr(_daemon, "_autostart_platform", lambda: "darwin")
+        monkeypatch.setattr(_daemon, "_autostart_install_dir", lambda: unit_dir)
+        # Supervisor routing is gated on the UNQUALIFIED default config
+        # dir (no flag, no env): clear the env override and make the
+        # default resolve to the test tmp_path so the gate passes.
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(_daemon, "nexus_config_dir", lambda: tmp_path)
+
+        recorded_runs: list[list[str]] = []
+
+        def _fake_run(argv, **kw):
+            recorded_runs.append(list(argv))
+
+            class _Res:
+                # First kickstart fails (unit not loaded); bootstrap and the
+                # kickstart retry succeed.
+                returncode = 1 if len(recorded_runs) == 1 else 0
+
+            return _Res()
+
+        monkeypatch.setattr(_subprocess, "run", _fake_run)
+        monkeypatch.setattr(
+            _subprocess, "Popen",
+            lambda *a, **kw: pytest.fail(
+                "Popen must NOT be called when bootstrap-then-kickstart succeeds"
+            ),
+        )
+
+        state = {"n": 0}
+
+        def _fake_sleep(_s):
+            state["n"] += 1
+            if state["n"] == 2:
+                _write_discovery(tmp_path, _os.getpid())
+
+        monkeypatch.setattr(_t, "sleep", _fake_sleep)
+
+        outcome = _t2_ensure_running_inner(None, timeout=30.0, quiet=True)
+        assert outcome == T2EnsureOutcome.REACHABLE
+        flat = [" ".join(a) for a in recorded_runs]
+        assert len(recorded_runs) == 3, f"expected kickstart, bootstrap, kickstart; got {flat}"
+        assert "kickstart" in flat[0]
+        assert "bootstrap" in flat[1]
+        assert "kickstart" in flat[2]

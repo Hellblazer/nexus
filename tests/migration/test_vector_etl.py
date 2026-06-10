@@ -1247,3 +1247,51 @@ class TestTaxonomyConsistencyIntegration:
 
         drift_db = _make_t2_with_assignments(tmp_path / "drift", [name, ghost])
         assert verify_taxonomy_consistency(drift_db, vec_etl_vector_client) == [ghost]
+
+
+# ── Additive (nexus-rvfwj, 2026-06-10): NUL-byte boundary documentation ──────
+
+
+class TestNulByteBoundary:
+    """NUL (0x00) handling — documents the DELIBERATE fake/real divergence.
+
+    The ETL transfers chunk text VERBATIM (vector-identity decision (a)),
+    including NUL bytes that Chroma/SQLite tolerated for years in
+    PDF-extraction noise (62 of 5,233 production dt-papers chunks). The REAL
+    service sanitizes NULs at the storage boundary — PgVectorRepository
+    strips 0x00 from chunk text and metadata strings before embed+bind,
+    because Postgres text/jsonb physically cannot store them (bead
+    nexus-rvfwj; Java contract test
+    PgVectorRepositoryContractTest.upsert_nulBytesInTextAndMetadata_sanitizedNotRejected).
+
+    FakeVectorClient deliberately does NOT sanitize: this suite pins the
+    ETL's own obligation (send verbatim), not the service's storage
+    behavior. Consequence on the real side, by design: for NUL-bearing
+    chunks sha256(stored_text)[:32] != chash — the chash is carried as the
+    caller's identity and never recomputed from stored text.
+    """
+
+    def test_etl_sends_nul_text_verbatim_fake_stores_passthrough(
+        self, source_client
+    ) -> None:
+        name = _coll("etlnul")
+        dirty = "nul\x00 bearing \x00\x00chunk"
+        cid = _chash(dirty)
+        col = source_client.get_or_create_collection(name)
+        col.add(
+            ids=[cid],
+            documents=[dirty],
+            metadatas=[{"tag": "etl\x00meta"}],
+            embeddings=[[1.0, 0.0]],
+        )
+
+        fake = FakeVectorClient()
+        report = migrate_collections(source_client, fake, leg="local")
+
+        assert report.ok is True
+        assert report.total_written == 1
+        # The ETL sent the NUL-bearing text VERBATIM — byte-identical,
+        # NULs included. Sanitization is the service's job, not the ETL's.
+        doc, meta = fake.store[name][cid]
+        assert doc == dirty
+        assert meta == {"tag": "etl\x00meta"}

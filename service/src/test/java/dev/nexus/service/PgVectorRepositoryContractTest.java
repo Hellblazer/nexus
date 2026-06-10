@@ -233,6 +233,39 @@ class PgVectorRepositoryContractTest {
         assertThat(superuserCount(384,  col)).as("nothing in chunks_384").isEqualTo(0L);
     }
 
+    /**
+     * Postgres {@code text} cannot store NUL (0x00) bytes — Chroma and SQLite tolerated
+     * them, so PDF-extraction noise carried NULs into chunk text for years (62 of 5,233
+     * chunks in the production dt-papers collection, RDR-155 cloud-leg migration
+     * 2026-06-10, bead nexus-rvfwj). Without sanitization the whole 300-chunk upsert
+     * batch dies with {@code invalid byte sequence for encoding "UTF8": 0x00} — on the
+     * serving path as well as the migration ETL. The repository strips NULs from chunk
+     * text and metadata string values before bind; the chash is the caller's identity
+     * and is never recomputed from the sanitized text.
+     */
+    @Test
+    void upsert_nulBytesInTextAndMetadata_sanitizedNotRejected() throws Exception {
+        String col = "knowledge__nulsan__voyage-context-3__v1";
+        String dirty = "before\u0000middle\u0000\u0000after";
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("nul-c1", "nul-c2"),
+            List.of(dirty, "clean text"),
+            List.of(Map.of("note", "meta\u0000nul"), Map.of("kind", "clean")));
+
+        assertThat(superuserCount(1024, col)).as("both rows landed despite NULs").isEqualTo(2L);
+        assertThat(superuserChunkText(1024, col, "nul-c1"))
+            .as("NULs stripped, surrounding text preserved verbatim")
+            .isEqualTo("beforemiddleafter");
+        assertThat(superuserChunkText(1024, col, "nul-c2"))
+            .as("clean text untouched")
+            .isEqualTo("clean text");
+        assertThat(superuserChunkMetadataJson(1024, col, "nul-c1"))
+            .as("metadata string values NUL-stripped too (jsonb rejects NUL like text)")
+            .contains("\"note\"")
+            .contains("\"metanul\"")
+            .doesNotContain("u0000");
+    }
+
     @Test
     void upsert_bge768_landsInChunks768Only() throws Exception {
         String col = COL_BGE_768;
@@ -881,6 +914,21 @@ class PgVectorRepositoryContractTest {
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return rs.getLong(1);
+            }
+        }
+    }
+
+    /** Superuser fetch of one chunk's metadata as JSON text (bypasses RLS). */
+    private String superuserChunkMetadataJson(int dim, String collection, String chash) throws SQLException {
+        try (Connection su = pg.createConnection("");
+             PreparedStatement ps = su.prepareStatement(
+                 "SELECT metadata::text FROM nexus.chunks_" + dim
+                 + " WHERE collection = ? AND chash = ?")) {
+            ps.setString(1, collection);
+            ps.setString(2, chash);
+            try (ResultSet rs = ps.executeQuery()) {
+                assertThat(rs.next()).as("row %s/%s must exist in chunks_%d", collection, chash, dim).isTrue();
+                return rs.getString(1);
             }
         }
     }
