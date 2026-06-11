@@ -182,7 +182,7 @@ class TestVerificationLoudness:
         from nexus.commands.storage_cmd import _verify_pg_counts
 
         with patch(
-            "nexus.daemon.jar_lifecycle._psql_bin", return_value=None,
+            "nexus.commands.storage_cmd._psql_for_verify", return_value=None,
         ):
             outcome = _verify_pg_counts(
                 {"summary": {"total_written": 5}, "stores": []},

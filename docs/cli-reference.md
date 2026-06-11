@@ -1823,6 +1823,24 @@ List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revo
 
 ## nx storage
 
+### nx storage migrate all
+
+```
+nx storage migrate all [--report PATH] [--db PATH] [--catalog-db PATH]
+```
+
+Run ALL seven T2 store migrations in the RDR-152 ladder order (memory →
+plans → telemetry → taxonomy → aspects → chash → catalog last) with one
+shared issue collector, and emit ONE RDR-153 migration report (default:
+`~/.config/nexus/migration-reports/migration-<id>.json` — a run always
+produces an artifact). Exits non-zero when `summary.total_failed > 0`
+("migration is NOT clean") or when post-run count verification finds
+Postgres counts below the report's written totals. When psql/credentials
+cannot be resolved the verification is reported as **VERIFICATION
+INDETERMINATE** — a loud warning, never a silent skip (the RDR-152
+prod-copy.sh harness bug). Every per-store command also accepts
+`--report PATH` for a single-store report.
+
 Storage migration ETLs (RDR-152 T2 stores; RDR-155 vectors). Every ETL is copy-not-move (the source is never modified) and idempotent (server-side upsert; re-runs produce no duplicates). All require `NX_SERVICE_TOKEN`.
 
 ### nx storage migrate
