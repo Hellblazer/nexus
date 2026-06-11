@@ -2055,3 +2055,12 @@ def test_preflight_registration_idempotent_on_staleness_skip(
         f"DocumentRegistered-without-ChunkIndexed state as non-drift. "
         f"Report: {_json.dumps(payload, indent=2)[:1000]}"
     )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_vector_backend(monkeypatch):
+    """nexus-tawx0: service mode is the post-P4a DEFAULT (no-Python-embed
+    stubs fire unless opted out). This module tests the legacy
+    chroma/local embed pipeline, which is exactly the chroma-injected
+    configuration the opt-out exists for."""
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")

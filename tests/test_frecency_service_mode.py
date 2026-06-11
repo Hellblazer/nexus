@@ -232,7 +232,9 @@ class TestFrecencyNonServiceMode:
         fake_db.get_collection.side_effect = _ChromaNotFoundError("collection not found")
 
         with (
-            patch.dict(os.environ, {"NX_STORAGE_BACKEND_VECTORS": ""}, clear=False),
+            # nexus-tawx0: service mode is now the DEFAULT; non-service
+            # requires the explicit opt-out value.
+            patch.dict(os.environ, {"NX_STORAGE_BACKEND_VECTORS": "chroma"}, clear=False),
             patch("nexus.db.make_t3", return_value=fake_db) as mock_make_t3,
             patch("nexus.db.http_vector_client.get_http_vector_client") as mock_get_svc,
             patch("nexus.frecency.batch_frecency", return_value={}),
@@ -252,7 +254,9 @@ class TestFrecencyNonServiceMode:
         registry.get.return_value = None
 
         with (
-            patch.dict(os.environ, {"NX_STORAGE_BACKEND_VECTORS": ""}, clear=False),
+            # nexus-tawx0: service mode is now the DEFAULT; non-service
+            # requires the explicit opt-out value.
+            patch.dict(os.environ, {"NX_STORAGE_BACKEND_VECTORS": "chroma"}, clear=False),
             patch("nexus.db.make_t3") as mock_make_t3,
         ):
             from nexus.indexer import _run_index_frecency_only

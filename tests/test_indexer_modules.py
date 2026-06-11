@@ -491,3 +491,12 @@ def test_indexer_oversize_guard_skips_huge_files(tmp_path, monkeypatch) -> None:
     assert any("vendor.min.js" in p for p in oversize_msgs), (
         f"oversize message should name the file; got: {oversize_msgs}"
     )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_vector_backend(monkeypatch):
+    """nexus-tawx0: service mode is the post-P4a DEFAULT (no-Python-embed
+    stubs fire unless opted out). This module tests the legacy
+    chroma/local embed pipeline, which is exactly the chroma-injected
+    configuration the opt-out exists for."""
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")

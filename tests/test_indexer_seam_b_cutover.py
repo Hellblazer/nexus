@@ -148,8 +148,8 @@ def test_run_index_service_mode_uses_get_t3_not_make_t3(tmp_path, monkeypatch):
 
 
 def test_run_index_non_service_mode_uses_make_t3(tmp_path, monkeypatch):
-    """When NX_STORAGE_BACKEND_VECTORS is unset, the legacy make_t3() path
-    must be used (default path, unchanged by this bead)."""
+    """With the explicit chroma opt-out, the legacy make_t3() path is used.
+    (nexus-tawx0: service mode is the DEFAULT now; unset == service.)"""
     from nexus.indexer import _run_index
 
     repo = tmp_path / "repo"
@@ -157,7 +157,7 @@ def test_run_index_non_service_mode_uses_make_t3(tmp_path, monkeypatch):
     (repo / "hello.py").write_text("x = 1\n")
     reg = _reg()
 
-    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
     monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     monkeypatch.setenv("CHROMA_API_KEY", "fake")
