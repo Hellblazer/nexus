@@ -465,10 +465,8 @@ class TestNotImplementedMethods:
         with pytest.raises(NotImplementedError):
             client.delete_by_source("col", "/path/to/file.py")
 
-    def test_get_embeddings_raises(self):
-        client = HttpVectorClient()
-        with pytest.raises(NotImplementedError):
-            client.get_embeddings("col", ["id1"])
+    # get_embeddings was here until nexus-pebfx.7 implemented it via
+    # /v1/vectors/get-embeddings — see TestGetEmbeddings.
 
 
 # ── get_t3() routing (integration with mcp_infra) ────────────────────────────
@@ -676,3 +674,52 @@ class TestTaxonomyServiceModeGuard:
             "_fetch_or_embed must return None in service mode — "
             "HttpVectorClient has no ._client, so the Chroma fetch path must be skipped."
         )
+
+
+class TestGetEmbeddings:
+    """nexus-pebfx.7: get_embeddings via /v1/vectors/get-embeddings — the
+    search engine's contradiction-check + Ward-clustering features silently
+    degraded on EVERY service-mode search while this raised
+    NotImplementedError."""
+
+    def test_posts_to_get_embeddings_endpoint(self, monkeypatch):
+        client = HttpVectorClient()
+        calls = []
+
+        def fake_post(path, body, *, tenant="default", timeout=120):
+            calls.append((path, body))
+            return {"ids": ["a", "b"], "embeddings": [[0.1, 0.2], [0.3, 0.4]]}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        result = client.get_embeddings("knowledge__x__minilm-l6-v2-384__v1", ["a", "b"])
+        path, body = calls[0]
+        assert path == "/v1/vectors/get-embeddings"
+        assert body == {
+            "collection": "knowledge__x__minilm-l6-v2-384__v1",
+            "ids": ["a", "b"],
+        }
+        import numpy as np
+
+        assert result.dtype == np.float32
+        assert result.shape == (2, 2)
+        assert result[1][1] == np.float32(0.4)
+
+    def test_missing_ids_dropped_chroma_parity(self, monkeypatch):
+        # The service omits ids it cannot find; N < len(ids) is the caller's
+        # shape-mismatch signal — same semantics as the Chroma path.
+        client = HttpVectorClient()
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            _make_mock_post({"ids": ["a"], "embeddings": [[0.1, 0.2]]}),
+        )
+        result = client.get_embeddings("col", ["a", "missing"])
+        assert result.shape == (1, 2)
+
+    def test_empty_result_shape(self, monkeypatch):
+        client = HttpVectorClient()
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            _make_mock_post({"ids": [], "embeddings": []}),
+        )
+        result = client.get_embeddings("col", ["x"])
+        assert result.shape[0] == 0
