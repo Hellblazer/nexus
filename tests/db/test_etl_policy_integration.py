@@ -299,15 +299,18 @@ class TestTelemetryPolicy:
         migrate_telemetry_rows(db, store, collector=collector)
 
         by_ts = {c["occurred_at"] for c in store.calls["import_hook_failure"]}
-        assert "2026-04-23T10:47:54" in by_ts     # normalized
-        assert "2026-04-24T09:00:00" in by_ts     # untouched
+        # Canonical form is OFFSET-QUALIFIED: the Java strict import
+        # parser (OffsetDateTime.parse) rejects naive timestamps — the
+        # actual nexus-9sjn3 root cause (0/234 imported). Naive == UTC.
+        assert "2026-04-23T10:47:54+00:00" in by_ts   # space form normalized
+        assert "2026-04-24T09:00:00+00:00" in by_ts  # naive T form gains offset
         assert "2026-04-23 10:47:54" not in by_ts # space form never written
         (issue,) = [
             i for i in collector.issues_for("telemetry", "hook_failures")
             if i.action == "handled"
         ]
         assert issue.issue_class == "format_anomaly"
-        assert issue.count == 1   # only the space-form row was normalized
+        assert issue.count == 2   # both naive rows were normalized
 
     def test_unparseable_timestamp_failed_never_silent(
         self, tmp_path: Path,
@@ -376,7 +379,7 @@ class TestEndToEndReport:
         report = build_report(collector, source={"sqlite": str(tax_db)}, target={})
         summary = report["summary"]
         assert summary["by_action"]["skipped"] == 4      # 2 assignments + 2 links
-        assert summary["by_action"]["handled"] == 1
+        assert summary["by_action"]["handled"] == 2  # both naive ts rows
         assert summary["by_action"]["flagged"] == 1
         assert summary["by_action"]["schema_corrected"] == 1
         assert summary["total_failed"] == 1              # the unparseable ts

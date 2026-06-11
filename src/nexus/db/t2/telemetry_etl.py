@@ -451,22 +451,32 @@ def _migrate_nx_answer_runs(
 
 
 def _normalize_timestamp(raw: str) -> tuple[str, bool]:
-    """RDR-153 format-anomaly policy: parse lenient, emit canonical ISO-8601.
+    """RDR-153 format-anomaly policy: parse lenient, emit canonical
+    OFFSET-QUALIFIED ISO-8601.
 
     Returns ``(canonical, was_normalized)``. The production anomaly is the
-    space-form ``2026-04-23 10:47:54`` (234/234 hook_failures rows);
-    ``datetime.fromisoformat`` accepts it and re-emits the ``T`` form.
+    space-form NAIVE ``2026-04-23 10:47:54`` (234/234 hook_failures rows).
+    The Java import path (``TelemetryRepository.parseTsStrict``) uses
+    ``OffsetDateTime.parse`` which REQUIRES an offset — this is the actual
+    root cause of nexus-9sjn3 (hook_failures imported 0/234): the rows fail
+    twice over, space separator AND missing offset. Naive timestamps are
+    treated as UTC (SQLite ``CURRENT_TIMESTAMP``/``datetime('now')`` is
+    UTC), so canonical form is ``...T...+00:00``.
+
     Raises ``ValueError`` for unparseable input — the caller records a
     ``failed`` issue (fail only if unparseable, never silently drop).
-    """
-    from datetime import datetime as _dt
 
-    canonical = _dt.fromisoformat(raw).isoformat()
-    # NOTE: any non-canonical-but-parseable form counts as normalized —
-    # e.g. a 'Z' suffix becomes '+00:00', a bare date gains T00:00:00.
-    # Production data had only the space form (234/234 hook_failures);
-    # benign variants inflating 'handled' is acceptable and honest (the
-    # stored value DID change).
+    NOTE: any non-canonical-but-parseable form counts as normalized —
+    a 'Z' suffix becomes '+00:00', a naive T-form gains '+00:00'. Benign
+    variants inflating 'handled' is acceptable and honest (the stored
+    value DID change).
+    """
+    from datetime import UTC as _UTC, datetime as _dt
+
+    parsed = _dt.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_UTC)
+    canonical = parsed.isoformat()
     return canonical, canonical != raw
 
 
