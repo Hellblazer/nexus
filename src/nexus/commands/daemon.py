@@ -1682,7 +1682,8 @@ def service_install_jar_cmd(
     "with_pg",
     is_flag=True,
     default=False,
-    help="Also stop the nx-managed Postgres cluster (left running by default).",
+    help="Also stop the nx-managed Postgres cluster via pg_ctl -m fast "
+         "(terminates open connections immediately; left running by default).",
 )
 def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     """Stop the running storage-service supervisor (SIGTERM -> SIGKILL).
@@ -1716,11 +1717,20 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
         return
 
     if not with_pg:
-        click.echo(
-            f"Postgres left running on 127.0.0.1:{port_str} (by design — it is "
-            "independently managed; use 'nx daemon service stop --with-pg' to "
-            "stop it too)."
-        )
+        if pid is None:
+            # Nothing was stopped — phrase as a state report, not an effect
+            # of this command (critic S4: the causal phrasing misled when
+            # the supervisor was already gone).
+            click.echo(
+                f"Postgres is still running on 127.0.0.1:{port_str} — use "
+                "'nx daemon service stop --with-pg' to stop it."
+            )
+        else:
+            click.echo(
+                f"Postgres left running on 127.0.0.1:{port_str} (by design — "
+                "it is independently managed; use 'nx daemon service stop "
+                "--with-pg' to stop it too)."
+            )
         return
 
     pg_data = creds.get("PG_DATA", "")
@@ -1904,10 +1914,10 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # it configured" — supervisor, JAR (/health + /version), PG cluster,
     # embedding mode, pgvector version, and the paths an operator would
     # otherwise assemble from ps aux + psql + curl + the addr file by hand.
+    import os as _os
+
     data["supervisor_pid"] = record.payload.get("supervisor_pid")
-    data["addr_file"] = str(
-        config_dir / f"storage_service_addr.{__import__('os').getuid()}"
-    )
+    data["addr_file"] = str(config_dir / f"storage_service_addr.{_os.getuid()}")
     host = ep.get("host", "127.0.0.1")
     port = int(ep.get("port") or 0)
     data["health"] = _probe_health(host, port)
@@ -1924,13 +1934,23 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
         fetch_service_version,
         read_installed_provenance,
     )
-    svc_version = fetch_service_version(host, port)
+    # Probe-latency guard (pebfx.5 critic S1): both HTTP probes hit the same
+    # host/port — when /health is unreachable, /version cannot succeed, and
+    # status is invoked MOST when the stack is broken. Skip the second 3s
+    # timeout.
+    svc_version = (
+        fetch_service_version(host, port)
+        if data["health"] != "unreachable"
+        else None
+    )
     stale_warning: str | None = None
     if svc_version is not None:
         data["service_app_version"] = svc_version.get("app_version")
         data["embedding_mode"] = svc_version.get("embedding_mode", "unknown")
         if svc_version.get("embedding_models"):
-            data["embedding_models"] = ",".join(svc_version["embedding_models"])
+            # Kept as a list: --json consumers get the same array shape the
+            # /version endpoint emits (CRE round-trip-fidelity finding).
+            data["embedding_models"] = svc_version["embedding_models"]
         data["schema_latest_id"] = svc_version.get("schema_latest_id")
         data["schema_changeset_count"] = svc_version.get("schema_changeset_count")
         installed = read_installed_provenance(config_dir)
