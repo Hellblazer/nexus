@@ -56,6 +56,30 @@ The chunk size cap is the load-bearing one: `MAX_DOCUMENT_BYTES = 16384`, but wr
 5. Run `./tests/e2e/release-sandbox.sh smoke` — schema migrations are sandbox-required.
 6. Run `nx doctor --check-schema` against the editable install.
 
+## Collection registration precedes chunk writes (RDR-156 P0.2)
+
+Collection registration is enforced server-side at two layers:
+
+1. **`PgVectorRepository.upsertChunks` (Java service)** auto-stubs the collection into
+   `nexus.catalog_collections` within the same transaction, before any chunk row is inserted.
+   For a conformant name (`<content_type>__<owner_id>__<embedding_model>__v<n>`) the parsed
+   segments are stored; for a non-conformant name a name-only stub with empty metadata fields
+   is stored.  Either way the FK is satisfied before the chunk row lands.
+
+2. **FK constraints** `chunks_384_collection_fk` / `chunks_768_collection_fk` /
+   `chunks_1024_collection_fk` / `chash_index_collection_fk` /
+   `topic_assignments_collection_fk` (all `NOT VALID` until RDR-153 data migration lands;
+   `VALIDATE CONSTRAINT` is bead nexus-70r3c.3).  `NOT VALID` still enforces ALL new writes.
+
+3. **Stub upgradability**: stub rows (all metadata fields `= ''`) are upgraded in-place by
+   `CatalogRepository.importCollection` via `DO UPDATE ... WHERE embedding_model='' AND
+   content_type='' AND owner_id=''`.  A re-run never clobbers a genuinely-newer live row.
+
+**Rule (Java service surface)**: Never add a chunk write path in the Java service that bypasses
+`PgVectorRepository.upsertChunks`.  This rule governs service-mode writes only; local-mode
+Python clients write directly to Chroma (bypassing PostgreSQL) and are outside this rule's
+scope until RDR-155 P4b removes the Chroma path.
+
 ## Hot rules
 
 - **No ORM.** SQLAlchemy etc. is banned. Direct `sqlite3` only.

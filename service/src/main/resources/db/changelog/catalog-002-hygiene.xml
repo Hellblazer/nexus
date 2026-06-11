@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-156 bead nexus-70r3c.2 — catalog hygiene changesets.
+
+    1. catalog-002-1-temporal-typing: converts catalog_collections.created_at and
+       superseded_at from TEXT NOT NULL DEFAULT '' (SQLite heritage) to timestamptz NULL.
+       Safe now because production catalog_collections is empty or stub-only.
+
+    2. catalog-002-2-chash-checks: CHECK constraints enforcing length(chash) = 32 on
+       chunks_384/768/1024 and catalog_document_chunks, plus position >= 0 on
+       catalog_document_chunks.
+
+    NOTE: no unique constraint on catalog_documents.source_uri — DEFERRED pending ghost
+    dedup sweep.  The 2026-06-11 live audit (T2 nexus_rdr/156-P0-source-uri-audit) found
+    201 distinct source_uris duplicated across different tumblers (e.g. rdr-127 registered
+    under tumblers 1.1.1781, 1.10.2708, and 1.10.2836).  A blind ADD UNIQUE CONSTRAINT on
+    (tenant_id, source_uri) would fail on the live data.  The dedup sweep and constraint
+    addition are tracked in a separate bead; this file ships NO such constraint.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset catalog-002-1-temporal-typing ───────────────────────────── -->
+    <changeSet id="catalog-002-1-temporal-typing" author="nexus-70r3c.2">
+        <comment>
+            Convert catalog_collections.created_at and superseded_at from TEXT NOT NULL DEFAULT ''
+            (SQLite heritage) to timestamptz NULL.  The USING clause handles the conversion:
+            NULLIF(value,'')::timestamptz maps empty-string sentinel to NULL, and any valid
+            ISO-8601 timestamp string is parsed directly.  Safe now because production
+            catalog_collections is empty or stub-only (all rows have created_at = '' default).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+-- created_at: drop DEFAULT and NOT NULL, convert type
+ALTER TABLE nexus.catalog_collections
+    ALTER COLUMN created_at DROP DEFAULT;
+ALTER TABLE nexus.catalog_collections
+    ALTER COLUMN created_at DROP NOT NULL;
+ALTER TABLE nexus.catalog_collections
+    ALTER COLUMN created_at TYPE timestamptz
+    USING NULLIF(created_at, '')::timestamptz;
+
+-- superseded_at: drop DEFAULT and NOT NULL, convert type
+ALTER TABLE nexus.catalog_collections
+    ALTER COLUMN superseded_at DROP DEFAULT;
+ALTER TABLE nexus.catalog_collections
+    ALTER COLUMN superseded_at DROP NOT NULL;
+ALTER TABLE nexus.catalog_collections
+    ALTER COLUMN superseded_at TYPE timestamptz
+    USING NULLIF(superseded_at, '')::timestamptz;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.catalog_collections
+                ALTER COLUMN superseded_at TYPE TEXT USING COALESCE(superseded_at::text, '');
+            ALTER TABLE nexus.catalog_collections
+                ALTER COLUMN superseded_at SET NOT NULL;
+            ALTER TABLE nexus.catalog_collections
+                ALTER COLUMN superseded_at SET DEFAULT '';
+            ALTER TABLE nexus.catalog_collections
+                ALTER COLUMN created_at TYPE TEXT USING COALESCE(created_at::text, '');
+            ALTER TABLE nexus.catalog_collections
+                ALTER COLUMN created_at SET NOT NULL;
+            ALTER TABLE nexus.catalog_collections
+                ALTER COLUMN created_at SET DEFAULT '';
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset catalog-002-2-chash-checks ──────────────────────────────── -->
+    <!--
+        CHECK constraints enforcing length(chash) = 32 on the three chunks tables and
+        on catalog_document_chunks; plus position >= 0 on catalog_document_chunks.
+
+        chunks_&lt;dim&gt;_chash_len_check: NOT VALID — production chunks tables hold 115,716
+        rows that were audited as uniformly length-32, but deploy safety matches the FK
+        model: new bad writes are rejected immediately; retroactive validation rides with
+        bead nexus-70r3c.3.
+
+        catalog_document_chunks checks: NOT VALID is also added for the chash len check
+        (manifest rows may exist from earlier ETL phases); the position >= 0 check is also
+        NOT VALID for uniformity and because catalog_document_chunks rows may already exist.
+    -->
+    <changeSet id="catalog-002-2-chash-checks" author="nexus-70r3c.2">
+        <comment>
+            Add CHECK constraints for chash length = 32 on chunks_384/768/1024 and
+            catalog_document_chunks, and position >= 0 on catalog_document_chunks.
+            chunks_&lt;dim&gt; checks are NOT VALID because production holds 115,716 rows
+            (audited as uniformly length-32; retroactive VALIDATE rides with nexus-70r3c.3).
+            catalog_document_chunks checks are also NOT VALID for deploy safety.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+-- chunks_384: chash must be exactly 32 characters (sha256[:32] hex)
+ALTER TABLE nexus.chunks_384
+    ADD CONSTRAINT chunks_384_chash_len_check
+    CHECK (length(chash) = 32)
+    NOT VALID;
+
+-- chunks_768: chash must be exactly 32 characters
+ALTER TABLE nexus.chunks_768
+    ADD CONSTRAINT chunks_768_chash_len_check
+    CHECK (length(chash) = 32)
+    NOT VALID;
+
+-- chunks_1024: chash must be exactly 32 characters
+ALTER TABLE nexus.chunks_1024
+    ADD CONSTRAINT chunks_1024_chash_len_check
+    CHECK (length(chash) = 32)
+    NOT VALID;
+
+-- catalog_document_chunks: chash must be exactly 32 characters
+ALTER TABLE nexus.catalog_document_chunks
+    ADD CONSTRAINT catalog_document_chunks_chash_len_check
+    CHECK (length(chash) = 32)
+    NOT VALID;
+
+-- catalog_document_chunks: position must be >= 0 (chunk sequence index)
+ALTER TABLE nexus.catalog_document_chunks
+    ADD CONSTRAINT catalog_document_chunks_position_check
+    CHECK (position >= 0)
+    NOT VALID;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS catalog_document_chunks_position_check;
+            ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS catalog_document_chunks_chash_len_check;
+            ALTER TABLE nexus.chunks_1024 DROP CONSTRAINT IF EXISTS chunks_1024_chash_len_check;
+            ALTER TABLE nexus.chunks_768  DROP CONSTRAINT IF EXISTS chunks_768_chash_len_check;
+            ALTER TABLE nexus.chunks_384  DROP CONSTRAINT IF EXISTS chunks_384_chash_len_check;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -1838,6 +1838,11 @@ List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revo
 
 ## nx storage
 
+> Running a real migration window? The operational narrative (quiescence,
+> mid-run failure playbook, cutover validation, rollback) lives in
+> [`docs/migration-runbook.md`](migration-runbook.md); this section is the
+> flag reference.
+
 ### nx storage migrate all
 
 ```

@@ -145,6 +145,9 @@ class ChunksRlsBehavioralTest {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks_" + dim + " TO " + SVC_ROLE);
             }
+            // RDR-156 P0.2: insertChunk now auto-stubs catalog_collections before chunk writes.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
@@ -271,7 +274,7 @@ class ChunksRlsBehavioralTest {
                 ctx.execute(
                     "INSERT INTO " + table + " (tenant_id, collection, chash, chunk_text, embedding) " +
                     "VALUES (?, ?, ?, ?, ?::vector)",
-                    TENANT_B, col, "chash-wc-cross-" + dim, "cross-tenant inject", vec);
+                    TENANT_B, col, padChash("chash-wc-cross-" + dim), "cross-tenant inject", vec);
                 return null;
             })
         ).as("INSERT with tenant_id='tenant-b' inside tenant-a scope must be rejected by RLS WITH CHECK")
@@ -313,7 +316,7 @@ class ChunksRlsBehavioralTest {
             tenantScope.withTenant(TENANT_A, ctx -> {
                 ctx.execute(
                     "UPDATE " + table + " SET tenant_id = ? WHERE chash = ? AND collection = ?",
-                    TENANT_B, "chash-wcu-own-" + dim, col);
+                    TENANT_B, padChash("chash-wcu-own-" + dim), col);
                 return null;
             })
         ).as("UPDATE setting tenant_id to tenant-b inside tenant-a scope must be rejected by RLS WITH CHECK")
@@ -426,7 +429,7 @@ class ChunksRlsBehavioralTest {
         // tenant-b attempts to delete tenant-a's row: RLS USING hides it, 0 affected.
         int deleted = tenantScope.withTenant(TENANT_B, ctx ->
             ctx.execute("DELETE FROM " + table + " WHERE chash = ? AND collection = ?",
-                        "chash-del-own-" + dim, col));
+                        padChash("chash-del-own-" + dim), col));
         assertThat(deleted)
             .as("cross-tenant DELETE must affect exactly 0 rows (RLS makes the row invisible)")
             .isEqualTo(0);
@@ -439,7 +442,7 @@ class ChunksRlsBehavioralTest {
         // The owner can delete its own row: exactly 1 affected.
         int ownDelete = tenantScope.withTenant(TENANT_A, ctx ->
             ctx.execute("DELETE FROM " + table + " WHERE chash = ? AND collection = ?",
-                        "chash-del-own-" + dim, col));
+                        padChash("chash-del-own-" + dim), col));
         assertThat(ownDelete)
             .as("owner DELETE must affect exactly 1 row")
             .isEqualTo(1);
@@ -451,6 +454,17 @@ class ChunksRlsBehavioralTest {
     // ---------------------------------------------------------------------------
     // Private helpers
     // ---------------------------------------------------------------------------
+
+    /**
+     * RDR-156 P0.2: pad a test chash to exactly 32 characters to satisfy
+     * the {@code chunks_<dim>_chash_len_check} constraint.
+     * Strips non-alphanumeric characters and pads with '0'.
+     */
+    private static String padChash(String raw) {
+        String stripped = raw.replaceAll("[^a-z0-9A-Z]", "");
+        if (stripped.length() >= 32) return stripped.substring(0, 32);
+        return stripped + "0".repeat(32 - stripped.length());
+    }
 
     /**
      * Build a vector literal string of exactly {@code dim} components, all 0.1.
@@ -470,13 +484,20 @@ class ChunksRlsBehavioralTest {
                               String chunkText, int embDim) {
         String table = "nexus.chunks_" + dim;
         String vec = vectorLiteral(embDim);
+        // RDR-156 P0.2: chash_len_check requires exactly 32 chars — pad test chashes.
+        String paddedChash = padChash(chash);
         tenantScope.withTenant(tenant, ctx -> {
+            // RDR-156 P0.2: ensure catalog_collections has a stub row before the chunk insert.
+            ctx.execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) " +
+                "ON CONFLICT (tenant_id, name) DO NOTHING",
+                tenant, collection);
             ctx.execute(
                 "INSERT INTO " + table +
                 " (tenant_id, collection, chash, chunk_text, embedding)" +
                 " VALUES (?, ?, ?, ?, ?::vector)" +
                 " ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
-                tenant, collection, chash, chunkText, vec);
+                tenant, collection, paddedChash, chunkText, vec);
             return null;
         });
     }
