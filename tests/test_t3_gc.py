@@ -555,3 +555,49 @@ def test_gc_no_yes_flag_reports_only(t3_db, catalog, tmp_path, runner):
         events = [e for e in EventLog(catalog._dir).replay()
                   if e.type == TYPE_CHUNK_ORPHANED]
         assert events == []
+
+
+class TestGetEmbeddingsRequestOrder:
+    """nexus-pebfx.7 critic: Chroma's col.get(ids=...) returns rows in
+    INTERNAL insertion order, not request order — positional consumption
+    misattributed embeddings whenever the orders differed (false
+    contradiction flags, wrong cluster geometry). T3Database.get_embeddings
+    must reorder to request order, exactly like the service path."""
+
+    def test_rows_follow_request_order_not_insertion_order(self):
+        import chromadb
+        import numpy as np
+        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+        from nexus.db.t3 import T3Database
+
+        client = chromadb.EphemeralClient()
+        t3 = T3Database(_client=client, _ef_override=DefaultEmbeddingFunction())
+        col = t3.get_or_create_collection("knowledge__ordertest", strict=False)
+        # Insert in REVERSE alphabetical order so insertion order != request
+        # order for the ["id-a", "id-b"] request below.
+        col.add(
+            ids=["id-b", "id-a"],
+            documents=["text for b", "text for a"],
+            metadatas=[{"k": "b"}, {"k": "a"}],
+        )
+        direct = col.get(ids=["id-a", "id-b"], include=["embeddings"])
+        by_id = dict(zip(direct["ids"], direct["embeddings"]))
+
+        result = t3.get_embeddings("knowledge__ordertest", ["id-a", "id-b"])
+        assert result.shape[0] == 2
+        assert np.allclose(result[0], np.array(by_id["id-a"], dtype=np.float32))
+        assert np.allclose(result[1], np.array(by_id["id-b"], dtype=np.float32))
+
+    def test_missing_ids_dropped(self):
+        import chromadb
+        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+        from nexus.db.t3 import T3Database
+
+        client = chromadb.EphemeralClient()
+        t3 = T3Database(_client=client, _ef_override=DefaultEmbeddingFunction())
+        col = t3.get_or_create_collection("knowledge__ordertest2", strict=False)
+        col.add(ids=["only"], documents=["text"], metadatas=[{"k": "v"}])
+        result = t3.get_embeddings("knowledge__ordertest2", ["only", "absent"])
+        assert result.shape[0] == 1
