@@ -560,8 +560,8 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # cross-check Python _MODEL_DIMS. The voyage tokens are registry
     # labels being compared, not embedder behavior; no embedder runs and
     # no mode-dependent code path is exercised ("canonical-set" class).
-    "tests/migration/test_vector_etl.py::test_cloud_mode_dispatch_tokens_are_known_models",
-    "tests/migration/test_vector_etl.py::test_embedder_model_tokens_match_java_overrides",
+    "tests/migration/test_vector_etl.py::TestEmbedderModeParityJava::test_cloud_mode_dispatch_tokens_are_known_models",
+    "tests/migration/test_vector_etl.py::TestEmbedderModeParityJava::test_embedder_model_tokens_match_java_overrides",
     #
     # #1060: pure collection-NAME validation (length/charset) — references a
     # legacy voyage-named collection as realistic input but makes no cloud-mode
