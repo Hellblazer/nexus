@@ -1982,6 +1982,8 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     click.echo("Storage Service Status")
     click.echo("-" * 40)
     for key, value in data.items():
-        click.echo(f"  {key}: {value}")
+        # Lists (embedding_models) stay arrays in --json; join for humans.
+        display = ", ".join(value) if isinstance(value, list) else value
+        click.echo(f"  {key}: {display}")
     if stale_warning:
         click.echo(f"warning: {stale_warning}", err=True)
