@@ -222,9 +222,20 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             embeddings = ctx.embed_fn(embed_texts)
             actual_model = ctx.embedding_model
         else:
-            embeddings, actual_model = _embed_with_fallback(
-                embed_texts, ctx.embedding_model, ctx.voyage_key, timeout=ctx.timeout
-            )
+            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+
+            if is_vector_service_mode():
+                # RDR-152 Seam B stub (nexus-fsquc): the service embeds
+                # server-side and HttpVectorClient discards caller
+                # embeddings — a client-side CCE call here paid Voyage
+                # TWICE per prose chunk since RDR-155 P4a. Mirror
+                # doc_indexer's stub: placeholder embeddings, no Voyage.
+                embeddings = [[] for _ in embed_texts]
+                actual_model = ctx.embedding_model
+            else:
+                embeddings, actual_model = _embed_with_fallback(
+                    embed_texts, ctx.embedding_model, ctx.voyage_key, timeout=ctx.timeout
+                )
     if actual_model != ctx.embedding_model:
         for m in metadatas:
             m["embedding_model"] = actual_model

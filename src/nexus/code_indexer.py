@@ -26,6 +26,17 @@ _log = structlog.get_logger(__name__)
 # Voyage AI embed() API limit: https://docs.voyageai.com/reference/embeddings-api
 _VOYAGE_EMBED_BATCH_SIZE = 128
 
+
+def _service_mode_stub() -> bool:
+    """True when the vector service embeds server-side (RDR-152 Seam B).
+
+    Lazy import so the monkeypatchable source of truth stays
+    ``nexus.db.http_vector_client.is_vector_service_mode``.
+    """
+    from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415
+
+    return is_vector_service_mode()
+
 # Comment character for each language used to build the embed-only context prefix.
 _COMMENT_CHARS: dict[str, str] = {
     "python": "#",
@@ -449,6 +460,12 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
             for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
                 batch = embed_texts[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
                 embeddings.extend(ctx.embed_fn(batch))
+        elif _service_mode_stub():
+            # RDR-152 Seam B stub (nexus-fsquc): the service embeds
+            # server-side and HttpVectorClient discards caller embeddings —
+            # the direct voyage_client.embed loop below paid Voyage TWICE
+            # per code chunk since RDR-155 P4a. Mirror doc_indexer's stub.
+            embeddings = [[] for _ in documents]
         else:
             for batch_start in range(0, total_chunks, _VOYAGE_EMBED_BATCH_SIZE):
                 batch = embed_texts[batch_start : batch_start + _VOYAGE_EMBED_BATCH_SIZE]
