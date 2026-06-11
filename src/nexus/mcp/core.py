@@ -740,15 +740,26 @@ def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
     """
     if not diagnostics:
         return base
+    # nexus-pebfx.8: collections the backend refused to serve were skipped,
+    # not searched — a zero-hit must say so or it reads as a genuine miss.
+    failed = diagnostics[0].failed_collections
+    suffix = ""
+    if failed:
+        suffix = (
+            f" Note: {len(failed)} collection(s) were excluded by service "
+            "errors and NOT searched: "
+            + "; ".join(f"{c}: {e}" for c, e in failed.items())
+        )
     worst = diagnostics[0].worst_offender()
     if worst is None:
-        return base
+        return base + suffix
     name, threshold, top_distance = worst
     thr = f"{threshold:.4f}" if threshold is not None else "the per-corpus default"
     return (
         f"{base} Closest candidate was dropped at distance {top_distance:.4f} "
         f"(threshold {thr}, collection {name}). Re-run with "
         f"threshold={top_distance + 0.05:.2f} (or higher) to include it."
+        + suffix
     )
 
 
