@@ -2,12 +2,13 @@
 title: "RDR-153: Migration Data-Quality Policy and Structured Issue Reporting for the SQLite→Postgres T2 Migration"
 id: RDR-153
 type: Feature
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-08
 accepted_date: 2026-06-08
+closed_date: 2026-06-11
 related_issues: [nexus-sa14p, nexus-9sjn3, nexus-r0esi, nexus-f1m8s]
 related_tests: []
 related: [RDR-152, RDR-101, RDR-108]
